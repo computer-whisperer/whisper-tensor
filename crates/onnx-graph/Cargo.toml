@@ -1,0 +1,11 @@
+[package]
+name = "onnx-graph"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+candle-core = {git = "https://github.com/huggingface/candle", default-features=false}
+prost = "0.13.5"
+
+[build-dependencies]
+prost-build = "0.13.3"
