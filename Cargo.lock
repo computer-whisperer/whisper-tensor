@@ -709,6 +709,7 @@ name = "onnx-graph"
 version = "0.1.0"
 dependencies = [
  "candle-core",
+ "half",
  "prost",
  "prost-build",
 ]
