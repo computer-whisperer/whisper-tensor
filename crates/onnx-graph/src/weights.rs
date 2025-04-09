@@ -50,7 +50,6 @@ impl <'a> WeightExternalOutputManager<'a> for EmbeddedOutputManager<'a> {
     }
 
     fn get_initializer(&mut self, graph_tensor: &'a dyn Tensor, tensor_name: String) -> Result<Option<TensorProto>, Error> {
-
         if let Some((float_data, int32_data)) = self.tensor_data_map.remove(&graph_tensor) {
             Ok(Some(TensorProto {
                 name: tensor_name,
@@ -256,7 +255,7 @@ impl WeightManager for PthWeightManager {
             name.to_string()
         };
         let tensor_infos = self.pth_tensors.tensor_infos();
-        let tensor_info = tensor_infos.get(&name).ok_or(Error::NoSuchTensorError)?;
+        let tensor_info = tensor_infos.get(&name).ok_or(Error::NoSuchTensorError(name))?;
         Ok(PthTensor::new(tensor_info.clone(), self.pth_tensors.clone())?)
     }
     fn get_prefix_tail(&self) -> Option<&str> {

@@ -20,41 +20,30 @@ pub mod onnx {
 #[derive(Debug)]
 pub enum Error {
     InputShapeError,
-    DTypeMismatchError,
+    ShapeMismatchError(Shape, Shape),
+    DTypeMismatchError(DType, DType),
     InvalidInputError,
     IoError(std::io::Error),
     UnsupportedDtypeError,
     NameConflictError,
-    NoSuchTensorError,
+    NoSuchTensorError(String),
     UnresolvedDimensionError,
     InvalidDTypeError,
     CannotResolveDataError
-}
-
-fn validate_elementwise_inputs(inputs: &[Arc<dyn Tensor>]) -> Result<(), Error> {
-    for input in inputs {
-        if input.dtype() != inputs[0].dtype() {
-            return Err(Error::DTypeMismatchError);
-        }
-        if input.shape() != inputs[0].shape() {
-            return Err(Error::InputShapeError);
-        }
-    };
-    Ok(())
 }
 
 
 
 pub fn build_proto(
     inputs: &[Arc<InputTensor>],
-    outputs: &[(&str, Arc<dyn Tensor>)],
-    bin_file_path: &Path,
+    outputs: &[(String, Arc<dyn Tensor>)],
+    bin_file_path: Option<&Path>,
 ) -> Result<onnx::ModelProto, Error> {
     
     // Get all nodes in graph
     let mut nodes = HashSet::new();
     for (_, tensor) in outputs {
-        nodes.extend(tensor.get_nodes());
+        tensor.get_nodes(&mut nodes);
     }
     
     // Get requested node names
@@ -66,15 +55,15 @@ pub fn build_proto(
             }
         }
     }
+    println!("Found {} nodes in graph", nodes.len());
 
     // Get all tensors in graph
     let mut tensors = HashSet::new();
     for (_, tensor) in outputs {
-        for tensor in tensor.get_sub_tensors() {
-            tensors.insert(tensor);
-            tensors.extend(tensor.get_sub_tensors());
-        }
+        tensors.insert(tensor.as_ref());
+        tensor.get_sub_tensors(&mut tensors);
     }
+    println!("Found {} tensors in graph", tensors.len());
 
     // Assign names to all tensors in graph
     let mut chosen_names: HashSet<String> = HashSet::new();
@@ -92,9 +81,8 @@ pub fn build_proto(
         }
     }
     for (name, tensor) in outputs {
-        let name = name.to_string();
         chosen_names.insert(name.clone());
-        tensor_names.insert(tensor.as_ref(), name);
+        tensor_names.insert(tensor.as_ref(), name.clone());
     }
     // Assign remaining names
     let mut next_tensor_id = 0;
@@ -116,7 +104,7 @@ pub fn build_proto(
 
     // Gather tensor weights
     let mut data_manager = BinOutputManager::new(
-        bin_file_path,
+        bin_file_path.unwrap(),
     );
     for tensor in &tensors {
         tensor.gather_weights(&mut data_manager);

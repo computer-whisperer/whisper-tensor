@@ -715,10 +715,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "onnx-rwkv"
+name = "onnx-import"
 version = "0.1.0"
 dependencies = [
  "candle-core",
+ "half",
  "onnx-graph",
  "prost",
 ]

@@ -1,26 +1,141 @@
 use std::sync::Arc;
-use crate::{validate_elementwise_inputs, Error};
-use crate::node::{Node, NodeElementwise, SingleOutputNode};
+use crate::{onnx, Error};
+use crate::node::{Node, SingleOutputNode};
+use crate::onnx::{AttributeProto};
 use crate::tensor::{DType, Dimension, Shape, Tensor, TensorData};
 
 fn validate_index_dtype(dtype: DType) -> Result<(), Error> {
-    if dtype != DType::I32 {
+    if dtype != DType::I32 && dtype != DType::I64 {
         Err(Error::InvalidDTypeError)?;
     }
     Ok(())
 }
 
+fn try_multidirectional_broadcasting(a: &Shape, b: &Shape) -> Result<Shape, Error> {
+    let mut a = a.clone();
+    let mut b = b.clone();
+
+    // Prepend dimensions to match
+    while a.rank() < b.rank() {
+        a = a.unsqueeze(0);
+    }
+    while b.rank() < a.rank() {
+        b = b.unsqueeze(0);
+    }
+    let mut output_dims = vec![];
+    for i in 0..a.rank() {
+        output_dims.push(
+            if a[i].as_ref() == b[i].as_ref() {
+                a[i].clone()
+            }
+            else {
+                if let Some(a_val) = a[i].resolve().ok() {
+                    if a_val == 1 {
+                        b[i].clone()
+                    }
+                    else {
+                        if let Some(b_val) = b[i].resolve().ok() {
+                            if b_val == 1 {
+                                a[i].clone()
+                            }
+                            else {
+                                Err(Error::ShapeMismatchError(a.clone(), b.clone()))?
+                            }
+                        }
+                        else {
+                            Err(Error::ShapeMismatchError(a.clone(), b.clone()))?
+                        }
+                    }
+                }
+                else {
+                    if let Some(b_val) = b[i].resolve().ok() {
+                        if b_val == 1 {
+                            a[i].clone()
+                        }
+                        else {
+                            Err(Error::ShapeMismatchError(a.clone(), b.clone()))?
+                        }
+                    }
+                    else {
+                        Err(Error::ShapeMismatchError(a.clone(), b.clone()))?
+                    }
+                }
+            }
+        );
+    }
+
+    Ok(Shape::new(output_dims))
+}
+
+fn make_int_attribute(name: &str, value: i64) -> AttributeProto {
+    AttributeProto {
+        name: name.to_string(),
+        r#type: onnx::attribute_proto::AttributeType::Int.into(),
+        i: value,
+        ..Default::default()
+    }
+}
+
+fn make_int_list_attribute(name: &str, values: &[i64]) -> AttributeProto {
+    AttributeProto {
+        name: name.to_string(),
+        r#type: onnx::attribute_proto::AttributeType::Ints.into(),
+        ints: values.to_vec(),
+        ..Default::default()
+    }
+}
+
+fn make_float_attribute(name: &str, value: f32) -> AttributeProto {
+    AttributeProto {
+        name: name.to_string(),
+        r#type: onnx::attribute_proto::AttributeType::Float.into(),
+        f: value,
+        ..Default::default()
+    }
+}
+
+#[allow(dead_code)]
+fn make_float_list_attribute(name: &str, values: &[f32]) -> AttributeProto {
+    AttributeProto {
+        name: name.to_string(),
+        r#type: onnx::attribute_proto::AttributeType::Floats.into(),
+        floats: values.to_vec(),
+        ..Default::default()
+    }
+}
+
+fn make_tensor_attribute(name: &str, tensor: &TensorData) -> Result<AttributeProto, Error> {
+    Ok(AttributeProto {
+        name: name.to_string(),
+        r#type: onnx::attribute_proto::AttributeType::Tensor.into(),
+        t: Some(tensor.to_tensor_data_proto()?),
+        ..Default::default()
+    })
+}
+
 pub struct Add {
     name: Option<String>,
     a: Arc<dyn Tensor>,
-    b: Arc<dyn Tensor>
+    b: Arc<dyn Tensor>,
+    output_shape: Shape
 }
-impl NodeElementwise for Add {}
+impl SingleOutputNode for Add {
+    fn get_output_shape(&self) -> &Shape {
+        &self.output_shape
+    }
+
+    fn get_output_dtype(&self) -> DType {
+        self.a.dtype()
+    }
+}
 
 impl Add {
     pub fn new(name: Option<String>, a: Arc<dyn Tensor>, b: Arc<dyn Tensor>) -> Result<Arc<Self>, Error> {
-        validate_elementwise_inputs(&[a.clone(), b.clone()])?;
-        Ok(Arc::new(Self {name, a, b }))
+        if a.dtype() != b.dtype() {
+            return Err(Error::DTypeMismatchError(a.dtype(), b.dtype()));
+        }
+        let output_shape = try_multidirectional_broadcasting(a.shape(), b.shape())?;
+        Ok(Arc::new(Self {name, a, b, output_shape}))
     }
 }
 
@@ -35,18 +150,25 @@ impl Node for Add {
     fn get_onnx_type(&self) -> &str {
         "Add"
     }
+    fn get_onnx_attributes(&self) -> Vec<AttributeProto> {
+        vec![]
+    }
 }
 
 pub struct Sub {
     name: Option<String>,
     a: Arc<dyn Tensor>,
-    b: Arc<dyn Tensor>
+    b: Arc<dyn Tensor>,
+    output_shape: Shape
 }
 
 impl Sub {
     pub fn new(name: Option<String>, a: Arc<dyn Tensor>, b: Arc<dyn Tensor>) -> Result<Arc<Self>, Error> {
-        validate_elementwise_inputs(&[a.clone(), b.clone()])?;
-        Ok(Arc::new(Self {name, a, b }))
+        if a.dtype() != b.dtype() {
+            return Err(Error::DTypeMismatchError(a.dtype(), b.dtype()));
+        }
+        let output_shape = try_multidirectional_broadcasting(a.shape(), b.shape())?;
+        Ok(Arc::new(Self {name, a, b, output_shape}))
     }
 }
 impl Node for Sub {
@@ -62,20 +184,36 @@ impl Node for Sub {
     fn get_onnx_type(&self) -> &str {
         "Sub"
     }
+
+    fn get_onnx_attributes(&self) -> Vec<AttributeProto> {
+        vec![]
+    }
 }
 
-impl NodeElementwise for Sub {}
+impl SingleOutputNode for Sub {
+    fn get_output_shape(&self) -> &Shape {
+        &self.output_shape
+    }
+
+    fn get_output_dtype(&self) -> DType {
+        self.a.dtype()
+    }
+}
 
 pub struct Mul {
     name: Option<String>,
     a: Arc<dyn Tensor>,
-    b: Arc<dyn Tensor>
+    b: Arc<dyn Tensor>,
+    output_shape: Shape
 }
 
 impl Mul {
     pub fn new(name: Option<String>, a: Arc<dyn Tensor>, b: Arc<dyn Tensor>) -> Result<Arc<Self>, Error> {
-        validate_elementwise_inputs(&[a.clone(), b.clone()])?;
-        Ok(Arc::new(Self {name, a, b }))
+        if a.dtype() != b.dtype() {
+            return Err(Error::DTypeMismatchError(a.dtype(), b.dtype()));
+        }
+        let output_shape = try_multidirectional_broadcasting(a.shape(), b.shape())?;
+        Ok(Arc::new(Self {name, a, b, output_shape}))
     }
 }
 
@@ -90,9 +228,20 @@ impl Node for Mul {
     fn get_onnx_type(&self) -> &str {
         "Mul"
     }
+    fn get_onnx_attributes(&self) -> Vec<AttributeProto> {
+        vec![]
+    }
 }
 
-impl NodeElementwise for Mul {}
+impl SingleOutputNode for Mul {
+    fn get_output_shape(&self) -> &Shape {
+        &self.output_shape
+    }
+
+    fn get_output_dtype(&self) -> DType {
+        self.a.dtype()
+    }
+}
 
 pub struct Gather {
     name: Option<String>,
@@ -123,7 +272,7 @@ impl Gather {
             }
             else {
                 if indices_shape.rank() > 1 || indices_shape[0].resolve()? > 1 {
-                    output_shape.extend_from_slice(&indices_shape.dims)
+                    output_shape.extend_from_slice(&indices_shape.dims[0..indices_shape.rank()-1])
                 }
             }
             data_i += 1;
@@ -157,6 +306,12 @@ impl Node for Gather {
     fn get_onnx_type(&self) -> &str {
         "Gather"
     }
+
+    fn get_onnx_attributes(&self) -> Vec<AttributeProto> {
+        vec![
+            make_int_attribute("axis", self.axis as i64)
+        ]
+    }
 }
 
 impl SingleOutputNode for Gather {
@@ -174,7 +329,7 @@ pub struct LayerNormalization {
     input: Arc<dyn Tensor>,
     scale: Arc<dyn Tensor>,
     bias: Option<Arc<dyn Tensor>>,
-    axis: i32,
+    axis: i64,
     epsilon: f32,
     stash_type: i32
 }
@@ -190,9 +345,9 @@ impl SingleOutputNode for LayerNormalization {
 }
 
 impl LayerNormalization {
-    pub fn new(name: Option<String>, input: Arc<dyn Tensor>, scale: Arc<dyn Tensor>, bias: Option<Arc<dyn Tensor>>, axis: i32, epsilon: f32, stash_type: i32) -> Result<Arc<Self>, Error> {
+    pub fn new(name: Option<String>, input: Arc<dyn Tensor>, scale: Arc<dyn Tensor>, bias: Option<Arc<dyn Tensor>>, axis: i64, epsilon: f32, stash_type: i32) -> Result<Arc<Self>, Error> {
         if input.dtype() != scale.dtype() {
-            return Err(Error::DTypeMismatchError);
+            return Err(Error::DTypeMismatchError(input.dtype(), scale.dtype()));
         }
         Ok(Arc::new(Self {
             name,
@@ -224,6 +379,13 @@ impl Node for LayerNormalization {
     fn get_onnx_type(&self) -> &str {
         "LayerNormalization"
     }
+    fn get_onnx_attributes(&self) -> Vec<AttributeProto> {
+        vec![
+            make_int_attribute("axis", self.axis),
+            make_float_attribute("epsilon", self.epsilon),
+            make_int_attribute("stash_type", self.stash_type as i64)
+        ]
+    }
 }
 
 pub struct MatMul {
@@ -237,7 +399,7 @@ pub struct MatMul {
 impl MatMul { 
     pub fn new(name: Option<String>, a: Arc<dyn Tensor>, b: Arc<dyn Tensor>) -> Result<Arc<Self>, Error> {
         if a.dtype() != b.dtype() {
-            Err(Error::DTypeMismatchError)?
+            Err(Error::DTypeMismatchError(a.dtype(), b.dtype()))?
         }
         // Handle broadcasting
         let mut a_shape = if a.rank() == 1 {
@@ -281,6 +443,9 @@ impl MatMul {
                         else {
                             if let Some(b_value) = b_shape[i].value {
                                 if b_value == 1 {
+                                    a_shape[i].clone()
+                                }
+                                else if a_value == b_value {
                                     a_shape[i].clone()
                                 }
                                 else {
@@ -339,9 +504,13 @@ impl Node for MatMul {
     fn get_name(&self) -> Option<&str> {
         self.name.as_deref()
     }
-
+    
     fn get_onnx_type(&self) -> &str {
         "MatMul"
+    }
+    
+    fn get_onnx_attributes(&self) -> Vec<AttributeProto> {
+        vec![]
     }
 }
 
@@ -371,11 +540,11 @@ pub struct Gemm {
 impl Gemm {
     pub fn new(name: Option<String>, a: Arc<dyn Tensor>, b: Arc<dyn Tensor>, c: Option<Arc<dyn Tensor>>, trans_a: bool, trans_b: bool, alpha: f32, beta: f32) -> Result<Arc<Self>, Error> {
         if a.dtype() != b.dtype() {
-            return Err(Error::DTypeMismatchError)
+            return Err(Error::DTypeMismatchError(a.dtype(), b.dtype()))
         }
         if let Some(c) = &c {
             if c.dtype() != a.dtype() {
-                return Err(Error::DTypeMismatchError)
+                return Err(Error::DTypeMismatchError(c.dtype(), a.dtype()))
             }
         }
         let a_shape = if trans_a {
@@ -433,6 +602,15 @@ impl Node for Gemm {
     fn get_onnx_type(&self) -> &str {
         "Gemm"
     }
+    
+    fn get_onnx_attributes(&self) -> Vec<AttributeProto> {
+        vec![
+            make_float_attribute("alpha", self.alpha),
+            make_float_attribute("beta", self.beta),
+            make_int_attribute("transA", self.trans_a as i64),
+            make_int_attribute("transB", self.trans_b as i64)
+        ]
+    }
 }
 
 impl SingleOutputNode for Gemm {
@@ -460,7 +638,7 @@ impl Concat {
         }
         for input in &inputs {
             if input.dtype() != inputs[0].dtype() {
-                Err(Error::DTypeMismatchError)?;
+                Err(Error::DTypeMismatchError(inputs[0].dtype(), input.dtype()))?;
             }
         }
         let u_axis = if axis < 0 { (inputs[0].rank() as i64 + axis) as usize } else { axis as usize };
@@ -514,47 +692,23 @@ impl Node for Concat {
     fn get_onnx_type(&self) -> &str {
         "Concat"
     }
-}
-
-/*
-pub struct Slice {
-    name: Option<String>,
-    input: Arc<dyn Tensor>,
-    starts: Arc<dyn Tensor>,
-    ends: Arc<dyn Tensor>,
-    axes: Option<Arc<dyn Tensor>>,
-    steps: Option<Arc<dyn Tensor>>,
-    output_dtype: DType,
-    output_shape: Shape
-}
-
-impl Slice {
     
-    pub fn new(name: Option<String>, input: Arc<dyn Tensor>, starts: Arc<dyn Tensor>, ends: Arc<dyn Tensor>, axes: Option<Arc<dyn Tensor>>, steps: Option<Arc<dyn Tensor>>) -> Result<Arc<Self>> {
-        validate_index_dtype(starts.dtype())?;
-        validate_index_dtype(ends.dtype())?;
-        if let Some(axes) = &axes {
-            validate_index_dtype(axes.dtype())?;
-        }
-        if let Some(steps) = &steps {
-            validate_index_dtype(steps.dtype())?;
-        }
-
-        let output_dtype = input.dtype().clone();
-        Ok(Arc::new(Self {
-            name,
-            input,
-            starts,
-            ends,
-            axes,
-            steps,
-            output_dtype,
-            output_shape
-        }))
+    fn get_onnx_attributes(&self) -> Vec<AttributeProto> {
+        vec![
+            make_int_attribute("axis", self.axis)
+        ]
     }
-}*/
+}
 
+impl SingleOutputNode for Concat {
+    fn get_output_shape(&self) -> &Shape {
+        &self.output_shape
+    }
 
+    fn get_output_dtype(&self) -> DType {
+        self.output_dtype
+    }
+}
 
 pub struct Sigmoid {
     name: Option<String>,
@@ -585,6 +739,10 @@ impl Node for Sigmoid {
 
     fn get_onnx_type(&self) -> &str {
         "Sigmoid"
+    }
+    
+    fn get_onnx_attributes(&self) -> Vec<AttributeProto> {
+        vec![]
     }
 }
 
@@ -628,6 +786,10 @@ impl Node for Softplus {
     fn get_onnx_type(&self) -> &str {
         "Softplus"
     }
+    
+    fn get_onnx_attributes(&self) -> Vec<AttributeProto> {
+        vec![]
+    }
 }
 
 impl SingleOutputNode for Softplus {
@@ -667,6 +829,10 @@ impl Node for Neg {
 
     fn get_onnx_type(&self) -> &str {
         "Neg"
+    }
+
+    fn get_onnx_attributes(&self) -> Vec<AttributeProto> {
+        vec![]
     }
 }
 
@@ -711,6 +877,10 @@ impl Node for Tanh {
     fn get_onnx_type(&self) -> &str {
         "Tanh"
     }
+
+    fn get_onnx_attributes(&self) -> Vec<AttributeProto> {
+        vec![]
+    }
 }
 
 impl SingleOutputNode for Tanh {
@@ -752,6 +922,12 @@ impl Node for Constant {
 
     fn get_onnx_type(&self) -> &str {
         "Constant"
+    }
+
+    fn get_onnx_attributes(&self) -> Vec<AttributeProto> {
+        vec![
+            make_tensor_attribute("value", &self.data).unwrap()
+        ]
     }
 }
 
@@ -799,6 +975,12 @@ impl Node for Cast {
     fn get_onnx_type(&self) -> &str {
         "Cast"
     }
+    
+    fn get_onnx_attributes(&self) -> Vec<AttributeProto> {
+        vec![
+            make_int_attribute("to", onnx::tensor_proto::DataType::from(self.to) as i64)
+        ]
+    }
 }
 
 impl SingleOutputNode for Cast {
@@ -840,6 +1022,10 @@ impl Node for Exp {
     
     fn get_onnx_type(&self) -> &str {
         "Exp"
+    }
+    
+    fn get_onnx_attributes(&self) -> Vec<AttributeProto> {
+        vec![]
     }
 }
 
@@ -887,6 +1073,13 @@ impl Node for LpNormalization {
     fn get_onnx_type(&self) -> &str {
         "LpNormalization"
     }
+    
+    fn get_onnx_attributes(&self) -> Vec<AttributeProto> {
+        vec![
+            make_int_attribute("p", self.p),
+            make_int_attribute("axis", self.axis)
+        ]
+    }
 }
 impl SingleOutputNode for LpNormalization {
     fn get_output_shape(&self) -> &Shape {
@@ -897,33 +1090,604 @@ impl SingleOutputNode for LpNormalization {
     }
 }
 
-/*
+
 pub struct Reshape {
     name: Option<String>,
-    input: Arc<dyn Tensor>,
-    shape: Arc<dyn Tensor>,
+    data_input: Arc<dyn Tensor>,
+    shape_input: Arc<dyn Tensor>,
     output_shape: Shape
 }
 
 impl Reshape {
-    pub fn new(name: Option<String>, input: Arc<dyn Tensor>, shape: Arc<dyn Tensor>) -> Result<Arc<Reshape>, Error> {
-        if shape.dtype() != DType::I64 {
+    pub fn new(name: Option<String>, data_input: Arc<dyn Tensor>, shape_input: Arc<dyn Tensor>) -> Result<Arc<Reshape>, Error> {
+        if shape_input.dtype() != DType::I64 {
             Err(Error::InvalidDTypeError)?
         }
-        let shape_data = shape.resolve_data().ok_or(Error::CannotResolveDataError)?;
-        let old_shape_dims = input.shape().clone().dims;
+        let shape_data = shape_input.resolve_data().ok_or(Error::CannotResolveDataError)?.to_int_vec()?;
+        let old_shape_dims = data_input.shape().clone().dims;
         let mut new_shape_dims = vec![];
         let mut backfill_dim: Option<usize> = None;
-        loop {
-            if new_shape_dims.len() < old_shape_dims.len() {
-                
+        for i in 0..shape_data.len() {
+            new_shape_dims.push(if shape_data[i] == 0 {
+                old_shape_dims[i].clone()
+            } else if shape_data[i] == -1 {
+                if backfill_dim.is_some() {
+                    // Only one dimension can be inferred
+                    Err(Error::InvalidInputError)?
+                }
+                backfill_dim = Some(i);
+                Dimension::new(Some(1), None, None)
+            }
+            else if shape_data[i] < -1 {
+                Err(Error::InvalidInputError)?
+            } else {
+                Dimension::new(Some(shape_data[i] as usize), None, None)
+            });
+        }
+        // Backfill the inferred dimension
+        if let Some(i) = backfill_dim {
+            let total_input_size = data_input.shape().num_elements()?;
+
+            // Calculate the current product of the dimensions
+            let mut current_product = 1;
+            for (j, dim) in new_shape_dims.iter().enumerate() {
+                if j != i {
+                    current_product *= dim.resolve()?;
+                }
+            }
+            // Calculate the inferred dimension size
+            let inferred_size = total_input_size / current_product;
+            new_shape_dims[i] = Dimension::new(Some(inferred_size), None, None);
+        }
+        let output_shape = Shape::new(new_shape_dims);
+        
+        Ok(Arc::new(Reshape {
+            name,
+            data_input,
+            shape_input,
+            output_shape
+        }))
+    }
+}
+
+impl Node for Reshape {
+    fn get_input_tensors(&self) -> Vec<&dyn Tensor> {
+        vec![self.data_input.as_ref(), self.shape_input.as_ref()]
+    }
+
+    fn get_output_tensors(&self) -> Vec<&dyn Tensor> {
+        vec![self]
+    }
+
+    fn get_name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    fn get_onnx_type(&self) -> &str {
+        "Reshape"
+    }
+    
+    fn get_onnx_attributes(&self) -> Vec<AttributeProto> {
+        vec![
+            
+        ]
+    }
+}
+
+impl SingleOutputNode for Reshape {
+    fn get_output_shape(&self) -> &Shape {
+        &self.output_shape
+    }
+
+    fn get_output_dtype(&self) -> DType {
+        self.data_input.dtype()
+    }
+}
+
+pub struct Slice {
+    name: Option<String>,
+    data_input: Arc<dyn Tensor>,
+    starts_input: Arc<dyn Tensor>,
+    ends_input: Arc<dyn Tensor>,
+    axes_input: Option<Arc<dyn Tensor>>,
+    steps_input: Option<Arc<dyn Tensor>>,
+    output_shape: Shape,
+}
+
+impl Slice {
+    pub fn new(name: Option<String>, data_input: Arc<dyn Tensor>, starts_input: Arc<dyn Tensor>, ends_input: Arc<dyn Tensor>, axes_input: Option<Arc<dyn Tensor>>, steps_input: Option<Arc<dyn Tensor>>) -> Result<Arc<Self>, Error> {
+        validate_index_dtype(starts_input.dtype())?;
+        validate_index_dtype(ends_input.dtype())?;
+        if let Some(axes_input) = &axes_input {
+            validate_index_dtype(axes_input.dtype())?;
+        }
+        if let Some(steps_input) = &steps_input {
+            validate_index_dtype(steps_input.dtype())?;
+        }
+
+        let starts_value = starts_input.resolve_data().ok_or(Error::CannotResolveDataError)?.to_int_vec()?;
+        let ends_value = ends_input.resolve_data().ok_or(Error::CannotResolveDataError)?.to_int_vec()?;
+
+        let axes_value = if let Some(axes_input) = &axes_input {
+            axes_input.resolve_data().ok_or(Error::CannotResolveDataError)?.to_int_vec()?
+        } else {
+            (0..data_input.rank() as i64).collect()
+        };
+
+        let steps_value = if let Some(steps_input) = &steps_input {
+            steps_input.resolve_data().ok_or(Error::CannotResolveDataError)?.to_int_vec()?
+        } else {
+            vec![1; axes_value.len()]
+        };
+
+        if starts_value.len() != axes_value.len() || ends_value.len() != axes_value.len() || steps_value.len() != axes_value.len() {
+            Err(Error::InputShapeError)?;
+        }
+
+        let mut output_dimensions = vec![];
+        for i in 0..data_input.rank() {
+            let mut found = false;
+            for j in 0..axes_value.len() {
+                if i == axes_value[j] as usize {
+                    output_dimensions.push(Dimension::new(Some(((ends_value[j] - starts_value[j]) / steps_value[j]) as usize), None, None));
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                output_dimensions.push(data_input.shape()[i].clone());
             }
         }
-        
-        Arc::new(Reshape {
+
+        let output_shape = Shape::new(output_dimensions);
+
+        Ok(Arc::new(Self {
             name,
-            input,
-            shape
+            data_input,
+            starts_input,
+            ends_input,
+            axes_input,
+            steps_input,
+            output_shape
+        }))
+    }
+}
+
+impl SingleOutputNode for Slice {
+    fn get_output_shape(&self) -> &Shape {
+        &self.output_shape
+    }
+
+    fn get_output_dtype(&self) -> DType {
+        self.data_input.dtype()
+    }
+}
+
+impl Node for Slice {
+    fn get_input_tensors(&self) -> Vec<&dyn Tensor> {
+        let mut inputs = vec![self.data_input.as_ref(), self.starts_input.as_ref(), self.ends_input.as_ref()];
+        if let Some(axes_input) = &self.axes_input {
+            inputs.push(axes_input.as_ref());
+        }
+        if let Some(steps_input) = &self.steps_input {
+            inputs.push(steps_input.as_ref());
+        }
+        inputs
+        
+    }
+
+    fn get_output_tensors(&self) -> Vec<&dyn Tensor> {
+        vec![self]
+    }
+
+    fn get_name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    fn get_onnx_type(&self) -> &str {
+        "Slice"
+    }
+
+    fn get_onnx_attributes(&self) -> Vec<AttributeProto> {
+        vec![]
+    }
+}
+
+pub struct Squeeze {
+    name: Option<String>,
+    data_input: Arc<dyn Tensor>,
+    axes_input: Arc<dyn Tensor>,
+    output_shape: Shape,
+}
+
+impl Squeeze {
+    pub fn new(name: Option<String>, data_input: Arc<dyn Tensor>, axes_input: Arc<dyn Tensor>) -> Result<Arc<Self>, Error> {
+
+        if axes_input.rank() != 1 {
+            Err(Error::InputShapeError)?;
+        }
+        if axes_input.dtype() != DType::I64 {
+            Err(Error::InvalidDTypeError)?;
+        }
+
+        let axes = axes_input.resolve_data().ok_or(Error::CannotResolveDataError)?.to_int_vec()?;
+        // Unsign the axes
+        let axes = axes.into_iter().map(|x| {if x < 0 {((data_input.rank() as i64) + x) as usize} else {x as usize}}).collect::<Vec<_>>();
+        for axis in &axes {
+            if *axis > data_input.rank() {
+                Err(Error::InvalidInputError)?;
+            }
+        }
+
+        let mut new_dims = vec![];
+        for i in 0..data_input.rank() {
+            if !axes.contains(&i) {
+                new_dims.push(data_input.shape()[i].clone());
+            }
+            else {
+                if data_input.shape()[i].resolve()? != 1 {
+                    Err(Error::InvalidInputError)?;
+                }
+            }
+        }
+
+        let output_shape = Shape::new(new_dims);
+
+        Ok(Arc::new(
+            Self {
+                name,
+                data_input,
+                axes_input,
+                output_shape
+            }
+        ))
+    }
+}
+
+impl Node for Squeeze {
+    fn get_input_tensors(&self) -> Vec<&dyn Tensor> {
+        vec![self.data_input.as_ref(), self.axes_input.as_ref()]
+    }
+
+    fn get_output_tensors(&self) -> Vec<&dyn Tensor> {
+        vec![self]
+    }
+
+    fn get_name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    fn get_onnx_type(&self) -> &str {
+        "Squeeze"
+    }
+    
+    fn get_onnx_attributes(&self) -> Vec<AttributeProto> {
+        vec![]
+    }
+}
+
+impl SingleOutputNode for Squeeze{
+    fn get_output_shape(&self) -> &Shape {
+        &self.output_shape
+    }
+
+    fn get_output_dtype(&self) -> DType {
+        self.data_input.dtype()
+    }
+}
+
+pub struct Unsqueeze {
+    name: Option<String>,
+    data_input: Arc<dyn Tensor>,
+    axes_input: Arc<dyn Tensor>,
+    output_shape: Shape
+}
+
+impl Unsqueeze {
+    pub fn new(name: Option<String>, data_input: Arc<dyn Tensor>, axes_input: Arc<dyn Tensor>) -> Result<Arc<Self>, Error> {
+        if axes_input.rank() != 1 {
+            Err(Error::InputShapeError)?;
+        }
+        if axes_input.dtype() != DType::I64 {
+            Err(Error::InvalidDTypeError)?;
+        }
+
+        let axes = axes_input.resolve_data().ok_or(Error::CannotResolveDataError)?.to_int_vec()?;
+        // Unsign the axes
+        let axes = axes.into_iter().map(|x| {if x < 0 {((data_input.rank() as i64) + x) as usize} else {x as usize}}).collect::<Vec<_>>();
+        for axis in &axes {
+            if *axis > data_input.rank() {
+                Err(Error::InvalidInputError)?;
+            }
+        }
+
+        let mut new_dims = vec![];
+        let mut old_dims_i = 0;
+        for i in 0..(data_input.rank() + axes.len()) {
+            if axes.contains(&i) {
+                new_dims.push(Dimension::new(Some(1), None, None));
+            }
+            else {
+                if old_dims_i > data_input.rank() {
+                    Err(Error::InvalidInputError)?;
+                }
+                new_dims.push(data_input.shape()[old_dims_i].clone());
+                old_dims_i += 1;
+            }
+        }
+
+        let output_shape = Shape::new(new_dims);
+
+        Ok(Arc::new(Self {
+            name,
+            data_input,
+            axes_input,
+            output_shape
+        }))
+    }
+}
+
+impl Node for Unsqueeze {
+    fn get_input_tensors(&self) -> Vec<&dyn Tensor> {
+        vec![self.data_input.as_ref(), self.axes_input.as_ref()]
+    }
+
+    fn get_output_tensors(&self) -> Vec<&dyn Tensor> {
+        vec![self]
+    }
+
+    fn get_name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    fn get_onnx_type(&self) -> &str {
+        "Unsqueeze"
+    }
+    
+    fn get_onnx_attributes(&self) -> Vec<AttributeProto> {
+        vec![]
+    }
+}
+
+impl SingleOutputNode for Unsqueeze{
+    fn get_output_shape(&self) -> &Shape {
+        &self.output_shape
+    }
+
+    fn get_output_dtype(&self) -> DType {
+        self.data_input.dtype()
+    }
+}
+
+pub struct Transpose {
+    name: Option<String>,
+    data_input: Arc<dyn Tensor>,
+    perm: Option<Vec<i64>>,
+    output_shape: Shape
+}
+
+impl Transpose {
+    pub fn new(name: Option<String>, data_input: Arc<dyn Tensor>, perm_in: Option<Vec<i64>>) -> Arc<Self> {
+        let perm = if let Some(perm) = &perm_in {
+            perm.clone()
+        } else {
+            (0..data_input.shape().dims.len() as i64).rev().collect()
+        };
+
+        let input_dims = data_input.shape().dims.clone();
+        let output_dims = perm.iter().map(|&i| input_dims[i as usize].clone()).collect();
+        let output_shape = Shape::new(output_dims);
+        Arc::new(Self {
+            name,
+            data_input,
+            perm: perm_in,
+            output_shape
+        })
+    }
+}
+
+impl Node for Transpose {
+    fn get_input_tensors(&self) -> Vec<&dyn Tensor> {
+        vec![self.data_input.as_ref()]
+    }
+    fn get_output_tensors(&self) -> Vec<&dyn Tensor> {
+        vec![self]
+    }
+    fn get_name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+    fn get_onnx_type(&self) -> &str {
+        "Transpose"
+    }
+    fn get_onnx_attributes(&self) -> Vec<AttributeProto> {
+        if let Some(perm) = &self.perm {
+            vec![
+                make_int_list_attribute("perm", perm)
+            ]
+        }
+        else {
+            vec![]
         }
     }
-}*/
+}
+
+impl SingleOutputNode for Transpose {
+    fn get_output_shape(&self) -> &Shape {
+        &self.output_shape
+    }
+    fn get_output_dtype(&self) -> DType {
+        self.data_input.dtype()
+    }
+}
+
+pub struct GroupNormalization {
+    name: Option<String>,
+    data_input: Arc<dyn Tensor>,
+    scale: Arc<dyn Tensor>,
+    bias: Arc<dyn Tensor>,
+    num_groups: i64,
+    epsilon: f32
+}
+
+impl GroupNormalization {
+    pub fn new(name: Option<String>, data_input: Arc<dyn Tensor>, scale: Arc<dyn Tensor>, bias: Arc<dyn Tensor>, num_groups: i64, epsilon: f32) -> Result<Arc<Self>, Error> {
+        Ok(Arc::new(Self {
+            name,
+            data_input,
+            scale,
+            bias,
+            num_groups,
+            epsilon
+        }))
+    }
+}
+
+impl Node for GroupNormalization {
+    fn get_input_tensors(&self) -> Vec<&dyn Tensor> {
+        vec![self.data_input.as_ref(), self.scale.as_ref(), self.bias.as_ref()]
+    }
+    fn get_output_tensors(&self) -> Vec<&dyn Tensor> {
+        vec![self]
+    }
+    fn get_name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+    fn get_onnx_type(&self) -> &str {
+        "GroupNormalization"
+    }
+    
+    fn get_onnx_attributes(&self) -> Vec<AttributeProto> {
+        vec![
+            make_float_attribute("epsilon", self.epsilon),
+            make_int_attribute("num_groups", self.num_groups)
+        ]
+    }
+}
+
+impl SingleOutputNode for GroupNormalization {
+    fn get_output_shape(&self) -> &Shape {
+        &self.data_input.shape()
+    }
+    fn get_output_dtype(&self) -> DType {
+        self.data_input.dtype()
+    }
+}
+
+pub struct CumSum {
+    name: Option<String>,
+    data_input: Arc<dyn Tensor>,
+    axis_input: Arc<dyn Tensor>,
+    output_shape: Shape
+}
+
+impl CumSum {
+    pub fn new(name: Option<String>, data_input: Arc<dyn Tensor>, axis_input: Arc<dyn Tensor>) -> Result<Arc<Self>, Error> {
+        validate_index_dtype(axis_input.dtype())?;
+
+        if axis_input.rank() > 1 {
+            return Err(Error::InputShapeError);
+        }
+
+        let axis_data = axis_input.resolve_data().ok_or(Error::CannotResolveDataError)?.to_int_vec()?;
+        if axis_data.len() > 1 {
+            return Err(Error::InputShapeError);
+        }
+        let axis = axis_data[0];
+        let axis = if axis < 0 {
+            (axis + data_input.rank() as i64) as usize
+        } else {
+            axis as usize
+        };
+        if axis >= data_input.rank() {
+            return Err(Error::InvalidInputError);
+        }
+
+        let mut output_dims = data_input.shape().dims.clone();
+        output_dims[axis] = Dimension::new(Some(1), None, None);
+        let output_shape = Shape::new(output_dims);
+
+        Ok(Arc::new(
+            Self {
+                name,
+                data_input,
+                axis_input,
+                output_shape
+            }
+        ))
+    }
+}
+
+impl Node for CumSum {
+    fn get_input_tensors(&self) -> Vec<&dyn Tensor> {
+        vec![self.data_input.as_ref(), self.axis_input.as_ref()]
+    }
+
+    fn get_output_tensors(&self) -> Vec<&dyn Tensor> {
+        vec![self]
+    }
+
+    fn get_name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    fn get_onnx_type(&self) -> &str {
+        "CumSum"
+    }
+    
+    fn get_onnx_attributes(&self) -> Vec<AttributeProto> {
+        vec![]
+    }
+}
+
+impl SingleOutputNode for CumSum {
+    fn get_output_shape(&self) -> &Shape {
+        &self.output_shape
+    }
+
+    fn get_output_dtype(&self) -> DType {
+        self.data_input.dtype()
+    }
+}
+
+pub struct Relu {
+    name: Option<String>,
+    input: Arc<dyn Tensor>
+}
+
+impl Relu {
+    pub fn new(name: Option<String>, input: Arc<dyn Tensor>) -> Result<Arc<Self>, Error> {
+        Ok(Arc::new(
+            Self {
+                name,
+                input
+            }
+        ))
+    }
+}
+
+impl Node for Relu {
+    fn get_input_tensors(&self) -> Vec<&dyn Tensor> {
+        vec![self.input.as_ref()]
+    }
+    fn get_output_tensors(&self) -> Vec<&dyn Tensor> {
+        vec![self]
+    }
+    fn get_name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+    fn get_onnx_type(&self) -> &str {
+        "Relu"
+    }
+    fn get_onnx_attributes(&self) -> Vec<AttributeProto> {
+        vec![]
+    }
+}
+
+impl SingleOutputNode for Relu {
+    fn get_output_shape(&self) -> &Shape {
+        self.input.shape()
+    }
+    fn get_output_dtype(&self) -> DType {
+        self.input.dtype()
+    }
+}

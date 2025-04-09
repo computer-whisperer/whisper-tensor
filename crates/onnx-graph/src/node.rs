@@ -5,28 +5,28 @@ use crate::tensor::{Shape, TensorData};
 use crate::tensor::Tensor;
 use crate::DType;
 
-pub(crate) trait Node {
+pub trait Node {
     fn get_input_tensors(&self) -> Vec<&dyn Tensor> {
         vec![]
     }
 
-    fn get_nodes(&self) -> HashSet<&dyn Node> where Self: Sized {
-        let mut out = HashSet::new();
+    fn get_nodes<'a>(&'a self, table: &mut HashSet<&'a dyn Node>) where Self: Sized {
         let dyn_self: &dyn Node = self;
-        out.insert(dyn_self);
-        for input in self.get_input_tensors() {
-            out.extend(input.get_nodes());
+        if !table.contains(&dyn_self) {
+            table.insert(dyn_self);
+            for input in self.get_input_tensors() {
+                input.get_nodes(table);
+            }
         }
-        out
     }
 
-    fn get_tensors(&self) -> HashSet<&dyn Tensor> {
-        let mut out = HashSet::new();
+    fn get_tensors<'a>(&'a self, table: &mut HashSet<&'a dyn Tensor>) {
         for input in self.get_input_tensors() {
-            out.insert(input);
-            out.extend(input.get_sub_tensors());
+            if !table.contains(&input) {
+                table.insert(input);
+                input.get_sub_tensors(table);
+            }
         }
-        out
     }
 
     fn get_output_tensors(&self) -> Vec<&dyn Tensor>;
@@ -41,9 +41,7 @@ pub(crate) trait Node {
         "ai.onnx"
     }
 
-    fn get_onnx_attributes(&self) -> Vec<crate::onnx::AttributeProto> {
-        vec![]
-    }
+    fn get_onnx_attributes(&self) -> Vec<crate::onnx::AttributeProto>;
 
     fn to_node_proto(&self, name: Option<String>, tensor_names: &HashMap<&dyn Tensor, String>) -> crate::onnx::NodeProto {
         crate::onnx::NodeProto {
@@ -83,9 +81,6 @@ trait MultiOutputNode: Node {
     fn get_num_outputs(&self) -> usize;
 }
 */
-
-pub(crate) trait NodeElementwise: Node {}
-
 pub(crate) trait SingleOutputNode: Node {
     fn get_output_shape(&self) -> &Shape;
 
@@ -93,24 +88,5 @@ pub(crate) trait SingleOutputNode: Node {
     
     fn resolve_output_data(&self) -> Option<TensorData> {
         None
-    }
-}
-
-
-impl <T: NodeElementwise> SingleOutputNode for T {
-    fn get_output_shape(&self) -> &Shape {
-        let inputs = self.get_input_tensors();
-        for input in &inputs {
-            assert_eq!(input.shape(), inputs[0].shape());
-        }
-        inputs[0].shape()
-    }
-
-    fn get_output_dtype(&self) -> DType {
-        let inputs = self.get_input_tensors();
-        for input in &inputs {
-            assert_eq!(input.dtype(), inputs[0].dtype());
-        }
-        inputs[0].dtype()
     }
 }

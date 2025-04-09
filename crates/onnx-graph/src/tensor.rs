@@ -1,10 +1,9 @@
 use std::collections::{HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
-use candle_core::D;
 use crate::{onnx, Error};
 use crate::node::{Node, SingleOutputNode};
-use crate::onnx::ValueInfoProto;
+use crate::onnx::{TensorProto, ValueInfoProto};
 use crate::weights::WeightExternalOutputManager;
 
 #[derive(Clone, Debug)]
@@ -39,9 +38,15 @@ impl From<&Dimension> for onnx::tensor_shape_proto::Dimension {
     }
 }
 
+impl From<usize> for Dimension {
+    fn from(value: usize) -> Self {
+        Self { value: Some(value), name: None, denotation: None }
+    }
+}
+
 impl PartialEq for &Dimension {
     fn eq(&self, other: &Self) -> bool {
-        core::ptr::eq(self, other) || if let (Some(a), Some(b)) = (self.value, other.value) {a == b} else {false}
+        core::ptr::eq(*self, *other) || if let (Some(a), Some(b)) = (self.value, other.value) {a == b} else {false}
     }
 }
 
@@ -217,19 +222,17 @@ pub trait Tensor  {
 
     fn store_data_bin(&mut self, _output_buffer: &mut Vec<u8>) {}
 
-    fn get_nodes(&self) -> HashSet<&dyn Node> {
-        HashSet::new()
+    fn get_nodes<'a>(&'a self, _table: &mut HashSet<&'a dyn Node>) {}
+
+    fn get_tensors<'a>(&'a self, table: &mut HashSet<&'a dyn Tensor>) where Self: Sized {
+        let self_dyn = self as &dyn Tensor;
+        if table.contains(&self_dyn) {
+            table.insert(self as &dyn Tensor);
+            self.get_sub_tensors(table);
+        }
     }
 
-    fn get_tensors(&self) -> HashSet<&dyn Tensor> where Self: Sized {
-        let mut tensors = self.get_sub_tensors();
-        tensors.insert(self as &dyn Tensor);
-        tensors
-    }
-
-    fn get_sub_tensors(&self) -> HashSet<&dyn Tensor> {
-        HashSet::new()
-    }
+    fn get_sub_tensors<'a>(&'a self, _table: &mut HashSet<&'a dyn Tensor>) {}
 
     fn gather_weights<'a>(&'a self, _manager: &mut dyn WeightExternalOutputManager<'a>) {}
 
@@ -276,12 +279,12 @@ impl <T: SingleOutputNode> Tensor for T {
         self.resolve_output_data()
     }
 
-    fn get_nodes(&self) -> HashSet<&dyn Node> {
-        <Self as Node>::get_nodes(self)
+    fn get_nodes<'a>(&'a self, table: &mut HashSet<&'a dyn Node>) {
+        <Self as Node>::get_nodes(self, table)
     }
 
-    fn get_sub_tensors(&self) -> HashSet<&dyn Tensor> {
-        <Self as Node>::get_tensors(self)
+    fn get_sub_tensors<'a>(&'a self, table: &mut HashSet<&'a dyn Tensor>) {
+        <Self as Node>::get_tensors(self, table);
     }
 }
 
@@ -335,6 +338,15 @@ impl TensorDataValue {
             TensorDataValue::BF16(_) => DType::BF16,
             TensorDataValue::I32(_) => DType::I32,
             TensorDataValue::I64(_) => DType::I64,
+        }
+    }
+    
+    pub fn get_raw_encoding(&self) -> Vec<u8> {
+        match self {
+            TensorDataValue::F32(v) => v.iter().flat_map(|x| x.to_le_bytes()).collect(),
+            TensorDataValue::BF16(v) => v.iter().flat_map(|x| x.to_le_bytes()).collect(),
+            TensorDataValue::I32(v) => v.iter().flat_map(|x| x.to_le_bytes()).collect(),
+            TensorDataValue::I64(v) => v.iter().flat_map(|x| x.to_le_bytes()).collect(),
         }
     }
 }
@@ -393,5 +405,22 @@ impl TensorData {
     
     pub fn shape(&self) -> &Shape {
         &self.shape
+    }
+    
+    pub fn to_int_vec(&self) -> Result<Vec<i64>, Error> {
+        match &self.value {
+            TensorDataValue::I32(x) => Ok(x.iter().map(|x| *x as i64).collect()),
+            TensorDataValue::I64(x) => Ok(x.clone()),
+            _ => Err(Error::InvalidDTypeError),
+        }
+    }
+    
+    pub fn to_tensor_data_proto(&self) -> Result<TensorProto, Error> {
+        Ok(TensorProto{
+            data_type: (onnx::tensor_proto::DataType::from(self.value.dtype()) as i32),
+            dims: self.shape.resolve()?.iter().map(|x| *x as i64).collect(),
+            raw_data: self.value.get_raw_encoding(),
+            ..Default::default()
+        })
     }
 }

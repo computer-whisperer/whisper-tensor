@@ -6,8 +6,8 @@ edition = "2024"
 [dependencies]
 
 [workspace]
-members = [ "crates/onnx-graph","crates/onnx-rwkv"]
+members = [ "crates/onnx-graph", "crates/onnx-import"]
 
 [workspace.dependencies]
 onnx-graph = { path = "crates/onnx-graph" }
-onnx-rwkv = { path = "crates/onnx-rwkv" }
+onnx-rwkv = { path = "crates/onnx-import" }
