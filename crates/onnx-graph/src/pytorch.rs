@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use crate::{operators, Error};
-use crate::operators::{Cast, Constant, CumSum, GroupNormalization, LayerNormalization, Reshape, Slice, Squeeze, Transpose, Unsqueeze};
-use crate::tensor::{DType, Dimension, Shape, Tensor, TensorData};
+use crate::operators::{Cast, Constant, CumSum, Div, Expand, GroupNormalization, LayerNormalization, Mul, RMSNormalization, Reshape, Sigmoid, Slice, Squeeze, Transpose, Unsqueeze};
+use crate::tensor::{DType, Dimension, Shape, Tensor, TensorData, TensorDataValue};
 use crate::weights::WeightManager;
 
 pub fn linear(weight_manager: &impl WeightManager, input: Arc<dyn Tensor>) -> Result<Arc<dyn Tensor>, Error> {
@@ -87,4 +87,44 @@ pub fn cumsum(input: Arc<dyn Tensor>, axis: i32) -> Result<Arc<CumSum>, Error> {
     let shape = Shape::new(vec![Dimension::new(Some(1), None, None)]);
     let axis = Constant::new(None, TensorData::fill(shape, axis)?);
     CumSum::new(None, input, axis)
+}
+
+pub fn rms_norm(weight_manager: &impl WeightManager, input: Arc<dyn Tensor>) -> Result<Arc<RMSNormalization>, Error> {
+    RMSNormalization::new(
+        weight_manager.get_prefix().map(|x| x.to_string()),
+        input,
+        weight_manager.get_tensor("weight")?,
+        1e-5,
+        -1
+    )
+}
+
+pub fn silu(input: Arc<dyn Tensor>) -> Result<Arc<dyn Tensor>, Error> {
+    let x = Sigmoid::new(None, input.clone());
+    Ok(Mul::new(None, input.clone(), x)?)
+}
+
+pub fn swiglu(weight_manager: &impl WeightManager, input: Arc<dyn Tensor>) -> Result<Arc<dyn Tensor>, Error> {
+    let x = linear(&weight_manager.prefix("linear_inner"), input.clone())?;
+    let x = silu(x)?;
+    let x2 = linear(&weight_manager.prefix("linear_outer"), input.clone())?;
+    let out = Mul::new(None, x, x2)?;
+    Ok(out)
+}
+
+pub fn div_scalar<T>(input: Arc<dyn Tensor>, scalar: T) -> Result<Arc<Div>, Error>
+where
+    T: Copy,
+    TensorDataValue: From<Vec<T>>
+{
+    let shape = Shape::new(vec![Dimension::new(Some(1), None, None)]);
+    let constant = Constant::new(None, TensorData::fill(shape, scalar)?);
+    
+    Ok(Div::new(None, input, constant)?)
+}
+
+pub fn expand(input: Arc<dyn Tensor>, dims: Vec<i64>) -> Result<Arc<Expand>, Error> {
+    let shape = Shape::from(&[dims.len()][..]);
+    let c = Constant::new(None, TensorData::new(dims.into(), shape)?);
+    Ok(Expand::new(None, input, c)?)
 }

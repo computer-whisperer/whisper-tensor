@@ -24,12 +24,16 @@ pub enum Error {
     DTypeMismatchError(DType, DType),
     InvalidInputError,
     IoError(std::io::Error),
-    UnsupportedDtypeError,
+    UnsupportedDTypeError,
     NameConflictError,
     NoSuchTensorError(String),
     UnresolvedDimensionError,
     InvalidDTypeError,
-    CannotResolveDataError
+    CannotResolveDataError,
+    CandleCoreError(candle_core::Error),
+    SafeTensorError(safetensors::SafeTensorError),
+    InvalidPathError,
+    OtherError
 }
 
 

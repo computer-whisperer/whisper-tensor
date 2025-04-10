@@ -6,6 +6,7 @@ use onnx_graph::operators::{Add, Cast, Constant, Exp, Gather, LpNormalization, M
 use onnx_graph::pytorch::{cast, cumsum, group_norm, layer_norm, linear, reshape, squeeze, transpose};
 use onnx_graph::tensor::{DType, Dimension, InputTensor, Shape, Tensor, TensorData, TensorDataValue};
 use onnx_graph::weights::{WeightManager};
+use crate::Error;
 
 fn lerp(a: Arc<dyn Tensor>, b: Arc<dyn Tensor>, t: Arc<dyn Tensor>) -> Result<Arc<dyn Tensor>, onnx_graph::Error> {
     let x = Sub::new(None, b, a.clone())?;
@@ -52,8 +53,8 @@ where
     Ok(Add::new(None, x, constant)?)
 }
 
-pub fn translate(pth_path: &Path, bin_path: Option<&Path>) -> Result<Vec::<u8>, onnx_graph::Error> {
-    println!("Loading weights from {}", pth_path.display());
+pub fn load_rwkv7_pth(pth_path: &Path, bin_path: Option<&Path>) -> Result<Vec<u8>, Error> {
+    println!("Attempting to load RWKV7 from {}", pth_path.display());
     let tensors = Arc::new(PthTensors::new(pth_path, None).unwrap());
 
     // Survey tensor names
@@ -65,12 +66,16 @@ pub fn translate(pth_path: &Path, bin_path: Option<&Path>) -> Result<Vec::<u8>, 
             layer_count = layer_count.max(name_split[1].parse::<usize>().unwrap());
         }
     }
+    
+    let weight_manager = onnx_graph::weights::PthWeightManager::new(tensors.clone());
+
+    load_rwkv7(weight_manager, layer_count, bin_path).map_err(|e| Error::OnnxGraphError(e))
+}
+
+pub fn load_rwkv7(weight_manager: impl WeightManager, layer_count: usize, bin_path: Option<&Path>) -> Result<Vec<u8>, onnx_graph::Error> {
 
     let mut input_tensors = vec![];
-    let mut output_tensors: Vec::<(String, Arc<dyn Tensor>)> = vec![];
-
-
-    let weight_manager = onnx_graph::weights::PthWeightManager::new(tensors.clone());
+    let mut output_tensors: Vec<(String, Arc<dyn Tensor>)> = vec![];
 
     let batch_dimension = Dimension::new(Some(1), Some("batch_size".to_string()), Some("DATA_BATCH".to_string()));
     let sequence_dimension = Dimension::new(Some(1), Some("seq_len".to_string()), None);
@@ -80,14 +85,14 @@ pub fn translate(pth_path: &Path, bin_path: Option<&Path>) -> Result<Vec::<u8>, 
         sequence_dimension.clone(),
         Dimension::new(Some(1), None, None)
     ]);
-    let token_input = InputTensor::new("token_input".to_string(), onnx_graph::tensor::DType::I32, input_shape);
+    let token_input = InputTensor::new("token_input".to_string(), DType::I32, input_shape);
     input_tensors.push(token_input.clone());
 
     let x = Gather::new(Some("emb".to_string()), weight_manager.get_tensor("emb.weight")?, token_input.clone(), 0)?;
 
     let hidden_dim = x.shape().dim(-1).clone();
 
-    let n_heads = tensor_infos["blocks.0.att.r_k"].layout.shape().dims()[0];
+    let n_heads = weight_manager.get_tensor("blocks.0.att.r_k")?.shape().resolve()?[0];
 
     let k_dimension = Dimension::new(Some(hidden_dim.resolve()?/n_heads), Some("k_dim".to_string()), None);
     let v_dimension = Dimension::new(Some(hidden_dim.resolve()?/n_heads), Some("v_dim".to_string()), None);
@@ -104,7 +109,7 @@ pub fn translate(pth_path: &Path, bin_path: Option<&Path>) -> Result<Vec::<u8>, 
     for layer_id in 0..layer_count {
         let block_weight_manager = weight_manager.prefix(&format!("blocks.{layer_id}"));
 
-        let after_ln1 = onnx_graph::pytorch::layer_norm(
+        let after_ln1 = layer_norm(
             &block_weight_manager.prefix("ln1"),
             x, 1e-5)?;
 
@@ -113,18 +118,18 @@ pub fn translate(pth_path: &Path, bin_path: Option<&Path>) -> Result<Vec::<u8>, 
 
         output_tensors.push((format!("time_mixer_x_out_{layer_id}"), after_ln1.clone()));
 
-        let dxprev = Sub::new(None, time_mixer_x_in, after_ln1.clone())?;
+        let dx_prev = Sub::new(None, time_mixer_x_in, after_ln1.clone())?;
 
-        let receptance = Add::new(None, after_ln1.clone(), Mul::new(None, dxprev.clone(), block_weight_manager.get_tensor("att.x_r")?)?)?;
-        let decay =      Add::new(None, after_ln1.clone(), Mul::new(None, dxprev.clone(), block_weight_manager.get_tensor("att.x_w")?)?)?;
-        let key =        Add::new(None, after_ln1.clone(), Mul::new(None, dxprev.clone(), block_weight_manager.get_tensor("att.x_k")?)?)?;
-        let value =      Add::new(None, after_ln1.clone(), Mul::new(None, dxprev.clone(), block_weight_manager.get_tensor("att.x_v")?)?)?;
-        let iclr =       Add::new(None, after_ln1.clone(), Mul::new(None, dxprev.clone(), block_weight_manager.get_tensor("att.x_a")?)?)?;
-        let gate =       Add::new(None, after_ln1.clone(), Mul::new(None, dxprev.clone(), block_weight_manager.get_tensor("att.x_g")?)?)?;
+        let receptance = Add::new(None, after_ln1.clone(), Mul::new(None, dx_prev.clone(), block_weight_manager.get_tensor("att.x_r")?)?)?;
+        let decay =      Add::new(None, after_ln1.clone(), Mul::new(None, dx_prev.clone(), block_weight_manager.get_tensor("att.x_w")?)?)?;
+        let key =        Add::new(None, after_ln1.clone(), Mul::new(None, dx_prev.clone(), block_weight_manager.get_tensor("att.x_k")?)?)?;
+        let value =      Add::new(None, after_ln1.clone(), Mul::new(None, dx_prev.clone(), block_weight_manager.get_tensor("att.x_v")?)?)?;
+        let iclr =       Add::new(None, after_ln1.clone(), Mul::new(None, dx_prev.clone(), block_weight_manager.get_tensor("att.x_a")?)?)?;
+        let gate =       Add::new(None, after_ln1.clone(), Mul::new(None, dx_prev.clone(), block_weight_manager.get_tensor("att.x_g")?)?)?;
 
-        let receptance = onnx_graph::pytorch::linear(&block_weight_manager.prefix("att.receptance"), receptance)?;
-        let key = onnx_graph::pytorch::linear(&block_weight_manager.prefix("att.key"), key)?;
-        let value = onnx_graph::pytorch::linear(&block_weight_manager.prefix("att.value"), value)?;
+        let receptance = linear(&block_weight_manager.prefix("att.receptance"), receptance)?;
+        let key = linear(&block_weight_manager.prefix("att.key"), key)?;
+        let value = linear(&block_weight_manager.prefix("att.value"), value)?;
 
         let (new_v0, value) = if let Some(v0) = v0 {
             let v0_mix = lora_forward(
@@ -147,15 +152,15 @@ pub fn translate(pth_path: &Path, bin_path: Option<&Path>) -> Result<Vec::<u8>, 
             gate
         )?;
 
-        let log_neglog_of_decay = lora_forward_tanh(
+        let log_neg_log_of_decay = lora_forward_tanh(
             block_weight_manager.get_tensor("att.w1")?,
             block_weight_manager.get_tensor("att.w2")?,
             Some(block_weight_manager.get_tensor("att.w0")?),
             decay
         )?;
-        let log_neglog_of_decay = add_scalar(Neg::new(None, Softplus::new(None, Neg::new(None, log_neglog_of_decay))), half::bf16::from_f32(-0.5))?;
+        let log_neg_log_of_decay = add_scalar(Neg::new(None, Softplus::new(None, Neg::new(None, log_neg_log_of_decay))), half::bf16::from_f32(-0.5))?;
 
-        let log_of_decay = Neg::new(None, Exp::new(None, Cast::new(None, log_neglog_of_decay, DType::F32)));
+        let log_of_decay = Neg::new(None, Exp::new(None, Cast::new(None, log_neg_log_of_decay, DType::F32)));
         let decay = Exp::new(None, log_of_decay);
 
         let deformed_key = Mul::new(None, key.clone(), block_weight_manager.get_tensor("att.k_k")?)?;
@@ -244,6 +249,6 @@ pub fn translate(pth_path: &Path, bin_path: Option<&Path>) -> Result<Vec::<u8>, 
 
     println!("Built graph, exporting...");
     let onnx_model = onnx_graph::build_proto(&input_tensors, &output_tensors, bin_path)?;
-    
+
     Ok(onnx_model.encode_to_vec())
 }

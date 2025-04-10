@@ -183,6 +183,28 @@ pub enum DType {
     I64
 }
 
+impl DType {
+    pub fn from_safetensors(dtype: safetensors::Dtype) -> Result<Self, Error> {
+        match dtype {
+            safetensors::Dtype::F32 => Ok(DType::F32),
+            safetensors::Dtype::F16 => Ok(DType::F16),
+            safetensors::Dtype::BF16 => Ok(DType::BF16),
+            safetensors::Dtype::U16 => Ok(DType::U16),
+            safetensors::Dtype::I32 => Ok(DType::I32),
+            _ => Err(Error::UnsupportedDTypeError)
+        }
+    }
+    
+    pub fn from_candle(dtype: candle_core::DType) -> Result<Self, Error> {
+        match dtype {
+            candle_core::DType::F32 => Ok(DType::F32),
+            candle_core::DType::BF16 => Ok(DType::BF16),
+            candle_core::DType::F16 => Ok(DType::F16),
+            _ => Err(Error::UnsupportedDTypeError)
+        }
+    }
+}
+
 impl From<DType> for onnx::tensor_proto::DataType {
     fn from(value: DType) -> Self {
         match value {
@@ -318,6 +340,7 @@ impl Tensor for InputTensor {
 pub enum TensorDataValue {
     F32(Vec<f32>),
     BF16(Vec<half::bf16>),
+    F16(Vec<half::f16>),
     I32(Vec<i32>),
     I64(Vec<i64>),
 }
@@ -328,6 +351,7 @@ impl TensorDataValue {
             TensorDataValue::F32(v) => v.len(),
             TensorDataValue::I32(v) => v.len(),
             TensorDataValue::BF16(v) => v.len(),
+            TensorDataValue::F16(v) => v.len(),
             TensorDataValue::I64(v) => v.len(),
         }
     }
@@ -336,6 +360,7 @@ impl TensorDataValue {
         match self {
             TensorDataValue::F32(_) => DType::F32,
             TensorDataValue::BF16(_) => DType::BF16,
+            TensorDataValue::F16(_) => DType::F16,
             TensorDataValue::I32(_) => DType::I32,
             TensorDataValue::I64(_) => DType::I64,
         }
@@ -345,8 +370,36 @@ impl TensorDataValue {
         match self {
             TensorDataValue::F32(v) => v.iter().flat_map(|x| x.to_le_bytes()).collect(),
             TensorDataValue::BF16(v) => v.iter().flat_map(|x| x.to_le_bytes()).collect(),
+            TensorDataValue::F16(v) => v.iter().flat_map(|x| x.to_le_bytes()).collect(),
             TensorDataValue::I32(v) => v.iter().flat_map(|x| x.to_le_bytes()).collect(),
             TensorDataValue::I64(v) => v.iter().flat_map(|x| x.to_le_bytes()).collect(),
+        }
+    }
+    
+    pub fn from_raw_encoding(dtype: DType, data: &[u8]) -> Result<Self, Error> {
+        match dtype {
+            DType::F32 => {
+                let mut v = Vec::new();
+                for i in 0..data.len() / 4 {
+                    v.push(f32::from_le_bytes(data[i * 4..i * 4 + 4].try_into().unwrap()));
+                }
+                Ok(TensorDataValue::F32(v))
+            }
+            DType::F16 => {
+                let mut v = Vec::new();
+                for i in 0..data.len() / 2 {
+                    v.push(half::f16::from_le_bytes(data[i * 2..i * 2 + 2].try_into().unwrap()));
+                }
+                Ok(TensorDataValue::F16(v))
+            }
+            DType::BF16 => {
+                let mut v = Vec::new();
+                for i in 0..data.len() / 2 {
+                    v.push(half::bf16::from_le_bytes(data[i * 2..i * 2 + 2].try_into().unwrap()));
+                }
+                Ok(TensorDataValue::BF16(v))
+            }
+            _ => Err(Error::UnsupportedDTypeError)
         }
     }
 }
@@ -360,6 +413,12 @@ impl From<Vec<f32>> for TensorDataValue {
 impl From<Vec<half::bf16>> for TensorDataValue {
     fn from(value: Vec<half::bf16>) -> Self {
         TensorDataValue::BF16(value)
+    }
+}
+
+impl From<Vec<half::f16>> for TensorDataValue {
+    fn from(value: Vec<half::f16>) -> Self {
+        TensorDataValue::F16(value)
     }
 }
 
@@ -415,12 +474,53 @@ impl TensorData {
         }
     }
     
-    pub fn to_tensor_data_proto(&self) -> Result<TensorProto, Error> {
+    pub fn to_tensor_data_proto(&self, name: Option<String>) -> Result<TensorProto, Error> {
         Ok(TensorProto{
+            name: name.unwrap_or_default(),
             data_type: (onnx::tensor_proto::DataType::from(self.value.dtype()) as i32),
             dims: self.shape.resolve()?.iter().map(|x| *x as i64).collect(),
             raw_data: self.value.get_raw_encoding(),
             ..Default::default()
+        })
+    }
+    
+    pub fn from_candle_tensor(tensor: candle_core::Tensor) -> Result<Self, Error> {
+        let shape = Shape::from(tensor.shape());
+        let value = match tensor.dtype() {
+            candle_core::DType::F32 => {
+                let f_vec: Vec<f32> = tensor.flatten_all().unwrap().to_vec1().map_err(|x| Error::CandleCoreError(x))?;
+                TensorDataValue::F32(f_vec)
+            }
+            candle_core::DType::BF16 => {
+                let f_vec: Vec<half::bf16> = tensor.flatten_all().unwrap().to_vec1().map_err(|x| Error::CandleCoreError(x))?;
+                TensorDataValue::BF16(f_vec)
+            }
+            candle_core::DType::F16 => {
+                let f_vec: Vec<half::f16> = tensor.flatten_all().unwrap().to_vec1().map_err(|x| Error::CandleCoreError(x))?;
+                TensorDataValue::F16(f_vec)
+            }
+            _ => return Err(Error::UnsupportedDTypeError),
+        };
+        Ok(Self{
+            shape,
+            value
+        })
+    }
+    
+    pub(crate) fn to_raw_encoding(&self) -> Vec<u8> {
+        self.value.get_raw_encoding()
+    }
+    
+    pub fn from_safetensors_view(tensor: safetensors::tensor::TensorView) -> Result<Self, Error> {
+        let dtype = DType::from_safetensors(tensor.dtype())?;
+        let shape = Shape::from(tensor.shape());
+        let value = TensorDataValue::from_raw_encoding(dtype, tensor.data())?;
+        if shape.num_elements()? != value.len() {
+            Err(Error::OtherError)?;
+        }
+        Ok(Self{
+            shape,
+            value
         })
     }
 }

@@ -5,7 +5,9 @@ edition = "2024"
 
 [dependencies]
 candle-core = {git = "https://github.com/huggingface/candle", default-features=false}
+safetensors = "0.5.3"
 prost = "0.13.5"
+memmap2 = "0.9.5"
 half = "2.5.0"
 
 [build-dependencies]
