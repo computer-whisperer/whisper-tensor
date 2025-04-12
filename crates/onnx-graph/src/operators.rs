@@ -1,8 +1,9 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 use crate::{onnx, Error};
-use crate::node::{Node, SingleOutputNode};
+use crate::node::{MultiOutputNode, MultiOutputNodeOutput, Node, SingleOutputNode};
 use crate::onnx::{AttributeProto};
-use crate::tensor::{DType, Dimension, Shape, Tensor, TensorData};
+use crate::tensor::{DType, Dimension, StubTensor, Shape, Tensor, TensorData};
 
 fn validate_index_dtype(dtype: DType) -> Result<(), Error> {
     if dtype != DType::I32 && dtype != DType::I64 {
@@ -1791,12 +1792,12 @@ pub struct RMSNormalization {
     name: Option<String>,
     input: Arc<dyn Tensor>,
     scale: Arc<dyn Tensor>,
-    epsilon: f32,
+    epsilon: Option<f32>,
     axis: i64
 }
 
 impl RMSNormalization {
-    pub fn new(name: Option<String>, input: Arc<dyn Tensor>, scale: Arc<dyn Tensor>, epsilon: f32, axis: i64) -> Result<Arc<Self>, Error> {
+    pub fn new(name: Option<String>, input: Arc<dyn Tensor>, scale: Arc<dyn Tensor>, epsilon: Option<f32>, axis: i64) -> Result<Arc<Self>, Error> {
         if input.dtype() != scale.dtype() {
             return Err(Error::DTypeMismatchError(input.dtype(), scale.dtype()));
         }
@@ -1829,10 +1830,13 @@ impl Node for RMSNormalization {
     }
 
     fn get_onnx_attributes(&self) -> Vec<AttributeProto> {
-        vec![
-            make_int_attribute("axis", self.axis),
-            make_float_attribute("epsilon", self.epsilon)
-        ]
+        let mut out = vec![
+            make_int_attribute("axis", self.axis)
+        ];
+        if let Some(epsilon) = self.epsilon {
+            out.push(make_float_attribute("epsilon", epsilon))
+        };
+        out
     }
 }
 
@@ -2143,5 +2147,103 @@ impl SingleOutputNode for Expand {
 
     fn get_output_dtype(&self) -> DType {
         self.input.dtype()
+    }
+}
+
+pub struct TopK {
+    name: Option<String>,
+    input: Arc<dyn Tensor>,
+    k: Arc<dyn Tensor>,
+    axis: i64,
+    largest: bool,
+    sorted: bool,
+    output_shape: Shape,
+    value_output: Arc<StubTensor>
+}
+
+impl TopK {
+    pub fn new(
+        name: Option<String>,
+        input: Arc<dyn Tensor>,
+        k: Arc<dyn Tensor>,
+        axis: i64,
+        largest: bool,
+        sorted: bool,
+    ) -> Result<(Arc<StubTensor>, Arc<Self>), Error> {
+        if k.rank() != 1 {
+            Err(Error::InputShapeError)?;
+        }
+        if k.dtype() != DType::I64 {
+            Err(Error::InvalidDTypeError)?;
+        }
+        
+        let k_val = k.resolve_data().ok_or(Error::CannotResolveDataError)?.to_int_vec()?[0];
+        if k_val < 0 {
+            Err(Error::InvalidInputError)?;
+        }
+        
+        let mut output_dims = input.shape().dims.clone();
+        let axis_u = if axis < 0 { (axis + input.rank() as i64) as usize } else { axis as usize };
+        output_dims[axis_u] = Dimension::new(Some(k_val as usize), None, None);
+        let output_shape = Shape::new(output_dims);
+        
+        let value_output = StubTensor::new(output_shape.clone(), input.dtype());
+        
+        Ok((value_output.clone(), Arc::new(Self {
+            name,
+            input,
+            k,
+            axis,
+            largest,
+            sorted,
+            output_shape,
+            value_output: value_output.clone()
+        })))
+    }
+}
+
+impl Node for TopK {
+    fn get_input_tensors(&self) -> Vec<&dyn Tensor> {
+        vec![self.input.as_ref()]
+    }
+
+    fn get_output_tensors(&self) -> Vec<&dyn Tensor> {
+        vec![self.value_output.as_ref(), self]
+    }
+
+    fn get_name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    fn get_onnx_type(&self) -> &str {
+        "TopK"
+    }
+
+    fn get_tensors<'a>(&'a self, table: &mut HashSet<&'a dyn Tensor>) {
+        for input in self.get_input_tensors() {
+            if !table.contains(&input) {
+                table.insert(input);
+                input.get_sub_tensors(table);
+            }
+        }
+        table.insert(self.value_output.as_ref());
+    }
+
+    fn get_onnx_attributes(&self) -> Vec<AttributeProto> {
+        vec![
+            make_int_attribute("axis", self.axis),
+            make_int_attribute("largest", self.largest as i64),
+            make_int_attribute("sorted", self.sorted as i64)
+        ]
+    }
+}
+
+impl SingleOutputNode for TopK {
+    fn get_output_shape(&self) -> &Shape {
+        &self.output_shape
+    }
+
+    fn get_output_dtype(&self) -> DType {
+        DType::I64
     }
 }

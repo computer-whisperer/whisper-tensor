@@ -7,7 +7,7 @@ use memmap2::Mmap;
 use safetensors::SafeTensors;
 use safetensors::tensor::{Metadata, TensorInfo};
 use crate::{onnx, Error};
-use crate::onnx::{TensorProto};
+use crate::onnx::{TensorProto, Version};
 use crate::tensor::{DType, Shape, Tensor, TensorData};
 
 pub trait WeightExternalOutputManager<'a> {
@@ -24,6 +24,29 @@ pub trait WeightExternalOutputManager<'a> {
     }
     fn write_tensor_data(&mut self, graph_tensor: &'a dyn Tensor, data: TensorData) -> Result<(), Error>;
     fn get_initializer(&mut self, graph_tensor: &'a dyn Tensor, tensor_name: String) -> Result<Option<TensorProto>, Error>;
+    fn finalize_tensor_data(&mut self) {}
+}
+
+pub struct NullOutputManager {}
+
+impl NullOutputManager {
+    pub(crate) fn new() -> Self {Self {}}
+}
+
+impl <'a> WeightExternalOutputManager<'a> for NullOutputManager {
+    fn write_pth_tensor_data(&mut self, graph_tensor: &'a dyn Tensor, tensor_info: candle_core::pickle::TensorInfo, tensors: Arc<candle_core::pickle::PthTensors>) -> Result<(), Error> {
+        Ok(())
+    }
+    fn write_safetensors_tensor_data(&mut self, graph_tensor: &'a SafetensorsTensor) -> Result<(), Error> {
+        Ok(())
+    }
+    fn write_tensor_data(&mut self, graph_tensor: &'a dyn Tensor, data: TensorData) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn get_initializer(&mut self, graph_tensor: &'a dyn Tensor, tensor_name: String) -> Result<Option<TensorProto>, Error> {
+        Ok(None)
+    }
 }
 
 pub struct EmbeddedOutputManager<'a> {
@@ -71,16 +94,6 @@ impl<'a> BinOutputManager<'a> {
             output_data: None
         }
     }
-
-    pub fn finalize_tensor_data(&mut self) {
-        self.output.flush().unwrap();
-        self.output_data = Some(vec![
-            onnx::StringStringEntryProto {
-                key: "location".to_string(),
-                value: self.output_path.file_name().unwrap().to_str().unwrap().to_string(),
-            }
-        ]);
-    }
 }
 impl<'a> WeightExternalOutputManager<'a> for BinOutputManager<'a> {
 
@@ -118,6 +131,16 @@ impl<'a> WeightExternalOutputManager<'a> for BinOutputManager<'a> {
         else {
             Ok(None)
         }
+    }
+
+    fn finalize_tensor_data(&mut self) {
+        self.output.flush().unwrap();
+        self.output_data = Some(vec![
+            onnx::StringStringEntryProto {
+                key: "location".to_string(),
+                value: self.output_path.file_name().unwrap().to_str().unwrap().to_string(),
+            }
+        ]);
     }
 }
 
@@ -184,6 +207,12 @@ pub trait WeightManager {
     fn get_tensor(&self, name: &str) -> Result<Arc<dyn Tensor>, Error>;
     fn get_prefix_tail(&self) -> Option<&str>;
     fn get_prefix(&self) -> Option<&str>;
+    fn get_tensor_names(&self) -> Vec<String>;
+    fn print_weight_list(&self) {
+        for name in self.get_tensor_names() {
+            println!("{}", name);
+        }
+    }
 }
 
 pub struct PthWeightManager {
@@ -231,6 +260,10 @@ impl WeightManager for PthWeightManager {
     fn get_prefix(&self) -> Option<&str> {
         self.prefix.as_deref()
     }
+
+    fn get_tensor_names(&self) -> Vec<String> {
+        self.pth_tensors.tensor_infos().keys().map(|x| x.to_string()).collect()
+    }
 }
 
 pub struct SafetensorsWeightManagerInner {
@@ -261,6 +294,15 @@ impl SafetensorsWeightManagerInner {
             }
         }
         None
+    }
+
+    fn get_tensor_names(&self) -> Vec<String> {
+        let mut out = vec![];
+        for metadata in &self.safetensors_metadata {
+            let tensors = metadata.1.tensors();
+            out.extend(tensors.keys().map(|x| x.clone()));
+        }
+        out
     }
 }
 
@@ -306,6 +348,10 @@ impl WeightManager for SafetensorsWeightManager {
     }
     fn get_prefix(&self) -> Option<&str> {
         self.prefix.as_deref()
+    }
+
+    fn get_tensor_names(&self) -> Vec<String> {
+        self.inner.get_tensor_names()
     }
 }
 

@@ -3,10 +3,11 @@ use std::path::Path;
 use std::sync::Arc;
 use memmap2::Mmap;
 use onnx_graph::weights::SafetensorsWeightManager;
-use crate::llama3::Llama3Config;
+use onnx_graph::WeightStorageStrategy;
 
 pub mod rwkv7;
 pub mod llama3;
+mod llama4;
 
 #[derive(Debug)]
 pub enum Error {
@@ -19,11 +20,29 @@ pub enum Error {
     MissingConfigEntryError(String)
 }
 
-pub fn identify_and_load(model_path: &Path, bin_path: Option<&Path>) -> Result<Vec::<u8>, Error> {
+impl core::fmt::Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+impl core::error::Error for Error{
+    fn cause(&self) -> Option<&dyn core::error::Error> {
+        match self {
+            Error::OnnxGraphError(e) => Some(e),
+            Error::IoError(e) => Some(e),
+            Error::ConfigParseError(e) => Some(e),
+            Error::SafeTensorError(e) => Some(e),
+            _ => None
+        }
+    }
+}
+
+pub fn identify_and_load(model_path: &Path, output_method: WeightStorageStrategy) -> Result<Vec::<u8>, Error> {
     if model_path.is_dir() {
         let config_path = model_path.join("config.json");
         if config_path.exists() {
-            load_transformers_format(model_path, bin_path)
+            load_transformers_format(model_path, output_method)
         }
         else {
             Err(Error::UnknownModel)
@@ -31,7 +50,7 @@ pub fn identify_and_load(model_path: &Path, bin_path: Option<&Path>) -> Result<V
     }
     else if let Some(ext) = model_path.extension() {
         if ext == "pth" {
-            rwkv7::load_rwkv7_pth(model_path, bin_path)
+            rwkv7::load_rwkv7_pth(model_path, output_method)
         }
         else {
             Err(Error::UnknownModel)
@@ -42,7 +61,7 @@ pub fn identify_and_load(model_path: &Path, bin_path: Option<&Path>) -> Result<V
     }
 }
 
-fn load_transformers_format(model_path: &Path, bin_path: Option<&Path>) -> Result<Vec::<u8>, Error> {
+fn load_transformers_format(model_path: &Path, output_method: WeightStorageStrategy) -> Result<Vec::<u8>, Error> {
     println!("Loading hf transformers weights from {}", model_path.display());
     
     let config_path = model_path.join("config.json");
@@ -72,30 +91,6 @@ fn load_transformers_format(model_path: &Path, bin_path: Option<&Path>) -> Resul
         }
         safetensors_mmaps
     };
-
-    /*
-    let mut central_metadata: HashMap<String, String> = HashMap::new();
-
-    let safetensors_metadata = {
-        let mut out = vec![];
-        for safetensors_mmap in &safetensors_mmaps {
-            let metadata = SafeTensors::read_metadata(&safetensors_mmap).map_err(|x| Error::SafeTensorError(x))?;
-            let data = metadata.1.metadata();
-            if let Some(data) = data {
-                for (k, v) in data {
-                    central_metadata.insert(k.clone(), v.clone());
-                }
-            }
-            out.push(metadata);
-        }
-        out
-    };
-
-    println!("Loaded {} files, here is the safetensors metadata:", safetensors_metadata.len());
-    for (k, v) in central_metadata {
-        println!("{}: {}", k, v);
-    }
-    */
     
     let weight_manager = SafetensorsWeightManager::new(safetensors_mmaps).map_err(|x| Error::OnnxGraphError(x))?;
 
@@ -103,8 +98,13 @@ fn load_transformers_format(model_path: &Path, bin_path: Option<&Path>) -> Resul
     match model_type {
         "llama" => {
             println!("Loading as Llama3");
-            let config = Llama3Config::from_huggingface_transformers_json(&config)?;
-            llama3::load_llama3(weight_manager, config, bin_path).map_err(|x| Error::OnnxGraphError(x))
+            let config = llama3::Llama3Config::from_huggingface_transformers_json(&config)?;
+            llama3::load_llama3(weight_manager, config, output_method).map_err(|x| Error::OnnxGraphError(x))
+        }
+        "llama4" => {
+            println!("Loading as Llama4");
+            let config = llama4::Llama4Config::from_huggingface_transformers_json(&config)?;
+            llama4::load_llama4(weight_manager, config, output_method).map_err(|x| Error::OnnxGraphError(x))
         }
         _ => Err(Error::UnknownModel)
     }

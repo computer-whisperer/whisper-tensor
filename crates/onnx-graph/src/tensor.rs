@@ -336,6 +336,26 @@ impl Tensor for InputTensor {
     }
 }
 
+pub struct StubTensor {
+    shape: Shape,
+    dtype: DType
+}
+
+impl StubTensor {
+    pub(crate) fn new(shape: Shape, dtype: DType) -> Arc<Self> {
+        Arc::new(Self {shape, dtype})
+    }
+}
+
+impl Tensor for StubTensor {
+    fn dtype(&self) -> DType {
+        self.dtype
+    }
+    fn shape(&self) -> &Shape {
+        &self.shape
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum TensorDataValue {
     F32(Vec<f32>),

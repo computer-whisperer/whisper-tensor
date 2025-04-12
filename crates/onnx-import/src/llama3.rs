@@ -1,10 +1,11 @@
 use std::path::Path;
 use std::sync::Arc;
 use prost::Message;
-use onnx_graph::operators::{Add, Concat, Div, Gather, MatMul, Mul, RotaryEmbedding, ShapeOp, Softmax, Transpose};
-use onnx_graph::pytorch::{div_scalar, expand, linear, reshape, rms_norm, silu, swiglu, transpose, unsqueeze};
+use onnx_graph::operators::{Add, Concat, Gather, MatMul, Mul, RotaryEmbedding, ShapeOp, Softmax, Transpose};
+use onnx_graph::pytorch::{div_scalar, linear, reshape, rms_norm, silu, transpose};
 use onnx_graph::tensor::{DType, Dimension, InputTensor, Shape, Tensor};
 use onnx_graph::weights::{WeightManager};
+use onnx_graph::WeightStorageStrategy;
 use crate::Error;
 
 pub struct Llama3Config {
@@ -33,7 +34,7 @@ impl Llama3Config {
     }
 }
 
-pub fn load_llama3(weight_manager: impl WeightManager, config: Llama3Config, bin_path: Option<&Path>) -> Result<Vec<u8>, onnx_graph::Error> {
+pub fn load_llama3(weight_manager: impl WeightManager, config: Llama3Config, output_method: WeightStorageStrategy) -> Result<Vec<u8>, onnx_graph::Error> {
 
     let model_weight_manager = weight_manager.prefix("model");
 
@@ -75,7 +76,7 @@ pub fn load_llama3(weight_manager: impl WeightManager, config: Llama3Config, bin
     for i in 0..config.num_hidden_layers {
         let layer_weight_manager = model_weight_manager.prefix(&format!("layers.{}", i));
         let layer_input = layer_output.clone();
-        let att_norm = rms_norm(&layer_weight_manager.prefix("input_layernorm"), layer_input.clone())?;
+        let att_norm = rms_norm(&layer_weight_manager.prefix("input_layernorm"), layer_input.clone(), None)?;
 
         // Multi-head Attention
         let q = linear(&layer_weight_manager.prefix("self_attn.q_proj"), att_norm.clone())?;
@@ -137,7 +138,7 @@ pub fn load_llama3(weight_manager: impl WeightManager, config: Llama3Config, bin
         let hidden_layer=  linear(&layer_weight_manager.prefix("self_attn.o_proj"), output)?;
 
         let attention_output = Add::new(None, layer_input, hidden_layer)?;
-        let ffn_norm = rms_norm(&layer_weight_manager.prefix("post_attention_layernorm"), attention_output.clone())?;
+        let ffn_norm = rms_norm(&layer_weight_manager.prefix("post_attention_layernorm"), attention_output.clone(), None)?;
 
 
         // FeedForward
@@ -150,11 +151,11 @@ pub fn load_llama3(weight_manager: impl WeightManager, config: Llama3Config, bin
         layer_output = Add::new(None, attention_output, hidden_layer)?;
     }
 
-    let h = rms_norm(&model_weight_manager.prefix("norm"), layer_output)?;
+    let h = rms_norm(&model_weight_manager.prefix("norm"), layer_output, None)?;
     let out = linear(&weight_manager.prefix("lm_head"), h)?;
     output_tensors.push(("logits".to_string(), out));
 
     println!("Built graph, exporting...");
-    let onnx_model = onnx_graph::build_proto(&input_tensors, &output_tensors, bin_path)?;
+    let onnx_model = onnx_graph::build_proto(&input_tensors, &output_tensors, output_method)?;
     Ok(onnx_model.encode_to_vec())
 }

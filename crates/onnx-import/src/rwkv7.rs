@@ -6,6 +6,7 @@ use onnx_graph::operators::{Add, Cast, Constant, Exp, Gather, LpNormalization, M
 use onnx_graph::pytorch::{cast, cumsum, group_norm, layer_norm, linear, reshape, squeeze, transpose};
 use onnx_graph::tensor::{DType, Dimension, InputTensor, Shape, Tensor, TensorData, TensorDataValue};
 use onnx_graph::weights::{WeightManager};
+use onnx_graph::WeightStorageStrategy;
 use crate::Error;
 
 fn lerp(a: Arc<dyn Tensor>, b: Arc<dyn Tensor>, t: Arc<dyn Tensor>) -> Result<Arc<dyn Tensor>, onnx_graph::Error> {
@@ -53,7 +54,7 @@ where
     Ok(Add::new(None, x, constant)?)
 }
 
-pub fn load_rwkv7_pth(pth_path: &Path, bin_path: Option<&Path>) -> Result<Vec<u8>, Error> {
+pub fn load_rwkv7_pth(pth_path: &Path, output_method: WeightStorageStrategy) -> Result<Vec<u8>, Error> {
     println!("Attempting to load RWKV7 from {}", pth_path.display());
     let tensors = Arc::new(PthTensors::new(pth_path, None).unwrap());
 
@@ -69,10 +70,10 @@ pub fn load_rwkv7_pth(pth_path: &Path, bin_path: Option<&Path>) -> Result<Vec<u8
     
     let weight_manager = onnx_graph::weights::PthWeightManager::new(tensors.clone());
 
-    load_rwkv7(weight_manager, layer_count, bin_path).map_err(|e| Error::OnnxGraphError(e))
+    load_rwkv7(weight_manager, layer_count, output_method).map_err(|e| Error::OnnxGraphError(e))
 }
 
-pub fn load_rwkv7(weight_manager: impl WeightManager, layer_count: usize, bin_path: Option<&Path>) -> Result<Vec<u8>, onnx_graph::Error> {
+pub fn load_rwkv7(weight_manager: impl WeightManager, layer_count: usize, output_method: WeightStorageStrategy) -> Result<Vec<u8>, onnx_graph::Error> {
 
     let mut input_tensors = vec![];
     let mut output_tensors: Vec<(String, Arc<dyn Tensor>)> = vec![];
@@ -248,7 +249,7 @@ pub fn load_rwkv7(weight_manager: impl WeightManager, layer_count: usize, bin_pa
     output_tensors.push(("output".to_string(), output));
 
     println!("Built graph, exporting...");
-    let onnx_model = onnx_graph::build_proto(&input_tensors, &output_tensors, bin_path)?;
+    let onnx_model = onnx_graph::build_proto(&input_tensors, &output_tensors, output_method)?;
 
     Ok(onnx_model.encode_to_vec())
 }

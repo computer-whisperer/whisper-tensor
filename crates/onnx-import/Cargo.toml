@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 onnx-graph = {workspace = true}
-candle-core = {git = "https://github.com/huggingface/candle", default-features=false}
+candle-core = {workspace=true, default-features=false}
 safetensors = "0.5.3"
 memmap2 = "0.9.5"
 prost = "0.13.5"

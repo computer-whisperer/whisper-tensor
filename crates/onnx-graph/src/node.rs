@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::default::Default;
+use std::sync::Arc;
 use crate::tensor::{Shape, TensorData};
 use crate::tensor::Tensor;
 use crate::DType;
@@ -13,10 +14,14 @@ pub trait Node {
     fn get_nodes<'a>(&'a self, table: &mut HashSet<&'a dyn Node>) where Self: Sized {
         let dyn_self: &dyn Node = self;
         if !table.contains(&dyn_self) {
+            self.get_sub_nodes(table);
             table.insert(dyn_self);
-            for input in self.get_input_tensors() {
-                input.get_nodes(table);
-            }
+        }
+    }
+
+    fn get_sub_nodes<'a>(&'a self, table: &mut HashSet<&'a dyn Node>) {
+        for input in self.get_input_tensors() {
+            input.get_nodes(table);
         }
     }
 
@@ -72,15 +77,49 @@ impl<'a> Hash for &'a dyn Node {
     }
 }
 
-/*
-trait MultiOutputNode: Node {
-    fn get_output_shape(&self, output_index: usize) -> Vec<usize>;
+
+pub trait MultiOutputNode: Node {
+    fn get_output_shape(&self, output_index: usize) -> &Shape;
 
     fn get_output_dtype(&self, output_index: usize) -> DType;
 
     fn get_num_outputs(&self) -> usize;
 }
-*/
+
+pub(crate) struct MultiOutputNodeOutput {
+    parent: Arc<dyn MultiOutputNode>,
+    output_index: usize,
+}
+
+impl MultiOutputNodeOutput {
+    pub(crate) fn new(parent: Arc<dyn MultiOutputNode>, output_index: usize) -> Self {
+        Self { parent, output_index }
+    }
+}
+
+impl Tensor for MultiOutputNodeOutput {
+    fn dtype(&self) -> DType {
+        self.parent.get_output_dtype(self.output_index)
+    }
+
+    fn shape(&self) -> &Shape {
+        self.parent.get_output_shape(self.output_index)
+    }
+
+    fn get_nodes<'a>(&'a self, table: &mut HashSet<&'a dyn Node>) {
+        let dyn_node: &dyn Node = self.parent.as_ref();
+        if !table.contains(&dyn_node) {
+            self.parent.get_sub_nodes(table);
+            table.insert(dyn_node);
+        }
+    }
+
+    fn get_sub_tensors<'a>(&'a self, table: &mut HashSet<&'a dyn Tensor>) {
+        self.parent.get_tensors(table)
+    }
+}
+
+
 pub(crate) trait SingleOutputNode: Node {
     fn get_output_shape(&self) -> &Shape;
 

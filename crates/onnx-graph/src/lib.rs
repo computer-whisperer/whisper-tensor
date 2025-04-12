@@ -5,11 +5,11 @@ mod node;
 pub mod pytorch;
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tensor::*;
 use node::*;
-use crate::weights::{BinOutputManager};
+use crate::weights::{WeightExternalOutputManager};
 
 pub mod onnx {
     include!(concat!(env!("OUT_DIR"), "/onnx.rs"));
@@ -36,12 +36,37 @@ pub enum Error {
     OtherError
 }
 
+impl core::fmt::Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
 
+impl core::error::Error for Error{
+    
+}
+
+pub enum WeightStorageStrategy {
+    None,
+    BinFile(PathBuf),
+    EmbeddedData
+}
+
+impl WeightStorageStrategy {
+    fn get_manager<'a>(&'a self) -> Result<Box<dyn WeightExternalOutputManager<'a> + 'a>, Error> {
+        match self {
+            WeightStorageStrategy::None => Ok(Box::new(weights::NullOutputManager::new())),
+            WeightStorageStrategy::BinFile(path) => Ok(Box::new(weights::BinOutputManager::<'a>::new(path))),
+            WeightStorageStrategy::EmbeddedData => Ok(Box::new(weights::EmbeddedOutputManager::<'a>::new())),
+            _ => panic!()
+        }
+    }
+}
 
 pub fn build_proto(
     inputs: &[Arc<InputTensor>],
     outputs: &[(String, Arc<dyn Tensor>)],
-    bin_file_path: Option<&Path>,
+    weight_storage: WeightStorageStrategy
 ) -> Result<onnx::ModelProto, Error> {
     
     // Get all nodes in graph
@@ -107,11 +132,9 @@ pub fn build_proto(
     }
 
     // Gather tensor weights
-    let mut data_manager = BinOutputManager::new(
-        bin_file_path.unwrap(),
-    );
+    let mut data_manager = weight_storage.get_manager()?;
     for tensor in &tensors {
-        tensor.gather_weights(&mut data_manager);
+        tensor.gather_weights(data_manager.as_mut());
     }
     data_manager.finalize_tensor_data();
     
@@ -127,7 +150,7 @@ pub fn build_proto(
     // Generate initializer blocks
     let mut initializers = vec![];
     for tensor in tensors {
-        if let Some(initializer) = tensor.get_initializer(tensor_names[&tensor].clone(), &mut data_manager)? {
+        if let Some(initializer) = tensor.get_initializer(tensor_names[&tensor].clone(), data_manager.as_mut())? {
             initializers.push(initializer);
         }
     }
@@ -149,7 +172,7 @@ pub fn build_proto(
         ir_version: onnx::Version::IrVersion2024325 as i64,
         opset_import: vec![],
         producer_version: own_version,
-        domain: String::from("com.rwkv"),
+        domain: String::new(),
         model_version: 0,
         doc_string: String::new(),
         graph: Some(graph),

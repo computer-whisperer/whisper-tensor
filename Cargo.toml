@@ -4,10 +4,19 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+onnx-import = {workspace=true}
+onnx-graph = {workspace=true}
+prost = "0.13.5"
+vulkano = "0.35.1"
+candle-core = {workspace=true, default-features=false}
+
+[build-dependencies]
+prost-build = "0.13.3"
 
 [workspace]
 members = [ "crates/onnx-graph", "crates/onnx-import"]
 
 [workspace.dependencies]
 onnx-graph = { path = "crates/onnx-graph" }
-onnx-rwkv = { path = "crates/onnx-import" }
+onnx-import = { path = "crates/onnx-import" }
+candle-core = {version="0.9.0-alpha.1", default-features=false}

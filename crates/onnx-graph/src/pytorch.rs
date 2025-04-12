@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use crate::{operators, Error};
-use crate::operators::{Cast, Constant, CumSum, Div, Expand, GroupNormalization, LayerNormalization, Mul, RMSNormalization, Reshape, Sigmoid, Slice, Squeeze, Transpose, Unsqueeze};
+use crate::operators::{Cast, Constant, CumSum, Div, Expand, GroupNormalization, LayerNormalization, Mul, RMSNormalization, Reshape, Sigmoid, Slice, Squeeze, TopK, Transpose, Unsqueeze};
 use crate::tensor::{DType, Dimension, Shape, Tensor, TensorData, TensorDataValue};
 use crate::weights::WeightManager;
 
@@ -89,12 +89,12 @@ pub fn cumsum(input: Arc<dyn Tensor>, axis: i32) -> Result<Arc<CumSum>, Error> {
     CumSum::new(None, input, axis)
 }
 
-pub fn rms_norm(weight_manager: &impl WeightManager, input: Arc<dyn Tensor>) -> Result<Arc<RMSNormalization>, Error> {
+pub fn rms_norm(weight_manager: &impl WeightManager, input: Arc<dyn Tensor>, epsilon: Option<f32>) -> Result<Arc<RMSNormalization>, Error> {
     RMSNormalization::new(
         weight_manager.get_prefix().map(|x| x.to_string()),
         input,
         weight_manager.get_tensor("weight")?,
-        1e-5,
+        epsilon,
         -1
     )
 }
@@ -127,4 +127,11 @@ pub fn expand(input: Arc<dyn Tensor>, dims: Vec<i64>) -> Result<Arc<Expand>, Err
     let shape = Shape::from(&[dims.len()][..]);
     let c = Constant::new(None, TensorData::new(dims.into(), shape)?);
     Ok(Expand::new(None, input, c)?)
+}
+
+pub fn topk(input: Arc<dyn Tensor>, k: i64, axis: i64) -> Result<(Arc<dyn Tensor>, Arc<dyn Tensor>), Error> {
+    let shape = Shape::from(vec![1]);
+    let c = Constant::new(None, TensorData::fill(shape, k)?);
+    let (a, b) = TopK::new(None, input, c, axis, false, false)?;
+    Ok((a, b))
 }
