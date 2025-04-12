@@ -1,5 +1,3 @@
-use std::path::Component::ParentDir;
-use std::path::Path;
 use std::sync::Arc;
 use prost::Message;
 use onnx_graph::operators::{Add, Gather, Mul, TopK};
@@ -7,7 +5,16 @@ use onnx_graph::pytorch::{layer_norm, linear, reshape, rms_norm, silu, topk, tra
 use onnx_graph::tensor::{DType, Dimension, InputTensor, Shape, Tensor};
 use onnx_graph::weights::WeightManager;
 use onnx_graph::WeightStorageStrategy;
-use crate::Error;
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("Unsupported activation: {0}")]
+    UnsupportedActivation(String),
+    #[error("Missing config entry: {0}")]
+    MissingConfigEntryError(String),
+    #[error("Unsupported configuration: {0}")]
+    UnsupportedConfigurationError(String)
+}
 
 enum HiddenAct {
     Silu
@@ -17,7 +24,7 @@ impl HiddenAct {
     pub fn from_str(s: &str) -> Result<Self, Error> {
         match s {
             "silu" => Ok(HiddenAct::Silu),
-            _ => Err(Error::ModelLoadError)
+            s => Err(Error::UnsupportedActivation(s.to_string()))
         }
     }
     
@@ -82,7 +89,7 @@ impl Llama4Config {
         
         let num_experts_per_tok = get_int(text_config, "num_experts_per_tok")? as usize;
         if num_experts_per_tok > 1 {
-            Err(Error::ModelLoadError)?;
+            Err(Error::UnsupportedConfigurationError("num_experts_per_tok > 1".to_string()))?;
         }
         
         Ok(Self {
@@ -97,7 +104,7 @@ impl Llama4Config {
     }
 }
 
-pub fn load_llama4(weight_manager: impl WeightManager, config: Llama4Config, output_method: WeightStorageStrategy) -> Result<Vec<u8>, onnx_graph::Error> {
+pub fn load_llama4(weight_manager: impl WeightManager, config: Llama4Config, output_method: WeightStorageStrategy) -> Result<Vec<u8>, anyhow::Error> {
     weight_manager.print_weight_list();
     let weight_manager = weight_manager.prefix("language_model");
     let model_weight_manager = weight_manager.prefix("model");
@@ -144,7 +151,7 @@ pub fn load_llama4(weight_manager: impl WeightManager, config: Llama4Config, out
             let hidden_state = reshape(hidden_state.clone(), vec![-1, model_dim as i64])?;
             let router_logits = linear(&layer_weight_manager.prefix("feed_forward.router"), hidden_state.clone())?;
             let router_logits = transpose(router_logits);
-            let (_values, selected_experts) = topk(router_logits, config.num_experts_per_tok as i64, 1)?;
+            let (_values, _selected_experts) = topk(router_logits, config.num_experts_per_tok as i64, 1)?;
             
             
             todo!();

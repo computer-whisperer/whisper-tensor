@@ -7,7 +7,6 @@ use onnx_graph::pytorch::{cast, cumsum, group_norm, layer_norm, linear, reshape,
 use onnx_graph::tensor::{DType, Dimension, InputTensor, Shape, Tensor, TensorData, TensorDataValue};
 use onnx_graph::weights::{WeightManager};
 use onnx_graph::WeightStorageStrategy;
-use crate::Error;
 
 fn lerp(a: Arc<dyn Tensor>, b: Arc<dyn Tensor>, t: Arc<dyn Tensor>) -> Result<Arc<dyn Tensor>, onnx_graph::Error> {
     let x = Sub::new(None, b, a.clone())?;
@@ -54,9 +53,9 @@ where
     Ok(Add::new(None, x, constant)?)
 }
 
-pub fn load_rwkv7_pth(pth_path: &Path, output_method: WeightStorageStrategy) -> Result<Vec<u8>, Error> {
+pub fn load_rwkv7_pth(pth_path: &Path, output_method: WeightStorageStrategy) -> Result<Vec<u8>, anyhow::Error> {
     println!("Attempting to load RWKV7 from {}", pth_path.display());
-    let tensors = Arc::new(PthTensors::new(pth_path, None).unwrap());
+    let tensors = Arc::new(PthTensors::new(pth_path, None)?);
 
     // Survey tensor names
     let tensor_infos = tensors.tensor_infos();
@@ -64,16 +63,16 @@ pub fn load_rwkv7_pth(pth_path: &Path, output_method: WeightStorageStrategy) -> 
     for (name, _info) in tensor_infos {
         let name_split = name.split(".").collect::<Vec<&str>>();
         if name_split[0] == "blocks" {
-            layer_count = layer_count.max(name_split[1].parse::<usize>().unwrap());
+            layer_count = layer_count.max(name_split[1].parse::<usize>()?);
         }
     }
     
     let weight_manager = onnx_graph::weights::PthWeightManager::new(tensors.clone());
 
-    load_rwkv7(weight_manager, layer_count, output_method).map_err(|e| Error::OnnxGraphError(e))
+    load_rwkv7(weight_manager, layer_count, output_method)
 }
 
-pub fn load_rwkv7(weight_manager: impl WeightManager, layer_count: usize, output_method: WeightStorageStrategy) -> Result<Vec<u8>, onnx_graph::Error> {
+pub fn load_rwkv7(weight_manager: impl WeightManager, layer_count: usize, output_method: WeightStorageStrategy) -> Result<Vec<u8>, anyhow::Error> {
 
     let mut input_tensors = vec![];
     let mut output_tensors: Vec<(String, Arc<dyn Tensor>)> = vec![];

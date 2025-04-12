@@ -2,8 +2,21 @@ use std::sync::Arc;
 use vulkano::device::{Device, DeviceCreateInfo, Queue, QueueCreateInfo, QueueFlags};
 use vulkano::instance::{Instance, InstanceCreateFlags, InstanceCreateInfo};
 use vulkano::memory::allocator::StandardMemoryAllocator;
-use vulkano::VulkanLibrary;
-use crate::Error;
+use vulkano::{VulkanError, VulkanLibrary};
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("No suitable Vulkan device found")]
+    NoSuitableVulkanDeviceError,
+    #[error("No suitable Vulkan queue found")]
+    NoSuitableVulkanQueueError,
+    #[error(transparent)]
+    VulkanError(#[from] VulkanError),
+    #[error(transparent)]
+    ValidatedVulkanError(#[from] vulkano::Validated<VulkanError>),
+    #[error(transparent)]
+    VulkanLoadingError(#[from] vulkano::LoadingError)
+}
 
 #[derive(Debug)]
 pub struct VulkanContext {

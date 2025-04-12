@@ -493,11 +493,11 @@ impl MatMul {
                                     a_shape[i].clone()
                                 }
                                 else {
-                                    Err(Error::InputShapeError)?
+                                    Err(Error::IncompatibleShapeError(a_shape.clone(), b_shape.clone()))?
                                 }
                             }
                             else {
-                                Err(Error::InputShapeError)?
+                                Err(Error::IncompatibleShapeError(a_shape.clone(), b_shape.clone()))?
                             }
                         }
                     }
@@ -506,11 +506,11 @@ impl MatMul {
                             a_shape[i].clone()
                         }
                         else {
-                            Err(Error::InputShapeError)?
+                            Err(Error::IncompatibleShapeError(a_shape.clone(), b_shape.clone()))?
                         }
                     }
                     else {
-                        Err(Error::InputShapeError)?
+                        Err(Error::IncompatibleShapeError(a_shape.clone(), b_shape.clone()))?
                     }
                 }
             )
@@ -601,11 +601,14 @@ impl Gemm {
         } else {
             b.shape().clone()
         };
-        if a_shape.rank() != 2 || b_shape.rank() != 2 {
-            return Err(Error::InputShapeError)
+        if a_shape.rank() != 2 {
+            return Err(Error::InputShapeError(a_shape.clone()))
+        }
+        if b_shape.rank() != 2 {
+            return Err(Error::InputShapeError(b_shape.clone()))
         }
         if a_shape[1].as_ref() != b_shape[0].as_ref() {
-            return Err(Error::InputShapeError)
+            return Err(Error::InvalidInputError)
         }
         let output_shape = Shape::new(vec![a_shape[0].clone(), b_shape[1].clone()]);
         let output_dtype = a.dtype();
@@ -1317,7 +1320,7 @@ impl Slice {
         };
 
         if starts_value.len() != axes_value.len() || ends_value.len() != axes_value.len() || steps_value.len() != axes_value.len() {
-            Err(Error::InputShapeError)?;
+            Err(Error::InvalidInputError)?;
         }
 
         let mut output_dimensions = vec![];
@@ -1400,7 +1403,7 @@ impl Squeeze {
     pub fn new(name: Option<String>, data_input: Arc<dyn Tensor>, axes_input: Arc<dyn Tensor>) -> Result<Arc<Self>, Error> {
 
         if axes_input.rank() != 1 {
-            Err(Error::InputShapeError)?;
+            Err(Error::InputShapeError(axes_input.shape().clone()))?;
         }
         if axes_input.dtype() != DType::I64 {
             Err(Error::InvalidDTypeError)?;
@@ -1482,7 +1485,7 @@ pub struct Unsqueeze {
 impl Unsqueeze {
     pub fn new(name: Option<String>, data_input: Arc<dyn Tensor>, axes_input: Arc<dyn Tensor>) -> Result<Arc<Self>, Error> {
         if axes_input.rank() != 1 {
-            Err(Error::InputShapeError)?;
+            Err(Error::InputShapeError(axes_input.shape().clone()))?;
         }
         if axes_input.dtype() != DType::I64 {
             Err(Error::InvalidDTypeError)?;
@@ -1681,13 +1684,11 @@ impl CumSum {
         validate_index_dtype(axis_input.dtype())?;
 
         if axis_input.rank() > 1 {
-            return Err(Error::InputShapeError);
+            return Err(Error::InputShapeError(axis_input.shape().clone()));
         }
 
         let axis_data = axis_input.resolve_data().ok_or(Error::CannotResolveDataError)?.to_int_vec()?;
-        if axis_data.len() > 1 {
-            return Err(Error::InputShapeError);
-        }
+
         let axis = axis_data[0];
         let axis = if axis < 0 {
             (axis + data_input.rank() as i64) as usize
@@ -2171,7 +2172,7 @@ impl TopK {
         sorted: bool,
     ) -> Result<(Arc<StubTensor>, Arc<Self>), Error> {
         if k.rank() != 1 {
-            Err(Error::InputShapeError)?;
+            Err(Error::InputShapeError(k.shape().clone()))?;
         }
         if k.dtype() != DType::I64 {
             Err(Error::InvalidDTypeError)?;

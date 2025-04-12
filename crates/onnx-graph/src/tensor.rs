@@ -5,6 +5,7 @@ use crate::{onnx, Error};
 use crate::node::{Node, SingleOutputNode};
 use crate::onnx::{TensorProto, ValueInfoProto};
 use crate::weights::WeightExternalOutputManager;
+use core::fmt;
 
 #[derive(Clone, Debug)]
 pub struct Dimension {
@@ -47,6 +48,20 @@ impl From<usize> for Dimension {
 impl PartialEq for &Dimension {
     fn eq(&self, other: &Self) -> bool {
         core::ptr::eq(*self, *other) || if let (Some(a), Some(b)) = (self.value, other.value) {a == b} else {false}
+    }
+}
+
+impl fmt::Display for Dimension {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(value) = self.value {
+            write!(f, "{}", value)
+        }
+        else if let Some(name) = &self.name {
+            write!(f, "{}", name)
+        }
+        else {
+            write!(f, "?")
+        }
     }
 }
 
@@ -107,6 +122,12 @@ impl Shape {
     }
 }
 
+impl fmt::Display for Shape {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.dims.iter().map(|x| x.to_string()).collect::<Vec<_>>().join("x"))
+    }
+}
+
 impl PartialEq for Shape {
     fn eq(&self, other: &Self) -> bool {
         self.dims.len() == other.dims.len() && self.dims.iter().zip(other.dims.iter()).all(|(a, b)| a.as_ref() == b.as_ref())
@@ -147,7 +168,7 @@ impl From<candle_core::Shape> for Shape {
     }
 }
 
-impl std::ops::Index<usize> for Shape {
+impl core::ops::Index<usize> for Shape {
     type Output = Arc<Dimension>;
 
     fn index(&self, index: usize) -> &Self::Output {
@@ -215,6 +236,12 @@ impl From<DType> for onnx::tensor_proto::DataType {
             DType::I32 => onnx::tensor_proto::DataType::Int32,
             DType::I64 => onnx::tensor_proto::DataType::Int64,
         }
+    }
+}
+
+impl core::fmt::Display for DType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{:?}", self)
     }
 }
 

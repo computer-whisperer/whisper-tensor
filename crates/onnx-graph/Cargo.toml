@@ -9,6 +9,7 @@ safetensors = "0.5.3"
 prost = "0.13.5"
 memmap2 = "0.9.5"
 half = "2.5.0"
+thiserror = "2.0.12"
 
 [build-dependencies]
 prost-build = "0.13.3"

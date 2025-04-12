@@ -15,35 +15,38 @@ pub mod onnx {
     include!(concat!(env!("OUT_DIR"), "/onnx.rs"));
 }
 
-
-
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum Error {
-    InputShapeError,
+    #[error("Bad input shape: {0}")]
+    InputShapeError(Shape),
+    #[error("Shape mismatch: {0} != {1}")]
     ShapeMismatchError(Shape, Shape),
+    #[error("Incompatible shapes: {0}, {1}")]
+    IncompatibleShapeError(Shape, Shape),
+    #[error("DType mismatch: {0} != {1}")]
     DTypeMismatchError(DType, DType),
+    #[error("Invalid input")]
     InvalidInputError,
-    IoError(std::io::Error),
+    #[error("Invalid dtype")]
     UnsupportedDTypeError,
-    NameConflictError,
+    #[error("Name conflict: {0}")]
+    NameConflictError(String),
+    #[error("No such tensor: {0}")]
     NoSuchTensorError(String),
+    #[error("Unresolved dimension")]
     UnresolvedDimensionError,
+    #[error("Invalid dtype")]
     InvalidDTypeError,
+    #[error("Cannot resolve data")]
     CannotResolveDataError,
-    CandleCoreError(candle_core::Error),
-    SafeTensorError(safetensors::SafeTensorError),
-    InvalidPathError,
+    #[error(transparent)]
+    IoError(#[from] std::io::Error),
+    #[error(transparent)]
+    CandleCoreError(#[from] candle_core::Error),
+    #[error(transparent)]
+    SafeTensorError(#[from] safetensors::SafeTensorError),
+    #[error("Other error")]
     OtherError
-}
-
-impl core::fmt::Display for Error {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{:?}", self)
-    }
-}
-
-impl core::error::Error for Error{
-    
 }
 
 pub enum WeightStorageStrategy {
@@ -103,7 +106,7 @@ pub fn build_proto(
         if let Some(name) = tensor.get_name() {
             let name = name.to_string();
             if chosen_names.contains(&name) {
-                return Err(Error::NameConflictError);
+                return Err(Error::NameConflictError(name));
             }
             chosen_names.insert(name.clone());
             tensor_names.insert(*tensor, name);

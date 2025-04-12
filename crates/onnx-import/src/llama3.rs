@@ -6,7 +6,14 @@ use onnx_graph::pytorch::{div_scalar, linear, reshape, rms_norm, silu, transpose
 use onnx_graph::tensor::{DType, Dimension, InputTensor, Shape, Tensor};
 use onnx_graph::weights::{WeightManager};
 use onnx_graph::WeightStorageStrategy;
-use crate::Error;
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("Missing config entry: {0}")]
+    MissingConfigEntryError(String),
+    #[error("Unsupported configuration: {0}")]
+    UnsupportedConfigurationError(String)
+}
 
 pub struct Llama3Config {
     num_hidden_layers: usize,
@@ -34,7 +41,7 @@ impl Llama3Config {
     }
 }
 
-pub fn load_llama3(weight_manager: impl WeightManager, config: Llama3Config, output_method: WeightStorageStrategy) -> Result<Vec<u8>, onnx_graph::Error> {
+pub fn load_llama3(weight_manager: impl WeightManager, config: Llama3Config, output_method: WeightStorageStrategy) -> Result<Vec<u8>, anyhow::Error> {
 
     let model_weight_manager = weight_manager.prefix("model");
 

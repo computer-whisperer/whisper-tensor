@@ -7,8 +7,12 @@ edition = "2024"
 onnx-import = {workspace=true}
 onnx-graph = {workspace=true}
 prost = "0.13.5"
+prost-types = "0.13.3"
 vulkano = "0.35.1"
 candle-core = {workspace=true, default-features=false}
+serde = { version = "1.0.210", features = ["derive"] }
+thiserror = "2.0.12"
+anyhow = "1.0.91"
 
 [build-dependencies]
 prost-build = "0.13.3"
