@@ -17,8 +17,16 @@ pub enum Error {
     UnknownModelType(String),
     #[error("Missing config entry: {0}")]
     MissingConfigEntryError(String),
+    #[error("Config file read error: {0}")]
+    ConfigFileReadError(#[from] std::io::Error),
+    #[error("Config file parse error: {0}")]
+    ConfigFileParseError(serde_json::Error),
     #[error("Model load error: {0}")]
-    ModelLoadError(#[from] anyhow::Error)
+    ModelLoadError(anyhow::Error),
+    #[error("Model build error: {0}")]
+    ModelBuildError(anyhow::Error),
+    #[error("Unsupported configuration: {0} {1}")]
+    UnsupportedConfigurationError(String, String)
 }
 
 pub fn identify_and_load(model_path: &Path, output_method: WeightStorageStrategy) -> Result<Vec::<u8>, Error> {
@@ -33,7 +41,7 @@ pub fn identify_and_load(model_path: &Path, output_method: WeightStorageStrategy
     }
     else if let Some(ext) = model_path.extension() {
         if ext == "pth" {
-            Ok(rwkv7::load_rwkv7_pth(model_path, output_method)?)
+            Ok(rwkv7::load_rwkv7_pth(model_path, output_method).map_err(|x| Error::ModelBuildError(x))?)
         }
         else {
             Err(Error::CannotIdentifyModel(model_path.to_path_buf()))
@@ -44,19 +52,19 @@ pub fn identify_and_load(model_path: &Path, output_method: WeightStorageStrategy
     }
 }
 
-fn load_transformers_format(model_path: &Path, output_method: WeightStorageStrategy) -> Result<Vec::<u8>, anyhow::Error> {
+fn load_transformers_format(model_path: &Path, output_method: WeightStorageStrategy) -> Result<Vec::<u8>, Error> {
     println!("Loading hf transformers weights from {}", model_path.display());
     
     let config_path = model_path.join("config.json");
     let config_file = File::open(config_path)?;
-    let config: serde_json::Value = serde_json::from_reader(config_file)?;
+    let config: serde_json::Value = serde_json::from_reader(config_file).map_err(|x| Error::ConfigFileParseError(x))?;
 
     // Load all safetensors files present
     let safetensors_files = {
         // Get all .safetensors files in that dir
         let mut safetensors_files = vec![];
         for entry in std::fs::read_dir(model_path)? {
-            let entry = entry.map_err(|x| anyhow::Error::from(x))?;
+            let entry = entry.map_err(|x| Error::ModelLoadError(anyhow::Error::from(x)))?;
             let path = entry.path();
             if path.is_file() && path.extension().map_or(false, |ext| ext == "safetensors") {
                 safetensors_files.push(path);
@@ -75,19 +83,19 @@ fn load_transformers_format(model_path: &Path, output_method: WeightStorageStrat
         safetensors_mmaps
     };
     
-    let weight_manager = SafetensorsWeightManager::new(safetensors_mmaps).map_err(|x| anyhow::Error::from(x))?;
+    let weight_manager = SafetensorsWeightManager::new(safetensors_mmaps).map_err(|x| anyhow::Error::from(x)).map_err(|x| Error::ModelLoadError(x))?;
 
     let model_type = config.get("model_type").ok_or(Error::MissingConfigEntryError("model_type".to_string()))?.as_str().ok_or(Error::MissingConfigEntryError("model_type".to_string()))?;
     Ok(match model_type {
         "llama" => {
             println!("Loading as Llama3");
             let config = llama3::Llama3Config::from_huggingface_transformers_json(&config)?;
-            llama3::load_llama3(weight_manager, config, output_method)?
+            llama3::load_llama3(weight_manager, config, output_method).map_err(|x| Error::ModelBuildError(x))?
         }
         "llama4" => {
             println!("Loading as Llama4");
             let config = llama4::Llama4Config::from_huggingface_transformers_json(&config)?;
-            llama4::load_llama4(weight_manager, config, output_method)?
+            llama4::load_llama4(weight_manager, config, output_method).map_err(|x| Error::ModelBuildError(x))?
         }
         model_type => Err(Error::UnknownModelType(model_type.to_string()))?
     })

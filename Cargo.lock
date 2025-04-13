@@ -532,6 +532,7 @@ dependencies = [
  "num-traits",
  "rand",
  "rand_distr",
+ "serde",
 ]
 
 [[package]]
@@ -877,6 +878,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "candle-core",
+ "half",
  "onnx-graph",
  "onnx-import",
  "prost",

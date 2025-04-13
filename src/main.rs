@@ -9,6 +9,6 @@ fn main() {
     
     let input_path = Path::new("/mnt/secondary/rwkv7-g1/rwkv7-g1-0.1b-20250307-ctx4096.pth");
     
-    let onnx_data = identify_and_load(input_path, WeightStorageStrategy::EmbeddedData).unwrap();
+    let onnx_data = identify_and_load(input_path, WeightStorageStrategy::None).unwrap();
     build(&onnx_data).unwrap();
 }

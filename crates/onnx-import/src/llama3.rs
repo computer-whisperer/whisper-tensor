@@ -6,14 +6,7 @@ use onnx_graph::pytorch::{div_scalar, linear, reshape, rms_norm, silu, transpose
 use onnx_graph::tensor::{DType, Dimension, InputTensor, Shape, Tensor};
 use onnx_graph::weights::{WeightManager};
 use onnx_graph::WeightStorageStrategy;
-
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    #[error("Missing config entry: {0}")]
-    MissingConfigEntryError(String),
-    #[error("Unsupported configuration: {0}")]
-    UnsupportedConfigurationError(String)
-}
+use crate::Error;
 
 pub struct Llama3Config {
     num_hidden_layers: usize,

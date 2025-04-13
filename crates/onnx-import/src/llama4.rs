@@ -5,16 +5,7 @@ use onnx_graph::pytorch::{layer_norm, linear, reshape, rms_norm, silu, topk, tra
 use onnx_graph::tensor::{DType, Dimension, InputTensor, Shape, Tensor};
 use onnx_graph::weights::WeightManager;
 use onnx_graph::WeightStorageStrategy;
-
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    #[error("Unsupported activation: {0}")]
-    UnsupportedActivation(String),
-    #[error("Missing config entry: {0}")]
-    MissingConfigEntryError(String),
-    #[error("Unsupported configuration: {0}")]
-    UnsupportedConfigurationError(String)
-}
+use crate::Error;
 
 enum HiddenAct {
     Silu
@@ -24,7 +15,7 @@ impl HiddenAct {
     pub fn from_str(s: &str) -> Result<Self, Error> {
         match s {
             "silu" => Ok(HiddenAct::Silu),
-            s => Err(Error::UnsupportedActivation(s.to_string()))
+            s => Err(Error::UnsupportedConfigurationError("activation".to_string(), s.to_string()))
         }
     }
     
@@ -89,7 +80,7 @@ impl Llama4Config {
         
         let num_experts_per_tok = get_int(text_config, "num_experts_per_tok")? as usize;
         if num_experts_per_tok > 1 {
-            Err(Error::UnsupportedConfigurationError("num_experts_per_tok > 1".to_string()))?;
+            Err(Error::UnsupportedConfigurationError("num_experts_per_tok".to_string(), num_experts_per_tok.to_string()))?;
         }
         
         Ok(Self {
