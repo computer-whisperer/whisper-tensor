@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use prost::Message;
-use onnx_graph::operators::{Add, Gather, Mul, TopK};
+use onnx_graph::operators::{Add, Gather, Mul};
 use onnx_graph::pytorch::{layer_norm, linear, reshape, rms_norm, silu, topk, transpose};
 use onnx_graph::tensor::{DType, Dimension, InputTensor, Shape, Tensor};
 use onnx_graph::weights::WeightManager;

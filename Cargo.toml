@@ -16,25 +16,22 @@ serde = { version = "1.0.210", features = ["derive"] }
 thiserror = "2.0.12"
 anyhow = "1.0.91"
 half = { version="2.5.0", features = ["serde"] }
-ort = {optional=true, git="https://github.com/pykeio/ort.git", branch="main", features=["cuda"]}
+ort = {optional=true, git="https://github.com/pykeio/ort.git", branch="main", features=["cuda", "ndarray", "half"]}
 tracing-subscriber = { version = "0.3", features = [ "env-filter", "fmt" ] }
 tempfile = "3.19.1"
 
-kn-runtime = { optional=true, version="0.7.3" }
-kn-graph = { optional=true, version="0.7.3" }
 wonnx = {optional=true, version="0.5.1"}
 pyo3 = {optional=true, version = "0.24.0", features = ["auto-initialize"]}
 tokenizers = {optional=true, version="0.21.1", features = ["http"]}
 llm-samplers = { optional=true, version="0.0.7" }
 rand = "0.8.5"
+ndarray = { version = "0.16.1", features = ["serde"] }
 
 [features]
-default = ["ort", "candle", "kyanite", "wonnx", "onnx-reference", "tokenizers", "llm-samplers"]
+default = ["ort", "candle", "wonnx", "onnx-reference", "tokenizers", "llm-samplers"]
 onnx-reference = ["pyo3"]
 ort = ["dep:ort"]
 candle = ["candle-onnx", "candle-core"]
-kyanite = ["kn-runtime", "kn-graph"]
-wonnx = ["dep:wonnx"]
 tokenizers = ["dep:tokenizers"]
 llm-samplers = ["dep:llm-samplers"]
 

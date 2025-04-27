@@ -77,53 +77,6 @@ impl<'a> Hash for &'a dyn Node {
     }
 }
 
-
-pub trait MultiOutputNode: Node {
-    fn get_output_shape(&self, output_index: usize) -> &Shape;
-
-    fn get_output_dtype(&self, output_index: usize) -> DType;
-
-    fn get_num_outputs(&self) -> usize;
-}
-
-pub(crate) struct MultiOutputNodeOutput {
-    parent: Arc<dyn MultiOutputNode>,
-    output_index: usize,
-}
-
-impl MultiOutputNodeOutput {
-    pub(crate) fn new(parent: Arc<dyn MultiOutputNode>, output_index: usize) -> Self {
-        Self { parent, output_index }
-    }
-}
-
-impl Tensor for MultiOutputNodeOutput {
-    fn dtype(&self) -> DType {
-        self.parent.get_output_dtype(self.output_index)
-    }
-
-    fn shape(&self) -> &Shape {
-        self.parent.get_output_shape(self.output_index)
-    }
-
-    fn get_nodes<'a>(&'a self, table: &mut HashSet<&'a dyn Node>) {
-        let dyn_node: &dyn Node = self.parent.as_ref();
-        if !table.contains(&dyn_node) {
-            self.parent.get_sub_nodes(table);
-            table.insert(dyn_node);
-        }
-    }
-
-    fn get_sub_tensors<'a>(&'a self, table: &mut HashSet<&'a dyn Tensor>) {
-        self.parent.get_tensors(table)
-    }
-    
-    fn is_input(&self) -> bool {
-        false
-    }
-}
-
-
 pub(crate) trait SingleOutputNode: Node {
     fn get_output_shape(&self) -> &Shape;
 

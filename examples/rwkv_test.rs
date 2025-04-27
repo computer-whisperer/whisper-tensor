@@ -17,8 +17,8 @@ fn main() {
     let onnx_data = identify_and_load(input_path, WeightStorageStrategy::BinFile(bin_out.to_path_buf())).unwrap();
     File::create(onnx_out).unwrap().write_all(&onnx_data).unwrap();
 
-    let runtime = RuntimeModel::load_onnx(&onnx_data, Backend::ORT).unwrap();
+    let mut runtime = RuntimeModel::load_onnx(&onnx_data, Backend::ORT).unwrap();
 
-    let input = NumericTensor::from_vec(vec![0.0], vec![1, 1, 1]);
+    let input = NumericTensor::from_vec_shape(vec![0.0], vec![1, 1, 1]).unwrap();
     runtime.run(HashMap::from([("tensor_input".to_string(), input)])).unwrap();
 }

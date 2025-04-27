@@ -7,7 +7,7 @@ use memmap2::Mmap;
 use safetensors::SafeTensors;
 use safetensors::tensor::{Metadata, TensorInfo};
 use crate::{onnx, Error};
-use crate::onnx::{TensorProto, Version};
+use crate::onnx::{TensorProto};
 use crate::tensor::{DType, Shape, Tensor, TensorData};
 
 pub trait WeightExternalOutputManager<'a> {
@@ -34,17 +34,17 @@ impl NullOutputManager {
 }
 
 impl <'a> WeightExternalOutputManager<'a> for NullOutputManager {
-    fn write_pth_tensor_data(&mut self, graph_tensor: &'a dyn Tensor, tensor_info: candle_core::pickle::TensorInfo, tensors: Arc<candle_core::pickle::PthTensors>) -> Result<(), Error> {
+    fn write_pth_tensor_data(&mut self, _graph_tensor: &'a dyn Tensor, _tensor_info: candle_core::pickle::TensorInfo, tensors: Arc<candle_core::pickle::PthTensors>) -> Result<(), Error> {
         Ok(())
     }
-    fn write_safetensors_tensor_data(&mut self, graph_tensor: &'a SafetensorsTensor) -> Result<(), Error> {
+    fn write_safetensors_tensor_data(&mut self, _graph_tensor: &'a SafetensorsTensor) -> Result<(), Error> {
         Ok(())
     }
-    fn write_tensor_data(&mut self, graph_tensor: &'a dyn Tensor, data: TensorData) -> Result<(), Error> {
+    fn write_tensor_data(&mut self, _graph_tensor: &'a dyn Tensor, _data: TensorData) -> Result<(), Error> {
         Ok(())
     }
 
-    fn get_initializer(&mut self, graph_tensor: &'a dyn Tensor, tensor_name: String) -> Result<Option<TensorProto>, Error> {
+    fn get_initializer(&mut self, _graph_tensor: &'a dyn Tensor, _tensor_name: String) -> Result<Option<TensorProto>, Error> {
         Ok(None)
     }
 }

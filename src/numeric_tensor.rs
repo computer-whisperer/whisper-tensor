@@ -1,10 +1,13 @@
 use std::fmt::Formatter;
 use std::ops::Range;
-use crate::dtype::DType;
-use crate::native_numeric_tensor::{NativeNumericTensor, NativeNumericTensorError, NativeNumericTensorInner};
+use crate::dtype::{DType, DTypeError};
+use crate::native_numeric_tensor::{FromVecShape, NativeNumericTensor, NativeNumericTensorError};
+use crate::ort_backend;
 
 #[derive(Debug, thiserror::Error)]
 pub enum NumericTensorError {
+    #[error(transparent)]
+    DTypeError(#[from] crate::dtype::DTypeError),
     #[error(transparent)]
     NativeNumericTensorError(#[from] NativeNumericTensorError),
     #[cfg(feature = "candle")]
@@ -13,6 +16,9 @@ pub enum NumericTensorError {
     #[cfg(feature = "onnx-reference")]
     #[error(transparent)]
     ONNXReference(#[from] crate::onnx_reference_backend::ONNXReferenceError),
+    #[cfg(feature = "ort")]
+    #[error(transparent)]
+    ORT(#[from] ort::Error),
 }
 
 #[derive(Debug, Clone)]
@@ -22,17 +28,21 @@ pub enum NumericTensor {
     ONNXReference(crate::onnx_reference_backend::ONNXReferenceTensor),
     #[cfg(feature = "candle")]
     Candle(candle_core::Tensor),
+    #[cfg(feature = "ort")]
+    ORT(ort_backend::ORTNumericTensor),
 }
 
 impl NumericTensor {
-    pub fn dtype(&self) -> DType {
-        match self {
+    pub fn dtype(&self) -> Result<DType, DTypeError> {
+        Ok(match self {
             NumericTensor::Native(x) => x.dtype(),
             #[cfg(feature = "onnx-reference")]
             NumericTensor::ONNXReference(x) => x.dtype(),
             #[cfg(feature = "candle")]
             NumericTensor::Candle(x) => x.dtype().into(),
-        }
+            #[cfg(feature = "ort")]
+            NumericTensor::ORT(x) => x.dtype()?,
+        })
     }
 
     pub fn shape(&self) -> Vec<usize> {
@@ -42,6 +52,8 @@ impl NumericTensor {
             NumericTensor::ONNXReference(x) => x.shape(),
             #[cfg(feature = "candle")]
             NumericTensor::Candle(x) => x.shape().dims().to_vec(),
+            #[cfg(feature = "ort")]
+            NumericTensor::ORT(x) => x.shape(),
         }
     }
     
@@ -49,17 +61,17 @@ impl NumericTensor {
         self.shape().iter().product()
     }
 
-    pub fn from_vec<T>(v: Vec<T>, shape: Vec<usize>) -> NumericTensor
-       where NativeNumericTensorInner: From<Vec<T>>
+    
+    pub fn from_vec_shape<T>(v: Vec<T>, shape: Vec<usize>) -> Result<NumericTensor, NumericTensorError>
+       where NativeNumericTensor: FromVecShape<T>
     {
-        NumericTensor::Native(NativeNumericTensor::from_vec(v, shape))
+        Ok(NumericTensor::Native(NativeNumericTensor::from_vec_shape(v, shape)?))
     }
 
     pub fn from_vec1<T>(v: Vec<T>) -> NumericTensor
-    where NativeNumericTensorInner: From<Vec<T>>
+    where NativeNumericTensor: From<Vec<T>>
     {
-        let shape = vec![v.len()];
-        NumericTensor::Native(NativeNumericTensor::from_vec(v, shape))
+        NumericTensor::Native(NativeNumericTensor::from(v))
     }
 
     pub fn concat(tensors: &[&NumericTensor], axis: usize) -> Result<Self, NumericTensorError> {
@@ -108,6 +120,8 @@ impl TryFrom<&NumericTensor> for NativeNumericTensor {
             NumericTensor::ONNXReference(x) => Ok(x.try_into()?),
             #[cfg(feature = "candle")]
             NumericTensor::Candle(x) => Ok(x.try_into()?),
+            #[cfg(feature = "ort")]
+            NumericTensor::ORT(x) => Ok(x.try_into()?),
         }
     }
 }
@@ -120,7 +134,9 @@ impl TryFrom<NumericTensor> for NativeNumericTensor {
             #[cfg(feature = "onnx-reference")]
             NumericTensor::ONNXReference(x) => Ok(x.try_into()?),
             #[cfg(feature = "candle")]
-            NumericTensor::Candle(x) => Ok(x.try_into()?),
+            NumericTensor::Candle(x) => Ok((&x).try_into()?),
+            #[cfg(feature = "ort")]
+            NumericTensor::ORT(x) => Ok((&x).try_into()?),
         }
     }
 }

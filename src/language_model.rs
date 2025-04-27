@@ -22,7 +22,7 @@ impl LanguageModelManager {
         }
     }
     
-    pub fn run<S: Sampler>(&self, input_tokens: NumericTensor, sampler: &mut S) -> Result<NumericTensor, RuntimeError> {
+    pub fn run<S: Sampler>(&mut self, input_tokens: NumericTensor, sampler: &mut S) -> Result<NumericTensor, RuntimeError> {
         let input_tokens = if let Some(token_context) = &self.token_context {
             NumericTensor::concat(&[token_context, &input_tokens], input_tokens.shape().len()-1)?
         } else {
@@ -34,7 +34,15 @@ impl LanguageModelManager {
         let output_tensors = self.model.run(input_tensors)?;
         
         let output_tensor = output_tensors.get(&self.output_name).unwrap();
-        let output_tensor_sampled = sampler.sample(output_tensor)?;
+        
+        let shape = output_tensor.shape();
+        let mut output_slice = Vec::new();
+        for i in 0..shape.len()-1 {
+            output_slice.push(shape[i]-1..shape[i]);
+        }
+        output_slice.push(0..shape[shape.len()-1]);
+        let sliced_output_tensor = output_tensor.slice(&output_slice)?;
+        let output_tensor_sampled = sampler.sample(&sliced_output_tensor)?;
         
         Ok(output_tensor_sampled)
     }

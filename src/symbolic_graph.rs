@@ -36,6 +36,8 @@ pub enum ONNXDecodingError {
     MissingAttribute(String, String),
     #[error(transparent)]
     DTypeError(#[from] crate::dtype::DTypeError),
+    #[error(transparent)]
+    NativeNumericTensorError(#[from] crate::native_numeric_tensor::NativeNumericTensorError),
     #[error("Unsupported ONNX: {0}")]
     UnsupportedONNX(String)
 }
@@ -841,7 +843,7 @@ impl SymbolicGraph {
                     )?;
 
                     let constant_value = if tensor.raw_data.len() > 0 {
-                        NativeNumericTensor::from_raw_data(&tensor.raw_data, dtype, tensor.dims.iter().map(|x| *x as usize).collect())
+                        NativeNumericTensor::from_raw_data(&tensor.raw_data, dtype, tensor.dims.iter().map(|x| *x as usize).collect())?
                     } else {
                         Err(ONNXDecodingError::UnsupportedONNX("No raw data field!".to_string()))?
                     };

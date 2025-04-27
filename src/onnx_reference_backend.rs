@@ -1,10 +1,11 @@
 use std::collections::HashMap;
+use ndarray::Ix1;
 use pyo3::{BoundObject, Py, PyAny, PyErr, Python};
 use pyo3::prelude::PyAnyMethods;
 use pyo3::types::{PyDict, PyNone};
 use crate::dtype::DType;
-use crate::native_numeric_tensor::{NativeNumericTensor, NativeNumericTensorInner};
-use crate::numeric_tensor::NumericTensor;
+use crate::native_numeric_tensor::{FromVecShape, NativeNumericTensor};
+use crate::numeric_tensor::{NumericTensor, NumericTensorError};
 use crate::onnx;
 
 #[derive(Debug)]
@@ -38,26 +39,24 @@ impl ONNXReferenceTensor {
 }
 
 impl TryFrom<&ONNXReferenceTensor> for NativeNumericTensor {
-    type Error = ONNXReferenceError;
+    type Error = NumericTensorError;
 
     fn try_from(value: &ONNXReferenceTensor) -> Result<Self, Self::Error> {
-        Python::with_gil(|py| {
+        let out = Python::with_gil(|py| {
             let value = value.value.bind(py);
             let v_flat = value.call_method0("flatten")?;
             let v_flat = v_flat.call_method0("tolist")?;
             let v_flat = v_flat.extract::<Vec<f32>>()?;
             let shape = value.getattr("shape")?;
             let shape = shape.extract::<Vec<usize>>()?;
-            Ok(NativeNumericTensor {
-                value: NativeNumericTensorInner::F32(v_flat),
-                shape,
-            })
-        }).map_err(|e| ONNXReferenceError::PyErr(e))
+            Ok(NativeNumericTensor::from_vec_shape(v_flat, shape))
+        }).map_err(|e| ONNXReferenceError::PyErr(e))?;
+        Ok(out?)
     }
 }
 
 impl TryFrom<ONNXReferenceTensor> for NativeNumericTensor {
-    type Error = ONNXReferenceError;
+    type Error = NumericTensorError;
     
     fn try_from(value: ONNXReferenceTensor) -> Result<Self, Self::Error> {
         Self::try_from(&value)
@@ -119,16 +118,16 @@ impl ONNXReferenceBackend {
     pub fn load_tensor(&self, input: &NativeNumericTensor) -> Result<ONNXReferenceTensor, ONNXReferenceError> {
         Python::with_gil(|py| {
             let np = py.import("numpy")?;
-            let np_array = match &input.value {
-                NativeNumericTensorInner::F32(x) => {np.call_method("array", (x,), None)?},
-                NativeNumericTensorInner::F64(x) => {np.call_method("array", (x,), None)?},
-                NativeNumericTensorInner::U32(x) => {np.call_method("array", (x,), None)?}
-                NativeNumericTensorInner::I32(x) => {np.call_method("array", (x,), None)?}
-                NativeNumericTensorInner::U64(x) => {np.call_method("array", (x,), None)?}
-                NativeNumericTensorInner::I64(x) => {np.call_method("array", (x,), None)?}
+            let np_array = match &input {
+                NativeNumericTensor::F32(x) => {np.call_method("array", (x.flatten().to_vec(),), None)?},
+                NativeNumericTensor::F64(x) => {np.call_method("array", (x.flatten().to_vec(),), None)?},
+                NativeNumericTensor::U32(x) => {np.call_method("array", (x.flatten().to_vec(),), None)?}
+                NativeNumericTensor::I32(x) => {np.call_method("array", (x.flatten().to_vec(),), None)?}
+                NativeNumericTensor::U64(x) => {np.call_method("array", (x.flatten().to_vec(),), None)?}
+                NativeNumericTensor::I64(x) => {np.call_method("array", (x.flatten().to_vec(),), None)?}
                 _ => {Err(ONNXReferenceError::UnsupportedDType)?}
             };
-            let np_array = np_array.call_method1("reshape", (&input.shape,))?;
+            let np_array = np_array.call_method1("reshape", (input.shape(),))?;
             
             Ok(ONNXReferenceTensor{
                 value: np_array.unbind()

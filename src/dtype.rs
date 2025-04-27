@@ -6,7 +6,10 @@ pub enum DTypeError {
     #[error("The backend {0} does not support the dtype {1}")]
     DTypeNotSupportedByBackend(DType, Backend),
     #[error("The onnx dtype {0:?} is not supported")]
-    UnsupportedONNXDtype(onnx::tensor_proto::DataType)
+    UnsupportedONNXDtype(onnx::tensor_proto::DataType),
+    #[cfg(feature = "ort")]
+    #[error("The ort dtype {0:?} is not supported")]
+    UnsupportedORTDtype(ort::tensor::TensorElementType)
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]

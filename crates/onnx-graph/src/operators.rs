@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 use crate::{onnx, Error};
-use crate::node::{MultiOutputNode, MultiOutputNodeOutput, Node, SingleOutputNode};
+use crate::node::{Node, SingleOutputNode};
 use crate::onnx::{AttributeProto};
 use crate::tensor::{DType, Dimension, StubTensor, Shape, Tensor, TensorData};
 

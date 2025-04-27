@@ -1,4 +1,3 @@
-use std::path::Path;
 use std::sync::Arc;
 use prost::Message;
 use onnx_graph::operators::{Add, Concat, Gather, MatMul, Mul, RotaryEmbedding, ShapeOp, Softmax, Transpose};

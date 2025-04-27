@@ -16,17 +16,17 @@ use whisper_tensor::sampler::{GreedySampler, LLMSamplersBundle};
 fn main() {
     tracing_subscriber::fmt::init();
 
-    let input_path = Path::new("gpt2-10.onnx");
+    let input_path = Path::new("gpt2-lm-head-10.onnx");
     let mut onnx_data = Vec::new();
     File::open(input_path).unwrap().read_to_end(&mut onnx_data).unwrap();
 
-    let runtime = RuntimeModel::load_onnx(&onnx_data, Backend::ONNXReference).unwrap();
-    let llm = LanguageModelManager::new(runtime, "input1", "output1");
+    let runtime = RuntimeModel::load_onnx(&onnx_data, Backend::ORT).unwrap();
+    let mut llm = LanguageModelManager::new(runtime, "input1", "output1");
 
     let tokenizer = Tokenizer::from_pretrained("gpt2", None).unwrap();
 
-    let prompt = "The fibbonacci sequence is: 1, 1, ";
-    let input = whisper_tensor::tokenizer::Tokenizer::encode(&tokenizer, prompt);
+    let prompt = "The fibbonacci sequence is: 1, 1, 2, 3, 5, 8, 13,";
+    let input = whisper_tensor::tokenizer::Tokenizer::encode(&tokenizer, prompt).iter().map(|x| *x as i64).collect::<Vec<_>>();
     let input_tensor = NumericTensor::from_vec1(input).unsqueeze(0).unwrap().unsqueeze(0).unwrap();
 
     let mut sampler = {

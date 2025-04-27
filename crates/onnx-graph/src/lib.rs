@@ -60,8 +60,7 @@ impl WeightStorageStrategy {
         match self {
             WeightStorageStrategy::None => Ok(Box::new(weights::NullOutputManager::new())),
             WeightStorageStrategy::BinFile(path) => Ok(Box::new(weights::BinOutputManager::<'a>::new(path))),
-            WeightStorageStrategy::EmbeddedData => Ok(Box::new(weights::EmbeddedOutputManager::<'a>::new())),
-            _ => panic!()
+            WeightStorageStrategy::EmbeddedData => Ok(Box::new(weights::EmbeddedOutputManager::<'a>::new()))
         }
     }
 }

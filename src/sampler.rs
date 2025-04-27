@@ -8,8 +8,6 @@ pub enum SamplerError {
     #[error(transparent)]
     LLMSamplersError(anyhow::Error),
     #[error(transparent)]
-    NativeNumericTensorError(#[from] NativeNumericTensorError),
-    #[error(transparent)]
     NumericTensorError(#[from] NumericTensorError),
     #[cfg(feature = "candle")]
     #[error(transparent)]
@@ -58,7 +56,7 @@ impl Sampler for LLMSamplersBundle {
         let out = out.unwrap();
         let mut output_shape = x_shape.clone();
         output_shape.remove(output_shape.len()-1);
-        let out_tensor = NumericTensor::from_vec(vec![out], output_shape);
+        let out_tensor = NumericTensor::from_vec_shape(vec![out], output_shape)?;
         Ok(out_tensor)
     }
 }
