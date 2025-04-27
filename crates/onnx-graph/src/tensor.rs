@@ -296,6 +296,8 @@ pub trait Tensor  {
     fn resolve_data(&self) -> Option<TensorData> {
         None
     }
+    
+    fn is_input(&self) -> bool;
 }
 
 impl<'a> PartialEq for &'a dyn Tensor{
@@ -335,6 +337,10 @@ impl <T: SingleOutputNode> Tensor for T {
     fn get_sub_tensors<'a>(&'a self, table: &mut HashSet<&'a dyn Tensor>) {
         <Self as Node>::get_tensors(self, table);
     }
+    
+    fn is_input(&self) -> bool {
+        false
+    }
 }
 
 pub struct InputTensor {
@@ -361,6 +367,43 @@ impl Tensor for InputTensor {
     fn get_name(&self) -> Option<&str> {
         Some(&self.name)
     }
+    
+    fn is_input(&self) -> bool {
+        true
+    }
+}
+
+pub struct InputTensorInitialized {
+    name: String,
+    initial_value: TensorData
+}
+
+impl InputTensorInitialized {
+    pub fn new(name: String, initial_value: TensorData) -> Arc<Self> {
+        Arc::new(Self {name, initial_value})
+    }
+}
+
+impl Tensor for InputTensorInitialized {
+    fn dtype(&self) -> DType {
+        self.initial_value.dtype()
+    }
+
+    fn shape(&self) -> &Shape {
+        &self.initial_value.shape()
+    }
+
+    fn get_name(&self) -> Option<&str> {
+        Some(&self.name)
+    }
+
+    fn is_input(&self) -> bool {
+        true
+    }
+    
+    fn get_initializer<'a>(&'a self, name: String, _manager: &mut dyn WeightExternalOutputManager<'a>) -> Result<Option<TensorProto>, Error> {
+        Ok(Some(self.initial_value.to_tensor_data_proto(Some(name))?))
+    }
 }
 
 pub struct StubTensor {
@@ -380,6 +423,9 @@ impl Tensor for StubTensor {
     }
     fn shape(&self) -> &Shape {
         &self.shape
+    }
+    fn is_input(&self) -> bool {
+        false
     }
 }
 
@@ -505,6 +551,17 @@ impl TensorData {
         Ok(Self::new(TensorDataValue::from(data), shape)?)
     }
     
+    pub fn zeros(shape: Shape, dtype: DType) -> Result<Self, Error> {
+        match dtype {
+            DType::F32 => Self::fill(shape, 0.0f32),
+            DType::F16 => Self::fill(shape, half::f16::from_f32(0.0f32)),
+            DType::BF16 => Self::fill(shape, half::bf16::from_f32(0.0f32)),
+            DType::I32 => Self::fill(shape, 0i32),
+            DType::I64 => Self::fill(shape, 0i64),
+            _ => Err(Error::UnsupportedDTypeError),
+        }
+    }
+    
     pub fn dtype(&self) -> DType {
         self.value.dtype()
     }
@@ -517,7 +574,7 @@ impl TensorData {
         match &self.value {
             TensorDataValue::I32(x) => Ok(x.iter().map(|x| *x as i64).collect()),
             TensorDataValue::I64(x) => Ok(x.clone()),
-            _ => Err(Error::InvalidDTypeError),
+            _ => Err(Error::UnsupportedDTypeError),
         }
     }
     

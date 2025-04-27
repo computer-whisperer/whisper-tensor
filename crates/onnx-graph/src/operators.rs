@@ -7,7 +7,7 @@ use crate::tensor::{DType, Dimension, StubTensor, Shape, Tensor, TensorData};
 
 fn validate_index_dtype(dtype: DType) -> Result<(), Error> {
     if dtype != DType::I32 && dtype != DType::I64 {
-        Err(Error::InvalidDTypeError)?;
+        Err(Error::InvalidDTypeError(dtype))?;
     }
     Ok(())
 }
@@ -840,11 +840,15 @@ pub struct Softplus {
 }
 
 impl Softplus {
-    pub fn new(name: Option<String>, input: Arc<dyn Tensor>) -> Arc<Softplus> {
-        Arc::new(Softplus {
+    pub fn new(name: Option<String>, input: Arc<dyn Tensor>) -> Result<Arc<Softplus>, Error> {
+        if input.dtype() != DType::F32 && input.dtype() != DType::F16 && input.dtype() != DType::BF16 {
+            Err(Error::InvalidDTypeError(input.dtype()))?;
+        }
+        
+        Ok(Arc::new(Softplus {
             name,
             input
-        })
+        }))
     }
 }
 
@@ -1179,7 +1183,7 @@ pub struct Reshape {
 impl Reshape {
     pub fn new(name: Option<String>, data_input: Arc<dyn Tensor>, shape_input: Arc<dyn Tensor>) -> Result<Arc<Reshape>, Error> {
         if shape_input.dtype() != DType::I64 {
-            Err(Error::InvalidDTypeError)?
+            Err(Error::InvalidDTypeError(shape_input.dtype()))?
         }
         let shape_data = shape_input.resolve_data().ok_or(Error::CannotResolveDataError)?.to_int_vec()?;
         let old_shape_dims = data_input.shape().clone().dims;
@@ -1234,7 +1238,7 @@ impl Reshape {
 
     pub fn new_with_forced_output(name: Option<String>, data_input: Arc<dyn Tensor>, shape_input: Arc<dyn Tensor>, output_shape: Shape) -> Result<Arc<Self>, Error>{
         if shape_input.dtype() != DType::I64 {
-            return Err(Error::InvalidDTypeError);
+            return Err(Error::InvalidDTypeError(shape_input.dtype()));
         }
         if shape_input.rank() != 1 {
             return Err(Error::InvalidInputError);
@@ -1406,7 +1410,7 @@ impl Squeeze {
             Err(Error::InputShapeError(axes_input.shape().clone()))?;
         }
         if axes_input.dtype() != DType::I64 {
-            Err(Error::InvalidDTypeError)?;
+            Err(Error::InvalidDTypeError(axes_input.dtype()))?;
         }
 
         let axes = axes_input.resolve_data().ok_or(Error::CannotResolveDataError)?.to_int_vec()?;
@@ -1488,7 +1492,7 @@ impl Unsqueeze {
             Err(Error::InputShapeError(axes_input.shape().clone()))?;
         }
         if axes_input.dtype() != DType::I64 {
-            Err(Error::InvalidDTypeError)?;
+            Err(Error::InvalidDTypeError(axes_input.dtype()))?;
         }
 
         let axes = axes_input.resolve_data().ok_or(Error::CannotResolveDataError)?.to_int_vec()?;
@@ -2080,7 +2084,7 @@ pub struct Expand {
 impl Expand {
     pub fn new(name: Option<String>, input: Arc<dyn Tensor>, shape: Arc<dyn Tensor>) -> Result<Arc<Self>, Error> {
         if shape.dtype() != DType::I64 {
-            return Err(Error::InvalidDTypeError);
+            return Err(Error::InvalidDTypeError(shape.dtype()));
         }
         if input.rank() != 1 {
             return Err(Error::InvalidInputError);
@@ -2104,7 +2108,7 @@ impl Expand {
     
     pub fn new_with_forced_output(name: Option<String>, input: Arc<dyn Tensor>, shape: Arc<dyn Tensor>, output_shape: Shape) -> Result<Arc<Self>, Error>{
         if shape.dtype() != DType::I64 {
-            return Err(Error::InvalidDTypeError);
+            return Err(Error::InvalidDTypeError(shape.dtype()));
         }
         if shape.rank() != 1 {
             return Err(Error::InvalidInputError);
@@ -2175,7 +2179,7 @@ impl TopK {
             Err(Error::InputShapeError(k.shape().clone()))?;
         }
         if k.dtype() != DType::I64 {
-            Err(Error::InvalidDTypeError)?;
+            Err(Error::InvalidDTypeError(k.dtype()))?;
         }
         
         let k_val = k.resolve_data().ok_or(Error::CannotResolveDataError)?.to_int_vec()?[0];

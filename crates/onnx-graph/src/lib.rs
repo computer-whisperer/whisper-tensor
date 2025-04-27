@@ -5,7 +5,7 @@ mod node;
 pub mod pytorch;
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::{PathBuf};
 use std::sync::Arc;
 use tensor::*;
 use node::*;
@@ -36,7 +36,7 @@ pub enum Error {
     #[error("Unresolved dimension")]
     UnresolvedDimensionError,
     #[error("Invalid dtype")]
-    InvalidDTypeError,
+    InvalidDTypeError(DType),
     #[error("Cannot resolve data")]
     CannotResolveDataError,
     #[error(transparent)]
@@ -67,7 +67,7 @@ impl WeightStorageStrategy {
 }
 
 pub fn build_proto(
-    inputs: &[Arc<InputTensor>],
+    inputs: &[Arc<dyn Tensor>],
     outputs: &[(String, Arc<dyn Tensor>)],
     weight_storage: WeightStorageStrategy
 ) -> Result<onnx::ModelProto, Error> {
@@ -79,12 +79,24 @@ pub fn build_proto(
     }
     
     // Get requested node names
+    let mut chosen_node_names: HashSet<String> = HashSet::new();
     let mut node_names: HashMap<&dyn Node, String> = HashMap::new();
     for node in &nodes {
-        if let Some(name) = node.get_name() {
-            if !node_names.contains_key(node) {
-                node_names.insert(*node, name.to_string());
+        let base_name = node.get_name().unwrap_or(node.get_onnx_type());
+        // Make up a new name based on the onnx type
+        let mut i = 0;
+        loop {
+            let name = if i == 0 {
+                base_name.to_string()
+            } else {
+                format!("{}_{}", base_name, i)
+            };
+            if !chosen_node_names.contains(&name) {
+                node_names.insert(*node, name.clone());
+                chosen_node_names.insert(name);
+                break;
             }
+            i += 1;
         }
     }
     println!("Found {} nodes in graph", nodes.len());
@@ -98,22 +110,22 @@ pub fn build_proto(
     println!("Found {} tensors in graph", tensors.len());
 
     // Assign names to all tensors in graph
-    let mut chosen_names: HashSet<String> = HashSet::new();
+    let mut chosen_tensor_names: HashSet<String> = HashSet::new();
     let mut tensor_names: HashMap<&dyn Tensor, String> = HashMap::new();
 
     // Assign requested names
     for tensor in &tensors { 
         if let Some(name) = tensor.get_name() {
             let name = name.to_string();
-            if chosen_names.contains(&name) {
+            if chosen_tensor_names.contains(&name) {
                 return Err(Error::NameConflictError(name));
             }
-            chosen_names.insert(name.clone());
+            chosen_tensor_names.insert(name.clone());
             tensor_names.insert(*tensor, name);
         }
     }
     for (name, tensor) in outputs {
-        chosen_names.insert(name.clone());
+        chosen_tensor_names.insert(name.clone());
         tensor_names.insert(tensor.as_ref(), name.clone());
     }
     // Assign remaining names
@@ -122,14 +134,14 @@ pub fn build_proto(
         if !tensor_names.contains_key(tensor) {
             let name = loop {
                 let name = format!("tensor_{}", next_tensor_id);
-                if !chosen_names.contains(&name) {
+                if !chosen_tensor_names.contains(&name) {
                     break name;
                 }
                 next_tensor_id += 1;
             };
             
             tensor_names.insert(*tensor, name.clone());
-            chosen_names.insert(name);
+            chosen_tensor_names.insert(name);
             next_tensor_id += 1;
         }
     }
@@ -158,9 +170,40 @@ pub fn build_proto(
         }
     }
     
+    // Order nodes so that dependencies are before dependents
+    let sorted_nodes = {
+        let mut provided_tensors: HashSet<&dyn Tensor> = HashSet::new();
+        let mut remaining_nodes: Vec<_> = nodes.drain().collect();
+        let mut sorted_nodes = vec![];
+        while !remaining_nodes.is_empty() {
+            let mut new_remaining_nodes = vec![];
+            for node in remaining_nodes {
+                let mut all_dependencies_provided = true;
+                for dependency in node.get_input_tensors() {
+                    if !provided_tensors.contains(&dependency) && !dependency.is_input() {
+                        all_dependencies_provided = false;
+                        break;
+                    }
+                }
+                if all_dependencies_provided {
+                    sorted_nodes.push(node);
+                    for output in node.get_output_tensors() {
+                        provided_tensors.insert(output); 
+                    }
+                }
+                else {
+                    new_remaining_nodes.push(node);
+                }
+            }
+            remaining_nodes = new_remaining_nodes;
+        }
+        sorted_nodes
+    };
+    
+    
     let graph = onnx::GraphProto {
-        name: String::new(),
-        node: nodes.iter().map(|node| node.to_node_proto(node_names.get(node).map(|name| name.clone()), &tensor_names)).collect(),
+        name: "model".to_string(),
+        node: sorted_nodes.iter().map(|node| node.to_node_proto(node_names.get(node).map(|name| name.clone()), &tensor_names)).collect(),
         initializer: initializers,
         doc_string: String::new(),
         input: inputs.iter().map(|tensor| tensor.to_value_info_proto(tensor_names[&(tensor.as_ref() as &dyn Tensor)].clone())).collect(),
@@ -173,7 +216,7 @@ pub fn build_proto(
     let own_version = env!("CARGO_PKG_VERSION").to_string();
     Ok(onnx::ModelProto {
         ir_version: onnx::Version::IrVersion2024325 as i64,
-        opset_import: vec![],
+        opset_import: vec![onnx::OperatorSetIdProto{version: 22, domain: "".to_string()}],
         producer_version: own_version,
         domain: String::new(),
         model_version: 0,

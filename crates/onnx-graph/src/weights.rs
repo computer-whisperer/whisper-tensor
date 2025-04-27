@@ -196,6 +196,10 @@ impl Tensor for PthTensor {
     fn get_name(&self) -> Option<&str> {
         Some(&self.tensor_info.name)
     }
+    
+    fn is_input(&self) -> bool {
+        true
+    }
 }
 
 pub struct SafeTensor {
@@ -398,5 +402,9 @@ impl Tensor for SafetensorsTensor {
 
     fn get_name(&self) -> Option<&str> {
         Some(&self.name)
+    }
+
+    fn is_input(&self) -> bool {
+        true
     }
 }

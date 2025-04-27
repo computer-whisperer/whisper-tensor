@@ -43,7 +43,7 @@ pub trait Node {
 
     fn get_onnx_type(&self) -> &str;
     fn get_onnx_domain(&self) -> &str {
-        "ai.onnx"
+        ""
     }
 
     fn get_onnx_attributes(&self) -> Vec<crate::onnx::AttributeProto>;
@@ -116,6 +116,10 @@ impl Tensor for MultiOutputNodeOutput {
 
     fn get_sub_tensors<'a>(&'a self, table: &mut HashSet<&'a dyn Tensor>) {
         self.parent.get_tensors(table)
+    }
+    
+    fn is_input(&self) -> bool {
+        false
     }
 }
 

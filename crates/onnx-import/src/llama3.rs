@@ -38,7 +38,7 @@ pub fn load_llama3(weight_manager: impl WeightManager, config: Llama3Config, out
 
     let model_weight_manager = weight_manager.prefix("model");
 
-    let mut input_tensors = vec![];
+    let mut input_tensors: Vec<Arc<dyn Tensor>> = vec![];
     let mut output_tensors: Vec<(String, Arc<dyn Tensor>)> = vec![];
 
     let batch_dimension = Dimension::new(Some(1), Some("batch_size".to_string()), Some("DATA_BATCH".to_string()));

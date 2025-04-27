@@ -4,7 +4,7 @@ use candle_core::pickle::PthTensors;
 use prost::Message;
 use onnx_graph::operators::{Add, Cast, Constant, Exp, Gather, LpNormalization, MatMul, Mul, Neg, Sigmoid, Softplus, Sub, Tanh, Relu};
 use onnx_graph::pytorch::{cast, cumsum, group_norm, layer_norm, linear, reshape, squeeze, transpose};
-use onnx_graph::tensor::{DType, Dimension, InputTensor, Shape, Tensor, TensorData, TensorDataValue};
+use onnx_graph::tensor::{DType, Dimension, InputTensor, InputTensorInitialized, Shape, Tensor, TensorData, TensorDataValue};
 use onnx_graph::weights::{WeightManager};
 use onnx_graph::WeightStorageStrategy;
 
@@ -74,7 +74,7 @@ pub fn load_rwkv7_pth(pth_path: &Path, output_method: WeightStorageStrategy) -> 
 
 pub fn load_rwkv7(weight_manager: impl WeightManager, layer_count: usize, output_method: WeightStorageStrategy) -> Result<Vec<u8>, anyhow::Error> {
 
-    let mut input_tensors = vec![];
+    let mut input_tensors: Vec<Arc<dyn Tensor>> = vec![];
     let mut output_tensors: Vec<(String, Arc<dyn Tensor>)> = vec![];
 
     let batch_dimension = Dimension::new(Some(1), Some("batch_size".to_string()), Some("DATA_BATCH".to_string()));
@@ -112,8 +112,8 @@ pub fn load_rwkv7(weight_manager: impl WeightManager, layer_count: usize, output
         let after_ln1 = layer_norm(
             &block_weight_manager.prefix("ln1"),
             x, 1e-5)?;
-
-        let time_mixer_x_in = InputTensor::new(format!("time_mixer_x_in_{layer_id}"), DType::BF16, after_ln1.shape().clone());
+        
+        let time_mixer_x_in = InputTensorInitialized::new(format!("time_mixer_x_in_{layer_id}"), TensorData::zeros(after_ln1.shape().clone(), after_ln1.dtype())?);
         input_tensors.push(time_mixer_x_in.clone());
 
         output_tensors.push((format!("time_mixer_x_out_{layer_id}"), after_ln1.clone()));
@@ -158,7 +158,8 @@ pub fn load_rwkv7(weight_manager: impl WeightManager, layer_count: usize, output
             Some(block_weight_manager.get_tensor("att.w0")?),
             decay
         )?;
-        let log_neg_log_of_decay = add_scalar(Neg::new(None, Softplus::new(None, Neg::new(None, log_neg_log_of_decay))), half::bf16::from_f32(-0.5))?;
+        let log_neg_log_of_decay= Cast::new(None, log_neg_log_of_decay, DType::F32);
+        let log_neg_log_of_decay = add_scalar(Neg::new(None, Softplus::new(None, Neg::new(None, log_neg_log_of_decay))?), -0.5f32)?;
 
         let log_of_decay = Neg::new(None, Exp::new(None, Cast::new(None, log_neg_log_of_decay, DType::F32)));
         let decay = Exp::new(None, log_of_decay);
@@ -167,12 +168,14 @@ pub fn load_rwkv7(weight_manager: impl WeightManager, layer_count: usize, output
         let deformed_key = reshape(deformed_key, vec![0, 0, n_heads as i64, -1])?;
         let deformed_key = LpNormalization::new(None, deformed_key, 2, -1);
 
-        let vk_state_in = InputTensor::new(format!("vk_state_in_{layer_id}"), DType::F32, Shape::new(vec![
+        let vk_state_in_shape = Shape::new(vec![
             batch_dimension.clone(),
             n_heads_dimension.clone(),
             k_dimension.clone(),
             v_dimension.clone()
-        ]));
+        ]);
+        
+        let vk_state_in = InputTensorInitialized::new(format!("vk_state_in_{layer_id}"), TensorData::zeros(vk_state_in_shape, DType::F32)?);
         input_tensors.push(vk_state_in.clone());
 
 
@@ -223,7 +226,7 @@ pub fn load_rwkv7(weight_manager: impl WeightManager, layer_count: usize, output
         let after_ln2 = layer_norm(&block_weight_manager.prefix("ln2"), after_time_mix.clone(), 1e-5)?;
 
         // Channel mixing
-        let channel_mixer_x_in = InputTensor::new(format!("channel_mixer_x_in_{layer_id}"), DType::BF16, after_ln2.shape().clone());
+        let channel_mixer_x_in = InputTensorInitialized::new(format!("channel_mixer_x_in_{layer_id}"), TensorData::zeros(after_ln2.shape().clone(), DType::BF16)?);
         input_tensors.push(channel_mixer_x_in.clone());
         output_tensors.push((format!("channel_mixer_x_out_{layer_id}"), after_ln2.clone()));
         let hidden_state = lerp(after_ln2.clone(), channel_mixer_x_in, block_weight_manager.get_tensor("ffn.x_k")?)?;

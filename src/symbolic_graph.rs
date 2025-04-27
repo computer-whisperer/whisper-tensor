@@ -2,56 +2,9 @@ use serde::{Deserialize, Serialize};
 use std::any::Any;
 use std::collections::HashMap;
 use prost::Message;
-
-pub mod onnx {
-    include!(concat!(env!("OUT_DIR"), "/onnx.rs"));
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum DType {
-    F64,
-    F32,
-    BF16,
-    F16,
-    I64,
-    I32,
-    U64,
-    U32,
-    U16
-}
-
-impl DType {
-    fn from_onnx(onnx_dtype: onnx::tensor_proto::DataType) -> Result<Self, ONNXDecodingError> {
-        match onnx_dtype {
-            onnx::tensor_proto::DataType::Double => Ok(DType::F64),
-            onnx::tensor_proto::DataType::Float => Ok(DType::F32),
-            onnx::tensor_proto::DataType::Bfloat16 => Ok(DType::BF16),
-            onnx::tensor_proto::DataType::Float16 => Ok(DType::F16),
-            onnx::tensor_proto::DataType::Int64 => Ok(DType::I64),
-            onnx::tensor_proto::DataType::Int32 => Ok(DType::I32),
-            onnx::tensor_proto::DataType::Uint64 => Ok(DType::U64),
-            onnx::tensor_proto::DataType::Uint32 => Ok(DType::U32),
-            onnx::tensor_proto::DataType::Uint16 => Ok(DType::U16),
-            x => Err(ONNXDecodingError::UnsupportedDType(x)),
-        }
-    }
-}
-
-impl std::fmt::Display for DType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            DType::F64 => write!(f, "Float64"),
-            DType::F32 => write!(f, "Float32"),
-            DType::BF16 => write!(f, "BFloat16"),
-            DType::F16 => write!(f, "Float16"),
-            DType::I64 => write!(f, "Int64"),
-            DType::I32 => write!(f, "Int32"),
-            DType::U64 => write!(f, "UInt64"),
-            DType::U32 => write!(f, "UInt32"),
-            DType::U16 => write!(f, "UInt16")
-        }
-    }
-}
+use crate::dtype::DType;
+use crate::native_numeric_tensor::NativeNumericTensor;
+use crate::onnx;
 
 #[derive(Debug, thiserror::Error)]
 enum SymbolicGraphError {
@@ -81,6 +34,8 @@ pub enum ONNXDecodingError {
     UnknownTensorName(String),
     #[error("Missing expected attribute \"{1}\" for op {0}")]
     MissingAttribute(String, String),
+    #[error(transparent)]
+    DTypeError(#[from] crate::dtype::DTypeError),
     #[error("Unsupported ONNX: {0}")]
     UnsupportedONNX(String)
 }
@@ -401,7 +356,7 @@ impl CastData {
         let to_i = attributes.iter().find(|a| a.name == "to")
             .ok_or(ONNXDecodingError::MissingAttribute("Cast".to_string(), "to".to_string()))?.i as i32;
         let to_datatype = onnx::tensor_proto::DataType::try_from(to_i).map_err(|x| ONNXDecodingError::ProtobufDecodeError(x.into()))?;
-        let to = DType::from_onnx(to_datatype)?;
+        let to = DType::try_from(to_datatype)?;
         Ok(Self {
             input: inputs[0],
             output: outputs[0],
@@ -589,67 +544,11 @@ enum Dimension {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-enum ConstantValue {
-    F64(Vec<f64>),
-    F32(Vec<f32>),
-    BF16(Vec<half::bf16>),
-    F16(Vec<half::f16>),
-    I64(Vec<i64>),
-    I32(Vec<i32>),
-    U64(Vec<u64>),
-    U32(Vec<u32>),
-    U16(Vec<u16>),
-}
-
-impl ConstantValue {
-    fn from_raw_data(dtype: DType, data: &[u8]) -> Result<Self, ONNXDecodingError> {
-        match dtype {
-            DType::F64 => {
-                let data = data.chunks_exact(8).map(|x| f64::from_le_bytes(x.try_into().unwrap())).collect();
-                Ok(ConstantValue::F64(data))
-            },
-            DType::F32 => {
-                let data = data.chunks_exact(4).map(|x| f32::from_le_bytes(x.try_into().unwrap())).collect();
-                Ok(ConstantValue::F32(data))
-            },
-            DType::BF16 => {
-                let data = data.chunks_exact(2).map(|x| half::bf16::from_bits(u16::from_le_bytes(x.try_into().unwrap()))).collect();
-                Ok(ConstantValue::BF16(data))
-            }
-            DType::F16 => {
-                let data = data.chunks_exact(2).map(|x| half::f16::from_bits(u16::from_le_bytes(x.try_into().unwrap()))).collect();
-                Ok(ConstantValue::F16(data))
-            }
-            DType::I64 => {
-                let data = data.chunks_exact(8).map(|x| i64::from_le_bytes(x.try_into().unwrap())).collect();
-                Ok(ConstantValue::I64(data))
-            },
-            DType::I32 => {
-                let data = data.chunks_exact(4).map(|x| i32::from_le_bytes(x.try_into().unwrap())).collect();
-                Ok(ConstantValue::I32(data))
-            },
-            DType::U64 => {
-                let data = data.chunks_exact(8).map(|x| u64::from_le_bytes(x.try_into().unwrap())).collect();
-                Ok(ConstantValue::U64(data))
-            },
-            DType::U32 => {
-                let data = data.chunks_exact(4).map(|x| u32::from_le_bytes(x.try_into().unwrap())).collect();
-                Ok(ConstantValue::U32(data))
-            },
-            DType::U16 => {
-                let data = data.chunks_exact(2).map(|x| u16::from_le_bytes(x.try_into().unwrap())).collect();
-                Ok(ConstantValue::U16(data))
-            }
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 enum TensorType {
     Input,
     Output,
     Intermediate,
-    Constant(ConstantValue),
+    Constant(NativeNumericTensor),
     Weight
 }
 
@@ -709,7 +608,7 @@ impl SymbolicGraph {
                 .as_ref()
                 .ok_or(ONNXDecodingError::MissingField("tensor_type.shape"))?;
 
-            let dtype = DType::from_onnx(
+            let dtype = DType::try_from(
                 onnx::tensor_proto::DataType::try_from(onnx_tensor_type_value_inner.elem_type)
                     .map_err(|x| ONNXDecodingError::ProtobufDecodeError(anyhow::Error::from(x)))?,
             )?;
@@ -936,13 +835,13 @@ impl SymbolicGraph {
                         }
                     };
 
-                    let dtype = DType::from_onnx(
+                    let dtype = DType::try_from(
                         onnx::tensor_proto::DataType::try_from(tensor.data_type)
                             .map_err(|x| ONNXDecodingError::ProtobufDecodeError(anyhow::Error::from(x)))?,
                     )?;
 
                     let constant_value = if tensor.raw_data.len() > 0 {
-                        ConstantValue::from_raw_data(dtype, &tensor.raw_data)?
+                        NativeNumericTensor::from_raw_data(&tensor.raw_data, dtype, tensor.dims.iter().map(|x| *x as usize).collect())
                     } else {
                         Err(ONNXDecodingError::UnsupportedONNX("No raw data field!".to_string()))?
                     };
