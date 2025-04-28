@@ -20,6 +20,7 @@ impl From<DType> for ort::tensor::TensorElementType {
             DType::U32 => ort::tensor::TensorElementType::Uint32,
             DType::U16 => ort::tensor::TensorElementType::Uint16,
             DType::U8 => ort::tensor::TensorElementType::Uint8,
+            DType::BOOL => ort::tensor::TensorElementType::Bool
         }
     }
 }
@@ -91,6 +92,9 @@ impl TryFrom<&NativeNumericTensor> for ORTNumericTensor {
                 ort::value::Value::from_array(x.to_owned())?.into_dyn()
             }
             NativeNumericTensor::BF16(x) => {
+                ort::value::Value::from_array(x.to_owned())?.into_dyn()
+            }
+            NativeNumericTensor::BOOL(x) => {
                 ort::value::Value::from_array(x.to_owned())?.into_dyn()
             }
         }))

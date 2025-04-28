@@ -27,11 +27,19 @@ pub enum NativeNumericTensor {
     I64(ArcArray<i64, IxDyn>),
     U16(ArcArray<u16, IxDyn>),
     U8(ArcArray<u8, IxDyn>),
+    BOOL(ArcArray<bool, IxDyn>),
 }
 
 enum CmpType {
     Min,
     Max,
+}
+
+pub enum BasicBinaryOp {
+    Add,
+    Sub,
+    Mul,
+    Div
 }
 
 impl NativeNumericTensor {
@@ -48,6 +56,7 @@ impl NativeNumericTensor {
             NativeNumericTensor::I64(_) => DType::I64,
             NativeNumericTensor::U16(_) => DType::U16,
             NativeNumericTensor::U8(_) => DType::U8,
+            NativeNumericTensor::BOOL(_) => DType::BOOL
         }
     }
 
@@ -62,7 +71,8 @@ impl NativeNumericTensor {
             NativeNumericTensor::U64(x) => x.shape(),
             NativeNumericTensor::I64(x) => x.shape(),
             NativeNumericTensor::U16(x) => x.shape(),
-            NativeNumericTensor::U8(x) => x.shape()
+            NativeNumericTensor::U8(x) => x.shape(),
+            NativeNumericTensor::BOOL(x) => x.shape()
         }
     }
 
@@ -107,6 +117,10 @@ impl NativeNumericTensor {
             DType::U8 => {
                 NativeNumericTensor::U8(ArcArray::<_, IxDyn>::from_shape_vec(shape, data.to_vec())?)
             }
+            DType::BOOL => {
+                let data = data.into_iter().map(|x| *x != 0).collect();
+                NativeNumericTensor::BOOL(ArcArray::<_, IxDyn>::from_shape_vec(shape, data)?)
+            }
         })
     }
 
@@ -126,6 +140,7 @@ impl NativeNumericTensor {
             NativeNumericTensor::I64(x) => Ok(NativeNumericTensor::I64(x.clone().into_shape_with_order(new_shape)?)),
             NativeNumericTensor::U16(x) => Ok(NativeNumericTensor::U16(x.clone().into_shape_with_order(new_shape)?)),
             NativeNumericTensor::U8(x) => Ok(NativeNumericTensor::U8(x.clone().into_shape_with_order(new_shape)?)),
+            NativeNumericTensor::BOOL(x) => Ok(NativeNumericTensor::BOOL(x.clone().into_shape_with_order(new_shape)?)),
         }
     }
 
@@ -154,7 +169,12 @@ impl NativeNumericTensor {
             NativeNumericTensor::I64(x) => {NativeNumericTensor::I64(x.slice(s).to_shared())}
             NativeNumericTensor::U16(x) => {NativeNumericTensor::U16(x.slice(s).to_shared())}
             NativeNumericTensor::U8(x) => {NativeNumericTensor::U8(x.slice(s).to_shared())}
+            NativeNumericTensor::BOOL(x) => {NativeNumericTensor::BOOL(x.slice(s).to_shared())}
         })
+    }
+    
+    pub fn apply_binary_op(a: NativeNumericTensor, b: NativeNumericTensor, op: BasicBinaryOp) -> NativeNumericTensor {
+        todo!()
     }
 }
 

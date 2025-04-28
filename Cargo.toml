@@ -20,20 +20,21 @@ ort = {optional=true, git="https://github.com/pykeio/ort.git", branch="main", fe
 tracing-subscriber = { version = "0.3", features = [ "env-filter", "fmt" ] }
 tempfile = "3.19.1"
 
-wonnx = {optional=true, version="0.5.1"}
 pyo3 = {optional=true, version = "0.24.0", features = ["auto-initialize"]}
 tokenizers = {optional=true, version="0.21.1", features = ["http"]}
 llm-samplers = { optional=true, version="0.0.7" }
 rand = "0.8.5"
 ndarray = { version = "0.16.1", features = ["serde"] }
+rwkv-tokenizer = { optional=true, version="0.9.1" }
 
 [features]
-default = ["ort", "candle", "wonnx", "onnx-reference", "tokenizers", "llm-samplers"]
+default = ["ort", "candle", "onnx-reference", "tokenizers", "llm-samplers", "rwkv-tokenizer"]
 onnx-reference = ["pyo3"]
 ort = ["dep:ort"]
 candle = ["candle-onnx", "candle-core"]
 tokenizers = ["dep:tokenizers"]
 llm-samplers = ["dep:llm-samplers"]
+rwkv-tokenizer = ["dep:rwkv-tokenizer"]
 
 [build-dependencies]
 prost-build = "0.13.3"

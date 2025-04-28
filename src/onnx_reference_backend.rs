@@ -1,6 +1,5 @@
 use std::collections::HashMap;
-use ndarray::Ix1;
-use pyo3::{BoundObject, Py, PyAny, PyErr, Python};
+use pyo3::{Py, PyAny, PyErr, Python};
 use pyo3::prelude::PyAnyMethods;
 use pyo3::types::{PyDict, PyNone};
 use crate::dtype::DType;
@@ -63,6 +62,63 @@ impl TryFrom<ONNXReferenceTensor> for NativeNumericTensor {
     }
 }
 
+impl TryFrom<&NativeNumericTensor> for ONNXReferenceTensor {
+    type Error = ONNXReferenceError;
+    fn try_from(input: &NativeNumericTensor) -> Result<Self, Self::Error> {
+        Python::with_gil(|py| {
+            let np = py.import("numpy")?;
+            let np_array = match &input {
+                NativeNumericTensor::F32(x) => {np.call_method("array", (x.flatten().to_vec(),), None)?},
+                NativeNumericTensor::F64(x) => {np.call_method("array", (x.flatten().to_vec(),), None)?},
+                NativeNumericTensor::U32(x) => {np.call_method("array", (x.flatten().to_vec(),), None)?}
+                NativeNumericTensor::I32(x) => {np.call_method("array", (x.flatten().to_vec(),), None)?}
+                NativeNumericTensor::U64(x) => {np.call_method("array", (x.flatten().to_vec(),), None)?}
+                NativeNumericTensor::I64(x) => {np.call_method("array", (x.flatten().to_vec(),), None)?}
+                _ => {Err(ONNXReferenceError::UnsupportedDType)?}
+            };
+            let np_array = np_array.call_method1("reshape", (input.shape(),))?;
+
+            Ok(ONNXReferenceTensor{
+                value: np_array.unbind()
+            })
+        }).map_err(|e| ONNXReferenceError::PyErr(e))
+    }
+}
+
+impl TryFrom<NativeNumericTensor> for ONNXReferenceTensor {
+    type Error = ONNXReferenceError;
+    fn try_from(value: NativeNumericTensor) -> Result<Self, Self::Error> {
+        Self::try_from(&value)
+    }
+}
+
+impl TryFrom<NumericTensor> for ONNXReferenceTensor {
+    type Error = NumericTensorError;
+    fn try_from(value: NumericTensor) -> Result<Self, Self::Error> {
+        Ok(match value {
+            NumericTensor::Native(x) => ONNXReferenceTensor::try_from(x)?,
+            _ => Self::try_from(NativeNumericTensor::try_from(value)?)?
+        })
+    }
+}
+
+impl TryFrom<&NumericTensor> for ONNXReferenceTensor {
+    type Error = NumericTensorError;
+    fn try_from(value: &NumericTensor) -> Result<Self, Self::Error> {
+        Ok(match value {
+            NumericTensor::Native(x) => ONNXReferenceTensor::try_from(x)?,
+            _ => Self::try_from(NativeNumericTensor::try_from(value)?)?
+        })
+    }
+}
+
+impl From<ONNXReferenceTensor> for NumericTensor {
+    fn from(value: ONNXReferenceTensor) -> Self {
+        Self::ONNXReference(value)
+    }
+}
+
+
 pub struct ONNXReferenceBackend {
     evaluator: Py<PyAny>,
 }
@@ -115,26 +171,6 @@ impl ONNXReferenceBackend {
         }).map_err(|e| ONNXReferenceError::PyErr(e))
     }
     
-    pub fn load_tensor(&self, input: &NativeNumericTensor) -> Result<ONNXReferenceTensor, ONNXReferenceError> {
-        Python::with_gil(|py| {
-            let np = py.import("numpy")?;
-            let np_array = match &input {
-                NativeNumericTensor::F32(x) => {np.call_method("array", (x.flatten().to_vec(),), None)?},
-                NativeNumericTensor::F64(x) => {np.call_method("array", (x.flatten().to_vec(),), None)?},
-                NativeNumericTensor::U32(x) => {np.call_method("array", (x.flatten().to_vec(),), None)?}
-                NativeNumericTensor::I32(x) => {np.call_method("array", (x.flatten().to_vec(),), None)?}
-                NativeNumericTensor::U64(x) => {np.call_method("array", (x.flatten().to_vec(),), None)?}
-                NativeNumericTensor::I64(x) => {np.call_method("array", (x.flatten().to_vec(),), None)?}
-                _ => {Err(ONNXReferenceError::UnsupportedDType)?}
-            };
-            let np_array = np_array.call_method1("reshape", (input.shape(),))?;
-            
-            Ok(ONNXReferenceTensor{
-                value: np_array.unbind()
-            })
-        }).map_err(|e| ONNXReferenceError::PyErr(e))
-    }
-    
     pub fn get_input_tensor_info(&self) -> Result<HashMap<String, (DType, Vec<Option<usize>>)>, ONNXReferenceError> {
         Python::with_gil(|py| {
             let mut output = HashMap::new();
@@ -153,3 +189,4 @@ impl ONNXReferenceBackend {
         }).map_err(|e| ONNXReferenceError::PyErr(e))
     }
 }
+

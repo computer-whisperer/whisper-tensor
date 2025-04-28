@@ -23,24 +23,27 @@ pub enum DType {
     U64,
     U32,
     U16,
-    U8
+    U8,
+    BOOL
 }
 
 impl TryFrom<onnx::tensor_proto::DataType> for DType {
     type Error = DTypeError;
     fn try_from(onnx_dtype: onnx::tensor_proto::DataType) -> Result<Self, DTypeError> {
-        match onnx_dtype {
-            onnx::tensor_proto::DataType::Double => Ok(DType::F64),
-            onnx::tensor_proto::DataType::Float => Ok(DType::F32),
-            onnx::tensor_proto::DataType::Bfloat16 => Ok(DType::BF16),
-            onnx::tensor_proto::DataType::Float16 => Ok(DType::F16),
-            onnx::tensor_proto::DataType::Int64 => Ok(DType::I64),
-            onnx::tensor_proto::DataType::Int32 => Ok(DType::I32),
-            onnx::tensor_proto::DataType::Uint64 => Ok(DType::U64),
-            onnx::tensor_proto::DataType::Uint32 => Ok(DType::U32),
-            onnx::tensor_proto::DataType::Uint16 => Ok(DType::U16),
-            _ => Err(DTypeError::UnsupportedONNXDtype(onnx_dtype))
-        }
+        Ok(match onnx_dtype {
+            onnx::tensor_proto::DataType::Double => DType::F64,
+            onnx::tensor_proto::DataType::Float => DType::F32,
+            onnx::tensor_proto::DataType::Bfloat16 => DType::BF16,
+            onnx::tensor_proto::DataType::Float16 => DType::F16,
+            onnx::tensor_proto::DataType::Int64 => DType::I64,
+            onnx::tensor_proto::DataType::Int32 => DType::I32,
+            onnx::tensor_proto::DataType::Uint64 => DType::U64,
+            onnx::tensor_proto::DataType::Uint32 => DType::U32,
+            onnx::tensor_proto::DataType::Uint16 => DType::U16,
+            onnx::tensor_proto::DataType::Uint8 => DType::U8,
+            onnx::tensor_proto::DataType::Bool => DType::BOOL,
+            _ => Err(DTypeError::UnsupportedONNXDtype(onnx_dtype))?
+        })
     }
 }
 
@@ -57,6 +60,7 @@ impl From<DType> for onnx::tensor_proto::DataType {
             DType::U32 => onnx::tensor_proto::DataType::Uint32,
             DType::U16 => onnx::tensor_proto::DataType::Uint16,
             DType::U8 => onnx::tensor_proto::DataType::Uint8,
+            DType::BOOL => onnx::tensor_proto::DataType::Bool
         }
     }
 }
@@ -74,6 +78,7 @@ impl std::fmt::Display for DType {
             DType::U32 => write!(f, "UInt32"),
             DType::U16 => write!(f, "UInt16"),
             DType::U8 => write!(f, "UInt8"),
+            DType::BOOL => write!(f, "Bool")
         }
     }
 }

@@ -8,7 +8,8 @@ use onnx_graph::WeightStorageStrategy;
 use onnx_import::identify_and_load;
 use rand::prelude::StdRng;
 use rand::SeedableRng;
-use whisper_tensor::{RuntimeModel, Backend};
+use rwkv_tokenizer::WorldTokenizer;
+use whisper_tensor::{RuntimeModel, Backend, RuntimeEnvironment};
 use whisper_tensor::language_model::LanguageModelManager;
 use whisper_tensor::numeric_tensor::{NumericTensor};
 use whisper_tensor::sampler::{GreedySampler, LLMSamplersBundle};
@@ -16,14 +17,17 @@ use whisper_tensor::sampler::{GreedySampler, LLMSamplersBundle};
 fn main() {
     tracing_subscriber::fmt::init();
 
-    let input_path = Path::new("gpt2-lm-head-10.onnx");
-    let mut onnx_data = Vec::new();
-    File::open(input_path).unwrap().read_to_end(&mut onnx_data).unwrap();
+    //let input_path = Path::new("/mnt/secondary/rwkv7-g1/rwkv7-g1-0.1b-20250307-ctx4096.pth");
+    let input_path = Path::new("/ceph-fuse/public/neural_models/llms/rwkv7-g1/rwkv7-g1-0.1b-20250307-ctx4096.pth");
+    let onnx_out = Path::new("out.onnx");
+    let bin_out = Path::new("out.bin");
+    let onnx_data = identify_and_load(input_path, WeightStorageStrategy::BinFile(bin_out.to_path_buf())).unwrap();
+    File::create(onnx_out).unwrap().write_all(&onnx_data).unwrap();
 
-    let runtime = RuntimeModel::load_onnx(&onnx_data, Backend::ORT).unwrap();
+    let runtime = RuntimeModel::load_onnx(&onnx_data, Backend::ORT, Default::default()).unwrap();
     let mut llm = LanguageModelManager::new(runtime, "input1", "output1");
 
-    let tokenizer = Tokenizer::from_pretrained("gpt2", None).unwrap();
+    let tokenizer = WorldTokenizer::new(None).unwrap();
 
     let prompt = "The fibbonacci sequence is: 1, 1, 2, 3, 5, 8, 13,";
     let input = whisper_tensor::tokenizer::Tokenizer::encode(&tokenizer, prompt).iter().map(|x| *x as i64).collect::<Vec<_>>();
@@ -48,6 +52,6 @@ fn main() {
 
     let output = llm.run(input_tensor.clone(), &mut sampler).unwrap();
     let output_values: Vec<u32> = output.squeeze(0).unwrap().squeeze(0).unwrap().try_into().unwrap();
-    let output = whisper_tensor::tokenizer::Tokenizer::decode(&tokenizer, &output_values);
+    let output = whisper_tensor::tokenizer::Tokenizer::decode(&tokenizer, &output_values).unwrap();
     println!("{}", output);
 }
