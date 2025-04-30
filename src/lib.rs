@@ -1,20 +1,22 @@
 use std::collections::HashMap;
 use crate::dtype::DType;
-use crate::ndarray_backend::NDArrayRuntime;
+use crate::eval_backend::{EvalBackend, EvalRuntime, EvalRuntimeError};
+use crate::ndarray_backend::NDArrayNumericTensorError;
 use crate::numeric_tensor::{NumericTensor, NumericTensorError};
 use crate::ort_backend::ORTNumericTensor;
 use crate::sampler::SamplerError;
 use crate::symbolic_graph::{ONNXDecodingError, SymbolicGraphMutator};
+use crate::symbolic_graph::ops::EvalError;
 
 mod vulkan_context;
 pub mod symbolic_graph;
 pub mod numeric_tensor;
-pub mod native_numeric_tensor;
 pub mod dtype;
 pub mod sampler;
 pub mod language_model;
 pub mod tokenizer;
-pub mod ndarray_backend;
+pub mod eval_backend;
+mod ndarray_backend;
 
 #[cfg(feature = "ort")]
 pub mod ort_backend;
@@ -28,19 +30,18 @@ pub mod onnx {
 }
 
 #[derive(Debug, Clone)]
-pub enum Backend {
+pub enum RuntimeBackend {
     ONNXReference,
     ORT,
     Candle,
-    NDArray,
+    Eval(EvalBackend),
 }
 
-impl core::fmt::Display for Backend {
+impl core::fmt::Display for RuntimeBackend {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{:?}", self)
     }
 }
-
 
 pub enum RuntimeModel {
     #[cfg(feature = "onnx-reference")]
@@ -49,19 +50,19 @@ pub enum RuntimeModel {
     ORT(ort::session::Session),
     #[cfg(feature = "candle")]
     Candle(candle_onnx::onnx::ModelProto),
-    NDArray(NDArrayRuntime)
+    Eval(EvalRuntime)
 }
 
-impl From<RuntimeModel> for Backend {
+impl From<RuntimeModel> for RuntimeBackend {
     fn from(value: RuntimeModel) -> Self {
         match value {
             #[cfg(feature = "onnx-reference")]
-            RuntimeModel::ONNXReference(_) => Backend::ONNXReference,
+            RuntimeModel::ONNXReference(_) => RuntimeBackend::ONNXReference,
             #[cfg(feature = "ort")]
-            RuntimeModel::ORT(_) => Backend::ORT,
+            RuntimeModel::ORT(_) => RuntimeBackend::ORT,
             #[cfg(feature = "candle")]
-            RuntimeModel::Candle(_) => Backend::Candle,
-            RuntimeModel::NDArray(_) => Backend::NDArray,
+            RuntimeModel::Candle(_) => RuntimeBackend::Candle,
+            RuntimeModel::Eval(x) => RuntimeBackend::Eval(x.get_eval_backend().clone()),
         }
     }
 }
@@ -69,7 +70,7 @@ impl From<RuntimeModel> for Backend {
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeError {
     #[error("Disabled runtime {0:?}")]
-    DisabledBackend(Backend),
+    DisabledBackend(RuntimeBackend),
     #[cfg(feature = "onnx-reference")]
     #[error(transparent)]
     ONNXReference(#[from] onnx_reference_backend::ONNXReferenceError),
@@ -86,11 +87,17 @@ pub enum RuntimeError {
     #[error(transparent)]
     NumericTensorError(#[from] NumericTensorError),
     #[error(transparent)]
+    NDArrayNumericTensorError(#[from] NDArrayNumericTensorError),
+    #[error(transparent)]
     SamplerError(#[from] SamplerError),
     #[error("Missing input {0}")]
     MissingInput(String),
     #[error(transparent)]
     ONNXDecodingError(#[from] ONNXDecodingError),
+    #[error(transparent)]
+    ExecNativeError(#[from] EvalError),
+    #[error(transparent)]
+    EvalRuntimeError(#[from] EvalRuntimeError),
     #[error(transparent)]
     Other(#[from] anyhow::Error)
 }
@@ -101,15 +108,15 @@ pub struct RuntimeEnvironment {
 }
 
 impl RuntimeModel {
-    pub fn load_onnx(onnx_data: &[u8], runtime: Backend, runtime_environment: RuntimeEnvironment) -> Result<Self, RuntimeError> {
+    pub fn load_onnx(onnx_data: &[u8], runtime: RuntimeBackend, runtime_environment: RuntimeEnvironment) -> Result<Self, RuntimeError> {
         match runtime {
             #[cfg(feature = "onnx-reference")]
-            Backend::ONNXReference => {
+            RuntimeBackend::ONNXReference => {
                 let backend = onnx_reference_backend::ONNXReferenceBackend::new(onnx_data)?;
                 Ok(RuntimeModel::ONNXReference(backend))
             }
             #[cfg(feature = "ort")]
-            Backend::ORT => {
+            RuntimeBackend::ORT => {
                 let mut builder = ort::session::Session::builder()?;
                 builder = builder.with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)?;
                 builder = builder.with_intra_threads(4)?;
@@ -119,15 +126,15 @@ impl RuntimeModel {
                 Ok(RuntimeModel::ORT(builder.commit_from_memory(&onnx_data)?))
             }
             #[cfg(feature = "candle")]
-            Backend::Candle => {
+            RuntimeBackend::Candle => {
                 // Emit to some temp file because bs
                 let temp_file = tempfile::NamedTempFile::new().map_err(|e| anyhow::anyhow!(e))?;
                 std::fs::write(temp_file.path(), onnx_data).map_err(|e| anyhow::anyhow!(e))?;
                 Ok(RuntimeModel::Candle(candle_onnx::read_file(temp_file.path()).map_err(|e| anyhow::anyhow!(e))?))
             }
-            Backend::NDArray => {
+            RuntimeBackend::Eval(eval_backend) => {
                 let model = SymbolicGraphMutator::from_onnx_bytes(onnx_data)?.get_inner();
-                Ok(RuntimeModel::NDArray(NDArrayRuntime::new(model)))
+                Ok(RuntimeModel::Eval(EvalRuntime::new(model, eval_backend)?))
             }
             _ => {
                 Err(RuntimeError::DisabledBackend(runtime))
@@ -177,10 +184,10 @@ impl RuntimeModel {
                 }
                 Ok(output_tensors)
             }
-            RuntimeModel::NDArray(runtime) => {
+            RuntimeModel::Eval(runtime) => {
                 let mut converted_inputs = HashMap::new();
                 for (key, tensor) in inputs {
-                    converted_inputs.insert(key.to_string(), tensor.try_into()?);
+                    converted_inputs.insert(key.to_string(), tensor);
                 }
                 let res = runtime.run(converted_inputs)?;
                 let mut output_tensors = HashMap::new();

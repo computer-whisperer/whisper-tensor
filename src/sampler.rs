@@ -1,5 +1,5 @@
-
-use crate::native_numeric_tensor::{NativeNumericTensor, NativeNumericTensorError};
+use crate::eval_backend::EvalBackend;
+use crate::ndarray_backend::{NDArrayNumericTensor, NDArrayNumericTensorError};
 use crate::numeric_tensor::{NumericTensor, NumericTensorError};
 
 #[derive(Debug, thiserror::Error)]
@@ -28,7 +28,7 @@ impl Sampler for GreedySampler {
                 NumericTensor::Candle(x.argmax(dim)?)
             }
             _ => {
-                let x = NativeNumericTensor::try_from(x)?;
+                let x = NDArrayNumericTensor::try_from(x)?;
                 let x = x.argmax(dim).1;
                 x.into()
             }
@@ -49,7 +49,7 @@ impl Sampler for LLMSamplersBundle {
         use llm_samplers::prelude::Sampler;
         
         let x_shape = x.shape();
-        let x = x.reshape(vec![x_shape[x_shape.len()-1]])?;
+        let x = x.reshape(vec![x_shape[x_shape.len()-1]], &EvalBackend::NDArray)?;
         let v: Vec<f32> = x.try_into()?;
         let mut logits = llm_samplers::prelude::Logits::try_from(v).map_err(|x| {SamplerError::LLMSamplersError(x.into())})?;
         let out = self.chain.sample_token(&mut self.res, &mut logits).map_err(|x| {SamplerError::LLMSamplersError(x.into())})?;

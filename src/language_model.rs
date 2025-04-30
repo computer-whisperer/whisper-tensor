@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use crate::numeric_tensor::NumericTensor;
 use crate::tokenizer::Tokenizer;
 use crate::{RuntimeError, RuntimeModel};
+use crate::eval_backend::EvalBackend;
 use crate::sampler::Sampler;
 
 
@@ -24,7 +25,7 @@ impl LanguageModelManager {
     
     pub fn run<S: Sampler>(&mut self, input_tokens: NumericTensor, sampler: &mut S) -> Result<NumericTensor, RuntimeError> {
         let input_tokens = if let Some(token_context) = &self.token_context {
-            NumericTensor::concat(&[token_context, &input_tokens], input_tokens.shape().len()-1)?
+            NumericTensor::concat(&[token_context, &input_tokens], input_tokens.shape().len()-1, &EvalBackend::NDArray)?
         } else {
             input_tokens
         };
@@ -41,7 +42,7 @@ impl LanguageModelManager {
             output_slice.push(shape[i]-1..shape[i]);
         }
         output_slice.push(0..shape[shape.len()-1]);
-        let sliced_output_tensor = output_tensor.slice(&output_slice)?;
+        let sliced_output_tensor = output_tensor.slice(&output_slice, &EvalBackend::NDArray)?;
         let output_tensor_sampled = sampler.sample(&sliced_output_tensor)?;
         
         Ok(output_tensor_sampled)
@@ -49,7 +50,7 @@ impl LanguageModelManager {
     
     pub fn push_context(&mut self, context: NumericTensor) {
         self.token_context = if let Some(token_context) = &self.token_context {
-            Some(NumericTensor::concat(&[token_context, &context], context.shape().len()-1).unwrap())
+            Some(NumericTensor::concat(&[token_context, &context], context.shape().len()-1, &EvalBackend::NDArray).unwrap())
         } else {
             Some(context)
         }

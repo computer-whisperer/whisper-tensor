@@ -1,0 +1,813 @@
+use std::ops::{Add, Mul, Not};
+use ndarray::{concatenate, ArcArray, Array, Array2, ArrayD, ArrayView2, ArrayViewD, ArrayViewMut2, ArrayViewMutD, Axis, Dimension, Ix2, IxDyn, LinalgScalar, ShapeError, SliceInfoElem, Zip};
+use ndarray::linalg::{general_mat_mul, Dot};
+use num_traits::{Float, Num, NumCast, One, Zero};
+use num_traits::real::Real;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, thiserror::Error)]
+pub enum NDArrayOperationError {
+    #[error(transparent)]
+    ShapeError(#[from] ShapeError),
+    #[error("out of bounds")]
+    OutOfBounds,
+    #[error("incompatible shape")]
+    IncompatibleShape,
+    #[error("shape mismatch: {0}")]
+    IncompatibleShapes(String),
+    #[error("broadcast error: {0}")]
+    BroadcastError(String)
+}
+
+pub(crate) fn reshape<T>(input: ArcArray<T, IxDyn>, shape: &[usize]) -> Result<ArcArray<T, IxDyn>, ShapeError>
+where
+    T: Clone,
+{
+    Ok(input.to_shape(shape)?.to_shared())
+}
+
+/// Gather elements from `tensor` along axis `dim` according to `indices`,
+/// following the ONNX spec (axis may be negative; out‐of‐bounds raises).
+/// Output shape = data.shape[..dim] ++ indices.shape ++ data.shape[dim+1..].
+///
+/// # Errors
+/// - If `dim` ≥ tensor.ndim()
+/// - If any index (after handling negatives) is out of bounds
+/// - If the final buffer length mismatches the computed shape
+pub(crate) fn gather<T: Clone>(
+    dim: usize,
+    tensor: ArcArray<T, IxDyn>,
+    indices: ArcArray<i64, IxDyn>,
+) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError> {
+    let data_shape = tensor.shape();
+    let rank = data_shape.len();
+    if dim >= rank {
+        return Err(NDArrayOperationError::OutOfBounds);
+    }
+
+    // ONNX allows negative axis, but we require dim non‐negative here.
+    let axis_len = data_shape[dim];
+
+    // 1) Compute output shape
+    let idx_shape = indices.shape();
+    let mut out_shape = Vec::with_capacity(rank - 1 + idx_shape.len());
+    out_shape.extend(&data_shape[..dim]);
+    out_shape.extend(idx_shape);
+    out_shape.extend(&data_shape[dim+1..]);
+    let out_len = out_shape.iter().product::<usize>();
+
+    // 2) Compute row‐major strides for output
+    let ndim = out_shape.len();
+    let mut strides = vec![0; ndim];
+    {
+        let mut stride = 1usize;
+        for i in (0..ndim).rev() {
+            strides[i] = stride;
+            // check overflow just in case
+            stride = stride
+                .checked_mul(out_shape[i])
+                .ok_or_else(||NDArrayOperationError::OutOfBounds)?;
+        }
+    }
+
+    // 3) Flatten‐index loop
+    let mut out_buf = Vec::with_capacity(out_len);
+    for flat in 0..out_len {
+        // a) compute multi‐index in the output
+        let mut rem = flat;
+        let mut idx_multi = Vec::with_capacity(ndim);
+        for &st in &strides {
+            idx_multi.push(rem / st);
+            rem %= st;
+        }
+
+        // b) extract the slice that indexes into `indices`
+        let idx_inds = &idx_multi[dim .. dim + idx_shape.len()];
+        let mut ix = indices[IxDyn(idx_inds)];
+        // handle negative
+        if ix < 0 {
+            ix += axis_len as i64;
+        }
+        if ix < 0 || ix >= axis_len as i64 {
+            return Err(NDArrayOperationError::OutOfBounds);
+        }
+        let ix = ix as usize;
+
+        // c) build the corresponding index into `tensor`
+        let mut data_idx = Vec::with_capacity(rank);
+        data_idx.extend(&idx_multi[..dim]);
+        data_idx.push(ix);
+        data_idx.extend(&idx_multi[dim + idx_shape.len()..]);
+
+        // d) fetch & clone
+        out_buf.push(tensor[IxDyn(&data_idx)].clone());
+    }
+
+    // 4) Reconstruct the ArrayD and wrap in ArcArray
+    let out_array = ArrayD::from_shape_vec(IxDyn(&out_shape), out_buf)?;
+    Ok(ArcArray::from(out_array))
+}
+
+/// Concatenate ONNX‐style along `dim` (must be 0 ≤ dim < rank of each input),
+/// for a nonempty slice of dynamic‐shaped `ArcArray<T, IxDyn>`.
+///
+/// # Errors
+/// - if `inputs` is empty
+/// - if any input has a different rank or mismatched shape off `dim`
+/// - if `dim` is out of bounds
+/// - if the underlying `ndarray::concatenate` fails (e.g. overflow)
+pub fn concat<T: Clone>(
+    dim: usize,
+    inputs: &[ArcArray<T, IxDyn>],
+) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError> {
+    // 1) Must have at least one input
+    if inputs.is_empty() {
+        return Err(NDArrayOperationError::OutOfBounds);
+    }
+
+    // 2) All inputs must share the same rank...
+    let rank = inputs[0].ndim();
+    if dim >= rank {
+        return Err(NDArrayOperationError::OutOfBounds);
+    }
+    // ...and the same shape on every axis ≠ dim.
+    let mut out_shape = inputs[0].shape().to_vec();
+    // We'll accumulate the new size along `dim`:
+    let mut axis_sum = 0;
+    for arr in inputs {
+        if arr.ndim() != rank {
+            return Err(NDArrayOperationError::IncompatibleShape);
+        }
+        for (d, &len) in arr.shape().iter().enumerate() {
+            if d == dim {
+                axis_sum += len;
+            } else if out_shape[d] != len {
+                return Err(NDArrayOperationError::IncompatibleShape);
+            }
+        }
+    }
+    out_shape[dim] = axis_sum;
+
+    // 3) Build a Vec of ArrayViewDs and call ndarray::concatenate
+    let views: Vec<ArrayViewD<T>> = inputs.iter().map(|a| a.view()).collect();
+    let concatenated: ArrayD<T> = concatenate(Axis(dim), &views)?;
+
+    // 4) Wrap in ArcArray and return
+    Ok(ArcArray::from(concatenated.into_dyn()))
+}
+
+/// ONNX NonZero: returns a [r,n] int64 tensor of the coordinates of each nonzero element.
+/// - r = input.rank
+/// - n = number of elements != 0
+///
+/// # Errors
+/// - if the built buffer doesn’t match the computed [r,n]
+///
+pub fn nonzero<T>(
+    tensor: ArcArray<T, IxDyn>,
+) -> Result<ArcArray<i64, IxDyn>, NDArrayOperationError>
+where
+    T: Clone + PartialEq + Default + Copy,
+{
+    let rank = tensor.ndim();
+
+    // 1) Gather each coordinate component into its own Vec<i64>
+    let mut coords_by_dim: Vec<Vec<i64>> = vec![Vec::new(); rank];
+    for (idx, &v) in tensor.indexed_iter() {
+        if v != T::default() {
+            let iv = idx.as_array_view();
+            for (d, &loc) in iv.iter().enumerate() {
+                coords_by_dim[d].push(loc as i64);
+            }
+        }
+    }
+
+    // 2) Number of nonzero elements
+    let n = coords_by_dim.get(0).map(|v| v.len()).unwrap_or(0);
+
+    // 3) Flatten in row-major order for shape [rank, n]
+    let mut flat = Vec::with_capacity(rank * n);
+    for d in 0..rank {
+        flat.extend(&coords_by_dim[d]);
+    }
+
+    // 4) Build and wrap
+    let shape = IxDyn(&[rank, n]);
+    let arr: ArrayD<i64> = ArrayD::from_shape_vec(shape.clone(), flat)?;
+    Ok(ArcArray::from(arr))
+}
+
+/// ONNX Transpose: permutes the axes of `tensor` according to `perm`.
+/// If `perm` is `None`, reverses the axes.
+///
+/// # Errors
+/// - perm.len() != rank(input) → IncompatibleShape
+/// - any perm entry out of bounds → OutOfBounds
+/// - perm is not a true permutation → IncompatibleShape
+pub fn transpose<T>(
+    tensor: ArcArray<T, IxDyn>,
+    perm: Option<Vec<i64>>,
+) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError>
+where
+    T: Clone,
+{
+    let shape = tensor.shape();
+    let rank = shape.len();
+
+    // 1) Build a Vec<usize> from `perm` or use default reversed axes
+    let axes: Vec<usize> = if let Some(p) = perm {
+        if p.len() != rank {
+            return Err(NDArrayOperationError::IncompatibleShape);
+        }
+        p.iter()
+            .map(|&x| {
+                // handle negatives
+                let idx = if x < 0 { x + rank as i64 } else { x };
+                if idx < 0 || idx >= rank as i64 {
+                    return Err(NDArrayOperationError::OutOfBounds);
+                }
+                Ok(idx as usize)
+            })
+            .collect::<Result<_,_>>()?
+    } else {
+        // default: reverse the axes
+        (0..rank).rev().collect()
+    };
+
+    // 2) Validate it's a true permutation of [0..rank)
+    let mut sorted = axes.clone();
+    sorted.sort_unstable();
+    if sorted != (0..rank).collect::<Vec<_>>() {
+        return Err(NDArrayOperationError::IncompatibleShape);
+    }
+
+    Ok(tensor.permuted_axes(axes).into_shared())
+}
+
+pub(crate) enum ReduceOp {
+    Sum,
+    Mean
+}
+
+impl ReduceOp {
+    pub fn apply<T>(&self, tensor: ArcArray<T, IxDyn>,
+                    axes: Option<Vec<i64>>,
+                    keepdims: bool) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError>
+    where
+        T: Clone + Zero + NumCast + std::ops::Div<Output = T> + Copy
+    {
+        Ok(match self {
+            ReduceOp::Sum => reduce_sum(tensor, axes, keepdims)?,
+            ReduceOp::Mean => reduce_mean(tensor, axes, keepdims)?,
+        })
+    }
+}
+
+
+/// ONNX ReduceMean: compute the mean over `axes` (or all axes if `None`),
+/// with `keepdims` controlling whether reduced dims remain as size 1.
+///
+/// # Parameters
+/// - `tensor`: input tensor, rank r
+/// - `axes`: Option<&[i64]> list of axes (may be negative). `None` ⇒ all axes.
+///
+/// # Errors
+/// - `axes` out of range → `OutOfBounds`
+/// - duplicate axes → `IncompatibleShape`
+/// - final buffer mismatch → `ShapeError`
+pub fn reduce_mean<T>(
+    tensor: ArcArray<T, IxDyn>,
+    axes: Option<Vec<i64>>,
+    keepdims: bool,
+) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError>
+where
+    T: Clone + Zero + NumCast + std::ops::Div<Output = T> + Copy
+{
+    let input_shape = tensor.shape().to_vec();
+    let rank = input_shape.len();
+
+    // 1) Normalize axes list
+    let mut ax: Vec<usize> = if let Some(a) = axes {
+        a.iter().map(|&x| {
+            let idx = if x < 0 { (x + rank as i64) } else { x };
+            if idx < 0 || idx >= rank as i64 {
+                return Err(NDArrayOperationError::OutOfBounds);
+            }
+            Ok(idx as usize)
+        }).collect::<Result<_, _>>()?
+    } else {
+        (0..rank).collect()
+    };
+
+    // 1a) Deduplicate & sort descending (so reductions don’t shift later axes)
+    {
+        let mut sorted = ax.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        if sorted.len() != ax.len() {
+            return Err(NDArrayOperationError::IncompatibleShape);
+        }
+        sorted.reverse();
+        ax = sorted;
+    }
+
+    // 2) Start with an owned dynamic array
+    let mut result: ArrayD<T> = tensor.view().to_owned().into_dyn();
+
+    // 3) For each axis, sum & divide, then optionally re-insert the dim
+    for &axis in &ax {
+        // a) sum over this axis
+        let summed = result.sum_axis(Axis(axis));
+        // b) divide by the count along that axis
+        let count = input_shape[axis];
+        let divisor = T::from(count).unwrap();
+        let meaned = summed.mapv(|v| v / divisor);
+
+        // c) keep or drop the reduced dim
+        result = if keepdims {
+            meaned.insert_axis(Axis(axis)).into_dyn()
+        } else {
+            meaned.into_dyn()
+        };
+    }
+
+    // 4) Wrap in ArcArray and return
+    Ok(ArcArray::from(result))
+}
+
+pub fn reduce_sum<T>(
+    tensor: ArcArray<T, IxDyn>,
+    axes: Option<Vec<i64>>,
+    keepdims: bool,
+) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError>
+where
+    T: Clone + Zero + NumCast + std::ops::Div<Output = T> + Copy
+{
+    let input_shape = tensor.shape().to_vec();
+    let rank = input_shape.len();
+
+    // 1) Normalize axes list
+    let mut ax: Vec<usize> = if let Some(a) = axes {
+        a.iter().map(|&x| {
+            let idx = if x < 0 { (x + rank as i64) } else { x };
+            if idx < 0 || idx >= rank as i64 {
+                return Err(NDArrayOperationError::OutOfBounds);
+            }
+            Ok(idx as usize)
+        }).collect::<Result<_, _>>()?
+    } else {
+        (0..rank).collect()
+    };
+
+    // 1a) Deduplicate & sort descending (so reductions don’t shift later axes)
+    {
+        let mut sorted = ax.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        if sorted.len() != ax.len() {
+            return Err(NDArrayOperationError::IncompatibleShape);
+        }
+        sorted.reverse();
+        ax = sorted;
+    }
+
+    // 2) Start with an owned dynamic array
+    let mut result: ArrayD<T> = tensor.view().to_owned().into_dyn();
+
+    // 3) For each axis, sum & divide, then optionally re-insert the dim
+    for &axis in &ax {
+        // a) sum over this axis
+        let summed = result.sum_axis(Axis(axis));
+
+        // c) keep or drop the reduced dim
+        result = if keepdims {
+            summed.insert_axis(Axis(axis)).into_dyn()
+        } else {
+            summed.into_dyn()
+        };
+    }
+
+    // 4) Wrap in ArcArray and return
+    Ok(ArcArray::from(result))
+}
+
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum NativeNumericTensorBinaryOperation {
+    Add,
+    Sub,
+    Mul,
+    Div,
+}
+
+impl core::fmt::Display for NativeNumericTensorBinaryOperation {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+fn try_multidirectional_broadcasting(a: &[usize], b: &[usize]) -> Result<Vec<usize>, NDArrayOperationError> {
+    let mut a = a.to_vec();
+    let mut b = b.to_vec();
+
+    // Prepend dimensions to match
+    while a.len() < b.len() {
+        a.insert(0, 1);
+    }
+    while b.len() < a.len() {
+        b.insert(0, 1);
+    }
+    let mut output_dims = vec![];
+    for i in 0..a.len() {
+        output_dims.push(
+            if a[i] == b[i] {
+                a[i].clone()
+            }
+            else {
+                if a[i] == 1 {
+                    b[i].clone()
+                }
+                else {
+                    if b[i] == 1 {
+                        a[i].clone()
+                    }
+                    else {
+                        Err(NDArrayOperationError::IncompatibleShape)?
+                    }
+                }
+            }
+        );
+    }
+
+    Ok(output_dims)
+}
+
+impl NativeNumericTensorBinaryOperation {
+    pub(crate) fn apply<'a, T: 'a>(&self, a: ArcArray<T, IxDyn>, b: ArcArray<T, IxDyn>) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError> where
+        T: Clone + Copy + std::ops::Add<Output = T> + std::ops::Sub<Output = T> + std::ops::Mul<Output = T> + std::ops::Div<Output = T>,
+    {
+        let a = if let Some(a) = a.broadcast(b.shape()) {
+            a
+        } else {
+            a.view()
+        };
+
+        let b = if let Some(b) = b.broadcast(a.shape()) {
+            b
+        }
+        else {
+            b.view()
+        };
+
+        let o: Array<T, IxDyn> = match self {
+            NativeNumericTensorBinaryOperation::Add => (&a + &b).into(),
+            NativeNumericTensorBinaryOperation::Sub => (&a - &b).into(),
+            NativeNumericTensorBinaryOperation::Mul => (&a * &b).into(),
+            NativeNumericTensorBinaryOperation::Div => (&a / &b).into(),
+        };
+        Ok(o.to_shared())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum NativeNumericTensorUnaryOperation {
+    Sigmoid,
+    Tanh,
+    Exp,
+    Softplus,
+}
+
+impl core::fmt::Display for NativeNumericTensorUnaryOperation {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+impl NativeNumericTensorUnaryOperation {
+    pub fn apply<T>(&self, a: ArcArray<T, IxDyn>) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError>
+    where
+        T: Clone + num_traits::Float
+    {
+        Ok(match self {
+            NativeNumericTensorUnaryOperation::Exp => a.mapv(|x| x.exp()).to_shared(),
+            NativeNumericTensorUnaryOperation::Tanh => a.mapv(|x| x.tanh()).to_shared(),
+            _ => todo!()
+        })
+    }
+}
+
+pub(crate) fn pow<T, TI>(a: ArcArray<T, IxDyn>, b: ArcArray<TI, IxDyn>) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError>
+where
+    T: num_traits::Pow<TI, Output = T>,
+    T: Num + Clone,
+    TI: Num + Clone
+{
+    let a = if let Some(a) = a.broadcast(b.shape()) {
+        a
+    } else {
+        a.view()
+    };
+
+    let b = if let Some(b) = b.broadcast(a.shape()) {
+        b
+    }
+    else {
+        b.view()
+    };
+
+    let v = ndarray::Zip::from(a).and(b).map_collect(|a, b| a.clone().pow(b.clone()));
+
+    Ok(v.to_shared())
+}
+
+
+/// ONNX Gemm: Y = alpha * A'·B' + beta * C
+/// - A, B: must be 2-D (M×K) and (K×N) (after optional transposition)
+/// - C: optional, broadcastable to (M,N)
+/// - trans_a/trans_b: if true, transpose A/B first
+pub fn gemm<T>(
+    A: ArcArray<T, IxDyn>,
+    B: ArcArray<T, IxDyn>,
+    C: Option<ArcArray<T, IxDyn>>,
+    alpha: T,
+    beta: T,
+    trans_a: bool,
+    trans_b: bool,
+) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError>
+where
+    T: Clone + Zero + One + Mul<Output = T> + Add<Output = T> + LinalgScalar,
+{
+    // 1) Convert to 2-D views
+    let Av = A.view().into_dimensionality::<Ix2>()?;
+    let Bv = B.view().into_dimensionality::<Ix2>()?;
+    let A2 = if trans_a { Av.reversed_axes() } else { Av };
+    let B2 = if trans_b { Bv.reversed_axes() } else { Bv };
+
+    // 2) Check inner dims
+    let (m, k1) = A2.dim();
+    let (k2, n) = B2.dim();
+    if k1 != k2 {
+        return Err(NDArrayOperationError::IncompatibleShape);
+    }
+
+    // 3) Prepare output buffer (m×n): if C is provided and broadcastable, clone it; else zeros
+    let mut Cmat: Array2<T> = match C {
+        Some(c_arr) => {
+            c_arr.broadcast((m, n))
+                .ok_or_else(|| NDArrayOperationError::IncompatibleShape)?
+                .to_owned()
+        }
+        None => Array2::zeros((m, n)),
+    };
+
+    // 4) Call the BLAS‐style routine
+    general_mat_mul(alpha, &A2, &B2, beta, &mut Cmat);
+
+    // 5) Wrap back into dynamic ArcArray
+    Ok(ArcArray::from(Cmat.into_dyn()))
+}
+
+
+/// Split `tensor` along `axis` into parts sized by `split` (or size=1 chunks if `split` is None).
+/// Returns a Vec of sub-tensors, preserving shared ownership via ArcArray.
+///
+/// # Errors
+/// - `axis` out of range → OutOfBounds
+/// - any `split` value < 0 or sum(split) ≠ dim_size → IncompatibleShape
+pub fn split<T>(
+    tensor: ArcArray<T, IxDyn>,
+    axis: Option<i64>,
+    split: Option<&[i64]>,
+) -> Result<Vec<ArcArray<T, IxDyn>>, NDArrayOperationError>
+where
+    T: Clone,
+{
+    let shape = tensor.shape().to_vec();
+    let rank = shape.len();
+
+    // 1) Normalize axis (default = 0, allow negative)
+    let ax = axis.unwrap_or(0);
+    let ax = if ax < 0 { ax + rank as i64 } else { ax } as usize;
+    if ax >= rank {
+        return Err(NDArrayOperationError::IncompatibleShape);
+    }
+    let axis_len = shape[ax];
+
+    // 2) Determine chunk sizes
+    let sizes: Vec<usize> = if let Some(sp) = split {
+        let mut out = Vec::with_capacity(sp.len());
+        for &x in sp {
+            if x < 0 {
+                return Err(NDArrayOperationError::IncompatibleShape);
+            }
+            out.push(x as usize);
+        }
+        if out.iter().sum::<usize>() != axis_len {
+            return Err(NDArrayOperationError::IncompatibleShape);
+        }
+        out
+    } else {
+        // default → one-element chunks
+        vec![1; axis_len]
+    };
+
+    // 3) Compute start offsets
+    let mut offsets = Vec::with_capacity(sizes.len());
+    let mut acc = 0;
+    for &sz in &sizes {
+        offsets.push(acc);
+        acc += sz;
+    }
+
+    // 4) Slice out each chunk
+    let mut outputs = Vec::with_capacity(sizes.len());
+    let parent_view = tensor.view();
+    for (&start, &sz) in offsets.iter().zip(&sizes) {
+        // build per-axis slice info: full for all but `ax`
+        let mut info = shape
+            .iter()
+            .map(|_| SliceInfoElem::Slice { start: 0, end: None, step: 1 })
+            .collect::<Vec<_>>();
+        info[ax] = SliceInfoElem::Slice {
+            start: start as isize,
+            end: Some((start + sz) as isize),
+            step: 1,
+        };
+
+        // apply the slice and clone into a new owned ArrayD
+        let view = parent_view.slice(&*info);
+        let sub: ArrayD<T> = view.to_owned().into_dyn();
+        outputs.push(ArcArray::from(sub));
+    }
+
+    Ok(outputs)
+}
+
+/// Helper: broadcast two “batch” shapes with NumPy-style rules.
+fn broadcast_shapes(
+    a: &[usize],
+    b: &[usize],
+) -> Result<Vec<usize>, NDArrayOperationError> {
+    let na = a.len();
+    let nb = b.len();
+    let n = na.max(nb);
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let da = if i < n - na { 1 } else { a[i - (n - na)] };
+        let db = if i < n - nb { 1 } else { b[i - (n - nb)] };
+        if da != db && da != 1 && db != 1 {
+            return Err(NDArrayOperationError::IncompatibleShape);
+        }
+        out.push(da.max(db));
+    }
+    Ok(out)
+}
+
+/// Helper: compute row-major strides for a shape.
+fn compute_strides(shape: &[usize]) -> Vec<usize> {
+    let ndim = shape.len();
+    let mut strides = vec![0; ndim];
+    let mut acc = 1usize;
+    for i in (0..ndim).rev() {
+        strides[i] = acc;
+        acc = acc.checked_mul(shape[i]).expect("stride overflow");
+    }
+    strides
+}
+
+/// ONNX MatMul with broadcasting, following numpy.matmul semantics.
+/// - Promotes 1-D inputs by prepending/appending a dim of 1, then squeezes.
+/// - Broadcasts batch dims before performing per-matrix multiply.
+pub fn matmul<T>(
+    A: ArcArray<T, IxDyn>,
+    B: ArcArray<T, IxDyn>,
+) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError>
+where
+    T: Clone + Zero + Add<Output = T> + Mul<Output = T>,
+{
+    let a_shape = A.shape();
+    let b_shape = B.shape();
+    let ra = a_shape.len();
+    let rb = b_shape.len();
+    if ra < 1 || rb < 1 {
+        return Err(NDArrayOperationError::OutOfBounds);
+    }
+
+    // 1) Promote to “at least 2D” for matrix multiply
+    // A: [..., M, K] or [K] → [1, K]
+    // B: [..., K, N] or [K] → [K, 1]
+    let (a_batch, m, k) = if ra == 1 {
+        (Vec::new(), 1, a_shape[0])
+    } else {
+        (a_shape[..ra-2].to_vec(), a_shape[ra-2], a_shape[ra-1])
+    };
+    let (b_batch, k2, n) = if rb == 1 {
+        (Vec::new(), b_shape[0], 1)
+    } else {
+        (b_shape[..rb-2].to_vec(), b_shape[rb-2], b_shape[rb-1])
+    };
+    if k != k2 {
+        return Err(NDArrayOperationError::IncompatibleShape);
+    }
+
+    // 2) Broadcast batch dims
+    let out_batch = broadcast_shapes(&a_batch, &b_batch)?;
+    let brank = out_batch.len();
+
+    // 3) Compute output shape (with 1-D squeeze rules)
+    let out_shape: Vec<usize> = match (ra, rb) {
+        (1, 1) => Vec::new(),                  // scalar dot
+        (1, _) => out_batch.iter().cloned().chain([n]).collect(),
+        (_, 1) => out_batch.iter().cloned().chain([m]).collect(),
+        _      => out_batch.iter().cloned().chain([m, n]).collect(),
+    };
+
+    // 4) Prepare looping: flat length & strides
+    let out_len = out_shape.iter().product::<usize>();
+    let strides = compute_strides(&out_shape);
+    let mut out_buf = Vec::with_capacity(out_len);
+
+    // 5) Manual flat‐index → multi‐index → dot‐product
+    for flat in 0..out_len {
+        // a) decode multi-index for this flat position
+        let mut rem = flat;
+        let mut idx = Vec::with_capacity(out_shape.len());
+        for &st in &strides {
+            idx.push(rem / st);
+            rem %= st;
+        }
+
+        // b) split into batch, i, j
+        //    for ra==1 or rb==1 we adjust how many trailing dims we consume
+        let (i_dim, j_dim) = match (ra, rb) {
+            (1, 1) => (0, 0), // dummy
+            (1, _) => (0, brank),          // only N
+            (_, 1) => (brank, 0),          // only M
+            _      => (brank, brank+1),    // M then N
+        };
+
+        // c) compute the dot product along K
+        let mut sum = T::zero();
+        for kk in 0..k {
+            // build index for A
+            let a_val = if ra == 1 {
+                // A is [K]
+                A[IxDyn(&[kk])].clone()
+            } else {
+                let mut a_idx = idx[..brank].to_vec();
+                a_idx.push(idx[i_dim]);
+                a_idx.push(kk);
+                A[IxDyn(&a_idx)].clone()
+            };
+            // build index for B
+            let b_val = if rb == 1 {
+                B[IxDyn(&[kk])].clone()
+            } else {
+                let mut b_idx = idx[..brank].to_vec();
+                b_idx.push(kk);
+                b_idx.push(idx[j_dim]);
+                B[IxDyn(&b_idx)].clone()
+            };
+            sum = sum + a_val * b_val;
+        }
+        out_buf.push(sum);
+    }
+
+    // 6) Assemble into an ArrayD and wrap
+    let out_array = ArrayD::from_shape_vec(IxDyn(&out_shape), out_buf)?;
+    Ok(ArcArray::from(out_array))
+}
+
+/// ONNX Where: elementwise select between `x` and `y` based on `condition`,
+/// with full NumPy‐style broadcasting across all three inputs.
+pub fn where_op<T>(
+    condition: ArcArray<bool, IxDyn>,
+    x: ArcArray<T, IxDyn>,
+    y: ArcArray<T, IxDyn>,
+) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError>
+where
+    T: Clone,
+{
+    // 1) Compute the common broadcast shape
+    let s1 = broadcast_shapes(condition.shape(), x.shape())?;
+    let out_shape = broadcast_shapes(&s1, y.shape())?;
+    let out_len = out_shape.iter().product::<usize>();
+
+    // 2) Broadcast each input to the common shape
+    let cond_b = condition.broadcast(out_shape.as_slice())
+        .ok_or_else(|| NDArrayOperationError::IncompatibleShape)?;
+    let x_b = x.broadcast(out_shape.as_slice())
+        .ok_or_else(|| NDArrayOperationError::IncompatibleShape)?;
+    let y_b = y.broadcast(out_shape.as_slice())
+        .ok_or_else(|| NDArrayOperationError::IncompatibleShape)?;
+
+    // 3) Build the output buffer by iterating in lockstep
+    let mut buf: Vec<T> = Vec::with_capacity(out_len);
+    for (&c, xv, yv) in cond_b.iter().zip(x_b.iter()).zip(y_b.iter()).map(|((c, x), y)| (c, x, y)) {
+        buf.push(if c { xv.clone() } else { yv.clone() });
+    }
+
+    // 4) Assemble into an ArrayD and wrap in ArcArray
+    let arr = ArrayD::from_shape_vec(IxDyn(&out_shape), buf)?;
+    Ok(ArcArray::from(arr))
+}

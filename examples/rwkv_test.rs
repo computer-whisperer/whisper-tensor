@@ -4,7 +4,7 @@ use std::io::Write;
 use std::path::Path;
 use onnx_graph::WeightStorageStrategy;
 use onnx_import::identify_and_load;
-use whisper_tensor::{RuntimeModel, Backend, RuntimeEnvironment};
+use whisper_tensor::{RuntimeModel, RuntimeBackend, RuntimeEnvironment};
 use whisper_tensor::numeric_tensor::{NumericTensor};
 
 fn main() {
@@ -17,7 +17,7 @@ fn main() {
     let onnx_data = identify_and_load(input_path, WeightStorageStrategy::BinFile(bin_out.to_path_buf())).unwrap();
     File::create(onnx_out).unwrap().write_all(&onnx_data).unwrap();
 
-    let mut runtime = RuntimeModel::load_onnx(&onnx_data, Backend::ORT, Default::default()).unwrap();
+    let mut runtime = RuntimeModel::load_onnx(&onnx_data, RuntimeBackend::ORT, Default::default()).unwrap();
 
     let input = NumericTensor::from_vec_shape(vec![0.0], vec![1, 1, 1]).unwrap();
     runtime.run(HashMap::from([("tensor_input".to_string(), input)])).unwrap();

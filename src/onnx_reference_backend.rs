@@ -3,7 +3,8 @@ use pyo3::{Py, PyAny, PyErr, Python};
 use pyo3::prelude::PyAnyMethods;
 use pyo3::types::{PyDict, PyNone};
 use crate::dtype::DType;
-use crate::native_numeric_tensor::{FromVecShape, NativeNumericTensor};
+use crate::ndarray_backend::conversions::FromVecShape;
+use crate::ndarray_backend::NDArrayNumericTensor;
 use crate::numeric_tensor::{NumericTensor, NumericTensorError};
 use crate::onnx;
 
@@ -37,7 +38,7 @@ impl ONNXReferenceTensor {
     }
 }
 
-impl TryFrom<&ONNXReferenceTensor> for NativeNumericTensor {
+impl TryFrom<&ONNXReferenceTensor> for NDArrayNumericTensor {
     type Error = NumericTensorError;
 
     fn try_from(value: &ONNXReferenceTensor) -> Result<Self, Self::Error> {
@@ -48,13 +49,13 @@ impl TryFrom<&ONNXReferenceTensor> for NativeNumericTensor {
             let v_flat = v_flat.extract::<Vec<f32>>()?;
             let shape = value.getattr("shape")?;
             let shape = shape.extract::<Vec<usize>>()?;
-            Ok(NativeNumericTensor::from_vec_shape(v_flat, shape))
+            Ok(NDArrayNumericTensor::from_vec_shape(v_flat, shape))
         }).map_err(|e| ONNXReferenceError::PyErr(e))?;
         Ok(out?)
     }
 }
 
-impl TryFrom<ONNXReferenceTensor> for NativeNumericTensor {
+impl TryFrom<ONNXReferenceTensor> for NDArrayNumericTensor {
     type Error = NumericTensorError;
     
     fn try_from(value: ONNXReferenceTensor) -> Result<Self, Self::Error> {
@@ -62,18 +63,18 @@ impl TryFrom<ONNXReferenceTensor> for NativeNumericTensor {
     }
 }
 
-impl TryFrom<&NativeNumericTensor> for ONNXReferenceTensor {
+impl TryFrom<&NDArrayNumericTensor> for ONNXReferenceTensor {
     type Error = ONNXReferenceError;
-    fn try_from(input: &NativeNumericTensor) -> Result<Self, Self::Error> {
+    fn try_from(input: &NDArrayNumericTensor) -> Result<Self, Self::Error> {
         Python::with_gil(|py| {
             let np = py.import("numpy")?;
             let np_array = match &input {
-                NativeNumericTensor::F32(x) => {np.call_method("array", (x.flatten().to_vec(),), None)?},
-                NativeNumericTensor::F64(x) => {np.call_method("array", (x.flatten().to_vec(),), None)?},
-                NativeNumericTensor::U32(x) => {np.call_method("array", (x.flatten().to_vec(),), None)?}
-                NativeNumericTensor::I32(x) => {np.call_method("array", (x.flatten().to_vec(),), None)?}
-                NativeNumericTensor::U64(x) => {np.call_method("array", (x.flatten().to_vec(),), None)?}
-                NativeNumericTensor::I64(x) => {np.call_method("array", (x.flatten().to_vec(),), None)?}
+                NDArrayNumericTensor::F32(x) => {np.call_method("array", (x.flatten().to_vec(),), None)?},
+                NDArrayNumericTensor::F64(x) => {np.call_method("array", (x.flatten().to_vec(),), None)?},
+                NDArrayNumericTensor::U32(x) => {np.call_method("array", (x.flatten().to_vec(),), None)?}
+                NDArrayNumericTensor::I32(x) => {np.call_method("array", (x.flatten().to_vec(),), None)?}
+                NDArrayNumericTensor::U64(x) => {np.call_method("array", (x.flatten().to_vec(),), None)?}
+                NDArrayNumericTensor::I64(x) => {np.call_method("array", (x.flatten().to_vec(),), None)?}
                 _ => {Err(ONNXReferenceError::UnsupportedDType)?}
             };
             let np_array = np_array.call_method1("reshape", (input.shape(),))?;
@@ -85,9 +86,9 @@ impl TryFrom<&NativeNumericTensor> for ONNXReferenceTensor {
     }
 }
 
-impl TryFrom<NativeNumericTensor> for ONNXReferenceTensor {
+impl TryFrom<NDArrayNumericTensor> for ONNXReferenceTensor {
     type Error = ONNXReferenceError;
-    fn try_from(value: NativeNumericTensor) -> Result<Self, Self::Error> {
+    fn try_from(value: NDArrayNumericTensor) -> Result<Self, Self::Error> {
         Self::try_from(&value)
     }
 }
@@ -96,8 +97,8 @@ impl TryFrom<NumericTensor> for ONNXReferenceTensor {
     type Error = NumericTensorError;
     fn try_from(value: NumericTensor) -> Result<Self, Self::Error> {
         Ok(match value {
-            NumericTensor::Native(x) => ONNXReferenceTensor::try_from(x)?,
-            _ => Self::try_from(NativeNumericTensor::try_from(value)?)?
+            NumericTensor::NDArray(x) => ONNXReferenceTensor::try_from(x)?,
+            _ => Self::try_from(NDArrayNumericTensor::try_from(value)?)?
         })
     }
 }
@@ -106,8 +107,8 @@ impl TryFrom<&NumericTensor> for ONNXReferenceTensor {
     type Error = NumericTensorError;
     fn try_from(value: &NumericTensor) -> Result<Self, Self::Error> {
         Ok(match value {
-            NumericTensor::Native(x) => ONNXReferenceTensor::try_from(x)?,
-            _ => Self::try_from(NativeNumericTensor::try_from(value)?)?
+            NumericTensor::NDArray(x) => ONNXReferenceTensor::try_from(x)?,
+            _ => Self::try_from(NDArrayNumericTensor::try_from(value)?)?
         })
     }
 }

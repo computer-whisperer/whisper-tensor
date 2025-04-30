@@ -8,7 +8,8 @@ use rand::SeedableRng;
 use tokenizers::Tokenizer;
 use onnx_graph::WeightStorageStrategy;
 use onnx_import::identify_and_load;
-use whisper_tensor::{RuntimeModel, Backend, RuntimeEnvironment};
+use whisper_tensor::{RuntimeModel, RuntimeBackend, RuntimeEnvironment};
+use whisper_tensor::eval_backend::EvalBackend;
 use whisper_tensor::language_model::LanguageModelManager;
 use whisper_tensor::numeric_tensor::{NumericTensor};
 use whisper_tensor::sampler::{GreedySampler, LLMSamplersBundle, Sampler};
@@ -20,14 +21,14 @@ fn main() {
     let mut onnx_data = Vec::new();
     File::open(input_path).unwrap().read_to_end(&mut onnx_data).unwrap();
 
-    let runtime = RuntimeModel::load_onnx(&onnx_data, Backend::NDArray, Default::default()).unwrap();
+    let runtime = RuntimeModel::load_onnx(&onnx_data, RuntimeBackend::Eval(EvalBackend::NDArray), Default::default()).unwrap();
     let mut llm = LanguageModelManager::new(runtime, "input1", "output1");
 
     let tokenizer = Tokenizer::from_pretrained("gpt2", None).unwrap();
 
     let prompt = "The fibbonacci sequence is: 1, 1, 2, 3, 5, 8, 13,";
     let input = whisper_tensor::tokenizer::Tokenizer::encode(&tokenizer, prompt).iter().map(|x| *x as i64).collect::<Vec<_>>();
-    let input_tensor = NumericTensor::from_vec1(input).unsqueeze(0).unwrap().unsqueeze(0).unwrap();
+    let input_tensor = NumericTensor::from_vec1(input).unsqueeze(0, &EvalBackend::NDArray).unwrap().unsqueeze(0, &EvalBackend::NDArray).unwrap();
 
     let mut sampler = {
         let mut sc = SamplerChain::new();
@@ -47,7 +48,7 @@ fn main() {
     };
 
     let output = llm.run(input_tensor.clone(), &mut sampler).unwrap();
-    let output_values: Vec<u32> = output.squeeze(0).unwrap().squeeze(0).unwrap().try_into().unwrap();
+    let output_values: Vec<u32> = output.squeeze(0, &EvalBackend::NDArray).unwrap().squeeze(0, &EvalBackend::NDArray).unwrap().try_into().unwrap();
     let output = whisper_tensor::tokenizer::Tokenizer::decode(&tokenizer, &output_values).unwrap();
     println!("{}", output);
 }

@@ -1,7 +1,7 @@
 use half::{bf16, f16};
 use ort::value::DynValue;
 use crate::dtype::{DType, DTypeError};
-use crate::native_numeric_tensor::NativeNumericTensor;
+use crate::ndarray_backend::NDArrayNumericTensor;
 use crate::numeric_tensor::{NumericTensor, NumericTensorError};
 
 #[derive(Debug)]
@@ -19,6 +19,8 @@ impl From<DType> for ort::tensor::TensorElementType {
             DType::U64 => ort::tensor::TensorElementType::Uint64,
             DType::U32 => ort::tensor::TensorElementType::Uint32,
             DType::U16 => ort::tensor::TensorElementType::Uint16,
+            DType::I16 => ort::tensor::TensorElementType::Int16,
+            DType::I8 => ort::tensor::TensorElementType::Int8,
             DType::U8 => ort::tensor::TensorElementType::Uint8,
             DType::BOOL => ort::tensor::TensorElementType::Bool
         }
@@ -60,75 +62,81 @@ impl Clone for ORTNumericTensor {
     }
 }
 
-impl TryFrom<&NativeNumericTensor> for ORTNumericTensor {
+impl TryFrom<&NDArrayNumericTensor> for ORTNumericTensor {
     type Error = NumericTensorError;
-    fn try_from(value: &NativeNumericTensor) -> Result<Self, Self::Error> {
+    fn try_from(value: &NDArrayNumericTensor) -> Result<Self, Self::Error> {
         Ok(ORTNumericTensor(match value {
-            NativeNumericTensor::F32(x) => {
+            NDArrayNumericTensor::F32(x) => {
                 ort::value::Value::from_array(x.to_owned())?.into_dyn()
             }
-            NativeNumericTensor::F64(x) => {
+            NDArrayNumericTensor::F64(x) => {
                 ort::value::Value::from_array(x.to_owned())?.into_dyn()
             }
-            NativeNumericTensor::U32(x) => {
+            NDArrayNumericTensor::U32(x) => {
                 ort::value::Value::from_array(x.to_owned())?.into_dyn()
             }
-            NativeNumericTensor::I32(x) => {
+            NDArrayNumericTensor::I32(x) => {
                 ort::value::Value::from_array(x.to_owned())?.into_dyn()
             }
-            NativeNumericTensor::U64(x) => {
+            NDArrayNumericTensor::U64(x) => {
                 ort::value::Value::from_array(x.to_owned())?.into_dyn()
             }
-            NativeNumericTensor::I64(x) => {
+            NDArrayNumericTensor::I64(x) => {
                 ort::value::Value::from_array(x.to_owned())?.into_dyn()
             }
-            NativeNumericTensor::U16(x) => {
+            NDArrayNumericTensor::U16(x) => {
                 ort::value::Value::from_array(x.to_owned())?.into_dyn()
             }
-            NativeNumericTensor::U8(x) => {
+            NDArrayNumericTensor::I16(x) => {
                 ort::value::Value::from_array(x.to_owned())?.into_dyn()
             }
-            NativeNumericTensor::F16(x) => {
+            NDArrayNumericTensor::U8(x) => {
                 ort::value::Value::from_array(x.to_owned())?.into_dyn()
             }
-            NativeNumericTensor::BF16(x) => {
+            NDArrayNumericTensor::I8(x) => {
                 ort::value::Value::from_array(x.to_owned())?.into_dyn()
             }
-            NativeNumericTensor::BOOL(x) => {
+            NDArrayNumericTensor::F16(x) => {
+                ort::value::Value::from_array(x.to_owned())?.into_dyn()
+            }
+            NDArrayNumericTensor::BF16(x) => {
+                ort::value::Value::from_array(x.to_owned())?.into_dyn()
+            }
+            NDArrayNumericTensor::BOOL(x) => {
                 ort::value::Value::from_array(x.to_owned())?.into_dyn()
             }
         }))
     }
 }
 
-impl TryFrom<NativeNumericTensor> for ORTNumericTensor {
+impl TryFrom<NDArrayNumericTensor> for ORTNumericTensor {
     type Error = NumericTensorError;
-    fn try_from(value: NativeNumericTensor) -> Result<Self, Self::Error> {
+    fn try_from(value: NDArrayNumericTensor) -> Result<Self, Self::Error> {
         Self::try_from(&value)
     }
 }
 
-impl TryFrom<&ORTNumericTensor> for NativeNumericTensor {
+impl TryFrom<&ORTNumericTensor> for NDArrayNumericTensor {
     type Error = NumericTensorError;
     fn try_from(value: &ORTNumericTensor) -> Result<Self, Self::Error> {
         let ort_dtype = value.0.dtype().tensor_type().unwrap();
         match ort_dtype {
-            ort::tensor::TensorElementType::Float32 => Ok(NativeNumericTensor::F32(value.0.try_extract_array::<f32>()?.to_shared())),
-            ort::tensor::TensorElementType::Float64 => Ok(NativeNumericTensor::F64(value.0.try_extract_array::<f64>()?.to_shared())),
-            ort::tensor::TensorElementType::Int32 => Ok(NativeNumericTensor::I32(value.0.try_extract_array::<i32>()?.to_shared())),
-            ort::tensor::TensorElementType::Int64 => Ok(NativeNumericTensor::I64(value.0.try_extract_array::<i64>()?.to_shared())),
-            ort::tensor::TensorElementType::Uint32 => Ok(NativeNumericTensor::U32(value.0.try_extract_array::<u32>()?.to_shared())),
-            ort::tensor::TensorElementType::Uint64 => Ok(NativeNumericTensor::U64(value.0.try_extract_array::<u64>()?.to_shared())),
-            ort::tensor::TensorElementType::Uint16 => Ok(NativeNumericTensor::U16(value.0.try_extract_array::<u16>()?.to_shared())),
-            ort::tensor::TensorElementType::Uint8 => Ok(NativeNumericTensor::U8(value.0.try_extract_array::<u8>()?.to_shared())),
-            ort::tensor::TensorElementType::Bfloat16 => Ok(NativeNumericTensor::BF16(value.0.try_extract_array::<bf16>()?.to_shared())),
-            ort::tensor::TensorElementType::Float16 => Ok(NativeNumericTensor::F16(value.0.try_extract_array::<f16>()?.to_shared())),
+            ort::tensor::TensorElementType::Float32 => Ok(NDArrayNumericTensor::F32(value.0.try_extract_array::<f32>()?.to_shared())),
+            ort::tensor::TensorElementType::Float64 => Ok(NDArrayNumericTensor::F64(value.0.try_extract_array::<f64>()?.to_shared())),
+            ort::tensor::TensorElementType::Int32 => Ok(NDArrayNumericTensor::I32(value.0.try_extract_array::<i32>()?.to_shared())),
+            ort::tensor::TensorElementType::Int64 => Ok(NDArrayNumericTensor::I64(value.0.try_extract_array::<i64>()?.to_shared())),
+            ort::tensor::TensorElementType::Uint32 => Ok(NDArrayNumericTensor::U32(value.0.try_extract_array::<u32>()?.to_shared())),
+            ort::tensor::TensorElementType::Uint64 => Ok(NDArrayNumericTensor::U64(value.0.try_extract_array::<u64>()?.to_shared())),
+            ort::tensor::TensorElementType::Uint16 => Ok(NDArrayNumericTensor::U16(value.0.try_extract_array::<u16>()?.to_shared())),
+            ort::tensor::TensorElementType::Uint8 => Ok(NDArrayNumericTensor::U8(value.0.try_extract_array::<u8>()?.to_shared())),
+            ort::tensor::TensorElementType::Bfloat16 => Ok(NDArrayNumericTensor::BF16(value.0.try_extract_array::<bf16>()?.to_shared())),
+            ort::tensor::TensorElementType::Float16 => Ok(NDArrayNumericTensor::F16(value.0.try_extract_array::<f16>()?.to_shared())),
             _ => Err(DTypeError::UnsupportedORTDtype(ort_dtype))?,
         }
     }
 }
 
-impl TryFrom<ORTNumericTensor> for NativeNumericTensor {
+impl TryFrom<ORTNumericTensor> for NDArrayNumericTensor {
     type Error = NumericTensorError;
     fn try_from(value: ORTNumericTensor) -> Result<Self, Self::Error> {
         Self::try_from(&value)
@@ -140,7 +148,7 @@ impl TryFrom<NumericTensor> for ORTNumericTensor {
     fn try_from(value: NumericTensor) -> Result<Self, Self::Error> {
         Ok(match value {
             NumericTensor::ORT(x) => x,
-            _ => ORTNumericTensor::try_from(NativeNumericTensor::try_from(value)?)?
+            _ => ORTNumericTensor::try_from(NDArrayNumericTensor::try_from(value)?)?
         })
     }
 }

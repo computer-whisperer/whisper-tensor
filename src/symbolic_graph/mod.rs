@@ -1,16 +1,17 @@
 pub mod ops;
 
+use std::any::Any;
 use std::collections::HashMap;
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use crate::dtype::DType;
-use crate::native_numeric_tensor::NativeNumericTensor;
+use crate::ndarray_backend::{NDArrayNumericTensor, NDArrayNumericTensorError};
 use crate::numeric_tensor::NumericTensor;
 use crate::onnx;
 use crate::symbolic_graph::ops::AnyOperation;
 
 #[derive(Debug, thiserror::Error)]
-enum SymbolicGraphError {
+pub enum SymbolicGraphError {
     #[error("Invalid operator inputs")]
     InvalidOperatorInputs,
     #[error("Invalid operator outputs")]
@@ -40,7 +41,7 @@ pub enum ONNXDecodingError {
     #[error(transparent)]
     DTypeError(#[from] crate::dtype::DTypeError),
     #[error(transparent)]
-    NativeNumericTensorError(#[from] crate::native_numeric_tensor::NativeNumericTensorError),
+    NDArrayNumericTensorError(#[from] NDArrayNumericTensorError),
     #[error("Unsupported ONNX: {0}")]
     UnsupportedONNX(String)
 }
@@ -71,6 +72,17 @@ fn query_attribute_int(attributes: &[onnx::AttributeProto], name: &str) -> Optio
     None
 }
 
+fn query_attribute_ints(attributes: &[onnx::AttributeProto], name: &str) -> Option<Vec<i64>> {
+    for attr in attributes{
+        if attr.name == name {
+            if attr.r#type == onnx::attribute_proto::AttributeType::Ints as i32 {
+                return Some(attr.ints.clone())
+            }
+        }
+    }
+    None
+}
+
 fn query_attribute_bool(attributes: &[onnx::AttributeProto], name: &str) -> Option<bool> {
     for attr in attributes{
         if attr.name == name {
@@ -87,7 +99,7 @@ fn query_attribute_bool(attributes: &[onnx::AttributeProto], name: &str) -> Opti
 
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-enum Dimension {
+pub enum Dimension {
     Known(usize),
     Unknown(UnknownDimensionId),
 }
@@ -97,24 +109,39 @@ enum TensorType {
     Input,
     Output,
     Intermediate,
-    Constant(NativeNumericTensor),
+    Constant(NDArrayNumericTensor),
     Weight
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-struct TensorInfo {
+pub struct TensorInfo {
     onnx_name: Option<String>,
     dtype: Option<DType>,
     shape: Option<Vec<Dimension>>,
     tensor_type: TensorType
 }
 
+impl TensorInfo {
+    pub fn shape(&self) -> Option<Vec<Dimension>> {
+       self.shape.clone()
+    }
+    
+    pub fn dtype(&self) -> Option<DType> {
+        self.dtype
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GraphOperation {
+    pub name: Option<String>,
+    pub op: AnyOperation
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SymbolicGraph {
     unknown_dimensions: HashMap<UnknownDimensionId, String>,
     tensors: HashMap<TensorId, TensorInfo>,
-    operations: HashMap<OperationId, AnyOperation>
+    operations: HashMap<OperationId, GraphOperation>
 }
 
 impl SymbolicGraph {
@@ -145,7 +172,7 @@ impl SymbolicGraph {
         unknown_dimensions_by_name
     }
 
-    pub fn get_operations(&self) -> &HashMap<OperationId, AnyOperation> {
+    pub fn get_operations(&self) -> &HashMap<OperationId, GraphOperation> {
         &self.operations
     }
 
@@ -168,7 +195,11 @@ impl SymbolicGraph {
         }
     }
     
-    pub fn get_initialized_tensors(&self) -> HashMap<TensorId, NativeNumericTensor> {
+    pub fn get_tensor_info(&self, tensor_id: TensorId) -> Option<&TensorInfo> {
+        self.tensors.get(&tensor_id)
+    }
+    
+    pub fn get_initialized_tensors(&self) -> HashMap<TensorId, NDArrayNumericTensor> {
         let mut out = HashMap::new();
         
         for (key, tensor) in &self.tensors {
@@ -181,7 +212,7 @@ impl SymbolicGraph {
     }
 }
 
-impl TryFrom<&onnx::TensorProto> for NativeNumericTensor {
+impl TryFrom<&onnx::TensorProto> for NDArrayNumericTensor {
     type Error = ONNXDecodingError;
 
     fn try_from(tensor: &onnx::TensorProto) -> Result<Self, Self::Error> {
@@ -191,7 +222,7 @@ impl TryFrom<&onnx::TensorProto> for NativeNumericTensor {
         )?;
 
         Ok(if tensor.raw_data.len() > 0 {
-            NativeNumericTensor::from_raw_data(&tensor.raw_data, dtype, tensor.dims.iter().map(|x| *x as usize).collect())?
+            NDArrayNumericTensor::from_raw_data(&tensor.raw_data, dtype, tensor.dims.iter().map(|x| *x as usize).collect())?
         } else {
             Err(ONNXDecodingError::UnsupportedONNX("No raw data field!".to_string()))?
         })
@@ -313,7 +344,7 @@ impl SymbolicGraphMutator {
         Ok(())
     }
 
-    pub fn new_constant_tensor(&mut self, value: NativeNumericTensor, name: Option<String>) -> TensorId {
+    pub fn new_constant_tensor(&mut self, value: NDArrayNumericTensor, name: Option<String>) -> TensorId {
         let tensor_id = self.next_tensor_id;
         self.next_tensor_id += 1;
 
@@ -325,7 +356,7 @@ impl SymbolicGraphMutator {
         self.graph.tensors.insert(
             tensor_id,
             TensorInfo {
-                onnx_name: name,
+                onnx_name: name.clone(),
                 dtype: Some(value.dtype()),
                 shape: Some(shape),
                 tensor_type: TensorType::Constant(
@@ -333,6 +364,9 @@ impl SymbolicGraphMutator {
                 )
             }
         );
+        if let Some(name) = name {
+            self.tensors_by_name.insert(name, tensor_id);
+        }
 
         tensor_id
     }
@@ -355,7 +389,13 @@ impl SymbolicGraphMutator {
                 self.new_unknown_tensor(output, TensorType::Intermediate)
             });
         }
-
+        
+        let name = if onnx_node.name.is_empty() {
+            None
+        } else {
+            Some(onnx_node.name.clone())
+        };
+        
         let new_op = match onnx_node.op_type.as_str() {
             "Add" => {
                 Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichBinaryOperation::Add)
@@ -458,9 +498,25 @@ impl SymbolicGraphMutator {
                             axes = attr.ints.clone()
                         }
                     }
-                    let axes_tensor_id = self.new_constant_tensor(NativeNumericTensor::from(axes), None);
+                    let axes_tensor_id = self.new_constant_tensor(NDArrayNumericTensor::from(axes), None);
                     input_tensors.push(axes_tensor_id);
                     Some(AnyOperation::ReduceMean(ops::ReduceMeanOperation::from_onnx(&input_tensors, &output_tensors, &onnx_node.attribute)?))
+                }
+            }
+            "ReduceSum" => {
+                if core_opset_version >= 18 {
+                    Some(AnyOperation::ReduceSum(ops::ReduceSumOperation::from_onnx(&input_tensors, &output_tensors, &onnx_node.attribute)?))
+                } else {
+                    // Adapt for older opset versions without "axes" input
+                    let mut axes = Vec::new();
+                    for attr in &onnx_node.attribute {
+                        if attr.name == "axes" {
+                            axes = attr.ints.clone()
+                        }
+                    }
+                    let axes_tensor_id = self.new_constant_tensor(NDArrayNumericTensor::from(axes), None);
+                    input_tensors.push(axes_tensor_id);
+                    Some(AnyOperation::ReduceSum(ops::ReduceSumOperation::from_onnx(&input_tensors, &output_tensors, &onnx_node.attribute)?))
                 }
             }
             "Squeeze" => {
@@ -477,7 +533,7 @@ impl SymbolicGraphMutator {
                             axes = attr.ints.clone()
                         }
                     }
-                    let axes_tensor_id = self.new_constant_tensor(NativeNumericTensor::from(axes), None);
+                    let axes_tensor_id = self.new_constant_tensor(NDArrayNumericTensor::from(axes), None);
                     input_tensors.push(axes_tensor_id);
                     Some(AnyOperation::Squeeze(ops::SqueezeOperation::from_onnx(input_tensors, output_tensors)
                         .map_err(|x| ONNXDecodingError::GraphConstructionError(onnx_node.name.clone(), x))?
@@ -498,7 +554,7 @@ impl SymbolicGraphMutator {
                             axes = attr.ints.clone()
                         }
                     }
-                    let axes_tensor_id = self.new_constant_tensor(NativeNumericTensor::from(axes), None);
+                    let axes_tensor_id = self.new_constant_tensor(NDArrayNumericTensor::from(axes), None);
                     input_tensors.push(axes_tensor_id);
                     Some(AnyOperation::Unsqueeze(ops::UnsqueezeOperation::from_onnx(input_tensors, output_tensors)
                         .map_err(|x| ONNXDecodingError::GraphConstructionError(onnx_node.name.clone(), x))?
@@ -537,21 +593,7 @@ impl SymbolicGraphMutator {
                 Some(AnyOperation::Softmax(ops::SoftmaxOperation::from_onnx(&input_tensors, &output_tensors, &onnx_node.attribute)?))
             }
             "Split" => {
-                if core_opset_version >= 18 {
-                    Some(AnyOperation::Split(ops::SplitOperation::from_onnx(&input_tensors, &output_tensors, &onnx_node.attribute)?))
-                } else {
-                    // Missing num_outputs, so we have to add one
-                    let mut attributes = onnx_node.attribute.clone();
-                    attributes.push(
-                        onnx::AttributeProto {
-                            name: "num_outputs".to_string(),
-                            r#type: onnx::attribute_proto::AttributeType::Int as i32,
-                            i: output_tensors.len() as i64,
-                            .. Default::default()
-                        }
-                    );
-                    Some(AnyOperation::Split(ops::SplitOperation::from_onnx(&input_tensors, &output_tensors, &attributes)?))
-                }
+                Some(AnyOperation::Split(ops::SplitOperation::from_onnx(&input_tensors, &output_tensors, &onnx_node.attribute)?))
             }
             "Constant" => {
                 let tensor =  {
@@ -570,16 +612,22 @@ impl SymbolicGraphMutator {
                     }
                 };
 
-                self.graph.tensors.get_mut(&output_tensors[0]).unwrap().tensor_type = TensorType::Constant(
-                    NativeNumericTensor::try_from(&tensor)?
-                );
+                let numeric_tensor = NDArrayNumericTensor::try_from(&tensor)?;
+                self.graph.tensors.get_mut(&output_tensors[0]).unwrap().tensor_type = TensorType::Constant(numeric_tensor);
 
                 None
             }
             x => Err(ONNXDecodingError::UnsupportedONNXType(x.to_string()))?
         };
 
+        
         if let Some(op) = new_op {
+            
+            let op = GraphOperation {
+                name,
+                op
+            };
+            
             let operation_id = self.next_operation_id;
             self.next_operation_id += 1;
             self.graph.operations.insert(operation_id, op);
@@ -610,7 +658,7 @@ impl SymbolicGraphMutator {
         }
 
         for t in onnx_graph.initializer {
-            let numeric_tensor = NativeNumericTensor::try_from(&t)?;
+            let numeric_tensor = NDArrayNumericTensor::try_from(&t)?;
             if let Some(x) = graph_mutator.tensors_by_name.get(&t.name) {
                 graph_mutator.graph.tensors.get_mut(x).unwrap().tensor_type = TensorType::Constant(numeric_tensor);
             } else {

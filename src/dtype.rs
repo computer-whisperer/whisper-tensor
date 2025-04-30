@@ -1,10 +1,10 @@
 use serde::{Deserialize, Serialize};
-use crate::{Backend, onnx};
+use crate::{RuntimeBackend, onnx};
 
 #[derive(Debug, thiserror::Error)]
 pub enum DTypeError {
     #[error("The backend {0} does not support the dtype {1}")]
-    DTypeNotSupportedByBackend(DType, Backend),
+    DTypeNotSupportedByBackend(DType, RuntimeBackend),
     #[error("The onnx dtype {0:?} is not supported")]
     UnsupportedONNXDtype(onnx::tensor_proto::DataType),
     #[cfg(feature = "ort")]
@@ -18,12 +18,14 @@ pub enum DType {
     F32,
     BF16,
     F16,
-    I64,
-    I32,
     U64,
+    I64,
     U32,
+    I32,
     U16,
+    I16,
     U8,
+    I8,
     BOOL
 }
 
@@ -40,7 +42,9 @@ impl TryFrom<onnx::tensor_proto::DataType> for DType {
             onnx::tensor_proto::DataType::Uint64 => DType::U64,
             onnx::tensor_proto::DataType::Uint32 => DType::U32,
             onnx::tensor_proto::DataType::Uint16 => DType::U16,
+            onnx::tensor_proto::DataType::Int16 => DType::I16,
             onnx::tensor_proto::DataType::Uint8 => DType::U8,
+            onnx::tensor_proto::DataType::Int8 => DType::I8,
             onnx::tensor_proto::DataType::Bool => DType::BOOL,
             _ => Err(DTypeError::UnsupportedONNXDtype(onnx_dtype))?
         })
@@ -59,7 +63,9 @@ impl From<DType> for onnx::tensor_proto::DataType {
             DType::U64 => onnx::tensor_proto::DataType::Uint64,
             DType::U32 => onnx::tensor_proto::DataType::Uint32,
             DType::U16 => onnx::tensor_proto::DataType::Uint16,
+            DType::I16 => onnx::tensor_proto::DataType::Int16,
             DType::U8 => onnx::tensor_proto::DataType::Uint8,
+            DType::I8 => onnx::tensor_proto::DataType::Int8,
             DType::BOOL => onnx::tensor_proto::DataType::Bool
         }
     }
@@ -76,8 +82,10 @@ impl std::fmt::Display for DType {
             DType::I32 => write!(f, "Int32"),
             DType::U64 => write!(f, "UInt64"),
             DType::U32 => write!(f, "UInt32"),
+            DType::I16 => write!(f, "Int16"),
             DType::U16 => write!(f, "UInt16"),
             DType::U8 => write!(f, "UInt8"),
+            DType::I8 => write!(f, "Int8"),
             DType::BOOL => write!(f, "Bool")
         }
     }
@@ -95,7 +103,7 @@ impl TryFrom<DType> for candle_core::DType {
             DType::I64 => candle_core::DType::I64,
             DType::U32 => candle_core::DType::U32,
             DType::U8 => candle_core::DType::U8,
-            _ => Err(DTypeError::DTypeNotSupportedByBackend(value, Backend::Candle))?
+            _ => Err(DTypeError::DTypeNotSupportedByBackend(value, RuntimeBackend::Candle))?
         })
     }
 }

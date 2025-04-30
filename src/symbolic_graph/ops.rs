@@ -1,13 +1,27 @@
+use half::{bf16, f16};
 use serde::{Deserialize, Serialize};
 use crate::dtype::DType;
-use crate::native_numeric_tensor::NativeNumericTensor;
+use crate::eval_backend::EvalBackend;
+use crate::ndarray_backend::{NDArrayNumericTensor, NDArrayNumericTensorError};
+use crate::ndarray_backend::conversions::FromScalarShape;
+use crate::numeric_tensor::{NumericTensor, NumericTensorError};
 use crate::onnx;
-use crate::symbolic_graph::{query_attribute_bool, query_attribute_float, query_attribute_int, ONNXDecodingError, SymbolicGraphError, TensorId};
+use crate::symbolic_graph::{query_attribute_bool, query_attribute_float, query_attribute_int, query_attribute_ints, ONNXDecodingError, SymbolicGraphError, TensorId};
+
+#[derive(Debug, thiserror::Error)]
+pub enum EvalError {
+    #[error(transparent)]
+    NDArrayNumericTensorError(#[from] NDArrayNumericTensorError),
+    #[error(transparent)]
+    NumericTensorError(#[from] NumericTensorError),
+    #[error("Invalid input for operation {0}")]
+    InvalidInput(String),
+}
 
 pub trait Operation {
     fn get_inputs(&self) -> Vec<TensorId>;
     fn get_outputs(&self) -> Vec<TensorId>;
-    fn exec_native(&self, inputs: &[&NativeNumericTensor]) -> Vec<NativeNumericTensor>;
+    fn eval(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError>;
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -53,11 +67,15 @@ impl Operation for BinaryOperation {
         vec![self.output]
     }
 
-    fn exec_native(&self, inputs: &[&NativeNumericTensor]) -> Vec<NativeNumericTensor> {
-        match self.which {
-            WhichBinaryOperation::Add => {}
-            _ => todo!()
-        }
+    fn eval(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
+        let v = match self.which {
+            WhichBinaryOperation::Add => NumericTensor::add(inputs[0], inputs[1], backend)?,
+            WhichBinaryOperation::Sub => NumericTensor::sub(inputs[0], inputs[1], backend)?,
+            WhichBinaryOperation::Mul => NumericTensor::mul(inputs[0], inputs[1], backend)?,
+            WhichBinaryOperation::Div => NumericTensor::div(inputs[0], inputs[1], backend)?,
+            WhichBinaryOperation::MatMul => NumericTensor::matmul(inputs[0], inputs[1], backend)?,
+        };
+        Ok(vec![v])
     }
 }
 
@@ -105,9 +123,16 @@ impl Operation for UnaryOperation {
         vec![self.output]
     }
 
-    fn exec_native(&self, inputs: &[&NativeNumericTensor]) -> Vec<NativeNumericTensor> {
+    fn eval(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
         match self.which {
-            _ => todo!()
+            WhichUnaryOperation::Neg => Ok(vec![inputs[0].clone().neg(backend)?]),
+            WhichUnaryOperation::Relu => Ok(vec![inputs[0].clone().relu(backend)?]),
+            WhichUnaryOperation::Sigmoid => Ok(vec![inputs[0].clone().sigmoid(backend)?]),
+            WhichUnaryOperation::Tanh => Ok(vec![inputs[0].clone().tanh(backend)?]),
+            WhichUnaryOperation::Exp => Ok(vec![inputs[0].clone().exp(backend)?]),
+            WhichUnaryOperation::Softplus => Ok(vec![inputs[0].clone().softplus(backend)?]),
+            WhichUnaryOperation::NonZero => Ok(vec![inputs[0].clone().nonzero(backend)?]),
+            WhichUnaryOperation::Sqrt => Ok(vec![inputs[0].clone().sqrt(backend)?]),
         }
     }
 }
@@ -142,7 +167,7 @@ impl Operation for CumSumOperation {
         vec![self.output]
     }
 
-    fn exec_native(&self, inputs: &[&NativeNumericTensor]) -> Vec<NativeNumericTensor> {
+    fn eval(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
         todo!()
     }
 }
@@ -188,7 +213,7 @@ impl Operation for LpNormalizationOperation {
     fn get_outputs(&self) -> Vec<TensorId> {
         vec![self.output]
     }
-    fn exec_native(&self, inputs: &[&NativeNumericTensor]) -> Vec<NativeNumericTensor> {
+    fn eval(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
         todo!()
     }
 }
@@ -239,7 +264,7 @@ impl Operation for GroupNormalizationOperation {
     fn get_outputs(&self) -> Vec<TensorId> {
         vec![self.output]
     }
-    fn exec_native(&self, inputs: &[&NativeNumericTensor]) -> Vec<NativeNumericTensor> {
+    fn eval(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
         todo!()
     }
 }
@@ -276,8 +301,21 @@ impl Operation for SqueezeOperation {
         vec![self.output]
     }
 
-    fn exec_native(&self, inputs: &[&NativeNumericTensor]) -> Vec<NativeNumericTensor> {
-        todo!()
+    fn eval(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
+        let axes_ndarray = NDArrayNumericTensor::try_from(inputs[1].cast(DType::I64, backend)?)?;
+        let axes = Vec::<i64>::try_from(axes_ndarray)?;
+        if axes.len() > 1 {
+            return Err(EvalError::InvalidInput("Unsqueeze".to_string()));
+        }
+        let axis = axes[0];
+        let input_shape = inputs[0].shape();
+        let axis = if axis >= 0 {
+            axis as usize
+        } else {
+            (input_shape.len() as i64 + axis) as usize
+        };
+        let output = inputs[0].squeeze(axis, backend)?;
+        Ok(vec![output])
     }
 }
 
@@ -314,8 +352,21 @@ impl Operation for UnsqueezeOperation {
         vec![self.output]
     }
 
-    fn exec_native(&self, inputs: &[&NativeNumericTensor]) -> Vec<NativeNumericTensor> {
-        todo!()
+    fn eval(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
+        let axes_ndarray = NDArrayNumericTensor::try_from(inputs[1].cast(DType::I64, backend)?)?;
+        let axes = Vec::<i64>::try_from(axes_ndarray)?;
+        if axes.len() > 1 {
+            return Err(EvalError::InvalidInput("Unsqueeze".to_string()));
+        }
+        let axis = axes[0];
+        let input_shape = inputs[0].shape();
+        let axis = if axis >= 0 {
+            axis as usize
+        } else {
+            (input_shape.len() as i64 + axis) as usize
+        };
+        let output = inputs[0].unsqueeze(axis, backend)?;
+        Ok(vec![output])
     }
 }
 
@@ -323,7 +374,7 @@ impl Operation for UnsqueezeOperation {
 pub struct TransposeOperation {
     input: TensorId,
     output: TensorId,
-    perm: Vec<i64>,
+    perm: Option<Vec<i64>>,
 }
 
 impl TransposeOperation {
@@ -334,17 +385,10 @@ impl TransposeOperation {
         if outputs.len() != 1 {
             return Err(SymbolicGraphError::InvalidOperatorOutputs);
         }
-        let mut perm = vec![];
-        for attr in attributes{
-            match attr.name.as_str() {
-                "perm" => {perm = attr.ints.clone()},
-                _ => {}
-            }
-        }
         Ok(Self {
             input: inputs[0],
             output: outputs[0],
-            perm
+            perm: query_attribute_ints(attributes, "perm")
         })
     }
 }
@@ -356,8 +400,8 @@ impl Operation for TransposeOperation {
     fn get_outputs(&self) -> Vec<TensorId> {
         vec![self.output]
     }
-    fn exec_native(&self, inputs: &[&NativeNumericTensor]) -> Vec<NativeNumericTensor> {
-        todo!()
+    fn eval(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
+        Ok(vec![inputs[0].transpose(self.perm.clone(), backend)?])
     }
 }
 
@@ -391,8 +435,56 @@ impl Operation for ReshapeOperation {
     fn get_outputs(&self) -> Vec<TensorId> {
         vec![self.output]
     }
-    fn exec_native(&self, inputs: &[&NativeNumericTensor]) -> Vec<NativeNumericTensor> {
-        todo!()
+    fn eval(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
+        let data_input = inputs[0];
+        let shape_input = inputs[1];
+        let data_input_shape = data_input.shape();
+        let shape_input_value: Vec<i64> = shape_input.cast(DType::I64, backend)?.try_into()?;
+        let mut new_shape_dims = vec![];
+        let mut backfill_dim: Option<usize> = None;
+        for i in 0..shape_input_value.len() {
+            new_shape_dims.push(if shape_input_value[i] == 0 {
+                data_input_shape[i].clone()
+            } else if shape_input_value[i] == -1 {
+                if backfill_dim.is_some() {
+                    // Only one dimension can be inferred
+                    Err(EvalError::InvalidInput("Reshape".to_string()))?
+                }
+                backfill_dim = Some(i);
+                1
+            }
+            else if shape_input_value[i] < -1 {
+                Err(EvalError::InvalidInput("Reshape".to_string()))?
+            } else {
+                shape_input_value[i] as usize
+            });
+        }
+
+        // Backfill the inferred dimension
+        if let Some(i) = backfill_dim {
+            let total_input_size = data_input.shape().iter().product::<usize>();
+
+            // Calculate the current product of the dimensions
+            let mut current_product = 1;
+            for (j, dim) in new_shape_dims.iter().enumerate() {
+                if j != i {
+                    current_product *= dim;
+                }
+            }
+            // Calculate the inferred dimension size
+            let inferred_size = total_input_size / current_product;
+            new_shape_dims[i] = inferred_size;
+        }
+        let output_shape = new_shape_dims;
+
+        // Verify that the dimensions are compatible
+        if output_shape.iter().product::<usize>() != data_input.shape().iter().product::<usize>() {
+            Err(EvalError::InvalidInput("Reshape".to_string()))?
+        }
+
+        let output_value = data_input.reshape(output_shape, backend)?;
+
+        Ok(vec![output_value])
     }
 }
 
@@ -430,8 +522,8 @@ impl Operation for CastOperation {
     fn get_outputs(&self) -> Vec<TensorId> {
         vec![self.output]
     }
-    fn exec_native(&self, inputs: &[&NativeNumericTensor]) -> Vec<NativeNumericTensor> {
-        todo!()
+    fn eval(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
+        Ok(vec![inputs[0].cast(self.to, backend)?])
     }
 }
 
@@ -488,7 +580,7 @@ impl Operation for LayerNormalizationOperation {
     fn get_outputs(&self) -> Vec<TensorId> {
         vec![self.output]
     }
-    fn exec_native(&self, inputs: &[&NativeNumericTensor]) -> Vec<NativeNumericTensor> {
+    fn eval(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
         todo!()
     }
 }
@@ -534,8 +626,8 @@ impl Operation for GatherOperation {
     fn get_outputs(&self) -> Vec<TensorId> {
         vec![self.output]
     }
-    fn exec_native(&self, inputs: &[&NativeNumericTensor]) -> Vec<NativeNumericTensor> {
-        todo!()
+    fn eval(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
+        Ok(vec![NumericTensor::gather(inputs[0], inputs[1], self.axis, backend)?])
     }
 }
 
@@ -584,8 +676,10 @@ impl Operation for ShapeOperation {
     fn get_outputs(&self) -> Vec<TensorId> {
         vec![self.output]
     }
-    fn exec_native(&self, inputs: &[&NativeNumericTensor]) -> Vec<NativeNumericTensor> {
-        todo!()
+    fn eval(&self, _backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
+        let shape = inputs[0].shape().iter().map(|x| *x as i64).collect::<Vec<_>>();
+        let shape_tensor = NDArrayNumericTensor::from(shape);
+        Ok(vec![shape_tensor.into()])
     }
 }
 
@@ -623,14 +717,19 @@ impl Operation for ConcatOperation {
     fn get_outputs(&self) -> Vec<TensorId> {
         vec![self.output]
     }
-    fn exec_native(&self, inputs: &[&NativeNumericTensor]) -> Vec<NativeNumericTensor> {
-        todo!()
+    fn eval(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
+        let axis = if self.axis < 0 {
+            inputs[0].shape().len() as i64 + self.axis
+        } else {
+            self.axis
+        } as usize;
+        Ok(vec![NumericTensor::concat(inputs, axis, backend)?])
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ConstantOfShapeOperation {
-    value: Option<NativeNumericTensor>,
+    value: Option<NDArrayNumericTensor>,
     input: TensorId,
     output: TensorId
 }
@@ -648,7 +747,7 @@ impl ConstantOfShapeOperation {
         for attr in attributes {
             if attr.name == "value" {
                 if let Some(tensor_proto) = &attr.t {
-                    value = Some(NativeNumericTensor::try_from(tensor_proto)?);
+                    value = Some(NDArrayNumericTensor::try_from(tensor_proto)?);
                 }
             }
         }
@@ -668,14 +767,35 @@ impl Operation for ConstantOfShapeOperation {
     fn get_outputs(&self) -> Vec<TensorId> {
         vec![self.output]
     }
-    fn exec_native(&self, inputs: &[&NativeNumericTensor]) -> Vec<NativeNumericTensor> {
-        todo!()
+    fn eval(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
+        let shape: Vec<i64> = inputs[0].cast(DType::I64, backend)?.try_into()?;
+        let shape = shape.iter().map(|x| *x as usize).collect();
+        let v = if let Some(value) = &self.value {
+            match value.dtype() {
+                DType::F64 => NDArrayNumericTensor::from_scalar_shape(Vec::<f64>::try_from(value.clone())?[0], shape)?,
+                DType::F32 => NDArrayNumericTensor::from_scalar_shape(Vec::<f32>::try_from(value.clone())?[0], shape)?,
+                DType::BF16 => NDArrayNumericTensor::from_scalar_shape(Vec::<bf16>::try_from(value.clone())?[0], shape)?,
+                DType::F16 => NDArrayNumericTensor::from_scalar_shape(Vec::<f16>::try_from(value.clone())?[0], shape)?,
+                DType::I64 => NDArrayNumericTensor::from_scalar_shape(Vec::<i64>::try_from(value.clone())?[0], shape)?,
+                DType::I32 => NDArrayNumericTensor::from_scalar_shape(Vec::<i32>::try_from(value.clone())?[0], shape)?,
+                DType::U64 => NDArrayNumericTensor::from_scalar_shape(Vec::<u64>::try_from(value.clone())?[0], shape)?,
+                DType::U32 => NDArrayNumericTensor::from_scalar_shape(Vec::<u32>::try_from(value.clone())?[0], shape)?,
+                DType::I16 => NDArrayNumericTensor::from_scalar_shape(Vec::<i16>::try_from(value.clone())?[0], shape)?,
+                DType::U16 => NDArrayNumericTensor::from_scalar_shape(Vec::<u16>::try_from(value.clone())?[0], shape)?,
+                DType::U8 => NDArrayNumericTensor::from_scalar_shape(Vec::<u8>::try_from(value.clone())?[0], shape)?,
+                DType::I8 => NDArrayNumericTensor::from_scalar_shape(Vec::<i8>::try_from(value.clone())?[0], shape)?,
+                DType::BOOL => NDArrayNumericTensor::from_scalar_shape(Vec::<bool>::try_from(value.clone())?[0], shape)?,
+            }
+        } else {
+            NDArrayNumericTensor::from_scalar_shape(0f32, shape)?
+        };
+        Ok(vec![v.into()])
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ReduceMeanOperation {
-    keepdims: i64,
+    keepdims: Option<i64>,
     noop_with_empty_axes: Option<i64>,
     input_data: TensorId,
     input_axes: Option<TensorId>,
@@ -691,19 +811,9 @@ impl ReduceMeanOperation {
             return Err(ONNXDecodingError::GraphConstructionError("ReduceMean".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
         }
 
-        let mut keepdims = 0;
-        let mut noop_with_empty_axes = None;
-        for attr in attributes {
-            match attr.name.as_str() {
-                "keepdims" => {
-                    keepdims = attr.i;
-                }
-                "noop_with_empty_axes" => {
-                    noop_with_empty_axes = Some(attr.i)
-                }
-                _ => {}
-            }
-        }
+        let keepdims = query_attribute_int(attributes, "keepdims");
+        let noop_with_empty_axes = query_attribute_int(attributes, "noop_with_empty_axes");
+
 
         Ok(
             Self {
@@ -728,10 +838,76 @@ impl Operation for ReduceMeanOperation {
     fn get_outputs(&self) -> Vec<TensorId> {
         vec![self.output]
     }
-    fn exec_native(&self, inputs: &[&NativeNumericTensor]) -> Vec<NativeNumericTensor> {
-        todo!()
+    fn eval(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
+        let data_input = inputs[0];
+        let axes = if self.input_axes.is_some() {
+            Vec::<i64>::try_from(inputs[1].clone())?
+        } else {
+            (0i64 .. (data_input.shape().len() as i64)).into_iter().collect()
+        };
+        let keepdims = self.keepdims.unwrap_or(1);
+        Ok(vec![inputs[0].reduce_mean(Some(axes), keepdims != 0, backend)?])
     }
 }
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ReduceSumOperation {
+    keepdims: Option<i64>,
+    noop_with_empty_axes: Option<i64>,
+    input_data: TensorId,
+    input_axes: Option<TensorId>,
+    output: TensorId
+}
+
+impl ReduceSumOperation {
+    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+        if inputs.len() < 1 || inputs.len() > 2 {
+            return Err(ONNXDecodingError::GraphConstructionError("ReduceSum".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+        }
+        if outputs.len() != 1 {
+            return Err(ONNXDecodingError::GraphConstructionError("ReduceSum".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+        }
+
+        let keepdims = query_attribute_int(attributes, "keepdims");
+        let noop_with_empty_axes = query_attribute_int(attributes, "noop_with_empty_axes");
+
+        Ok(
+            Self {
+                keepdims,
+                noop_with_empty_axes,
+                input_data: inputs[0],
+                input_axes: if inputs.len() > 1 {Some(inputs[1])} else {None},
+                output: outputs[0]
+            }
+        )
+    }
+}
+
+impl Operation for ReduceSumOperation {
+    fn get_inputs(&self) -> Vec<TensorId> {
+        if let Some(input_axes) = self.input_axes {
+            vec![self.input_data, input_axes]
+        } else {
+            vec![self.input_data]
+        }
+    }
+
+    fn get_outputs(&self) -> Vec<TensorId> {
+        vec![self.output]
+    }
+
+    fn eval(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
+        let data_input = inputs[0];
+        let axes = if self.input_axes.is_some() {
+            Vec::<i64>::try_from(inputs[1].clone())?
+        } else {
+            (0i64 .. (data_input.shape().len() as i64)).into_iter().collect()
+        };
+        let keepdims = self.keepdims.unwrap_or(1);
+        Ok(vec![inputs[0].reduce_sum(Some(axes), keepdims != 0, backend)?])
+    }
+}
+
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PowOperation {
@@ -741,7 +917,7 @@ pub struct PowOperation {
 }
 
 impl PowOperation {
-    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], _attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 2 {
             return Err(ONNXDecodingError::GraphConstructionError("Pow".to_string(), SymbolicGraphError::InvalidOperatorInputs));
         }
@@ -763,8 +939,8 @@ impl Operation for PowOperation {
     fn get_outputs(&self) -> Vec<TensorId> {
         vec![self.output]
     }
-    fn exec_native(&self, inputs: &[&NativeNumericTensor]) -> Vec<NativeNumericTensor> {
-        todo!()
+    fn eval(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
+        Ok(vec![inputs[0].pow(inputs[1], backend)?])
     }
 }
 
@@ -818,17 +994,20 @@ impl Operation for GemmOperation {
     fn get_outputs(&self) -> Vec<TensorId> {
         vec![self.output]
     }
-    fn exec_native(&self, inputs: &[&NativeNumericTensor]) -> Vec<NativeNumericTensor> {
-        todo!()
+    fn eval(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
+        Ok(vec![NumericTensor::gemm(inputs[0], inputs[1], if inputs.len() > 2 {Some(inputs[2])} else {None},
+                            self.alpha.unwrap_or(1.0), self.beta.unwrap_or(1.0),
+                            self.trans_a.unwrap_or(false), self.trans_b.unwrap_or(false), backend)?])
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SplitOperation {
     axis: Option<i64>,
-    num_outputs: i64,
+    num_outputs: Option<i64>,
     input: TensorId,
     split: Option<TensorId>,
+    split_attribute: Option<Vec<i64>>,
     outputs: Vec<TensorId>
 }
 
@@ -839,13 +1018,14 @@ impl SplitOperation {
         }
 
         let axis = query_attribute_int(attributes, "axis");
-        let num_outputs = query_attribute_int(attributes, "num_outputs")
-            .ok_or(ONNXDecodingError::MissingAttribute("Split".to_string(), "num_outputs".to_string()))?;
+        let num_outputs = query_attribute_int(attributes, "num_outputs");
+        let split_attribute = query_attribute_ints(attributes, "split");
 
         Ok(Self{
             input: inputs[0],
             split: if inputs.len() > 1 {Some(inputs[1])} else {None},
             outputs: outputs.to_vec(),
+            split_attribute,
             axis,
             num_outputs
         })
@@ -863,8 +1043,13 @@ impl Operation for SplitOperation {
     fn get_outputs(&self) -> Vec<TensorId> {
         self.outputs.clone()
     }
-    fn exec_native(&self, inputs: &[&NativeNumericTensor]) -> Vec<NativeNumericTensor> {
-        todo!()
+    fn eval(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
+        let split: Vec<i64> = if let Some(split) = self.split_attribute.clone() {
+            split
+        } else {
+            inputs[1].clone().try_into()?
+        };
+        Ok(inputs[0].split(&split, self.axis.unwrap_or_default(), backend)?)
     }
 }
 
@@ -879,7 +1064,7 @@ pub struct SliceOperation {
 }
 
 impl SliceOperation {
-    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], _attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
         if inputs.len() < 3 || inputs.len() > 5  {
             return Err(ONNXDecodingError::GraphConstructionError("Slice".to_string(), SymbolicGraphError::InvalidOperatorInputs));
         }
@@ -913,8 +1098,36 @@ impl Operation for SliceOperation {
     fn get_outputs(&self) -> Vec<TensorId> {
         vec![self.output]
     }
-    fn exec_native(&self, inputs: &[&NativeNumericTensor]) -> Vec<NativeNumericTensor> {
-        todo!()
+    fn eval(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
+        let data_input = inputs[0];
+        let axes: Vec<i64> = if self.axes.is_some() {
+            inputs[3].cast(DType::I64, backend)?.try_into()?
+        } else {
+            (0i64..(data_input.shape().len() as i64)).into_iter().collect()
+        };
+        let steps: Vec<i64> = if self.steps.is_some() {
+            inputs[4].cast(DType::I64, backend)?.try_into()?
+        } else {
+            axes.iter().map(|_| 1).collect()
+        };
+        let starts: Vec<i64> = inputs[1].cast(DType::I64, backend)?.try_into()?;
+        let ends: Vec<i64> = inputs[2].cast(DType::I64, backend)?.try_into()?;
+        let mut output_slice = vec![];
+        for i in 0..data_input.shape().len() {
+            output_slice.push(0..data_input.shape()[i]);
+        }
+        for (i, axis) in axes.into_iter().enumerate() {
+            let axis = axis as usize;
+            let step = steps[i];
+            if step != 1 {
+                return Err(EvalError::InvalidInput(format!("Step {} is not supported", step)));
+            }
+            let start = (if starts[i] < 0 { data_input.shape()[i] as i64 + starts[i] } else { starts[i] }) as usize;
+            let end = (if ends[i] < 0 { data_input.shape()[i] as i64 + ends[i] } else { ends[i] }) as usize;
+            output_slice[axis] = start..end;
+        }
+        let output = data_input.slice(&output_slice, backend)?;
+        Ok(vec![output])
     }
 }
 
@@ -927,7 +1140,7 @@ pub struct WhereOperation {
 }
 
 impl WhereOperation {
-    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], _attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 3  {
             return Err(ONNXDecodingError::GraphConstructionError("Where".to_string(), SymbolicGraphError::InvalidOperatorInputs));
         }
@@ -951,8 +1164,11 @@ impl Operation for WhereOperation {
     fn get_outputs(&self) -> Vec<TensorId> {
         vec![self.output]
     }
-    fn exec_native(&self, inputs: &[&NativeNumericTensor]) -> Vec<NativeNumericTensor> {
-        todo!()
+    fn eval(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
+        let conditional = inputs[0];
+        let a = inputs[1];
+        let b = inputs[2];
+        Ok(vec![conditional.where_op(a, b, backend)?])
     }
 }
 
@@ -987,8 +1203,16 @@ impl Operation for SoftmaxOperation {
     fn get_outputs(&self) -> Vec<TensorId> {
         vec![self.output]
     }
-    fn exec_native(&self, inputs: &[&NativeNumericTensor]) -> Vec<NativeNumericTensor> {
-        todo!()
+    fn eval(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
+        let e = inputs[0].exp(backend)?;
+        let axis = if let Some(axis) = self.axis {
+            axis
+        } else {
+             -1
+        };
+        let r = e.reduce_sum(Some(vec![axis]), true, backend)?;
+        let o = NumericTensor::div(&e, &r, backend)?;
+        Ok(vec![o])
     }
 }
 
@@ -1010,6 +1234,7 @@ pub enum AnyOperation {
     Concat(ConcatOperation),
     ConstantOfShape(ConstantOfShapeOperation),
     ReduceMean(ReduceMeanOperation),
+    ReduceSum(ReduceSumOperation),
     Pow(PowOperation),
     Gemm(GemmOperation),
     Split(SplitOperation),
@@ -1037,6 +1262,7 @@ impl AnyOperation {
             AnyOperation::Concat(op) => op,
             AnyOperation::ConstantOfShape(op) => op,
             AnyOperation::ReduceMean(op) => op,
+            AnyOperation::ReduceSum(op) => op,
             AnyOperation::Pow(op) => op,
             AnyOperation::Gemm(op) => op,
             AnyOperation::Split(op) => op,
@@ -1054,7 +1280,7 @@ impl Operation for AnyOperation {
     fn get_outputs(&self) -> Vec<TensorId> {
         self.as_dyn().get_outputs()
     }
-    fn exec_native(&self, inputs: &[&NativeNumericTensor]) -> Vec<NativeNumericTensor> {
-        self.as_dyn().exec_native(inputs)
+    fn eval(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
+        self.as_dyn().eval(backend, inputs)
     }
 }

@@ -3245,6 +3245,7 @@ dependencies = [
  "half",
  "llm-samplers",
  "ndarray",
+ "num-traits",
  "onnx-graph",
  "onnx-import",
  "ort",
