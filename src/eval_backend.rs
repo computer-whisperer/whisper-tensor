@@ -6,7 +6,8 @@ use crate::symbolic_graph::ops::{EvalError, Operation};
 
 #[derive(Debug, Clone)]
 pub enum EvalBackend {
-    Candle,
+    #[cfg(feature = "candle")]
+    Candle(candle_core::Device),
     NDArray,
 }
 
@@ -53,7 +54,7 @@ impl EvalRuntime {
             // Always available
             EvalBackend::NDArray => {}
             #[cfg(feature = "candle")]
-            EvalBackend::Candle => {}
+            EvalBackend::Candle(_) => {}
             _ => return Err(EvalRuntimeError::DisabledBackend(eval_backend))
         }
         Ok(Self {
@@ -61,7 +62,7 @@ impl EvalRuntime {
             eval_backend
         })
     }
-    
+
     pub fn get_eval_backend(&self) -> &EvalBackend {
         &self.eval_backend
     }

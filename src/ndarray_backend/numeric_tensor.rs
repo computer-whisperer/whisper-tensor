@@ -325,14 +325,14 @@ impl NDArrayNumericTensor {
 
     pub fn matmul(a: &NDArrayNumericTensor, b: &NDArrayNumericTensor) -> Result<NDArrayNumericTensor, NDArrayNumericTensorError> {
         Ok(match (a, b) {
-            (NDArrayNumericTensor::F32(a), NDArrayNumericTensor::F32(b)) => NDArrayNumericTensor::F32(ops::matmul(a.clone(), b.clone())?),
-            (NDArrayNumericTensor::F64(a), NDArrayNumericTensor::F64(b)) => NDArrayNumericTensor::F64(ops::matmul(a.clone(), b.clone())?),
-            (NDArrayNumericTensor::BF16(a), NDArrayNumericTensor::BF16(b)) => NDArrayNumericTensor::BF16(ops::matmul(a.clone(), b.clone())?),
-            (NDArrayNumericTensor::F16(a), NDArrayNumericTensor::F16(b)) => NDArrayNumericTensor::F16(ops::matmul(a.clone(), b.clone())?),
-            (NDArrayNumericTensor::U64(a), NDArrayNumericTensor::U64(b)) => NDArrayNumericTensor::U64(ops::matmul(a.clone(), b.clone())?),
-            (NDArrayNumericTensor::I64(a), NDArrayNumericTensor::I64(b)) => NDArrayNumericTensor::I64(ops::matmul(a.clone(), b.clone())?),
-            (NDArrayNumericTensor::U32(a), NDArrayNumericTensor::U32(b)) => NDArrayNumericTensor::U32(ops::matmul(a.clone(), b.clone())?),
-            (NDArrayNumericTensor::I32(a), NDArrayNumericTensor::I32(b)) => NDArrayNumericTensor::I32(ops::matmul(a.clone(), b.clone())?),
+            (NDArrayNumericTensor::F32(a), NDArrayNumericTensor::F32(b)) => NDArrayNumericTensor::F32(ops::matmul(a, b)?),
+            (NDArrayNumericTensor::F64(a), NDArrayNumericTensor::F64(b)) => NDArrayNumericTensor::F64(ops::matmul(a, b)?),
+            (NDArrayNumericTensor::BF16(a), NDArrayNumericTensor::BF16(b)) => NDArrayNumericTensor::BF16(ops::matmul(a, b)?),
+            (NDArrayNumericTensor::F16(a), NDArrayNumericTensor::F16(b)) => NDArrayNumericTensor::F16(ops::matmul(a, b)?),
+            (NDArrayNumericTensor::U64(a), NDArrayNumericTensor::U64(b)) => NDArrayNumericTensor::U64(ops::matmul(a, b)?),
+            (NDArrayNumericTensor::I64(a), NDArrayNumericTensor::I64(b)) => NDArrayNumericTensor::I64(ops::matmul(a, b)?),
+            (NDArrayNumericTensor::U32(a), NDArrayNumericTensor::U32(b)) => NDArrayNumericTensor::U32(ops::matmul(a, b)?),
+            (NDArrayNumericTensor::I32(a), NDArrayNumericTensor::I32(b)) => NDArrayNumericTensor::I32(ops::matmul(a, b)?),
             _ => return Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("matmul".to_string(), vec![a.dtype(), b.dtype()])),
         })
     }

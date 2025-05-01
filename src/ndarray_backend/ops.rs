@@ -1,5 +1,5 @@
 use std::ops::{Add, Mul, Not};
-use ndarray::{concatenate, ArcArray, Array, Array2, ArrayD, ArrayView2, ArrayViewD, ArrayViewMut2, ArrayViewMutD, Axis, Dimension, Ix2, IxDyn, LinalgScalar, ShapeError, SliceInfoElem, Zip};
+use ndarray::{concatenate, s, ArcArray, Array, Array2, ArrayD, ArrayView2, ArrayViewD, ArrayViewMut2, ArrayViewMutD, Axis, Dimension, Ix2, IxDyn, LinalgScalar, ShapeError, SliceInfoElem, Zip};
 use ndarray::linalg::{general_mat_mul, Dot};
 use num_traits::{Float, Num, NumCast, One, Zero};
 use num_traits::real::Real;
@@ -16,7 +16,9 @@ pub enum NDArrayOperationError {
     #[error("shape mismatch: {0}")]
     IncompatibleShapes(String),
     #[error("broadcast error: {0}")]
-    BroadcastError(String)
+    BroadcastError(String),
+    #[error("Internal error")]
+    Internal
 }
 
 pub(crate) fn reshape<T>(input: ArcArray<T, IxDyn>, shape: &[usize]) -> Result<ArcArray<T, IxDyn>, ShapeError>
@@ -675,107 +677,134 @@ fn compute_strides(shape: &[usize]) -> Vec<usize> {
     strides
 }
 
-/// ONNX MatMul with broadcasting, following numpy.matmul semantics.
-/// - Promotes 1-D inputs by prepending/appending a dim of 1, then squeezes.
-/// - Broadcasts batch dims before performing per-matrix multiply.
+
+/// ONNX-style batched/broadcasted matrix multiplication.
+///
+/// Broadcasting semantics are exactly those of `numpy.matmul` (and thus the
+/// ONNX spec):
+///
+/// * 1-D × 1-D → 0-D (scalar)
+/// * 1-D × 2-D → 1-D
+/// * 2-D × 1-D → 1-D
+/// * ≥2-D tensors are treated as stacks of matrices whose _leading_ dimensions
+///   broadcast element-wise. The final two axes are multiplied.
+///
+/// The implementation works for any `ndarray::LinalgScalar` (f32, f64, c64,
+/// etc.) and falls back to `matrixmultiply` if BLAS is not enabled.
 pub fn matmul<T>(
-    A: ArcArray<T, IxDyn>,
-    B: ArcArray<T, IxDyn>,
+    a: &ArcArray<T, IxDyn>,
+    b: &ArcArray<T, IxDyn>,
 ) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError>
 where
-    T: Clone + Zero + Add<Output = T> + Mul<Output = T>,
+    T: LinalgScalar + One + Zero,
 {
-    let a_shape = A.shape();
-    let b_shape = B.shape();
-    let ra = a_shape.len();
-    let rb = b_shape.len();
-    if ra < 1 || rb < 1 {
-        return Err(NDArrayOperationError::OutOfBounds);
+    // ---------- 1. Normalise ranks (add singleton axes where required) ----------
+    let mut a_view: ArrayViewD<'_, T> = a.view();
+    let mut b_view: ArrayViewD<'_, T> = b.view();
+
+    let mut a_rank = a_view.ndim();
+    let mut b_rank = b_view.ndim();
+
+    // Promote 1-D operands to matrices so we can treat everything uniformly.
+    let mut drop_first_axis_after = false;
+    let mut drop_last_axis_after = false;
+
+    if a_rank == 1 {
+        // [N]  → [1, N]
+        a_view = a_view.insert_axis(Axis(0));
+        a_rank = 2;
+        drop_first_axis_after = true;
+    }
+    if b_rank == 1 {
+        // [N]  → [N, 1]
+        b_view = b_view.insert_axis(Axis(b_rank));
+        b_rank = 2;
+        drop_last_axis_after = true;
     }
 
-    // 1) Promote to “at least 2D” for matrix multiply
-    // A: [..., M, K] or [K] → [1, K]
-    // B: [..., K, N] or [K] → [K, 1]
-    let (a_batch, m, k) = if ra == 1 {
-        (Vec::new(), 1, a_shape[0])
-    } else {
-        (a_shape[..ra-2].to_vec(), a_shape[ra-2], a_shape[ra-1])
-    };
-    let (b_batch, k2, n) = if rb == 1 {
-        (Vec::new(), b_shape[0], 1)
-    } else {
-        (b_shape[..rb-2].to_vec(), b_shape[rb-2], b_shape[rb-1])
-    };
-    if k != k2 {
+    // Pre-pend 1-sized axes so both tensors have the same rank.
+    let max_rank = a_rank.max(b_rank);
+    while a_view.ndim() < max_rank {
+        a_view = a_view.insert_axis(Axis(0));
+    }
+    while b_view.ndim() < max_rank {
+        b_view = b_view.insert_axis(Axis(0));
+    }
+
+    // ---------- 2. Validate broadcastability & gather size info ----------
+    let a_shape = a_view.shape();
+    let b_shape = b_view.shape();
+    let rank = a_shape.len();
+
+    // Everything except the last two axes must broadcast.
+    let mut batch_shape = Vec::with_capacity(rank.saturating_sub(2));
+    for d in 0..rank.saturating_sub(2) {
+        let (ad, bd) = (a_shape[d], b_shape[d]);
+        if ad != bd && ad != 1 && bd != 1 {
+            return Err(NDArrayOperationError::BroadcastError(String::new()));
+        }
+        batch_shape.push(ad.max(bd));
+    }
+
+    // Matrix dimensions.
+    let (m, k_left) = (a_shape[rank - 2], a_shape[rank - 1]);
+    let (k_right, p) = (b_shape[rank - 2], b_shape[rank - 1]);
+    if k_left != k_right {
         return Err(NDArrayOperationError::IncompatibleShape);
     }
 
-    // 2) Broadcast batch dims
-    let out_batch = broadcast_shapes(&a_batch, &b_batch)?;
-    let brank = out_batch.len();
+    // ---------- 3. Broadcast & reshape to 3-D (batch, M, K) / (batch, K, P) ----------
+    let mut a_bcast_shape = batch_shape.clone();
+    a_bcast_shape.extend([m, k_left]);
+    let mut b_bcast_shape = batch_shape.clone();
+    b_bcast_shape.extend([k_left, p]);
 
-    // 3) Compute output shape (with 1-D squeeze rules)
-    let out_shape: Vec<usize> = match (ra, rb) {
-        (1, 1) => Vec::new(),                  // scalar dot
-        (1, _) => out_batch.iter().cloned().chain([n]).collect(),
-        (_, 1) => out_batch.iter().cloned().chain([m]).collect(),
-        _      => out_batch.iter().cloned().chain([m, n]).collect(),
-    };
+    let a_b = a_view
+        .broadcast(a_bcast_shape.clone())
+        .ok_or(NDArrayOperationError::IncompatibleShape)?;
+    
+    let a_b = a_b
+        .to_shape((batch_shape.iter().product::<usize>(), m, k_left))
+        .map_err(|_| NDArrayOperationError::Internal)?;
 
-    // 4) Prepare looping: flat length & strides
-    let out_len = out_shape.iter().product::<usize>();
-    let strides = compute_strides(&out_shape);
-    let mut out_buf = Vec::with_capacity(out_len);
+    let b_b = b_view
+        .broadcast(b_bcast_shape)
+        .ok_or(NDArrayOperationError::IncompatibleShape)?;
+    
+    let b_b = b_b
+        .to_shape((batch_shape.iter().product::<usize>(), k_left, p))
+        .map_err(|_| NDArrayOperationError::Internal)?;
 
-    // 5) Manual flat‐index → multi‐index → dot‐product
-    for flat in 0..out_len {
-        // a) decode multi-index for this flat position
-        let mut rem = flat;
-        let mut idx = Vec::with_capacity(out_shape.len());
-        for &st in &strides {
-            idx.push(rem / st);
-            rem %= st;
-        }
+    // ---------- 4. Batched multiply ----------
+    let mut out = Array::<T, _>::zeros((a_b.dim().0, m, p));
+    for i in 0..a_b.dim().0 {
+        let (a_mat, b_mat): (ArrayView2<'_, T>, ArrayView2<'_, T>) =
+            (a_b.slice(s![i, .., ..]), b_b.slice(s![i, .., ..]));
+        let mut c: ArrayViewMut2<'_, T> = out.slice_mut(s![i, .., ..]);
 
-        // b) split into batch, i, j
-        //    for ra==1 or rb==1 we adjust how many trailing dims we consume
-        let (i_dim, j_dim) = match (ra, rb) {
-            (1, 1) => (0, 0), // dummy
-            (1, _) => (0, brank),          // only N
-            (_, 1) => (brank, 0),          // only M
-            _      => (brank, brank+1),    // M then N
-        };
-
-        // c) compute the dot product along K
-        let mut sum = T::zero();
-        for kk in 0..k {
-            // build index for A
-            let a_val = if ra == 1 {
-                // A is [K]
-                A[IxDyn(&[kk])].clone()
-            } else {
-                let mut a_idx = idx[..brank].to_vec();
-                a_idx.push(idx[i_dim]);
-                a_idx.push(kk);
-                A[IxDyn(&a_idx)].clone()
-            };
-            // build index for B
-            let b_val = if rb == 1 {
-                B[IxDyn(&[kk])].clone()
-            } else {
-                let mut b_idx = idx[..brank].to_vec();
-                b_idx.push(kk);
-                b_idx.push(idx[j_dim]);
-                B[IxDyn(&b_idx)].clone()
-            };
-            sum = sum + a_val * b_val;
-        }
-        out_buf.push(sum);
+        // C ← 1·A·B + 0·C
+        general_mat_mul(T::one(), &a_mat, &b_mat, T::zero(), &mut c);
     }
 
-    // 6) Assemble into an ArrayD and wrap
-    let out_array = ArrayD::from_shape_vec(IxDyn(&out_shape), out_buf)?;
-    Ok(ArcArray::from(out_array))
+    // ---------- 5. Reshape back to the ONNX-style output shape ----------
+    let mut final_shape = batch_shape;
+    final_shape.extend([m, p]);
+    let mut result = out
+        .into_shape(IxDyn(&final_shape))
+        .map_err(|_| NDArrayOperationError::Internal)?;
+
+    // Remove the axes we temporarily added for 1-D inputs.
+    if drop_last_axis_after {
+        // Result shape …, K, P → …, K
+        let last_axis = Axis(result.ndim() - 1);
+        result = result.index_axis_move(last_axis, 0);
+    }
+    if drop_first_axis_after {
+        // Result shape 1, … → …
+        result = result.index_axis_move(Axis(0), 0);
+    }
+
+    Ok(result.into_shared())
 }
 
 /// ONNX Where: elementwise select between `x` and `y` based on `condition`,

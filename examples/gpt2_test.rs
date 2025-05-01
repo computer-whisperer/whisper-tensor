@@ -21,9 +21,10 @@ fn main() {
     let mut onnx_data = Vec::new();
     File::open(input_path).unwrap().read_to_end(&mut onnx_data).unwrap();
 
-    let runtime = RuntimeModel::load_onnx(&onnx_data, RuntimeBackend::Eval(EvalBackend::NDArray), Default::default()).unwrap();
+    let runtime = RuntimeModel::load_onnx(&onnx_data, RuntimeBackend::Eval(EvalBackend::NDArray), RuntimeEnvironment::default()).unwrap();
     let mut llm = LanguageModelManager::new(runtime, "input1", "output1");
-
+    
+    
     let tokenizer = Tokenizer::from_pretrained("gpt2", None).unwrap();
 
     let prompt = "The fibbonacci sequence is: 1, 1, 2, 3, 5, 8, 13,";

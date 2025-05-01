@@ -5,7 +5,7 @@ use crate::dtype::DTypeError;
 use crate::ndarray_backend::numeric_tensor::{NDArrayNumericTensor, NDArrayNumericTensorError};
 use crate::numeric_tensor::{NumericTensor, NumericTensorError};
 
-fn load_to_device(value: &NDArrayNumericTensor, device: &Device) -> Result<candle_core::Tensor, NumericTensorError> {
+pub(crate) fn load_to_device(value: &NDArrayNumericTensor, device: &Device) -> Result<candle_core::Tensor, NumericTensorError> {
     Ok(match &value {
         NDArrayNumericTensor::F32(x) => {
             let x = x.as_slice_memory_order().unwrap();
