@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::default::Default;
-use std::sync::Arc;
 use crate::tensor::{Shape, TensorData};
 use crate::tensor::Tensor;
 use crate::DType;

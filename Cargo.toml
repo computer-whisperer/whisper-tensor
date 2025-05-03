@@ -27,6 +27,9 @@ llm-samplers = { optional=true, version="0.0.7" }
 rand = "0.8.5"
 ndarray = { version = "0.16.1", features = ["serde"] }
 rwkv-tokenizer = { optional=true, version="0.9.1" }
+env_logger = "0.11.8"
+log = "0.4.27"
+serde_json = "1.0.140"
 
 [features]
 default = ["ort", "candle", "onnx-reference", "tokenizers", "llm-samplers", "rwkv-tokenizer"]

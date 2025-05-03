@@ -4,7 +4,7 @@ use onnx_graph::operators::{Add, Gather, Mul};
 use onnx_graph::pytorch::{layer_norm, linear, reshape, rms_norm, silu, topk, transpose};
 use onnx_graph::tensor::{DType, Dimension, InputTensor, Shape, Tensor};
 use onnx_graph::weights::WeightManager;
-use onnx_graph::WeightStorageStrategy;
+use onnx_graph::{InputMetadata, ModelInputType, ModelMetadata, ModelOutputType, OutputMetadata, TokenizerInfo, WeightStorageStrategy};
 use crate::Error;
 
 enum HiddenAct {
@@ -100,8 +100,8 @@ pub fn load_llama4(weight_manager: impl WeightManager, config: Llama4Config, out
     let weight_manager = weight_manager.prefix("language_model");
     let model_weight_manager = weight_manager.prefix("model");
 
-    let mut input_tensors: Vec<Arc<dyn Tensor>> = vec![];
-    let mut output_tensors: Vec<(String, Arc<dyn Tensor>)> = vec![];
+    let mut input_tensors: Vec<(Arc<dyn Tensor>, Option<InputMetadata>)> = vec![];
+    let mut output_tensors: Vec<(String, Arc<dyn Tensor>, Option<OutputMetadata>)> = vec![];
 
     let batch_dimension = Dimension::new(Some(1), Some("batch_size".to_string()), Some("DATA_BATCH".to_string()));
     let sequence_dimension = Dimension::new(Some(1), Some("seq_len".to_string()), None);
@@ -113,7 +113,7 @@ pub fn load_llama4(weight_manager: impl WeightManager, config: Llama4Config, out
     ]);
 
     let token_input = InputTensor::new("input_ids".to_string(), DType::I32, input_shape);
-    input_tensors.push(token_input.clone());
+    input_tensors.push((token_input.clone(), Some(InputMetadata{model_input_type: ModelInputType::TokenID(0)})));
 
     let x = Gather::new(Some("embed_tokens".to_string()), model_weight_manager.get_tensor("embed_tokens.weight")?, token_input.clone(), 0)?;
 
@@ -163,10 +163,14 @@ pub fn load_llama4(weight_manager: impl WeightManager, config: Llama4Config, out
     
     let h = rms_norm(&model_weight_manager.prefix("norm"), layer_output, Some(config.rms_norm_eps))?;
     let out = linear(&weight_manager.prefix("lm_head"), h)?;
-    output_tensors.push(("logits".to_string(), out));
+    output_tensors.push(("logits".to_string(), out, Some(OutputMetadata{model_output_type: ModelOutputType::TokenID(0)})));
 
     println!("Built graph, exporting...");
-    let onnx_model = onnx_graph::build_proto(&input_tensors, &output_tensors, output_method)?;
+    let model_metadata = ModelMetadata{
+        tokenizer_infos: vec![TokenizerInfo::HFTokenizer("meta/llama4".to_string())],
+        max_token_batch: Some(1)
+    };
+    let onnx_model = onnx_graph::build_proto(&input_tensors, &output_tensors, output_method, Some(model_metadata))?;
 
     Ok(onnx_model.encode_to_vec())
 }

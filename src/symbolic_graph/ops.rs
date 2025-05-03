@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+use candle_core::cpu::kernels::VecOps;
 use half::{bf16, f16};
 use serde::{Deserialize, Serialize};
 use crate::dtype::DType;
@@ -7,6 +9,7 @@ use crate::ndarray_backend::conversions::FromScalarShape;
 use crate::numeric_tensor::{NumericTensor, NumericTensorError};
 use crate::onnx;
 use crate::symbolic_graph::{query_attribute_bool, query_attribute_float, query_attribute_int, query_attribute_ints, ONNXDecodingError, SymbolicGraphError, TensorId};
+use crate::symbolic_graph::milli_ops::*;
 
 #[derive(Debug, thiserror::Error)]
 pub enum EvalError {
@@ -14,6 +17,12 @@ pub enum EvalError {
     NDArrayNumericTensorError(#[from] NDArrayNumericTensorError),
     #[error(transparent)]
     NumericTensorError(#[from] NumericTensorError),
+    #[error("Unexpected dtype: expected {0}, got {1}")]
+    UnexpectedDType(DType, DType),
+    #[error("Unimplemented operator: {0}")]
+    UnimplementedOperatorError(String),
+    #[error(transparent)]
+    MilliOpGraphError(#[from] MilliOpGraphError),
     #[error("Invalid input for operation {0}")]
     InvalidInput(String),
 }
@@ -21,7 +30,13 @@ pub enum EvalError {
 pub trait Operation {
     fn get_inputs(&self) -> Vec<TensorId>;
     fn get_outputs(&self) -> Vec<TensorId>;
-    fn eval(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError>;
+    fn eval_old(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {unimplemented!()}
+
+    fn eval(&self, backend: &EvalBackend, inputs: &HashMap<TensorId, NumericTensor>) -> Result<HashMap<TensorId, NumericTensor>, EvalError> {
+        let milli_graph = self.get_milli_op_graph();
+        Ok(milli_graph.eval(inputs, backend)?)
+    }
+    fn get_milli_op_graph(&self) -> MilliOpGraph;
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -67,15 +82,22 @@ impl Operation for BinaryOperation {
         vec![self.output]
     }
 
-    fn eval(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
-        let v = match self.which {
-            WhichBinaryOperation::Add => NumericTensor::add(inputs[0], inputs[1], backend)?,
-            WhichBinaryOperation::Sub => NumericTensor::sub(inputs[0], inputs[1], backend)?,
-            WhichBinaryOperation::Mul => NumericTensor::mul(inputs[0], inputs[1], backend)?,
-            WhichBinaryOperation::Div => NumericTensor::div(inputs[0], inputs[1], backend)?,
-            WhichBinaryOperation::MatMul => NumericTensor::matmul(inputs[0], inputs[1], backend)?,
+    fn get_milli_op_graph(&self) -> MilliOpGraph {
+        let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
+        let a = input_map[&self.a];
+        let b = input_map[&self.b];
+        let res = match self.which {
+            WhichBinaryOperation::Add => AnyMilliOp::Add(MilliOpAdd::new(a, b)),
+            WhichBinaryOperation::Sub => AnyMilliOp::Sub(MilliOpSub::new(a, b)),
+            WhichBinaryOperation::Mul => AnyMilliOp::Mul(MilliOpMul::new(a, b)),
+            WhichBinaryOperation::Div => AnyMilliOp::Div(MilliOpDiv::new(a, b)),
+            WhichBinaryOperation::MatMul => AnyMilliOp::MatMul(MilliOpMatMul::new(a, b)),
         };
-        Ok(vec![v])
+        let mut output_map = HashMap::new();
+        let out = graph.push_op(res);
+        output_map.insert(out, self.output);
+        graph.set_output_map(output_map);
+        graph
     }
 }
 
@@ -123,17 +145,33 @@ impl Operation for UnaryOperation {
         vec![self.output]
     }
 
-    fn eval(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
-        match self.which {
-            WhichUnaryOperation::Neg => Ok(vec![inputs[0].clone().neg(backend)?]),
-            WhichUnaryOperation::Relu => Ok(vec![inputs[0].clone().relu(backend)?]),
-            WhichUnaryOperation::Sigmoid => Ok(vec![inputs[0].clone().sigmoid(backend)?]),
-            WhichUnaryOperation::Tanh => Ok(vec![inputs[0].clone().tanh(backend)?]),
-            WhichUnaryOperation::Exp => Ok(vec![inputs[0].clone().exp(backend)?]),
-            WhichUnaryOperation::Softplus => Ok(vec![inputs[0].clone().softplus(backend)?]),
-            WhichUnaryOperation::NonZero => Ok(vec![inputs[0].clone().nonzero(backend)?]),
-            WhichUnaryOperation::Sqrt => Ok(vec![inputs[0].clone().sqrt(backend)?]),
-        }
+    fn get_milli_op_graph(&self) -> MilliOpGraph {
+        let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
+        let a = input_map[&self.input];
+        let res = match self.which {
+            WhichUnaryOperation::Relu => AnyMilliOp::ClampMin(MilliOpClampMin::new(a, 0.0)),
+            WhichUnaryOperation::Sigmoid => {
+                let x = graph.push_op(AnyMilliOp::Neg(MilliOpNeg::new(a)));
+                let x = graph.push_op(AnyMilliOp::Exp(MilliOpExp::new(x)));
+                let x = graph.push_op(AnyMilliOp::AddScalar(MilliOpAddScalar::new(x, 1.0)));
+                AnyMilliOp::Reciprocal(MilliOpReciprocal::new(x))
+            },
+            WhichUnaryOperation::Tanh => AnyMilliOp::Tanh(MilliOpTanh::new(a)),
+            WhichUnaryOperation::Exp => AnyMilliOp::Exp(MilliOpExp::new(a)),
+            WhichUnaryOperation::Softplus => {
+                let x = graph.push_op(AnyMilliOp::Exp(MilliOpExp::new(a)));
+                let x = graph.push_op(AnyMilliOp::AddScalar(MilliOpAddScalar::new(x, 1.0)));
+                AnyMilliOp::Log(MilliOpLog::new(x))
+            }
+            WhichUnaryOperation::Neg => AnyMilliOp::Neg(MilliOpNeg::new(a)),
+            WhichUnaryOperation::NonZero => AnyMilliOp::NonZero(MilliOpNonZero::new(a)),
+            WhichUnaryOperation::Sqrt => AnyMilliOp::Sqrt(MilliOpSqrt::new(a)),
+        };
+        let mut output_map = HashMap::new();
+        let out = graph.push_op(res);
+        output_map.insert(out, self.output);
+        graph.set_output_map(output_map);
+        graph
     }
 }
 
@@ -142,6 +180,8 @@ pub struct CumSumOperation {
     input: TensorId,
     output: TensorId,
     axis: TensorId,
+    exclusive: bool,
+    reverse: bool
 }
 
 impl CumSumOperation {
@@ -156,6 +196,8 @@ impl CumSumOperation {
             input: inputs[0],
             axis: inputs[1],
             output: outputs[0],
+            exclusive: false,
+            reverse: false
         })
     }
 }
@@ -167,8 +209,17 @@ impl Operation for CumSumOperation {
         vec![self.output]
     }
 
-    fn eval(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
-        todo!()
+    fn get_milli_op_graph(&self) -> MilliOpGraph {
+        let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
+        let a = input_map[&self.input];
+        let b = input_map[&self.axis];
+
+        let out = graph.push_op(AnyMilliOp::CumSum(MilliOpCumSum::new(a, b, self.exclusive, self.reverse)));
+
+        let mut output_map = HashMap::new();
+        output_map.insert(out, self.output);
+        graph.set_output_map(output_map);
+        graph
     }
 }
 
@@ -197,6 +248,11 @@ impl LpNormalizationOperation {
                 _ => {}
             }
         }
+        match p {
+            1 | 2 => {},
+            _ => return Err(SymbolicGraphError::InvalidOperatorInputs),
+        }
+
         Ok(Self {
             input: inputs[0],
             output: outputs[0],
@@ -213,8 +269,51 @@ impl Operation for LpNormalizationOperation {
     fn get_outputs(&self) -> Vec<TensorId> {
         vec![self.output]
     }
-    fn eval(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
-        todo!()
+    fn eval_old(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
+        let input = inputs[0];
+        let axis = (if self.axis < 0 {input.shape().len() as i64 + self.axis} else {self.axis}) as i64;
+        let x = input.abs(backend)?;
+        let x = match self.p{
+            1 => x,
+            2 => NumericTensor::mul(&x, &x, backend)?,
+            _ => Err(EvalError::InvalidInput("p must be either 1 or 2".to_string()))?
+        };
+        let x = x.reduce_sum(Some(vec![axis]), true, backend)?;
+        let x = match self.p{
+            1 => x,
+            2 => x.sqrt(backend)?,
+            _ => Err(EvalError::InvalidInput("p must be either 1 or 2".to_string()))?
+        };
+        let y = NumericTensor::div(input, &x, backend)?;
+
+        Ok(vec![y])
+    }
+
+    fn get_milli_op_graph(&self) -> MilliOpGraph {
+        let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
+        let input = input_map[&self.input];
+
+        let x = graph.push_op(AnyMilliOp::Abs(MilliOpAbs::new(input)));
+
+        let x = match self.p{
+            1 => x,
+            2 => graph.push_op(AnyMilliOp::Mul(MilliOpMul::new(input, input))),
+            _ => panic!()
+        };
+        let axis_tensor = NDArrayNumericTensor::from(vec![self.axis]);
+        let axis = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(axis_tensor.into())));
+        let x = graph.push_op(AnyMilliOp::ReduceSum(MilliOpReduceSum::new(x, Some(axis), true)));
+        let x = match self.p{
+            1 => x,
+            2 => graph.push_op(AnyMilliOp::Sqrt(MilliOpSqrt::new(input))),
+            _ => panic!()
+        };
+        let out = graph.push_op(AnyMilliOp::Div(MilliOpDiv::new(input, x)));
+
+        let mut output_map = HashMap::new();
+        output_map.insert(out, self.output);
+        graph.set_output_map(output_map);
+        graph
     }
 }
 
@@ -225,7 +324,7 @@ pub struct GroupNormalizationOperation {
     bias: TensorId,
     output: TensorId,
     epsilon: f32,
-    num_groups: i64
+    num_groups: usize
 }
 
 impl GroupNormalizationOperation {
@@ -245,7 +344,7 @@ impl GroupNormalizationOperation {
                 _ => {}
             }
         }
-        let num_groups = num_groups.ok_or(ONNXDecodingError::MissingAttribute("GroupNormalization".to_string(), "num_groups".to_string()))?;
+        let num_groups = num_groups.ok_or(ONNXDecodingError::MissingAttribute("GroupNormalization".to_string(), "num_groups".to_string()))? as usize;
         Ok(Self {
             input: inputs[0],
             scale: inputs[1],
@@ -264,7 +363,36 @@ impl Operation for GroupNormalizationOperation {
     fn get_outputs(&self) -> Vec<TensorId> {
         vec![self.output]
     }
-    fn eval(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
+    fn eval_old(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
+        let input = inputs[0];
+        let scale = inputs[1];
+        let bias = inputs[2];
+
+        let input_shape = input.shape();
+        let batch_size = input_shape[0];
+        let num_channels = input_shape[1];
+        let num_groups = self.num_groups;
+
+        let hidden_size = input_shape[2..].iter().product::<usize>() * num_channels / num_groups;
+        let input = input.reshape(vec![batch_size, num_groups, hidden_size], backend)?;
+
+        let mean = NumericTensor::div_f32(&input.clone().reduce_sum(Some(vec![2]), true, backend)?, hidden_size as f32, backend)?;
+        let input = NumericTensor::sub(&input, &mean, backend)?;
+
+        let x = NumericTensor::mul(&input, &input, backend)?.reduce_sum(Some(vec![2]), true, backend)?;
+        let var =  NumericTensor::div_f32(&x, hidden_size as f32, backend)?;
+        let input_normalized = NumericTensor::div(&input, &NumericTensor::add_f32(&var, self.epsilon, backend)?.sqrt(backend)?, backend)?;
+
+        let y = input_normalized.reshape(vec![batch_size, num_channels, input_shape[2..].iter().product::<usize>()], backend)?;
+        
+        let y = NumericTensor::mul(&y, &scale.unsqueeze(1, backend)?, backend)?;
+        let y = NumericTensor::add(&y, &bias.unsqueeze(1, backend)?, backend)?;
+
+        let y = y.reshape(input_shape, backend)?;
+        Ok(vec![y])
+    }
+
+    fn get_milli_op_graph(&self) -> MilliOpGraph {
         todo!()
     }
 }
@@ -301,7 +429,7 @@ impl Operation for SqueezeOperation {
         vec![self.output]
     }
 
-    fn eval(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
+    fn eval_old(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
         let axes_ndarray = NDArrayNumericTensor::try_from(inputs[1].cast(DType::I64, backend)?)?;
         let axes = Vec::<i64>::try_from(axes_ndarray)?;
         if axes.len() > 1 {
@@ -316,6 +444,10 @@ impl Operation for SqueezeOperation {
         };
         let output = inputs[0].squeeze(axis, backend)?;
         Ok(vec![output])
+    }
+
+    fn get_milli_op_graph(&self) -> MilliOpGraph {
+        todo!()
     }
 }
 
@@ -352,7 +484,7 @@ impl Operation for UnsqueezeOperation {
         vec![self.output]
     }
 
-    fn eval(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
+    fn eval_old(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
         let axes_ndarray = NDArrayNumericTensor::try_from(inputs[1].cast(DType::I64, backend)?)?;
         let axes = Vec::<i64>::try_from(axes_ndarray)?;
         if axes.len() > 1 {
@@ -367,6 +499,10 @@ impl Operation for UnsqueezeOperation {
         };
         let output = inputs[0].unsqueeze(axis, backend)?;
         Ok(vec![output])
+    }
+
+    fn get_milli_op_graph(&self) -> MilliOpGraph {
+        todo!()
     }
 }
 
@@ -400,8 +536,12 @@ impl Operation for TransposeOperation {
     fn get_outputs(&self) -> Vec<TensorId> {
         vec![self.output]
     }
-    fn eval(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
+    fn eval_old(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
         Ok(vec![inputs[0].transpose(self.perm.clone(), backend)?])
+    }
+
+    fn get_milli_op_graph(&self) -> MilliOpGraph {
+        todo!()
     }
 }
 
@@ -435,7 +575,7 @@ impl Operation for ReshapeOperation {
     fn get_outputs(&self) -> Vec<TensorId> {
         vec![self.output]
     }
-    fn eval(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
+    fn eval_old(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
         let data_input = inputs[0];
         let shape_input = inputs[1];
         let data_input_shape = data_input.shape();
@@ -486,6 +626,10 @@ impl Operation for ReshapeOperation {
 
         Ok(vec![output_value])
     }
+
+    fn get_milli_op_graph(&self) -> MilliOpGraph {
+        todo!()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -522,8 +666,12 @@ impl Operation for CastOperation {
     fn get_outputs(&self) -> Vec<TensorId> {
         vec![self.output]
     }
-    fn eval(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
+    fn eval_old(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
         Ok(vec![inputs[0].cast(self.to, backend)?])
+    }
+
+    fn get_milli_op_graph(&self) -> MilliOpGraph {
+        todo!()
     }
 }
 
@@ -533,6 +681,8 @@ pub struct LayerNormalizationOperation {
     scale: TensorId,
     bias: Option<TensorId>,
     output: TensorId,
+    mean_output: Option<TensorId>,
+    inv_std_dev_output: Option<TensorId>,
     axis: i64,
     epsilon: f32
 }
@@ -563,6 +713,8 @@ impl LayerNormalizationOperation {
             scale: inputs[1],
             bias: if inputs.len() == 3 { Some(inputs[2]) } else { None },
             output: outputs[0],
+            mean_output: if inputs.len() > 1 {Some(outputs[1])} else {None},
+            inv_std_dev_output: if inputs.len() > 2 {Some(outputs[2])} else {None},
             axis,
             epsilon
         })
@@ -580,7 +732,41 @@ impl Operation for LayerNormalizationOperation {
     fn get_outputs(&self) -> Vec<TensorId> {
         vec![self.output]
     }
-    fn eval(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
+    fn eval_old(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
+        let input = inputs[0];
+        let scale = inputs[1];
+        let bias = self.bias.map(|b| inputs[2]);
+
+        let axis = if self.axis < 0 { (input.rank() as i64 + self.axis) as usize } else { self.axis as usize };
+
+        let normalized_axes: Vec<_> = (axis..input.rank()).map(|x| x as i64).collect();
+
+        let mean = input.reduce_mean(Some(normalized_axes.clone()), true, backend)?;
+        let d = NumericTensor::sub(input, &mean, backend)?;
+        let dd = NumericTensor::mul(&d, &d, backend)?;
+        let var = dd.reduce_mean(Some(normalized_axes), true, backend)?;
+        let var_eps = NumericTensor::add_f32(&var, self.epsilon, backend)?;
+        let stddev = var_eps.sqrt(backend)?;
+        let inv_stddev = stddev.reciprocal(backend)?;
+        let normalized = NumericTensor::mul(&d, &inv_stddev, backend)?;
+
+        let normalized_scaled = NumericTensor::mul(&normalized, scale, backend)?;
+        let y = if let Some(bias) = bias {
+            NumericTensor::add(&normalized_scaled, bias, backend)?
+        } else {
+            normalized_scaled
+        };
+        let mut outputs = vec![y];
+        if self.mean_output.is_some() {
+            outputs.push(mean);
+        }
+        if self.inv_std_dev_output.is_some() {
+            outputs.push(inv_stddev);
+        }
+        Ok(outputs)
+    }
+
+    fn get_milli_op_graph(&self) -> MilliOpGraph {
         todo!()
     }
 }
@@ -626,8 +812,12 @@ impl Operation for GatherOperation {
     fn get_outputs(&self) -> Vec<TensorId> {
         vec![self.output]
     }
-    fn eval(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
+    fn eval_old(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
         Ok(vec![NumericTensor::gather(inputs[0], inputs[1], self.axis, backend)?])
+    }
+
+    fn get_milli_op_graph(&self) -> MilliOpGraph {
+        todo!()
     }
 }
 
@@ -676,10 +866,56 @@ impl Operation for ShapeOperation {
     fn get_outputs(&self) -> Vec<TensorId> {
         vec![self.output]
     }
-    fn eval(&self, _backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
-        let shape = inputs[0].shape().iter().map(|x| *x as i64).collect::<Vec<_>>();
-        let shape_tensor = NDArrayNumericTensor::from(shape);
+    fn eval_old(&self, _backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
+        let input_shape = inputs[0].shape();
+        let mut output_shape = vec![];
+        let start = {
+            let mut start = 0;
+            if let Some(x) = self.start {
+                start = x;
+            }
+            if start < 0 {
+                start = start + input_shape.len() as i64
+            }
+            if start > input_shape.len() as i64 {
+                start = input_shape.len() as i64;
+            }
+            if start < 0 {
+                start = 0;
+            }
+            start as usize
+        };
+        let end = {
+            let mut end = input_shape.len() as i64;
+            if let Some(x) = self.end {
+                end = x;
+            }
+            if end < 0 {
+                end = end + input_shape.len() as i64
+            }
+            if end > input_shape.len() as i64 {
+                end = input_shape.len() as i64;
+            }
+            if end < 0 {
+                end = 0;
+            }
+            end as usize
+        };
+        for i in 0..input_shape.len() {
+            if i < start {
+                continue;
+            }
+            if i >= end {
+                continue;
+            }
+            output_shape.push(input_shape[i] as i64);
+        }
+        let shape_tensor = NDArrayNumericTensor::from(output_shape);
         Ok(vec![shape_tensor.into()])
+    }
+
+    fn get_milli_op_graph(&self) -> MilliOpGraph {
+        todo!()
     }
 }
 
@@ -717,13 +953,17 @@ impl Operation for ConcatOperation {
     fn get_outputs(&self) -> Vec<TensorId> {
         vec![self.output]
     }
-    fn eval(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
+    fn eval_old(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
         let axis = if self.axis < 0 {
             inputs[0].shape().len() as i64 + self.axis
         } else {
             self.axis
         } as usize;
         Ok(vec![NumericTensor::concat(inputs, axis, backend)?])
+    }
+
+    fn get_milli_op_graph(&self) -> MilliOpGraph {
+        todo!()
     }
 }
 
@@ -767,7 +1007,7 @@ impl Operation for ConstantOfShapeOperation {
     fn get_outputs(&self) -> Vec<TensorId> {
         vec![self.output]
     }
-    fn eval(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
+    fn eval_old(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
         let shape: Vec<i64> = inputs[0].cast(DType::I64, backend)?.try_into()?;
         let shape = shape.iter().map(|x| *x as usize).collect();
         let v = if let Some(value) = &self.value {
@@ -790,6 +1030,10 @@ impl Operation for ConstantOfShapeOperation {
             NDArrayNumericTensor::from_scalar_shape(0f32, shape)?
         };
         Ok(vec![v.into()])
+    }
+
+    fn get_milli_op_graph(&self) -> MilliOpGraph {
+        todo!()
     }
 }
 
@@ -838,7 +1082,7 @@ impl Operation for ReduceMeanOperation {
     fn get_outputs(&self) -> Vec<TensorId> {
         vec![self.output]
     }
-    fn eval(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
+    fn eval_old(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
         let data_input = inputs[0];
         let axes = if self.input_axes.is_some() {
             Vec::<i64>::try_from(inputs[1].clone())?
@@ -847,6 +1091,10 @@ impl Operation for ReduceMeanOperation {
         };
         let keepdims = self.keepdims.unwrap_or(1);
         Ok(vec![inputs[0].reduce_mean(Some(axes), keepdims != 0, backend)?])
+    }
+
+    fn get_milli_op_graph(&self) -> MilliOpGraph {
+        todo!()
     }
 }
 
@@ -896,7 +1144,7 @@ impl Operation for ReduceSumOperation {
         vec![self.output]
     }
 
-    fn eval(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
+    fn eval_old(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
         let data_input = inputs[0];
         let axes = if self.input_axes.is_some() {
             Vec::<i64>::try_from(inputs[1].clone())?
@@ -905,6 +1153,10 @@ impl Operation for ReduceSumOperation {
         };
         let keepdims = self.keepdims.unwrap_or(1);
         Ok(vec![inputs[0].reduce_sum(Some(axes), keepdims != 0, backend)?])
+    }
+
+    fn get_milli_op_graph(&self) -> MilliOpGraph {
+        todo!()
     }
 }
 
@@ -939,8 +1191,12 @@ impl Operation for PowOperation {
     fn get_outputs(&self) -> Vec<TensorId> {
         vec![self.output]
     }
-    fn eval(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
+    fn eval_old(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
         Ok(vec![inputs[0].pow(inputs[1], backend)?])
+    }
+
+    fn get_milli_op_graph(&self) -> MilliOpGraph {
+        todo!()
     }
 }
 
@@ -994,10 +1250,14 @@ impl Operation for GemmOperation {
     fn get_outputs(&self) -> Vec<TensorId> {
         vec![self.output]
     }
-    fn eval(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
+    fn eval_old(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
         Ok(vec![NumericTensor::gemm(inputs[0], inputs[1], if inputs.len() > 2 {Some(inputs[2])} else {None},
                             self.alpha.unwrap_or(1.0), self.beta.unwrap_or(1.0),
                             self.trans_a.unwrap_or(false), self.trans_b.unwrap_or(false), backend)?])
+    }
+
+    fn get_milli_op_graph(&self) -> MilliOpGraph {
+        todo!()
     }
 }
 
@@ -1043,13 +1303,20 @@ impl Operation for SplitOperation {
     fn get_outputs(&self) -> Vec<TensorId> {
         self.outputs.clone()
     }
-    fn eval(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
+    fn eval_old(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
         let split: Vec<i64> = if let Some(split) = self.split_attribute.clone() {
             split
-        } else {
+        }
+        else if let Some(_) = self.split {
             inputs[1].clone().try_into()?
+        } else {
+            Err(EvalError::InvalidInput("Split attribute is not set, and we do not support num_outputs yet".to_string()))?
         };
         Ok(inputs[0].split(&split, self.axis.unwrap_or_default(), backend)?)
+    }
+
+    fn get_milli_op_graph(&self) -> MilliOpGraph {
+        todo!()
     }
 }
 
@@ -1098,7 +1365,7 @@ impl Operation for SliceOperation {
     fn get_outputs(&self) -> Vec<TensorId> {
         vec![self.output]
     }
-    fn eval(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
+    fn eval_old(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
         let data_input = inputs[0];
         let axes: Vec<i64> = if self.axes.is_some() {
             inputs[3].cast(DType::I64, backend)?.try_into()?
@@ -1117,17 +1384,27 @@ impl Operation for SliceOperation {
             output_slice.push(0..data_input.shape()[i]);
         }
         for (i, axis) in axes.into_iter().enumerate() {
-            let axis = axis as usize;
+            let axis = if axis < 0 {
+                (data_input.shape().len() as i64 + axis) as usize
+            } else {
+                axis as usize
+            };
             let step = steps[i];
             if step != 1 {
                 return Err(EvalError::InvalidInput(format!("Step {} is not supported", step)));
             }
-            let start = (if starts[i] < 0 { data_input.shape()[i] as i64 + starts[i] } else { starts[i] }) as usize;
-            let end = (if ends[i] < 0 { data_input.shape()[i] as i64 + ends[i] } else { ends[i] }) as usize;
+            let start = (if starts[i] < 0 { data_input.shape()[axis] as i64 + starts[i] } else { starts[i] }) as usize;
+            let end = (if ends[i] < 0 { data_input.shape()[axis] as i64 + ends[i] } else { ends[i] }) as usize;
+            let start = start.min(data_input.shape()[axis]);
+            let end = end.min(data_input.shape()[axis]);
             output_slice[axis] = start..end;
         }
         let output = data_input.slice(&output_slice, backend)?;
         Ok(vec![output])
+    }
+
+    fn get_milli_op_graph(&self) -> MilliOpGraph {
+        todo!()
     }
 }
 
@@ -1164,11 +1441,15 @@ impl Operation for WhereOperation {
     fn get_outputs(&self) -> Vec<TensorId> {
         vec![self.output]
     }
-    fn eval(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
+    fn eval_old(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
         let conditional = inputs[0];
         let a = inputs[1];
         let b = inputs[2];
         Ok(vec![conditional.where_op(a, b, backend)?])
+    }
+
+    fn get_milli_op_graph(&self) -> MilliOpGraph {
+        todo!()
     }
 }
 
@@ -1203,7 +1484,7 @@ impl Operation for SoftmaxOperation {
     fn get_outputs(&self) -> Vec<TensorId> {
         vec![self.output]
     }
-    fn eval(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
+    fn eval_old(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
         let e = inputs[0].exp(backend)?;
         let axis = if let Some(axis) = self.axis {
             axis
@@ -1213,6 +1494,10 @@ impl Operation for SoftmaxOperation {
         let r = e.reduce_sum(Some(vec![axis]), true, backend)?;
         let o = NumericTensor::div(&e, &r, backend)?;
         Ok(vec![o])
+    }
+
+    fn get_milli_op_graph(&self) -> MilliOpGraph {
+        todo!()
     }
 }
 
@@ -1275,12 +1560,88 @@ impl AnyOperation {
 
 impl Operation for AnyOperation {
     fn get_inputs(&self) -> Vec<TensorId> {
-        self.as_dyn().get_inputs()
+        match self {
+            AnyOperation::Unary(op) => op.get_inputs(),
+            AnyOperation::Binary(op) => op.get_inputs(),
+            AnyOperation::Cast(op) => op.get_inputs(),
+            AnyOperation::Squeeze(op) => op.get_inputs(),
+            AnyOperation::Unsqueeze(op) => op.get_inputs(),
+            AnyOperation::Transpose(op) => op.get_inputs(),
+            AnyOperation::Reshape(op) => op.get_inputs(),
+            AnyOperation::CumSum(op) => op.get_inputs(),
+            AnyOperation::Gather(op) => op.get_inputs(),
+            AnyOperation::LpNormalization(op) => op.get_inputs(),
+            AnyOperation::GroupNormalization(op) => op.get_inputs(),
+            AnyOperation::LayerNormalization(op) => op.get_inputs(),
+            AnyOperation::Shape(op) => op.get_inputs(),
+            AnyOperation::Concat(op) => op.get_inputs(),
+            AnyOperation::ConstantOfShape(op) => op.get_inputs(),
+            AnyOperation::ReduceMean(op) => op.get_inputs(),
+            AnyOperation::ReduceSum(op) => op.get_inputs(),
+            AnyOperation::Pow(op) => op.get_inputs(),
+            AnyOperation::Gemm(op) => op.get_inputs(),
+            AnyOperation::Split(op) => op.get_inputs(),
+            AnyOperation::Slice(op) => op.get_inputs(),
+            AnyOperation::Where(op) => op.get_inputs(),
+            AnyOperation::Softmax(op) => op.get_inputs()
+        }
     }
     fn get_outputs(&self) -> Vec<TensorId> {
-        self.as_dyn().get_outputs()
+        match self {
+            AnyOperation::Unary(op) => op.get_outputs(),
+            AnyOperation::Binary(op) => op.get_outputs(),
+            AnyOperation::Cast(op) => op.get_outputs(),
+            AnyOperation::Squeeze(op) => op.get_outputs(),
+            AnyOperation::Unsqueeze(op) => op.get_outputs(),
+            AnyOperation::Transpose(op) => op.get_outputs(),
+            AnyOperation::Reshape(op) => op.get_outputs(),
+            AnyOperation::CumSum(op) => op.get_outputs(),
+            AnyOperation::Gather(op) => op.get_outputs(),
+            AnyOperation::LpNormalization(op) => op.get_outputs(),
+            AnyOperation::GroupNormalization(op) => op.get_outputs(),
+            AnyOperation::LayerNormalization(op) => op.get_outputs(),
+            AnyOperation::Shape(op) => op.get_outputs(),
+            AnyOperation::Concat(op) => op.get_outputs(),
+            AnyOperation::ConstantOfShape(op) => op.get_outputs(),
+            AnyOperation::ReduceMean(op) => op.get_outputs(),
+            AnyOperation::ReduceSum(op) => op.get_outputs(),
+            AnyOperation::Pow(op) => op.get_outputs(),
+            AnyOperation::Gemm(op) => op.get_outputs(),
+            AnyOperation::Split(op) => op.get_outputs(),
+            AnyOperation::Slice(op) => op.get_outputs(),
+            AnyOperation::Where(op) => op.get_outputs(),
+            AnyOperation::Softmax(op) => op.get_outputs()
+        }
     }
-    fn eval(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
-        self.as_dyn().eval(backend, inputs)
+    fn eval_old(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
+        self.as_dyn().eval_old(backend, inputs)
+    }
+
+    fn get_milli_op_graph(&self) -> MilliOpGraph {
+        match self {
+            AnyOperation::Unary(op) => op.get_milli_op_graph(),
+            AnyOperation::Binary(op) => op.get_milli_op_graph(),
+            AnyOperation::Cast(op) => op.get_milli_op_graph(),
+            AnyOperation::Squeeze(op) => op.get_milli_op_graph(),
+            AnyOperation::Unsqueeze(op) => op.get_milli_op_graph(),
+            AnyOperation::Transpose(op) => op.get_milli_op_graph(),
+            AnyOperation::Reshape(op) => op.get_milli_op_graph(),
+            AnyOperation::CumSum(op) => op.get_milli_op_graph(),
+            AnyOperation::Gather(op) => op.get_milli_op_graph(),
+            AnyOperation::LpNormalization(op) => op.get_milli_op_graph(),
+            AnyOperation::GroupNormalization(op) => op.get_milli_op_graph(),
+            AnyOperation::LayerNormalization(op) => op.get_milli_op_graph(),
+            AnyOperation::Shape(op) => op.get_milli_op_graph(),
+            AnyOperation::Concat(op) => op.get_milli_op_graph(),
+            AnyOperation::ConstantOfShape(op) => op.get_milli_op_graph(),
+            AnyOperation::ReduceMean(op) => op.get_milli_op_graph(),
+            AnyOperation::ReduceSum(op) => op.get_milli_op_graph(),
+            AnyOperation::Pow(op) => op.get_milli_op_graph(),
+            AnyOperation::Gemm(op) => op.get_milli_op_graph(),
+            AnyOperation::Split(op) => op.get_milli_op_graph(),
+            AnyOperation::Slice(op) => op.get_milli_op_graph(),
+            AnyOperation::Where(op) => op.get_milli_op_graph(),
+            AnyOperation::Softmax(op) => op.get_milli_op_graph()
+        }
     }
 }

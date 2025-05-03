@@ -21,7 +21,9 @@ pub enum NDArrayNumericTensorError {
     #[error(transparent)]
     NDArrayOperationError(#[from] ops::NDArrayOperationError),
     #[error(transparent)]
-    ShapeError(#[from] ndarray::ShapeError)
+    ShapeError(#[from] ndarray::ShapeError),
+    #[error("other error")]
+    OtherError
 }
 
 
@@ -142,6 +144,20 @@ impl NDArrayNumericTensor {
         })
     }
 
+    pub fn from_f32_data(data: &[f32], dtype: DType, shape: Vec<usize>) -> Result<Self, NDArrayNumericTensorError> {
+        match dtype {
+            DType::F32 => Ok(NDArrayNumericTensor::F32(ArcArray::<_, IxDyn>::from_shape_vec(shape, data.to_vec())?)),
+            _ => Err(NDArrayNumericTensorError::OtherError)
+        }
+    }
+
+    pub fn from_f64_data(data: &[f64], dtype: DType, shape: Vec<usize>) -> Result<Self, NDArrayNumericTensorError> {
+        match dtype {
+            DType::F64 => Ok(NDArrayNumericTensor::F64(ArcArray::<_, IxDyn>::from_shape_vec(shape, data.to_vec())?)),
+            _ => Err(NDArrayNumericTensorError::OtherError)
+        }
+    }
+
     pub fn argmax(&self, axis: usize) -> (Self, Self) {
         todo!()
     }
@@ -174,6 +190,24 @@ impl NDArrayNumericTensor {
         let mut s = self.shape().to_vec();
         s.remove(p0);
         self.reshape(s)
+    }
+
+    pub fn flatten(&self) -> Result<Self, NDArrayNumericTensorError> {
+        Ok(match self {
+            NDArrayNumericTensor::F32(x) => {NDArrayNumericTensor::F32(x.flatten().to_shared().into_dyn())},
+            NDArrayNumericTensor::I64(x) => {NDArrayNumericTensor::I64(x.flatten().to_shared().into_dyn())},
+            NDArrayNumericTensor::F64(x) => {NDArrayNumericTensor::F64(x.flatten().to_shared().into_dyn())},
+            NDArrayNumericTensor::BF16(x) => {NDArrayNumericTensor::BF16(x.flatten().to_shared().into_dyn())},
+            NDArrayNumericTensor::F16(x) => {NDArrayNumericTensor::F16(x.flatten().to_shared().into_dyn())},
+            NDArrayNumericTensor::U64(x) => {NDArrayNumericTensor::U64(x.flatten().to_shared().into_dyn())},
+            NDArrayNumericTensor::U32(x) => {NDArrayNumericTensor::U32(x.flatten().to_shared().into_dyn())},
+            NDArrayNumericTensor::I32(x) => {NDArrayNumericTensor::I32(x.flatten().to_shared().into_dyn())},
+            NDArrayNumericTensor::U16(x) => {NDArrayNumericTensor::U16(x.flatten().to_shared().into_dyn())},
+            NDArrayNumericTensor::I16(x) => {NDArrayNumericTensor::I16(x.flatten().to_shared().into_dyn())},
+            NDArrayNumericTensor::U8(x) => {NDArrayNumericTensor::U8(x.flatten().to_shared().into_dyn())},
+            NDArrayNumericTensor::I8(x) => {NDArrayNumericTensor::I8(x.flatten().to_shared().into_dyn())},
+            NDArrayNumericTensor::BOOL(x) => {NDArrayNumericTensor::BOOL(x.flatten().to_shared().into_dyn())},
+        })
     }
 
     pub fn slice(&self, indices: &[Range<usize>]) -> Result<Self, NDArrayNumericTensorError> {
@@ -315,6 +349,36 @@ impl NDArrayNumericTensor {
         Self::try_binary_op(a, b, NativeNumericTensorBinaryOperation::Add)
     }
 
+    pub fn add_f32(a: &NDArrayNumericTensor, b: f32) -> Result<NDArrayNumericTensor, NDArrayNumericTensorError> {
+        Ok(match a {
+            NDArrayNumericTensor::F64(x) => NDArrayNumericTensor::F64(x.map(|x| *x + b as f64).to_shared()),
+            NDArrayNumericTensor::F32(x) => NDArrayNumericTensor::F32(x.map(|x| *x + b).to_shared()),
+            NDArrayNumericTensor::BF16(x) => NDArrayNumericTensor::BF16(x.map(|x| bf16::from_f32(x.to_f32() + b)).to_shared()),
+            NDArrayNumericTensor::F16(x) => NDArrayNumericTensor::F16(x.map(|x| f16::from_f32(x.to_f32() + b)).to_shared()),
+            _ => return Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("add_f32".to_string(), vec![a.dtype()])),
+        })
+    }
+
+    pub fn mul_f32(a: &NDArrayNumericTensor, b: f32) -> Result<NDArrayNumericTensor, NDArrayNumericTensorError> {
+        Ok(match a {
+            NDArrayNumericTensor::F64(x) => NDArrayNumericTensor::F64(x.map(|x| *x * b as f64).to_shared()),
+            NDArrayNumericTensor::F32(x) => NDArrayNumericTensor::F32(x.map(|x| *x * b).to_shared()),
+            NDArrayNumericTensor::BF16(x) => NDArrayNumericTensor::BF16(x.map(|x| bf16::from_f32(x.to_f32() * b)).to_shared()),
+            NDArrayNumericTensor::F16(x) => NDArrayNumericTensor::F16(x.map(|x| f16::from_f32(x.to_f32() * b)).to_shared()),
+            _ => return Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("mul_f32".to_string(), vec![a.dtype()])),
+        })
+    }
+
+    pub fn div_f32(a: &NDArrayNumericTensor, b: f32) -> Result<NDArrayNumericTensor, NDArrayNumericTensorError> {
+        Ok(match a {
+            NDArrayNumericTensor::F64(x) => NDArrayNumericTensor::F64(x.map(|x| *x / b as f64).to_shared()),
+            NDArrayNumericTensor::F32(x) => NDArrayNumericTensor::F32(x.map(|x| *x / b).to_shared()),
+            NDArrayNumericTensor::BF16(x) => NDArrayNumericTensor::BF16(x.map(|x| bf16::from_f32(x.to_f32() / b)).to_shared()),
+            NDArrayNumericTensor::F16(x) => NDArrayNumericTensor::F16(x.map(|x| f16::from_f32(x.to_f32() / b)).to_shared()),
+            _ => return Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("add_f32".to_string(), vec![a.dtype()])),
+        })
+    }
+
     pub fn sub(a: &NDArrayNumericTensor, b: &NDArrayNumericTensor) -> Result<NDArrayNumericTensor, NDArrayNumericTensorError> {
         Self::try_binary_op(a, b, NativeNumericTensorBinaryOperation::Sub)
     }
@@ -353,6 +417,38 @@ impl NDArrayNumericTensor {
         })
     }
 
+    pub fn abs(self) -> Result<Self, NDArrayNumericTensorError> {
+        Ok(match self {
+            NDArrayNumericTensor::F32(x) => NDArrayNumericTensor::F32(x.abs().to_shared()),
+            NDArrayNumericTensor::F64(x) => NDArrayNumericTensor::F64(x.abs().to_shared()),
+            NDArrayNumericTensor::BF16(x) => NDArrayNumericTensor::BF16(x.abs().to_shared()),
+            NDArrayNumericTensor::F16(x) => NDArrayNumericTensor::F16(x.abs().to_shared()),
+            NDArrayNumericTensor::I64(x) => NDArrayNumericTensor::I64(x.map(|x| x.abs()).to_shared()),
+            NDArrayNumericTensor::U64(x) => NDArrayNumericTensor::U64(x),
+            NDArrayNumericTensor::I32(x) => NDArrayNumericTensor::I32(x.map(|x| x.abs()).to_shared()),
+            NDArrayNumericTensor::U32(x) => NDArrayNumericTensor::U32(x),
+            NDArrayNumericTensor::I16(x) => NDArrayNumericTensor::I16(x.map(|x| x.abs()).to_shared()),
+            NDArrayNumericTensor::U16(x) => NDArrayNumericTensor::U16(x),
+            NDArrayNumericTensor::I8(x) => NDArrayNumericTensor::I8(x.map(|x| x.abs()).to_shared()),
+            NDArrayNumericTensor::U8(x) => NDArrayNumericTensor::U8(x),
+            _ => return Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("abs".to_string(), vec![self.dtype()])),
+        })
+    }
+
+    pub fn clamp_min(self, min: f32) -> Result<Self, NDArrayNumericTensorError> {
+        Ok(match self {
+            NDArrayNumericTensor::F32(x) => NDArrayNumericTensor::F32(x.map(|x| x.max(min)).to_shared()),
+            NDArrayNumericTensor::F64(x) => NDArrayNumericTensor::F64(x.map(|x| x.max(min as f64)).to_shared()),
+            NDArrayNumericTensor::BF16(x) => NDArrayNumericTensor::BF16(x.map(|x| x.max(bf16::from_f32(min))).to_shared()),
+            NDArrayNumericTensor::F16(x) => NDArrayNumericTensor::F16(x.map(|x| x.max(f16::from_f32(min))).to_shared()),
+            NDArrayNumericTensor::I64(x) => NDArrayNumericTensor::I64(x.map(|x| (*x).max(min as i64)).to_shared()),
+            NDArrayNumericTensor::I32(x) => NDArrayNumericTensor::I32(x.map(|x| (*x).max(min as i32)).to_shared()),
+            NDArrayNumericTensor::I16(x) => NDArrayNumericTensor::I16(x.map(|x| (*x).max(min as i16)).to_shared()),
+            NDArrayNumericTensor::I8(x) => NDArrayNumericTensor::I8(x.map(|x| (*x).max(min as i8)).to_shared()),
+            _ => return Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("clamp_min".to_string(), vec![self.dtype()])),
+        })
+    }
+
     pub fn sigmoid(&self) -> Result<Self, NDArrayNumericTensorError> {
         Self::try_unary_op(self, NativeNumericTensorUnaryOperation::Sigmoid)
     }
@@ -381,6 +477,10 @@ impl NDArrayNumericTensor {
 
     pub fn exp(&self) -> Result<Self, NDArrayNumericTensorError> {
         Self::try_unary_op(self, NativeNumericTensorUnaryOperation::Exp)
+    }
+
+    pub fn log(&self) -> Result<Self, NDArrayNumericTensorError> {
+        Self::try_unary_op(self, NativeNumericTensorUnaryOperation::Log)
     }
 
     pub fn pow(&self, input_exponent: &NDArrayNumericTensor) -> Result<Self, NDArrayNumericTensorError> {
@@ -527,6 +627,16 @@ impl NDArrayNumericTensor {
             NDArrayNumericTensor::BF16(x) => NDArrayNumericTensor::BF16(x.sqrt().to_shared()),
             NDArrayNumericTensor::F16(x) => NDArrayNumericTensor::F16(x.sqrt().to_shared()),
             _ => Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("sqrt".to_string(), vec![self.dtype()]))?
+        })
+    }
+
+    pub fn reciprocal(&self) -> Result<Self, NDArrayNumericTensorError> {
+        Ok(match self {
+            NDArrayNumericTensor::F32(x) => NDArrayNumericTensor::F32(x.recip().to_shared()),
+            NDArrayNumericTensor::F64(x) => NDArrayNumericTensor::F64(x.recip().to_shared()),
+            NDArrayNumericTensor::BF16(x) => NDArrayNumericTensor::BF16(x.recip().to_shared()),
+            NDArrayNumericTensor::F16(x) => NDArrayNumericTensor::F16(x.recip().to_shared()),
+            _ => Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("recip".to_string(), vec![self.dtype()]))?
         })
     }
     
@@ -815,6 +925,20 @@ impl NDArrayNumericTensor {
                     _ => Err(NDArrayNumericTensorError::InvalidCastOperation(self.dtype(), dtype)),
                 }
             }
+        }
+    }
+    
+    pub fn group_norm(&self, scale: &NDArrayNumericTensor, bias: &NDArrayNumericTensor, num_groups: usize, epsilon: f64) -> Result<Self, NDArrayNumericTensorError> {
+        match (self, scale, bias) {
+            (NDArrayNumericTensor::F32(x), NDArrayNumericTensor::F32(scale), NDArrayNumericTensor::F32(bias)) => 
+                Ok(NDArrayNumericTensor::F32(ops::group_normalization(x, scale, bias, num_groups, epsilon)?)),
+            (NDArrayNumericTensor::F64(x), NDArrayNumericTensor::F64(scale), NDArrayNumericTensor::F64(bias)) =>
+                Ok(NDArrayNumericTensor::F64(ops::group_normalization(x, scale, bias, num_groups, epsilon)?)),
+            (NDArrayNumericTensor::BF16(x), NDArrayNumericTensor::BF16(scale), NDArrayNumericTensor::BF16(bias)) =>
+                Ok(NDArrayNumericTensor::BF16(ops::group_normalization(x, scale, bias, num_groups, epsilon)?)),
+            (NDArrayNumericTensor::F16(x), NDArrayNumericTensor::F16(scale), NDArrayNumericTensor::F16(bias)) =>
+                Ok(NDArrayNumericTensor::F16(ops::group_normalization(x, scale, bias, num_groups, epsilon)?)),
+            _ => Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("GroupNorm".to_string(), vec![self.dtype(), scale.dtype(), bias.dtype()]))?
         }
     }
 

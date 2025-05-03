@@ -4,7 +4,7 @@ use onnx_graph::operators::{Add, Concat, Gather, MatMul, Mul, RotaryEmbedding, S
 use onnx_graph::pytorch::{div_scalar, linear, reshape, rms_norm, silu, transpose};
 use onnx_graph::tensor::{DType, Dimension, InputTensor, Shape, Tensor};
 use onnx_graph::weights::{WeightManager};
-use onnx_graph::WeightStorageStrategy;
+use onnx_graph::{InputMetadata, ModelInputType, ModelMetadata, ModelOutputType, OutputMetadata, TokenizerInfo, WeightStorageStrategy};
 use crate::Error;
 
 pub struct Llama3Config {
@@ -37,8 +37,8 @@ pub fn load_llama3(weight_manager: impl WeightManager, config: Llama3Config, out
 
     let model_weight_manager = weight_manager.prefix("model");
 
-    let mut input_tensors: Vec<Arc<dyn Tensor>> = vec![];
-    let mut output_tensors: Vec<(String, Arc<dyn Tensor>)> = vec![];
+    let mut input_tensors: Vec<(Arc<dyn Tensor>, Option<InputMetadata>)> = vec![];
+    let mut output_tensors: Vec<(String, Arc<dyn Tensor>, Option<OutputMetadata>)> = vec![];
 
     let batch_dimension = Dimension::new(Some(1), Some("batch_size".to_string()), Some("DATA_BATCH".to_string()));
     let sequence_dimension = Dimension::new(Some(1), Some("seq_len".to_string()), None);
@@ -50,7 +50,7 @@ pub fn load_llama3(weight_manager: impl WeightManager, config: Llama3Config, out
     ]);
 
     let token_input = InputTensor::new("input_ids".to_string(), DType::I32, input_shape);
-    input_tensors.push(token_input.clone());
+    input_tensors.push((token_input.clone(), Some(InputMetadata{model_input_type: ModelInputType::TokenID(0)})));
 
     let x = Gather::new(Some("embed_tokens".to_string()), model_weight_manager.get_tensor("embed_tokens.weight")?, token_input.clone(), 0)?;
 
@@ -71,6 +71,8 @@ pub fn load_llama3(weight_manager: impl WeightManager, config: Llama3Config, out
     let sin_cache = InputTensor::new("sin_cache".to_string(), kv_cache_input_type, cos_sin_cache_shape.clone());
     let cos_cache = InputTensor::new("cos_cache".to_string(), kv_cache_input_type, cos_sin_cache_shape);
 
+    let mut next_io_id = 0;
+    
     let mut layer_output: Arc<dyn Tensor> = x;
     for i in 0..config.num_hidden_layers {
         let layer_weight_manager = model_weight_manager.prefix(&format!("layers.{}", i));
@@ -87,9 +89,10 @@ pub fn load_llama3(weight_manager: impl WeightManager, config: Llama3Config, out
         let v = Transpose::new(None, reshape(v, vec![0, 0, config.num_key_value_heads as i64, head_dim as i64])?, Some(vec![0, 2, 1, 3]));
 
         let kv_cache_input_k = InputTensor::new(format!("kv_cache_input_k_{}", i), kv_cache_input_type, kv_cache_input_shape.clone());
-        input_tensors.push(kv_cache_input_k.clone());
+        
         let kv_cache_input_v = InputTensor::new(format!("kv_cache_input_v_{}", i), kv_cache_input_type, kv_cache_input_shape.clone());
-        input_tensors.push(kv_cache_input_v.clone());
+        
+        
         let rope_i = ShapeOp::new(None, kv_cache_input_k.clone(), Some(0), Some(2))?;
 
         let q = RotaryEmbedding::new(None, q, cos_cache.clone(), sin_cache.clone(), Some(rope_i.clone()), None, None, None)?;
@@ -102,11 +105,16 @@ pub fn load_llama3(weight_manager: impl WeightManager, config: Llama3Config, out
             new_seq_len_dim,
             k.shape()[3].clone()
         ]);
-        let k = Concat::new_with_output_shape(None, vec![kv_cache_input_k, k], 2, new_shape.clone())?;
-        let v = Concat::new_with_output_shape(None, vec![kv_cache_input_v, v], 2, new_shape)?;
+        let k = Concat::new_with_output_shape(None, vec![kv_cache_input_k.clone(), k], 2, new_shape.clone())?;
+        let v = Concat::new_with_output_shape(None, vec![kv_cache_input_v.clone(), v], 2, new_shape)?;
+
+        input_tensors.push((kv_cache_input_k, Some(InputMetadata{model_input_type: ModelInputType::PreviousInternal(next_io_id)})));
+        output_tensors.push((format!("kv_cache_output_k_{}", i), k.clone(), Some(OutputMetadata{model_output_type: ModelOutputType::NextInternal(next_io_id)})));
+        next_io_id += 1;
         
-        output_tensors.push((format!("kv_cache_output_v_{}", i), v.clone()));
-        output_tensors.push((format!("kv_cache_output_k_{}", i), k.clone()));
+        input_tensors.push((kv_cache_input_v, Some(InputMetadata{model_input_type: ModelInputType::PreviousInternal(next_io_id)})));
+        output_tensors.push((format!("kv_cache_output_v_{}", i), v.clone(), Some(OutputMetadata{model_output_type: ModelOutputType::NextInternal(next_io_id)})));
+        next_io_id += 1;
 
         let (k, v): (Arc<dyn Tensor>, Arc<dyn Tensor>) = if config.num_key_value_heads == config.num_attention_heads {
             (k, v)
@@ -152,9 +160,13 @@ pub fn load_llama3(weight_manager: impl WeightManager, config: Llama3Config, out
 
     let h = rms_norm(&model_weight_manager.prefix("norm"), layer_output, None)?;
     let out = linear(&weight_manager.prefix("lm_head"), h)?;
-    output_tensors.push(("logits".to_string(), out));
+    output_tensors.push(("logits".to_string(), out, Some(OutputMetadata{model_output_type: ModelOutputType::TokenID(0)})));
 
     println!("Built graph, exporting...");
-    let onnx_model = onnx_graph::build_proto(&input_tensors, &output_tensors, output_method)?;
+    let model_metadata = ModelMetadata{
+        tokenizer_infos: vec![TokenizerInfo::HFTokenizer("meta/llama3".to_string())],
+        max_token_batch: Some(1)
+    };
+    let onnx_model = onnx_graph::build_proto(&input_tensors, &output_tensors, output_method, Some(model_metadata))?;
     Ok(onnx_model.encode_to_vec())
 }

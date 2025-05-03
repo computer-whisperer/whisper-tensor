@@ -9,6 +9,8 @@ use std::path::{PathBuf};
 use std::sync::Arc;
 use tensor::*;
 use node::*;
+use serde::{Deserialize, Serialize};
+use crate::onnx::StringStringEntryProto;
 use crate::weights::{WeightExternalOutputManager};
 
 pub mod onnx {
@@ -46,7 +48,9 @@ pub enum Error {
     #[error(transparent)]
     SafeTensorError(#[from] safetensors::SafeTensorError),
     #[error("Other error")]
-    OtherError
+    OtherError,
+    #[error(transparent)]
+    SerdeJsonError(#[from] serde_json::Error)
 }
 
 pub enum WeightStorageStrategy {
@@ -65,15 +69,50 @@ impl WeightStorageStrategy {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ModelInputType {
+    TokenID(usize), // Tokenizer ID number
+    PreviousInternal(usize)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InputMetadata {
+    pub model_input_type: ModelInputType
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ModelOutputType {
+    TokenID(usize), // Tokenizer ID number
+    NextInternal(usize)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutputMetadata {
+    pub model_output_type: ModelOutputType
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum TokenizerInfo {
+    HFTokenizer(String),
+    RWKVWorld
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelMetadata {
+    pub tokenizer_infos: Vec<TokenizerInfo>,
+    pub max_token_batch: Option<usize>
+}
+
 pub fn build_proto(
-    inputs: &[Arc<dyn Tensor>],
-    outputs: &[(String, Arc<dyn Tensor>)],
-    weight_storage: WeightStorageStrategy
+    inputs: &[(Arc<dyn Tensor>, Option<InputMetadata>)],
+    outputs: &[(String, Arc<dyn Tensor>, Option<OutputMetadata>)],
+    weight_storage: WeightStorageStrategy,
+    model_metadata: Option<ModelMetadata>
 ) -> Result<onnx::ModelProto, Error> {
     
     // Get all nodes in graph
     let mut nodes = HashSet::new();
-    for (_, tensor) in outputs {
+    for (_, tensor, _) in outputs {
         tensor.get_nodes(&mut nodes);
     }
     
@@ -102,7 +141,7 @@ pub fn build_proto(
 
     // Get all tensors in graph
     let mut tensors = HashSet::new();
-    for (_, tensor) in outputs {
+    for (_, tensor, _) in outputs {
         tensors.insert(tensor.as_ref());
         tensor.get_sub_tensors(&mut tensors);
     }
@@ -123,7 +162,7 @@ pub fn build_proto(
             tensor_names.insert(*tensor, name);
         }
     }
-    for (name, tensor) in outputs {
+    for (name, tensor, _) in outputs {
         chosen_tensor_names.insert(name.clone());
         tensor_names.insert(tensor.as_ref(), name.clone());
     }
@@ -156,7 +195,7 @@ pub fn build_proto(
     let mut tensors_to_enumerate = vec![];
     for tensor in &tensors {
         // Check if tensor is not in inputs and outputs
-        if !inputs.iter().any(|t| (t.as_ref() as &dyn Tensor) == *tensor) && !outputs.iter().any(|(_, t)| t.as_ref() == *tensor) {
+        if !inputs.iter().any(|(t, _)| (t.as_ref() as &dyn Tensor) == *tensor) && !outputs.iter().any(|(_, t, _)| t.as_ref() == *tensor) {
             tensors_to_enumerate.push(*tensor);
         }
     }
@@ -199,17 +238,33 @@ pub fn build_proto(
         sorted_nodes
     };
     
+    let graph_inputs = inputs.iter().map(|(tensor, metadata)| {
+        let json_str = serde_json::to_string(&metadata).unwrap();
+        tensor.to_value_info_proto(tensor_names[&(tensor.as_ref())].clone(), vec![("whisper_tensor_metadata".to_string(), json_str)])
+    }).collect();
+    let graph_outputs = outputs.iter().map(|(name, tensor, metadata)| {
+        let json_str = serde_json::to_string(&metadata).unwrap();
+        tensor.to_value_info_proto(name.to_string(), vec![("whisper_tensor_metadata".to_string(), json_str)])
+    }).collect();
+    
     
     let graph = onnx::GraphProto {
         name: "model".to_string(),
         node: sorted_nodes.iter().map(|node| node.to_node_proto(node_names.get(node).map(|name| name.clone()), &tensor_names)).collect(),
         initializer: initializers,
         doc_string: String::new(),
-        input: inputs.iter().map(|tensor| tensor.to_value_info_proto(tensor_names[&(tensor.as_ref() as &dyn Tensor)].clone())).collect(),
-        output: outputs.iter().map(|(name, tensor)| tensor.to_value_info_proto(name.to_string())).collect(),
-        value_info: tensors_to_enumerate.iter().map(|tensor| tensor.to_value_info_proto(tensor_names.get(tensor).unwrap().to_string())).collect(),
+        input: graph_inputs,
+        output: graph_outputs,
+        value_info: tensors_to_enumerate.iter().map(|tensor| tensor.to_value_info_proto(tensor_names.get(tensor).unwrap().to_string(), vec![])).collect(),
         metadata_props: vec![],
         .. Default::default()
+    };
+    
+    let model_metadata = if let Some(metadata) = model_metadata {
+        let json_str = serde_json::to_string(&metadata)?;
+        vec![StringStringEntryProto{key: "whisper_tensor_metadata".to_string(), value: json_str}]
+    } else {
+        vec![]
     };
 
     let own_version = env!("CARGO_PKG_VERSION").to_string();
@@ -221,7 +276,7 @@ pub fn build_proto(
         model_version: 0,
         doc_string: String::new(),
         graph: Some(graph),
-        metadata_props: vec![],
+        metadata_props: model_metadata,
         training_info: vec![],
         functions: vec![],
         .. Default::default()

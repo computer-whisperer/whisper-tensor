@@ -34,7 +34,7 @@ impl NullOutputManager {
 }
 
 impl <'a> WeightExternalOutputManager<'a> for NullOutputManager {
-    fn write_pth_tensor_data(&mut self, _graph_tensor: &'a dyn Tensor, _tensor_info: candle_core::pickle::TensorInfo, tensors: Arc<candle_core::pickle::PthTensors>) -> Result<(), Error> {
+    fn write_pth_tensor_data(&mut self, _graph_tensor: &'a dyn Tensor, _tensor_info: candle_core::pickle::TensorInfo, _tensors: Arc<candle_core::pickle::PthTensors>) -> Result<(), Error> {
         Ok(())
     }
     fn write_safetensors_tensor_data(&mut self, _graph_tensor: &'a SafetensorsTensor) -> Result<(), Error> {

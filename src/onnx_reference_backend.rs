@@ -30,6 +30,10 @@ impl ONNXReferenceTensor {
         todo!()
     }
     
+    pub fn rank(&self) -> usize {
+        self.shape().len()
+    }
+    
     pub fn shape(&self) -> Vec<usize> {
         Python::with_gil(|py| {
             let value = self.value.bind(py);

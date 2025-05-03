@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use crate::dtype::DTypeError;
+use crate::dtype::{DType, DTypeError};
 use crate::numeric_tensor::NumericTensor;
 use crate::symbolic_graph::{Dimension, GraphOperation, OperationId, SymbolicGraph, TensorId, TensorInfo};
 use crate::symbolic_graph::ops::{EvalError, Operation};
@@ -23,6 +23,14 @@ pub enum EvalRuntimeError {
     DisabledBackend(EvalBackend),
     #[error(transparent)]
     DTypeError(#[from] DTypeError),
+    #[error("Unexpected shape: expected {0:?}, got {1:?} in shape {2:?}")]
+    UnexpectedDimension(usize, usize, Vec<usize>),
+    #[error("Unexpected rank: expected {0}, got {1}")]
+    UnexpectedRank(usize, usize),
+    #[error("Unexpected dtype: expected {0}, got {1}")]
+    UnexpectedDType(DType, DType),
+    #[error("Missing input tensor: {0} {1:?} {2:?}")]
+    MissingInputTensor(String, Option<DType>, Option<Vec<usize>>),
     #[error("Eval Error: {0:?} {1}")]
     EvalError(Option<String>, EvalError)
 }
@@ -32,18 +40,25 @@ pub struct EvalRuntime {
     model: SymbolicGraph
 }
 
-fn check_tensor_matches(tensor: &NumericTensor, tensor_info: &TensorInfo) -> Result<(), DTypeError> {
+fn check_tensor_matches(tensor: &NumericTensor, tensor_info: &TensorInfo) -> Result<(), EvalRuntimeError> {
     if let Some(shape) = tensor_info.shape() {
-        assert_eq!(shape.len(), tensor.shape().len());
+        if shape.len() != tensor.shape().len() {
+            Err(EvalRuntimeError::UnexpectedRank(shape.len(), tensor.shape().len()))?;
+        }
         for (a, b) in shape.iter().zip(tensor.shape()) {
             match a {
-                Dimension::Known(a) => assert_eq!(*a, b),
+                Dimension::Known(a) => if *a != b {
+                    Err(EvalRuntimeError::UnexpectedDimension(*a, b, tensor.shape()))?
+                },
                 Dimension::Unknown(_) => {}
             }
         }
     }
     if let Some(dtype) = tensor_info.dtype() {
-        assert_eq!(dtype, tensor.dtype()?);
+        let tensor_dtype =  tensor.dtype()?;
+        if dtype != tensor_dtype {
+            Err(EvalRuntimeError::UnexpectedDType(dtype, tensor_dtype))?
+        }
     }
     Ok(())
 }
@@ -63,6 +78,23 @@ impl EvalRuntime {
         })
     }
 
+    pub fn get_input_tensor_info(&self) -> Result<HashMap<String, (DType, Vec<Option<usize>>)>, EvalRuntimeError> {
+        let input_ids = self.model.get_inputs();
+        let mut results = HashMap::new();
+        for tensor_id in input_ids {
+            if let Some(tensor_info) = self.model.get_tensor_info(tensor_id) {
+                if let (Some(dtype), Some(name), Some(shape)) = (tensor_info.dtype(), tensor_info.name(), tensor_info.shape()) {
+                    let shape: Vec<_> = shape.iter().map(|x| match x {
+                        Dimension::Known(x) => Some(*x),
+                        Dimension::Unknown(_) => None
+                    }).collect();
+                    results.insert(name, (dtype, shape));
+                }
+            }
+        }
+        Ok(results)
+    }
+
     pub fn get_eval_backend(&self) -> &EvalBackend {
         &self.eval_backend
     }
@@ -78,8 +110,6 @@ impl EvalRuntime {
             if let Some(tensor_id) = tensors_by_name.get(&name) {
                 active_tensors.insert(*tensor_id, tensor);
             }
-            else {
-            }
         }
 
         let ops = self.model.get_operations();
@@ -91,14 +121,14 @@ impl EvalRuntime {
             for op_id in &remaining_ops_to_complete {
                 let GraphOperation{ name, op } = ops.get(op_id).unwrap();
                 let input_ids = op.get_inputs();
-                let mut input_values = Vec::new();
+                let mut input_values = HashMap::new();
                 // Collect all inputs, abort if we can't do this one yet
                 for tensor_id in &input_ids {
                     if let Some(value) = active_tensors.get(&tensor_id) {
                         // Validate shape and dtype
                         let tensor_info = self.model.get_tensor_info(*tensor_id).unwrap();
                         check_tensor_matches(value, tensor_info)?;
-                        input_values.push(value)
+                        input_values.insert(*tensor_id, value.clone());
                     }
                     else {
                         // Can't do this one yet
@@ -109,13 +139,12 @@ impl EvalRuntime {
                     continue
                 }
                 let outputs = op.eval(&self.eval_backend, &input_values).map_err(|x| EvalRuntimeError::EvalError(name.clone(), x))?;
-                let output_ids = op.get_outputs();
-                for (tensor_id, value) in output_ids.iter().zip(outputs) {
+                for (tensor_id, value) in outputs {
                     // Validate shape and dtype
-                    let tensor_info = self.model.get_tensor_info(*tensor_id).unwrap();
+                    let tensor_info = self.model.get_tensor_info(tensor_id).unwrap();
                     check_tensor_matches(&value, tensor_info)?;
                     
-                    active_tensors.insert(*tensor_id, value);
+                    active_tensors.insert(tensor_id, value);
                 }
                 ops_completed_now.push(*op_id)
             }

@@ -3,7 +3,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use crate::{onnx, Error};
 use crate::node::{Node, SingleOutputNode};
-use crate::onnx::{TensorProto, ValueInfoProto};
+use crate::onnx::{StringStringEntryProto, TensorProto, ValueInfoProto};
 use crate::weights::WeightExternalOutputManager;
 use core::fmt;
 
@@ -251,7 +251,7 @@ pub trait Tensor  {
     fn rank(&self) -> usize {
         self.shape().rank()
     }
-    fn to_value_info_proto(&self, name: String) -> ValueInfoProto {
+    fn to_value_info_proto(&self, name: String, metadata: Vec<(String, String)>) -> ValueInfoProto {
         ValueInfoProto{
             name,
             r#type: Some(
@@ -265,7 +265,8 @@ pub trait Tensor  {
                     denotation: "TENSOR".to_string()
                 }
             ),
-            .. Default::default()
+            doc_string: String::new(),
+            metadata_props: metadata.into_iter().map(|(key, value)| StringStringEntryProto{key, value}).collect()
         }
     }
 

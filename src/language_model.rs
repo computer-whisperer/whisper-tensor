@@ -1,41 +1,57 @@
 use std::collections::HashMap;
+use std::io;
+use std::sync::Arc;
+use rwkv_tokenizer::WorldTokenizer;
+use onnx_graph::{ModelInputType, ModelOutputType, TokenizerInfo};
 use crate::numeric_tensor::NumericTensor;
 use crate::tokenizer::Tokenizer;
-use crate::{RuntimeError, RuntimeModel};
+use crate::{RuntimeError, RuntimeModel, RuntimeModelInner};
 use crate::eval_backend::EvalBackend;
 use crate::sampler::Sampler;
 
+#[derive(Debug, thiserror::Error)]
+pub enum LanguageModelManagerError {
+    #[error(transparent)]
+    TokenizersError(#[from] tokenizers::Error),
+    #[error(transparent)]
+    RWKVWorldTokenizerError(#[from] io::Error)
+}
+
+#[derive(Debug, Clone)]
+pub struct LangaugeModelIntermediateValues {
+    values: HashMap<usize, NumericTensor>
+}
 
 pub struct LanguageModelManager {
     model: RuntimeModel,
-    token_context: Option<NumericTensor>,
-    input_name: String,
-    output_name: String,
+    tokenizer: Option<Arc<dyn Tokenizer>>
 }
 
 impl LanguageModelManager {
-    pub fn new(model: RuntimeModel, input_name: &str, output_name: &str) -> Self {
-        Self { 
-            model,
-            token_context: None,
-            input_name: input_name.to_string(),
-            output_name: output_name.to_string()
+    pub fn new(model: RuntimeModel) -> Result<Self, LanguageModelManagerError> {
+        let mut tokenizer: Option<Arc<dyn Tokenizer>> = None;
+        if let Some(meta) = &model.model_metadata {
+            if let Some(tokenizer_info) = meta.tokenizer_infos.get(0) {
+                match tokenizer_info {
+                    TokenizerInfo::HFTokenizer(name) => {
+                        let x = Arc::new(tokenizers::Tokenizer::from_pretrained(name, None)?);
+                        tokenizer = Some(x);
+                    }
+                    TokenizerInfo::RWKVWorld => {
+                        let x = Arc::new(WorldTokenizer::new(None)?);
+                        tokenizer = Some(x);
+                    }
+                }
+            }
         }
+        Ok(Self { 
+            model,
+            tokenizer
+        })
     }
     
-    pub fn run<S: Sampler>(&mut self, input_tokens: NumericTensor, sampler: &mut S) -> Result<NumericTensor, RuntimeError> {
-        let input_tokens = if let Some(token_context) = &self.token_context {
-            NumericTensor::concat(&[token_context, &input_tokens], input_tokens.shape().len()-1, &EvalBackend::NDArray)?
-        } else {
-            input_tokens
-        };
-        
-        let input_tensors = HashMap::from([(self.input_name.clone(), input_tokens)]);
-        
-        let output_tensors = self.model.run(input_tensors)?;
-        
-        let output_tensor = output_tensors.get(&self.output_name).unwrap();
-        
+    pub fn run<S: Sampler>(&mut self, input_tokens: NumericTensor, input_intermediate_values: Option<LangaugeModelIntermediateValues>, sampler: &mut S) -> Result<(NumericTensor, LangaugeModelIntermediateValues), RuntimeError> {
+        let (output_tensor, output_intermediate_values) = self.forward(input_tokens, input_intermediate_values)?;
         let shape = output_tensor.shape();
         let mut output_slice = Vec::new();
         for i in 0..shape.len()-1 {
@@ -44,15 +60,76 @@ impl LanguageModelManager {
         output_slice.push(0..shape[shape.len()-1]);
         let sliced_output_tensor = output_tensor.slice(&output_slice, &EvalBackend::NDArray)?;
         let output_tensor_sampled = sampler.sample(&sliced_output_tensor)?;
+        Ok((output_tensor_sampled, output_intermediate_values))
+    } 
+    
+    pub fn forward(&mut self, input_tokens: NumericTensor, intermediate_values: Option<LangaugeModelIntermediateValues>) -> Result<(NumericTensor, LangaugeModelIntermediateValues), RuntimeError> {
+        let input_shape = input_tokens.shape();
+        let input_sequence_len = input_shape[1];
+        let mut input_tokens_processed = 0;
+        let mut output_chunks = vec![];
         
-        Ok(output_tensor_sampled)
+        let max_sequence_len = self.model.model_metadata.clone().map(|x| x.max_token_batch).flatten().unwrap_or(input_sequence_len);
+        let mut intermediate_values = intermediate_values.clone();
+        
+        let input_tensor_infos = self.model.get_input_tensor_info()?;
+        
+        while input_tokens_processed < input_sequence_len {
+            let chunk_size = max_sequence_len.min(input_sequence_len - input_tokens_processed);
+            let mut slice_indices: Vec<_> = input_shape.iter().map(|x| 0..*x).collect();
+            slice_indices[1] = (input_tokens_processed..(input_tokens_processed + chunk_size));
+            let input_tokens_chunk = input_tokens.slice(slice_indices.as_slice(), &EvalBackend::NDArray)?;
+
+            let mut input_tensors = HashMap::new();
+            for (name, meta) in &self.model.model_inputs {
+                if let Some(meta) = meta {
+                    match meta.model_input_type {
+                        ModelInputType::TokenID(_) => {
+                            let info = input_tensor_infos.get(name);
+                            let input_chunk = if let Some((dtype, _)) = info {
+                                input_tokens_chunk.cast(*dtype, &EvalBackend::NDArray)?
+                            } else {
+                                input_tokens_chunk.clone()
+                            };
+                            input_tensors.insert(name.clone(), input_chunk);
+                        }
+                        ModelInputType::PreviousInternal(x) => {
+                            if let Some(intermediate_values) = &intermediate_values {
+                                if let Some(tensor) = intermediate_values.values.get(&x) {
+                                    input_tensors.insert(name.clone(), tensor.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            let output_tensors = self.model.run(input_tensors)?;
+
+            let mut output_tensor = None;
+            let mut output_intermediate_values = HashMap::new();
+            for (name, meta) in &self.model.model_outputs {
+                if let (Some(meta), Some(tensor)) = (meta, output_tensors.get(name)) {
+                    match meta.model_output_type {
+                        ModelOutputType::TokenID(_) => {
+                            output_tensor = Some(tensor.clone());
+                        }
+                        ModelOutputType::NextInternal(i) => {
+                            output_intermediate_values.insert(i, tensor.clone());
+                        }
+                    }
+                }
+            }
+            input_tokens_processed += chunk_size;
+            output_chunks.push(output_tensor.unwrap());
+            intermediate_values = Some(LangaugeModelIntermediateValues { values: output_intermediate_values });
+        }
+        let tmp: Vec<_> = output_chunks.iter().collect(); 
+        let output_tensor = NumericTensor::concat(tmp.as_slice(), 1, &EvalBackend::NDArray)?;
+        Ok((output_tensor, intermediate_values.unwrap()))
     }
     
-    pub fn push_context(&mut self, context: NumericTensor) {
-        self.token_context = if let Some(token_context) = &self.token_context {
-            Some(NumericTensor::concat(&[token_context, &context], context.shape().len()-1, &EvalBackend::NDArray).unwrap())
-        } else {
-            Some(context)
-        }
+    pub fn get_tokenizer(&self) -> Option<Arc<dyn Tokenizer>> {
+        self.tokenizer.clone()
     }
 }

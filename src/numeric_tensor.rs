@@ -4,7 +4,7 @@ use std::ops::Range;
 use crate::dtype::{DType, DTypeError};
 use crate::eval_backend::EvalBackend;
 use crate::ndarray_backend::{NDArrayNumericTensor, NDArrayNumericTensorError};
-use crate::ndarray_backend::conversions::FromVecShape;
+use crate::ndarray_backend::conversions::{FromVecShape};
 
 #[cfg(feature = "candle")]
 use crate::candle_backend;
@@ -50,7 +50,11 @@ impl NumericTensor {
             Ok(candle_backend::load_to_device(&NDArrayNumericTensor::try_from(self)?, device)?)
         }
     }
-    
+
+    pub fn to_ndarray(&self) -> Result<NDArrayNumericTensor, NumericTensorError> {
+        Ok(NDArrayNumericTensor::try_from(self)?)
+    }
+
     pub fn dtype(&self) -> Result<DType, DTypeError> {
         Ok(match self {
             NumericTensor::NDArray(x) => x.dtype(),
@@ -72,6 +76,18 @@ impl NumericTensor {
             NumericTensor::Candle(x) => x.shape().dims().to_vec(),
             #[cfg(feature = "ort")]
             NumericTensor::ORT(x) => x.shape(),
+        }
+    }
+
+    pub fn rank(&self) -> usize {
+        match self {
+            NumericTensor::NDArray(x) => x.rank(),
+            #[cfg(feature = "onnx-reference")]
+            NumericTensor::ONNXReference(x) => x.rank(),
+            #[cfg(feature = "candle")]
+            NumericTensor::Candle(x) => x.rank(),
+            #[cfg(feature = "ort")]
+            NumericTensor::ORT(x) => x.rank(),
         }
     }
     
@@ -138,6 +154,10 @@ impl NumericTensor {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::add(&a.try_into()?, &b.try_into()?)?))
     }
 
+    pub fn add_f32(a: &NumericTensor, b: f32, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
+        Ok(NumericTensor::NDArray(NDArrayNumericTensor::add_f32(&a.try_into()?, b)?))
+    }
+
     pub fn sub(a: &NumericTensor, b: &NumericTensor, backend: &EvalBackend) -> Result<Self, NumericTensorError> {
         #[cfg(feature = "candle")]
         if let EvalBackend::Candle(device) = backend {
@@ -154,12 +174,20 @@ impl NumericTensor {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::div(&a.try_into()?, &b.try_into()?)?))
     }
 
+    pub fn div_f32(a: &NumericTensor, b: f32, backend: &EvalBackend) -> Result<Self, NumericTensorError> {
+        Ok(NumericTensor::NDArray(NDArrayNumericTensor::div_f32(&a.try_into()?, b)?))
+    }
+
     pub fn mul(a: &NumericTensor, b: &NumericTensor, backend: &EvalBackend) -> Result<Self, NumericTensorError> {
         #[cfg(feature = "candle")]
         if let EvalBackend::Candle(device) = backend {
             return Ok(NumericTensor::Candle((a.to_candle(device)?*b.to_candle(device)?)?))
         }
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::mul(&a.try_into()?, &b.try_into()?)?))
+    }
+
+    pub fn mul_f32(a: &NumericTensor, b: f32, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
+        Ok(NumericTensor::NDArray(NDArrayNumericTensor::mul_f32(&a.try_into()?, b)?))
     }
 
     pub fn matmul(a: &NumericTensor, b: &NumericTensor, backend: &EvalBackend) -> Result<Self, NumericTensorError> {
@@ -194,6 +222,22 @@ impl NumericTensor {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::try_from(self)?.exp()?))
     }
 
+    pub fn log(&self, backend: &EvalBackend) -> Result<Self, NumericTensorError> {
+        Ok(NumericTensor::NDArray(NDArrayNumericTensor::try_from(self)?.log()?))
+    }
+
+    pub fn abs(&self, backend: &EvalBackend) -> Result<Self, NumericTensorError> {
+        #[cfg(feature = "candle")]
+        if let EvalBackend::Candle(device) = backend {
+            return Ok(NumericTensor::Candle(self.to_candle(device)?.abs()?))
+        }
+        Ok(NumericTensor::NDArray(NDArrayNumericTensor::try_from(self)?.abs()?))
+    }
+    
+    pub fn clamp_min(&self, min: f32, backend: &EvalBackend) -> Result<Self, NumericTensorError>  {
+        Ok(NumericTensor::NDArray(NDArrayNumericTensor::try_from(self)?.clamp_min(min)?))
+    }
+
     pub fn sigmoid(&self, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::try_from(self)?.sigmoid()?))
     }
@@ -210,8 +254,16 @@ impl NumericTensor {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::try_from(self)?.softplus()?))
     }
 
+    pub fn group_norm(&self, scale: &NumericTensor, bias: &NumericTensor, num_groups: usize, epsilon: f64, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
+        Ok(NumericTensor::NDArray(NDArrayNumericTensor::try_from(self)?.group_norm(&scale.try_into()?, &bias.try_into()?, num_groups, epsilon)?))
+    }
+
     pub fn nonzero(&self, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::try_from(self)?.nonzero()?))
+    }
+
+    pub fn reciprocal(&self, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
+        Ok(NumericTensor::NDArray(NDArrayNumericTensor::try_from(self)?.reciprocal()?))
     }
 
     pub fn sqrt(&self, backend: &EvalBackend) -> Result<Self, NumericTensorError> {
@@ -227,7 +279,7 @@ impl NumericTensor {
         if let EvalBackend::Candle(device) = backend {
             return Ok(NumericTensor::Candle(self.to_candle(device)?.pow(&exponent.to_candle(device)?)?))
         }
-        Ok(NumericTensor::NDArray(NDArrayNumericTensor::try_from(self)?.pow(&NDArrayNumericTensor::try_from(self)?)?))
+        Ok(NumericTensor::NDArray(NDArrayNumericTensor::try_from(self)?.pow(&NDArrayNumericTensor::try_from(exponent)?)?))
     }
     
     pub fn cast(&self, dtype: DType, backend: &EvalBackend) -> Result<Self, NumericTensorError> {
@@ -273,6 +325,10 @@ impl NumericTensor {
     
     pub fn where_op(&self, a: &NumericTensor, b: &NumericTensor, backend: &EvalBackend) -> Result<NumericTensor, NumericTensorError> {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::try_from(self)?.where_op(&a.try_into()?, &b.try_into()?)?))
+    }
+
+    pub fn flatten(&self) -> Result<NumericTensor, NumericTensorError> {
+        Ok(NumericTensor::NDArray(NDArrayNumericTensor::try_from(self)?.flatten()?))
     }
 }
 
@@ -328,4 +384,8 @@ impl From<NDArrayNumericTensor> for NumericTensor {
     fn from(x: NDArrayNumericTensor) -> Self {
         NumericTensor::NDArray(x)
     }
+}
+
+pub trait TryToFlatVec<T> {
+    fn try_to_flat_vec(&self) -> Result<Vec<T>, NDArrayNumericTensorError>;
 }

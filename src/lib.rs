@@ -1,8 +1,12 @@
 use std::collections::HashMap;
-use crate::dtype::DType;
+use ort::session::Input;
+use prost::{DecodeError, Message};
+use onnx_graph::{InputMetadata, ModelMetadata, OutputMetadata};
+use crate::dtype::{DType, DTypeError};
 use crate::eval_backend::{EvalBackend, EvalRuntime, EvalRuntimeError};
 use crate::ndarray_backend::NDArrayNumericTensorError;
 use crate::numeric_tensor::{NumericTensor, NumericTensorError};
+use crate::onnx::{ModelProto, StringStringEntryProto};
 use crate::ort_backend::ORTNumericTensor;
 use crate::sampler::SamplerError;
 use crate::symbolic_graph::{ONNXDecodingError, SymbolicGraphMutator};
@@ -17,6 +21,7 @@ pub mod language_model;
 pub mod tokenizer;
 pub mod eval_backend;
 mod ndarray_backend;
+mod onnx_testing;
 
 #[cfg(feature = "ort")]
 pub mod ort_backend;
@@ -43,7 +48,14 @@ impl core::fmt::Display for RuntimeBackend {
     }
 }
 
-pub enum RuntimeModel {
+pub struct RuntimeModel {
+    inner: RuntimeModelInner,
+    model_metadata: Option<ModelMetadata>,
+    model_inputs: HashMap<String, Option<InputMetadata>>,
+    model_outputs: HashMap<String, Option<OutputMetadata>>,
+}
+
+enum RuntimeModelInner {
     #[cfg(feature = "onnx-reference")]
     ONNXReference(onnx_reference_backend::ONNXReferenceBackend),
     #[cfg(feature = "ort")]
@@ -53,16 +65,16 @@ pub enum RuntimeModel {
     Eval(EvalRuntime)
 }
 
-impl From<RuntimeModel> for RuntimeBackend {
-    fn from(value: RuntimeModel) -> Self {
+impl From<RuntimeModelInner> for RuntimeBackend {
+    fn from(value: RuntimeModelInner) -> Self {
         match value {
             #[cfg(feature = "onnx-reference")]
-            RuntimeModel::ONNXReference(_) => RuntimeBackend::ONNXReference,
+            RuntimeModelInner::ONNXReference(_) => RuntimeBackend::ONNXReference,
             #[cfg(feature = "ort")]
-            RuntimeModel::ORT(_) => RuntimeBackend::ORT,
+            RuntimeModelInner::ORT(_) => RuntimeBackend::ORT,
             #[cfg(feature = "candle")]
-            RuntimeModel::Candle(_) => RuntimeBackend::Candle,
-            RuntimeModel::Eval(x) => RuntimeBackend::Eval(x.get_eval_backend().clone()),
+            RuntimeModelInner::Candle(_) => RuntimeBackend::Candle,
+            RuntimeModelInner::Eval(x) => RuntimeBackend::Eval(x.get_eval_backend().clone()),
         }
     }
 }
@@ -99,7 +111,13 @@ pub enum RuntimeError {
     #[error(transparent)]
     EvalRuntimeError(#[from] EvalRuntimeError),
     #[error(transparent)]
-    Other(#[from] anyhow::Error)
+    DTypeError(#[from] DTypeError),
+    #[error("Other error: {0}")]
+    OtherAnyhow(#[from] anyhow::Error),
+    #[error(transparent)]
+    DecodeError(#[from] DecodeError),
+    #[error(transparent)]
+    SerdeJSONError(#[from] serde_json::Error)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -109,11 +127,11 @@ pub struct RuntimeEnvironment {
 
 impl RuntimeModel {
     pub fn load_onnx(onnx_data: &[u8], runtime: RuntimeBackend, runtime_environment: RuntimeEnvironment) -> Result<Self, RuntimeError> {
-        match runtime {
+        let inner = match runtime {
             #[cfg(feature = "onnx-reference")]
             RuntimeBackend::ONNXReference => {
                 let backend = onnx_reference_backend::ONNXReferenceBackend::new(onnx_data)?;
-                Ok(RuntimeModel::ONNXReference(backend))
+                RuntimeModelInner::ONNXReference(backend)
             }
             #[cfg(feature = "ort")]
             RuntimeBackend::ORT => {
@@ -123,29 +141,76 @@ impl RuntimeModel {
                 if runtime_environment.cuda {
                     builder = builder.with_execution_providers([ort::execution_providers::CUDAExecutionProvider::default().build()])?;
                 }
-                Ok(RuntimeModel::ORT(builder.commit_from_memory(&onnx_data)?))
+                RuntimeModelInner::ORT(builder.commit_from_memory(&onnx_data)?)
             }
             #[cfg(feature = "candle")]
             RuntimeBackend::Candle => {
                 // Emit to some temp file because bs
                 let temp_file = tempfile::NamedTempFile::new().map_err(|e| anyhow::anyhow!(e))?;
                 std::fs::write(temp_file.path(), onnx_data).map_err(|e| anyhow::anyhow!(e))?;
-                Ok(RuntimeModel::Candle(candle_onnx::read_file(temp_file.path()).map_err(|e| anyhow::anyhow!(e))?))
+                RuntimeModelInner::Candle(candle_onnx::read_file(temp_file.path()).map_err(|e| anyhow::anyhow!(e))?)
             }
             RuntimeBackend::Eval(eval_backend) => {
                 let model = SymbolicGraphMutator::from_onnx_bytes(onnx_data)?.get_inner();
-                Ok(RuntimeModel::Eval(EvalRuntime::new(model, eval_backend)?))
+                RuntimeModelInner::Eval(EvalRuntime::new(model, eval_backend)?)
             }
             _ => {
-                Err(RuntimeError::DisabledBackend(runtime))
+                Err(RuntimeError::DisabledBackend(runtime))?
             }
-        }
+        };
+        let (model_meta, inputs, outputs) = match &inner {
+            _ => {
+                // Decode anew and extract
+                let model_info = ModelProto::decode(onnx_data)?;
+                let mut model_meta = None;
+                for StringStringEntryProto{key, value} in model_info.metadata_props {
+                    if key == "whisper_tensor_metadata" {
+                        let model_metadata: ModelMetadata = serde_json::from_str(&value)?;
+                        model_meta = Some(model_metadata);
+                    }
+                }
+                let mut inputs = HashMap::new();
+                let mut outputs = HashMap::new();
+                if let Some(graph) = model_info.graph {
+                    for input in graph.input {
+                        if !input.name.is_empty() {
+                            let mut meta = None;
+                            for StringStringEntryProto{key, value} in input.metadata_props {
+                                if key == "whisper_tensor_metadata" {
+                                    meta = Some(serde_json::from_str(&value)?);
+                                }
+                            }
+                            inputs.insert(input.name.clone(), meta);
+                        }
+                    }
+                    for output in graph.output {
+                        if !output.name.is_empty() {
+                            let mut meta = None;
+                            for StringStringEntryProto{key, value} in output.metadata_props {
+                                if key == "whisper_tensor_metadata" {
+                                    meta = Some(serde_json::from_str(&value)?);
+                                }
+                            }
+                            outputs.insert(output.name.clone(), meta);
+                        }
+                    }
+                }
+                (model_meta, inputs, outputs)
+            }
+        };
+        
+        Ok(Self{
+            inner,
+            model_metadata: model_meta,
+            model_inputs: inputs,
+            model_outputs: outputs
+        })
     }
 
     pub fn run(&mut self, inputs: HashMap<String, NumericTensor>) -> Result<HashMap<String, NumericTensor>, RuntimeError> {
-        match self {
+        match &mut self.inner {
             #[cfg(feature = "onnx-reference")]
-            RuntimeModel::ONNXReference(session) => {
+            RuntimeModelInner::ONNXReference(session) => {
                 let mut converted_inputs = HashMap::new();
                 for (name, tensor) in inputs {
                     converted_inputs.insert(name, tensor.try_into()?);
@@ -158,7 +223,7 @@ impl RuntimeModel {
                 Ok(output_tensors)
             }
             #[cfg(feature = "ort")]
-            RuntimeModel::ORT(session) => {
+            RuntimeModelInner::ORT(session) => {
                 // Run the session
                 let mut converted_inputs: HashMap<String, ort::value::DynValue> = HashMap::new();
                 for (key, tensor) in inputs.into_iter() {
@@ -172,7 +237,7 @@ impl RuntimeModel {
                 Ok(output_tensors)
             }
             #[cfg(feature = "candle")]
-            RuntimeModel::Candle(model) => {
+            RuntimeModelInner::Candle(model) => {
                 let mut converted_inputs = HashMap::new();
                 for (key, tensor) in inputs {
                     converted_inputs.insert(key.to_string(), candle_core::Tensor::try_from(tensor)?);
@@ -184,7 +249,7 @@ impl RuntimeModel {
                 }
                 Ok(output_tensors)
             }
-            RuntimeModel::Eval(runtime) => {
+            RuntimeModelInner::Eval(runtime) => {
                 let mut converted_inputs = HashMap::new();
                 for (key, tensor) in inputs {
                     converted_inputs.insert(key.to_string(), tensor);
@@ -203,10 +268,13 @@ impl RuntimeModel {
     }
     
     pub fn get_input_tensor_info(&self) -> Result<HashMap<String, (DType, Vec<Option<usize>>)>, RuntimeError> {
-        match self {
+        match &self.inner {
             #[cfg(feature = "onnx-reference")]
-            RuntimeModel::ONNXReference(session) => {
+            RuntimeModelInner::ONNXReference(session) => {
                 Ok(session.get_input_tensor_info()?)
+            }
+            RuntimeModelInner::Eval(runtime) => {
+                Ok(runtime.get_input_tensor_info()?)
             }
             _ => {
                 todo!()

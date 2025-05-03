@@ -5,7 +5,7 @@ use std::path::Path;
 use llm_samplers::prelude::{SampleFreqPresence, SampleGreedy, SampleTemperature, SamplerChain, SimpleSamplerResources};
 use tokenizers::Tokenizer;
 use onnx_graph::WeightStorageStrategy;
-use onnx_import::identify_and_load;
+use onnx_import::{identify_and_load, ModelTypeHint};
 use rand::prelude::StdRng;
 use rand::SeedableRng;
 use rwkv_tokenizer::WorldTokenizer;
@@ -22,16 +22,16 @@ fn main() {
     let input_path = Path::new("/ceph-fuse/public/neural_models/llms/rwkv7-g1/rwkv7-g1-0.1b-20250307-ctx4096.pth");
     let onnx_out = Path::new("out.onnx");
     let bin_out = Path::new("out.bin");
-    let onnx_data = identify_and_load(input_path, WeightStorageStrategy::BinFile(bin_out.to_path_buf())).unwrap();
+    let onnx_data = identify_and_load(input_path, WeightStorageStrategy::BinFile(bin_out.to_path_buf()), Some(ModelTypeHint::RWKV7)).unwrap();
     File::create(onnx_out).unwrap().write_all(&onnx_data).unwrap();
 
     let runtime = RuntimeModel::load_onnx(&onnx_data, RuntimeBackend::ORT, Default::default()).unwrap();
-    let mut llm = LanguageModelManager::new(runtime, "input1", "output1");
+    let mut llm = LanguageModelManager::new(runtime).unwrap();
 
-    let tokenizer = WorldTokenizer::new(None).unwrap();
+    let tokenizer = llm.get_tokenizer().unwrap();
 
     let prompt = "The fibbonacci sequence is: 1, 1, 2, 3, 5, 8, 13,";
-    let input = whisper_tensor::tokenizer::Tokenizer::encode(&tokenizer, prompt).iter().map(|x| *x as i64).collect::<Vec<_>>();
+    let input = tokenizer.encode(prompt).iter().map(|x| *x as i64).collect::<Vec<_>>();
     let input_tensor = NumericTensor::from_vec1(input).unsqueeze(0, &EvalBackend::NDArray).unwrap().unsqueeze(0, &EvalBackend::NDArray).unwrap();
 
     let mut sampler = {
@@ -51,8 +51,8 @@ fn main() {
         }
     };
 
-    let output = llm.run(input_tensor.clone(), &mut sampler).unwrap();
+    let (output, _) = llm.run(input_tensor.clone(), None, &mut sampler).unwrap();
     let output_values: Vec<u32> = output.squeeze(0, &EvalBackend::NDArray).unwrap().squeeze(0, &EvalBackend::NDArray).unwrap().try_into().unwrap();
-    let output = whisper_tensor::tokenizer::Tokenizer::decode(&tokenizer, &output_values).unwrap();
+    let output = tokenizer.decode(&output_values).unwrap();
     println!("{}", output);
 }

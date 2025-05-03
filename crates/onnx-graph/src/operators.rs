@@ -316,7 +316,7 @@ impl Gather {
             }
             else {
                 if indices_shape.rank() > 1 || indices_shape[0].resolve()? > 1 {
-                    output_shape.extend_from_slice(&indices_shape.dims[0..indices_shape.rank()-1])
+                    output_shape.extend_from_slice(&indices_shape.dims[0..indices_shape.rank()])
                 }
             }
             data_i += 1;
@@ -1741,6 +1741,92 @@ impl Node for CumSum {
 }
 
 impl SingleOutputNode for CumSum {
+    fn get_output_shape(&self) -> &Shape {
+        &self.output_shape
+    }
+
+    fn get_output_dtype(&self) -> DType {
+        self.data_input.dtype()
+    }
+}
+
+pub struct ReduceSum {
+    name: Option<String>,
+    data_input: Arc<dyn Tensor>,
+    axis_input: Arc<dyn Tensor>,
+    keep_dims: Option<bool>,
+    output_shape: Shape
+}
+
+impl ReduceSum {
+    pub fn new(name: Option<String>, data_input: Arc<dyn Tensor>, axis_input: Arc<dyn Tensor>, keep_dims: Option<bool>) -> Result<Arc<Self>, Error> {
+        validate_index_dtype(axis_input.dtype())?;
+
+        let axis_data = axis_input.resolve_data().ok_or(Error::CannotResolveDataError)?.to_int_vec()?;
+
+        let axes: Vec<_> = axis_data.iter().map(|x| {
+            if *x < 0 {
+                (*x + data_input.rank() as i64) as usize
+            } else {
+                *x as usize
+            }
+        }).collect();
+        
+        let input_dims = data_input.shape().dims.clone();
+        let mut output_dims = vec![];
+        for (i, dim) in input_dims.iter().enumerate() {
+            if axes.contains(&i) {
+                if keep_dims.unwrap_or(true) {
+                    output_dims.push(Dimension::new(Some(1), None, None));
+                }
+            } else {
+                output_dims.push(dim.clone());
+            }
+        }
+        let output_shape = Shape::new(output_dims);
+
+        Ok(Arc::new(
+            Self {
+                name,
+                data_input,
+                axis_input,
+                output_shape,
+                keep_dims
+            }
+        ))
+    }
+}
+
+impl Node for ReduceSum {
+    fn get_input_tensors(&self) -> Vec<&dyn Tensor> {
+        vec![self.data_input.as_ref(), self.axis_input.as_ref()]
+    }
+
+    fn get_output_tensors(&self) -> Vec<&dyn Tensor> {
+        vec![self]
+    }
+
+    fn get_name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    fn get_onnx_type(&self) -> &str {
+        "ReduceSum"
+    }
+
+    fn get_onnx_attributes(&self) -> Vec<AttributeProto> {
+        if let Some(keep_dims) = self.keep_dims {
+            vec![
+                make_int_attribute("keepdims", keep_dims as i64)
+            ]
+        } else {
+            vec![]
+        }
+
+    }
+}
+
+impl SingleOutputNode for ReduceSum {
     fn get_output_shape(&self) -> &Shape {
         &self.output_shape
     }

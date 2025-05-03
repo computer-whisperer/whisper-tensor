@@ -2,6 +2,7 @@ use ndarray::{ArcArray, Ix1, IxDyn};
 use half::{bf16, f16};
 use crate::dtype::DType;
 use crate::ndarray_backend::{NDArrayNumericTensor, NDArrayNumericTensorError};
+use crate::numeric_tensor::TryToFlatVec;
 
 pub trait FromScalarShape<T>: Sized {
     fn from_scalar_shape(v: T, s: Vec<usize>) -> Result<Self, NDArrayNumericTensorError>;
@@ -293,9 +294,45 @@ impl FromVecShape<u32> for NDArrayNumericTensor {
     }
 }
 
+impl FromVecShape<i32> for NDArrayNumericTensor {
+    fn from_vec_shape(v: Vec<i32>, s: Vec<usize>) -> Result<Self, NDArrayNumericTensorError> {
+        Ok(NDArrayNumericTensor::I32(ArcArray::<_, IxDyn>::from_shape_vec(s, v)?))
+    }
+}
+
+impl FromVecShape<u16> for NDArrayNumericTensor {
+    fn from_vec_shape(v: Vec<u16>, s: Vec<usize>) -> Result<Self, NDArrayNumericTensorError> {
+        Ok(NDArrayNumericTensor::U16(ArcArray::<_, IxDyn>::from_shape_vec(s, v)?))
+    }
+}
+
+impl FromVecShape<i16> for NDArrayNumericTensor {
+    fn from_vec_shape(v: Vec<i16>, s: Vec<usize>) -> Result<Self, NDArrayNumericTensorError> {
+        Ok(NDArrayNumericTensor::I16(ArcArray::<_, IxDyn>::from_shape_vec(s, v)?))
+    }
+}
+
+impl FromVecShape<u8> for NDArrayNumericTensor {
+    fn from_vec_shape(v: Vec<u8>, s: Vec<usize>) -> Result<Self, NDArrayNumericTensorError> {
+        Ok(NDArrayNumericTensor::U8(ArcArray::<_, IxDyn>::from_shape_vec(s, v)?))
+    }
+}
+
+impl FromVecShape<i8> for NDArrayNumericTensor {
+    fn from_vec_shape(v: Vec<i8>, s: Vec<usize>) -> Result<Self, NDArrayNumericTensorError> {
+        Ok(NDArrayNumericTensor::I8(ArcArray::<_, IxDyn>::from_shape_vec(s, v)?))
+    }
+}
+
 impl FromVecShape<u64> for NDArrayNumericTensor {
     fn from_vec_shape(v: Vec<u64>, s: Vec<usize>) -> Result<Self, NDArrayNumericTensorError> {
         Ok(NDArrayNumericTensor::U64(ArcArray::<_, IxDyn>::from_shape_vec(s, v)?))
+    }
+}
+
+impl FromVecShape<i64> for NDArrayNumericTensor {
+    fn from_vec_shape(v: Vec<i64>, s: Vec<usize>) -> Result<Self, NDArrayNumericTensorError> {
+        Ok(NDArrayNumericTensor::I64(ArcArray::<_, IxDyn>::from_shape_vec(s, v)?))
     }
 }
 
@@ -398,6 +435,17 @@ impl TryToSlice<f32> for NDArrayNumericTensor {
         }
         else {
             Err(NDArrayNumericTensorError::WrongDTypeError(DType::F32, self.dtype()))
+        }
+    }
+}
+
+impl TryToFlatVec<f64> for NDArrayNumericTensor {
+    fn try_to_flat_vec(&self) -> Result<Vec<f64>, NDArrayNumericTensorError> {
+        if let NDArrayNumericTensor::F64(x) = &self {
+            Ok(x.to_owned().as_slice().unwrap().to_vec())
+        }
+        else {
+            Err(NDArrayNumericTensorError::WrongDTypeError(DType::F64, self.dtype()))
         }
     }
 }

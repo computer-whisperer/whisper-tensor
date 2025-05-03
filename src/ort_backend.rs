@@ -31,16 +31,18 @@ impl TryFrom<ort::tensor::TensorElementType> for DType {
     type Error = DTypeError;
     fn try_from(value: ort::tensor::TensorElementType) -> Result<Self, Self::Error> {
         Ok(match value {
-            ort::tensor::TensorElementType::Float32 => DType::F32,
             ort::tensor::TensorElementType::Float64 => DType::F64,
+            ort::tensor::TensorElementType::Float32 => DType::F32,
             ort::tensor::TensorElementType::Bfloat16 => DType::BF16,
             ort::tensor::TensorElementType::Float16 => DType::F16,
-            ort::tensor::TensorElementType::Int64 => DType::I64,
-            ort::tensor::TensorElementType::Int32 => DType::I32,
             ort::tensor::TensorElementType::Uint64 => DType::U64,
+            ort::tensor::TensorElementType::Int64 => DType::I64,
             ort::tensor::TensorElementType::Uint32 => DType::U32,
+            ort::tensor::TensorElementType::Int32 => DType::I32,
             ort::tensor::TensorElementType::Uint16 => DType::U16,
+            ort::tensor::TensorElementType::Int16 => DType::I16,
             ort::tensor::TensorElementType::Uint8 => DType::U8,
+            ort::tensor::TensorElementType::Int8 => DType::I8,
             _ => Err(DTypeError::UnsupportedORTDtype(value))?,
         })
     }
@@ -49,6 +51,10 @@ impl TryFrom<ort::tensor::TensorElementType> for DType {
 impl ORTNumericTensor {
     pub fn dtype(&self) -> Result<DType, DTypeError> {
         self.0.dtype().tensor_type().unwrap().try_into()
+    }
+    
+    pub fn rank(&self) -> usize {
+        self.0.shape().len()
     }
     
     pub fn shape(&self) -> Vec<usize> {
@@ -127,7 +133,9 @@ impl TryFrom<&ORTNumericTensor> for NDArrayNumericTensor {
             ort::tensor::TensorElementType::Int64 => Ok(NDArrayNumericTensor::I64(value.0.try_extract_array::<i64>()?.to_shared())),
             ort::tensor::TensorElementType::Uint32 => Ok(NDArrayNumericTensor::U32(value.0.try_extract_array::<u32>()?.to_shared())),
             ort::tensor::TensorElementType::Uint64 => Ok(NDArrayNumericTensor::U64(value.0.try_extract_array::<u64>()?.to_shared())),
+            ort::tensor::TensorElementType::Int16 => Ok(NDArrayNumericTensor::I16(value.0.try_extract_array::<i16>()?.to_shared())),
             ort::tensor::TensorElementType::Uint16 => Ok(NDArrayNumericTensor::U16(value.0.try_extract_array::<u16>()?.to_shared())),
+            ort::tensor::TensorElementType::Int8 => Ok(NDArrayNumericTensor::I8(value.0.try_extract_array::<i8>()?.to_shared())),
             ort::tensor::TensorElementType::Uint8 => Ok(NDArrayNumericTensor::U8(value.0.try_extract_array::<u8>()?.to_shared())),
             ort::tensor::TensorElementType::Bfloat16 => Ok(NDArrayNumericTensor::BF16(value.0.try_extract_array::<bf16>()?.to_shared())),
             ort::tensor::TensorElementType::Float16 => Ok(NDArrayNumericTensor::F16(value.0.try_extract_array::<f16>()?.to_shared())),

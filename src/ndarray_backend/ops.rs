@@ -1,9 +1,10 @@
 use std::ops::{Add, Mul, Not};
-use ndarray::{concatenate, s, ArcArray, Array, Array2, ArrayD, ArrayView2, ArrayViewD, ArrayViewMut2, ArrayViewMutD, Axis, Dimension, Ix2, IxDyn, LinalgScalar, ShapeError, SliceInfoElem, Zip};
+use ndarray::{concatenate, s, ArcArray, Array, Array2, ArrayD, ArrayView2, ArrayViewD, ArrayViewMut2, ArrayViewMutD, Axis, Dimension, Ix2, IxDyn, LinalgScalar, ScalarOperand, ShapeError, SliceInfoElem, Zip};
 use ndarray::linalg::{general_mat_mul, Dot};
-use num_traits::{Float, Num, NumCast, One, Zero};
+use num_traits::{Float, FromPrimitive, Num, NumCast, One, Zero};
 use num_traits::real::Real;
 use serde::{Deserialize, Serialize};
+use crate::ndarray_backend::ops::NDArrayOperationError::UnimplementedOp;
 
 #[derive(Debug, thiserror::Error)]
 pub enum NDArrayOperationError {
@@ -17,6 +18,8 @@ pub enum NDArrayOperationError {
     IncompatibleShapes(String),
     #[error("broadcast error: {0}")]
     BroadcastError(String),
+    #[error("unsupported operation")]
+    UnimplementedOp(String),
     #[error("Internal error")]
     Internal
 }
@@ -464,7 +467,7 @@ impl NativeNumericTensorBinaryOperation {
         let o: Array<T, IxDyn> = match self {
             NativeNumericTensorBinaryOperation::Add => (&a + &b).into(),
             NativeNumericTensorBinaryOperation::Sub => (&a - &b).into(),
-            NativeNumericTensorBinaryOperation::Mul => (&a * &b).into(),
+             NativeNumericTensorBinaryOperation::Mul => (&a * &b).into(),
             NativeNumericTensorBinaryOperation::Div => (&a / &b).into(),
         };
         Ok(o.to_shared())
@@ -476,7 +479,8 @@ pub enum NativeNumericTensorUnaryOperation {
     Sigmoid,
     Tanh,
     Exp,
-    Softplus,
+    Log,
+    Softplus
 }
 
 impl core::fmt::Display for NativeNumericTensorUnaryOperation {
@@ -493,7 +497,12 @@ impl NativeNumericTensorUnaryOperation {
         Ok(match self {
             NativeNumericTensorUnaryOperation::Exp => a.mapv(|x| x.exp()).to_shared(),
             NativeNumericTensorUnaryOperation::Tanh => a.mapv(|x| x.tanh()).to_shared(),
-            _ => todo!()
+            NativeNumericTensorUnaryOperation::Sigmoid => a.mapv(|x| T::one() / ( T::one() + T::exp(-x))).to_shared(),
+            NativeNumericTensorUnaryOperation::Softplus => a.mapv(|x| T::ln(T::exp(x) + T::one())).to_shared(),
+            NativeNumericTensorUnaryOperation::Log => a.mapv(|x| x.ln()).to_shared(),
+            _ => {
+                Err(NDArrayOperationError::UnimplementedOp(format!("{self:?}")))?
+            } 
         })
     }
 }
@@ -839,4 +848,101 @@ where
     // 4) Assemble into an ArrayD and wrap in ArcArray
     let arr = ArrayD::from_shape_vec(IxDyn(&out_shape), buf)?;
     Ok(ArcArray::from(arr))
+}
+
+
+/// ONNX GroupNormalization (op‑set ≥ 18)
+///
+/// * **X**      : `(N, C, d₁, d₂, …)`
+/// * **scale** : `(C)`      (γ)  
+/// * **bias**  : `(C)`      (β)\
+/// * **num_groups** ∣ **epsilon** are the required attributes
+///
+/// Output **Y** has the **same shape** as **X**.
+///
+/// Broadcasting & semantics exactly match the spec – when
+/// `num_groups == 1` this degenerates to **LayerNorm**;
+/// when `num_groups == C` it is **InstanceNorm**.
+pub fn group_normalization<T>(
+    x: &ArcArray<T, IxDyn>,
+    scale: &ArcArray<T, IxDyn>,
+    bias: &ArcArray<T, IxDyn>,
+    num_groups: usize,
+    epsilon: f64,
+) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError>
+where
+    T: Float + FromPrimitive,
+{
+    // ---------- 0. Basic shape checks ----------
+    let rank = x.ndim();
+    if rank < 3 {
+        return Err(NDArrayOperationError::IncompatibleShape);
+    }
+    let n  = x.shape()[0];
+    let c  = x.shape()[1];
+    if c % num_groups != 0 {
+        return Err(NDArrayOperationError::IncompatibleShape);
+    }
+    if scale.len() != c || bias.len() != c {
+        return Err(NDArrayOperationError::IncompatibleShape);
+    }
+    let group_size     = c / num_groups;
+    let spatial_size: usize = x.shape()[2..].iter().product();
+    let elems_per_grp  = group_size * spatial_size;
+
+    // ---------- 1. Reshape to (N, G, elems_per_grp) ----------
+    // Safe because we only collapse contiguous trailing axes.
+    let x3: Array<T, _> = x
+        .view()
+        .into_shape((n, num_groups, elems_per_grp))
+        .map_err(|_| NDArrayOperationError::Internal)?
+        .to_owned();     // keep contiguous for fast SIMD
+
+    // ---------- 2. Compute per‑(N,G) mean & variance ----------
+    // ndarray’s `mean_axis`/`var_axis` give us vectors of shape (N, G)
+    let mean = x3.mean_axis(Axis(2)).expect("axis always exists");          // (N,G)
+    let var  = x3.var_axis(Axis(2), T::zero());                             // (N,G)  ddof = 0  :contentReference[oaicite:1]{index=1}
+
+    // Transient buffers for broadcasting to (N,G,elems_per_grp)
+    let mean_b = mean.insert_axis(Axis(2));          // (N,G,1) ➜ broadcast
+    let var_b  = var .insert_axis(Axis(2));
+    let eps: T = T::from_f64(epsilon).unwrap();
+    let denom  = var_b.mapv(|v| (v + eps).sqrt());   // std‑dev
+
+    // ---------- 3. Normalize inside each group ----------
+    let y3 = (&x3 - &mean_b) / &denom;               // (N,G,E)
+
+    // ---------- 4. Reshape back to (N,C,…) ----------
+    let mut y = y3
+        .into_shape(IxDyn(&[n, c, spatial_size]))
+        .map_err(|_| NDArrayOperationError::Internal)?;
+
+    // ---------- 5. Apply scale (γ) and bias (β) ----------
+    // Broadcast γ/β to (1,C,spatial_size) then multiply/add in‑place.
+    let scale_a = scale.clone()
+        .insert_axis(Axis(0))
+        .insert_axis(Axis(2));
+    let scale_b = scale_a
+        .broadcast(y.raw_dim())
+        .ok_or(NDArrayOperationError::Internal)?;
+    let bias_a = bias.to_owned()
+        .insert_axis(Axis(0))
+        .insert_axis(Axis(2));
+    let bias_b  = bias_a
+        .broadcast(y.raw_dim())
+        .ok_or(NDArrayOperationError::Internal)?;
+
+    Zip::from(&mut y)
+        .and(&scale_b)
+        .and(&bias_b)
+        .for_each(|y_elem, &s, &b| *y_elem = *y_elem * s + b);
+
+    // ---------- 6. Final reshape to original >2‑D layout ----------
+    let mut final_shape = x.shape().to_vec();
+    final_shape[0] = n;
+    y = y
+        .into_shape(IxDyn(&final_shape))
+        .map_err(|_| NDArrayOperationError::Internal)?;
+
+    Ok(y.into_shared())
 }

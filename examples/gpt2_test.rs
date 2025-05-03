@@ -7,8 +7,8 @@ use rand::prelude::StdRng;
 use rand::SeedableRng;
 use tokenizers::Tokenizer;
 use onnx_graph::WeightStorageStrategy;
-use onnx_import::identify_and_load;
-use whisper_tensor::{RuntimeModel, RuntimeBackend, RuntimeEnvironment};
+use onnx_import::{identify_and_load, ModelTypeHint};
+use whisper_tensor::{RuntimeBackend, RuntimeEnvironment, RuntimeModel};
 use whisper_tensor::eval_backend::EvalBackend;
 use whisper_tensor::language_model::LanguageModelManager;
 use whisper_tensor::numeric_tensor::{NumericTensor};
@@ -18,17 +18,16 @@ fn main() {
     tracing_subscriber::fmt::init();
 
     let input_path = Path::new("gpt2-lm-head-10.onnx");
-    let mut onnx_data = Vec::new();
-    File::open(input_path).unwrap().read_to_end(&mut onnx_data).unwrap();
+    let onnx_data = identify_and_load(input_path, WeightStorageStrategy::EmbeddedData, Some(ModelTypeHint::GPT2)).unwrap();
 
     let runtime = RuntimeModel::load_onnx(&onnx_data, RuntimeBackend::Eval(EvalBackend::NDArray), RuntimeEnvironment::default()).unwrap();
-    let mut llm = LanguageModelManager::new(runtime, "input1", "output1");
-    
-    
-    let tokenizer = Tokenizer::from_pretrained("gpt2", None).unwrap();
+    let mut llm = LanguageModelManager::new(runtime).unwrap();
+
+
+    let tokenizer = llm.get_tokenizer().unwrap();
 
     let prompt = "The fibbonacci sequence is: 1, 1, 2, 3, 5, 8, 13,";
-    let input = whisper_tensor::tokenizer::Tokenizer::encode(&tokenizer, prompt).iter().map(|x| *x as i64).collect::<Vec<_>>();
+    let input = tokenizer.encode(prompt).iter().map(|x| *x as i64).collect::<Vec<_>>();
     let input_tensor = NumericTensor::from_vec1(input).unsqueeze(0, &EvalBackend::NDArray).unwrap().unsqueeze(0, &EvalBackend::NDArray).unwrap();
 
     let mut sampler = {
@@ -48,8 +47,8 @@ fn main() {
         }
     };
 
-    let output = llm.run(input_tensor.clone(), &mut sampler).unwrap();
+    let (output, _) = llm.run(input_tensor.clone(), None, &mut sampler).unwrap();
     let output_values: Vec<u32> = output.squeeze(0, &EvalBackend::NDArray).unwrap().squeeze(0, &EvalBackend::NDArray).unwrap().try_into().unwrap();
-    let output = whisper_tensor::tokenizer::Tokenizer::decode(&tokenizer, &output_values).unwrap();
+    let output = tokenizer.decode(&output_values).unwrap();
     println!("{}", output);
 }

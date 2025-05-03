@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use crate::{operators, Error};
-use crate::operators::{Cast, Constant, CumSum, Div, Expand, GroupNormalization, LayerNormalization, Mul, RMSNormalization, Reshape, Sigmoid, Slice, Squeeze, TopK, Transpose, Unsqueeze};
+use crate::operators::{Cast, Constant, CumSum, Div, Expand, GroupNormalization, LayerNormalization, Mul, RMSNormalization, ReduceSum, Reshape, Sigmoid, Slice, Squeeze, TopK, Transpose, Unsqueeze};
 use crate::tensor::{DType, Dimension, Shape, Tensor, TensorData, TensorDataValue};
 use crate::weights::WeightManager;
 
@@ -87,6 +87,12 @@ pub fn cumsum(input: Arc<dyn Tensor>, axis: i32) -> Result<Arc<CumSum>, Error> {
     let shape = Shape::new(vec![Dimension::new(Some(1), None, None)]);
     let axis = Constant::new(None, TensorData::fill(shape, axis)?);
     CumSum::new(None, input, axis)
+}
+
+pub fn sum_dim(input: Arc<dyn Tensor>, axis: i64, keepdims: Option<bool>) -> Result<Arc<ReduceSum>, Error> {
+    let shape = Shape::new(vec![Dimension::new(Some(1), None, None)]);
+    let constant = Constant::new(None, TensorData::fill(shape, axis)?);
+    ReduceSum::new(None, input, constant, keepdims)
 }
 
 pub fn rms_norm(weight_manager: &impl WeightManager, input: Arc<dyn Tensor>, epsilon: Option<f32>) -> Result<Arc<RMSNormalization>, Error> {
