@@ -1,6 +1,7 @@
 pub mod ops;
 mod milli_ops;
 mod milli_ops_helpers;
+pub(crate) mod dimension;
 
 use std::collections::HashMap;
 use prost::Message;
@@ -10,6 +11,8 @@ use crate::ndarray_backend::{NDArrayNumericTensor, NDArrayNumericTensorError};
 use crate::ndarray_backend::conversions::FromVecShape;
 use crate::{onnx, TrigOp};
 use crate::numeric_scalar::NumericScalar;
+pub(crate) use crate::symbolic_graph::dimension::{Dimension, DimensionResolver};
+use crate::symbolic_graph::dimension::UnknownDimension;
 use crate::symbolic_graph::ops::AnyOperation;
 
 #[derive(Debug, thiserror::Error)]
@@ -48,7 +51,6 @@ pub enum ONNXDecodingError {
     UnsupportedONNX(String)
 }
 
-pub type UnknownDimensionId = usize;
 pub type TensorId = usize;
 pub type OperationId = usize;
 
@@ -125,12 +127,6 @@ fn query_attribute_tensor(attributes: &[onnx::AttributeProto], name: &str) -> Op
 
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum Dimension {
-    Known(usize),
-    Unknown(UnknownDimensionId),
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 enum TensorType {
     Input,
     Output,
@@ -139,7 +135,7 @@ enum TensorType {
     Weight
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TensorInfo {
     onnx_name: Option<String>,
     dtype: Option<DType>,
@@ -167,7 +163,7 @@ pub struct GraphOperation {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SymbolicGraph {
-    unknown_dimensions: HashMap<UnknownDimensionId, String>,
+    unknown_dimensions: HashMap<String, UnknownDimension>,
     tensors: HashMap<TensorId, TensorInfo>,
     operations: HashMap<OperationId, GraphOperation>
 }
@@ -180,8 +176,7 @@ impl SymbolicGraph {
             operations: HashMap::new()
         }
     }
-
-
+    
     pub fn get_tensors_by_name(&self) -> HashMap<String, TensorId> {
         let mut tensors_by_name = HashMap::new();
         for (id, tensor) in &self.tensors {
@@ -192,12 +187,8 @@ impl SymbolicGraph {
         tensors_by_name
     }
 
-    pub fn get_unknown_dimensions_by_name(&self) -> HashMap<String, TensorId> {
-        let mut unknown_dimensions_by_name = HashMap::new();
-        for (id, name) in &self.unknown_dimensions {
-            unknown_dimensions_by_name.insert(name.clone(), *id);
-        }
-        unknown_dimensions_by_name
+    pub fn get_unknown_dimensions_by_name(&self) -> &HashMap<String, UnknownDimension> {
+        &self.unknown_dimensions
     }
 
     pub fn get_operations(&self) -> &HashMap<OperationId, GraphOperation> {
@@ -310,9 +301,9 @@ impl TryFrom<&onnx::TensorProto> for NDArrayNumericTensor {
 pub struct SymbolicGraphMutator {
     graph: SymbolicGraph,
     tensors_by_name: HashMap<String, TensorId>,
-    unknown_dimensions_by_name: HashMap<String, UnknownDimensionId>,
+    unknown_dimensions_by_name: HashMap<String, UnknownDimension>,
     next_tensor_id: TensorId,
-    next_unknown_dimension_id: UnknownDimensionId,
+    dimension_resolver: DimensionResolver,
     next_operation_id: OperationId,
 }
 
@@ -327,13 +318,16 @@ impl SymbolicGraphMutator {
 
     pub fn from_graph(graph: SymbolicGraph) -> Self {
         let next_tensor_id = graph.tensors.keys().max().map(|x| x + 1).unwrap_or(0);
-        let next_unknown_dimension_id = graph.unknown_dimensions.keys().max().map(|x| x + 1).unwrap_or(0);
+        let mut dimension_resolver = DimensionResolver::new();
+        for (_, dim) in &graph.unknown_dimensions {
+            dimension_resolver.update_last_assigned(*dim)
+        }
         let next_operation_id = graph.operations.keys().max().map(|x| x + 1).unwrap_or(0);
         Self {
             tensors_by_name: graph.get_tensors_by_name(),
             graph,
             next_tensor_id,
-            next_unknown_dimension_id,
+            dimension_resolver,
             unknown_dimensions_by_name: HashMap::new(),
             next_operation_id,
         }
@@ -397,12 +391,9 @@ impl SymbolicGraphMutator {
                         if let Some(x) = self.unknown_dimensions_by_name.get(x.as_str()) {
                             *x
                         } else {
-                            let new_id = self.next_unknown_dimension_id;
-                            self.next_unknown_dimension_id += 1;
-                            self.unknown_dimensions_by_name.insert(x.clone(), new_id);
-                            self.graph.unknown_dimensions.insert(new_id, x.clone());
-
-                            new_id
+                            let new_dim = self.dimension_resolver.new_unknown();
+                            self.unknown_dimensions_by_name.insert(x.clone(), new_dim);
+                            new_dim
                         };
                     Dimension::Unknown(unknown_dim_id)
                 }

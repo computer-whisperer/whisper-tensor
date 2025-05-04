@@ -85,10 +85,10 @@ impl Operation for BinaryOperation {
         let a = input_map[&self.a];
         let b = input_map[&self.b];
         let res = match self.which {
-            WhichBinaryOperation::Add => AnyMilliOp::Add(MilliOpAdd::new(a, b)),
-            WhichBinaryOperation::Sub => AnyMilliOp::Sub(MilliOpSub::new(a, b)),
-            WhichBinaryOperation::Mul => AnyMilliOp::Mul(MilliOpMul::new(a, b)),
-            WhichBinaryOperation::Div => AnyMilliOp::Div(MilliOpDiv::new(a, b)),
+            WhichBinaryOperation::Add => AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::add(a, b)),
+            WhichBinaryOperation::Sub => AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::sub(a, b)),
+            WhichBinaryOperation::Mul => AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::mul(a, b)),
+            WhichBinaryOperation::Div => AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::div(a, b)),
             WhichBinaryOperation::MatMul => AnyMilliOp::MatMul(MilliOpMatMul::new(a, b)),
         };
         let mut output_map = HashMap::new();
@@ -157,7 +157,7 @@ impl Operation for UnaryOperation {
                 let x = graph.push_op(AnyMilliOp::Exp(MilliOpExp::new(x)));
                 let c = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new_scalar(1.0f32)));
                 let c = graph.push_op(AnyMilliOp::CastLike(MilliOpCastLike::new(c, x)));
-                let x = graph.push_op(AnyMilliOp::Add(MilliOpAdd::new(x, c)));
+                let x = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::add(x, c)));
                 AnyMilliOp::Reciprocal(MilliOpReciprocal::new(x))
             },
             WhichUnaryOperation::Exp => AnyMilliOp::Exp(MilliOpExp::new(a)),
@@ -166,7 +166,7 @@ impl Operation for UnaryOperation {
                 let x = graph.push_op(AnyMilliOp::Exp(MilliOpExp::new(a)));
                 let c = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new_scalar(1.0f32)));
                 let c = graph.push_op(AnyMilliOp::CastLike(MilliOpCastLike::new(c, x)));
-                let x = graph.push_op(AnyMilliOp::Add(MilliOpAdd::new(x, c)));
+                let x = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::add(x, c)));
                 AnyMilliOp::Log(MilliOpLog::new(x))
             }
             WhichUnaryOperation::Neg => AnyMilliOp::Neg(MilliOpNeg::new(a)),
@@ -287,7 +287,7 @@ impl Operation for LpNormalizationOperation {
 
         let x = match self.p{
             1 => x,
-            2 => graph.push_op(AnyMilliOp::Mul(MilliOpMul::new(input, input))),
+            2 => graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::mul(input, input))),
             _ => panic!()
         };
         let axis_tensor = NDArrayNumericTensor::from(vec![self.axis]);
@@ -298,7 +298,7 @@ impl Operation for LpNormalizationOperation {
             2 => graph.push_op(AnyMilliOp::Sqrt(MilliOpSqrt::new(input))),
             _ => panic!()
         };
-        let out = graph.push_op(AnyMilliOp::Div(MilliOpDiv::new(input, x)));
+        let out = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::div(input, x)));
 
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
@@ -407,18 +407,18 @@ impl Operation for GroupNormalizationOperation {
         let mean_axis = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new_scalar(2i64)));
         let mean = graph.push_op(AnyMilliOp::ReduceMean(MilliOpReduceMean::new(reshaped_input, Some(mean_axis), true)));
 
-        let input = graph.push_op(AnyMilliOp::Sub(MilliOpSub::new(reshaped_input, mean)));
+        let input = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::sub(reshaped_input, mean)));
 
         let variance = {
-            let x = graph.push_op(AnyMilliOp::Mul(MilliOpMul::new(input, input)));
+            let x = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::mul(input, input)));
             graph.push_op(AnyMilliOp::ReduceMean(MilliOpReduceMean::new(x, Some(mean_axis), true)))
         };
 
         let input_normalized = {
             let epsilon = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new_scalar(self.epsilon)));
-            let var_plus_eps = graph.push_op(AnyMilliOp::Add(MilliOpAdd::new(variance, epsilon)));
+            let var_plus_eps = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::add(variance, epsilon)));
             let val = graph.push_op(AnyMilliOp::Sqrt(MilliOpSqrt::new(var_plus_eps)));
-            graph.push_op(AnyMilliOp::Div(MilliOpDiv::new(input, val)))
+            graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::div(input, val)))
         };
 
         let zero = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new_scalar(0i64)));
@@ -436,7 +436,7 @@ impl Operation for GroupNormalizationOperation {
                 input_map[&self.scale],
                 one
             )));
-            graph.push_op(AnyMilliOp::Mul(MilliOpMul::new(y, scale)))
+            graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::mul(y, scale)))
         };
 
         let y = {
@@ -444,7 +444,7 @@ impl Operation for GroupNormalizationOperation {
                 input_map[&self.bias],
                 one
             )));
-            graph.push_op(AnyMilliOp::Add(MilliOpAdd::new(y, bias)))
+            graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::add(y, bias)))
         };
 
         let out = graph.push_op(AnyMilliOp::Reshape(MilliOpReshape::new(
@@ -814,18 +814,18 @@ impl Operation for LayerNormalizationOperation {
         let mean = graph.push_op(AnyMilliOp::ReduceMean(MilliOpReduceMean::new(
             input_data, Some(normalized_axes), true)));
 
-        let d = graph.push_op(AnyMilliOp::Sub(MilliOpSub::new(input_data, mean)));
-        let dd = graph.push_op(AnyMilliOp::Mul(MilliOpMul::new(d, d)));
+        let d = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::sub(input_data, mean)));
+        let dd = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::mul(d, d)));
         let variance = graph.push_op(AnyMilliOp::ReduceMean(MilliOpReduceMean::new(
             dd, Some(normalized_axes), true)));
         let stddev = graph.push_op(AnyMilliOp::Sqrt(MilliOpSqrt::new(variance)));
         let inv_stddev = graph.push_op(AnyMilliOp::Reciprocal(MilliOpReciprocal::new(stddev)));
-        let normalized = graph.push_op(AnyMilliOp::Mul(MilliOpMul::new(d, inv_stddev)));
+        let normalized = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::mul(d, inv_stddev)));
 
-        let out = graph.push_op(AnyMilliOp::Mul(MilliOpMul::new(normalized, input_scale)));
+        let out = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::mul(normalized, input_scale)));
 
         let out = if let Some(bias) = self.bias {
-            graph.push_op(AnyMilliOp::Add(MilliOpAdd::new(out, input_map[&bias])))
+            graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::add(out, input_map[&bias])))
         } else {
             out
         };
@@ -1427,7 +1427,7 @@ impl Operation for GemmOperation {
         let x = if let Some(alpha) = self.alpha {
             let alpha_const = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new_scalar(alpha)));
             let alpha_const = graph.push_op(AnyMilliOp::CastLike(MilliOpCastLike::new(alpha_const, x)));
-            graph.push_op(AnyMilliOp::Mul(MilliOpMul::new(x, alpha_const)))
+            graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::mul(x, alpha_const)))
         } else {
             x
         };
@@ -1437,11 +1437,11 @@ impl Operation for GemmOperation {
             let c = if let Some(beta) = self.beta {
                 let beta_const = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new_scalar(beta)));
                 let beta_const = graph.push_op(AnyMilliOp::CastLike(MilliOpCastLike::new(beta_const, c)));
-                graph.push_op(AnyMilliOp::Mul(MilliOpMul::new(c, beta_const)))
+                graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::mul(c, beta_const)))
             } else {
                 c
             };
-            graph.push_op(AnyMilliOp::Add(MilliOpAdd::new(x, c)))
+            graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::add(x, c)))
         } else {
             x
         };
@@ -1676,7 +1676,7 @@ impl Operation for SoftmaxOperation {
         let e = graph.push_op(AnyMilliOp::Exp(MilliOpExp::new(input_map[&self.input])));
         let axis_const = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new_scalar(self.axis.unwrap_or(-1))));
         let sum = graph.push_op(AnyMilliOp::ReduceSum(MilliOpReduceSum::new(e, Some(axis_const), true)));
-        let out = graph.push_op(AnyMilliOp::Div(MilliOpDiv::new(e, sum)));
+        let out = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::div(e, sum)));
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
         graph.set_output_map(output_map);
@@ -1723,7 +1723,7 @@ impl Operation for LogSoftmaxOperation {
         let e = graph.push_op(AnyMilliOp::Exp(MilliOpExp::new(input_map[&self.input])));
         let axis_const = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new_scalar(self.axis.unwrap_or(-1))));
         let sum = graph.push_op(AnyMilliOp::ReduceSum(MilliOpReduceSum::new(e, Some(axis_const), true)));
-        let softmax = graph.push_op(AnyMilliOp::Div(MilliOpDiv::new(e, sum)));
+        let softmax = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::div(e, sum)));
         let out = graph.push_op(AnyMilliOp::Log(MilliOpLog::new(softmax)));
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);

@@ -12,7 +12,7 @@ pub enum DTypeError {
     UnsupportedORTDtype(ort::tensor::TensorElementType)
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, Hash, Eq, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub enum DType {
     F64,
     F32,

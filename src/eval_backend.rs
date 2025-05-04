@@ -86,7 +86,7 @@ impl EvalRuntime {
                 if let (Some(dtype), Some(name), Some(shape)) = (tensor_info.dtype(), tensor_info.name(), tensor_info.shape()) {
                     let shape: Vec<_> = shape.iter().map(|x| match x {
                         Dimension::Known(x) => Some(*x),
-                        Dimension::Unknown(_) => None
+                        _ => None
                     }).collect();
                     results.insert(name, (dtype, shape));
                 }
