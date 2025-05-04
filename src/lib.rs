@@ -1,6 +1,9 @@
 use std::collections::HashMap;
+use num_traits::Float;
+use num_traits::real::Real;
 use ort::session::Input;
 use prost::{DecodeError, Message};
+use serde::{Deserialize, Serialize};
 use onnx_graph::{InputMetadata, ModelMetadata, OutputMetadata};
 use crate::dtype::{DType, DTypeError};
 use crate::eval_backend::{EvalBackend, EvalRuntime, EvalRuntimeError};
@@ -22,6 +25,7 @@ pub mod tokenizer;
 pub mod eval_backend;
 mod ndarray_backend;
 mod onnx_testing;
+pub mod numeric_scalar;
 
 #[cfg(feature = "ort")]
 pub mod ort_backend;
@@ -118,6 +122,41 @@ pub enum RuntimeError {
     DecodeError(#[from] DecodeError),
     #[error(transparent)]
     SerdeJSONError(#[from] serde_json::Error)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
+pub enum TrigOp {
+    Asin,
+    Asinh,
+    Acos,
+    Acosh,
+    Atan,
+    Atanh,
+    Sin,
+    Sinh,
+    Cos,
+    Cosh,
+    Tan,
+    Tanh
+}
+
+impl TrigOp {
+    fn apply<F: Float>(&self, x: F) -> F {
+        match self {
+            TrigOp::Asin => x.asin(),
+            TrigOp::Asinh => x.asinh(),
+            TrigOp::Acos => x.acos(),
+            TrigOp::Acosh => x.acosh(),
+            TrigOp::Atan => x.atan(),
+            TrigOp::Atanh => x.atanh(),
+            TrigOp::Sin => x.sin(),
+            TrigOp::Sinh => x.sinh(),
+            TrigOp::Cos => x.cos(),
+            TrigOp::Cosh => x.cosh(),
+            TrigOp::Tan => x.tan(),
+            TrigOp::Tanh => x.tanh()
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -250,16 +289,7 @@ impl RuntimeModel {
                 Ok(output_tensors)
             }
             RuntimeModelInner::Eval(runtime) => {
-                let mut converted_inputs = HashMap::new();
-                for (key, tensor) in inputs {
-                    converted_inputs.insert(key.to_string(), tensor);
-                }
-                let res = runtime.run(converted_inputs)?;
-                let mut output_tensors = HashMap::new();
-                for (key, tensor) in res {
-                    output_tensors.insert(key, NumericTensor::from(tensor));
-                }
-                Ok(output_tensors)
+                Ok(runtime.run(inputs)?)
             }
             _ => {
                 todo!()

@@ -5,6 +5,7 @@ use num_traits::{Float, FromPrimitive, Num, NumCast, One, Zero};
 use num_traits::real::Real;
 use serde::{Deserialize, Serialize};
 use crate::ndarray_backend::ops::NDArrayOperationError::UnimplementedOp;
+use crate::TrigOp;
 
 #[derive(Debug, thiserror::Error)]
 pub enum NDArrayOperationError {
@@ -251,7 +252,8 @@ where
 
 pub(crate) enum ReduceOp {
     Sum,
-    Mean
+    Mean,
+    Prod
 }
 
 impl ReduceOp {
@@ -259,11 +261,12 @@ impl ReduceOp {
                     axes: Option<Vec<i64>>,
                     keepdims: bool) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError>
     where
-        T: Clone + Zero + NumCast + std::ops::Div<Output = T> + Copy
+        T: Clone + Zero + NumCast + std::ops::Div<Output = T> + Copy + One
     {
         Ok(match self {
             ReduceOp::Sum => reduce_sum(tensor, axes, keepdims)?,
             ReduceOp::Mean => reduce_mean(tensor, axes, keepdims)?,
+            ReduceOp::Prod => reduce_prod(tensor, axes, keepdims)?,
         })
     }
 }
@@ -396,6 +399,62 @@ where
     Ok(ArcArray::from(result))
 }
 
+pub fn reduce_prod<T>(
+    tensor: ArcArray<T, IxDyn>,
+    axes: Option<Vec<i64>>,
+    keepdims: bool,
+) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError>
+where
+    T: Clone + Zero + NumCast + std::ops::Div<Output = T> + Copy + One
+{
+    let input_shape = tensor.shape().to_vec();
+    let rank = input_shape.len();
+
+    // 1) Normalize axes list
+    let mut ax: Vec<usize> = if let Some(a) = axes {
+        a.iter().map(|&x| {
+            let idx = if x < 0 { (x + rank as i64) } else { x };
+            if idx < 0 || idx >= rank as i64 {
+                return Err(NDArrayOperationError::OutOfBounds);
+            }
+            Ok(idx as usize)
+        }).collect::<Result<_, _>>()?
+    } else {
+        (0..rank).collect()
+    };
+
+    // 1a) Deduplicate & sort descending (so reductions don’t shift later axes)
+    {
+        let mut sorted = ax.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        if sorted.len() != ax.len() {
+            return Err(NDArrayOperationError::IncompatibleShape);
+        }
+        sorted.reverse();
+        ax = sorted;
+    }
+
+    // 2) Start with an owned dynamic array
+    let mut result: ArrayD<T> = tensor.view().to_owned().into_dyn();
+
+    // 3) For each axis, sum & divide, then optionally re-insert the dim
+    for &axis in &ax {
+        // a) sum over this axis
+        let summed = result.product_axis(Axis(axis));
+
+        // c) keep or drop the reduced dim
+        result = if keepdims {
+            summed.insert_axis(Axis(axis)).into_dyn()
+        } else {
+            summed.into_dyn()
+        };
+    }
+
+    // 4) Wrap in ArcArray and return
+    Ok(ArcArray::from(result))
+}
+
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum NativeNumericTensorBinaryOperation {
@@ -477,7 +536,7 @@ impl NativeNumericTensorBinaryOperation {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum NativeNumericTensorUnaryOperation {
     Sigmoid,
-    Tanh,
+    Trig(TrigOp),
     Exp,
     Log,
     Softplus
@@ -496,7 +555,7 @@ impl NativeNumericTensorUnaryOperation {
     {
         Ok(match self {
             NativeNumericTensorUnaryOperation::Exp => a.mapv(|x| x.exp()).to_shared(),
-            NativeNumericTensorUnaryOperation::Tanh => a.mapv(|x| x.tanh()).to_shared(),
+            NativeNumericTensorUnaryOperation::Trig(trigop) => a.mapv(|x| trigop.apply(x)).to_shared(),
             NativeNumericTensorUnaryOperation::Sigmoid => a.mapv(|x| T::one() / ( T::one() + T::exp(-x))).to_shared(),
             NativeNumericTensorUnaryOperation::Softplus => a.mapv(|x| T::ln(T::exp(x) + T::one())).to_shared(),
             NativeNumericTensorUnaryOperation::Log => a.mapv(|x| x.ln()).to_shared(),
@@ -945,4 +1004,17 @@ where
         .map_err(|_| NDArrayOperationError::Internal)?;
 
     Ok(y.into_shared())
+}
+
+
+pub fn range<T>(start: T, end: T, step: T) -> ArcArray<T, IxDyn>
+where T: Num + Copy + PartialOrd + std::ops::AddAssign
+{
+    let mut out = vec![];
+    let mut i = start;
+    while i < end {
+        out.push(i);
+        i += step;
+    }
+    ArcArray::from_vec(out).into_dyn()
 }

@@ -1,6 +1,6 @@
 use std::fmt::Formatter;
 use std::ops::Range;
-
+use num_traits::real::Real;
 use crate::dtype::{DType, DTypeError};
 use crate::eval_backend::EvalBackend;
 use crate::ndarray_backend::{NDArrayNumericTensor, NDArrayNumericTensorError};
@@ -8,9 +8,10 @@ use crate::ndarray_backend::conversions::{FromVecShape};
 
 #[cfg(feature = "candle")]
 use crate::candle_backend;
-
+use crate::numeric_scalar::NumericScalar;
 #[cfg(feature = "ort")]
 use crate::ort_backend;
+use crate::TrigOp;
 
 #[derive(Debug, thiserror::Error)]
 pub enum NumericTensorError {
@@ -91,6 +92,14 @@ impl NumericTensor {
         }
     }
     
+    pub fn index(&self, index: &[usize]) -> Result<NumericScalar, NumericTensorError> {
+        Ok(NDArrayNumericTensor::try_from(self)?.index(index)?)
+    }
+    
+    pub fn to_scalar(&self) -> Result<NumericScalar, NumericTensorError> {
+        Ok(NDArrayNumericTensor::try_from(self)?.to_scalar()?)
+    }
+    
     pub fn num_elements(&self) -> usize {
         self.shape().iter().product()
     }
@@ -116,6 +125,10 @@ impl NumericTensor {
                 NumericTensor::NDArray(NDArrayNumericTensor::concat(&ndarrays_ref, axis)?)
             }
         })
+    }
+    
+    pub fn range(start: NumericScalar, end: NumericScalar, step: NumericScalar, backend: &EvalBackend) -> Result<Self, NumericTensorError> {
+        Ok(NumericTensor::NDArray(NDArrayNumericTensor::range(start, end, step)?))
     }
     
     pub fn slice(&self, indices: &[Range<usize>], _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
@@ -242,12 +255,8 @@ impl NumericTensor {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::try_from(self)?.sigmoid()?))
     }
 
-    pub fn tanh(&self, backend: &EvalBackend) -> Result<Self, NumericTensorError> {
-        #[cfg(feature = "candle")]
-        if let EvalBackend::Candle(device) = backend {
-            return Ok(NumericTensor::Candle(self.to_candle(device)?.tanh()?))
-        }
-        Ok(NumericTensor::NDArray(NDArrayNumericTensor::try_from(self)?.tanh()?))
+    pub fn trig(&self, op: TrigOp, backend: &EvalBackend) -> Result<Self, NumericTensorError> {
+        Ok(NumericTensor::NDArray(NDArrayNumericTensor::try_from(self)?.trig(op)?))
     }
 
     pub fn softplus(&self, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
@@ -304,6 +313,10 @@ impl NumericTensor {
 
     pub fn reduce_sum(&self, axes: Option<Vec<i64>>, keepdims: bool, _backend: &EvalBackend) -> Result<NumericTensor, NumericTensorError> {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::try_from(self)?.reduce_sum(axes, keepdims)?))
+    }
+
+    pub fn reduce_prod(&self, axes: Option<Vec<i64>>, keepdims: bool, _backend: &EvalBackend) -> Result<NumericTensor, NumericTensorError> {
+        Ok(NumericTensor::NDArray(NDArrayNumericTensor::try_from(self)?.reduce_prod(axes, keepdims)?))
     }
     
     pub fn gemm(a: &NumericTensor, b: &NumericTensor, c: Option<&NumericTensor>, alpha: f32, beta: f32, trans_a: bool, trans_b: bool, backend: &EvalBackend) -> Result<NumericTensor, NumericTensorError> {

@@ -123,6 +123,7 @@ impl EvalRuntime {
                 let input_ids = op.get_inputs();
                 let mut input_values = HashMap::new();
                 // Collect all inputs, abort if we can't do this one yet
+                let mut failed_to_fetch = false;
                 for tensor_id in &input_ids {
                     if let Some(value) = active_tensors.get(&tensor_id) {
                         // Validate shape and dtype
@@ -132,10 +133,11 @@ impl EvalRuntime {
                     }
                     else {
                         // Can't do this one yet
+                        failed_to_fetch = true;
                         continue
                     }
                 }
-                if input_values.len() < input_ids.len() {
+                if failed_to_fetch {
                     continue
                 }
                 let outputs = op.eval(&self.eval_backend, &input_values).map_err(|x| EvalRuntimeError::EvalError(name.clone(), x))?;
@@ -162,8 +164,9 @@ impl EvalRuntime {
         let model_output_ids = self.model.get_outputs();
         for id in model_output_ids {
             if let Some(name)  = self.model.get_tensor_name(id) {
-                let tensor = active_tensors.get(&id).unwrap();
-                output_tensors.insert(name.to_string(), tensor.clone());
+                if let Some(tensor) = active_tensors.get(&id) {
+                    output_tensors.insert(name.to_string(), tensor.clone());
+                }
             }
         }
 

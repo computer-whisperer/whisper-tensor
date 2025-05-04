@@ -5,6 +5,8 @@ use num_traits::Pow;
 use serde::{Deserialize, Serialize};
 use crate::dtype::DType;
 use crate::ndarray_backend::conversions::{FromScalarShape, FromVecShape, TryToSlice};
+use crate::numeric_scalar::NumericScalar;
+use crate::TrigOp;
 use super::ops;
 use super::ops::{NativeNumericTensorBinaryOperation, NativeNumericTensorUnaryOperation, ReduceOp};
 
@@ -155,6 +157,55 @@ impl NDArrayNumericTensor {
         match dtype {
             DType::F64 => Ok(NDArrayNumericTensor::F64(ArcArray::<_, IxDyn>::from_shape_vec(shape, data.to_vec())?)),
             _ => Err(NDArrayNumericTensorError::OtherError)
+        }
+    }
+    
+    pub fn index(&self, index: &[usize]) -> Result<NumericScalar, NDArrayNumericTensorError> {
+        Ok(match self {
+            NDArrayNumericTensor::F64(x) => NumericScalar::F64(x[index]),
+            NDArrayNumericTensor::F32(x) => NumericScalar::F32(x[index]),
+            NDArrayNumericTensor::BF16(x) => NumericScalar::BF16(x[index]),
+            NDArrayNumericTensor::F16(x) => NumericScalar::F16(x[index]),
+            NDArrayNumericTensor::I64(x) => NumericScalar::I64(x[index]),
+            NDArrayNumericTensor::U64(x) => NumericScalar::U64(x[index]),
+            NDArrayNumericTensor::I32(x) => NumericScalar::I32(x[index]),
+            NDArrayNumericTensor::U32(x) => NumericScalar::U32(x[index]),
+            NDArrayNumericTensor::I16(x) => NumericScalar::I16(x[index]),
+            NDArrayNumericTensor::U16(x) => NumericScalar::U16(x[index]),
+            NDArrayNumericTensor::I8(x) => NumericScalar::I8(x[index]),
+            NDArrayNumericTensor::U8(x) => NumericScalar::U8(x[index]),
+            _ => return Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("index".to_string(), vec![self.dtype()])),
+        })
+    }
+
+    pub fn to_scalar(&self) -> Result<NumericScalar, NDArrayNumericTensorError> {
+        Ok(match self {
+            NDArrayNumericTensor::F64(x) => NumericScalar::F64(x.to_owned().as_slice().unwrap()[0]),
+            NDArrayNumericTensor::F32(x) => NumericScalar::F32(x.to_owned().as_slice().unwrap()[0]),
+            NDArrayNumericTensor::BF16(x) => NumericScalar::BF16(x.to_owned().as_slice().unwrap()[0]),
+            NDArrayNumericTensor::F16(x) => NumericScalar::F16(x.to_owned().as_slice().unwrap()[0]),
+            NDArrayNumericTensor::I64(x) => NumericScalar::I64(x.to_owned().as_slice().unwrap()[0]),
+            NDArrayNumericTensor::U64(x) => NumericScalar::U64(x.to_owned().as_slice().unwrap()[0]),
+            NDArrayNumericTensor::I32(x) => NumericScalar::I32(x.to_owned().as_slice().unwrap()[0]),
+            NDArrayNumericTensor::U32(x) => NumericScalar::U32(x.to_owned().as_slice().unwrap()[0]),
+            NDArrayNumericTensor::I16(x) => NumericScalar::I16(x.to_owned().as_slice().unwrap()[0]),
+            NDArrayNumericTensor::U16(x) => NumericScalar::U16(x.to_owned().as_slice().unwrap()[0]),
+            NDArrayNumericTensor::I8(x) => NumericScalar::I8(x.to_owned().as_slice().unwrap()[0]),
+            NDArrayNumericTensor::U8(x) => NumericScalar::U8(x.to_owned().as_slice().unwrap()[0]),
+            _ => return Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("index".to_string(), vec![self.dtype()])),
+        })
+    }
+
+    pub fn range(start: NumericScalar, end: NumericScalar, step: NumericScalar) -> Result<Self, NDArrayNumericTensorError> {
+        match (start, end, step) {
+            (NumericScalar::F64(start), NumericScalar::F64(end), NumericScalar::F64(step)) => Ok(NDArrayNumericTensor::F64(ops::range(start, end, step))),
+            (NumericScalar::F32(start), NumericScalar::F32(end), NumericScalar::F32(step)) => Ok(NDArrayNumericTensor::F32(ops::range(start, end, step))),
+            (NumericScalar::BF16(start), NumericScalar::BF16(end), NumericScalar::BF16(step)) => Ok(NDArrayNumericTensor::BF16(ops::range(start, end, step))),
+            (NumericScalar::F16(start), NumericScalar::F16(end), NumericScalar::F16(step)) => Ok(NDArrayNumericTensor::F16(ops::range(start, end, step))),
+            (NumericScalar::I64(start), NumericScalar::I64(end), NumericScalar::I64(step)) => Ok(NDArrayNumericTensor::I64(ops::range(start, end, step))),
+            (NumericScalar::I32(start), NumericScalar::I32(end), NumericScalar::I32(step)) => Ok(NDArrayNumericTensor::I32(ops::range(start, end, step))),
+            (NumericScalar::I16(start), NumericScalar::I16(end), NumericScalar::I16(step)) => Ok(NDArrayNumericTensor::I16(ops::range(start, end, step))),
+            _ => return Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("range".to_string(), vec![start.dtype(), end.dtype(), step.dtype()])),
         }
     }
 
@@ -467,8 +518,8 @@ impl NDArrayNumericTensor {
         })
     }
 
-    pub fn tanh(&self) -> Result<Self, NDArrayNumericTensorError> {
-        Self::try_unary_op(self, NativeNumericTensorUnaryOperation::Tanh)
+    pub fn trig(&self, op: TrigOp) -> Result<Self, NDArrayNumericTensorError> {
+        Self::try_unary_op(self, NativeNumericTensorUnaryOperation::Trig(op))
     }
 
     pub fn softplus(&self) -> Result<Self, NDArrayNumericTensorError> {
@@ -1116,6 +1167,10 @@ impl NDArrayNumericTensor {
         self.reduce_op(axes, keepdims, ReduceOp::Sum)
     }
 
+    pub fn reduce_prod(&self, axes: Option<Vec<i64>>, keepdims: bool) -> Result<NDArrayNumericTensor, NDArrayNumericTensorError> {
+        self.reduce_op(axes, keepdims, ReduceOp::Prod)
+    }
+
     pub fn gemm(a: &NDArrayNumericTensor, b: &NDArrayNumericTensor, c: Option<&NDArrayNumericTensor>, alpha: f32, beta: f32, transa: bool, transb: bool) -> Result<NDArrayNumericTensor, NDArrayNumericTensorError> {
         Ok(if let Some(c) = c {
             match (a, b, c) {
@@ -1198,6 +1253,24 @@ impl NDArrayNumericTensor {
             (NDArrayNumericTensor::I8(a), NDArrayNumericTensor::I8(b)) => NDArrayNumericTensor::I8(ops::where_op(cond, a.clone(), b.clone())?),
             (NDArrayNumericTensor::U8(a), NDArrayNumericTensor::U8(b)) => NDArrayNumericTensor::U8(ops::where_op(cond, a.clone(), b.clone())?),
             _ => return Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("where".to_string(), vec![self.dtype(), a.dtype(), b.dtype()]))
+        })
+    }
+
+    pub fn fill(value: NumericScalar, shape: &[usize]) -> Result<NDArrayNumericTensor, NDArrayNumericTensorError> {
+        Ok(match value {
+            NumericScalar::F64(x) => Self::F64(ArcArray::from_elem(shape, x)),
+            NumericScalar::F32(x) => Self::F32(ArcArray::from_elem(shape, x)),
+            NumericScalar::BF16(x) => Self::BF16(ArcArray::from_elem(shape, x)),
+            NumericScalar::F16(x) => Self::F16(ArcArray::from_elem(shape, x)),
+            NumericScalar::U64(x) => Self::U64(ArcArray::from_elem(shape, x)),
+            NumericScalar::I64(x) => Self::I64(ArcArray::from_elem(shape, x)),
+            NumericScalar::U32(x) => Self::U32(ArcArray::from_elem(shape, x)),
+            NumericScalar::I32(x) => Self::I32(ArcArray::from_elem(shape, x)),
+            NumericScalar::U16(x) => Self::U16(ArcArray::from_elem(shape, x)),
+            NumericScalar::I16(x) => Self::I16(ArcArray::from_elem(shape, x)),
+            NumericScalar::U8(x) => Self::U8(ArcArray::from_elem(shape, x)),
+            NumericScalar::I8(x) => Self::I8(ArcArray::from_elem(shape, x)),
+            NumericScalar::BOOL(x) => Self::BOOL(ArcArray::from_elem(shape, x)),
         })
     }
 }
