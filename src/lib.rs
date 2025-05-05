@@ -297,7 +297,7 @@ impl RuntimeModel {
         }
     }
     
-    pub fn get_input_tensor_info(&self) -> Result<HashMap<String, (DType, Vec<Option<usize>>)>, RuntimeError> {
+    pub fn get_input_tensor_info(&self) -> Result<HashMap<String, (DType, Vec<Option<u64>>)>, RuntimeError> {
         match &self.inner {
             #[cfg(feature = "onnx-reference")]
             RuntimeModelInner::ONNXReference(session) => {

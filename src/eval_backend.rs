@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 use crate::dtype::{DType, DTypeError};
 use crate::numeric_tensor::NumericTensor;
-use crate::symbolic_graph::{Dimension, GraphOperation, OperationId, SymbolicGraph, TensorId, TensorInfo};
+use crate::symbolic_graph::{GraphOperation, OperationId, SymbolicGraph, TensorId, ONNXTensorInfo};
 use crate::symbolic_graph::ops::{EvalError, Operation};
+use crate::symbolic_graph::scalar_info::ScalarInfoTyped;
 
 #[derive(Debug, Clone)]
 pub enum EvalBackend {
@@ -24,7 +25,7 @@ pub enum EvalRuntimeError {
     #[error(transparent)]
     DTypeError(#[from] DTypeError),
     #[error("Unexpected shape: expected {0:?}, got {1:?} in shape {2:?}")]
-    UnexpectedDimension(usize, usize, Vec<usize>),
+    UnexpectedDimension(u64, u64, Vec<usize>),
     #[error("Unexpected rank: expected {0}, got {1}")]
     UnexpectedRank(usize, usize),
     #[error("Unexpected dtype: expected {0}, got {1}")]
@@ -40,17 +41,17 @@ pub struct EvalRuntime {
     model: SymbolicGraph
 }
 
-fn check_tensor_matches(tensor: &NumericTensor, tensor_info: &TensorInfo) -> Result<(), EvalRuntimeError> {
+fn check_tensor_matches(tensor: &NumericTensor, tensor_info: &ONNXTensorInfo) -> Result<(), EvalRuntimeError> {
     if let Some(shape) = tensor_info.shape() {
         if shape.len() != tensor.shape().len() {
             Err(EvalRuntimeError::UnexpectedRank(shape.len(), tensor.shape().len()))?;
         }
         for (a, b) in shape.iter().zip(tensor.shape()) {
             match a {
-                Dimension::Known(a) => if *a != b {
-                    Err(EvalRuntimeError::UnexpectedDimension(*a, b, tensor.shape()))?
+                ScalarInfoTyped::Numeric(a) => if *a != b as u64 {
+                    Err(EvalRuntimeError::UnexpectedDimension(*a, b as u64, tensor.shape()))?
                 },
-                Dimension::Unknown(_) => {}
+                _ => {}
             }
         }
     }
@@ -78,14 +79,14 @@ impl EvalRuntime {
         })
     }
 
-    pub fn get_input_tensor_info(&self) -> Result<HashMap<String, (DType, Vec<Option<usize>>)>, EvalRuntimeError> {
+    pub fn get_input_tensor_info(&self) -> Result<HashMap<String, (DType, Vec<Option<u64>>)>, EvalRuntimeError> {
         let input_ids = self.model.get_inputs();
         let mut results = HashMap::new();
         for tensor_id in input_ids {
             if let Some(tensor_info) = self.model.get_tensor_info(tensor_id) {
                 if let (Some(dtype), Some(name), Some(shape)) = (tensor_info.dtype(), tensor_info.name(), tensor_info.shape()) {
                     let shape: Vec<_> = shape.iter().map(|x| match x {
-                        Dimension::Known(x) => Some(*x),
+                        ScalarInfoTyped::Numeric(a) => Some(*a),
                         _ => None
                     }).collect();
                     results.insert(name, (dtype, shape));

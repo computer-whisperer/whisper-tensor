@@ -530,7 +530,7 @@ impl NDArrayNumericTensor {
         Self::try_unary_op(self, NativeNumericTensorUnaryOperation::Exp)
     }
 
-    pub fn log(&self) -> Result<Self, NDArrayNumericTensorError> {
+    pub fn ln(&self) -> Result<Self, NDArrayNumericTensorError> {
         Self::try_unary_op(self, NativeNumericTensorUnaryOperation::Log)
     }
 

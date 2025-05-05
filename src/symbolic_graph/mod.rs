@@ -1,7 +1,9 @@
 pub mod ops;
 mod milli_ops;
 mod milli_ops_helpers;
-pub(crate) mod dimension;
+pub mod symbolic_scalar;
+mod tensor_info;
+pub mod scalar_info;
 
 use std::collections::HashMap;
 use prost::Message;
@@ -11,9 +13,9 @@ use crate::ndarray_backend::{NDArrayNumericTensor, NDArrayNumericTensorError};
 use crate::ndarray_backend::conversions::FromVecShape;
 use crate::{onnx, TrigOp};
 use crate::numeric_scalar::NumericScalar;
-pub(crate) use crate::symbolic_graph::dimension::{Dimension, DimensionResolver};
-use crate::symbolic_graph::dimension::UnknownDimension;
 use crate::symbolic_graph::ops::AnyOperation;
+use crate::symbolic_graph::scalar_info::ScalarInfoTyped;
+use crate::symbolic_graph::symbolic_scalar::{SymbolicResolver, SymbolicScalar, SymbolicScalarTyped};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SymbolicGraphError {
@@ -136,15 +138,15 @@ enum TensorType {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct TensorInfo {
+pub struct ONNXTensorInfo {
     onnx_name: Option<String>,
     dtype: Option<DType>,
-    shape: Option<Vec<Dimension>>,
+    shape: Option<Vec<ScalarInfoTyped<u64>>>,
     tensor_type: TensorType
 }
 
-impl TensorInfo {
-    pub fn shape(&self) -> Option<Vec<Dimension>> {
+impl ONNXTensorInfo {
+    pub fn shape(&self) -> Option<Vec<ScalarInfoTyped<u64>>> {
        self.shape.clone()
     }
     
@@ -163,8 +165,8 @@ pub struct GraphOperation {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SymbolicGraph {
-    unknown_dimensions: HashMap<String, UnknownDimension>,
-    tensors: HashMap<TensorId, TensorInfo>,
+    unknown_dimensions: HashMap<String, SymbolicScalar>,
+    tensors: HashMap<TensorId, ONNXTensorInfo>,
     operations: HashMap<OperationId, GraphOperation>
 }
 
@@ -187,7 +189,7 @@ impl SymbolicGraph {
         tensors_by_name
     }
 
-    pub fn get_unknown_dimensions_by_name(&self) -> &HashMap<String, UnknownDimension> {
+    pub fn get_unknown_dimensions_by_name(&self) -> &HashMap<String, SymbolicScalar> {
         &self.unknown_dimensions
     }
 
@@ -224,7 +226,7 @@ impl SymbolicGraph {
         }
     }
     
-    pub fn get_tensor_info(&self, tensor_id: TensorId) -> Option<&TensorInfo> {
+    pub fn get_tensor_info(&self, tensor_id: TensorId) -> Option<&ONNXTensorInfo> {
         self.tensors.get(&tensor_id)
     }
     
@@ -301,9 +303,9 @@ impl TryFrom<&onnx::TensorProto> for NDArrayNumericTensor {
 pub struct SymbolicGraphMutator {
     graph: SymbolicGraph,
     tensors_by_name: HashMap<String, TensorId>,
-    unknown_dimensions_by_name: HashMap<String, UnknownDimension>,
+    unknown_dimensions_by_name: HashMap<String, SymbolicScalarTyped<u64>>,
     next_tensor_id: TensorId,
-    dimension_resolver: DimensionResolver,
+    symbolic_resolver: SymbolicResolver,
     next_operation_id: OperationId,
 }
 
@@ -318,16 +320,16 @@ impl SymbolicGraphMutator {
 
     pub fn from_graph(graph: SymbolicGraph) -> Self {
         let next_tensor_id = graph.tensors.keys().max().map(|x| x + 1).unwrap_or(0);
-        let mut dimension_resolver = DimensionResolver::new();
+        let mut dimension_resolver = SymbolicResolver::new();
         for (_, dim) in &graph.unknown_dimensions {
-            dimension_resolver.update_last_assigned(*dim)
+            dimension_resolver.update_last_assigned(dim.clone())
         }
         let next_operation_id = graph.operations.keys().max().map(|x| x + 1).unwrap_or(0);
         Self {
             tensors_by_name: graph.get_tensors_by_name(),
             graph,
             next_tensor_id,
-            dimension_resolver,
+            symbolic_resolver: dimension_resolver,
             unknown_dimensions_by_name: HashMap::new(),
             next_operation_id,
         }
@@ -341,7 +343,7 @@ impl SymbolicGraphMutator {
     pub fn new_unknown_tensor(&mut self, name: &str, tensor_type: TensorType) -> TensorId {
         let tensor_id = self.next_tensor_id;
         self.next_tensor_id += 1;
-        let tensor = TensorInfo {
+        let tensor = ONNXTensorInfo {
             onnx_name: Some(name.to_string()),
             tensor_type,
             dtype: None,
@@ -381,21 +383,21 @@ impl SymbolicGraphMutator {
         for dim in &onnx_shape.dim {
             let value = dim.value.as_ref().ok_or(ONNXDecodingError::MissingField("dim.value"))?;
             dimensions.push(match value {
-                onnx::tensor_shape_proto::dimension::Value::DimValue(x) => Dimension::Known(if *x < 0 {
+                onnx::tensor_shape_proto::dimension::Value::DimValue(x) => ScalarInfoTyped::Numeric(if *x < 0 {
                     return Err(ONNXDecodingError::NegativeDimensionError);
                 } else {
-                    *x as usize
+                    *x as u64
                 }),
                 onnx::tensor_shape_proto::dimension::Value::DimParam(x) => {
                     let unknown_dim_id =
                         if let Some(x) = self.unknown_dimensions_by_name.get(x.as_str()) {
-                            *x
+                            x.clone()
                         } else {
-                            let new_dim = self.dimension_resolver.new_unknown();
-                            self.unknown_dimensions_by_name.insert(x.clone(), new_dim);
+                            let new_dim = SymbolicScalarTyped::new(&mut self.symbolic_resolver);
+                            self.unknown_dimensions_by_name.insert(x.clone(), new_dim.clone());
                             new_dim
                         };
-                    Dimension::Unknown(unknown_dim_id)
+                    ScalarInfoTyped::Symbolic(unknown_dim_id)
                 }
             });
         }
@@ -404,7 +406,7 @@ impl SymbolicGraphMutator {
 
         self.tensors_by_name.insert(name.clone(), tensor_id);
         self.graph.tensors.insert(tensor_id,
-                                  TensorInfo {
+                                  ONNXTensorInfo {
                                       onnx_name: Some(name),
                                       dtype: Some(dtype),
                                       shape: Some(dimensions),
@@ -419,12 +421,12 @@ impl SymbolicGraphMutator {
 
         let mut shape = Vec::new();
         for s in value.shape() {
-            shape.push(Dimension::Known(*s))
+            shape.push(ScalarInfoTyped::Numeric(*s as u64))
         }
 
         self.graph.tensors.insert(
             tensor_id,
-            TensorInfo {
+            ONNXTensorInfo {
                 onnx_name: name.clone(),
                 dtype: Some(value.dtype()),
                 shape: Some(shape),

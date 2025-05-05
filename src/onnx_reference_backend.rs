@@ -176,7 +176,7 @@ impl ONNXReferenceBackend {
         }).map_err(|e| ONNXReferenceError::PyErr(e))
     }
     
-    pub fn get_input_tensor_info(&self) -> Result<HashMap<String, (DType, Vec<Option<usize>>)>, ONNXReferenceError> {
+    pub fn get_input_tensor_info(&self) -> Result<HashMap<String, (DType, Vec<Option<u64>>)>, ONNXReferenceError> {
         Python::with_gil(|py| {
             let mut output = HashMap::new();
             let evaluator = self.evaluator.bind(py);
@@ -187,7 +187,7 @@ impl ONNXReferenceBackend {
                 let dtype: i32 = tensor_type.getattr("elem_type")?.extract()?;
                 let dtype = DType::try_from(onnx::tensor_proto::DataType::try_from(dtype)?)?;
                 let shape = tensor_type.getattr("shape")?.getattr("dim")?;
-                let shape: Vec<Option<usize>> = shape.try_iter()?.map(|x| None).collect();
+                let shape: Vec<Option<u64>> = shape.try_iter()?.map(|x| None).collect();
                 output.insert(name.clone(), (dtype, shape));
             }
             Ok(output)

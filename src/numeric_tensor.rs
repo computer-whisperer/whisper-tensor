@@ -127,7 +127,7 @@ impl NumericTensor {
         })
     }
     
-    pub fn range(start: NumericScalar, end: NumericScalar, step: NumericScalar, backend: &EvalBackend) -> Result<Self, NumericTensorError> {
+    pub fn range(start: NumericScalar, end: NumericScalar, step: NumericScalar, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::range(start, end, step)?))
     }
     
@@ -187,7 +187,7 @@ impl NumericTensor {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::div(&a.try_into()?, &b.try_into()?)?))
     }
 
-    pub fn div_f32(a: &NumericTensor, b: f32, backend: &EvalBackend) -> Result<Self, NumericTensorError> {
+    pub fn div_f32(a: &NumericTensor, b: f32, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::div_f32(&a.try_into()?, b)?))
     }
 
@@ -235,8 +235,8 @@ impl NumericTensor {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::try_from(self)?.exp()?))
     }
 
-    pub fn log(&self, backend: &EvalBackend) -> Result<Self, NumericTensorError> {
-        Ok(NumericTensor::NDArray(NDArrayNumericTensor::try_from(self)?.log()?))
+    pub fn ln(&self, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
+        Ok(NumericTensor::NDArray(NDArrayNumericTensor::try_from(self)?.ln()?))
     }
 
     pub fn abs(&self, backend: &EvalBackend) -> Result<Self, NumericTensorError> {
@@ -247,7 +247,7 @@ impl NumericTensor {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::try_from(self)?.abs()?))
     }
     
-    pub fn clamp_min(&self, min: f32, backend: &EvalBackend) -> Result<Self, NumericTensorError>  {
+    pub fn clamp_min(&self, min: f32, _backend: &EvalBackend) -> Result<Self, NumericTensorError>  {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::try_from(self)?.clamp_min(min)?))
     }
 
@@ -255,7 +255,7 @@ impl NumericTensor {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::try_from(self)?.sigmoid()?))
     }
 
-    pub fn trig(&self, op: TrigOp, backend: &EvalBackend) -> Result<Self, NumericTensorError> {
+    pub fn trig(&self, op: TrigOp, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::try_from(self)?.trig(op)?))
     }
 
@@ -319,7 +319,7 @@ impl NumericTensor {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::try_from(self)?.reduce_prod(axes, keepdims)?))
     }
     
-    pub fn gemm(a: &NumericTensor, b: &NumericTensor, c: Option<&NumericTensor>, alpha: f32, beta: f32, trans_a: bool, trans_b: bool, backend: &EvalBackend) -> Result<NumericTensor, NumericTensorError> {
+    pub fn gemm(a: &NumericTensor, b: &NumericTensor, c: Option<&NumericTensor>, alpha: f32, beta: f32, trans_a: bool, trans_b: bool, _backend: &EvalBackend) -> Result<NumericTensor, NumericTensorError> {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::gemm(&a.try_into()?, &b.try_into()?, c.map(|x| NDArrayNumericTensor::try_from(x)).transpose()?.as_ref(), alpha, beta, trans_a, trans_b)?), )
     }
     
@@ -336,7 +336,7 @@ impl NumericTensor {
         })
     }
     
-    pub fn where_op(&self, a: &NumericTensor, b: &NumericTensor, backend: &EvalBackend) -> Result<NumericTensor, NumericTensorError> {
+    pub fn where_op(&self, a: &NumericTensor, b: &NumericTensor, _backend: &EvalBackend) -> Result<NumericTensor, NumericTensorError> {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::try_from(self)?.where_op(&a.try_into()?, &b.try_into()?)?))
     }
 

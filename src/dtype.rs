@@ -1,3 +1,4 @@
+use half::{bf16, f16};
 use serde::{Deserialize, Serialize};
 use crate::{RuntimeBackend, onnx};
 
@@ -122,3 +123,21 @@ impl From<candle_core::DType> for DType {
         }
     }
 }
+
+pub trait DTypeOfPrimitive {
+    const DTYPE: DType;
+}
+
+impl DTypeOfPrimitive for f64 { const DTYPE: DType = DType::F64; }
+impl DTypeOfPrimitive for f32 { const DTYPE: DType = DType::F32; }
+impl DTypeOfPrimitive for bf16 { const DTYPE: DType = DType::BF16; }
+impl DTypeOfPrimitive for f16 { const DTYPE: DType = DType::F16; }
+impl DTypeOfPrimitive for i64 { const DTYPE: DType = DType::I64; }
+impl DTypeOfPrimitive for u64 { const DTYPE: DType = DType::U64; }
+impl DTypeOfPrimitive for i32 { const DTYPE: DType = DType::I32; }
+impl DTypeOfPrimitive for u32 { const DTYPE: DType = DType::U32; }
+impl DTypeOfPrimitive for i16 { const DTYPE: DType = DType::I16; }
+impl DTypeOfPrimitive for u16 { const DTYPE: DType = DType::U16; }
+impl DTypeOfPrimitive for i8 { const DTYPE: DType = DType::I8; }
+impl DTypeOfPrimitive for u8 { const DTYPE: DType = DType::U8; }
+impl DTypeOfPrimitive for bool { const DTYPE: DType = DType::BOOL; }
