@@ -3,7 +3,6 @@ use pyo3::{Py, PyAny, PyErr, Python};
 use pyo3::prelude::PyAnyMethods;
 use pyo3::types::{PyDict, PyNone};
 use crate::dtype::DType;
-use crate::ndarray_backend::conversions::FromVecShape;
 use crate::ndarray_backend::NDArrayNumericTensor;
 use crate::numeric_tensor::{NumericTensor, NumericTensorError};
 use crate::onnx;
@@ -53,7 +52,7 @@ impl TryFrom<&ONNXReferenceTensor> for NDArrayNumericTensor {
             let v_flat = v_flat.extract::<Vec<f32>>()?;
             let shape = value.getattr("shape")?;
             let shape = shape.extract::<Vec<usize>>()?;
-            Ok(NDArrayNumericTensor::from_vec_shape(v_flat, shape))
+            Ok(NDArrayNumericTensor::from_vec_shape(v_flat, &shape))
         }).map_err(|e| ONNXReferenceError::PyErr(e))?;
         Ok(out?)
     }

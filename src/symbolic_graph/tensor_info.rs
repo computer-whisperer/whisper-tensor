@@ -1,8 +1,16 @@
 use crate::dtype::{DType};
+use crate::ndarray_backend::conversions::NDArrayNumericTensorType;
 use crate::numeric_scalar::{NumericScalarType};
 use crate::numeric_tensor::NumericTensor;
 use crate::symbolic_graph::scalar_info::{ScalarInfo, ScalarInfoTyped};
-use crate::symbolic_graph::symbolic_scalar::{SymbolicScalarTyped};
+use crate::symbolic_graph::symbolic_scalar::{SymbolicResolver, SymbolicScalar, SymbolicScalarTyped};
+
+pub(crate) enum TensorInfoTyped<T> {
+    Numeric(NumericTensorTyped),
+    Shaped(ShapedTensorTyped),
+    Ranked(RankedTensorTyped),
+    Minimal(MinimalTensorTyped)
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct ShapedTensorTyped<T>
@@ -15,7 +23,7 @@ where
 
 impl<T> ShapedTensorTyped<T>
 where
-    T: Clone + PartialEq + Copy + NumericScalarType, 
+    T: Clone + PartialEq + Copy + NumericScalarType + NDArrayNumericTensorType, 
 {
     pub(crate) fn new(shape: Vec<usize>, values: Vec<ScalarInfoTyped<T>>) -> Self {
         Self { shape, values }
@@ -37,6 +45,24 @@ where
         Self {
             shape: new_shape,
             values: self.values.clone(),
+        }
+    }
+
+    pub(crate) fn try_upgrade_to_numeric_tensor(&self) -> Option<NumericTensor> {
+        let mut are_all_known = true;
+        let mut entries = vec![];
+        for scalar in &self.values {
+            if let ScalarInfoTyped::Numeric(value) = scalar {
+                entries.push(*value);
+            } else {
+                are_all_known = false;
+                break;
+            }
+        }
+        if are_all_known {
+            Some(NumericTensor::from_vec_shape(entries, self.shape.clone()).unwrap())
+        } else {
+            None
         }
     }
 }
@@ -77,11 +103,12 @@ impl ShapedTensor {
             ShapedTensor::I64(x) => x.first_element().promote(),
         }
     }
-    pub(crate) fn get(&self, idx: usize) -> ScalarInfo {
+    pub(crate) fn get(&self, index: &[usize]) -> ScalarInfo {
+        assert_eq!(index.len(), 1);
         match self {
-            ShapedTensor::F64(x) => x.get(idx).promote(),
-            ShapedTensor::F32(x) => x.get(idx).promote(),
-            ShapedTensor::I64(x) => x.get(idx).promote(),
+            ShapedTensor::F64(x) => x.get(index[0]).promote(),
+            ShapedTensor::F32(x) => x.get(index[0]).promote(),
+            ShapedTensor::I64(x) => x.get(index[0]).promote(),
         }
     }
     pub(crate) fn reshape(&self, new_shape: Vec<usize>) -> Self {
@@ -89,6 +116,13 @@ impl ShapedTensor {
             ShapedTensor::F64(x) => Self::F64(x.reshape(new_shape)),
             ShapedTensor::F32(x) => Self::F32(x.reshape(new_shape)),
             ShapedTensor::I64(x) => Self::I64(x.reshape(new_shape))
+        }
+    }
+    pub(crate) fn try_upgrade_to_numeric_tensor(&self) -> Option<NumericTensor> {
+        match self {
+            ShapedTensor::F64(x) => x.try_upgrade_to_numeric_tensor(),
+            ShapedTensor::F32(x) => x.try_upgrade_to_numeric_tensor(),
+            ShapedTensor::I64(x) => x.try_upgrade_to_numeric_tensor()
         }
     }
 }
@@ -154,6 +188,38 @@ pub(crate) enum TensorInfo {
 }
 
 impl TensorInfo {
+    // Resolves and applies any viable promotions of it's internal types
+    pub(crate) fn refine(&self) -> Self {
+        match self {
+            TensorInfo::Shaped(shaped_tensor) => {
+                if let Some(x) = shaped_tensor.try_upgrade_to_numeric_tensor() {
+                    TensorInfo::Numeric(x)
+                } else {
+                    self.clone()
+                }
+            }
+            _ => self.clone()
+        }
+    }
+    
+    pub(crate) fn new_from_rank_and_first_value(first_value: ScalarInfo, rank: ScalarInfoTyped<u32>, symbolic_resolver: &mut SymbolicResolver) -> Self {
+        match rank {
+            ScalarInfoTyped::Numeric(x) => {
+                let mut shape = vec![];
+                for _ in 0..x {
+                    shape.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(symbolic_resolver))); 
+                }
+                TensorInfo::Ranked(RankedTensor::new(first_value, shape))
+            }
+            ScalarInfoTyped::Symbolic(x) => {
+                TensorInfo::Minimal(MinimalTensor::new(
+                    first_value,
+                    x
+                ))
+            }
+        }
+    }
+    
     pub(crate) fn dtype(&self) -> DType {
         match self {
             Self::Numeric(tensor) => tensor.dtype().unwrap(),
@@ -162,7 +228,7 @@ impl TensorInfo {
             Self::Minimal(x) => x.dtype()
         }
     }
-    pub(crate) fn shape(&self) -> Option<Vec<ScalarInfoTyped<u64>>> {
+    pub(crate) fn shape(&self) -> TensorInfo::<u64> {
         match self {
             Self::Numeric(x) => Some(x.shape().iter().map(|x| ScalarInfoTyped::Numeric(*x as u64)).collect()),
             Self::Shaped(tensor) => Some(tensor.shape().iter().map(|x| ScalarInfoTyped::Numeric(*x as u64)).collect()),
@@ -191,6 +257,19 @@ impl TensorInfo {
         match self {
             Self::Numeric(x) => Some(x.clone()),
             _ => None
+        }
+    }
+    
+    pub(crate) fn get(&self, index: &[u64], symbolic_resolver: &mut SymbolicResolver) -> ScalarInfo {
+        let index_usize = index.iter().map(|x| *x as usize).collect::<Vec<usize>>();
+        if index.iter().all(|x| *x == 0) {
+            return self.first_element()
+        }
+        match self {
+            TensorInfo::Numeric(tensor) => ScalarInfo::Numeric(tensor.get(&index_usize).unwrap()),
+            TensorInfo::Shaped(tensor) => tensor.get(&index_usize).clone(),
+            TensorInfo::Ranked(_) => ScalarInfo::Symbolic(SymbolicScalar::new(self.dtype(), symbolic_resolver)),
+            TensorInfo::Minimal(_) => ScalarInfo::Symbolic(SymbolicScalar::new(self.dtype(), symbolic_resolver))
         }
     }
 }

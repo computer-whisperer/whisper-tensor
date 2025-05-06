@@ -4,7 +4,6 @@ use ndarray::{ArcArray, IxDyn, SliceInfo, SliceInfoElem};
 use num_traits::Pow;
 use serde::{Deserialize, Serialize};
 use crate::dtype::DType;
-use crate::ndarray_backend::conversions::{FromScalarShape, FromVecShape, TryToSlice};
 use crate::numeric_scalar::NumericScalar;
 use crate::TrigOp;
 use super::ops;
@@ -160,7 +159,7 @@ impl NDArrayNumericTensor {
         }
     }
     
-    pub fn index(&self, index: &[usize]) -> Result<NumericScalar, NDArrayNumericTensorError> {
+    pub fn get(&self, index: &[usize]) -> Result<NumericScalar, NDArrayNumericTensorError> {
         Ok(match self {
             NDArrayNumericTensor::F64(x) => NumericScalar::F64(x[index]),
             NDArrayNumericTensor::F32(x) => NumericScalar::F32(x[index]),

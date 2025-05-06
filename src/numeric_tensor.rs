@@ -1,13 +1,13 @@
-use std::fmt::Formatter;
+use std::fmt::{Debug, Formatter};
 use std::ops::Range;
 use num_traits::real::Real;
 use crate::dtype::{DType, DTypeError};
 use crate::eval_backend::EvalBackend;
 use crate::ndarray_backend::{NDArrayNumericTensor, NDArrayNumericTensorError};
-use crate::ndarray_backend::conversions::{FromVecShape};
 
 #[cfg(feature = "candle")]
 use crate::candle_backend;
+use crate::ndarray_backend::conversions::NDArrayNumericTensorType;
 use crate::numeric_scalar::NumericScalar;
 #[cfg(feature = "ort")]
 use crate::ort_backend;
@@ -92,12 +92,16 @@ impl NumericTensor {
         }
     }
     
-    pub fn index(&self, index: &[usize]) -> Result<NumericScalar, NumericTensorError> {
-        Ok(NDArrayNumericTensor::try_from(self)?.index(index)?)
+    pub fn get(&self, index: &[usize]) -> Result<NumericScalar, NumericTensorError> {
+        Ok(NDArrayNumericTensor::try_from(self)?.get(index)?)
     }
     
     pub fn to_scalar(&self) -> Result<NumericScalar, NumericTensorError> {
         Ok(NDArrayNumericTensor::try_from(self)?.to_scalar()?)
+    }
+    
+    pub fn to_1d_vec<T: NDArrayNumericTensorType + Clone>(&self) -> Result<Vec<T>, NumericTensorError> {
+        Ok(NDArrayNumericTensor::try_from(self)?.to_1d_vec()?)
     }
     
     pub fn num_elements(&self) -> usize {
@@ -106,9 +110,10 @@ impl NumericTensor {
 
     
     pub fn from_vec_shape<T>(v: Vec<T>, shape: Vec<usize>) -> Result<NumericTensor, NumericTensorError>
-       where NDArrayNumericTensor: FromVecShape<T>
+       where 
+           T: NDArrayNumericTensorType
     {
-        Ok(NumericTensor::NDArray(NDArrayNumericTensor::from_vec_shape(v, shape)?))
+        Ok(NumericTensor::NDArray(NDArrayNumericTensor::from_vec_shape(v, &shape)?))
     }
 
     pub fn from_vec1<T>(v: Vec<T>) -> NumericTensor

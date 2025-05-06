@@ -10,7 +10,6 @@ use prost::Message;
 use serde::{Deserialize, Serialize};
 use crate::dtype::DType;
 use crate::ndarray_backend::{NDArrayNumericTensor, NDArrayNumericTensorError};
-use crate::ndarray_backend::conversions::FromVecShape;
 use crate::{onnx, TrigOp};
 use crate::numeric_scalar::NumericScalar;
 use crate::symbolic_graph::ops::AnyOperation;
@@ -259,36 +258,36 @@ impl TryFrom<&onnx::TensorProto> for NDArrayNumericTensor {
         } 
         else if !tensor.float_data.is_empty() {
             match dtype {
-                DType::F32 => {NDArrayNumericTensor::from_vec_shape(tensor.float_data.clone(), shape)?}
+                DType::F32 => {NDArrayNumericTensor::from_vec_shape(tensor.float_data.clone(), &shape)?}
                 _ => Err(ONNXDecodingError::UnsupportedONNX("Unsupported dtype in float_data field!".to_string()))?,
             }
         }
         else if !tensor.double_data.is_empty() {
             match dtype {
-                DType::F64 => {NDArrayNumericTensor::from_vec_shape(tensor.double_data.clone(), shape)?}
+                DType::F64 => {NDArrayNumericTensor::from_vec_shape(tensor.double_data.clone(), &shape)?}
                 _ => Err(ONNXDecodingError::UnsupportedONNX("Unsupported dtype in double_data field!".to_string()))?,
             }        
         }
         else if !tensor.int32_data.is_empty() {
             match dtype {
-                DType::I32 => NDArrayNumericTensor::from_vec_shape(tensor.int32_data.clone(), shape)?,
-                DType::U16 => NDArrayNumericTensor::from_vec_shape(tensor.int32_data.iter().map(|x| *x as u16).collect::<Vec<_>>(), shape)?,
-                DType::I16 => NDArrayNumericTensor::from_vec_shape(tensor.int32_data.iter().map(|x| *x as i16).collect::<Vec<_>>(), shape)?,
-                DType::U8 => NDArrayNumericTensor::from_vec_shape(tensor.int32_data.iter().map(|x| *x as u8).collect::<Vec<_>>(), shape)?,
-                DType::I8 => NDArrayNumericTensor::from_vec_shape(tensor.int32_data.iter().map(|x| *x as i8).collect::<Vec<_>>(), shape)?,
+                DType::I32 => NDArrayNumericTensor::from_vec_shape(tensor.int32_data.clone(), &shape)?,
+                DType::U16 => NDArrayNumericTensor::from_vec_shape(tensor.int32_data.iter().map(|x| *x as u16).collect::<Vec<_>>(), &shape)?,
+                DType::I16 => NDArrayNumericTensor::from_vec_shape(tensor.int32_data.iter().map(|x| *x as i16).collect::<Vec<_>>(), &shape)?,
+                DType::U8 => NDArrayNumericTensor::from_vec_shape(tensor.int32_data.iter().map(|x| *x as u8).collect::<Vec<_>>(), &shape)?,
+                DType::I8 => NDArrayNumericTensor::from_vec_shape(tensor.int32_data.iter().map(|x| *x as i8).collect::<Vec<_>>(), &shape)?,
                 _ => Err(ONNXDecodingError::UnsupportedONNX("Unsupported dtype in int32_data field!".to_string()))?
             }
         }
         else if !tensor.int64_data.is_empty() {
             match dtype {
-                DType::I64 => NDArrayNumericTensor::from_vec_shape(tensor.int64_data.clone(), shape)?,
+                DType::I64 => NDArrayNumericTensor::from_vec_shape(tensor.int64_data.clone(), &shape)?,
                 _ => Err(ONNXDecodingError::UnsupportedONNX("Unsupported dtype in int32_data field!".to_string()))?
             }
         }
         else if !tensor.uint64_data.is_empty() {
             match dtype {
-                DType::U64 => NDArrayNumericTensor::from_vec_shape(tensor.uint64_data.clone(), shape)?,
-                DType::U32 => NDArrayNumericTensor::from_vec_shape(tensor.uint64_data.iter().map(|x| *x as u32).collect::<Vec<_>>(), shape)?,
+                DType::U64 => NDArrayNumericTensor::from_vec_shape(tensor.uint64_data.clone(), &shape)?,
+                DType::U32 => NDArrayNumericTensor::from_vec_shape(tensor.uint64_data.iter().map(|x| *x as u32).collect::<Vec<_>>(), &shape)?,
                 _ => Err(ONNXDecodingError::UnsupportedONNX("Unsupported dtype in int32_data field!".to_string()))?
             }
         }

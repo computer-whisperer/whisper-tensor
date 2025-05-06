@@ -54,6 +54,14 @@ impl<T> SymbolicScalarTyped<T> where
             None
         }
     }
+
+    pub(crate) fn add_offset(&self, offset: i64) -> Self {
+        Self {
+            offset: self.offset + offset,
+            symbol_idx: self.symbol_idx,
+            _phantom_type: PhantomData
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

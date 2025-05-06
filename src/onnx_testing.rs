@@ -506,3 +506,45 @@ fn test_reduce_sum_operator() {
         }
     }
 }
+
+#[test]
+fn test_squeeze_operator() {
+    let node_test_paths = vec![
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_squeeze"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_squeeze_negative_axes"),
+    ];
+
+    for path in node_test_paths {
+        if !path.exists() {
+            println!("Test directory not found, skipping");
+            return;
+        }
+
+        if let Some(test) = OnnxNodeTest::from_directory(&path) {
+            test.run(RuntimeBackend::Eval(EvalBackend::NDArray)).expect("operator test failed");
+        } else {
+            panic!("Could not parse operator test");
+        }
+    }
+}
+
+#[test]
+fn test_unsqueeze_operator() {
+    let node_test_paths = vec![
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_unsqueeze"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_unsqueeze_negative_axes"),
+    ];
+
+    for path in node_test_paths {
+        if !path.exists() {
+            println!("Test directory not found, skipping");
+            return;
+        }
+
+        if let Some(test) = OnnxNodeTest::from_directory(&path) {
+            test.run(RuntimeBackend::Eval(EvalBackend::NDArray)).expect("operator test failed");
+        } else {
+            panic!("Could not parse operator test");
+        }
+    }
+}

@@ -1,3 +1,4 @@
+use crate::ndarray_backend::conversions::NDArrayNumericTensorType;
 use crate::ndarray_backend::NDArrayNumericTensor;
 use super::milli_ops::*;
 
@@ -8,7 +9,7 @@ pub(crate) fn rank(graph: &mut MilliOpGraph, tensor: MilliOpGraphTensorId) -> Mi
 
 pub(crate) fn scalar_const<T>(graph: &mut MilliOpGraph, value: T) -> MilliOpGraphTensorId
 where
-    NDArrayNumericTensor: From<Vec<T>>
+    T:NDArrayNumericTensorType
 {
     graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new_scalar(value)))
 }

@@ -44,6 +44,17 @@ where
             None
         }
     }
+    
+    pub(crate) fn add_offset(&self, offset: i64) -> Self 
+    where
+        T: 'static + std::ops::Add<Output = T>,
+        i64: AsPrimitive<T>
+    {
+        match self {
+            Self::Numeric(a) => Self::Numeric(*a + offset.as_()),
+            Self::Symbolic(scalar) => Self::Symbolic(scalar.add_offset(offset))
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

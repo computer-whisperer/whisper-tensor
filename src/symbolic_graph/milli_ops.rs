@@ -1,7 +1,9 @@
 use std::collections::HashMap;
+use futures::StreamExt;
 use onnx_graph::tensor::Tensor;
 use crate::dtype::{DType, DTypeError};
 use crate::eval_backend::EvalBackend;
+use crate::ndarray_backend::conversions::NDArrayNumericTensorType;
 use crate::ndarray_backend::NDArrayNumericTensor;
 use crate::numeric_scalar::NumericScalar;
 use crate::numeric_tensor::NumericTensor;
@@ -34,6 +36,7 @@ pub(crate) struct MilliOpGraphTensorId {
 
 trait MilliOp {
     fn get_inputs(&self) -> Vec<MilliOpGraphTensorId>;
+    /*
     fn infer(&self, known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>, _symbolic_resolver: &mut SymbolicResolver, backend: &EvalBackend) -> Result<TensorInfo, MilliOpGraphError> {
         let mut resolved_inputs = HashMap::new();
         for input in self.get_inputs() {
@@ -51,7 +54,8 @@ trait MilliOp {
         }
 
         Ok(TensorInfo::Numeric(self.eval(&resolved_inputs, backend)?))
-    }
+    }*/
+    fn infer(&self, known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>, _symbolic_resolver: &mut SymbolicResolver, backend: &EvalBackend) -> Result<TensorInfo, MilliOpGraphError>;
     fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor>, _backend: &EvalBackend) -> Result<NumericTensor, MilliOpGraphError>;
 }
 
@@ -66,10 +70,10 @@ impl MilliOpConstant {
 
     pub(crate) fn new_scalar<T>(v: T) -> Self
     where
-        NDArrayNumericTensor: From<Vec<T>>
+        T: NDArrayNumericTensorType
     {
         Self{
-            data: NDArrayNumericTensor::from(vec![v]).into()
+            data: NDArrayNumericTensor::from_vec_shape(vec![v], &vec![1]).unwrap().into()
         }
     }
 }
@@ -1058,6 +1062,139 @@ impl MilliOp for MilliOpSlice {
         res
     }
 
+    fn infer(&self, known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>, symbolic_resolver: &mut SymbolicResolver, backend: &EvalBackend) -> Result<TensorInfo, MilliOpGraphError> {
+        let data_input = &known_inputs[&self.data];
+        let start_input = &known_inputs[&self.starts];
+        let end_input = &known_inputs[&self.ends];
+        let steps_input = self.steps.map(|x| &known_inputs[&x]);
+        let axes_input = self.axes.map(|x| &known_inputs[&x]);
+        
+        let output_rank = data_input.rank();
+        
+        let output_rank = match output_rank {
+            ScalarInfoTyped::Numeric(output_rank) => {Some(output_rank)}
+            ScalarInfoTyped::Symbolic(output_rank) => {
+                if let Some(axes_input) = axes_input {
+                    // Axes are being selected, we cannot infer output rank from the axes
+                    None
+                } else {
+                    // output rank should match input len
+                    if let ScalarInfoTyped::Numeric(x) = start_input.shape()[0] {
+                        
+                    }
+                }
+            }
+        }
+
+        match data_input {
+            TensorInfo::Numeric(data_input_numeric) => {
+                // We know the start element for certain, and we know the rank for certain
+                let is_steps_numeric_or_none = steps_input.map(|x| if let TensorInfo::Numeric(_) = x {true} else {false}).unwrap_or(true);
+                let is_axes_numeric_or_none = axes_input.map(|x| if let TensorInfo::Numeric(_) = x {true} else {false}).unwrap_or(true);
+
+                // Try to use eval
+                let res = if is_steps_numeric_or_none && is_axes_numeric_or_none {
+                    if let (TensorInfo::Numeric(start_input), TensorInfo::Numeric(end_input)) = (start_input, end_input) {
+                        let mut inputs = HashMap::from([(self.data, data_input_numeric.clone()), (self.starts, start_input.clone()), (self.ends, end_input.clone())]);
+                        if let Some(steps_input_id) = self.steps {
+                            if let TensorInfo::Numeric(steps_input) = steps_input.unwrap() {
+                                inputs.insert(steps_input_id, steps_input.clone());
+                            }
+                        }
+                        if let Some(axes_input_id) = self.axes {
+                            if let TensorInfo::Numeric(axes_input) = axes_input.unwrap() {
+                                inputs.insert(axes_input_id, axes_input.clone());
+                            }
+                        }
+                        Some(Ok(TensorInfo::Numeric(self.eval(&inputs, backend)?)))
+                    }
+                    else {
+                        // We do not know the values
+                        None
+                    }
+                }
+                else {
+                    None
+                };
+                
+                if let Some(res) = res {
+                    res
+                } else {
+                    // We know the values for the data input, but at least one value from the slice is unknown/symbolic. 
+                    // This means we cannot fully numerically determine the output shape.
+                    // Do our best to figure it out symbolically
+                    let mut output_rank = data_input_numeric.rank();
+                    let mut output_shape = vec![];
+                    
+                    if is_axes_numeric_or_none {
+                        for i in 0..output_rank {
+                            // Determine if this axis is controlled by the slice or not
+                            let inner_i = if let Some(axes_input) = axes_input {
+                                if let TensorInfo::Numeric(axes_input) = axes_input {
+                                    let axes_vec: Vec<i64> = axes_input.to_1d_vec()?;
+                                    let mut res = None;
+                                    for (j, axis) in axes_vec.iter().enumerate() {
+                                        if (*axis as usize) == i {
+                                            res = Some(j);
+                                            break;
+                                        }
+                                    }
+                                    res
+                                } else {
+                                    unreachable!()
+                                }
+                            } else {
+                                Some(i)
+                            };
+                            
+                            if let Some(inner_i) = inner_i {
+                                // Axis is controlled by the slice, can only resolve if we have a full numeric set
+                                let start = start_input.get(&[inner_i as u64], symbolic_resolver).cast::<i64>();
+                                let end = end_input.get(&[inner_i as u64], symbolic_resolver).cast::<i64>();
+                                let step = steps_input.map(|x| x.get(&[inner_i as u64], symbolic_resolver).cast::<i64>());
+                                
+                                if let Some(step) = step {
+                                    // Give up for now todo: do better
+                                    output_shape.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(symbolic_resolver)));
+                                } else {
+                                    if let (ScalarInfoTyped::Numeric(start), ScalarInfoTyped::Numeric(end)) = (start, end) {
+                                        output_shape.push(ScalarInfoTyped::Numeric((start - end).abs() as u64))
+                                    }
+                                }
+                                
+                            } else {
+                                // Axis is not controlled by the slice
+                                output_shape.push(ScalarInfoTyped::Numeric(data_input_numeric.shape()[i] as u64))
+                            }
+                        }
+                    } else {
+                        // Impossible to resolve shape, push new symbolic axes
+                        for _ in 0..output_rank {
+                            output_shape.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(symbolic_resolver)));
+                        }
+                    }
+                    Ok(TensorInfo::Ranked(RankedTensor::new(
+                        ScalarInfo::Symbolic(SymbolicScalar::new(data_input.dtype(), symbolic_resolver)),
+                        output_shape
+                    )))
+                }
+            }
+            TensorInfo::Shaped(data_input_shaped) => {
+                
+            }
+            TensorInfo::Ranked(data_input_ranked) => {
+
+            }
+            TensorInfo::Minimal(data_input_minimal) => {
+                // todo: in theory we could try to use start/end/steps/axes to figure more stuff out
+                Ok(TensorInfo::Minimal(MinimalTensor::new(
+                    ScalarInfo::Symbolic(SymbolicScalar::new(data_input_minimal.dtype(), symbolic_resolver)),
+                    data_input_minimal.rank().clone()
+                )))
+            }
+        }
+    }
+
     fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor>, backend: &EvalBackend) -> Result<NumericTensor, MilliOpGraphError> {
         let data_input = &inputs[&self.data];
         let input_shape = data_input.shape();
@@ -1179,43 +1316,16 @@ impl MilliOp for MilliOpReshape {
     fn infer(&self, known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>, symbolic_resolver: &mut SymbolicResolver, backend: &EvalBackend) -> Result<TensorInfo, MilliOpGraphError> {
         let data_input = &known_inputs[&self.data];
         let shape_input = &known_inputs[&self.shape];
-        
-        if let (TensorInfo::Numeric(shape_input_numeric_tensor), TensorInfo::Numeric(data_input_numeric_tensor)) = (&shape_input, &data_input) {
-            let inputs = HashMap::from([
-                (self.shape, shape_input_numeric_tensor.clone()), (self.data, data_input_numeric_tensor.clone())]);
-            Ok(TensorInfo::Numeric(self.eval(&inputs, backend)?))
-        }
-        else {
-            let (shape_input_value, could_resolve_input_shape) = match &shape_input {
-                TensorInfo::Numeric(shape_input_numeric_tensor) => {
-                    let shape_input_value: Vec<i64> = shape_input_numeric_tensor.cast(DType::I64, backend)?.try_into()?;
-                    (shape_input_value, true)
-                }
-                TensorInfo::Shaped(shape_input_shaped_tensor) => {
-                    // Try to resolve the values
-                    let mut shape_input_values = vec![];
-                    let mut could_resolve_input_shape = true;
-                    for i in 0..shape_input_shaped_tensor.shape()[0] {
-                        let val = shape_input_shaped_tensor.get(i).cast::<i64>();
-                        match val {
-                            ScalarInfoTyped::Numeric(x) => {
-                                shape_input_values.push(x);
-                            }
-                            ScalarInfoTyped::Symbolic(x) => {
-                                could_resolve_input_shape = false;
-                            }
-                        }
-                    }
-                    (shape_input_values, could_resolve_input_shape)
-                }
-                TensorInfo::Ranked(_) => {(vec![], false)}
-                TensorInfo::Minimal(_) => {(vec![], false)}
-            };
-            
-            if could_resolve_input_shape {
+
+        match &shape_input {
+            TensorInfo::Numeric(shape_input_numeric_tensor) => {
+                let shape_input_value: Vec<i64> = shape_input_numeric_tensor.cast(DType::I64, backend)?.try_into()?;
                 match data_input {
                     TensorInfo::Numeric(data_input_numeric_tensor) => {
-                        unreachable!()
+                        // Just run it straight
+                        let inputs = HashMap::from([
+                            (self.shape, shape_input_numeric_tensor.clone()), (self.data, data_input_numeric_tensor.clone())]);
+                        Ok(TensorInfo::Numeric(self.eval(&inputs, backend)?))
                     }
                     TensorInfo::Shaped(data_input_shaped_tensor) => {
                         let data_shape: Vec<_> = data_input_shaped_tensor.shape().iter().map(|x| *x as u64).collect();
@@ -1269,7 +1379,7 @@ impl MilliOp for MilliOpReshape {
                     TensorInfo::Minimal(data_input_minimal_tensor) => {
                         // Could not resolve even the input rank, so even worse resolution
                         let mut output_shape = vec![];
-                        for (i, value) in shape_input_value.iter().enumerate() {
+                        for (_i, value) in shape_input_value.iter().enumerate() {
                             if *value == 0 {
                                 output_shape.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(symbolic_resolver)));
                             } else if *value < 0 {
@@ -1285,12 +1395,182 @@ impl MilliOp for MilliOpReshape {
                     }
                 }
             }
-            else {
-                match &shape_input {
-                    TensorInfo::Ranked(data_input_ranked_tensor) => {
-                        
+            TensorInfo::Shaped(shape_input_shaped_tensor) => {
+                let mut shape_input_values = vec![];
+                let mut could_resolve_input_shape = true;
+                for i in 0..shape_input_shaped_tensor.shape()[0] {
+                    let val = shape_input_shaped_tensor.get(i).cast::<i64>();
+                    match val {
+                        ScalarInfoTyped::Numeric(x) => {
+                            shape_input_values.push(x);
+                        }
+                        ScalarInfoTyped::Symbolic(_x) => {
+                            could_resolve_input_shape = false;
+                        }
                     }
                 }
+                match &data_input {
+                    TensorInfo::Numeric(data_input_numeric_tensor) => {
+                        if could_resolve_input_shape {
+                            let data_shape: Vec<_> = data_input_numeric_tensor.shape().iter().map(|x| *x as u64).collect();
+                            let new_shape = self.calculate_new_shape(
+                                data_shape, shape_input_values)?;
+                            let new_shape_usize: Vec<_> = new_shape.iter().map(|x| *x as usize).collect();
+                            Ok(TensorInfo::Numeric(data_input_numeric_tensor.reshape(new_shape_usize, backend)?))
+                        }
+                        else {
+                            // At least one dim of the shape input is symbolic, so we can't completely resolve.
+                            let mut output_dims = vec![];
+                            for i in 0..shape_input_shaped_tensor.shape()[0] {
+                                let v = shape_input_shaped_tensor.get(i).cast::<i64>();
+                                match v {
+                                    ScalarInfoTyped::Numeric(x) => {
+                                        if x > 0 {
+                                            output_dims.push(v.cast::<u64>());
+                                        } else if x == 0 {
+                                            output_dims.push(ScalarInfoTyped::Numeric(data_input_numeric_tensor.shape()[i] as u64));
+                                        } else {
+                                            output_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(symbolic_resolver)));
+                                        }
+                                    }
+                                    ScalarInfoTyped::Symbolic(_) => {
+                                        // Must use a new symbol here, since it could be negative or 0 at runtime
+                                        output_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(symbolic_resolver)));
+                                    }
+                                }
+                            }
+                            Ok(TensorInfo::Ranked(
+                                RankedTensor::new(
+                                    data_input.first_element(),
+                                    output_dims
+                                ),
+                            ))
+                        }
+                    }
+                    TensorInfo::Shaped(data_input_shaped_tensor) => {
+                        if could_resolve_input_shape {
+                            let data_shape: Vec<_> = data_input_shaped_tensor.shape().iter().map(|x| *x as u64).collect();
+                            let new_shape = self.calculate_new_shape(
+                                data_shape, shape_input_values)?;
+                            let new_shape_usize: Vec<_> = new_shape.iter().map(|x| *x as usize).collect();
+                            Ok(TensorInfo::Shaped(data_input_shaped_tensor.reshape(new_shape_usize)))
+                        } else {
+                            // At least one dim of the shape input is symbolic, so we can't completely resolve.
+                            let mut output_dims = vec![];
+                            for i in 0..shape_input_shaped_tensor.shape()[0] {
+                                let v = shape_input_shaped_tensor.get(i).cast::<i64>();
+                                match v {
+                                    ScalarInfoTyped::Numeric(x) => {
+                                        if x > 0 {
+                                            output_dims.push(v.cast::<u64>());
+                                        } else if x == 0 {
+                                            output_dims.push(ScalarInfoTyped::Numeric(data_input_shaped_tensor.shape()[i] as u64));
+                                        } else {
+                                            output_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(symbolic_resolver)));
+                                        }
+                                    }
+                                    ScalarInfoTyped::Symbolic(_) => {
+                                        // Must use a new symbol here, since it could be negative or 0 at runtime
+                                        output_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(symbolic_resolver)));
+                                    }
+                                }
+                            }
+                            Ok(TensorInfo::Ranked(
+                                RankedTensor::new(
+                                    data_input.first_element(),
+                                    output_dims
+                                ),
+                            ))
+                        }
+                    }
+                    TensorInfo::Ranked(data_input_ranked_tensor) => {
+                        // At least one dim of the shape input is symbolic, so we can't completely resolve.
+                        let mut output_dims = vec![];
+                        for i in 0..shape_input_shaped_tensor.shape()[0] {
+                            let v = shape_input_shaped_tensor.get(i).cast::<i64>();
+                            match v {
+                                ScalarInfoTyped::Numeric(x) => {
+                                    if x > 0 {
+                                        output_dims.push(v.cast::<u64>());
+                                    } else if x == 0 {
+                                        output_dims.push(data_input_ranked_tensor.shape()[i].clone());
+                                    } else {
+                                        output_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(symbolic_resolver)));
+                                    }
+                                }
+                                ScalarInfoTyped::Symbolic(_) => {
+                                    // Must use a new symbol here, since it could be negative or 0 at runtime
+                                    output_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(symbolic_resolver)));
+                                }
+                            }
+                        }
+                        Ok(TensorInfo::Ranked(
+                            RankedTensor::new(
+                                data_input.first_element(),
+                                output_dims
+                            ),
+                        ))
+                    }
+                    TensorInfo::Minimal(_) => {
+                        // At least one dim of the shape input is symbolic, so we can't completely resolve.
+                        let mut output_dims = vec![];
+                        for i in 0..shape_input_shaped_tensor.shape()[0] {
+                            let v = shape_input_shaped_tensor.get(i).cast::<i64>();
+                            match v {
+                                ScalarInfoTyped::Numeric(x) => {
+                                    if x > 0 {
+                                        output_dims.push(v.cast::<u64>());
+                                    } else if x == 0 {
+                                        output_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(symbolic_resolver)));
+                                    } else {
+                                        output_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(symbolic_resolver)));
+                                    }
+                                }
+                                ScalarInfoTyped::Symbolic(_) => {
+                                    // Must use a new symbol here, since it could be negative or 0 at runtime
+                                    output_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(symbolic_resolver)));
+                                }
+                            }
+                        }
+                        Ok(TensorInfo::Ranked(
+                            RankedTensor::new(
+                                data_input.first_element(),
+                                output_dims
+                            ),
+                        ))
+                    }
+                }
+            }
+            TensorInfo::Ranked(shape_input_ranked_tensor) => {
+                let value = shape_input_ranked_tensor.shape()[0].clone();
+                match value {
+                    ScalarInfoTyped::Numeric(x) => {
+                        // We know the full rank of the output, just not the shape
+                        let mut new_shape = vec![];
+                        new_shape.push(shape_input_ranked_tensor.first_element().cast::<u64>());
+                        for _ in 1..x {
+                            new_shape.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(symbolic_resolver)));
+                        }
+                        Ok(TensorInfo::Ranked(RankedTensor::new(
+                            data_input.first_element(),
+                            new_shape
+                        )))
+                    }
+                    ScalarInfoTyped::Symbolic(x) => {
+                        // Rank is symbolic
+                        Ok(TensorInfo::Minimal(MinimalTensor::new(
+                            data_input.first_element(),
+                            x.cast::<u32>()
+                        )))
+                    }
+                }
+            }
+            TensorInfo::Minimal(_) => {
+                // We know actually nothing about the final shape...
+                Ok(TensorInfo::Minimal(MinimalTensor::new(
+                    data_input.first_element(),
+                    SymbolicScalarTyped::new(symbolic_resolver)
+                )))
             }
         }
     }
@@ -1332,6 +1612,106 @@ impl MilliOpSqueeze {
 
 impl MilliOp for MilliOpSqueeze {
     fn get_inputs(&self) -> Vec<MilliOpGraphTensorId> {vec![self.data, self.axes]}
+
+    fn infer(&self, known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>, symbolic_resolver: &mut SymbolicResolver, backend: &EvalBackend) -> Result<TensorInfo, MilliOpGraphError> {
+        let data_input = &known_inputs[&self.data];
+        let axes_input = &known_inputs[&self.axes];
+
+        match axes_input {
+            TensorInfo::Numeric(axes_input_numeric_tensor) => {
+                let axes: Vec<i64> = axes_input_numeric_tensor.to_ndarray()?.try_into()?;
+                match data_input {
+                    TensorInfo::Numeric(data_input_numeric_tensor) => {
+                        // Just run it straight
+                        let inputs = HashMap::from([
+                            (self.axes, axes_input_numeric_tensor.clone()), (self.data, data_input_numeric_tensor.clone())]);
+                        Ok(TensorInfo::Numeric(self.eval(&inputs, backend)?))
+                    }
+                    TensorInfo::Shaped(data_input_shaped_tensor) => {
+                        let old_shape = data_input_shaped_tensor.shape().iter().map(|&x| x as u64).collect::<Vec<_>>();
+                        let mut new_shape = vec![];
+                        for i in 0..old_shape.len() {
+                            let mut do_skip = false;
+                            for axis in &axes {
+                                let axis = if *axis < 0 {
+                                    old_shape.len() as i64 + axis
+                                } else {
+                                    *axis
+                                };
+                                if axis == i as i64 {
+                                    do_skip = true;
+                                    break;
+                                }
+                            }
+                            if do_skip {
+                                continue;
+                            }
+                            new_shape.push(old_shape[i] as usize);
+                        }
+                        Ok(TensorInfo::Shaped(data_input_shaped_tensor.reshape(new_shape)))
+                    }
+                    TensorInfo::Ranked(data_input_ranked_tensor) => {
+                        let old_shape = data_input_ranked_tensor.shape();
+                        let mut new_shape = vec![];
+                        for i in 0..old_shape.len() {
+                            let mut do_skip = false;
+                            for axis in &axes {
+                                let axis = if *axis < 0 {
+                                    old_shape.len() as i64 + axis
+                                } else {
+                                    *axis
+                                };
+                                if axis == i as i64 {
+                                    do_skip = true;
+                                    break;
+                                }
+                            }
+                            if do_skip {
+                                continue;
+                            }
+                            new_shape.push(old_shape[i].clone());
+                        }
+                        Ok(TensorInfo::Ranked(RankedTensor::new(
+                            data_input_ranked_tensor.first_element().clone(),
+                            new_shape
+                        )))
+                    }
+                    TensorInfo::Minimal(data_input_minimal_tensor) => {
+                        let old_rank = data_input_minimal_tensor.rank();
+                        let new_rank = old_rank.add_offset(axes.len() as i64);
+                        Ok(TensorInfo::Minimal(MinimalTensor::new(
+                            data_input_minimal_tensor.first_element().clone(),
+                            new_rank
+                        )))
+                    }
+                }
+            }
+            TensorInfo::Shaped(axes_input_shaped_tensor) => {
+                // We can assume that not enough values are resolved to allow for any resolution of the output shape, limiting us to only knowing the rank
+                let old_rank = data_input.rank();
+                let new_rank = old_rank.add_offset(axes_input_shaped_tensor.shape()[0] as i64);
+                Ok(TensorInfo::new_from_rank_and_first_value(data_input.first_element().clone(), new_rank, symbolic_resolver))
+            }
+            TensorInfo::Ranked(axes_input_ranked_tensor) => {
+                // We can assume that not enough values are resolved to allow for any resolution of the output shape, limiting us to only knowing the rank
+                let old_rank = data_input.rank();
+                let new_rank = match &axes_input_ranked_tensor.shape()[0] {
+                    ScalarInfoTyped::Numeric(x) => {
+                        old_rank.add_offset(*x as i64)
+                    }
+                    ScalarInfoTyped::Symbolic(_) => {
+                        ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(symbolic_resolver))
+                    }
+                };
+                Ok(TensorInfo::new_from_rank_and_first_value(data_input.first_element().clone(), new_rank, symbolic_resolver))
+            }
+            TensorInfo::Minimal(_) => {
+                // We don't even know the number of indexes we will be removing
+                Ok(TensorInfo::Minimal(MinimalTensor::new( data_input.first_element().clone(), SymbolicScalarTyped::new(symbolic_resolver))))
+            }
+        }
+    }
+
     fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor>, backend: &EvalBackend) -> Result<NumericTensor, MilliOpGraphError> {
         let axes_ndarray = NDArrayNumericTensor::try_from(inputs[&self.axes].cast(DType::I64, backend)?)?;
         let axes = Vec::<i64>::try_from(axes_ndarray)?;
@@ -1367,6 +1747,114 @@ impl MilliOpUnsqueeze {
 
 impl MilliOp for MilliOpUnsqueeze {
     fn get_inputs(&self) -> Vec<MilliOpGraphTensorId> {vec![self.data, self.axes]}
+
+    fn infer(&self, known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>, symbolic_resolver: &mut SymbolicResolver, backend: &EvalBackend) -> Result<TensorInfo, MilliOpGraphError> {
+        let data_input = &known_inputs[&self.data];
+        let axes_input = &known_inputs[&self.axes];
+
+        match axes_input {
+            TensorInfo::Numeric(axes_input_numeric_tensor) => {
+                let axes: Vec<i64> = axes_input_numeric_tensor.to_ndarray()?.try_into()?;
+                match data_input {
+                    TensorInfo::Numeric(data_input_numeric_tensor) => {
+                        // Just run it straight
+                        let inputs = HashMap::from([
+                            (self.axes, axes_input_numeric_tensor.clone()), (self.data, data_input_numeric_tensor.clone())]);
+                        Ok(TensorInfo::Numeric(self.eval(&inputs, backend)?))
+                    }
+                    TensorInfo::Shaped(data_input_shaped_tensor) => {
+                        let old_shape = data_input_shaped_tensor.shape().iter().map(|&x| x as u64).collect::<Vec<_>>();
+                        let mut new_shape = vec![];
+                        let mut old_i = 0;
+                        for i in 0..old_shape.len()+axes.len() {
+                            let mut insert_here = false;
+                            for axis in &axes {
+                                let axis = if *axis < 0 {
+                                    old_shape.len() as i64 + axis
+                                } else {
+                                    *axis
+                                };
+                                if axis == i as i64 {
+                                    insert_here = true;
+                                    break;
+                                }
+                            }
+                            if insert_here {
+                                new_shape.push(1)
+                            }
+                            else {
+                                new_shape.push(old_shape[old_i] as usize);
+                                old_i += 1;
+                            }
+                        }
+                        Ok(TensorInfo::Shaped(data_input_shaped_tensor.reshape(new_shape)))
+                    }
+                    TensorInfo::Ranked(data_input_ranked_tensor) => {
+                        let old_shape = data_input_ranked_tensor.shape();
+                        let mut new_shape = vec![];
+                        let mut old_i = 0;
+                        for i in 0..old_shape.len()+axes.len() {
+                            let mut insert_here = false;
+                            for axis in &axes {
+                                let axis = if *axis < 0 {
+                                    old_shape.len() as i64 + axis
+                                } else {
+                                    *axis
+                                };
+                                if axis == i as i64 {
+                                    insert_here = true;
+                                    break;
+                                }
+                            }
+                            if insert_here {
+                                new_shape.push(ScalarInfoTyped::Numeric(1));
+                            }
+                            else {
+                                new_shape.push(old_shape[old_i].clone());
+                                old_i += 1;
+                            }
+                        }
+                        Ok(TensorInfo::Ranked(RankedTensor::new(
+                            data_input_ranked_tensor.first_element().clone(),
+                            new_shape
+                        )))
+                    }
+                    TensorInfo::Minimal(data_input_minimal_tensor) => {
+                        let old_rank = data_input_minimal_tensor.rank();
+                        let new_rank = old_rank.add_offset(-(axes.len() as i64));
+                        Ok(TensorInfo::Minimal(MinimalTensor::new(
+                            data_input_minimal_tensor.first_element().clone(),
+                            new_rank
+                        )))
+                    }
+                }
+            }
+            TensorInfo::Shaped(axes_input_shaped_tensor) => {
+                // We can assume that not enough values are resolved to allow for any resolution of the output shape, limiting us to only knowing the rank
+                let old_rank = data_input.rank();
+                let new_rank = old_rank.add_offset(-(axes_input_shaped_tensor.shape()[0] as i64));
+                Ok(TensorInfo::new_from_rank_and_first_value(data_input.first_element().clone(), new_rank, symbolic_resolver))
+            }
+            TensorInfo::Ranked(axes_input_ranked_tensor) => {
+                // We can assume that not enough values are resolved to allow for any resolution of the output shape, limiting us to only knowing the rank
+                let old_rank = data_input.rank();
+                let new_rank = match &axes_input_ranked_tensor.shape()[0] {
+                    ScalarInfoTyped::Numeric(x) => {
+                        old_rank.add_offset(-(*x as i64))
+                    }
+                    ScalarInfoTyped::Symbolic(_) => {
+                        ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(symbolic_resolver))
+                    }
+                };
+                Ok(TensorInfo::new_from_rank_and_first_value(data_input.first_element().clone(), new_rank, symbolic_resolver))
+            }
+            TensorInfo::Minimal(_) => {
+                // We don't even know the number of indexes we will be removing
+                Ok(TensorInfo::Minimal(MinimalTensor::new( data_input.first_element().clone(), SymbolicScalarTyped::new(symbolic_resolver))))
+            }
+        }
+    }
+
     fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor>, backend: &EvalBackend) -> Result<NumericTensor, MilliOpGraphError> {
         let axes_ndarray = NDArrayNumericTensor::try_from(inputs[&self.axes].cast(DType::I64, backend)?)?;
         let axes = Vec::<i64>::try_from(axes_ndarray)?;
@@ -1620,6 +2108,42 @@ impl MilliOp for AnyMilliOp {
             AnyMilliOp::Split(x) => x.get_inputs(),
             AnyMilliOp::Where(x) => x.get_inputs(),
             AnyMilliOp::Range(x) => x.get_inputs()
+        }
+    }
+
+    fn infer(&self, known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>, symbolic_resolver: &mut SymbolicResolver, backend: &EvalBackend) -> Result<TensorInfo, MilliOpGraphError> {
+        match self {
+            AnyMilliOp::Constant(x) => x.infer(known_inputs, symbolic_resolver, backend),
+            AnyMilliOp::ConstantOfShape(x) => x.infer(known_inputs, symbolic_resolver, backend),
+            AnyMilliOp::SimpleBinary(x) => x.infer(known_inputs, symbolic_resolver, backend),
+            AnyMilliOp::Pow(x) => x.infer(known_inputs, symbolic_resolver, backend),
+            AnyMilliOp::Neg(x) => x.infer(known_inputs, symbolic_resolver, backend),
+            AnyMilliOp::Abs(x) => x.infer(known_inputs, symbolic_resolver, backend),
+            AnyMilliOp::Exp(x) => x.infer(known_inputs, symbolic_resolver, backend),
+            AnyMilliOp::Log(x) => x.infer(known_inputs, symbolic_resolver, backend),
+            AnyMilliOp::Sqrt(x) => x.infer(known_inputs, symbolic_resolver, backend),
+            AnyMilliOp::Trig(x) => x.infer(known_inputs, symbolic_resolver, backend),
+            AnyMilliOp::MatMul(x) =>x.infer(known_inputs, symbolic_resolver, backend),
+            AnyMilliOp::ClampMin(x) => x.infer(known_inputs, symbolic_resolver, backend),
+            AnyMilliOp::Reciprocal(x) => x.infer(known_inputs, symbolic_resolver, backend),
+            AnyMilliOp::NonZero(x) => x.infer(known_inputs, symbolic_resolver, backend),
+            AnyMilliOp::CumSum(x) => x.infer(known_inputs, symbolic_resolver, backend),
+            AnyMilliOp::Shape(x) => x.infer(known_inputs, symbolic_resolver, backend),
+            AnyMilliOp::Reshape(x) => x.infer(known_inputs, symbolic_resolver, backend),
+            AnyMilliOp::Slice(x) => x.infer(known_inputs, symbolic_resolver, backend),
+            AnyMilliOp::ReduceSum(x) => x.infer(known_inputs, symbolic_resolver, backend),
+            AnyMilliOp::ReduceProd(x) => x.infer(known_inputs, symbolic_resolver, backend),
+            AnyMilliOp::ReduceMean(x) => x.infer(known_inputs, symbolic_resolver, backend),
+            AnyMilliOp::Cast(x) => x.infer(known_inputs, symbolic_resolver, backend),
+            AnyMilliOp::CastLike(x) => x.infer(known_inputs, symbolic_resolver, backend),
+            AnyMilliOp::Transpose(x) => x.infer(known_inputs, symbolic_resolver, backend),
+            AnyMilliOp::Squeeze(x) =>  x.infer(known_inputs, symbolic_resolver, backend),
+            AnyMilliOp::Unsqueeze(x) => x.infer(known_inputs, symbolic_resolver, backend),
+            AnyMilliOp::Gather(x) => x.infer(known_inputs, symbolic_resolver, backend),
+            AnyMilliOp::Concat(x) => x.infer(known_inputs, symbolic_resolver, backend),
+            AnyMilliOp::Split(x) => x.infer(known_inputs, symbolic_resolver, backend),
+            AnyMilliOp::Where(x) => x.infer(known_inputs, symbolic_resolver, backend),
+            AnyMilliOp::Range(x) => x.infer(known_inputs, symbolic_resolver, backend),
         }
     }
 

@@ -1043,7 +1043,7 @@ impl ConstantOfShapeOperation {
         }
 
         let value = query_attribute_tensor(attributes, "value")
-            .map(|x| x.index(&[0]))
+            .map(|x| x.get(&[0]))
             .transpose()?
             .unwrap_or(NumericScalar::F32(0.0));
 
