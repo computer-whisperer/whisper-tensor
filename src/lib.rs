@@ -14,6 +14,7 @@ use crate::ort_backend::ORTNumericTensor;
 use crate::sampler::SamplerError;
 use crate::symbolic_graph::{ONNXDecodingError, SymbolicGraphMutator};
 use crate::symbolic_graph::ops::EvalError;
+use crate::tensor_rank::DynRank;
 
 mod vulkan_context;
 pub mod symbolic_graph;
@@ -26,6 +27,8 @@ pub mod eval_backend;
 mod ndarray_backend;
 mod onnx_testing;
 pub mod numeric_scalar;
+pub mod tensor_rank;
+pub mod numeric_tensor_typed;
 
 #[cfg(feature = "ort")]
 pub mod ort_backend;
@@ -246,7 +249,7 @@ impl RuntimeModel {
         })
     }
 
-    pub fn run(&mut self, inputs: HashMap<String, NumericTensor>) -> Result<HashMap<String, NumericTensor>, RuntimeError> {
+    pub fn run(&mut self, inputs: HashMap<String, NumericTensor<DynRank>>) -> Result<HashMap<String, NumericTensor<DynRank>>, RuntimeError> {
         match &mut self.inner {
             #[cfg(feature = "onnx-reference")]
             RuntimeModelInner::ONNXReference(session) => {

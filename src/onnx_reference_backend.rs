@@ -6,6 +6,7 @@ use crate::dtype::DType;
 use crate::ndarray_backend::NDArrayNumericTensor;
 use crate::numeric_tensor::{NumericTensor, NumericTensorError};
 use crate::onnx;
+use crate::tensor_rank::{DynRank, Rank};
 
 #[derive(Debug)]
 pub struct ONNXReferenceTensor {
@@ -39,26 +40,30 @@ impl ONNXReferenceTensor {
             value.getattr("shape").unwrap().extract().unwrap()
         })
     }
-}
-
-impl TryFrom<&ONNXReferenceTensor> for NDArrayNumericTensor {
-    type Error = NumericTensorError;
-
-    fn try_from(value: &ONNXReferenceTensor) -> Result<Self, Self::Error> {
+    
+    pub fn to_ndarray<R: Rank>(&self) -> Result<NDArrayNumericTensor<R>, NumericTensorError> {
         let out = Python::with_gil(|py| {
-            let value = value.value.bind(py);
+            let value = self.value.bind(py);
             let v_flat = value.call_method0("flatten")?;
             let v_flat = v_flat.call_method0("tolist")?;
             let v_flat = v_flat.extract::<Vec<f32>>()?;
             let shape = value.getattr("shape")?;
             let shape = shape.extract::<Vec<usize>>()?;
-            Ok(NDArrayNumericTensor::from_vec_shape(v_flat, &shape))
+            Ok(NDArrayNumericTensor::try_from_vec_shape(v_flat, &shape))
         }).map_err(|e| ONNXReferenceError::PyErr(e))?;
         Ok(out?)
     }
 }
 
-impl TryFrom<ONNXReferenceTensor> for NDArrayNumericTensor {
+impl<R: Rank> TryFrom<&ONNXReferenceTensor> for NDArrayNumericTensor<R> {
+    type Error = NumericTensorError;
+
+    fn try_from(value: &ONNXReferenceTensor) -> Result<Self, Self::Error> {
+        value.to_ndarray()
+    }
+}
+
+impl TryFrom<ONNXReferenceTensor> for NDArrayNumericTensor<DynRank> {
     type Error = NumericTensorError;
     
     fn try_from(value: ONNXReferenceTensor) -> Result<Self, Self::Error> {
@@ -66,9 +71,9 @@ impl TryFrom<ONNXReferenceTensor> for NDArrayNumericTensor {
     }
 }
 
-impl TryFrom<&NDArrayNumericTensor> for ONNXReferenceTensor {
+impl TryFrom<&NDArrayNumericTensor<DynRank>> for ONNXReferenceTensor {
     type Error = ONNXReferenceError;
-    fn try_from(input: &NDArrayNumericTensor) -> Result<Self, Self::Error> {
+    fn try_from(input: &NDArrayNumericTensor<DynRank>) -> Result<Self, Self::Error> {
         Python::with_gil(|py| {
             let np = py.import("numpy")?;
             let np_array = match &input {
@@ -89,34 +94,34 @@ impl TryFrom<&NDArrayNumericTensor> for ONNXReferenceTensor {
     }
 }
 
-impl TryFrom<NDArrayNumericTensor> for ONNXReferenceTensor {
+impl TryFrom<NDArrayNumericTensor<DynRank>> for ONNXReferenceTensor {
     type Error = ONNXReferenceError;
-    fn try_from(value: NDArrayNumericTensor) -> Result<Self, Self::Error> {
+    fn try_from(value: NDArrayNumericTensor<DynRank>) -> Result<Self, Self::Error> {
         Self::try_from(&value)
     }
 }
 
-impl TryFrom<NumericTensor> for ONNXReferenceTensor {
+impl TryFrom<NumericTensor<DynRank>> for ONNXReferenceTensor {
     type Error = NumericTensorError;
-    fn try_from(value: NumericTensor) -> Result<Self, Self::Error> {
+    fn try_from(value: NumericTensor<DynRank>) -> Result<Self, Self::Error> {
         Ok(match value {
             NumericTensor::NDArray(x) => ONNXReferenceTensor::try_from(x)?,
-            _ => Self::try_from(NDArrayNumericTensor::try_from(value)?)?
+            _ => Self::try_from(value.to_ndarray()?)?
         })
     }
 }
 
-impl TryFrom<&NumericTensor> for ONNXReferenceTensor {
+impl TryFrom<&NumericTensor<DynRank>> for ONNXReferenceTensor {
     type Error = NumericTensorError;
-    fn try_from(value: &NumericTensor) -> Result<Self, Self::Error> {
+    fn try_from(value: &NumericTensor<DynRank>) -> Result<Self, Self::Error> {
         Ok(match value {
             NumericTensor::NDArray(x) => ONNXReferenceTensor::try_from(x)?,
-            _ => Self::try_from(NDArrayNumericTensor::try_from(value)?)?
+            _ => Self::try_from(value.to_ndarray()?)?
         })
     }
 }
 
-impl From<ONNXReferenceTensor> for NumericTensor {
+impl From<ONNXReferenceTensor> for NumericTensor<DynRank> {
     fn from(value: ONNXReferenceTensor) -> Self {
         Self::ONNXReference(value)
     }

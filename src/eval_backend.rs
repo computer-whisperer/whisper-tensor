@@ -4,6 +4,7 @@ use crate::numeric_tensor::NumericTensor;
 use crate::symbolic_graph::{GraphOperation, OperationId, SymbolicGraph, TensorId, ONNXTensorInfo};
 use crate::symbolic_graph::ops::{EvalError, Operation};
 use crate::symbolic_graph::scalar_info::ScalarInfoTyped;
+use crate::tensor_rank::DynRank;
 
 #[derive(Debug, Clone)]
 pub enum EvalBackend {
@@ -25,7 +26,7 @@ pub enum EvalRuntimeError {
     #[error(transparent)]
     DTypeError(#[from] DTypeError),
     #[error("Unexpected shape: expected {0:?}, got {1:?} in shape {2:?}")]
-    UnexpectedDimension(u64, u64, Vec<usize>),
+    UnexpectedDimension(u64, u64, Vec<u64>),
     #[error("Unexpected rank: expected {0}, got {1}")]
     UnexpectedRank(usize, usize),
     #[error("Unexpected dtype: expected {0}, got {1}")]
@@ -41,7 +42,7 @@ pub struct EvalRuntime {
     model: SymbolicGraph
 }
 
-fn check_tensor_matches(tensor: &NumericTensor, tensor_info: &ONNXTensorInfo) -> Result<(), EvalRuntimeError> {
+fn check_tensor_matches(tensor: &NumericTensor<DynRank>, tensor_info: &ONNXTensorInfo) -> Result<(), EvalRuntimeError> {
     if let Some(shape) = tensor_info.shape() {
         if shape.len() != tensor.shape().len() {
             Err(EvalRuntimeError::UnexpectedRank(shape.len(), tensor.shape().len()))?;
@@ -56,7 +57,7 @@ fn check_tensor_matches(tensor: &NumericTensor, tensor_info: &ONNXTensorInfo) ->
         }
     }
     if let Some(dtype) = tensor_info.dtype() {
-        let tensor_dtype =  tensor.dtype()?;
+        let tensor_dtype =  tensor.dtype();
         if dtype != tensor_dtype {
             Err(EvalRuntimeError::UnexpectedDType(dtype, tensor_dtype))?
         }
@@ -100,9 +101,9 @@ impl EvalRuntime {
         &self.eval_backend
     }
 
-    pub fn run(&mut self, inputs: HashMap<String, NumericTensor>) -> Result<HashMap<String, NumericTensor>, EvalRuntimeError>{
+    pub fn run(&mut self, inputs: HashMap<String, NumericTensor<DynRank>>) -> Result<HashMap<String, NumericTensor<DynRank>>, EvalRuntimeError>{
         let initialized_tensors = self.model.get_initialized_tensors().clone();
-        let mut active_tensors: HashMap<TensorId, NumericTensor> = HashMap::new();
+        let mut active_tensors: HashMap<TensorId, NumericTensor<DynRank>> = HashMap::new();
         for (name, tensor) in initialized_tensors {
             active_tensors.insert(name, tensor.into());
         }

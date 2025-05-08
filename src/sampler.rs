@@ -1,7 +1,9 @@
+use typenum::P1;
 use crate::dtype::DType;
 use crate::eval_backend::EvalBackend;
 use crate::ndarray_backend::{NDArrayNumericTensor, NDArrayNumericTensorError};
 use crate::numeric_tensor::{NumericTensor, NumericTensorError};
+use crate::tensor_rank::DynRank;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SamplerError {
@@ -16,26 +18,9 @@ pub enum SamplerError {
 }
 
 pub trait Sampler {
-    fn sample(&mut self, x: &NumericTensor) -> Result<NumericTensor, SamplerError>;
+    fn sample(&mut self, x: &NumericTensor<DynRank>) -> Result<NumericTensor<DynRank>, SamplerError>;
 }
 
-pub struct GreedySampler{}
-
-impl Sampler for GreedySampler {
-    fn sample(&mut self, x: &NumericTensor) -> Result<NumericTensor, SamplerError> {
-        let dim = x.shape().len() - 1;
-        Ok(match x {
-            NumericTensor::Candle(x) => {
-                NumericTensor::Candle(x.argmax(dim)?)
-            }
-            _ => {
-                let x = NDArrayNumericTensor::try_from(x)?;
-                let x = x.argmax(dim).1;
-                x.into()
-            }
-        })
-    }
-}
 
 #[cfg(feature = "llm-samplers")]
 pub struct LLMSamplersBundle {
@@ -46,18 +31,18 @@ pub struct LLMSamplersBundle {
 #[cfg(feature = "llm-samplers")]
 impl Sampler for LLMSamplersBundle {
     
-    fn sample(&mut self, x: &NumericTensor) -> Result<NumericTensor, SamplerError> {
+    fn sample(&mut self, x: &NumericTensor<DynRank>) -> Result<NumericTensor<DynRank>, SamplerError> {
         use llm_samplers::prelude::Sampler;
         
         let x_shape = x.shape();
         let x = x.reshape(vec![x_shape[x_shape.len()-1]], &EvalBackend::NDArray)?;
-        let v: Vec<f32> = x.cast(DType::F32, &EvalBackend::NDArray)?.try_into()?;
+        let v: Vec<f32> = x.cast(DType::F32, &EvalBackend::NDArray)?.try_to_rank::<P1>()?.try_into()?;
         let mut logits = llm_samplers::prelude::Logits::try_from(v).map_err(|x| {SamplerError::LLMSamplersError(x.into())})?;
         let out = self.chain.sample_token(&mut self.res, &mut logits).map_err(|x| {SamplerError::LLMSamplersError(x.into())})?;
         let out = out.unwrap();
         let mut output_shape = x_shape.clone();
         output_shape.remove(output_shape.len()-1);
-        let out_tensor = NumericTensor::from_vec_shape(vec![out], output_shape)?;
+        let out_tensor = NumericTensor::from_vec_shape(vec![out], output_shape.iter().map(|x| *x as usize).collect())?;
         Ok(out_tensor)
     }
 }

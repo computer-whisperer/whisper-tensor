@@ -28,7 +28,7 @@ impl<T> SymbolicScalarTyped<T> where
         T::DTYPE
     }
     
-    pub(crate) fn promote(&self) -> SymbolicScalar {
+    pub(crate) fn to_dyn_type(&self) -> SymbolicScalar {
         SymbolicScalar {
             offset: self.offset,
             dtype: T::DTYPE,
@@ -62,6 +62,7 @@ impl<T> SymbolicScalarTyped<T> where
             _phantom_type: PhantomData
         }
     }
+    
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -30,6 +30,7 @@ rwkv-tokenizer = { optional=true, version="0.9.1" }
 env_logger = "0.11.8"
 log = "0.4.27"
 serde_json = "1.0.140"
+typenum = { version="1.18.0", features=["const-generics"] }
 
 [features]
 default = ["ort", "candle", "onnx-reference", "tokenizers", "llm-samplers", "rwkv-tokenizer"]

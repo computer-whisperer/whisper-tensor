@@ -20,7 +20,7 @@ where
     pub(crate) fn promote(&self) -> ScalarInfo {
         match self {
             ScalarInfoTyped::Numeric(x) => ScalarInfo::Numeric(NumericScalar::from(*x)),
-            ScalarInfoTyped::Symbolic(scalar) => ScalarInfo::Symbolic(scalar.promote())
+            ScalarInfoTyped::Symbolic(scalar) => ScalarInfo::Symbolic(scalar.to_dyn_type())
         }
     }
     
@@ -53,6 +53,13 @@ where
         match self {
             Self::Numeric(a) => Self::Numeric(*a + offset.as_()),
             Self::Symbolic(scalar) => Self::Symbolic(scalar.add_offset(offset))
+        }
+    }
+    
+    pub(crate) fn to_dyn_type(&self) -> ScalarInfo {
+        match self {
+            Self::Numeric(x) => ScalarInfo::Numeric(NumericScalar::from(*x)),
+            Self::Symbolic(x) => ScalarInfo::Symbolic(x.to_dyn_type())
         }
     }
 }

@@ -13,6 +13,7 @@ use crate::eval_backend::EvalBackend;
 use crate::ndarray_backend::NDArrayNumericTensor;
 use crate::onnx::TensorProto;
 use crate::symbolic_graph::ONNXDecodingError;
+use crate::tensor_rank::DynRank;
 
 // Structure to hold a test case
 struct OnnxNodeTest {
@@ -132,9 +133,9 @@ impl OnnxNodeTest {
     }
 
     // Compare tensors with tolerance
-    fn compare_tensors(&self, actual: &NumericTensor, expected: &NumericTensor) -> Result<(), TestError> {
+    fn compare_tensors(&self, actual: &NumericTensor<DynRank>, expected: &NumericTensor<DynRank>) -> Result<(), TestError> {
         // Check shapes match
-        if actual.dtype()? != expected.dtype()? {
+        if actual.dtype() != expected.dtype() {
             Err(format!(
                 "Data type mismatch: actual {:?} vs expected {:?}", actual.dtype(), expected.dtype()))?
         }
@@ -147,8 +148,8 @@ impl OnnxNodeTest {
         }
 
         // Compare values when cast to 64 bit
-        let actual_values: Vec<f64> = actual.cast(DType::F64, &EvalBackend::NDArray).unwrap().flatten().unwrap().try_into().unwrap();
-        let expected_values: Vec<f64> = expected.cast(DType::F64, &EvalBackend::NDArray).unwrap().flatten().unwrap().try_into().unwrap();
+        let actual_values: Vec<f64> = actual.cast(DType::F64, &EvalBackend::NDArray).unwrap().to_ndarray().unwrap().flatten().try_to_vec().unwrap();
+        let expected_values: Vec<f64> = expected.cast(DType::F64, &EvalBackend::NDArray).unwrap().to_ndarray().unwrap().flatten().try_to_vec().unwrap();
 
         for (actual_value, expected_value) in actual_values.iter().zip(expected_values.iter()) {
             let abs_diff = (actual_value - expected_value).abs();
@@ -203,14 +204,14 @@ impl TestDataSet {
     }
 
     // Parse input protobuf data into NumericTensors
-    fn parse_inputs(&self) -> Result<HashMap<String, NumericTensor>, ONNXDecodingError> {
+    fn parse_inputs(&self) -> Result<HashMap<String, NumericTensor<DynRank>>, ONNXDecodingError> {
         let mut result = HashMap::new();
 
         // This will need to use the model to get input names
         // For now, we'll use placeholder indices as names
         for (index, (_, proto_data)) in self.inputs.iter().enumerate() {
             let tensor_proto = TensorProto::decode(proto_data.as_slice()).unwrap();
-            let tensor: NumericTensor = NDArrayNumericTensor::try_from(&tensor_proto)?.into();
+            let tensor: NumericTensor<DynRank> = NDArrayNumericTensor::try_from(&tensor_proto)?.into();
 
             // Use a name based on index (you'll need a better naming strategy)
             result.insert(tensor_proto.name, tensor);
@@ -220,12 +221,12 @@ impl TestDataSet {
     }
 
     // Parse output protobuf data into NumericTensors
-    fn parse_outputs(&self) -> Result<HashMap<String, NumericTensor>, ONNXDecodingError> {
+    fn parse_outputs(&self) -> Result<HashMap<String, NumericTensor<DynRank>>, ONNXDecodingError> {
         let mut result = HashMap::new();
 
         for (index, (_, proto_data)) in self.outputs.iter().enumerate() {
             let tensor_proto = TensorProto::decode(proto_data.as_slice()).unwrap();
-            let tensor: NumericTensor = NDArrayNumericTensor::try_from(&tensor_proto)?.into();
+            let tensor: NumericTensor<DynRank> = NDArrayNumericTensor::try_from(&tensor_proto)?.into();
             
             result.insert(tensor_proto.name, tensor);
         }
@@ -235,7 +236,7 @@ impl TestDataSet {
 }
 
 // Function to parse TensorProto to NumericTensor
-fn parse_tensor_proto(proto_data: &[u8]) -> Result<NumericTensor, String> {
+fn parse_tensor_proto(proto_data: &[u8]) -> Result<NumericTensor<DynRank>, String> {
     let tensor_proto = TensorProto::decode(proto_data).unwrap();
     Ok(NDArrayNumericTensor::try_from(&tensor_proto).unwrap().into())
 }

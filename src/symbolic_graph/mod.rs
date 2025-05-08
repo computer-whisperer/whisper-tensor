@@ -12,9 +12,11 @@ use crate::dtype::DType;
 use crate::ndarray_backend::{NDArrayNumericTensor, NDArrayNumericTensorError};
 use crate::{onnx, TrigOp};
 use crate::numeric_scalar::NumericScalar;
+use crate::numeric_tensor::NumericTensor;
 use crate::symbolic_graph::ops::AnyOperation;
 use crate::symbolic_graph::scalar_info::ScalarInfoTyped;
 use crate::symbolic_graph::symbolic_scalar::{SymbolicResolver, SymbolicScalar, SymbolicScalarTyped};
+use crate::tensor_rank::DynRank;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SymbolicGraphError {
@@ -110,7 +112,7 @@ fn query_attribute_bool(attributes: &[onnx::AttributeProto], name: &str) -> Opti
     None
 }
 
-fn query_attribute_tensor(attributes: &[onnx::AttributeProto], name: &str) -> Option<NDArrayNumericTensor> {
+fn query_attribute_tensor(attributes: &[onnx::AttributeProto], name: &str) -> Option<NDArrayNumericTensor<DynRank>> {
     for attr in attributes{
         if attr.name == name {
             if attr.r#type == onnx::attribute_proto::AttributeType::Tensor as i32 {
@@ -127,16 +129,16 @@ fn query_attribute_tensor(attributes: &[onnx::AttributeProto], name: &str) -> Op
 
 
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 enum TensorType {
     Input,
     Output,
     Intermediate,
-    Constant(NDArrayNumericTensor),
+    Constant(NumericTensor<DynRank>),
     Weight
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct ONNXTensorInfo {
     onnx_name: Option<String>,
     dtype: Option<DType>,
@@ -156,13 +158,13 @@ impl ONNXTensorInfo {
     pub fn name(&self) -> Option<String> { self.onnx_name.clone() }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct GraphOperation {
     pub name: Option<String>,
     pub op: AnyOperation
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct SymbolicGraph {
     unknown_dimensions: HashMap<String, SymbolicScalar>,
     tensors: HashMap<TensorId, ONNXTensorInfo>,
@@ -229,7 +231,7 @@ impl SymbolicGraph {
         self.tensors.get(&tensor_id)
     }
     
-    pub fn get_initialized_tensors(&self) -> HashMap<TensorId, NDArrayNumericTensor> {
+    pub fn get_initialized_tensors(&self) -> HashMap<TensorId, NumericTensor<DynRank>> {
         let mut out = HashMap::new();
         
         for (key, tensor) in &self.tensors {
@@ -242,7 +244,7 @@ impl SymbolicGraph {
     }
 }
 
-impl TryFrom<&onnx::TensorProto> for NDArrayNumericTensor {
+impl TryFrom<&onnx::TensorProto> for NDArrayNumericTensor<DynRank> {
     type Error = ONNXDecodingError;
 
     fn try_from(tensor: &onnx::TensorProto) -> Result<Self, Self::Error> {
@@ -414,13 +416,13 @@ impl SymbolicGraphMutator {
         Ok(())
     }
 
-    pub fn new_constant_tensor(&mut self, value: NDArrayNumericTensor, name: Option<String>) -> TensorId {
+    pub fn new_constant_tensor(&mut self, value: NumericTensor<DynRank>, name: Option<String>) -> TensorId {
         let tensor_id = self.next_tensor_id;
         self.next_tensor_id += 1;
 
         let mut shape = Vec::new();
         for s in value.shape() {
-            shape.push(ScalarInfoTyped::Numeric(*s as u64))
+            shape.push(ScalarInfoTyped::Numeric(s as u64))
         }
 
         self.graph.tensors.insert(
@@ -615,7 +617,7 @@ impl SymbolicGraphMutator {
                             axes = attr.ints.clone()
                         }
                     }
-                    let axes_tensor_id = self.new_constant_tensor(NDArrayNumericTensor::from(axes), None);
+                    let axes_tensor_id = self.new_constant_tensor(NDArrayNumericTensor::from(axes).try_to_rank()?.into(), None);
                     input_tensors.push(axes_tensor_id);
                     Some(AnyOperation::Squeeze(ops::SqueezeOperation::from_onnx(input_tensors, output_tensors)
                         .map_err(|x| ONNXDecodingError::GraphConstructionError(onnx_node.name.clone(), x))?
@@ -636,7 +638,7 @@ impl SymbolicGraphMutator {
                             axes = attr.ints.clone()
                         }
                     }
-                    let axes_tensor_id = self.new_constant_tensor(NDArrayNumericTensor::from(axes), None);
+                    let axes_tensor_id = self.new_constant_tensor(NDArrayNumericTensor::from(axes).try_to_rank()?.into(), None);
                     input_tensors.push(axes_tensor_id);
                     Some(AnyOperation::Unsqueeze(ops::UnsqueezeOperation::from_onnx(input_tensors, output_tensors)
                         .map_err(|x| ONNXDecodingError::GraphConstructionError(onnx_node.name.clone(), x))?
@@ -730,7 +732,7 @@ impl SymbolicGraphMutator {
         }
 
         for t in onnx_graph.initializer {
-            let numeric_tensor = NDArrayNumericTensor::try_from(&t)?;
+            let numeric_tensor = NumericTensor::NDArray(NDArrayNumericTensor::try_from(&t)?);
             if let Some(x) = graph_mutator.tensors_by_name.get(&t.name) {
                 graph_mutator.graph.tensors.get_mut(x).unwrap().tensor_type = TensorType::Constant(numeric_tensor);
             } else {

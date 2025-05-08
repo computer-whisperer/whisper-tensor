@@ -1,5 +1,5 @@
 use std::ops::{Add, Mul, Not};
-use ndarray::{concatenate, s, ArcArray, Array, Array2, ArrayD, ArrayView2, ArrayViewD, ArrayViewMut2, ArrayViewMutD, Axis, Dimension, Ix2, IxDyn, LinalgScalar, ScalarOperand, ShapeError, SliceInfoElem, Zip};
+use ndarray::{concatenate, s, ArcArray, Array, Array2, ArrayD, ArrayView2, ArrayViewD, ArrayViewMut2, ArrayViewMutD, Axis, Dimension, Ix1, Ix2, IxDyn, LinalgScalar, ScalarOperand, ShapeError, SliceInfoElem, Zip};
 use ndarray::linalg::{general_mat_mul, Dot};
 use num_traits::{Float, FromPrimitive, Num, NumCast, One, Zero};
 use num_traits::real::Real;
@@ -549,7 +549,7 @@ impl core::fmt::Display for NativeNumericTensorUnaryOperation {
 }
 
 impl NativeNumericTensorUnaryOperation {
-    pub fn apply<T>(&self, a: ArcArray<T, IxDyn>) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError>
+    pub fn apply<T, D: Dimension>(&self, a: ArcArray<T, D>) -> Result<ArcArray<T, D>, NDArrayOperationError>
     where
         T: Clone + num_traits::Float
     {
@@ -1007,7 +1007,7 @@ where
 }
 
 
-pub fn range<T>(start: T, end: T, step: T) -> ArcArray<T, IxDyn>
+pub fn range<T>(start: T, end: T, step: T) -> ArcArray<T, Ix1>
 where T: Num + Copy + PartialOrd + std::ops::AddAssign
 {
     let mut out = vec![];
@@ -1016,5 +1016,5 @@ where T: Num + Copy + PartialOrd + std::ops::AddAssign
         out.push(i);
         i += step;
     }
-    ArcArray::from_vec(out).into_dyn()
+    ArcArray::from_vec(out)
 }

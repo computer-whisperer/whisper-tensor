@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use serde::{Deserialize, Serialize};
 use crate::dtype::DType;
 use crate::eval_backend::EvalBackend;
 use crate::ndarray_backend::{NDArrayNumericTensor, NDArrayNumericTensorError};
@@ -8,6 +7,7 @@ use crate::numeric_tensor::{NumericTensor, NumericTensorError};
 use crate::{onnx, TrigOp};
 use crate::symbolic_graph::{milli_ops_helpers, query_attribute_bool, query_attribute_float, query_attribute_floats, query_attribute_int, query_attribute_ints, query_attribute_tensor, ONNXDecodingError, SymbolicGraphError, TensorId};
 use crate::symbolic_graph::milli_ops::*;
+use crate::tensor_rank::DynRank;
 
 #[derive(Debug, thiserror::Error)]
 pub enum EvalError {
@@ -28,16 +28,15 @@ pub enum EvalError {
 pub trait Operation {
     fn get_inputs(&self) -> Vec<TensorId>;
     fn get_outputs(&self) -> Vec<TensorId>;
-    fn eval_old(&self, _backend: &EvalBackend, _inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {unimplemented!()}
-
-    fn eval(&self, backend: &EvalBackend, inputs: &HashMap<TensorId, NumericTensor>) -> Result<HashMap<TensorId, NumericTensor>, EvalError> {
+    
+    fn eval(&self, backend: &EvalBackend, inputs: &HashMap<TensorId, NumericTensor<DynRank>>) -> Result<HashMap<TensorId, NumericTensor<DynRank>>, EvalError> {
         let milli_graph = self.get_milli_op_graph();
         Ok(milli_graph.eval(inputs, backend)?)
     }
     fn get_milli_op_graph(&self) -> MilliOpGraph;
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) enum WhichBinaryOperation {
     Add,
     Sub,
@@ -46,7 +45,7 @@ pub(crate) enum WhichBinaryOperation {
     MatMul
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct BinaryOperation {
     a: TensorId,
     b: TensorId,
@@ -99,7 +98,7 @@ impl Operation for BinaryOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) enum WhichUnaryOperation {
     Relu,
     Sigmoid,
@@ -114,7 +113,7 @@ pub(crate) enum WhichUnaryOperation {
     Trig(TrigOp)
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct UnaryOperation {
     input: TensorId,
     output: TensorId,
@@ -184,7 +183,7 @@ impl Operation for UnaryOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CumSumOperation {
     input: TensorId,
     output: TensorId,
@@ -232,7 +231,7 @@ impl Operation for CumSumOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct LpNormalizationOperation {
     input: TensorId,
     output: TensorId,
@@ -290,7 +289,7 @@ impl Operation for LpNormalizationOperation {
             2 => graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::mul(input, input))),
             _ => panic!()
         };
-        let axis_tensor = NDArrayNumericTensor::from(vec![self.axis]);
+        let axis_tensor = NDArrayNumericTensor::from(vec![self.axis]).try_to_rank::<DynRank>().unwrap();
         let axis = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(axis_tensor.into())));
         let x = graph.push_op(AnyMilliOp::ReduceSum(MilliOpReduceSum::new(x, Some(axis), true)));
         let x = match self.p{
@@ -307,7 +306,7 @@ impl Operation for LpNormalizationOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct GroupNormalizationOperation {
     input: TensorId,
     scale: TensorId,
@@ -353,34 +352,6 @@ impl Operation for GroupNormalizationOperation {
     fn get_outputs(&self) -> Vec<TensorId> {
         vec![self.output]
     }
-    fn eval_old(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
-        let input = inputs[0];
-        let scale = inputs[1];
-        let bias = inputs[2];
-
-        let input_shape = input.shape();
-        let batch_size = input_shape[0];
-        let num_channels = input_shape[1];
-        let num_groups = self.num_groups;
-
-        let hidden_size = input_shape[2..].iter().product::<usize>() * num_channels / num_groups;
-        let input = input.reshape(vec![batch_size, num_groups, hidden_size], backend)?;
-
-        let mean = NumericTensor::div_f32(&input.clone().reduce_sum(Some(vec![2]), true, backend)?, hidden_size as f32, backend)?;
-        let input = NumericTensor::sub(&input, &mean, backend)?;
-
-        let x = NumericTensor::mul(&input, &input, backend)?.reduce_sum(Some(vec![2]), true, backend)?;
-        let var =  NumericTensor::div_f32(&x, hidden_size as f32, backend)?;
-        let input_normalized = NumericTensor::div(&input, &NumericTensor::add_f32(&var, self.epsilon, backend)?.sqrt(backend)?, backend)?;
-
-        let y = input_normalized.reshape(vec![batch_size, num_channels, input_shape[2..].iter().product::<usize>()], backend)?;
-        
-        let y = NumericTensor::mul(&y, &scale.unsqueeze(1, backend)?, backend)?;
-        let y = NumericTensor::add(&y, &bias.unsqueeze(1, backend)?, backend)?;
-
-        let y = y.reshape(input_shape, backend)?;
-        Ok(vec![y])
-    }
 
     fn get_milli_op_graph(&self) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
@@ -400,7 +371,7 @@ impl Operation for GroupNormalizationOperation {
         };
         let reshaped_input = {
             let new_shape_tensor = NDArrayNumericTensor::from(vec![0i64, self.num_groups as i64, -1]);
-            let new_shape = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(new_shape_tensor.into())));
+            let new_shape = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(new_shape_tensor.to_dyn().into())));
             graph.push_op(AnyMilliOp::Reshape(MilliOpReshape::new(input, new_shape, false)))
         };
 
@@ -460,7 +431,7 @@ impl Operation for GroupNormalizationOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SqueezeOperation {
     input: TensorId,
     axes: TensorId,
@@ -506,7 +477,7 @@ impl Operation for SqueezeOperation {
 }
 
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct UnsqueezeOperation {
     input: TensorId,
     axes: TensorId,
@@ -551,7 +522,7 @@ impl Operation for UnsqueezeOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TransposeOperation {
     input: TensorId,
     output: TensorId,
@@ -595,7 +566,7 @@ impl Operation for TransposeOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ReshapeOperation {
     input: TensorId,
     shape: TensorId,
@@ -640,7 +611,7 @@ impl Operation for ReshapeOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CastLikeOperation {
     input: TensorId,
     target_type: TensorId,
@@ -684,7 +655,7 @@ impl Operation for CastLikeOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CastOperation {
     input: TensorId,
     output: TensorId,
@@ -732,7 +703,7 @@ impl Operation for CastOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct LayerNormalizationOperation {
     input: TensorId,
     scale: TensorId,
@@ -843,7 +814,7 @@ impl Operation for LayerNormalizationOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct GatherOperation {
     input: TensorId,
     indices: TensorId,
@@ -899,7 +870,7 @@ impl Operation for GatherOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ShapeOperation {
     start: Option<i64>,
     end: Option<i64>,
@@ -974,7 +945,7 @@ impl Operation for ShapeOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ConcatOperation {
     axis: i64,
     inputs: Vec<TensorId>,
@@ -1026,7 +997,7 @@ impl Operation for ConcatOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ConstantOfShapeOperation {
     value: NumericScalar,
     input: TensorId,
@@ -1043,8 +1014,7 @@ impl ConstantOfShapeOperation {
         }
 
         let value = query_attribute_tensor(attributes, "value")
-            .map(|x| x.get(&[0]))
-            .transpose()?
+            .map(|x| x.first_element())
             .unwrap_or(NumericScalar::F32(0.0));
 
         Ok(Self{
@@ -1076,7 +1046,7 @@ impl Operation for ConstantOfShapeOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ReduceMeanOperation {
     keepdims: Option<i64>,
     noop_with_empty_axes: Option<i64>,
@@ -1132,7 +1102,7 @@ impl Operation for ReduceMeanOperation {
         } else {
             if let Some(axes) = &self.axes_attr {
                 let tensor = NDArrayNumericTensor::from(axes.clone());
-                Some(graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(tensor.into()))))
+                Some(graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(tensor.to_dyn().into()))))
             } else {
                 None
             }
@@ -1149,7 +1119,7 @@ impl Operation for ReduceMeanOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ReduceSumOperation {
     keepdims: Option<i64>,
     noop_with_empty_axes: Option<i64>,
@@ -1205,7 +1175,7 @@ impl Operation for ReduceSumOperation {
         } else {
             if let Some(axes) = &self.axes_attr {
                 let tensor = NDArrayNumericTensor::from(axes.clone());
-                Some(graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(tensor.into()))))
+                Some(graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(tensor.to_dyn().into()))))
             } else {
                 None
             }
@@ -1223,7 +1193,7 @@ impl Operation for ReduceSumOperation {
 }
 
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ReduceProdOperation {
     keepdims: Option<i64>,
     noop_with_empty_axes: Option<i64>,
@@ -1279,7 +1249,7 @@ impl Operation for ReduceProdOperation {
         } else {
             if let Some(axes) = &self.axes_attr {
                 let tensor = NDArrayNumericTensor::from(axes.clone());
-                Some(graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(tensor.into()))))
+                Some(graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(tensor.to_dyn().into()))))
             } else {
                 None
             }
@@ -1298,7 +1268,7 @@ impl Operation for ReduceProdOperation {
 
 
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PowOperation {
     input_x: TensorId,
     input_y: TensorId,
@@ -1328,9 +1298,6 @@ impl Operation for PowOperation {
     fn get_outputs(&self) -> Vec<TensorId> {
         vec![self.output]
     }
-    fn eval_old(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
-        Ok(vec![inputs[0].pow(inputs[1], backend)?])
-    }
 
     fn get_milli_op_graph(&self) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
@@ -1345,7 +1312,7 @@ impl Operation for PowOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct GemmOperation {
     alpha: Option<f32>,
     beta: Option<f32>,
@@ -1453,7 +1420,7 @@ impl Operation for GemmOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SplitOperation {
     axis: Option<i64>,
     num_outputs: Option<i64>,
@@ -1495,17 +1462,6 @@ impl Operation for SplitOperation {
     fn get_outputs(&self) -> Vec<TensorId> {
         self.outputs.clone()
     }
-    fn eval_old(&self, backend: &EvalBackend, inputs: &[&NumericTensor]) -> Result<Vec<NumericTensor>, EvalError> {
-        let split: Vec<i64> = if let Some(split) = self.split_attribute.clone() {
-            split
-        }
-        else if let Some(_) = self.split {
-            inputs[1].clone().try_into()?
-        } else {
-            Err(EvalError::InvalidInput("Split attribute is not set, and we do not support num_outputs yet".to_string()))?
-        };
-        Ok(inputs[0].split(&split, self.axis.unwrap_or_default(), backend)?)
-    }
 
     fn get_milli_op_graph(&self) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
@@ -1528,7 +1484,7 @@ impl Operation for SplitOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SliceOperation {
     data: TensorId,
     starts: TensorId,
@@ -1590,7 +1546,7 @@ impl Operation for SliceOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct WhereOperation {
     condition: TensorId,
     x: TensorId,
@@ -1638,7 +1594,7 @@ impl Operation for WhereOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SoftmaxOperation {
     axis: Option<i64>,
     input: TensorId,
@@ -1685,7 +1641,7 @@ impl Operation for SoftmaxOperation {
 }
 
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct LogSoftmaxOperation {
     axis: Option<i64>,
     input: TensorId,
@@ -1732,7 +1688,7 @@ impl Operation for LogSoftmaxOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct SizeOperation {
     input: TensorId,
     output: TensorId
@@ -1774,7 +1730,7 @@ impl Operation for SizeOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct RangeOperation {
     start: TensorId,
     end: TensorId,
@@ -1823,7 +1779,7 @@ impl Operation for RangeOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct FlattenOperation {
     input: TensorId,
     output: TensorId,
@@ -1866,7 +1822,7 @@ impl Operation for FlattenOperation {
         }
         output_shape.push(-1i64);
         let shape_tensor = NDArrayNumericTensor::from(output_shape);
-        let shape_constant = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(shape_tensor.into())));
+        let shape_constant = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(shape_tensor.to_dyn().into())));
         let out = graph.push_op(AnyMilliOp::Reshape(MilliOpReshape::new(input, shape_constant, false)));
         
         let mut output_map = HashMap::new();
@@ -1876,9 +1832,9 @@ impl Operation for FlattenOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub(crate) struct ConstantOperation {
-    value: NDArrayNumericTensor,
+    value: NDArrayNumericTensor<DynRank>,
     output: TensorId
 }
 
@@ -1895,16 +1851,16 @@ impl ConstantOperation {
             tensor
         } 
         else if let Some(value_float) = query_attribute_float(attributes, "value_float") {
-            NDArrayNumericTensor::from(vec![value_float])
+            NDArrayNumericTensor::from(vec![value_float]).try_to_rank()?
         }
         else if let Some(value_floats) = query_attribute_floats(attributes, "value_floats") {
-            NDArrayNumericTensor::from(value_floats)
+            NDArrayNumericTensor::from(value_floats).try_to_rank()?
         }
         else if let Some(value_int) = query_attribute_int(attributes, "value_int") {
-            NDArrayNumericTensor::from(vec![value_int])
+            NDArrayNumericTensor::from(vec![value_int]).try_to_rank()?
         }
         else if let Some(value_ints) = query_attribute_ints(attributes, "value_ints") {
-            NDArrayNumericTensor::from(value_ints)
+            NDArrayNumericTensor::from(value_ints).try_to_rank()?
         }
         else {
             Err(ONNXDecodingError::MissingAttribute("Constant".to_string(), "value".to_string()))?
@@ -1938,7 +1894,7 @@ impl Operation for ConstantOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct IdentityOperation {
     input: TensorId,
     output: TensorId
@@ -1979,7 +1935,7 @@ impl Operation for IdentityOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub(crate) enum AnyOperation {
     Unary(UnaryOperation),
     Binary(BinaryOperation),

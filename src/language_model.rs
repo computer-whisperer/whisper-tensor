@@ -5,9 +5,10 @@ use rwkv_tokenizer::WorldTokenizer;
 use onnx_graph::{ModelInputType, ModelOutputType, TokenizerInfo};
 use crate::numeric_tensor::NumericTensor;
 use crate::tokenizer::Tokenizer;
-use crate::{RuntimeError, RuntimeModel, RuntimeModelInner};
+use crate::{RuntimeError, RuntimeModel};
 use crate::eval_backend::EvalBackend;
 use crate::sampler::Sampler;
+use crate::tensor_rank::DynRank;
 
 #[derive(Debug, thiserror::Error)]
 pub enum LanguageModelManagerError {
@@ -19,7 +20,7 @@ pub enum LanguageModelManagerError {
 
 #[derive(Debug, Clone)]
 pub struct LangaugeModelIntermediateValues {
-    values: HashMap<usize, NumericTensor>
+    values: HashMap<usize, NumericTensor<DynRank>>
 }
 
 pub struct LanguageModelManager {
@@ -50,12 +51,12 @@ impl LanguageModelManager {
         })
     }
     
-    pub fn run<S: Sampler>(&mut self, input_tokens: NumericTensor, input_intermediate_values: Option<LangaugeModelIntermediateValues>, sampler: &mut S) -> Result<(NumericTensor, LangaugeModelIntermediateValues), RuntimeError> {
+    pub fn run<S: Sampler>(&mut self, input_tokens: NumericTensor<DynRank>, input_intermediate_values: Option<LangaugeModelIntermediateValues>, sampler: &mut S) -> Result<(NumericTensor<DynRank>, LangaugeModelIntermediateValues), RuntimeError> {
         let (output_tensor, output_intermediate_values) = self.forward(input_tokens, input_intermediate_values)?;
         let shape = output_tensor.shape();
         let mut output_slice = Vec::new();
         for i in 0..shape.len()-1 {
-            output_slice.push(shape[i]-1..shape[i]);
+            output_slice.push(shape[i] -1..shape[i]);
         }
         output_slice.push(0..shape[shape.len()-1]);
         let sliced_output_tensor = output_tensor.slice(&output_slice, &EvalBackend::NDArray)?;
@@ -63,19 +64,19 @@ impl LanguageModelManager {
         Ok((output_tensor_sampled, output_intermediate_values))
     } 
     
-    pub fn forward(&mut self, input_tokens: NumericTensor, intermediate_values: Option<LangaugeModelIntermediateValues>) -> Result<(NumericTensor, LangaugeModelIntermediateValues), RuntimeError> {
+    pub fn forward(&mut self, input_tokens: NumericTensor<DynRank>, intermediate_values: Option<LangaugeModelIntermediateValues>) -> Result<(NumericTensor<DynRank>, LangaugeModelIntermediateValues), RuntimeError> {
         let input_shape = input_tokens.shape();
         let input_sequence_len = input_shape[1];
         let mut input_tokens_processed = 0;
         let mut output_chunks = vec![];
         
-        let max_sequence_len = self.model.model_metadata.clone().map(|x| x.max_token_batch).flatten().unwrap_or(input_sequence_len);
+        let max_sequence_len = self.model.model_metadata.clone().map(|x| x.max_token_batch).flatten().unwrap_or(input_sequence_len as usize);
         let mut intermediate_values = intermediate_values.clone();
         
         let input_tensor_infos = self.model.get_input_tensor_info()?;
         
         while input_tokens_processed < input_sequence_len {
-            let chunk_size = max_sequence_len.min(input_sequence_len - input_tokens_processed);
+            let chunk_size = max_sequence_len.min((input_sequence_len - input_tokens_processed) as usize) as u64;
             let mut slice_indices: Vec<_> = input_shape.iter().map(|x| 0..*x).collect();
             slice_indices[1] = (input_tokens_processed..(input_tokens_processed + chunk_size));
             let input_tokens_chunk = input_tokens.slice(slice_indices.as_slice(), &EvalBackend::NDArray)?;
