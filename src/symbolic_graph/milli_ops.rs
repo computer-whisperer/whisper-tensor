@@ -218,30 +218,77 @@ impl MilliOp for MilliOpConstantOfShape {
     }
 }
 
-fn infer_multidirectional_broadcasting(shapes: &[TensorInfoTypedRanked<u64, P1>], symbolic_resolver: &mut SymbolicResolver) -> Result<Vec<ScalarInfoTyped<u64>>, MilliOpGraphError> {
+fn infer_multidirectional_broadcasting_rank(shapes: &[TensorInfoTypedRanked<u64, P1>], symbolic_resolver: &mut SymbolicResolver) -> Result<ScalarInfoTyped<u32>, MilliOpGraphError> {
+    let mut output_rank: Option<usize> = None;
+    for shape in shapes {
+        match shape {
+            TensorInfoTypedRanked::Numeric(x) => {
+                let this_rank = x.shape()[0] as usize;
+                if let Some(o) = output_rank {
+                    output_rank = Some(o.min(this_rank));
+                } else {
+                    output_rank = Some(this_rank)
+                }
+            }
+            TensorInfoTypedRanked::Shaped(x) => {
+                let this_rank = x.shape()[0] as usize;
+                if let Some(o) = output_rank {
+                    output_rank = Some(o.min(this_rank));
+                } else {
+                    output_rank = Some(this_rank)
+                }
+            }
+            TensorInfoTypedRanked::Ranked(_x) => {
+                output_rank = None;
+                break;
+            }
+        }
+    }
+    match output_rank {
+        Some(x) => Ok(ScalarInfoTyped::Numeric(x as u32)),
+        None => Ok(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(symbolic_resolver))),
+    }
+}
+
+
+fn infer_multidirectional_broadcasting_shape(shapes: &[TensorInfoTypedRanked<u64, P1>], symbolic_resolver: &mut SymbolicResolver) -> Result<Option<TensorInfoTypedRanked<u64, P1>>, MilliOpGraphError> {
     if shapes.is_empty() {
         return Err(MilliOpGraphError::InvalidInput("Cannot broadcast empty input".to_string()));
     }
-    let output_rank = shapes.iter().map(|x| x.shape().get(&[0], symbolic_resolver).unwrap()).max().unwrap();
+
+    let rank = infer_multidirectional_broadcasting_rank(shapes, symbolic_resolver)?;
+
+    let output_rank = if let ScalarInfoTyped::Numeric(rank) = rank {
+        rank
+    } else {
+        return Ok(None);
+    };
+
+
     let mut output_shape = vec![];
     for i in 0..output_rank {
         let mut dim = ScalarInfoTyped::<u64>::Numeric(1);
         for shape in shapes {
-            let local_i = (i as i64 - output_rank as i64) + shape.len() as i64;
+            let rank = if let TensorInfoTypedRanked::Numeric(shape_shape) = shape.shape() {
+                shape_shape.to_vec()[0]
+            } else {
+                unreachable!()
+            };
+            let local_i = (i as i64 - output_rank as i64) + rank as i64;
             if local_i < 0 {
                 // Infer dim of size 1, and pass
             } else {
-                let local_dim = &shape[local_i as usize];
+                let local_dim = shape.get(&[local_i as u64], symbolic_resolver).unwrap();
                 match local_dim {
                     ScalarInfoTyped::Numeric(x) => {
-                        if *x == 1 {
+                        if x == 1 {
                             // Do not modify the dimension, pass it through.
                         }
                         else {
                             match dim {
                                 ScalarInfoTyped::Numeric(y) => {
-                                    if y == 1 || *x == y {
-                                        dim = ScalarInfoTyped::Numeric(y.max(*x));
+                                    if y == 1 || x == y {
+                                        dim = ScalarInfoTyped::Numeric(y.max(x));
                                     } else {
                                         return Err(MilliOpGraphError::InvalidInput("Cannot broadcast input shape".to_string()));
                                     }
@@ -266,7 +313,7 @@ fn infer_multidirectional_broadcasting(shapes: &[TensorInfoTypedRanked<u64, P1>]
                             }
                             _ => {
                                 // Two unknown dimensions
-                                match dim.try_eq(local_dim) {
+                                match dim.try_eq(&local_dim) {
                                     None => {
                                         // Must use new unknown dimension
                                         dim = ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(symbolic_resolver))
@@ -289,7 +336,7 @@ fn infer_multidirectional_broadcasting(shapes: &[TensorInfoTypedRanked<u64, P1>]
         }
         output_shape.push(dim);
     }
-    Ok(output_shape)
+    Ok(Some(TensorInfoTypedRanked::new_from_scalar_infos(output_shape, [output_rank as u64])))
 }
 
 enum SimpleBinaryOp {
@@ -334,34 +381,25 @@ impl MilliOp for MilliOpSimpleBinary {
     fn infer(&self, known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>, symbolic_resolver: &mut SymbolicResolver, backend: &EvalBackend) -> Result<TensorInfo, MilliOpGraphError> {
         let a = &known_inputs[&self.a];
         let b = &known_inputs[&self.b];
-        let a_shape = a.shape();
-        
-        match a {
-            TensorInfo::Numeric(a) => {
-                match b {
-                    TensorInfo::Numeric(b) => {
-                        // Call through to eval
-                        let inputs = HashMap::from([(self.a.clone(), a.clone()), (self.b.clone(), b.clone())]);
-                        Ok(TensorInfo::Numeric(
-                            self.eval(&inputs, backend)?
-                        ))
-                    }
-                    TensorInfo::Shaped(b) => {
 
-                        // Both ranks are known, can do broadcast inference
-                        let new_shape = infer_multidirectional_broadcasting(&[a_shape.as_slice(), b_shape], symbolic_resolver)?;
-                        Ok(TensorInfo::Ranked(RankedTensor::new(
-                            ScalarInfo::Symbolic(SymbolicScalar::new(a.dtype(), symbolic_resolver)),
-                            new_shape
-                        )))
-                    }
-                    TensorInfo::Ranked(_) => {}
-                    TensorInfo::Minimal(_) => {}
+        let a_shape = a.shape(symbolic_resolver);
+        let b_shape = b.shape(symbolic_resolver);
+        let output_rank = infer_multidirectional_broadcasting_rank(&[a_shape.clone(), b_shape.clone()], symbolic_resolver)?;
+
+        if let (TensorInfo::Numeric(a), TensorInfo::Numeric(b)) = (a, b) {
+            let inputs = HashMap::from([(self.a.clone(), a.clone()), (self.b.clone(), b.clone())]);
+            Ok(TensorInfo::Numeric(self.eval(&inputs, backend)?))
+        } else {
+            match output_rank {
+                ScalarInfoTyped::Numeric(_) => {
+                    let output_shape = infer_multidirectional_broadcasting_shape(&[a_shape, b_shape], symbolic_resolver)?.unwrap();
+                    Ok(TensorInfo::new_from_first_value_and_shape(ScalarInfo::Symbolic(
+                        SymbolicScalar::new(a.dtype(), symbolic_resolver)), output_shape, symbolic_resolver))
+                }
+                ScalarInfoTyped::Symbolic(symbolic_rank) => {
+                    Ok(TensorInfo::Minimal(MinimalTensor::new(ScalarInfo::Symbolic(SymbolicScalar::new(a.dtype(), symbolic_resolver)), symbolic_rank)))
                 }
             }
-            TensorInfo::Shaped(x) => {}
-            TensorInfo::Ranked(x) => {}
-            TensorInfo::Minimal(x) => {}
         }
     }
 
@@ -394,46 +432,23 @@ impl MilliOp for MilliOpPow {
     fn infer(&self, known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>, symbolic_resolver: &mut SymbolicResolver, backend: &EvalBackend) -> Result<TensorInfo, MilliOpGraphError> {
         let a = &known_inputs[&self.a];
         let b = &known_inputs[&self.b];
+
+        let a_shape = a.shape(symbolic_resolver);
+        let b_shape = b.shape(symbolic_resolver);
+        let output_rank = infer_multidirectional_broadcasting_rank(&[a_shape.clone(), b_shape.clone()], symbolic_resolver)?;
+
         if let (TensorInfo::Numeric(a), TensorInfo::Numeric(b)) = (a, b) {
-            // Call through to eval
             let inputs = HashMap::from([(self.a.clone(), a.clone()), (self.b.clone(), b.clone())]);
-            Ok(TensorInfo::Numeric(
-                self.eval(&inputs, backend)?
-            ))
-        }
-        else {
-            let dtype = a.dtype();
-            let shape_a = a.shape();
-            let shape_b = b.shape();
-            if let (Some(a), Some(b)) = (shape_a, shape_b) {
-                // Both ranks are known, can do broadcast inference
-                let new_shape = infer_multidirectional_broadcasting(&[a.as_slice(), b.as_slice()], symbolic_resolver)?;
-                Ok(TensorInfo::Ranked(RankedTensor::new(
-                    ScalarInfo::Symbolic(SymbolicScalar::new(dtype, symbolic_resolver)),
-                    new_shape
-                )))
-            }
-            else {
-                // Need to know the rank of both inputs to infer the rank of the output
-                let rank_a = a.rank();
-                let rank_b = b.rank();
-                if rank_a.try_eq(&rank_b).unwrap_or(false) {
-                    // Same rank, so we can use this for the output rank
-                    match rank_a {
-                        ScalarInfoTyped::Numeric(_x) => {
-                            // Should not happen (already handled by earlier cases)
-                            unreachable!()
-                        }
-                        ScalarInfoTyped::Symbolic(x) => {
-                            Ok(TensorInfo::Minimal(MinimalTensor::new(ScalarInfo::Symbolic(SymbolicScalar::new(dtype, symbolic_resolver)), x)))
-                        }
-                    }
-                } else {
-                    // Different or unresolvable ranks
-                    Ok(TensorInfo::Minimal(MinimalTensor::new(
-                        ScalarInfo::Symbolic(SymbolicScalar::new(dtype, symbolic_resolver)),
-                        SymbolicScalarTyped::new(symbolic_resolver)
-                    )))
+            Ok(TensorInfo::Numeric(self.eval(&inputs, backend)?))
+        } else {
+            match output_rank {
+                ScalarInfoTyped::Numeric(_) => {
+                    let output_shape = infer_multidirectional_broadcasting_shape(&[a_shape, b_shape], symbolic_resolver)?.unwrap();
+                    Ok(TensorInfo::new_from_first_value_and_shape(ScalarInfo::Symbolic(
+                        SymbolicScalar::new(a.dtype(), symbolic_resolver)), output_shape, symbolic_resolver))
+                }
+                ScalarInfoTyped::Symbolic(symbolic_rank) => {
+                    Ok(TensorInfo::Minimal(MinimalTensor::new(ScalarInfo::Symbolic(SymbolicScalar::new(a.dtype(), symbolic_resolver)), symbolic_rank)))
                 }
             }
         }
@@ -471,13 +486,15 @@ impl MilliOp for MilliOpMatMul {
         else {
             let dtype = a.dtype();
             assert_eq!(b.dtype(), dtype);
-            let shape_a = a.shape();
-            let shape_b = b.shape();
+            let shape_a = a.shape(symbolic_resolver);
+            let shape_b = b.shape(symbolic_resolver);
 
-            if let (Some(shape_a), Some(shape_b)) = (shape_a, shape_b) {
+            if let (TensorInfoTypedRanked::Numeric(shape_a), TensorInfoTypedRanked::Numeric(shape_b)) = (shape_a, shape_b) {
+                let shape_a = shape_a.to_vec();
+                let shape_b = shape_b.to_vec();
                 // Prepend to a if rank 1
                 let (mut shape_a, prune_first_after) = if shape_a.len() == 1 {
-                    (vec![ScalarInfoTyped::Numeric(1), shape_a[0].clone()], true)
+                    (vec![1, shape_a[0].clone()], true)
                 } else {
                     (shape_a, false)
                 };

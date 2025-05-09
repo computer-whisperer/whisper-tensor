@@ -335,6 +335,16 @@ impl MinimalTensor {
     }
 }
 
+#[derive(Clone, Debug)]
+pub(crate) enum TensorInfoTypedShaped<T, R: KnownRank>
+where
+    T: TensorInfoType,
+{
+    Numeric(NumericTensorTyped<T, R>),
+    Shaped(ShapedTensorTyped<T, R>),
+}
+
+#[derive(Clone, Debug)]
 pub(crate) enum TensorInfoTypedRanked<T, R: KnownRank>
 where
     T: TensorInfoType,
@@ -348,6 +358,13 @@ impl<T, R: KnownRank> TensorInfoTypedRanked<T, R>
 where
     T: TensorInfoType,
 {
+    pub(crate) fn new_from_scalar_infos(scalar_infos: Vec<ScalarInfoTyped<T>>, shape: R::KnownDims) -> Self {
+        Self::Shaped(ShapedTensorTyped{
+            shape,
+            values: scalar_infos
+        })
+    }
+    
     pub(crate) fn shape(&self) -> TensorInfoTypedRanked<u64, P1> {
         match self {
             TensorInfoTypedRanked::Numeric(numeric) => {
@@ -461,6 +478,21 @@ impl TensorInfo {
                     first_value,
                     x
                 ))
+            }
+        }
+    }
+
+    pub(crate) fn new_from_first_value_and_shape(first_value: ScalarInfo, shape: TensorInfoTypedRanked::<u64, P1>, symbolic_resolver: &mut SymbolicResolver) -> Self {
+        match shape {
+            TensorInfoTypedRanked::Numeric(x) => {
+                let shape = x.to_vec().iter().map(|x| ScalarInfoTyped::Numeric(*x)).collect();
+                TensorInfo::Ranked(RankedTensor::new(first_value, shape))
+            }
+            TensorInfoTypedRanked::Shaped(x) => {
+                TensorInfo::Ranked(RankedTensor::new(first_value, x.values))
+            }
+            TensorInfoTypedRanked::Ranked(_x) => {
+                TensorInfo::Minimal(MinimalTensor::new(first_value, SymbolicScalarTyped::new(symbolic_resolver)))
             }
         }
     }

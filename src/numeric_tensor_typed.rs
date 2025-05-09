@@ -4,6 +4,7 @@ use crate::ndarray_backend::conversions::NDArrayNumericTensorType;
 use crate::numeric_tensor::NumericTensor;
 use crate::tensor_rank::{DimContainer, DynRank, Rank};
 
+#[derive(Clone, Debug)]
 pub(crate) enum NumericTensorTyped<T, R: Rank> {
     NDArray(ArcArray<T, R::NDArrayDim>)
 }
