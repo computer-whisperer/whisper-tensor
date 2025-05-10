@@ -55,7 +55,9 @@ pub trait Rank: Debug + Clone {
     type KnownDims: Debug + Clone + DimContainer<u64> + Index<usize, Output=u64>;
     
     fn try_cast_to_dim(dims: &[usize]) -> Result<Self::NDArrayDim, RankError>;
-    fn cast_to_ndarray_dim(dims: Self::KnownDims) -> Self::NDArrayDim;
+    fn cast_to_ndarray_dim(dims: &Self::KnownDims) -> Self::NDArrayDim;
+    fn known_to_unknown_dims(dims: &Self::KnownDims) -> Self::UnknownDims;
+    fn try_unknown_to_known_dims(dims: &Self::UnknownDims) -> Option<Self::KnownDims>;
 }
 
 pub trait KnownRank: Rank {
@@ -75,11 +77,19 @@ impl Rank for DynRank {
         Ok(ndarray::IxDyn(dims))
     }
     
-    fn cast_to_ndarray_dim(dims: Self::KnownDims) -> Self::NDArrayDim {
-        let s = dims.into_iter().map(|x| x as usize).collect::<Vec<_>>();
+    fn cast_to_ndarray_dim(dims: &Self::KnownDims) -> Self::NDArrayDim {
+        let s = dims.into_iter().map(|x| *x as usize).collect::<Vec<_>>();
         ndarray::IxDyn(s.as_slice())
     }
     
+    fn known_to_unknown_dims(dims: &Self::KnownDims) -> Self::UnknownDims {
+        dims.into_iter().map(|x| ScalarInfoTyped::Numeric(*x)).collect::<Vec<_>>() 
+    
+    }
+    
+    fn try_unknown_to_known_dims(dims: &Self::UnknownDims) -> Option<Self::KnownDims> {
+        dims.into_iter().map(|x| x.as_numeric().map(|x| *x)).collect::<Option<Vec<_>>>()
+    }
 }
 
 impl Rank for P1 {
@@ -92,8 +102,16 @@ impl Rank for P1 {
         Ok(ndarray::Ix1(*dims.get(0).ok_or(RankError::CannotCastRank)?))
     }
 
-    fn cast_to_ndarray_dim(dims: Self::KnownDims) -> Self::NDArrayDim {
+    fn cast_to_ndarray_dim(dims: &Self::KnownDims) -> Self::NDArrayDim {
         ndarray::Ix1(dims[0] as usize)
+    }
+
+    fn known_to_unknown_dims(dims: &Self::KnownDims) -> Self::UnknownDims {
+        [ScalarInfoTyped::Numeric(dims[0])]
+    }
+    
+    fn try_unknown_to_known_dims(dims: &Self::UnknownDims) -> Option<Self::KnownDims> {
+        dims[0].as_numeric().map(|x| [*x])
     }
 }
 
@@ -114,8 +132,16 @@ impl Rank for P2 {
         ))
     }
 
-    fn cast_to_ndarray_dim(dims: Self::KnownDims) -> Self::NDArrayDim {
+    fn cast_to_ndarray_dim(dims: &Self::KnownDims) -> Self::NDArrayDim {
         ndarray::Ix2(dims[0] as usize, dims[1] as usize)
+    }
+    
+    fn known_to_unknown_dims(dims: &Self::KnownDims) -> Self::UnknownDims {
+        [ScalarInfoTyped::Numeric(dims[0]), ScalarInfoTyped::Numeric(dims[1])]
+    }
+    
+    fn try_unknown_to_known_dims(dims: &Self::UnknownDims) -> Option<Self::KnownDims> {
+        Some([*dims[0].as_numeric()?, *dims[1].as_numeric()?])
     }
 }
 

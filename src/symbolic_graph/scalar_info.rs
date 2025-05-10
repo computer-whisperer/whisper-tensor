@@ -5,7 +5,7 @@ use crate::numeric_scalar::{NumericScalar, NumericScalarType};
 use crate::symbolic_graph::symbolic_scalar::{SymbolicScalar, SymbolicScalarTyped};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) enum ScalarInfoTyped<T>
+pub enum ScalarInfoTyped<T>
 where
     T: Clone + Copy + PartialEq + NumericScalarType,
 {
@@ -62,6 +62,30 @@ where
             Self::Symbolic(x) => ScalarInfo::Symbolic(x.to_dyn_type())
         }
     }
+
+    pub(crate) fn is_numeric(&self) -> bool {
+        matches!(self, ScalarInfoTyped::Numeric(_))
+    }
+
+    pub(crate) fn is_symbolic(&self) -> bool {
+        matches!(self, ScalarInfoTyped::Symbolic(_))
+    }
+    
+    pub(crate) fn as_numeric(&self) -> Option<&T> {
+        if let Self::Numeric(x) = self {
+            Some(x)
+        } else {
+            None
+        }
+    }
+    
+    pub(crate) fn as_symbolic(&self) -> Option<&SymbolicScalarTyped<T>> {
+        if let Self::Symbolic(x) = self {
+            Some(x)
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -86,5 +110,13 @@ impl ScalarInfo {
             ScalarInfo::Numeric(x) => ScalarInfoTyped::Numeric(T::cast_from_numeric_scalar(x)),
             ScalarInfo::Symbolic(scalar) => ScalarInfoTyped::<T>::Symbolic(scalar.cast())
         }
+    }
+    
+    pub(crate) fn is_numeric(&self) -> bool {
+        matches!(self, ScalarInfo::Numeric(_))
+    }
+
+    pub(crate) fn is_symbolic(&self) -> bool {
+        matches!(self, ScalarInfo::Symbolic(_))
     }
 }

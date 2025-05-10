@@ -1,13 +1,24 @@
 use ndarray::ArcArray;
 use typenum::P1;
 use crate::ndarray_backend::conversions::NDArrayNumericTensorType;
-use crate::numeric_tensor::NumericTensor;
-use crate::tensor_rank::{DimContainer, DynRank, Rank};
+use crate::numeric_tensor::{NumericTensor};
+use crate::tensor_rank::{DimContainer, DynRank, Rank, RankError};
 
 #[derive(Clone, Debug)]
-pub(crate) enum NumericTensorTyped<T, R: Rank> {
+pub enum NumericTensorTyped<T, R: Rank> {
     NDArray(ArcArray<T, R::NDArrayDim>)
 }
+
+#[derive(Debug, thiserror::Error)]
+pub enum TypedNumericTensorError {
+    #[error(transparent)]
+    ShapeError(#[from] ndarray::ShapeError),
+    #[error(transparent)]
+    RankError(#[from] RankError),
+    #[error("other error")]
+    OtherError
+}
+
 
 impl<T: NDArrayNumericTensorType, R: Rank> NumericTensorTyped<T, R> {
     pub fn to_ndarray(&self) -> ArcArray<T, R::NDArrayDim> {
@@ -25,10 +36,22 @@ impl<T: NDArrayNumericTensorType, R: Rank> NumericTensorTyped<T, R> {
             NumericTensorTyped::NDArray(x) => NumericTensorTyped::NDArray(x.clone().into_dyn()),
         }
     }
+
+    pub fn try_to_rank<R1: Rank>(&self) -> Result<NumericTensorTyped<T, R1>, TypedNumericTensorError> {
+        Ok(match self {
+            NumericTensorTyped::NDArray(x) => NumericTensorTyped::NDArray(x.clone().into_dimensionality()?.to_shared()),
+        })
+    }
     
     pub fn shape(&self) -> R::KnownDims {
         match self {
             NumericTensorTyped::NDArray(x) => R::KnownDims::try_from_slice(x.shape().iter().map(|x| *x as u64).collect::<Vec<_>>().as_slice()).unwrap(),
+        }
+    }
+    
+    pub fn rank(&self) -> usize {
+        match self {
+            NumericTensorTyped::NDArray(x) => x.ndim(),
         }
     }
     

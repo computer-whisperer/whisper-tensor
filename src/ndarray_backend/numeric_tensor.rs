@@ -4,7 +4,7 @@ use ndarray::{ArcArray, IxDyn, NdIndex, SliceInfo, SliceInfoElem};
 use typenum::P1;
 use crate::dtype::DType;
 use crate::numeric_scalar::NumericScalar;
-use crate::tensor_rank::{DynRank, Rank, RankError};
+use crate::tensor_rank::{DimContainer, DynRank, Rank, RankError};
 use crate::TrigOp;
 use super::ops;
 use super::ops::{NativeNumericTensorBinaryOperation, NativeNumericTensorUnaryOperation, ReduceOp};
@@ -94,8 +94,8 @@ impl<R: Rank> NDArrayNumericTensor<R> {
         }
     }
 
-    pub fn shape(&self) -> &[usize] {
-        match self {
+    pub fn shape(&self) -> R::KnownDims {
+        let s = match self {
             NDArrayNumericTensor::F32(x) => x.shape(),
             NDArrayNumericTensor::F64(x) => x.shape(),
             NDArrayNumericTensor::F16(x) => x.shape(),
@@ -109,13 +109,14 @@ impl<R: Rank> NDArrayNumericTensor<R> {
             NDArrayNumericTensor::U8(x) => x.shape(),
             NDArrayNumericTensor::I8(x) => x.shape(),
             NDArrayNumericTensor::BOOL(x) => x.shape()
-        }
+        };
+        let s2 = s.iter().map(|x| *x as u64).collect::<Vec<_>>();
+        R::KnownDims::try_from_slice(s2.as_slice()).unwrap()
     }
     
-    pub fn get<I>(&self, index: I) -> Option<NumericScalar> 
-    where
-        I: NdIndex<R::NDArrayDim>
+    pub fn get(&self, index: &R::KnownDims) -> Option<NumericScalar>
     {
+        let index = R::cast_to_ndarray_dim(index);
         Some(match self {
             NDArrayNumericTensor::F64(x) => NumericScalar::F64(*x.get(index)?),
             NDArrayNumericTensor::F32(x) => NumericScalar::F32(*x.get(index)?),
@@ -507,6 +508,25 @@ impl<R: Rank> NDArrayNumericTensor<R> {
             NDArrayNumericTensor::U8(x) => NDArrayNumericTensor::<P1>::U8(x.flatten().to_shared()),
             NDArrayNumericTensor::I8(x) => NDArrayNumericTensor::<P1>::I8(x.flatten().to_shared()),
             NDArrayNumericTensor::BOOL(x) => NDArrayNumericTensor::<P1>::BOOL(x.flatten().to_shared()),
+        }
+    }
+
+    pub fn reshape(&self, new_shape: &R::KnownDims) -> Result<Self, NDArrayNumericTensorError> {
+        let new_shape = R::cast_to_ndarray_dim(new_shape);
+        match self {
+            NDArrayNumericTensor::F32(x) => Ok(NDArrayNumericTensor::F32(ops::reshape(x.clone(), new_shape)?)),
+            NDArrayNumericTensor::F64(x) => Ok(NDArrayNumericTensor::F64(ops::reshape(x.clone(), new_shape)?)),
+            NDArrayNumericTensor::F16(x) => Ok(NDArrayNumericTensor::F16(ops::reshape(x.clone(), new_shape)?)),
+            NDArrayNumericTensor::BF16(x) => Ok(NDArrayNumericTensor::BF16(ops::reshape(x.clone(), new_shape)?)),
+            NDArrayNumericTensor::U32(x) => Ok(NDArrayNumericTensor::U32(ops::reshape(x.clone(), new_shape)?)),
+            NDArrayNumericTensor::I32(x) => Ok(NDArrayNumericTensor::I32(ops::reshape(x.clone(), new_shape)?)),
+            NDArrayNumericTensor::U64(x) => Ok(NDArrayNumericTensor::U64(ops::reshape(x.clone(), new_shape)?)),
+            NDArrayNumericTensor::I64(x) => Ok(NDArrayNumericTensor::I64(ops::reshape(x.clone(), new_shape)?)),
+            NDArrayNumericTensor::U16(x) => Ok(NDArrayNumericTensor::U16(ops::reshape(x.clone(), new_shape)?)),
+            NDArrayNumericTensor::I16(x) => Ok(NDArrayNumericTensor::I16(ops::reshape(x.clone(), new_shape)?)),
+            NDArrayNumericTensor::U8(x) => Ok(NDArrayNumericTensor::U8(ops::reshape(x.clone(), new_shape)?)),
+            NDArrayNumericTensor::I8(x) => Ok(NDArrayNumericTensor::I8(ops::reshape(x.clone(), new_shape)?)),
+            NDArrayNumericTensor::BOOL(x) => Ok(NDArrayNumericTensor::BOOL(ops::reshape(x.clone(), new_shape)?)),
         }
     }
 }
@@ -1223,34 +1243,16 @@ impl NDArrayNumericTensor<DynRank> {
         Self::try_binary_op(a, b, NativeNumericTensorBinaryOperation::Div)
     }
 
-    pub fn reshape(&self, new_shape: Vec<usize>) -> Result<Self, NDArrayNumericTensorError> {
-        match self {
-            NDArrayNumericTensor::F32(x) => Ok(NDArrayNumericTensor::F32(ops::reshape(x.clone(), &new_shape)?)),
-            NDArrayNumericTensor::F64(x) => Ok(NDArrayNumericTensor::F64(ops::reshape(x.clone(), &new_shape)?)),
-            NDArrayNumericTensor::F16(x) => Ok(NDArrayNumericTensor::F16(ops::reshape(x.clone(), &new_shape)?)),
-            NDArrayNumericTensor::BF16(x) => Ok(NDArrayNumericTensor::BF16(ops::reshape(x.clone(), &new_shape)?)),
-            NDArrayNumericTensor::U32(x) => Ok(NDArrayNumericTensor::U32(ops::reshape(x.clone(), &new_shape)?)),
-            NDArrayNumericTensor::I32(x) => Ok(NDArrayNumericTensor::I32(ops::reshape(x.clone(), &new_shape)?)),
-            NDArrayNumericTensor::U64(x) => Ok(NDArrayNumericTensor::U64(ops::reshape(x.clone(), &new_shape)?)),
-            NDArrayNumericTensor::I64(x) => Ok(NDArrayNumericTensor::I64(ops::reshape(x.clone(), &new_shape)?)),
-            NDArrayNumericTensor::U16(x) => Ok(NDArrayNumericTensor::U16(ops::reshape(x.clone(), &new_shape)?)),
-            NDArrayNumericTensor::I16(x) => Ok(NDArrayNumericTensor::I16(ops::reshape(x.clone(), &new_shape)?)),
-            NDArrayNumericTensor::U8(x) => Ok(NDArrayNumericTensor::U8(ops::reshape(x.clone(), &new_shape)?)),
-            NDArrayNumericTensor::I8(x) => Ok(NDArrayNumericTensor::I8(ops::reshape(x.clone(), &new_shape)?)),
-            NDArrayNumericTensor::BOOL(x) => Ok(NDArrayNumericTensor::BOOL(ops::reshape(x.clone(), &new_shape)?)),
-        }
-    }
-
     pub fn unsqueeze(&self, p0: usize) -> Result<Self, NDArrayNumericTensorError> {
         let mut s = self.shape().to_vec();
         s.insert(p0, 1);
-        self.reshape(s)
+        self.reshape(&s)
     }
 
     pub fn squeeze(&self, p0: usize) -> Result<Self, NDArrayNumericTensorError> {
         let mut s = self.shape().to_vec();
         s.remove(p0);
-        self.reshape(s)
+        self.reshape(&s)
     }
 
     pub fn slice(&self, indices: &[Range<usize>]) -> Result<Self, NDArrayNumericTensorError> {

@@ -78,7 +78,18 @@ impl<R: Rank> NumericTensor<R> {
             Ok(candle_backend::load_to_device(&self.to_ndarray()?, device)?)
         }
     }
-
+    
+    pub fn reshape(&self, new_shape: R::KnownDims) -> Result<Self, NumericTensorError> {
+        #[cfg(feature = "candle")]
+        if let NumericTensor::Candle(tensor) = self {
+            return Ok(NumericTensor::Candle(tensor.reshape(new_shape.as_slice().iter().map(|x| *x as usize).collect::<Vec<_>>())?))
+        }
+        Ok(NumericTensor::NDArray(self.to_ndarray()?.reshape(&new_shape)?))
+    }
+    
+    pub fn get(&self, index: &R::KnownDims) -> Option<NumericScalar> {
+        self.to_ndarray().unwrap().get(index)
+    }
 
     pub fn try_to_rank<R1: Rank>(&self) -> Result<NumericTensor<R1>, NumericTensorError> {
         Ok(NumericTensor::<R1>::NDArray(self.to_ndarray()?.try_to_rank()?))
@@ -88,8 +99,8 @@ impl<R: Rank> NumericTensor<R> {
         Ok(NumericTensorTyped::<T, R>::NDArray(self.to_ndarray()?.as_inner()?.clone()))
     }
     
-    pub fn to_dyn(&self) -> Result<NumericTensor<DynRank>, NumericTensorError> {
-        Ok(NumericTensor::NDArray(self.to_ndarray()?.to_dyn()))
+    pub fn to_dyn_rank(&self) -> NumericTensor<DynRank> {
+        NumericTensor::NDArray(self.to_ndarray().unwrap().to_dyn())
     }
 
     pub fn dtype(&self) -> DType {
@@ -104,17 +115,28 @@ impl<R: Rank> NumericTensor<R> {
         }
     }
 
-    pub fn shape(&self) -> Vec<u64> {
-        let v = match self {
-            NumericTensor::NDArray(x) => x.shape().to_vec(),
+    pub fn shape(&self) -> R::KnownDims {
+        match self {
+            NumericTensor::NDArray(x) => x.shape(),
             #[cfg(feature = "onnx-reference")]
-            NumericTensor::ONNXReference(x) => x.shape(),
+            NumericTensor::ONNXReference(x) => {
+                let s = x.shape();
+                let s2 = s.iter().map(|x| *x as u64).collect::<Vec<_>>();
+                R::KnownDims::try_from_slice(s2.as_slice()).unwrap()
+            },
             #[cfg(feature = "candle")]
-            NumericTensor::Candle(x) => x.shape().dims().to_vec(),
+            NumericTensor::Candle(x) => {
+                let s = x.shape().dims().to_vec();
+                let s2 = s.iter().map(|x| *x as u64).collect::<Vec<_>>();
+                R::KnownDims::try_from_slice(s2.as_slice()).unwrap()
+            },
             #[cfg(feature = "ort")]
-            NumericTensor::ORT(x) => x.shape(),
-        };
-        v.into_iter().map(|x| x as u64).collect()
+            NumericTensor::ORT(x) => {
+                let s = x.shape();
+                let s2 = s.iter().map(|x| *x as u64).collect::<Vec<_>>();
+                R::KnownDims::try_from_slice(s2.as_slice()).unwrap()
+            },
+        }
     }
 
     pub fn rank(&self) -> usize {
@@ -130,7 +152,7 @@ impl<R: Rank> NumericTensor<R> {
     }
     
     pub fn num_elements(&self) -> u64 {
-        self.shape().iter().product()
+        self.shape().as_slice().iter().product()
     }
 
     pub fn from_vec_shape<T>(v: Vec<T>, shape: Vec<usize>) -> Result<Self, NumericTensorError>
@@ -204,16 +226,12 @@ impl<R: Rank> NumericTensor<R> {
         Ok(NumericTensor::NDArray(self.to_ndarray()?.sqrt()?))
     }
 
-    pub fn first_element(&self) -> Result<NumericScalar, NumericTensorError> {
-        Ok(self.to_ndarray()?.first_element())
+    pub fn first_element(&self) -> NumericScalar {
+        self.to_ndarray().unwrap().first_element()
     }
 }
 
 impl NumericTensor<DynRank> {
-
-    pub fn get(&self, index: &[u64]) -> Result<Option<NumericScalar>, NumericTensorError> {
-        Ok(self.to_ndarray()?.get(index.into_iter().map(|x| *x as usize).collect::<Vec<_>>().as_slice()))
-    }
 
     pub fn concat(tensors: &[&Self], axis: usize, backend: &EvalBackend) -> Result<Self, NumericTensorError> {
         Ok(match backend {
@@ -337,14 +355,6 @@ impl NumericTensor<DynRank> {
 
     pub fn where_op(&self, a: &Self, b: &Self, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::<DynRank>::try_from(self)?.where_op(&a.try_into()?, &b.try_into()?)?))
-    }
-
-    pub fn reshape(&self, new_shape: Vec<u64>, backend: &EvalBackend) -> Result<Self, NumericTensorError> {
-        #[cfg(feature = "candle")]
-        if let EvalBackend::Candle(device) = backend {
-            return Ok(NumericTensor::Candle(self.to_candle(device)?.reshape(new_shape.iter().map(|x| *x as usize).collect::<Vec<_>>())?))
-        }
-        Ok(NumericTensor::NDArray(self.to_ndarray()?.reshape(new_shape.iter().map(|x| *x as usize).collect())?))
     }
 
     pub fn cast(&self, dtype: DType, backend: &EvalBackend) -> Result<Self, NumericTensorError> {

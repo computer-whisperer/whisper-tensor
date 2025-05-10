@@ -1468,10 +1468,18 @@ impl Operation for SplitOperation {
 
         let mut output_map = HashMap::new();
 
+        let split = if let Some(split) = self.split {
+            Some(MilliOpTensorIDOrLiteral::TensorID(input_map[&split]))
+        } else if let Some(split) = &self.split_attribute {
+            Some(MilliOpTensorIDOrLiteral::Literal(NumericTensor::from_vec(split.clone()).to_dyn_rank()))
+        } else {
+            None
+        };
+        
         for (output_id, output_tensor_id) in self.outputs.iter().enumerate() {
             let out = graph.push_op(AnyMilliOp::Split(MilliOpSplit::new(
                 input_map[&self.input],
-                self.split.map(|x| input_map[&x]),
+                split.clone(),
                 self.axis.unwrap_or_default(),
                 self.num_outputs.map(|x| x as usize),
                 output_id
@@ -1536,8 +1544,8 @@ impl Operation for SliceOperation {
             input_map[&self.data],
             input_map[&self.starts],
             input_map[&self.ends],
+            self.steps.map(|x| input_map[&x]),
             self.axes.map(|x| input_map[&x]),
-            self.steps.map(|x| input_map[&x])
         )));
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);

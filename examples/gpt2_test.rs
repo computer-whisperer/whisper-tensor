@@ -6,13 +6,14 @@ use llm_samplers::prelude::{SampleFreqPresence, SampleGreedy, SampleTemperature,
 use rand::prelude::StdRng;
 use rand::SeedableRng;
 use tokenizers::Tokenizer;
+use typenum::P1;
 use onnx_graph::WeightStorageStrategy;
 use onnx_import::{identify_and_load, ModelTypeHint};
 use whisper_tensor::{RuntimeBackend, RuntimeEnvironment, RuntimeModel};
 use whisper_tensor::eval_backend::EvalBackend;
 use whisper_tensor::language_model::LanguageModelManager;
 use whisper_tensor::numeric_tensor::{NumericTensor};
-use whisper_tensor::sampler::{GreedySampler, LLMSamplersBundle, Sampler};
+use whisper_tensor::sampler::{LLMSamplersBundle};
 
 fn main() {
     tracing_subscriber::fmt::init();
@@ -28,7 +29,7 @@ fn main() {
 
     let prompt = "The fibbonacci sequence is: 1, 1, 2, 3, 5, 8, 13,";
     let input = tokenizer.encode(prompt).iter().map(|x| *x as i64).collect::<Vec<_>>();
-    let input_tensor = NumericTensor::from_vec1(input).unsqueeze(0, &EvalBackend::NDArray).unwrap().unsqueeze(0, &EvalBackend::NDArray).unwrap();
+    let input_tensor = NumericTensor::from_vec(input).to_dyn_rank().unsqueeze(0, &EvalBackend::NDArray).unwrap().unsqueeze(0, &EvalBackend::NDArray).unwrap();
 
     let mut sampler = {
         let mut sc = SamplerChain::new();
@@ -48,7 +49,10 @@ fn main() {
     };
 
     let (output, _) = llm.run(input_tensor.clone(), None, &mut sampler).unwrap();
-    let output_values: Vec<u32> = output.squeeze(0, &EvalBackend::NDArray).unwrap().squeeze(0, &EvalBackend::NDArray).unwrap().try_into().unwrap();
+    let output_tensor = output.squeeze(0, &EvalBackend::NDArray).unwrap()
+        .squeeze(0, &EvalBackend::NDArray).unwrap()
+        .try_to_type::<u32>().unwrap().try_to_rank::<P1>().unwrap();
+    let output_values: Vec<u32> = output_tensor.to_vec();
     let output = tokenizer.decode(&output_values).unwrap();
     println!("{}", output);
 }

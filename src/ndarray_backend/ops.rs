@@ -25,7 +25,7 @@ pub enum NDArrayOperationError {
     Internal
 }
 
-pub(crate) fn reshape<T>(input: ArcArray<T, IxDyn>, shape: &[usize]) -> Result<ArcArray<T, IxDyn>, ShapeError>
+pub(crate) fn reshape<T, D: Dimension>(input: ArcArray<T, D>, shape: D) -> Result<ArcArray<T, D>, ShapeError>
 where
     T: Clone,
 {

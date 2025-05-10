@@ -3,33 +3,34 @@ use crate::RuntimeBackend;
 use crate::dtype::DTypeError;
 use crate::ndarray_backend::numeric_tensor::{NDArrayNumericTensor};
 use crate::numeric_tensor::{NumericTensor, NumericTensorError};
-use crate::tensor_rank::{Rank};
+use crate::tensor_rank::{DimContainer, Rank};
 
 pub(crate) fn load_to_device<R: Rank>(value: &NDArrayNumericTensor<R>, device: &Device) -> Result<candle_core::Tensor, NumericTensorError> {
+    let shape = value.shape().as_slice().into_iter().map(|x| *x as usize).collect::<Vec<_>>();
     Ok(match &value {
         NDArrayNumericTensor::F32(x) => {
             let x = x.as_slice_memory_order().unwrap();
-            candle_core::Tensor::from_slice(x, value.shape(), device)?
+            candle_core::Tensor::from_slice(x, shape, device)?
         }
         NDArrayNumericTensor::F64(x) => {
             let x = x.as_slice_memory_order().unwrap();
-            candle_core::Tensor::from_slice(x, value.shape(), device)?
+            candle_core::Tensor::from_slice(x, shape, device)?
         }
         NDArrayNumericTensor::F16(x) => {
             let x = x.as_slice_memory_order().unwrap();
-            candle_core::Tensor::from_slice(x, value.shape(), device)?
+            candle_core::Tensor::from_slice(x, shape, device)?
         }
         NDArrayNumericTensor::BF16(x) => {
             let x = x.as_slice_memory_order().unwrap();
-            candle_core::Tensor::from_slice(x, value.shape(), device)?
+            candle_core::Tensor::from_slice(x, shape, device)?
         }
         NDArrayNumericTensor::U32(x) => {
             let x = x.as_slice_memory_order().unwrap();
-            candle_core::Tensor::from_slice(x, value.shape(), device)?
+            candle_core::Tensor::from_slice(x, shape, device)?
         }
         NDArrayNumericTensor::I64(x) => {
             let x = x.as_slice_memory_order().unwrap();
-            candle_core::Tensor::from_slice(x, value.shape(), device)?
+            candle_core::Tensor::from_slice(x, shape, device)?
         }
         _ => {
             Err(DTypeError::DTypeNotSupportedByBackend(value.dtype(), RuntimeBackend::Candle))?

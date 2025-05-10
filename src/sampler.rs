@@ -35,7 +35,7 @@ impl Sampler for LLMSamplersBundle {
         use llm_samplers::prelude::Sampler;
         
         let x_shape = x.shape();
-        let x = x.reshape(vec![x_shape[x_shape.len()-1]], &EvalBackend::NDArray)?;
+        let x = x.reshape(vec![x_shape[x_shape.len()-1]])?;
         let v: Vec<f32> = x.cast(DType::F32, &EvalBackend::NDArray)?.try_to_rank::<P1>()?.try_into()?;
         let mut logits = llm_samplers::prelude::Logits::try_from(v).map_err(|x| {SamplerError::LLMSamplersError(x.into())})?;
         let out = self.chain.sample_token(&mut self.res, &mut logits).map_err(|x| {SamplerError::LLMSamplersError(x.into())})?;
