@@ -30,7 +30,7 @@ fn main() {
 
     let tokenizer = llm.get_tokenizer().unwrap();
 
-    let prompt = "The fibbonacci sequence is: 1, 1, 2, 3, 5, 8, 13,";
+    let prompt = "The fibbonacci sequence is: 1, 1, 2";
     let input = tokenizer.encode(prompt).iter().map(|x| *x as i64).collect::<Vec<_>>();
     let input_tensor = NumericTensor::from_vec(input).to_dyn_rank().unsqueeze(0, &EvalBackend::NDArray).unwrap();
 
@@ -52,10 +52,9 @@ fn main() {
     };
 
     let (output, _) = llm.run(input_tensor.clone(), None, &mut sampler).unwrap();
-    let output_tensor = output.squeeze(0, &EvalBackend::NDArray).unwrap()
-        .squeeze(0, &EvalBackend::NDArray).unwrap()
-        .try_to_type::<u32>().unwrap().try_to_rank::<P1>().unwrap();
+    let output_tensor = output.squeeze(0, &EvalBackend::NDArray).unwrap().try_to_type::<u32>().unwrap().try_to_rank::<P1>().unwrap();
     let output_values: Vec<u32> = output_tensor.to_vec();
+    println!("{:?}", output_values);
     let output = tokenizer.decode(&output_values).unwrap();
     println!("{}", output);
 }

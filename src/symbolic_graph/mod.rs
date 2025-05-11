@@ -474,6 +474,11 @@ impl SymbolicGraphMutator {
                     .map_err(|x| ONNXDecodingError::GraphConstructionError(onnx_node.name.clone(), x))?
                 ))
             },
+            "Mod" => {
+                Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichBinaryOperation::Modulo)
+                    .map_err(|x| ONNXDecodingError::GraphConstructionError(onnx_node.name.clone(), x))?
+                ))
+            },
             "Sub" => {
                 Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichBinaryOperation::Sub)
                     .map_err(|x| ONNXDecodingError::GraphConstructionError(onnx_node.name.clone(), x))?

@@ -42,6 +42,7 @@ pub(crate) enum WhichBinaryOperation {
     Sub,
     Mul,
     Div,
+    Modulo,
     MatMul
 }
 
@@ -88,6 +89,7 @@ impl Operation for BinaryOperation {
             WhichBinaryOperation::Sub => AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::sub(a, b)),
             WhichBinaryOperation::Mul => AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::mul(a, b)),
             WhichBinaryOperation::Div => AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::div(a, b)),
+            WhichBinaryOperation::Modulo => AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::modulo(a, b)),
             WhichBinaryOperation::MatMul => AnyMilliOp::MatMul(MilliOpMatMul::new(a, b)),
         };
         let mut output_map = HashMap::new();
@@ -291,10 +293,10 @@ impl Operation for LpNormalizationOperation {
         };
         let axis_tensor = NDArrayNumericTensor::from(vec![self.axis]).try_to_rank::<DynRank>().unwrap();
         let axis = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(axis_tensor.into())));
-        let x = graph.push_op(AnyMilliOp::ReduceSum(MilliOpReduceSum::new(x, Some(axis), true)));
+        let x = graph.push_op(AnyMilliOp::ReduceSum(MilliOpReduceSum::new(x, Some(axis), true, false)));
         let x = match self.p{
             1 => x,
-            2 => graph.push_op(AnyMilliOp::Sqrt(MilliOpSqrt::new(input))),
+            2 => graph.push_op(AnyMilliOp::Sqrt(MilliOpSqrt::new(x))),
             _ => panic!()
         };
         let out = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::div(input, x)));
@@ -376,17 +378,18 @@ impl Operation for GroupNormalizationOperation {
         };
 
         let mean_axis = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new_scalar(2i64)));
-        let mean = graph.push_op(AnyMilliOp::ReduceMean(MilliOpReduceMean::new(reshaped_input, Some(mean_axis), true)));
+        let mean = graph.push_op(AnyMilliOp::ReduceMean(MilliOpReduceMean::new(reshaped_input, Some(mean_axis), true, false)));
 
         let input = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::sub(reshaped_input, mean)));
 
         let variance = {
             let x = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::mul(input, input)));
-            graph.push_op(AnyMilliOp::ReduceMean(MilliOpReduceMean::new(x, Some(mean_axis), true)))
+            graph.push_op(AnyMilliOp::ReduceMean(MilliOpReduceMean::new(x, Some(mean_axis), true, false)))
         };
 
         let input_normalized = {
             let epsilon = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new_scalar(self.epsilon)));
+            let epsilon = graph.push_op(AnyMilliOp::CastLike(MilliOpCastLike::new(epsilon, variance)));
             let var_plus_eps = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::add(variance, epsilon)));
             let val = graph.push_op(AnyMilliOp::Sqrt(MilliOpSqrt::new(var_plus_eps)));
             graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::div(input, val)))
@@ -741,8 +744,8 @@ impl LayerNormalizationOperation {
             scale: inputs[1],
             bias: if inputs.len() == 3 { Some(inputs[2]) } else { None },
             output: outputs[0],
-            mean_output: if inputs.len() > 1 {Some(outputs[1])} else {None},
-            inv_std_dev_output: if inputs.len() > 2 {Some(outputs[2])} else {None},
+            mean_output: if outputs.len() > 1 {Some(outputs[1])} else {None},
+            inv_std_dev_output: if outputs.len() > 2 {Some(outputs[2])} else {None},
             axis,
             epsilon
         })
@@ -773,9 +776,12 @@ impl Operation for LayerNormalizationOperation {
         let input_data = input_map[&self.input];
         let input_scale = input_map[&self.scale];
 
+        let axis = milli_ops_helpers::scalar_const(&mut graph, self.axis);
+        let axis = milli_ops_helpers::resolve_axes(&mut graph, axis, input_data);
+
         let normalized_axes = {
             let r =MilliOpRange::new(
-                milli_ops_helpers::scalar_const(&mut graph, self.axis),
+                axis,
                 milli_ops_helpers::rank(&mut graph, input_data),
                 milli_ops_helpers::scalar_const(&mut graph, 1i64),
             );
@@ -783,12 +789,12 @@ impl Operation for LayerNormalizationOperation {
         };
 
         let mean = graph.push_op(AnyMilliOp::ReduceMean(MilliOpReduceMean::new(
-            input_data, Some(normalized_axes), true)));
+            input_data, Some(normalized_axes), true, false)));
 
         let d = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::sub(input_data, mean)));
         let dd = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::mul(d, d)));
         let variance = graph.push_op(AnyMilliOp::ReduceMean(MilliOpReduceMean::new(
-            dd, Some(normalized_axes), true)));
+            dd, Some(normalized_axes), true, false)));
         let stddev = graph.push_op(AnyMilliOp::Sqrt(MilliOpSqrt::new(variance)));
         let inv_stddev = graph.push_op(AnyMilliOp::Reciprocal(MilliOpReciprocal::new(stddev)));
         let normalized = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::mul(d, inv_stddev)));
@@ -1048,8 +1054,8 @@ impl Operation for ConstantOfShapeOperation {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReduceMeanOperation {
-    keepdims: Option<i64>,
-    noop_with_empty_axes: Option<i64>,
+    keepdims: Option<bool>,
+    noop_with_empty_axes: Option<bool>,
     input_data: TensorId,
     input_axes: Option<TensorId>,
     axes_attr: Option<Vec<i64>>,
@@ -1066,8 +1072,8 @@ impl ReduceMeanOperation {
         }
 
         let axes_attr = query_attribute_ints(attributes, "attr");
-        let keepdims = query_attribute_int(attributes, "keepdims");
-        let noop_with_empty_axes = query_attribute_int(attributes, "noop_with_empty_axes");
+        let keepdims = query_attribute_int(attributes, "keepdims").map(|x| x != 0);
+        let noop_with_empty_axes = query_attribute_int(attributes, "noop_with_empty_axes").map(|x| x != 0);
 
 
         Ok(
@@ -1110,7 +1116,7 @@ impl Operation for ReduceMeanOperation {
         let out = graph.push_op(AnyMilliOp::ReduceMean(MilliOpReduceMean::new(
             input_map[&self.input_data],
             axes,
-            self.keepdims.unwrap_or(1) != 0
+            self.keepdims.unwrap_or(true), self.noop_with_empty_axes.unwrap_or(false)
         )));
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
@@ -1121,8 +1127,8 @@ impl Operation for ReduceMeanOperation {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReduceSumOperation {
-    keepdims: Option<i64>,
-    noop_with_empty_axes: Option<i64>,
+    keepdims: Option<bool>,
+    noop_with_empty_axes: Option<bool>,
     input_data: TensorId,
     input_axes: Option<TensorId>,
     axes_attr: Option<Vec<i64>>,
@@ -1139,8 +1145,8 @@ impl ReduceSumOperation {
         }
 
         let axes_attr = query_attribute_ints(attributes, "attr");
-        let keepdims = query_attribute_int(attributes, "keepdims");
-        let noop_with_empty_axes = query_attribute_int(attributes, "noop_with_empty_axes");
+        let keepdims = query_attribute_int(attributes, "keepdims").map(|x| x != 0);
+        let noop_with_empty_axes = query_attribute_int(attributes, "noop_with_empty_axes").map(|x| x != 0);
 
         Ok(
             Self {
@@ -1183,7 +1189,7 @@ impl Operation for ReduceSumOperation {
         let out = graph.push_op(AnyMilliOp::ReduceSum(MilliOpReduceSum::new(
             input_map[&self.input_data],
             axes,
-            self.keepdims.unwrap_or(1) != 0
+            self.keepdims.unwrap_or(true), self.noop_with_empty_axes.unwrap_or(false)
         )));
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
@@ -1195,8 +1201,8 @@ impl Operation for ReduceSumOperation {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReduceProdOperation {
-    keepdims: Option<i64>,
-    noop_with_empty_axes: Option<i64>,
+    keepdims: Option<bool>,
+    noop_with_empty_axes: Option<bool>,
     input_data: TensorId,
     input_axes: Option<TensorId>,
     axes_attr: Option<Vec<i64>>,
@@ -1213,8 +1219,8 @@ impl ReduceProdOperation {
         }
 
         let axes_attr = query_attribute_ints(attributes, "attr");
-        let keepdims = query_attribute_int(attributes, "keepdims");
-        let noop_with_empty_axes = query_attribute_int(attributes, "noop_with_empty_axes");
+        let keepdims = query_attribute_int(attributes, "keepdims").map(|x| x != 0);
+        let noop_with_empty_axes = query_attribute_int(attributes, "noop_with_empty_axes").map(|x| x != 0);
 
         Ok(
             Self {
@@ -1257,7 +1263,7 @@ impl Operation for ReduceProdOperation {
         let out = graph.push_op(AnyMilliOp::ReduceProd(MilliOpReduceProd::new(
             input_map[&self.input_data],
             axes,
-            self.keepdims.unwrap_or(1) != 0
+            self.keepdims.unwrap_or(true), self.noop_with_empty_axes.unwrap_or(false)
         )));
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
@@ -1475,7 +1481,7 @@ impl Operation for SplitOperation {
         } else {
             None
         };
-        
+
         for (output_id, output_tensor_id) in self.outputs.iter().enumerate() {
             let out = graph.push_op(AnyMilliOp::Split(MilliOpSplit::new(
                 input_map[&self.input],
@@ -1639,7 +1645,7 @@ impl Operation for SoftmaxOperation {
 
         let e = graph.push_op(AnyMilliOp::Exp(MilliOpExp::new(input_map[&self.input])));
         let axis_const = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new_scalar(self.axis.unwrap_or(-1))));
-        let sum = graph.push_op(AnyMilliOp::ReduceSum(MilliOpReduceSum::new(e, Some(axis_const), true)));
+        let sum = graph.push_op(AnyMilliOp::ReduceSum(MilliOpReduceSum::new(e, Some(axis_const), true, false)));
         let out = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::div(e, sum)));
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
@@ -1686,7 +1692,7 @@ impl Operation for LogSoftmaxOperation {
 
         let e = graph.push_op(AnyMilliOp::Exp(MilliOpExp::new(input_map[&self.input])));
         let axis_const = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new_scalar(self.axis.unwrap_or(-1))));
-        let sum = graph.push_op(AnyMilliOp::ReduceSum(MilliOpReduceSum::new(e, Some(axis_const), true)));
+        let sum = graph.push_op(AnyMilliOp::ReduceSum(MilliOpReduceSum::new(e, Some(axis_const), true, false)));
         let softmax = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::div(e, sum)));
         let out = graph.push_op(AnyMilliOp::Log(MilliOpLog::new(softmax)));
         let mut output_map = HashMap::new();
@@ -1729,7 +1735,7 @@ impl Operation for SizeOperation {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
 
         let shape = graph.push_op(AnyMilliOp::Shape(MilliOpShape::new(input_map[&self.input])));
-        let size = graph.push_op(AnyMilliOp::ReduceProd(MilliOpReduceProd::new(shape, None, false)));
+        let size = graph.push_op(AnyMilliOp::ReduceProd(MilliOpReduceProd::new(shape, None, false, false)));
 
         let mut output_map = HashMap::new();
         output_map.insert(size, self.output);

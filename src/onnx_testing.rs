@@ -402,9 +402,29 @@ fn test_groupnorm_operator() {
 #[test]
 fn test_layernorm_operator() {
     let node_test_paths = vec![
-      //  PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_layer_normalization_2d_axis0"),
-      //  PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_layer_normalization_2d_axis1"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_layer_normalization_2d_axis0"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_layer_normalization_2d_axis1"),
         PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_layer_normalization_2d_axis0_expanded"),
+    ];
+
+    for path in node_test_paths {
+        if !path.exists() {
+            println!("Test directory not found, skipping");
+            return;
+        }
+
+        if let Some(test) = OnnxNodeTest::from_directory(&path) {
+            test.run(RuntimeBackend::Eval(EvalBackend::NDArray)).expect("operator test failed");
+        } else {
+            panic!("Could not parse operator test");
+        }
+    }
+}
+
+#[test]
+fn test_lpnorm_operator() {
+    let node_test_paths = vec![
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_lpnorm_2d_axis0"),
     ];
 
     for path in node_test_paths {

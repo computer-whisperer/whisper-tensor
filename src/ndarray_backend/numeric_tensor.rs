@@ -1,6 +1,6 @@
 use std::ops::Range;
 use half::{bf16, f16};
-use ndarray::{ArcArray, IxDyn, NdIndex, SliceInfo, SliceInfoElem};
+use ndarray::{ArcArray, IxDyn, SliceInfo, SliceInfoElem};
 use typenum::P1;
 use crate::dtype::DType;
 use crate::numeric_scalar::NumericScalar;
@@ -529,6 +529,16 @@ impl<R: Rank> NDArrayNumericTensor<R> {
             NDArrayNumericTensor::BOOL(x) => Ok(NDArrayNumericTensor::BOOL(ops::reshape(x.clone(), new_shape)?)),
         }
     }
+    
+    pub fn is_nan(&self) -> Result<Self, NDArrayNumericTensorError> {
+        Ok(match self {
+            NDArrayNumericTensor::F64(x) => NDArrayNumericTensor::BOOL(x.map(|x| x.is_nan()).to_shared()),
+            NDArrayNumericTensor::F32(x) => NDArrayNumericTensor::BOOL(x.map(|x| x.is_nan()).to_shared()),
+            NDArrayNumericTensor::BF16(x) => NDArrayNumericTensor::BOOL(x.map(|x| x.is_nan()).to_shared()),
+            NDArrayNumericTensor::F16(x) => NDArrayNumericTensor::BOOL(x.map(|x| x.is_nan()).to_shared()),
+            _ => Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("is_nan".to_string(), vec![self.dtype()]))?,
+        })
+    }
 }
 
 impl NDArrayNumericTensor<DynRank> {
@@ -1056,7 +1066,7 @@ impl NDArrayNumericTensor<DynRank> {
         })
     }
 
-    pub(crate) fn reduce_op(&self, axes: Option<Vec<i64>>, keepdims: bool, op: ReduceOp)  -> Result<Self, NDArrayNumericTensorError> {
+    pub(crate) fn reduce_op(&self, axes: Vec<usize>, keepdims: bool, op: ReduceOp)  -> Result<Self, NDArrayNumericTensorError> {
         Ok(match self {
             NDArrayNumericTensor::F32(x) => NDArrayNumericTensor::F32(op.apply(x.clone(), axes, keepdims)?),
             NDArrayNumericTensor::F64(x) => NDArrayNumericTensor::F64(op.apply(x.clone(), axes, keepdims)?),
@@ -1074,15 +1084,15 @@ impl NDArrayNumericTensor<DynRank> {
         })
     }
 
-    pub fn reduce_mean(&self, axes: Option<Vec<i64>>, keepdims: bool) -> Result<Self, NDArrayNumericTensorError> {
+    pub fn reduce_mean(&self, axes: Vec<usize>, keepdims: bool) -> Result<Self, NDArrayNumericTensorError> {
         self.reduce_op(axes, keepdims, ReduceOp::Mean)
     }
 
-    pub fn reduce_sum(&self, axes: Option<Vec<i64>>, keepdims: bool) -> Result<Self, NDArrayNumericTensorError> {
+    pub fn reduce_sum(&self, axes: Vec<usize>, keepdims: bool) -> Result<Self, NDArrayNumericTensorError> {
         self.reduce_op(axes, keepdims, ReduceOp::Sum)
     }
 
-    pub fn reduce_prod(&self, axes: Option<Vec<i64>>, keepdims: bool) -> Result<Self, NDArrayNumericTensorError> {
+    pub fn reduce_prod(&self, axes: Vec<usize>, keepdims: bool) -> Result<Self, NDArrayNumericTensorError> {
         self.reduce_op(axes, keepdims, ReduceOp::Prod)
     }
 
@@ -1225,6 +1235,10 @@ impl NDArrayNumericTensor<DynRank> {
         Self::try_binary_op(a, b, NativeNumericTensorBinaryOperation::Mul)
     }
 
+    pub fn modulo(a: &Self, b: &Self) -> Result<Self, NDArrayNumericTensorError> {
+        Self::try_binary_op(a, b, NativeNumericTensorBinaryOperation::Modulo)
+    }
+    
     pub fn matmul(a: &Self, b: &Self) -> Result<Self, NDArrayNumericTensorError> {
         Ok(match (a, b) {
             (NDArrayNumericTensor::F32(a), NDArrayNumericTensor::F32(b)) => NDArrayNumericTensor::F32(ops::matmul(a, b)?),

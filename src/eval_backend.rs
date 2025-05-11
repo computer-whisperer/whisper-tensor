@@ -144,6 +144,8 @@ impl EvalRuntime {
                 }
                 let outputs = op.eval(&self.eval_backend, &input_values).map_err(|x| EvalRuntimeError::EvalError(name.clone(), x))?;
                 for (tensor_id, value) in outputs {
+                    //assert_eq!(value.has_nan().unwrap(), false);
+                    
                     // Validate shape and dtype
                     let tensor_info = self.model.get_tensor_info(tensor_id).unwrap();
                     check_tensor_matches(&value, tensor_info)?;

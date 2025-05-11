@@ -307,6 +307,7 @@ enum SimpleBinaryOp {
     Sub,
     Mul,
     Div,
+    Modulo,
 }
 
 pub(crate) struct MilliOpSimpleBinary {
@@ -335,6 +336,10 @@ impl MilliOpSimpleBinary {
 
     pub(crate) fn div(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
         Self { a, b, which_op: SimpleBinaryOp::Div }
+    }
+
+    pub(crate) fn modulo(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
+        Self { a, b, which_op: SimpleBinaryOp::Modulo }
     }
 }
 
@@ -374,6 +379,7 @@ impl MilliOp for MilliOpSimpleBinary {
             SimpleBinaryOp::Sub => NumericTensor::<DynRank>::sub(a, b, backend)?,
             SimpleBinaryOp::Mul => NumericTensor::<DynRank>::mul(a, b, backend)?,
             SimpleBinaryOp::Div => NumericTensor::<DynRank>::div(a, b, backend)?,
+            SimpleBinaryOp::Modulo => NumericTensor::<DynRank>::modulo(a, b, backend)?,
         })
     }
 }
@@ -867,12 +873,13 @@ impl MilliOp for MilliOpShape {
 pub(crate) struct MilliOpReduceSum {
     data: MilliOpGraphTensorId,
     axes: Option<MilliOpGraphTensorId>,
-    keepdims: bool
+    keepdims: bool,
+    noop_with_empty_axes: bool
 }
 
 impl MilliOpReduceSum {
-    pub(crate) fn new(data: MilliOpGraphTensorId, axes: Option<MilliOpGraphTensorId>, keepdims: bool) -> Self {
-        Self { data, axes, keepdims}
+    pub(crate) fn new(data: MilliOpGraphTensorId, axes: Option<MilliOpGraphTensorId>, keepdims: bool, noop_with_empty_axes: bool) -> Self {
+        Self { data, axes, keepdims, noop_with_empty_axes}
     }
 }
 
@@ -886,7 +893,17 @@ impl MilliOp for MilliOpReduceSum {
         } else {
             (0i64 .. (data.shape().len() as i64)).into_iter().collect()
         };
-        let out = data.reduce_sum(Some(axes), self.keepdims, backend)?;
+        let axes = if axes.len() == 0 {
+            if self.noop_with_empty_axes {
+                return Ok(data.clone())
+            } else {
+                (0i64 .. (data.shape().len() as i64)).into_iter().collect::<Vec<_>>()
+            }
+        } else {
+            axes
+        };
+        let axes = axes.into_iter().map(|x| (if x < 0 {x + data.shape().len() as i64} else {x}) as usize).collect::<Vec<_>>();
+        let out = data.reduce_sum(axes, self.keepdims, backend)?;
         Ok(out)
     }
 }
@@ -894,12 +911,13 @@ impl MilliOp for MilliOpReduceSum {
 pub(crate) struct MilliOpReduceProd {
     data: MilliOpGraphTensorId,
     axes: Option<MilliOpGraphTensorId>,
-    keepdims: bool
+    keepdims: bool,
+    noop_with_empty_axes: bool
 }
 
 impl MilliOpReduceProd {
-    pub(crate) fn new(data: MilliOpGraphTensorId, axes: Option<MilliOpGraphTensorId>, keepdims: bool) -> Self {
-        Self { data, axes, keepdims}
+    pub(crate) fn new(data: MilliOpGraphTensorId, axes: Option<MilliOpGraphTensorId>, keepdims: bool, noop_with_empty_axes: bool) -> Self {
+        Self { data, axes, keepdims, noop_with_empty_axes}
     }
 }
 
@@ -913,7 +931,17 @@ impl MilliOp for MilliOpReduceProd {
         } else {
             (0i64 .. (data.shape().len() as i64)).into_iter().collect()
         };
-        let out = data.reduce_prod(Some(axes), self.keepdims, backend)?;
+        let axes = if axes.len() == 0 {
+            if self.noop_with_empty_axes {
+                return Ok(data.clone())
+            } else {
+                (0i64 .. (data.shape().len() as i64)).into_iter().collect::<Vec<_>>()
+            }
+        } else {
+            axes
+        };
+        let axes = axes.into_iter().map(|x| (if x < 0 {x + data.shape().len() as i64} else {x}) as usize).collect::<Vec<_>>();
+        let out = data.reduce_prod(axes, self.keepdims, backend)?;
         Ok(out)
     }
 }
@@ -922,12 +950,13 @@ impl MilliOp for MilliOpReduceProd {
 pub(crate) struct MilliOpReduceMean {
     data: MilliOpGraphTensorId,
     axes: Option<MilliOpGraphTensorId>,
-    keepdims: bool
+    keepdims: bool,
+    noop_with_empty_axes: bool
 }
 
 impl MilliOpReduceMean {
-    pub(crate) fn new(data: MilliOpGraphTensorId, axes: Option<MilliOpGraphTensorId>, keepdims: bool) -> Self {
-        Self { data, axes, keepdims}
+    pub(crate) fn new(data: MilliOpGraphTensorId, axes: Option<MilliOpGraphTensorId>, keepdims: bool, noop_with_empty_axes: bool) -> Self {
+        Self { data, axes, keepdims, noop_with_empty_axes}
     }
 }
 
@@ -939,9 +968,19 @@ impl MilliOp for MilliOpReduceMean {
         let axes = if let Some(axes) = self.axes {
             Vec::<i64>::try_from(inputs[&axes].try_to_rank::<P1>()?)?
         } else {
-            (0i64 .. (data.shape().len() as i64)).into_iter().collect()
+            (0i64 .. (data.rank() as i64)).into_iter().collect()
         };
-        let out = data.reduce_mean(Some(axes), self.keepdims, backend)?;
+        let axes = if axes.len() == 0 {
+            if self.noop_with_empty_axes {
+                return Ok(data.clone())
+            } else {
+                (0i64 .. (data.rank() as i64)).into_iter().collect::<Vec<_>>()
+            }
+        } else {
+            axes
+        };
+        let axes = axes.into_iter().map(|x| (if x < 0 {x + data.rank() as i64} else {x}) as usize).collect::<Vec<_>>();
+        let out = data.reduce_mean(axes, self.keepdims, backend)?;
         Ok(out)
     }
 }
@@ -1528,7 +1567,6 @@ impl MilliOp for MilliOpWhere {
     }
 }
 
-
 pub(crate) enum AnyMilliOp {
     Constant(MilliOpConstant),
     ConstantOfShape(MilliOpConstantOfShape),
@@ -1723,7 +1761,10 @@ impl MilliOpGraph {
         }
 
         for op_id in op_ids_to_eval {
-            intermediate_values.insert(*op_id, self.ops[op_id].eval(&intermediate_values, backend)?);
+            let op = &self.ops[op_id];
+            let out = op.eval(&intermediate_values, backend)?;
+            //assert_eq!(out.has_nan()?, false);
+            intermediate_values.insert(*op_id, out);
         }
 
         let mut outputs = HashMap::new();

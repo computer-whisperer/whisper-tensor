@@ -258,7 +258,7 @@ pub(crate) enum ReduceOp {
 
 impl ReduceOp {
     pub fn apply<T>(&self, tensor: ArcArray<T, IxDyn>,
-                    axes: Option<Vec<i64>>,
+                    axes: Vec<usize>,
                     keepdims: bool) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError>
     where
         T: Clone + Zero + NumCast + std::ops::Div<Output = T> + Copy + One
@@ -285,7 +285,7 @@ impl ReduceOp {
 /// - final buffer mismatch → `ShapeError`
 pub fn reduce_mean<T>(
     tensor: ArcArray<T, IxDyn>,
-    axes: Option<Vec<i64>>,
+    axes: Vec<usize>,
     keepdims: bool,
 ) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError>
 where
@@ -295,17 +295,7 @@ where
     let rank = input_shape.len();
 
     // 1) Normalize axes list
-    let mut ax: Vec<usize> = if let Some(a) = axes {
-        a.iter().map(|&x| {
-            let idx = if x < 0 { (x + rank as i64) } else { x };
-            if idx < 0 || idx >= rank as i64 {
-                return Err(NDArrayOperationError::OutOfBounds);
-            }
-            Ok(idx as usize)
-        }).collect::<Result<_, _>>()?
-    } else {
-        (0..rank).collect()
-    };
+    let mut ax = axes;
 
     // 1a) Deduplicate & sort descending (so reductions don’t shift later axes)
     {
@@ -324,6 +314,10 @@ where
 
     // 3) For each axis, sum & divide, then optionally re-insert the dim
     for &axis in &ax {
+        if axis >= result.ndim() {
+            continue;
+        }
+        
         // a) sum over this axis
         let summed = result.sum_axis(Axis(axis));
         // b) divide by the count along that axis
@@ -345,28 +339,15 @@ where
 
 pub fn reduce_sum<T>(
     tensor: ArcArray<T, IxDyn>,
-    axes: Option<Vec<i64>>,
+    axes: Vec<usize>,
     keepdims: bool,
 ) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError>
 where
     T: Clone + Zero + NumCast + std::ops::Div<Output = T> + Copy
 {
-    let input_shape = tensor.shape().to_vec();
-    let rank = input_shape.len();
-
-    // 1) Normalize axes list
-    let mut ax: Vec<usize> = if let Some(a) = axes {
-        a.iter().map(|&x| {
-            let idx = if x < 0 { (x + rank as i64) } else { x };
-            if idx < 0 || idx >= rank as i64 {
-                return Err(NDArrayOperationError::OutOfBounds);
-            }
-            Ok(idx as usize)
-        }).collect::<Result<_, _>>()?
-    } else {
-        (0..rank).collect()
-    };
-
+    
+    let mut ax =  axes;
+    
     // 1a) Deduplicate & sort descending (so reductions don’t shift later axes)
     {
         let mut sorted = ax.clone();
@@ -384,6 +365,10 @@ where
 
     // 3) For each axis, sum & divide, then optionally re-insert the dim
     for &axis in &ax {
+        if axis >= result.ndim() {
+            continue;
+        }
+        
         // a) sum over this axis
         let summed = result.sum_axis(Axis(axis));
 
@@ -401,27 +386,15 @@ where
 
 pub fn reduce_prod<T>(
     tensor: ArcArray<T, IxDyn>,
-    axes: Option<Vec<i64>>,
+    axes: Vec<usize>,
     keepdims: bool,
 ) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError>
 where
     T: Clone + Zero + NumCast + std::ops::Div<Output = T> + Copy + One
 {
-    let input_shape = tensor.shape().to_vec();
-    let rank = input_shape.len();
 
     // 1) Normalize axes list
-    let mut ax: Vec<usize> = if let Some(a) = axes {
-        a.iter().map(|&x| {
-            let idx = if x < 0 { (x + rank as i64) } else { x };
-            if idx < 0 || idx >= rank as i64 {
-                return Err(NDArrayOperationError::OutOfBounds);
-            }
-            Ok(idx as usize)
-        }).collect::<Result<_, _>>()?
-    } else {
-        (0..rank).collect()
-    };
+    let mut ax = axes;
 
     // 1a) Deduplicate & sort descending (so reductions don’t shift later axes)
     {
@@ -440,6 +413,10 @@ where
 
     // 3) For each axis, sum & divide, then optionally re-insert the dim
     for &axis in &ax {
+        if axis >= result.ndim() {
+            continue;
+        }
+        
         // a) sum over this axis
         let summed = result.product_axis(Axis(axis));
 
@@ -462,6 +439,7 @@ pub enum NativeNumericTensorBinaryOperation {
     Sub,
     Mul,
     Div,
+    Modulo
 }
 
 impl core::fmt::Display for NativeNumericTensorBinaryOperation {
@@ -508,7 +486,7 @@ fn try_multidirectional_broadcasting(a: &[usize], b: &[usize]) -> Result<Vec<usi
 
 impl NativeNumericTensorBinaryOperation {
     pub(crate) fn apply<'a, T: 'a>(&self, a: ArcArray<T, IxDyn>, b: ArcArray<T, IxDyn>) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError> where
-        T: Clone + Copy + std::ops::Add<Output = T> + std::ops::Sub<Output = T> + std::ops::Mul<Output = T> + std::ops::Div<Output = T>,
+        T: Clone + Copy + std::ops::Add<Output = T> + std::ops::Sub<Output = T> + std::ops::Mul<Output = T> + std::ops::Div<Output = T> + std::ops::Rem<Output = T>,
     {
         let a = if let Some(a) = a.broadcast(b.shape()) {
             a
@@ -528,6 +506,7 @@ impl NativeNumericTensorBinaryOperation {
             NativeNumericTensorBinaryOperation::Sub => (&a - &b).into(),
              NativeNumericTensorBinaryOperation::Mul => (&a * &b).into(),
             NativeNumericTensorBinaryOperation::Div => (&a / &b).into(),
+            NativeNumericTensorBinaryOperation::Modulo => (&a % &b).into(),
         };
         Ok(o.to_shared())
     }

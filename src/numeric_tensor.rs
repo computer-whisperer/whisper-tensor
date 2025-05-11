@@ -296,6 +296,10 @@ impl NumericTensor<DynRank> {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::mul(&a.try_into()?, &b.try_into()?)?))
     }
 
+    pub fn modulo(a: &Self, b: &Self, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
+        Ok(NumericTensor::NDArray(NDArrayNumericTensor::modulo(&a.try_into()?, &b.try_into()?)?))
+    }
+
     pub fn matmul(a: &Self, b: &Self, backend: &EvalBackend) -> Result<Self, NumericTensorError> {
         #[cfg(feature = "candle")]
         if let EvalBackend::Candle(device) = backend {
@@ -319,20 +323,34 @@ impl NumericTensor<DynRank> {
     pub fn transpose(&self, axes: Option<Vec<i64>>, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::<DynRank>::try_from(self)?.transpose(axes)?))
     }
+    
+    pub fn is_nan(&self) -> Result<Self, NumericTensorError> {
+        Ok(NumericTensor::NDArray(self.to_ndarray()?.is_nan()?))
+    }
+    
+    pub fn has_nan(&self) -> Result<bool, NumericTensorError> {
+        let is_nan = if let Ok(is_nan) = self.is_nan() {
+            is_nan
+        } else {
+            return Ok(false)
+        };
+        let values = is_nan.flatten()?.to_ndarray()?.try_to_vec()?;
+        Ok(values.iter().any(|v| *v))
+    }
 
     pub fn gather(data: &Self, indices: &Self, axis: i64, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::<DynRank>::gather(&data.try_into()?, &indices.try_into()?, axis)?), )
     }
 
-    pub fn reduce_mean(&self, axes: Option<Vec<i64>>, keepdims: bool, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
+    pub fn reduce_mean(&self, axes: Vec<usize>, keepdims: bool, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::<DynRank>::try_from(self)?.reduce_mean(axes, keepdims)?))
     }
 
-    pub fn reduce_sum(&self, axes: Option<Vec<i64>>, keepdims: bool, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
+    pub fn reduce_sum(&self, axes: Vec<usize>, keepdims: bool, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::<DynRank>::try_from(self)?.reduce_sum(axes, keepdims)?))
     }
 
-    pub fn reduce_prod(&self, axes: Option<Vec<i64>>, keepdims: bool, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
+    pub fn reduce_prod(&self, axes: Vec<usize>, keepdims: bool, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::<DynRank>::try_from(self)?.reduce_prod(axes, keepdims)?))
     }
 
