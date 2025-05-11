@@ -1,4 +1,4 @@
-use std::ops::Range;
+use std::ops::{BitAnd, BitOr, BitXor, Not, Range};
 use half::{bf16, f16};
 use ndarray::{ArcArray, IxDyn, SliceInfo, SliceInfoElem};
 use typenum::P1;
@@ -7,7 +7,7 @@ use crate::numeric_scalar::NumericScalar;
 use crate::tensor_rank::{DimContainer, DynRank, Rank, RankError};
 use crate::TrigOp;
 use super::ops;
-use super::ops::{NativeNumericTensorBinaryOperation, NativeNumericTensorUnaryOperation, ReduceOp};
+use super::ops::{NativeNumericTensorBinaryOperation, NativeNumericTensorBinaryOperationBoolOut, NativeNumericTensorBitwiseBinaryOperation, NativeNumericTensorUnaryOperation, ReduceOp};
 
 #[derive(Debug, thiserror::Error)]
 pub enum NDArrayNumericTensorError {
@@ -249,6 +249,18 @@ impl<R: Rank> NDArrayNumericTensor<R> {
         Self::try_unary_op(self, NativeNumericTensorUnaryOperation::Log)
     }
 
+    pub fn floor(&self) -> Result<Self, NDArrayNumericTensorError> {
+        Self::try_unary_op(self, NativeNumericTensorUnaryOperation::Floor)
+    }
+
+    pub fn ceil(&self) -> Result<Self, NDArrayNumericTensorError> {
+        Self::try_unary_op(self, NativeNumericTensorUnaryOperation::Ceil)
+    }
+
+    pub fn round(&self) -> Result<Self, NDArrayNumericTensorError> {
+        Self::try_unary_op(self, NativeNumericTensorUnaryOperation::Round)
+    }
+
     pub fn sqrt(&self) -> Result<Self, NDArrayNumericTensorError> {
         Ok(match self {
             NDArrayNumericTensor::F32(x) => NDArrayNumericTensor::F32(x.sqrt().to_shared()),
@@ -256,6 +268,27 @@ impl<R: Rank> NDArrayNumericTensor<R> {
             NDArrayNumericTensor::BF16(x) => NDArrayNumericTensor::BF16(x.sqrt().to_shared()),
             NDArrayNumericTensor::F16(x) => NDArrayNumericTensor::F16(x.sqrt().to_shared()),
             _ => Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("sqrt".to_string(), vec![self.dtype()]))?
+        })
+    }
+
+    pub fn not(&self) -> Result<Self, NDArrayNumericTensorError> {
+        Ok(match self {
+            NDArrayNumericTensor::BOOL(x) => NDArrayNumericTensor::BOOL(x.not().to_shared()),
+            _ => Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("not".to_string(), vec![self.dtype()]))?
+        })
+    }
+    pub fn bitwise_not(&self) -> Result<Self, NDArrayNumericTensorError> {
+        Ok(match self {
+            NDArrayNumericTensor::BOOL(x) => NDArrayNumericTensor::BOOL(x.not().to_shared()),
+            NDArrayNumericTensor::U64(x) => NDArrayNumericTensor::U64(x.not().to_shared()),
+            NDArrayNumericTensor::I64(x) => NDArrayNumericTensor::I64(x.not().to_shared()),
+            NDArrayNumericTensor::U32(x) => NDArrayNumericTensor::U32(x.not().to_shared()),
+            NDArrayNumericTensor::I32(x) => NDArrayNumericTensor::I32(x.not().to_shared()),
+            NDArrayNumericTensor::U16(x) => NDArrayNumericTensor::U16(x.not().to_shared()),
+            NDArrayNumericTensor::I16(x) => NDArrayNumericTensor::I16(x.not().to_shared()),
+            NDArrayNumericTensor::U8(x) => NDArrayNumericTensor::U8(x.not().to_shared()),
+            NDArrayNumericTensor::I8(x) => NDArrayNumericTensor::I8(x.not().to_shared()),
+            _ => Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("bitwise_not".to_string(), vec![self.dtype()]))?
         })
     }
 
@@ -478,6 +511,10 @@ impl<R: Rank> NDArrayNumericTensor<R> {
             }
             NDArrayNumericTensor::BOOL(x) => {
                 match dtype {
+                    DType::F64 => Ok(NDArrayNumericTensor::F64(x.map(|x| if *x { 1.0 } else { 0.0 }).to_shared())),
+                    DType::F32 => Ok(NDArrayNumericTensor::F32(x.map(|x| if *x { 1.0 } else { 0.0 }).to_shared())),
+                    DType::BF16 => Ok(NDArrayNumericTensor::BF16(x.map(|x| bf16::from_f32(if *x { 1.0 } else { 0.0 })).to_shared())),
+                    DType::F16 => Ok(NDArrayNumericTensor::F16(x.map(|x| f16::from_f32(if *x { 1.0 } else { 0.0 })).to_shared())),
                     DType::U32 => Ok(NDArrayNumericTensor::U32(x.map(|x| *x as u32).to_shared())),
                     DType::I32 => Ok(NDArrayNumericTensor::I32(x.map(|x| *x as i32).to_shared())),
                     DType::U64 => Ok(NDArrayNumericTensor::U64(x.map(|x| *x as u64).to_shared())),
@@ -529,7 +566,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
             NDArrayNumericTensor::BOOL(x) => Ok(NDArrayNumericTensor::BOOL(ops::reshape(x.clone(), new_shape)?)),
         }
     }
-    
+
     pub fn is_nan(&self) -> Result<Self, NDArrayNumericTensorError> {
         Ok(match self {
             NDArrayNumericTensor::F64(x) => NDArrayNumericTensor::BOOL(x.map(|x| x.is_nan()).to_shared()),
@@ -537,6 +574,34 @@ impl<R: Rank> NDArrayNumericTensor<R> {
             NDArrayNumericTensor::BF16(x) => NDArrayNumericTensor::BOOL(x.map(|x| x.is_nan()).to_shared()),
             NDArrayNumericTensor::F16(x) => NDArrayNumericTensor::BOOL(x.map(|x| x.is_nan()).to_shared()),
             _ => Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("is_nan".to_string(), vec![self.dtype()]))?,
+        })
+    }
+
+    pub fn is_inf(&self) -> Result<Self, NDArrayNumericTensorError> {
+        Ok(match self {
+            NDArrayNumericTensor::F64(x) => NDArrayNumericTensor::BOOL(x.map(|x| x.is_infinite()).to_shared()),
+            NDArrayNumericTensor::F32(x) => NDArrayNumericTensor::BOOL(x.map(|x| x.is_infinite()).to_shared()),
+            NDArrayNumericTensor::BF16(x) => NDArrayNumericTensor::BOOL(x.map(|x| x.is_infinite()).to_shared()),
+            NDArrayNumericTensor::F16(x) => NDArrayNumericTensor::BOOL(x.map(|x| x.is_infinite()).to_shared()),
+            _ => Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("is_infinite".to_string(), vec![self.dtype()]))?,
+        })
+    }
+
+    pub fn sign(&self) -> Result<Self, NDArrayNumericTensorError> {
+        Ok(match self {
+            NDArrayNumericTensor::F64(x) => NDArrayNumericTensor::F64(x.map(|x| if *x == 0.0 { 0.0 } else { x.signum() }).to_shared()),
+            NDArrayNumericTensor::F32(x) => NDArrayNumericTensor::F32(x.map(|x| if *x == 0.0 { 0.0 } else { x.signum() }).to_shared()),
+            NDArrayNumericTensor::BF16(x) => NDArrayNumericTensor::BF16(x.map(|x| if x.to_f32() == 0.0 { bf16::from_f32(0.0) } else { x.signum() }).to_shared()),
+            NDArrayNumericTensor::F16(x) => NDArrayNumericTensor::F16(x.map(|x| if x.to_f32() == 0.0 { f16::from_f32(0.0) } else { x.signum() }).to_shared()),
+            NDArrayNumericTensor::I64(x) => NDArrayNumericTensor::I64(x.map(|x| if *x == 0 { 0 } else { x.signum() }).to_shared()),
+            NDArrayNumericTensor::I32(x) => NDArrayNumericTensor::I32(x.map(|x| if *x == 0 { 0 } else { x.signum() }).to_shared()),
+            NDArrayNumericTensor::I16(x) => NDArrayNumericTensor::I16(x.map(|x| if *x == 0 { 0 } else { x.signum() }).to_shared()),
+            NDArrayNumericTensor::I8(x) => NDArrayNumericTensor::I8(x.map(|x| if *x == 0 { 0 } else { x.signum() }).to_shared()),
+            NDArrayNumericTensor::U64(x) => NDArrayNumericTensor::U64(x.map(|x| if *x == 0 { 0 } else { *x }).to_shared()),
+            NDArrayNumericTensor::U32(x) => NDArrayNumericTensor::U32(x.map(|x| if *x == 0 { 0 } else { *x }).to_shared()),
+            NDArrayNumericTensor::U16(x) => NDArrayNumericTensor::U16(x.map(|x| if *x == 0 { 0 } else { *x }).to_shared()),
+            NDArrayNumericTensor::U8(x) => NDArrayNumericTensor::U8(x.map(|x| if *x == 0 { 0 } else { *x }).to_shared()),
+            _ => Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("sign".to_string(), vec![self.dtype()]))?,
         })
     }
 }
@@ -551,6 +616,8 @@ impl NDArrayNumericTensor<DynRank> {
                     NDArrayNumericTensor::F64(x) => NDArrayNumericTensor::F64(ops::pow(x.clone(), exponent.clone())?),
                     NDArrayNumericTensor::F16(x) => NDArrayNumericTensor::F16(ops::pow(x.map(|x| (*x).to_f32()).to_shared(), exponent.clone())?.map(|x| f16::from_f32(*x)).to_shared()),
                     NDArrayNumericTensor::BF16(x) => NDArrayNumericTensor::BF16(ops::pow(x.map(|x| (*x).to_f32()).to_shared(), exponent.clone())?.map(|x| bf16::from_f32(*x)).to_shared()),
+                    NDArrayNumericTensor::I32(x) => NDArrayNumericTensor::I32(ops::pow(x.clone(), exponent.map(|x| *x as u32).to_shared())?),
+                    NDArrayNumericTensor::I64(x) => NDArrayNumericTensor::I64(ops::pow(x.clone(), exponent.map(|x| *x as u32).to_shared())?),
                     _ => Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("pow".to_string(), vec![self.dtype(), input_exponent.dtype()]))?,
                 }
             },
@@ -560,6 +627,8 @@ impl NDArrayNumericTensor<DynRank> {
                     NDArrayNumericTensor::F64(x) => NDArrayNumericTensor::F64(ops::pow(x.clone(), exponent.clone())?),
                     NDArrayNumericTensor::F16(x) => NDArrayNumericTensor::F16(ops::pow(x.map(|x| (*x).to_f64()).to_shared(), exponent.clone())?.map(|x| f16::from_f64(*x)).to_shared()),
                     NDArrayNumericTensor::BF16(x) => NDArrayNumericTensor::BF16(ops::pow(x.map(|x| (*x).to_f64()).to_shared(), exponent.clone())?.map(|x| bf16::from_f64(*x)).to_shared()),
+                    NDArrayNumericTensor::I32(x) => NDArrayNumericTensor::I32(ops::pow(x.clone(), exponent.map(|x| *x as u32).to_shared())?),
+                    NDArrayNumericTensor::I64(x) => NDArrayNumericTensor::I64(ops::pow(x.clone(), exponent.map(|x| *x as u32).to_shared())?),
                     _ => Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("pow".to_string(), vec![self.dtype(), input_exponent.dtype()]))?,
                 }
             },
@@ -570,6 +639,8 @@ impl NDArrayNumericTensor<DynRank> {
                     NDArrayNumericTensor::F64(x) => NDArrayNumericTensor::F64(ops::pow(x.clone(), exponent.clone())?),
                     NDArrayNumericTensor::F16(x) => NDArrayNumericTensor::F16(ops::pow(x.map(|x| (*x).to_f64()).to_shared(), exponent.clone())?.map(|x| f16::from_f64(*x)).to_shared()),
                     NDArrayNumericTensor::BF16(x) => NDArrayNumericTensor::BF16(ops::pow(x.map(|x| (*x).to_f64()).to_shared(), exponent.clone())?.map(|x| bf16::from_f64(*x)).to_shared()),
+                    NDArrayNumericTensor::I32(x) => NDArrayNumericTensor::I32(ops::pow(x.clone(), exponent.map(|x| *x as u32).to_shared())?),
+                    NDArrayNumericTensor::I64(x) => NDArrayNumericTensor::I64(ops::pow(x.clone(), exponent.map(|x| *x as u32).to_shared())?),
                     _ => Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("pow".to_string(), vec![self.dtype(), input_exponent.dtype()]))?,
                 }
             },
@@ -580,6 +651,8 @@ impl NDArrayNumericTensor<DynRank> {
                     NDArrayNumericTensor::F64(x) => NDArrayNumericTensor::F64(ops::pow(x.clone(), exponent.clone())?),
                     NDArrayNumericTensor::F16(x) => NDArrayNumericTensor::F16(ops::pow(x.map(|x| (*x).to_f64()).to_shared(), exponent.clone())?.map(|x| f16::from_f64(*x)).to_shared()),
                     NDArrayNumericTensor::BF16(x) => NDArrayNumericTensor::BF16(ops::pow(x.map(|x| (*x).to_f64()).to_shared(), exponent.clone())?.map(|x| bf16::from_f64(*x)).to_shared()),
+                    NDArrayNumericTensor::I32(x) => NDArrayNumericTensor::I32(ops::pow(x.clone(), exponent.map(|x| *x as u32).to_shared())?),
+                    NDArrayNumericTensor::I64(x) => NDArrayNumericTensor::I64(ops::pow(x.clone(), exponent.map(|x| *x as u32).to_shared())?),
                     _ => Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("pow".to_string(), vec![self.dtype(), input_exponent.dtype()]))?,
                 }
             },
@@ -590,6 +663,8 @@ impl NDArrayNumericTensor<DynRank> {
                     NDArrayNumericTensor::F64(x) => NDArrayNumericTensor::F64(ops::pow(x.clone(), exponent.clone())?),
                     NDArrayNumericTensor::F16(x) => NDArrayNumericTensor::F16(ops::pow(x.map(|x| (*x).to_f32()).to_shared(), exponent.clone())?.map(|x| f16::from_f32(*x)).to_shared()),
                     NDArrayNumericTensor::BF16(x) => NDArrayNumericTensor::BF16(ops::pow(x.map(|x| (*x).to_f32()).to_shared(), exponent.clone())?.map(|x| bf16::from_f32(*x)).to_shared()),
+                    NDArrayNumericTensor::I32(x) => NDArrayNumericTensor::I32(ops::pow(x.clone(), exponent.map(|x| *x as u32).to_shared())?),
+                    NDArrayNumericTensor::I64(x) => NDArrayNumericTensor::I64(ops::pow(x.clone(), exponent.map(|x| *x as u32).to_shared())?),
                     _ => Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("pow".to_string(), vec![self.dtype(), input_exponent.dtype()]))?,
                 }
             },
@@ -600,6 +675,8 @@ impl NDArrayNumericTensor<DynRank> {
                     NDArrayNumericTensor::F64(x) => NDArrayNumericTensor::F64(ops::pow(x.clone(), exponent.clone())?),
                     NDArrayNumericTensor::F16(x) => NDArrayNumericTensor::F16(ops::pow(x.map(|x| (*x).to_f32()).to_shared(), exponent.clone())?.map(|x| f16::from_f32(*x)).to_shared()),
                     NDArrayNumericTensor::BF16(x) => NDArrayNumericTensor::BF16(ops::pow(x.map(|x| (*x).to_f32()).to_shared(), exponent.clone())?.map(|x| bf16::from_f32(*x)).to_shared()),
+                    NDArrayNumericTensor::I32(x) => NDArrayNumericTensor::I32(ops::pow(x.clone(), exponent.map(|x| *x as u32).to_shared())?),
+                    NDArrayNumericTensor::I64(x) => NDArrayNumericTensor::I64(ops::pow(x.clone(), exponent.map(|x| *x as u32).to_shared())?),
                     _ => Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("pow".to_string(), vec![self.dtype(), input_exponent.dtype()]))?,
                 }
             },
@@ -610,6 +687,8 @@ impl NDArrayNumericTensor<DynRank> {
                     NDArrayNumericTensor::F64(x) => NDArrayNumericTensor::F64(ops::pow(x.clone(), exponent.clone())?),
                     NDArrayNumericTensor::F16(x) => NDArrayNumericTensor::F16(ops::pow(x.map(|x| (*x).to_f32()).to_shared(), exponent.clone())?.map(|x| f16::from_f32(*x)).to_shared()),
                     NDArrayNumericTensor::BF16(x) => NDArrayNumericTensor::BF16(ops::pow(x.map(|x| (*x).to_f32()).to_shared(), exponent.clone())?.map(|x| bf16::from_f32(*x)).to_shared()),
+                    NDArrayNumericTensor::I32(x) => NDArrayNumericTensor::I32(ops::pow(x.clone(), exponent.map(|x| *x as u32).to_shared())?),
+                    NDArrayNumericTensor::I64(x) => NDArrayNumericTensor::I64(ops::pow(x.clone(), exponent.map(|x| *x as u32).to_shared())?),
                     _ => Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("pow".to_string(), vec![self.dtype(), input_exponent.dtype()]))?,
                 }
             },
@@ -619,6 +698,8 @@ impl NDArrayNumericTensor<DynRank> {
                     NDArrayNumericTensor::F64(x) => NDArrayNumericTensor::F64(ops::pow(x.clone(), exponent.clone())?),
                     NDArrayNumericTensor::F16(x) => NDArrayNumericTensor::F16(ops::pow(x.map(|x| (*x).to_f32()).to_shared(), exponent.clone())?.map(|x| f16::from_f32(*x)).to_shared()),
                     NDArrayNumericTensor::BF16(x) => NDArrayNumericTensor::BF16(ops::pow(x.map(|x| (*x).to_f32()).to_shared(), exponent.clone())?.map(|x| bf16::from_f32(*x)).to_shared()),
+                    NDArrayNumericTensor::I32(x) => NDArrayNumericTensor::I32(ops::pow(x.clone(), exponent.map(|x| *x as u32).to_shared())?),
+                    NDArrayNumericTensor::I64(x) => NDArrayNumericTensor::I64(ops::pow(x.clone(), exponent.map(|x| *x as u32).to_shared())?),
                     _ => Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("pow".to_string(), vec![self.dtype(), input_exponent.dtype()]))?,
                 }
             },
@@ -628,6 +709,8 @@ impl NDArrayNumericTensor<DynRank> {
                     NDArrayNumericTensor::F64(x) => NDArrayNumericTensor::F64(ops::pow(x.clone(), exponent.clone())?),
                     NDArrayNumericTensor::F16(x) => NDArrayNumericTensor::F16(ops::pow(x.map(|x| (*x).to_f32()).to_shared(), exponent.clone())?.map(|x| f16::from_f32(*x)).to_shared()),
                     NDArrayNumericTensor::BF16(x) => NDArrayNumericTensor::BF16(ops::pow(x.map(|x| (*x).to_f32()).to_shared(), exponent.clone())?.map(|x| bf16::from_f32(*x)).to_shared()),
+                    NDArrayNumericTensor::I32(x) => NDArrayNumericTensor::I32(ops::pow(x.clone(), exponent.map(|x| *x as u32).to_shared())?),
+                    NDArrayNumericTensor::I64(x) => NDArrayNumericTensor::I64(ops::pow(x.clone(), exponent.map(|x| *x as u32).to_shared())?),
                     _ => Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("pow".to_string(), vec![self.dtype(), input_exponent.dtype()]))?,
                 }
             },
@@ -637,6 +720,8 @@ impl NDArrayNumericTensor<DynRank> {
                     NDArrayNumericTensor::F64(x) => NDArrayNumericTensor::F64(ops::pow(x.clone(), exponent.clone())?),
                     NDArrayNumericTensor::F16(x) => NDArrayNumericTensor::F16(ops::pow(x.map(|x| (*x).to_f32()).to_shared(), exponent.clone())?.map(|x| f16::from_f32(*x)).to_shared()),
                     NDArrayNumericTensor::BF16(x) => NDArrayNumericTensor::BF16(ops::pow(x.map(|x| (*x).to_f32()).to_shared(), exponent.clone())?.map(|x| bf16::from_f32(*x)).to_shared()),
+                    NDArrayNumericTensor::I32(x) => NDArrayNumericTensor::I32(ops::pow(x.clone(), exponent.map(|x| *x as u32).to_shared())?),
+                    NDArrayNumericTensor::I64(x) => NDArrayNumericTensor::I64(ops::pow(x.clone(), exponent.map(|x| *x as u32).to_shared())?),
                     _ => Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("pow".to_string(), vec![self.dtype(), input_exponent.dtype()]))?,
                 }
             },
@@ -646,6 +731,8 @@ impl NDArrayNumericTensor<DynRank> {
                     NDArrayNumericTensor::F64(x) => NDArrayNumericTensor::F64(ops::pow(x.clone(), exponent.clone())?),
                     NDArrayNumericTensor::F16(x) => NDArrayNumericTensor::F16(ops::pow(x.map(|x| (*x).to_f32()).to_shared(), exponent.clone())?.map(|x| f16::from_f32(*x)).to_shared()),
                     NDArrayNumericTensor::BF16(x) => NDArrayNumericTensor::BF16(ops::pow(x.map(|x| (*x).to_f32()).to_shared(), exponent.clone())?.map(|x| bf16::from_f32(*x)).to_shared()),
+                    NDArrayNumericTensor::I32(x) => NDArrayNumericTensor::I32(ops::pow(x.clone(), exponent.map(|x| *x as u32).to_shared())?),
+                    NDArrayNumericTensor::I64(x) => NDArrayNumericTensor::I64(ops::pow(x.clone(), exponent.map(|x| *x as u32).to_shared())?),
                     _ => Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("pow".to_string(), vec![self.dtype(), input_exponent.dtype()]))?,
                 }
             },
@@ -655,6 +742,8 @@ impl NDArrayNumericTensor<DynRank> {
                     NDArrayNumericTensor::F64(x) => NDArrayNumericTensor::F64(ops::pow(x.clone(), exponent.clone())?),
                     NDArrayNumericTensor::F16(x) => NDArrayNumericTensor::F16(ops::pow(x.map(|x| (*x).to_f32()).to_shared(), exponent.clone())?.map(|x| f16::from_f32(*x)).to_shared()),
                     NDArrayNumericTensor::BF16(x) => NDArrayNumericTensor::BF16(ops::pow(x.map(|x| (*x).to_f32()).to_shared(), exponent.clone())?.map(|x| bf16::from_f32(*x)).to_shared()),
+                    NDArrayNumericTensor::I32(x) => NDArrayNumericTensor::I32(ops::pow(x.clone(), exponent.map(|x| *x as u32).to_shared())?),
+                    NDArrayNumericTensor::I64(x) => NDArrayNumericTensor::I64(ops::pow(x.clone(), exponent.map(|x| *x as u32).to_shared())?),
                     _ => Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("pow".to_string(), vec![self.dtype(), input_exponent.dtype()]))?,
                 }
             },
@@ -1092,6 +1181,14 @@ impl NDArrayNumericTensor<DynRank> {
         self.reduce_op(axes, keepdims, ReduceOp::Sum)
     }
 
+    pub fn reduce_min(&self, axes: Vec<usize>, keepdims: bool) -> Result<Self, NDArrayNumericTensorError> {
+        self.reduce_op(axes, keepdims, ReduceOp::Min)
+    }
+    
+    pub fn reduce_max(&self, axes: Vec<usize>, keepdims: bool) -> Result<Self, NDArrayNumericTensorError> {
+        self.reduce_op(axes, keepdims, ReduceOp::Max)
+    }
+
     pub fn reduce_prod(&self, axes: Vec<usize>, keepdims: bool) -> Result<Self, NDArrayNumericTensorError> {
         self.reduce_op(axes, keepdims, ReduceOp::Prod)
     }
@@ -1100,84 +1197,84 @@ impl NDArrayNumericTensor<DynRank> {
         let result = match a {
             NDArrayNumericTensor::F32(a) => {
                 if let NDArrayNumericTensor::F32(b) = b {
-                    Some(NDArrayNumericTensor::F32(op.apply(a.clone(), b.clone())?))
+                    Some(NDArrayNumericTensor::F32(op.applyf(a.clone(), b.clone())?))
                 } else {
                     None
                 }
             }
             NDArrayNumericTensor::F64(a) => {
                 if let NDArrayNumericTensor::F64(b) = b {
-                    Some(NDArrayNumericTensor::F64(op.apply(a.clone(), b.clone())?))
+                    Some(NDArrayNumericTensor::F64(op.applyf(a.clone(), b.clone())?))
                 } else {
                     None
                 }
             }
             NDArrayNumericTensor::F16(a) => {
                 if let NDArrayNumericTensor::F16(b) = b {
-                    Some(NDArrayNumericTensor::F16(op.apply(a.clone(), b.clone())?))
+                    Some(NDArrayNumericTensor::F16(op.applyf(a.clone(), b.clone())?))
                 } else {
                     None
                 }
             }
             NDArrayNumericTensor::BF16(a) => {
                 if let NDArrayNumericTensor::BF16(b) = b {
-                    Some(NDArrayNumericTensor::BF16(op.apply(a.clone(), b.clone())?))
+                    Some(NDArrayNumericTensor::BF16(op.applyf(a.clone(), b.clone())?))
                 } else {
                     None
                 }
             }
             NDArrayNumericTensor::U32(a) => {
                 if let NDArrayNumericTensor::U32(b) = b {
-                    Some(NDArrayNumericTensor::U32(op.apply(a.clone(), b.clone())?))
+                    Some(NDArrayNumericTensor::U32(op.applyi(a.clone(), b.clone())?))
                 } else {
                     None
                 }
             }
             NDArrayNumericTensor::I32(a) => {
                 if let NDArrayNumericTensor::I32(b) = b {
-                    Some(NDArrayNumericTensor::I32(op.apply(a.clone(), b.clone())?))
+                    Some(NDArrayNumericTensor::I32(op.applyi(a.clone(), b.clone())?))
                 } else {
                     None
                 }
             }
             NDArrayNumericTensor::U64(a) => {
                 if let NDArrayNumericTensor::U64(b) = b {
-                    Some(NDArrayNumericTensor::U64(op.apply(a.clone(), b.clone())?))
+                    Some(NDArrayNumericTensor::U64(op.applyi(a.clone(), b.clone())?))
                 } else {
                     None
                 }
             }
             NDArrayNumericTensor::I64(a) => {
                 if let NDArrayNumericTensor::I64(b) = b {
-                    Some(NDArrayNumericTensor::I64(op.apply(a.clone(), b.clone())?))
+                    Some(NDArrayNumericTensor::I64(op.applyi(a.clone(), b.clone())?))
                 } else {
                     None
                 }
             }
             NDArrayNumericTensor::U16(a) => {
                 if let NDArrayNumericTensor::U16(b) = b {
-                    Some(NDArrayNumericTensor::U16(op.apply(a.clone(), b.clone())?))
+                    Some(NDArrayNumericTensor::U16(op.applyi(a.clone(), b.clone())?))
                 } else {
                     None
                 }
             }
             NDArrayNumericTensor::I16(a) => {
                 if let NDArrayNumericTensor::I16(b) = b {
-                    Some(NDArrayNumericTensor::I16(op.apply(a.clone(), b.clone())?))
+                    Some(NDArrayNumericTensor::I16(op.applyi(a.clone(), b.clone())?))
                 } else {
                     None
                 }
             }
             NDArrayNumericTensor::U8(a) => {
                 if let NDArrayNumericTensor::U8(b) = b {
-                    Some(NDArrayNumericTensor::U8(op.apply(a.clone(), b.clone())?))
+                    Some(NDArrayNumericTensor::U8(op.applyi(a.clone(), b.clone())?))
                 } else {
                     None
                 }
             }
             NDArrayNumericTensor::I8(a) => {
                 if let NDArrayNumericTensor::I8(b) = b {
-                    Some(NDArrayNumericTensor::I8(op.apply(a.clone(), b.clone())?))
+                    Some(NDArrayNumericTensor::I8(op.applyi(a.clone(), b.clone())?))
                 } else {
                     None
                 }
@@ -1195,6 +1292,92 @@ impl NDArrayNumericTensor<DynRank> {
 
     pub fn add(a: &Self, b: &Self) -> Result<Self, NDArrayNumericTensorError> {
         Self::try_binary_op(a, b, NativeNumericTensorBinaryOperation::Add)
+    }
+
+    pub fn max(a: &Self, b: &Self) -> Result<Self, NDArrayNumericTensorError> {
+        Self::try_binary_op(a, b, NativeNumericTensorBinaryOperation::Max)
+    }
+
+    pub fn min(a: &Self, b: &Self) -> Result<Self, NDArrayNumericTensorError> {
+        Self::try_binary_op(a, b, NativeNumericTensorBinaryOperation::Min)
+    }
+
+    pub fn bitwise_op(a: &Self, b: &Self, op: NativeNumericTensorBitwiseBinaryOperation) -> Result<Self, NDArrayNumericTensorError> {
+        match (a, b) {
+            (Self::I64(a), Self::I64(b)) => Ok(Self::I64(op.apply(a.clone(), b.clone())?)),
+            (Self::U64(a), Self::U64(b)) => Ok(Self::U64(op.apply(a.clone(), b.clone())?)),
+            (Self::I32(a), Self::I32(b)) => Ok(Self::I32(op.apply(a.clone(), b.clone())?)),
+            (Self::U32(a), Self::U32(b)) => Ok(Self::U32(op.apply(a.clone(), b.clone())?)),
+            (Self::I16(a), Self::I16(b)) => Ok(Self::I16(op.apply(a.clone(), b.clone())?)),
+            (Self::U16(a), Self::U16(b)) => Ok(Self::U16(op.apply(a.clone(), b.clone())?)),
+            (Self::I8(a), Self::I8(b)) => Ok(Self::I8(op.apply(a.clone(), b.clone())?)),
+            (Self::U8(a), Self::U8(b)) => Ok(Self::U8(op.apply(a.clone(), b.clone())?)),
+            (Self::BOOL(a), Self::BOOL(b)) => Ok(Self::BOOL(op.apply(a.clone(), b.clone())?)),
+            _ => Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("bitwise_op".to_string(), vec![a.dtype(), b.dtype()])),
+        }
+    }
+
+    pub fn binary_op_bool_out(a: &Self, b: &Self, op: NativeNumericTensorBinaryOperationBoolOut) -> Result<Self, NDArrayNumericTensorError> {
+        match (a, b) {
+            (Self::F64(a), Self::F64(b)) => Ok(Self::BOOL(op.apply(a.clone(), b.clone())?)),
+            (Self::F32(a), Self::F32(b)) => Ok(Self::BOOL(op.apply(a.clone(), b.clone())?)),
+            (Self::BF16(a), Self::BF16(b)) => Ok(Self::BOOL(op.apply(a.clone(), b.clone())?)),
+            (Self::F16(a), Self::F16(b)) => Ok(Self::BOOL(op.apply(a.clone(), b.clone())?)),
+            (Self::I64(a), Self::I64(b)) => Ok(Self::BOOL(op.apply(a.clone(), b.clone())?)),
+            (Self::U64(a), Self::U64(b)) => Ok(Self::BOOL(op.apply(a.clone(), b.clone())?)),
+            (Self::I32(a), Self::I32(b)) => Ok(Self::BOOL(op.apply(a.clone(), b.clone())?)),
+            (Self::U32(a), Self::U32(b)) => Ok(Self::BOOL(op.apply(a.clone(), b.clone())?)),
+            (Self::I16(a), Self::I16(b)) => Ok(Self::BOOL(op.apply(a.clone(), b.clone())?)),
+            (Self::U16(a), Self::U16(b)) => Ok(Self::BOOL(op.apply(a.clone(), b.clone())?)),
+            (Self::I8(a), Self::I8(b)) => Ok(Self::BOOL(op.apply(a.clone(), b.clone())?)),
+            (Self::U8(a), Self::U8(b)) => Ok(Self::BOOL(op.apply(a.clone(), b.clone())?)),
+            (Self::BOOL(a), Self::BOOL(b)) => Ok(Self::BOOL(op.apply(a.clone(), b.clone())?)),
+            _ => Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("binary_op_bool_out".to_string(), vec![a.dtype(), b.dtype()])),
+        }
+    }
+
+    pub fn equal(a: &Self, b: &Self) -> Result<Self, NDArrayNumericTensorError> {
+        Self::binary_op_bool_out(a, b, NativeNumericTensorBinaryOperationBoolOut::Equal)
+    }
+
+    pub fn greater(a: &Self, b: &Self) -> Result<Self, NDArrayNumericTensorError> {
+        Self::binary_op_bool_out(a, b, NativeNumericTensorBinaryOperationBoolOut::Greater)
+    }
+
+    pub fn greater_or_equal(a: &Self, b: &Self) -> Result<Self, NDArrayNumericTensorError> {
+        Self::binary_op_bool_out(a, b, NativeNumericTensorBinaryOperationBoolOut::GreaterOrEqual)
+    }
+
+    pub fn less(a: &Self, b: &Self) -> Result<Self, NDArrayNumericTensorError> {
+        Self::binary_op_bool_out(a, b, NativeNumericTensorBinaryOperationBoolOut::Less)
+    }
+
+    pub fn less_or_equal(a: &Self, b: &Self) -> Result<Self, NDArrayNumericTensorError> {
+        Self::binary_op_bool_out(a, b, NativeNumericTensorBinaryOperationBoolOut::LessOrEqual)
+    }
+
+    pub fn and(a: &Self, b: &Self) -> Result<Self, NDArrayNumericTensorError> {
+        Self::bitwise_op(a, b, NativeNumericTensorBitwiseBinaryOperation::And)
+    }
+
+    pub fn or(a: &Self, b: &Self) -> Result<Self, NDArrayNumericTensorError> {
+        Self::bitwise_op(a, b, NativeNumericTensorBitwiseBinaryOperation::Or)
+    }
+
+    pub fn xor(a: &Self, b: &Self) -> Result<Self, NDArrayNumericTensorError> {
+        Self::bitwise_op(a, b, NativeNumericTensorBitwiseBinaryOperation::Xor)
+    }
+
+    pub fn bitwise_and(a: &Self, b: &Self) -> Result<Self, NDArrayNumericTensorError> {
+        Self::bitwise_op(a, b, NativeNumericTensorBitwiseBinaryOperation::And)
+    }
+
+    pub fn bitwise_or(a: &Self, b: &Self) -> Result<Self, NDArrayNumericTensorError> {
+        Self::bitwise_op(a, b, NativeNumericTensorBitwiseBinaryOperation::Or)
+    }
+
+    pub fn bitwise_xor(a: &Self, b: &Self) -> Result<Self, NDArrayNumericTensorError> {
+        Self::bitwise_op(a, b, NativeNumericTensorBitwiseBinaryOperation::Xor)
     }
 
     pub fn add_f32(a: &Self, b: f32) -> Result<Self, NDArrayNumericTensorError> {
@@ -1238,7 +1421,7 @@ impl NDArrayNumericTensor<DynRank> {
     pub fn modulo(a: &Self, b: &Self) -> Result<Self, NDArrayNumericTensorError> {
         Self::try_binary_op(a, b, NativeNumericTensorBinaryOperation::Modulo)
     }
-    
+
     pub fn matmul(a: &Self, b: &Self) -> Result<Self, NDArrayNumericTensorError> {
         Ok(match (a, b) {
             (NDArrayNumericTensor::F32(a), NDArrayNumericTensor::F32(b)) => NDArrayNumericTensor::F32(ops::matmul(a, b)?),

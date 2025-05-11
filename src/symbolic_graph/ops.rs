@@ -38,12 +38,25 @@ pub trait Operation {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum WhichBinaryOperation {
+    Max,
+    Min,
     Add,
     Sub,
     Mul,
     Div,
     Modulo,
-    MatMul
+    MatMul,
+    And,
+    Or,
+    Xor,
+    BitwiseAnd,
+    BitwiseOr,
+    BitwiseXor,
+    Equal,
+    Greater,
+    GreaterOrEqual,
+    Less,
+    LessOrEqual
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -91,6 +104,19 @@ impl Operation for BinaryOperation {
             WhichBinaryOperation::Div => AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::div(a, b)),
             WhichBinaryOperation::Modulo => AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::modulo(a, b)),
             WhichBinaryOperation::MatMul => AnyMilliOp::MatMul(MilliOpMatMul::new(a, b)),
+            WhichBinaryOperation::And => AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::and(a, b)),
+            WhichBinaryOperation::Or => AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::or(a, b)),
+            WhichBinaryOperation::Xor => AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::xor(a, b)),
+            WhichBinaryOperation::BitwiseAnd => AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::bitwise_and(a, b)),
+            WhichBinaryOperation::BitwiseOr => AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::bitwise_or(a, b)),
+            WhichBinaryOperation::BitwiseXor => AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::bitwise_xor(a, b)),
+            WhichBinaryOperation::Equal => AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::equal(a, b)),
+            WhichBinaryOperation::Greater => AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::greater(a, b)),
+            WhichBinaryOperation::GreaterOrEqual => AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::greater_or_equal(a, b)),
+            WhichBinaryOperation::Less => AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::less(a, b)),
+            WhichBinaryOperation::LessOrEqual => AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::less_or_equal(a, b)),
+            WhichBinaryOperation::Max => AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::max(a, b)),
+            WhichBinaryOperation::Min => AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::min(a, b)),
         };
         let mut output_map = HashMap::new();
         let out = graph.push_op(res);
@@ -110,9 +136,17 @@ pub(crate) enum WhichUnaryOperation {
     Reciprocal,
     Neg,
     Abs,
+    Sign,
+    Not,
     NonZero,
     Sqrt,
-    Trig(TrigOp)
+    BitwiseNot,
+    Trig(TrigOp),
+    Floor,
+    Ceil,
+    Round,
+    IsNan,
+    IsInf
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -154,28 +188,36 @@ impl Operation for UnaryOperation {
         let res = match &self.which {
             WhichUnaryOperation::Relu => AnyMilliOp::ClampMin(MilliOpClampMin::new(a, 0.0)),
             WhichUnaryOperation::Sigmoid => {
-                let x = graph.push_op(AnyMilliOp::Neg(MilliOpNeg::new(a)));
-                let x = graph.push_op(AnyMilliOp::Exp(MilliOpExp::new(x)));
+                let x = graph.push_op(AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::neg(a)));
+                let x = graph.push_op(AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::exp(x)));
                 let c = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new_scalar(1.0f32)));
                 let c = graph.push_op(AnyMilliOp::CastLike(MilliOpCastLike::new(c, x)));
                 let x = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::add(x, c)));
-                AnyMilliOp::Reciprocal(MilliOpReciprocal::new(x))
+                AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::reciprocal(x))
             },
-            WhichUnaryOperation::Exp => AnyMilliOp::Exp(MilliOpExp::new(a)),
-            WhichUnaryOperation::Log => AnyMilliOp::Log(MilliOpLog::new(a)),
+            WhichUnaryOperation::Exp => AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::exp(a)),
+            WhichUnaryOperation::Log => AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::ln(a)),
             WhichUnaryOperation::Softplus => {
-                let x = graph.push_op(AnyMilliOp::Exp(MilliOpExp::new(a)));
+                let x = graph.push_op(AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::exp(a)));
                 let c = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new_scalar(1.0f32)));
                 let c = graph.push_op(AnyMilliOp::CastLike(MilliOpCastLike::new(c, x)));
                 let x = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::add(x, c)));
-                AnyMilliOp::Log(MilliOpLog::new(x))
+                AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::ln(x))
             }
-            WhichUnaryOperation::Neg => AnyMilliOp::Neg(MilliOpNeg::new(a)),
+            WhichUnaryOperation::Neg => AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::neg(a)),
             WhichUnaryOperation::NonZero => AnyMilliOp::NonZero(MilliOpNonZero::new(a)),
-            WhichUnaryOperation::Sqrt => AnyMilliOp::Sqrt(MilliOpSqrt::new(a)),
-            WhichUnaryOperation::Abs => AnyMilliOp::Abs(MilliOpAbs::new(a)),
-            WhichUnaryOperation::Trig(trig_op) => AnyMilliOp::Trig(MilliOpTrig::new(a, *trig_op)),
-            WhichUnaryOperation::Reciprocal => AnyMilliOp::Reciprocal(MilliOpReciprocal::new(a))
+            WhichUnaryOperation::Sqrt => AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::sqrt(a)),
+            WhichUnaryOperation::Abs => AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::abs(a)),
+            WhichUnaryOperation::Trig(trig_op) => AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::trig(a, *trig_op)),
+            WhichUnaryOperation::Reciprocal => AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::reciprocal(a)),
+            WhichUnaryOperation::BitwiseNot => AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::bitwise_not(a)),
+            WhichUnaryOperation::Not => AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::not(a)),
+            WhichUnaryOperation::Sign => AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::sign(a)),
+            WhichUnaryOperation::Floor => AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::floor(a)),
+            WhichUnaryOperation::Ceil => AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::ceil(a)),
+            WhichUnaryOperation::Round => AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::round(a)),
+            WhichUnaryOperation::IsNan => AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::is_nan(a)),
+            WhichUnaryOperation::IsInf => AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::is_inf(a)),
         };
         let mut output_map = HashMap::new();
         let out = graph.push_op(res);
@@ -284,7 +326,7 @@ impl Operation for LpNormalizationOperation {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let input = input_map[&self.input];
 
-        let x = graph.push_op(AnyMilliOp::Abs(MilliOpAbs::new(input)));
+        let x = graph.push_op(AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::abs(input)));
 
         let x = match self.p{
             1 => x,
@@ -296,7 +338,7 @@ impl Operation for LpNormalizationOperation {
         let x = graph.push_op(AnyMilliOp::ReduceSum(MilliOpReduceSum::new(x, Some(axis), true, false)));
         let x = match self.p{
             1 => x,
-            2 => graph.push_op(AnyMilliOp::Sqrt(MilliOpSqrt::new(x))),
+            2 => graph.push_op(AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::sqrt(x))),
             _ => panic!()
         };
         let out = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::div(input, x)));
@@ -391,7 +433,7 @@ impl Operation for GroupNormalizationOperation {
             let epsilon = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new_scalar(self.epsilon)));
             let epsilon = graph.push_op(AnyMilliOp::CastLike(MilliOpCastLike::new(epsilon, variance)));
             let var_plus_eps = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::add(variance, epsilon)));
-            let val = graph.push_op(AnyMilliOp::Sqrt(MilliOpSqrt::new(var_plus_eps)));
+            let val = graph.push_op(AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::sqrt(var_plus_eps)));
             graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::div(input, val)))
         };
 
@@ -795,8 +837,8 @@ impl Operation for LayerNormalizationOperation {
         let dd = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::mul(d, d)));
         let variance = graph.push_op(AnyMilliOp::ReduceMean(MilliOpReduceMean::new(
             dd, Some(normalized_axes), true, false)));
-        let stddev = graph.push_op(AnyMilliOp::Sqrt(MilliOpSqrt::new(variance)));
-        let inv_stddev = graph.push_op(AnyMilliOp::Reciprocal(MilliOpReciprocal::new(stddev)));
+        let stddev = graph.push_op(AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::sqrt(variance)));
+        let inv_stddev = graph.push_op(AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::reciprocal(stddev)));
         let normalized = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::mul(d, inv_stddev)));
 
         let out = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::mul(normalized, input_scale)));
@@ -1187,6 +1229,153 @@ impl Operation for ReduceSumOperation {
             }
         };
         let out = graph.push_op(AnyMilliOp::ReduceSum(MilliOpReduceSum::new(
+            input_map[&self.input_data],
+            axes,
+            self.keepdims.unwrap_or(true), self.noop_with_empty_axes.unwrap_or(false)
+        )));
+        let mut output_map = HashMap::new();
+        output_map.insert(out, self.output);
+        graph.set_output_map(output_map);
+        graph
+    }
+}
+
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReduceMaxOperation {
+    keepdims: Option<bool>,
+    noop_with_empty_axes: Option<bool>,
+    input_data: TensorId,
+    input_axes: Option<TensorId>,
+    axes_attr: Option<Vec<i64>>,
+    output: TensorId
+}
+
+impl ReduceMaxOperation {
+    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+        if inputs.len() < 1 || inputs.len() > 2 {
+            return Err(ONNXDecodingError::GraphConstructionError("ReduceMax".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+        }
+        if outputs.len() != 1 {
+            return Err(ONNXDecodingError::GraphConstructionError("ReduceMax".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+        }
+
+        let axes_attr = query_attribute_ints(attributes, "attr");
+        let keepdims = query_attribute_int(attributes, "keepdims").map(|x| x != 0);
+        let noop_with_empty_axes = query_attribute_int(attributes, "noop_with_empty_axes").map(|x| x != 0);
+
+        Ok(
+            Self {
+                keepdims,
+                noop_with_empty_axes,
+                input_data: inputs[0],
+                input_axes: if inputs.len() > 1 {Some(inputs[1])} else {None},
+                output: outputs[0],
+                axes_attr
+            }
+        )
+    }
+}
+
+impl Operation for ReduceMaxOperation {
+    fn get_inputs(&self) -> Vec<TensorId> {
+        if let Some(input_axes) = self.input_axes {
+            vec![self.input_data, input_axes]
+        } else {
+            vec![self.input_data]
+        }
+    }
+
+    fn get_outputs(&self) -> Vec<TensorId> {
+        vec![self.output]
+    }
+
+    fn get_milli_op_graph(&self) -> MilliOpGraph {
+        let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
+        let axes = if let Some(input_axes) = &self.input_axes {
+            Some(input_map[input_axes])
+        } else {
+            if let Some(axes) = &self.axes_attr {
+                let tensor = NDArrayNumericTensor::from(axes.clone());
+                Some(graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(tensor.to_dyn().into()))))
+            } else {
+                None
+            }
+        };
+        let out = graph.push_op(AnyMilliOp::ReduceMax(MilliOpReduceMax::new(
+            input_map[&self.input_data],
+            axes,
+            self.keepdims.unwrap_or(true), self.noop_with_empty_axes.unwrap_or(false)
+        )));
+        let mut output_map = HashMap::new();
+        output_map.insert(out, self.output);
+        graph.set_output_map(output_map);
+        graph
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReduceMinOperation {
+    keepdims: Option<bool>,
+    noop_with_empty_axes: Option<bool>,
+    input_data: TensorId,
+    input_axes: Option<TensorId>,
+    axes_attr: Option<Vec<i64>>,
+    output: TensorId
+}
+
+impl ReduceMinOperation {
+    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+        if inputs.len() < 1 || inputs.len() > 2 {
+            return Err(ONNXDecodingError::GraphConstructionError("ReduceMin".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+        }
+        if outputs.len() != 1 {
+            return Err(ONNXDecodingError::GraphConstructionError("ReduceMin".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+        }
+
+        let axes_attr = query_attribute_ints(attributes, "attr");
+        let keepdims = query_attribute_int(attributes, "keepdims").map(|x| x != 0);
+        let noop_with_empty_axes = query_attribute_int(attributes, "noop_with_empty_axes").map(|x| x != 0);
+
+        Ok(
+            Self {
+                keepdims,
+                noop_with_empty_axes,
+                input_data: inputs[0],
+                input_axes: if inputs.len() > 1 {Some(inputs[1])} else {None},
+                output: outputs[0],
+                axes_attr
+            }
+        )
+    }
+}
+
+impl Operation for ReduceMinOperation {
+    fn get_inputs(&self) -> Vec<TensorId> {
+        if let Some(input_axes) = self.input_axes {
+            vec![self.input_data, input_axes]
+        } else {
+            vec![self.input_data]
+        }
+    }
+
+    fn get_outputs(&self) -> Vec<TensorId> {
+        vec![self.output]
+    }
+
+    fn get_milli_op_graph(&self) -> MilliOpGraph {
+        let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
+        let axes = if let Some(input_axes) = &self.input_axes {
+            Some(input_map[input_axes])
+        } else {
+            if let Some(axes) = &self.axes_attr {
+                let tensor = NDArrayNumericTensor::from(axes.clone());
+                Some(graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(tensor.to_dyn().into()))))
+            } else {
+                None
+            }
+        };
+        let out = graph.push_op(AnyMilliOp::ReduceMin(MilliOpReduceMin::new(
             input_map[&self.input_data],
             axes,
             self.keepdims.unwrap_or(true), self.noop_with_empty_axes.unwrap_or(false)
@@ -1643,7 +1832,7 @@ impl Operation for SoftmaxOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
 
-        let e = graph.push_op(AnyMilliOp::Exp(MilliOpExp::new(input_map[&self.input])));
+        let e = graph.push_op(AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::exp(input_map[&self.input])));
         let axis_const = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new_scalar(self.axis.unwrap_or(-1))));
         let sum = graph.push_op(AnyMilliOp::ReduceSum(MilliOpReduceSum::new(e, Some(axis_const), true, false)));
         let out = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::div(e, sum)));
@@ -1690,11 +1879,11 @@ impl Operation for LogSoftmaxOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
 
-        let e = graph.push_op(AnyMilliOp::Exp(MilliOpExp::new(input_map[&self.input])));
+        let e = graph.push_op(AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::exp(input_map[&self.input])));
         let axis_const = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new_scalar(self.axis.unwrap_or(-1))));
         let sum = graph.push_op(AnyMilliOp::ReduceSum(MilliOpReduceSum::new(e, Some(axis_const), true, false)));
         let softmax = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::div(e, sum)));
-        let out = graph.push_op(AnyMilliOp::Log(MilliOpLog::new(softmax)));
+        let out = graph.push_op(AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::ln(softmax)));
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
         graph.set_output_map(output_map);
@@ -1829,15 +2018,24 @@ impl Operation for FlattenOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let input = input_map[&self.input];
-        
-        let mut output_shape = vec![];
-        for _ in 0..self.axis {
-            output_shape.push(0i64);
-        }
-        output_shape.push(-1i64);
-        let shape_tensor = NDArrayNumericTensor::from(output_shape);
-        let shape_constant = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(shape_tensor.to_dyn().into())));
-        let out = graph.push_op(AnyMilliOp::Reshape(MilliOpReshape::new(input, shape_constant, false)));
+
+        let shape_tensor = if self.axis == 0 {
+            let mut output_shape = vec![];
+            output_shape.push(1i64);
+            output_shape.push(-1i64);
+            let shape_tensor = NDArrayNumericTensor::from(output_shape);
+            graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(shape_tensor.to_dyn().into())))
+        } else {
+            let input_shape = graph.push_op(AnyMilliOp::Shape(MilliOpShape::new(input)));
+            let zero_const = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(NumericTensor::from_vec_shape(vec![0i64], vec![1]).unwrap())));
+            let axis_const = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(NumericTensor::from_vec_shape(vec![self.axis], vec![1]).unwrap())));
+            let first_dims = graph.push_op(AnyMilliOp::Slice(MilliOpSlice::new(input_shape, zero_const, axis_const, None, None)));
+            let prod = graph.push_op(AnyMilliOp::ReduceProd(MilliOpReduceProd::new(first_dims, None, true, false)));
+            let neg_one_const = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(NumericTensor::from_vec_shape(vec![-1i64], vec![1]).unwrap())));
+            graph.push_op(AnyMilliOp::Concat(MilliOpConcat::new(vec![prod, neg_one_const], 0)))
+        };
+
+        let out = graph.push_op(AnyMilliOp::Reshape(MilliOpReshape::new(input, shape_tensor, false)));
         
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);

@@ -170,7 +170,7 @@ impl MilliOp for MilliOpConstantOfShape {
     fn infer(&self, known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>, symbolic_resolver: &mut SymbolicResolver, backend: &EvalBackend) -> Result<TensorInfo, MilliOpGraphError> {
         let input = &known_inputs[&self.shape];
         let input = input.try_to_rank::<P1>(symbolic_resolver)?.try_to_type::<u64>()?;
-        
+
         match input {
             TensorInfoTypedRanked::Shaped(tensor) => {
                 match tensor {
@@ -229,9 +229,9 @@ fn infer_multidirectional_broadcasting_shape(shapes: &[Vec<ScalarInfoTyped<u64>>
     if shapes.is_empty() {
         return Err(MilliOpGraphError::InvalidInput("Cannot broadcast empty input".to_string()));
     }
-    
+
     let output_rank = shapes.into_iter().map(|x| x.len()).max().unwrap();
-    
+
     let mut output_shape = vec![];
     for i in 0..output_rank {
         let mut dim = ScalarInfoTyped::<u64>::Numeric(1);
@@ -308,6 +308,19 @@ enum SimpleBinaryOp {
     Mul,
     Div,
     Modulo,
+    And,
+    Or,
+    Xor,
+    BitwiseAnd,
+    BitwiseOr,
+    BitwiseXor,
+    Equal,
+    Greater,
+    GreaterOrEqual,
+    Less,
+    LessOrEqual,
+    Max,
+    Min
 }
 
 pub(crate) struct MilliOpSimpleBinary {
@@ -341,6 +354,59 @@ impl MilliOpSimpleBinary {
     pub(crate) fn modulo(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
         Self { a, b, which_op: SimpleBinaryOp::Modulo }
     }
+
+    pub(crate) fn and(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
+        Self { a, b, which_op: SimpleBinaryOp::And }
+    }
+
+    pub(crate) fn or(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
+        Self { a, b, which_op: SimpleBinaryOp::Or }
+    }
+
+    pub(crate) fn xor(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
+        Self { a, b, which_op: SimpleBinaryOp::Xor }
+    }
+
+    pub(crate) fn bitwise_and(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
+        Self { a, b, which_op: SimpleBinaryOp::BitwiseAnd }
+    }
+
+    pub(crate) fn bitwise_or(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
+        Self { a, b, which_op: SimpleBinaryOp::BitwiseOr }
+    }
+
+    pub(crate) fn bitwise_xor(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
+        Self { a, b, which_op: SimpleBinaryOp::BitwiseXor }
+    }
+
+    pub(crate) fn equal(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
+        Self { a, b, which_op: SimpleBinaryOp::Equal }
+    }
+
+    pub(crate) fn greater(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
+        Self { a, b, which_op: SimpleBinaryOp::Greater }
+    }
+
+    pub(crate) fn greater_or_equal(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
+        Self { a, b, which_op: SimpleBinaryOp::GreaterOrEqual }
+    }
+
+    pub(crate) fn less(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
+        Self { a, b, which_op: SimpleBinaryOp::Less }
+    }
+
+    pub(crate) fn less_or_equal(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
+        Self { a, b, which_op: SimpleBinaryOp::LessOrEqual }
+    }
+
+    pub(crate) fn max(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
+        Self { a, b, which_op: SimpleBinaryOp::Max }
+    }
+
+    pub(crate) fn min(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
+        Self { a, b, which_op: SimpleBinaryOp::Min }
+    }
+
 }
 
 impl MilliOp for MilliOpSimpleBinary {
@@ -368,7 +434,7 @@ impl MilliOp for MilliOpSimpleBinary {
         else {
             Ok(TensorInfo::new_from_first_element_and_rank(ScalarInfo::Symbolic(SymbolicScalar::new(a.dtype(), symbolic_resolver)), output_rank, symbolic_resolver))
         }
-        
+
     }
 
     fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
@@ -380,6 +446,19 @@ impl MilliOp for MilliOpSimpleBinary {
             SimpleBinaryOp::Mul => NumericTensor::<DynRank>::mul(a, b, backend)?,
             SimpleBinaryOp::Div => NumericTensor::<DynRank>::div(a, b, backend)?,
             SimpleBinaryOp::Modulo => NumericTensor::<DynRank>::modulo(a, b, backend)?,
+            SimpleBinaryOp::And => NumericTensor::<DynRank>::and(a, b, backend)?,
+            SimpleBinaryOp::Or => NumericTensor::<DynRank>::or(a, b, backend)?,
+            SimpleBinaryOp::Xor => NumericTensor::<DynRank>::xor(a, b, backend)?,
+            SimpleBinaryOp::BitwiseAnd => NumericTensor::<DynRank>::bitwise_and(a, b, backend)?,
+            SimpleBinaryOp::BitwiseOr => NumericTensor::<DynRank>::bitwise_or(a, b, backend)?,
+            SimpleBinaryOp::BitwiseXor => NumericTensor::<DynRank>::bitwise_xor(a, b, backend)?,
+            SimpleBinaryOp::Equal => NumericTensor::<DynRank>::equal(a, b, backend)?,
+            SimpleBinaryOp::Greater => NumericTensor::<DynRank>::greater(a, b, backend)?,
+            SimpleBinaryOp::GreaterOrEqual => NumericTensor::<DynRank>::greater_or_equal(a, b, backend)?,
+            SimpleBinaryOp::Less => NumericTensor::<DynRank>::less(a, b, backend)?,
+            SimpleBinaryOp::LessOrEqual => NumericTensor::<DynRank>::less_or_equal(a, b, backend)?,
+            SimpleBinaryOp::Max => NumericTensor::<DynRank>::max(a, b, backend)?,
+            SimpleBinaryOp::Min => NumericTensor::<DynRank>::min(a, b, backend)?,
         })
     }
 }
@@ -454,7 +533,7 @@ impl MilliOp for MilliOpMatMul {
         else {
             let dtype = a.dtype();
             assert_eq!(b.dtype(), dtype);
-            
+
             if let (Some(a), Some(b)) = (a.as_ranked(), b.as_ranked()) {
                 let shape_a = a.shape().to_vec();
                 let shape_b = b.shape().to_vec();
@@ -575,7 +654,7 @@ impl<T: SimpleUnaryMilliOp> MilliOp for T {
     fn infer(&self, known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>, symbolic_resolver: &mut SymbolicResolver, backend: &EvalBackend) -> Result<TensorInfo, MilliOpGraphError> {
         let input_id = self.get_inputs()[0];
         let input = &known_inputs[&input_id];
-        
+
         if let Some(input) = input.as_shaped() {
             match input {
                 TensorInfoShaped::Numeric(input) => {
@@ -608,161 +687,137 @@ impl<T: SimpleUnaryMilliOp> MilliOp for T {
     }
 }
 
-pub(crate) struct MilliOpNeg {
-    input: MilliOpGraphTensorId
+pub(crate) enum SimpleUnaryOp {
+    Neg,
+    Abs,
+    Exp,
+    Ln,
+    Sqrt,
+    Not,
+    Sign,
+    BitwiseNot,
+    Reciprocal,
+    Trig(TrigOp),
+    Floor,
+    Ceil,
+    Round,
+    IsNan,
+    IsInf
 }
 
-impl MilliOpNeg {
-    pub(crate) fn new(input: MilliOpGraphTensorId) -> Self {
-        Self {input}
+pub(crate) struct MilliOpSimpleUnary {
+    input: MilliOpGraphTensorId,
+    op: SimpleUnaryOp
+}
+
+impl MilliOpSimpleUnary {
+    pub(crate) fn new(input: MilliOpGraphTensorId, op: SimpleUnaryOp) -> Self {
+        Self {input, op}
+    }
+
+    pub(crate) fn neg(input: MilliOpGraphTensorId) -> Self {
+        Self::new(input, SimpleUnaryOp::Neg)
+    }
+
+    pub(crate) fn abs(input: MilliOpGraphTensorId) -> Self {
+        Self::new(input, SimpleUnaryOp::Abs)
+    }
+
+    pub(crate) fn exp(input: MilliOpGraphTensorId) -> Self {
+        Self::new(input, SimpleUnaryOp::Exp)
+    }
+
+    pub(crate) fn ln(input: MilliOpGraphTensorId) -> Self {
+        Self::new(input, SimpleUnaryOp::Ln)
+    }
+
+    pub(crate) fn sqrt(input: MilliOpGraphTensorId) -> Self {
+        Self::new(input, SimpleUnaryOp::Sqrt)
+    }
+
+    pub(crate) fn not(input: MilliOpGraphTensorId) -> Self {
+        Self::new(input, SimpleUnaryOp::Not)
+    }
+
+    pub(crate) fn sign(input: MilliOpGraphTensorId) -> Self {
+        Self::new(input, SimpleUnaryOp::Sign)
+    }
+
+    pub(crate) fn bitwise_not(input: MilliOpGraphTensorId) -> Self {
+        Self::new(input, SimpleUnaryOp::BitwiseNot)
+    }
+
+    pub(crate) fn reciprocal(input: MilliOpGraphTensorId) -> Self {
+        Self::new(input, SimpleUnaryOp::Reciprocal)
+    }
+
+    pub(crate) fn trig(input: MilliOpGraphTensorId, trig_op: TrigOp) -> Self {
+        Self::new(input, SimpleUnaryOp::Trig(trig_op))
+    }
+
+    pub(crate) fn floor(input: MilliOpGraphTensorId) -> Self {
+        Self::new(input, SimpleUnaryOp::Floor)
+    }
+
+    pub(crate) fn ceil(input: MilliOpGraphTensorId) -> Self {
+        Self::new(input, SimpleUnaryOp::Ceil)
+    }
+
+    pub(crate) fn round(input: MilliOpGraphTensorId) -> Self {
+        Self::new(input, SimpleUnaryOp::Round)
+    }
+
+    pub(crate) fn is_inf(input: MilliOpGraphTensorId) -> Self {
+        Self::new(input, SimpleUnaryOp::IsInf)
+    }
+
+    pub(crate) fn is_nan(input: MilliOpGraphTensorId) -> Self {
+        Self::new(input, SimpleUnaryOp::IsNan)
     }
 }
 
-impl SimpleUnaryMilliOp for MilliOpNeg {
+impl SimpleUnaryMilliOp for MilliOpSimpleUnary {
     fn get_inputs(&self) -> Vec<MilliOpGraphTensorId> {vec![self.input]}
 
     fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
         let input = &inputs[&self.input];
-        Ok(input.neg(backend)?)
+        match self.op {
+            SimpleUnaryOp::Neg => Ok(input.neg(backend)?),
+            SimpleUnaryOp::Abs => Ok(input.abs(backend)?),
+            SimpleUnaryOp::Exp => Ok(input.exp(backend)?),
+            SimpleUnaryOp::Ln => Ok(input.ln(backend)?),
+            SimpleUnaryOp::Sqrt => Ok(input.sqrt(backend)?),
+            SimpleUnaryOp::Not => Ok(input.not(backend)?),
+            SimpleUnaryOp::Sign => Ok(input.sign()?),
+            SimpleUnaryOp::BitwiseNot => Ok(input.bitwise_not(backend)?),
+            SimpleUnaryOp::Reciprocal => Ok(input.reciprocal(backend)?),
+            SimpleUnaryOp::Trig(trig_op) => Ok(input.trig(trig_op, backend)?),
+            SimpleUnaryOp::Floor => Ok(input.floor(backend)?),
+            SimpleUnaryOp::Ceil => Ok(input.ceil(backend)?),
+            SimpleUnaryOp::Round => Ok(input.round(backend)?),
+            SimpleUnaryOp::IsInf => Ok(input.is_inf()?),
+            SimpleUnaryOp::IsNan => Ok(input.is_nan()?),
+        }
     }
 
     fn eval_scalar(&self, input: &NumericScalar) -> Result<NumericScalar, MilliOpGraphError> {
-        Ok(input.neg())
-    }
-}
-
-pub(crate) struct MilliOpAbs {
-    input: MilliOpGraphTensorId
-}
-
-impl MilliOpAbs {
-    pub(crate) fn new(input: MilliOpGraphTensorId) -> Self {
-        Self {input}
-    }
-}
-
-impl SimpleUnaryMilliOp for MilliOpAbs {
-    fn get_inputs(&self) -> Vec<MilliOpGraphTensorId> {vec![self.input]}
-
-    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
-        Ok(inputs[&self.input].abs(backend)?)
-    }
-
-    fn eval_scalar(&self, input: &NumericScalar) -> Result<NumericScalar, MilliOpGraphError> {
-        Ok(input.abs())
-    }
-}
-
-pub(crate) struct MilliOpExp {
-    input: MilliOpGraphTensorId
-}
-
-impl MilliOpExp {
-    pub(crate) fn new(input: MilliOpGraphTensorId) -> Self {
-        Self { input }
-    }
-}
-
-impl SimpleUnaryMilliOp for MilliOpExp {
-    fn get_inputs(&self) -> Vec<MilliOpGraphTensorId> {vec![self.input]}
-
-    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
-        Ok(inputs[&self.input].exp(backend)?)
-    }
-
-    fn eval_scalar(&self, input: &NumericScalar) -> Result<NumericScalar, MilliOpGraphError> {
-        Ok(input.exp())
-    }
-}
-
-pub(crate) struct MilliOpLog {
-    input: MilliOpGraphTensorId
-}
-
-impl MilliOpLog {
-    pub(crate) fn new(input: MilliOpGraphTensorId) -> Self {
-        Self { input }
-    }
-}
-
-impl SimpleUnaryMilliOp for MilliOpLog {
-    fn get_inputs(&self) -> Vec<MilliOpGraphTensorId> {vec![self.input]}
-
-    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
-        Ok(inputs[&self.input].ln(backend)?)
-    }
-
-    fn eval_scalar(&self, input: &NumericScalar) -> Result<NumericScalar, MilliOpGraphError> {
-        Ok(input.ln())
-    }
-}
-
-
-pub(crate) struct MilliOpTrig {
-    input: MilliOpGraphTensorId,
-    op: TrigOp
-}
-
-impl MilliOpTrig {
-    pub(crate) fn new(input: MilliOpGraphTensorId, op: TrigOp) -> Self {
-        Self { input, op}
-    }
-}
-
-impl SimpleUnaryMilliOp for MilliOpTrig {
-    fn get_inputs(&self) -> Vec<MilliOpGraphTensorId> {vec![self.input]}
-
-    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
-        Ok(inputs[&self.input].trig(self.op, backend)?)
-    }
-
-    fn eval_scalar(&self, input: &NumericScalar) -> Result<NumericScalar, MilliOpGraphError> {
-        Ok(input.trig(self.op))
-    }
-}
-
-pub(crate) struct MilliOpSqrt {
-    input: MilliOpGraphTensorId
-}
-
-impl MilliOpSqrt {
-    pub(crate) fn new(input: MilliOpGraphTensorId) -> Self {
-        Self { input }
-    }
-}
-
-impl SimpleUnaryMilliOp for MilliOpSqrt {
-    fn get_inputs(&self) -> Vec<MilliOpGraphTensorId> {vec![self.input]}
-
-    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
-        Ok(inputs[&self.input].sqrt(backend)?)
-    }
-
-    fn eval_scalar(&self, input: &NumericScalar) -> Result<NumericScalar, MilliOpGraphError> {
-        Ok(input.sqrt())
-    }
-}
-
-
-pub(crate) struct MilliOpReciprocal {
-    input: MilliOpGraphTensorId
-}
-
-impl MilliOpReciprocal {
-    pub(crate) fn new(input: MilliOpGraphTensorId) -> Self {
-        Self { input }
-    }
-}
-
-impl SimpleUnaryMilliOp for MilliOpReciprocal {
-    fn get_inputs(&self) -> Vec<MilliOpGraphTensorId> {vec![self.input]}
-
-    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
-        Ok(inputs[&self.input].reciprocal(backend)?)
-    }
-
-    fn eval_scalar(&self, input: &NumericScalar) -> Result<NumericScalar, MilliOpGraphError> {
-        Ok(input.recip())
+        match self.op {
+            SimpleUnaryOp::Neg => Ok(input.neg()),
+            SimpleUnaryOp::Abs => Ok(input.abs()),
+            SimpleUnaryOp::Exp => Ok(input.exp()),
+            SimpleUnaryOp::Ln => Ok(input.ln()),
+            SimpleUnaryOp::Sqrt => Ok(input.sqrt()),
+            SimpleUnaryOp::Not => Ok(input.not()),
+            SimpleUnaryOp::Sign => Ok(input.sign()),
+            SimpleUnaryOp::BitwiseNot => Ok(input.bitwise_not()),
+            SimpleUnaryOp::Reciprocal => Ok(input.recip()),
+            SimpleUnaryOp::Trig(trig_op) => Ok(input.trig(trig_op)),
+            SimpleUnaryOp::Floor => Ok(input.floor()),
+            SimpleUnaryOp::Ceil => Ok(input.ceil()),
+            SimpleUnaryOp::Round => Ok(input.round()),
+            SimpleUnaryOp::IsInf => Ok(input.is_inf()),
+            SimpleUnaryOp::IsNan => Ok(input.is_nan()),
+        }
     }
 }
 
@@ -908,6 +963,83 @@ impl MilliOp for MilliOpReduceSum {
     }
 }
 
+pub(crate) struct MilliOpReduceMin {
+    data: MilliOpGraphTensorId,
+    axes: Option<MilliOpGraphTensorId>,
+    keepdims: bool,
+    noop_with_empty_axes: bool
+}
+
+impl MilliOpReduceMin {
+    pub(crate) fn new(data: MilliOpGraphTensorId, axes: Option<MilliOpGraphTensorId>, keepdims: bool, noop_with_empty_axes: bool) -> Self {
+        Self { data, axes, keepdims, noop_with_empty_axes}
+    }
+}
+
+impl MilliOp for MilliOpReduceMin {
+    fn get_inputs(&self) -> Vec<MilliOpGraphTensorId> {vec![self.data]}
+
+    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
+        let data = &inputs[&self.data];
+        let axes = if let Some(axes) = self.axes {
+            Vec::<i64>::try_from(inputs[&axes].try_to_rank::<P1>()?)?
+        } else {
+            (0i64 .. (data.shape().len() as i64)).into_iter().collect()
+        };
+        let axes = if axes.len() == 0 {
+            if self.noop_with_empty_axes {
+                return Ok(data.clone())
+            } else {
+                (0i64 .. (data.shape().len() as i64)).into_iter().collect::<Vec<_>>()
+            }
+        } else {
+            axes
+        };
+        let axes = axes.into_iter().map(|x| (if x < 0 {x + data.shape().len() as i64} else {x}) as usize).collect::<Vec<_>>();
+        let out = data.reduce_min(axes, self.keepdims, backend)?;
+        Ok(out)
+    }
+}
+
+
+pub(crate) struct MilliOpReduceMax {
+    data: MilliOpGraphTensorId,
+    axes: Option<MilliOpGraphTensorId>,
+    keepdims: bool,
+    noop_with_empty_axes: bool
+}
+
+impl MilliOpReduceMax {
+    pub(crate) fn new(data: MilliOpGraphTensorId, axes: Option<MilliOpGraphTensorId>, keepdims: bool, noop_with_empty_axes: bool) -> Self {
+        Self { data, axes, keepdims, noop_with_empty_axes}
+    }
+}
+
+impl MilliOp for MilliOpReduceMax {
+    fn get_inputs(&self) -> Vec<MilliOpGraphTensorId> {vec![self.data]}
+
+    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
+        let data = &inputs[&self.data];
+        let axes = if let Some(axes) = self.axes {
+            Vec::<i64>::try_from(inputs[&axes].try_to_rank::<P1>()?)?
+        } else {
+            (0i64 .. (data.shape().len() as i64)).into_iter().collect()
+        };
+        let axes = if axes.len() == 0 {
+            if self.noop_with_empty_axes {
+                return Ok(data.clone())
+            } else {
+                (0i64 .. (data.shape().len() as i64)).into_iter().collect::<Vec<_>>()
+            }
+        } else {
+            axes
+        };
+        let axes = axes.into_iter().map(|x| (if x < 0 {x + data.shape().len() as i64} else {x}) as usize).collect::<Vec<_>>();
+        let out = data.reduce_max(axes, self.keepdims, backend)?;
+        Ok(out)
+    }
+}
+
 pub(crate) struct MilliOpReduceProd {
     data: MilliOpGraphTensorId,
     axes: Option<MilliOpGraphTensorId>,
@@ -1014,7 +1146,7 @@ impl MilliOp for MilliOpSlice {
         }
         res
     }
-    
+
     fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
         let data_input = &inputs[&self.data];
         let input_shape = data_input.shape();
@@ -1136,7 +1268,7 @@ impl MilliOp for MilliOpReshape {
     fn infer(&self, known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>, symbolic_resolver: &mut SymbolicResolver, backend: &EvalBackend) -> Result<TensorInfo, MilliOpGraphError> {
         let data_input = &known_inputs[&self.data];
         let shape_input = known_inputs[&self.shape].try_to_rank::<P1>(symbolic_resolver)?.try_to_type::<i64>()?;
-        
+
         if let Some(shape) = shape_input.as_numeric() {
             if let Some(data) = data_input.as_shaped() {
                 match data {
@@ -1235,7 +1367,7 @@ impl MilliOp for MilliOpSqueeze {
     fn infer(&self, known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>, symbolic_resolver: &mut SymbolicResolver, backend: &EvalBackend) -> Result<TensorInfo, MilliOpGraphError> {
         let data_input = &known_inputs[&self.data];
         let axes_input = &known_inputs[&self.axes].try_to_rank::<P1>(symbolic_resolver)?.try_to_type::<i64>()?;
-        
+
         if let Some(axes) = axes_input.as_numeric() {
             if let Some(data) = data_input.as_numeric() {
                 let inputs = HashMap::from([(self.data, data.clone()), (self.axes, axes.to_dyn_type().to_dyn_rank())]);
@@ -1573,20 +1705,16 @@ pub(crate) enum AnyMilliOp {
     SimpleBinary(MilliOpSimpleBinary),
     MatMul(MilliOpMatMul),
     Pow(MilliOpPow),
-    Neg(MilliOpNeg),
-    Abs(MilliOpAbs),
-    Exp(MilliOpExp),
-    Log(MilliOpLog),
-    Sqrt(MilliOpSqrt),
-    Trig(MilliOpTrig),
+    SimpleUnary(MilliOpSimpleUnary),
     ClampMin(MilliOpClampMin),
-    Reciprocal(MilliOpReciprocal),
     NonZero(MilliOpNonZero),
     CumSum(MilliOpCumSum),
     Shape(MilliOpShape),
     Reshape(MilliOpReshape),
     Slice(MilliOpSlice),
     ReduceSum(MilliOpReduceSum),
+    ReduceMin(MilliOpReduceMin),
+    ReduceMax(MilliOpReduceMax),
     ReduceProd(MilliOpReduceProd),
     ReduceMean(MilliOpReduceMean),
     Cast(MilliOpCast),
@@ -1608,21 +1736,17 @@ impl MilliOp for AnyMilliOp {
             AnyMilliOp::ConstantOfShape(x) => x.get_inputs(),
             AnyMilliOp::SimpleBinary(x) => x.get_inputs(),
             AnyMilliOp::Pow(x) => x.get_inputs(),
-            AnyMilliOp::Neg(x) => <_ as MilliOp>::get_inputs(x),
-            AnyMilliOp::Abs(x) => <_ as MilliOp>::get_inputs(x),
-            AnyMilliOp::Exp(x) => <_ as MilliOp>::get_inputs(x),
-            AnyMilliOp::Log(x) => <_ as MilliOp>::get_inputs(x),
-            AnyMilliOp::Sqrt(x) => <_ as MilliOp>::get_inputs(x),
-            AnyMilliOp::Trig(x) => <_ as MilliOp>::get_inputs(x),
+            AnyMilliOp::SimpleUnary(x) => <_ as MilliOp>::get_inputs(x),
             AnyMilliOp::MatMul(x) => x.get_inputs(),
             AnyMilliOp::ClampMin(x) => <_ as MilliOp>::get_inputs(x),
-            AnyMilliOp::Reciprocal(x) => <_ as MilliOp>::get_inputs(x),
             AnyMilliOp::NonZero(x) => x.get_inputs(),
             AnyMilliOp::CumSum(x) => x.get_inputs(),
             AnyMilliOp::Shape(x) => x.get_inputs(),
             AnyMilliOp::Reshape(x) => x.get_inputs(),
             AnyMilliOp::Slice(x) => x.get_inputs(),
             AnyMilliOp::ReduceSum(x) => x.get_inputs(),
+            AnyMilliOp::ReduceMin(x) => x.get_inputs(),
+            AnyMilliOp::ReduceMax(x) => x.get_inputs(),
             AnyMilliOp::ReduceProd(x) => x.get_inputs(),
             AnyMilliOp::ReduceMean(x) => x.get_inputs(),
             AnyMilliOp::Cast(x) => x.get_inputs(),
@@ -1644,21 +1768,17 @@ impl MilliOp for AnyMilliOp {
             AnyMilliOp::ConstantOfShape(x) => x.infer(known_inputs, symbolic_resolver, backend),
             AnyMilliOp::SimpleBinary(x) => x.infer(known_inputs, symbolic_resolver, backend),
             AnyMilliOp::Pow(x) => x.infer(known_inputs, symbolic_resolver, backend),
-            AnyMilliOp::Neg(x) => x.infer(known_inputs, symbolic_resolver, backend),
-            AnyMilliOp::Abs(x) => x.infer(known_inputs, symbolic_resolver, backend),
-            AnyMilliOp::Exp(x) => x.infer(known_inputs, symbolic_resolver, backend),
-            AnyMilliOp::Log(x) => x.infer(known_inputs, symbolic_resolver, backend),
-            AnyMilliOp::Sqrt(x) => x.infer(known_inputs, symbolic_resolver, backend),
-            AnyMilliOp::Trig(x) => x.infer(known_inputs, symbolic_resolver, backend),
+            AnyMilliOp::SimpleUnary(x) => x.infer(known_inputs, symbolic_resolver, backend),
             AnyMilliOp::MatMul(x) =>x.infer(known_inputs, symbolic_resolver, backend),
             AnyMilliOp::ClampMin(x) => x.infer(known_inputs, symbolic_resolver, backend),
-            AnyMilliOp::Reciprocal(x) => x.infer(known_inputs, symbolic_resolver, backend),
             AnyMilliOp::NonZero(x) => x.infer(known_inputs, symbolic_resolver, backend),
             AnyMilliOp::CumSum(x) => x.infer(known_inputs, symbolic_resolver, backend),
             AnyMilliOp::Shape(x) => x.infer(known_inputs, symbolic_resolver, backend),
             AnyMilliOp::Reshape(x) => x.infer(known_inputs, symbolic_resolver, backend),
             AnyMilliOp::Slice(x) => x.infer(known_inputs, symbolic_resolver, backend),
             AnyMilliOp::ReduceSum(x) => x.infer(known_inputs, symbolic_resolver, backend),
+            AnyMilliOp::ReduceMin(x) => x.infer(known_inputs, symbolic_resolver, backend),
+            AnyMilliOp::ReduceMax(x) => x.infer(known_inputs, symbolic_resolver, backend),
             AnyMilliOp::ReduceProd(x) => x.infer(known_inputs, symbolic_resolver, backend),
             AnyMilliOp::ReduceMean(x) => x.infer(known_inputs, symbolic_resolver, backend),
             AnyMilliOp::Cast(x) => x.infer(known_inputs, symbolic_resolver, backend),
@@ -1680,21 +1800,17 @@ impl MilliOp for AnyMilliOp {
             AnyMilliOp::ConstantOfShape(x) => x.eval(inputs, backend),
             AnyMilliOp::SimpleBinary(x) => x.eval(inputs, backend),
             AnyMilliOp::Pow(x) => x.eval(inputs, backend),
-            AnyMilliOp::Neg(x) => <_ as MilliOp>::eval(x, inputs, backend),
-            AnyMilliOp::Abs(x) => <_ as MilliOp>::eval(x, inputs, backend),
-            AnyMilliOp::Exp(x) => <_ as MilliOp>::eval(x, inputs, backend),
-            AnyMilliOp::Log(x) => <_ as MilliOp>::eval(x, inputs, backend),
-            AnyMilliOp::Sqrt(x) => <_ as MilliOp>::eval(x, inputs, backend),
-            AnyMilliOp::Trig(x) => <_ as MilliOp>::eval(x, inputs, backend),
+            AnyMilliOp::SimpleUnary(x) => <_ as MilliOp>::eval(x, inputs, backend),
             AnyMilliOp::MatMul(x) => x.eval(inputs, backend),
             AnyMilliOp::ClampMin(x) => <_ as MilliOp>::eval(x, inputs, backend),
-            AnyMilliOp::Reciprocal(x) => <_ as MilliOp>::eval(x, inputs, backend),
             AnyMilliOp::NonZero(x) => x.eval(inputs, backend),
             AnyMilliOp::CumSum(x) => x.eval(inputs, backend),
             AnyMilliOp::Shape(x) => x.eval(inputs, backend),
             AnyMilliOp::Reshape(x) => x.eval(inputs, backend),
             AnyMilliOp::Slice(x) => x.eval(inputs, backend),
             AnyMilliOp::ReduceSum(x) => x.eval(inputs, backend),
+            AnyMilliOp::ReduceMin(x) => x.eval(inputs, backend),
+            AnyMilliOp::ReduceMax(x) => x.eval(inputs, backend),
             AnyMilliOp::ReduceProd(x) => x.eval(inputs, backend),
             AnyMilliOp::ReduceMean(x) => x.eval(inputs, backend),
             AnyMilliOp::Cast(x) => x.eval(inputs, backend),

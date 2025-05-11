@@ -190,6 +190,19 @@ impl<R: Rank> NumericTensor<R> {
         Ok(NumericTensor::NDArray(self.to_ndarray()?.ln()?))
     }
 
+    pub fn floor(&self, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
+        Ok(NumericTensor::NDArray(self.to_ndarray()?.floor()?))
+    }
+
+    pub fn ceil(&self, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
+        Ok(NumericTensor::NDArray(self.to_ndarray()?.ceil()?))
+    }
+
+    pub fn round(&self, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
+        Ok(NumericTensor::NDArray(self.to_ndarray()?.round()?))
+    }
+
+
     pub fn abs(&self, backend: &EvalBackend) -> Result<Self, NumericTensorError> {
         #[cfg(feature = "candle")]
         if let EvalBackend::Candle(device) = backend {
@@ -224,6 +237,14 @@ impl<R: Rank> NumericTensor<R> {
             return Ok(NumericTensor::Candle(self.to_candle(device)?.sqrt()?))
         }
         Ok(NumericTensor::NDArray(self.to_ndarray()?.sqrt()?))
+    }
+
+    pub fn not(&self, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
+        Ok(NumericTensor::NDArray(self.to_ndarray()?.not()?))
+    }
+
+    pub fn bitwise_not(&self, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
+        Ok(NumericTensor::NDArray(self.to_ndarray()?.bitwise_not()?))
     }
 
     pub fn first_element(&self) -> NumericScalar {
@@ -308,6 +329,58 @@ impl NumericTensor<DynRank> {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::matmul(&a.try_into()?, &b.try_into()?)?))
     }
 
+    pub fn and(a: &Self, b: &Self, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
+        Ok(NumericTensor::NDArray(NDArrayNumericTensor::and(&a.try_into()?, &b.try_into()?)?))
+    }
+
+    pub fn or(a: &Self, b: &Self, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
+        Ok(NumericTensor::NDArray(NDArrayNumericTensor::or(&a.try_into()?, &b.try_into()?)?))
+    }
+
+    pub fn xor(a: &Self, b: &Self, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
+        Ok(NumericTensor::NDArray(NDArrayNumericTensor::xor(&a.try_into()?, &b.try_into()?)?))
+    }
+
+    pub fn bitwise_and(a: &Self, b: &Self, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
+        Ok(NumericTensor::NDArray(NDArrayNumericTensor::bitwise_and(&a.try_into()?, &b.try_into()?)?))
+    }
+
+    pub fn bitwise_or(a: &Self, b: &Self, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
+        Ok(NumericTensor::NDArray(NDArrayNumericTensor::bitwise_or(&a.try_into()?, &b.try_into()?)?))
+    }
+
+    pub fn bitwise_xor(a: &Self, b: &Self, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
+        Ok(NumericTensor::NDArray(NDArrayNumericTensor::bitwise_xor(&a.try_into()?, &b.try_into()?)?))
+    }
+
+    pub fn max(a: &Self, b: &Self, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
+        Ok(NumericTensor::NDArray(NDArrayNumericTensor::max(&a.try_into()?, &b.try_into()?)?))
+    }
+    
+    pub fn min(a: &Self, b: &Self, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
+        Ok(NumericTensor::NDArray(NDArrayNumericTensor::min(&a.try_into()?, &b.try_into()?)?))
+    }
+
+    pub fn equal(a: &Self, b: &Self, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
+        Ok(NumericTensor::NDArray(NDArrayNumericTensor::equal(&a.try_into()?, &b.try_into()?)?))
+    }
+
+    pub fn greater(a: &Self, b: &Self, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
+        Ok(NumericTensor::NDArray(NDArrayNumericTensor::greater(&a.try_into()?, &b.try_into()?)?))
+    }
+
+    pub fn greater_or_equal(a: &Self, b: &Self, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
+        Ok(NumericTensor::NDArray(NDArrayNumericTensor::greater_or_equal(&a.try_into()?, &b.try_into()?)?))
+    }
+
+    pub fn less(a: &Self, b: &Self, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
+        Ok(NumericTensor::NDArray(NDArrayNumericTensor::less(&a.try_into()?, &b.try_into()?)?))
+    }
+
+    pub fn less_or_equal(a: &Self, b: &Self, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
+        Ok(NumericTensor::NDArray(NDArrayNumericTensor::less_or_equal(&a.try_into()?, &b.try_into()?)?))
+    }
+    
     pub fn nonzero(&self, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::<DynRank>::try_from(self)?.nonzero()?))
     }
@@ -326,6 +399,14 @@ impl NumericTensor<DynRank> {
     
     pub fn is_nan(&self) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(self.to_ndarray()?.is_nan()?))
+    }
+
+    pub fn is_inf(&self) -> Result<Self, NumericTensorError> {
+        Ok(NumericTensor::NDArray(self.to_ndarray()?.is_inf()?))
+    }
+
+    pub fn sign(&self) -> Result<Self, NumericTensorError> {
+        Ok(NumericTensor::NDArray(self.to_ndarray()?.sign()?))
     }
     
     pub fn has_nan(&self) -> Result<bool, NumericTensorError> {
@@ -349,6 +430,15 @@ impl NumericTensor<DynRank> {
     pub fn reduce_sum(&self, axes: Vec<usize>, keepdims: bool, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::<DynRank>::try_from(self)?.reduce_sum(axes, keepdims)?))
     }
+
+    pub fn reduce_min(&self, axes: Vec<usize>, keepdims: bool, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
+        Ok(NumericTensor::NDArray(NDArrayNumericTensor::<DynRank>::try_from(self)?.reduce_min(axes, keepdims)?))
+    }
+
+    pub fn reduce_max(&self, axes: Vec<usize>, keepdims: bool, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
+        Ok(NumericTensor::NDArray(NDArrayNumericTensor::<DynRank>::try_from(self)?.reduce_max(axes, keepdims)?))
+    }
+
 
     pub fn reduce_prod(&self, axes: Vec<usize>, keepdims: bool, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::<DynRank>::try_from(self)?.reduce_prod(axes, keepdims)?))

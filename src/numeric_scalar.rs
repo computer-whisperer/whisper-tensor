@@ -78,6 +78,27 @@ impl NumericScalar {
         }
     }
 
+    pub fn not(&self) -> Self {
+        match self {
+            NumericScalar::BOOL(x) => Self::BOOL(!x),
+            _ => panic!("Cannot not this type"),
+        }
+    }
+
+    pub fn bitwise_not(&self) -> Self {
+        match self {
+            NumericScalar::I64(x) => Self::I64(!x),
+            NumericScalar::U64(x) => Self::U64(!x),
+            NumericScalar::I32(x) => Self::I32(!x),
+            NumericScalar::U32(x) => Self::U32(!x),
+            NumericScalar::I16(x) => Self::I16(!x),
+            NumericScalar::U16(x) => Self::U16(!x),
+            NumericScalar::I8(x) => Self::I8(!x),
+            NumericScalar::U8(x) => Self::U8(!x),
+            _ => panic!("Cannot bitwise not this type"),
+        }
+    }
+
     pub fn abs(&self) -> Self {
         match self {
             NumericScalar::F64(x) => Self::F64(x.abs()),
@@ -103,6 +124,74 @@ impl NumericScalar {
             NumericScalar::BF16(x) => Self::BF16(x.exp()),
             NumericScalar::F16(x) => Self::F16(x.exp()),
             _ => panic!("Cannot exp this type"),
+        }
+    }
+
+    pub fn ceil(&self) -> Self {
+        match self {
+            NumericScalar::F64(x) => Self::F64(x.ceil()),
+            NumericScalar::F32(x) => Self::F32(x.ceil()),
+            NumericScalar::BF16(x) => Self::BF16(x.ceil()),
+            NumericScalar::F16(x) => Self::F16(x.ceil()),
+            _ => panic!("Cannot ceil this type"),
+        }
+    }
+
+    pub fn floor(&self) -> Self {
+        match self {
+            NumericScalar::F64(x) => Self::F64(x.floor()),
+            NumericScalar::F32(x) => Self::F32(x.floor()),
+            NumericScalar::BF16(x) => Self::BF16(x.floor()),
+            NumericScalar::F16(x) => Self::F16(x.floor()),
+            _ => panic!("Cannot floor this type"),
+        }
+    }
+
+    pub fn round(&self) -> Self {
+        match self {
+            NumericScalar::F64(x) => Self::F64(x.round()),
+            NumericScalar::F32(x) => Self::F32(x.round()),
+            NumericScalar::BF16(x) => Self::BF16(x.round()),
+            NumericScalar::F16(x) => Self::F16(x.round()),
+            _ => panic!("Cannot round this type"),
+        }
+    }
+
+    pub fn sign(&self) -> Self {
+        match self {
+            NumericScalar::F64(x) => Self::F64(if *x == 0.0 { 0.0 } else { x.signum() }),
+            NumericScalar::F32(x) => Self::F32(if *x == 0.0 { 0.0 } else { x.signum() }),
+            NumericScalar::BF16(x) => Self::BF16(if x.to_f32() == 0.0 { bf16::from_f32(0.0) } else { x.signum() }),
+            NumericScalar::F16(x) => Self::F16(if x.to_f32() == 0.0 { f16::from_f32(0.0) } else { x.signum() }),
+            NumericScalar::U64(x) => Self::U64(if *x == 0 { 0 } else { *x }),
+            NumericScalar::U32(x) => Self::U32(if *x == 0 { 0 } else { *x }),
+            NumericScalar::U16(x) => Self::U16(if *x == 0 { 0 } else { *x }),
+            NumericScalar::U8(x) => Self::U8(if *x == 0 { 0 } else { *x }),
+            NumericScalar::I64(x) => Self::I64(if *x == 0 { 0 } else { x.signum() }),
+            NumericScalar::I32(x) => Self::I32(if *x == 0 { 0 } else { x.signum() }),
+            NumericScalar::I16(x) => Self::I16(if *x == 0 { 0 } else { x.signum() }),
+            NumericScalar::I8(x) => Self::I8(if *x == 0 { 0 } else { x.signum() }),
+            _ => panic!("Cannot sign this type"),
+        }
+    }
+
+    pub fn is_inf(&self) -> Self {
+        match self {
+            NumericScalar::F64(x) => Self::BOOL(x.is_infinite()),
+            NumericScalar::F32(x) => Self::BOOL(x.is_infinite()),
+            NumericScalar::BF16(x) => Self::BOOL(x.is_infinite()),
+            NumericScalar::F16(x) => Self::BOOL(x.is_infinite()),
+            _ => panic!("Cannot is_inf this type"),
+        }
+    }
+
+    pub fn is_nan(&self) -> Self {
+        match self {
+            NumericScalar::F64(x) => Self::BOOL(x.is_nan()),
+            NumericScalar::F32(x) => Self::BOOL(x.is_nan()),
+            NumericScalar::BF16(x) => Self::BOOL(x.is_nan()),
+            NumericScalar::F16(x) => Self::BOOL(x.is_nan()),
+            _ => panic!("Cannot is_nan this type"),
         }
     }
 

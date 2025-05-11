@@ -1,10 +1,9 @@
-use std::ops::{Add, Mul, Not};
+use std::ops::{Add, BitAnd, BitOr, BitXor, Mul, Not};
 use ndarray::{concatenate, s, ArcArray, Array, Array2, ArrayD, ArrayView2, ArrayViewD, ArrayViewMut2, ArrayViewMutD, Axis, Dimension, Ix1, Ix2, IxDyn, LinalgScalar, ScalarOperand, ShapeError, SliceInfoElem, Zip};
 use ndarray::linalg::{general_mat_mul, Dot};
 use num_traits::{Float, FromPrimitive, Num, NumCast, One, Zero};
 use num_traits::real::Real;
 use serde::{Deserialize, Serialize};
-use crate::ndarray_backend::ops::NDArrayOperationError::UnimplementedOp;
 use crate::TrigOp;
 
 #[derive(Debug, thiserror::Error)]
@@ -253,7 +252,9 @@ where
 pub(crate) enum ReduceOp {
     Sum,
     Mean,
-    Prod
+    Prod,
+    Min,
+    Max
 }
 
 impl ReduceOp {
@@ -267,6 +268,8 @@ impl ReduceOp {
             ReduceOp::Sum => reduce_sum(tensor, axes, keepdims)?,
             ReduceOp::Mean => reduce_mean(tensor, axes, keepdims)?,
             ReduceOp::Prod => reduce_prod(tensor, axes, keepdims)?,
+            ReduceOp::Min => Err(NDArrayOperationError::UnimplementedOp("ReduceMin".to_string()))?,
+            ReduceOp::Max => Err(NDArrayOperationError::UnimplementedOp("ReduceMax".to_string()))?,
         })
     }
 }
@@ -314,10 +317,7 @@ where
 
     // 3) For each axis, sum & divide, then optionally re-insert the dim
     for &axis in &ax {
-        if axis >= result.ndim() {
-            continue;
-        }
-        
+
         // a) sum over this axis
         let summed = result.sum_axis(Axis(axis));
         // b) divide by the count along that axis
@@ -345,9 +345,9 @@ pub fn reduce_sum<T>(
 where
     T: Clone + Zero + NumCast + std::ops::Div<Output = T> + Copy
 {
-    
+
     let mut ax =  axes;
-    
+
     // 1a) Deduplicate & sort descending (so reductions don’t shift later axes)
     {
         let mut sorted = ax.clone();
@@ -365,10 +365,7 @@ where
 
     // 3) For each axis, sum & divide, then optionally re-insert the dim
     for &axis in &ax {
-        if axis >= result.ndim() {
-            continue;
-        }
-        
+
         // a) sum over this axis
         let summed = result.sum_axis(Axis(axis));
 
@@ -413,10 +410,7 @@ where
 
     // 3) For each axis, sum & divide, then optionally re-insert the dim
     for &axis in &ax {
-        if axis >= result.ndim() {
-            continue;
-        }
-        
+
         // a) sum over this axis
         let summed = result.product_axis(Axis(axis));
 
@@ -439,7 +433,25 @@ pub enum NativeNumericTensorBinaryOperation {
     Sub,
     Mul,
     Div,
-    Modulo
+    Modulo,
+    Max,
+    Min
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum NativeNumericTensorBinaryOperationBoolOut {
+    Equal,
+    Less,
+    LessOrEqual,
+    Greater,
+    GreaterOrEqual
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum NativeNumericTensorBitwiseBinaryOperation {
+    And,
+    Or,
+    Xor
 }
 
 impl core::fmt::Display for NativeNumericTensorBinaryOperation {
@@ -485,8 +497,8 @@ fn try_multidirectional_broadcasting(a: &[usize], b: &[usize]) -> Result<Vec<usi
 }
 
 impl NativeNumericTensorBinaryOperation {
-    pub(crate) fn apply<'a, T: 'a>(&self, a: ArcArray<T, IxDyn>, b: ArcArray<T, IxDyn>) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError> where
-        T: Clone + Copy + std::ops::Add<Output = T> + std::ops::Sub<Output = T> + std::ops::Mul<Output = T> + std::ops::Div<Output = T> + std::ops::Rem<Output = T>,
+    pub(crate) fn applyf<'a, T: 'a>(&self, a: ArcArray<T, IxDyn>, b: ArcArray<T, IxDyn>) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError> where
+        T: Clone + Copy + Real + std::ops::Add<Output = T> + std::ops::Sub<Output = T> + std::ops::Mul<Output = T> + std::ops::Div<Output = T> + std::ops::Rem<Output = T>,
     {
         let a = if let Some(a) = a.broadcast(b.shape()) {
             a
@@ -502,11 +514,95 @@ impl NativeNumericTensorBinaryOperation {
         };
 
         let o: Array<T, IxDyn> = match self {
-            NativeNumericTensorBinaryOperation::Add => (&a + &b).into(),
-            NativeNumericTensorBinaryOperation::Sub => (&a - &b).into(),
-             NativeNumericTensorBinaryOperation::Mul => (&a * &b).into(),
-            NativeNumericTensorBinaryOperation::Div => (&a / &b).into(),
-            NativeNumericTensorBinaryOperation::Modulo => (&a % &b).into(),
+            Self::Add => (&a + &b).into(),
+            Self::Sub => (&a - &b).into(),
+            Self::Mul => (&a * &b).into(),
+            Self::Div => (&a / &b).into(),
+            Self::Modulo => (&a % &b).into(),
+            Self::Max => ndarray::Zip::from(a).and(b).map_collect(|a, b| (*a).max(*b)),
+            Self::Min => ndarray::Zip::from(a).and(b).map_collect(|a, b| (*a).min(*b))
+        };
+        Ok(o.to_shared())
+    }
+    pub(crate) fn applyi<'a, T: 'a>(&self, a: ArcArray<T, IxDyn>, b: ArcArray<T, IxDyn>) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError> where
+        T: Clone + Copy + Ord + std::ops::Add<Output = T> + std::ops::Sub<Output = T> + std::ops::Mul<Output = T> + std::ops::Div<Output = T> + std::ops::Rem<Output = T>,
+    {
+        let a = if let Some(a) = a.broadcast(b.shape()) {
+            a
+        } else {
+            a.view()
+        };
+
+        let b = if let Some(b) = b.broadcast(a.shape()) {
+            b
+        }
+        else {
+            b.view()
+        };
+
+        let o: Array<T, IxDyn> = match self {
+            Self::Add => (&a + &b).into(),
+            Self::Sub => (&a - &b).into(),
+            Self::Mul => (&a * &b).into(),
+            Self::Div => (&a / &b).into(),
+            Self::Modulo => (&a % &b).into(),
+            Self::Max => ndarray::Zip::from(a).and(b).map_collect(|a, b| (*a).max(*b)),
+            Self::Min => ndarray::Zip::from(a).and(b).map_collect(|a, b| (*a).min(*b))
+        };
+        Ok(o.to_shared())
+    }
+}
+
+impl NativeNumericTensorBinaryOperationBoolOut {
+    pub(crate) fn apply<'a, T: 'a>(&self, a: ArcArray<T, IxDyn>, b: ArcArray<T, IxDyn>) -> Result<ArcArray<bool, IxDyn>, NDArrayOperationError> where
+        T: Clone + Copy + PartialEq + PartialOrd,
+    {
+        let a = if let Some(a) = a.broadcast(b.shape()) {
+            a
+        } else {
+            a.view()
+        };
+
+        let b = if let Some(b) = b.broadcast(a.shape()) {
+            b
+        }
+        else {
+            b.view()
+        };
+
+        let o = match self {
+            NativeNumericTensorBinaryOperationBoolOut::Equal => ndarray::Zip::from(a).and(b).map_collect(|a, b| a.clone() == b.clone()),
+            NativeNumericTensorBinaryOperationBoolOut::Less => ndarray::Zip::from(a).and(b).map_collect(|a, b| a.clone() < b.clone()),
+            NativeNumericTensorBinaryOperationBoolOut::LessOrEqual => ndarray::Zip::from(a).and(b).map_collect(|a, b| a.clone() <= b.clone()),
+            NativeNumericTensorBinaryOperationBoolOut::Greater => ndarray::Zip::from(a).and(b).map_collect(|a, b| a.clone() > b.clone()),
+            NativeNumericTensorBinaryOperationBoolOut::GreaterOrEqual => ndarray::Zip::from(a).and(b).map_collect(|a, b| a.clone() >= b.clone()),
+        };
+        
+        Ok(o.to_shared())
+    }
+}
+
+impl NativeNumericTensorBitwiseBinaryOperation {
+    pub(crate) fn apply<'a, T: 'a>(&self, a: ArcArray<T, IxDyn>, b: ArcArray<T, IxDyn>) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError> where
+        T: Clone + Copy + BitAnd<Output=T> + BitOr<Output=T> + BitXor<Output=T>,
+    {
+        let a = if let Some(a) = a.broadcast(b.shape()) {
+            a
+        } else {
+            a.view()
+        };
+
+        let b = if let Some(b) = b.broadcast(a.shape()) {
+            b
+        }
+        else {
+            b.view()
+        };
+
+        let o: Array<T, IxDyn> = match self {
+            Self::And => a.bitand(&b),
+            Self::Or => a.bitor(&b),
+            Self::Xor => a.bitxor(&b),
         };
         Ok(o.to_shared())
     }
@@ -518,6 +614,9 @@ pub enum NativeNumericTensorUnaryOperation {
     Trig(TrigOp),
     Exp,
     Log,
+    Floor,
+    Ceil,
+    Round,
     Softplus
 }
 
@@ -538,6 +637,9 @@ impl NativeNumericTensorUnaryOperation {
             NativeNumericTensorUnaryOperation::Sigmoid => a.mapv(|x| T::one() / ( T::one() + T::exp(-x))).to_shared(),
             NativeNumericTensorUnaryOperation::Softplus => a.mapv(|x| T::ln(T::exp(x) + T::one())).to_shared(),
             NativeNumericTensorUnaryOperation::Log => a.mapv(|x| x.ln()).to_shared(),
+            NativeNumericTensorUnaryOperation::Floor => a.mapv(|x| x.floor()).to_shared(),
+            NativeNumericTensorUnaryOperation::Round => a.mapv(|x| x.round()).to_shared(),
+            NativeNumericTensorUnaryOperation::Ceil => a.mapv(|x| x.ceil()).to_shared(),
             _ => {
                 Err(NDArrayOperationError::UnimplementedOp(format!("{self:?}")))?
             } 
@@ -545,11 +647,12 @@ impl NativeNumericTensorUnaryOperation {
     }
 }
 
-pub(crate) fn pow<T, TI>(a: ArcArray<T, IxDyn>, b: ArcArray<TI, IxDyn>) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError>
+pub(crate) fn pow<T, TI, TO>(a: ArcArray<T, IxDyn>, b: ArcArray<TI, IxDyn>) -> Result<ArcArray<TO, IxDyn>, NDArrayOperationError>
 where
-    T: num_traits::Pow<TI, Output = T>,
+    T: num_traits::Pow<TI, Output = TO>,
     T: Num + Clone,
-    TI: Num + Clone
+    TI: Num + Clone,
+    TO: Num + Clone
 {
     let a = if let Some(a) = a.broadcast(b.shape()) {
         a
