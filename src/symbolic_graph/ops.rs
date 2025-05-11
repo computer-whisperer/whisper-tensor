@@ -44,7 +44,6 @@ pub(crate) enum WhichBinaryOperation {
     Sub,
     Mul,
     Div,
-    Modulo,
     MatMul,
     And,
     Or,
@@ -102,7 +101,6 @@ impl Operation for BinaryOperation {
             WhichBinaryOperation::Sub => AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::sub(a, b)),
             WhichBinaryOperation::Mul => AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::mul(a, b)),
             WhichBinaryOperation::Div => AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::div(a, b)),
-            WhichBinaryOperation::Modulo => AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::modulo(a, b)),
             WhichBinaryOperation::MatMul => AnyMilliOp::MatMul(MilliOpMatMul::new(a, b)),
             WhichBinaryOperation::And => AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::and(a, b)),
             WhichBinaryOperation::Or => AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::or(a, b)),
@@ -145,8 +143,7 @@ pub(crate) enum WhichUnaryOperation {
     Floor,
     Ceil,
     Round,
-    IsNan,
-    IsInf
+    IsNan
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -217,7 +214,6 @@ impl Operation for UnaryOperation {
             WhichUnaryOperation::Ceil => AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::ceil(a)),
             WhichUnaryOperation::Round => AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::round(a)),
             WhichUnaryOperation::IsNan => AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::is_nan(a)),
-            WhichUnaryOperation::IsInf => AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::is_inf(a)),
         };
         let mut output_map = HashMap::new();
         let out = graph.push_op(res);
@@ -837,7 +833,10 @@ impl Operation for LayerNormalizationOperation {
         let dd = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::mul(d, d)));
         let variance = graph.push_op(AnyMilliOp::ReduceMean(MilliOpReduceMean::new(
             dd, Some(normalized_axes), true, false)));
-        let stddev = graph.push_op(AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::sqrt(variance)));
+        let epsilon = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new_scalar(self.epsilon)));
+        let epsilon = graph.push_op(AnyMilliOp::CastLike(MilliOpCastLike::new(epsilon, variance)));
+        let var_plus_eps = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::add(variance, epsilon)));
+        let stddev = graph.push_op(AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::sqrt(var_plus_eps)));
         let inv_stddev = graph.push_op(AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::reciprocal(stddev)));
         let normalized = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::mul(d, inv_stddev)));
 
@@ -1113,7 +1112,7 @@ impl ReduceMeanOperation {
             return Err(ONNXDecodingError::GraphConstructionError("ReduceMean".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
         }
 
-        let axes_attr = query_attribute_ints(attributes, "attr");
+        let axes_attr = query_attribute_ints(attributes, "axes");
         let keepdims = query_attribute_int(attributes, "keepdims").map(|x| x != 0);
         let noop_with_empty_axes = query_attribute_int(attributes, "noop_with_empty_axes").map(|x| x != 0);
 
@@ -2147,6 +2146,169 @@ impl Operation for IdentityOperation {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct IsInfOperation {
+    input: TensorId,
+    output: TensorId,
+    detect_negative: Option<bool>,
+    detect_positive: Option<bool>
+}
+
+impl IsInfOperation {
+    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+        if inputs.len() != 1  {
+            return Err(ONNXDecodingError::GraphConstructionError("IsInf".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+        }
+        if outputs.len() != 1 {
+            return Err(ONNXDecodingError::GraphConstructionError("IsInf".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+        }
+
+        let detect_negative = query_attribute_int(attributes, "detect_negative").map(|x| x != 0);
+        let detect_positive = query_attribute_int(attributes, "detect_positive").map(|x| x != 0);
+
+        Ok(Self{
+            input: inputs[0],
+            output: outputs[0],
+            detect_negative,
+            detect_positive
+        })
+    }
+}
+
+impl Operation for IsInfOperation {
+    fn get_inputs(&self) -> Vec<TensorId> {
+        vec![self.input]
+    }
+
+    fn get_outputs(&self) -> Vec<TensorId> {
+        vec![self.output]
+    }
+
+    fn get_milli_op_graph(&self) -> MilliOpGraph {
+        let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
+        let input = input_map[&self.input];
+        let output = graph.push_op(AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::is_inf(input, self.detect_positive.unwrap_or(true), self.detect_negative.unwrap_or(true),)));
+        let mut output_map = HashMap::new();
+        output_map.insert(output, self.output);
+        graph.set_output_map(output_map);
+        graph
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ModuloOperation {
+    a: TensorId,
+    b: TensorId,
+    output: TensorId,
+    fmod: Option<bool>,
+}
+
+impl ModuloOperation {
+    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+        if inputs.len() != 2  {
+            return Err(ONNXDecodingError::GraphConstructionError("Modulo".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+        }
+        if outputs.len() != 1 {
+            return Err(ONNXDecodingError::GraphConstructionError("Modulo".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+        }
+
+        let fmod = query_attribute_int(attributes, "fmod").map(|x| x != 0);
+
+        Ok(Self{
+            a: inputs[0],
+            b: inputs[1],
+            output: outputs[0],
+            fmod,
+        })
+    }
+}
+
+impl Operation for ModuloOperation {
+    fn get_inputs(&self) -> Vec<TensorId> {
+        vec![self.a, self.b]
+    }
+
+    fn get_outputs(&self) -> Vec<TensorId> {
+        vec![self.output]
+    }
+
+    fn get_milli_op_graph(&self) -> MilliOpGraph {
+        let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
+        let a = input_map[&self.a];
+        let b = input_map[&self.b];
+        
+        let output = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::modulo(a, b, self.fmod)));
+        let mut output_map = HashMap::new();
+        output_map.insert(output, self.output);
+        graph.set_output_map(output_map);
+        graph
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ClipOperation {
+    input: TensorId,
+    min: Option<TensorId>,
+    max: Option<TensorId>,
+    output: TensorId
+}
+
+impl ClipOperation {
+    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], _attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+        if inputs.len() < 1 || inputs.len() > 3  {
+            return Err(ONNXDecodingError::GraphConstructionError("Clip".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+        }
+        if outputs.len() != 1 {
+            return Err(ONNXDecodingError::GraphConstructionError("Clip".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+        }
+
+        Ok(Self{
+            input: inputs[0],
+            min: if inputs.len() > 1 { Some(inputs[1]) } else { None },
+            max: if inputs.len() > 2 { Some(inputs[2]) } else { None },
+            output: outputs[0]
+        })
+    }
+}
+
+impl Operation for ClipOperation {
+    fn get_inputs(&self) -> Vec<TensorId> {
+        let mut o = vec![self.input];
+        if let Some(min) = self.min {
+            o.push(min);
+        }
+        if let Some(max) = self.max {
+            o.push(max);
+        }
+        o
+    }
+
+    fn get_outputs(&self) -> Vec<TensorId> {
+        vec![self.output]
+    }
+
+    fn get_milli_op_graph(&self) -> MilliOpGraph {
+        let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
+        let x = input_map[&self.input];
+        let x = if let Some(min) = self.min {
+            let min = input_map[&min];
+            graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::max(x, min)))
+        } else {
+            x
+        };
+        let x = if let Some(max) = self.max {
+            let max = input_map[&max];
+            graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::min(x, max)))
+        } else {
+            x
+        };
+        let mut output_map = HashMap::new();
+        output_map.insert(x, self.output);
+        graph.set_output_map(output_map);
+        graph
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum AnyOperation {
     Unary(UnaryOperation),
@@ -2180,6 +2342,9 @@ pub(crate) enum AnyOperation {
     Flatten(FlattenOperation),
     Constant(ConstantOperation),
     Identity(IdentityOperation),
+    Clip(ClipOperation),
+    IsInf(IsInfOperation),
+    Modulo(ModuloOperation),
 }
 
 impl AnyOperation {
@@ -2216,6 +2381,9 @@ impl AnyOperation {
             AnyOperation::Flatten(op) => op,
             AnyOperation::Constant(op) => op,
             AnyOperation::Identity(op) => op,
+            AnyOperation::IsInf(op) => op,
+            AnyOperation::Clip(op) => op,
+            AnyOperation::Modulo(op) => op,
         }
     }
 }
@@ -2254,6 +2422,9 @@ impl Operation for AnyOperation {
             AnyOperation::Flatten(op) => op.get_inputs(),
             AnyOperation::Constant(op) => op.get_inputs(),
             AnyOperation::Identity(op) => op.get_inputs(),
+            AnyOperation::IsInf(op) => op.get_inputs(),
+            AnyOperation::Clip(op) => op.get_inputs(),
+            AnyOperation::Modulo(op) => op.get_inputs(),
         }
     }
     fn get_outputs(&self) -> Vec<TensorId> {
@@ -2289,6 +2460,9 @@ impl Operation for AnyOperation {
             AnyOperation::Flatten(op) => op.get_outputs(),
             AnyOperation::Constant(op) => op.get_outputs(),
             AnyOperation::Identity(op) => op.get_outputs(),
+            AnyOperation::IsInf(op) => op.get_outputs(),
+            AnyOperation::Clip(op) => op.get_outputs(),
+            AnyOperation::Modulo(op) => op.get_outputs(),
         }
     }
 
@@ -2325,6 +2499,9 @@ impl Operation for AnyOperation {
             AnyOperation::Flatten(op) => op.get_milli_op_graph(),
             AnyOperation::Constant(op) => op.get_milli_op_graph(),
             AnyOperation::Identity(op) => op.get_milli_op_graph(),
+            AnyOperation::IsInf(op) => op.get_milli_op_graph(),
+            AnyOperation::Clip(op) => op.get_milli_op_graph(),
+            AnyOperation::Modulo(op) => op.get_milli_op_graph(),
         }
     }
 }

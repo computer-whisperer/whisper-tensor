@@ -209,7 +209,7 @@ impl TestDataSet {
 
         // This will need to use the model to get input names
         // For now, we'll use placeholder indices as names
-        for (index, (_, proto_data)) in self.inputs.iter().enumerate() {
+        for (_index, (_, proto_data)) in self.inputs.iter().enumerate() {
             let tensor_proto = TensorProto::decode(proto_data.as_slice()).unwrap();
             let tensor: NumericTensor<DynRank> = NDArrayNumericTensor::try_from(&tensor_proto)?.into();
 
@@ -224,7 +224,7 @@ impl TestDataSet {
     fn parse_outputs(&self) -> Result<HashMap<String, NumericTensor<DynRank>>, ONNXDecodingError> {
         let mut result = HashMap::new();
 
-        for (index, (_, proto_data)) in self.outputs.iter().enumerate() {
+        for (_index, (_, proto_data)) in self.outputs.iter().enumerate() {
             let tensor_proto = TensorProto::decode(proto_data.as_slice()).unwrap();
             let tensor: NumericTensor<DynRank> = NDArrayNumericTensor::try_from(&tensor_proto)?.into();
             
@@ -404,7 +404,55 @@ fn test_layernorm_operator() {
     let node_test_paths = vec![
         PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_layer_normalization_2d_axis0"),
         PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_layer_normalization_2d_axis1"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_layer_normalization_2d_axis_negative_1"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_layer_normalization_2d_axis_negative_2"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_layer_normalization_3d_axis0_epsilon"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_layer_normalization_3d_axis1_epsilon"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_layer_normalization_3d_axis2_epsilon"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_layer_normalization_3d_axis_negative_1_epsilon"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_layer_normalization_3d_axis_negative_2_epsilon"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_layer_normalization_3d_axis_negative_3_epsilon"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_layer_normalization_4d_axis0"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_layer_normalization_4d_axis1"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_layer_normalization_4d_axis2"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_layer_normalization_4d_axis3"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_layer_normalization_4d_axis_negative_1"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_layer_normalization_4d_axis_negative_2"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_layer_normalization_4d_axis_negative_3"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_layer_normalization_4d_axis_negative_4"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_layer_normalization_default_axis"),
+    ];
+
+    for path in node_test_paths {
+        if !path.exists() {
+            println!("Test directory not found, skipping");
+            return;
+        }
+
+        if let Some(test) = OnnxNodeTest::from_directory(&path) {
+            test.run(RuntimeBackend::Eval(EvalBackend::NDArray)).expect("operator test failed");
+        } else {
+            panic!("Could not parse operator test");
+        }
+    }
+}
+
+
+#[test]
+fn test_layernorm_expanded() {
+    let node_test_paths = vec![
         PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_layer_normalization_2d_axis0_expanded"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_layer_normalization_2d_axis1_expanded"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_layer_normalization_2d_axis_negative_1_expanded"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_layer_normalization_3d_axis1_epsilon_expanded"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_layer_normalization_3d_axis2_epsilon_expanded"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_layer_normalization_4d_axis1_expanded"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_layer_normalization_4d_axis2_expanded"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_layer_normalization_4d_axis3_expanded"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_layer_normalization_4d_axis_negative_1_expanded"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_layer_normalization_4d_axis_negative_2_expanded"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_layer_normalization_4d_axis_negative_3_expanded"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_layer_normalization_4d_default_axis_expanded"),
     ];
 
     for path in node_test_paths {
@@ -490,7 +538,13 @@ fn test_size_operator() {
 fn test_reduce_mean_operator() {
     let node_test_paths = vec![
         PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_reduce_mean_default_axes_keepdims_example"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_reduce_mean_default_axes_keepdims_random"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_reduce_mean_do_not_keepdims_example"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_reduce_mean_do_not_keepdims_random"),
         PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_reduce_mean_keepdims_example"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_reduce_mean_keepdims_random"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_reduce_mean_negative_axes_keepdims_example"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_reduce_mean_negative_axes_keepdims_random"),
     ];
 
     for path in node_test_paths {
@@ -554,6 +608,131 @@ fn test_unsqueeze_operator() {
     let node_test_paths = vec![
         PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_unsqueeze"),
         PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_unsqueeze_negative_axes"),
+    ];
+
+    for path in node_test_paths {
+        if !path.exists() {
+            println!("Test directory not found, skipping");
+            return;
+        }
+
+        if let Some(test) = OnnxNodeTest::from_directory(&path) {
+            test.run(RuntimeBackend::Eval(EvalBackend::NDArray)).expect("operator test failed");
+        } else {
+            panic!("Could not parse operator test");
+        }
+    }
+}
+
+#[test]
+fn test_range_operator() {
+    let node_test_paths = vec![
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_range_float_type_positive_delta"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_range_int32_type_negative_delta"),
+    ];
+
+    for path in node_test_paths {
+        if !path.exists() {
+            println!("Test directory not found, skipping");
+            return;
+        }
+
+        if let Some(test) = OnnxNodeTest::from_directory(&path) {
+            test.run(RuntimeBackend::Eval(EvalBackend::NDArray)).expect("operator test failed");
+        } else {
+            panic!("Could not parse operator test");
+        }
+    }
+}
+
+#[test]
+fn test_flatten_operator() {
+    let node_test_paths = vec![
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_flatten_axis0"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_flatten_axis1"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_flatten_axis2"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_flatten_axis3"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_flatten_default_axis"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_flatten_negative_axis1"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_flatten_negative_axis2"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_flatten_negative_axis3"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_flatten_negative_axis4"),
+    ];
+
+    for path in node_test_paths {
+        if !path.exists() {
+            println!("Test directory not found, skipping");
+            return;
+        }
+
+        if let Some(test) = OnnxNodeTest::from_directory(&path) {
+            test.run(RuntimeBackend::Eval(EvalBackend::NDArray)).expect("operator test failed");
+        } else {
+            panic!("Could not parse operator test");
+        }
+    }
+}
+
+#[test]
+fn test_round_operator() {
+    let node_test_paths = vec![
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_round"),
+    ];
+
+    for path in node_test_paths {
+        if !path.exists() {
+            println!("Test directory not found, skipping");
+            return;
+        }
+
+        if let Some(test) = OnnxNodeTest::from_directory(&path) {
+            test.run(RuntimeBackend::Eval(EvalBackend::NDArray)).expect("operator test failed");
+        } else {
+            panic!("Could not parse operator test");
+        }
+    }
+}
+
+#[test]
+fn test_isinf_operator() {
+    let node_test_paths = vec![
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_isinf"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_isinf_float16"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_isinf_negative"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_isinf_positive"),
+
+    ];
+
+    for path in node_test_paths {
+        if !path.exists() {
+            println!("Test directory not found, skipping");
+            return;
+        }
+
+        if let Some(test) = OnnxNodeTest::from_directory(&path) {
+            test.run(RuntimeBackend::Eval(EvalBackend::NDArray)).expect("operator test failed");
+        } else {
+            panic!("Could not parse operator test");
+        }
+    }
+}
+
+#[test]
+fn test_mod_operator() {
+    let node_test_paths = vec![
+        //PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_mod_broadcast"),
+        //PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_mod_int64_fmod"),
+        //PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_mod_mixed_sign_float16"),
+        //PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_mod_mixed_sign_float32"),
+        //PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_mod_mixed_sign_float64"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_mod_mixed_sign_int64"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_mod_mixed_sign_int32"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_mod_mixed_sign_int16"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_mod_mixed_sign_int8"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_mod_uint64"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_mod_uint32"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_mod_uint16"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_mod_uint8"),
     ];
 
     for path in node_test_paths {

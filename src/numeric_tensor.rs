@@ -317,8 +317,12 @@ impl NumericTensor<DynRank> {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::mul(&a.try_into()?, &b.try_into()?)?))
     }
 
-    pub fn modulo(a: &Self, b: &Self, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
-        Ok(NumericTensor::NDArray(NDArrayNumericTensor::modulo(&a.try_into()?, &b.try_into()?)?))
+    pub fn fmod(a: &Self, b: &Self, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
+        Ok(NumericTensor::NDArray(NDArrayNumericTensor::fmod(&a.try_into()?, &b.try_into()?)?))
+    }
+
+    pub fn imod(a: &Self, b: &Self, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
+        Ok(NumericTensor::NDArray(NDArrayNumericTensor::imod(&a.try_into()?, &b.try_into()?)?))
     }
 
     pub fn matmul(a: &Self, b: &Self, backend: &EvalBackend) -> Result<Self, NumericTensorError> {
@@ -401,8 +405,8 @@ impl NumericTensor<DynRank> {
         Ok(NumericTensor::NDArray(self.to_ndarray()?.is_nan()?))
     }
 
-    pub fn is_inf(&self) -> Result<Self, NumericTensorError> {
-        Ok(NumericTensor::NDArray(self.to_ndarray()?.is_inf()?))
+    pub fn is_inf(&self, detect_positive: bool, detect_negative: bool) -> Result<Self, NumericTensorError> {
+        Ok(NumericTensor::NDArray(self.to_ndarray()?.is_inf(detect_positive, detect_negative)?))
     }
 
     pub fn sign(&self) -> Result<Self, NumericTensorError> {

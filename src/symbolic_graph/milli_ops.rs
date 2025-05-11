@@ -9,7 +9,7 @@ use crate::numeric_tensor::NumericTensor;
 use crate::symbolic_graph::{TensorId};
 use crate::symbolic_graph::scalar_info::{ScalarInfo, ScalarInfoTyped};
 use crate::symbolic_graph::symbolic_scalar::{SymbolicResolver, SymbolicScalar, SymbolicScalarTyped};
-use crate::symbolic_graph::tensor_info::{MinimalTensor, RankedTensor, TensorInfo, TensorInfoError, TensorInfoRanked, TensorInfoShaped, TensorInfoTypedRanked, TensorInfoTypedShaped};
+use crate::symbolic_graph::tensor_info::{MinimalTensor, TensorInfo, TensorInfoError, TensorInfoRanked, TensorInfoShaped, TensorInfoTypedRanked, TensorInfoTypedShaped};
 use crate::tensor_rank::DynRank;
 use crate::TrigOp;
 
@@ -307,7 +307,7 @@ enum SimpleBinaryOp {
     Sub,
     Mul,
     Div,
-    Modulo,
+    Modulo(Option<bool>),
     And,
     Or,
     Xor,
@@ -351,10 +351,9 @@ impl MilliOpSimpleBinary {
         Self { a, b, which_op: SimpleBinaryOp::Div }
     }
 
-    pub(crate) fn modulo(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
-        Self { a, b, which_op: SimpleBinaryOp::Modulo }
+    pub(crate) fn modulo(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId, fmod: Option<bool>) -> Self {
+        Self { a, b, which_op: SimpleBinaryOp::Modulo(fmod) }
     }
-
     pub(crate) fn and(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
         Self { a, b, which_op: SimpleBinaryOp::And }
     }
@@ -445,7 +444,16 @@ impl MilliOp for MilliOpSimpleBinary {
             SimpleBinaryOp::Sub => NumericTensor::<DynRank>::sub(a, b, backend)?,
             SimpleBinaryOp::Mul => NumericTensor::<DynRank>::mul(a, b, backend)?,
             SimpleBinaryOp::Div => NumericTensor::<DynRank>::div(a, b, backend)?,
-            SimpleBinaryOp::Modulo => NumericTensor::<DynRank>::modulo(a, b, backend)?,
+            SimpleBinaryOp::Modulo(fmod) => {
+                let is_float = [DType::F64, DType::F32, DType::BF16, DType::F16].contains(&a.dtype());
+                let fmod = if is_float {true} else {fmod.unwrap_or(false)};
+                if fmod {
+                    NumericTensor::<DynRank>::fmod(a, b, backend)?
+                }
+                else {
+                    NumericTensor::<DynRank>::imod(a, b, backend)?
+                }
+            },
             SimpleBinaryOp::And => NumericTensor::<DynRank>::and(a, b, backend)?,
             SimpleBinaryOp::Or => NumericTensor::<DynRank>::or(a, b, backend)?,
             SimpleBinaryOp::Xor => NumericTensor::<DynRank>::xor(a, b, backend)?,
@@ -702,7 +710,7 @@ pub(crate) enum SimpleUnaryOp {
     Ceil,
     Round,
     IsNan,
-    IsInf
+    IsInf { detect_positive: bool, detect_negative: bool }
 }
 
 pub(crate) struct MilliOpSimpleUnary {
@@ -767,8 +775,8 @@ impl MilliOpSimpleUnary {
         Self::new(input, SimpleUnaryOp::Round)
     }
 
-    pub(crate) fn is_inf(input: MilliOpGraphTensorId) -> Self {
-        Self::new(input, SimpleUnaryOp::IsInf)
+    pub(crate) fn is_inf(input: MilliOpGraphTensorId, detect_positive: bool, detect_negative: bool) -> Self {
+        Self::new(input, SimpleUnaryOp::IsInf{detect_positive, detect_negative})
     }
 
     pub(crate) fn is_nan(input: MilliOpGraphTensorId) -> Self {
@@ -795,7 +803,7 @@ impl SimpleUnaryMilliOp for MilliOpSimpleUnary {
             SimpleUnaryOp::Floor => Ok(input.floor(backend)?),
             SimpleUnaryOp::Ceil => Ok(input.ceil(backend)?),
             SimpleUnaryOp::Round => Ok(input.round(backend)?),
-            SimpleUnaryOp::IsInf => Ok(input.is_inf()?),
+            SimpleUnaryOp::IsInf{detect_positive, detect_negative} => Ok(input.is_inf(detect_positive, detect_negative)?),
             SimpleUnaryOp::IsNan => Ok(input.is_nan()?),
         }
     }
@@ -815,7 +823,7 @@ impl SimpleUnaryMilliOp for MilliOpSimpleUnary {
             SimpleUnaryOp::Floor => Ok(input.floor()),
             SimpleUnaryOp::Ceil => Ok(input.ceil()),
             SimpleUnaryOp::Round => Ok(input.round()),
-            SimpleUnaryOp::IsInf => Ok(input.is_inf()),
+            SimpleUnaryOp::IsInf{detect_positive, detect_negative} => Ok(input.is_inf(detect_positive, detect_negative)),
             SimpleUnaryOp::IsNan => Ok(input.is_nan()),
         }
     }

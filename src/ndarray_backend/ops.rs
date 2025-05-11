@@ -1,4 +1,5 @@
 use std::ops::{Add, BitAnd, BitOr, BitXor, Mul, Not};
+use half::bf16;
 use ndarray::{concatenate, s, ArcArray, Array, Array2, ArrayD, ArrayView2, ArrayViewD, ArrayViewMut2, ArrayViewMutD, Axis, Dimension, Ix1, Ix2, IxDyn, LinalgScalar, ScalarOperand, ShapeError, SliceInfoElem, Zip};
 use ndarray::linalg::{general_mat_mul, Dot};
 use num_traits::{Float, FromPrimitive, Num, NumCast, One, Zero};
@@ -433,7 +434,7 @@ pub enum NativeNumericTensorBinaryOperation {
     Sub,
     Mul,
     Div,
-    Modulo,
+    FMod,
     Max,
     Min
 }
@@ -518,7 +519,7 @@ impl NativeNumericTensorBinaryOperation {
             Self::Sub => (&a - &b).into(),
             Self::Mul => (&a * &b).into(),
             Self::Div => (&a / &b).into(),
-            Self::Modulo => (&a % &b).into(),
+            Self::FMod => (&a % &b).into(),
             Self::Max => ndarray::Zip::from(a).and(b).map_collect(|a, b| (*a).max(*b)),
             Self::Min => ndarray::Zip::from(a).and(b).map_collect(|a, b| (*a).min(*b))
         };
@@ -545,7 +546,7 @@ impl NativeNumericTensorBinaryOperation {
             Self::Sub => (&a - &b).into(),
             Self::Mul => (&a * &b).into(),
             Self::Div => (&a / &b).into(),
-            Self::Modulo => (&a % &b).into(),
+            Self::FMod => (&a % &b).into(),
             Self::Max => ndarray::Zip::from(a).and(b).map_collect(|a, b| (*a).max(*b)),
             Self::Min => ndarray::Zip::from(a).and(b).map_collect(|a, b| (*a).min(*b))
         };
@@ -577,7 +578,7 @@ impl NativeNumericTensorBinaryOperationBoolOut {
             NativeNumericTensorBinaryOperationBoolOut::Greater => ndarray::Zip::from(a).and(b).map_collect(|a, b| a.clone() > b.clone()),
             NativeNumericTensorBinaryOperationBoolOut::GreaterOrEqual => ndarray::Zip::from(a).and(b).map_collect(|a, b| a.clone() >= b.clone()),
         };
-        
+
         Ok(o.to_shared())
     }
 }
@@ -616,7 +617,6 @@ pub enum NativeNumericTensorUnaryOperation {
     Log,
     Floor,
     Ceil,
-    Round,
     Softplus
 }
 
@@ -638,7 +638,6 @@ impl NativeNumericTensorUnaryOperation {
             NativeNumericTensorUnaryOperation::Softplus => a.mapv(|x| T::ln(T::exp(x) + T::one())).to_shared(),
             NativeNumericTensorUnaryOperation::Log => a.mapv(|x| x.ln()).to_shared(),
             NativeNumericTensorUnaryOperation::Floor => a.mapv(|x| x.floor()).to_shared(),
-            NativeNumericTensorUnaryOperation::Round => a.mapv(|x| x.round()).to_shared(),
             NativeNumericTensorUnaryOperation::Ceil => a.mapv(|x| x.ceil()).to_shared(),
             _ => {
                 Err(NDArrayOperationError::UnimplementedOp(format!("{self:?}")))?
@@ -1094,9 +1093,91 @@ where T: Num + Copy + PartialOrd + std::ops::AddAssign
 {
     let mut out = vec![];
     let mut i = start;
-    while i < end {
-        out.push(i);
-        i += step;
+    if start < end {
+        if step <= T::zero() {
+            return ArcArray::from_vec(out);
+        }
+        while i < end {
+            out.push(i);
+            i += step;
+        }
     }
+    else {
+        if step >= T::zero() {
+            return ArcArray::from_vec(out);
+        }
+        while i > end {
+            out.push(i);
+            i += step;
+        }
+    }
+
     ArcArray::from_vec(out)
 }
+
+pub fn imod_u64(a: ArcArray<u64, IxDyn>, b: ArcArray<u64, IxDyn>) -> Result<ArcArray<u64, IxDyn>, NDArrayOperationError>
+{
+    let a = if let Some(a) = a.broadcast(b.shape()) { a } else { a.view() };
+    let b = if let Some(b) = b.broadcast(a.shape()) { b } else { b.view() };
+    let v = ndarray::Zip::from(a).and(b).map_collect(|a, b| ((*a % *b) + *b) % *b);
+    Ok(v.to_shared())
+}
+
+pub fn imod_i64(a: ArcArray<i64, IxDyn>, b: ArcArray<i64, IxDyn>) -> Result<ArcArray<i64, IxDyn>, NDArrayOperationError>
+{
+    let a = if let Some(a) = a.broadcast(b.shape()) { a } else { a.view() };
+    let b = if let Some(b) = b.broadcast(a.shape()) { b } else { b.view() };
+    let v = ndarray::Zip::from(a).and(b).map_collect(|a, b| ((*a % *b) + *b) % *b);
+    Ok(v.to_shared())
+}
+
+pub fn imod_u32(a: ArcArray<u32, IxDyn>, b: ArcArray<u32, IxDyn>) -> Result<ArcArray<u32, IxDyn>, NDArrayOperationError>
+{
+    let a = if let Some(a) = a.broadcast(b.shape()) { a } else { a.view() };
+    let b = if let Some(b) = b.broadcast(a.shape()) { b } else { b.view() };
+    let v = ndarray::Zip::from(a).and(b).map_collect(|a, b| ((*a % *b) + *b) % *b);
+    Ok(v.to_shared())
+}
+
+pub fn imod_i32(a: ArcArray<i32, IxDyn>, b: ArcArray<i32, IxDyn>) -> Result<ArcArray<i32, IxDyn>, NDArrayOperationError>
+{
+    let a = if let Some(a) = a.broadcast(b.shape()) { a } else { a.view() };
+    let b = if let Some(b) = b.broadcast(a.shape()) { b } else { b.view() };
+    let v = ndarray::Zip::from(a).and(b).map_collect(|a, b| ((*a % *b) + *b) % *b);
+    Ok(v.to_shared())
+}
+
+pub fn imod_u16(a: ArcArray<u16, IxDyn>, b: ArcArray<u16, IxDyn>) -> Result<ArcArray<u16, IxDyn>, NDArrayOperationError>
+{
+    let a = if let Some(a) = a.broadcast(b.shape()) { a } else { a.view() };
+    let b = if let Some(b) = b.broadcast(a.shape()) { b } else { b.view() };
+    let v = ndarray::Zip::from(a).and(b).map_collect(|a, b| ((*a % *b) + *b) % *b);
+    Ok(v.to_shared())
+}
+
+pub fn imod_i16(a: ArcArray<i16, IxDyn>, b: ArcArray<i16, IxDyn>) -> Result<ArcArray<i16, IxDyn>, NDArrayOperationError>
+{
+    let a = if let Some(a) = a.broadcast(b.shape()) { a } else { a.view() };
+    let b = if let Some(b) = b.broadcast(a.shape()) { b } else { b.view() };
+    let v = ndarray::Zip::from(a).and(b).map_collect(|a, b| ((*a % *b) + *b) % *b);
+    Ok(v.to_shared())
+}
+
+
+pub fn imod_u8(a: ArcArray<u8, IxDyn>, b: ArcArray<u8, IxDyn>) -> Result<ArcArray<u8, IxDyn>, NDArrayOperationError>
+{
+    let a = if let Some(a) = a.broadcast(b.shape()) { a } else { a.view() };
+    let b = if let Some(b) = b.broadcast(a.shape()) { b } else { b.view() };
+    let v = ndarray::Zip::from(a).and(b).map_collect(|a, b| ((*a % *b) + *b) % *b);
+    Ok(v.to_shared())
+}
+
+pub fn imod_i8(a: ArcArray<i8, IxDyn>, b: ArcArray<i8, IxDyn>) -> Result<ArcArray<i8, IxDyn>, NDArrayOperationError>
+{
+    let a = if let Some(a) = a.broadcast(b.shape()) { a } else { a.view() };
+    let b = if let Some(b) = b.broadcast(a.shape()) { b } else { b.view() };
+    let v = ndarray::Zip::from(a).and(b).map_collect(|a, b| ((*a % *b) + *b) % *b);
+    Ok(v.to_shared())
+}
+
+

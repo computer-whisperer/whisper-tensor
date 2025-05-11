@@ -485,9 +485,7 @@ impl SymbolicGraphMutator {
                 ))
             },
             "Mod" => {
-                Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichBinaryOperation::Modulo)
-                    .map_err(|x| ONNXDecodingError::GraphConstructionError(onnx_node.name.clone(), x))?
-                ))
+                Some(AnyOperation::Modulo(ops::ModuloOperation::from_onnx(&input_tensors, &output_tensors, &onnx_node.attribute)?))
             },
             "Sub" => {
                 Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichBinaryOperation::Sub)
@@ -637,7 +635,7 @@ impl SymbolicGraphMutator {
                 Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichUnaryOperation::IsNan)?))
             }
             "IsInf" => {
-                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichUnaryOperation::IsInf)?))
+                Some(AnyOperation::IsInf(ops::IsInfOperation::from_onnx(&input_tensors, &output_tensors, &onnx_node.attribute)?))
             }
             "Floor" => {
                 Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichUnaryOperation::Floor)?))
@@ -647,6 +645,9 @@ impl SymbolicGraphMutator {
             }
             "Round" => {
                 Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichUnaryOperation::Round)?))
+            }
+            "Clip" => {
+                Some(AnyOperation::Clip(ops::ClipOperation::from_onnx(&input_tensors, &output_tensors, &onnx_node.attribute)?))
             }
             "Reciprocal" => {
                 Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichUnaryOperation::Reciprocal)?))

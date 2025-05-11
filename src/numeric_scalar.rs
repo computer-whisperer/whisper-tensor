@@ -175,12 +175,12 @@ impl NumericScalar {
         }
     }
 
-    pub fn is_inf(&self) -> Self {
+    pub fn is_inf(&self, detect_positive: bool, detect_negative: bool) -> Self {
         match self {
-            NumericScalar::F64(x) => Self::BOOL(x.is_infinite()),
-            NumericScalar::F32(x) => Self::BOOL(x.is_infinite()),
-            NumericScalar::BF16(x) => Self::BOOL(x.is_infinite()),
-            NumericScalar::F16(x) => Self::BOOL(x.is_infinite()),
+            NumericScalar::F64(x) => Self::BOOL(x.is_infinite() && ((detect_positive && x.is_sign_positive()) || (detect_negative && x.is_sign_negative()))),
+            NumericScalar::F32(x) => Self::BOOL(x.is_infinite() && ((detect_positive && x.is_sign_positive()) || (detect_negative && x.is_sign_negative()))),
+            NumericScalar::BF16(x) => Self::BOOL(x.is_infinite() && ((detect_positive && x.is_sign_positive()) || (detect_negative && x.is_sign_negative()))),
+            NumericScalar::F16(x) => Self::BOOL(x.is_infinite() && ((detect_positive && x.is_sign_positive()) || (detect_negative && x.is_sign_negative()))),
             _ => panic!("Cannot is_inf this type"),
         }
     }

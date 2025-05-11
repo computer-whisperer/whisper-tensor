@@ -183,6 +183,16 @@ impl<R: Rank> NDArrayNumericTensor<R> {
         })
     }
 
+    pub fn round(self) -> Result<Self, NDArrayNumericTensorError> {
+        Ok(match self {
+            NDArrayNumericTensor::F32(x) => NDArrayNumericTensor::F32(x.map(|x| x.round_ties_even()).to_shared()),
+            NDArrayNumericTensor::F64(x) => NDArrayNumericTensor::F64(x.map(|x| x.round_ties_even()).to_shared()),
+            NDArrayNumericTensor::BF16(x) => NDArrayNumericTensor::BF16(x.map(|x| bf16::from_f32(x.to_f32().round_ties_even())).to_shared()),
+            NDArrayNumericTensor::F16(x) => NDArrayNumericTensor::F16(x.map(|x| f16::from_f32(x.to_f32().round_ties_even())).to_shared()),
+            _ => return Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("round".to_string(), vec![self.dtype()])),
+        })
+    }
+
     pub fn abs(self) -> Result<Self, NDArrayNumericTensorError> {
         Ok(match self {
             NDArrayNumericTensor::F32(x) => NDArrayNumericTensor::F32(x.abs().to_shared()),
@@ -255,10 +265,6 @@ impl<R: Rank> NDArrayNumericTensor<R> {
 
     pub fn ceil(&self) -> Result<Self, NDArrayNumericTensorError> {
         Self::try_unary_op(self, NativeNumericTensorUnaryOperation::Ceil)
-    }
-
-    pub fn round(&self) -> Result<Self, NDArrayNumericTensorError> {
-        Self::try_unary_op(self, NativeNumericTensorUnaryOperation::Round)
     }
 
     pub fn sqrt(&self) -> Result<Self, NDArrayNumericTensorError> {
@@ -577,12 +583,12 @@ impl<R: Rank> NDArrayNumericTensor<R> {
         })
     }
 
-    pub fn is_inf(&self) -> Result<Self, NDArrayNumericTensorError> {
+    pub fn is_inf(&self, detect_positive: bool, detect_negative: bool) -> Result<Self, NDArrayNumericTensorError> {
         Ok(match self {
-            NDArrayNumericTensor::F64(x) => NDArrayNumericTensor::BOOL(x.map(|x| x.is_infinite()).to_shared()),
-            NDArrayNumericTensor::F32(x) => NDArrayNumericTensor::BOOL(x.map(|x| x.is_infinite()).to_shared()),
-            NDArrayNumericTensor::BF16(x) => NDArrayNumericTensor::BOOL(x.map(|x| x.is_infinite()).to_shared()),
-            NDArrayNumericTensor::F16(x) => NDArrayNumericTensor::BOOL(x.map(|x| x.is_infinite()).to_shared()),
+            NDArrayNumericTensor::F64(x) => NDArrayNumericTensor::BOOL(x.map(|x| x.is_infinite() && ((detect_positive && x.is_sign_positive()) || (detect_negative && x.is_sign_negative()))).to_shared()),
+            NDArrayNumericTensor::F32(x) => NDArrayNumericTensor::BOOL(x.map(|x| x.is_infinite() && ((detect_positive && x.is_sign_positive()) || (detect_negative && x.is_sign_negative()))).to_shared()),
+            NDArrayNumericTensor::BF16(x) => NDArrayNumericTensor::BOOL(x.map(|x| x.is_infinite() && ((detect_positive && x.is_sign_positive()) || (detect_negative && x.is_sign_negative()))).to_shared()),
+            NDArrayNumericTensor::F16(x) => NDArrayNumericTensor::BOOL(x.map(|x| x.is_infinite() && ((detect_positive && x.is_sign_positive()) || (detect_negative && x.is_sign_negative()))).to_shared()),
             _ => Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("is_infinite".to_string(), vec![self.dtype()]))?,
         })
     }
@@ -1184,7 +1190,7 @@ impl NDArrayNumericTensor<DynRank> {
     pub fn reduce_min(&self, axes: Vec<usize>, keepdims: bool) -> Result<Self, NDArrayNumericTensorError> {
         self.reduce_op(axes, keepdims, ReduceOp::Min)
     }
-    
+
     pub fn reduce_max(&self, axes: Vec<usize>, keepdims: bool) -> Result<Self, NDArrayNumericTensorError> {
         self.reduce_op(axes, keepdims, ReduceOp::Max)
     }
@@ -1418,8 +1424,22 @@ impl NDArrayNumericTensor<DynRank> {
         Self::try_binary_op(a, b, NativeNumericTensorBinaryOperation::Mul)
     }
 
-    pub fn modulo(a: &Self, b: &Self) -> Result<Self, NDArrayNumericTensorError> {
-        Self::try_binary_op(a, b, NativeNumericTensorBinaryOperation::Modulo)
+    pub fn fmod(a: &Self, b: &Self) -> Result<Self, NDArrayNumericTensorError> {
+        Self::try_binary_op(a, b, NativeNumericTensorBinaryOperation::FMod)
+    }
+
+    pub fn imod(a: &Self, b: &Self) -> Result<Self, NDArrayNumericTensorError> {
+        Ok(match (a, b) {
+            (NDArrayNumericTensor::U64(a), NDArrayNumericTensor::U64(b)) => NDArrayNumericTensor::U64(ops::imod_u64(a.clone(), b.clone())?),
+            (NDArrayNumericTensor::U32(a), NDArrayNumericTensor::U32(b)) => NDArrayNumericTensor::U32(ops::imod_u32(a.clone(), b.clone())?),
+            (NDArrayNumericTensor::U16(a), NDArrayNumericTensor::U16(b)) => NDArrayNumericTensor::U16(ops::imod_u16(a.clone(), b.clone())?),
+            (NDArrayNumericTensor::U8(a), NDArrayNumericTensor::U8(b)) => NDArrayNumericTensor::U8(ops::imod_u8(a.clone(), b.clone())?),
+            (NDArrayNumericTensor::I64(a), NDArrayNumericTensor::I64(b)) => NDArrayNumericTensor::I64(ops::imod_i64(a.clone(), b.clone())?),
+            (NDArrayNumericTensor::I32(a), NDArrayNumericTensor::I32(b)) => NDArrayNumericTensor::I32(ops::imod_i32(a.clone(), b.clone())?),
+            (NDArrayNumericTensor::I16(a), NDArrayNumericTensor::I16(b)) => NDArrayNumericTensor::I16(ops::imod_i16(a.clone(), b.clone())?),
+            (NDArrayNumericTensor::I8(a), NDArrayNumericTensor::I8(b)) => NDArrayNumericTensor::I8(ops::imod_i8(a.clone(), b.clone())?),
+            _ => return Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("imod".to_string(), vec![a.dtype(), b.dtype()])),
+        })
     }
 
     pub fn matmul(a: &Self, b: &Self) -> Result<Self, NDArrayNumericTensorError> {

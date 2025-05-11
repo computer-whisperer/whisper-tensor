@@ -1,5 +1,4 @@
 use crate::ndarray_backend::conversions::NDArrayNumericTensorType;
-use crate::ndarray_backend::NDArrayNumericTensor;
 use super::milli_ops::*;
 
 pub(crate) fn rank(graph: &mut MilliOpGraph, tensor: MilliOpGraphTensorId) -> MilliOpGraphTensorId {
@@ -18,6 +17,6 @@ pub(crate) fn resolve_axes(graph: &mut MilliOpGraph, axes: MilliOpGraphTensorId,
     let shape = graph.push_op(AnyMilliOp::Shape(MilliOpShape::new(tensor)));
     let rank = graph.push_op(AnyMilliOp::Shape(MilliOpShape::new(shape)));
     let axes_2 = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::add(axes, rank)));
-    let out = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::modulo(axes_2, rank)));
+    let out = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::modulo(axes_2, rank, None)));
     out
 }
