@@ -32,6 +32,10 @@ pub(crate) fn load_to_device<R: Rank>(value: &NDArrayNumericTensor<R>, device: &
             let x = x.as_slice_memory_order().unwrap();
             candle_core::Tensor::from_slice(x, shape, device)?
         }
+        NDArrayNumericTensor::U8(x) => {
+            let x = x.as_slice_memory_order().unwrap();
+            candle_core::Tensor::from_slice(x, shape, device)?
+        }
         _ => {
             Err(DTypeError::DTypeNotSupportedByBackend(value.dtype(), RuntimeBackend::Candle))?
         }

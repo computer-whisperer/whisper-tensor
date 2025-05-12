@@ -21,7 +21,7 @@ fn main() {
     let input_path = Path::new("gpt2-lm-head-10.onnx");
     let onnx_data = identify_and_load(input_path, WeightStorageStrategy::EmbeddedData, Some(ModelTypeHint::GPT2)).unwrap();
 
-    let runtime = RuntimeModel::load_onnx(&onnx_data, RuntimeBackend::Eval(EvalBackend::NDArray), RuntimeEnvironment::default()).unwrap();
+    let runtime = RuntimeModel::load_onnx(&onnx_data, RuntimeBackend::Eval(EvalBackend::Candle(candle_core::Device::Cpu)), RuntimeEnvironment::default()).unwrap();
     let mut llm = LanguageModelManager::new(runtime).unwrap();
 
 

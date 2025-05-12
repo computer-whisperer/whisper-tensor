@@ -288,7 +288,7 @@ impl NumericTensor<DynRank> {
     pub fn add(a: &Self, b: &Self, backend: &EvalBackend) -> Result<Self, NumericTensorError> {
         #[cfg(feature = "candle")]
         if let EvalBackend::Candle(device) = backend {
-            return Ok(NumericTensor::Candle((a.to_candle(device)?+b.to_candle(device)?)?))
+            return Ok(NumericTensor::Candle(a.to_candle(device)?.broadcast_add(&b.to_candle(device)?)?))
         }
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::add(&a.try_into()?, &b.try_into()?)?))
     }
@@ -296,7 +296,7 @@ impl NumericTensor<DynRank> {
     pub fn sub(a: &Self, b: &Self, backend: &EvalBackend) -> Result<Self, NumericTensorError> {
         #[cfg(feature = "candle")]
         if let EvalBackend::Candle(device) = backend {
-            return Ok(NumericTensor::Candle((a.to_candle(device)?-b.to_candle(device)?)?))
+            return Ok(NumericTensor::Candle(a.to_candle(device)?.broadcast_sub(&b.to_candle(device)?)?))
         }
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::sub(&a.try_into()?, &b.try_into()?)?))
     }
@@ -304,7 +304,7 @@ impl NumericTensor<DynRank> {
     pub fn div(a: &Self, b: &Self, backend: &EvalBackend) -> Result<Self, NumericTensorError> {
         #[cfg(feature = "candle")]
         if let EvalBackend::Candle(device) = backend {
-            return Ok(NumericTensor::Candle((a.to_candle(device)?/b.to_candle(device)?)?))
+            return Ok(NumericTensor::Candle(a.to_candle(device)?.broadcast_div(&b.to_candle(device)?)?))
         }
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::div(&a.try_into()?, &b.try_into()?)?))
     }
@@ -312,7 +312,7 @@ impl NumericTensor<DynRank> {
     pub fn mul(a: &Self, b: &Self, backend: &EvalBackend) -> Result<Self, NumericTensorError> {
         #[cfg(feature = "candle")]
         if let EvalBackend::Candle(device) = backend {
-            return Ok(NumericTensor::Candle((a.to_candle(device)?*b.to_candle(device)?)?))
+            return Ok(NumericTensor::Candle(a.to_candle(device)?.broadcast_mul(&b.to_candle(device)?)?))
         }
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::mul(&a.try_into()?, &b.try_into()?)?))
     }
@@ -392,7 +392,7 @@ impl NumericTensor<DynRank> {
     pub fn pow(&self, exponent: &Self, backend: &EvalBackend) -> Result<Self, NumericTensorError> {
         #[cfg(feature = "candle")]
         if let EvalBackend::Candle(device) = backend {
-            return Ok(NumericTensor::Candle(self.to_candle(device)?.pow(&exponent.to_candle(device)?)?))
+            return Ok(NumericTensor::Candle(self.to_candle(device)?.broadcast_pow(&exponent.to_candle(device)?)?))
         }
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::<DynRank>::try_from(self)?.pow(&NDArrayNumericTensor::<DynRank>::try_from(exponent)?)?))
     }

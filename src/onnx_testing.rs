@@ -299,15 +299,17 @@ macro_rules! backend_tests {
     };
 }
 
-// Define tests for each backend
-backend_tests!(RuntimeBackend::Eval(EvalBackend::NDArray), test_ndarray_backend);
+const MAIN_TEST_BACKEND: RuntimeBackend = RuntimeBackend::Eval(EvalBackend::NDArray);
 
-/*#[cfg(feature = "candle")]
+// Define tests for each backend
+//backend_tests!(RuntimeBackend::Eval(EvalBackend::NDArray), test_ndarray_backend);
+
+#[cfg(feature = "candle")]
 backend_tests!(
     RuntimeBackend::Eval(EvalBackend::Candle(candle_core::Device::Cpu)),
     test_eval_candle_backend
 );
-
+/*
 #[cfg(feature = "candle")]
 backend_tests!(
     RuntimeBackend::Candle,

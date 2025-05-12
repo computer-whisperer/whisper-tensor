@@ -25,7 +25,7 @@ pyo3 = {optional=true, version = "0.24.0", features = ["auto-initialize"]}
 tokenizers = {optional=true, version="0.21.1", features = ["http"]}
 llm-samplers = { optional=true, version="0.0.7" }
 rand = "0.8.5"
-ndarray = { version = "0.16.1", features = ["serde"] }
+ndarray = { version = "0.16.1", features = ["serde", "rayon"] }
 rwkv-tokenizer = { optional=true, version="0.9.1" }
 env_logger = "0.11.8"
 log = "0.4.27"
