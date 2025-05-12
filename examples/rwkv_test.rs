@@ -30,7 +30,7 @@ fn main() {
 
     let tokenizer = llm.get_tokenizer().unwrap();
 
-    let prompt = "The fibbonacci sequence is: 1, 1, 2";
+    let prompt = "The fibbonacci sequence is: 1, 1, 2, 3, 5,";
     let input = tokenizer.encode(prompt).iter().map(|x| *x as i64).collect::<Vec<_>>();
     let input_tensor = NumericTensor::from_vec(input).to_dyn_rank().unsqueeze(0, &EvalBackend::NDArray).unwrap();
 
