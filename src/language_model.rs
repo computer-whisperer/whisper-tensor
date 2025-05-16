@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
+#[cfg(feature = "rwkv-tokenizer")]
 use rwkv_tokenizer::WorldTokenizer;
 use onnx_graph::{ModelInputType, ModelOutputType, TokenizerInfo};
 use crate::numeric_tensor::NumericTensor;
@@ -12,8 +13,10 @@ use crate::tensor_rank::DynRank;
 
 #[derive(Debug, thiserror::Error)]
 pub enum LanguageModelManagerError {
+    #[cfg(feature = "tokenizers")]
     #[error(transparent)]
     TokenizersError(#[from] tokenizers::Error),
+    #[cfg(feature = "rwkv-tokenizer")]
     #[error(transparent)]
     RWKVWorldTokenizerError(#[from] io::Error)
 }
@@ -35,12 +38,18 @@ impl LanguageModelManager {
             if let Some(tokenizer_info) = meta.tokenizer_infos.get(0) {
                 match tokenizer_info {
                     TokenizerInfo::HFTokenizer(name) => {
-                        let x = Arc::new(tokenizers::Tokenizer::from_pretrained(name, None)?);
-                        tokenizer = Some(x);
+                        #[cfg(feature = "tokenizers")]
+                        {
+                            let x = Arc::new(tokenizers::Tokenizer::from_pretrained(name, None)?);
+                            tokenizer = Some(x);
+                        }
                     }
                     TokenizerInfo::RWKVWorld => {
-                        let x = Arc::new(WorldTokenizer::new(None)?);
-                        tokenizer = Some(x);
+                        #[cfg(feature = "rwkv-tokenizer")]
+                        {
+                            let x = Arc::new(WorldTokenizer::new(None)?);
+                            tokenizer = Some(x);
+                        }
                     }
                 }
             }

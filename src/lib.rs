@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use num_traits::Float;
 use num_traits::real::Real;
-use ort::session::Input;
+
 use prost::{DecodeError, Message};
 use serde::{Deserialize, Serialize};
 use onnx_graph::{InputMetadata, ModelMetadata, OutputMetadata};
@@ -10,13 +10,11 @@ use crate::eval_backend::{EvalBackend, EvalRuntime, EvalRuntimeError};
 use crate::ndarray_backend::NDArrayNumericTensorError;
 use crate::numeric_tensor::{NumericTensor, NumericTensorError};
 use crate::onnx::{ModelProto, StringStringEntryProto};
-use crate::ort_backend::ORTNumericTensor;
 use crate::sampler::SamplerError;
 use crate::symbolic_graph::{ONNXDecodingError, SymbolicGraphMutator};
 use crate::symbolic_graph::ops::EvalError;
 use crate::tensor_rank::DynRank;
 
-mod vulkan_context;
 pub mod symbolic_graph;
 pub mod numeric_tensor;
 pub mod dtype;
@@ -36,6 +34,8 @@ pub mod ort_backend;
 mod onnx_reference_backend;
 #[cfg(feature = "candle")]
 mod candle_backend;
+#[cfg(feature = "vulkan")]
+mod vulkan_context;
 
 pub mod onnx {
     include!(concat!(env!("OUT_DIR"), "/onnx.rs"));
@@ -167,6 +167,9 @@ pub struct RuntimeEnvironment {
     pub cuda: bool
 }
 
+#[cfg(feature = "ort")]
+use crate::ort_backend::ORTNumericTensor;
+
 impl RuntimeModel {
     pub fn load_onnx(onnx_data: &[u8], runtime: RuntimeBackend, runtime_environment: RuntimeEnvironment) -> Result<Self, RuntimeError> {
         let inner = match runtime {
@@ -264,6 +267,7 @@ impl RuntimeModel {
                 }
                 Ok(output_tensors)
             }
+
             #[cfg(feature = "ort")]
             RuntimeModelInner::ORT(session) => {
                 // Run the session

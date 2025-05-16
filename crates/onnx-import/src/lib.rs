@@ -34,6 +34,7 @@ pub enum Error {
     UnsupportedConfigurationError(String, String)
 }
 
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, strum_macros::EnumIter, strum_macros::Display)]
 pub enum ModelTypeHint {
     GPT2,
     RWKV7

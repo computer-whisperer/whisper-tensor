@@ -1,4 +1,3 @@
-use candle_core::WithDType;
 use half::{bf16, f16};
 use num_traits::Float;
 use serde::{Deserialize, Serialize};

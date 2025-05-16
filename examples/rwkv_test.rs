@@ -1,11 +1,9 @@
-use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
-use llm_samplers::prelude::{SampleFreqPresence, SampleGreedy, SampleTemperature, SamplerChain, SimpleSamplerResources};
+use llm_samplers::prelude::{SampleGreedy, SampleTemperature, SamplerChain, SimpleSamplerResources};
 use rand::prelude::StdRng;
 use rand::SeedableRng;
-use rwkv_tokenizer::WorldTokenizer;
 use typenum::P1;
 use onnx_graph::WeightStorageStrategy;
 use onnx_import::{identify_and_load, ModelTypeHint};

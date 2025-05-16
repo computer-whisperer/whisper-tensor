@@ -2,6 +2,7 @@
 name = "whisper-tensor"
 version = "0.1.0"
 edition = "2024"
+resolver = "2"
 
 [dependencies]
 onnx-import = {workspace=true}
@@ -9,7 +10,7 @@ onnx-graph = {workspace=true}
 prost = "0.13.5"
 prost-types = "0.13.3"
 futures = "0.3.31"
-vulkano = "0.35.1"
+vulkano = { version = "0.35.1", optional=true }
 candle-core = {optional=true, workspace=true, default-features=false}
 candle-onnx = {optional=true, workspace=true, default-features=false}
 serde = { version = "1.0.210", features = ["derive"] }
@@ -24,31 +25,36 @@ tempfile = "3.19.1"
 pyo3 = {optional=true, version = "0.24.0", features = ["auto-initialize"]}
 tokenizers = {optional=true, version="0.21.1", default-features = false, features = ["http", "unstable_wasm"]}
 llm-samplers = { optional=true, version="0.0.7" }
-rand = "0.8.5"
+
 ndarray = { version = "0.16.1", features = ["serde", "rayon", "matrixmultiply-threading"] }
 rwkv-tokenizer = { optional=true, version="0.9.1" }
 env_logger = "0.11.8"
 log = "0.4.27"
 serde_json = "1.0.140"
+rand = { version = "0.8.5", optional = true }
 typenum = { version="1.18.0", features=["const-generics"] }
 
 [features]
-default = ["ort", "candle", "onnx-reference", "tokenizers", "llm-samplers", "rwkv-tokenizer"]
+default = ["ort", "candle", "onnx-reference", "tokenizers", "llm-samplers", "rwkv-tokenizer", "dep:rand"]
 onnx-reference = ["pyo3"]
 ort = ["dep:ort"]
 candle = ["candle-onnx", "candle-core"]
 tokenizers = ["dep:tokenizers"]
 llm-samplers = ["dep:llm-samplers"]
 rwkv-tokenizer = ["dep:rwkv-tokenizer"]
+vulkan = ["dep:vulkano"]
 
 [build-dependencies]
 prost-build = "0.13.3"
 
 [workspace]
-members = [ "crates/onnx-graph", "crates/onnx-import"]
+members = [ "crates/onnx-graph", "crates/onnx-import", "crates/whisper-tensor-webui", "crates/whisper-tensor-webui-server"]
 
 [workspace.dependencies]
 onnx-graph = { path = "crates/onnx-graph" }
 onnx-import = { path = "crates/onnx-import" }
+whisper-tensor = {path = "", default-features=false}
+whisper-tensor-webui = {path = "crates/whisper-tensor-webui"}
+whisper-tensor-webui-server = {path = "crates/whisper-tensor-webui-server"}
 candle-core = {version="0.9.0", default-features=false}
 candle-onnx = {version="0.9.0", default-features=false}
