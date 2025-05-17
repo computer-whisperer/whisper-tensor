@@ -1,4 +1,6 @@
+use std::any::type_name_of_val;
 use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
 use crate::dtype::DType;
 use crate::eval_backend::EvalBackend;
 use crate::ndarray_backend::{NDArrayNumericTensor, NDArrayNumericTensorError};
@@ -26,6 +28,9 @@ pub enum EvalError {
 }
 
 pub trait Operation {
+    fn get_op_type_name(&self) -> String {
+        type_name_of_val(self).to_string()
+    }
     fn get_inputs(&self) -> Vec<TensorId>;
     fn get_outputs(&self) -> Vec<TensorId>;
     
@@ -36,7 +41,7 @@ pub trait Operation {
     fn get_milli_op_graph(&self) -> MilliOpGraph;
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, strum_macros::Display, Serialize, Deserialize)]
 pub(crate) enum WhichBinaryOperation {
     Max,
     Min,
@@ -58,7 +63,7 @@ pub(crate) enum WhichBinaryOperation {
     LessOrEqual
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BinaryOperation {
     a: TensorId,
     b: TensorId,
@@ -84,6 +89,10 @@ impl BinaryOperation {
 }
 
 impl Operation for BinaryOperation {
+    fn get_op_type_name(&self) -> String {
+        self.which.to_string()
+    }
+
     fn get_inputs(&self) -> Vec<TensorId> {
         vec![self.a, self.b]
     }
@@ -124,7 +133,7 @@ impl Operation for BinaryOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, strum_macros::Display, Serialize, Deserialize)]
 pub(crate) enum WhichUnaryOperation {
     Relu,
     Sigmoid,
@@ -146,7 +155,7 @@ pub(crate) enum WhichUnaryOperation {
     IsNan
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct UnaryOperation {
     input: TensorId,
     output: TensorId,
@@ -154,6 +163,10 @@ pub struct UnaryOperation {
 }
 
 impl UnaryOperation {
+    fn get_op_type_name(&self) -> String {
+        self.which.to_string()
+    }
+
     pub(crate) fn from_onnx(inputs: Vec<TensorId>, outputs: Vec<TensorId>, which: WhichUnaryOperation) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 1  {
             return Err(ONNXDecodingError::GraphConstructionError("Unary".to_string(), SymbolicGraphError::InvalidOperatorInputs));
@@ -223,7 +236,7 @@ impl Operation for UnaryOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CumSumOperation {
     input: TensorId,
     output: TensorId,
@@ -271,7 +284,7 @@ impl Operation for CumSumOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LpNormalizationOperation {
     input: TensorId,
     output: TensorId,
@@ -346,7 +359,7 @@ impl Operation for LpNormalizationOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GroupNormalizationOperation {
     input: TensorId,
     scale: TensorId,
@@ -472,7 +485,7 @@ impl Operation for GroupNormalizationOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SqueezeOperation {
     input: TensorId,
     axes: TensorId,
@@ -518,7 +531,7 @@ impl Operation for SqueezeOperation {
 }
 
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct UnsqueezeOperation {
     input: TensorId,
     axes: TensorId,
@@ -563,7 +576,7 @@ impl Operation for UnsqueezeOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TransposeOperation {
     input: TensorId,
     output: TensorId,
@@ -607,7 +620,7 @@ impl Operation for TransposeOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ReshapeOperation {
     input: TensorId,
     shape: TensorId,
@@ -652,7 +665,7 @@ impl Operation for ReshapeOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CastLikeOperation {
     input: TensorId,
     target_type: TensorId,
@@ -696,7 +709,7 @@ impl Operation for CastLikeOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CastOperation {
     input: TensorId,
     output: TensorId,
@@ -744,7 +757,7 @@ impl Operation for CastOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LayerNormalizationOperation {
     input: TensorId,
     scale: TensorId,
@@ -861,7 +874,7 @@ impl Operation for LayerNormalizationOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GatherOperation {
     input: TensorId,
     indices: TensorId,
@@ -917,7 +930,7 @@ impl Operation for GatherOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ShapeOperation {
     start: Option<i64>,
     end: Option<i64>,
@@ -992,7 +1005,7 @@ impl Operation for ShapeOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ConcatOperation {
     axis: i64,
     inputs: Vec<TensorId>,
@@ -1044,7 +1057,7 @@ impl Operation for ConcatOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ConstantOfShapeOperation {
     value: NumericScalar,
     input: TensorId,
@@ -1093,7 +1106,7 @@ impl Operation for ConstantOfShapeOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ReduceMeanOperation {
     keepdims: Option<bool>,
     noop_with_empty_axes: Option<bool>,
@@ -1166,7 +1179,7 @@ impl Operation for ReduceMeanOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ReduceSumOperation {
     keepdims: Option<bool>,
     noop_with_empty_axes: Option<bool>,
@@ -1240,7 +1253,7 @@ impl Operation for ReduceSumOperation {
 }
 
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ReduceMaxOperation {
     keepdims: Option<bool>,
     noop_with_empty_axes: Option<bool>,
@@ -1313,7 +1326,7 @@ impl Operation for ReduceMaxOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ReduceMinOperation {
     keepdims: Option<bool>,
     noop_with_empty_axes: Option<bool>,
@@ -1387,7 +1400,7 @@ impl Operation for ReduceMinOperation {
 }
 
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ReduceProdOperation {
     keepdims: Option<bool>,
     noop_with_empty_axes: Option<bool>,
@@ -1462,7 +1475,7 @@ impl Operation for ReduceProdOperation {
 
 
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PowOperation {
     input_x: TensorId,
     input_y: TensorId,
@@ -1506,7 +1519,7 @@ impl Operation for PowOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GemmOperation {
     alpha: Option<f32>,
     beta: Option<f32>,
@@ -1614,7 +1627,7 @@ impl Operation for GemmOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SplitOperation {
     axis: Option<i64>,
     num_outputs: Option<i64>,
@@ -1686,7 +1699,7 @@ impl Operation for SplitOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SliceOperation {
     data: TensorId,
     starts: TensorId,
@@ -1748,7 +1761,7 @@ impl Operation for SliceOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WhereOperation {
     condition: TensorId,
     x: TensorId,
@@ -1796,7 +1809,7 @@ impl Operation for WhereOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SoftmaxOperation {
     axis: Option<i64>,
     input: TensorId,
@@ -1843,7 +1856,7 @@ impl Operation for SoftmaxOperation {
 }
 
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LogSoftmaxOperation {
     axis: Option<i64>,
     input: TensorId,
@@ -1890,7 +1903,7 @@ impl Operation for LogSoftmaxOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct SizeOperation {
     input: TensorId,
     output: TensorId
@@ -1932,7 +1945,7 @@ impl Operation for SizeOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct RangeOperation {
     start: TensorId,
     end: TensorId,
@@ -1981,7 +1994,7 @@ impl Operation for RangeOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct FlattenOperation {
     input: TensorId,
     output: TensorId,
@@ -2043,7 +2056,7 @@ impl Operation for FlattenOperation {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct ConstantOperation {
     value: NDArrayNumericTensor<DynRank>,
     output: TensorId
@@ -2105,7 +2118,7 @@ impl Operation for ConstantOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct IdentityOperation {
     input: TensorId,
     output: TensorId
@@ -2146,7 +2159,7 @@ impl Operation for IdentityOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct IsInfOperation {
     input: TensorId,
     output: TensorId,
@@ -2195,7 +2208,7 @@ impl Operation for IsInfOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct ModuloOperation {
     a: TensorId,
     b: TensorId,
@@ -2245,7 +2258,7 @@ impl Operation for ModuloOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct ClipOperation {
     input: TensorId,
     min: Option<TensorId>,
@@ -2309,8 +2322,8 @@ impl Operation for ClipOperation {
     }
 }
 
-#[derive(Clone, Debug)]
-pub(crate) enum AnyOperation {
+#[derive(Clone, Debug, strum_macros::VariantNames, Serialize, Deserialize)]
+pub enum AnyOperation {
     Unary(UnaryOperation),
     Binary(BinaryOperation),
     Cast(CastOperation),
@@ -2389,6 +2402,9 @@ impl AnyOperation {
 }
 
 impl Operation for AnyOperation {
+    fn get_op_type_name(&self) -> String {
+        self.as_dyn().get_op_type_name()
+    }
     fn get_inputs(&self) -> Vec<TensorId> {
         match self {
             AnyOperation::Unary(op) => op.get_inputs(),

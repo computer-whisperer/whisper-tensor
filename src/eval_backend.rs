@@ -4,6 +4,7 @@ use crate::numeric_tensor::NumericTensor;
 use crate::symbolic_graph::{GraphOperation, OperationId, SymbolicGraph, TensorId, ONNXTensorInfo};
 use crate::symbolic_graph::ops::{EvalError, Operation};
 use crate::symbolic_graph::scalar_info::ScalarInfoTyped;
+use crate::symbolic_graph::tensor_store::TensorStore;
 use crate::tensor_rank::DynRank;
 
 #[derive(Debug, Clone)]
@@ -39,6 +40,7 @@ pub enum EvalRuntimeError {
 
 pub struct EvalRuntime {
     eval_backend: EvalBackend,
+    tensor_store: TensorStore,
     model: SymbolicGraph
 }
 
@@ -66,7 +68,7 @@ fn check_tensor_matches(tensor: &NumericTensor<DynRank>, tensor_info: &ONNXTenso
 }
 
 impl EvalRuntime {
-    pub fn new(model: SymbolicGraph, eval_backend: EvalBackend) -> Result<Self, EvalRuntimeError> {
+    pub fn new(model: SymbolicGraph, tensor_store: TensorStore, eval_backend: EvalBackend) -> Result<Self, EvalRuntimeError> {
         match &eval_backend {
             // Always available
             EvalBackend::NDArray => {}
@@ -76,7 +78,8 @@ impl EvalRuntime {
         }
         Ok(Self {
             model,
-            eval_backend
+            eval_backend,
+            tensor_store
         })
     }
 
@@ -102,7 +105,7 @@ impl EvalRuntime {
     }
 
     pub fn run(&mut self, inputs: HashMap<String, NumericTensor<DynRank>>) -> Result<HashMap<String, NumericTensor<DynRank>>, EvalRuntimeError>{
-        let initialized_tensors = self.model.get_initialized_tensors().clone();
+        let initialized_tensors = self.model.get_initialized_tensors(&self.tensor_store);
         let mut active_tensors: HashMap<TensorId, NumericTensor<DynRank>> = HashMap::new();
         for (name, tensor) in initialized_tensors {
             active_tensors.insert(name, tensor.into());
@@ -175,5 +178,9 @@ impl EvalRuntime {
         }
 
         Ok(output_tensors)
+    }
+    
+    pub fn get_symbolic_graph(&self) -> &SymbolicGraph {
+        &self.model
     }
 }

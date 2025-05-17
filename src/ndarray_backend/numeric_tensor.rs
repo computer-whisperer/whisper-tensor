@@ -1,6 +1,7 @@
 use std::ops::{BitAnd, BitOr, BitXor, Not, Range};
 use half::{bf16, f16};
 use ndarray::{ArcArray, IxDyn, SliceInfo, SliceInfoElem};
+use serde::{Deserialize, Serialize};
 use typenum::P1;
 use crate::dtype::DType;
 use crate::numeric_scalar::NumericScalar;
@@ -30,7 +31,7 @@ pub enum NDArrayNumericTensorError {
 }
 
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum NDArrayNumericTensor<R: Rank>
 {
     F64(ArcArray<f64, R::NDArrayDim>),
@@ -112,6 +113,24 @@ impl<R: Rank> NDArrayNumericTensor<R> {
         };
         let s2 = s.iter().map(|x| *x as u64).collect::<Vec<_>>();
         R::KnownDims::try_from_slice(s2.as_slice()).unwrap()
+    }
+    
+    pub fn num_elements(&self) -> usize {
+        match self {
+            NDArrayNumericTensor::F32(x) => x.len(),
+            NDArrayNumericTensor::F64(x) => x.len(),
+            NDArrayNumericTensor::F16(x) => x.len(),
+            NDArrayNumericTensor::BF16(x) => x.len(),
+            NDArrayNumericTensor::U32(x) => x.len(),
+            NDArrayNumericTensor::I32(x) => x.len(),
+            NDArrayNumericTensor::U64(x) => x.len(),
+            NDArrayNumericTensor::I64(x) => x.len(),
+            NDArrayNumericTensor::U16(x) => x.len(),
+            NDArrayNumericTensor::I16(x) => x.len(),
+            NDArrayNumericTensor::U8(x) => x.len(),
+            NDArrayNumericTensor::I8(x) => x.len(),
+            NDArrayNumericTensor::BOOL(x) => x.len(),
+        }
     }
     
     pub fn get(&self, index: &R::KnownDims) -> Option<NumericScalar>

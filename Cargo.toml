@@ -33,6 +33,8 @@ log = "0.4.27"
 serde_json = "1.0.140"
 rand = { version = "0.8.5", optional = true }
 typenum = { version="1.18.0", features=["const-generics"] }
+strum = "0.27"
+strum_macros = "0.27"
 
 [features]
 default = ["ort", "candle", "onnx-reference", "tokenizers", "llm-samplers", "rwkv-tokenizer", "dep:rand"]

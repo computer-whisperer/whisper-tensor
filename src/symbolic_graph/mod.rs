@@ -4,6 +4,7 @@ mod milli_ops_helpers;
 pub mod symbolic_scalar;
 mod tensor_info;
 pub mod scalar_info;
+pub mod tensor_store;
 
 use std::collections::HashMap;
 use prost::Message;
@@ -16,6 +17,7 @@ use crate::numeric_tensor::NumericTensor;
 use crate::symbolic_graph::ops::AnyOperation;
 use crate::symbolic_graph::scalar_info::ScalarInfoTyped;
 use crate::symbolic_graph::symbolic_scalar::{SymbolicResolver, SymbolicScalar, SymbolicScalarTyped};
+use crate::symbolic_graph::tensor_store::{StoredTensor, TensorStore, TensorStoreTensorId};
 use crate::tensor_rank::DynRank;
 
 #[derive(Debug, thiserror::Error)]
@@ -129,16 +131,16 @@ fn query_attribute_tensor(attributes: &[onnx::AttributeProto], name: &str) -> Op
 
 
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 enum TensorType {
     Input,
     Output,
     Intermediate,
-    Constant(NumericTensor<DynRank>),
-    Weight
+    Constant(NDArrayNumericTensor<DynRank>),
+    Weight(TensorStoreTensorId)
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ONNXTensorInfo {
     onnx_name: Option<String>,
     dtype: Option<DType>,
@@ -158,13 +160,13 @@ impl ONNXTensorInfo {
     pub fn name(&self) -> Option<String> { self.onnx_name.clone() }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GraphOperation {
     pub name: Option<String>,
     pub op: AnyOperation
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SymbolicGraph {
     unknown_dimensions: HashMap<String, SymbolicScalar>,
     tensors: HashMap<TensorId, ONNXTensorInfo>,
@@ -231,12 +233,14 @@ impl SymbolicGraph {
         self.tensors.get(&tensor_id)
     }
     
-    pub fn get_initialized_tensors(&self) -> HashMap<TensorId, NumericTensor<DynRank>> {
+    pub fn get_initialized_tensors(&self, tensor_store: &TensorStore) -> HashMap<TensorId, NumericTensor<DynRank>> {
         let mut out = HashMap::new();
         
         for (key, tensor) in &self.tensors {
-            if let TensorType::Constant(x) = &tensor.tensor_type {
-                out.insert(*key, x.clone());
+            match &tensor.tensor_type {
+                TensorType::Constant(x) => {out.insert(*key, NumericTensor::NDArray(x.clone()));}
+                TensorType::Weight(x) => {out.insert(*key, tensor_store.get_tensor(*x).unwrap().to_numeric());}
+                _ => {}
             }
         }
         
@@ -308,18 +312,19 @@ pub struct SymbolicGraphMutator {
     next_tensor_id: TensorId,
     symbolic_resolver: SymbolicResolver,
     next_operation_id: OperationId,
+    tensor_store: TensorStore
 }
 
 impl SymbolicGraphMutator {
     pub fn new() -> Self {
-        Self::from_graph(SymbolicGraph::new())
+        Self::from_graph(SymbolicGraph::new(), TensorStore::new())
     }
 
-    pub fn get_inner(self) -> SymbolicGraph {
-        self.graph
+    pub fn get_inner(self) -> (SymbolicGraph, TensorStore) {
+        (self.graph, self.tensor_store)
     }
 
-    pub fn from_graph(graph: SymbolicGraph) -> Self {
+    pub fn from_graph(graph: SymbolicGraph, tensor_store: TensorStore) -> Self {
         let next_tensor_id = graph.tensors.keys().max().map(|x| x + 1).unwrap_or(0);
         let mut dimension_resolver = SymbolicResolver::new();
         for (_, dim) in &graph.unknown_dimensions {
@@ -333,6 +338,7 @@ impl SymbolicGraphMutator {
             symbolic_resolver: dimension_resolver,
             unknown_dimensions_by_name: HashMap::new(),
             next_operation_id,
+            tensor_store
         }
     }
 
@@ -416,7 +422,7 @@ impl SymbolicGraphMutator {
         Ok(())
     }
 
-    pub fn new_constant_tensor(&mut self, value: NumericTensor<DynRank>, name: Option<String>) -> TensorId {
+    pub fn new_constant_tensor(&mut self, value: NDArrayNumericTensor<DynRank>, name: Option<String>) -> TensorId {
         let tensor_id = self.next_tensor_id;
         self.next_tensor_id += 1;
 
@@ -433,6 +439,35 @@ impl SymbolicGraphMutator {
                 shape: Some(shape),
                 tensor_type: TensorType::Constant(
                     value
+                )
+            }
+        );
+        if let Some(name) = name {
+            self.tensors_by_name.insert(name, tensor_id);
+        }
+
+        tensor_id
+    }
+
+    pub fn new_stored_tensor(&mut self, id: TensorStoreTensorId, name: Option<String>) -> TensorId {
+        let tensor_id = self.next_tensor_id;
+        self.next_tensor_id += 1;
+        
+        let tensor_ref = self.tensor_store.get_tensor(id).unwrap();
+
+        let mut shape = Vec::new();
+        for s in tensor_ref.shape() {
+            shape.push(ScalarInfoTyped::Numeric(s))
+        }
+
+        self.graph.tensors.insert(
+            tensor_id,
+            ONNXTensorInfo {
+                onnx_name: name.clone(),
+                dtype: Some(tensor_ref.dtype()),
+                shape: Some(shape),
+                tensor_type: TensorType::Weight(
+                    id
                 )
             }
         );
@@ -827,11 +862,22 @@ impl SymbolicGraphMutator {
         }
 
         for t in onnx_graph.initializer {
-            let numeric_tensor = NumericTensor::NDArray(NDArrayNumericTensor::try_from(&t)?);
-            if let Some(x) = graph_mutator.tensors_by_name.get(&t.name) {
-                graph_mutator.graph.tensors.get_mut(x).unwrap().tensor_type = TensorType::Constant(numeric_tensor);
-            } else {
-                graph_mutator.new_constant_tensor(numeric_tensor.clone(), Some(t.name));
+            let numeric_tensor = NDArrayNumericTensor::try_from(&t)?;
+            if numeric_tensor.num_elements() > 100 {
+                // Larger tensors go into tensor store
+                let id = graph_mutator.tensor_store.add_tensor(StoredTensor::Numeric(NumericTensor::NDArray(numeric_tensor)));
+                if let Some(x) = graph_mutator.tensors_by_name.get(&t.name) {
+                    graph_mutator.graph.tensors.get_mut(x).unwrap().tensor_type = TensorType::Weight(id);
+                } else {
+                    graph_mutator.new_stored_tensor(id, Some(t.name));
+                }
+            }
+            else {
+                if let Some(x) = graph_mutator.tensors_by_name.get(&t.name) {
+                    graph_mutator.graph.tensors.get_mut(x).unwrap().tensor_type = TensorType::Constant(numeric_tensor);
+                } else {
+                    graph_mutator.new_constant_tensor(numeric_tensor.clone(), Some(t.name));
+                }
             }
         }
         

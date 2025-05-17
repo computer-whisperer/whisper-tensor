@@ -1,6 +1,7 @@
 use std::fmt::Debug;
 use std::ops::{ Index};
 use ndarray::{Dimension, Ix1, Ix2};
+use serde::{Serialize, Deserialize};
 use typenum::{P1, P2};
 use crate::symbolic_graph::scalar_info::ScalarInfoTyped;
 
@@ -48,7 +49,7 @@ impl<T: Clone, const L: usize> DimContainer<T> for [T; L]
 
 
 pub trait Rank: Debug + Clone {
-    type NDArrayDim: Dimension;
+    type NDArrayDim: Dimension + Serialize + for<'a> Deserialize<'a>;
     const LEN: Option<usize>;
     
     type UnknownDims: Debug + Clone + DimContainer<ScalarInfoTyped<u64>> + Index<usize, Output=ScalarInfoTyped<u64>>;

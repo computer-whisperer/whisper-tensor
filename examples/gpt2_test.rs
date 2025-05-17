@@ -23,8 +23,7 @@ fn main() {
 
     let runtime = RuntimeModel::load_onnx(&onnx_data, RuntimeBackend::Eval(EvalBackend::Candle(candle_core::Device::Cpu)), RuntimeEnvironment::default()).unwrap();
     let mut llm = LanguageModelManager::new(runtime).unwrap();
-
-
+    
     let tokenizer = llm.get_tokenizer().unwrap();
 
     let prompt = "The fibbonacci sequence is: 1, 1, 2, 3, 5, 8, 13";

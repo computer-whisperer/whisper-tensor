@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "lib"]
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 tracing-subscriber = "0.3.19"
@@ -14,7 +14,6 @@ eframe = {version = "0.31.0", default-features = false, features = [
     "glow",          # Use the glow rendering backend. Alternative: "wgpu".
     "persistence",   # Enable restoring app state when restarting the app.
 ]}
-serde = { version = "1.0.219", features = ["derive"] }
 log = "0.4.27"
 wasm-bindgen-futures = "0.4.50"
 web-sys = { version = "0.3.70", features = ['Document',
@@ -22,13 +21,22 @@ web-sys = { version = "0.3.70", features = ['Document',
     'HtmlElement',
     'Node',
     'Window',
-    'WebSocket'
+    'WebSocket',
+    'MessageEvent',
+    'ErrorEvent',
+    'CloseEvent',
+    'ProgressEvent',
+    'FileReader'
 ] }
+rmp-serde = "1.3.0"
 wasm-bindgen = "0.2.100"
+getrandom = { version = "0.3", features = ["wasm_js"] }
+tokio = {version = "1.45.0", default-features = false, features = ["sync"]}
+futures = {version = "0.3.31"}
+
+[dependencies]
 onnx-import = {workspace=true}
 whisper-tensor = {workspace=true, default-features = false}
-getrandom = { version = "0.3", features = ["wasm_js"] }
-tokio = {version = "1.45.0", default-features = false}
-futures = {version = "0.3.31"}
-[dependencies]
 strum = "0.27.1"
+serde = { version = "1.0.219", features = ["derive"] }
+rand = "0.9.1"

@@ -11,7 +11,7 @@ use crate::ndarray_backend::NDArrayNumericTensorError;
 use crate::numeric_tensor::{NumericTensor, NumericTensorError};
 use crate::onnx::{ModelProto, StringStringEntryProto};
 use crate::sampler::SamplerError;
-use crate::symbolic_graph::{ONNXDecodingError, SymbolicGraphMutator};
+use crate::symbolic_graph::{ONNXDecodingError, SymbolicGraph, SymbolicGraphMutator};
 use crate::symbolic_graph::ops::EvalError;
 use crate::tensor_rank::DynRank;
 
@@ -196,8 +196,8 @@ impl RuntimeModel {
                 RuntimeModelInner::Candle(candle_onnx::read_file(temp_file.path()).map_err(|e| anyhow::anyhow!(e))?)
             }
             RuntimeBackend::Eval(eval_backend) => {
-                let model = SymbolicGraphMutator::from_onnx_bytes(onnx_data)?.get_inner();
-                RuntimeModelInner::Eval(EvalRuntime::new(model, eval_backend)?)
+                let (symbolic_graph, tensor_store) = SymbolicGraphMutator::from_onnx_bytes(onnx_data)?.get_inner();
+                RuntimeModelInner::Eval(EvalRuntime::new(symbolic_graph, tensor_store, eval_backend)?)
             }
             _ => {
                 Err(RuntimeError::DisabledBackend(runtime))?
@@ -315,6 +315,17 @@ impl RuntimeModel {
             }
             _ => {
                 todo!()
+            }
+        }
+    }
+    
+    pub fn get_symbolic_graph(&self) -> Option<&SymbolicGraph> {
+        match &self.inner {
+            RuntimeModelInner::Eval(runtime) => {
+                Some(runtime.get_symbolic_graph())
+            }
+            _ => {
+                None
             }
         }
     }
