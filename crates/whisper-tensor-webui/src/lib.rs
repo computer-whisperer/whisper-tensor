@@ -1,6 +1,9 @@
 #[cfg(target_arch = "wasm32")]
 mod app;
 #[cfg(target_arch = "wasm32")]
+mod graph_layout;
+
+#[cfg(target_arch = "wasm32")]
 pub use app::TemplateApp;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
@@ -21,7 +24,8 @@ pub enum WebsocketClientServerMessage {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CurrentModelsReportEntry {
     pub model_id: u32,
-    pub model_name: String
+    pub model_name: String,
+    pub num_ops: Option<u64>
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -75,8 +79,7 @@ fn main() {
                 Box::new(|cc| {
                     Ok(Box::new(TemplateApp::new(cc, server_client_receiver, client_server_sender)))
                 }),
-            )
-            .await;
+            ).await;
 
         // Remove the loading text and spinner:
         if let Some(loading_text) = document.get_element_by_id("loading_text") {

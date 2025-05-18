@@ -82,6 +82,10 @@ impl EvalRuntime {
             tensor_store
         })
     }
+    
+    pub fn get_num_ops(&self) -> usize {
+        self.model.get_operations().len()
+    }
 
     pub fn get_input_tensor_info(&self) -> Result<HashMap<String, (DType, Vec<Option<u64>>)>, EvalRuntimeError> {
         let input_ids = self.model.get_inputs();

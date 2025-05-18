@@ -252,6 +252,26 @@ impl RuntimeModel {
         })
     }
 
+    pub fn get_num_ops(&self) -> Option<usize> {
+        match &self.inner {
+            #[cfg(feature = "onnx-reference")]
+            RuntimeModelInner::ONNXReference(x) => {
+                None
+            }
+            #[cfg(feature = "ort")]
+            RuntimeModelInner::ORT(x) => {
+                None
+            }
+            #[cfg(feature = "candle")]
+            RuntimeModelInner::Candle(x) => {
+                None
+            }
+            RuntimeModelInner::Eval(x) => {
+                Some(x.get_num_ops())
+            }
+        }
+    }
+
     pub fn run(&mut self, inputs: HashMap<String, NumericTensor<DynRank>>) -> Result<HashMap<String, NumericTensor<DynRank>>, RuntimeError> {
         match &mut self.inner {
             #[cfg(feature = "onnx-reference")]

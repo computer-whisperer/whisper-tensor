@@ -128,24 +128,48 @@ fn query_attribute_tensor(attributes: &[onnx::AttributeProto], name: &str) -> Op
 }
 
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum StoredOrNotTensor {
+    Stored(TensorStoreTensorId),
+    NotStored(NDArrayNumericTensor<DynRank>)
+}
 
+impl StoredOrNotTensor {
+    pub fn get_tensor(&self, tensor_store: &TensorStore) -> NumericTensor<DynRank> {
+        match self {
+            StoredOrNotTensor::Stored(id) => tensor_store.get_tensor(*id).unwrap().to_numeric(),
+            StoredOrNotTensor::NotStored(tensor) => NumericTensor::NDArray(tensor.clone())
+        }
+    }
+    pub fn shape(&self, tensor_store: &TensorStore) -> Vec<u64> {
+        match self {
+            StoredOrNotTensor::Stored(id) => tensor_store.get_tensor(*id).unwrap().shape(),
+            StoredOrNotTensor::NotStored(tensor) => tensor.shape()
+        }
+    }
 
+    pub fn dtype(&self, tensor_store: &TensorStore) -> DType {
+        match self {
+            StoredOrNotTensor::Stored(id) => tensor_store.get_tensor(*id).unwrap().dtype(),
+            StoredOrNotTensor::NotStored(tensor) => tensor.dtype()
+        }
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-enum TensorType {
-    Input,
+pub enum TensorType {
+    Input(Option<StoredOrNotTensor>),
     Output,
     Intermediate,
-    Constant(NDArrayNumericTensor<DynRank>),
-    Weight(TensorStoreTensorId)
+    Constant(StoredOrNotTensor)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ONNXTensorInfo {
-    onnx_name: Option<String>,
+    pub onnx_name: Option<String>,
     dtype: Option<DType>,
     shape: Option<Vec<ScalarInfoTyped<u64>>>,
-    tensor_type: TensorType
+    pub tensor_type: TensorType
 }
 
 impl ONNXTensorInfo {
@@ -200,6 +224,10 @@ impl SymbolicGraph {
         &self.operations
     }
 
+    pub fn get_tensors(&self) -> &HashMap<TensorId, ONNXTensorInfo> {
+        &self.tensors
+    }
+
     pub fn get_outputs(&self) -> Vec<TensorId> {
         let mut results = Vec::new();
         for (id, info) in &self.tensors {
@@ -213,7 +241,7 @@ impl SymbolicGraph {
     pub fn get_inputs(&self) -> Vec<TensorId> {
         let mut results = Vec::new();
         for (id, info) in &self.tensors {
-            if let TensorType::Input = info.tensor_type {
+            if let TensorType::Input(_) = info.tensor_type {
                 results.push(*id);
             }
         }
@@ -238,8 +266,7 @@ impl SymbolicGraph {
         
         for (key, tensor) in &self.tensors {
             match &tensor.tensor_type {
-                TensorType::Constant(x) => {out.insert(*key, NumericTensor::NDArray(x.clone()));}
-                TensorType::Weight(x) => {out.insert(*key, tensor_store.get_tensor(*x).unwrap().to_numeric());}
+                TensorType::Constant(x) => {out.insert(*key, x.get_tensor(tensor_store));}
                 _ => {}
             }
         }
@@ -438,7 +465,7 @@ impl SymbolicGraphMutator {
                 dtype: Some(value.dtype()),
                 shape: Some(shape),
                 tensor_type: TensorType::Constant(
-                    value
+                    StoredOrNotTensor::NotStored(value)
                 )
             }
         );
@@ -452,7 +479,7 @@ impl SymbolicGraphMutator {
     pub fn new_stored_tensor(&mut self, id: TensorStoreTensorId, name: Option<String>) -> TensorId {
         let tensor_id = self.next_tensor_id;
         self.next_tensor_id += 1;
-        
+
         let tensor_ref = self.tensor_store.get_tensor(id).unwrap();
 
         let mut shape = Vec::new();
@@ -466,8 +493,8 @@ impl SymbolicGraphMutator {
                 onnx_name: name.clone(),
                 dtype: Some(tensor_ref.dtype()),
                 shape: Some(shape),
-                tensor_type: TensorType::Weight(
-                    id
+                tensor_type: TensorType::Constant(
+                    StoredOrNotTensor::Stored(id)
                 )
             }
         );
@@ -747,7 +774,7 @@ impl SymbolicGraphMutator {
                             axes = attr.ints.clone()
                         }
                     }
-                    let axes_tensor_id = self.new_constant_tensor(NDArrayNumericTensor::from(axes).try_to_rank()?.into(), None);
+                    let axes_tensor_id = self.new_constant_tensor(NDArrayNumericTensor::from(axes).try_to_rank()?, None);
                     input_tensors.push(axes_tensor_id);
                     Some(AnyOperation::Squeeze(ops::SqueezeOperation::from_onnx(input_tensors, output_tensors)
                         .map_err(|x| ONNXDecodingError::GraphConstructionError(onnx_node.name.clone(), x))?
@@ -768,7 +795,7 @@ impl SymbolicGraphMutator {
                             axes = attr.ints.clone()
                         }
                     }
-                    let axes_tensor_id = self.new_constant_tensor(NDArrayNumericTensor::from(axes).try_to_rank()?.into(), None);
+                    let axes_tensor_id = self.new_constant_tensor(NDArrayNumericTensor::from(axes).try_to_rank()?, None);
                     input_tensors.push(axes_tensor_id);
                     Some(AnyOperation::Unsqueeze(ops::UnsqueezeOperation::from_onnx(input_tensors, output_tensors)
                         .map_err(|x| ONNXDecodingError::GraphConstructionError(onnx_node.name.clone(), x))?
@@ -852,7 +879,7 @@ impl SymbolicGraphMutator {
         let mut graph_mutator = Self::new();
 
         for t in onnx_graph.input.iter() {
-            graph_mutator.new_tensor_from_tensor_info(t, TensorType::Input)?;
+            graph_mutator.new_tensor_from_tensor_info(t, TensorType::Input(None))?;
         }
         for t in onnx_graph.output.iter() {
             graph_mutator.new_tensor_from_tensor_info(t, TensorType::Output)?;
@@ -863,20 +890,36 @@ impl SymbolicGraphMutator {
 
         for t in onnx_graph.initializer {
             let numeric_tensor = NDArrayNumericTensor::try_from(&t)?;
-            if numeric_tensor.num_elements() > 100 {
+            let tensor = if numeric_tensor.num_elements() > 100 {
                 // Larger tensors go into tensor store
                 let id = graph_mutator.tensor_store.add_tensor(StoredTensor::Numeric(NumericTensor::NDArray(numeric_tensor)));
-                if let Some(x) = graph_mutator.tensors_by_name.get(&t.name) {
-                    graph_mutator.graph.tensors.get_mut(x).unwrap().tensor_type = TensorType::Weight(id);
-                } else {
-                    graph_mutator.new_stored_tensor(id, Some(t.name));
-                }
+                StoredOrNotTensor::Stored(id)
             }
             else {
-                if let Some(x) = graph_mutator.tensors_by_name.get(&t.name) {
-                    graph_mutator.graph.tensors.get_mut(x).unwrap().tensor_type = TensorType::Constant(numeric_tensor);
-                } else {
-                    graph_mutator.new_constant_tensor(numeric_tensor.clone(), Some(t.name));
+                StoredOrNotTensor::NotStored(numeric_tensor)
+            };
+
+            if let Some(x) = graph_mutator.tensors_by_name.get(&t.name) {
+                let tensor_type = &mut graph_mutator.graph.tensors.get_mut(x).unwrap().tensor_type;
+                match tensor_type.clone() {
+                    TensorType::Input(_) => {
+                        *tensor_type = TensorType::Input(Some(tensor));
+                    }
+                    TensorType::Constant(_) => {
+                        *tensor_type = TensorType::Constant(tensor);
+                    }
+                    _ => {
+                        *tensor_type = TensorType::Constant(tensor);
+                    }
+                }
+            } else {
+                match tensor {
+                    StoredOrNotTensor::Stored(x) => {
+                        graph_mutator.new_stored_tensor(x, Some(t.name));
+                    }
+                    StoredOrNotTensor::NotStored(x) => {
+                        graph_mutator.new_constant_tensor(x, Some(t.name));
+                    }
                 }
             }
         }

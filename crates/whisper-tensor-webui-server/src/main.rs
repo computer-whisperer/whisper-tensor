@@ -43,14 +43,15 @@ impl ModelServer {
             models_report_watch_receiver
         }
     }
-
+    
     pub(crate) async fn generate_new_model_report(&self) {
         let guard = self.models.read().await;
         let mut new_vec = vec![];
         for model in guard.iter() {
             new_vec.push(CurrentModelsReportEntry{
                 model_id: model.model_id,
-                model_name: model.model_name.clone()
+                model_name: model.model_name.clone(),
+                num_ops: model.runtime_model.get_num_ops().map(|x| x as u64)
             })
         }
         self.models_report_watch_sender.send(new_vec).unwrap()
@@ -100,6 +101,7 @@ async fn websocket_handler(ws: WebSocketUpgrade, model_server: Arc<ModelServer>)
 use whisper_tensor_webui::{WebsocketServerClientMessage, WebsocketClientServerMessage, CurrentModelsReportEntry};
 
 use axum::extract::ws::Message;
+use tracing::Instrument;
 
 async fn send_message(socket: &mut WebSocket, message: WebsocketServerClientMessage) {
     let data = rmp_serde::to_vec(&message).unwrap();
