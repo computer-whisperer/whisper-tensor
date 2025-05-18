@@ -72,7 +72,9 @@ fn main() {
             .start(
                 canvas,
                 web_options,
-                Box::new(|cc| Ok(Box::new(TemplateApp::new(cc, server_client_receiver, client_server_sender)))),
+                Box::new(|cc| {
+                    Ok(Box::new(TemplateApp::new(cc, server_client_receiver, client_server_sender)))
+                }),
             )
             .await;
 

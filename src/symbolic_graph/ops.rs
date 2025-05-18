@@ -28,9 +28,10 @@ pub enum EvalError {
 }
 
 pub trait Operation {
-    fn get_op_type_name(&self) -> String {
+    /*fn get_op_type_name(&self) -> String {
         type_name_of_val(self).to_string()
-    }
+    }*/
+    fn get_op_type_name(&self) -> String;
     fn get_inputs(&self) -> Vec<TensorId>;
     fn get_outputs(&self) -> Vec<TensorId>;
     
@@ -163,9 +164,6 @@ pub struct UnaryOperation {
 }
 
 impl UnaryOperation {
-    fn get_op_type_name(&self) -> String {
-        self.which.to_string()
-    }
 
     pub(crate) fn from_onnx(inputs: Vec<TensorId>, outputs: Vec<TensorId>, which: WhichUnaryOperation) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 1  {
@@ -184,6 +182,10 @@ impl UnaryOperation {
 }
 
 impl Operation for UnaryOperation {
+    fn get_op_type_name(&self) -> String {
+        self.which.to_string()
+    }
+
     fn get_inputs(&self) -> Vec<TensorId> {
         vec![self.input]
     }
@@ -263,6 +265,10 @@ impl CumSumOperation {
     }
 }
 impl Operation for CumSumOperation {
+    fn get_op_type_name(&self) -> String {
+        "CumSum".to_string()
+    }
+    
     fn get_inputs(&self) -> Vec<TensorId> {
         vec![self.input, self.axis]
     }
@@ -324,6 +330,10 @@ impl LpNormalizationOperation {
 }
 
 impl Operation for LpNormalizationOperation {
+    fn get_op_type_name(&self) -> String {
+        "LpNormalization".to_string()
+    }
+    
     fn get_inputs(&self) -> Vec<TensorId> {
         vec![self.input]
     }
@@ -399,6 +409,10 @@ impl GroupNormalizationOperation {
 }
 
 impl Operation for GroupNormalizationOperation {
+    fn get_op_type_name(&self) -> String {
+        "GroupNormalization".to_string()
+    }
+    
     fn get_inputs(&self) -> Vec<TensorId> {
         vec![self.input, self.scale, self.bias]
     }
@@ -509,6 +523,10 @@ impl SqueezeOperation {
 }
 
 impl Operation for SqueezeOperation {
+    fn get_op_type_name(&self) -> String {
+        "Squeeze".to_string()
+    }
+    
     fn get_inputs(&self) -> Vec<TensorId> {
         vec![self.input, self.axes]
     }
@@ -555,6 +573,10 @@ impl UnsqueezeOperation {
 }
 
 impl Operation for UnsqueezeOperation {
+    fn get_op_type_name(&self) -> String {
+        "Unsqueeze".to_string()
+    }
+    
     fn get_inputs(&self) -> Vec<TensorId> {
         vec![self.input, self.axes]
     }
@@ -600,6 +622,10 @@ impl TransposeOperation {
 }
 
 impl Operation for TransposeOperation {
+    fn get_op_type_name(&self) -> String {
+        "Transpose".to_string()
+    }
+    
     fn get_inputs(&self) -> Vec<TensorId> {
         vec![self.input]
     }
@@ -644,6 +670,10 @@ impl ReshapeOperation {
 }
 
 impl Operation for ReshapeOperation {
+    fn get_op_type_name(&self) -> String {
+        "Reshape".to_string()
+    }
+    
     fn get_inputs(&self) -> Vec<TensorId> {
         vec![self.input, self.shape]
     }
@@ -689,6 +719,10 @@ impl CastLikeOperation {
 }
 
 impl Operation for CastLikeOperation {
+    fn get_op_type_name(&self) -> String {
+        "Cast Like".to_string()
+    }
+    
     fn get_inputs(&self) -> Vec<TensorId> {
         vec![self.input, self.target_type]
     }
@@ -737,6 +771,10 @@ impl CastOperation {
 }
 
 impl Operation for CastOperation {
+    fn get_op_type_name(&self) -> String {
+        "Cast".to_string()
+    }
+    
     fn get_inputs(&self) -> Vec<TensorId> {
         vec![self.input]
     }
@@ -804,6 +842,10 @@ impl LayerNormalizationOperation {
 }
 
 impl Operation for LayerNormalizationOperation {
+    fn get_op_type_name(&self) -> String {
+        "Layer Normalization".to_string()
+    }
+    
     fn get_inputs(&self) -> Vec<TensorId> {
         let mut v = vec![self.input, self.scale];
         if let Some(bias) = self.bias {
@@ -909,6 +951,10 @@ impl GatherOperation {
 }
 
 impl Operation for GatherOperation {
+    fn get_op_type_name(&self) -> String {
+        "Gather".to_string()
+    }
+    
     fn get_inputs(&self) -> Vec<TensorId> {
         vec![self.input, self.indices]
     }
@@ -969,6 +1015,11 @@ impl ShapeOperation {
 }
 
 impl Operation for ShapeOperation {
+
+    fn get_op_type_name(&self) -> String {
+        "Shape".to_string()
+    }
+    
     fn get_inputs(&self) -> Vec<TensorId> {
         vec![self.input]
     }
@@ -1033,6 +1084,10 @@ impl ConcatOperation {
 }
 
 impl Operation for ConcatOperation {
+    fn get_op_type_name(&self) -> String {
+        "Concat".to_string()
+    }
+    
     fn get_inputs(&self) -> Vec<TensorId> {
         self.inputs.clone()
     }
@@ -1086,6 +1141,10 @@ impl ConstantOfShapeOperation {
 }
 
 impl Operation for ConstantOfShapeOperation {
+    fn get_op_type_name(&self) -> String {
+        "Constant of Shape".to_string()
+    }
+    
     fn get_inputs(&self) -> Vec<TensorId> {
         vec![self.input]
     }
@@ -1144,6 +1203,10 @@ impl ReduceMeanOperation {
 }
 
 impl Operation for ReduceMeanOperation {
+    fn get_op_type_name(&self) -> String {
+        "Reduce Mean".to_string()
+    }
+    
     fn get_inputs(&self) -> Vec<TensorId> {
         if let Some(input_axes) = self.input_axes {
             vec![self.input_data, input_axes]
@@ -1216,6 +1279,10 @@ impl ReduceSumOperation {
 }
 
 impl Operation for ReduceSumOperation {
+    fn get_op_type_name(&self) -> String {
+        "Reduce Sum".to_string()
+    }
+    
     fn get_inputs(&self) -> Vec<TensorId> {
         if let Some(input_axes) = self.input_axes {
             vec![self.input_data, input_axes]
@@ -1290,6 +1357,10 @@ impl ReduceMaxOperation {
 }
 
 impl Operation for ReduceMaxOperation {
+    fn get_op_type_name(&self) -> String {
+        "Reduce Max".to_string()
+    }
+    
     fn get_inputs(&self) -> Vec<TensorId> {
         if let Some(input_axes) = self.input_axes {
             vec![self.input_data, input_axes]
@@ -1363,6 +1434,10 @@ impl ReduceMinOperation {
 }
 
 impl Operation for ReduceMinOperation {
+    fn get_op_type_name(&self) -> String {
+        "Reduce Min".to_string()
+    }
+    
     fn get_inputs(&self) -> Vec<TensorId> {
         if let Some(input_axes) = self.input_axes {
             vec![self.input_data, input_axes]
@@ -1437,6 +1512,10 @@ impl ReduceProdOperation {
 }
 
 impl Operation for ReduceProdOperation {
+    fn get_op_type_name(&self) -> String {
+        "Reduce Prod".to_string()
+    }
+    
     fn get_inputs(&self) -> Vec<TensorId> {
         if let Some(input_axes) = self.input_axes {
             vec![self.input_data, input_axes]
@@ -1499,6 +1578,10 @@ impl PowOperation {
 }
 
 impl Operation for PowOperation {
+    fn get_op_type_name(&self) -> String {
+        "Pow".to_string()
+    }
+    
     fn get_inputs(&self) -> Vec<TensorId> {
         vec!(self.input_x, self.input_y)
     }
@@ -1559,6 +1642,10 @@ impl GemmOperation {
 }
 
 impl Operation for GemmOperation {
+    fn get_op_type_name(&self) -> String {
+        "Gemm".to_string()
+    }
+    
     fn get_inputs(&self) -> Vec<TensorId> {
         if let Some(input_c) = self.input_c {
             vec![self.input_a, self.input_b, input_c]
@@ -1659,6 +1746,10 @@ impl SplitOperation {
 }
 
 impl Operation for SplitOperation {
+    fn get_op_type_name(&self) -> String {
+        "Split".to_string()
+    }
+    
     fn get_inputs(&self) -> Vec<TensorId> {
         if let Some(split) = self.split {
             vec![self.input, split]
@@ -1730,6 +1821,10 @@ impl SliceOperation {
 }
 
 impl Operation for SliceOperation {
+    fn get_op_type_name(&self) -> String {
+        "Slice".to_string()
+    }
+    
     fn get_inputs(&self) -> Vec<TensorId> {
         if let Some(axes) = self.axes {
             if let Some(steps) = self.steps {
@@ -1788,6 +1883,10 @@ impl WhereOperation {
 }
 
 impl Operation for WhereOperation {
+    fn get_op_type_name(&self) -> String {
+        "Where".to_string()
+    }
+    
     fn get_inputs(&self) -> Vec<TensorId> {
         vec![self.condition, self.x, self.y]
     }
@@ -1834,6 +1933,10 @@ impl SoftmaxOperation {
 }
 
 impl Operation for SoftmaxOperation {
+    fn get_op_type_name(&self) -> String {
+        "Softmax".to_string()
+    }
+    
     fn get_inputs(&self) -> Vec<TensorId> {
         vec![self.input]
     }
@@ -1881,6 +1984,10 @@ impl LogSoftmaxOperation {
 }
 
 impl Operation for LogSoftmaxOperation {
+    fn get_op_type_name(&self) -> String {
+        "LogSoftmax".to_string()
+    }
+    
     fn get_inputs(&self) -> Vec<TensorId> {
         vec![self.input]
     }
@@ -1925,6 +2032,10 @@ impl SizeOperation {
 }
 
 impl Operation for SizeOperation {
+    fn get_op_type_name(&self) -> String {
+        "Size".to_string()
+    }
+    
     fn get_inputs(&self) -> Vec<TensorId> {
         vec![self.input]
     }
@@ -1971,6 +2082,10 @@ impl RangeOperation {
 }
 
 impl Operation for RangeOperation {
+    fn get_op_type_name(&self) -> String {
+        "Range".to_string()
+    }
+    
     fn get_inputs(&self) -> Vec<TensorId> {
         vec![self.start, self.end, self.delta]
     }
@@ -2019,6 +2134,10 @@ impl FlattenOperation {
 }
 
 impl Operation for FlattenOperation {
+    fn get_op_type_name(&self) -> String {
+        "Flatten".to_string()
+    }
+    
     fn get_inputs(&self) -> Vec<TensorId> {
         vec![self.input]
     }
@@ -2098,6 +2217,10 @@ impl ConstantOperation {
 }
 
 impl Operation for ConstantOperation {
+    fn get_op_type_name(&self) -> String {
+        "Constant".to_string()
+    }
+    
     fn get_inputs(&self) -> Vec<TensorId> {
         vec![]
     }
@@ -2141,6 +2264,10 @@ impl IdentityOperation {
 }
 
 impl Operation for IdentityOperation {
+    fn get_op_type_name(&self) -> String {
+        "Identity".to_string()
+    }
+    
     fn get_inputs(&self) -> Vec<TensorId> {
         vec![self.input]
     }
@@ -2189,6 +2316,10 @@ impl IsInfOperation {
 }
 
 impl Operation for IsInfOperation {
+    fn get_op_type_name(&self) -> String {
+        "Is Inf".to_string()
+    }
+    
     fn get_inputs(&self) -> Vec<TensorId> {
         vec![self.input]
     }
@@ -2237,6 +2368,10 @@ impl ModuloOperation {
 }
 
 impl Operation for ModuloOperation {
+    fn get_op_type_name(&self) -> String {
+        "Modulo".to_string()
+    }
+    
     fn get_inputs(&self) -> Vec<TensorId> {
         vec![self.a, self.b]
     }
@@ -2285,6 +2420,11 @@ impl ClipOperation {
 }
 
 impl Operation for ClipOperation {
+
+    fn get_op_type_name(&self) -> String {
+        "Clip".to_string()
+    }
+    
     fn get_inputs(&self) -> Vec<TensorId> {
         let mut o = vec![self.input];
         if let Some(min) = self.min {
