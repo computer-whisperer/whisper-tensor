@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use rand::{random, random_range};
-use egui::vec2;
+use egui::{vec2, Rect};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct GraphLayoutNodeId(pub(crate) u32);
@@ -37,7 +37,8 @@ pub(crate) struct GraphLayout {
     op_inputs: HashMap<GraphLayoutNodeId, Vec<GraphLayoutNodeId>>,
     op_outputs: HashMap<GraphLayoutNodeId, Vec<GraphLayoutNodeId>>,
     layout_clock: f32,
-    max_cell_shape: egui::Vec2
+    max_cell_shape: egui::Vec2,
+    bounding_rect: Rect
 }
 
 fn calculate_height(node_id: GraphLayoutNodeId, nodes: &HashMap<GraphLayoutNodeId, GraphLayoutNodeInitData>, node_heights: &mut HashMap<GraphLayoutNodeId, usize>) -> usize {
@@ -280,6 +281,8 @@ impl GraphLayout {
             };
             nodes.insert(op_id, new_node);
         }
+        
+        let bounding_rect = Self::get_bounding_rect_from_nodes(&nodes);
 
         Self {
             nodes,
@@ -288,7 +291,8 @@ impl GraphLayout {
             op_inputs,
             op_outputs,
             layout_clock: 0.0,
-            max_cell_shape: max_node_shape
+            max_cell_shape: max_node_shape,
+            bounding_rect,
         }
     }
 
@@ -303,6 +307,20 @@ impl GraphLayout {
     
     pub(crate) fn get_nodes_mut(&mut self) -> &mut HashMap<GraphLayoutNodeId, GraphLayoutNode> {
         &mut self.nodes
+    }
+    
+    pub(crate) fn get_bounding_rect(&self) -> Rect {
+        self.bounding_rect
+    }
+
+    fn get_bounding_rect_from_nodes(nodes: &HashMap<GraphLayoutNodeId, GraphLayoutNode>) -> Rect {
+        let mut min_vec = egui::pos2(0.0, 0.0);
+        let mut max_vec = egui::pos2(0.0, 0.0);
+        for (_id, node) in nodes {
+            min_vec = min_vec.min(node.position - node.shape/2.0);
+            max_vec = max_vec.max(node.position + node.shape/2.0);
+        }
+        Rect::from_min_max(min_vec, max_vec)
     }
 
     pub(crate) fn update_layout(&mut self, max_nodes_to_update: u32) -> bool {
@@ -424,6 +442,9 @@ impl GraphLayout {
             }
         }
         self.layout_clock += max_nodes_to_update as f32 / self.nodes.len() as f32;
+        if did_update {
+            self.bounding_rect = Self::get_bounding_rect_from_nodes(&self.nodes)
+        }
         did_update
     }
 }

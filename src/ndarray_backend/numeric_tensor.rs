@@ -1,3 +1,4 @@
+use std::fmt::{Display, Formatter};
 use std::ops::{BitAnd, BitOr, BitXor, Not, Range};
 use half::{bf16, f16};
 use ndarray::{ArcArray, IxDyn, SliceInfo, SliceInfoElem};
@@ -47,6 +48,26 @@ pub enum NDArrayNumericTensor<R: Rank>
     U8(ArcArray<u8, R::NDArrayDim>),
     I8(ArcArray<i8, R::NDArrayDim>),
     BOOL(ArcArray<bool, R::NDArrayDim>),
+}
+
+impl<R: Rank> Display for NDArrayNumericTensor<R> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NDArrayNumericTensor::F64(x) => x.fmt(f),
+            NDArrayNumericTensor::F32(x) => x.fmt(f),
+            NDArrayNumericTensor::BF16(x) => x.fmt(f),
+            NDArrayNumericTensor::F16(x) => x.fmt(f),
+            NDArrayNumericTensor::U64(x) => x.fmt(f),
+            NDArrayNumericTensor::I64(x) => x.fmt(f),
+            NDArrayNumericTensor::U32(x) => x.fmt(f),
+            NDArrayNumericTensor::I32(x) => x.fmt(f),
+            NDArrayNumericTensor::U16(x) => x.fmt(f),
+            NDArrayNumericTensor::I16(x) => x.fmt(f),
+            NDArrayNumericTensor::U8(x) => x.fmt(f),
+            NDArrayNumericTensor::I8(x) => x.fmt(f),
+            NDArrayNumericTensor::BOOL(x) => x.fmt(f),
+        }
+    }
 }
 
 impl<R: Rank> NDArrayNumericTensor<R> {
@@ -114,7 +135,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
         let s2 = s.iter().map(|x| *x as u64).collect::<Vec<_>>();
         R::KnownDims::try_from_slice(s2.as_slice()).unwrap()
     }
-    
+
     pub fn num_elements(&self) -> usize {
         match self {
             NDArrayNumericTensor::F32(x) => x.len(),

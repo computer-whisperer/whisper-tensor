@@ -2177,7 +2177,7 @@ impl Operation for FlattenOperation {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ConstantOperation {
-    value: NDArrayNumericTensor<DynRank>,
+    pub value: NDArrayNumericTensor<DynRank>,
     output: TensorId
 }
 

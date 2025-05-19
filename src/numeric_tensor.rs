@@ -519,7 +519,7 @@ impl TryFrom<NumericTensor<DynRank>> for NDArrayNumericTensor<DynRank> {
 
 impl core::fmt::Display for NumericTensor<DynRank> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        self.to_ndarray().map_err(|_| std::fmt::Error)?.fmt(f)
+        std::fmt::Display::fmt(&self.to_ndarray().map_err(|_| std::fmt::Error)?, f)
     }
 }
 

@@ -167,7 +167,7 @@ pub enum TensorType {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ONNXTensorInfo {
     pub onnx_name: Option<String>,
-    dtype: Option<DType>,
+    pub dtype: Option<DType>,
     shape: Option<Vec<ScalarInfoTyped<u64>>>,
     pub tensor_type: TensorType
 }

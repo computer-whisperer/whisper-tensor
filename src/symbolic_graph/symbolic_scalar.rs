@@ -4,7 +4,7 @@ use crate::dtype::{DType};
 use crate::numeric_scalar::{NumericScalarType};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct SymbolicScalarTyped<T>
+pub struct SymbolicScalarTyped<T>
 where
     T: Clone + Copy + NumericScalarType,
 {
