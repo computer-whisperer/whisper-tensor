@@ -183,7 +183,11 @@ impl UnaryOperation {
 
 impl Operation for UnaryOperation {
     fn get_op_type_name(&self) -> String {
-        self.which.to_string()
+        match self.which {
+            WhichUnaryOperation::Trig(trig) => trig.to_string(),
+            _ => self.which.to_string()
+        }
+        
     }
 
     fn get_inputs(&self) -> Vec<TensorId> {

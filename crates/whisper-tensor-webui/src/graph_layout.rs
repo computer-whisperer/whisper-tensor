@@ -1,17 +1,26 @@
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use rand::{random, random_range};
-use egui::{vec2, Rect};
+use egui::{vec2, Rect, UiBuilder};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct GraphLayoutNodeId(pub(crate) u32);
+pub(crate) struct GraphLayoutNodeId(pub(crate) usize);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct GraphLayoutLinkId(pub(crate) usize);
+
+#[derive(Debug, Clone)]
+pub(crate) struct GraphLayoutIOOffsets {
+    pub(crate) inputs: Vec<egui::Vec2>,
+    pub(crate) outputs: Vec<egui::Vec2>
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum GraphLayoutNodeType {
     SymbolicGraphOperation(whisper_tensor::symbolic_graph::OperationId),
     SymbolicGraphTensor(whisper_tensor::symbolic_graph::TensorId),
-    ConnectionByNameSrc(String),
-    ConnectionByNameDest(String)
+    ConnectionByNameSrc(GraphLayoutLinkData),
+    ConnectionByNameDest(GraphLayoutLinkData)
 }
 
 #[derive(Debug, Clone)]
@@ -20,34 +29,52 @@ pub(crate) struct GraphLayoutNode {
     pub(crate) position: egui::Pos2,
     pub(crate) velocity: egui::Vec2,
     pub(crate) shape: egui::Vec2,
-    inputs: Vec<GraphLayoutNodeId>,
+    pub(crate) inputs: Vec<GraphLayoutLinkId>,
+    pub(crate) outputs: Vec<GraphLayoutLinkId>,
+    pub(crate) io_offsets: GraphLayoutIOOffsets
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct GraphLayoutNodeInitData {
     pub node_type: GraphLayoutNodeType,
-    pub shape: egui::Vec2,
-    pub inputs: Vec<GraphLayoutNodeId>
+    pub inputs: Vec<GraphLayoutLinkId>,
+    pub outputs: Vec<GraphLayoutLinkId>
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum GraphLayoutLinkType {
+    SymbolicGraphTensor(whisper_tensor::symbolic_graph::TensorId),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct GraphLayoutLinkData {
+    pub(crate) link_type: GraphLayoutLinkType
 }
 
 pub(crate) struct GraphLayout {
     nodes: HashMap<GraphLayoutNodeId, GraphLayoutNode>,
     node_map: HashMap<(i32, i32), Vec<GraphLayoutNodeId>>,
-    edges: Vec<(GraphLayoutNodeId, GraphLayoutNodeId)>,
-    op_inputs: HashMap<GraphLayoutNodeId, Vec<GraphLayoutNodeId>>,
-    op_outputs: HashMap<GraphLayoutNodeId, Vec<GraphLayoutNodeId>>,
+    edges: Vec<((GraphLayoutNodeId, usize), (GraphLayoutNodeId, usize), GraphLayoutLinkId)>,
     layout_clock: f32,
     max_cell_shape: egui::Vec2,
-    bounding_rect: Rect
+    bounding_rect: Rect,
+    upstream_node_for_link: HashMap<GraphLayoutLinkId, (GraphLayoutNodeId, usize)>,
+    downstream_nodes_for_link: HashMap<GraphLayoutLinkId, Vec<(GraphLayoutNodeId, usize)>>,
+    link_data: HashMap<GraphLayoutLinkId, GraphLayoutLinkData>,
 }
 
-fn calculate_height(node_id: GraphLayoutNodeId, nodes: &HashMap<GraphLayoutNodeId, GraphLayoutNodeInitData>, node_heights: &mut HashMap<GraphLayoutNodeId, usize>) -> usize {
+fn calculate_height(
+    node_id: GraphLayoutNodeId,
+    nodes: &HashMap<GraphLayoutNodeId, GraphLayoutNodeInitData>,
+    upstream_node_for_link: &HashMap<GraphLayoutLinkId, (GraphLayoutNodeId, usize)>,
+    node_heights: &mut HashMap<GraphLayoutNodeId, usize>) -> usize {
     if let Some(x) = node_heights.get(&node_id) {
         *x
     } else {
         let mut min_height = 0;
-        for input in &nodes[&node_id].inputs {
-            min_height = min_height.max(1 + calculate_height(*input, nodes, node_heights));
+        for link_id in &nodes[&node_id].inputs {
+            let node_id = upstream_node_for_link[link_id].0;
+            min_height = min_height.max(1 + calculate_height(node_id, nodes, upstream_node_for_link, node_heights));
         }
         node_heights.insert(node_id, min_height);
         min_height
@@ -82,32 +109,47 @@ impl GraphLayout {
         ret
     }
 
-    pub(crate) fn new(input_init_data: HashMap<GraphLayoutNodeId, GraphLayoutNodeInitData>) -> Self {
-        // Get max op shape
-        let mut max_existing_id = 0;
-        let mut max_node_shape = vec2(1.0, 1.0);
-        for (id, data) in &input_init_data {
-            max_node_shape.x = max_node_shape.x.max(data.shape.x);
-            max_node_shape.y = max_node_shape.y.max(data.shape.y);
-            max_existing_id = max_existing_id.max(id.0);
-        }
-        let mut next_node_id = max_existing_id + 1;
+    pub(crate) fn new(
+        input_node_init_data: HashMap<GraphLayoutNodeId, GraphLayoutNodeInitData>,
+        link_data: HashMap<GraphLayoutLinkId, GraphLayoutLinkData>,
+        ui: &mut egui::Ui,
+        node_render_tester: impl Fn(&mut egui::Ui, &GraphLayoutNodeInitData) -> GraphLayoutIOOffsets
+    ) -> Self {
 
-        // get edges
-        let mut op_inputs = HashMap::new();
-        let mut op_outputs = HashMap::new();
-        for (op_id, data) in &input_init_data {
-            for input in &data.inputs {
-                op_inputs.entry(*op_id).or_insert(Vec::new()).push(*input);
-                op_outputs.entry(*input).or_insert(Vec::new()).push(*op_id);
+        let mut max_existing_node_id = 0;
+        let mut max_existing_link_id = 0;
+        for (id, data) in &input_node_init_data {
+            max_existing_node_id = max_existing_node_id.max(id.0);
+            for link_id in &data.inputs {
+                max_existing_link_id = max_existing_link_id.max(link_id.0);
+            }
+            for link_id in &data.outputs {
+                max_existing_link_id = max_existing_link_id.max(link_id.0);
+            }
+        }
+        for (id, _) in &link_data {
+            max_existing_link_id = max_existing_link_id.max(id.0);
+        }
+        let mut next_node_id = max_existing_node_id + 1;
+        let mut next_link_id = max_existing_link_id + 1;
+
+        // Resolve upstream/downstream nodes for each link
+        let mut upstream_node_for_link = HashMap::new();
+        let mut downstream_nodes_for_link = HashMap::new();
+        for (node_id, node_data) in &input_node_init_data {
+            for (i, link_id) in node_data.outputs.iter().enumerate() {
+                upstream_node_for_link.insert(*link_id, (*node_id, i));
+            }
+            for (i, link_id) in node_data.inputs.iter().enumerate() {
+                downstream_nodes_for_link.entry(*link_id).or_insert_with(Vec::new).push((*node_id, i));
             }
         }
 
         // Get heights
         let mut max_height = 0;
         let mut node_heights = HashMap::new();
-        for (op_id, _op) in &input_init_data {
-            let height = calculate_height(*op_id, &input_init_data, &mut node_heights);
+        for (op_id, _op) in &input_node_init_data {
+            let height = calculate_height(*op_id, &input_node_init_data, &upstream_node_for_link, &mut node_heights);
             max_height = max_height.max(height);
         }
 
@@ -116,11 +158,12 @@ impl GraphLayout {
         nodes_and_heights.sort_by(|(_, a), (_, b)| {b.cmp(a)});
 
         // Iterate over backwards and push nodes up to right under their children
-        for (op_id, _) in nodes_and_heights.iter() {
+
+        for (node_id, _) in nodes_and_heights.iter() {
             let mut upper_bound = None;
-            if let Some(outputs) = op_outputs.get(op_id) {
-                for output in outputs {
-                    let height = &node_heights[output];
+            for link_id in &input_node_init_data[node_id].outputs {
+                for (node_id, _) in &downstream_nodes_for_link[link_id] {
+                    let height = &node_heights[&node_id];
                     if let Some(x) = upper_bound.clone() {
                         if *height < x {
                             upper_bound = Some(*height);
@@ -133,76 +176,97 @@ impl GraphLayout {
             }
 
             if let Some(upper_bound) = upper_bound {
-                node_heights.insert(*op_id, upper_bound-1);
+                node_heights.insert(*node_id, upper_bound-1);
             }
         }
 
-        // Break long edges with connection by name
-        let mut connection_by_name_ids: HashMap<GraphLayoutNodeId, String> = HashMap::new();
-        let mut init_data = input_init_data.clone();
-        let mut connection_by_name_next_id = 0;
-        for (op_id, _op) in &input_init_data {
-            let mut new_inputs = vec![];
-            if let Some(inputs) = op_inputs.get(op_id) {
-                for input_id in inputs.clone() {
-                    let height_delta = node_heights[&op_id] - node_heights[&input_id];
-                    if height_delta > 10 {  
-                        // Break into connection by name
+        // Break long edges with connection by name (involves rewriting the input list)
+        let mut link_data = link_data;
+        let mut node_init_data = HashMap::new();
+        let mut links_with_source_node = HashSet::new();
+        for (node_id, _op) in &input_node_init_data {
+            let node = &input_node_init_data[node_id];
+            let mut new_node_inputs = vec![];
+            for link_id in &node.inputs {
+                let (upstream_node_id, _) = upstream_node_for_link[link_id];
+                let height_delta = node_heights[node_id] - node_heights[&upstream_node_id];
+                if height_delta > 10 {
+                    // Break into connection by name
 
-                        // Add source node if necessary
-                        let source_node_id: String = if let Some(node) = connection_by_name_ids.get(&input_id) {
-                            node.to_string()
-                        } else {
-                            let connection_by_name_id = connection_by_name_next_id.to_string();
-                            let new_node = GraphLayoutNodeInitData{
-                                node_type: GraphLayoutNodeType::ConnectionByNameSrc(connection_by_name_id.clone()),
-                                inputs: vec![input_id],
-                                shape: vec2(80.0, 30.0)
-                            };
-                            let new_node_id = GraphLayoutNodeId(next_node_id);
-                            next_node_id += 1;
-                            connection_by_name_next_id += 1;
-                            connection_by_name_ids.insert(input_id, connection_by_name_id.clone());
-
-                            init_data.insert(new_node_id, new_node);
-                            node_heights.insert(new_node_id, node_heights[&input_id]+1);
-
-                            op_inputs.insert(new_node_id, vec![input_id]);
-                            op_outputs.entry(input_id).and_modify(|v| {v.push(new_node_id)});
-
-                            connection_by_name_id
-                        };
-                        // Add new dest node
+                    if !links_with_source_node.contains(link_id) {
+                        links_with_source_node.insert(*link_id);
                         let new_node = GraphLayoutNodeInitData{
-                            node_type: GraphLayoutNodeType::ConnectionByNameDest(source_node_id.clone()),
-                            inputs: vec![],
-                            shape: vec2(80.0, 30.0)
+                            node_type: GraphLayoutNodeType::ConnectionByNameSrc(link_data[link_id].clone()),
+                            inputs: vec![*link_id],
+                            outputs: vec![],
                         };
                         let new_node_id = GraphLayoutNodeId(next_node_id);
                         next_node_id += 1;
-                        init_data.insert(new_node_id, new_node);
-                        node_heights.insert(new_node_id, node_heights[op_id]-1);
 
-                        op_outputs.insert(new_node_id, vec![*op_id]);
-                        new_inputs.push(new_node_id);
-                        // Delete us from the output list of the source node
-                        op_outputs.entry(input_id).and_modify(|x| {
-                            let idx = x.iter().position(|&r| r == *op_id).unwrap();
-                            x.remove(idx);
-                        });
-                    } else {
-                        new_inputs.push(input_id)
+                        node_init_data.insert(new_node_id, new_node);
+                        node_heights.insert(new_node_id, node_heights[&upstream_node_id]+1);
                     }
+
+                    // Add new dest node
+                    let new_link_id = GraphLayoutLinkId(next_link_id);
+                    link_data.insert(new_link_id, link_data[link_id].clone());
+                    next_link_id += 1;
+                    let new_node = GraphLayoutNodeInitData{
+                        node_type: GraphLayoutNodeType::ConnectionByNameDest(link_data[link_id].clone()),
+                        inputs: vec![],
+                        outputs: vec![new_link_id],
+                    };
+                    let new_node_id = GraphLayoutNodeId(next_node_id);
+                    next_node_id += 1;
+                    node_init_data.insert(new_node_id, new_node);
+                    node_heights.insert(new_node_id, node_heights[node_id]-1);
+
+                    new_node_inputs.push(new_link_id);
+                } else {
+                    new_node_inputs.push(*link_id)
                 }
             }
-            op_inputs.insert(*op_id, new_inputs);
+            node_init_data.insert(*node_id,
+                                  GraphLayoutNodeInitData{
+                                node_type: node.node_type.clone(),
+                                inputs: new_node_inputs,
+                                outputs: node.outputs.clone(),
+                             });
         }
-        
-        // List all edges
+        drop(input_node_init_data);
+
+        // Re-resolve upstream/downstream nodes for each link
+        let mut upstream_node_for_link = HashMap::new();
+        let mut downstream_nodes_for_link = HashMap::new();
+        for (node_id, node_data) in &node_init_data {
+            for (i, link_id) in node_data.outputs.iter().enumerate() {
+                upstream_node_for_link.insert(*link_id, (*node_id, i));
+            }
+            for (i, link_id) in node_data.inputs.iter().enumerate() {
+                downstream_nodes_for_link.entry(*link_id).or_insert_with(Vec::new).push((*node_id, i));
+            }
+        }
+
+        let mut node_shapes = HashMap::new();
+        let mut node_io_offsets = HashMap::new();
+        let mut max_node_shape = egui::Vec2::ZERO;
+        for (node_id, node_data) in node_init_data.iter_mut() {
+            let ui_builder = UiBuilder::new();
+            let mut ui_child = ui.new_child(ui_builder);
+            ui_child.set_invisible();
+            let io_offsets = node_render_tester(&mut ui_child, &node_data);
+            node_io_offsets.insert(*node_id, io_offsets);
+            let new_shape = ui_child.min_size();
+            max_node_shape = max_node_shape.max(new_shape);
+            node_shapes.insert(*node_id, new_shape);
+        }
+
+        // Write edges list
         let mut edges = vec![];
-        for (op_id, inputs) in op_inputs.iter() {
-            for input in inputs {
-                edges.push((*input, *op_id));
+        for (node_id, node_data) in &node_init_data {
+            for (i, link_id) in node_data.inputs.iter().enumerate() {
+                let (upstream_node_id, j) = &upstream_node_for_link[link_id];
+                edges.push(((*upstream_node_id, *j), (*node_id, i), *link_id));
             }
         }
 
@@ -210,8 +274,8 @@ impl GraphLayout {
         let mut nodes_and_heights = node_heights.clone().into_iter().collect::<Vec<_>>();
         nodes_and_heights.sort_by(|(_, a), (_, b)| {b.cmp(a)});
 
-        // Assign lateral positions to minimize crossovers
-        let mut node_lat_vals = HashMap::new();
+        // Resolve y positions
+        let mut node_y_positions = HashMap::new();
         let mut height_val = nodes_and_heights.first().unwrap().1;
         let mut height_siblings = vec![];
         let mut i = 0;
@@ -230,28 +294,34 @@ impl GraphLayout {
                 i += 1;
             }
             if height_siblings.len() > 0 {
-                // Get avg lateral position of parents
+                // Get avg lateral position of downstream nodes
                 let mut lat_means = vec![];
-                for op_id in &height_siblings {
-                    if let Some(outputs) = op_outputs.get(op_id) {
-                        let outputs_len = outputs.len();
-                        let mut total = 0.0;
-                        for output in outputs {
-                            total += node_lat_vals[output]
+                let mut max_shape = egui::Vec2::ZERO;
+                for node_id in &height_siblings {
+                    let node = &node_init_data[node_id];
+                    max_shape = max_shape.max(node_shapes[node_id]);
+                    let mut num = 0;
+                    let mut total = 0.0;
+                    for link_id in &node.outputs {
+                        for (downstream_node_id, input_idx) in &downstream_nodes_for_link[link_id] {
+                            let link_offset = (*input_idx as f32 / node_init_data[downstream_node_id].inputs.len() as f32) * 0.2 ;
+                            num += 1;
+                            total += node_y_positions[downstream_node_id] + link_offset;
                         }
-                        lat_means.push((op_id, total / outputs_len as f32))
                     }
-                    else {
-                        // No outputs
-                        lat_means.push((op_id, 0.0))
+                    if num > 0 {
+                        lat_means.push((node_id, total / num as f32))
+                    } else {
+                        lat_means.push((node_id, 0.0))
                     }
                 }
                 // Sort and place
                 lat_means.sort_by(|(_, a), (_, b)| {if a > b {Ordering::Greater} else {Ordering::Less}});
                 let num_vals = lat_means.len();
-                for (i, (a, b)) in lat_means.into_iter().enumerate() {
-                    let x = (i as f32) - (num_vals as f32 / 2.0);
-                    node_lat_vals.insert(*a, (x + b)/2.0);
+                // Get total len
+                for (i, (a, _b)) in lat_means.into_iter().enumerate() {
+                    let y = ((i as f32) - (num_vals as f32 / 2.0)) * (max_shape.y + 30.0);
+                    node_y_positions.insert(*a, y);
                 }
                 height_siblings.clear();
             }
@@ -264,22 +334,45 @@ impl GraphLayout {
             }
         }
 
+        // Calculate node x positions
+        // Sort by height again
+        let mut nodes_and_heights = node_heights.clone().into_iter().collect::<Vec<_>>();
+        nodes_and_heights.sort_by(|(_, a), (_, b)| {a.cmp(b)});
+
+        let mut node_x_positions = HashMap::new();
+        let mut last_height_max_x = 0.0f32;
+        let mut this_height_max_x = 0.0f32;
+        let mut last_height = 0;
+        for (node_id, height) in nodes_and_heights.iter() {
+            if *height != last_height {
+                last_height = *height;
+                last_height_max_x = this_height_max_x;
+            }
+            let margin = 50.0;
+            let x_pos = last_height_max_x + margin;
+            node_x_positions.insert(*node_id, x_pos + node_shapes[node_id].x/2.0);
+            this_height_max_x = this_height_max_x.max(x_pos + node_shapes[node_id].x);
+        }
+
+
         let mut nodes = HashMap::new();
         let mut node_map = HashMap::new();
-        for (op_id, data) in init_data {
-            let pos = egui::pos2(node_heights[&op_id] as f32 * max_node_shape.x*1.5, node_lat_vals[&op_id] * max_node_shape.y*1.5);
+        for (node_id, data) in node_init_data {
+            let pos = egui::pos2(node_x_positions[&node_id], node_y_positions[&node_id]);
             let vel = egui::vec2(random::<f32>(), random::<f32>());
 
-            node_map.entry(Self::get_index_for(&pos)).or_insert(Vec::new()).push(op_id);
+            node_map.entry(Self::get_index_for(&pos)).or_insert(Vec::new()).push(node_id);
 
             let new_node = GraphLayoutNode {
                 node_type: data.node_type,
                 position: pos,
                 velocity: vel,
-                shape: data.shape,
+                shape: node_shapes[&node_id],
                 inputs: data.inputs,
+                outputs: data.outputs,
+                io_offsets: node_io_offsets[&node_id].clone()
             };
-            nodes.insert(op_id, new_node);
+            nodes.insert(node_id, new_node);
         }
         
         let bounding_rect = Self::get_bounding_rect_from_nodes(&nodes);
@@ -288,11 +381,12 @@ impl GraphLayout {
             nodes,
             node_map,
             edges,
-            op_inputs,
-            op_outputs,
             layout_clock: 0.0,
             max_cell_shape: max_node_shape,
             bounding_rect,
+            upstream_node_for_link,
+            downstream_nodes_for_link,
+            link_data
         }
     }
 
@@ -301,8 +395,12 @@ impl GraphLayout {
     }
 
     
-    pub(crate) fn get_edges(&self) -> &Vec<(GraphLayoutNodeId, GraphLayoutNodeId)> {
+    pub(crate) fn get_edges(&self) -> &Vec<((GraphLayoutNodeId, usize), (GraphLayoutNodeId, usize), GraphLayoutLinkId)> {
         &self.edges
+    }
+
+    pub(crate) fn get_link_data(&self) -> &HashMap<GraphLayoutLinkId, GraphLayoutLinkData> {
+        &self.link_data
     }
     
     pub(crate) fn get_nodes_mut(&mut self) -> &mut HashMap<GraphLayoutNodeId, GraphLayoutNode> {
@@ -350,31 +448,30 @@ impl GraphLayout {
                 }
             }
             let mut links = vec![];
-            if let Some(inputs) = self.op_inputs.get(&op_id) {
-                for input in inputs {
-                    links.push((*input, op_id));
-                }
+            for (i, link_id) in node_data.inputs.iter().enumerate() {
+                let (upstream_node_id, j) = self.upstream_node_for_link[link_id];
+                links.push(((upstream_node_id, j), (op_id, i)));
             }
-            if let Some(outputs) = self.op_outputs.get(&op_id) {
-                for output in outputs {
-                    links.push((op_id, *output));
+            for (i, link_id) in node_data.outputs.iter().enumerate() {
+                for (downstream_node_id, j) in &self.downstream_nodes_for_link[link_id] {
+                    links.push(((op_id, i), (*downstream_node_id, *j)));
                 }
             }
 
-            for (src, dst) in links {
+            for ((src_node_id, src_i), (dst_node_id, dst_i)) in links {
                 // Applied to dst, inverse applied to src
                 let mut link_force = (0.0, 0.0);
-                let src_data = &self.nodes[&src];
-                let dst_data = &self.nodes[&dst];
+                let src_data = &self.nodes[&src_node_id];
+                let dst_data = &self.nodes[&dst_node_id];
 
-                let diag_dist = (src_data.shape.length() + dst_data.shape.length())/2.0;
-                let horiz_dist = (src_data.shape.x + dst_data.shape.x)/2.0;
+                let source_io_position = src_data.position + src_data.io_offsets.outputs[src_i];
+                let dest_io_position = dst_data.position + dst_data.io_offsets.inputs[dst_i];
 
-                let delta = dst_data.position - src_data.position;
+                let delta = dest_io_position - source_io_position;
                 let distance = delta.length();
                 let normalized_delta = (delta.x / distance, delta.y / distance);
-                let force = if distance > horiz_dist * 1.2 {
-                    (-distance / (100.0 + diag_dist)).min(0.5)
+                let force = if distance > 40.0 {
+                    (-distance / 300.0).min(0.5)
                 } else {
                     0.0
                 };
@@ -387,11 +484,11 @@ impl GraphLayout {
                     link_force.0 += 5.0 + 0.01* hierarchy_error;
                 }
 
-                if dst == op_id {
+                if dst_node_id == op_id {
                     applied_force.0 += link_force.0;
                     applied_force.1 += link_force.1;
                 }
-                if src == op_id {
+                if src_node_id == op_id {
                     applied_force.0 -= link_force.0;
                     applied_force.1 -= link_force.1;
                 }

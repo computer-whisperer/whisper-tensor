@@ -127,7 +127,7 @@ pub enum RuntimeError {
     SerdeJSONError(#[from] serde_json::Error)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize, strum_macros::Display)]
 pub enum TrigOp {
     Asin,
     Asinh,
