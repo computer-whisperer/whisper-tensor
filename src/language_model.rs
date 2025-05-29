@@ -3,9 +3,9 @@ use std::io;
 use std::sync::Arc;
 #[cfg(feature = "rwkv-tokenizer")]
 use rwkv_tokenizer::WorldTokenizer;
-use onnx_graph::{ModelInputType, ModelOutputType, TokenizerInfo};
+use whisper_tensor_import::onnx_graph::{ModelInputType, ModelOutputType, TokenizerInfo};
 use crate::numeric_tensor::NumericTensor;
-use crate::tokenizer::Tokenizer;
+use crate::tokenizer::{AnyTokenizer, Tokenizer};
 use crate::{RuntimeError, RuntimeModel};
 use crate::eval_backend::EvalBackend;
 use crate::sampler::Sampler;
@@ -28,26 +28,26 @@ pub struct LangaugeModelIntermediateValues {
 
 pub struct LanguageModelManager {
     model: RuntimeModel,
-    tokenizer: Option<Arc<dyn Tokenizer>>
+    tokenizer: Option<Arc<AnyTokenizer>>
 }
 
 impl LanguageModelManager {
     pub fn new(model: RuntimeModel) -> Result<Self, LanguageModelManagerError> {
-        let mut tokenizer: Option<Arc<dyn Tokenizer>> = None;
+        let mut tokenizer: Option<Arc<AnyTokenizer>> = None;
         if let Some(meta) = &model.model_metadata {
             if let Some(tokenizer_info) = meta.tokenizer_infos.get(0) {
                 match tokenizer_info {
                     TokenizerInfo::HFTokenizer(name) => {
-                        #[cfg(feature = "tokenizers")]
+                        #[cfg(all(feature = "tokenizers", feature = "http"))]
                         {
-                            let x = Arc::new(tokenizers::Tokenizer::from_pretrained(name, None)?);
+                            let x = Arc::new(AnyTokenizer::Tokenizers(tokenizers::Tokenizer::from_pretrained(name, None)?));
                             tokenizer = Some(x);
                         }
                     }
                     TokenizerInfo::RWKVWorld => {
                         #[cfg(feature = "rwkv-tokenizer")]
                         {
-                            let x = Arc::new(WorldTokenizer::new(None)?);
+                            let x = Arc::new(AnyTokenizer::Rwkv(WorldTokenizer::new(None)?));
                             tokenizer = Some(x);
                         }
                     }
@@ -139,7 +139,11 @@ impl LanguageModelManager {
         Ok((output_tensor, intermediate_values.unwrap()))
     }
     
-    pub fn get_tokenizer(&self) -> Option<Arc<dyn Tokenizer>> {
+    pub fn get_tokenizer(&self) -> Option<Arc<AnyTokenizer>> {
         self.tokenizer.clone()
+    }
+    
+    pub fn get_runtime(&self) -> &RuntimeModel {
+        &self.model
     }
 }

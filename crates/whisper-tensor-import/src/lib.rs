@@ -8,6 +8,7 @@ use onnx_graph::onnx::{ModelProto, StringStringEntryProto};
 use onnx_graph::weights::SafetensorsWeightManager;
 use onnx_graph::{InputMetadata, ModelInputType, ModelMetadata, ModelOutputType, OutputMetadata, TokenizerInfo, WeightStorageStrategy};
 
+pub mod onnx_graph;
 pub mod rwkv7;
 pub mod llama3;
 mod llama4;

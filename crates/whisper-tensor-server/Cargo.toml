@@ -1,0 +1,30 @@
+[package]
+name = "whisper-tensor-server"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+
+[dependencies]
+tracing-subscriber = "0.3.19"
+
+tracing = "0.1"
+log = "0.4.27"
+ciborium = { version="0.2.2"}
+whisper-tensor-import = {workspace=true}
+whisper-tensor = {workspace=true}
+anyhow = "1.0.98"
+serde = { version = "1.0.219", features = ["derive"] }
+strum_macros = "0.27.1"
+strum = "0.27.0"
+
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { version = "1.45.0", features = ["rt", "rt-multi-thread"] }
+axum = { version = "0.8.4", features = ["http2", "tokio", "ws"] }
+tower-http = { version = "0.6.4", features = ["fs", "trace"] }
+hf-hub = {version = "0.4.2", features = ["tokio"]}
+tokenizers = {version="0.21.1", default-features = false, features = ["unstable_wasm"]}
+
+[features]
+default = ["whisper-tensor/default"]

@@ -6,9 +6,9 @@ use std::sync::Arc;
 use memmap2::Mmap;
 use safetensors::SafeTensors;
 use safetensors::tensor::{Metadata, TensorInfo};
-use crate::{onnx, Error};
-use crate::onnx::{TensorProto};
-use crate::tensor::{DType, Shape, Tensor, TensorData};
+use super::{onnx, Error};
+use super::onnx::{TensorProto};
+use super::tensor::{DType, Shape, Tensor, TensorData};
 
 pub trait WeightExternalOutputManager<'a> {
     fn write_pth_tensor_data(&mut self, graph_tensor: &'a dyn Tensor, tensor_info: candle_core::pickle::TensorInfo, tensors: Arc<candle_core::pickle::PthTensors>) -> Result<(), Error> {

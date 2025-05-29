@@ -1,10 +1,10 @@
 use std::sync::Arc;
 use prost::Message;
-use onnx_graph::operators::{Add, Concat, Gather, MatMul, Mul, RotaryEmbedding, ShapeOp, Softmax, Transpose};
-use onnx_graph::pytorch::{div_scalar, linear, reshape, rms_norm, silu, transpose};
-use onnx_graph::tensor::{DType, Dimension, InputTensor, Shape, Tensor};
-use onnx_graph::weights::{WeightManager};
-use onnx_graph::{InputMetadata, ModelInputType, ModelMetadata, ModelOutputType, OutputMetadata, TokenizerInfo, WeightStorageStrategy};
+use crate::onnx_graph::operators::{Add, Concat, Gather, MatMul, Mul, RotaryEmbedding, ShapeOp, Softmax, Transpose};
+use crate::onnx_graph::pytorch::{div_scalar, linear, reshape, rms_norm, silu, transpose};
+use crate::onnx_graph::tensor::{DType, Dimension, InputTensor, Shape, Tensor};
+use crate::onnx_graph::weights::{WeightManager};
+use crate::onnx_graph::{InputMetadata, ModelInputType, ModelMetadata, ModelOutputType, OutputMetadata, TokenizerInfo, WeightStorageStrategy};
 use crate::Error;
 
 pub struct Llama3Config {
@@ -119,7 +119,7 @@ pub fn load_llama3(weight_manager: impl WeightManager, config: Llama3Config, out
         let (k, v): (Arc<dyn Tensor>, Arc<dyn Tensor>) = if config.num_key_value_heads == config.num_attention_heads {
             (k, v)
         } else {
-            let repeat_kv = |x: Arc<dyn Tensor>| -> Result<Arc<dyn Tensor>, onnx_graph::Error> {
+            let repeat_kv = |x: Arc<dyn Tensor>| -> Result<Arc<dyn Tensor>, crate::onnx_graph::Error> {
                 let n_rep = config.num_attention_heads / config.num_key_value_heads;
                 let x = Concat::new(None, vec![x.clone(); n_rep], 1)?;
                 Ok(x)
@@ -167,6 +167,6 @@ pub fn load_llama3(weight_manager: impl WeightManager, config: Llama3Config, out
         tokenizer_infos: vec![TokenizerInfo::HFTokenizer("meta/llama3".to_string())],
         max_token_batch: Some(1)
     };
-    let onnx_model = onnx_graph::build_proto(&input_tensors, &output_tensors, output_method, Some(model_metadata))?;
+    let onnx_model = crate::onnx_graph::build_proto(&input_tensors, &output_tensors, output_method, Some(model_metadata))?;
     Ok(onnx_model.encode_to_vec())
 }

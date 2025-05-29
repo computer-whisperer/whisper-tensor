@@ -1,10 +1,10 @@
 use std::collections::{HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
-use crate::{onnx, Error};
-use crate::node::{Node, SingleOutputNode};
-use crate::onnx::{StringStringEntryProto, TensorProto, ValueInfoProto};
-use crate::weights::WeightExternalOutputManager;
+use super::{onnx, Error};
+use super::node::{Node, SingleOutputNode};
+use super::onnx::{StringStringEntryProto, TensorProto, ValueInfoProto};
+use super::weights::WeightExternalOutputManager;
 use core::fmt;
 
 #[derive(Clone, Debug)]

@@ -1,8 +1,8 @@
 use std::sync::Arc;
-use crate::{operators, Error};
-use crate::operators::{Cast, Constant, CumSum, Div, Expand, GroupNormalization, LayerNormalization, Mul, RMSNormalization, ReduceSum, Reshape, Sigmoid, Slice, Squeeze, TopK, Transpose, Unsqueeze};
-use crate::tensor::{DType, Dimension, Shape, Tensor, TensorData, TensorDataValue};
-use crate::weights::WeightManager;
+use super::{operators, Error};
+use super::operators::{Cast, Constant, CumSum, Div, Expand, GroupNormalization, LayerNormalization, Mul, RMSNormalization, ReduceSum, Reshape, Sigmoid, Slice, Squeeze, TopK, Transpose, Unsqueeze};
+use super::tensor::{DType, Dimension, Shape, Tensor, TensorData, TensorDataValue};
+use super::weights::WeightManager;
 
 pub fn linear(weight_manager: &impl WeightManager, input: Arc<dyn Tensor>) -> Result<Arc<dyn Tensor>, Error> {
 

@@ -3,5 +3,3 @@
 version = 4
 
 [[package]]
-name = "onnx-import"
-version = "0.1.0"

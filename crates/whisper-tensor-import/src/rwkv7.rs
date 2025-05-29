@@ -2,19 +2,19 @@ use std::path::Path;
 use std::sync::Arc;
 use candle_core::pickle::PthTensors;
 use prost::Message;
-use onnx_graph::operators::{Add, Cast, Constant, Exp, Gather, LpNormalization, MatMul, Mul, Neg, Sigmoid, Softplus, Sub, Tanh, Relu, Unsqueeze};
-use onnx_graph::pytorch::{cast, group_norm, layer_norm, linear, reshape, squeeze, sum_dim, transpose, unsqueeze};
-use onnx_graph::tensor::{DType, Dimension, InputTensor, InputTensorInitialized, Shape, Tensor, TensorData, TensorDataValue};
-use onnx_graph::weights::{WeightManager};
-use onnx_graph::{InputMetadata, ModelInputType, ModelMetadata, ModelOutputType, OutputMetadata, TokenizerInfo, WeightStorageStrategy};
+use crate::onnx_graph::operators::{Add, Cast, Constant, Exp, Gather, LpNormalization, MatMul, Mul, Neg, Sigmoid, Softplus, Sub, Tanh, Relu,};
+use crate::onnx_graph::pytorch::{cast, group_norm, layer_norm, linear, reshape, squeeze, sum_dim, transpose,};
+use crate::onnx_graph::tensor::{DType, Dimension, InputTensor, InputTensorInitialized, Shape, Tensor, TensorData, TensorDataValue};
+use crate::onnx_graph::weights::{WeightManager};
+use crate::onnx_graph::{InputMetadata, ModelInputType, ModelMetadata, ModelOutputType, OutputMetadata, TokenizerInfo, WeightStorageStrategy};
 
-fn lerp(a: Arc<dyn Tensor>, b: Arc<dyn Tensor>, t: Arc<dyn Tensor>) -> Result<Arc<dyn Tensor>, onnx_graph::Error> {
+fn lerp(a: Arc<dyn Tensor>, b: Arc<dyn Tensor>, t: Arc<dyn Tensor>) -> Result<Arc<dyn Tensor>, crate::onnx_graph::Error> {
     let x = Sub::new(None, b, a.clone())?;
     let x = Mul::new(None, x, t)?;
     Ok(Add::new(None, a, x)?)
 }
 
-fn lora_forward(a: Arc<dyn Tensor>, b: Arc<dyn Tensor>, c: Option<Arc<dyn Tensor>>, x: Arc<dyn Tensor>) -> Result<Arc<dyn Tensor>, onnx_graph::Error>{
+fn lora_forward(a: Arc<dyn Tensor>, b: Arc<dyn Tensor>, c: Option<Arc<dyn Tensor>>, x: Arc<dyn Tensor>) -> Result<Arc<dyn Tensor>, crate::onnx_graph::Error>{
     let x1 = MatMul::new(None, x, a)?;
     let x2 = MatMul::new(None, x1, b)?;
     Ok(if let Some(c) = c {
@@ -24,7 +24,7 @@ fn lora_forward(a: Arc<dyn Tensor>, b: Arc<dyn Tensor>, c: Option<Arc<dyn Tensor
     })
 }
 
-fn lora_forward_sigmoid(a: Arc<dyn Tensor>, b: Arc<dyn Tensor>, c: Option<Arc<dyn Tensor>>, x: Arc<dyn Tensor>) -> Result<Arc<dyn Tensor>, onnx_graph::Error>{
+fn lora_forward_sigmoid(a: Arc<dyn Tensor>, b: Arc<dyn Tensor>, c: Option<Arc<dyn Tensor>>, x: Arc<dyn Tensor>) -> Result<Arc<dyn Tensor>, crate::onnx_graph::Error>{
     let x1 = MatMul::new(None, x, a)?;
     let x2 = MatMul::new(None, Sigmoid::new(None, x1), b)?;
     Ok(if let Some(c) = c {
@@ -34,7 +34,7 @@ fn lora_forward_sigmoid(a: Arc<dyn Tensor>, b: Arc<dyn Tensor>, c: Option<Arc<dy
     })
 }
 
-fn lora_forward_tanh(a: Arc<dyn Tensor>, b: Arc<dyn Tensor>, c: Option<Arc<dyn Tensor>>, x: Arc<dyn Tensor>) -> Result<Arc<dyn Tensor>, onnx_graph::Error>{
+fn lora_forward_tanh(a: Arc<dyn Tensor>, b: Arc<dyn Tensor>, c: Option<Arc<dyn Tensor>>, x: Arc<dyn Tensor>) -> Result<Arc<dyn Tensor>, crate::onnx_graph::Error>{
     let x1 = MatMul::new(None, x, a)?;
     let x2 = MatMul::new(None, Tanh::new(None, x1), b)?;
     Ok(if let Some(c) = c {
@@ -44,7 +44,7 @@ fn lora_forward_tanh(a: Arc<dyn Tensor>, b: Arc<dyn Tensor>, c: Option<Arc<dyn T
     })
 }
 
-pub fn add_scalar<T>(x: Arc<dyn Tensor>, scalar: T) -> Result<Arc<dyn Tensor>, onnx_graph::Error>
+pub fn add_scalar<T>(x: Arc<dyn Tensor>, scalar: T) -> Result<Arc<dyn Tensor>, crate::onnx_graph::Error>
 where
     T: Copy,
     TensorDataValue: From<Vec<T>>
@@ -67,7 +67,7 @@ pub fn load_rwkv7_pth(pth_path: &Path, output_method: WeightStorageStrategy) -> 
         }
     }
     
-    let weight_manager = onnx_graph::weights::PthWeightManager::new(tensors.clone());
+    let weight_manager = crate::onnx_graph::weights::PthWeightManager::new(tensors.clone());
 
     load_rwkv7(weight_manager, layer_count, output_method)
 }
@@ -271,7 +271,7 @@ pub fn load_rwkv7(weight_manager: impl WeightManager, layer_count: usize, output
         tokenizer_infos: vec![TokenizerInfo::RWKVWorld],
         max_token_batch: Some(1)
     };
-    let onnx_model = onnx_graph::build_proto(&input_tensors, &output_tensors, output_method, Some(model_metadata))?;
+    let onnx_model = crate::onnx_graph::build_proto(&input_tensors, &output_tensors, output_method, Some(model_metadata))?;
 
     Ok(onnx_model.encode_to_vec())
 }

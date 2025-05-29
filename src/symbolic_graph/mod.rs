@@ -267,6 +267,7 @@ impl SymbolicGraph {
         for (key, tensor) in &self.tensors {
             match &tensor.tensor_type {
                 TensorType::Constant(x) => {out.insert(*key, x.get_tensor(tensor_store));}
+                TensorType::Input(Some(x)) => {out.insert(*key, x.get_tensor(tensor_store));}
                 _ => {}
             }
         }

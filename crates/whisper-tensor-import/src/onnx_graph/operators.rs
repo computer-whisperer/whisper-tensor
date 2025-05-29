@@ -1,9 +1,9 @@
 use std::collections::HashSet;
 use std::sync::Arc;
-use crate::{onnx, Error};
-use crate::node::{Node, SingleOutputNode};
-use crate::onnx::{AttributeProto};
-use crate::tensor::{DType, Dimension, StubTensor, Shape, Tensor, TensorData};
+use super::{onnx, Error};
+use super::node::{Node, SingleOutputNode};
+use super::onnx::{AttributeProto};
+use super::tensor::{DType, Dimension, StubTensor, Shape, Tensor, TensorData};
 
 fn validate_index_dtype(dtype: DType) -> Result<(), Error> {
     if dtype != DType::I32 && dtype != DType::I64 {

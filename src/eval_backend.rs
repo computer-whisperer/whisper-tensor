@@ -40,7 +40,7 @@ pub enum EvalRuntimeError {
 
 pub struct EvalRuntime {
     eval_backend: EvalBackend,
-    tensor_store: TensorStore,
+    pub(crate) tensor_store: TensorStore,
     model: SymbolicGraph
 }
 
@@ -111,8 +111,8 @@ impl EvalRuntime {
     pub fn run(&mut self, inputs: HashMap<String, NumericTensor<DynRank>>) -> Result<HashMap<String, NumericTensor<DynRank>>, EvalRuntimeError>{
         let initialized_tensors = self.model.get_initialized_tensors(&self.tensor_store);
         let mut active_tensors: HashMap<TensorId, NumericTensor<DynRank>> = HashMap::new();
-        for (name, tensor) in initialized_tensors {
-            active_tensors.insert(name, tensor.into());
+        for (tensor_id, tensor) in initialized_tensors {
+            active_tensors.insert(tensor_id, tensor.into());
         }
         let tensors_by_name = self.model.get_tensors_by_name();
         for (name, tensor) in inputs {

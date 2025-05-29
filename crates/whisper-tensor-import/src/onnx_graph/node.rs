@@ -1,9 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::default::Default;
-use crate::tensor::{Shape, TensorData};
-use crate::tensor::Tensor;
-use crate::DType;
+use super::tensor::{Shape, TensorData};
+use super::tensor::Tensor;
+use super::DType;
 
 pub trait Node {
     fn get_input_tensors(&self) -> Vec<&dyn Tensor> {
@@ -45,10 +45,10 @@ pub trait Node {
         ""
     }
 
-    fn get_onnx_attributes(&self) -> Vec<crate::onnx::AttributeProto>;
+    fn get_onnx_attributes(&self) -> Vec<super::onnx::AttributeProto>;
 
-    fn to_node_proto(&self, name: Option<String>, tensor_names: &HashMap<&dyn Tensor, String>) -> crate::onnx::NodeProto {
-        crate::onnx::NodeProto {
+    fn to_node_proto(&self, name: Option<String>, tensor_names: &HashMap<&dyn Tensor, String>) -> super::onnx::NodeProto {
+        super::onnx::NodeProto {
             name: name.unwrap_or_default(),
             input: self.get_input_tensors().iter().map(|tensor| tensor_names[tensor].clone()).collect(),
             output: self.get_output_tensors().iter().map(|tensor| tensor_names[tensor].clone()).collect(),

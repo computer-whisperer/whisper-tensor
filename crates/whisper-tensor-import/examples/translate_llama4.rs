@@ -1,8 +1,8 @@
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
-use onnx_graph::WeightStorageStrategy;
-use onnx_import::identify_and_load;
+use whisper_tensor_import::onnx_graph::WeightStorageStrategy;
+use whisper_tensor_import::identify_and_load;
 
 fn main() {
     //let file_in = Path::new("/ceph/public/neural_models/llms/Llama-4-Scout-17B-16E-Instruct");

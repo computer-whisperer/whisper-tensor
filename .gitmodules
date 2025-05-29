@@ -1,3 +1,6 @@
 [submodule "libs/onnx"]
 	path = libs/onnx
 	url = https://github.com/onnx/onnx.git
+[submodule "libs/rwkv-tokenizer"]
+	path = libs/rwkv-tokenizer
+	url = git@github.com:computer-whisperer/rwkv-tokenizer.git

@@ -8,37 +8,8 @@ pub use app::TemplateApp;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
-use onnx_import::ModelTypeHint;
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub enum WebsocketClientServerMessage {
-    Ping,
-    LoadModel{
-        model_path: String,
-        model_type_hint: Option<ModelTypeHint>
-    },
-    UnloadModel(u32),
-    GetModelGraph(u32)
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct CurrentModelsReportEntry {
-    pub model_id: u32,
-    pub model_name: String,
-    pub num_ops: Option<u64>
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub enum WebsocketServerClientMessage {
-    Pong,
-    ModelLoadReturn(Result<(), String>),
-    CurrentModelsReport(Vec<CurrentModelsReportEntry>),
-    ModelGraphReturn(Result<(u32, Vec<u8>), String>)
-}
-
 #[cfg(target_arch = "wasm32")]
 use tokio::sync::mpsc;
-
 #[cfg(target_arch = "wasm32")]
 use crate::app::websocket_task;
 

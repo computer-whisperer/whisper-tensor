@@ -1,10 +1,10 @@
 use std::sync::Arc;
 use prost::Message;
-use onnx_graph::operators::{Add, Gather, Mul};
-use onnx_graph::pytorch::{layer_norm, linear, reshape, rms_norm, silu, topk, transpose};
-use onnx_graph::tensor::{DType, Dimension, InputTensor, Shape, Tensor};
-use onnx_graph::weights::WeightManager;
-use onnx_graph::{InputMetadata, ModelInputType, ModelMetadata, ModelOutputType, OutputMetadata, TokenizerInfo, WeightStorageStrategy};
+use crate::onnx_graph::operators::{Add, Gather, Mul};
+use crate::onnx_graph::pytorch::{layer_norm, linear, reshape, rms_norm, silu, topk, transpose};
+use crate::onnx_graph::tensor::{DType, Dimension, InputTensor, Shape, Tensor};
+use crate::onnx_graph::weights::WeightManager;
+use crate::onnx_graph::{InputMetadata, ModelInputType, ModelMetadata, ModelOutputType, OutputMetadata, TokenizerInfo, WeightStorageStrategy};
 use crate::Error;
 
 enum HiddenAct {
@@ -19,7 +19,7 @@ impl HiddenAct {
         }
     }
     
-    pub fn apply(&self, input: Arc<dyn Tensor>) -> Result<Arc<dyn Tensor>, onnx_graph::Error> {
+    pub fn apply(&self, input: Arc<dyn Tensor>) -> Result<Arc<dyn Tensor>, crate::onnx_graph::Error> {
         match self {
             HiddenAct::Silu => silu(input)
         }
@@ -170,7 +170,7 @@ pub fn load_llama4(weight_manager: impl WeightManager, config: Llama4Config, out
         tokenizer_infos: vec![TokenizerInfo::HFTokenizer("meta/llama4".to_string())],
         max_token_batch: Some(1)
     };
-    let onnx_model = onnx_graph::build_proto(&input_tensors, &output_tensors, output_method, Some(model_metadata))?;
+    let onnx_model = crate::onnx_graph::build_proto(&input_tensors, &output_tensors, output_method, Some(model_metadata))?;
 
     Ok(onnx_model.encode_to_vec())
 }

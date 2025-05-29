@@ -10,8 +10,8 @@ use std::sync::Arc;
 use tensor::*;
 use node::*;
 use serde::{Deserialize, Serialize};
-use crate::onnx::StringStringEntryProto;
-use crate::weights::{WeightExternalOutputManager};
+use onnx::StringStringEntryProto;
+use weights::{WeightExternalOutputManager};
 
 pub mod onnx {
     include!(concat!(env!("OUT_DIR"), "/onnx.rs"));

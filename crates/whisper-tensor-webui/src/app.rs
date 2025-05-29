@@ -1,25 +1,31 @@
 use std::cmp::{max, Ordering};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::Duration;
-use egui::{vec2, Color32, Label, Layout, Margin, Rect, Response, RichText, Sense, Shape, Stroke, StrokeKind, UiBuilder, Vec2};
+use egui::{vec2, Color32, Label, Layout, Margin, Rect, Response, RichText, Sense, Shape, Stroke, StrokeKind, UiBuilder, Vec2, Widget};
 use egui::epaint::{CubicBezierShape, QuadraticBezierShape, RectShape};
 use strum::IntoEnumIterator;
 use web_sys::WebSocket;
 use tokio::sync::mpsc;
 use futures::SinkExt;
 use log::{debug, info};
-use rmp_serde::decode::Error;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::error::TryRecvError;
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::js_sys;
 use wasm_bindgen_futures::js_sys::ArrayBuffer;
-use crate::{CurrentModelsReportEntry, WebsocketClientServerMessage, WebsocketServerClientMessage};
 use wasm_bindgen::prelude::*;
 use rand::{random, random_range};
+use rwkv_tokenizer::WorldTokenizer;
+use whisper_tensor::{DynRank, NDArrayNumericTensor};
 use whisper_tensor::symbolic_graph::{OperationId, StoredOrNotTensor, SymbolicGraph, TensorId, TensorType};
 use whisper_tensor::symbolic_graph::ops::{AnyOperation, Operation};
 use whisper_tensor::symbolic_graph::scalar_info::ScalarInfoTyped;
+use whisper_tensor::symbolic_graph::tensor_store::TensorStoreTensorId;
+use whisper_tensor::tokenizer::AnyTokenizer;
+use whisper_tensor_import::ModelTypeHint;
+use whisper_tensor_import::onnx_graph::TokenizerInfo;
+use whisper_tensor_server::{CurrentModelsReportEntry, LoadedModelId, ModelLoadType, ModelTypeMetadata, WebsocketClientServerMessage, WebsocketServerClientMessage};
 use crate::graph_layout::{GraphLayout, GraphLayoutIOOffsets, GraphLayoutLinkData, GraphLayoutLinkId, GraphLayoutLinkType, GraphLayoutNode, GraphLayoutNodeId, GraphLayoutNodeInitData, GraphLayoutNodeType};
 
 pub (crate) async fn websocket_task(server_client_sender: mpsc::UnboundedSender<WebsocketServerClientMessage>,
@@ -48,7 +54,7 @@ pub (crate) async fn websocket_task(server_client_sender: mpsc::UnboundedSender<
                     log::info!("Blob received {} bytes: {:?}", vec.len(), vec);
                     // here you can for example use the received image/png data
 
-                    match rmp_serde::from_slice::<WebsocketServerClientMessage>(&vec) {
+                    match ciborium::from_reader::<WebsocketServerClientMessage, _>(vec.as_slice()) {
                         Ok(msg) => {
                             log::debug!("Decoded message: {:?}", msg);
                             sender_clone.send(msg).unwrap();
@@ -87,7 +93,8 @@ pub (crate) async fn websocket_task(server_client_sender: mpsc::UnboundedSender<
     // Process messages from the client to send to the server
     let ws_clone = ws.clone();
     while let Some(message) = client_server_receiver.recv().await {
-        let data = rmp_serde::to_vec(&message).unwrap();
+        let mut data = Vec::<u8>::new();
+        ciborium::into_writer(&message, &mut data).unwrap();
         log::debug!("Sending message to server");
         ws_clone.send_with_u8_array(&data).unwrap();
     }
@@ -135,22 +142,63 @@ enum ModelLoadState {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 enum SelectedTab {
     Models,
-    Explorer,
-    OtherStuff
+    GraphExplorer,
+    LLMExplorer
 }
 
-#[derive(Clone, Debug, PartialEq, Hash)]
+#[derive(Clone, Debug)]
+struct InspectWindowTensor {
+    tensor_id: TensorId,
+    stored_value_requested: Option<TensorStoreTensorId>,
+    stored_value: Option<Result<NDArrayNumericTensor<DynRank>, String>>
+}
+
+#[derive(Clone, Debug)]
 enum InspectWindow {
     Operation(OperationId),
-    Tensor(TensorId)
+    Tensor(InspectWindowTensor)
+}
+
+impl InspectWindow {
+    fn to_op_or_tensor_id(&self) -> OpOrTensorId {
+        match self {
+            InspectWindow::Operation(op_id) => OpOrTensorId::Op(*op_id),
+            InspectWindow::Tensor (x) => OpOrTensorId::Tensor(x.tensor_id),
+        }
+    }
+
+    fn check_if_already_exists(windows: &[Self], op_or_tensor_id: &OpOrTensorId) -> bool {
+        for window in windows {
+            if window.to_op_or_tensor_id() == *op_or_tensor_id {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn new(op_or_tensor_id: OpOrTensorId) -> Self {
+        match op_or_tensor_id {
+            OpOrTensorId::Op(op_id) => Self::Operation(op_id),
+            OpOrTensorId::Tensor(tensor_id) => {
+                Self::Tensor(InspectWindowTensor{
+                    tensor_id,
+                    stored_value_requested: None,
+                    stored_value: None
+                })
+            },
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct AppState {
     selected_tab: SelectedTab,
     model_to_load_path_text: String,
-    model_type_hint_selected: Option<onnx_import::ModelTypeHint>,
-    explorer_selected_model_id: Option<u32>,
+    model_type_hint_selected: Option<ModelTypeHint>,
+    model_load_type_selected: ModelLoadType,
+    graph_explorer_selected_model_id: Option<LoadedModelId>,
+    llm_explorer_selected_model_id: Option<LoadedModelId>,
+    current_llm_text: String,
     explorer_physics: bool,
     explorer_minimap: bool,
 }
@@ -161,14 +209,17 @@ impl Default for AppState {
             selected_tab: SelectedTab::Models,
             model_to_load_path_text: String::new(),
             model_type_hint_selected: None,
-            explorer_selected_model_id: None,
+            graph_explorer_selected_model_id: None,
+            llm_explorer_selected_model_id: None,
+            model_load_type_selected: ModelLoadType::Other,
+            current_llm_text: String::new(),
             explorer_physics: true,
             explorer_minimap: true,
         }
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum OpOrTensorId {
     Op(OperationId),
     Tensor(TensorId)
@@ -177,23 +228,24 @@ enum OpOrTensorId {
 pub struct TemplateApp {
     model_load_state: Option<ModelLoadState>,
     websocket_server_client_receiver: mpsc::UnboundedReceiver<WebsocketServerClientMessage>,
-    websocket_client_server_message: mpsc::UnboundedSender<WebsocketClientServerMessage>,
+    websocket_client_server_sender: mpsc::UnboundedSender<WebsocketClientServerMessage>,
     current_models: Vec<CurrentModelsReportEntry>,
-    graph_layouts: HashMap<u32, GraphLayout>,
-    loaded_model_graph: Option<(u32, SymbolicGraph)>,
-    currently_requesting_model: Option<u32>,
-    model_view_scene_rects: HashMap<u32, Rect>,
+    graph_layouts: HashMap<LoadedModelId, GraphLayout>,
+    loaded_model_graph: Option<(LoadedModelId, SymbolicGraph)>,
+    currently_requesting_model: Option<LoadedModelId>,
+    model_view_scene_rects: HashMap<LoadedModelId, Rect>,
     app_state: AppState,
     explorer_selection: Option<OpOrTensorId>,
     explorer_hovered: Option<OpOrTensorId>,
-    inspect_windows: Vec<InspectWindow>
+    inspect_windows: Vec<InspectWindow>,
+    loaded_tokenizers: HashMap<LoadedModelId, Option<Result<Arc<AnyTokenizer>, String>>>,
 }
 
 impl TemplateApp {
     /// Called once before the first frame.
     pub fn new(cc: &eframe::CreationContext<'_>,
                websocket_server_client_receiver: mpsc::UnboundedReceiver<WebsocketServerClientMessage>,
-               websocket_client_server_message: mpsc::UnboundedSender<WebsocketClientServerMessage>) -> Self {
+               websocket_client_server_sender: mpsc::UnboundedSender<WebsocketClientServerMessage>) -> Self {
         // This is also where you can customize the look and feel of egui using
         // `cc.egui_ctx.set_visuals` and `cc.egui_ctx.set_fonts`.
         cc.egui_ctx.set_zoom_factor(1.2);
@@ -209,7 +261,7 @@ impl TemplateApp {
         Self {
             model_load_state: None,
             websocket_server_client_receiver,
-            websocket_client_server_message,
+            websocket_client_server_sender,
             current_models: vec![],
             graph_layouts: HashMap::new(),
             loaded_model_graph: None,
@@ -218,7 +270,8 @@ impl TemplateApp {
             app_state,
             explorer_selection: None,
             explorer_hovered: None,
-            inspect_windows: vec![]
+            inspect_windows: vec![],
+            loaded_tokenizers: HashMap::new()
         }
     }
 }
@@ -374,14 +427,74 @@ impl eframe::App for TemplateApp {
                         }
                         WebsocketServerClientMessage::CurrentModelsReport(res) => {
                             self.current_models = res;
+                            // Prompt tokenizer loading
+                            for model in &self.current_models {
+                                if let ModelTypeMetadata::LLM(llm_metadata) = &model.model_type_metadata {
+                                    match &llm_metadata.tokenizer_info {
+                                        TokenizerInfo::HFTokenizer(x) => {
+                                            if !self.loaded_tokenizers.contains_key(&model.model_id) {
+                                                self.websocket_client_server_sender.send(WebsocketClientServerMessage::GetHFTokenizer(x.clone())).unwrap();
+                                                self.loaded_tokenizers.insert(model.model_id, None);
+                                            }
+                                        }
+                                        TokenizerInfo::RWKVWorld => {
+                                            if !self.loaded_tokenizers.contains_key(&model.model_id) {
+                                                self.loaded_tokenizers.insert(model.model_id, Some(Ok(Arc::new(AnyTokenizer::Rwkv(WorldTokenizer::new_default())))));
+                                            }
+                                        }
+                                    }
+
+                                }
+                            }
                         }
                         WebsocketServerClientMessage::ModelGraphReturn(res) => {
                             let (id, graph_bin) = res.unwrap();
                             if let Some(requesting_id) = self.currently_requesting_model {
                                 if requesting_id == id {
                                     self.currently_requesting_model = None;
-                                    let graph = rmp_serde::from_slice::<SymbolicGraph>(&graph_bin).unwrap();
+                                    let graph = ciborium::from_reader::<SymbolicGraph, _>(graph_bin.as_slice()).unwrap();
                                     self.loaded_model_graph = Some((id, graph))
+                                }
+                            }
+                        }
+                        WebsocketServerClientMessage::TensorStoreReturn(model_id, stored_tensor_id, res) => {
+                            if let Some(selected_model_id) = self.app_state.graph_explorer_selected_model_id {
+                                if selected_model_id == model_id {
+                                    for window in &mut self.inspect_windows {
+                                        if let InspectWindow::Tensor(inspect_window_tensor) = window {
+                                            if let Some(x) = inspect_window_tensor.stored_value_requested {
+                                                if x == stored_tensor_id {
+                                                    inspect_window_tensor.stored_value = Some(res.clone());
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        WebsocketServerClientMessage::HFTokenizerReturn(hf_name, bytes_res) => {
+                            let tokenizer = match bytes_res {
+                                Ok(x) => {
+                                    tokenizers::Tokenizer::from_bytes(x).map_err(|x| x.to_string()).map(|x|
+                                        Arc::new(AnyTokenizer::Tokenizers(x))
+                                    )
+                                }
+                                Err(err) => {
+                                    Err(err)
+                                }
+                            };
+
+                            for model_entry in &self.current_models {
+                                if let ModelTypeMetadata::LLM(x) = &model_entry.model_type_metadata {
+                                    if let TokenizerInfo::HFTokenizer(model_hf_name) = &x.tokenizer_info {
+                                        if hf_name == *model_hf_name {
+                                            if let Some(x) = self.loaded_tokenizers.get_mut(&model_entry.model_id) {
+                                                if x.is_none() {
+                                                    *x = Some(tokenizer.clone())
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -402,8 +515,8 @@ impl eframe::App for TemplateApp {
                 egui::widgets::global_theme_preference_switch(ui);
                 ui.heading("Whisper Tensor");
                 ui.selectable_value(&mut self.app_state.selected_tab, SelectedTab::Models, "Manage Models");
-                ui.selectable_value(&mut self.app_state.selected_tab, SelectedTab::Explorer, "Model Explorer");
-                ui.selectable_value(&mut self.app_state.selected_tab, SelectedTab::OtherStuff, "Other Stuff");
+                ui.selectable_value(&mut self.app_state.selected_tab, SelectedTab::GraphExplorer, "Graph Explorer");
+                ui.selectable_value(&mut self.app_state.selected_tab, SelectedTab::LLMExplorer, "LLM Explorer");
             });
         });
 
@@ -431,16 +544,23 @@ impl eframe::App for TemplateApp {
                             egui::ComboBox::from_id_salt(1245).selected_text(if let Some(which) = &self.app_state.model_type_hint_selected {which.to_string()} else {String::from("No Hint")})
                                 .show_ui(ui, |ui|{
                                     ui.selectable_value(&mut self.app_state.model_type_hint_selected, None, "No Hint");
-                                    for which in onnx_import::ModelTypeHint::iter() {
+                                    for which in ModelTypeHint::iter() {
                                         ui.selectable_value(&mut self.app_state.model_type_hint_selected, Some(which.clone()), which.to_string());
+                                    }
+                                });
+                            egui::ComboBox::from_id_salt(1246).selected_text(format!("{}", &self.app_state.model_load_type_selected))
+                                .show_ui(ui, |ui|{
+                                    for which in ModelLoadType::iter() {
+                                        ui.selectable_value(&mut self.app_state.model_load_type_selected, which.clone(), which.to_string());
                                     }
                                 });
                         });
                         ui.horizontal(|ui| {
                             if ui.button("Load").clicked() {
-                                self.websocket_client_server_message.send(WebsocketClientServerMessage::LoadModel {
+                                self.websocket_client_server_sender.send(WebsocketClientServerMessage::LoadModel {
                                     model_path: self.app_state.model_to_load_path_text.clone(),
-                                    model_type_hint: self.app_state.model_type_hint_selected.clone()
+                                    model_type_hint: self.app_state.model_type_hint_selected.clone(),
+                                    model_load_type: self.app_state.model_load_type_selected.clone(),
                                 }).unwrap();
                                 self.model_load_state = Some(ModelLoadState::Loading)
                             }
@@ -475,8 +595,31 @@ impl eframe::App for TemplateApp {
                                 ui.label(model.model_id.to_string());
                                 ui.label(model.model_name.clone());
                                 ui.label(if let Some(ops) = model.num_ops {format!("Operations: {:?}", ops)} else {"Operations: Unknown".to_string()});
+                                match model.model_type_metadata {
+                                    ModelTypeMetadata::Other => {
+                                        ui.label("Other");
+                                    }
+                                    ModelTypeMetadata::LLM(_) => {
+                                        ui.label("LLM");
+                                    }
+                                }
+                                if let Some(x) = self.loaded_tokenizers.get(&model.model_id) {
+                                    match x {
+                                        None => {
+                                            ui.label("Loading tokenizer...");
+                                        },
+                                        Some(Ok(_)) => {
+                                            ui.label("Loaded tokenizer");
+                                        },
+                                        Some(Err(err)) => {
+                                            ui.label(format!("Error loading tokenizer: {}", err));
+                                        }
+                                    }
+                                } else {
+                                    ui.label("N/A");
+                                }
                                 if ui.button("Unload").clicked() {
-                                    self.websocket_client_server_message.send(
+                                    self.websocket_client_server_sender.send(
                                         WebsocketClientServerMessage::UnloadModel(model.model_id)
                                     ).unwrap();
                                 }
@@ -485,13 +628,13 @@ impl eframe::App for TemplateApp {
                         });
                     });
                 }
-                SelectedTab::Explorer => {
+                SelectedTab::GraphExplorer => {
                     ui.horizontal(|ui| {
                         if self.current_models.is_empty() {
                             ui.label("No Models Loaded");
                         }
                         for model in &self.current_models {
-                            if ui.selectable_value(&mut self.app_state.explorer_selected_model_id, Some(model.model_id), format!("({}) {}", model.model_id, model.model_name.clone())).clicked() {
+                            if ui.selectable_value(&mut self.app_state.graph_explorer_selected_model_id, Some(model.model_id), format!("({}) {}", model.model_id, model.model_name.clone())).clicked() {
                                 self.explorer_selection = None;
                                 self.explorer_hovered = None;
                                 self.inspect_windows.clear();
@@ -508,7 +651,7 @@ impl eframe::App for TemplateApp {
                         })
                     });
 
-                    let model_id = if let Some(model_id) = self.app_state.explorer_selected_model_id {
+                    let model_id = if let Some(model_id) = self.app_state.graph_explorer_selected_model_id {
                         let mut ret = None;
                         for model in &self.current_models {
                             if model.model_id == model_id {
@@ -857,23 +1000,23 @@ impl eframe::App for TemplateApp {
                                         if resp.double_clicked() {
                                             match &current_node_data[&node_id].node_type {
                                                 GraphLayoutNodeType::SymbolicGraphOperation(op_id) => {
-                                                    let new_inspect = InspectWindow::Operation(*op_id);
-                                                    if !self.inspect_windows.contains(&new_inspect) {
-                                                        self.inspect_windows.push(new_inspect);
+                                                    let new_inspect = OpOrTensorId::Op(*op_id);
+                                                    if !InspectWindow::check_if_already_exists(&self.inspect_windows, &new_inspect) {
+                                                        self.inspect_windows.push(InspectWindow::new(new_inspect));
                                                     }
                                                 }
                                                 GraphLayoutNodeType::SymbolicGraphTensor(tensor_id) => {
-                                                    let new_inspect = InspectWindow::Tensor(*tensor_id);
-                                                    if !self.inspect_windows.contains(&new_inspect) {
-                                                        self.inspect_windows.push(new_inspect);
+                                                    let new_inspect = OpOrTensorId::Tensor(*tensor_id);
+                                                    if !InspectWindow::check_if_already_exists(&self.inspect_windows, &new_inspect) {
+                                                        self.inspect_windows.push(InspectWindow::new(new_inspect));
                                                     }
                                                 }
                                                 GraphLayoutNodeType::ConnectionByNameSrc(link_data) | GraphLayoutNodeType::ConnectionByNameDest(link_data) => {
                                                     match &link_data.link_type {
                                                         GraphLayoutLinkType::SymbolicGraphTensor(tensor_id) => {
-                                                            let new_inspect = InspectWindow::Tensor(*tensor_id);
-                                                            if !self.inspect_windows.contains(&new_inspect) {
-                                                                self.inspect_windows.push(new_inspect);
+                                                            let new_inspect = OpOrTensorId::Tensor(*tensor_id);
+                                                            if !InspectWindow::check_if_already_exists(&self.inspect_windows, &new_inspect) {
+                                                                self.inspect_windows.push(InspectWindow::new(new_inspect));
                                                             }
                                                         }
                                                     }
@@ -938,7 +1081,7 @@ impl eframe::App for TemplateApp {
                             ui.label("Loading Model Graph...");
                             ui.spinner();
                             if self.currently_requesting_model.map(|id| id != model_id).unwrap_or(true) {
-                                self.websocket_client_server_message.send(WebsocketClientServerMessage::GetModelGraph(model_id)).unwrap();
+                                self.websocket_client_server_sender.send(WebsocketClientServerMessage::GetModelGraph(model_id)).unwrap();
                                 self.currently_requesting_model = Some(model_id);
                             }
                         }
@@ -946,8 +1089,29 @@ impl eframe::App for TemplateApp {
                         ui.label("No Model Selected");
                     }
                 }
-                SelectedTab::OtherStuff => {
-                    ui.label("Other Stuff");
+                SelectedTab::LLMExplorer => {
+                    ui.horizontal(|ui| {
+                        if self.current_models.is_empty() {
+                            ui.label("No Models Loaded");
+                        }
+                        for model in &self.current_models {
+                            if let ModelTypeMetadata::LLM(_) = model.model_type_metadata {
+                                if ui.selectable_value(&mut self.app_state.graph_explorer_selected_model_id, Some(model.model_id), format!("({}) {}", model.model_id, model.model_name.clone())).clicked() {
+                                    self.explorer_selection = None;
+                                    self.explorer_hovered = None;
+                                    self.inspect_windows.clear();
+                                };
+                            }
+                        }
+                        if ui.button("Load New Model").clicked() {
+                            self.model_load_state = Some(ModelLoadState::DialogOpen(None));
+                        };
+                    });
+                    egui::TextEdit::singleline(&mut self.app_state.current_llm_text).ui(ui);
+                    let frame = egui::Frame::default().stroke(ui.visuals().window_stroke);
+                    frame.show(ui, |ui| {
+                        ui.label(&self.app_state.current_llm_text);
+                    });
                 }
             }
 
@@ -967,30 +1131,19 @@ impl eframe::App for TemplateApp {
             format!("({joined:})")
         }
 
-        fn format_tensor(val: &StoredOrNotTensor) -> String {
-            match val {
-                StoredOrNotTensor::Stored(x) => {
-                    "Stored Tensor".to_string()
-                }
-                StoredOrNotTensor::NotStored(x) => {
-                    x.to_string()
-                }
-            }
-        }
-
-        if let SelectedTab::Explorer = self.app_state.selected_tab {
+        if let SelectedTab::GraphExplorer = self.app_state.selected_tab {
             let mut new_inspect_windows = vec![];
-            self.inspect_windows.retain(|inspect_window| {
+            self.inspect_windows.retain_mut(|inspect_window| {
                 let mut local_open = true;
                 let default_pos = ctx.input(|x| {x.pointer.latest_pos()});
                 if let Some((model_id, model_graph)) = &self.loaded_model_graph {
-                    if let Some(selected_model_id) = self.app_state.explorer_selected_model_id {
+                    if let Some(selected_model_id) = self.app_state.graph_explorer_selected_model_id {
                         if *model_id == selected_model_id {
                             match inspect_window {
                                 InspectWindow::Operation(op_id) => {
                                     let mut is_hovering_tensor = false;
                                     let op_info =  &model_graph.get_operations()[op_id];
-                                    let name = op_info.name.clone().map(|x| format!("Op: {x}")).unwrap_or(format!("{inspect_window:?}"));
+                                    let name = op_info.name.clone().map(|x| format!("Op: {x}")).unwrap_or(format!("Op Id: {op_id:?}"));
                                     let mut window = egui::Window::new(RichText::from(name.clone()).size(14.)).open(&mut local_open).resizable(false);
                                     if let Some(default_pos) = default_pos {
                                         window = window.default_pos(default_pos);
@@ -999,7 +1152,7 @@ impl eframe::App for TemplateApp {
                                         let mut resp = ui.label(format!("ONNX Name: {:}", op_info.name.clone().unwrap_or("N/A".to_string())));
                                         resp = resp.union(ui.label(format!("Op Type: {:}", op_info.op.get_op_type_name())));
                                         resp = resp.union(ui.label("Inputs:"));
-                                        fn format_tensor_row(ui: &mut egui::Ui, i: usize, tensor_id: TensorId, model_graph: &SymbolicGraph, new_inspect_windows: &mut Vec<InspectWindow>) -> Response {
+                                        fn format_tensor_row(ui: &mut egui::Ui, i: usize, tensor_id: TensorId, model_graph: &SymbolicGraph, new_inspect_windows: &mut Vec<OpOrTensorId>) -> Response {
                                             let tensor_info = model_graph.get_tensor_info(tensor_id).unwrap();
                                             let mut response = ui.label(format!("{i}"));
                                             response = response.union(ui.label(format!("{tensor_id:?}")));
@@ -1007,7 +1160,7 @@ impl eframe::App for TemplateApp {
                                             response = response.union(ui.label(tensor_info.dtype.map(|x| x.to_string()).clone().unwrap_or("N/A".to_string())));
                                             response = response.union(ui.label(tensor_info.shape().map(|x| format_shape(&x)).unwrap_or("N/A".to_string())));
                                             if ui.button("Inspect").clicked() || response.double_clicked() {
-                                                new_inspect_windows.push(InspectWindow::Tensor(tensor_id));
+                                                new_inspect_windows.push(OpOrTensorId::Tensor(tensor_id));
                                             }
                                             ui.end_row();
                                             response
@@ -1054,23 +1207,32 @@ impl eframe::App for TemplateApp {
                                         }
                                     }
                                 }
-                                InspectWindow::Tensor(tensor_id) => {
-                                    let tensor_info = model_graph.get_tensor_info(*tensor_id).unwrap();
-                                    let name = tensor_info.onnx_name.clone().map(|x| format!("Tensor: {x}")).unwrap_or(format!("{inspect_window:?}"));
+                                InspectWindow::Tensor(inspect_window_tensor) => {
+                                    let tensor_id = inspect_window_tensor.tensor_id;
+                                    let tensor_info = model_graph.get_tensor_info(tensor_id).unwrap();
+                                    let name = tensor_info.onnx_name.clone().map(|x| format!("Tensor: {x}")).unwrap_or(format!("Tensor Id: {tensor_id}"));
                                     let mut window = egui::Window::new(RichText::from(name.clone()).size(14.)).open(&mut local_open).resizable(false);
                                     if let Some(default_pos) = default_pos {
                                         window = window.default_pos(default_pos);
                                     }
+
                                     let resp = window.show(ctx, |ui| {
                                         let mut resp = ui.label(format!("ONNX Name: {:}", tensor_info.onnx_name.clone().unwrap_or("N/A".to_string())));
                                         resp = resp.union(ui.label(format!("DType: {:}", tensor_info.dtype.map(|x| x.to_string()).clone().unwrap_or("N/A".to_string()))));
                                         resp = resp.union(ui.label(format!("Shape: {:}", tensor_info.shape().map(|x| format_shape(&x)).unwrap_or("N/A".to_string()))));
-
+                                        let mut stored_tensor = None;
                                         match &tensor_info.tensor_type {
                                             TensorType::Input(x) => {
                                                 resp = resp.union(ui.label("Tensor Type: Model Input"));
                                                 if let Some(x) = x {
-                                                    ui.label(format!("Initial Value: {}", format_tensor(&x)));
+                                                    match x {
+                                                        StoredOrNotTensor::Stored(stored_tensor_id) => {
+                                                            stored_tensor = Some(*stored_tensor_id);
+                                                        }
+                                                        StoredOrNotTensor::NotStored(x) => {
+                                                            ui.label(format!("Initial Value: {x}"));
+                                                        }
+                                                    };
                                                 }
                                             }
                                             TensorType::Output => {
@@ -1081,18 +1243,53 @@ impl eframe::App for TemplateApp {
                                             }
                                             TensorType::Constant(x) => {
                                                 resp = resp.union(ui.label("Tensor Type: Constant"));
-                                                ui.label(format!("Value: {}", format_tensor(&x)));
+                                                match x {
+                                                    StoredOrNotTensor::Stored(stored_tensor_id) => {
+                                                        stored_tensor = Some(*stored_tensor_id);
+                                                    }
+                                                    StoredOrNotTensor::NotStored(x) => {
+                                                        resp = resp.union(ui.label(format!("Value: {x}")));
+                                                    }
+                                                };
+
+                                            }
+                                        }
+                                        if let Some(stored_tensor_id) = stored_tensor {
+                                            if inspect_window_tensor.stored_value_requested.is_none() {
+                                                inspect_window_tensor.stored_value_requested = Some(stored_tensor_id);
+                                                let msg = WebsocketClientServerMessage::GetStoredTensor(*model_id, stored_tensor_id);
+                                                self.websocket_client_server_sender.send(msg).unwrap();
+                                            }
+                                            if let Some(x) = &inspect_window_tensor.stored_value {
+                                                match x {
+                                                    Ok(x) => {
+                                                        resp = resp.union(ui.label(format!("Value: {x}")));
+                                                    }
+                                                    Err(err) => {
+                                                        ui.scope(|ui| {
+                                                            ui.visuals_mut().override_text_color = Some(egui::Color32::RED);
+                                                            ui.style_mut().override_text_style = Some(egui::TextStyle::Monospace);
+                                                            ui.label(err);
+                                                        });
+                                                    }
+                                                }
+                                            }
+                                            else {
+                                                resp = resp.union(ui.label("Loading Tensor..."));
+                                                resp = resp.union(ui.spinner());
                                             }
                                         }
                                         if resp.clicked() {
-                                            self.explorer_selection = Some(OpOrTensorId::Tensor(*tensor_id));
+                                            self.explorer_selection = Some(OpOrTensorId::Tensor(tensor_id));
                                         }
                                     });
                                     if let Some(resp) = resp {
                                         if resp.response.contains_pointer() {
-                                            new_explorer_hovered = Some(OpOrTensorId::Tensor(*tensor_id))
+                                            new_explorer_hovered = Some(OpOrTensorId::Tensor(tensor_id))
                                         }
                                     }
+
+
                                 }
                             }
                         }
@@ -1101,8 +1298,8 @@ impl eframe::App for TemplateApp {
                 local_open
             });
             for new_inspect_window in new_inspect_windows {
-                if !self.inspect_windows.contains(&new_inspect_window) {
-                    self.inspect_windows.push(new_inspect_window);
+                if !InspectWindow::check_if_already_exists(&self.inspect_windows, &new_inspect_window) {
+                    self.inspect_windows.push(InspectWindow::new(new_inspect_window));
                 }
             }
         }

@@ -1777,7 +1777,7 @@ impl MilliOp for AnyMilliOp {
             AnyMilliOp::SimpleBinary(x) => x.infer(known_inputs, symbolic_resolver, backend),
             AnyMilliOp::Pow(x) => x.infer(known_inputs, symbolic_resolver, backend),
             AnyMilliOp::SimpleUnary(x) => x.infer(known_inputs, symbolic_resolver, backend),
-            AnyMilliOp::MatMul(x) =>x.infer(known_inputs, symbolic_resolver, backend),
+            AnyMilliOp::MatMul(x) => x.infer(known_inputs, symbolic_resolver, backend),
             AnyMilliOp::ClampMin(x) => x.infer(known_inputs, symbolic_resolver, backend),
             AnyMilliOp::NonZero(x) => x.infer(known_inputs, symbolic_resolver, backend),
             AnyMilliOp::CumSum(x) => x.infer(known_inputs, symbolic_resolver, backend),

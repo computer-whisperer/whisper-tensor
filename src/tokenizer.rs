@@ -9,6 +9,35 @@ pub enum TokenizerError {
     Utf8Error(#[from] Utf8Error),
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum AnyTokenizer {
+    #[cfg(feature = "tokenizers")]
+    Tokenizers(tokenizers::Tokenizer),
+    #[cfg(feature = "rwkv-tokenizer")]
+    Rwkv(rwkv_tokenizer::WorldTokenizer),
+}
+
+impl Tokenizer for AnyTokenizer {
+    fn encode(&self, text: &str) -> Vec<u32> {
+        match self {
+            #[cfg(feature = "tokenizers")]
+            AnyTokenizer::Tokenizers(x) => <_ as Tokenizer>::encode(x, text),
+            #[cfg(feature = "rwkv-tokenizer")]
+            AnyTokenizer::Rwkv(x) => <_ as Tokenizer>::encode(x, text),
+            _ => unimplemented!()
+        }
+    }
+    fn decode(&self, tokens: &[u32]) -> Result<String, TokenizerError> {
+        match self {
+            #[cfg(feature = "tokenizers")]
+            AnyTokenizer::Tokenizers(x) => <_ as Tokenizer>::decode(x, tokens),
+            #[cfg(feature = "rwkv-tokenizer")]
+            AnyTokenizer::Rwkv(x) => <_ as Tokenizer>::decode(x, tokens),
+            _ => unimplemented!()
+        }
+    }
+}
+
 pub trait Tokenizer {
     fn encode(&self, text: &str) -> Vec<u32>;
     fn decode(&self, tokens: &[u32]) -> Result<String, TokenizerError>;

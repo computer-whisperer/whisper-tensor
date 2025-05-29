@@ -4,7 +4,7 @@ use num_traits::real::Real;
 
 use prost::{DecodeError, Message};
 use serde::{Deserialize, Serialize};
-use onnx_graph::{InputMetadata, ModelMetadata, OutputMetadata};
+use whisper_tensor_import::onnx_graph::{InputMetadata, ModelMetadata, OutputMetadata, TokenizerInfo};
 use crate::dtype::{DType, DTypeError};
 use crate::eval_backend::{EvalBackend, EvalRuntime, EvalRuntimeError};
 use crate::ndarray_backend::NDArrayNumericTensorError;
@@ -13,7 +13,6 @@ use crate::onnx::{ModelProto, StringStringEntryProto};
 use crate::sampler::SamplerError;
 use crate::symbolic_graph::{ONNXDecodingError, SymbolicGraph, SymbolicGraphMutator};
 use crate::symbolic_graph::ops::EvalError;
-use crate::tensor_rank::DynRank;
 
 pub mod symbolic_graph;
 pub mod numeric_tensor;
@@ -22,11 +21,14 @@ pub mod sampler;
 pub mod language_model;
 pub mod tokenizer;
 pub mod eval_backend;
-mod ndarray_backend;
+pub mod ndarray_backend;
 mod onnx_testing;
 pub mod numeric_scalar;
 pub mod tensor_rank;
 pub mod numeric_tensor_typed;
+
+pub use ndarray_backend::NDArrayNumericTensor;
+pub use tensor_rank::DynRank;
 
 #[cfg(feature = "ort")]
 pub mod ort_backend;
@@ -169,6 +171,7 @@ pub struct RuntimeEnvironment {
 
 #[cfg(feature = "ort")]
 use crate::ort_backend::ORTNumericTensor;
+use crate::symbolic_graph::tensor_store::TensorStoreTensorId;
 
 impl RuntimeModel {
     pub fn load_onnx(onnx_data: &[u8], runtime: RuntimeBackend, runtime_environment: RuntimeEnvironment) -> Result<Self, RuntimeError> {
@@ -348,6 +351,21 @@ impl RuntimeModel {
                 None
             }
         }
+    }
+
+    pub fn get_stored_tensor_id(&self, stored_tensor_id: TensorStoreTensorId) -> Option<NumericTensor<DynRank>> {
+        match &self.inner {
+            RuntimeModelInner::Eval(runtime) => {
+                runtime.tensor_store.get_tensor(stored_tensor_id).map(|x| x.to_numeric())
+            }
+            _ => {
+                None
+            }
+        }
+    }
+    
+    pub fn get_tokenizer_infos(&self) -> &Vec<TokenizerInfo> {
+        &self.model_metadata.as_ref().unwrap().tokenizer_infos
     }
 }
 

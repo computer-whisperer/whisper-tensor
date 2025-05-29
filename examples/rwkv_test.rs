@@ -5,13 +5,14 @@ use llm_samplers::prelude::{SampleGreedy, SampleTemperature, SamplerChain, Simpl
 use rand::prelude::StdRng;
 use rand::SeedableRng;
 use typenum::P1;
-use onnx_graph::WeightStorageStrategy;
-use onnx_import::{identify_and_load, ModelTypeHint};
+use whisper_tensor_import::onnx_graph::WeightStorageStrategy;
 use whisper_tensor::{RuntimeBackend, RuntimeEnvironment, RuntimeModel};
 use whisper_tensor::eval_backend::EvalBackend;
 use whisper_tensor::language_model::LanguageModelManager;
 use whisper_tensor::numeric_tensor::{NumericTensor};
 use whisper_tensor::sampler::LLMSamplersBundle;
+use whisper_tensor::tokenizer::Tokenizer;
+use whisper_tensor_import::{identify_and_load, ModelTypeHint};
 
 fn main() {
     tracing_subscriber::fmt::init();
@@ -28,7 +29,7 @@ fn main() {
 
     let tokenizer = llm.get_tokenizer().unwrap();
 
-    let prompt = "The fibbonacci sequence is: 1, 1, 2, 3, 5,";
+    let prompt = "The fibonacci sequence is a sequence of";
     let input = tokenizer.encode(prompt).iter().map(|x| *x as i64).collect::<Vec<_>>();
     let input_tensor = NumericTensor::from_vec(input).to_dyn_rank().unsqueeze(0, &EvalBackend::NDArray).unwrap();
 
