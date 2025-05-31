@@ -2,7 +2,7 @@ use std::cmp::{max, Ordering};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
-use egui::{vec2, Color32, Label, Layout, Margin, Rect, Response, RichText, Sense, Shape, Stroke, StrokeKind, UiBuilder, Vec2, Widget};
+use egui::{vec2, Color32, CursorIcon, Event, EventFilter, Label, Layout, Margin, Rect, Response, RichText, Sense, Shape, Stroke, StrokeKind, UiBuilder, Vec2, Widget, WidgetText};
 use egui::epaint::{CubicBezierShape, QuadraticBezierShape, RectShape};
 use strum::IntoEnumIterator;
 use web_sys::WebSocket;
@@ -22,10 +22,10 @@ use whisper_tensor::symbolic_graph::{OperationId, StoredOrNotTensor, SymbolicGra
 use whisper_tensor::symbolic_graph::ops::{AnyOperation, Operation};
 use whisper_tensor::symbolic_graph::scalar_info::ScalarInfoTyped;
 use whisper_tensor::symbolic_graph::tensor_store::TensorStoreTensorId;
-use whisper_tensor::tokenizer::AnyTokenizer;
+use whisper_tensor::tokenizer::{AnyTokenizer, Tokenizer, TokenizerError};
 use whisper_tensor_import::ModelTypeHint;
 use whisper_tensor_import::onnx_graph::TokenizerInfo;
-use whisper_tensor_server::{CurrentModelsReportEntry, LoadedModelId, ModelLoadType, ModelTypeMetadata, WebsocketClientServerMessage, WebsocketServerClientMessage};
+use whisper_tensor_server::{CurrentModelsReportEntry, ForwardLogitRequest, LoadedModelId, ModelLoadType, ModelTypeMetadata, WebsocketClientServerMessage, WebsocketServerClientMessage};
 use crate::graph_layout::{GraphLayout, GraphLayoutIOOffsets, GraphLayoutLinkData, GraphLayoutLinkId, GraphLayoutLinkType, GraphLayoutNode, GraphLayoutNodeId, GraphLayoutNodeInitData, GraphLayoutNodeType};
 
 pub (crate) async fn websocket_task(server_client_sender: mpsc::UnboundedSender<WebsocketServerClientMessage>,
@@ -212,7 +212,7 @@ impl Default for AppState {
             graph_explorer_selected_model_id: None,
             llm_explorer_selected_model_id: None,
             model_load_type_selected: ModelLoadType::Other,
-            current_llm_text: String::new(),
+            current_llm_text: String::from("This is some example text."),
             explorer_physics: true,
             explorer_minimap: true,
         }
@@ -239,6 +239,8 @@ pub struct TemplateApp {
     explorer_hovered: Option<OpOrTensorId>,
     inspect_windows: Vec<InspectWindow>,
     loaded_tokenizers: HashMap<LoadedModelId, Option<Result<Arc<AnyTokenizer>, String>>>,
+    llm_explorer_cached_token_list: Option<Vec<u32>>,
+    latest_logits: Option<(LoadedModelId, Vec<u32>, Result<Vec<Vec<(u32, f32)>>, String>)>
 }
 
 impl TemplateApp {
@@ -271,7 +273,9 @@ impl TemplateApp {
             explorer_selection: None,
             explorer_hovered: None,
             inspect_windows: vec![],
-            loaded_tokenizers: HashMap::new()
+            loaded_tokenizers: HashMap::new(),
+            llm_explorer_cached_token_list: None,
+            latest_logits: None,
         }
     }
 }
@@ -398,6 +402,30 @@ fn render_node_contents(ui: &mut egui::Ui, node_type: &GraphLayoutNodeType, num_
     )
 }
 
+fn escape_token_text(input: &str) -> String {
+    use std::fmt::Write;
+
+    let mut out = String::with_capacity(input.len());
+
+    for c in input.chars() {
+        match c {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\\' => out.push_str("\\\\"),
+            // `is_control` is true for all C0 controls (0x00–0x1F) and DEL (0x7F)
+            c if c.is_control() => {
+                // \u{XXXX} where XXXX is at least 4 hex digits
+                write!(out, "\\u{{{:04X}}}", c as u32).unwrap();
+            }
+            // Printable, keep as‑is
+            c => out.push(c),
+        }
+    }
+
+    out
+}
+
 impl eframe::App for TemplateApp {
     /// Called by the frame work to save state before shutdown.
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
@@ -497,6 +525,9 @@ impl eframe::App for TemplateApp {
                                     }
                                 }
                             }
+                        }
+                        WebsocketServerClientMessage::GetLogitsReturn(request, result) => {
+                            self.latest_logits = Some((request.model_id, request.context_tokens, result));
                         }
                         _ => {
                             log::debug!("Unhandled message: {:?}", msg);
@@ -1096,10 +1127,9 @@ impl eframe::App for TemplateApp {
                         }
                         for model in &self.current_models {
                             if let ModelTypeMetadata::LLM(_) = model.model_type_metadata {
-                                if ui.selectable_value(&mut self.app_state.graph_explorer_selected_model_id, Some(model.model_id), format!("({}) {}", model.model_id, model.model_name.clone())).clicked() {
-                                    self.explorer_selection = None;
-                                    self.explorer_hovered = None;
-                                    self.inspect_windows.clear();
+                                if ui.selectable_value(&mut self.app_state.llm_explorer_selected_model_id, Some(model.model_id), format!("({}) {}", model.model_id, model.model_name.clone())).clicked() {
+                                    // Good!
+                                    self.llm_explorer_cached_token_list = None;
                                 };
                             }
                         }
@@ -1107,11 +1137,227 @@ impl eframe::App for TemplateApp {
                             self.model_load_state = Some(ModelLoadState::DialogOpen(None));
                         };
                     });
-                    egui::TextEdit::singleline(&mut self.app_state.current_llm_text).ui(ui);
-                    let frame = egui::Frame::default().stroke(ui.visuals().window_stroke);
-                    frame.show(ui, |ui| {
-                        ui.label(&self.app_state.current_llm_text);
-                    });
+
+                    let model = if let Some(selected_model_id) =  self.app_state.llm_explorer_selected_model_id {
+                        let mut ret = None;
+                        for model in &self.current_models {
+                            if model.model_id == selected_model_id {
+                                ret = Some(model);
+                            }
+                        }
+                        ret
+                    } else {
+                        None
+                    };
+
+                    {
+                        let spacing_mut = ui.spacing_mut();
+                        spacing_mut.item_spacing.y = 10.0;
+                    }
+
+                    let tokenizer = if let Some(model) = model {
+                        match self.loaded_tokenizers.get(&model.model_id) {
+                            Some(x) => {
+                                x.as_ref()
+                            },
+                            _ => { None }
+                        }
+                    } else {
+                        None
+                    };
+
+                    match (model, tokenizer) {
+                        (Some(model), Some(Ok(tokenizer))) => {
+                            if let ModelTypeMetadata::LLM(x) = &model.model_type_metadata {
+                                let v = match &x.tokenizer_info {
+                                    TokenizerInfo::HFTokenizer(x) => {
+                                        format!("Huggingface: {x}")
+                                    }
+                                    TokenizerInfo::RWKVWorld => {
+                                        "RWKV World".to_string()
+                                    }
+                                };
+                                ui.label(format!("Using tokenizer: {v}"));
+                            }
+                            {
+                                let old_text = self.app_state.current_llm_text.clone();
+                                egui::TextEdit::multiline(&mut self.app_state.current_llm_text).ui(ui);
+                                if self.app_state.current_llm_text != old_text {
+                                    self.llm_explorer_cached_token_list = None;
+                                }
+                            }
+                            let frame = egui::Frame::default();
+                            frame.show(ui, |ui| {
+                                let id = egui::Id::new("llm box");
+
+                                // Generate tokens if needed
+                                if self.llm_explorer_cached_token_list.is_none() {
+                                    // Generate it
+                                    self.llm_explorer_cached_token_list = Some(
+                                        tokenizer.encode(&self.app_state.current_llm_text)
+                                    );
+                                }
+
+                                // Display
+
+                                if let Some(tokens) = &self.llm_explorer_cached_token_list{
+                                    let color_wheel = [
+                                        Color32::from_rgb(50, 0, 0),
+                                        Color32::from_rgb(0, 50, 0),
+                                        Color32::from_rgb(0, 0, 50),
+                                    ];
+
+                                    ui.horizontal_wrapped(|ui| {
+                                        {
+                                            let spacing_mut = ui.spacing_mut();
+                                            spacing_mut.item_spacing.x = 0.0;
+                                            spacing_mut.item_spacing.y = 2.0;
+                                        }
+                                        let mut idx = 0;
+                                        let mut is_good = true;
+                                        loop {
+                                            let color = color_wheel[idx%color_wheel.len()];
+                                            if idx >= tokens.len() && !is_good {
+                                                break;
+                                            }
+
+                                            let chosen_token_id = tokens.get(idx);
+
+                                            ui.vertical(|ui| {
+                                                let mut next_is_good = is_good;
+                                                if let Some(chosen_token) = chosen_token_id {
+                                                    let label_text = match tokenizer.decode(&[*chosen_token]) {
+                                                        Ok(token_str) => {
+                                                            escape_token_text(&token_str)
+                                                        }
+                                                        Err(_) => {
+                                                            "(?)".to_string()
+                                                        }
+                                                    };
+
+                                                    // Token string
+                                                    let text = RichText::new(label_text).background_color(color).size(20.0);
+                                                    Label::new(text).ui(ui);
+
+                                                    // Token id
+                                                    let text = RichText::new(chosen_token.to_string()).background_color(color).size(8.0);
+                                                    Label::new(text).ui(ui);
+
+                                                    // Validate logits
+                                                    if let Some((_a, b, _c)) = &self.latest_logits {
+                                                        if idx < b.len() {
+                                                            next_is_good &= b[idx] == *chosen_token
+                                                        }
+                                                    }
+                                                }
+                                                else {
+                                                    next_is_good = false;
+                                                }
+                                                {
+                                                    let spacing_mut = ui.spacing_mut();
+                                                    spacing_mut.item_spacing.x = 5.0;
+                                                    spacing_mut.item_spacing.y = 3.0;
+                                                }
+                                                if is_good {
+                                                    if let Some((a, b, c)) = &self.latest_logits {
+                                                        if *a == model.model_id && idx-1 < b.len() {
+                                                            if let Ok(c) = c {
+                                                                let logits = &c[idx-1];
+                                                                for j in 0..5 {
+                                                                    if j >= logits.len() {
+                                                                        break;
+                                                                    }
+                                                                    let (token_id, value) = &logits[j];
+                                                                    let token_str = tokenizer.decode(&[*token_id]).unwrap_or("?".to_string());
+                                                                    let token_str = escape_token_text(&token_str);
+                                                                    //ui.label(format!("{token_id}, {value}, {token_str}"));
+                                                                    let text = RichText::new(token_str).background_color(Color32::from_rgb(20, 20, 20)).size(15.0);
+                                                                    ui.label(text);
+                                                                    //let text = RichText::new(token_id.to_string()).size(8.0);
+                                                                    //ui.label(text);
+                                                                    let text = RichText::new(format!("{value:.02}")).size(8.0);
+                                                                    ui.label(text);
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                is_good = next_is_good;
+                                            });
+
+
+                                            idx += 1;
+                                        }
+                                    });
+                                }
+
+                                let mut response = ui.interact(ui.min_rect(), id, Sense::click());
+
+                                if response.hovered() {
+                                    ui.ctx().set_cursor_icon(CursorIcon::Text);
+                                }
+                                let event_filter = EventFilter {
+                                    // moving the cursor is really important
+                                    horizontal_arrows: true,
+                                    vertical_arrows: true,
+                                    tab: false, // tab is used to change focus, not to insert a tab character
+                                    ..Default::default()
+                                };
+                                if ui.memory(|mem| mem.has_focus(id)) {
+                                    ui.memory_mut(|mem| mem.set_focus_lock_filter(id, event_filter));
+
+                                    let events = ui.input(|i| i.filtered_events(&event_filter));
+                                    for event in events {
+                                        match event {
+                                            Event::Text(x) => {
+                                                self.app_state.current_llm_text.push_str(&x);
+                                                self.llm_explorer_cached_token_list = None;
+                                            }
+                                            Event::Key{
+                                                key: egui::Key::Backspace,
+                                                pressed: true,
+                                                ..
+                                            } => {
+                                                self.app_state.current_llm_text.remove(self.app_state.current_llm_text.len() - 1);
+                                                self.llm_explorer_cached_token_list = None;
+                                            }
+                                            Event::PointerMoved(_) | Event::PointerGone | Event::Key{..} => {
+                                                // Don't care
+                                            }
+                                            _ => {
+                                                info!("Unhandled event: {event:?}")
+                                            }
+                                        }
+                                    }
+                                }
+                                if response.clicked() {
+                                    ui.memory_mut(|mem| mem.request_focus(response.id));
+                                }
+                            });
+                            if ui.button("Run").clicked() {
+                                // Generate tokens if needed
+                                if self.llm_explorer_cached_token_list.is_none() {
+                                    // Generate it
+                                    self.llm_explorer_cached_token_list = Some(
+                                        tokenizer.encode(&self.app_state.current_llm_text)
+                                    );
+                                }
+                                let tokens = self.llm_explorer_cached_token_list.clone().unwrap();
+                                let msg = WebsocketClientServerMessage::GetLogits(ForwardLogitRequest{
+                                    model_id: model.model_id,
+                                    context_tokens: tokens
+                                });
+                                self.websocket_client_server_sender.send(msg).unwrap();
+                                self.latest_logits = None;
+                            }
+                        }
+                        (Some(_), Some(Err(err))) => {
+                            ui.label(format!("Tokenizer load error: {err}."));
+                        }
+                        _ => {
+                            ui.label("Invalid model selected.");
+                        }
+                    }
                 }
             }
 

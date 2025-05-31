@@ -5257,6 +5257,7 @@ dependencies = [
  "ciborium",
  "hf-hub",
  "log",
+ "num-traits",
  "serde",
  "strum",
  "strum_macros",
@@ -5265,6 +5266,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "typenum",
  "whisper-tensor",
  "whisper-tensor-import",
 ]

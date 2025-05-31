@@ -1,8 +1,9 @@
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::cmp::Ordering;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32};
 use std::time;
 use tokio::time::sleep;
 use tower_http::{
@@ -16,7 +17,7 @@ use axum::{
     Router,
 };
 use tokio::sync::RwLock;
-use whisper_tensor::{DynRank, RuntimeBackend, RuntimeEnvironment, RuntimeModel};
+use whisper_tensor::{DynRank, NDArrayNumericTensor, RuntimeBackend, RuntimeEnvironment, RuntimeModel};
 use whisper_tensor::eval_backend::EvalBackend;
 use tokio::sync::watch;
 
@@ -95,7 +96,7 @@ impl ModelServer {
         
         let runtime_model = RuntimeModel::load_onnx(&onnx_data, RuntimeBackend::Eval(EvalBackend::NDArray), RuntimeEnvironment::default())?;
         let model_name = model_path.file_stem().unwrap_or_default().to_str().unwrap_or_default().to_string();
-        let model_id = self.next_model_id.fetch_add(1, Ordering::Relaxed);
+        let model_id = self.next_model_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut guard = self.models.write().await;
         
         let inner = match model_load_type {
@@ -130,6 +131,36 @@ impl ModelServer {
         let guard = self.models.read().await;
         if let Some(model) = guard.iter().find(|model| model.model_id == model_id) {
             Ok(f(model))
+        }
+        else {
+            Err(format!("Model with id {} not found", model_id))
+        }
+    }
+
+    pub(crate) async fn with_llm<T>(&self, model_id: LoadedModelId, f: impl FnOnce(&LanguageModelManager) -> T) -> Result<T, String>
+    {
+        let guard = self.models.read().await;
+        if let Some(model) = guard.iter().find(|model| model.model_id == model_id) {
+            if let ModelDataInner::ModelDataLLM(x) = &model.inner {
+                Ok(f(x))
+            } else {
+                Err("Unsupported operation".to_string())
+            }
+        }
+        else {
+            Err(format!("Model with id {} not found", model_id))
+        }
+    }
+
+    pub(crate) async fn with_llm_mut<T>(&self, model_id: LoadedModelId, f: impl FnOnce(&mut LanguageModelManager) -> T) -> Result<T, String>
+    {
+        let mut guard = self.models.write().await;
+        if let Some(model) = guard.iter_mut().find(|model| model.model_id == model_id) {
+            if let ModelDataInner::ModelDataLLM(x) = &mut model.inner {
+                Ok(f(x))
+            } else {
+                Err("Unsupported operation".to_string())
+            }
         }
         else {
             Err(format!("Model with id {} not found", model_id))
@@ -185,7 +216,10 @@ use whisper_tensor_server::{CurrentModelsReportEntry, LLMMetadata, LoadedModelId
 use hf_hub::api::sync::Api;
 use hf_hub::api::tokio::ApiBuilder;
 use hf_hub::{Repo, RepoType};
+use log::info;
 use tokenizers::FromPretrainedParameters;
+use typenum::P1;
+use whisper_tensor::dtype::DType;
 
 async fn send_message(socket: &mut WebSocket, message: WebsocketServerClientMessage) {
     let mut data = Vec::<u8>::new();
@@ -309,6 +343,43 @@ async fn handle_socket(mut socket: WebSocket, model_server: Arc<ModelServer>) {
                                                     File::open(x).unwrap().read_to_end(&mut v).unwrap();
                                                     v
                                                 }));
+                                            send_message(&mut socket, msg_out).await;
+                                        }
+                                        WebsocketClientServerMessage::GetLogits(request) => {
+                                            let ret = model_server.with_llm_mut(request.model_id, |x| {
+                                                info!("Starting inference");
+                                                let input_tokens = NDArrayNumericTensor::from(request.context_tokens.clone()).to_dyn();
+                                                x.forward(input_tokens.into(), None)
+                                            }).await;
+                                            let ret = match ret {
+                                                Ok(Ok(x)) => Ok(x.0),
+                                                Ok(Err(err)) => Err(err.to_string()),
+                                                Err(err) => Err(err),
+                                            };
+                                            let ret = ret.map(|x| {
+                                                let mut outputs = vec![];
+                                                let shape = x.shape();
+                                                let num_tokens = shape[1];
+                                                let logits_per_token = shape[shape.len()-1];
+                                                let reshaped_x = x.reshape(vec![num_tokens, logits_per_token]).unwrap();
+                                                for i in 0..num_tokens {
+                                                    let sliced_output_tensor = reshaped_x.slice(&[
+                                                        i..i+1,
+                                                        0..logits_per_token
+                                                    ], &EvalBackend::NDArray).unwrap();
+                                                    let output = sliced_output_tensor.flatten().unwrap();
+                                                    let output_vec: Vec<f32> = output.to_ndarray().unwrap().cast(DType::F32).unwrap().try_into().unwrap();
+                                                    let mut idx_and_val = output_vec.iter().enumerate().map(|(a, b)| (a as u32, *b)).collect::<Vec<_>>();
+                                                    idx_and_val.sort_by(|(_, a), (_, b)| {if a < b {Ordering::Greater} else {Ordering::Less}});
+                                                    let clipped_logits = idx_and_val[0..idx_and_val.len().min(100)].to_vec();
+                                                    outputs.push(clipped_logits)
+                                                }
+                                                outputs
+                                            });
+                                            let msg_out = WebsocketServerClientMessage::GetLogitsReturn(
+                                                request,
+                                                ret
+                                            );
                                             send_message(&mut socket, msg_out).await;
                                         }
                                         _ => {

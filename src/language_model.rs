@@ -74,6 +74,12 @@ impl LanguageModelManager {
     } 
     
     pub fn forward(&mut self, input_tokens: NumericTensor<DynRank>, intermediate_values: Option<LangaugeModelIntermediateValues>) -> Result<(NumericTensor<DynRank>, LangaugeModelIntermediateValues), RuntimeError> {
+        // Add batch dim if needed
+        let input_tokens = if input_tokens.rank() < 2 {
+            input_tokens.unsqueeze(0, &EvalBackend::NDArray)?
+        } else {
+            input_tokens
+        };
         let input_shape = input_tokens.shape();
         let input_sequence_len = input_shape[1];
         let mut input_tokens_processed = 0;
@@ -96,8 +102,13 @@ impl LanguageModelManager {
                     match meta.model_input_type {
                         ModelInputType::TokenID(_) => {
                             let info = input_tensor_infos.get(name);
-                            let input_chunk = if let Some((dtype, _)) = info {
-                                input_tokens_chunk.cast(*dtype, &EvalBackend::NDArray)?
+                            let input_chunk = if let Some((dtype, shape_info)) = info {
+                                let mut ret = input_tokens_chunk.cast(*dtype, &EvalBackend::NDArray)?;
+                                while shape_info.len() > ret.rank() {
+                                    // Append dims if needed
+                                    ret = ret.unsqueeze(ret.rank(), &EvalBackend::NDArray)?
+                                }
+                                ret
                             } else {
                                 input_tokens_chunk.clone()
                             };

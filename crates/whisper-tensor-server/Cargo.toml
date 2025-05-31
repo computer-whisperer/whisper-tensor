@@ -17,7 +17,8 @@ anyhow = "1.0.98"
 serde = { version = "1.0.219", features = ["derive"] }
 strum_macros = "0.27.1"
 strum = "0.27.0"
-
+num-traits = "0.2.19"
+typenum = { version="1.18.0", features=["const-generics"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { version = "1.45.0", features = ["rt", "rt-multi-thread"] }

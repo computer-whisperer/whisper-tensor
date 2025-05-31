@@ -26,6 +26,7 @@ mod onnx_testing;
 pub mod numeric_scalar;
 pub mod tensor_rank;
 pub mod numeric_tensor_typed;
+//pub mod model;
 
 pub use ndarray_backend::NDArrayNumericTensor;
 pub use tensor_rank::DynRank;

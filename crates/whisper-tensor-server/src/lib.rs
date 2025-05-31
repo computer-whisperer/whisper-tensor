@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use whisper_tensor::{DynRank, NDArrayNumericTensor};
 use whisper_tensor::symbolic_graph::SymbolicGraph;
@@ -33,6 +34,12 @@ pub enum ModelTypeMetadata {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ForwardLogitRequest {
+    pub model_id: LoadedModelId,
+    pub context_tokens: Vec<u32>
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum WebsocketClientServerMessage {
     Ping,
     LoadModel{
@@ -43,7 +50,8 @@ pub enum WebsocketClientServerMessage {
     UnloadModel(LoadedModelId),
     GetModelGraph(LoadedModelId),
     GetStoredTensor(LoadedModelId, TensorStoreTensorId),
-    GetHFTokenizer(String)
+    GetHFTokenizer(String),
+    GetLogits(ForwardLogitRequest)
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -62,4 +70,5 @@ pub enum WebsocketServerClientMessage {
     ModelGraphReturn(Result<(LoadedModelId, Vec<u8>), String>),
     TensorStoreReturn(LoadedModelId, TensorStoreTensorId, Result<NDArrayNumericTensor<DynRank>, String>),
     HFTokenizerReturn(String, Result<Vec<u8>, String>),
+    GetLogitsReturn(ForwardLogitRequest, Result<Vec<Vec<(u32, f32)>>, String>)
 }
