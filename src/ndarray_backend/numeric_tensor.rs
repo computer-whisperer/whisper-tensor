@@ -233,6 +233,10 @@ impl<R: Rank> NDArrayNumericTensor<R> {
         })
     }
 
+    pub fn erf(self) -> Result<Self, NDArrayNumericTensorError> {
+        unimplemented!();
+    }
+
     pub fn abs(self) -> Result<Self, NDArrayNumericTensorError> {
         Ok(match self {
             NDArrayNumericTensor::F32(x) => NDArrayNumericTensor::F32(x.abs().to_shared()),
@@ -1528,6 +1532,25 @@ impl NDArrayNumericTensor<DynRank> {
             NDArrayNumericTensor::U8(x) => { NDArrayNumericTensor::U8(x.slice(s).to_shared())}
             NDArrayNumericTensor::I8(x) => { NDArrayNumericTensor::I8(x.slice(s).to_shared())}
             NDArrayNumericTensor::BOOL(x) => { NDArrayNumericTensor::BOOL(x.slice(s).to_shared())}
+        })
+    }
+    
+    pub fn expand(&self, shape: &[u64]) -> Result<Self, NDArrayNumericTensorError> {
+        let shape = shape.iter().map(|x| *x as usize).collect::<Vec<_>>();
+        Ok(match self {
+            NDArrayNumericTensor::F64(x) => NDArrayNumericTensor::F64(ops::expand(x, &shape)?),
+            NDArrayNumericTensor::F32(x) => NDArrayNumericTensor::F32(ops::expand(x, &shape)?),
+            NDArrayNumericTensor::BF16(x) => NDArrayNumericTensor::BF16(ops::expand(x, &shape)?),
+            NDArrayNumericTensor::F16(x) => NDArrayNumericTensor::F16(ops::expand(x, &shape)?),
+            NDArrayNumericTensor::U64(x) => NDArrayNumericTensor::U64(ops::expand(x, &shape)?),
+            NDArrayNumericTensor::I64(x) => NDArrayNumericTensor::I64(ops::expand(x, &shape)?),
+            NDArrayNumericTensor::U32(x) => NDArrayNumericTensor::U32(ops::expand(x, &shape)?),
+            NDArrayNumericTensor::I32(x) => NDArrayNumericTensor::I32(ops::expand(x, &shape)?),
+            NDArrayNumericTensor::U16(x) => NDArrayNumericTensor::U16(ops::expand(x, &shape)?),
+            NDArrayNumericTensor::I16(x) => NDArrayNumericTensor::I16(ops::expand(x, &shape)?),
+            NDArrayNumericTensor::U8(x) => NDArrayNumericTensor::U8(ops::expand(x, &shape)?),
+            NDArrayNumericTensor::I8(x) => NDArrayNumericTensor::I8(ops::expand(x, &shape)?),
+            NDArrayNumericTensor::BOOL(x) => NDArrayNumericTensor::BOOL(ops::expand(x, &shape)?),
         })
     }
 }

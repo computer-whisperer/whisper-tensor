@@ -1180,4 +1180,7 @@ pub fn imod_i8(a: ArcArray<i8, IxDyn>, b: ArcArray<i8, IxDyn>) -> Result<ArcArra
     Ok(v.to_shared())
 }
 
-
+pub fn expand<T: Clone>(x: &ArcArray<T, IxDyn>, shape: &[usize]) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError> {
+    let o = x.broadcast(shape).ok_or(NDArrayOperationError::IncompatibleShape)?;
+    Ok(o.to_shared())
+}

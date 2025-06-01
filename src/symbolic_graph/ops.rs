@@ -7,7 +7,7 @@ use crate::ndarray_backend::{NDArrayNumericTensor, NDArrayNumericTensorError};
 use crate::numeric_scalar::NumericScalar;
 use crate::numeric_tensor::{NumericTensor, NumericTensorError};
 use crate::{onnx, TrigOp};
-use crate::symbolic_graph::{milli_ops_helpers, query_attribute_bool, query_attribute_float, query_attribute_floats, query_attribute_int, query_attribute_ints, query_attribute_tensor, ONNXDecodingError, SymbolicGraphError, TensorId};
+use crate::symbolic_graph::{milli_ops_helpers, query_attribute_bool, query_attribute_float, query_attribute_floats, query_attribute_int, query_attribute_ints, query_attribute_string, query_attribute_tensor, ONNXDecodingError, SymbolicGraphError, TensorId};
 use crate::symbolic_graph::milli_ops::*;
 use crate::tensor_rank::DynRank;
 
@@ -153,7 +153,8 @@ pub(crate) enum WhichUnaryOperation {
     Floor,
     Ceil,
     Round,
-    IsNan
+    IsNan,
+    Erf,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -233,6 +234,7 @@ impl Operation for UnaryOperation {
             WhichUnaryOperation::Ceil => AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::ceil(a)),
             WhichUnaryOperation::Round => AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::round(a)),
             WhichUnaryOperation::IsNan => AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::is_nan(a)),
+            WhichUnaryOperation::Erf => AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::erf(a)),
         };
         let mut output_map = HashMap::new();
         let out = graph.push_op(res);
@@ -506,22 +508,25 @@ impl Operation for GroupNormalizationOperation {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SqueezeOperation {
     input: TensorId,
-    axes: TensorId,
+    axes: Option<TensorId>,
+    axes_attribute: Option<Vec<i64>>,
     output: TensorId,
 }
 
 impl SqueezeOperation {
-    pub fn from_onnx(inputs: Vec<TensorId>, outputs: Vec<TensorId>) -> Result<Self, SymbolicGraphError> {
-        if inputs.len() != 2 {
+    pub fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], attributes: &[onnx::AttributeProto]) -> Result<Self, SymbolicGraphError> {
+        if inputs.len() < 1 || inputs.len() > 2 {
             return Err(SymbolicGraphError::InvalidOperatorInputs);
         }
         if outputs.len() != 1 {
             return Err(SymbolicGraphError::InvalidOperatorOutputs);
         }
+        let axes_attribute = query_attribute_ints(attributes, "axes");
         Ok(Self {
             input: inputs[0],
-            axes: inputs[1],
+            axes: if inputs.len() > 1 {Some(inputs[1])} else {None},
             output: outputs[0],
+            axes_attribute
         })
     }
 }
@@ -532,7 +537,11 @@ impl Operation for SqueezeOperation {
     }
 
     fn get_inputs(&self) -> Vec<TensorId> {
-        vec![self.input, self.axes]
+        if let Some(axes) = self.axes {
+            vec![self.input, axes]
+        } else {
+            vec![self.input]
+        }
     }
 
     fn get_outputs(&self) -> Vec<TensorId> {
@@ -541,9 +550,18 @@ impl Operation for SqueezeOperation {
 
     fn get_milli_op_graph(&self) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
-        let out = graph.push_op(AnyMilliOp::Squeeze(MilliOpSqueeze::new(
+        let axes_input = if let Some(axes) = self.axes {
+            input_map[&axes]
+        } else if let Some(axes) = &self.axes_attribute {
+            let axes_tensor = NDArrayNumericTensor::from_vec(axes.clone());
+            graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(axes_tensor.to_dyn().into())))
+        } else {
+            panic!();
+        };
+
+        let out = graph.push_op(AnyMilliOp::Unsqueeze(MilliOpUnsqueeze::new(
             input_map[&self.input],
-            input_map[&self.axes]
+            axes_input
         )));
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
@@ -556,22 +574,25 @@ impl Operation for SqueezeOperation {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct UnsqueezeOperation {
     input: TensorId,
-    axes: TensorId,
+    axes: Option<TensorId>,
+    axes_attribute: Option<Vec<i64>>,
     output: TensorId,
 }
 
 impl UnsqueezeOperation {
-    pub fn from_onnx(inputs: Vec<TensorId>, outputs: Vec<TensorId>) -> Result<Self, SymbolicGraphError> {
-        if inputs.len() != 2 {
+    pub fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], attributes: &[onnx::AttributeProto]) -> Result<Self, SymbolicGraphError> {
+        if inputs.len() < 1 || inputs.len() > 2 {
             return Err(SymbolicGraphError::InvalidOperatorInputs);
         }
         if outputs.len() != 1 {
             return Err(SymbolicGraphError::InvalidOperatorOutputs);
         }
+        let axes_attribute = query_attribute_ints(attributes, "axes");
         Ok(Self {
             input: inputs[0],
-            axes: inputs[1],
+            axes: if inputs.len() > 1 {Some(inputs[1])} else {None},
             output: outputs[0],
+            axes_attribute
         })
     }
 }
@@ -582,7 +603,11 @@ impl Operation for UnsqueezeOperation {
     }
 
     fn get_inputs(&self) -> Vec<TensorId> {
-        vec![self.input, self.axes]
+        if let Some(axes) = self.axes {
+            vec![self.input, axes]
+        } else {
+            vec![self.input]
+        }
     }
 
     fn get_outputs(&self) -> Vec<TensorId> {
@@ -591,9 +616,18 @@ impl Operation for UnsqueezeOperation {
 
     fn get_milli_op_graph(&self) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
+        let axes_input = if let Some(axes) = self.axes {
+            input_map[&axes]
+        } else if let Some(axes) = &self.axes_attribute {
+            let axes_tensor = NDArrayNumericTensor::from_vec(axes.clone());
+            graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(axes_tensor.to_dyn().into())))
+        } else {
+            panic!();
+        };
+
         let out = graph.push_op(AnyMilliOp::Unsqueeze(MilliOpUnsqueeze::new(
             input_map[&self.input],
-            input_map[&self.axes]
+            axes_input
         )));
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
@@ -2466,6 +2500,566 @@ impl Operation for ClipOperation {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct ExpandOperation {
+    input: TensorId,
+    shape: TensorId,
+    output: TensorId
+}
+
+impl ExpandOperation {
+    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], _attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+        if inputs.len() != 2  {
+            return Err(ONNXDecodingError::GraphConstructionError("Expand".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+        }
+        if outputs.len() != 1 {
+            return Err(ONNXDecodingError::GraphConstructionError("Expand".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+        }
+
+        Ok(Self{
+            input: inputs[0],
+            shape: inputs[1],
+            output: outputs[0]
+        })
+    }
+}
+
+impl Operation for ExpandOperation {
+    fn get_op_type_name(&self) -> String {
+        "Expand".to_string()
+    }
+
+    fn get_inputs(&self) -> Vec<TensorId> {
+        vec![self.input, self.shape]
+    }
+
+    fn get_outputs(&self) -> Vec<TensorId> {
+        vec![self.output]
+    }
+
+    fn get_milli_op_graph(&self) -> MilliOpGraph {
+        let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
+
+        let x = graph.push_op(AnyMilliOp::Expand(MilliOpExpand::new(
+            input_map[&self.input],
+            input_map[&self.shape]
+        )));
+
+        let mut output_map = HashMap::new();
+        output_map.insert(x, self.output);
+        graph.set_output_map(output_map);
+        graph
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) enum ConvOperationAutoPad {
+    NotSet,
+    SameUpper,
+    SameLower,
+    Valid
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct ConvOperation {
+    input: TensorId,
+    output: TensorId,
+    weight: TensorId,
+    bias: Option<TensorId>,
+    auto_pad: ConvOperationAutoPad,
+    dilations: Vec<i64>,
+    group: i64,
+    kernel_shape: Vec<i64>,
+    pads: Vec<i64>,
+    strides: Vec<i64>
+}
+
+impl ConvOperation {
+    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+        if inputs.len() < 2 || inputs.len() > 3  {
+            return Err(ONNXDecodingError::GraphConstructionError("Conv".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+        }
+        if outputs.len() != 1 {
+            return Err(ONNXDecodingError::GraphConstructionError("Conv".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+        }
+
+        let auto_pad_str = query_attribute_string(attributes, "auto_pad");
+        let auto_pad = match auto_pad_str {
+            Some(x) => {
+                match x.to_lowercase().as_str() {
+                    "notset" => ConvOperationAutoPad::NotSet,
+                    "same_upper" => ConvOperationAutoPad::SameUpper,
+                    "same_lower" => ConvOperationAutoPad::SameLower,
+                    "valid" => ConvOperationAutoPad::Valid,
+                    _ => ConvOperationAutoPad::NotSet
+                }
+            }
+            _ => ConvOperationAutoPad::NotSet
+        };
+
+        let dilations = query_attribute_ints(attributes, "dilations").unwrap_or_default();
+        let group = query_attribute_int(attributes, "group").unwrap_or(1);
+        let kernel_shape = query_attribute_ints(attributes, "kernel_shape").unwrap_or_default();
+        let pads = query_attribute_ints(attributes, "pads").unwrap_or_default();
+        let strides = query_attribute_ints(attributes, "strides").unwrap_or_default();
+
+        Ok(Self{
+            input: inputs[0],
+            weight: inputs[1],
+            bias: if inputs.len() > 2 {Some(inputs[2])} else {None},
+            output: outputs[0],
+            auto_pad,
+            dilations,
+            group,
+            kernel_shape,
+            pads,
+            strides
+        })
+    }
+}
+
+impl Operation for ConvOperation {
+    fn get_op_type_name(&self) -> String {
+        "Conv".to_string()
+    }
+
+    fn get_inputs(&self) -> Vec<TensorId> {
+        if let Some(bias) = self.bias {
+            vec![self.input, self.weight, bias]
+        } else {
+            vec![self.input, self.weight]
+        }
+    }
+
+    fn get_outputs(&self) -> Vec<TensorId> {
+        vec![self.output]
+    }
+
+    fn get_milli_op_graph(&self) -> MilliOpGraph {
+        unimplemented!();
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct InstanceNormalizationOperation {
+    input: TensorId,
+    scale: TensorId,
+    bias: TensorId,
+    output: TensorId,
+    epsilon: Option<f32>
+}
+
+impl InstanceNormalizationOperation {
+    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+        if inputs.len() != 3  {
+            return Err(ONNXDecodingError::GraphConstructionError("InstanceNormalization".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+        }
+        if outputs.len() != 1 {
+            return Err(ONNXDecodingError::GraphConstructionError("InstanceNormalization".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+        }
+        let epsilon = query_attribute_float(attributes, "epsilon");
+
+        Ok(Self {
+            input: inputs[0],
+            scale: inputs[1],
+            bias: inputs[2],
+            output: outputs[0],
+            epsilon
+        })
+    }
+}
+
+impl Operation for InstanceNormalizationOperation {
+    fn get_op_type_name(&self) -> String {
+        "Instance Normalization".to_string()
+    }
+
+    fn get_inputs(&self) -> Vec<TensorId> {
+        vec![self.input, self.scale, self.bias]
+    }
+
+    fn get_outputs(&self) -> Vec<TensorId> {
+        vec![self.output]
+    }
+
+    fn get_milli_op_graph(&self) -> MilliOpGraph {
+        unimplemented!();
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) enum ResizeCoordinateTransformationMode {
+    HalfPixel,
+    HalfPixelSymmetric,
+    PytorchHalfPixel,
+    AlignCorners,
+    Asymmetric,
+    TFCropAndResize
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) enum ResizeKeepAspectRatioPolicy {
+    Stretch,
+    NotLarger,
+    NotSmaller
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) enum ResizeMode {
+    Nearest,
+    Linear,
+    Cubic
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) enum ResizeNearestMode {
+    RoundPreferFloor,
+    Ceil,
+    Floor
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct ResizeOperation {
+    input: TensorId,
+    roi: Option<TensorId>,
+    scales: Option<TensorId>,
+    sizes: Option<TensorId>,
+    output: TensorId,
+    antialias: bool,
+    axes: Vec<i64>,
+    coordinate_transformation_mode: ResizeCoordinateTransformationMode,
+    cubic_coeff_a: f32,
+    exclude_outside: bool,
+    extrapolation_value: f32,
+    keep_aspect_ratio_policy: ResizeKeepAspectRatioPolicy,
+    mode: ResizeMode,
+    nearest_mode: ResizeNearestMode
+}
+
+impl ResizeOperation {
+    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+        if inputs.len() < 1 || inputs.len() > 4 {
+            return Err(ONNXDecodingError::GraphConstructionError("Resize".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+        }
+        if outputs.len() != 1 {
+            return Err(ONNXDecodingError::GraphConstructionError("Resize".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+        }
+
+        let antialias = query_attribute_bool(attributes, "antialias").unwrap_or(false);
+        let axes = query_attribute_ints(attributes, "axes").unwrap_or(vec![]);
+        let coordinate_transformation_mode = query_attribute_string(attributes, "coordinate_transformation_mode").unwrap_or("half_pixel".to_string());
+        let coordinate_transformation_mode = match coordinate_transformation_mode.as_str() {
+            "half_pixel_symmetric" => ResizeCoordinateTransformationMode::HalfPixelSymmetric,
+            "align_corners" => ResizeCoordinateTransformationMode::AlignCorners,
+            "asymmetric" => ResizeCoordinateTransformationMode::Asymmetric,
+            "pytorch_half_pixel" => ResizeCoordinateTransformationMode::PytorchHalfPixel,
+            "tf_crop_and_resize" => ResizeCoordinateTransformationMode::TFCropAndResize,
+            "half_pixel" | _ =>  ResizeCoordinateTransformationMode::HalfPixel
+        };
+        let cubic_coeff_a = query_attribute_float(attributes, "cubic_coeff_a").unwrap_or(-0.75);
+        let exclude_outside = query_attribute_bool(attributes, "exclude_outside").unwrap_or(false);
+        let extrapolation_value = query_attribute_float(attributes, "extrapolation_value").unwrap_or(0.0);
+        let keep_aspect_ratio_policy = query_attribute_string(attributes, "keep_aspect_ratio_policy").unwrap_or("stretch".to_string());
+        let keep_aspect_ratio_policy = match keep_aspect_ratio_policy.as_str() {
+            "stretch" => ResizeKeepAspectRatioPolicy::Stretch,
+            "not_larger" => ResizeKeepAspectRatioPolicy::NotLarger,
+            "not_smaller" => ResizeKeepAspectRatioPolicy::NotSmaller,
+            _ => ResizeKeepAspectRatioPolicy::Stretch
+        };
+        let mode = query_attribute_string(attributes, "mode").unwrap_or("nearest".to_string());
+        let mode = match mode.as_str() {
+            "nearest" => ResizeMode::Nearest,
+            "linear" => ResizeMode::Linear,
+            "cubic" => ResizeMode::Cubic,
+            _ => ResizeMode::Nearest
+        };
+        let nearest_mode = query_attribute_string(attributes, "nearest_mode").unwrap_or("round_prefer_floor".to_string());
+        let nearest_mode = match nearest_mode.as_str() {
+            "round_prefer_floor" => ResizeNearestMode::RoundPreferFloor,
+            "floor" => ResizeNearestMode::Floor,
+            "ceil" => ResizeNearestMode::Ceil,
+            _ => ResizeNearestMode::RoundPreferFloor
+        };
+
+        Ok(Self {
+            input: inputs[0],
+            roi: if inputs.len() > 1 {Some(inputs[1])} else {None},
+            scales: if inputs.len() > 2 {Some(inputs[2])} else {None},
+            sizes: if inputs.len() > 3 {Some(inputs[3])} else {None},
+            output: outputs[0],
+            antialias,
+            axes,
+            coordinate_transformation_mode,
+            cubic_coeff_a,
+            exclude_outside,
+            extrapolation_value,
+            keep_aspect_ratio_policy,
+            mode,
+            nearest_mode,
+        })
+    }
+}
+
+impl Operation for ResizeOperation {
+    fn get_op_type_name(&self) -> String {
+        "Resize".to_string()
+    }
+
+    fn get_inputs(&self) -> Vec<TensorId> {
+        let mut ret = vec![self.input];
+        if let Some(roi) = &self.roi {
+            ret.push(*roi);
+        }
+        if let Some(scales) = &self.scales {
+            ret.push(*scales);
+        }
+        if let Some(sizes) = &self.sizes {
+            ret.push(*sizes)
+        }
+        ret
+    }
+
+    fn get_outputs(&self) -> Vec<TensorId> {
+        vec![self.output]
+    }
+
+    fn get_milli_op_graph(&self) -> MilliOpGraph {
+        todo!()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) enum PadMode {
+    Constant,
+    Reflect,
+    Edge,
+    Wrap
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct PadOperation {
+    input: TensorId,
+    pads: TensorId,
+    constant_value: Option<TensorId>,
+    axes: Option<TensorId>,
+    mode: PadMode,
+    output: TensorId
+}
+
+impl PadOperation {
+    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+        if inputs.len() < 2 || inputs.len() > 4 {
+            return Err(ONNXDecodingError::GraphConstructionError("Pad".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+        }
+        if outputs.len() != 1 {
+            return Err(ONNXDecodingError::GraphConstructionError("Pad".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+        }
+        
+        let pad_mode = query_attribute_string(attributes, "mode").unwrap_or("constant".to_string());
+        let pad_mode = match pad_mode.as_str() {
+            "constant" => PadMode::Constant,
+            "reflect" => PadMode::Reflect,
+            "edge" => PadMode::Edge,
+            "wrap" => PadMode::Wrap,
+            _ => PadMode::Constant
+        };
+        
+        Ok(Self{
+            input: inputs[0],
+            pads: inputs[1],
+            constant_value: if inputs.len() > 2 { Some(inputs[2]) } else { None },
+            axes: if inputs.len() > 3 { Some(inputs[3]) } else { None },
+            mode: pad_mode,
+            output: outputs[0]
+        })
+    }
+}
+
+impl Operation for PadOperation {
+    fn get_op_type_name(&self) -> String {
+        "Pad".to_string()
+    }
+
+    fn get_inputs(&self) -> Vec<TensorId> {
+        let mut ret = vec![self.input, self.pads];
+        if let Some(constant_value) = self.constant_value {
+            ret.push(constant_value);
+        }
+        if let Some(axes) = self.axes {
+            ret.push(axes);
+        }
+        ret
+    }
+
+    fn get_outputs(&self) -> Vec<TensorId> {
+        vec![self.output]
+    }
+
+    fn get_milli_op_graph(&self) -> MilliOpGraph {
+        todo!()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct RandomNormalLikeOperation {
+    input: TensorId,
+    output: TensorId,
+    dtype: Option<DType>,
+    mean: f32,
+    scale: f32,
+    seed: Option<f32>
+}
+
+impl RandomNormalLikeOperation {
+    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+        if inputs.len() != 1 {
+            return Err(ONNXDecodingError::GraphConstructionError("RandomNormalLike".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+        }
+        if outputs.len() != 1 {
+            return Err(ONNXDecodingError::GraphConstructionError("RandomNormalLike".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+        }
+
+        let dtype = attributes.iter().find(|a| a.name == "dtype");
+        let dtype = if let Some(dtype) = dtype {
+            let to_datatype = onnx::tensor_proto::DataType::try_from(dtype.i as i32).map_err(|x| ONNXDecodingError::ProtobufDecodeError(x.into()))?;
+            Some(DType::try_from(to_datatype)?)
+        } else {
+            None
+        };
+
+        let mean = query_attribute_float(attributes, "mean").unwrap_or(0.0);
+        let scale = query_attribute_float(attributes, "scale").unwrap_or(1.0);
+        let seed = query_attribute_float(attributes, "seed");
+
+        Ok(Self {
+            input: inputs[0],
+            output: outputs[0],
+            dtype,
+            mean,
+            scale,
+            seed
+        })
+    }
+}
+
+impl Operation for RandomNormalLikeOperation {
+    fn get_op_type_name(&self) -> String {
+        "Random Normal Like".to_string()
+    }
+
+    fn get_inputs(&self) -> Vec<TensorId> {
+        vec![self.input]
+    }
+
+    fn get_outputs(&self) -> Vec<TensorId> {
+        vec![self.output]
+    }
+
+    fn get_milli_op_graph(&self) -> MilliOpGraph {
+        todo!()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct ArgMaxOperation {
+    axis: i64,
+    keepdims: bool,
+    select_last_index: bool,
+    input: TensorId,
+    output: TensorId
+}
+
+impl ArgMaxOperation {
+    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+        if inputs.len() != 1 {
+            return Err(ONNXDecodingError::GraphConstructionError("ArgMax".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+        }
+        if outputs.len() != 1 {
+            return Err(ONNXDecodingError::GraphConstructionError("ArgMax".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+        }
+
+        let axis = query_attribute_int(attributes, "axis").unwrap_or(0);
+        let keepdims = query_attribute_bool(attributes, "keepdims").unwrap_or(true);
+        let select_last_index = query_attribute_bool(attributes, "select_last_index").unwrap_or(false);
+
+        Ok(Self {
+            input: inputs[0],
+            output: outputs[0],
+            axis,
+            keepdims,
+            select_last_index
+        })
+    }
+}
+
+impl Operation for ArgMaxOperation {
+    fn get_op_type_name(&self) -> String {
+        "ArgMax".to_string()
+    }
+
+    fn get_inputs(&self) -> Vec<TensorId> {
+        vec![self.input]
+    }
+
+    fn get_outputs(&self) -> Vec<TensorId> {
+        vec![self.output]
+    }
+
+    fn get_milli_op_graph(&self) -> MilliOpGraph {
+        todo!()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct ArgMinOperation {
+    axis: i64,
+    keepdims: bool,
+    select_last_index: bool,
+    input: TensorId,
+    output: TensorId
+}
+
+impl ArgMinOperation {
+    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+        if inputs.len() != 1 {
+            return Err(ONNXDecodingError::GraphConstructionError("ArgMin".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+        }
+        if outputs.len() != 1 {
+            return Err(ONNXDecodingError::GraphConstructionError("ArgMin".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+        }
+
+        let axis = query_attribute_int(attributes, "axis").unwrap_or(0);
+        let keepdims = query_attribute_bool(attributes, "keepdims").unwrap_or(true);
+        let select_last_index = query_attribute_bool(attributes, "select_last_index").unwrap_or(false);
+
+        Ok(Self {
+            input: inputs[0],
+            output: outputs[0],
+            axis,
+            keepdims,
+            select_last_index
+        })
+    }
+}
+
+impl Operation for ArgMinOperation {
+    fn get_op_type_name(&self) -> String {
+        "ArgMin".to_string()
+    }
+
+    fn get_inputs(&self) -> Vec<TensorId> {
+        vec![self.input]
+    }
+
+    fn get_outputs(&self) -> Vec<TensorId> {
+        vec![self.output]
+    }
+
+    fn get_milli_op_graph(&self) -> MilliOpGraph {
+        todo!()
+    }
+}
+
 #[derive(Clone, Debug, strum_macros::VariantNames, Serialize, Deserialize)]
 pub enum AnyOperation {
     Unary(UnaryOperation),
@@ -2502,6 +3096,14 @@ pub enum AnyOperation {
     Clip(ClipOperation),
     IsInf(IsInfOperation),
     Modulo(ModuloOperation),
+    Expand(ExpandOperation),
+    Conv(ConvOperation),
+    InstanceNormalization(InstanceNormalizationOperation),
+    Resize(ResizeOperation),
+    Pad(PadOperation),
+    RandomNormalLike(RandomNormalLikeOperation),
+    ArgMax(ArgMaxOperation),
+    ArgMin(ArgMinOperation),
 }
 
 impl AnyOperation {
@@ -2541,6 +3143,14 @@ impl AnyOperation {
             AnyOperation::IsInf(op) => op,
             AnyOperation::Clip(op) => op,
             AnyOperation::Modulo(op) => op,
+            AnyOperation::Expand(op) => op,
+            AnyOperation::Conv(op) => op,
+            AnyOperation::InstanceNormalization(op) => op,
+            AnyOperation::Resize(op) => op,
+            AnyOperation::Pad(op) => op,
+            AnyOperation::RandomNormalLike(op) => op,
+            AnyOperation::ArgMax(op) => op,
+            AnyOperation::ArgMin(op) => op,
         }
     }
 }
@@ -2585,6 +3195,14 @@ impl Operation for AnyOperation {
             AnyOperation::IsInf(op) => op.get_inputs(),
             AnyOperation::Clip(op) => op.get_inputs(),
             AnyOperation::Modulo(op) => op.get_inputs(),
+            AnyOperation::Expand(op) => op.get_inputs(),
+            AnyOperation::Conv(op) => op.get_inputs(),
+            AnyOperation::InstanceNormalization(op) => op.get_inputs(),
+            AnyOperation::Resize(op) => op.get_inputs(),
+            AnyOperation::Pad(op) => op.get_inputs(),
+            AnyOperation::RandomNormalLike(op) => op.get_inputs(),
+            AnyOperation::ArgMax(op) => op.get_inputs(),
+            AnyOperation::ArgMin(op) => op.get_inputs(),
         }
     }
     fn get_outputs(&self) -> Vec<TensorId> {
@@ -2623,6 +3241,14 @@ impl Operation for AnyOperation {
             AnyOperation::IsInf(op) => op.get_outputs(),
             AnyOperation::Clip(op) => op.get_outputs(),
             AnyOperation::Modulo(op) => op.get_outputs(),
+            AnyOperation::Expand(op) => op.get_outputs(),
+            AnyOperation::Conv(op) => op.get_outputs(),
+            AnyOperation::InstanceNormalization(op) => op.get_outputs(),
+            AnyOperation::Resize(op) => op.get_outputs(),
+            AnyOperation::Pad(op) => op.get_outputs(),
+            AnyOperation::RandomNormalLike(op) => op.get_outputs(),
+            AnyOperation::ArgMax(op) => op.get_outputs(),
+            AnyOperation::ArgMin(op) => op.get_outputs(),
         }
     }
 
@@ -2662,6 +3288,14 @@ impl Operation for AnyOperation {
             AnyOperation::IsInf(op) => op.get_milli_op_graph(),
             AnyOperation::Clip(op) => op.get_milli_op_graph(),
             AnyOperation::Modulo(op) => op.get_milli_op_graph(),
+            AnyOperation::Expand(op) => op.get_milli_op_graph(),
+            AnyOperation::Conv(op) => op.get_milli_op_graph(),
+            AnyOperation::InstanceNormalization(op) => op.get_milli_op_graph(),
+            AnyOperation::Resize(op) => op.get_milli_op_graph(),
+            AnyOperation::Pad(op) => op.get_milli_op_graph(),
+            AnyOperation::RandomNormalLike(op) => op.get_milli_op_graph(),
+            AnyOperation::ArgMax(op) => op.get_milli_op_graph(),
+            AnyOperation::ArgMin(op) => op.get_milli_op_graph(),
         }
     }
 }

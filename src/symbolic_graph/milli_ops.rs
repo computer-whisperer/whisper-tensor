@@ -152,6 +152,29 @@ impl MilliOp for MilliOpRange {
     }
 }
 
+pub(crate) struct MilliOpExpand {
+    input: MilliOpGraphTensorId,
+    shape: MilliOpGraphTensorId
+}
+
+impl MilliOpExpand {
+    pub(crate) fn new(input: MilliOpGraphTensorId, shape: MilliOpGraphTensorId) -> Self{
+        Self {input, shape}
+    }
+}
+
+impl MilliOp for MilliOpExpand {
+    fn get_inputs(&self) -> Vec<MilliOpGraphTensorId> {
+        vec![self.input, self.shape]
+    }
+
+    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, _backend: &EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
+        let shape: Vec<i64> = inputs[&self.shape].try_to_rank::<P1>()?.try_into()?;
+        let shape_u = shape.iter().map(|x| *x as u64).collect::<Vec<u64>>();
+        let input = &inputs[&self.input];
+        Ok(input.expand(&shape_u)?)
+    }
+}
 
 pub(crate) struct MilliOpConstantOfShape {
     value: NumericScalar,
@@ -710,7 +733,8 @@ pub(crate) enum SimpleUnaryOp {
     Ceil,
     Round,
     IsNan,
-    IsInf { detect_positive: bool, detect_negative: bool }
+    IsInf { detect_positive: bool, detect_negative: bool },
+    Erf,
 }
 
 pub(crate) struct MilliOpSimpleUnary {
@@ -782,6 +806,10 @@ impl MilliOpSimpleUnary {
     pub(crate) fn is_nan(input: MilliOpGraphTensorId) -> Self {
         Self::new(input, SimpleUnaryOp::IsNan)
     }
+
+    pub(crate) fn erf(input: MilliOpGraphTensorId) -> Self {
+        Self::new(input, SimpleUnaryOp::Erf)
+    }
 }
 
 impl SimpleUnaryMilliOp for MilliOpSimpleUnary {
@@ -805,6 +833,7 @@ impl SimpleUnaryMilliOp for MilliOpSimpleUnary {
             SimpleUnaryOp::Round => Ok(input.round(backend)?),
             SimpleUnaryOp::IsInf{detect_positive, detect_negative} => Ok(input.is_inf(detect_positive, detect_negative)?),
             SimpleUnaryOp::IsNan => Ok(input.is_nan()?),
+            SimpleUnaryOp::Erf => Ok(input.erf(backend)?),
         }
     }
 
@@ -825,6 +854,7 @@ impl SimpleUnaryMilliOp for MilliOpSimpleUnary {
             SimpleUnaryOp::Round => Ok(input.round()),
             SimpleUnaryOp::IsInf{detect_positive, detect_negative} => Ok(input.is_inf(detect_positive, detect_negative)),
             SimpleUnaryOp::IsNan => Ok(input.is_nan()),
+            SimpleUnaryOp::Erf => Ok(input.erf()),
         }
     }
 }
@@ -1735,6 +1765,7 @@ pub(crate) enum AnyMilliOp {
     Split(MilliOpSplit),
     Where(MilliOpWhere),
     Range(MilliOpRange),
+    Expand(MilliOpExpand)
 }
 
 impl MilliOp for AnyMilliOp {
@@ -1766,7 +1797,8 @@ impl MilliOp for AnyMilliOp {
             AnyMilliOp::Concat(x) => x.get_inputs(),
             AnyMilliOp::Split(x) => x.get_inputs(),
             AnyMilliOp::Where(x) => x.get_inputs(),
-            AnyMilliOp::Range(x) => x.get_inputs()
+            AnyMilliOp::Range(x) => x.get_inputs(),
+            AnyMilliOp::Expand(x) => x.get_inputs()
         }
     }
 
@@ -1799,6 +1831,7 @@ impl MilliOp for AnyMilliOp {
             AnyMilliOp::Split(x) => x.infer(known_inputs, symbolic_resolver, backend),
             AnyMilliOp::Where(x) => x.infer(known_inputs, symbolic_resolver, backend),
             AnyMilliOp::Range(x) => x.infer(known_inputs, symbolic_resolver, backend),
+            AnyMilliOp::Expand(x) => x.infer(known_inputs, symbolic_resolver, backend),
         }
     }
 
@@ -1831,6 +1864,7 @@ impl MilliOp for AnyMilliOp {
             AnyMilliOp::Split(x) => x.eval(inputs, backend),
             AnyMilliOp::Where(x) => x.eval(inputs, backend),
             AnyMilliOp::Range(x) => x.eval(inputs, backend),
+            AnyMilliOp::Expand(x) => x.eval(inputs, backend),
         }
     }
 }

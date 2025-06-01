@@ -103,6 +103,17 @@ fn query_attribute_ints(attributes: &[onnx::AttributeProto], name: &str) -> Opti
     None
 }
 
+fn query_attribute_string(attributes: &[onnx::AttributeProto], name: &str) -> Option<String> {
+    for attr in attributes{
+        if attr.name == name {
+            if attr.r#type == onnx::attribute_proto::AttributeType::String as i32 {
+                return Some(String::from_utf8(attr.s.clone()).unwrap())
+            }
+        }
+    }
+    None
+}
+
 fn query_attribute_bool(attributes: &[onnx::AttributeProto], name: &str) -> Option<bool> {
     for attr in attributes{
         if attr.name == name {
@@ -697,6 +708,9 @@ impl SymbolicGraphMutator {
             "IsNaN" => {
                 Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichUnaryOperation::IsNan)?))
             }
+            "Erf" => {
+                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichUnaryOperation::Erf)?))
+            }
             "IsInf" => {
                 Some(AnyOperation::IsInf(ops::IsInfOperation::from_onnx(&input_tensors, &output_tensors, &onnx_node.attribute)?))
             }
@@ -761,47 +775,18 @@ impl SymbolicGraphMutator {
             "Flatten" => {
                 Some(AnyOperation::Flatten(ops::FlattenOperation::from_onnx(&input_tensors, &output_tensors, &onnx_node.attribute)?))
             }
+            "Expand" => {
+                Some(AnyOperation::Expand(ops::ExpandOperation::from_onnx(&input_tensors, &output_tensors, &onnx_node.attribute)?))
+            }
             "Squeeze" => {
-                if core_opset_version >= 21 {
-                    Some(AnyOperation::Squeeze(ops::SqueezeOperation::from_onnx(input_tensors, output_tensors)
-                        .map_err(|x| ONNXDecodingError::GraphConstructionError(onnx_node.name.clone(), x))?
-                    ))
-                }
-                else {
-                    // Adapt for older opset versions without "axes" input
-                    let mut axes = Vec::new();
-                    for attr in &onnx_node.attribute {
-                        if attr.name == "axes" {
-                            axes = attr.ints.clone()
-                        }
-                    }
-                    let axes_tensor_id = self.new_constant_tensor(NDArrayNumericTensor::from(axes).try_to_rank()?, None);
-                    input_tensors.push(axes_tensor_id);
-                    Some(AnyOperation::Squeeze(ops::SqueezeOperation::from_onnx(input_tensors, output_tensors)
-                        .map_err(|x| ONNXDecodingError::GraphConstructionError(onnx_node.name.clone(), x))?
-                    ))
-                }
+                Some(AnyOperation::Squeeze(ops::SqueezeOperation::from_onnx(&input_tensors, &output_tensors, &onnx_node.attribute)
+                    .map_err(|x| ONNXDecodingError::GraphConstructionError(onnx_node.name.clone(), x))?
+                ))
             }
             "Unsqueeze" => {
-                if core_opset_version >= 21 {
-                    Some(AnyOperation::Unsqueeze(ops::UnsqueezeOperation::from_onnx(input_tensors, output_tensors)
-                        .map_err(|x| ONNXDecodingError::GraphConstructionError(onnx_node.name.clone(), x))?
-                    ))
-                }
-                else {
-                    // Adapt for older opset version without axes tensor
-                    let mut axes = Vec::new();
-                    for attr in &onnx_node.attribute {
-                        if attr.name == "axes" {
-                            axes = attr.ints.clone()
-                        }
-                    }
-                    let axes_tensor_id = self.new_constant_tensor(NDArrayNumericTensor::from(axes).try_to_rank()?, None);
-                    input_tensors.push(axes_tensor_id);
-                    Some(AnyOperation::Unsqueeze(ops::UnsqueezeOperation::from_onnx(input_tensors, output_tensors)
-                        .map_err(|x| ONNXDecodingError::GraphConstructionError(onnx_node.name.clone(), x))?
-                    ))
-                }
+                Some(AnyOperation::Unsqueeze(ops::UnsqueezeOperation::from_onnx(&input_tensors, &output_tensors, &onnx_node.attribute)
+                    .map_err(|x| ONNXDecodingError::GraphConstructionError(onnx_node.name.clone(), x))?
+                ))
             }
             "Transpose" => {
                 Some(AnyOperation::Transpose(ops::TransposeOperation::from_onnx(input_tensors, output_tensors, &onnx_node.attribute)
@@ -848,6 +833,27 @@ impl SymbolicGraphMutator {
             }
             "Identity" => {
                 Some(AnyOperation::Identity(ops::IdentityOperation::from_onnx(&input_tensors, &output_tensors, &onnx_node.attribute)?))
+            }
+            "Conv" => {
+                Some(AnyOperation::Conv(ops::ConvOperation::from_onnx(&input_tensors, &output_tensors, &onnx_node.attribute)?))
+            }
+            "InstanceNormalization" => {
+                Some(AnyOperation::InstanceNormalization(ops::InstanceNormalizationOperation::from_onnx(&input_tensors, &output_tensors, &onnx_node.attribute)?))
+            }
+            "Resize" => {
+                Some(AnyOperation::Resize(ops::ResizeOperation::from_onnx(&input_tensors, &output_tensors, &onnx_node.attribute)?))
+            }
+            "Pad" => {
+                Some(AnyOperation::Pad(ops::PadOperation::from_onnx(&input_tensors, &output_tensors, &onnx_node.attribute)?))
+            }
+            "RandomNormalLike" => {
+                Some(AnyOperation::RandomNormalLike(ops::RandomNormalLikeOperation::from_onnx(&input_tensors, &output_tensors, &onnx_node.attribute)?))
+            }
+            "ArgMax" => {
+                Some(AnyOperation::ArgMax(ops::ArgMaxOperation::from_onnx(&input_tensors, &output_tensors, &onnx_node.attribute)?))
+            }
+            "ArgMin" => {
+                Some(AnyOperation::ArgMin(ops::ArgMinOperation::from_onnx(&input_tensors, &output_tensors, &onnx_node.attribute)?))
             }
             x => Err(ONNXDecodingError::UnsupportedONNXType(x.to_string()))?
         };

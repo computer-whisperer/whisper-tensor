@@ -202,6 +202,10 @@ impl<R: Rank> NumericTensor<R> {
         Ok(NumericTensor::NDArray(self.to_ndarray()?.round()?))
     }
 
+    pub fn erf(&self, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
+        Ok(NumericTensor::NDArray(self.to_ndarray()?.erf()?))
+    }
+
 
     pub fn abs(&self, backend: &EvalBackend) -> Result<Self, NumericTensorError> {
         #[cfg(feature = "candle")]
@@ -479,6 +483,10 @@ impl NumericTensor<DynRank> {
 
     pub fn flatten(&self) -> Result<NumericTensor<P1>, NumericTensorError> {
         Ok(NumericTensor::NDArray(self.to_ndarray()?.flatten()))
+    }
+    
+    pub fn expand(&self, shape: &[u64]) -> Result<NumericTensor<DynRank>, NumericTensorError> {
+        Ok(NumericTensor::NDArray(self.to_ndarray()?.expand(shape)?))
     }
 }
 

@@ -720,6 +720,28 @@ fn test_isinf_operator() {
 }
 
 #[test]
+fn test_expand_operator() {
+    let node_test_paths = vec![
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_expand_dim_changed"),
+        PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_expand_dim_unchanged"),
+    ];
+
+    for path in node_test_paths {
+        if !path.exists() {
+            println!("Test directory not found, skipping");
+            return;
+        }
+
+        if let Some(test) = OnnxNodeTest::from_directory(&path) {
+            test.run(RuntimeBackend::Eval(EvalBackend::NDArray)).expect("operator test failed");
+        } else {
+            panic!("Could not parse operator test");
+        }
+    }
+}
+
+
+#[test]
 fn test_mod_operator() {
     let node_test_paths = vec![
         //PathBuf::from("libs/onnx/onnx/backend/test/data/node/test_mod_broadcast"),

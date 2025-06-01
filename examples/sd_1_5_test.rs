@@ -15,9 +15,13 @@ use whisper_tensor_import::{identify_and_load, ModelTypeHint};
 fn main() {
     tracing_subscriber::fmt::init();
 
-    let input_path = Path::new("/mnt/secondary/neural_networks/v1-5-pruned-emaonly.safetensors");
+    //let input_path = Path::new("/mnt/secondary/neural_networks/v1-5-pruned-emaonly.safetensors");
+    //let input_path = Path::new("/mnt/secondary/neural_networks/stable-diffusion-1.5-onnx-fp16/unet/model.onnx");
+    let input_path = Path::new("/mnt/secondary/neural_networks/stable-diffusion-1.5-onnx-fp16/text_encoder/model.onnx");
     let onnx_out = Path::new("out.onnx");
     let bin_out = Path::new("out.bin");
     let onnx_data = identify_and_load(input_path, WeightStorageStrategy::EmbeddedData, None).unwrap();
     File::create(onnx_out).unwrap().write_all(&onnx_data).unwrap();
+    let runtime = RuntimeModel::load_onnx(&onnx_data, RuntimeBackend::Eval(EvalBackend::NDArray), RuntimeEnvironment::default()).unwrap();
+
 }

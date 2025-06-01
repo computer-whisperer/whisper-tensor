@@ -820,6 +820,7 @@ impl eframe::App for TemplateApp {
                                 }
 
                                 // Build node init data for ops and I/O tensors
+                                let mut sourced_links = HashSet::new();
                                 let mut next_node_id = 0;
                                 let mut node_init_data = HashMap::new();
                                 for (op_id, op) in graph.get_operations() {
@@ -832,6 +833,7 @@ impl eframe::App for TemplateApp {
                                     }
                                     let mut outputs = vec![];
                                     for tensor_id in op.op.get_outputs() {
+                                        sourced_links.insert(tensor_link_ids[&tensor_id]);
                                         outputs.push(tensor_link_ids[&tensor_id]);
                                     }
                                     node_init_data.insert(new_node_id, GraphLayoutNodeInitData {
@@ -848,7 +850,7 @@ impl eframe::App for TemplateApp {
                                             let node_id = GraphLayoutNodeId(next_node_id);
                                             io_tensor_node_ids.insert(*tensor_id, node_id);
                                             next_node_id += 1;
-
+                                            sourced_links.insert(tensor_link_ids[&tensor_id]);
                                             node_init_data.insert(node_id, GraphLayoutNodeInitData {
                                                 node_type: GraphLayoutNodeType::SymbolicGraphTensor(*tensor_id),
                                                 inputs: vec![],
@@ -867,13 +869,24 @@ impl eframe::App for TemplateApp {
                                             });
                                         }
                                         TensorType::Intermediate => {
+                                            if !sourced_links.contains(&tensor_link_ids[tensor_id]) {
+                                                let node_id = GraphLayoutNodeId(next_node_id);
+                                                io_tensor_node_ids.insert(*tensor_id, node_id);
+                                                next_node_id += 1;
+                                                sourced_links.insert(tensor_link_ids[&tensor_id]);
+                                                node_init_data.insert(node_id, GraphLayoutNodeInitData {
+                                                    node_type: GraphLayoutNodeType::SymbolicGraphTensor(*tensor_id),
+                                                    inputs: vec![],
+                                                    outputs: vec![tensor_link_ids[tensor_id]]
+                                                });
+                                            }
                                             continue;
                                         }
                                         TensorType::Constant(_) => {
                                             let node_id = GraphLayoutNodeId(next_node_id);
                                             io_tensor_node_ids.insert(*tensor_id, node_id);
                                             next_node_id += 1;
-
+                                            sourced_links.insert(tensor_link_ids[&tensor_id]);
                                             node_init_data.insert(node_id, GraphLayoutNodeInitData {
                                                 node_type: GraphLayoutNodeType::SymbolicGraphTensor(*tensor_id),
                                                 inputs: vec![],

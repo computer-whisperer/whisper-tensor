@@ -194,6 +194,10 @@ impl NumericScalar {
         }
     }
 
+    pub fn erf(&self) -> Self {
+        unimplemented!();
+    }
+
     pub fn ln(&self) -> Self {
         match self {
             NumericScalar::F64(x) => Self::F64(x.ln()),
