@@ -218,8 +218,8 @@ impl MilliOp for MilliOpConstantOfShape {
 
     fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, _backend: &EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
         let shape: Vec<i64> = inputs[&self.shape].try_to_rank::<P1>()?.try_into()?;
-        let shape_usize = shape.iter().map(|x| *x as usize).collect::<Vec<usize>>();
-        Ok(NDArrayNumericTensor::<DynRank>::fill(self.value.clone(), shape_usize.as_slice())?.into())
+        let shape_usize = shape.iter().map(|x| *x as u64).collect::<Vec<_>>();
+        Ok(NDArrayNumericTensor::<DynRank>::fill(self.value.clone(), &shape_usize)?.into())
     }
 }
 

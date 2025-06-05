@@ -6,9 +6,9 @@ use rand::prelude::StdRng;
 use rand::SeedableRng;
 use typenum::P1;
 use whisper_tensor_import::onnx_graph::WeightStorageStrategy;
-use whisper_tensor::{RuntimeBackend, RuntimeEnvironment, RuntimeModel};
 use whisper_tensor::eval_backend::EvalBackend;
 use whisper_tensor::language_model::LanguageModelManager;
+use whisper_tensor::model::Model;
 use whisper_tensor::numeric_tensor::{NumericTensor};
 use whisper_tensor_import::{identify_and_load, ModelTypeHint};
 
@@ -22,6 +22,6 @@ fn main() {
     let bin_out = Path::new("out.bin");
     let onnx_data = identify_and_load(input_path, WeightStorageStrategy::EmbeddedData, None).unwrap();
     File::create(onnx_out).unwrap().write_all(&onnx_data).unwrap();
-    let runtime = RuntimeModel::load_onnx(&onnx_data, RuntimeBackend::Eval(EvalBackend::NDArray), RuntimeEnvironment::default()).unwrap();
+    let runtime = Model::new_from_onnx(&onnx_data).unwrap();
 
 }

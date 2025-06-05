@@ -1,5 +1,4 @@
 use candle_core::Device;
-use crate::RuntimeBackend;
 use crate::dtype::DTypeError;
 use crate::ndarray_backend::numeric_tensor::{NDArrayNumericTensor};
 use crate::numeric_tensor::{NumericTensor, NumericTensorError};
@@ -37,7 +36,7 @@ pub(crate) fn load_to_device<R: Rank>(value: &NDArrayNumericTensor<R>, device: &
             candle_core::Tensor::from_slice(x, shape, device)?
         }
         _ => {
-            Err(DTypeError::DTypeNotSupportedByBackend(value.dtype(), RuntimeBackend::Candle))?
+            Err(DTypeError::DTypeNotSupportedByBackend(value.dtype()))?
         }
     })
 }

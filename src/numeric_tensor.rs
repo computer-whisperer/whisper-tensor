@@ -14,6 +14,8 @@ use crate::numeric_tensor_typed::NumericTensorTyped;
 use crate::ort_backend;
 use crate::tensor_rank::{DimContainer, DynRank, Rank};
 use crate::TrigOp;
+#[cfg(feature = "vulkan")]
+use crate::vulkan_backend::VulkanTensor;
 
 #[derive(Debug, thiserror::Error)]
 pub enum NumericTensorError {
@@ -41,6 +43,8 @@ pub enum NumericTensor<R: Rank> {
     Candle(candle_core::Tensor),
     #[cfg(feature = "ort")]
     ORT(ort_backend::ORTNumericTensor),
+    #[cfg(feature = "vulkan")]
+    Vulkan(VulkanTensor<R>)
 }
 
 impl<R: Rank> NumericTensor<R> {
@@ -54,6 +58,8 @@ impl<R: Rank> NumericTensor<R> {
             NumericTensor::Candle(x) => Ok(x.try_into()?),
             #[cfg(feature = "ort")]
             NumericTensor::ORT(x) => Ok(x.try_into()?),
+            #[cfg(feature = "vulkan")]
+            NumericTensor::Vulkan(x) => Ok(x.to_ndarray()),
         }
     }
 
@@ -66,6 +72,8 @@ impl<R: Rank> NumericTensor<R> {
             NumericTensor::Candle(x) => Ok(x.try_into()?),
             #[cfg(feature = "ort")]
             NumericTensor::ORT(x) => Ok(x.try_into()?),
+            #[cfg(feature = "vulkan")]
+            NumericTensor::Vulkan(x) => Ok(x.to_ndarray()),
         }
     }
 
@@ -112,6 +120,8 @@ impl<R: Rank> NumericTensor<R> {
             NumericTensor::Candle(x) => x.dtype().into(),
             #[cfg(feature = "ort")]
             NumericTensor::ORT(x) => x.dtype().unwrap(),
+            #[cfg(feature = "vulkan")]
+            NumericTensor::Vulkan(x) => x.dtype(),
         }
     }
 
@@ -136,6 +146,8 @@ impl<R: Rank> NumericTensor<R> {
                 let s2 = s.iter().map(|x| *x as u64).collect::<Vec<_>>();
                 R::KnownDims::try_from_slice(s2.as_slice()).unwrap()
             },
+            #[cfg(feature = "vulkan")]
+            NumericTensor::Vulkan(x) => x.shape().clone(),
         }
     }
 
@@ -148,6 +160,8 @@ impl<R: Rank> NumericTensor<R> {
             NumericTensor::Candle(x) => x.rank(),
             #[cfg(feature = "ort")]
             NumericTensor::ORT(x) => x.rank(),
+            #[cfg(feature = "vulkan")]
+            NumericTensor::Vulkan(x) => x.rank(),
         }
     }
     

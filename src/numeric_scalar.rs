@@ -247,6 +247,24 @@ impl NumericScalar {
             _ => panic!("Cannot clamp_min this type"),
         }
     }
+    
+    pub fn to_bytes(&self) -> Vec<u8> {
+        match self {
+            NumericScalar::F64(x) => x.to_le_bytes().to_vec(),
+            NumericScalar::F32(x) => x.to_le_bytes().to_vec(),
+            NumericScalar::BF16(x) => x.to_le_bytes().to_vec(),
+            NumericScalar::F16(x) => x.to_le_bytes().to_vec(),
+            NumericScalar::U64(x) => x.to_le_bytes().to_vec(),
+            NumericScalar::I64(x) => x.to_le_bytes().to_vec(),
+            NumericScalar::U32(x) => x.to_le_bytes().to_vec(),
+            NumericScalar::I32(x) => x.to_le_bytes().to_vec(),
+            NumericScalar::U16(x) => x.to_le_bytes().to_vec(),
+            NumericScalar::I16(x) => x.to_le_bytes().to_vec(),
+            NumericScalar::U8(x) => x.to_le_bytes().to_vec(),
+            NumericScalar::I8(x) => x.to_le_bytes().to_vec(),
+            NumericScalar::BOOL(x) => vec![*x as u8],
+        }
+    }
 }
 
 pub trait NumericScalarType: DTypeOfPrimitive {

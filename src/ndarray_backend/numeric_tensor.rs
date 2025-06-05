@@ -1,12 +1,12 @@
 use std::fmt::{Display, Formatter};
 use std::ops::{BitAnd, BitOr, BitXor, Not, Range};
 use half::{bf16, f16};
-use ndarray::{ArcArray, IxDyn, SliceInfo, SliceInfoElem};
+use ndarray::{ArcArray, IxDyn, SliceInfo, SliceInfoElem, StrideShape};
 use serde::{Deserialize, Serialize};
 use typenum::P1;
 use crate::dtype::DType;
 use crate::numeric_scalar::NumericScalar;
-use crate::tensor_rank::{DimContainer, DynRank, Rank, RankError};
+use crate::tensor_rank::{DimContainer, DimProduct, DynRank, Rank, RankError};
 use crate::TrigOp;
 use super::ops;
 use super::ops::{NativeNumericTensorBinaryOperation, NativeNumericTensorBinaryOperationBoolOut, NativeNumericTensorBitwiseBinaryOperation, NativeNumericTensorUnaryOperation, ReduceOp};
@@ -190,6 +190,114 @@ impl<R: Rank> NDArrayNumericTensor<R> {
             NDArrayNumericTensor::U8(x) => NumericScalar::U8(x.to_owned().as_slice().unwrap()[0]),
             NDArrayNumericTensor::BOOL(x) => NumericScalar::BOOL(x.to_owned().as_slice().unwrap()[0]),
         }
+    }
+    
+    pub(crate) fn from_bytes(bytes: &[u8], dtype: DType, shape: &R::KnownDims, stride: &R::KnownDims) -> Result<Self, NDArrayNumericTensorError> {
+        Ok(match dtype {
+            DType::F64 => {
+                let mut v = Vec::new();
+                for i in 0..shape.dim_product() as usize {
+                    let type_len = 8;
+                    v[i] = f64::from_bits(u64::from_le_bytes(bytes[i * type_len..(i+1) * type_len].try_into().unwrap()));
+                }
+                Self::from_slice_shape_stride(v, shape, stride)?
+            },
+            DType::F32 => {
+                let mut v = Vec::new();
+                for i in 0..shape.dim_product() as usize {
+                    let type_len = 4;
+                    v[i] = f32::from_bits(u32::from_le_bytes(bytes[i * type_len..(i+1) * type_len].try_into().unwrap()));
+                }
+                Self::from_slice_shape_stride(v, shape, stride)?
+            }
+            DType::BF16 => {
+                let mut v = Vec::new();
+                for i in 0..shape.dim_product() as usize {
+                    let type_len = 2;
+                    v[i] = bf16::from_bits(u16::from_le_bytes(bytes[i * type_len..(i+1) * type_len].try_into().unwrap()));
+                }
+                Self::from_slice_shape_stride(v, shape, stride)?
+            }
+            DType::F16 => {
+                let mut v = Vec::new();
+                for i in 0..shape.dim_product() as usize {
+                    let type_len = 2;
+                    v[i] = f16::from_bits(u16::from_le_bytes(bytes[i * type_len..(i+1) * type_len].try_into().unwrap()));
+                }
+                Self::from_slice_shape_stride(v, shape, stride)?
+            }
+            DType::U64 => {
+                let mut v = Vec::new();
+                for i in 0..shape.dim_product() as usize {
+                    let type_len = 8;
+                    v[i] = u64::from_le_bytes(bytes[i * type_len..(i+1) * type_len].try_into().unwrap());
+                }
+                Self::from_slice_shape_stride(v, shape, stride)?
+            }
+            DType::I64 => {
+                let mut v = Vec::new();
+                for i in 0..shape.dim_product() as usize {
+                    let type_len = 8;
+                    v[i] = i64::from_le_bytes(bytes[i * type_len..(i+1) * type_len].try_into().unwrap());
+                }
+                Self::from_slice_shape_stride(v, shape, stride)?
+            }
+            DType::U32 => {
+                let mut v = Vec::new();
+                for i in 0..shape.dim_product() as usize {
+                    let type_len = 4;
+                    v[i] = u32::from_le_bytes(bytes[i * type_len..(i+1) * type_len].try_into().unwrap());
+                }
+                Self::from_slice_shape_stride(v, shape, stride)?
+            }
+            DType::I32 => {
+                let mut v = Vec::new();
+                for i in 0..shape.dim_product() as usize {
+                    let type_len = 4;
+                    v[i] = i32::from_le_bytes(bytes[i * type_len..(i+1) * type_len].try_into().unwrap());
+                }
+                Self::from_slice_shape_stride(v, shape, stride)?
+            }
+            DType::U16 => {
+                let mut v = Vec::new();
+                for i in 0..shape.dim_product() as usize {
+                    let type_len = 2;
+                    v[i] = u16::from_le_bytes(bytes[i * type_len..(i+1) * type_len].try_into().unwrap());
+                }
+                Self::from_slice_shape_stride(v, shape, stride)?
+            }
+            DType::I16 => {
+                let mut v = Vec::new();
+                for i in 0..shape.dim_product() as usize {
+                    let type_len = 2;
+                    v[i] = i16::from_le_bytes(bytes[i * type_len..(i+1) * type_len].try_into().unwrap());
+                }
+                Self::from_slice_shape_stride(v, shape, stride)?
+            }
+            DType::U8 => {
+                let mut v = Vec::new();
+                for i in 0..shape.dim_product() as usize {
+                    let type_len = 2;
+                    v[i] = u8::from_le_bytes(bytes[i * type_len..(i+1) * type_len].try_into().unwrap());
+                }
+                Self::from_slice_shape_stride(v, shape, stride)?
+            }
+            DType::I8 => {
+                let mut v = Vec::new();
+                for i in 0..shape.dim_product() as usize {
+                    let type_len = 2;
+                    v[i] = i8::from_le_bytes(bytes[i * type_len..(i+1) * type_len].try_into().unwrap());
+                }
+                Self::from_slice_shape_stride(v, shape, stride)?
+            }
+            DType::BOOL => {
+                let mut v = Vec::new();
+                for i in 0..shape.dim_product() as usize {
+                    v[i] = bytes[i] != 0;
+                }
+                Self::from_slice_shape_stride(v, shape, stride)?
+            }
+        })
     }
 
     fn try_unary_op(a: &Self, op: NativeNumericTensorUnaryOperation) -> Result<Self, NDArrayNumericTensorError> {
@@ -654,6 +762,25 @@ impl<R: Rank> NDArrayNumericTensor<R> {
             _ => Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("sign".to_string(), vec![self.dtype()]))?,
         })
     }
+
+    pub fn fill(value: NumericScalar, shape: &R::KnownDims) -> Result<Self, NDArrayNumericTensorError> {
+        let shape = R::cast_to_ndarray_dim(shape);
+        Ok(match value {
+            NumericScalar::F64(x) => Self::F64(ArcArray::from_elem(shape, x)),
+            NumericScalar::F32(x) => Self::F32(ArcArray::from_elem(shape, x)),
+            NumericScalar::BF16(x) => Self::BF16(ArcArray::from_elem(shape, x)),
+            NumericScalar::F16(x) => Self::F16(ArcArray::from_elem(shape, x)),
+            NumericScalar::U64(x) => Self::U64(ArcArray::from_elem(shape, x)),
+            NumericScalar::I64(x) => Self::I64(ArcArray::from_elem(shape, x)),
+            NumericScalar::U32(x) => Self::U32(ArcArray::from_elem(shape, x)),
+            NumericScalar::I32(x) => Self::I32(ArcArray::from_elem(shape, x)),
+            NumericScalar::U16(x) => Self::U16(ArcArray::from_elem(shape, x)),
+            NumericScalar::I16(x) => Self::I16(ArcArray::from_elem(shape, x)),
+            NumericScalar::U8(x) => Self::U8(ArcArray::from_elem(shape, x)),
+            NumericScalar::I8(x) => Self::I8(ArcArray::from_elem(shape, x)),
+            NumericScalar::BOOL(x) => Self::BOOL(ArcArray::from_elem(shape, x)),
+        })
+    }
 }
 
 impl NDArrayNumericTensor<DynRank> {
@@ -1046,79 +1173,63 @@ impl NDArrayNumericTensor<DynRank> {
         }
     }
 
-    pub fn from_raw_data(data: &[u8], dtype: DType, shape: Vec<usize>) -> Result<Self, NDArrayNumericTensorError> {
+    pub fn from_raw_data(data: &[u8], dtype: DType, shape: Vec<u64>) -> Result<Self, NDArrayNumericTensorError> {
         Ok(match dtype {
             DType::F64 => {
                 let data: Vec<_> = data.chunks_exact(8).map(|x| f64::from_le_bytes(x.try_into().unwrap())).collect();
-                NDArrayNumericTensor::F64(ArcArray::<_, IxDyn>::from_shape_vec(shape.clone(), data)?)
+                NDArrayNumericTensor::from_vec_shape(data, &shape)?
             },
             DType::F32 => {
                 let data = data.chunks_exact(4).map(|x| f32::from_le_bytes(x.try_into().unwrap())).collect();
-                NDArrayNumericTensor::F32(ArcArray::<_, IxDyn>::from_shape_vec(shape, data)?)
+                NDArrayNumericTensor::from_vec_shape(data, &shape)?
             },
             DType::BF16 => {
                 let data = data.chunks_exact(2).map(|x| bf16::from_bits(u16::from_le_bytes(x.try_into().unwrap()))).collect();
-                NDArrayNumericTensor::BF16(ArcArray::<_, IxDyn>::from_shape_vec(shape, data)?)
+                NDArrayNumericTensor::from_vec_shape(data, &shape)?
             }
             DType::F16 => {
                 let data = data.chunks_exact(2).map(|x| f16::from_bits(u16::from_le_bytes(x.try_into().unwrap()))).collect();
-                NDArrayNumericTensor::F16(ArcArray::<_, IxDyn>::from_shape_vec(shape, data)?)
+                NDArrayNumericTensor::from_vec_shape(data, &shape)?
             }
             DType::I64 => {
                 let data = data.chunks_exact(8).map(|x| i64::from_le_bytes(x.try_into().unwrap())).collect();
-                NDArrayNumericTensor::I64(ArcArray::<_, IxDyn>::from_shape_vec(shape, data)?)
+                NDArrayNumericTensor::from_vec_shape(data, &shape)?
             },
             DType::I32 => {
                 let data = data.chunks_exact(4).map(|x| i32::from_le_bytes(x.try_into().unwrap())).collect();
-                NDArrayNumericTensor::I32(ArcArray::<_, IxDyn>::from_shape_vec(shape, data)?)
+                NDArrayNumericTensor::from_vec_shape(data, &shape)?
             },
             DType::U64 => {
                 let data = data.chunks_exact(8).map(|x| u64::from_le_bytes(x.try_into().unwrap())).collect();
-                NDArrayNumericTensor::U64(ArcArray::<_, IxDyn>::from_shape_vec(shape, data)?)
+                NDArrayNumericTensor::from_vec_shape(data, &shape)?
             },
             DType::U32 => {
                 let data = data.chunks_exact(4).map(|x| u32::from_le_bytes(x.try_into().unwrap())).collect();
-                NDArrayNumericTensor::U32(ArcArray::<_, IxDyn>::from_shape_vec(shape, data)?)
+                NDArrayNumericTensor::from_vec_shape(data, &shape)?
             },
             DType::I16 => {
                 let data = data.chunks_exact(2).map(|x| i16::from_le_bytes(x.try_into().unwrap())).collect();
-                NDArrayNumericTensor::I16(ArcArray::<_, IxDyn>::from_shape_vec(shape, data)?)
+                NDArrayNumericTensor::from_vec_shape(data, &shape)?
             }
             DType::U16 => {
                 let data = data.chunks_exact(2).map(|x| u16::from_le_bytes(x.try_into().unwrap())).collect();
-                NDArrayNumericTensor::U16(ArcArray::<_, IxDyn>::from_shape_vec(shape, data)?)
+                NDArrayNumericTensor::from_vec_shape(data, &shape)?
             }
             DType::U8 => {
-                NDArrayNumericTensor::U8(ArcArray::<_, IxDyn>::from_shape_vec(shape, data.to_vec())?)
+                NDArrayNumericTensor::from_vec_shape(data.to_vec(), &shape)?
             }
             DType::I8 => {
                 let data = data.into_iter().map(|x| *x as i8).collect();
-                NDArrayNumericTensor::I8(ArcArray::<_, IxDyn>::from_shape_vec(shape, data)?)
+                NDArrayNumericTensor::from_vec_shape(data, &shape)?
             }
             DType::BOOL => {
                 let data = data.into_iter().map(|x| *x != 0).collect();
-                NDArrayNumericTensor::BOOL(ArcArray::<_, IxDyn>::from_shape_vec(shape, data)?)
+                NDArrayNumericTensor::from_vec_shape(data, &shape)?
             }
         })
     }
 
-    pub fn fill(value: NumericScalar, shape: &[usize]) -> Result<Self, NDArrayNumericTensorError> {
-        Ok(match value {
-            NumericScalar::F64(x) => Self::F64(ArcArray::from_elem(shape, x)),
-            NumericScalar::F32(x) => Self::F32(ArcArray::from_elem(shape, x)),
-            NumericScalar::BF16(x) => Self::BF16(ArcArray::from_elem(shape, x)),
-            NumericScalar::F16(x) => Self::F16(ArcArray::from_elem(shape, x)),
-            NumericScalar::U64(x) => Self::U64(ArcArray::from_elem(shape, x)),
-            NumericScalar::I64(x) => Self::I64(ArcArray::from_elem(shape, x)),
-            NumericScalar::U32(x) => Self::U32(ArcArray::from_elem(shape, x)),
-            NumericScalar::I32(x) => Self::I32(ArcArray::from_elem(shape, x)),
-            NumericScalar::U16(x) => Self::U16(ArcArray::from_elem(shape, x)),
-            NumericScalar::I16(x) => Self::I16(ArcArray::from_elem(shape, x)),
-            NumericScalar::U8(x) => Self::U8(ArcArray::from_elem(shape, x)),
-            NumericScalar::I8(x) => Self::I8(ArcArray::from_elem(shape, x)),
-            NumericScalar::BOOL(x) => Self::BOOL(ArcArray::from_elem(shape, x)),
-        })
-    }
+
 
     pub fn where_op(&self, a: &Self, b: &Self) -> Result<Self, NDArrayNumericTensorError> {
         let cond = if let NDArrayNumericTensor::BOOL(x) = self {

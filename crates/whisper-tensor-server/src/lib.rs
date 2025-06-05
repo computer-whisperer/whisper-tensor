@@ -58,7 +58,7 @@ pub enum WebsocketClientServerMessage {
 pub struct CurrentModelsReportEntry {
     pub model_id: LoadedModelId,
     pub model_name: String,
-    pub num_ops: Option<u64>,
+    pub num_ops: u64,
     pub model_type_metadata: ModelTypeMetadata
 }
 

@@ -1,11 +1,11 @@
 use half::{bf16, f16};
 use serde::{Deserialize, Serialize};
-use crate::{RuntimeBackend, onnx};
+use crate::{onnx};
 
 #[derive(Debug, thiserror::Error)]
 pub enum DTypeError {
-    #[error("The backend {0} does not support the dtype {1}")]
-    DTypeNotSupportedByBackend(DType, RuntimeBackend),
+    #[error("The backend does not support the dtype {0}")]
+    DTypeNotSupportedByBackend(DType),
     #[error("The onnx dtype {0:?} is not supported")]
     UnsupportedONNXDtype(onnx::tensor_proto::DataType),
     #[cfg(feature = "ort")]
@@ -28,6 +28,26 @@ pub enum DType {
     U8,
     I8,
     BOOL
+}
+
+impl DType {
+    pub fn size(&self) -> usize {
+        match self {
+            DType::F64 => 8,
+            DType::F32 => 4,
+            DType::BF16 => 2,
+            DType::F16 => 2,
+            DType::U64 => 8,
+            DType::I64 => 8,
+            DType::U32 => 4,
+            DType::I32 => 4,
+            DType::U16 => 2,
+            DType::I16 => 2,
+            DType::U8 => 1,
+            DType::I8 => 1,
+            DType::BOOL => 1
+        }
+    }
 }
 
 impl TryFrom<onnx::tensor_proto::DataType> for DType {
@@ -104,7 +124,7 @@ impl TryFrom<DType> for candle_core::DType {
             DType::I64 => candle_core::DType::I64,
             DType::U32 => candle_core::DType::U32,
             DType::U8 => candle_core::DType::U8,
-            _ => Err(DTypeError::DTypeNotSupportedByBackend(value, RuntimeBackend::Candle))?
+            _ => Err(DTypeError::DTypeNotSupportedByBackend(value))?
         })
     }
 }

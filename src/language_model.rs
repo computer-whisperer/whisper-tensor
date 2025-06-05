@@ -6,8 +6,8 @@ use rwkv_tokenizer::WorldTokenizer;
 use whisper_tensor_import::onnx_graph::{ModelInputType, ModelOutputType, TokenizerInfo};
 use crate::numeric_tensor::NumericTensor;
 use crate::tokenizer::{AnyTokenizer, Tokenizer};
-use crate::{RuntimeError, RuntimeModel};
 use crate::eval_backend::EvalBackend;
+use crate::model::{Model, ModelError, ModelExecutionRuntime};
 use crate::sampler::Sampler;
 use crate::tensor_rank::DynRank;
 
@@ -27,14 +27,14 @@ pub struct LangaugeModelIntermediateValues {
 }
 
 pub struct LanguageModelManager {
-    model: RuntimeModel,
+    model: Model,
     tokenizer: Option<Arc<AnyTokenizer>>
 }
 
 impl LanguageModelManager {
-    pub fn new(model: RuntimeModel) -> Result<Self, LanguageModelManagerError> {
+    pub fn new(model: Model) -> Result<Self, LanguageModelManagerError> {
         let mut tokenizer: Option<Arc<AnyTokenizer>> = None;
-        if let Some(meta) = &model.model_metadata {
+        if let Some(meta) = model.get_model_metadata() {
             if let Some(tokenizer_info) = meta.tokenizer_infos.get(0) {
                 match tokenizer_info {
                     TokenizerInfo::HFTokenizer(name) => {
@@ -60,8 +60,8 @@ impl LanguageModelManager {
         })
     }
     
-    pub fn run<S: Sampler>(&mut self, input_tokens: NumericTensor<DynRank>, input_intermediate_values: Option<LangaugeModelIntermediateValues>, sampler: &mut S) -> Result<(NumericTensor<DynRank>, LangaugeModelIntermediateValues), RuntimeError> {
-        let (output_tensor, output_intermediate_values) = self.forward(input_tokens, input_intermediate_values)?;
+    pub fn run<S: Sampler>(&mut self, input_tokens: NumericTensor<DynRank>, input_intermediate_values: Option<LangaugeModelIntermediateValues>, sampler: &mut S, model_execution_runtime: &ModelExecutionRuntime) -> Result<(NumericTensor<DynRank>, LangaugeModelIntermediateValues), ModelError> {
+        let (output_tensor, output_intermediate_values) = self.forward(input_tokens, input_intermediate_values, model_execution_runtime)?;
         let shape = output_tensor.shape();
         let mut output_slice = Vec::new();
         for i in 0..shape.len()-1 {
@@ -69,11 +69,11 @@ impl LanguageModelManager {
         }
         output_slice.push(0..shape[shape.len()-1]);
         let sliced_output_tensor = output_tensor.slice(&output_slice, &EvalBackend::NDArray)?;
-        let output_tensor_sampled = sampler.sample(&sliced_output_tensor)?;
+        let output_tensor_sampled = sampler.sample(&sliced_output_tensor).unwrap();
         Ok((output_tensor_sampled, output_intermediate_values))
     } 
     
-    pub fn forward(&mut self, input_tokens: NumericTensor<DynRank>, intermediate_values: Option<LangaugeModelIntermediateValues>) -> Result<(NumericTensor<DynRank>, LangaugeModelIntermediateValues), RuntimeError> {
+    pub fn forward(&mut self, input_tokens: NumericTensor<DynRank>, intermediate_values: Option<LangaugeModelIntermediateValues>, model_execution_runtime: &ModelExecutionRuntime) -> Result<(NumericTensor<DynRank>, LangaugeModelIntermediateValues), ModelError> {
         // Add batch dim if needed
         let input_tokens = if input_tokens.rank() < 2 {
             input_tokens.unsqueeze(0, &EvalBackend::NDArray)?
@@ -85,7 +85,7 @@ impl LanguageModelManager {
         let mut input_tokens_processed = 0;
         let mut output_chunks = vec![];
         
-        let max_sequence_len = self.model.model_metadata.clone().map(|x| x.max_token_batch).flatten().unwrap_or(input_sequence_len as usize);
+        let max_sequence_len = self.model.get_model_metadata().clone().map(|x| x.max_token_batch).flatten().unwrap_or(input_sequence_len as usize);
         let mut intermediate_values = intermediate_values.clone();
         
         let input_tensor_infos = self.model.get_input_tensor_info()?;
@@ -125,7 +125,7 @@ impl LanguageModelManager {
                 }
             }
 
-            let output_tensors = self.model.run(input_tensors)?;
+            let output_tensors = self.model.run(input_tensors, model_execution_runtime)?;
 
             let mut output_tensor = None;
             let mut output_intermediate_values = HashMap::new();
@@ -152,9 +152,5 @@ impl LanguageModelManager {
     
     pub fn get_tokenizer(&self) -> Option<Arc<AnyTokenizer>> {
         self.tokenizer.clone()
-    }
-    
-    pub fn get_runtime(&self) -> &RuntimeModel {
-        &self.model
     }
 }

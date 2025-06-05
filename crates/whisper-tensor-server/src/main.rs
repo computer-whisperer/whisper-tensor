@@ -17,32 +17,14 @@ use axum::{
     Router,
 };
 use tokio::sync::RwLock;
-use whisper_tensor::{DynRank, NDArrayNumericTensor, RuntimeBackend, RuntimeEnvironment, RuntimeModel};
+use whisper_tensor::{DynRank, NDArrayNumericTensor};
 use whisper_tensor::eval_backend::EvalBackend;
 use tokio::sync::watch;
 
-enum ModelDataInner {
-    ModelDataLLM(LanguageModelManager),
-    ModelDataOther(RuntimeModel)
-}
-
 struct ModelData {
-    inner: ModelDataInner,
+    model: Model,
     model_id: LoadedModelId,
     model_name: String
-}
-
-impl ModelData {
-    fn get_runtime(&self) -> &RuntimeModel {
-        match &self.inner {
-            ModelDataInner::ModelDataLLM(llm) => llm.get_runtime(),
-            ModelDataInner::ModelDataOther(runtime) => runtime
-        }
-    }
-    
-    fn get_symbolic_graph(&self) -> Option<&SymbolicGraph> {
-        self.get_runtime().get_symbolic_graph()
-    }
 }
 
 pub(crate) struct ModelServer {
@@ -68,23 +50,11 @@ impl ModelServer {
         let mut new_vec = vec![];
 
         for model in guard.iter() {
-            let model_type_metadata = match &model.inner {
-                ModelDataInner::ModelDataLLM(x) => {
-                    if let Some(_tokenizer) = x.get_tokenizer() {
-                        ModelTypeMetadata::LLM(LLMMetadata{
-                            tokenizer_info: x.get_runtime().get_tokenizer_infos()[0].clone()
-                            })
-                    }
-                    else {
-                        ModelTypeMetadata::Other
-                    }
-                }
-                ModelDataInner::ModelDataOther(_) => {ModelTypeMetadata::Other}
-            };
+            let model_type_metadata = ModelTypeMetadata::Other;
             new_vec.push(CurrentModelsReportEntry{
                 model_id: model.model_id,
                 model_name: model.model_name.clone(),
-                num_ops: model.get_runtime().get_num_ops().map(|x| x as u64),
+                num_ops: model.model.get_symbolic_graph().get_operations().len() as u64,
                 model_type_metadata
             })
         }
@@ -94,22 +64,14 @@ impl ModelServer {
     pub(crate) async fn load_model(&self, model_path: &Path, model_hint: Option<ModelTypeHint>, model_load_type: ModelLoadType) -> Result<(), anyhow::Error> {
         let onnx_data = identify_and_load(model_path, WeightStorageStrategy::EmbeddedData, model_hint)?;
         
-        let runtime_model = RuntimeModel::load_onnx(&onnx_data, RuntimeBackend::Eval(EvalBackend::NDArray), RuntimeEnvironment::default())?;
+        let runtime_model = Model::new_from_onnx(&onnx_data)?;
         let model_name = model_path.file_stem().unwrap_or_default().to_str().unwrap_or_default().to_string();
         let model_id = self.next_model_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut guard = self.models.write().await;
         
-        let inner = match model_load_type {
-            ModelLoadType::LLM => {
-                ModelDataInner::ModelDataLLM(LanguageModelManager::new(runtime_model)?)
-            }
-            ModelLoadType::Other => {
-                ModelDataInner::ModelDataOther(runtime_model)
-            }
-        };
         
         guard.push(ModelData{
-            inner,
+            model: runtime_model,
             model_id: LoadedModelId(model_id),
             model_name
         });
@@ -136,62 +98,11 @@ impl ModelServer {
             Err(format!("Model with id {} not found", model_id))
         }
     }
-
-    pub(crate) async fn with_llm<T>(&self, model_id: LoadedModelId, f: impl FnOnce(&LanguageModelManager) -> T) -> Result<T, String>
-    {
-        let guard = self.models.read().await;
-        if let Some(model) = guard.iter().find(|model| model.model_id == model_id) {
-            if let ModelDataInner::ModelDataLLM(x) = &model.inner {
-                Ok(f(x))
-            } else {
-                Err("Unsupported operation".to_string())
-            }
-        }
-        else {
-            Err(format!("Model with id {} not found", model_id))
-        }
-    }
-
-    pub(crate) async fn with_llm_mut<T>(&self, model_id: LoadedModelId, f: impl FnOnce(&mut LanguageModelManager) -> T) -> Result<T, String>
-    {
-        let mut guard = self.models.write().await;
-        if let Some(model) = guard.iter_mut().find(|model| model.model_id == model_id) {
-            if let ModelDataInner::ModelDataLLM(x) = &mut model.inner {
-                Ok(f(x))
-            } else {
-                Err("Unsupported operation".to_string())
-            }
-        }
-        else {
-            Err(format!("Model with id {} not found", model_id))
-        }
-    }
     
     pub(crate) async fn get_stored_tensor_id(&self, model_id: LoadedModelId, stored_tensor_id: TensorStoreTensorId) -> Result<NumericTensor<DynRank>, String> {
         let guard = self.models.read().await;
         if let Some(model) = guard.iter().find(|model| model.model_id == model_id) {
-            model.get_runtime().get_stored_tensor_id(stored_tensor_id).ok_or("Tensor not found in Tensor Store".to_string())
-        }
-        else {
-            Err(format!("Model with id {} not found", model_id))
-        }
-    }
-
-    pub(crate) async fn get_tokenizer(&self, model_id: LoadedModelId) -> Result<AnyTokenizer, String> {
-        let guard = self.models.read().await;
-        if let Some(model) = guard.iter().find(|model| model.model_id == model_id) {
-            match &model.inner {
-                ModelDataInner::ModelDataLLM(x) => {
-                    if let Some(x) = x.get_tokenizer() {
-                        Ok(x.as_ref().clone())
-                    } else {
-                        Err("Model does not have a loaded tokenizer".to_string())
-                    }
-                }
-                ModelDataInner::ModelDataOther(_) => {
-                    Err("Model is not loaded as an LLM".to_string())
-                }
-            }
+            model.model.get_tensor_store().get_tensor(stored_tensor_id).map(|x| x.to_numeric()).ok_or("Tensor not found in Tensor Store".to_string())
         }
         else {
             Err(format!("Model with id {} not found", model_id))
@@ -220,6 +131,7 @@ use log::info;
 use tokenizers::FromPretrainedParameters;
 use typenum::P1;
 use whisper_tensor::dtype::DType;
+use whisper_tensor::model::Model;
 
 async fn send_message(socket: &mut WebSocket, message: WebsocketServerClientMessage) {
     let mut data = Vec::<u8>::new();
@@ -316,13 +228,10 @@ async fn handle_socket(mut socket: WebSocket, model_server: Arc<ModelServer>) {
                                         }
                                         WebsocketClientServerMessage::GetModelGraph(model_id) => {
                                             let ret = match model_server.with_model(model_id, |model| {
-                                                if let Some(graph) = &model.get_symbolic_graph() {
-                                                    let mut data = Vec::<u8>::new();
-                                                    ciborium::into_writer(graph, &mut data).unwrap();
-                                                    Ok(data)
-                                                } else {
-                                                    Err("Model runtime does not support graph introspection".to_string())
-                                                }
+                                                let graph = &model.model.get_symbolic_graph();
+                                                let mut data = Vec::<u8>::new();
+                                                ciborium::into_writer(graph, &mut data).unwrap();
+                                                Ok(data)
                                             }).await {
                                                 Ok(Ok(graph)) => {
                                                     WebsocketServerClientMessage::ModelGraphReturn(Ok((model_id, graph)))
@@ -345,6 +254,7 @@ async fn handle_socket(mut socket: WebSocket, model_server: Arc<ModelServer>) {
                                                 }));
                                             send_message(&mut socket, msg_out).await;
                                         }
+                                        /*
                                         WebsocketClientServerMessage::GetLogits(request) => {
                                             let ret = model_server.with_llm_mut(request.model_id, |x| {
                                                 info!("Starting inference");
@@ -381,7 +291,7 @@ async fn handle_socket(mut socket: WebSocket, model_server: Arc<ModelServer>) {
                                                 ret
                                             );
                                             send_message(&mut socket, msg_out).await;
-                                        }
+                                        }*/
                                         _ => {
                                             log::debug!("Unhandled message: {:?}", msg)
                                         }

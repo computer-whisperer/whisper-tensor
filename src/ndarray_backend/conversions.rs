@@ -1,21 +1,26 @@
-use ndarray::{ArcArray, Dimension, IntoDimension, Ix1, IxDyn, StrideShape};
+use ndarray::{ArcArray, ShapeBuilder};
 use half::{bf16, f16};
 use typenum::P1;
 use crate::dtype::{DTypeOfPrimitive};
 use crate::ndarray_backend::{NDArrayNumericTensor, NDArrayNumericTensorError};
-use crate::tensor_rank::{DynRank, Rank};
+use crate::tensor_rank::{Rank};
 
 pub trait NDArrayNumericTensorType: Sized + DTypeOfPrimitive + Clone {
-    fn ndarray_numeric_tensor_from_parts(v: Vec<Self>, shape: &[usize]) -> Result<NDArrayNumericTensor<DynRank>, NDArrayNumericTensorError>;
+    fn ndarray_numeric_tensor_from_vec_shape<R: Rank>(v: Vec<Self>, shape: R::NDArrayDim) -> Result<NDArrayNumericTensor<R>, NDArrayNumericTensorError>;
+    fn ndarray_numeric_tensor_from_vec_shape_stride<R: Rank>(v: Vec<Self>, shape: R::NDArrayDim, stride: R::NDArrayDim) -> Result<NDArrayNumericTensor<R>, NDArrayNumericTensorError>;
     fn ndarray_numeric_tensor_from_vec(v: Vec<Self>) -> NDArrayNumericTensor<P1>;
     fn ndarray_numeric_tensor_ref_parts<R: Rank>(tensor: &NDArrayNumericTensor<R>) -> Result<(&[Self], &[usize]), NDArrayNumericTensorError>;
     fn ndarray_numeric_tensor_inner<R: Rank>(tensor: &NDArrayNumericTensor<R>) -> Result<&ArcArray<Self, R::NDArrayDim>, NDArrayNumericTensorError>;
     fn ndarray_numeric_tensor_from_ndarray<R: Rank>(value: ArcArray<Self, R::NDArrayDim>) -> NDArrayNumericTensor<R>;
 }
 
-impl NDArrayNumericTensor<DynRank> {
-    pub(crate) fn from_vec_shape<T: NDArrayNumericTensorType>(v: Vec<T>, shape: &[usize]) -> Result<Self, NDArrayNumericTensorError> {
-        T::ndarray_numeric_tensor_from_parts(v, shape)
+impl<R: Rank> NDArrayNumericTensor<R> {
+    pub(crate) fn from_vec_shape<T: NDArrayNumericTensorType>(v: Vec<T>, shape: &R::KnownDims) -> Result<Self, NDArrayNumericTensorError> {
+        T::ndarray_numeric_tensor_from_vec_shape(v, R::cast_to_ndarray_dim(shape))
+    }
+    
+    pub(crate) fn from_slice_shape_stride<T: NDArrayNumericTensorType>(v: Vec<T>, shape: &R::KnownDims, stride: &R::KnownDims) -> Result<Self, NDArrayNumericTensorError> {
+        T::ndarray_numeric_tensor_from_vec_shape_stride(v, R::cast_to_ndarray_dim(shape), R::cast_to_ndarray_dim(stride))
     }
 }
 
@@ -62,8 +67,17 @@ macro_rules! impl_type_ndarray_backend {
     ($a:ident, $b:ident) => {
         impl NDArrayNumericTensorType for $a
         {
-            fn ndarray_numeric_tensor_from_parts(v: Vec<Self>, shape: &[usize]) -> Result<NDArrayNumericTensor<DynRank>, NDArrayNumericTensorError> {
-                Ok(NDArrayNumericTensor::$b(ArcArray::from_shape_vec(shape, v)?))
+            fn ndarray_numeric_tensor_from_vec_shape<R: Rank>(v: Vec<Self>, shape: R::NDArrayDim) -> Result<NDArrayNumericTensor<R>, NDArrayNumericTensorError> {
+                Ok(NDArrayNumericTensor::$b(ArcArray::from_shape_vec(
+                    shape, 
+                    v)?))
+            }
+            
+            fn ndarray_numeric_tensor_from_vec_shape_stride<R: Rank>(v: Vec<Self>, shape: R::NDArrayDim, stride: R::NDArrayDim) -> Result<NDArrayNumericTensor<R>, NDArrayNumericTensorError> {
+                let strideshape = ShapeBuilder::strides(ndarray::Shape::from(shape), stride);
+                Ok(NDArrayNumericTensor::$b(ArcArray::from_shape_vec(
+                    strideshape, 
+                    v)?))
             }
             
             fn ndarray_numeric_tensor_from_vec(v: Vec<Self>) -> NDArrayNumericTensor<P1> {

@@ -296,7 +296,7 @@ impl TryFrom<&onnx::TensorProto> for NDArrayNumericTensor<DynRank> {
                 .map_err(|x| ONNXDecodingError::ProtobufDecodeError(anyhow::Error::from(x)))?,
         )?;
         
-        let shape = tensor.dims.iter().map(|x| *x as usize).collect();
+        let shape = tensor.dims.iter().map(|x| *x as u64).collect();
 
         let out = if !tensor.raw_data.is_empty() {
             NDArrayNumericTensor::from_raw_data(&tensor.raw_data, dtype, shape)?
@@ -337,7 +337,7 @@ impl TryFrom<&onnx::TensorProto> for NDArrayNumericTensor<DynRank> {
             }
         }
         else {
-            NDArrayNumericTensor::fill(NumericScalar::zero_of(dtype), shape.as_slice())?
+            NDArrayNumericTensor::fill(NumericScalar::zero_of(dtype), &shape)?
         };
         assert_eq!(out.dtype(), dtype);
         Ok(out)

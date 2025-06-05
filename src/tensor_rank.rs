@@ -47,13 +47,35 @@ impl<T: Clone, const L: usize> DimContainer<T> for [T; L]
     }
 }
 
+pub trait DimProduct {
+    fn dim_product(&self) -> u64;
+}
+
+impl DimProduct for [u64] {
+    fn dim_product(&self) -> u64 {
+        self.iter().product()
+    }
+}
+
+impl DimProduct for Vec<u64> {
+    fn dim_product(&self) -> u64 {
+        self.iter().product()
+    }
+}
+
+impl<const L: usize> DimProduct for [u64; L] {
+    fn dim_product(&self) -> u64 {
+        self.iter().product()
+    }
+}
+
 
 pub trait Rank: Debug + Clone {
     type NDArrayDim: Dimension + Serialize + for<'a> Deserialize<'a>;
     const LEN: Option<usize>;
     
     type UnknownDims: Debug + Clone + DimContainer<ScalarInfoTyped<u64>> + Index<usize, Output=ScalarInfoTyped<u64>>;
-    type KnownDims: Debug + Clone + DimContainer<u64> + Index<usize, Output=u64>;
+    type KnownDims: Debug + Clone + DimContainer<u64> + Index<usize, Output=u64> + DimProduct;
     
     fn try_cast_to_dim(dims: &[usize]) -> Result<Self::NDArrayDim, RankError>;
     fn cast_to_ndarray_dim(dims: &Self::KnownDims) -> Self::NDArrayDim;

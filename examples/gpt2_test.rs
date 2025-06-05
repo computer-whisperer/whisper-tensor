@@ -1,14 +1,11 @@
-use std::collections::HashMap;
-use std::fs::File;
-use std::io::{Read, Write};
 use std::path::Path;
 use llm_samplers::prelude::{SampleFreqPresence, SampleGreedy, SampleTemperature, SamplerChain, SimpleSamplerResources};
 use rand::prelude::StdRng;
 use rand::SeedableRng;
 use typenum::P1;
-use whisper_tensor::{RuntimeBackend, RuntimeEnvironment, RuntimeModel};
 use whisper_tensor::eval_backend::EvalBackend;
 use whisper_tensor::language_model::LanguageModelManager;
+use whisper_tensor::model::{Model, ModelExecutionRuntime};
 use whisper_tensor::numeric_tensor::{NumericTensor};
 use whisper_tensor::sampler::{LLMSamplersBundle};
 use whisper_tensor::tokenizer::Tokenizer;
@@ -21,7 +18,7 @@ fn main() {
     let input_path = Path::new("gpt2-lm-head-10.onnx");
     let onnx_data = identify_and_load(input_path, WeightStorageStrategy::EmbeddedData, Some(ModelTypeHint::GPT2)).unwrap();
 
-    let runtime = RuntimeModel::load_onnx(&onnx_data, RuntimeBackend::Eval(EvalBackend::NDArray), RuntimeEnvironment::default()).unwrap();
+    let runtime = Model::new_from_onnx(&onnx_data).unwrap();
     let mut llm = LanguageModelManager::new(runtime).unwrap();
     
     let tokenizer = llm.get_tokenizer().unwrap();
@@ -47,7 +44,7 @@ fn main() {
         }
     };
 
-    let (output, _) = llm.run(input_tensor.clone(), None, &mut sampler).unwrap();
+    let (output, _) = llm.run(input_tensor.clone(), None, &mut sampler, &ModelExecutionRuntime::Eval(EvalBackend::NDArray)).unwrap();
     let output_tensor = output.squeeze(0, &EvalBackend::NDArray).unwrap()
         .squeeze(0, &EvalBackend::NDArray).unwrap()
         .try_to_type::<u32>().unwrap().try_to_rank::<P1>().unwrap();

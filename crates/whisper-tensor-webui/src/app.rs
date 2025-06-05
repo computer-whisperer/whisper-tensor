@@ -625,7 +625,7 @@ impl eframe::App for TemplateApp {
                             for model in &self.current_models {
                                 ui.label(model.model_id.to_string());
                                 ui.label(model.model_name.clone());
-                                ui.label(if let Some(ops) = model.num_ops {format!("Operations: {:?}", ops)} else {"Operations: Unknown".to_string()});
+                                ui.label(format!("Operations: {:?}", model.num_ops));
                                 match model.model_type_metadata {
                                     ModelTypeMetadata::Other => {
                                         ui.label("Other");
