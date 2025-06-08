@@ -198,7 +198,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                 let mut v = Vec::new();
                 for i in 0..shape.dim_product() as usize {
                     let type_len = 8;
-                    v[i] = f64::from_bits(u64::from_le_bytes(bytes[i * type_len..(i+1) * type_len].try_into().unwrap()));
+                    v.push(f64::from_bits(u64::from_le_bytes(bytes[i * type_len..(i+1) * type_len].try_into().unwrap())));
                 }
                 Self::from_slice_shape_stride(v, shape, stride)?
             },
@@ -206,7 +206,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                 let mut v = Vec::new();
                 for i in 0..shape.dim_product() as usize {
                     let type_len = 4;
-                    v[i] = f32::from_bits(u32::from_le_bytes(bytes[i * type_len..(i+1) * type_len].try_into().unwrap()));
+                    v.push(f32::from_bits(u32::from_le_bytes(bytes[i * type_len..(i+1) * type_len].try_into().unwrap())));
                 }
                 Self::from_slice_shape_stride(v, shape, stride)?
             }
@@ -214,7 +214,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                 let mut v = Vec::new();
                 for i in 0..shape.dim_product() as usize {
                     let type_len = 2;
-                    v[i] = bf16::from_bits(u16::from_le_bytes(bytes[i * type_len..(i+1) * type_len].try_into().unwrap()));
+                    v.push(bf16::from_bits(u16::from_le_bytes(bytes[i * type_len..(i+1) * type_len].try_into().unwrap())));
                 }
                 Self::from_slice_shape_stride(v, shape, stride)?
             }
@@ -222,7 +222,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                 let mut v = Vec::new();
                 for i in 0..shape.dim_product() as usize {
                     let type_len = 2;
-                    v[i] = f16::from_bits(u16::from_le_bytes(bytes[i * type_len..(i+1) * type_len].try_into().unwrap()));
+                    v.push(f16::from_bits(u16::from_le_bytes(bytes[i * type_len..(i+1) * type_len].try_into().unwrap())));
                 }
                 Self::from_slice_shape_stride(v, shape, stride)?
             }
@@ -230,7 +230,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                 let mut v = Vec::new();
                 for i in 0..shape.dim_product() as usize {
                     let type_len = 8;
-                    v[i] = u64::from_le_bytes(bytes[i * type_len..(i+1) * type_len].try_into().unwrap());
+                    v.push(u64::from_le_bytes(bytes[i * type_len..(i+1) * type_len].try_into().unwrap()));
                 }
                 Self::from_slice_shape_stride(v, shape, stride)?
             }
@@ -238,7 +238,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                 let mut v = Vec::new();
                 for i in 0..shape.dim_product() as usize {
                     let type_len = 8;
-                    v[i] = i64::from_le_bytes(bytes[i * type_len..(i+1) * type_len].try_into().unwrap());
+                    v.push(i64::from_le_bytes(bytes[i * type_len..(i+1) * type_len].try_into().unwrap()));
                 }
                 Self::from_slice_shape_stride(v, shape, stride)?
             }
@@ -246,7 +246,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                 let mut v = Vec::new();
                 for i in 0..shape.dim_product() as usize {
                     let type_len = 4;
-                    v[i] = u32::from_le_bytes(bytes[i * type_len..(i+1) * type_len].try_into().unwrap());
+                    v.push(u32::from_le_bytes(bytes[i * type_len..(i+1) * type_len].try_into().unwrap()));
                 }
                 Self::from_slice_shape_stride(v, shape, stride)?
             }
@@ -254,7 +254,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                 let mut v = Vec::new();
                 for i in 0..shape.dim_product() as usize {
                     let type_len = 4;
-                    v[i] = i32::from_le_bytes(bytes[i * type_len..(i+1) * type_len].try_into().unwrap());
+                    v.push(i32::from_le_bytes(bytes[i * type_len..(i+1) * type_len].try_into().unwrap()));
                 }
                 Self::from_slice_shape_stride(v, shape, stride)?
             }
@@ -262,7 +262,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                 let mut v = Vec::new();
                 for i in 0..shape.dim_product() as usize {
                     let type_len = 2;
-                    v[i] = u16::from_le_bytes(bytes[i * type_len..(i+1) * type_len].try_into().unwrap());
+                    v.push(u16::from_le_bytes(bytes[i * type_len..(i+1) * type_len].try_into().unwrap()));
                 }
                 Self::from_slice_shape_stride(v, shape, stride)?
             }
@@ -270,7 +270,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                 let mut v = Vec::new();
                 for i in 0..shape.dim_product() as usize {
                     let type_len = 2;
-                    v[i] = i16::from_le_bytes(bytes[i * type_len..(i+1) * type_len].try_into().unwrap());
+                    v.push(i16::from_le_bytes(bytes[i * type_len..(i+1) * type_len].try_into().unwrap()));
                 }
                 Self::from_slice_shape_stride(v, shape, stride)?
             }
@@ -278,7 +278,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                 let mut v = Vec::new();
                 for i in 0..shape.dim_product() as usize {
                     let type_len = 2;
-                    v[i] = u8::from_le_bytes(bytes[i * type_len..(i+1) * type_len].try_into().unwrap());
+                    v.push(u8::from_le_bytes(bytes[i * type_len..(i+1) * type_len].try_into().unwrap()));
                 }
                 Self::from_slice_shape_stride(v, shape, stride)?
             }
@@ -286,14 +286,14 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                 let mut v = Vec::new();
                 for i in 0..shape.dim_product() as usize {
                     let type_len = 2;
-                    v[i] = i8::from_le_bytes(bytes[i * type_len..(i+1) * type_len].try_into().unwrap());
+                    v.push(i8::from_le_bytes(bytes[i * type_len..(i+1) * type_len].try_into().unwrap()));
                 }
                 Self::from_slice_shape_stride(v, shape, stride)?
             }
             DType::BOOL => {
                 let mut v = Vec::new();
                 for i in 0..shape.dim_product() as usize {
-                    v[i] = bytes[i] != 0;
+                    v.push(bytes[i] != 0);
                 }
                 Self::from_slice_shape_stride(v, shape, stride)?
             }

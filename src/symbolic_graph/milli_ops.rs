@@ -45,7 +45,7 @@ pub(crate) enum MilliOpTensorIDOrLiteral {
 trait MilliOp {
     fn get_inputs(&self) -> Vec<MilliOpGraphTensorId>;
     
-    fn infer(&self, known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>, _symbolic_resolver: &mut SymbolicResolver, backend: &EvalBackend) -> Result<TensorInfo, MilliOpGraphError> {
+    fn infer(&self, known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>, _symbolic_resolver: &mut SymbolicResolver, backend: &mut EvalBackend) -> Result<TensorInfo, MilliOpGraphError> {
         let mut resolved_inputs = HashMap::new();
         for input in self.get_inputs() {
             if let Some(tensor_info) = known_inputs.get(&input) {
@@ -63,8 +63,8 @@ trait MilliOp {
 
         Ok(TensorInfo::from(self.eval(&resolved_inputs, backend)?))
     }
-    //fn infer(&self, known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>, _symbolic_resolver: &mut SymbolicResolver, backend: &EvalBackend) -> Result<TensorInfo, MilliOpGraphError>;
-    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, _backend: &EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError>;
+    //fn infer(&self, known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>, _symbolic_resolver: &mut SymbolicResolver, backend: &mut EvalBackend) -> Result<TensorInfo, MilliOpGraphError>;
+    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, _backend: &mut EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError>;
 }
 
 pub(crate) struct MilliOpConstant {
@@ -89,10 +89,10 @@ impl MilliOpConstant {
 impl MilliOp for MilliOpConstant {
     fn get_inputs(&self) -> Vec<MilliOpGraphTensorId> {vec![]}
 
-    fn infer(&self, _known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>, _symbolic_resolver: &mut SymbolicResolver, _backend: &EvalBackend) -> Result<TensorInfo, MilliOpGraphError> {
+    fn infer(&self, _known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>, _symbolic_resolver: &mut SymbolicResolver, _backend: &mut EvalBackend) -> Result<TensorInfo, MilliOpGraphError> {
         Ok(TensorInfo::from(self.data.clone()))
     }
-    fn eval(&self, _inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, _backend: &EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
+    fn eval(&self, _inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, _backend: &mut EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
         Ok(self.data.clone())
     }
 }
@@ -114,7 +114,7 @@ impl MilliOpRange {
 impl MilliOp for MilliOpRange {
     fn get_inputs(&self) -> Vec<MilliOpGraphTensorId> {vec![]}
 
-    fn infer(&self, known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>, symbolic_resolver: &mut SymbolicResolver, backend: &EvalBackend) -> Result<TensorInfo, MilliOpGraphError> {
+    fn infer(&self, known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>, symbolic_resolver: &mut SymbolicResolver, backend: &mut EvalBackend) -> Result<TensorInfo, MilliOpGraphError> {
         let start = &known_inputs[&self.start].first_element();
         let end = &known_inputs[&self.end].first_element();
         let delta = &known_inputs[&self.delta].first_element();
@@ -142,7 +142,7 @@ impl MilliOp for MilliOpRange {
         })
     }
 
-    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
+    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &mut EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
         Ok(NumericTensor::<P1>::range(
             inputs[&self.start].first_element(),
             inputs[&self.end].first_element(),
@@ -168,7 +168,7 @@ impl MilliOp for MilliOpExpand {
         vec![self.input, self.shape]
     }
 
-    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, _backend: &EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
+    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, _backend: &mut EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
         let shape: Vec<i64> = inputs[&self.shape].try_to_rank::<P1>()?.try_into()?;
         let shape_u = shape.iter().map(|x| *x as u64).collect::<Vec<u64>>();
         let input = &inputs[&self.input];
@@ -190,7 +190,7 @@ impl MilliOpConstantOfShape {
 impl MilliOp for MilliOpConstantOfShape {
     fn get_inputs(&self) -> Vec<MilliOpGraphTensorId> {vec![]}
 
-    fn infer(&self, known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>, symbolic_resolver: &mut SymbolicResolver, backend: &EvalBackend) -> Result<TensorInfo, MilliOpGraphError> {
+    fn infer(&self, known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>, symbolic_resolver: &mut SymbolicResolver, backend: &mut EvalBackend) -> Result<TensorInfo, MilliOpGraphError> {
         let input = &known_inputs[&self.shape];
         let input = input.try_to_rank::<P1>(symbolic_resolver)?.try_to_type::<u64>()?;
 
@@ -216,7 +216,7 @@ impl MilliOp for MilliOpConstantOfShape {
         }
     }
 
-    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, _backend: &EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
+    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, _backend: &mut EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
         let shape: Vec<i64> = inputs[&self.shape].try_to_rank::<P1>()?.try_into()?;
         let shape_usize = shape.iter().map(|x| *x as u64).collect::<Vec<_>>();
         Ok(NDArrayNumericTensor::<DynRank>::fill(self.value.clone(), &shape_usize)?.into())
@@ -434,7 +434,7 @@ impl MilliOpSimpleBinary {
 impl MilliOp for MilliOpSimpleBinary {
     fn get_inputs(&self) -> Vec<MilliOpGraphTensorId> {vec![self.a.clone(), self.b.clone()]}
 
-    fn infer(&self, known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>, symbolic_resolver: &mut SymbolicResolver, backend: &EvalBackend) -> Result<TensorInfo, MilliOpGraphError> {
+    fn infer(&self, known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>, symbolic_resolver: &mut SymbolicResolver, backend: &mut EvalBackend) -> Result<TensorInfo, MilliOpGraphError> {
         let a = &known_inputs[&self.a];
         let b = &known_inputs[&self.b];
 
@@ -459,7 +459,7 @@ impl MilliOp for MilliOpSimpleBinary {
 
     }
 
-    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
+    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &mut EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
         let a = &inputs[&self.a];
         let b = &inputs[&self.b];
         Ok(match self.which_op {
@@ -508,7 +508,7 @@ impl MilliOpPow {
 impl MilliOp for MilliOpPow {
     fn get_inputs(&self) -> Vec<MilliOpGraphTensorId> {vec![self.a, self.b]}
 
-    fn infer(&self, known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>, symbolic_resolver: &mut SymbolicResolver, backend: &EvalBackend) -> Result<TensorInfo, MilliOpGraphError> {
+    fn infer(&self, known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>, symbolic_resolver: &mut SymbolicResolver, backend: &mut EvalBackend) -> Result<TensorInfo, MilliOpGraphError> {
         let a = &known_inputs[&self.a];
         let b = &known_inputs[&self.b];
 
@@ -532,7 +532,7 @@ impl MilliOp for MilliOpPow {
         }
     }
 
-    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
+    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &mut EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
         Ok(NumericTensor::<DynRank>::pow(&inputs[&self.a], &inputs[&self.b], backend)?)
     }
 }
@@ -552,7 +552,7 @@ impl MilliOpMatMul {
 impl MilliOp for MilliOpMatMul {
     fn get_inputs(&self) -> Vec<MilliOpGraphTensorId> {vec![self.a, self.b]}
 
-    fn infer(&self, known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>, symbolic_resolver: &mut SymbolicResolver, backend: &EvalBackend) -> Result<TensorInfo, MilliOpGraphError> {
+    fn infer(&self, known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>, symbolic_resolver: &mut SymbolicResolver, backend: &mut EvalBackend) -> Result<TensorInfo, MilliOpGraphError> {
         let a = &known_inputs[&self.a];
         let b = &known_inputs[&self.b];
         if let (Some(a), Some(b)) = (a.as_numeric(), b.as_numeric()) {
@@ -663,7 +663,7 @@ impl MilliOp for MilliOpMatMul {
             }
         }
     }
-    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
+    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &mut EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
         Ok(NumericTensor::<DynRank>::matmul(&inputs[&self.a], &inputs[&self.b], backend)?)
     }
 }
@@ -672,7 +672,7 @@ impl MilliOp for MilliOpMatMul {
 trait SimpleUnaryMilliOp {
     fn get_inputs(&self) -> Vec<MilliOpGraphTensorId>;
 
-    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError>;
+    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &mut EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError>;
 
     fn eval_scalar(&self, input: &NumericScalar) -> Result<NumericScalar, MilliOpGraphError>;
 }
@@ -682,7 +682,7 @@ impl<T: SimpleUnaryMilliOp> MilliOp for T {
         <T as SimpleUnaryMilliOp>::get_inputs(self)
     }
 
-    fn infer(&self, known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>, symbolic_resolver: &mut SymbolicResolver, backend: &EvalBackend) -> Result<TensorInfo, MilliOpGraphError> {
+    fn infer(&self, known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>, symbolic_resolver: &mut SymbolicResolver, backend: &mut EvalBackend) -> Result<TensorInfo, MilliOpGraphError> {
         let input_id = self.get_inputs()[0];
         let input = &known_inputs[&input_id];
 
@@ -713,7 +713,7 @@ impl<T: SimpleUnaryMilliOp> MilliOp for T {
         }
     }
 
-    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
+    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &mut EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
         <T as SimpleUnaryMilliOp>::eval(self, inputs, backend)
     }
 }
@@ -815,7 +815,7 @@ impl MilliOpSimpleUnary {
 impl SimpleUnaryMilliOp for MilliOpSimpleUnary {
     fn get_inputs(&self) -> Vec<MilliOpGraphTensorId> {vec![self.input]}
 
-    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
+    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &mut EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
         let input = &inputs[&self.input];
         match self.op {
             SimpleUnaryOp::Neg => Ok(input.neg(backend)?),
@@ -873,7 +873,7 @@ impl MilliOpClampMin {
 impl SimpleUnaryMilliOp for MilliOpClampMin {
     fn get_inputs(&self) -> Vec<MilliOpGraphTensorId> {vec![self.input]}
 
-    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
+    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &mut EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
         Ok(inputs[&self.input].clamp_min(self.value, backend)?)
     }
 
@@ -895,7 +895,7 @@ impl MilliOpNonZero {
 impl MilliOp for MilliOpNonZero {
     fn get_inputs(&self) -> Vec<MilliOpGraphTensorId> {vec![self.input]}
 
-    fn infer(&self, known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>, symbolic_resolver: &mut SymbolicResolver, backend: &EvalBackend) -> Result<TensorInfo, MilliOpGraphError> {
+    fn infer(&self, known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>, symbolic_resolver: &mut SymbolicResolver, backend: &mut EvalBackend) -> Result<TensorInfo, MilliOpGraphError> {
         let input = &known_inputs[&self.input];
         if let Some(x) = input.as_numeric() {
             let inputs = HashMap::from([(self.input.clone(), x.clone())]);
@@ -912,7 +912,7 @@ impl MilliOp for MilliOpNonZero {
         }
     }
 
-    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
+    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &mut EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
         Ok(inputs[&self.input].nonzero(backend)?)
     }
 }
@@ -933,7 +933,7 @@ impl MilliOpCumSum {
 impl MilliOp for MilliOpCumSum {
     fn get_inputs(&self) -> Vec<MilliOpGraphTensorId> {vec![self.a, self.axis]}
 
-    fn eval(&self, _inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, _backend: &EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
+    fn eval(&self, _inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, _backend: &mut EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
         Err(MilliOpGraphError::UnimplementedOperatorError("CumSum".to_string()))?;
         todo!()
     }
@@ -952,12 +952,12 @@ impl MilliOpShape {
 impl MilliOp for MilliOpShape {
     fn get_inputs(&self) -> Vec<MilliOpGraphTensorId> {vec![self.input]}
 
-    fn infer(&self, known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>, symbolic_resolver: &mut SymbolicResolver, _backend: &EvalBackend) -> Result<TensorInfo, MilliOpGraphError> {
+    fn infer(&self, known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>, symbolic_resolver: &mut SymbolicResolver, _backend: &mut EvalBackend) -> Result<TensorInfo, MilliOpGraphError> {
         let input = &known_inputs[&self.input];
         Ok(TensorInfo::from(input.shape(symbolic_resolver)))
     }
 
-    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, _backend: &EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
+    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, _backend: &mut EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
         let output_shape = inputs[&self.input].shape().into_iter().map(|x| x as i64).collect::<Vec<_>>();
         Ok(NDArrayNumericTensor::<P1>::from(output_shape).to_dyn().into())
     }
@@ -979,7 +979,7 @@ impl MilliOpReduceSum {
 impl MilliOp for MilliOpReduceSum {
     fn get_inputs(&self) -> Vec<MilliOpGraphTensorId> {vec![self.data]}
 
-    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
+    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &mut EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
         let data = &inputs[&self.data];
         let axes = if let Some(axes) = self.axes {
             Vec::<i64>::try_from(inputs[&axes].try_to_rank::<P1>()?)?
@@ -1017,7 +1017,7 @@ impl MilliOpReduceMin {
 impl MilliOp for MilliOpReduceMin {
     fn get_inputs(&self) -> Vec<MilliOpGraphTensorId> {vec![self.data]}
 
-    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
+    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &mut EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
         let data = &inputs[&self.data];
         let axes = if let Some(axes) = self.axes {
             Vec::<i64>::try_from(inputs[&axes].try_to_rank::<P1>()?)?
@@ -1056,7 +1056,7 @@ impl MilliOpReduceMax {
 impl MilliOp for MilliOpReduceMax {
     fn get_inputs(&self) -> Vec<MilliOpGraphTensorId> {vec![self.data]}
 
-    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
+    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &mut EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
         let data = &inputs[&self.data];
         let axes = if let Some(axes) = self.axes {
             Vec::<i64>::try_from(inputs[&axes].try_to_rank::<P1>()?)?
@@ -1094,7 +1094,7 @@ impl MilliOpReduceProd {
 impl MilliOp for MilliOpReduceProd {
     fn get_inputs(&self) -> Vec<MilliOpGraphTensorId> {vec![self.data]}
 
-    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
+    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &mut EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
         let data = &inputs[&self.data];
         let axes = if let Some(axes) = self.axes {
             Vec::<i64>::try_from(inputs[&axes].try_to_rank::<P1>()?)?
@@ -1133,7 +1133,7 @@ impl MilliOpReduceMean {
 impl MilliOp for MilliOpReduceMean {
     fn get_inputs(&self) -> Vec<MilliOpGraphTensorId> {vec![self.data]}
 
-    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
+    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &mut EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
         let data = &inputs[&self.data];
         let axes = if let Some(axes) = self.axes {
             Vec::<i64>::try_from(inputs[&axes].try_to_rank::<P1>()?)?
@@ -1185,7 +1185,7 @@ impl MilliOp for MilliOpSlice {
         res
     }
 
-    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
+    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &mut EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
         let data_input = &inputs[&self.data];
         let input_shape = data_input.shape();
         let input_rank = data_input.rank();
@@ -1303,7 +1303,7 @@ impl MilliOp for MilliOpReshape {
         vec![self.data, self.shape]
     }
 
-    fn infer(&self, known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>, symbolic_resolver: &mut SymbolicResolver, backend: &EvalBackend) -> Result<TensorInfo, MilliOpGraphError> {
+    fn infer(&self, known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>, symbolic_resolver: &mut SymbolicResolver, backend: &mut EvalBackend) -> Result<TensorInfo, MilliOpGraphError> {
         let data_input = &known_inputs[&self.data];
         let shape_input = known_inputs[&self.shape].try_to_rank::<P1>(symbolic_resolver)?.try_to_type::<i64>()?;
 
@@ -1368,7 +1368,7 @@ impl MilliOp for MilliOpReshape {
     }
 
 
-    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
+    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &mut EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
         let data_input = &inputs[&self.data];
         let shape_input = &inputs[&self.shape];
         let shape_input_value: Vec<i64> = shape_input.cast(DType::I64, backend)?.try_to_rank::<P1>()?.try_into()?;
@@ -1402,7 +1402,7 @@ impl MilliOpSqueeze {
 impl MilliOp for MilliOpSqueeze {
     fn get_inputs(&self) -> Vec<MilliOpGraphTensorId> {vec![self.data, self.axes]}
 
-    fn infer(&self, known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>, symbolic_resolver: &mut SymbolicResolver, backend: &EvalBackend) -> Result<TensorInfo, MilliOpGraphError> {
+    fn infer(&self, known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>, symbolic_resolver: &mut SymbolicResolver, backend: &mut EvalBackend) -> Result<TensorInfo, MilliOpGraphError> {
         let data_input = &known_inputs[&self.data];
         let axes_input = &known_inputs[&self.axes].try_to_rank::<P1>(symbolic_resolver)?.try_to_type::<i64>()?;
 
@@ -1455,7 +1455,7 @@ impl MilliOp for MilliOpSqueeze {
         }
     }
 
-    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
+    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &mut EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
         let axes_ndarray = NDArrayNumericTensor::<DynRank>::try_from(inputs[&self.axes].cast(DType::I64, backend)?)?;
         let axes = Vec::<i64>::try_from(axes_ndarray.try_to_rank::<P1>()?)?;
         if axes.len() > 1 {
@@ -1491,7 +1491,7 @@ impl MilliOpUnsqueeze {
 impl MilliOp for MilliOpUnsqueeze {
     fn get_inputs(&self) -> Vec<MilliOpGraphTensorId> {vec![self.data, self.axes]}
 
-    fn infer(&self, known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>, symbolic_resolver: &mut SymbolicResolver, backend: &EvalBackend) -> Result<TensorInfo, MilliOpGraphError> {
+    fn infer(&self, known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>, symbolic_resolver: &mut SymbolicResolver, backend: &mut EvalBackend) -> Result<TensorInfo, MilliOpGraphError> {
         let data_input = &known_inputs[&self.data];
         let axes_input = &known_inputs[&self.axes].try_to_rank::<P1>(symbolic_resolver)?.try_to_type::<i64>()?;
 
@@ -1550,7 +1550,7 @@ impl MilliOp for MilliOpUnsqueeze {
         }
     }
 
-    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
+    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &mut EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
         let axes_ndarray = NDArrayNumericTensor::<DynRank>::try_from(inputs[&self.axes].cast(DType::I64, backend)?)?;
         let axes = Vec::<i64>::try_from(axes_ndarray.try_to_rank::<P1>()?)?;
         if axes.len() > 1 {
@@ -1583,7 +1583,7 @@ impl MilliOpCast {
 impl MilliOp for MilliOpCast {
     fn get_inputs(&self) -> Vec<MilliOpGraphTensorId> {vec![self.data]}
 
-    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
+    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &mut EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
         Ok(inputs[&self.data].cast(self.dtype, backend)?)
     }
 }
@@ -1602,7 +1602,7 @@ impl MilliOpCastLike {
 impl MilliOp for MilliOpCastLike {
     fn get_inputs(&self) -> Vec<MilliOpGraphTensorId> {vec![self.data]}
 
-    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
+    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &mut EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
         Ok(inputs[&self.data].cast(inputs[&self.target_type].dtype(), backend)?)
     }
 }
@@ -1622,7 +1622,7 @@ impl MilliOpTranspose {
 impl MilliOp for MilliOpTranspose {
     fn get_inputs(&self) -> Vec<MilliOpGraphTensorId> {vec![self.data]}
 
-    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
+    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &mut EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
         Ok(inputs[&self.data].transpose(self.perm.clone(), backend)?)
     }
 }
@@ -1644,7 +1644,7 @@ impl MilliOpGather {
 impl MilliOp for MilliOpGather {
     fn get_inputs(&self) -> Vec<MilliOpGraphTensorId> {vec![self.data]}
 
-    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
+    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &mut EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
         Ok(NumericTensor::<DynRank>::gather(&inputs[&self.data], &inputs[&self.indices], self.axis, backend)?)
     }
 }
@@ -1664,7 +1664,7 @@ impl MilliOpConcat {
 impl MilliOp for MilliOpConcat {
     fn get_inputs(&self) -> Vec<MilliOpGraphTensorId> {self.inputs.clone()}
 
-    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
+    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &mut EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
         let mut resolved_inputs = vec![];
         for input in &self.inputs {
             resolved_inputs.push(&inputs[input]);
@@ -1700,7 +1700,7 @@ impl MilliOpSplit {
 impl MilliOp for MilliOpSplit {
     fn get_inputs(&self) -> Vec<MilliOpGraphTensorId> {vec![self.data]}
 
-    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
+    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &mut EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
         let split: Vec<i64> = if let Some(split) = &self.split {
             match split {
                 MilliOpTensorIDOrLiteral::TensorID(split) => {inputs[&split].clone().try_to_rank::<P1>()?.try_into()?}
@@ -1732,7 +1732,7 @@ impl MilliOpWhere {
 impl MilliOp for MilliOpWhere {
     fn get_inputs(&self) -> Vec<MilliOpGraphTensorId> {vec![self.condition, self.x, self.y]}
 
-    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
+    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &mut EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
         Ok(inputs[&self.condition].where_op(&inputs[&self.x], &inputs[&self.y], backend)?)
     }
 }
@@ -1802,7 +1802,7 @@ impl MilliOp for AnyMilliOp {
         }
     }
 
-    fn infer(&self, known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>, symbolic_resolver: &mut SymbolicResolver, backend: &EvalBackend) -> Result<TensorInfo, MilliOpGraphError> {
+    fn infer(&self, known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>, symbolic_resolver: &mut SymbolicResolver, backend: &mut EvalBackend) -> Result<TensorInfo, MilliOpGraphError> {
         match self {
             AnyMilliOp::Constant(x) => x.infer(known_inputs, symbolic_resolver, backend),
             AnyMilliOp::ConstantOfShape(x) => x.infer(known_inputs, symbolic_resolver, backend),
@@ -1835,7 +1835,7 @@ impl MilliOp for AnyMilliOp {
         }
     }
 
-    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
+    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &mut EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
         match self {
             AnyMilliOp::Constant(x) => x.eval(inputs, backend),
             AnyMilliOp::ConstantOfShape(x) => x.eval(inputs, backend),
@@ -1904,7 +1904,7 @@ impl MilliOpGraph {
         new_tensor_id
     }
 
-    pub(crate) fn eval(&self, inputs: &HashMap<TensorId, NumericTensor<DynRank>>, backend: &EvalBackend) -> Result<HashMap<TensorId, NumericTensor<DynRank>>, MilliOpGraphError> {
+    pub(crate) fn eval(&self, inputs: &HashMap<TensorId, NumericTensor<DynRank>>, backend: &mut EvalBackend) -> Result<HashMap<TensorId, NumericTensor<DynRank>>, MilliOpGraphError> {
         assert!(self.output_map.is_some());
 
         let op_ids_to_eval: Vec<_> = {

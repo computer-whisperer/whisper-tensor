@@ -60,7 +60,7 @@ impl LanguageModelManager {
         })
     }
     
-    pub fn run<S: Sampler>(&mut self, input_tokens: NumericTensor<DynRank>, input_intermediate_values: Option<LangaugeModelIntermediateValues>, sampler: &mut S, model_execution_runtime: &ModelExecutionRuntime) -> Result<(NumericTensor<DynRank>, LangaugeModelIntermediateValues), ModelError> {
+    pub fn run<S: Sampler>(&mut self, input_tokens: NumericTensor<DynRank>, input_intermediate_values: Option<LangaugeModelIntermediateValues>, sampler: &mut S, model_execution_runtime: &mut ModelExecutionRuntime) -> Result<(NumericTensor<DynRank>, LangaugeModelIntermediateValues), ModelError> {
         let (output_tensor, output_intermediate_values) = self.forward(input_tokens, input_intermediate_values, model_execution_runtime)?;
         let shape = output_tensor.shape();
         let mut output_slice = Vec::new();
@@ -73,7 +73,7 @@ impl LanguageModelManager {
         Ok((output_tensor_sampled, output_intermediate_values))
     } 
     
-    pub fn forward(&mut self, input_tokens: NumericTensor<DynRank>, intermediate_values: Option<LangaugeModelIntermediateValues>, model_execution_runtime: &ModelExecutionRuntime) -> Result<(NumericTensor<DynRank>, LangaugeModelIntermediateValues), ModelError> {
+    pub fn forward(&mut self, input_tokens: NumericTensor<DynRank>, intermediate_values: Option<LangaugeModelIntermediateValues>, model_execution_runtime: &mut ModelExecutionRuntime) -> Result<(NumericTensor<DynRank>, LangaugeModelIntermediateValues), ModelError> {
         // Add batch dim if needed
         let input_tokens = if input_tokens.rank() < 2 {
             input_tokens.unsqueeze(0, &EvalBackend::NDArray)?

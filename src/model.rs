@@ -136,7 +136,7 @@ impl Model {
         Ok(())
     }
 
-    pub fn run(&mut self, inputs: HashMap<String, NumericTensor<DynRank>>, selected_runtime: &ModelExecutionRuntime) -> Result<HashMap<String, NumericTensor<DynRank>>, ModelError> {
+    pub fn run(&mut self, inputs: HashMap<String, NumericTensor<DynRank>>, selected_runtime: &mut ModelExecutionRuntime) -> Result<HashMap<String, NumericTensor<DynRank>>, ModelError> {
         Ok(match selected_runtime {
             #[cfg(feature = "onnx-reference")]
             ModelExecutionRuntime::ONNXReference => {

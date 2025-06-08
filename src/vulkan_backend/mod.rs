@@ -1,25 +1,34 @@
+pub mod tensor;
+pub mod ops;
+
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
-use vulkano::device::{Device, DeviceCreateInfo, Queue, QueueCreateInfo, QueueFlags};
+use vulkano::device::{Device, DeviceCreateInfo, DeviceExtensions, DeviceFeatures, Queue, QueueCreateInfo, QueueFlags};
 use vulkano::instance::{Instance, InstanceCreateFlags, InstanceCreateInfo};
 use vulkano::memory::allocator::{AllocationCreateInfo, AllocationType, DeviceLayout, FreeListAllocator, MemoryTypeFilter, StandardMemoryAllocator, Suballocation, Suballocator};
-use vulkano::{DeviceSize, VulkanError, VulkanLibrary};
+use vulkano::{DeviceSize, VulkanLibrary};
 use vulkano::buffer::{AllocateBufferError, Buffer, BufferCreateInfo, BufferUsage, Subbuffer};
+use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
+use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
+use vulkano::descriptor_set::{DescriptorSet, WriteDescriptorSet};
+use vulkano::descriptor_set::layout::{DescriptorSetLayout, DescriptorSetLayoutBinding, DescriptorSetLayoutCreateInfo, DescriptorType};
 use vulkano::memory::allocator::suballocator::Region;
 use vulkano::memory::DeviceAlignment;
+use vulkano::shader::ShaderStages;
 use crate::dtype::DType;
 use crate::NDArrayNumericTensor;
 use crate::tensor_rank::{DimContainer, Rank};
 
 #[derive(Debug, thiserror::Error)]
-pub enum Error {
+pub enum VulkanError {
     #[error("No suitable Vulkan device found")]
     NoSuitableVulkanDeviceError,
     #[error("No suitable Vulkan queue found")]
     NoSuitableVulkanQueueError,
     #[error(transparent)]
-    VulkanError(#[from] VulkanError),
+    VulkanError(#[from] vulkano::VulkanError),
     #[error(transparent)]
-    ValidatedVulkanError(#[from] vulkano::Validated<VulkanError>),
+    ValidatedVulkanError(#[from] vulkano::Validated<vulkano::VulkanError>),
     #[error(transparent)]
     ValidatedVulkanAllocateBufferError(#[from] vulkano::Validated<AllocateBufferError>),
     #[error(transparent)]
@@ -32,21 +41,40 @@ pub struct VulkanContext {
     pub queue: Arc<Queue>,
     pub device: Arc<Device>,
     pub memory_allocator: Arc<StandardMemoryAllocator>,
+    pub descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
+    pub command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
 }
 
 impl VulkanContext {
-    pub fn new() -> Result<Self, Error> {
-        let library = VulkanLibrary::new().map_err(|x| Error::VulkanLoadingError(x))?;
+    pub fn new() -> Result<Self, VulkanError> {
+        let library = VulkanLibrary::new().map_err(|x| VulkanError::VulkanLoadingError(x))?;
         let instance = Instance::new(library, InstanceCreateInfo{
             flags: InstanceCreateFlags::ENUMERATE_PORTABILITY,
             .. Default::default()
-        }).map_err(|x| Error::ValidatedVulkanError(x))?;
+        }).map_err(|x| VulkanError::ValidatedVulkanError(x))?;
 
+        let device_extensions = DeviceExtensions {
+            ..DeviceExtensions::empty()
+        };
+        
+        let device_features = DeviceFeatures {
+            shader_float64: true,
+            .. Default::default()
+        };
+        
         let physical_device = instance
             .enumerate_physical_devices()
-            .map_err(|x| Error::VulkanError(x))?
+            .map_err(|x| VulkanError::VulkanError(x))?
+            .filter(|p| {
+                // Some devices may not support the extensions or features that your application,
+                // or report properties and limits that are not sufficient for your application.
+                // These should be filtered out here.
+                //p.properties().device_name != "AMD Radeon RX 6900 XT (RADV NAVI21)" &&
+                p.supported_extensions().contains(&device_extensions) &&
+                    p.supported_features().contains(&device_features)
+            })
             .next()
-            .ok_or(Error::NoSuitableVulkanDeviceError)?;
+            .ok_or(VulkanError::NoSuitableVulkanDeviceError)?;
 
         let queue_family_index = physical_device
             .queue_family_properties()
@@ -55,8 +83,10 @@ impl VulkanContext {
             .position(|(_queue_family_index, queue_family_properties)| {
                 queue_family_properties.queue_flags.contains(QueueFlags::COMPUTE)
             })
-            .ok_or(Error::NoSuitableVulkanQueueError)?;
+            .ok_or(VulkanError::NoSuitableVulkanQueueError)?;
 
+        
+        
         let (device, mut queues) = Device::new(
             physical_device,
             DeviceCreateInfo {
@@ -65,26 +95,33 @@ impl VulkanContext {
                     queue_family_index: queue_family_index as u32,
                     ..Default::default()
                 }],
+                enabled_features: device_features,
+                enabled_extensions: device_extensions,
                 ..Default::default()
             },
-        ).map_err(|x| Error::ValidatedVulkanError(x))?;
+        ).map_err(|x| VulkanError::ValidatedVulkanError(x))?;
 
-        let queue = queues.next().ok_or(Error::NoSuitableVulkanQueueError)?;
+        let queue = queues.next().ok_or(VulkanError::NoSuitableVulkanQueueError)?;
 
         let memory_allocator = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
+
+        let descriptor_set_allocator = Arc::new(StandardDescriptorSetAllocator::new(device.clone(), Default::default()));
+        let command_buffer_allocator = Arc::new(StandardCommandBufferAllocator::new(device.clone(), Default::default()));
 
         Ok(Self {
             instance,
             device,
             queue,
-            memory_allocator
+            memory_allocator,
+            descriptor_set_allocator,
+            command_buffer_allocator
         })
     }
 }
 
 #[derive(Debug)]
 pub struct VulkanImmediateExecutorBuffer {
-    buffer: Arc<Subbuffer<[u8]>>,
+    buffer: Subbuffer<[u8]>,
     allocator: FreeListAllocator
 }
 
@@ -92,17 +129,69 @@ pub struct VulkanImmediateExecutorBuffer {
 pub struct VulkanImmediateExecutor {
     context: VulkanContext,
     buffers: Vec<VulkanImmediateExecutorBuffer>,
+    descriptor_set_layouts: HashMap<BTreeSet<u32>, Arc<DescriptorSetLayout>>,
+    descriptor_set_cache: HashMap<(BTreeMap<u32, Subbuffer<[u8]>>), Arc<DescriptorSet>>
 }
 
 impl VulkanImmediateExecutor {
-    pub fn new(context: VulkanContext) -> Result<Self, Error> {
+    pub fn new(context: VulkanContext) -> Result<Self, VulkanError> {
         Ok(Self {
             context,
+            descriptor_set_layouts: HashMap::new(),
+            descriptor_set_cache: HashMap::new(),
             buffers: Vec::new()
         })
     }
 
-    pub fn allocate_buffer(&mut self, size: usize) -> Result<usize, Error> {
+
+    pub fn get_descriptor_set_layout(&mut self, binding_ids: BTreeSet<u32>) -> Result<Arc<DescriptorSetLayout>, VulkanError> {
+        if !self.descriptor_set_layouts.contains_key(&binding_ids) {
+            // Build new one
+            let descriptor_set_bindings = {
+                let mut ret = BTreeMap::new();
+                // inputs
+                for id in &binding_ids {
+                    ret.insert(
+                        *id,
+                        DescriptorSetLayoutBinding {
+                            stages: ShaderStages::COMPUTE,
+                            ..DescriptorSetLayoutBinding::descriptor_type(DescriptorType::StorageBuffer)
+                        }
+                    );
+                }
+                ret
+            };
+            let res = DescriptorSetLayout::new(self.context.device.clone(), DescriptorSetLayoutCreateInfo {
+                bindings: descriptor_set_bindings,
+                ..Default::default()
+            })?;
+            self.descriptor_set_layouts.insert(binding_ids.clone(), res.clone());
+        }
+
+        // Fetch from cache
+        Ok(self.descriptor_set_layouts[&binding_ids].clone())
+    }
+
+    pub fn get_descriptor_set_and_layout(&mut self, input_buffer_ids: &BTreeMap<u32, Subbuffer<[u8]>>) -> Result<(Arc<DescriptorSet>, Arc<DescriptorSetLayout>), VulkanError> {
+        let layout = self.get_descriptor_set_layout(input_buffer_ids.keys().cloned().collect())?;
+
+        if !self.descriptor_set_cache.contains_key(&input_buffer_ids) {
+            // Build new one
+            let writes = input_buffer_ids.iter().map(|(a, b)|
+                WriteDescriptorSet::buffer(*a, b.clone())
+            ).collect::<Vec<_>>();
+            let descriptor_set = DescriptorSet::new(
+                self.context.descriptor_set_allocator.clone(),
+                layout.clone(),
+                writes, // 0 is the binding
+                [],
+            ).unwrap();
+            self.descriptor_set_cache.insert(input_buffer_ids.clone(), descriptor_set.clone());
+        }
+        Ok((self.descriptor_set_cache[&input_buffer_ids].clone(), layout))
+    }
+
+    pub fn allocate_buffer(&mut self, size: usize) -> Result<usize, VulkanError> {
         let buffer = Buffer::new_slice(
             self.context.memory_allocator.clone(),
             BufferCreateInfo {
@@ -115,17 +204,17 @@ impl VulkanImmediateExecutor {
                 ..Default::default()
                 },
                 size as u64
-            ).map_err(|x| Error::ValidatedVulkanAllocateBufferError(x))?;
+            ).map_err(|x| VulkanError::ValidatedVulkanAllocateBufferError(x))?;
         let allocator = FreeListAllocator::new(Region::new(0, buffer.size()).unwrap());
         let buffer = VulkanImmediateExecutorBuffer {
-            buffer: Arc::new(buffer),
+            buffer,
             allocator
         };
         self.buffers.push(buffer);
         Ok(self.buffers.len() - 1)
     }
 
-    pub fn alloc_space(&mut self, size: usize) -> (Arc<Subbuffer<[u8]>>, Suballocation) {
+    pub fn alloc_space(&mut self, size: usize) -> (Subbuffer<[u8]>, Suballocation) {
         if self.buffers.len() == 0 {
             self.allocate_buffer(100000).unwrap();
         }
@@ -139,86 +228,3 @@ impl VulkanImmediateExecutor {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct VulkanTensor<R: Rank> {
-    dtype: DType,
-    shape: R::KnownDims,
-    stride: R::KnownDims,
-    suballocation: Arc<Suballocation>,
-    offset: usize,
-    buffer: Arc<Subbuffer<[u8]>>
-}
-
-impl<R: Rank> VulkanTensor<R> {
-
-    pub fn from_ndarray(source: NDArrayNumericTensor<R>, executor: &mut VulkanImmediateExecutor) -> Result<Self, Error> {
-
-        let shape = source.shape();
-        let dtype = source.dtype();
-        let needed_space = shape.as_slice().iter().product::<u64>() as usize*dtype.size();
-        let (buffer, suballocation) = executor.alloc_space(needed_space);
-
-        let mut stride = vec![];
-        let mut v = 1;
-        for &i in shape.as_slice() {
-            stride.push(v);
-            v = v * i;
-        }
-        let stride = R::KnownDims::try_from_slice(stride.as_slice()).unwrap();
-        {
-            let mut writer = buffer.write().unwrap();
-            for i in 0..shape.as_slice().iter().product() {
-                let mut index = vec![];
-                let mut v = i;
-                for &j in shape.as_slice() {
-                    index.push(v % j);
-                    v = v / j;
-                }
-                let index = R::KnownDims::try_from_slice(index.as_slice()).unwrap();
-                let value = source.get(&index).unwrap().to_bytes();
-                // Calculate destination
-                let outer_offset = suballocation.offset as usize;
-                let inner_offset = index.as_slice().iter().zip(stride.as_slice().iter()).map(|(a, b)| a*b).sum::<u64>() as usize;
-                writer[outer_offset+inner_offset..outer_offset+inner_offset+value.len()].copy_from_slice(&value);
-            }
-        }
-
-        Ok(VulkanTensor {
-            dtype,
-            shape,
-            suballocation: Arc::new(suballocation),
-            offset: 0,
-            buffer,
-            stride
-        })
-    }
-
-    pub fn to_ndarray(&self) -> NDArrayNumericTensor<R> {
-        {
-            let reader = self.buffer.read().unwrap();
-            let bytes_to_read = self.shape.as_slice().iter().zip(self.stride.as_slice().iter()).map(|(a, b)| a*b).sum::<u64>() as usize*self.dtype.size();
-            let start_offset = self.suballocation.offset as usize + self.offset;
-            NDArrayNumericTensor::from_bytes(
-                &reader[start_offset ..start_offset + bytes_to_read], 
-                self.dtype, &self.shape, &self.stride).unwrap()
-        }
-    }
-    
-    pub fn shape(&self) -> &R::KnownDims {
-        &self.shape
-    }
-    
-    pub fn dtype(&self) -> DType {
-        self.dtype
-    }
-    
-    pub fn rank(&self) -> usize {
-        self.shape.len()
-    }
-}
-
-impl<R: Rank> From<VulkanTensor<R>> for NDArrayNumericTensor<R> {
-    fn from(value: VulkanTensor<R>) -> Self {
-        value.to_ndarray()
-    }
-}

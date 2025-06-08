@@ -65,7 +65,7 @@ fn check_tensor_matches(tensor: &NumericTensor<DynRank>, tensor_info: &ONNXTenso
     Ok(())
 }
 
-pub fn run(model: &SymbolicGraph, tensor_store: &TensorStore, eval_backend: &EvalBackend, inputs: HashMap<String, NumericTensor<DynRank>>) -> Result<HashMap<String, NumericTensor<DynRank>>, EvalRuntimeError>{
+pub fn run(model: &SymbolicGraph, tensor_store: &TensorStore, eval_backend: &mut EvalBackend, inputs: HashMap<String, NumericTensor<DynRank>>) -> Result<HashMap<String, NumericTensor<DynRank>>, EvalRuntimeError>{
     let initialized_tensors = model.get_initialized_tensors(&tensor_store);
     let mut active_tensors: HashMap<TensorId, NumericTensor<DynRank>> = HashMap::new();
     for (tensor_id, tensor) in initialized_tensors {
@@ -106,7 +106,7 @@ pub fn run(model: &SymbolicGraph, tensor_store: &TensorStore, eval_backend: &Eva
             if failed_to_fetch {
                 continue
             }
-            let outputs = op.eval(&eval_backend, &input_values).map_err(|x| EvalRuntimeError::EvalError(name.clone(), x))?;
+            let outputs = op.eval(eval_backend, &input_values).map_err(|x| EvalRuntimeError::EvalError(name.clone(), x))?;
             for (tensor_id, value) in outputs {
                 //assert_eq!(value.has_nan().unwrap(), false);
 

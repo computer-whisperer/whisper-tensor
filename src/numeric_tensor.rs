@@ -15,7 +15,9 @@ use crate::ort_backend;
 use crate::tensor_rank::{DimContainer, DynRank, Rank};
 use crate::TrigOp;
 #[cfg(feature = "vulkan")]
-use crate::vulkan_backend::VulkanTensor;
+use crate::vulkan_backend::tensor::VulkanTensor;
+#[cfg(feature = "vulkan")]
+use crate::vulkan_backend::{VulkanError, VulkanImmediateExecutor};
 
 #[derive(Debug, thiserror::Error)]
 pub enum NumericTensorError {
@@ -32,6 +34,9 @@ pub enum NumericTensorError {
     #[cfg(feature = "ort")]
     #[error(transparent)]
     ORT(#[from] ort::Error),
+    #[cfg(feature = "vulkan")]
+    #[error(transparent)]
+    Vulkan(#[from] VulkanError),
 }
 
 #[derive(Debug, Clone)]
@@ -86,7 +91,18 @@ impl<R: Rank> NumericTensor<R> {
             Ok(candle_backend::load_to_device(&self.to_ndarray()?, device)?)
         }
     }
-    
+
+    #[cfg(feature = "vulkan")]
+    pub fn to_vulkan(&self, vulkan_immediate_executor: &mut VulkanImmediateExecutor) -> Result<VulkanTensor<R>, NumericTensorError> {
+        if let NumericTensor::Vulkan(x) = self {
+            Ok(x.clone())
+        }
+        else {
+            Ok(VulkanTensor::from_ndarray(self.to_ndarray()?, vulkan_immediate_executor)?)
+        }
+    }
+
+
     pub fn reshape(&self, new_shape: R::KnownDims) -> Result<Self, NumericTensorError> {
         #[cfg(feature = "candle")]
         if let NumericTensor::Candle(tensor) = self {
@@ -176,10 +192,14 @@ impl<R: Rank> NumericTensor<R> {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::<R>::try_from_vec_shape(v, &shape)?))
     }
 
-    pub fn neg(&self, backend: &EvalBackend) -> Result<Self, NumericTensorError> {
+    pub fn neg(&self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         #[cfg(feature = "candle")]
         if let EvalBackend::Candle(device) = backend {
             return Ok(NumericTensor::Candle(self.to_candle(device)?.neg()?))
+        }
+        #[cfg(feature = "vulkan")]
+        if let EvalBackend::Vulkan(executor) = backend {
+            return Ok(NumericTensor::Vulkan(self.to_vulkan(executor)?.neg(executor)?))
         }
         Ok(NumericTensor::NDArray(self.to_ndarray()?.neg()?))
     }
@@ -221,10 +241,14 @@ impl<R: Rank> NumericTensor<R> {
     }
 
 
-    pub fn abs(&self, backend: &EvalBackend) -> Result<Self, NumericTensorError> {
+    pub fn abs(&self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         #[cfg(feature = "candle")]
         if let EvalBackend::Candle(device) = backend {
             return Ok(NumericTensor::Candle(self.to_candle(device)?.abs()?))
+        }
+        #[cfg(feature = "vulkan")]
+        if let EvalBackend::Vulkan(executor) = backend {
+            return Ok(NumericTensor::Vulkan(self.to_vulkan(executor)?.abs(executor)?))
         }
         Ok(NumericTensor::NDArray(self.to_ndarray()?.abs()?))
     }

@@ -35,7 +35,7 @@ pub trait Operation {
     fn get_inputs(&self) -> Vec<TensorId>;
     fn get_outputs(&self) -> Vec<TensorId>;
     
-    fn eval(&self, backend: &EvalBackend, inputs: &HashMap<TensorId, NumericTensor<DynRank>>) -> Result<HashMap<TensorId, NumericTensor<DynRank>>, EvalError> {
+    fn eval(&self, backend: &mut EvalBackend, inputs: &HashMap<TensorId, NumericTensor<DynRank>>) -> Result<HashMap<TensorId, NumericTensor<DynRank>>, EvalError> {
         let milli_graph = self.get_milli_op_graph();
         Ok(milli_graph.eval(inputs, backend)?)
     }

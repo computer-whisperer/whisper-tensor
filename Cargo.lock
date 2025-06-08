@@ -3801,10 +3801,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "rspirv"
+version = "0.12.0+sdk-1.3.268.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69cf3a93856b6e5946537278df0d3075596371b1950ccff012f02b0f7eafec8d"
+dependencies = [
+ "rustc-hash",
+ "spirv",
+]
+
+[[package]]
 name = "rustc-demangle"
 version = "0.1.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "719b953e2095829ee67db738b3bfa9fa368c94900df327b3f07fe6e794d2fe1f"
+
+[[package]]
+name = "rustc-hash"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08d43f7aa6b08d49f382cde6a7982047c3426db949b1424bc4b7ec9ae12c6ce2"
 
 [[package]]
 name = "rustix"
@@ -4195,6 +4211,15 @@ dependencies = [
  "byteorder",
  "libc",
  "winapi",
+]
+
+[[package]]
+name = "spirv"
+version = "0.3.0+sdk-1.3.268.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eda41003dc44290527a59b13432d4a0379379fa074b70174882adfbdfd917844"
+dependencies = [
+ "bitflags 2.9.0",
 ]
 
 [[package]]
@@ -5255,6 +5280,7 @@ name = "whisper-tensor"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytemuck",
  "candle-core",
  "candle-onnx",
  "env_logger",
@@ -5270,6 +5296,7 @@ dependencies = [
  "prost-types 0.13.5",
  "pyo3",
  "rand 0.8.5",
+ "rspirv",
  "rwkv-tokenizer",
  "serde",
  "serde_json",
@@ -5284,6 +5311,7 @@ dependencies = [
  "vulkano-shaders",
  "whisper-tensor-import",
  "zerocopy",
+ "zerocopy-derive",
 ]
 
 [[package]]

@@ -26,6 +26,8 @@ pyo3 = {optional=true, version = "0.24.0", features = ["auto-initialize"]}
 tokenizers = {optional=true, version="0.21.1", default-features = false, features = ["unstable_wasm"]}
 llm-samplers = { optional=true, version="0.0.7" }
 zerocopy = "0.8.25"
+zerocopy-derive = "0.8.25"
+rspirv = "0.12.0"
 
 ndarray = { version = "0.16.1", features = ["serde", "rayon", "matrixmultiply-threading"] }
 rwkv-tokenizer = {workspace=true, optional=true, features = ["serde"] }
@@ -36,6 +38,7 @@ rand = { version = "0.8.5", optional = true }
 typenum = { version="1.18.0", features=["const-generics"] }
 strum = "0.27"
 strum_macros = "0.27"
+bytemuck = "1.23.0"
 
 [features]
 default = ["ort", "candle", "onnx-reference", "tokenizers", "llm-samplers", "rwkv-tokenizer", "dep:rand", "http", "vulkan"]

@@ -91,7 +91,7 @@ impl OnnxNodeTest {
     }
 
     // Run the test using a specified backend
-    fn run(&self, backend: &ModelExecutionRuntime) -> Result<(), TestError> {
+    fn run(&self, backend: &mut ModelExecutionRuntime) -> Result<(), TestError> {
         log::info!("Running test: {}", self.name);
 
         // Load the model
@@ -241,7 +241,7 @@ fn parse_tensor_proto(proto_data: &[u8]) -> Result<NumericTensor<DynRank>, Strin
 }
 
 // Function to discover and run all node tests
-fn run_node_tests(backend: &ModelExecutionRuntime) -> (usize, usize) {
+fn run_node_tests(backend: &mut ModelExecutionRuntime) -> (usize, usize) {
     // Path to the ONNX node tests
     let node_test_path = PathBuf::from(
         std::env::var("ONNX_NODE_TEST_PATH")
