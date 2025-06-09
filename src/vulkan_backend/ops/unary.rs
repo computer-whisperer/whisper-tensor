@@ -1,16 +1,19 @@
-use std::collections::BTreeMap;
+use std::any::Any;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::hash::Hash;
+use std::sync::{Arc, Mutex};
 use rspirv::binary::Assemble;
-use rspirv::dr::Operand;
+use rspirv::dr::{InsertPoint, Operand};
 use rspirv::dr::Operand::LiteralBit32;
 use rspirv::spirv;
-use rspirv::spirv::{BuiltIn, Decoration, ExecutionMode, ExecutionModel, SelectionControl, StorageClass};
+use rspirv::spirv::{BuiltIn, Capability, Decoration, ExecutionMode, ExecutionModel, GLOp, Op, SelectionControl, StorageClass};
 use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage};
 use vulkano::descriptor_set::{DescriptorSet, WriteDescriptorSet};
 use vulkano::descriptor_set::layout::{DescriptorSetLayout, DescriptorSetLayoutBinding, DescriptorSetLayoutCreateInfo, DescriptorType};
 use vulkano::pipeline::{ComputePipeline, Pipeline, PipelineBindPoint, PipelineLayout, PipelineShaderStageCreateInfo};
 use vulkano::pipeline::compute::ComputePipelineCreateInfo;
 use vulkano::pipeline::layout::{PipelineLayoutCreateInfo, PushConstantRange};
-use vulkano::shader::ShaderStages;
+use vulkano::shader::{ShaderModule, ShaderModuleCreateInfo, ShaderStages};
 use vulkano::sync::GpuFuture;
 use zerocopy::IntoBytes;
 use crate::dtype::DType;
@@ -18,97 +21,117 @@ use crate::tensor_rank::{DimContainer, DimProduct, Rank};
 use crate::vulkan_backend::tensor::VulkanTensor;
 use crate::vulkan_backend::{VulkanError, VulkanImmediateExecutor};
 
-#[repr(C)]
-#[derive(zerocopy_derive::IntoBytes, zerocopy_derive::Immutable, bytemuck::Pod, bytemuck::Zeroable, Copy, Clone, Debug)]
-struct OpMetadata {
-    input_offset: u32,
-    input_stride: u32,
-    output_offset: u32,
-    size: u32,
-}
-
-mod cs_f64 {
-    vulkano_shaders::shader!{
-        ty: "compute",
-        src: r"
-            #version 460
-
-            layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
-
-            layout(set = 0, binding = 0) buffer Input {double data[]; } input_0;
-            layout(set = 0, binding = 1) buffer Output {double data[]; } output_0;
-            layout(push_constant) uniform PushConstants { uint input_offset; uint input_stride; uint output_offset; uint size; } metadata;
-
-            void main() {
-                uint idx = gl_GlobalInvocationID.x;
-                if (idx < metadata.size) {
-                   output_0.data[metadata.output_offset/8 + idx] = -input_0.data[metadata.input_offset/8 + idx*metadata.input_stride];
-                }
-            }
-        ",
-    }
-}
-
-mod cs_f32 {
-    vulkano_shaders::shader!{
-        ty: "compute",
-        src: r"
-#version 460
-
-layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
-
-layout(set = 0, binding = 0) buffer Input {float data[]; } input_0;
-layout(set = 0, binding = 1) buffer Output {float data[]; } output_0;
-layout(push_constant) uniform PushConstants { uint input_offset; uint input_stride; uint output_offset; uint size; } metadata;
-
-void main() {
-    uint idx = gl_GlobalInvocationID.x;
-    if (idx < metadata.size) {
-       output_0.data[metadata.output_offset/4 + idx] = -input_0.data[metadata.input_offset/4 + idx*metadata.input_stride];
-    }
-}
-        ",
-    }
-}
-
 impl<R: Rank> VulkanTensor<R> {
-    pub fn unary(&self, vulkan_immediate_executor: &mut VulkanImmediateExecutor) -> Result<VulkanTensor<R>, VulkanError> {
-        
-        // Generate spirv
-        let mut b = rspirv::dr::Builder::new();
-        b.memory_model(spirv::AddressingModel::Logical, spirv::MemoryModel::GLSL450);
-        let void = b.type_void();
-        let data_type = match self.dtype() {
+
+    pub fn get_spirv_datatype(b: &mut rspirv::dr::Builder, dtype: DType) -> Result<rspirv::spirv::Word, VulkanError> {
+        Ok(match dtype {
             DType::F64 => b.type_float(64),
             DType::F32 => b.type_float(32),
             DType::BF16 => b.type_float(16),
             DType::F16 => b.type_float(16),
             DType::I64 => b.type_int(64, 1),
-            DType::I32 => b.type_int(32, 1),
             DType::U64 => b.type_int(64, 0),
+            DType::I32 => b.type_int(32, 1),
             DType::U32 => b.type_int(32, 0),
+            DType::I16 => b.type_int(16, 1),
+            DType::U16 => b.type_int(16, 0),
+            DType::I8 => b.type_int(8, 1),
             DType::U8 => b.type_int(8, 0),
-            DType::I8 => b.type_int(8, 0),
-            DType::BOOL => b.type_bool(),
-            _ => panic!("Unsupported dtype"),
+            DType::BOOL => b.type_bool()
+        })
+    }
+
+    pub fn cast_bf16_to_f32(b: &mut rspirv::dr::Builder, input: rspirv::spirv::Word) -> rspirv::spirv::Word {
+        let f32_t = b.type_float(32);
+        let u32_t = b.type_int(32, 0);
+
+        let c16  = b.constant_bit32(u32_t, 16);
+
+        let as32   = b.u_convert(u32_t, None, input).unwrap();
+        let sh     = b.shift_left_logical(u32_t, None, as32, c16).unwrap();
+        let out    = b.bitcast(f32_t, None, sh).unwrap();
+        out
+    }
+
+    pub fn cast_f32_to_bf16(b: &mut rspirv::dr::Builder, input: rspirv::spirv::Word) -> rspirv::spirv::Word {
+        let u32_t = b.type_int(32, 0);
+        let u16_t = b.type_int(16, 0);
+
+        let c16  = b.constant_bit32(u32_t, 16);
+        let c8000 = b.constant_bit32(u32_t, 0x0000_8000);
+
+        let bits32    = b.bitcast(u32_t, None, input).unwrap();
+        let rounded = b.i_add(u32_t, None, bits32, c8000).unwrap();
+        let sh     = b.shift_right_logical(u32_t, None, rounded, c16).unwrap();
+        let out    = b.u_convert(u16_t, None, sh).unwrap();
+        out
+    }
+
+    pub fn build_pipeline(
+        vulkan_immediate_executor: &mut VulkanImmediateExecutor,
+        input_dtype: DType,
+        output_dtype: DType,
+        rank: usize,
+        op: fn(&mut rspirv::dr::Builder, rspirv::spirv::Word, DType) -> Result<rspirv::spirv::Word, VulkanError>
+    ) -> Result<(Arc<PipelineLayout>, Arc<ComputePipeline>), VulkanError>
+    {
+        let mut b = rspirv::dr::Builder::new();
+        b.capability(Capability::Shader);
+        b.capability(Capability::Float64);
+        b.capability(Capability::Float16);
+        b.capability(Capability::Int16);
+        b.memory_model(spirv::AddressingModel::Logical, spirv::MemoryModel::GLSL450);
+        let void = b.type_void();
+
+        let input_data_type = match input_dtype {
+            DType::BF16 => b.type_int(16, 0),
+            _ => Self::get_spirv_datatype(&mut b, input_dtype)?
         };
-        let data_type_array = b.type_runtime_array(data_type);
-        let data_type_array_ptr = b.type_pointer(None, StorageClass::StorageBuffer, data_type_array);
-        let input_0_var = b.variable(data_type_array_ptr, None, StorageClass::StorageBuffer, None);
+
+        let output_data_type = match output_dtype {
+            DType::BF16 => b.type_int(16, 0),
+            _ => Self::get_spirv_datatype(&mut b, input_dtype)?
+        };
+        
+        let input_data_type_array = b.type_runtime_array(input_data_type);
+        b.decorate(input_data_type_array, Decoration::ArrayStride, [Operand::LiteralBit32(input_dtype.size() as u32)]);
+        let input_data_type_array_struct = b.type_struct([input_data_type_array]);
+        b.decorate(input_data_type_array_struct, Decoration::Block, []);
+        b.member_decorate(input_data_type_array_struct, 0, Decoration::Offset, [Operand::LiteralBit32(0)]);
+        let input_sb_ptr  = b.type_pointer(None, StorageClass::StorageBuffer, input_data_type_array_struct);
+        let input_0_var = b.variable(input_sb_ptr, None, StorageClass::StorageBuffer, None);
         b.decorate(input_0_var, Decoration::DescriptorSet, [LiteralBit32(0)]);
         b.decorate(input_0_var, Decoration::Binding, [LiteralBit32(0)]);
-
-        let output_0_var = b.variable(data_type_array_ptr, None, StorageClass::StorageBuffer, None);
+        
+        let output_data_type_array = b.type_runtime_array(output_data_type);
+        b.decorate(output_data_type_array, Decoration::ArrayStride, [Operand::LiteralBit32(input_dtype.size() as u32)]);
+        let output_data_type_array_struct = b.type_struct([output_data_type_array]);
+        b.decorate(output_data_type_array_struct, Decoration::Block, []);
+        b.member_decorate(output_data_type_array_struct, 0, Decoration::Offset, [Operand::LiteralBit32(0)]);
+        let output_sb_ptr  = b.type_pointer(None, StorageClass::StorageBuffer, input_data_type_array_struct);
+        let output_0_var = b.variable(output_sb_ptr, None, StorageClass::StorageBuffer, None);
         b.decorate(output_0_var, Decoration::DescriptorSet, [LiteralBit32(0)]);
         b.decorate(output_0_var, Decoration::Binding, [LiteralBit32(1)]);
 
         let u32_t = b.type_int(32, 0);
-        let pc_struct = b.type_struct([u32_t, u32_t, u32_t, u32_t]);
+        // Data:
+        // input_offset,
+        // output_offset,
+        // num_elements,
+        // input_output_shape (RANK u32s)
+        // input_stride (RANK u32s)
+        // output_stride (RANK u32s)
+        let metadata_value_count = rank*3 + 3;
+        let pc_struct = {
+            let mut v = Vec::new();
+            v.resize(metadata_value_count, u32_t);
+            b.type_struct(v)
+        };
 
         b.decorate(pc_struct, Decoration::Block, []);
-        for (i, off) in [0,4,8,12].iter().enumerate() {
+        for i in 0..metadata_value_count {
             b.member_decorate(pc_struct, i as u32, Decoration::Offset,
-                                    [Operand::LiteralBit32(*off)]);
+                              [Operand::LiteralBit32((i*4) as u32)]);
         }
 
         let pc_ptr = b.type_pointer(None, StorageClass::PushConstant, pc_struct);
@@ -119,33 +142,42 @@ impl<R: Rank> VulkanTensor<R> {
         let gid    = b.variable(in_ptr, None, StorageClass::Input, None);
         b.decorate(gid, Decoration::BuiltIn,[Operand::BuiltIn(BuiltIn::GlobalInvocationId)]);
 
-        let voidf = b.type_function(void, vec![void]);
+        let voidf = b.type_function(void, []);
         let main_fn = b.begin_function(void, None, (spirv::FunctionControl::DONT_INLINE), voidf).unwrap();
-        b.entry_point(ExecutionModel::GLCompute, main_fn, "main", []);
-        b.execution_mode(main_fn, ExecutionMode::LocalSize, [1, 1, 1]);
+        b.entry_point(ExecutionModel::GLCompute, main_fn, "main", [gid, metadata_var, output_0_var, input_0_var]);
+        b.execution_mode(main_fn, ExecutionMode::LocalSize, [64, 1, 1]);
         b.begin_block(None).unwrap();
 
         /* Constants */
         let c0 = b.constant_bit32(u32_t, 0);
-        let c1 = b.constant_bit32(u32_t, 1);
-        let c2 = b.constant_bit32(u32_t, 2);
-        let c3 = b.constant_bit32(u32_t, 3);
-        let c4 = b.constant_bit32(u32_t, 4);
 
         /* idx = gl_GlobalInvocationID.x */
         let gid  = b.load(vec3u32_t, None, gid.clone(), None, []).unwrap();
         let idx  = b.composite_extract(u32_t, None, gid, [0u32]).unwrap();
 
         /* size  = metadata.size */
-        let u32_pc_ptr_t = b.type_pointer(None, StorageClass::PushConstant, u32_t);
-        let size_ptr = b.access_chain(u32_pc_ptr_t, None, metadata_var,
-                                      [c0 /* struct */, c3]).unwrap();
-        let size_val = b.load(u32_t, None, size_ptr, None, []).unwrap();
+        let push_constant_vals = {
+            let mut vals = Vec::new();
+            let u32_pc_ptr_t = b.type_pointer(None, StorageClass::PushConstant, u32_t);
+            for i in 0..metadata_value_count {
+                let c_i = b.constant_bit32(u32_t, i as u32);
+                let size_ptr = b.access_chain(u32_pc_ptr_t, None, metadata_var, [c_i]).unwrap();
+                vals.push(b.load(u32_t, None, size_ptr, None, []).unwrap());
+            }
+            vals
+        };
+
+        let input_offset = push_constant_vals[0];
+        let output_offset = push_constant_vals[1];
+        let num_elements = push_constant_vals[2];
+        let io_shape = &push_constant_vals[3..3+rank];
+        let input_strides = &push_constant_vals[3+rank..3+rank+rank];
+        let output_strides = &push_constant_vals[3+rank+rank..3+rank+rank+rank];
 
         /* cmp & branch */
-        
+
         let bool_type = b.type_bool();
-        let cmp = b.u_less_than(bool_type, None, idx, size_val).unwrap();
+        let cmp = b.u_less_than(bool_type, None, idx, num_elements).unwrap();
         let merge_blk = b.id();
         let then_blk  = b.id();
 
@@ -153,67 +185,88 @@ impl<R: Rank> VulkanTensor<R> {
         b.branch_conditional(cmp, then_blk, merge_blk, None).unwrap();
 
         /* ---- THEN block ---- */
-        b.begin_block(None).unwrap();
+        b.begin_block(Some(then_blk)).unwrap();
 
-        /* input_index = input_offset/4 + idx*stride */
-        let inoff_ptr = b.access_chain(u32_pc_ptr_t, None, metadata_var,
-                                       [c0, c0]).unwrap();
-        let inoff_val = b.load(u32_t, None, inoff_ptr, None, []).unwrap();
-        let inoff_div4= b.u_div(u32_t, None, inoff_val, c4).unwrap();
+        // Calculate index
+        let mut remaining_idx = idx;
+        let index = {
+            let mut v = vec![];
+            for i in 0..rank {
+                let shape_val = io_shape[i];
+                let rem = b.u_mod(u32_t, None, remaining_idx, shape_val).unwrap();
+                let div = b.u_div(u32_t, None, remaining_idx, shape_val).unwrap();
+                remaining_idx = div;
+                v.push(rem);
+            }
+            v.reverse();
+            v
+        };
 
-        let stride_ptr= b.access_chain(u32_pc_ptr_t, None, metadata_var,
-                                       [c0, c1]).unwrap();
-        let stride_val= b.load(u32_t, None, stride_ptr, None, []).unwrap();
-        let mul       = b.i_mul(u32_t, None, idx, stride_val).unwrap();
-        let in_index  = b.i_add(u32_t, None, inoff_div4, mul).unwrap();
+        let input_index = {
+            let mut v = input_offset;
+            for i in 0..rank {
+                let mul = b.i_mul(u32_t, None, index[i], input_strides[i]).unwrap();
+                v = b.i_add(u32_t, None, v, mul).unwrap();
+            }
+            v
+        };
+
+        let output_index = {
+            let mut v = output_offset;
+            for i in 0..rank {
+                let mul = b.i_mul(u32_t, None, index[i], output_strides[i]).unwrap();
+                v = b.i_add(u32_t, None, v, mul).unwrap();
+            }
+            v
+        };
 
         /* value = -input[in_index] */
-        let data_input_ptr_t = b.type_pointer(None, StorageClass::Input, data_type);
-        let in_ptr = b.access_chain(data_input_ptr_t, None, input_0_var, [c0, in_index]).unwrap();
-        let in_val = b.load(data_type, None, in_ptr, None, []).unwrap();
-        let neg_val= b.f_negate(data_type, None, in_val).unwrap();
+        let data_i_ptr_t = b.type_pointer(None, StorageClass::StorageBuffer, input_data_type);
+        let in_ptr = b.access_chain(data_i_ptr_t, None, input_0_var, [c0, input_index]).unwrap();
+        let in_val = b.load(input_data_type, None, in_ptr, None, []).unwrap();
 
-        /* out_index = output_offset/4 + idx */
-        let outoff_ptr= b.access_chain(u32_pc_ptr_t, None, metadata_var,
-                                       [c0, c2]).unwrap();
-        let outoff_val= b.load(u32_t, None, outoff_ptr, None, []).unwrap();
-        let outoff_div4= b.u_div(u32_t, None, outoff_val, c4).unwrap();
-        let out_index = b.i_add(u32_t, None, outoff_div4, idx).unwrap();
+        let (in_val, in_type) = if let DType::BF16 = input_dtype {
+            (Self::cast_bf16_to_f32(&mut b, in_val), DType::F32)
+        } else {
+            (in_val, input_dtype)
+        };
+
+        let out_val = op(&mut b, in_val, in_type)?;
+
+        let out_val = if let DType::BF16 = output_dtype {
+            Self::cast_f32_to_bf16(&mut b, out_val)
+        } else {
+            out_val
+        };
 
         /* store */
-        let out_ptr = b.access_chain(data_type, None, output_0_var, [c0, out_index]).unwrap();
-        b.store(out_ptr, neg_val, None, []).unwrap();
+        let data_o_ptr_t = b.type_pointer(None, StorageClass::StorageBuffer, output_data_type);
+        let out_ptr = b.access_chain(data_o_ptr_t, None, output_0_var, [c0, output_index]).unwrap();
+        b.store(out_ptr, out_val, None, []).unwrap();
 
         /* branch to merge */
         b.branch(merge_blk).unwrap();
 
         /* ---- MERGE block ---- */
-        b.begin_block(None).unwrap();
+        b.begin_block(Some(merge_blk)).unwrap();
         b.ret().unwrap();                       // OpReturn
         b.end_function().unwrap();              // OpFunction
-        
+
         let module = b.module();
         let code = module.assemble();
 
-        let output_tensor = unsafe{VulkanTensor::new_uninitialized(self.shape().clone(), self.dtype(), vulkan_immediate_executor)}?;
+        VulkanImmediateExecutor::debug_dump_spirv(&code);
 
-        let shader = match self.dtype() {
-            DType::F64 => {
-                cs_f64::load(vulkan_immediate_executor.context.device.clone())?
-            }
-            DType::F32 => {
-                cs_f32::load(vulkan_immediate_executor.context.device.clone())?
-            }
-            _ => panic!("Unsupported dtype")
-        };
+        let shader = unsafe{ ShaderModule::new(
+            vulkan_immediate_executor.context.device.clone(),
+            ShaderModuleCreateInfo::new(&code)
+        )}?;
 
         let cs = shader.entry_point("main").unwrap();
+
         let stage = PipelineShaderStageCreateInfo::new(cs);
 
-        let (descriptor_set, descriptor_set_layout) = vulkan_immediate_executor.get_descriptor_set_and_layout(&BTreeMap::from([
-            (0, self.buffer.clone()),
-            (1, output_tensor.buffer.clone())
-        ]))?;
+        let descriptor_set_layout = vulkan_immediate_executor.get_descriptor_set_layout(BTreeSet::from([0, 1]))?;
 
         let layout = PipelineLayout::new(
             vulkan_immediate_executor.context.device.clone(),
@@ -222,34 +275,69 @@ impl<R: Rank> VulkanTensor<R> {
                 push_constant_ranges: vec![PushConstantRange{
                     stages: ShaderStages::COMPUTE,
                     offset: 0,
-                    size: std::mem::size_of::<OpMetadata>() as u32,
+                    size: (rank*12 + 12) as u32,
                 }],
                 .. Default::default()
             }
-        ).unwrap();
+        )?;
 
         let compute_pipeline = ComputePipeline::new(
             vulkan_immediate_executor.context.device.clone(),
             None,
             ComputePipelineCreateInfo::stage_layout(stage, layout.clone())
-        ).unwrap();
+        )?;
 
-        let min_input_stride = self.stride.as_slice().iter().min().unwrap();
+        Ok((layout, compute_pipeline))
+    }
 
-        let op_metadata = OpMetadata {
-            input_offset: self.offset as u32 + self.suballocation.offset as u32,
-            input_stride: 1,
-            output_offset: output_tensor.offset as u32 + output_tensor.suballocation.offset as u32,
-            size: self.shape().dim_product() as u32
+    pub fn unary(&self, vulkan_immediate_executor: &mut VulkanImmediateExecutor, cache_id: u32, op: fn(&mut rspirv::dr::Builder, rspirv::spirv::Word, DType) -> Result<rspirv::spirv::Word, VulkanError>) -> Result<VulkanTensor<R>, VulkanError> {
+
+        let (pipeline_layout, compute_pipeline) = {
+            let key = (cache_id, self.dtype(), self.dtype(), self.rank() as u32);
+            let res = vulkan_immediate_executor.pipeline_cache.unary_op.get(&key);
+            if let Some(res) = res {
+                res.clone()
+            } else {
+                let res = Self::build_pipeline(vulkan_immediate_executor, self.dtype(), self.dtype(), self.rank(), op)?;
+                vulkan_immediate_executor.pipeline_cache.unary_op.insert(key, res.clone());
+                res
+            }
         };
+
+        let output_tensor = unsafe{VulkanTensor::new_uninitialized(self.shape().clone(), self.dtype(), vulkan_immediate_executor)}?;
+
+        let (descriptor_set, _) = vulkan_immediate_executor.get_descriptor_set_and_layout(&BTreeMap::from([
+            (0, self.buffer.clone()),
+            (1, output_tensor.buffer.clone())
+        ]))?;
+
+        let op_metadata_vec = {
+            let mut v = vec![];
+            v.push((self.offset as u32 + self.suballocation.offset as u32)/self.dtype().size() as u32);
+            v.push((output_tensor.offset as u32 + output_tensor.suballocation.offset as u32)/self.dtype().size() as u32);
+            v.push((self.shape().dim_product() as u32));
+            for dim in self.shape().as_slice() {
+                v.push(*dim as u32);
+            }
+            for dim in self.stride.as_slice() {
+                v.push(*dim as u32);
+            }
+            for dim in R::KnownDims::as_slice(&output_tensor.stride) {
+                v.push(*dim as u32);
+            }
+            v
+        };
+
 
         let mut builder = AutoCommandBufferBuilder::primary(
             vulkan_immediate_executor.context.command_buffer_allocator.clone(),
             vulkan_immediate_executor.context.queue.queue_family_index(),
             CommandBufferUsage::OneTimeSubmit
-        ).unwrap();
+        )?;
 
-        builder.push_constants(layout, 0, op_metadata).unwrap();
+        for (a, b) in op_metadata_vec.iter().enumerate() {
+            builder.push_constants(pipeline_layout.clone(), (a*4) as u32, *b).unwrap();
+        }
 
         // Note that we clone the pipeline and the set. Since they are both wrapped in an `Arc`,
         // this only clones the `Arc` and not the whole pipeline or set (which aren't cloneable
@@ -268,10 +356,10 @@ impl<R: Rank> VulkanTensor<R> {
 
         // The command buffer only does one thing: execute the compute pipeline. This is called a
         // *dispatch* operation.
-        unsafe { builder.dispatch([1024, 1, 1]) }.unwrap();
+        unsafe { builder.dispatch([((self.shape().dim_product()/64) + 1) as u32, 1, 1]) }.unwrap();
 
         // Finish building the command buffer by calling `build`.
-        let command_buffer = builder.build().unwrap();
+        let command_buffer = builder.build()?;
 
         // Let's execute this command buffer now.
         let future = vulkano::sync::now(vulkan_immediate_executor.context.device.clone())
@@ -299,11 +387,115 @@ impl<R: Rank> VulkanTensor<R> {
         Ok(output_tensor)
     }
 
+
     pub fn neg(&self, vulkan_immediate_executor: &mut VulkanImmediateExecutor) -> Result<VulkanTensor<R>, VulkanError> {
-        self.unary(vulkan_immediate_executor)
+        self.unary(vulkan_immediate_executor, 0, |b, i, dtype| {
+            let data_type = Self::get_spirv_datatype(b, dtype)?;
+            match dtype {
+                DType::F16 | DType::F32 | DType::F64 => Ok(b.f_negate(data_type, None, i).unwrap()),
+                DType::I64 | DType::I32 | DType::I16 | DType::I8 => Ok(b.s_negate(data_type, None, i).unwrap()),
+                _ => Err(VulkanError::UnsupportedByBackendError),
+            }
+        })
     }
-    
+
     pub fn abs(&self, vulkan_immediate_executor: &mut VulkanImmediateExecutor) -> Result<VulkanTensor<R>, VulkanError> {
-        unimplemented!()
+        self.unary(vulkan_immediate_executor, 1, |b, i, dtype| {
+            let data_type = Self::get_spirv_datatype(b, dtype)?;
+            let glsl   = b.ext_inst_import("GLSL.std.450");
+            match dtype {
+                DType::F16 | DType::F32 | DType::F64 =>
+                    Ok(b.ext_inst(data_type, None, glsl, GLOp::FAbs as u32, [rspirv::dr::Operand::IdRef(i)]).unwrap()),
+                DType::I64 | DType::I32 | DType::I16 | DType::I8 | DType::U64 | DType::U32 | DType::U16 | DType::U8  =>
+                    Ok(b.ext_inst(data_type, None, glsl, GLOp::SAbs as u32, [rspirv::dr::Operand::IdRef(i)]).unwrap()),
+                _ =>
+                    Err(VulkanError::UnsupportedByBackendError)
+            }
+        })
+    }
+
+    pub fn exp(&self, vulkan_immediate_executor: &mut VulkanImmediateExecutor) -> Result<VulkanTensor<R>, VulkanError> {
+        self.unary(vulkan_immediate_executor, 2, |b, i, dtype| {
+            let data_type = Self::get_spirv_datatype(b, dtype)?;
+            let glsl   = b.ext_inst_import("GLSL.std.450");
+            match dtype {
+                DType::F16 | DType::F32 | DType::F64 => Ok(b.ext_inst(data_type, None, glsl, GLOp::Exp as u32, [rspirv::dr::Operand::IdRef(i)]).unwrap()),
+                _ => Err(VulkanError::UnsupportedByBackendError),
+            }
+        })
+    }
+}
+
+mod test {
+    use typenum::P1;
+    use crate::dtype::DType;
+    use crate::eval_backend::EvalBackend;
+    use crate::NDArrayNumericTensor;
+    use crate::numeric_tensor::NumericTensor;
+    use crate::vulkan_backend::{VulkanContext, VulkanImmediateExecutor};
+    use crate::vulkan_backend::tensor::VulkanTensor;
+
+    #[test]
+    fn test_neg() {
+        let vulkan_context = VulkanContext::new().unwrap();
+        let mut vulkan_runtime = VulkanImmediateExecutor::new(vulkan_context).unwrap();
+
+        let start_data = vec![1.0, -2.0, 3.0, -4.0];
+        let expected_data = vec![-1.0, 2.0, -3.0, 4.0];
+
+        let start_tensor = NDArrayNumericTensor::from(start_data).to_dyn();
+
+        let dtypes_to_test = [
+            DType::F64,
+            DType::F32,
+            DType::F16,
+            DType::BF16,
+            DType::I64,
+            DType::I32,
+            DType::I16,
+            DType::I8,
+        ];
+
+        for dtype in dtypes_to_test {
+            let start_tensor_cast = start_tensor.cast(dtype).unwrap();
+            let start_tensor_vk = VulkanTensor::from_ndarray(start_tensor_cast, &mut vulkan_runtime).unwrap();
+            let end_tensor_vk = start_tensor_vk.neg(&mut vulkan_runtime).unwrap();
+            let end_tensor = end_tensor_vk.to_ndarray();
+            let end_tensor_ranked = end_tensor.cast(DType::F64).unwrap().try_to_rank::<P1>().unwrap();
+            let end_data: Vec<f64> = end_tensor_ranked.try_to_vec().unwrap();
+            assert_eq!(end_data, expected_data);
+        }
+    }
+
+    #[test]
+    fn test_abs() {
+        let vulkan_context = VulkanContext::new().unwrap();
+        let mut vulkan_runtime = VulkanImmediateExecutor::new(vulkan_context).unwrap();
+
+        let start_data = vec![1.0, -2.0, 3.0, -4.0];
+        let expected_data = vec![1.0, 2.0, 3.0, 4.0];
+
+        let start_tensor = NDArrayNumericTensor::from(start_data).to_dyn();
+
+        let dtypes_to_test = [
+            DType::F64,
+            DType::F32,
+            DType::F16,
+            DType::BF16,
+            DType::I64,
+            DType::I32,
+            DType::I16,
+            DType::I8,
+        ];
+
+        for dtype in dtypes_to_test {
+            let start_tensor_cast = start_tensor.cast(dtype).unwrap();
+            let start_tensor_vk = VulkanTensor::from_ndarray(start_tensor_cast, &mut vulkan_runtime).unwrap();
+            let end_tensor_vk = start_tensor_vk.abs(&mut vulkan_runtime).unwrap();
+            let end_tensor = end_tensor_vk.to_ndarray();
+            let end_tensor_ranked = end_tensor.cast(DType::F64).unwrap().try_to_rank::<P1>().unwrap();
+            let end_data: Vec<f64> = end_tensor_ranked.try_to_vec().unwrap();
+            assert_eq!(end_data, expected_data);
+        }
     }
 }

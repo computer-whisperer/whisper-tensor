@@ -1,7 +1,10 @@
 pub mod tensor;
 pub mod ops;
 
+use std::any::TypeId;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::fs::File;
+use std::io::{BufWriter, Write};
 use std::sync::{Arc, Mutex};
 use vulkano::device::{Device, DeviceCreateInfo, DeviceExtensions, DeviceFeatures, Queue, QueueCreateInfo, QueueFlags};
 use vulkano::instance::{Instance, InstanceCreateFlags, InstanceCreateInfo};
@@ -14,6 +17,7 @@ use vulkano::descriptor_set::{DescriptorSet, WriteDescriptorSet};
 use vulkano::descriptor_set::layout::{DescriptorSetLayout, DescriptorSetLayoutBinding, DescriptorSetLayoutCreateInfo, DescriptorType};
 use vulkano::memory::allocator::suballocator::Region;
 use vulkano::memory::DeviceAlignment;
+use vulkano::pipeline::{ComputePipeline, PipelineLayout};
 use vulkano::shader::ShaderStages;
 use crate::dtype::DType;
 use crate::NDArrayNumericTensor;
@@ -32,7 +36,9 @@ pub enum VulkanError {
     #[error(transparent)]
     ValidatedVulkanAllocateBufferError(#[from] vulkano::Validated<AllocateBufferError>),
     #[error(transparent)]
-    VulkanLoadingError(#[from] vulkano::LoadingError)
+    VulkanLoadingError(#[from] vulkano::LoadingError),
+    #[error("Unsupported in backend")]
+    UnsupportedByBackendError,
 }
 
 #[derive(Debug)]
@@ -59,6 +65,8 @@ impl VulkanContext {
         
         let device_features = DeviceFeatures {
             shader_float64: true,
+            shader_float16: true,
+            shader_int16: true,
             .. Default::default()
         };
         
@@ -126,11 +134,25 @@ pub struct VulkanImmediateExecutorBuffer {
 }
 
 #[derive(Debug)]
+pub struct PipelineCache {
+    pub unary_op: HashMap<(u32, DType, DType, u32), (Arc<PipelineLayout>, Arc<ComputePipeline>)>
+}
+
+impl PipelineCache {
+    pub fn new() -> Self {
+        Self {
+            unary_op: HashMap::new()
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct VulkanImmediateExecutor {
     context: VulkanContext,
     buffers: Vec<VulkanImmediateExecutorBuffer>,
     descriptor_set_layouts: HashMap<BTreeSet<u32>, Arc<DescriptorSetLayout>>,
-    descriptor_set_cache: HashMap<(BTreeMap<u32, Subbuffer<[u8]>>), Arc<DescriptorSet>>
+    descriptor_set_cache: HashMap<(BTreeMap<u32, Subbuffer<[u8]>>), Arc<DescriptorSet>>,
+    pipeline_cache: PipelineCache
 }
 
 impl VulkanImmediateExecutor {
@@ -139,7 +161,8 @@ impl VulkanImmediateExecutor {
             context,
             descriptor_set_layouts: HashMap::new(),
             descriptor_set_cache: HashMap::new(),
-            buffers: Vec::new()
+            buffers: Vec::new(),
+            pipeline_cache: PipelineCache::new()
         })
     }
 
@@ -225,6 +248,15 @@ impl VulkanImmediateExecutor {
             DeviceAlignment::MIN
         ).unwrap();
         (self.buffers[0].buffer.clone(), v)
+    }
+    
+    pub fn debug_dump_spirv(spirv: &[u32]) {
+        let output_file = File::create("shader.spv").unwrap();
+        let mut writer = BufWriter::new(output_file);
+        for word in spirv {
+            writer.write(&word.to_le_bytes()).unwrap();
+        }
+        writer.flush().unwrap();
     }
 }
 

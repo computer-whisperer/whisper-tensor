@@ -305,7 +305,7 @@ const MAIN_TEST_BACKEND: ModelExecutionRuntime = ModelExecutionRuntime::Eval(Eva
 
 #[cfg(feature = "candle")]
 backend_tests!(
-    &ModelExecutionRuntime::Eval(EvalBackend::Candle(candle_core::Device::Cpu)),
+    &mut ModelExecutionRuntime::Eval(EvalBackend::Candle(candle_core::Device::Cpu)),
     test_eval_candle_backend
 );
 /*
@@ -330,7 +330,7 @@ fn test_add_operator() {
         }
 
         if let Some(test) = OnnxNodeTest::from_directory(&path) {
-            test.run(&ModelExecutionRuntime::Eval(EvalBackend::NDArray)).expect("Add operator test failed");
+            test.run(&mut ModelExecutionRuntime::Eval(EvalBackend::NDArray)).expect("Add operator test failed");
         } else {
             panic!("Could not parse add operator test");
         }
@@ -348,7 +348,7 @@ fn test_pow_operator() {
         }
 
         if let Some(test) = OnnxNodeTest::from_directory(&path) {
-            test.run(&ModelExecutionRuntime::Eval(EvalBackend::NDArray)).expect("operator test failed");
+            test.run(&mut ModelExecutionRuntime::Eval(EvalBackend::NDArray)).expect("operator test failed");
         } else {
             panic!("Could not parse operator test");
         }
@@ -370,7 +370,7 @@ fn test_gather_operator() {
         }
 
         if let Some(test) = OnnxNodeTest::from_directory(&path) {
-            test.run(&ModelExecutionRuntime::Eval(EvalBackend::NDArray)).expect("operator test failed");
+            test.run(&mut ModelExecutionRuntime::Eval(EvalBackend::NDArray)).expect("operator test failed");
         } else {
             panic!("Could not parse operator test");
         }
@@ -393,7 +393,7 @@ fn test_groupnorm_operator() {
         }
 
         if let Some(test) = OnnxNodeTest::from_directory(&path) {
-            test.run(&ModelExecutionRuntime::Eval(EvalBackend::NDArray)).expect("operator test failed");
+            test.run(&mut ModelExecutionRuntime::Eval(EvalBackend::NDArray)).expect("operator test failed");
         } else {
             panic!("Could not parse operator test");
         }
@@ -431,7 +431,7 @@ fn test_layernorm_operator() {
         }
 
         if let Some(test) = OnnxNodeTest::from_directory(&path) {
-            test.run(&ModelExecutionRuntime::Eval(EvalBackend::NDArray)).expect("operator test failed");
+            test.run(&mut ModelExecutionRuntime::Eval(EvalBackend::NDArray)).expect("operator test failed");
         } else {
             panic!("Could not parse operator test");
         }
@@ -463,7 +463,7 @@ fn test_layernorm_expanded() {
         }
 
         if let Some(test) = OnnxNodeTest::from_directory(&path) {
-            test.run(&ModelExecutionRuntime::Eval(EvalBackend::NDArray)).expect("operator test failed");
+            test.run(&mut ModelExecutionRuntime::Eval(EvalBackend::NDArray)).expect("operator test failed");
         } else {
             panic!("Could not parse operator test");
         }
@@ -483,7 +483,7 @@ fn test_lpnorm_operator() {
         }
 
         if let Some(test) = OnnxNodeTest::from_directory(&path) {
-            test.run(&ModelExecutionRuntime::Eval(EvalBackend::NDArray)).expect("operator test failed");
+            test.run(&mut ModelExecutionRuntime::Eval(EvalBackend::NDArray)).expect("operator test failed");
         } else {
             panic!("Could not parse operator test");
         }
@@ -507,7 +507,7 @@ fn test_shape_operator() {
         }
 
         if let Some(test) = OnnxNodeTest::from_directory(&path) {
-            test.run(&ModelExecutionRuntime::Eval(EvalBackend::NDArray)).expect("operator test failed");
+            test.run(&mut ModelExecutionRuntime::Eval(EvalBackend::NDArray)).expect("operator test failed");
         } else {
             panic!("Could not parse operator test");
         }
@@ -528,7 +528,7 @@ fn test_size_operator() {
         }
 
         if let Some(test) = OnnxNodeTest::from_directory(&path) {
-            test.run(&ModelExecutionRuntime::Eval(EvalBackend::NDArray)).expect("operator test failed");
+            test.run(&mut ModelExecutionRuntime::Eval(EvalBackend::NDArray)).expect("operator test failed");
         } else {
             panic!("Could not parse operator test");
         }
@@ -555,7 +555,7 @@ fn test_reduce_mean_operator() {
         }
 
         if let Some(test) = OnnxNodeTest::from_directory(&path) {
-            test.run(&ModelExecutionRuntime::Eval(EvalBackend::NDArray)).expect("operator test failed");
+            test.run(&mut ModelExecutionRuntime::Eval(EvalBackend::NDArray)).expect("operator test failed");
         } else {
             panic!("Could not parse operator test");
         }
@@ -576,7 +576,7 @@ fn test_reduce_sum_operator() {
         }
 
         if let Some(test) = OnnxNodeTest::from_directory(&path) {
-            test.run(&ModelExecutionRuntime::Eval(EvalBackend::NDArray)).expect("operator test failed");
+            test.run(&mut ModelExecutionRuntime::Eval(EvalBackend::NDArray)).expect("operator test failed");
         } else {
             panic!("Could not parse operator test");
         }
@@ -597,7 +597,7 @@ fn test_squeeze_operator() {
         }
 
         if let Some(test) = OnnxNodeTest::from_directory(&path) {
-            test.run(&ModelExecutionRuntime::Eval(EvalBackend::NDArray)).expect("operator test failed");
+            test.run(&mut ModelExecutionRuntime::Eval(EvalBackend::NDArray)).expect("operator test failed");
         } else {
             panic!("Could not parse operator test");
         }
@@ -618,7 +618,7 @@ fn test_unsqueeze_operator() {
         }
 
         if let Some(test) = OnnxNodeTest::from_directory(&path) {
-            test.run(&ModelExecutionRuntime::Eval(EvalBackend::NDArray)).expect("operator test failed");
+            test.run(&mut ModelExecutionRuntime::Eval(EvalBackend::NDArray)).expect("operator test failed");
         } else {
             panic!("Could not parse operator test");
         }
@@ -639,7 +639,7 @@ fn test_range_operator() {
         }
 
         if let Some(test) = OnnxNodeTest::from_directory(&path) {
-            test.run(&ModelExecutionRuntime::Eval(EvalBackend::NDArray)).expect("operator test failed");
+            test.run(&mut ModelExecutionRuntime::Eval(EvalBackend::NDArray)).expect("operator test failed");
         } else {
             panic!("Could not parse operator test");
         }
@@ -667,7 +667,7 @@ fn test_flatten_operator() {
         }
 
         if let Some(test) = OnnxNodeTest::from_directory(&path) {
-            test.run(&ModelExecutionRuntime::Eval(EvalBackend::NDArray)).expect("operator test failed");
+            test.run(&mut ModelExecutionRuntime::Eval(EvalBackend::NDArray)).expect("operator test failed");
         } else {
             panic!("Could not parse operator test");
         }
@@ -687,7 +687,7 @@ fn test_round_operator() {
         }
 
         if let Some(test) = OnnxNodeTest::from_directory(&path) {
-            test.run(&ModelExecutionRuntime::Eval(EvalBackend::NDArray)).expect("operator test failed");
+            test.run(&mut ModelExecutionRuntime::Eval(EvalBackend::NDArray)).expect("operator test failed");
         } else {
             panic!("Could not parse operator test");
         }
@@ -711,7 +711,7 @@ fn test_isinf_operator() {
         }
 
         if let Some(test) = OnnxNodeTest::from_directory(&path) {
-            test.run(&ModelExecutionRuntime::Eval(EvalBackend::NDArray)).expect("operator test failed");
+            test.run(&mut ModelExecutionRuntime::Eval(EvalBackend::NDArray)).expect("operator test failed");
         } else {
             panic!("Could not parse operator test");
         }
@@ -732,7 +732,7 @@ fn test_expand_operator() {
         }
 
         if let Some(test) = OnnxNodeTest::from_directory(&path) {
-            test.run(&ModelExecutionRuntime::Eval(EvalBackend::NDArray)).expect("operator test failed");
+            test.run(&mut ModelExecutionRuntime::Eval(EvalBackend::NDArray)).expect("operator test failed");
         } else {
             panic!("Could not parse operator test");
         }
@@ -765,7 +765,7 @@ fn test_mod_operator() {
         }
 
         if let Some(test) = OnnxNodeTest::from_directory(&path) {
-            test.run(&ModelExecutionRuntime::Eval(EvalBackend::NDArray)).expect("operator test failed");
+            test.run(&mut ModelExecutionRuntime::Eval(EvalBackend::NDArray)).expect("operator test failed");
         } else {
             panic!("Could not parse operator test");
         }

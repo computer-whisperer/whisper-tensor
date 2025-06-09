@@ -1,3 +1,4 @@
+use whisper_tensor::dtype::DType;
 use whisper_tensor::eval_backend::EvalBackend;
 use whisper_tensor::NDArrayNumericTensor;
 use whisper_tensor::numeric_tensor::NumericTensor;
@@ -12,12 +13,14 @@ fn main() {
     
     let mut eval_backend = EvalBackend::Vulkan(vulkan_runtime);
     
-    let start_data = vec![1.0, 2.0, 3.0, 4.0];
+    let start_data = vec![1.0f64, -2.0, 3.0, -4.0];
     
     let start_tensor = NumericTensor::NDArray(NDArrayNumericTensor::from(start_data).to_dyn());
     
     //let vulkan_tensor = VulkanTensor::from_ndarray(start_tensor, &mut vulkan_runtime).unwrap();
     //let returned_tensor = vulkan_tensor.to_ndarray();
+    
+    let v = start_tensor.cast(DType::BF16, &mut eval_backend).unwrap();
     
     let v1 = start_tensor.neg(&mut eval_backend).unwrap();
     

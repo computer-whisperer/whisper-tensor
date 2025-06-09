@@ -277,16 +277,14 @@ impl<R: Rank> NDArrayNumericTensor<R> {
             DType::U8 => {
                 let mut v = Vec::new();
                 for i in 0..shape.dim_product() as usize {
-                    let type_len = 2;
-                    v.push(u8::from_le_bytes(bytes[i * type_len..(i+1) * type_len].try_into().unwrap()));
+                    v.push(bytes[i]);
                 }
                 Self::from_slice_shape_stride(v, shape, stride)?
             }
             DType::I8 => {
                 let mut v = Vec::new();
                 for i in 0..shape.dim_product() as usize {
-                    let type_len = 2;
-                    v.push(i8::from_le_bytes(bytes[i * type_len..(i+1) * type_len].try_into().unwrap()));
+                    v.push(i8::from_le_bytes(bytes[i..i+1].try_into().unwrap()));
                 }
                 Self::from_slice_shape_stride(v, shape, stride)?
             }
