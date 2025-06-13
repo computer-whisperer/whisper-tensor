@@ -3,18 +3,17 @@
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::Read;
-use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::Once;
 use prost::Message;
-use crate::{NumericTensor};
-use crate::dtype::{DType, DTypeError};
-use crate::eval_backend::EvalBackend;
-use crate::model::{Model, ModelExecutionRuntime};
-use crate::ndarray_backend::NDArrayNumericTensor;
-use crate::onnx::TensorProto;
-use crate::symbolic_graph::ONNXDecodingError;
-use crate::tensor_rank::DynRank;
+use whisper_tensor::numeric_tensor::NumericTensor;
+use whisper_tensor::dtype::{DType, DTypeError};
+use whisper_tensor::eval_backend::EvalBackend;
+use whisper_tensor::model::{Model, ModelExecutionRuntime};
+use whisper_tensor::ndarray_backend::NDArrayNumericTensor;
+use whisper_tensor::onnx::TensorProto;
+use whisper_tensor::symbolic_graph::ONNXDecodingError;
+use whisper_tensor::tensor_rank::DynRank;
 
 // Structure to hold a test case
 struct OnnxNodeTest {
@@ -24,7 +23,6 @@ struct OnnxNodeTest {
     rtol: f64,
     atol: f64,
 }
-
 
 #[derive(Debug, thiserror::Error)]
 enum TestError {

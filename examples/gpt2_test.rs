@@ -9,6 +9,7 @@ use whisper_tensor::model::{Model, ModelExecutionRuntime};
 use whisper_tensor::numeric_tensor::{NumericTensor};
 use whisper_tensor::sampler::{LLMSamplersBundle};
 use whisper_tensor::tokenizer::Tokenizer;
+use whisper_tensor::vulkan_backend::{VulkanContext, VulkanImmediateExecutor};
 use whisper_tensor_import::{identify_and_load, ModelTypeHint};
 use whisper_tensor_import::onnx_graph::WeightStorageStrategy;
 
@@ -23,9 +24,9 @@ fn main() {
     
     let tokenizer = llm.get_tokenizer().unwrap();
 
-    let prompt = "The fibonacci sequence is: 1, 1, 2, 3, 5, 8, 13";
+    let prompt = "The fibonacci sequence is: 1, 1, 2, 3, 5, 8, 13,";
     let input = tokenizer.encode(prompt).iter().map(|x| *x as i64).collect::<Vec<_>>();
-    let input_tensor = NumericTensor::from_vec(input).to_dyn_rank().unsqueeze(0, &EvalBackend::NDArray).unwrap().unsqueeze(0, &EvalBackend::NDArray).unwrap();
+    let input_tensor = NumericTensor::from_vec(input).to_dyn_rank().unsqueeze(0, &mut EvalBackend::NDArray).unwrap().unsqueeze(0, &mut EvalBackend::NDArray).unwrap();
 
     let mut sampler = {
         let mut sc = SamplerChain::new();
@@ -44,9 +45,12 @@ fn main() {
         }
     };
 
-    let (output, _) = llm.run(input_tensor.clone(), None, &mut sampler, &ModelExecutionRuntime::Eval(EvalBackend::NDArray)).unwrap();
-    let output_tensor = output.squeeze(0, &EvalBackend::NDArray).unwrap()
-        .squeeze(0, &EvalBackend::NDArray).unwrap()
+    let vulkan_context = VulkanContext::new().unwrap();
+    let mut vulkan_runtime = VulkanImmediateExecutor::new(vulkan_context).unwrap();
+    
+    let (output, _) = llm.run(input_tensor.clone(), None, &mut sampler, &mut ModelExecutionRuntime::Eval(EvalBackend::Vulkan(vulkan_runtime))).unwrap();
+    let output_tensor = output.squeeze(0, &mut EvalBackend::NDArray).unwrap()
+        .squeeze(0, &mut EvalBackend::NDArray).unwrap()
         .try_to_type::<u32>().unwrap().try_to_rank::<P1>().unwrap();
     let output_values: Vec<u32> = output_tensor.to_vec();
     let output = tokenizer.decode(&output_values).unwrap();

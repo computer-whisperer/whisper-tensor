@@ -69,14 +69,14 @@ impl LanguageModelManager {
         }
         output_slice.push(0..shape[shape.len()-1]);
         let sliced_output_tensor = output_tensor.slice(&output_slice, &EvalBackend::NDArray)?;
-        let output_tensor_sampled = sampler.sample(&sliced_output_tensor).unwrap();
+        let output_tensor_sampled = sampler.sample(&sliced_output_tensor, &mut EvalBackend::NDArray).unwrap();
         Ok((output_tensor_sampled, output_intermediate_values))
     } 
     
     pub fn forward(&mut self, input_tokens: NumericTensor<DynRank>, intermediate_values: Option<LangaugeModelIntermediateValues>, model_execution_runtime: &mut ModelExecutionRuntime) -> Result<(NumericTensor<DynRank>, LangaugeModelIntermediateValues), ModelError> {
         // Add batch dim if needed
         let input_tokens = if input_tokens.rank() < 2 {
-            input_tokens.unsqueeze(0, &EvalBackend::NDArray)?
+            input_tokens.unsqueeze(0, &mut EvalBackend::NDArray)?
         } else {
             input_tokens
         };
@@ -106,7 +106,7 @@ impl LanguageModelManager {
                                 let mut ret = input_tokens_chunk.cast(*dtype, &EvalBackend::NDArray)?;
                                 while shape_info.len() > ret.rank() {
                                     // Append dims if needed
-                                    ret = ret.unsqueeze(ret.rank(), &EvalBackend::NDArray)?
+                                    ret = ret.unsqueeze(ret.rank(), &mut EvalBackend::NDArray)?
                                 }
                                 ret
                             } else {

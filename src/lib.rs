@@ -13,7 +13,6 @@ pub mod language_model;
 pub mod tokenizer;
 pub mod eval_backend;
 pub mod ndarray_backend;
-mod onnx_testing;
 pub mod numeric_scalar;
 pub mod tensor_rank;
 pub mod numeric_tensor_typed;

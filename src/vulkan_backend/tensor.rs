@@ -10,8 +10,8 @@ use crate::vulkan_backend::{VulkanError, VulkanImmediateExecutor};
 
 #[derive(Debug, Clone)]
 pub struct VulkanTensor<R: Rank> {
-    dtype: DType,
-    shape: R::KnownDims,
+    pub(crate) dtype: DType,
+    pub(crate) shape: R::KnownDims,
     pub(crate) stride: R::KnownDims,
     pub(crate) suballocation: Arc<Suballocation>,
     pub(crate) offset: usize,
@@ -69,7 +69,7 @@ impl<R: Rank> VulkanTensor<R> {
     pub fn to_ndarray(&self) -> NDArrayNumericTensor<R> {
         {
             let reader = self.buffer.read().unwrap();
-            let bytes_to_read = self.shape.as_slice().iter().zip(self.stride.as_slice().iter()).map(|(a, b)| a*b).sum::<u64>() as usize*self.dtype.size();
+            let bytes_to_read = self.shape.as_slice().iter().zip(self.stride.as_slice().iter()).map(|(a, b)| a*b).sum::<u64>().max(1) as usize*self.dtype.size();
             let start_offset = self.suballocation.offset as usize + self.offset;
             NDArrayNumericTensor::from_bytes(
                 &reader[start_offset ..start_offset + bytes_to_read],
@@ -87,6 +87,66 @@ impl<R: Rank> VulkanTensor<R> {
 
     pub fn rank(&self) -> usize {
         self.shape.len()
+    }
+
+    pub fn broadcast<R2: Rank>(&self, dim: &R2::KnownDims) -> Option<VulkanTensor<R2>>
+    {
+        
+        let mut new_stride = dim.as_slice().to_vec();
+        // begin at the back (the least significant dimension)
+        // size of the axis has to either agree or `from` has to be 1
+        if dim.len() < self.rank() {
+            return None;
+        }
+
+        {
+            let mut new_stride_iter = new_stride.iter_mut().rev();
+            for ((er, es), dr) in self.shape()
+                .as_slice()
+                .iter()
+                .rev()
+                .zip(self.stride.as_slice().iter().rev())
+                .zip(new_stride_iter.by_ref())
+            {
+                /* update strides */
+                if *dr == *er {
+                    /* keep stride */
+                    *dr = *es;
+                } else if *er == 1 {
+                    /* dead dimension, zero stride */
+                    *dr = 0
+                } else {
+                    return None;
+                }
+            }
+
+            /* set remaining strides to zero */
+            for dr in new_stride_iter {
+                *dr = 0;
+            }
+        }
+        
+        let new_stride = R2::KnownDims::try_from_slice(&new_stride).unwrap();
+        
+        Some(VulkanTensor{
+            shape: dim.clone(),
+            stride: new_stride,
+            suballocation: self.suballocation.clone(),
+            offset: self.offset,
+            dtype: self.dtype.clone(),
+            buffer: self.buffer.clone(),
+        })
+    }
+    
+    pub fn is_contiguous(&self) -> bool {
+        let mut v = 1;
+        for i in 0..self.rank() {
+            if self.stride[i] != v {
+                return false;
+            }
+            v = v * self.shape[i];
+        }
+        true
     }
 }
 

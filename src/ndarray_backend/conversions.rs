@@ -37,7 +37,7 @@ impl NDArrayNumericTensor<P1> {
         T::ndarray_numeric_tensor_from_vec(v)
     }
     
-    pub(crate) fn try_to_vec<T: NDArrayNumericTensorType>(&self) ->  Result<Vec<T>, NDArrayNumericTensorError> {
+    pub fn try_to_vec<T: NDArrayNumericTensorType>(&self) ->  Result<Vec<T>, NDArrayNumericTensorError> {
         Ok(T::ndarray_numeric_tensor_inner(self)?.to_vec())
     }
 }

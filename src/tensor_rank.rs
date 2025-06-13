@@ -75,7 +75,7 @@ pub trait Rank: Debug + Clone {
     const LEN: Option<usize>;
     
     type UnknownDims: Debug + Clone + DimContainer<ScalarInfoTyped<u64>> + Index<usize, Output=ScalarInfoTyped<u64>>;
-    type KnownDims: Debug + Clone + DimContainer<u64> + Index<usize, Output=u64> + DimProduct;
+    type KnownDims: Debug + Clone + DimContainer<u64> + Index<usize, Output=u64> + DimProduct + PartialEq;
     
     fn try_cast_to_dim(dims: &[usize]) -> Result<Self::NDArrayDim, RankError>;
     fn cast_to_ndarray_dim(dims: &Self::KnownDims) -> Self::NDArrayDim;

@@ -645,9 +645,9 @@ impl<R: Rank> TensorInfoShaped<R> {
         }
     }
     
-    pub(crate) fn reshape(&self, new_shape: R::KnownDims) -> Result<Self, TensorInfoError> {
+    pub(crate) fn reshape(&self, new_shape: R::KnownDims, backend: &mut EvalBackend) -> Result<Self, TensorInfoError> {
         match self {
-            TensorInfoShaped::Numeric(x) => Ok(TensorInfoShaped::Numeric(x.reshape(new_shape)?)),
+            TensorInfoShaped::Numeric(x) => Ok(TensorInfoShaped::Numeric(x.reshape(new_shape, backend)?)),
             TensorInfoShaped::Symbolic(x) => Ok(TensorInfoShaped::Symbolic(x.reshape(new_shape))),
         }
     }
@@ -739,11 +739,11 @@ impl<R: Rank> TensorInfoRanked<R> {
         }
     }
     
-    pub(crate) fn reshape(&self, new_shape: R::UnknownDims, symbolic_resolver: &mut SymbolicResolver) -> Result<Self, TensorInfoError> {
+    pub(crate) fn reshape(&self, new_shape: R::UnknownDims, symbolic_resolver: &mut SymbolicResolver, eval_backend: &mut EvalBackend) -> Result<Self, TensorInfoError> {
         if let Some(new_shape) = R::try_unknown_to_known_dims(&new_shape) {
             match self {
                 TensorInfoRanked::Shaped(x) => {
-                    Ok(TensorInfoRanked::Shaped(x.reshape(new_shape)?))
+                    Ok(TensorInfoRanked::Shaped(x.reshape(new_shape, eval_backend)?))
                 }
                 TensorInfoRanked::Ranked(_x) => {
                     Ok(TensorInfoRanked::Shaped(TensorInfoShaped::Symbolic(ShapedTensor::new_symbolic(self.first_element(), new_shape, symbolic_resolver))))

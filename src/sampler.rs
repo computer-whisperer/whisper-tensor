@@ -18,7 +18,7 @@ pub enum SamplerError {
 }
 
 pub trait Sampler {
-    fn sample(&mut self, x: &NumericTensor<DynRank>) -> Result<NumericTensor<DynRank>, SamplerError>;
+    fn sample(&mut self, x: &NumericTensor<DynRank>, backend: &mut EvalBackend) -> Result<NumericTensor<DynRank>, SamplerError>;
 }
 
 
@@ -31,12 +31,12 @@ pub struct LLMSamplersBundle {
 #[cfg(feature = "llm-samplers")]
 impl Sampler for LLMSamplersBundle {
     
-    fn sample(&mut self, x: &NumericTensor<DynRank>) -> Result<NumericTensor<DynRank>, SamplerError> {
+    fn sample(&mut self, x: &NumericTensor<DynRank>, backend: &mut EvalBackend) -> Result<NumericTensor<DynRank>, SamplerError> {
         use llm_samplers::prelude::Sampler;
         
         let x_shape = x.shape();
-        let x = x.reshape(vec![x_shape[x_shape.len()-1]])?;
-        let v: Vec<f32> = x.cast(DType::F32, &EvalBackend::NDArray)?.try_to_rank::<P1>()?.try_into()?;
+        let x = x.reshape(vec![x_shape[x_shape.len()-1]], backend)?;
+        let v: Vec<f32> = x.cast(DType::F32, backend)?.try_to_rank::<P1>()?.try_into()?;
         let mut logits = llm_samplers::prelude::Logits::try_from(v).map_err(|x| {SamplerError::LLMSamplersError(x.into())})?;
         let out = self.chain.sample_token(&mut self.res, &mut logits).map_err(|x| {SamplerError::LLMSamplersError(x.into())})?;
         let out = out.unwrap();

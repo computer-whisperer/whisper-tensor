@@ -1,5 +1,6 @@
 pub mod tensor;
 pub mod ops;
+mod spirv_helpers;
 
 use std::any::TypeId;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -39,6 +40,8 @@ pub enum VulkanError {
     VulkanLoadingError(#[from] vulkano::LoadingError),
     #[error("Unsupported in backend")]
     UnsupportedByBackendError,
+    #[error("Invalid Shape")]
+    InvalidShape
 }
 
 #[derive(Debug)]
@@ -135,13 +138,15 @@ pub struct VulkanImmediateExecutorBuffer {
 
 #[derive(Debug)]
 pub struct PipelineCache {
-    pub unary_op: HashMap<(u32, DType, DType, u32), (Arc<PipelineLayout>, Arc<ComputePipeline>)>
+    pub unary_op: HashMap<(u32, DType, DType, u32), (Arc<PipelineLayout>, Arc<ComputePipeline>)>,
+    pub binary_op: HashMap<(u32, DType, DType, u32), (Arc<PipelineLayout>, Arc<ComputePipeline>)>
 }
 
 impl PipelineCache {
     pub fn new() -> Self {
         Self {
-            unary_op: HashMap::new()
+            unary_op: HashMap::new(),
+            binary_op: HashMap::new()
         }
     }
 }
@@ -239,7 +244,7 @@ impl VulkanImmediateExecutor {
 
     pub fn alloc_space(&mut self, size: usize) -> (Subbuffer<[u8]>, Suballocation) {
         if self.buffers.len() == 0 {
-            self.allocate_buffer(100000).unwrap();
+            self.allocate_buffer(100000000).unwrap();
         }
         let layout = DeviceLayout::from_size_alignment(size as u64, 8).unwrap();
         let v = self.buffers[0].allocator.allocate(

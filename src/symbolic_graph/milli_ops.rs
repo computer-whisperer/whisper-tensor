@@ -824,7 +824,7 @@ impl SimpleUnaryMilliOp for MilliOpSimpleUnary {
             SimpleUnaryOp::Ln => Ok(input.ln(backend)?),
             SimpleUnaryOp::Sqrt => Ok(input.sqrt(backend)?),
             SimpleUnaryOp::Not => Ok(input.not(backend)?),
-            SimpleUnaryOp::Sign => Ok(input.sign()?),
+            SimpleUnaryOp::Sign => Ok(input.sign(backend)?),
             SimpleUnaryOp::BitwiseNot => Ok(input.bitwise_not(backend)?),
             SimpleUnaryOp::Reciprocal => Ok(input.reciprocal(backend)?),
             SimpleUnaryOp::Trig(trig_op) => Ok(input.trig(trig_op, backend)?),
@@ -832,7 +832,7 @@ impl SimpleUnaryMilliOp for MilliOpSimpleUnary {
             SimpleUnaryOp::Ceil => Ok(input.ceil(backend)?),
             SimpleUnaryOp::Round => Ok(input.round(backend)?),
             SimpleUnaryOp::IsInf{detect_positive, detect_negative} => Ok(input.is_inf(detect_positive, detect_negative)?),
-            SimpleUnaryOp::IsNan => Ok(input.is_nan()?),
+            SimpleUnaryOp::IsNan => Ok(input.is_nan(backend)?),
             SimpleUnaryOp::Erf => Ok(input.erf(backend)?),
         }
     }
@@ -1378,7 +1378,7 @@ impl MilliOp for MilliOpReshape {
             &shape_input_value
         )?;
         
-        let output_value = data_input.reshape(output_shape)?;
+        let output_value = data_input.reshape(output_shape, backend)?;
 
         Ok(output_value)
     }
@@ -1436,7 +1436,7 @@ impl MilliOp for MilliOpSqueeze {
                             new_shape.push(data.shape()[i].clone());
                         }
                     }
-                    Ok(TensorInfo::from(data.reshape(new_shape, symbolic_resolver)?))
+                    Ok(TensorInfo::from(data.reshape(new_shape, symbolic_resolver, backend)?))
                 } else {
                     // Data has no defined rank, just decrease the rank by the number of axes.
                     let new_rank = data_input.rank().add_offset(-(axes.len() as i64));
@@ -1531,7 +1531,7 @@ impl MilliOp for MilliOpUnsqueeze {
                             input_i += 1;
                         }
                     }
-                    Ok(TensorInfo::from(data.reshape(new_shape, symbolic_resolver)?))
+                    Ok(TensorInfo::from(data.reshape(new_shape, symbolic_resolver, backend)?))
                 } else {
                     // Data has no defined rank, just decrease the rank by the number of axes.
                     let new_rank = data_input.rank().add_offset(axes.len() as i64);
