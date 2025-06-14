@@ -39,6 +39,7 @@ typenum = { version="1.18.0", features=["const-generics"] }
 strum = "0.27"
 strum_macros = "0.27"
 bytemuck = "1.23.0"
+paste = "1.0.15"
 
 [features]
 default = ["ort", "candle", "onnx-reference", "tokenizers", "llm-samplers", "rwkv-tokenizer", "dep:rand", "http", "vulkan"]
@@ -53,6 +54,7 @@ vulkan = ["dep:vulkano", "dep:vulkano-shaders"]
 
 [build-dependencies]
 prost-build = "0.13.3"
+
 
 [workspace]
 members = [ "crates/whisper-tensor-import", "crates/whisper-tensor-webui", "crates/whisper-tensor-server"]

@@ -544,14 +544,10 @@ impl SymbolicGraphMutator {
         
         let new_op = match onnx_node.op_type.as_str() {
             "Max" => {
-                Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichBinaryOperation::Max)
-                    .map_err(|x| ONNXDecodingError::GraphConstructionError(onnx_node.name.clone(), x))?
-                ))
+                Some(AnyOperation::Max(ops::MaxOperation::from_onnx(&input_tensors, &output_tensors, &onnx_node.attribute)?))
             },
             "Min" => {
-                Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichBinaryOperation::Min)
-                    .map_err(|x| ONNXDecodingError::GraphConstructionError(onnx_node.name.clone(), x))?
-                ))
+                Some(AnyOperation::Min(ops::MinOperation::from_onnx(&input_tensors, &output_tensors, &onnx_node.attribute)?))
             },
             "Add" => {
                 Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichBinaryOperation::Add)

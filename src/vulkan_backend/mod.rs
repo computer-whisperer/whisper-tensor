@@ -70,6 +70,7 @@ impl VulkanContext {
             shader_float64: true,
             shader_float16: true,
             shader_int16: true,
+            shader_int8: true,
             .. Default::default()
         };
         

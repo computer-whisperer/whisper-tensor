@@ -44,8 +44,6 @@ pub trait Operation {
 
 #[derive(Clone, Debug, PartialEq, strum_macros::Display, Serialize, Deserialize)]
 pub(crate) enum WhichBinaryOperation {
-    Max,
-    Min,
     Add,
     Sub,
     Mul,
@@ -123,8 +121,6 @@ impl Operation for BinaryOperation {
             WhichBinaryOperation::GreaterOrEqual => AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::greater_or_equal(a, b)),
             WhichBinaryOperation::Less => AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::less(a, b)),
             WhichBinaryOperation::LessOrEqual => AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::less_or_equal(a, b)),
-            WhichBinaryOperation::Max => AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::max(a, b)),
-            WhichBinaryOperation::Min => AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::min(a, b)),
         };
         let mut output_map = HashMap::new();
         let out = graph.push_op(res);
@@ -3060,6 +3056,104 @@ impl Operation for ArgMinOperation {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct MaxOperation {
+    inputs: Vec<TensorId>,
+    output: TensorId
+}
+
+impl MaxOperation {
+    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], _attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+        if inputs.len() == 0 {
+            return Err(ONNXDecodingError::GraphConstructionError("Max".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+        }
+        if outputs.len() != 1 {
+            return Err(ONNXDecodingError::GraphConstructionError("Max".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+        }
+
+        Ok(Self {
+            inputs: inputs.to_vec(),
+            output: outputs[0]
+        })
+    }
+}
+
+impl Operation for MaxOperation {
+    fn get_op_type_name(&self) -> String {
+        "Max".to_string()
+    }
+
+    fn get_inputs(&self) -> Vec<TensorId> {
+        self.inputs.clone()
+    }
+
+    fn get_outputs(&self) -> Vec<TensorId> {
+        vec![self.output]
+    }
+
+    fn get_milli_op_graph(&self) -> MilliOpGraph {
+        let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
+        let mut x = input_map[&self.inputs[0]];
+        for input in &self.inputs[1..] {
+            let y = input_map[input];
+            x = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::max(x, y)))
+        }
+        let mut output_map = HashMap::new();
+        output_map.insert(x, self.output);
+        graph.set_output_map(output_map);
+        graph
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct MinOperation {
+    inputs: Vec<TensorId>,
+    output: TensorId
+}
+
+impl MinOperation {
+    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], _attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+        if inputs.len() == 0 {
+            return Err(ONNXDecodingError::GraphConstructionError("Min".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+        }
+        if outputs.len() != 1 {
+            return Err(ONNXDecodingError::GraphConstructionError("Min".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+        }
+
+        Ok(Self {
+            inputs: inputs.to_vec(),
+            output: outputs[0]
+        })
+    }
+}
+
+impl Operation for MinOperation {
+    fn get_op_type_name(&self) -> String {
+        "Min".to_string()
+    }
+
+    fn get_inputs(&self) -> Vec<TensorId> {
+        self.inputs.clone()
+    }
+
+    fn get_outputs(&self) -> Vec<TensorId> {
+        vec![self.output]
+    }
+
+    fn get_milli_op_graph(&self) -> MilliOpGraph {
+        let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
+        let mut x = input_map[&self.inputs[0]];
+        for input in &self.inputs[1..] {
+            let y = input_map[input];
+            x = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::min(x, y)))
+        }
+        let mut output_map = HashMap::new();
+        output_map.insert(x, self.output);
+        graph.set_output_map(output_map);
+        graph
+    }
+}
+
 #[derive(Clone, Debug, strum_macros::VariantNames, Serialize, Deserialize)]
 pub enum AnyOperation {
     Unary(UnaryOperation),
@@ -3104,6 +3198,8 @@ pub enum AnyOperation {
     RandomNormalLike(RandomNormalLikeOperation),
     ArgMax(ArgMaxOperation),
     ArgMin(ArgMinOperation),
+    Max(MaxOperation),
+    Min(MinOperation),
 }
 
 impl AnyOperation {
@@ -3151,6 +3247,8 @@ impl AnyOperation {
             AnyOperation::RandomNormalLike(op) => op,
             AnyOperation::ArgMax(op) => op,
             AnyOperation::ArgMin(op) => op,
+            AnyOperation::Max(op) => op,
+            AnyOperation::Min(op) => op,
         }
     }
 }
@@ -3203,6 +3301,8 @@ impl Operation for AnyOperation {
             AnyOperation::RandomNormalLike(op) => op.get_inputs(),
             AnyOperation::ArgMax(op) => op.get_inputs(),
             AnyOperation::ArgMin(op) => op.get_inputs(),
+            AnyOperation::Max(op) => op.get_inputs(),
+            AnyOperation::Min(op) => op.get_inputs(),
         }
     }
     fn get_outputs(&self) -> Vec<TensorId> {
@@ -3249,6 +3349,8 @@ impl Operation for AnyOperation {
             AnyOperation::RandomNormalLike(op) => op.get_outputs(),
             AnyOperation::ArgMax(op) => op.get_outputs(),
             AnyOperation::ArgMin(op) => op.get_outputs(),
+            AnyOperation::Max(op) => op.get_outputs(),
+            AnyOperation::Min(op) => op.get_outputs(),
         }
     }
 
@@ -3296,6 +3398,8 @@ impl Operation for AnyOperation {
             AnyOperation::RandomNormalLike(op) => op.get_milli_op_graph(),
             AnyOperation::ArgMax(op) => op.get_milli_op_graph(),
             AnyOperation::ArgMin(op) => op.get_milli_op_graph(),
+            AnyOperation::Max(op) => op.get_milli_op_graph(),
+            AnyOperation::Min(op) => op.get_milli_op_graph(),
         }
     }
 }

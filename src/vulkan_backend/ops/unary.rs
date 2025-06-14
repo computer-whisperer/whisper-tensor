@@ -41,11 +41,13 @@ impl<R: Rank> VulkanTensor<R> {
 
         let input_data_type = match input_dtype {
             DType::BF16 => b.type_int(16, 0),
+            DType::BOOL => b.type_int(8, 0),
             _ => get_spirv_datatype(&mut b, input_dtype)?
         };
 
         let output_data_type = match output_dtype {
             DType::BF16 => b.type_int(16, 0),
+            DType::BOOL => b.type_int(8, 0),
             _ => get_spirv_datatype(&mut b, input_dtype)?
         };
 
@@ -60,7 +62,9 @@ impl<R: Rank> VulkanTensor<R> {
         b.decorate(input_0_var, Decoration::Binding, [LiteralBit32(0)]);
 
         let output_data_type_array = b.type_runtime_array(output_data_type);
-        b.decorate(output_data_type_array, Decoration::ArrayStride, [Operand::LiteralBit32(input_dtype.size() as u32)]);
+        if output_data_type_array != input_data_type_array {
+            b.decorate(output_data_type_array, Decoration::ArrayStride, [Operand::LiteralBit32(output_dtype.size() as u32)]);
+        }
         let output_data_type_array_struct = b.type_struct([output_data_type_array]);
         b.decorate(output_data_type_array_struct, Decoration::Block, []);
         b.member_decorate(output_data_type_array_struct, 0, Decoration::Offset, [Operand::LiteralBit32(0)]);
@@ -180,18 +184,36 @@ impl<R: Rank> VulkanTensor<R> {
         let in_ptr = b.access_chain(data_i_ptr_t, None, input_0_var, [c0, input_index]).unwrap();
         let in_val = b.load(input_data_type, None, in_ptr, None, []).unwrap();
 
-        let (in_val, in_type) = if let DType::BF16 = input_dtype {
-            (cast_bf16_to_f32(&mut b, in_val), DType::F32)
-        } else {
-            (in_val, input_dtype)
+        let (in_val, in_type) = match input_dtype {
+            DType::BF16 => {
+                (cast_bf16_to_f32(&mut b, in_val), DType::F32)
+            }
+            DType::BOOL => {
+                let bool_type = b.type_bool();
+                let u8_type = b.type_int(8, 0);
+                let c0 = b.constant_bit32(u8_type, 0);
+                (b.logical_not_equal(bool_type, None, c0, in_val).unwrap(), DType::BOOL)
+            }
+            _ => {
+                (in_val, input_dtype)
+            }
         };
 
         let out_val = op(&mut b, in_val, in_type)?;
 
-        let out_val = if let DType::BF16 = output_dtype {
-            cast_f32_to_bf16(&mut b, out_val)
-        } else {
-            out_val
+        let out_val = match output_dtype {
+            DType::BF16 => {
+                cast_f32_to_bf16(&mut b, out_val)
+            }
+            DType::BOOL => {
+                let u8_type = b.type_int(8, 0);
+                let c0 = b.constant_bit32(u8_type, 0);
+                let c1 = b.constant_bit32(u8_type, 1);
+                b.select(u8_type, None, out_val, c1, c0).unwrap()
+            }
+            _ => {
+                out_val
+            }
         };
 
         /* store */
@@ -560,7 +582,7 @@ impl<R: Rank> VulkanTensor<R> {
                     let glsl   = b.ext_inst_import("GLSL.std.450");
                     match dtype {
                         DType::F16 | DType::F32 | DType::F64 =>
-                            Ok(b.ext_inst(data_type, None, glsl, GLOp::Cos as u32, [rspirv::dr::Operand::IdRef(i)]).unwrap()),
+                            Ok(b.ext_inst(data_type, None, glsl, GLOp::Cosh as u32, [rspirv::dr::Operand::IdRef(i)]).unwrap()),
                         _ => Err(VulkanError::UnsupportedByBackendError),
                     }
                 })
