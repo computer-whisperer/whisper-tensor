@@ -9,7 +9,7 @@ whisper-tensor-import = {workspace=true}
 prost = "0.13.5"
 prost-types = "0.13.3"
 futures = "0.3.31"
-vulkano = { version = "0.35.1", optional=true }
+vulkano = { version = "0.35.1", optional=true, default-features = false, features = ["serde"] }
 vulkano-shaders = {version = "0.35.0", optional=true}
 candle-core = {optional=true, workspace=true, default-features=false}
 candle-onnx = {optional=true, workspace=true, default-features=false}

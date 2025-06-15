@@ -28,7 +28,7 @@ impl<R: Rank> VulkanTensor<R> {
         input_dtype: DType,
         output_dtype: DType,
         rank: usize,
-        op: fn(&mut rspirv::dr::Builder, rspirv::spirv::Word, DType) -> Result<rspirv::spirv::Word, VulkanError>
+        op: fn(&mut rspirv::dr::Builder, rspirv::spirv::Word, DType, DType) -> Result<rspirv::spirv::Word, VulkanError>
     ) -> Result<(Arc<PipelineLayout>, Arc<ComputePipeline>), VulkanError>
     {
         let mut b = rspirv::dr::Builder::new();
@@ -36,6 +36,7 @@ impl<R: Rank> VulkanTensor<R> {
         b.capability(Capability::Float64);
         b.capability(Capability::Float16);
         b.capability(Capability::Int16);
+        b.capability(Capability::Int8);
         b.memory_model(spirv::AddressingModel::Logical, spirv::MemoryModel::GLSL450);
         let void = b.type_void();
 
@@ -48,7 +49,7 @@ impl<R: Rank> VulkanTensor<R> {
         let output_data_type = match output_dtype {
             DType::BF16 => b.type_int(16, 0),
             DType::BOOL => b.type_int(8, 0),
-            _ => get_spirv_datatype(&mut b, input_dtype)?
+            _ => get_spirv_datatype(&mut b, output_dtype)?
         };
 
         let input_data_type_array = b.type_runtime_array(input_data_type);
@@ -68,7 +69,7 @@ impl<R: Rank> VulkanTensor<R> {
         let output_data_type_array_struct = b.type_struct([output_data_type_array]);
         b.decorate(output_data_type_array_struct, Decoration::Block, []);
         b.member_decorate(output_data_type_array_struct, 0, Decoration::Offset, [Operand::LiteralBit32(0)]);
-        let output_sb_ptr  = b.type_pointer(None, StorageClass::StorageBuffer, input_data_type_array_struct);
+        let output_sb_ptr  = b.type_pointer(None, StorageClass::StorageBuffer, output_data_type_array_struct);
         let output_0_var = b.variable(output_sb_ptr, None, StorageClass::StorageBuffer, None);
         b.decorate(output_0_var, Decoration::DescriptorSet, [LiteralBit32(0)]);
         b.decorate(output_0_var, Decoration::Binding, [LiteralBit32(1)]);
@@ -199,7 +200,12 @@ impl<R: Rank> VulkanTensor<R> {
             }
         };
 
-        let out_val = op(&mut b, in_val, in_type)?;
+        let out_type = match output_dtype {
+            DType::BF16 => DType::F32,
+            _ => output_dtype,
+        };
+
+        let out_val = op(&mut b, in_val, in_type, out_type)?;
 
         let out_val = match output_dtype {
             DType::BF16 => {
@@ -267,21 +273,26 @@ impl<R: Rank> VulkanTensor<R> {
         Ok((layout, compute_pipeline))
     }
 
-    fn unary(&self, vulkan_immediate_executor: &mut VulkanImmediateExecutor, cache_id: u32, op: fn(&mut rspirv::dr::Builder, rspirv::spirv::Word, DType) -> Result<rspirv::spirv::Word, VulkanError>) -> Result<VulkanTensor<R>, VulkanError> {
-
+    fn unary(&self,
+             vulkan_immediate_executor: &mut VulkanImmediateExecutor,
+             cache_id: u32,
+             output_dtype: DType,
+             op: fn(&mut rspirv::dr::Builder, rspirv::spirv::Word, DType, DType) -> Result<rspirv::spirv::Word, VulkanError>)
+        -> Result<VulkanTensor<R>, VulkanError>
+    {
         let (pipeline_layout, compute_pipeline) = {
-            let key = (cache_id, self.dtype(), self.dtype(), self.rank() as u32);
+            let key = (cache_id, self.dtype(), output_dtype, self.rank() as u32);
             let res = vulkan_immediate_executor.pipeline_cache.unary_op.get(&key);
             if let Some(res) = res {
                 res.clone()
             } else {
-                let res = Self::build_unary_pipeline(vulkan_immediate_executor, self.dtype(), self.dtype(), self.rank(), op)?;
+                let res = Self::build_unary_pipeline(vulkan_immediate_executor, self.dtype(), output_dtype, self.rank(), op)?;
                 vulkan_immediate_executor.pipeline_cache.unary_op.insert(key, res.clone());
                 res
             }
         };
 
-        let output_tensor = unsafe{VulkanTensor::new_uninitialized(self.shape().clone(), self.dtype(), vulkan_immediate_executor)}?;
+        let output_tensor = unsafe{VulkanTensor::new_uninitialized(self.shape().clone(), output_dtype, vulkan_immediate_executor)}?;
 
         let (descriptor_set, _) = vulkan_immediate_executor.get_descriptor_set_and_layout(&BTreeMap::from([
             (0, self.buffer.clone()),
@@ -291,7 +302,7 @@ impl<R: Rank> VulkanTensor<R> {
         let op_metadata_vec = {
             let mut v = vec![];
             v.push((self.offset as u32 + self.suballocation.offset as u32)/self.dtype().size() as u32);
-            v.push((output_tensor.offset as u32 + output_tensor.suballocation.offset as u32)/self.dtype().size() as u32);
+            v.push((output_tensor.offset as u32 + output_tensor.suballocation.offset as u32)/output_dtype.size() as u32);
             v.push((self.shape().dim_product() as u32));
             for dim in self.shape().as_slice() {
                 v.push(*dim as u32);
@@ -366,9 +377,9 @@ impl<R: Rank> VulkanTensor<R> {
 
 
     pub fn neg(&self, vulkan_immediate_executor: &mut VulkanImmediateExecutor) -> Result<VulkanTensor<R>, VulkanError> {
-        self.unary(vulkan_immediate_executor, 0, |b, i, dtype| {
-            let data_type = get_spirv_datatype(b, dtype)?;
-            match dtype {
+        self.unary(vulkan_immediate_executor, 0, self.dtype,|b, i, input_dtype, output_dtype| {
+            let data_type = get_spirv_datatype(b, output_dtype)?;
+            match input_dtype {
                 DType::F16 | DType::F32 | DType::F64 => Ok(b.f_negate(data_type, None, i).unwrap()),
                 DType::I64 | DType::I32 | DType::I16 | DType::I8 => Ok(b.s_negate(data_type, None, i).unwrap()),
                 _ => Err(VulkanError::UnsupportedByBackendError),
@@ -377,10 +388,10 @@ impl<R: Rank> VulkanTensor<R> {
     }
 
     pub fn abs(&self, vulkan_immediate_executor: &mut VulkanImmediateExecutor) -> Result<VulkanTensor<R>, VulkanError> {
-        self.unary(vulkan_immediate_executor, 1, |b, i, dtype| {
-            let data_type = get_spirv_datatype(b, dtype)?;
+        self.unary(vulkan_immediate_executor, 1, self.dtype, |b, i, input_dtype, output_dtype| {
+            let data_type = get_spirv_datatype(b, output_dtype)?;
             let glsl   = b.ext_inst_import("GLSL.std.450");
-            match dtype {
+            match input_dtype {
                 DType::F16 | DType::F32 | DType::F64 =>
                     Ok(b.ext_inst(data_type, None, glsl, GLOp::FAbs as u32, [rspirv::dr::Operand::IdRef(i)]).unwrap()),
                 DType::I64 | DType::I32 | DType::I16 | DType::I8 | DType::U64 | DType::U32 | DType::U16 | DType::U8  =>
@@ -392,10 +403,10 @@ impl<R: Rank> VulkanTensor<R> {
     }
 
     pub fn exp(&self, vulkan_immediate_executor: &mut VulkanImmediateExecutor) -> Result<VulkanTensor<R>, VulkanError> {
-        self.unary(vulkan_immediate_executor, 2, |b, i, dtype| {
-            let data_type = get_spirv_datatype(b, dtype)?;
+        self.unary(vulkan_immediate_executor, 2, self.dtype, |b, i, input_dtype, output_dtype| {
+            let data_type = get_spirv_datatype(b, output_dtype)?;
             let glsl   = b.ext_inst_import("GLSL.std.450");
-            match dtype {
+            match input_dtype {
                 // F64 fails for some reason, must investigate later
                 DType::F16 | DType::F32 => Ok(b.ext_inst(data_type, None, glsl, GLOp::Exp as u32, [rspirv::dr::Operand::IdRef(i)]).unwrap()),
                 _ => Err(VulkanError::UnsupportedByBackendError),
@@ -404,10 +415,10 @@ impl<R: Rank> VulkanTensor<R> {
     }
 
     pub fn ln(&self, vulkan_immediate_executor: &mut VulkanImmediateExecutor) -> Result<VulkanTensor<R>, VulkanError> {
-        self.unary(vulkan_immediate_executor, 3, |b, i, dtype| {
-            let data_type = get_spirv_datatype(b, dtype)?;
+        self.unary(vulkan_immediate_executor, 3, self.dtype, |b, i, input_dtype, output_dtype| {
+            let data_type = get_spirv_datatype(b, output_dtype)?;
             let glsl   = b.ext_inst_import("GLSL.std.450");
-            match dtype {
+            match input_dtype {
                 DType::F16 | DType::F32 | DType::F64 => Ok(b.ext_inst(data_type, None, glsl, GLOp::Log as u32, [rspirv::dr::Operand::IdRef(i)]).unwrap()),
                 _ => Err(VulkanError::UnsupportedByBackendError),
             }
@@ -415,10 +426,10 @@ impl<R: Rank> VulkanTensor<R> {
     }
 
     pub fn sqrt(&self, vulkan_immediate_executor: &mut VulkanImmediateExecutor) -> Result<VulkanTensor<R>, VulkanError> {
-        self.unary(vulkan_immediate_executor, 4, |b, i, dtype| {
-            let data_type = get_spirv_datatype(b, dtype)?;
+        self.unary(vulkan_immediate_executor, 4, self.dtype, |b, i, input_dtype, output_dtype| {
+            let data_type = get_spirv_datatype(b, output_dtype)?;
             let glsl   = b.ext_inst_import("GLSL.std.450");
-            match dtype {
+            match input_dtype {
                 DType::F16 | DType::F32 | DType::F64 => Ok(b.ext_inst(data_type, None, glsl, GLOp::Sqrt as u32, [rspirv::dr::Operand::IdRef(i)]).unwrap()),
                 _ => Err(VulkanError::UnsupportedByBackendError),
             }
@@ -426,9 +437,9 @@ impl<R: Rank> VulkanTensor<R> {
     }
 
     pub fn not(&self, vulkan_immediate_executor: &mut VulkanImmediateExecutor) -> Result<VulkanTensor<R>, VulkanError> {
-        self.unary(vulkan_immediate_executor, 5, |b, i, dtype| {
-            let data_type = get_spirv_datatype(b, dtype)?;
-            match dtype {
+        self.unary(vulkan_immediate_executor, 5, self.dtype, |b, i, input_dtype, output_dtype| {
+            let data_type = get_spirv_datatype(b, output_dtype)?;
+            match input_dtype {
                 DType::BOOL => Ok(b.not(data_type, None, i).unwrap()),
                 _ => Err(VulkanError::UnsupportedByBackendError),
             }
@@ -436,10 +447,10 @@ impl<R: Rank> VulkanTensor<R> {
     }
 
     pub fn sign(&self, vulkan_immediate_executor: &mut VulkanImmediateExecutor) -> Result<VulkanTensor<R>, VulkanError> {
-        self.unary(vulkan_immediate_executor, 6, |b, i, dtype| {
-            let data_type = get_spirv_datatype(b, dtype)?;
+        self.unary(vulkan_immediate_executor, 6, self.dtype, |b, i, input_dtype, output_dtype| {
+            let data_type = get_spirv_datatype(b, output_dtype)?;
             let glsl   = b.ext_inst_import("GLSL.std.450");
-            match dtype {
+            match input_dtype {
                 DType::F16 | DType::F32 | DType::F64 => 
                     Ok(b.ext_inst(data_type, None, glsl, GLOp::FSign as u32, [rspirv::dr::Operand::IdRef(i)]).unwrap()),
                 DType::I64 | DType::I32 | DType::I16 | DType::I8 | DType::U64 | DType::U32 | DType::U16 | DType::U8  =>
@@ -450,9 +461,9 @@ impl<R: Rank> VulkanTensor<R> {
     }
 
     pub fn bitwise_not(&self, vulkan_immediate_executor: &mut VulkanImmediateExecutor) -> Result<VulkanTensor<R>, VulkanError> {
-        self.unary(vulkan_immediate_executor, 7, |b, i, dtype| {
-            let data_type = get_spirv_datatype(b, dtype)?;
-            match dtype {
+        self.unary(vulkan_immediate_executor, 7, self.dtype, |b, i, input_dtype, output_dtype| {
+            let data_type = get_spirv_datatype(b, output_dtype)?;
+            match input_dtype {
                 DType::I64 | DType::I32 | DType::I16 | DType::I8 | DType::U64 | DType::U32 | DType::U16 | DType::U8  =>
                     Ok(b.not(data_type, None, i).unwrap()),
                 _ => Err(VulkanError::UnsupportedByBackendError),
@@ -461,12 +472,12 @@ impl<R: Rank> VulkanTensor<R> {
     }
 
     pub fn reciprocal(&self, vulkan_immediate_executor: &mut VulkanImmediateExecutor) -> Result<VulkanTensor<R>, VulkanError> {
-        self.unary(vulkan_immediate_executor, 8, |b, i, dtype| {
-            let data_type = get_spirv_datatype(b, dtype)?;
+        self.unary(vulkan_immediate_executor, 8, self.dtype, |b, i, input_dtype, output_dtype| {
+            let data_type = get_spirv_datatype(b, output_dtype)?;
             let f32_type = b.type_float(32);
-            match dtype {
+            match input_dtype {
                 DType::F16 | DType::F32 | DType::F64 => {
-                    let const_one = b.constant_bit32(f32_type, 1);
+                    let const_one = b.constant_bit32(f32_type, 1.0f32.to_bits());
                     let const_one = b.f_convert(data_type, None, const_one).unwrap();
                     Ok(b.f_div(data_type, None, const_one, i).unwrap())
                 }
@@ -478,10 +489,10 @@ impl<R: Rank> VulkanTensor<R> {
     pub fn trig(&self, which_trig_op: TrigOp, vulkan_immediate_executor: &mut VulkanImmediateExecutor) -> Result<VulkanTensor<R>, VulkanError> {
         match which_trig_op {
             TrigOp::Asin => {
-                self.unary(vulkan_immediate_executor, 9, |b, i, dtype| {
-                    let data_type = get_spirv_datatype(b, dtype)?;
+                self.unary(vulkan_immediate_executor, 9, self.dtype, |b, i, input_dtype, output_dtype| {
+                    let data_type = get_spirv_datatype(b, output_dtype)?;
                     let glsl   = b.ext_inst_import("GLSL.std.450");
-                    match dtype {
+                    match input_dtype {
                         DType::F16 | DType::F32 | DType::F64 =>
                             Ok(b.ext_inst(data_type, None, glsl, GLOp::Asin as u32, [rspirv::dr::Operand::IdRef(i)]).unwrap()),
                         _ => Err(VulkanError::UnsupportedByBackendError),
@@ -489,10 +500,10 @@ impl<R: Rank> VulkanTensor<R> {
                 })
             }
             TrigOp::Asinh => {
-                self.unary(vulkan_immediate_executor, 10, |b, i, dtype| {
-                    let data_type = get_spirv_datatype(b, dtype)?;
+                self.unary(vulkan_immediate_executor, 10, self.dtype, |b, i, input_dtype, output_dtype| {
+                    let data_type = get_spirv_datatype(b, output_dtype)?;
                     let glsl   = b.ext_inst_import("GLSL.std.450");
-                    match dtype {
+                    match input_dtype {
                         DType::F16 | DType::F32 | DType::F64 => 
                             Ok(b.ext_inst(data_type, None, glsl, GLOp::Asinh as u32, [rspirv::dr::Operand::IdRef(i)]).unwrap()),
                         _ => Err(VulkanError::UnsupportedByBackendError),
@@ -500,10 +511,10 @@ impl<R: Rank> VulkanTensor<R> {
                 })
             }
             TrigOp::Acos => {
-                self.unary(vulkan_immediate_executor, 11, |b, i, dtype| {
-                    let data_type = get_spirv_datatype(b, dtype)?;
+                self.unary(vulkan_immediate_executor, 11, self.dtype, |b, i, input_dtype, output_dtype| {
+                    let data_type = get_spirv_datatype(b, output_dtype)?;
                     let glsl   = b.ext_inst_import("GLSL.std.450");
-                    match dtype {
+                    match input_dtype {
                         DType::F16 | DType::F32 | DType::F64 =>
                             Ok(b.ext_inst(data_type, None, glsl, GLOp::Acos as u32, [rspirv::dr::Operand::IdRef(i)]).unwrap()),
                         _ => Err(VulkanError::UnsupportedByBackendError),
@@ -511,10 +522,10 @@ impl<R: Rank> VulkanTensor<R> {
                 })
             }
             TrigOp::Acosh => {
-                self.unary(vulkan_immediate_executor, 12, |b, i, dtype| {
-                    let data_type = get_spirv_datatype(b, dtype)?;
+                self.unary(vulkan_immediate_executor, 12, self.dtype, |b, i, input_dtype, output_dtype| {
+                    let data_type = get_spirv_datatype(b, output_dtype)?;
                     let glsl   = b.ext_inst_import("GLSL.std.450");
-                    match dtype {
+                    match input_dtype {
                         DType::F16 | DType::F32 | DType::F64 =>
                             Ok(b.ext_inst(data_type, None, glsl, GLOp::Acosh as u32, [rspirv::dr::Operand::IdRef(i)]).unwrap()),
                         _ => Err(VulkanError::UnsupportedByBackendError),
@@ -522,10 +533,10 @@ impl<R: Rank> VulkanTensor<R> {
                 })
             }
             TrigOp::Atan => {
-                self.unary(vulkan_immediate_executor, 13, |b, i, dtype| {
-                    let data_type = get_spirv_datatype(b, dtype)?;
+                self.unary(vulkan_immediate_executor, 13, self.dtype, |b, i, input_dtype, output_dtype| {
+                    let data_type = get_spirv_datatype(b, output_dtype)?;
                     let glsl   = b.ext_inst_import("GLSL.std.450");
-                    match dtype {
+                    match input_dtype {
                         DType::F16 | DType::F32 | DType::F64 =>
                             Ok(b.ext_inst(data_type, None, glsl, GLOp::Atan as u32, [rspirv::dr::Operand::IdRef(i)]).unwrap()),
                         _ => Err(VulkanError::UnsupportedByBackendError),
@@ -533,10 +544,10 @@ impl<R: Rank> VulkanTensor<R> {
                 })
             }
             TrigOp::Atanh => {
-                self.unary(vulkan_immediate_executor, 14, |b, i, dtype| {
-                    let data_type = get_spirv_datatype(b, dtype)?;
+                self.unary(vulkan_immediate_executor, 14, self.dtype, |b, i, input_dtype, output_dtype| {
+                    let data_type = get_spirv_datatype(b, output_dtype)?;
                     let glsl   = b.ext_inst_import("GLSL.std.450");
-                    match dtype {
+                    match input_dtype {
                         DType::F16 | DType::F32 | DType::F64 =>
                             Ok(b.ext_inst(data_type, None, glsl, GLOp::Atanh as u32, [rspirv::dr::Operand::IdRef(i)]).unwrap()),
                         _ => Err(VulkanError::UnsupportedByBackendError),
@@ -544,10 +555,10 @@ impl<R: Rank> VulkanTensor<R> {
                 })
             }
             TrigOp::Sin => {
-                self.unary(vulkan_immediate_executor, 15, |b, i, dtype| {
-                    let data_type = get_spirv_datatype(b, dtype)?;
+                self.unary(vulkan_immediate_executor, 15, self.dtype, |b, i, input_dtype, output_dtype| {
+                    let data_type = get_spirv_datatype(b, output_dtype)?;
                     let glsl   = b.ext_inst_import("GLSL.std.450");
-                    match dtype {
+                    match input_dtype {
                         DType::F16 | DType::F32 | DType::F64 =>
                             Ok(b.ext_inst(data_type, None, glsl, GLOp::Sin as u32, [rspirv::dr::Operand::IdRef(i)]).unwrap()),
                         _ => Err(VulkanError::UnsupportedByBackendError),
@@ -555,10 +566,10 @@ impl<R: Rank> VulkanTensor<R> {
                 })
             }
             TrigOp::Sinh => {
-                self.unary(vulkan_immediate_executor, 16, |b, i, dtype| {
-                    let data_type = get_spirv_datatype(b, dtype)?;
+                self.unary(vulkan_immediate_executor, 16, self.dtype, |b, i, input_dtype, output_dtype| {
+                    let data_type = get_spirv_datatype(b, output_dtype)?;
                     let glsl   = b.ext_inst_import("GLSL.std.450");
-                    match dtype {
+                    match input_dtype {
                         DType::F16 | DType::F32 | DType::F64 =>
                             Ok(b.ext_inst(data_type, None, glsl, GLOp::Sinh as u32, [rspirv::dr::Operand::IdRef(i)]).unwrap()),
                         _ => Err(VulkanError::UnsupportedByBackendError),
@@ -566,10 +577,10 @@ impl<R: Rank> VulkanTensor<R> {
                 })
             }
             TrigOp::Cos => {
-                self.unary(vulkan_immediate_executor, 17, |b, i, dtype| {
-                    let data_type = get_spirv_datatype(b, dtype)?;
+                self.unary(vulkan_immediate_executor, 17, self.dtype, |b, i, input_dtype, output_dtype| {
+                    let data_type = get_spirv_datatype(b, output_dtype)?;
                     let glsl   = b.ext_inst_import("GLSL.std.450");
-                    match dtype {
+                    match input_dtype {
                         DType::F16 | DType::F32 | DType::F64 =>
                             Ok(b.ext_inst(data_type, None, glsl, GLOp::Cos as u32, [rspirv::dr::Operand::IdRef(i)]).unwrap()),
                         _ => Err(VulkanError::UnsupportedByBackendError),
@@ -577,10 +588,10 @@ impl<R: Rank> VulkanTensor<R> {
                 })
             }
             TrigOp::Cosh => {
-                self.unary(vulkan_immediate_executor, 18, |b, i, dtype| {
-                    let data_type = get_spirv_datatype(b, dtype)?;
+                self.unary(vulkan_immediate_executor, 18, self.dtype, |b, i, input_dtype, output_dtype| {
+                    let data_type = get_spirv_datatype(b, output_dtype)?;
                     let glsl   = b.ext_inst_import("GLSL.std.450");
-                    match dtype {
+                    match input_dtype {
                         DType::F16 | DType::F32 | DType::F64 =>
                             Ok(b.ext_inst(data_type, None, glsl, GLOp::Cosh as u32, [rspirv::dr::Operand::IdRef(i)]).unwrap()),
                         _ => Err(VulkanError::UnsupportedByBackendError),
@@ -588,10 +599,10 @@ impl<R: Rank> VulkanTensor<R> {
                 })
             }
             TrigOp::Tan => {
-                self.unary(vulkan_immediate_executor, 19, |b, i, dtype| {
-                    let data_type = get_spirv_datatype(b, dtype)?;
+                self.unary(vulkan_immediate_executor, 19, self.dtype, |b, i, input_dtype, output_dtype| {
+                    let data_type = get_spirv_datatype(b, output_dtype)?;
                     let glsl   = b.ext_inst_import("GLSL.std.450");
-                    match dtype {
+                    match input_dtype {
                         DType::F16 | DType::F32 | DType::F64 =>
                             Ok(b.ext_inst(data_type, None, glsl, GLOp::Tan as u32, [rspirv::dr::Operand::IdRef(i)]).unwrap()),
                         _ => Err(VulkanError::UnsupportedByBackendError),
@@ -599,10 +610,10 @@ impl<R: Rank> VulkanTensor<R> {
                 })
             }
             TrigOp::Tanh => {
-                self.unary(vulkan_immediate_executor, 20, |b, i, dtype| {
-                    let data_type = get_spirv_datatype(b, dtype)?;
+                self.unary(vulkan_immediate_executor, 20, self.dtype, |b, i, input_dtype, output_dtype| {
+                    let data_type = get_spirv_datatype(b, output_dtype)?;
                     let glsl   = b.ext_inst_import("GLSL.std.450");
-                    match dtype {
+                    match input_dtype {
                         DType::F16 | DType::F32 | DType::F64 =>
                             Ok(b.ext_inst(data_type, None, glsl, GLOp::Tanh as u32, [rspirv::dr::Operand::IdRef(i)]).unwrap()),
                         _ => Err(VulkanError::UnsupportedByBackendError),
@@ -613,10 +624,10 @@ impl<R: Rank> VulkanTensor<R> {
     }
 
     pub fn floor(&self, vulkan_immediate_executor: &mut VulkanImmediateExecutor) -> Result<VulkanTensor<R>, VulkanError> {
-        self.unary(vulkan_immediate_executor, 21, |b, i, dtype| {
-            let data_type = get_spirv_datatype(b, dtype)?;
+        self.unary(vulkan_immediate_executor, 21, self.dtype, |b, i, input_dtype, output_dtype| {
+            let data_type = get_spirv_datatype(b, output_dtype)?;
             let glsl   = b.ext_inst_import("GLSL.std.450");
-            match dtype {
+            match input_dtype {
                 DType::F16 | DType::F32 | DType::F64 =>
                     Ok(b.ext_inst(data_type, None, glsl, GLOp::Floor as u32, [rspirv::dr::Operand::IdRef(i)]).unwrap()),
                 _ => Err(VulkanError::UnsupportedByBackendError),
@@ -625,10 +636,10 @@ impl<R: Rank> VulkanTensor<R> {
     }
 
     pub fn ceil(&self, vulkan_immediate_executor: &mut VulkanImmediateExecutor) -> Result<VulkanTensor<R>, VulkanError> {
-        self.unary(vulkan_immediate_executor, 22, |b, i, dtype| {
-            let data_type = get_spirv_datatype(b, dtype)?;
+        self.unary(vulkan_immediate_executor, 22, self.dtype, |b, i, input_dtype, output_dtype| {
+            let data_type = get_spirv_datatype(b, output_dtype)?;
             let glsl   = b.ext_inst_import("GLSL.std.450");
-            match dtype {
+            match input_dtype {
                 DType::F16 | DType::F32 | DType::F64 =>
                     Ok(b.ext_inst(data_type, None, glsl, GLOp::Ceil as u32, [rspirv::dr::Operand::IdRef(i)]).unwrap()),
                 _ => Err(VulkanError::UnsupportedByBackendError),
@@ -637,10 +648,10 @@ impl<R: Rank> VulkanTensor<R> {
     }
 
     pub fn round(&self, vulkan_immediate_executor: &mut VulkanImmediateExecutor) -> Result<VulkanTensor<R>, VulkanError> {
-        self.unary(vulkan_immediate_executor, 23, |b, i, dtype| {
-            let data_type = get_spirv_datatype(b, dtype)?;
+        self.unary(vulkan_immediate_executor, 23, self.dtype, |b, i, input_dtype, output_dtype| {
+            let data_type = get_spirv_datatype(b, output_dtype)?;
             let glsl   = b.ext_inst_import("GLSL.std.450");
-            match dtype {
+            match input_dtype {
                 DType::F16 | DType::F32 | DType::F64 =>
                     Ok(b.ext_inst(data_type, None, glsl, GLOp::RoundEven as u32, [rspirv::dr::Operand::IdRef(i)]).unwrap()),
                 _ => Err(VulkanError::UnsupportedByBackendError),
@@ -649,9 +660,9 @@ impl<R: Rank> VulkanTensor<R> {
     }
 
     pub fn is_nan(&self, vulkan_immediate_executor: &mut VulkanImmediateExecutor) -> Result<VulkanTensor<R>, VulkanError> {
-        self.unary(vulkan_immediate_executor, 24, |b, i, dtype| {
-            let data_type = get_spirv_datatype(b, dtype)?;
-            match dtype {
+        self.unary(vulkan_immediate_executor, 24, DType::BOOL, |b, i, input_dtype, output_dtype| {
+            let data_type = get_spirv_datatype(b, output_dtype)?;
+            match input_dtype {
                 DType::F16 | DType::F32 | DType::F64 =>
                     Ok(b.is_nan(data_type, None, i).unwrap()),
                 _ => Err(VulkanError::UnsupportedByBackendError),
@@ -663,7 +674,7 @@ impl<R: Rank> VulkanTensor<R> {
         if self.is_contiguous() {
             Ok(self.clone())
         } else {
-            self.unary(vulkan_immediate_executor, 24, |b, i, dtype| {
+            self.unary(vulkan_immediate_executor, 24, self.dtype, |b, i, input_dtype, output_dtype| {
                 Ok(i)
             })
         }

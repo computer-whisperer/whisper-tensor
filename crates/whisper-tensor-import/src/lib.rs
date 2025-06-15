@@ -74,7 +74,7 @@ pub fn identify_and_load(model_path: &Path, output_method: WeightStorageStrategy
 
 fn load_onnx_file(model_path: &Path, hint: Option<ModelTypeHint>) -> Result<Vec::<u8>, Error> {
     let mut onnx_data = Vec::new();
-    File::open(model_path).unwrap().read_to_end(&mut onnx_data)?;
+    File::open(model_path)?.read_to_end(&mut onnx_data)?;
     
     if let Some(hint) = hint {
         if let ModelTypeHint::GPT2 = hint {

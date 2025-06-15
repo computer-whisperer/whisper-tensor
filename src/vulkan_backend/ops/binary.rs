@@ -485,7 +485,7 @@ impl<R: Rank> VulkanTensor<R> {
         Self::binary(a, b, a.dtype(), vulkan_immediate_executor, 5, |builder, a, b, input_dtype, output_dtype| {
             let data_type = get_spirv_datatype(builder, output_dtype)?;
             match input_dtype {
-                DType::F16 | DType::F32 | DType::F64 => Ok(builder.f_mod(data_type, None, a, b).unwrap()),
+                DType::F16 | DType::F32 | DType::F64 => Ok(builder.f_rem(data_type, None, a, b).unwrap()),
                 _ => Err(VulkanError::UnsupportedByBackendError),
             }
         })

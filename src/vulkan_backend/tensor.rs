@@ -26,10 +26,11 @@ impl<R: Rank> VulkanTensor<R> {
 
         let mut stride = vec![];
         let mut v = 1;
-        for &i in shape.as_slice() {
+        for &i in shape.as_slice().iter().rev() {
             stride.push(v);
             v = v * i;
         }
+        stride.reverse();
         let stride = R::KnownDims::try_from_slice(stride.as_slice()).unwrap();
 
         Ok(VulkanTensor {
@@ -140,7 +141,7 @@ impl<R: Rank> VulkanTensor<R> {
     
     pub fn is_contiguous(&self) -> bool {
         let mut v = 1;
-        for i in 0..self.rank() {
+        for i in self.rank()-1..=0 {
             if self.stride[i] != v {
                 return false;
             }
