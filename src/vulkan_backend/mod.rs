@@ -140,14 +140,16 @@ pub struct VulkanImmediateExecutorBuffer {
 #[derive(Debug)]
 pub struct PipelineCache {
     pub unary_op: HashMap<(u32, DType, DType, u32), (Arc<PipelineLayout>, Arc<ComputePipeline>)>,
-    pub binary_op: HashMap<(u32, DType, DType, u32), (Arc<PipelineLayout>, Arc<ComputePipeline>)>
+    pub binary_op: HashMap<(u32, DType, DType, u32), (Arc<PipelineLayout>, Arc<ComputePipeline>)>,
+    pub matmul_op: HashMap<(DType, Vec<u64>, u64, u64, u64, Vec<u64>, Vec<u64>), (Arc<PipelineLayout>, Arc<ComputePipeline>)>
 }
 
 impl PipelineCache {
     pub fn new() -> Self {
         Self {
             unary_op: HashMap::new(),
-            binary_op: HashMap::new()
+            binary_op: HashMap::new(),
+            matmul_op: HashMap::new()
         }
     }
 }

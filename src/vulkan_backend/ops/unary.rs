@@ -1,12 +1,12 @@
 use std::any::Any;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::hash::Hash;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc};
 use rspirv::binary::Assemble;
-use rspirv::dr::{InsertPoint, Operand};
+use rspirv::dr::{Operand};
 use rspirv::dr::Operand::LiteralBit32;
 use rspirv::spirv;
-use rspirv::spirv::{BuiltIn, Capability, Decoration, ExecutionMode, ExecutionModel, GLOp, Op, SelectionControl, StorageClass};
+use rspirv::spirv::{BuiltIn, Capability, Decoration, ExecutionMode, ExecutionModel, GLOp, SelectionControl, StorageClass};
 use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage};
 use vulkano::pipeline::{ComputePipeline, Pipeline, PipelineBindPoint, PipelineLayout, PipelineShaderStageCreateInfo};
 use vulkano::pipeline::compute::ComputePipelineCreateInfo;
@@ -21,257 +21,257 @@ use crate::vulkan_backend::tensor::VulkanTensor;
 use crate::vulkan_backend::{VulkanError, VulkanImmediateExecutor};
 use crate::vulkan_backend::spirv_helpers::{cast_bf16_to_f32, cast_f32_to_bf16, get_spirv_datatype};
 
-impl<R: Rank> VulkanTensor<R> {
-    
-    fn build_unary_pipeline(
-        vulkan_immediate_executor: &mut VulkanImmediateExecutor,
-        input_dtype: DType,
-        output_dtype: DType,
-        rank: usize,
-        op: fn(&mut rspirv::dr::Builder, rspirv::spirv::Word, DType, DType) -> Result<rspirv::spirv::Word, VulkanError>
-    ) -> Result<(Arc<PipelineLayout>, Arc<ComputePipeline>), VulkanError>
-    {
-        let mut b = rspirv::dr::Builder::new();
-        b.capability(Capability::Shader);
-        b.capability(Capability::Float64);
-        b.capability(Capability::Float16);
-        b.capability(Capability::Int16);
-        b.capability(Capability::Int8);
-        b.memory_model(spirv::AddressingModel::Logical, spirv::MemoryModel::GLSL450);
-        let void = b.type_void();
+fn build_unary_pipeline(
+    vulkan_immediate_executor: &mut VulkanImmediateExecutor,
+    input_dtype: DType,
+    output_dtype: DType,
+    rank: usize,
+    op: fn(&mut rspirv::dr::Builder, rspirv::spirv::Word, DType, DType) -> Result<rspirv::spirv::Word, VulkanError>
+) -> Result<(Arc<PipelineLayout>, Arc<ComputePipeline>), VulkanError>
+{
+    let mut b = rspirv::dr::Builder::new();
+    b.capability(Capability::Shader);
+    b.capability(Capability::Float64);
+    b.capability(Capability::Float16);
+    b.capability(Capability::Int16);
+    b.capability(Capability::Int8);
+    b.memory_model(spirv::AddressingModel::Logical, spirv::MemoryModel::GLSL450);
+    let void = b.type_void();
 
-        let input_data_type = match input_dtype {
-            DType::BF16 => b.type_int(16, 0),
-            DType::BOOL => b.type_int(8, 0),
-            _ => get_spirv_datatype(&mut b, input_dtype)?
-        };
+    let input_data_type = match input_dtype {
+        DType::BF16 => b.type_int(16, 0),
+        DType::BOOL => b.type_int(8, 0),
+        _ => get_spirv_datatype(&mut b, input_dtype)?
+    };
 
-        let output_data_type = match output_dtype {
-            DType::BF16 => b.type_int(16, 0),
-            DType::BOOL => b.type_int(8, 0),
-            _ => get_spirv_datatype(&mut b, output_dtype)?
-        };
+    let output_data_type = match output_dtype {
+        DType::BF16 => b.type_int(16, 0),
+        DType::BOOL => b.type_int(8, 0),
+        _ => get_spirv_datatype(&mut b, output_dtype)?
+    };
 
-        let input_data_type_array = b.type_runtime_array(input_data_type);
-        b.decorate(input_data_type_array, Decoration::ArrayStride, [Operand::LiteralBit32(input_dtype.size() as u32)]);
-        let input_data_type_array_struct = b.type_struct([input_data_type_array]);
-        b.decorate(input_data_type_array_struct, Decoration::Block, []);
-        b.member_decorate(input_data_type_array_struct, 0, Decoration::Offset, [Operand::LiteralBit32(0)]);
-        let input_sb_ptr  = b.type_pointer(None, StorageClass::StorageBuffer, input_data_type_array_struct);
-        let input_0_var = b.variable(input_sb_ptr, None, StorageClass::StorageBuffer, None);
-        b.decorate(input_0_var, Decoration::DescriptorSet, [LiteralBit32(0)]);
-        b.decorate(input_0_var, Decoration::Binding, [LiteralBit32(0)]);
+    let input_data_type_array = b.type_runtime_array(input_data_type);
+    b.decorate(input_data_type_array, Decoration::ArrayStride, [Operand::LiteralBit32(input_dtype.size() as u32)]);
+    let input_data_type_array_struct = b.type_struct([input_data_type_array]);
+    b.decorate(input_data_type_array_struct, Decoration::Block, []);
+    b.member_decorate(input_data_type_array_struct, 0, Decoration::Offset, [Operand::LiteralBit32(0)]);
+    let input_sb_ptr  = b.type_pointer(None, StorageClass::StorageBuffer, input_data_type_array_struct);
+    let input_0_var = b.variable(input_sb_ptr, None, StorageClass::StorageBuffer, None);
+    b.decorate(input_0_var, Decoration::DescriptorSet, [LiteralBit32(0)]);
+    b.decorate(input_0_var, Decoration::Binding, [LiteralBit32(0)]);
 
-        let output_data_type_array = b.type_runtime_array(output_data_type);
-        if output_data_type_array != input_data_type_array {
-            b.decorate(output_data_type_array, Decoration::ArrayStride, [Operand::LiteralBit32(output_dtype.size() as u32)]);
-        }
-        let output_data_type_array_struct = b.type_struct([output_data_type_array]);
-        b.decorate(output_data_type_array_struct, Decoration::Block, []);
-        b.member_decorate(output_data_type_array_struct, 0, Decoration::Offset, [Operand::LiteralBit32(0)]);
-        let output_sb_ptr  = b.type_pointer(None, StorageClass::StorageBuffer, output_data_type_array_struct);
-        let output_0_var = b.variable(output_sb_ptr, None, StorageClass::StorageBuffer, None);
-        b.decorate(output_0_var, Decoration::DescriptorSet, [LiteralBit32(0)]);
-        b.decorate(output_0_var, Decoration::Binding, [LiteralBit32(1)]);
-
-        let u32_t = b.type_int(32, 0);
-        // Data:
-        // input_offset,
-        // output_offset,
-        // num_elements,
-        // input_output_shape (RANK u32s)
-        // input_stride (RANK u32s)
-        // output_stride (RANK u32s)
-        let metadata_value_count = rank*3 + 3;
-        let pc_struct = {
-            let mut v = Vec::new();
-            v.resize(metadata_value_count, u32_t);
-            b.type_struct(v)
-        };
-
-        b.decorate(pc_struct, Decoration::Block, []);
-        for i in 0..metadata_value_count {
-            b.member_decorate(pc_struct, i as u32, Decoration::Offset,
-                              [Operand::LiteralBit32((i*4) as u32)]);
-        }
-
-        let pc_ptr = b.type_pointer(None, StorageClass::PushConstant, pc_struct);
-        let metadata_var = b.variable(pc_ptr, None, StorageClass::PushConstant, None);
-
-        let vec3u32_t  = b.type_vector(u32_t, 3);
-        let in_ptr = b.type_pointer(None, StorageClass::Input, vec3u32_t);
-        let gid    = b.variable(in_ptr, None, StorageClass::Input, None);
-        b.decorate(gid, Decoration::BuiltIn,[Operand::BuiltIn(BuiltIn::GlobalInvocationId)]);
-
-        let voidf = b.type_function(void, []);
-        let main_fn = b.begin_function(void, None, (spirv::FunctionControl::DONT_INLINE), voidf).unwrap();
-        b.entry_point(ExecutionModel::GLCompute, main_fn, "main", [gid, metadata_var, output_0_var, input_0_var]);
-        b.execution_mode(main_fn, ExecutionMode::LocalSize, [64, 1, 1]);
-        b.begin_block(None).unwrap();
-
-        /* Constants */
-        let c0 = b.constant_bit32(u32_t, 0);
-
-        /* idx = gl_GlobalInvocationID.x */
-        let gid  = b.load(vec3u32_t, None, gid.clone(), None, []).unwrap();
-        let idx  = b.composite_extract(u32_t, None, gid, [0u32]).unwrap();
-
-        /* size  = metadata.size */
-        let push_constant_vals = {
-            let mut vals = Vec::new();
-            let u32_pc_ptr_t = b.type_pointer(None, StorageClass::PushConstant, u32_t);
-            for i in 0..metadata_value_count {
-                let c_i = b.constant_bit32(u32_t, i as u32);
-                let size_ptr = b.access_chain(u32_pc_ptr_t, None, metadata_var, [c_i]).unwrap();
-                vals.push(b.load(u32_t, None, size_ptr, None, []).unwrap());
-            }
-            vals
-        };
-
-        let input_offset = push_constant_vals[0];
-        let output_offset = push_constant_vals[1];
-        let num_elements = push_constant_vals[2];
-        let io_shape = &push_constant_vals[3..3+rank];
-        let input_strides = &push_constant_vals[3+rank..3+rank+rank];
-        let output_strides = &push_constant_vals[3+rank+rank..3+rank+rank+rank];
-
-        /* cmp & branch */
-
-        let bool_type = b.type_bool();
-        let cmp = b.u_less_than(bool_type, None, idx, num_elements).unwrap();
-        let merge_blk = b.id();
-        let then_blk  = b.id();
-
-        b.selection_merge(merge_blk, SelectionControl::NONE).unwrap();
-        b.branch_conditional(cmp, then_blk, merge_blk, None).unwrap();
-
-        /* ---- THEN block ---- */
-        b.begin_block(Some(then_blk)).unwrap();
-
-        // Calculate index
-        let mut remaining_idx = idx;
-        let index = {
-            let mut v = vec![];
-            for i in 0..rank {
-                let shape_val = io_shape[i];
-                let rem = b.u_mod(u32_t, None, remaining_idx, shape_val).unwrap();
-                let div = b.u_div(u32_t, None, remaining_idx, shape_val).unwrap();
-                remaining_idx = div;
-                v.push(rem);
-            }
-            v
-        };
-
-        let input_index = {
-            let mut v = input_offset;
-            for i in 0..rank {
-                let mul = b.i_mul(u32_t, None, index[i], input_strides[i]).unwrap();
-                v = b.i_add(u32_t, None, v, mul).unwrap();
-            }
-            v
-        };
-
-        let output_index = {
-            let mut v = output_offset;
-            for i in 0..rank {
-                let mul = b.i_mul(u32_t, None, index[i], output_strides[i]).unwrap();
-                v = b.i_add(u32_t, None, v, mul).unwrap();
-            }
-            v
-        };
-
-        /* value = -input[in_index] */
-        let data_i_ptr_t = b.type_pointer(None, StorageClass::StorageBuffer, input_data_type);
-        let in_ptr = b.access_chain(data_i_ptr_t, None, input_0_var, [c0, input_index]).unwrap();
-        let in_val = b.load(input_data_type, None, in_ptr, None, []).unwrap();
-
-        let (in_val, in_type) = match input_dtype {
-            DType::BF16 => {
-                (cast_bf16_to_f32(&mut b, in_val), DType::F32)
-            }
-            DType::BOOL => {
-                let bool_type = b.type_bool();
-                let u8_type = b.type_int(8, 0);
-                let c0 = b.constant_bit32(u8_type, 0);
-                (b.logical_not_equal(bool_type, None, c0, in_val).unwrap(), DType::BOOL)
-            }
-            _ => {
-                (in_val, input_dtype)
-            }
-        };
-
-        let out_type = match output_dtype {
-            DType::BF16 => DType::F32,
-            _ => output_dtype,
-        };
-
-        let out_val = op(&mut b, in_val, in_type, out_type)?;
-
-        let out_val = match output_dtype {
-            DType::BF16 => {
-                cast_f32_to_bf16(&mut b, out_val)
-            }
-            DType::BOOL => {
-                let u8_type = b.type_int(8, 0);
-                let c0 = b.constant_bit32(u8_type, 0);
-                let c1 = b.constant_bit32(u8_type, 1);
-                b.select(u8_type, None, out_val, c1, c0).unwrap()
-            }
-            _ => {
-                out_val
-            }
-        };
-
-        /* store */
-        let data_o_ptr_t = b.type_pointer(None, StorageClass::StorageBuffer, output_data_type);
-        let out_ptr = b.access_chain(data_o_ptr_t, None, output_0_var, [c0, output_index]).unwrap();
-        b.store(out_ptr, out_val, None, []).unwrap();
-
-        /* branch to merge */
-        b.branch(merge_blk).unwrap();
-
-        /* ---- MERGE block ---- */
-        b.begin_block(Some(merge_blk)).unwrap();
-        b.ret().unwrap();                       // OpReturn
-        b.end_function().unwrap();              // OpFunction
-
-        let module = b.module();
-        let code = module.assemble();
-
-        VulkanImmediateExecutor::debug_dump_spirv(&code);
-
-        let shader = unsafe{ ShaderModule::new(
-            vulkan_immediate_executor.context.device.clone(),
-            ShaderModuleCreateInfo::new(&code)
-        )}?;
-
-        let cs = shader.entry_point("main").unwrap();
-
-        let stage = PipelineShaderStageCreateInfo::new(cs);
-
-        let descriptor_set_layout = vulkan_immediate_executor.get_descriptor_set_layout(BTreeSet::from([0, 1]))?;
-
-        let layout = PipelineLayout::new(
-            vulkan_immediate_executor.context.device.clone(),
-            PipelineLayoutCreateInfo {
-                set_layouts: vec![descriptor_set_layout],
-                push_constant_ranges: vec![PushConstantRange{
-                    stages: ShaderStages::COMPUTE,
-                    offset: 0,
-                    size: (rank*12 + 12) as u32,
-                }],
-                .. Default::default()
-            }
-        )?;
-
-        let compute_pipeline = ComputePipeline::new(
-            vulkan_immediate_executor.context.device.clone(),
-            None,
-            ComputePipelineCreateInfo::stage_layout(stage, layout.clone())
-        )?;
-
-        Ok((layout, compute_pipeline))
+    let output_data_type_array = b.type_runtime_array(output_data_type);
+    if output_data_type_array != input_data_type_array {
+        b.decorate(output_data_type_array, Decoration::ArrayStride, [Operand::LiteralBit32(output_dtype.size() as u32)]);
     }
+    let output_data_type_array_struct = b.type_struct([output_data_type_array]);
+    b.decorate(output_data_type_array_struct, Decoration::Block, []);
+    b.member_decorate(output_data_type_array_struct, 0, Decoration::Offset, [Operand::LiteralBit32(0)]);
+    let output_sb_ptr  = b.type_pointer(None, StorageClass::StorageBuffer, output_data_type_array_struct);
+    let output_0_var = b.variable(output_sb_ptr, None, StorageClass::StorageBuffer, None);
+    b.decorate(output_0_var, Decoration::DescriptorSet, [LiteralBit32(0)]);
+    b.decorate(output_0_var, Decoration::Binding, [LiteralBit32(1)]);
+
+    let u32_t = b.type_int(32, 0);
+    // Data:
+    // input_offset,
+    // output_offset,
+    // num_elements,
+    // input_output_shape (RANK u32s)
+    // input_stride (RANK u32s)
+    // output_stride (RANK u32s)
+    let metadata_value_count = rank*3 + 3;
+    let pc_struct = {
+        let mut v = Vec::new();
+        v.resize(metadata_value_count, u32_t);
+        b.type_struct(v)
+    };
+
+    b.decorate(pc_struct, Decoration::Block, []);
+    for i in 0..metadata_value_count {
+        b.member_decorate(pc_struct, i as u32, Decoration::Offset,
+                          [Operand::LiteralBit32((i*4) as u32)]);
+    }
+
+    let pc_ptr = b.type_pointer(None, StorageClass::PushConstant, pc_struct);
+    let metadata_var = b.variable(pc_ptr, None, StorageClass::PushConstant, None);
+
+    let vec3u32_t  = b.type_vector(u32_t, 3);
+    let in_ptr = b.type_pointer(None, StorageClass::Input, vec3u32_t);
+    let gid    = b.variable(in_ptr, None, StorageClass::Input, None);
+    b.decorate(gid, Decoration::BuiltIn,[Operand::BuiltIn(BuiltIn::GlobalInvocationId)]);
+
+    let voidf = b.type_function(void, []);
+    let main_fn = b.begin_function(void, None, (spirv::FunctionControl::DONT_INLINE), voidf).unwrap();
+    b.entry_point(ExecutionModel::GLCompute, main_fn, "main", [gid, metadata_var, output_0_var, input_0_var]);
+    b.execution_mode(main_fn, ExecutionMode::LocalSize, [64, 1, 1]);
+    b.begin_block(None).unwrap();
+
+    /* Constants */
+    let c0 = b.constant_bit32(u32_t, 0);
+
+    /* idx = gl_GlobalInvocationID.x */
+    let gid  = b.load(vec3u32_t, None, gid.clone(), None, []).unwrap();
+    let idx  = b.composite_extract(u32_t, None, gid, [0u32]).unwrap();
+
+    /* size  = metadata.size */
+    let push_constant_vals = {
+        let mut vals = Vec::new();
+        let u32_pc_ptr_t = b.type_pointer(None, StorageClass::PushConstant, u32_t);
+        for i in 0..metadata_value_count {
+            let c_i = b.constant_bit32(u32_t, i as u32);
+            let size_ptr = b.access_chain(u32_pc_ptr_t, None, metadata_var, [c_i]).unwrap();
+            vals.push(b.load(u32_t, None, size_ptr, None, []).unwrap());
+        }
+        vals
+    };
+
+    let input_offset = push_constant_vals[0];
+    let output_offset = push_constant_vals[1];
+    let num_elements = push_constant_vals[2];
+    let io_shape = &push_constant_vals[3..3+rank];
+    let input_strides = &push_constant_vals[3+rank..3+rank+rank];
+    let output_strides = &push_constant_vals[3+rank+rank..3+rank+rank+rank];
+
+    /* cmp & branch */
+
+    let bool_type = b.type_bool();
+    let cmp = b.u_less_than(bool_type, None, idx, num_elements).unwrap();
+    let merge_blk = b.id();
+    let then_blk  = b.id();
+
+    b.selection_merge(merge_blk, SelectionControl::NONE).unwrap();
+    b.branch_conditional(cmp, then_blk, merge_blk, None).unwrap();
+
+    /* ---- THEN block ---- */
+    b.begin_block(Some(then_blk)).unwrap();
+
+    // Calculate index
+    let mut remaining_idx = idx;
+    let index = {
+        let mut v = vec![];
+        for i in 0..rank {
+            let shape_val = io_shape[i];
+            let rem = b.u_mod(u32_t, None, remaining_idx, shape_val).unwrap();
+            let div = b.u_div(u32_t, None, remaining_idx, shape_val).unwrap();
+            remaining_idx = div;
+            v.push(rem);
+        }
+        v
+    };
+
+    let input_index = {
+        let mut v = input_offset;
+        for i in 0..rank {
+            let mul = b.i_mul(u32_t, None, index[i], input_strides[i]).unwrap();
+            v = b.i_add(u32_t, None, v, mul).unwrap();
+        }
+        v
+    };
+
+    let output_index = {
+        let mut v = output_offset;
+        for i in 0..rank {
+            let mul = b.i_mul(u32_t, None, index[i], output_strides[i]).unwrap();
+            v = b.i_add(u32_t, None, v, mul).unwrap();
+        }
+        v
+    };
+
+    /* value = -input[in_index] */
+    let data_i_ptr_t = b.type_pointer(None, StorageClass::StorageBuffer, input_data_type);
+    let in_ptr = b.access_chain(data_i_ptr_t, None, input_0_var, [c0, input_index]).unwrap();
+    let in_val = b.load(input_data_type, None, in_ptr, None, []).unwrap();
+
+    let (in_val, in_type) = match input_dtype {
+        DType::BF16 => {
+            (cast_bf16_to_f32(&mut b, in_val), DType::F32)
+        }
+        DType::BOOL => {
+            let bool_type = b.type_bool();
+            let u8_type = b.type_int(8, 0);
+            let c0 = b.constant_bit32(u8_type, 0);
+            (b.logical_not_equal(bool_type, None, c0, in_val).unwrap(), DType::BOOL)
+        }
+        _ => {
+            (in_val, input_dtype)
+        }
+    };
+
+    let out_type = match output_dtype {
+        DType::BF16 => DType::F32,
+        _ => output_dtype,
+    };
+
+    let out_val = op(&mut b, in_val, in_type, out_type)?;
+
+    let out_val = match output_dtype {
+        DType::BF16 => {
+            cast_f32_to_bf16(&mut b, out_val)
+        }
+        DType::BOOL => {
+            let u8_type = b.type_int(8, 0);
+            let c0 = b.constant_bit32(u8_type, 0);
+            let c1 = b.constant_bit32(u8_type, 1);
+            b.select(u8_type, None, out_val, c1, c0).unwrap()
+        }
+        _ => {
+            out_val
+        }
+    };
+
+    /* store */
+    let data_o_ptr_t = b.type_pointer(None, StorageClass::StorageBuffer, output_data_type);
+    let out_ptr = b.access_chain(data_o_ptr_t, None, output_0_var, [c0, output_index]).unwrap();
+    b.store(out_ptr, out_val, None, []).unwrap();
+
+    /* branch to merge */
+    b.branch(merge_blk).unwrap();
+
+    /* ---- MERGE block ---- */
+    b.begin_block(Some(merge_blk)).unwrap();
+    b.ret().unwrap();                       // OpReturn
+    b.end_function().unwrap();              // OpFunction
+
+    let module = b.module();
+    let code = module.assemble();
+
+    VulkanImmediateExecutor::debug_dump_spirv(&code);
+
+    let shader = unsafe{ ShaderModule::new(
+        vulkan_immediate_executor.context.device.clone(),
+        ShaderModuleCreateInfo::new(&code)
+    )}?;
+
+    let cs = shader.entry_point("main").unwrap();
+
+    let stage = PipelineShaderStageCreateInfo::new(cs);
+
+    let descriptor_set_layout = vulkan_immediate_executor.get_descriptor_set_layout(BTreeSet::from([0, 1]))?;
+
+    let layout = PipelineLayout::new(
+        vulkan_immediate_executor.context.device.clone(),
+        PipelineLayoutCreateInfo {
+            set_layouts: vec![descriptor_set_layout],
+            push_constant_ranges: vec![PushConstantRange{
+                stages: ShaderStages::COMPUTE,
+                offset: 0,
+                size: (rank*12 + 12) as u32,
+            }],
+            .. Default::default()
+        }
+    )?;
+
+    let compute_pipeline = ComputePipeline::new(
+        vulkan_immediate_executor.context.device.clone(),
+        None,
+        ComputePipelineCreateInfo::stage_layout(stage, layout.clone())
+    )?;
+
+    Ok((layout, compute_pipeline))
+}
+
+impl<R: Rank> VulkanTensor<R> {
 
     fn unary(&self,
              vulkan_immediate_executor: &mut VulkanImmediateExecutor,
@@ -286,7 +286,7 @@ impl<R: Rank> VulkanTensor<R> {
             if let Some(res) = res {
                 res.clone()
             } else {
-                let res = Self::build_unary_pipeline(vulkan_immediate_executor, self.dtype(), output_dtype, self.rank(), op)?;
+                let res = build_unary_pipeline(vulkan_immediate_executor, self.dtype(), output_dtype, self.rank(), op)?;
                 vulkan_immediate_executor.pipeline_cache.unary_op.insert(key, res.clone());
                 res
             }

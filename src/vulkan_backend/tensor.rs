@@ -20,10 +20,7 @@ pub struct VulkanTensor<R: Rank> {
 
 impl<R: Rank> VulkanTensor<R> {
 
-    pub unsafe fn new_uninitialized(shape: R::KnownDims, dtype: DType, executor: &mut VulkanImmediateExecutor) -> Result<Self, VulkanError> {
-        let needed_space = shape.as_slice().iter().product::<u64>() as usize*dtype.size();
-        let (buffer, suballocation) = executor.alloc_space(needed_space);
-
+    pub fn get_standard_stride(shape: &R::KnownDims) -> R::KnownDims {
         let mut stride = vec![];
         let mut v = 1;
         for &i in shape.as_slice().iter().rev() {
@@ -31,7 +28,14 @@ impl<R: Rank> VulkanTensor<R> {
             v = v * i;
         }
         stride.reverse();
-        let stride = R::KnownDims::try_from_slice(stride.as_slice()).unwrap();
+        R::KnownDims::try_from_slice(stride.as_slice()).unwrap()
+    }
+
+    pub unsafe fn new_uninitialized(shape: R::KnownDims, dtype: DType, executor: &mut VulkanImmediateExecutor) -> Result<Self, VulkanError> {
+        let needed_space = shape.as_slice().iter().product::<u64>() as usize*dtype.size();
+        let (buffer, suballocation) = executor.alloc_space(needed_space);
+
+        let stride = Self::get_standard_stride(&shape);
 
         Ok(VulkanTensor {
             dtype,

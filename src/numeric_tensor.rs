@@ -457,10 +457,18 @@ impl NumericTensor<DynRank> {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::imod(&a.try_into()?, &b.try_into()?)?))
     }
 
-    pub fn matmul(a: &Self, b: &Self, backend: &EvalBackend) -> Result<Self, NumericTensorError> {
+    pub fn matmul(a: &Self, b: &Self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         #[cfg(feature = "candle")]
         if let EvalBackend::Candle(device) = backend {
             return Ok(NumericTensor::Candle((a.to_candle(device)?.broadcast_matmul(&b.to_candle(device)?))?))
+        }
+        #[cfg(feature = "vulkan")]
+        if let EvalBackend::Vulkan(executor) = backend {
+            return Ok(NumericTensor::Vulkan(VulkanTensor::matmul(
+                &a.to_vulkan(executor)?,
+                &b.to_vulkan(executor)?,
+                executor
+            )?))
         }
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::matmul(&a.try_into()?, &b.try_into()?)?))
     }

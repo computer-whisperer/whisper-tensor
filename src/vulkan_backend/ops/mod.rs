@@ -1,4 +1,4 @@
-//pub mod neg;
 pub mod unary;
 pub mod binary;
-mod reshape;
+pub mod reshape;
+pub mod matmul;
