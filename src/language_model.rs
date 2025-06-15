@@ -103,7 +103,7 @@ impl LanguageModelManager {
                         ModelInputType::TokenID(_) => {
                             let info = input_tensor_infos.get(name);
                             let input_chunk = if let Some((dtype, shape_info)) = info {
-                                let mut ret = input_tokens_chunk.cast(*dtype, &EvalBackend::NDArray)?;
+                                let mut ret = input_tokens_chunk.cast(*dtype, &mut EvalBackend::NDArray)?;
                                 while shape_info.len() > ret.rank() {
                                     // Append dims if needed
                                     ret = ret.unsqueeze(ret.rank())?

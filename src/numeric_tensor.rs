@@ -713,10 +713,14 @@ impl NumericTensor<DynRank> {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::<DynRank>::try_from(self)?.where_op(&a.try_into()?, &b.try_into()?)?))
     }
 
-    pub fn cast(&self, dtype: DType, backend: &EvalBackend) -> Result<Self, NumericTensorError> {
+    pub fn cast(&self, dtype: DType, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         #[cfg(feature = "candle")]
         if let EvalBackend::Candle(device) = backend {
             return Ok(NumericTensor::Candle(self.to_candle(device)?.to_dtype(dtype.try_into()?)?))
+        }
+        #[cfg(feature = "vulkan")]
+        if let EvalBackend::Vulkan(executor) = backend {
+            return Ok(NumericTensor::Vulkan(self.to_vulkan(executor)?.cast(executor, dtype)?))
         }
         Ok(NumericTensor::NDArray(self.to_ndarray()?.cast(dtype)?))
     }
