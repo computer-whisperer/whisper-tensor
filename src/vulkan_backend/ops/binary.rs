@@ -308,22 +308,24 @@ impl<R: Rank> VulkanTensor<R> {
     fn binary(a: &Self, b: &Self, output_dtype: DType, vulkan_immediate_executor: &mut VulkanImmediateExecutor, cache_id: u32, op: fn(&mut rspirv::dr::Builder, rspirv::spirv::Word, rspirv::spirv::Word, DType, DType) -> Result<rspirv::spirv::Word, VulkanError>) -> Result<VulkanTensor<R>, VulkanError> {
         assert_eq!(a.dtype(), b.dtype());
 
-        let a = if let Some(a) = a.broadcast::<R>(b.shape()) {
-            a
-        } else {
-            a.clone()
-        };
-
-        let b = if let Some(b) = b.broadcast::<R>(a.shape()) {
-            b
+        // Start by forcing them to even rank
+        let mut a = a.clone();
+        let mut b = b.clone();
+        while a.rank() < b.rank() {
+            a = a.unsqueeze(0)?;
         }
-        else {
-            b.clone()
-        };
+        while b.rank() < a.rank() {
+            b = b.unsqueeze(0)?;
+        }
 
-        let out_shape = a.shape();
-        let rank = out_shape.len();
-        assert_eq!(out_shape, b.shape());
+
+        let output_shape = a.shape().as_slice().iter().zip(b.shape().as_slice().iter()).map(|(a, b)| *a.max(b)).collect::<Vec<_>>();
+        let output_shape = R::KnownDims::try_from_slice(output_shape.as_slice()).unwrap();
+
+        let a = a.broadcast::<R>(&output_shape).unwrap();
+        let b = b.broadcast::<R>(&output_shape).unwrap();
+
+        let rank = output_shape.len();
 
         let (pipeline_layout, compute_pipeline) = {
             let key = (cache_id, a.dtype(), output_dtype, rank as u32);
@@ -337,7 +339,7 @@ impl<R: Rank> VulkanTensor<R> {
             }
         };
 
-        let output_tensor = unsafe{VulkanTensor::new_uninitialized(out_shape.clone(), output_dtype, vulkan_immediate_executor)}?;
+        let output_tensor = unsafe{VulkanTensor::new_uninitialized(output_shape.clone(), output_dtype, vulkan_immediate_executor)}?;
 
         let (descriptor_set, _) = vulkan_immediate_executor.get_descriptor_set_and_layout(&BTreeMap::from([
             (0, a.buffer.clone()),
@@ -350,8 +352,8 @@ impl<R: Rank> VulkanTensor<R> {
             v.push((a.offset as u32 + a.suballocation.offset as u32)/a.dtype().size() as u32);
             v.push((b.offset as u32 + b.suballocation.offset as u32)/b.dtype().size() as u32);
             v.push((output_tensor.offset as u32 + output_tensor.suballocation.offset as u32)/output_dtype.size() as u32);
-            v.push((out_shape.dim_product() as u32));
-            for dim in out_shape.as_slice() {
+            v.push((output_shape.dim_product() as u32));
+            for dim in output_shape.as_slice() {
                 v.push(*dim as u32);
             }
             for dim in a.stride.as_slice() {
@@ -394,7 +396,7 @@ impl<R: Rank> VulkanTensor<R> {
 
         // The command buffer only does one thing: execute the compute pipeline. This is called a
         // *dispatch* operation.
-        unsafe { builder.dispatch([((out_shape.dim_product()/64) + 1) as u32, 1, 1]) }.unwrap();
+        unsafe { builder.dispatch([((output_shape.dim_product()/64) + 1) as u32, 1, 1]) }.unwrap();
 
         // Finish building the command buffer by calling `build`.
         let command_buffer = builder.build()?;
@@ -486,6 +488,7 @@ impl<R: Rank> VulkanTensor<R> {
             let data_type = get_spirv_datatype(builder, output_dtype)?;
             match input_dtype {
                 DType::F16 | DType::F32 | DType::F64 => Ok(builder.f_rem(data_type, None, a, b).unwrap()),
+                DType::I64 | DType::I32 | DType::I16 | DType::I8 => Ok(builder.s_rem(data_type, None, a, b).unwrap()),
                 _ => Err(VulkanError::UnsupportedByBackendError),
             }
         })

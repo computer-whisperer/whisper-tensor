@@ -168,11 +168,15 @@ impl MilliOp for MilliOpExpand {
         vec![self.input, self.shape]
     }
 
-    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, _backend: &mut EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
+    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &mut EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
         let shape: Vec<i64> = inputs[&self.shape].try_to_rank::<P1>()?.try_into()?;
         let shape_u = shape.iter().map(|x| *x as u64).collect::<Vec<u64>>();
-        let input = &inputs[&self.input];
-        Ok(input.expand(&shape_u)?)
+        let mut x = inputs[&self.input].clone();
+        while x.rank() < shape_u.len() {
+            x = x.unsqueeze(0)?;
+        }
+        let shape_u = shape_u.iter().zip(x.shape().iter()).map(|(a, b)| std::cmp::max(*a, *b)).collect::<Vec<u64>>();
+        Ok(x.expand(&shape_u)?)
     }
 }
 
@@ -1458,18 +1462,43 @@ impl MilliOp for MilliOpSqueeze {
     fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &mut EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
         let axes_ndarray = NDArrayNumericTensor::<DynRank>::try_from(inputs[&self.axes].cast(DType::I64, backend)?)?;
         let axes = Vec::<i64>::try_from(axes_ndarray.try_to_rank::<P1>()?)?;
-        if axes.len() > 1 {
-            return Err(MilliOpGraphError::InvalidInput("Unsqueeze".to_string()));
-        }
-        let axis = axes[0];
-        let input_shape = inputs[&self.data].shape();
-        let axis = if axis >= 0 {
-            axis as usize
+        if axes.len() == 1 {
+            let axis = axes[0];
+            let input_shape = inputs[&self.data].shape();
+            let axis = if axis >= 0 {
+                axis as usize
+            } else {
+                (input_shape.len() as i64 + axis) as usize
+            };
+            let output = inputs[&self.data].squeeze(axis)?;
+            Ok(output)
         } else {
-            (input_shape.len() as i64 + axis) as usize
-        };
-        let output = inputs[&self.data].squeeze(axis, backend)?;
-        Ok(output)
+            // Multiple axes (use reshape)
+            let input_shape = inputs[&self.data].shape();
+            let mut output_shape = Vec::new();
+            for i in 0..(input_shape.len() - axes.len()) {
+                let mut is_selected = false;
+                for axis in &axes {
+                    let axis = if *axis < 0 {
+                        input_shape.len() as i64 + *axis
+                    } else {
+                        *axis
+                    };
+                    if axis == i as i64 {
+                        is_selected = true;
+                        break;
+                    }
+                }
+                if is_selected {
+                    // Skip it
+                } else {
+                    output_shape.push(input_shape[i]);
+                }
+            }
+            let output = inputs[&self.data].reshape(output_shape, backend)?;
+            Ok(output)
+        }
+
     }
 }
 
@@ -1553,18 +1582,46 @@ impl MilliOp for MilliOpUnsqueeze {
     fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &mut EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
         let axes_ndarray = NDArrayNumericTensor::<DynRank>::try_from(inputs[&self.axes].cast(DType::I64, backend)?)?;
         let axes = Vec::<i64>::try_from(axes_ndarray.try_to_rank::<P1>()?)?;
-        if axes.len() > 1 {
-            return Err(MilliOpGraphError::InvalidInput("Unsqueeze".to_string()));
+        if axes.len() == 1 {
+            let axis = axes[0];
+            let input_shape = inputs[&self.data].shape();
+            let axis = if axis >= 0 {
+                axis as usize
+            } else {
+                (input_shape.len() as i64 + axis) as usize
+            };
+            let output = inputs[&self.data].unsqueeze(axis)?;
+            Ok(output)
         }
-        let axis = axes[0];
-        let input_shape = inputs[&self.data].shape();
-        let axis = if axis >= 0 {
-            axis as usize
-        } else {
-            (input_shape.len() as i64 + axis) as usize
-        };
-        let output = inputs[&self.data].unsqueeze(axis, backend)?;
-        Ok(output)
+        else {
+            // Multiple axes (use reshape)
+            let input_shape = inputs[&self.data].shape();
+            let mut output_shape = Vec::new();
+            let mut input_index = 0;
+            for i in 0..(input_shape.len() + axes.len()) {
+                let mut is_selected = false;
+                for axis in &axes {
+                    let axis = if *axis < 0 {
+                        input_shape.len() as i64 + *axis
+                    } else {
+                        *axis
+                    };
+                    if axis == i as i64 {
+                        is_selected = true;
+                        break;
+                    }
+                }
+                if is_selected {
+                    output_shape.push(1);
+                } else {
+                    output_shape.push(input_shape[input_index]);
+                    input_index += 1;
+                }
+            }
+            let output = inputs[&self.data].reshape(output_shape, backend)?;
+            Ok(output)
+
+        }
     }
 }
 

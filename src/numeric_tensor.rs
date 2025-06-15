@@ -341,28 +341,32 @@ impl NumericTensor<DynRank> {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::<DynRank>::try_from(self)?.slice(indices.into_iter().map(|x| x.start as usize .. x.end as usize ).collect::<Vec<_>>().as_slice())?))
     }
 
-    pub fn unsqueeze(&self, axis: usize, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
-        #[cfg(feature = "candle")]
-        if let EvalBackend::Candle(device) = backend {
-            return Ok(NumericTensor::Candle(self.to_candle(device)?.unsqueeze(axis)?))
-        }
-        #[cfg(feature = "vulkan")]
-        if let EvalBackend::Vulkan(executor) = backend {
-            return Ok(NumericTensor::Vulkan(self.to_vulkan(executor)?.unsqueeze(axis)?))
-        }
-        Ok(NumericTensor::NDArray(NDArrayNumericTensor::<DynRank>::try_from(self)?.unsqueeze(axis)?))
+    pub fn unsqueeze(&self, axis: usize) -> Result<Self, NumericTensorError> {
+        Ok(match self {
+            NumericTensor::Candle(x) => {
+                NumericTensor::Candle(x.unsqueeze(axis)?)
+            }
+            NumericTensor::Vulkan(x) => {
+                NumericTensor::Vulkan(x.unsqueeze(axis)?)
+            }
+            _ => {
+                NumericTensor::NDArray(NDArrayNumericTensor::<DynRank>::try_from(self)?.unsqueeze(axis)?)
+            }
+        })
     }
 
-    pub fn squeeze(&self, axis: usize, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
-        #[cfg(feature = "candle")]
-        if let EvalBackend::Candle(device) = backend {
-            return Ok(NumericTensor::Candle(self.to_candle(device)?.squeeze(axis)?))
-        }
-        #[cfg(feature = "vulkan")]
-        if let EvalBackend::Vulkan(executor) = backend {
-            return Ok(NumericTensor::Vulkan(self.to_vulkan(executor)?.squeeze(axis)?))
-        }
-        Ok(NumericTensor::NDArray(NDArrayNumericTensor::<DynRank>::try_from(self)?.squeeze(axis)?))
+    pub fn squeeze(&self, axis: usize) -> Result<Self, NumericTensorError> {
+        Ok(match self {
+            NumericTensor::Candle(x) => {
+                NumericTensor::Candle(x.squeeze(axis)?)
+            }
+            NumericTensor::Vulkan(x) => {
+                NumericTensor::Vulkan(x.squeeze(axis)?)
+            }
+            _ => {
+                NumericTensor::NDArray(NDArrayNumericTensor::<DynRank>::try_from(self)?.squeeze(axis)?)
+            }
+        })
     }
 
     pub fn add(a: &Self, b: &Self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {

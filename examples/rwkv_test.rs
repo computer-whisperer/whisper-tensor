@@ -31,7 +31,7 @@ fn main() {
 
     let prompt = "The fibonacci sequence is a sequence of";
     let input = tokenizer.encode(prompt).iter().map(|x| *x as i64).collect::<Vec<_>>();
-    let input_tensor = NumericTensor::from_vec(input).to_dyn_rank().unsqueeze(0, &mut EvalBackend::NDArray).unwrap();
+    let input_tensor = NumericTensor::from_vec(input).to_dyn_rank().unsqueeze(0).unwrap();
 
     let mut sampler = {
         let mut sc = SamplerChain::new();
@@ -51,7 +51,7 @@ fn main() {
     };
 
     let (output, _) = llm.run(input_tensor.clone(), None, &mut sampler, &mut ModelExecutionRuntime::Eval(EvalBackend::NDArray)).unwrap();
-    let output_tensor = output.squeeze(0, &mut EvalBackend::NDArray).unwrap().try_to_type::<u32>().unwrap().try_to_rank::<P1>().unwrap();
+    let output_tensor = output.squeeze(0).unwrap().try_to_type::<u32>().unwrap().try_to_rank::<P1>().unwrap();
     let output_values: Vec<u32> = output_tensor.to_vec();
     println!("{:?}", output_values);
     let output = tokenizer.decode(&output_values).unwrap();

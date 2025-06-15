@@ -76,7 +76,7 @@ impl LanguageModelManager {
     pub fn forward(&mut self, input_tokens: NumericTensor<DynRank>, intermediate_values: Option<LangaugeModelIntermediateValues>, model_execution_runtime: &mut ModelExecutionRuntime) -> Result<(NumericTensor<DynRank>, LangaugeModelIntermediateValues), ModelError> {
         // Add batch dim if needed
         let input_tokens = if input_tokens.rank() < 2 {
-            input_tokens.unsqueeze(0, &mut EvalBackend::NDArray)?
+            input_tokens.unsqueeze(0)?
         } else {
             input_tokens
         };
@@ -106,7 +106,7 @@ impl LanguageModelManager {
                                 let mut ret = input_tokens_chunk.cast(*dtype, &EvalBackend::NDArray)?;
                                 while shape_info.len() > ret.rank() {
                                     // Append dims if needed
-                                    ret = ret.unsqueeze(ret.rank(), &mut EvalBackend::NDArray)?
+                                    ret = ret.unsqueeze(ret.rank())?
                                 }
                                 ret
                             } else {

@@ -555,7 +555,7 @@ impl Operation for SqueezeOperation {
             panic!();
         };
 
-        let out = graph.push_op(AnyMilliOp::Unsqueeze(MilliOpUnsqueeze::new(
+        let out = graph.push_op(AnyMilliOp::Squeeze(MilliOpSqueeze::new(
             input_map[&self.input],
             axes_input
         )));

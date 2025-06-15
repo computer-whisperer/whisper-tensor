@@ -19,7 +19,7 @@ jobs:
       with:
         submodules: recursive
     - name: Install Dependencies
-      run: "sudo apt install -y libprotobuf-dev protobuf-compiler"
+      run: "sudo apt install -y libprotobuf-dev protobuf-compiler mesa-vulkan-drivers libvulkan1 vulkan-tools vulkan-validationlayers"
     - name: Build
       run: cargo build --verbose
     - name: Run tests
