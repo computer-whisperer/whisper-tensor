@@ -1,3 +1,4 @@
+use std::ops::Range;
 use crate::tensor_rank::{DimContainer, DimProduct, Rank};
 use crate::vulkan_backend::tensor::VulkanTensor;
 use crate::vulkan_backend::{VulkanError, VulkanImmediateExecutor};
@@ -81,5 +82,35 @@ impl<R: Rank> VulkanTensor<R> {
         else {
             Err(VulkanError::InvalidShape)
         }
+    }
+
+    pub fn slice(&self, indices: &[Range<u64>]) -> Result<Self, VulkanError> {
+        // Get indices for the lowest value in output tensor
+        let start_index = indices.iter().map(|r| r.start).collect::<Vec<_>>();
+        let new_shape = indices.iter().map(|r| r.end - r.start).collect::<Vec<_>>();
+        let new_shape = R::KnownDims::try_from_slice(new_shape.as_slice()).unwrap();
+        let new_strides = self.stride.clone();
+        let new_offset = self.offset + (self.stride.as_slice().iter().zip(start_index.iter()).map(|(s, i)| s * i).sum::<u64>() as usize);
+        Ok(VulkanTensor::<R>{
+            shape: R::KnownDims::try_from_slice(new_shape.as_slice()).unwrap(),
+            stride: R::KnownDims::try_from_slice(new_strides.as_slice()).unwrap(),
+            dtype: self.dtype,
+            suballocation: self.suballocation.clone(),
+            buffer: self.buffer.clone(),
+            offset: new_offset
+        })
+    }
+
+    pub fn transpose(&self, axes: &[usize]) -> Result<Self, VulkanError> {
+        let new_shape = axes.iter().map(|&i| self.shape[i]).collect::<Vec<_>>();
+        let new_strides = axes.iter().map(|&i| self.stride[i]).collect::<Vec<_>>();
+        Ok(VulkanTensor::<R>{
+            shape: R::KnownDims::try_from_slice(new_shape.as_slice()).unwrap(),
+            stride: R::KnownDims::try_from_slice(new_strides.as_slice()).unwrap(),
+            dtype: self.dtype,
+            suballocation: self.suballocation.clone(),
+            buffer: self.buffer.clone(),
+            offset: self.offset
+        })
     }
 }

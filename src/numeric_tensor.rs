@@ -1,5 +1,7 @@
 use std::fmt::{Debug, Formatter};
 use std::ops::Range;
+use futures::StreamExt;
+use ort::operator::kernel::Kernel;
 use typenum::P1;
 use crate::dtype::{DType, DTypeError};
 use crate::eval_backend::EvalBackend;
@@ -338,7 +340,15 @@ impl NumericTensor<DynRank> {
     }
 
     pub fn slice(&self, indices: &[Range<u64>], _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
-        Ok(NumericTensor::NDArray(NDArrayNumericTensor::<DynRank>::try_from(self)?.slice(indices.into_iter().map(|x| x.start as usize .. x.end as usize ).collect::<Vec<_>>().as_slice())?))
+        Ok(match self {
+            NumericTensor::Vulkan(tensor) => {
+                NumericTensor::Vulkan(tensor.slice(indices)?)
+            }
+            _ => {
+                let indices = indices.into_iter().map(|x| x.start as usize .. x.end as usize ).collect::<Vec<_>>();
+                NumericTensor::NDArray(NDArrayNumericTensor::<DynRank>::try_from(self)?.slice(indices.as_slice())?)
+            }
+        })
     }
 
     pub fn unsqueeze(&self, axis: usize) -> Result<Self, NumericTensorError> {
@@ -633,16 +643,35 @@ impl NumericTensor<DynRank> {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::<DynRank>::try_from(self)?.nonzero()?))
     }
 
-    pub fn pow(&self, exponent: &Self, backend: &EvalBackend) -> Result<Self, NumericTensorError> {
+    pub fn pow(&self, exponent: &Self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         #[cfg(feature = "candle")]
         if let EvalBackend::Candle(device) = backend {
             return Ok(NumericTensor::Candle(self.to_candle(device)?.broadcast_pow(&exponent.to_candle(device)?)?))
+        }
+        #[cfg(feature = "vulkan")]
+        if let EvalBackend::Vulkan(executor) = backend {
+            return Ok(NumericTensor::Vulkan(self.to_vulkan(executor)?.pow(&exponent.to_vulkan(executor)?, executor)?))
         }
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::<DynRank>::try_from(self)?.pow(&NDArrayNumericTensor::<DynRank>::try_from(exponent)?)?))
     }
 
     pub fn transpose(&self, axes: Option<Vec<i64>>, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
-        Ok(NumericTensor::NDArray(NDArrayNumericTensor::<DynRank>::try_from(self)?.transpose(axes)?))
+        Ok(match self {
+            NumericTensor::Vulkan(tensor) => {
+                let axes = match axes {
+                    Some(axes) => {
+                        axes.iter().map(|x| *x as usize).collect::<Vec<_>>()
+                    }
+                    None => {
+                        (0..tensor.shape().len()).rev().collect::<Vec<_>>()
+                    }
+                };
+                NumericTensor::Vulkan(tensor.transpose(&axes)?)
+            }
+            _ => {
+                NumericTensor::NDArray(NDArrayNumericTensor::<DynRank>::try_from(self)?.transpose(axes)?)
+            }
+        })
     }
     
     pub fn is_nan(&self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {

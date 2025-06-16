@@ -140,7 +140,7 @@ pub struct VulkanImmediateExecutorBuffer {
 #[derive(Debug)]
 pub struct PipelineCache {
     pub unary_op: HashMap<(u32, DType, DType, u32), (Arc<PipelineLayout>, Arc<ComputePipeline>)>,
-    pub binary_op: HashMap<(u32, DType, DType, u32), (Arc<PipelineLayout>, Arc<ComputePipeline>)>,
+    pub binary_op: HashMap<(u32, DType, DType, DType, u32), (Arc<PipelineLayout>, Arc<ComputePipeline>)>,
     pub matmul_op: HashMap<(DType, Vec<u64>, u64, u64, u64, Vec<u64>, Vec<u64>), (Arc<PipelineLayout>, Arc<ComputePipeline>)>
 }
 
@@ -246,16 +246,26 @@ impl VulkanImmediateExecutor {
     }
 
     pub fn alloc_space(&mut self, size: usize) -> (Subbuffer<[u8]>, Suballocation) {
-        if self.buffers.len() == 0 {
-            self.allocate_buffer(100000000).unwrap();
-        }
         let layout = DeviceLayout::from_size_alignment(size as u64, 8).unwrap();
-        let v = self.buffers[0].allocator.allocate(
+        for buffer in &mut self.buffers {
+            let v = buffer.allocator.allocate(
+                layout,
+                AllocationType::Linear,
+                DeviceAlignment::MIN
+            );
+            if let Ok(v) = v {
+                return (buffer.buffer.clone(), v);
+            }
+        }
+        // If we get here, we need to allocate a new buffer
+        let buffer_id = self.allocate_buffer(10000000.max(size)).unwrap();
+
+        let v = self.buffers[buffer_id].allocator.allocate(
             layout,
             AllocationType::Linear,
             DeviceAlignment::MIN
         ).unwrap();
-        (self.buffers[0].buffer.clone(), v)
+        (self.buffers[buffer_id].buffer.clone(), v)
     }
     
     pub fn debug_dump_spirv(spirv: &[u32]) {

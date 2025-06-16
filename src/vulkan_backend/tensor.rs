@@ -74,7 +74,7 @@ impl<R: Rank> VulkanTensor<R> {
     pub fn to_ndarray(&self) -> NDArrayNumericTensor<R> {
         {
             let reader = self.buffer.read().unwrap();
-            let bytes_to_read = self.shape.as_slice().iter().zip(self.stride.as_slice().iter()).map(|(a, b)| a*b).sum::<u64>().max(1) as usize*self.dtype.size();
+            let bytes_to_read = (self.shape.as_slice().iter().zip(self.stride.as_slice().iter()).map(|(a, b)| (a-1)*b).sum::<u64>() + 1) as usize*self.dtype.size();
             let start_offset = self.suballocation.offset as usize + self.offset;
             NDArrayNumericTensor::from_bytes(
                 &reader[start_offset ..start_offset + bytes_to_read],
