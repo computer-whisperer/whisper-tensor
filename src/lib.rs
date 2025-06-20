@@ -1,9 +1,7 @@
-use std::collections::HashMap;
 use num_traits::Float;
 
 use prost::{Message};
 use serde::{Deserialize, Serialize};
-use crate::numeric_tensor::{NumericTensor};
 
 pub mod symbolic_graph;
 pub mod numeric_tensor;
@@ -11,25 +9,21 @@ pub mod dtype;
 pub mod sampler;
 pub mod language_model;
 pub mod tokenizer;
-pub mod eval_backend;
-pub mod ndarray_backend;
+pub mod backends;
 pub mod numeric_scalar;
 pub mod tensor_rank;
 pub mod numeric_tensor_typed;
-
 pub mod model;
+pub mod super_graph;
+pub mod milli_graph;
+pub mod scalar_info;
+pub mod tensor_info;
+pub mod symbolic_scalar;
 
-pub use ndarray_backend::NDArrayNumericTensor;
 pub use tensor_rank::DynRank;
 
-#[cfg(feature = "ort")]
-pub mod ort_backend;
-#[cfg(feature = "onnx-reference")]
-mod onnx_reference_backend;
-#[cfg(feature = "candle")]
-mod candle_backend;
-#[cfg(feature = "vulkan")]
-pub mod vulkan_backend;
+
+mod model_cache;
 
 pub mod onnx {
     include!(concat!(env!("OUT_DIR"), "/onnx.rs"));

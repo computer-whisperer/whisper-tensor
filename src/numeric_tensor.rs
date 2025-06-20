@@ -1,25 +1,27 @@
 use std::fmt::{Debug, Formatter};
 use std::ops::Range;
 use futures::StreamExt;
+use num_traits::real::Real;
 use ort::operator::kernel::Kernel;
+use tracing_subscriber::filter::FilterExt;
 use typenum::P1;
 use crate::dtype::{DType, DTypeError};
-use crate::eval_backend::EvalBackend;
-use crate::ndarray_backend::{NDArrayNumericTensor, NDArrayNumericTensorError};
+use crate::backends::eval_backend::EvalBackend;
+use crate::backends::ndarray_backend::{NDArrayNumericTensor, NDArrayNumericTensorError};
 
 #[cfg(feature = "candle")]
-use crate::candle_backend;
-use crate::ndarray_backend::conversions::NDArrayNumericTensorType;
+use crate::backends::candle_backend;
+use crate::backends::ndarray_backend::conversions::NDArrayNumericTensorType;
 use crate::numeric_scalar::NumericScalar;
 use crate::numeric_tensor_typed::NumericTensorTyped;
 #[cfg(feature = "ort")]
-use crate::ort_backend;
+use crate::backends::ort_backend;
 use crate::tensor_rank::{DimContainer, DynRank, Rank};
 use crate::TrigOp;
 #[cfg(feature = "vulkan")]
-use crate::vulkan_backend::tensor::VulkanTensor;
+use crate::backends::vulkan_backend::tensor::VulkanTensor;
 #[cfg(feature = "vulkan")]
-use crate::vulkan_backend::{VulkanError, VulkanImmediateExecutor};
+use crate::backends::vulkan_backend::{VulkanError, VulkanImmediateExecutor};
 
 #[derive(Debug, thiserror::Error)]
 pub enum NumericTensorError {
@@ -32,7 +34,7 @@ pub enum NumericTensorError {
     Candle(#[from] candle_core::Error),
     #[cfg(feature = "onnx-reference")]
     #[error(transparent)]
-    ONNXReference(#[from] crate::onnx_reference_backend::ONNXReferenceError),
+    ONNXReference(#[from] crate::backends::onnx_reference_backend::ONNXReferenceError),
     #[cfg(feature = "ort")]
     #[error(transparent)]
     ORT(#[from] ort::Error),
@@ -45,7 +47,7 @@ pub enum NumericTensorError {
 pub enum NumericTensor<R: Rank> {
     NDArray(NDArrayNumericTensor<R>),
     #[cfg(feature = "onnx-reference")]
-    ONNXReference(crate::onnx_reference_backend::ONNXReferenceTensor),
+    ONNXReference(crate::backends::onnx_reference_backend::ONNXReferenceTensor),
     #[cfg(feature = "candle")]
     Candle(candle_core::Tensor),
     #[cfg(feature = "ort")]
@@ -275,14 +277,6 @@ impl<R: Rank> NumericTensor<R> {
             return Ok(NumericTensor::Vulkan(self.to_vulkan(executor)?.trig(op, executor)?))
         }
         Ok(NumericTensor::NDArray(self.to_ndarray()?.trig(op)?))
-    }
-
-    pub fn sigmoid(&self, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
-        Ok(NumericTensor::NDArray(self.to_ndarray()?.sigmoid()?))
-    }
-
-    pub fn softplus(&self, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
-        Ok(NumericTensor::NDArray(self.to_ndarray()?.softplus()?))
     }
 
     pub fn reciprocal(&self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
@@ -723,7 +717,6 @@ impl NumericTensor<DynRank> {
     pub fn reduce_max(&self, axes: Vec<usize>, keepdims: bool, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::<DynRank>::try_from(self)?.reduce_max(axes, keepdims)?))
     }
-
 
     pub fn reduce_prod(&self, axes: Vec<usize>, keepdims: bool, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::<DynRank>::try_from(self)?.reduce_prod(axes, keepdims)?))

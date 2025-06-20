@@ -1,13 +1,13 @@
 use ndarray::{ArcArray, ShapeError};
 use typenum::P1;
 use crate::dtype::{DType};
-use crate::eval_backend::EvalBackend;
-use crate::ndarray_backend::conversions::NDArrayNumericTensorType;
+use crate::backends::eval_backend::EvalBackend;
+use crate::backends::ndarray_backend::conversions::NDArrayNumericTensorType;
 use crate::numeric_scalar::{NumericScalarType};
 use crate::numeric_tensor::{NumericTensor, NumericTensorError};
 use crate::numeric_tensor_typed::NumericTensorTyped;
-use crate::symbolic_graph::scalar_info::{ScalarInfo, ScalarInfoTyped};
-use crate::symbolic_graph::symbolic_scalar::{SymbolicResolver, SymbolicScalar, SymbolicScalarTyped};
+use crate::scalar_info::{ScalarInfo, ScalarInfoTyped};
+use crate::symbolic_scalar::{SymbolicResolver, SymbolicScalar, SymbolicScalarTyped};
 use crate::tensor_rank::{DimContainer, DynRank, KnownRank, Rank, RankError};
 
 #[derive(Debug, thiserror::Error)]

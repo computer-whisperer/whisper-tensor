@@ -1,7 +1,7 @@
 use typenum::P1;
+use crate::backends::eval_backend::EvalBackend;
 use crate::dtype::DType;
-use crate::eval_backend::EvalBackend;
-use crate::ndarray_backend::{NDArrayNumericTensor, NDArrayNumericTensorError};
+use crate::backends::ndarray_backend::{NDArrayNumericTensor, NDArrayNumericTensorError};
 use crate::numeric_tensor::{NumericTensor, NumericTensorError};
 use crate::tensor_rank::DynRank;
 

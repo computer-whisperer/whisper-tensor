@@ -3,7 +3,7 @@ use std::ops::{ Index};
 use ndarray::{Dimension, Ix1, Ix2};
 use serde::{Serialize, Deserialize};
 use typenum::{P1, P2};
-use crate::symbolic_graph::scalar_info::ScalarInfoTyped;
+use crate::scalar_info::ScalarInfoTyped;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RankError {

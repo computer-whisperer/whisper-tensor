@@ -1,21 +1,22 @@
 use std::collections::HashMap;
 use prost::{DecodeError, Message};
 use whisper_tensor_import::onnx_graph::{InputMetadata, ModelMetadata, OutputMetadata};
-use crate::eval_backend::{EvalBackend, EvalRuntimeError};
 use crate::numeric_tensor::{NumericTensor, NumericTensorError};
-use crate::{eval_backend, DynRank};
+use crate::backends::{eval_backend};
+use crate::backends::eval_backend::{EvalBackend, EvalRuntimeError};
 use crate::dtype::DType;
 use crate::onnx::{ModelProto, StringStringEntryProto};
 
 #[cfg(feature = "onnx-reference")]
-use crate::onnx_reference_backend::{self, ONNXReferenceTensor};
+use crate::backends::onnx_reference_backend::{self, ONNXReferenceTensor};
 
 use crate::symbolic_graph::{ ONNXDecodingError, SymbolicGraph, SymbolicGraphMutator};
-use crate::symbolic_graph::scalar_info::ScalarInfoTyped;
 use crate::symbolic_graph::tensor_store::TensorStore;
 
 #[cfg(feature = "ort")]
-use crate::ort_backend::ORTNumericTensor;
+use crate::backends::ort_backend::ORTNumericTensor;
+use crate::DynRank;
+use crate::scalar_info::ScalarInfoTyped;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ModelError {
@@ -38,6 +39,8 @@ pub enum ModelError {
     ORT(#[from] ort::Error),
     #[error(transparent)]
     DecodeError(#[from] DecodeError),
+    #[error("Unconfigured Backend")]
+    UnconfiguredBackend
 }
 
 pub enum ModelExecutionRuntime {
@@ -136,13 +139,14 @@ impl Model {
         Ok(())
     }
 
-    pub fn run(&mut self, inputs: HashMap<String, NumericTensor<DynRank>>, selected_runtime: &mut ModelExecutionRuntime) -> Result<HashMap<String, NumericTensor<DynRank>>, ModelError> {
+    pub fn run(&self, inputs: HashMap<String, NumericTensor<DynRank>>, selected_runtime: &mut ModelExecutionRuntime) -> Result<HashMap<String, NumericTensor<DynRank>>, ModelError> {
         Ok(match selected_runtime {
             #[cfg(feature = "onnx-reference")]
             ModelExecutionRuntime::ONNXReference => {
-                let session = self.onnx_reference_backend.get_or_insert_with(|| {
-                    onnx_reference_backend::ONNXReferenceBackend::new(&self.onnx_data).unwrap()
-                });
+                if self.onnx_reference_backend.is_none() {
+                    Err(ModelError::UnconfiguredBackend)?;
+                }
+                let session = self.onnx_reference_backend.as_ref().unwrap();
                 let mut converted_inputs = HashMap::new();
                 for (name, tensor) in inputs {
                     converted_inputs.insert(name, ONNXReferenceTensor::try_from(tensor)?);
@@ -154,10 +158,11 @@ impl Model {
                 }
                 output_tensors
             }
+            /*
             #[cfg(feature = "ort")]
             ModelExecutionRuntime::ORT => {
                 if self.ort_session.is_none() {
-                    self.setup_ort_backend().unwrap();
+                    Err(ModelError::UnconfiguredBackend)?;
                 }
                 let session = self.ort_session.as_mut().unwrap();
                 // Run the session
@@ -171,11 +176,11 @@ impl Model {
                     output_tensors.insert(key.to_string(), NumericTensor::from(ORTNumericTensor(value)));
                 }
                 output_tensors
-            }
+            }*/
             #[cfg(feature = "candle")]
             ModelExecutionRuntime::Candle => {
                 if self.candle_proto.is_none() {
-                    self.setup_candle_backend().unwrap();
+                    Err(ModelError::UnconfiguredBackend)?;
                 }
                 let candle_proto = self.candle_proto.as_ref().unwrap();
                 let mut converted_inputs = HashMap::new();
@@ -194,6 +199,10 @@ impl Model {
             }
             _ => {panic!("Unsupported backend")}
         })
+    }
+
+    pub fn eval(&self, inputs: HashMap<String, NumericTensor<DynRank>>, eval_backend: &mut EvalBackend) -> Result<HashMap<String, NumericTensor<DynRank>>, ModelError> {
+        Ok(eval_backend::run(&self.graph, &self.tensor_store, eval_backend, inputs)?)
     }
 
     pub fn get_symbolic_graph(&self) -> &SymbolicGraph {
@@ -224,4 +233,5 @@ impl Model {
         }
         Ok(results)
     }
+
 }

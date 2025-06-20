@@ -1,6 +1,6 @@
 use ndarray::ArcArray;
 use typenum::P1;
-use crate::ndarray_backend::conversions::NDArrayNumericTensorType;
+use crate::backends::ndarray_backend::conversions::NDArrayNumericTensorType;
 use crate::numeric_tensor::{NumericTensor};
 use crate::tensor_rank::{DimContainer, DynRank, Rank, RankError};
 

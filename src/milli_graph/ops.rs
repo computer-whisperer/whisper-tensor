@@ -1,48 +1,28 @@
 use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
 use typenum::P1;
-use crate::dtype::{DType, DTypeError};
-use crate::eval_backend::EvalBackend;
-use crate::ndarray_backend::conversions::NDArrayNumericTensorType;
-use crate::ndarray_backend::NDArrayNumericTensor;
+use whisper_tensor_import::onnx_graph::tensor::Tensor;
+use crate::backends::eval_backend::EvalBackend;
+use crate::backends::ndarray_backend::conversions::NDArrayNumericTensorType;
+use crate::backends::ndarray_backend::NDArrayNumericTensor;
+use crate::dtype::{DType};
+use crate::milli_graph::{MilliOpGraphError, MilliOpGraphTensorId};
 use crate::numeric_scalar::NumericScalar;
 use crate::numeric_tensor::NumericTensor;
-use crate::symbolic_graph::{TensorId};
-use crate::symbolic_graph::scalar_info::{ScalarInfo, ScalarInfoTyped};
-use crate::symbolic_graph::symbolic_scalar::{SymbolicResolver, SymbolicScalar, SymbolicScalarTyped};
-use crate::symbolic_graph::tensor_info::{MinimalTensor, TensorInfo, TensorInfoError, TensorInfoRanked, TensorInfoShaped, TensorInfoTypedRanked, TensorInfoTypedShaped};
+use crate::scalar_info::{ScalarInfo, ScalarInfoTyped};
+use crate::symbolic_scalar::{SymbolicResolver, SymbolicScalar, SymbolicScalarTyped};
+use crate::tensor_info::{MinimalTensor, TensorInfo, TensorInfoRanked, TensorInfoShaped, TensorInfoTypedRanked, TensorInfoTypedShaped};
 use crate::tensor_rank::DynRank;
 use crate::TrigOp;
 
-#[derive(Debug, thiserror::Error)]
-pub enum MilliOpGraphError {
-    #[error(transparent)]
-    NumericTensorError(#[from] crate::numeric_tensor::NumericTensorError),
-    #[error(transparent)]
-    NDArrayNumericTensorError(#[from] crate::ndarray_backend::NDArrayNumericTensorError),
-    #[error("Unimplemented milli operator: {0}")]
-    UnimplementedOperatorError(String),
-    #[error("Invalid input for operation {0}")]
-    InvalidInput(String),
-    #[error(transparent)]
-    DTypeError(#[from] DTypeError),
-    #[error(transparent)]
-    TensorInfoError(#[from] TensorInfoError),
-    #[error("Unable to do any type if inference")]
-    UnableToInfer
-}
 
-#[derive(Debug, Clone, Copy, Hash, Ord, PartialOrd, Eq, PartialEq)]
-pub(crate) struct MilliOpGraphTensorId {
-    inner: usize,
-}
-
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) enum MilliOpTensorIDOrLiteral {
     TensorID(MilliOpGraphTensorId),
-    Literal(NumericTensor<DynRank>)
+    Literal(NDArrayNumericTensor<DynRank>)
 }
 
-trait MilliOp {
+pub trait MilliOp {
     fn get_inputs(&self) -> Vec<MilliOpGraphTensorId>;
     
     fn infer(&self, known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>, _symbolic_resolver: &mut SymbolicResolver, backend: &mut EvalBackend) -> Result<TensorInfo, MilliOpGraphError> {
@@ -67,12 +47,13 @@ trait MilliOp {
     fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, _backend: &mut EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError>;
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct MilliOpConstant {
-    data: NumericTensor<DynRank>
+    data: NDArrayNumericTensor<DynRank>
 }
 
 impl MilliOpConstant {
-    pub(crate) fn new(a: NumericTensor<DynRank>) -> Self {
+    pub(crate) fn new(a: NDArrayNumericTensor<DynRank>) -> Self {
         Self { data: a }
     }
 
@@ -90,13 +71,14 @@ impl MilliOp for MilliOpConstant {
     fn get_inputs(&self) -> Vec<MilliOpGraphTensorId> {vec![]}
 
     fn infer(&self, _known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>, _symbolic_resolver: &mut SymbolicResolver, _backend: &mut EvalBackend) -> Result<TensorInfo, MilliOpGraphError> {
-        Ok(TensorInfo::from(self.data.clone()))
+        Ok(TensorInfo::from(NumericTensor::NDArray(self.data.clone())))
     }
     fn eval(&self, _inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, _backend: &mut EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
-        Ok(self.data.clone())
+        Ok(self.data.clone().into())
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct MilliOpRange {
     start: MilliOpGraphTensorId,
     end: MilliOpGraphTensorId,
@@ -152,6 +134,7 @@ impl MilliOp for MilliOpRange {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct MilliOpExpand {
     input: MilliOpGraphTensorId,
     shape: MilliOpGraphTensorId
@@ -168,7 +151,7 @@ impl MilliOp for MilliOpExpand {
         vec![self.input, self.shape]
     }
 
-    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &mut EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
+    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, _backend: &mut EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
         let shape: Vec<i64> = inputs[&self.shape].try_to_rank::<P1>()?.try_into()?;
         let shape_u = shape.iter().map(|x| *x as u64).collect::<Vec<u64>>();
         let mut x = inputs[&self.input].clone();
@@ -180,6 +163,7 @@ impl MilliOp for MilliOpExpand {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct MilliOpConstantOfShape {
     value: NumericScalar,
     shape: MilliOpGraphTensorId
@@ -329,6 +313,7 @@ fn infer_multidirectional_broadcasting_shape(shapes: &[Vec<ScalarInfoTyped<u64>>
     Ok(output_shape)
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 enum SimpleBinaryOp {
     Add,
     Sub,
@@ -350,6 +335,7 @@ enum SimpleBinaryOp {
     Min
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct MilliOpSimpleBinary {
     which_op: SimpleBinaryOp,
     a: MilliOpGraphTensorId,
@@ -498,6 +484,7 @@ impl MilliOp for MilliOpSimpleBinary {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct MilliOpPow {
     a: MilliOpGraphTensorId,
     b: MilliOpGraphTensorId
@@ -541,7 +528,7 @@ impl MilliOp for MilliOpPow {
     }
 }
 
-
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct MilliOpMatMul {
     a: MilliOpGraphTensorId,
     b: MilliOpGraphTensorId
@@ -722,6 +709,7 @@ impl<T: SimpleUnaryMilliOp> MilliOp for T {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) enum SimpleUnaryOp {
     Neg,
     Abs,
@@ -741,6 +729,7 @@ pub(crate) enum SimpleUnaryOp {
     Erf,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct MilliOpSimpleUnary {
     input: MilliOpGraphTensorId,
     op: SimpleUnaryOp
@@ -863,6 +852,7 @@ impl SimpleUnaryMilliOp for MilliOpSimpleUnary {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct MilliOpClampMin {
     input: MilliOpGraphTensorId,
     value: f32
@@ -886,6 +876,7 @@ impl SimpleUnaryMilliOp for MilliOpClampMin {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct MilliOpNonZero {
     input: MilliOpGraphTensorId,
 }
@@ -921,6 +912,7 @@ impl MilliOp for MilliOpNonZero {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct MilliOpCumSum {
     a: MilliOpGraphTensorId,
     axis: MilliOpGraphTensorId,
@@ -943,6 +935,7 @@ impl MilliOp for MilliOpCumSum {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct MilliOpShape {
     input: MilliOpGraphTensorId
 }
@@ -967,6 +960,7 @@ impl MilliOp for MilliOpShape {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct MilliOpReduceSum {
     data: MilliOpGraphTensorId,
     axes: Option<MilliOpGraphTensorId>,
@@ -1005,6 +999,7 @@ impl MilliOp for MilliOpReduceSum {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct MilliOpReduceMin {
     data: MilliOpGraphTensorId,
     axes: Option<MilliOpGraphTensorId>,
@@ -1043,7 +1038,7 @@ impl MilliOp for MilliOpReduceMin {
     }
 }
 
-
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct MilliOpReduceMax {
     data: MilliOpGraphTensorId,
     axes: Option<MilliOpGraphTensorId>,
@@ -1082,6 +1077,7 @@ impl MilliOp for MilliOpReduceMax {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct MilliOpReduceProd {
     data: MilliOpGraphTensorId,
     axes: Option<MilliOpGraphTensorId>,
@@ -1120,7 +1116,7 @@ impl MilliOp for MilliOpReduceProd {
     }
 }
 
-
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct MilliOpReduceMean {
     data: MilliOpGraphTensorId,
     axes: Option<MilliOpGraphTensorId>,
@@ -1159,6 +1155,7 @@ impl MilliOp for MilliOpReduceMean {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct MilliOpSlice {
     data: MilliOpGraphTensorId,
     starts: MilliOpGraphTensorId,
@@ -1238,6 +1235,7 @@ impl MilliOp for MilliOpSlice {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct MilliOpReshape {
     data: MilliOpGraphTensorId,
     shape: MilliOpGraphTensorId,
@@ -1388,6 +1386,7 @@ impl MilliOp for MilliOpReshape {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct MilliOpSqueeze {
     data: MilliOpGraphTensorId,
     axes: MilliOpGraphTensorId,
@@ -1502,6 +1501,7 @@ impl MilliOp for MilliOpSqueeze {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct MilliOpUnsqueeze {
     data: MilliOpGraphTensorId,
     axes: MilliOpGraphTensorId,
@@ -1625,7 +1625,7 @@ impl MilliOp for MilliOpUnsqueeze {
     }
 }
 
-
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct MilliOpCast {
     data: MilliOpGraphTensorId,
     dtype: DType
@@ -1645,6 +1645,7 @@ impl MilliOp for MilliOpCast {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct MilliOpCastLike {
     data: MilliOpGraphTensorId,
     target_type: MilliOpGraphTensorId
@@ -1664,6 +1665,7 @@ impl MilliOp for MilliOpCastLike {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct MilliOpTranspose {
     data: MilliOpGraphTensorId,
     perm: Option<Vec<i64>>
@@ -1684,6 +1686,7 @@ impl MilliOp for MilliOpTranspose {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct MilliOpGather {
     data: MilliOpGraphTensorId,
     indices: MilliOpGraphTensorId,
@@ -1706,6 +1709,7 @@ impl MilliOp for MilliOpGather {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct MilliOpConcat {
     inputs: Vec<MilliOpGraphTensorId>,
     axis: i64
@@ -1735,6 +1739,7 @@ impl MilliOp for MilliOpConcat {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct MilliOpSplit {
     data: MilliOpGraphTensorId,
     split: Option<MilliOpTensorIDOrLiteral>,
@@ -1771,6 +1776,7 @@ impl MilliOp for MilliOpSplit {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct MilliOpWhere {
     condition: MilliOpGraphTensorId,
     x: MilliOpGraphTensorId,
@@ -1794,6 +1800,7 @@ impl MilliOp for MilliOpWhere {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) enum AnyMilliOp {
     Constant(MilliOpConstant),
     ConstantOfShape(MilliOpConstantOfShape),
@@ -1926,67 +1933,3 @@ impl MilliOp for AnyMilliOp {
     }
 }
 
-pub struct MilliOpGraph {
-    input_map: HashMap<TensorId, MilliOpGraphTensorId>,
-    output_map: Option<HashMap<MilliOpGraphTensorId, TensorId>>,
-    ops: HashMap<MilliOpGraphTensorId, AnyMilliOp>,
-    next_op_id: usize
-}
-
-impl MilliOpGraph {
-    pub(crate) fn new(inputs: &[TensorId]) -> (Self, HashMap<TensorId, MilliOpGraphTensorId>) {
-        let mut next_op_id = 0;
-        let mut input_map = HashMap::new();
-        for input in inputs {
-            input_map.insert(*input, MilliOpGraphTensorId{inner:next_op_id});
-            next_op_id += 1;
-        }
-        (Self{
-            input_map: input_map.clone(),
-            ops: HashMap::new(),
-            output_map: None,
-            next_op_id
-        }, input_map)
-    }
-
-    pub(crate) fn set_output_map(&mut self, output_map: HashMap<MilliOpGraphTensorId, TensorId>) {
-        assert!(self.output_map.is_none());
-        self.output_map = Some(output_map)
-    }
-
-    pub(crate) fn push_op(&mut self, op: AnyMilliOp) -> MilliOpGraphTensorId {
-        let new_tensor_id = MilliOpGraphTensorId{inner:self.next_op_id};
-        self.next_op_id += 1;
-        self.ops.insert(new_tensor_id, op);
-        new_tensor_id
-    }
-
-    pub(crate) fn eval(&self, inputs: &HashMap<TensorId, NumericTensor<DynRank>>, backend: &mut EvalBackend) -> Result<HashMap<TensorId, NumericTensor<DynRank>>, MilliOpGraphError> {
-        assert!(self.output_map.is_some());
-
-        let op_ids_to_eval: Vec<_> = {
-            let mut x = self.ops.keys().collect::<Vec<_>>();
-            x.sort();
-            x
-        };
-
-        let mut intermediate_values = HashMap::new();
-        for (tensor_id, tensor_value) in inputs {
-            intermediate_values.insert(self.input_map[tensor_id], tensor_value.clone());
-        }
-
-        for op_id in op_ids_to_eval {
-            let op = &self.ops[op_id];
-            let out = op.eval(&intermediate_values, backend)?;
-            //assert_eq!(out.has_nan()?, false);
-            intermediate_values.insert(*op_id, out);
-        }
-
-        let mut outputs = HashMap::new();
-        for (a, b) in self.output_map.as_ref().unwrap() {
-            outputs.insert(*b, intermediate_values[a].clone());
-        }
-
-        Ok(outputs)
-    }
-}

@@ -14,9 +14,9 @@ use vulkano::sync::GpuFuture;
 use crate::dtype::DType;
 use crate::DynRank;
 use crate::tensor_rank::{DimContainer, DimProduct, Rank};
-use crate::vulkan_backend::tensor::VulkanTensor;
-use crate::vulkan_backend::{VulkanError, VulkanImmediateExecutor};
-use crate::vulkan_backend::spirv_helpers::{cast_bf16_to_f32, cast_f32_to_bf16, get_spirv_datatype};
+use crate::backends::vulkan_backend::tensor::VulkanTensor;
+use crate::backends::vulkan_backend::{VulkanError, VulkanImmediateExecutor};
+use crate::backends::vulkan_backend::spirv_helpers::{cast_bf16_to_f32, cast_f32_to_bf16, get_spirv_datatype};
 
 fn build_matmul_pipeline(
     vulkan_immediate_executor: &mut VulkanImmediateExecutor,
@@ -508,9 +508,9 @@ impl<R: Rank> VulkanTensor<R> {
 
 mod test {
     use crate::dtype::DType;
-    use crate::NDArrayNumericTensor;
-    use crate::vulkan_backend::{VulkanContext, VulkanImmediateExecutor};
-    use crate::vulkan_backend::tensor::VulkanTensor;
+    use crate::backends::ndarray_backend::NDArrayNumericTensor;
+    use crate::backends::vulkan_backend::{VulkanContext, VulkanImmediateExecutor};
+    use crate::backends::vulkan_backend::tensor::VulkanTensor;
 
     #[test]
     fn test_matmul_2d() {

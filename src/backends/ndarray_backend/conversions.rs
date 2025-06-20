@@ -2,7 +2,7 @@ use ndarray::{ArcArray, ShapeBuilder};
 use half::{bf16, f16};
 use typenum::P1;
 use crate::dtype::{DTypeOfPrimitive};
-use crate::ndarray_backend::{NDArrayNumericTensor, NDArrayNumericTensorError};
+use crate::backends::ndarray_backend::{NDArrayNumericTensor, NDArrayNumericTensorError};
 use crate::tensor_rank::{Rank};
 
 pub trait NDArrayNumericTensorType: Sized + DTypeOfPrimitive + Clone {

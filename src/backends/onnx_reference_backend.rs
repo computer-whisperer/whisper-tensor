@@ -3,7 +3,7 @@ use pyo3::{Py, PyAny, PyErr, Python};
 use pyo3::prelude::PyAnyMethods;
 use pyo3::types::{PyDict, PyNone};
 use crate::dtype::DType;
-use crate::ndarray_backend::NDArrayNumericTensor;
+use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::numeric_tensor::{NumericTensor, NumericTensorError};
 use crate::onnx;
 use crate::tensor_rank::{DynRank, Rank};

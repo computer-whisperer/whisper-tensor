@@ -1,9 +1,9 @@
 use whisper_tensor::dtype::DType;
-use whisper_tensor::eval_backend::EvalBackend;
-use whisper_tensor::NDArrayNumericTensor;
+use whisper_tensor::backends::eval_backend::EvalBackend;
+use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::numeric_tensor::NumericTensor;
-use whisper_tensor::vulkan_backend::{VulkanContext, VulkanImmediateExecutor};
-use whisper_tensor::vulkan_backend::tensor::VulkanTensor;
+use whisper_tensor::backends::vulkan_backend::{VulkanContext, VulkanImmediateExecutor};
+use whisper_tensor::backends::vulkan_backend::tensor::VulkanTensor;
 
 fn main() {
     tracing_subscriber::fmt::init();

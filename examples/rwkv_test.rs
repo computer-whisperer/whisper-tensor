@@ -6,9 +6,9 @@ use rand::prelude::StdRng;
 use rand::SeedableRng;
 use typenum::P1;
 use whisper_tensor_import::onnx_graph::WeightStorageStrategy;
-use whisper_tensor::eval_backend::EvalBackend;
+use whisper_tensor::backends::eval_backend::EvalBackend;
 use whisper_tensor::language_model::LanguageModelManager;
-use whisper_tensor::model::{Model, ModelExecutionRuntime};
+use whisper_tensor::model::{Model};
 use whisper_tensor::numeric_tensor::{NumericTensor};
 use whisper_tensor::sampler::LLMSamplersBundle;
 use whisper_tensor::tokenizer::Tokenizer;
@@ -50,7 +50,7 @@ fn main() {
         }
     };
 
-    let (output, _) = llm.run(input_tensor.clone(), None, &mut sampler, &mut ModelExecutionRuntime::Eval(EvalBackend::NDArray)).unwrap();
+    let (output, _) = llm.run(input_tensor.clone(), None, &mut sampler, &mut EvalBackend::NDArray).unwrap();
     let output_tensor = output.squeeze(0).unwrap().try_to_type::<u32>().unwrap().try_to_rank::<P1>().unwrap();
     let output_values: Vec<u32> = output_tensor.to_vec();
     println!("{:?}", output_values);

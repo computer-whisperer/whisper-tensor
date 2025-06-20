@@ -17,8 +17,8 @@ use axum::{
     Router,
 };
 use tokio::sync::RwLock;
-use whisper_tensor::{DynRank, NDArrayNumericTensor};
-use whisper_tensor::eval_backend::EvalBackend;
+use whisper_tensor::{DynRank};
+use whisper_tensor::backends::eval_backend::EvalBackend;
 use tokio::sync::watch;
 
 struct ModelData {

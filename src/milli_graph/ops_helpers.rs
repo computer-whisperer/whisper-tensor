@@ -1,5 +1,6 @@
-use crate::ndarray_backend::conversions::NDArrayNumericTensorType;
-use super::milli_ops::*;
+use crate::backends::ndarray_backend::conversions::NDArrayNumericTensorType;
+use crate::milli_graph::{MilliOpGraph, MilliOpGraphTensorId};
+use super::ops::*;
 
 pub(crate) fn rank(graph: &mut MilliOpGraph, tensor: MilliOpGraphTensorId) -> MilliOpGraphTensorId {
     let shape = graph.push_op(AnyMilliOp::Shape(MilliOpShape::new(tensor)));

@@ -1,7 +1,7 @@
 use std::ops::Range;
 use crate::tensor_rank::{DimContainer, DimProduct, Rank};
-use crate::vulkan_backend::tensor::VulkanTensor;
-use crate::vulkan_backend::{VulkanError, VulkanImmediateExecutor};
+use crate::backends::vulkan_backend::tensor::VulkanTensor;
+use crate::backends::vulkan_backend::{VulkanError, VulkanImmediateExecutor};
 
 impl<R: Rank> VulkanTensor<R> {
     pub fn reshape(&self, new_shape: R::KnownDims, vulkan_immediate_executor: &mut VulkanImmediateExecutor) -> Result<Self, VulkanError> {

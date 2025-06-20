@@ -3,11 +3,11 @@ use crate::dtype::{DType, DTypeError};
 use crate::numeric_tensor::NumericTensor;
 use crate::symbolic_graph::{GraphOperation, OperationId, SymbolicGraph, TensorId, ONNXTensorInfo};
 use crate::symbolic_graph::ops::{EvalError, Operation};
-use crate::symbolic_graph::scalar_info::ScalarInfoTyped;
+use crate::scalar_info::ScalarInfoTyped;
 use crate::symbolic_graph::tensor_store::TensorStore;
 use crate::tensor_rank::DynRank;
 #[cfg(feature = "vulkan")]
-use crate::vulkan_backend::VulkanImmediateExecutor;
+use crate::backends::vulkan_backend::VulkanImmediateExecutor;
 
 #[derive(Debug)]
 pub enum EvalBackend {

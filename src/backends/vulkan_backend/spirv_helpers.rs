@@ -1,5 +1,5 @@
 use crate::dtype::DType;
-use crate::vulkan_backend::VulkanError;
+use crate::backends::vulkan_backend::VulkanError;
 
 pub fn get_spirv_datatype(b: &mut rspirv::dr::Builder, dtype: DType) -> Result<rspirv::spirv::Word, VulkanError> {
     Ok(match dtype {

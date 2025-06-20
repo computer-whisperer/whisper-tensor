@@ -1,7 +1,7 @@
 use half::{bf16, f16};
 use ort::value::DynValue;
 use crate::dtype::{DType, DTypeError};
-use crate::ndarray_backend::NDArrayNumericTensor;
+use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::numeric_tensor::{NumericTensor, NumericTensorError};
 use crate::tensor_rank::{DynRank, Rank};
 

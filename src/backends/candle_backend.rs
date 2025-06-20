@@ -1,6 +1,6 @@
 use candle_core::Device;
 use crate::dtype::DTypeError;
-use crate::ndarray_backend::numeric_tensor::{NDArrayNumericTensor};
+use crate::backends::ndarray_backend::numeric_tensor::{NDArrayNumericTensor};
 use crate::numeric_tensor::{NumericTensor, NumericTensorError};
 use crate::tensor_rank::{DimContainer, Rank};
 

@@ -1,14 +1,14 @@
-use std::any::type_name_of_val;
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use crate::dtype::DType;
-use crate::eval_backend::EvalBackend;
-use crate::ndarray_backend::{NDArrayNumericTensor, NDArrayNumericTensorError};
+use crate::backends::eval_backend::EvalBackend;
+use crate::backends::ndarray_backend::{NDArrayNumericTensor, NDArrayNumericTensorError};
 use crate::numeric_scalar::NumericScalar;
 use crate::numeric_tensor::{NumericTensor, NumericTensorError};
 use crate::{onnx, TrigOp};
-use crate::symbolic_graph::{milli_ops_helpers, query_attribute_bool, query_attribute_float, query_attribute_floats, query_attribute_int, query_attribute_ints, query_attribute_string, query_attribute_tensor, ONNXDecodingError, SymbolicGraphError, TensorId};
-use crate::symbolic_graph::milli_ops::*;
+use crate::milli_graph::{ops_helpers, MilliOpGraph, MilliOpGraphError};
+use crate::symbolic_graph::{query_attribute_bool, query_attribute_float, query_attribute_floats, query_attribute_int, query_attribute_ints, query_attribute_string, query_attribute_tensor, ONNXDecodingError, SymbolicGraphError, TensorId};
+use crate::milli_graph::ops::*;
 use crate::tensor_rank::DynRank;
 
 #[derive(Debug, thiserror::Error)]
@@ -903,14 +903,14 @@ impl Operation for LayerNormalizationOperation {
         let input_data = input_map[&self.input];
         let input_scale = input_map[&self.scale];
 
-        let axis = milli_ops_helpers::scalar_const(&mut graph, self.axis);
-        let axis = milli_ops_helpers::resolve_axes(&mut graph, axis, input_data);
+        let axis = ops_helpers::scalar_const(&mut graph, self.axis);
+        let axis = ops_helpers::resolve_axes(&mut graph, axis, input_data);
 
         let normalized_axes = {
             let r =MilliOpRange::new(
                 axis,
-                milli_ops_helpers::rank(&mut graph, input_data),
-                milli_ops_helpers::scalar_const(&mut graph, 1i64),
+                ops_helpers::rank(&mut graph, input_data),
+                ops_helpers::scalar_const(&mut graph, 1i64),
             );
             graph.push_op(AnyMilliOp::Range(r))
         };
@@ -1067,9 +1067,9 @@ impl Operation for ShapeOperation {
             input_map[&self.input]
         )));
         let out = if self.start.is_some() || self.end.is_some() {
-            let start = milli_ops_helpers::scalar_const(&mut graph, self.start.unwrap_or(0));
+            let start = ops_helpers::scalar_const(&mut graph, self.start.unwrap_or(0));
             let end = if let Some(end) = self.end {
-                milli_ops_helpers::scalar_const(&mut graph, end)
+                ops_helpers::scalar_const(&mut graph, end)
             } else {
                 graph.push_op(AnyMilliOp::Shape(MilliOpShape::new(out)))
             };
@@ -1803,7 +1803,7 @@ impl Operation for SplitOperation {
         let split = if let Some(split) = self.split {
             Some(MilliOpTensorIDOrLiteral::TensorID(input_map[&split]))
         } else if let Some(split) = &self.split_attribute {
-            Some(MilliOpTensorIDOrLiteral::Literal(NumericTensor::from_vec(split.clone()).to_dyn_rank()))
+            Some(MilliOpTensorIDOrLiteral::Literal(NDArrayNumericTensor::from_vec(split.clone()).to_dyn()))
         } else {
             None
         };
@@ -2192,11 +2192,11 @@ impl Operation for FlattenOperation {
             graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(shape_tensor.to_dyn().into())))
         } else {
             let input_shape = graph.push_op(AnyMilliOp::Shape(MilliOpShape::new(input)));
-            let zero_const = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(NumericTensor::from_vec_shape(vec![0i64], vec![1]).unwrap())));
-            let axis_const = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(NumericTensor::from_vec_shape(vec![self.axis], vec![1]).unwrap())));
+            let zero_const = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap())));
+            let axis_const = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(NDArrayNumericTensor::from_vec_shape(vec![self.axis], &vec![1]).unwrap())));
             let first_dims = graph.push_op(AnyMilliOp::Slice(MilliOpSlice::new(input_shape, zero_const, axis_const, None, None)));
             let prod = graph.push_op(AnyMilliOp::ReduceProd(MilliOpReduceProd::new(first_dims, None, true, false)));
-            let neg_one_const = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(NumericTensor::from_vec_shape(vec![-1i64], vec![1]).unwrap())));
+            let neg_one_const = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(NDArrayNumericTensor::from_vec_shape(vec![-1i64], &vec![1]).unwrap())));
             graph.push_op(AnyMilliOp::Concat(MilliOpConcat::new(vec![prod, neg_one_const], 0)))
         };
 

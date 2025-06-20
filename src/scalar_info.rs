@@ -2,7 +2,7 @@ use num_traits::AsPrimitive;
 use serde::{Deserialize, Serialize};
 use crate::dtype::{DType, DTypeOfPrimitive};
 use crate::numeric_scalar::{NumericScalar, NumericScalarType};
-use crate::symbolic_graph::symbolic_scalar::{SymbolicScalar, SymbolicScalarTyped};
+use crate::symbolic_scalar::{SymbolicScalar, SymbolicScalarTyped};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ScalarInfoTyped<T>

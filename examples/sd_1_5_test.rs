@@ -6,7 +6,7 @@ use rand::prelude::StdRng;
 use rand::SeedableRng;
 use typenum::P1;
 use whisper_tensor_import::onnx_graph::WeightStorageStrategy;
-use whisper_tensor::eval_backend::EvalBackend;
+use whisper_tensor::backends::eval_backend::EvalBackend;
 use whisper_tensor::language_model::LanguageModelManager;
 use whisper_tensor::model::Model;
 use whisper_tensor::numeric_tensor::{NumericTensor};

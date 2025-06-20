@@ -21,7 +21,6 @@ use vulkano::memory::DeviceAlignment;
 use vulkano::pipeline::{ComputePipeline, PipelineLayout};
 use vulkano::shader::ShaderStages;
 use crate::dtype::DType;
-use crate::NDArrayNumericTensor;
 use crate::tensor_rank::{DimContainer, Rank};
 
 #[derive(Debug, thiserror::Error)]

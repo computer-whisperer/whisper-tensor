@@ -1,22 +1,17 @@
 pub mod ops;
-mod milli_ops;
-mod milli_ops_helpers;
-pub mod symbolic_scalar;
-mod tensor_info;
-pub mod scalar_info;
 pub mod tensor_store;
 
 use std::collections::HashMap;
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use crate::dtype::DType;
-use crate::ndarray_backend::{NDArrayNumericTensor, NDArrayNumericTensorError};
+use crate::backends::ndarray_backend::{NDArrayNumericTensor, NDArrayNumericTensorError};
 use crate::{onnx, TrigOp};
 use crate::numeric_scalar::NumericScalar;
 use crate::numeric_tensor::NumericTensor;
 use crate::symbolic_graph::ops::AnyOperation;
-use crate::symbolic_graph::scalar_info::ScalarInfoTyped;
-use crate::symbolic_graph::symbolic_scalar::{SymbolicResolver, SymbolicScalar, SymbolicScalarTyped};
+use crate::scalar_info::ScalarInfoTyped;
+use crate::symbolic_scalar::{SymbolicResolver, SymbolicScalar, SymbolicScalarTyped};
 use crate::symbolic_graph::tensor_store::{StoredTensor, TensorStore, TensorStoreTensorId};
 use crate::tensor_rank::DynRank;
 

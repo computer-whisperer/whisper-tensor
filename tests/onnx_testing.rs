@@ -8,13 +8,13 @@ use std::sync::Once;
 use prost::Message;
 use whisper_tensor::numeric_tensor::NumericTensor;
 use whisper_tensor::dtype::{DType, DTypeError};
-use whisper_tensor::eval_backend::EvalBackend;
+use whisper_tensor::backends::eval_backend::EvalBackend;
 use whisper_tensor::model::{Model, ModelExecutionRuntime};
-use whisper_tensor::ndarray_backend::NDArrayNumericTensor;
+use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::onnx::TensorProto;
 use whisper_tensor::symbolic_graph::ONNXDecodingError;
 use whisper_tensor::tensor_rank::DynRank;
-use whisper_tensor::vulkan_backend::{VulkanContext, VulkanImmediateExecutor};
+use whisper_tensor::backends::vulkan_backend::{VulkanContext, VulkanImmediateExecutor};
 use paste::paste;
 
 // Structure to hold a test case
@@ -91,7 +91,7 @@ impl OnnxNodeTest {
     }
 
     // Run the test using a specified backend
-    fn run(&self, backend: &mut ModelExecutionRuntime) -> Result<(), TestError> {
+    fn run(&self, backend: &mut EvalBackend) -> Result<(), TestError> {
         log::info!("Running test: {}", self.name);
 
         // Load the model
@@ -115,7 +115,7 @@ impl OnnxNodeTest {
                 .map_err(|e| format!("Failed to parse expected outputs: {}", e))?;
 
             // Run the model
-            let outputs = model.run(inputs, backend)
+            let outputs = model.eval(inputs, backend)
                 .map_err(|e| format!("Model execution failed: {:?}", e))?;
 
             // Compare outputs with expected values
@@ -241,7 +241,7 @@ fn parse_tensor_proto(proto_data: &[u8]) -> Result<NumericTensor<DynRank>, Strin
 }
 
 // Function to discover and run all node tests
-fn run_node_tests(backend: &mut ModelExecutionRuntime) -> (usize, usize) {
+fn run_node_tests(backend: &mut EvalBackend) -> (usize, usize) {
     // Path to the ONNX node tests
     let node_test_path = PathBuf::from(
         std::env::var("ONNX_NODE_TEST_PATH")
@@ -285,16 +285,16 @@ fn run_node_tests(backend: &mut ModelExecutionRuntime) -> (usize, usize) {
 
 fn run_ndarray_test(path: &Path) {
     let test = OnnxNodeTest::from_directory(&path).unwrap();
-    test.run(&mut ModelExecutionRuntime::Eval(EvalBackend::NDArray)).unwrap()
+    test.run(&mut EvalBackend::NDArray).unwrap()
 }
 
 fn run_vulkan_test(path: &Path) {
     let vulkan_context = VulkanContext::new().unwrap();
     let vulkan_runtime = VulkanImmediateExecutor::new(vulkan_context).unwrap();
-    let eval_backend = EvalBackend::Vulkan(vulkan_runtime);
+    let mut eval_backend = EvalBackend::Vulkan(vulkan_runtime);
 
     let test = OnnxNodeTest::from_directory(&path).unwrap();
-    test.run(&mut ModelExecutionRuntime::Eval(eval_backend)).unwrap()
+    test.run(&mut eval_backend).unwrap()
 }
 
 macro_rules! do_test {

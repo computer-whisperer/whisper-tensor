@@ -1,10 +1,10 @@
 use std::sync::Arc;
 use vulkano::buffer::Subbuffer;
 use vulkano::memory::allocator::Suballocation;
+use crate::backends::ndarray_backend::NDArrayNumericTensor;
+use crate::backends::vulkan_backend::{VulkanError, VulkanImmediateExecutor};
 use crate::dtype::DType;
-use crate::NDArrayNumericTensor;
 use crate::tensor_rank::{DimContainer, DimProduct, Rank};
-use crate::vulkan_backend::{VulkanError, VulkanImmediateExecutor};
 
 
 

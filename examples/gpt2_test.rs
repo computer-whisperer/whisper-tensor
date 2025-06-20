@@ -3,13 +3,13 @@ use llm_samplers::prelude::{SampleFreqPresence, SampleGreedy, SampleTemperature,
 use rand::prelude::StdRng;
 use rand::SeedableRng;
 use typenum::P1;
-use whisper_tensor::eval_backend::EvalBackend;
+use whisper_tensor::backends::eval_backend::EvalBackend;
 use whisper_tensor::language_model::LanguageModelManager;
-use whisper_tensor::model::{Model, ModelExecutionRuntime};
+use whisper_tensor::model::{Model};
 use whisper_tensor::numeric_tensor::{NumericTensor};
 use whisper_tensor::sampler::{LLMSamplersBundle};
 use whisper_tensor::tokenizer::Tokenizer;
-use whisper_tensor::vulkan_backend::{VulkanContext, VulkanImmediateExecutor};
+use whisper_tensor::backends::vulkan_backend::{VulkanContext, VulkanImmediateExecutor};
 use whisper_tensor_import::{identify_and_load, ModelTypeHint};
 use whisper_tensor_import::onnx_graph::WeightStorageStrategy;
 
@@ -48,7 +48,7 @@ fn main() {
     let vulkan_context = VulkanContext::new().unwrap();
     let mut vulkan_runtime = VulkanImmediateExecutor::new(vulkan_context).unwrap();
     
-    let (output, _) = llm.run(input_tensor.clone(), None, &mut sampler, &mut ModelExecutionRuntime::Eval(EvalBackend::Vulkan(vulkan_runtime))).unwrap();
+    let (output, _) = llm.run(input_tensor.clone(), None, &mut sampler, &mut EvalBackend::Vulkan(vulkan_runtime)).unwrap();
     let output_tensor = output.squeeze(0).unwrap()
         .squeeze(0).unwrap()
         .try_to_type::<u32>().unwrap().try_to_rank::<P1>().unwrap();
