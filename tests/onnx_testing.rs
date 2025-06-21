@@ -350,7 +350,7 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_and_bcast4v3d);
         do_test!($runner_fn, $runner_name, test_and_bcast4v4d);
 
-       /* do_test!($runner_fn, $runner_name, test_argmax_default_axis_example);
+        do_test!($runner_fn, $runner_name, test_argmax_default_axis_example);
         do_test!($runner_fn, $runner_name, test_argmax_default_axis_example_select_last_index);
         do_test!($runner_fn, $runner_name, test_argmax_default_axis_random);
         do_test!($runner_fn, $runner_name, test_argmax_default_axis_random_select_last_index);
@@ -381,7 +381,7 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_argmin_no_keepdims_example);
         do_test!($runner_fn, $runner_name, test_argmin_no_keepdims_example_select_last_index);
         do_test!($runner_fn, $runner_name, test_argmin_no_keepdims_random);
-        do_test!($runner_fn, $runner_name, test_argmin_no_keepdims_random_select_last_index);*/
+        do_test!($runner_fn, $runner_name, test_argmin_no_keepdims_random_select_last_index);
 
         do_test!($runner_fn, $runner_name, test_asin);
         do_test!($runner_fn, $runner_name, test_asin_example);

@@ -1662,6 +1662,44 @@ impl NDArrayNumericTensor<DynRank> {
             NDArrayNumericTensor::BOOL(x) => NDArrayNumericTensor::BOOL(ops::expand(x, &shape)?),
         })
     }
+
+    pub fn argmax(&self, axis: usize, keepdims: bool, select_last_index: bool) -> Result<NDArrayNumericTensor<DynRank>, NDArrayNumericTensorError>
+    {
+        Ok(NDArrayNumericTensor::I64(match self {
+            NDArrayNumericTensor::F64(x) => {ops::argmax(x, axis, keepdims, select_last_index)?}
+            NDArrayNumericTensor::F32(x) => {ops::argmax(x, axis, keepdims, select_last_index)?}
+            NDArrayNumericTensor::BF16(x) => {ops::argmax(x, axis, keepdims, select_last_index)?}
+            NDArrayNumericTensor::F16(x) => {ops::argmax(x, axis, keepdims, select_last_index)?}
+            NDArrayNumericTensor::U64(x) => {ops::argmax(x, axis, keepdims, select_last_index)?}
+            NDArrayNumericTensor::I64(x) => {ops::argmax(x, axis, keepdims, select_last_index)?}
+            NDArrayNumericTensor::U32(x) => {ops::argmax(x, axis, keepdims, select_last_index)?}
+            NDArrayNumericTensor::I32(x) => {ops::argmax(x, axis, keepdims, select_last_index)?}
+            NDArrayNumericTensor::U16(x) => {ops::argmax(x, axis, keepdims, select_last_index)?}
+            NDArrayNumericTensor::I16(x) => {ops::argmax(x, axis, keepdims, select_last_index)?}
+            NDArrayNumericTensor::U8(x) => {ops::argmax(x, axis, keepdims, select_last_index)?}
+            NDArrayNumericTensor::I8(x) => {ops::argmax(x, axis, keepdims, select_last_index)?}
+            NDArrayNumericTensor::BOOL(_) => Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("argmax".to_string(), vec![self.dtype()]))?
+        }))
+    }
+
+    pub fn argmin(&self, axis: usize, keepdims: bool, select_last_index: bool) -> Result<NDArrayNumericTensor<DynRank>, NDArrayNumericTensorError>
+    {
+        Ok(NDArrayNumericTensor::I64(match self {
+            NDArrayNumericTensor::F64(x) => {ops::argmin(x, axis, keepdims, select_last_index)?}
+            NDArrayNumericTensor::F32(x) => {ops::argmin(x, axis, keepdims, select_last_index)?}
+            NDArrayNumericTensor::BF16(x) => {ops::argmin(x, axis, keepdims, select_last_index)?}
+            NDArrayNumericTensor::F16(x) => {ops::argmin(x, axis, keepdims, select_last_index)?}
+            NDArrayNumericTensor::U64(x) => {ops::argmin(x, axis, keepdims, select_last_index)?}
+            NDArrayNumericTensor::I64(x) => {ops::argmin(x, axis, keepdims, select_last_index)?}
+            NDArrayNumericTensor::U32(x) => {ops::argmin(x, axis, keepdims, select_last_index)?}
+            NDArrayNumericTensor::I32(x) => {ops::argmin(x, axis, keepdims, select_last_index)?}
+            NDArrayNumericTensor::U16(x) => {ops::argmin(x, axis, keepdims, select_last_index)?}
+            NDArrayNumericTensor::I16(x) => {ops::argmin(x, axis, keepdims, select_last_index)?}
+            NDArrayNumericTensor::U8(x) => {ops::argmin(x, axis, keepdims, select_last_index)?}
+            NDArrayNumericTensor::I8(x) => {ops::argmin(x, axis, keepdims, select_last_index)?}
+            NDArrayNumericTensor::BOOL(_) => Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("argmin".to_string(), vec![self.dtype()]))?
+        }))
+    }
 }
 
 impl NDArrayNumericTensor<P1> {

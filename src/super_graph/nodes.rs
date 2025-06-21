@@ -18,12 +18,12 @@ impl <T: SuperGraphNode> From<T> for SuperGraphAnyNode {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct ModelReference {
+pub struct ModelReference {
     name: String
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct SuperGraphNodeModelLoad {
+pub struct SuperGraphNodeModelLoad {
     model: ModelReference,
     output: SuperGraphLinkModel
 }
@@ -61,7 +61,7 @@ impl SuperGraphNode for SuperGraphNodeModelLoad {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct SuperGraphNodeModelExecution {
+pub struct SuperGraphNodeModelExecution {
     model: SuperGraphLinkModel,
     tensor_inputs: HashMap<SuperGraphLinkTensor, String>,
     tensor_outputs: HashMap<String, SuperGraphLinkTensor>
@@ -90,7 +90,7 @@ impl SuperGraphNode for SuperGraphNodeModelExecution {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct SuperGraphNodeTokenizerLoad {
+pub struct SuperGraphNodeTokenizerLoad {
     info: TokenizerInfo,
     output: SuperGraphLinkTokenizer
 }
@@ -128,7 +128,7 @@ impl SuperGraphNode for SuperGraphNodeTokenizerLoad {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct SuperGraphNodeTokenizerEncode {
+pub struct SuperGraphNodeTokenizerEncode {
     tokenizer: SuperGraphLinkTokenizer,
     text_input: SuperGraphLinkString,
     tensor_output: SuperGraphLinkTensor
@@ -170,7 +170,7 @@ impl SuperGraphNode for SuperGraphNodeTokenizerEncode {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct SuperGraphNodeStringInput {
+pub struct SuperGraphNodeStringInput {
     text_output: SuperGraphLinkString
 }
 
@@ -206,7 +206,7 @@ impl SuperGraphNode for SuperGraphNodeStringInput {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct SuperGraphNodeStringOutput {
+pub struct SuperGraphNodeStringOutput {
     text_input: SuperGraphLinkString
 }
 
@@ -236,7 +236,7 @@ impl SuperGraphNode for SuperGraphNodeStringOutput {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct SuperGraphNodeTokenizerDecode {
+pub struct SuperGraphNodeTokenizerDecode {
     tokenizer: SuperGraphLinkTokenizer,
     tensor_input: SuperGraphLinkTensor,
     text_output: SuperGraphLinkString
@@ -274,12 +274,12 @@ impl SuperGraphNode for SuperGraphNodeTokenizerDecode {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct SuperGraphNodeMilliOpGraph {
-    graph: MilliOpGraph
+pub struct SuperGraphNodeMilliOpGraph {
+    graph: MilliOpGraph<SuperGraphLinkTensor>
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) enum SuperGraphAnyNode {
+pub enum SuperGraphAnyNode {
     ModelExecution(SuperGraphNodeModelExecution),
     TokenizerEncode(SuperGraphNodeTokenizerEncode),
     TokenizerDecode(SuperGraphNodeTokenizerDecode),

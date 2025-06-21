@@ -1740,6 +1740,72 @@ impl MilliOp for MilliOpConcat {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MilliOpArgMax {
+    input: MilliOpGraphTensorId,
+    axis: i64,
+    keepdims: bool,
+    select_last_index: bool
+}
+
+impl MilliOpArgMax {
+    pub(crate) fn new(    input: MilliOpGraphTensorId,
+                          axis: i64,
+                          keepdims: bool,
+                          select_last_index: bool
+    ) -> Self {
+        Self {input, axis, keepdims, select_last_index}
+    }
+}
+
+impl MilliOp for MilliOpArgMax {
+    fn get_inputs(&self) -> Vec<MilliOpGraphTensorId> {vec![self.input]}
+
+    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &mut EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
+        let input = inputs[&self.input].clone();
+        let axis = if self.axis < 0 {
+            input.shape().len() as i64 + self.axis
+        } else {
+            self.axis
+        } as usize;
+        let max = input.argmax(axis, self.keepdims, self.select_last_index, backend)?;
+        Ok(max)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MilliOpArgMin {
+    input: MilliOpGraphTensorId,
+    axis: i64,
+    keepdims: bool,
+    select_last_index: bool
+}
+
+impl MilliOpArgMin {
+    pub(crate) fn new(    input: MilliOpGraphTensorId,
+                          axis: i64,
+                          keepdims: bool,
+                          select_last_index: bool
+    ) -> Self {
+        Self {input, axis, keepdims, select_last_index}
+    }
+}
+
+impl MilliOp for MilliOpArgMin {
+    fn get_inputs(&self) -> Vec<MilliOpGraphTensorId> {vec![self.input]}
+
+    fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &mut EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
+        let input = inputs[&self.input].clone();
+        let axis = if self.axis < 0 {
+            input.shape().len() as i64 + self.axis
+        } else {
+            self.axis
+        } as usize;
+        let max = input.argmin(axis, self.keepdims, self.select_last_index, backend)?;
+        Ok(max)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct MilliOpSplit {
     data: MilliOpGraphTensorId,
     split: Option<MilliOpTensorIDOrLiteral>,
@@ -1801,7 +1867,7 @@ impl MilliOp for MilliOpWhere {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) enum AnyMilliOp {
+pub enum AnyMilliOp {
     Constant(MilliOpConstant),
     ConstantOfShape(MilliOpConstantOfShape),
     SimpleBinary(MilliOpSimpleBinary),
@@ -1829,7 +1895,9 @@ pub(crate) enum AnyMilliOp {
     Split(MilliOpSplit),
     Where(MilliOpWhere),
     Range(MilliOpRange),
-    Expand(MilliOpExpand)
+    Expand(MilliOpExpand),
+    ArgMax(MilliOpArgMax),
+    ArgMin(MilliOpArgMin),
 }
 
 impl MilliOp for AnyMilliOp {
@@ -1862,7 +1930,9 @@ impl MilliOp for AnyMilliOp {
             AnyMilliOp::Split(x) => x.get_inputs(),
             AnyMilliOp::Where(x) => x.get_inputs(),
             AnyMilliOp::Range(x) => x.get_inputs(),
-            AnyMilliOp::Expand(x) => x.get_inputs()
+            AnyMilliOp::Expand(x) => x.get_inputs(),
+            AnyMilliOp::ArgMax(x) => x.get_inputs(),
+            AnyMilliOp::ArgMin(x) => x.get_inputs(),
         }
     }
 
@@ -1896,6 +1966,8 @@ impl MilliOp for AnyMilliOp {
             AnyMilliOp::Where(x) => x.infer(known_inputs, symbolic_resolver, backend),
             AnyMilliOp::Range(x) => x.infer(known_inputs, symbolic_resolver, backend),
             AnyMilliOp::Expand(x) => x.infer(known_inputs, symbolic_resolver, backend),
+            AnyMilliOp::ArgMax(x) => x.infer(known_inputs, symbolic_resolver, backend),
+            AnyMilliOp::ArgMin(x) => x.infer(known_inputs, symbolic_resolver, backend),
         }
     }
 
@@ -1929,6 +2001,8 @@ impl MilliOp for AnyMilliOp {
             AnyMilliOp::Where(x) => x.eval(inputs, backend),
             AnyMilliOp::Range(x) => x.eval(inputs, backend),
             AnyMilliOp::Expand(x) => x.eval(inputs, backend),
+            AnyMilliOp::ArgMax(x) => x.eval(inputs, backend),
+            AnyMilliOp::ArgMin(x) => x.eval(inputs, backend),
         }
     }
 }

@@ -39,7 +39,7 @@ pub trait Operation {
         let milli_graph = self.get_milli_op_graph();
         Ok(milli_graph.eval(inputs, backend)?)
     }
-    fn get_milli_op_graph(&self) -> MilliOpGraph;
+    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId>;
 }
 
 #[derive(Clone, Debug, PartialEq, strum_macros::Display, Serialize, Deserialize)]
@@ -100,7 +100,7 @@ impl Operation for BinaryOperation {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let a = input_map[&self.a];
         let b = input_map[&self.b];
@@ -195,7 +195,7 @@ impl Operation for UnaryOperation {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let a = input_map[&self.input];
         let res = match &self.which {
@@ -278,7 +278,7 @@ impl Operation for CumSumOperation {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let a = input_map[&self.input];
         let b = input_map[&self.axis];
@@ -343,7 +343,7 @@ impl Operation for LpNormalizationOperation {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let input = input_map[&self.input];
 
@@ -422,7 +422,7 @@ impl Operation for GroupNormalizationOperation {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let input = input_map[&self.input];
 
@@ -544,7 +544,7 @@ impl Operation for SqueezeOperation {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let axes_input = if let Some(axes) = self.axes {
             input_map[&axes]
@@ -610,7 +610,7 @@ impl Operation for UnsqueezeOperation {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let axes_input = if let Some(axes) = self.axes {
             input_map[&axes]
@@ -667,7 +667,7 @@ impl Operation for TransposeOperation {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let out = graph.push_op(AnyMilliOp::Transpose(MilliOpTranspose::new(
             input_map[&self.input],
@@ -715,7 +715,7 @@ impl Operation for ReshapeOperation {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let out = graph.push_op(AnyMilliOp::Reshape(MilliOpReshape::new(
             input_map[&self.input],
@@ -764,7 +764,7 @@ impl Operation for CastLikeOperation {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let out = graph.push_op(AnyMilliOp::CastLike(MilliOpCastLike::new(
             input_map[&self.input],
@@ -816,7 +816,7 @@ impl Operation for CastOperation {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let out = graph.push_op(AnyMilliOp::Cast(MilliOpCast::new(
             input_map[&self.input],
@@ -898,7 +898,7 @@ impl Operation for LayerNormalizationOperation {
         res
     }
     
-    fn get_milli_op_graph(&self) -> MilliOpGraph {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let input_data = input_map[&self.input];
         let input_scale = input_map[&self.scale];
@@ -996,7 +996,7 @@ impl Operation for GatherOperation {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let out = graph.push_op(AnyMilliOp::Gather(MilliOpGather::new(
             input_map[&self.input],
@@ -1061,7 +1061,7 @@ impl Operation for ShapeOperation {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let out = graph.push_op(AnyMilliOp::Shape(MilliOpShape::new(
             input_map[&self.input]
@@ -1129,7 +1129,7 @@ impl Operation for ConcatOperation {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let mut milli_inputs = vec![];
         for input in &self.inputs {
@@ -1186,7 +1186,7 @@ impl Operation for ConstantOfShapeOperation {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let out = graph.push_op(AnyMilliOp::ConstantOfShape(MilliOpConstantOfShape::new(
             self.value,
@@ -1252,7 +1252,7 @@ impl Operation for ReduceMeanOperation {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let axes = if let Some(input_axes) = &self.input_axes {
             Some(input_map[input_axes])
@@ -1329,7 +1329,7 @@ impl Operation for ReduceSumOperation {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let axes = if let Some(input_axes) = &self.input_axes {
             Some(input_map[input_axes])
@@ -1407,7 +1407,7 @@ impl Operation for ReduceMaxOperation {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let axes = if let Some(input_axes) = &self.input_axes {
             Some(input_map[input_axes])
@@ -1484,7 +1484,7 @@ impl Operation for ReduceMinOperation {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let axes = if let Some(input_axes) = &self.input_axes {
             Some(input_map[input_axes])
@@ -1562,7 +1562,7 @@ impl Operation for ReduceProdOperation {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let axes = if let Some(input_axes) = &self.input_axes {
             Some(input_map[input_axes])
@@ -1623,7 +1623,7 @@ impl Operation for PowOperation {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let out = graph.push_op(AnyMilliOp::Pow(MilliOpPow::new(
             input_map[&self.input_x],
@@ -1691,7 +1691,7 @@ impl Operation for GemmOperation {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
 
         let a = input_map[&self.input_a];
@@ -1795,7 +1795,7 @@ impl Operation for SplitOperation {
         self.outputs.clone()
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
 
         let mut output_map = HashMap::new();
@@ -1874,7 +1874,7 @@ impl Operation for SliceOperation {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let out = graph.push_op(AnyMilliOp::Slice(MilliOpSlice::new(
             input_map[&self.data],
@@ -1928,7 +1928,7 @@ impl Operation for WhereOperation {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let out = graph.push_op(AnyMilliOp::Where(MilliOpWhere::new(
             input_map[&self.condition],
@@ -1978,7 +1978,7 @@ impl Operation for SoftmaxOperation {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
 
         let e = graph.push_op(AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::exp(input_map[&self.input])));
@@ -2029,7 +2029,7 @@ impl Operation for LogSoftmaxOperation {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
 
         let e = graph.push_op(AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::exp(input_map[&self.input])));
@@ -2077,7 +2077,7 @@ impl Operation for SizeOperation {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
 
         let shape = graph.push_op(AnyMilliOp::Shape(MilliOpShape::new(input_map[&self.input])));
@@ -2127,7 +2127,7 @@ impl Operation for RangeOperation {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
 
         let out = graph.push_op(AnyMilliOp::Range(MilliOpRange::new(
@@ -2180,7 +2180,7 @@ impl Operation for FlattenOperation {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let input = input_map[&self.input];
 
@@ -2263,7 +2263,7 @@ impl Operation for ConstantOperation {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
         let (mut graph, _input_map) = MilliOpGraph::new(&self.get_inputs());
 
         let out = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(self.value.clone().into())));
@@ -2310,7 +2310,7 @@ impl Operation for IdentityOperation {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let input = input_map[&self.input];
         let mut output_map = HashMap::new();
@@ -2362,7 +2362,7 @@ impl Operation for IsInfOperation {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let input = input_map[&self.input];
         let output = graph.push_op(AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::is_inf(input, self.detect_positive.unwrap_or(true), self.detect_negative.unwrap_or(true),)));
@@ -2414,7 +2414,7 @@ impl Operation for ModuloOperation {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let a = input_map[&self.a];
         let b = input_map[&self.b];
@@ -2474,7 +2474,7 @@ impl Operation for ClipOperation {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let x = input_map[&self.input];
         let x = if let Some(min) = self.min {
@@ -2533,7 +2533,7 @@ impl Operation for ExpandOperation {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
 
         let x = graph.push_op(AnyMilliOp::Expand(MilliOpExpand::new(
@@ -2631,7 +2631,7 @@ impl Operation for ConvOperation {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
         unimplemented!();
     }
 }
@@ -2678,7 +2678,7 @@ impl Operation for InstanceNormalizationOperation {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
         unimplemented!();
     }
 }
@@ -2819,7 +2819,7 @@ impl Operation for ResizeOperation {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
         todo!()
     }
 }
@@ -2891,7 +2891,7 @@ impl Operation for PadOperation {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
         todo!()
     }
 }
@@ -2951,7 +2951,7 @@ impl Operation for RandomNormalLikeOperation {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
         todo!()
     }
 }
@@ -3001,8 +3001,20 @@ impl Operation for ArgMaxOperation {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph {
-        todo!()
+    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
+        let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
+
+        let x = graph.push_op(AnyMilliOp::ArgMax(MilliOpArgMax::new(
+            input_map[&self.input],
+            self.axis,
+            self.keepdims,
+            self.select_last_index
+        )));
+
+        let mut output_map = HashMap::new();
+        output_map.insert(x, self.output);
+        graph.set_output_map(output_map);
+        graph
     }
 }
 
@@ -3051,8 +3063,20 @@ impl Operation for ArgMinOperation {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph {
-        todo!()
+    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
+        let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
+
+        let x = graph.push_op(AnyMilliOp::ArgMin(MilliOpArgMin::new(
+            input_map[&self.input],
+            self.axis,
+            self.keepdims,
+            self.select_last_index
+        )));
+
+        let mut output_map = HashMap::new();
+        output_map.insert(x, self.output);
+        graph.set_output_map(output_map);
+        graph
     }
 }
 
@@ -3091,7 +3115,7 @@ impl Operation for MaxOperation {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let mut x = input_map[&self.inputs[0]];
         for input in &self.inputs[1..] {
@@ -3140,7 +3164,7 @@ impl Operation for MinOperation {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let mut x = input_map[&self.inputs[0]];
         for input in &self.inputs[1..] {
@@ -3354,7 +3378,7 @@ impl Operation for AnyOperation {
         }
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
         match self {
             AnyOperation::Unary(op) => op.get_milli_op_graph(),
             AnyOperation::Binary(op) => op.get_milli_op_graph(),

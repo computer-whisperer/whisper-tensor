@@ -22,7 +22,9 @@ pub enum NDArrayOperationError {
     #[error("unsupported operation")]
     UnimplementedOp(String),
     #[error("Internal error")]
-    Internal
+    Internal,
+    #[error("Empty input")]
+    EmptyInput,
 }
 
 pub(crate) fn reshape<T, D: Dimension>(input: ArcArray<T, D>, shape: D) -> Result<ArcArray<T, D>, ShapeError>
@@ -1183,4 +1185,88 @@ pub fn imod_i8(a: ArcArray<i8, IxDyn>, b: ArcArray<i8, IxDyn>) -> Result<ArcArra
 pub fn expand<T: Clone>(x: &ArcArray<T, IxDyn>, shape: &[usize]) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError> {
     let o = x.broadcast(shape).ok_or(NDArrayOperationError::IncompatibleShape)?;
     Ok(o.to_shared())
+}
+
+pub fn argmax<T: Clone + PartialOrd>(x: &ArcArray<T, IxDyn>, axis: usize, keepdims: bool, select_last_index: bool) -> Result<ArcArray<i64, IxDyn>, NDArrayOperationError> {
+    let ndim = x.ndim();
+    if ndim == 0 {
+        return Err(NDArrayOperationError::EmptyInput);
+    }
+    if axis >= ndim {
+        return Err(NDArrayOperationError::IncompatibleShape);
+    }
+
+    // For each “lane” along `axis`, find the index of the maximum element.
+    let reduced = x.map_axis(Axis(axis), |lane| {
+        let start = lane[0].clone();
+        // lane is a 1-D view; we know it’s non-empty because we checked ndim>0.
+        lane.iter()
+            .enumerate()
+            .fold((0, start), |(best_i, best_val), (i, v)| {
+                let v = v.clone();
+                if v > best_val {
+                    (i, v)
+                }
+                else if select_last_index && v == best_val {
+                    (i, v)
+                }
+                else {
+                    (best_i, best_val)
+                }
+            })
+            .0 as i64
+    });
+
+    // `map_axis` returns an Array<i64, _> of rank ndim-1.
+    // If keepdims, re-insert the axis as length=1; then convert to dynamic dim.
+    let out = if keepdims {
+        reduced.insert_axis(Axis(axis)).into_dyn()
+    } else {
+        reduced.into_dyn()
+    };
+
+    // Convert to ArcArray (shared ownership) for consistency with input.
+    Ok(out.into_shared())
+}
+
+pub fn argmin<T: Clone + PartialOrd>(x: &ArcArray<T, IxDyn>, axis: usize, keepdims: bool, select_last_index: bool) -> Result<ArcArray<i64, IxDyn>, NDArrayOperationError> {
+    let ndim = x.ndim();
+    if ndim == 0 {
+        return Err(NDArrayOperationError::EmptyInput);
+    }
+    if axis >= ndim {
+        return Err(NDArrayOperationError::IncompatibleShape);
+    }
+
+    // For each “lane” along `axis`, find the index of the maximum element.
+    let reduced = x.map_axis(Axis(axis), |lane| {
+        let start = lane[0].clone();
+        // lane is a 1-D view; we know it’s non-empty because we checked ndim>0.
+        lane.iter()
+            .enumerate()
+            .fold((0, start), |(best_i, best_val), (i, v)| {
+                let v = v.clone();
+                if v < best_val {
+                    (i, v)
+                }
+                else if select_last_index && v == best_val {
+                    (i, v)
+                }
+                else {
+                    (best_i, best_val)
+                }
+            })
+            .0 as i64
+    });
+
+    // `map_axis` returns an Array<i64, _> of rank ndim-1.
+    // If keepdims, re-insert the axis as length=1; then convert to dynamic dim.
+    let out = if keepdims {
+        reduced.insert_axis(Axis(axis)).into_dyn()
+    } else {
+        reduced.into_dyn()
+    };
+
+    // Convert to ArcArray (shared ownership) for consistency with input.
+    Ok(out.into_shared())
 }

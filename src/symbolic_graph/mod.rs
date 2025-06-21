@@ -512,7 +512,7 @@ impl SymbolicGraphMutator {
         tensor_id
     }
 
-    pub fn new_node_from_onnx_node(&mut self, core_opset_version: usize, onnx_node: &onnx::NodeProto) -> Result<(), ONNXDecodingError> {
+    pub fn new_node_from_onnx_node(&mut self, _core_opset_version: usize, onnx_node: &onnx::NodeProto) -> Result<(), ONNXDecodingError> {
         let mut input_tensors = vec![];
         for input in &onnx_node.input {
             input_tensors.push(if let Some(tensor_id) = self.tensors_by_name.get(input) {

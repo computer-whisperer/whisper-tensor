@@ -1,11 +1,11 @@
 use std::collections::HashMap;
+use std::hash::Hash;
 use serde::{Deserialize, Serialize};
 use crate::backends::eval_backend::EvalBackend;
 use crate::dtype::DTypeError;
 use crate::DynRank;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::numeric_tensor::NumericTensor;
-use crate::symbolic_graph::TensorId;
 use crate::tensor_info::TensorInfoError;
 
 pub(crate) mod ops;
@@ -30,25 +30,25 @@ pub enum MilliOpGraphError {
 }
 
 #[derive(Debug, Clone, Copy, Hash, Ord, PartialOrd, Eq, PartialEq, Serialize, Deserialize)]
-pub(crate) struct MilliOpGraphTensorId {
+pub struct MilliOpGraphTensorId {
     inner: usize,
 }
 
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MilliOpGraph {
-    input_map: HashMap<TensorId, MilliOpGraphTensorId>,
-    output_map: Option<HashMap<MilliOpGraphTensorId, TensorId>>,
+pub struct MilliOpGraph<ID: Hash + Clone + Eq> {
+    input_map: HashMap<ID, MilliOpGraphTensorId>,
+    output_map: Option<HashMap<MilliOpGraphTensorId, ID>>,
     ops: HashMap<MilliOpGraphTensorId, AnyMilliOp>,
     next_op_id: usize
 }
 
-impl MilliOpGraph {
-    pub(crate) fn new(inputs: &[TensorId]) -> (Self, HashMap<TensorId, MilliOpGraphTensorId>) {
+impl<ID: Hash + Clone + Eq> MilliOpGraph<ID> {
+    pub fn new(inputs: &[ID]) -> (Self, HashMap<ID, MilliOpGraphTensorId>) {
         let mut next_op_id = 0;
         let mut input_map = HashMap::new();
         for input in inputs {
-            input_map.insert(*input, MilliOpGraphTensorId{inner:next_op_id});
+            input_map.insert(input.clone(), MilliOpGraphTensorId{inner:next_op_id});
             next_op_id += 1;
         }
         (Self{
@@ -59,19 +59,19 @@ impl MilliOpGraph {
         }, input_map)
     }
 
-    pub(crate) fn set_output_map(&mut self, output_map: HashMap<MilliOpGraphTensorId, TensorId>) {
+    pub fn set_output_map(&mut self, output_map: HashMap<MilliOpGraphTensorId, ID>) {
         assert!(self.output_map.is_none());
         self.output_map = Some(output_map)
     }
 
-    pub(crate) fn push_op(&mut self, op: AnyMilliOp) -> MilliOpGraphTensorId {
+    pub fn push_op(&mut self, op: AnyMilliOp) -> MilliOpGraphTensorId {
         let new_tensor_id = MilliOpGraphTensorId{inner:self.next_op_id};
         self.next_op_id += 1;
         self.ops.insert(new_tensor_id, op);
         new_tensor_id
     }
 
-    pub(crate) fn eval(&self, inputs: &HashMap<TensorId, NumericTensor<DynRank>>, backend: &mut EvalBackend) -> Result<HashMap<TensorId, NumericTensor<DynRank>>, MilliOpGraphError> {
+    pub(crate) fn eval(&self, inputs: &HashMap<ID, NumericTensor<DynRank>>, backend: &mut EvalBackend) -> Result<HashMap<ID, NumericTensor<DynRank>>, MilliOpGraphError> {
         assert!(self.output_map.is_some());
 
         let op_ids_to_eval: Vec<_> = {
@@ -94,7 +94,7 @@ impl MilliOpGraph {
 
         let mut outputs = HashMap::new();
         for (a, b) in self.output_map.as_ref().unwrap() {
-            outputs.insert(*b, intermediate_values[a].clone());
+            outputs.insert(b.clone(), intermediate_values[a].clone());
         }
 
         Ok(outputs)

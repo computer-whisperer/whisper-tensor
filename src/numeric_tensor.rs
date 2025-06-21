@@ -333,6 +333,14 @@ impl NumericTensor<DynRank> {
         })
     }
 
+    pub fn argmax(&self, axis: usize, keepdims: bool, select_last_index: bool, _backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
+        Ok(NumericTensor::NDArray(self.to_ndarray()?.argmax(axis, keepdims, select_last_index)?))
+    }
+
+    pub fn argmin(&self, axis: usize, keepdims: bool, select_last_index: bool, _backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
+        Ok(NumericTensor::NDArray(self.to_ndarray()?.argmin(axis, keepdims, select_last_index)?))
+    }
+
     pub fn slice(&self, indices: &[Range<u64>], _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
         Ok(match self {
             NumericTensor::Vulkan(tensor) => {

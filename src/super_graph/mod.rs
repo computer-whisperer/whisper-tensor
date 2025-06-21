@@ -1,5 +1,5 @@
-mod links;
-mod nodes;
+pub mod links;
+pub mod nodes;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -10,15 +10,15 @@ use crate::super_graph::links::{SuperGraphAnyLink, SuperGraphLinkId, SuperGraphL
 use crate::super_graph::nodes::{SuperGraphAnyNode, SuperGraphNodeModelExecution, SuperGraphNodeModelLoad, SuperGraphNodeStringInput, SuperGraphNodeStringOutput, SuperGraphNodeTokenizerDecode, SuperGraphNodeTokenizerEncode, SuperGraphNodeTokenizerLoad};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub(crate) struct SuperGraphNodeId (pub(crate) u32);
+pub struct SuperGraphNodeId (pub(crate) u32);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct SuperGraph {
+pub struct SuperGraph {
     nodes: HashMap<SuperGraphNodeId, SuperGraphAnyNode>,
     links: Vec<SuperGraphAnyLink>
 }
 
-struct SuperGraphBuilder {
+pub struct SuperGraphBuilder {
     next_node_id: u32,
     next_link_id: u32,
     nodes: HashMap<SuperGraphNodeId, SuperGraphAnyNode>,
@@ -26,7 +26,7 @@ struct SuperGraphBuilder {
 }
 
 impl SuperGraphBuilder {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             next_node_id: 0,
             next_link_id: 0,
@@ -41,19 +41,19 @@ impl SuperGraphBuilder {
         SuperGraphNodeId(id)
     }
 
-    fn get_next_link_id(&mut self) -> SuperGraphLinkId {
+    pub fn get_next_link_id(&mut self) -> SuperGraphLinkId {
         let id = self.next_link_id;
         self.next_link_id += 1;
         SuperGraphLinkId(id)
     }
 
-    fn add_node(&mut self, node: SuperGraphAnyNode) -> SuperGraphNodeId {
+    pub fn add_node(&mut self, node: SuperGraphAnyNode) -> SuperGraphNodeId {
         let id = self.get_next_node_id();
         self.nodes.insert(id.clone(), node);
         id
     }
 
-    fn build(self) -> SuperGraph {
+    pub fn build(self) -> SuperGraph {
         SuperGraph {
             nodes: self.nodes,
             links: self.links
