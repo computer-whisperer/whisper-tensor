@@ -33,7 +33,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
 }
 
 impl NDArrayNumericTensor<P1> {
-    pub(crate) fn from_vec<T: NDArrayNumericTensorType>(v: Vec<T>) -> Self {
+    pub fn from_vec<T: NDArrayNumericTensorType>(v: Vec<T>) -> Self {
         T::ndarray_numeric_tensor_from_vec(v)
     }
     

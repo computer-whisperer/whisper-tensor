@@ -1,9 +1,5 @@
 use std::fmt::{Debug, Formatter};
 use std::ops::Range;
-use futures::StreamExt;
-use num_traits::real::Real;
-use ort::operator::kernel::Kernel;
-use tracing_subscriber::filter::FilterExt;
 use typenum::P1;
 use crate::dtype::{DType, DTypeError};
 use crate::backends::eval_backend::EvalBackend;

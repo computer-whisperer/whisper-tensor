@@ -8,7 +8,7 @@ use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::numeric_tensor::NumericTensor;
 use crate::tensor_info::TensorInfoError;
 
-pub(crate) mod ops;
+pub mod ops;
 pub(crate) mod ops_helpers;
 
 #[derive(Debug, thiserror::Error)]
@@ -57,6 +57,19 @@ impl<ID: Hash + Clone + Eq> MilliOpGraph<ID> {
             output_map: None,
             next_op_id
         }, input_map)
+    }
+
+    pub fn get_inputs(&self) -> Vec<ID> {
+        self.input_map.keys().cloned().collect()
+    }
+
+    pub fn get_outputs(&self) -> Vec<ID> {
+        if let Some(x) = &self.output_map {
+            x.values().cloned().collect()
+        }
+        else {
+            vec![]
+        }
     }
 
     pub fn set_output_map(&mut self, output_map: HashMap<MilliOpGraphTensorId, ID>) {

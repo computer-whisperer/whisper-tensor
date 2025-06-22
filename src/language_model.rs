@@ -6,7 +6,7 @@ use rwkv_tokenizer::WorldTokenizer;
 use whisper_tensor_import::onnx_graph::{ModelInputType, ModelOutputType, TokenizerInfo};
 use crate::backends::eval_backend::EvalBackend;
 use crate::numeric_tensor::NumericTensor;
-use crate::tokenizer::{AnyTokenizer, Tokenizer};
+use crate::tokenizer::{AnyTokenizer};
 use crate::model::{Model, ModelError};
 use crate::sampler::Sampler;
 use crate::tensor_rank::DynRank;
@@ -93,7 +93,7 @@ impl LanguageModelManager {
         while input_tokens_processed < input_sequence_len {
             let chunk_size = max_sequence_len.min((input_sequence_len - input_tokens_processed) as usize) as u64;
             let mut slice_indices: Vec<_> = input_shape.iter().map(|x| 0..*x).collect();
-            slice_indices[1] = (input_tokens_processed..(input_tokens_processed + chunk_size));
+            slice_indices[1] = input_tokens_processed..(input_tokens_processed + chunk_size);
             let input_tokens_chunk = input_tokens.slice(slice_indices.as_slice(), &EvalBackend::NDArray)?;
 
             let mut input_tensors = HashMap::new();

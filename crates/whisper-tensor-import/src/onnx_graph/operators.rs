@@ -2244,7 +2244,7 @@ impl SingleOutputNode for Expand {
 pub struct TopK {
     name: Option<String>,
     input: Arc<dyn Tensor>,
-    k: Arc<dyn Tensor>,
+    _k: Arc<dyn Tensor>,
     axis: i64,
     largest: bool,
     sorted: bool,
@@ -2283,7 +2283,7 @@ impl TopK {
         Ok((value_output.clone(), Arc::new(Self {
             name,
             input,
-            k,
+            _k: k,
             axis,
             largest,
             sorted,

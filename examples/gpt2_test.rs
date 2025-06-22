@@ -48,7 +48,7 @@ fn main() {
     let vulkan_context = VulkanContext::new().unwrap();
     let mut vulkan_runtime = VulkanImmediateExecutor::new(vulkan_context).unwrap();
     
-    let (output, _) = llm.run(input_tensor.clone(), None, &mut sampler, &mut EvalBackend::Vulkan(vulkan_runtime)).unwrap();
+    let (output, _) = llm.run(input_tensor.clone(), None, &mut sampler, &mut EvalBackend::NDArray).unwrap();
     let output_tensor = output.squeeze(0).unwrap()
         .squeeze(0).unwrap()
         .try_to_type::<u32>().unwrap().try_to_rank::<P1>().unwrap();

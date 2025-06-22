@@ -9,25 +9,17 @@ pub fn linear(weight_manager: &impl WeightManager, input: Arc<dyn Tensor>) -> Re
     let weight = weight_manager.get_tensor("weight")?;
     let weight = transpose(weight);
     
-    let input_shape = input.shape();
-    let weight_shape = weight.shape();
-    
     let bias = weight_manager.get_tensor("bias").ok();
     let input_rank = input.rank();
     let input = unsqueeze(input, (input_rank as i64) - 1)?;
 
-    let input_shape_2 = input.shape();
-    
-    let weight_rank = weight.rank();
     //let weight = unsqueeze(weight, weight_rank as i64)?;
     let mat_out = operators::MatMul::new(
         weight_manager.get_prefix().map(|x| x.to_string()),
         input,
         weight
     )?;
-    let mat_out_shape = mat_out.shape();
     let mat_out = squeeze(mat_out, (input_rank as i64) - 1)?;
-    let mat_out_shape_1 = mat_out.shape();
     if let Some(bias) = bias {
         Ok(operators::Add::new(Some(format!("{}.bias", weight_manager.get_prefix().unwrap())), mat_out, bias)?)
     } else {

@@ -48,12 +48,12 @@ pub trait MilliOp {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct MilliOpConstant {
+pub struct MilliOpConstant {
     data: NDArrayNumericTensor<DynRank>
 }
 
 impl MilliOpConstant {
-    pub(crate) fn new(a: NDArrayNumericTensor<DynRank>) -> Self {
+    pub fn new(a: NDArrayNumericTensor<DynRank>) -> Self {
         Self { data: a }
     }
 
@@ -79,14 +79,14 @@ impl MilliOp for MilliOpConstant {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct MilliOpRange {
+pub struct MilliOpRange {
     start: MilliOpGraphTensorId,
     end: MilliOpGraphTensorId,
     delta: MilliOpGraphTensorId
 }
 
 impl MilliOpRange {
-    pub(crate) fn new(start: MilliOpGraphTensorId,
+    pub fn new(start: MilliOpGraphTensorId,
                       end: MilliOpGraphTensorId,
                       delta: MilliOpGraphTensorId) -> Self {
         Self { start, end, delta}
@@ -135,13 +135,13 @@ impl MilliOp for MilliOpRange {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct MilliOpExpand {
+pub struct MilliOpExpand {
     input: MilliOpGraphTensorId,
     shape: MilliOpGraphTensorId
 }
 
 impl MilliOpExpand {
-    pub(crate) fn new(input: MilliOpGraphTensorId, shape: MilliOpGraphTensorId) -> Self{
+    pub fn new(input: MilliOpGraphTensorId, shape: MilliOpGraphTensorId) -> Self{
         Self {input, shape}
     }
 }
@@ -164,13 +164,13 @@ impl MilliOp for MilliOpExpand {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct MilliOpConstantOfShape {
+pub struct MilliOpConstantOfShape {
     value: NumericScalar,
     shape: MilliOpGraphTensorId
 }
 
 impl MilliOpConstantOfShape {
-    pub(crate) fn new(value: NumericScalar, shape: MilliOpGraphTensorId) -> Self {
+    pub fn new(value: NumericScalar, shape: MilliOpGraphTensorId) -> Self {
         Self { value, shape }
     }
 }
@@ -336,7 +336,7 @@ enum SimpleBinaryOp {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct MilliOpSimpleBinary {
+pub struct MilliOpSimpleBinary {
     which_op: SimpleBinaryOp,
     a: MilliOpGraphTensorId,
     b: MilliOpGraphTensorId
@@ -348,74 +348,74 @@ impl MilliOpSimpleBinary {
         Self { a, b, which_op }
     }
 
-    pub(crate) fn add(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
+    pub fn add(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
         Self { a, b, which_op: SimpleBinaryOp::Add }
     }
 
-    pub(crate) fn sub(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
+    pub fn sub(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
         Self { a, b, which_op: SimpleBinaryOp::Sub }
     }
 
-    pub(crate) fn mul(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
+    pub fn mul(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
         Self { a, b, which_op: SimpleBinaryOp::Mul }
     }
 
-    pub(crate) fn div(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
+    pub fn div(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
         Self { a, b, which_op: SimpleBinaryOp::Div }
     }
 
-    pub(crate) fn modulo(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId, fmod: Option<bool>) -> Self {
+    pub fn modulo(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId, fmod: Option<bool>) -> Self {
         Self { a, b, which_op: SimpleBinaryOp::Modulo(fmod) }
     }
-    pub(crate) fn and(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
+    pub fn and(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
         Self { a, b, which_op: SimpleBinaryOp::And }
     }
 
-    pub(crate) fn or(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
+    pub fn or(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
         Self { a, b, which_op: SimpleBinaryOp::Or }
     }
 
-    pub(crate) fn xor(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
+    pub fn xor(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
         Self { a, b, which_op: SimpleBinaryOp::Xor }
     }
 
-    pub(crate) fn bitwise_and(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
+    pub fn bitwise_and(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
         Self { a, b, which_op: SimpleBinaryOp::BitwiseAnd }
     }
 
-    pub(crate) fn bitwise_or(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
+    pub fn bitwise_or(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
         Self { a, b, which_op: SimpleBinaryOp::BitwiseOr }
     }
 
-    pub(crate) fn bitwise_xor(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
+    pub fn bitwise_xor(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
         Self { a, b, which_op: SimpleBinaryOp::BitwiseXor }
     }
 
-    pub(crate) fn equal(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
+    pub fn equal(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
         Self { a, b, which_op: SimpleBinaryOp::Equal }
     }
 
-    pub(crate) fn greater(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
+    pub fn greater(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
         Self { a, b, which_op: SimpleBinaryOp::Greater }
     }
 
-    pub(crate) fn greater_or_equal(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
+    pub fn greater_or_equal(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
         Self { a, b, which_op: SimpleBinaryOp::GreaterOrEqual }
     }
 
-    pub(crate) fn less(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
+    pub fn less(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
         Self { a, b, which_op: SimpleBinaryOp::Less }
     }
 
-    pub(crate) fn less_or_equal(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
+    pub fn less_or_equal(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
         Self { a, b, which_op: SimpleBinaryOp::LessOrEqual }
     }
 
-    pub(crate) fn max(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
+    pub fn max(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
         Self { a, b, which_op: SimpleBinaryOp::Max }
     }
 
-    pub(crate) fn min(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
+    pub fn min(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
         Self { a, b, which_op: SimpleBinaryOp::Min }
     }
 
@@ -485,7 +485,7 @@ impl MilliOp for MilliOpSimpleBinary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct MilliOpPow {
+pub struct MilliOpPow {
     a: MilliOpGraphTensorId,
     b: MilliOpGraphTensorId
 }
@@ -529,13 +529,13 @@ impl MilliOp for MilliOpPow {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct MilliOpMatMul {
+pub struct MilliOpMatMul {
     a: MilliOpGraphTensorId,
     b: MilliOpGraphTensorId
 }
 
 impl MilliOpMatMul {
-    pub(crate) fn new(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
+    pub fn new(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
         Self { a, b }
     }
 }
@@ -730,7 +730,7 @@ pub(crate) enum SimpleUnaryOp {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct MilliOpSimpleUnary {
+pub struct MilliOpSimpleUnary {
     input: MilliOpGraphTensorId,
     op: SimpleUnaryOp
 }
@@ -740,67 +740,67 @@ impl MilliOpSimpleUnary {
         Self {input, op}
     }
 
-    pub(crate) fn neg(input: MilliOpGraphTensorId) -> Self {
+    pub fn neg(input: MilliOpGraphTensorId) -> Self {
         Self::new(input, SimpleUnaryOp::Neg)
     }
 
-    pub(crate) fn abs(input: MilliOpGraphTensorId) -> Self {
+    pub fn abs(input: MilliOpGraphTensorId) -> Self {
         Self::new(input, SimpleUnaryOp::Abs)
     }
 
-    pub(crate) fn exp(input: MilliOpGraphTensorId) -> Self {
+    pub fn exp(input: MilliOpGraphTensorId) -> Self {
         Self::new(input, SimpleUnaryOp::Exp)
     }
 
-    pub(crate) fn ln(input: MilliOpGraphTensorId) -> Self {
+    pub fn ln(input: MilliOpGraphTensorId) -> Self {
         Self::new(input, SimpleUnaryOp::Ln)
     }
 
-    pub(crate) fn sqrt(input: MilliOpGraphTensorId) -> Self {
+    pub fn sqrt(input: MilliOpGraphTensorId) -> Self {
         Self::new(input, SimpleUnaryOp::Sqrt)
     }
 
-    pub(crate) fn not(input: MilliOpGraphTensorId) -> Self {
+    pub fn not(input: MilliOpGraphTensorId) -> Self {
         Self::new(input, SimpleUnaryOp::Not)
     }
 
-    pub(crate) fn sign(input: MilliOpGraphTensorId) -> Self {
+    pub fn sign(input: MilliOpGraphTensorId) -> Self {
         Self::new(input, SimpleUnaryOp::Sign)
     }
 
-    pub(crate) fn bitwise_not(input: MilliOpGraphTensorId) -> Self {
+    pub fn bitwise_not(input: MilliOpGraphTensorId) -> Self {
         Self::new(input, SimpleUnaryOp::BitwiseNot)
     }
 
-    pub(crate) fn reciprocal(input: MilliOpGraphTensorId) -> Self {
+    pub fn reciprocal(input: MilliOpGraphTensorId) -> Self {
         Self::new(input, SimpleUnaryOp::Reciprocal)
     }
 
-    pub(crate) fn trig(input: MilliOpGraphTensorId, trig_op: TrigOp) -> Self {
+    pub fn trig(input: MilliOpGraphTensorId, trig_op: TrigOp) -> Self {
         Self::new(input, SimpleUnaryOp::Trig(trig_op))
     }
 
-    pub(crate) fn floor(input: MilliOpGraphTensorId) -> Self {
+    pub fn floor(input: MilliOpGraphTensorId) -> Self {
         Self::new(input, SimpleUnaryOp::Floor)
     }
 
-    pub(crate) fn ceil(input: MilliOpGraphTensorId) -> Self {
+    pub fn ceil(input: MilliOpGraphTensorId) -> Self {
         Self::new(input, SimpleUnaryOp::Ceil)
     }
 
-    pub(crate) fn round(input: MilliOpGraphTensorId) -> Self {
+    pub fn round(input: MilliOpGraphTensorId) -> Self {
         Self::new(input, SimpleUnaryOp::Round)
     }
 
-    pub(crate) fn is_inf(input: MilliOpGraphTensorId, detect_positive: bool, detect_negative: bool) -> Self {
+    pub fn is_inf(input: MilliOpGraphTensorId, detect_positive: bool, detect_negative: bool) -> Self {
         Self::new(input, SimpleUnaryOp::IsInf{detect_positive, detect_negative})
     }
 
-    pub(crate) fn is_nan(input: MilliOpGraphTensorId) -> Self {
+    pub fn is_nan(input: MilliOpGraphTensorId) -> Self {
         Self::new(input, SimpleUnaryOp::IsNan)
     }
 
-    pub(crate) fn erf(input: MilliOpGraphTensorId) -> Self {
+    pub fn erf(input: MilliOpGraphTensorId) -> Self {
         Self::new(input, SimpleUnaryOp::Erf)
     }
 }
@@ -853,13 +853,13 @@ impl SimpleUnaryMilliOp for MilliOpSimpleUnary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct MilliOpClampMin {
+pub struct MilliOpClampMin {
     input: MilliOpGraphTensorId,
     value: f32
 }
 
 impl MilliOpClampMin {
-    pub(crate) fn new(a: MilliOpGraphTensorId, value: f32) -> Self {
+    pub fn new(a: MilliOpGraphTensorId, value: f32) -> Self {
         Self { input: a, value}
     }
 }
@@ -877,12 +877,12 @@ impl SimpleUnaryMilliOp for MilliOpClampMin {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct MilliOpNonZero {
+pub struct MilliOpNonZero {
     input: MilliOpGraphTensorId,
 }
 
 impl MilliOpNonZero {
-    pub(crate) fn new(input: MilliOpGraphTensorId) -> Self {
+    pub fn new(input: MilliOpGraphTensorId) -> Self {
         Self { input}
     }
 }
@@ -913,7 +913,7 @@ impl MilliOp for MilliOpNonZero {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct MilliOpCumSum {
+pub struct MilliOpCumSum {
     a: MilliOpGraphTensorId,
     axis: MilliOpGraphTensorId,
     exclusive: bool,
@@ -936,12 +936,12 @@ impl MilliOp for MilliOpCumSum {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct MilliOpShape {
+pub struct MilliOpShape {
     input: MilliOpGraphTensorId
 }
 
 impl MilliOpShape {
-    pub(crate) fn new(input: MilliOpGraphTensorId) -> Self {
+    pub fn new(input: MilliOpGraphTensorId) -> Self {
         Self { input }
     }
 }
@@ -961,7 +961,7 @@ impl MilliOp for MilliOpShape {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct MilliOpReduceSum {
+pub struct MilliOpReduceSum {
     data: MilliOpGraphTensorId,
     axes: Option<MilliOpGraphTensorId>,
     keepdims: bool,
@@ -969,7 +969,7 @@ pub(crate) struct MilliOpReduceSum {
 }
 
 impl MilliOpReduceSum {
-    pub(crate) fn new(data: MilliOpGraphTensorId, axes: Option<MilliOpGraphTensorId>, keepdims: bool, noop_with_empty_axes: bool) -> Self {
+    pub fn new(data: MilliOpGraphTensorId, axes: Option<MilliOpGraphTensorId>, keepdims: bool, noop_with_empty_axes: bool) -> Self {
         Self { data, axes, keepdims, noop_with_empty_axes}
     }
 }
@@ -1000,7 +1000,7 @@ impl MilliOp for MilliOpReduceSum {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct MilliOpReduceMin {
+pub struct MilliOpReduceMin {
     data: MilliOpGraphTensorId,
     axes: Option<MilliOpGraphTensorId>,
     keepdims: bool,
@@ -1008,7 +1008,7 @@ pub(crate) struct MilliOpReduceMin {
 }
 
 impl MilliOpReduceMin {
-    pub(crate) fn new(data: MilliOpGraphTensorId, axes: Option<MilliOpGraphTensorId>, keepdims: bool, noop_with_empty_axes: bool) -> Self {
+    pub fn new(data: MilliOpGraphTensorId, axes: Option<MilliOpGraphTensorId>, keepdims: bool, noop_with_empty_axes: bool) -> Self {
         Self { data, axes, keepdims, noop_with_empty_axes}
     }
 }
@@ -1039,7 +1039,7 @@ impl MilliOp for MilliOpReduceMin {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct MilliOpReduceMax {
+pub struct MilliOpReduceMax {
     data: MilliOpGraphTensorId,
     axes: Option<MilliOpGraphTensorId>,
     keepdims: bool,
@@ -1078,7 +1078,7 @@ impl MilliOp for MilliOpReduceMax {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct MilliOpReduceProd {
+pub struct MilliOpReduceProd {
     data: MilliOpGraphTensorId,
     axes: Option<MilliOpGraphTensorId>,
     keepdims: bool,
@@ -1086,7 +1086,7 @@ pub(crate) struct MilliOpReduceProd {
 }
 
 impl MilliOpReduceProd {
-    pub(crate) fn new(data: MilliOpGraphTensorId, axes: Option<MilliOpGraphTensorId>, keepdims: bool, noop_with_empty_axes: bool) -> Self {
+    pub fn new(data: MilliOpGraphTensorId, axes: Option<MilliOpGraphTensorId>, keepdims: bool, noop_with_empty_axes: bool) -> Self {
         Self { data, axes, keepdims, noop_with_empty_axes}
     }
 }
@@ -1117,7 +1117,7 @@ impl MilliOp for MilliOpReduceProd {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct MilliOpReduceMean {
+pub struct MilliOpReduceMean {
     data: MilliOpGraphTensorId,
     axes: Option<MilliOpGraphTensorId>,
     keepdims: bool,
@@ -1125,7 +1125,7 @@ pub(crate) struct MilliOpReduceMean {
 }
 
 impl MilliOpReduceMean {
-    pub(crate) fn new(data: MilliOpGraphTensorId, axes: Option<MilliOpGraphTensorId>, keepdims: bool, noop_with_empty_axes: bool) -> Self {
+    pub fn new(data: MilliOpGraphTensorId, axes: Option<MilliOpGraphTensorId>, keepdims: bool, noop_with_empty_axes: bool) -> Self {
         Self { data, axes, keepdims, noop_with_empty_axes}
     }
 }
@@ -1156,7 +1156,7 @@ impl MilliOp for MilliOpReduceMean {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct MilliOpSlice {
+pub struct MilliOpSlice {
     data: MilliOpGraphTensorId,
     starts: MilliOpGraphTensorId,
     ends: MilliOpGraphTensorId,
@@ -1165,7 +1165,7 @@ pub(crate) struct MilliOpSlice {
 }
 
 impl MilliOpSlice {
-    pub(crate) fn new(    data: MilliOpGraphTensorId,
+    pub fn new(    data: MilliOpGraphTensorId,
                           starts: MilliOpGraphTensorId,
                           ends: MilliOpGraphTensorId,
                           steps: Option<MilliOpGraphTensorId>,
@@ -1236,14 +1236,14 @@ impl MilliOp for MilliOpSlice {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct MilliOpReshape {
+pub struct MilliOpReshape {
     data: MilliOpGraphTensorId,
     shape: MilliOpGraphTensorId,
     allowzero: bool,
 }
 
 impl MilliOpReshape {
-    pub(crate) fn new(    data: MilliOpGraphTensorId,
+    pub fn new(    data: MilliOpGraphTensorId,
                           shape: MilliOpGraphTensorId,
                           allowzero: bool) -> Self {
         Self {
@@ -1387,13 +1387,13 @@ impl MilliOp for MilliOpReshape {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct MilliOpSqueeze {
+pub struct MilliOpSqueeze {
     data: MilliOpGraphTensorId,
     axes: MilliOpGraphTensorId,
 }
 
 impl MilliOpSqueeze {
-    pub(crate) fn new(    data: MilliOpGraphTensorId,
+    pub fn new(    data: MilliOpGraphTensorId,
                           axes: MilliOpGraphTensorId) -> Self {
         Self {
             data,
@@ -1502,13 +1502,13 @@ impl MilliOp for MilliOpSqueeze {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct MilliOpUnsqueeze {
+pub struct MilliOpUnsqueeze {
     data: MilliOpGraphTensorId,
     axes: MilliOpGraphTensorId,
 }
 
 impl MilliOpUnsqueeze {
-    pub(crate) fn new(    data: MilliOpGraphTensorId,
+    pub fn new(    data: MilliOpGraphTensorId,
                           axes: MilliOpGraphTensorId) -> Self {
         Self {
             data,
@@ -1626,13 +1626,13 @@ impl MilliOp for MilliOpUnsqueeze {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct MilliOpCast {
+pub struct MilliOpCast {
     data: MilliOpGraphTensorId,
     dtype: DType
 }
 
 impl MilliOpCast {
-    pub(crate) fn new(data: MilliOpGraphTensorId, dtype: DType) -> Self {
+    pub fn new(data: MilliOpGraphTensorId, dtype: DType) -> Self {
         Self {data, dtype}
     }
 }
@@ -1646,13 +1646,13 @@ impl MilliOp for MilliOpCast {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct MilliOpCastLike {
+pub struct MilliOpCastLike {
     data: MilliOpGraphTensorId,
     target_type: MilliOpGraphTensorId
 }
 
 impl MilliOpCastLike {
-    pub(crate) fn new(data: MilliOpGraphTensorId, target_type: MilliOpGraphTensorId) -> Self {
+    pub fn new(data: MilliOpGraphTensorId, target_type: MilliOpGraphTensorId) -> Self {
         Self {data, target_type}
     }
 }
@@ -1666,13 +1666,13 @@ impl MilliOp for MilliOpCastLike {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct MilliOpTranspose {
+pub struct MilliOpTranspose {
     data: MilliOpGraphTensorId,
     perm: Option<Vec<i64>>
 }
 
 impl MilliOpTranspose {
-    pub(crate) fn new(    data: MilliOpGraphTensorId,
+    pub fn new(    data: MilliOpGraphTensorId,
                           perm: Option<Vec<i64>>) -> Self {
         Self {data, perm}
     }
@@ -1687,14 +1687,14 @@ impl MilliOp for MilliOpTranspose {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct MilliOpGather {
+pub struct MilliOpGather {
     data: MilliOpGraphTensorId,
     indices: MilliOpGraphTensorId,
     axis: i64
 }
 
 impl MilliOpGather {
-    pub(crate) fn new(    data: MilliOpGraphTensorId,
+    pub fn new(    data: MilliOpGraphTensorId,
                           indices: MilliOpGraphTensorId,
                           axis: i64) -> Self {
         Self {data, indices, axis}
@@ -1716,7 +1716,7 @@ pub(crate) struct MilliOpConcat {
 }
 
 impl MilliOpConcat {
-    pub(crate) fn new(    inputs: Vec<MilliOpGraphTensorId>,
+    pub fn new(    inputs: Vec<MilliOpGraphTensorId>,
                           axis: i64) -> Self {
         Self {inputs, axis}
     }
@@ -1748,7 +1748,7 @@ pub struct MilliOpArgMax {
 }
 
 impl MilliOpArgMax {
-    pub(crate) fn new(    input: MilliOpGraphTensorId,
+    pub fn new(    input: MilliOpGraphTensorId,
                           axis: i64,
                           keepdims: bool,
                           select_last_index: bool
@@ -1781,7 +1781,7 @@ pub struct MilliOpArgMin {
 }
 
 impl MilliOpArgMin {
-    pub(crate) fn new(    input: MilliOpGraphTensorId,
+    pub fn new(    input: MilliOpGraphTensorId,
                           axis: i64,
                           keepdims: bool,
                           select_last_index: bool
@@ -1806,7 +1806,7 @@ impl MilliOp for MilliOpArgMin {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct MilliOpSplit {
+pub struct MilliOpSplit {
     data: MilliOpGraphTensorId,
     split: Option<MilliOpTensorIDOrLiteral>,
     axis: i64,
@@ -1815,7 +1815,7 @@ pub(crate) struct MilliOpSplit {
 }
 
 impl MilliOpSplit {
-    pub(crate) fn new(    data: MilliOpGraphTensorId,
+    pub fn new(    data: MilliOpGraphTensorId,
                           split: Option<MilliOpTensorIDOrLiteral>,
                           axis: i64,
                           num_outputs: Option<usize>,
@@ -1843,7 +1843,7 @@ impl MilliOp for MilliOpSplit {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct MilliOpWhere {
+pub struct MilliOpWhere {
     condition: MilliOpGraphTensorId,
     x: MilliOpGraphTensorId,
     y: MilliOpGraphTensorId,

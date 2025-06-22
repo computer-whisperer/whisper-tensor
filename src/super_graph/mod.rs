@@ -4,18 +4,118 @@ pub mod nodes;
 use std::collections::HashMap;
 use std::sync::Arc;
 use serde::{Deserialize, Serialize};
-use whisper_tensor_import::onnx_graph::TokenizerInfo;
-use crate::model::Model;
-use crate::super_graph::links::{SuperGraphAnyLink, SuperGraphLinkId, SuperGraphLinkTensor};
-use crate::super_graph::nodes::{SuperGraphAnyNode, SuperGraphNodeModelExecution, SuperGraphNodeModelLoad, SuperGraphNodeStringInput, SuperGraphNodeStringOutput, SuperGraphNodeTokenizerDecode, SuperGraphNodeTokenizerEncode, SuperGraphNodeTokenizerLoad};
+use crate::backends::eval_backend::EvalBackend;
+use crate::DynRank;
+use crate::milli_graph::MilliOpGraphError;
+use crate::model::{Model, ModelError};
+use crate::numeric_tensor::{NumericTensor, NumericTensorError};
+use crate::numeric_tensor_typed::TypedNumericTensorError;
+use crate::super_graph::links::{SuperGraphAnyLink, SuperGraphLinkId, SuperGraphLinkModel, SuperGraphLinkString, SuperGraphLinkTensor, SuperGraphLinkTokenizer};
+use crate::super_graph::nodes::{SuperGraphAnyNode};
+use crate::tokenizer::{AnyTokenizer, TokenizerError};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SuperGraphNodeId (pub(crate) u32);
+
+#[derive(Debug, thiserror::Error)]
+pub enum SuperGraphError {
+    #[error(transparent)]
+    ModelError(#[from] ModelError),
+    #[error(transparent)]
+    TokenizerError(#[from] TokenizerError),
+    #[error(transparent)]
+    MilliOpGraphError(#[from] MilliOpGraphError),
+    #[error(transparent)]
+    NumericTensorError(#[from] NumericTensorError),
+    #[error(transparent)]
+    TypedNumericTensorError(#[from] TypedNumericTensorError),
+}
+
+struct SuperGraphData {
+    tensors: HashMap<SuperGraphLinkTensor, NumericTensor<DynRank>>,
+    strings: HashMap<SuperGraphLinkString, String>,
+    tokenizers: HashMap<SuperGraphLinkTokenizer, AnyTokenizer>,
+    models: HashMap<SuperGraphLinkModel, Arc<Model>>,
+    text_input: String,
+    text_output: Option<String>,
+    loaded_models: Vec<Arc<Model>>
+}
+
+impl SuperGraphData {
+    pub fn new(text_input: String, loaded_models: Vec<Arc<Model>>) -> Self {
+        Self {
+            tensors: HashMap::new(),
+            strings: HashMap::new(),
+            tokenizers: HashMap::new(),
+            models: HashMap::new(),
+            text_input,
+            text_output: None,
+            loaded_models
+        }
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SuperGraph {
     nodes: HashMap<SuperGraphNodeId, SuperGraphAnyNode>,
     links: Vec<SuperGraphAnyLink>
+}
+
+impl SuperGraph {
+    pub fn run(&self, models: &[Arc<Model>], input: String, backend: &mut EvalBackend) -> Result<Option<String>, SuperGraphError> {
+        let mut data = SuperGraphData::new(input, models.to_vec());
+
+        let mut remaining_ops = self.nodes.keys().map(|x| x.clone()).collect::<Vec<_>>();
+
+        loop {
+            let op_id_to_use = {
+                let mut op_id_to_use = None;
+                for op_id in &remaining_ops {
+                    let op = self.nodes.get(op_id).unwrap();
+                    let mut all_inputs_ready = true;
+                    for input in &op.get_inputs() {
+                        match input {
+                            SuperGraphAnyLink::Tensor(x) => {
+                                if !data.tensors.contains_key(x) {
+                                    all_inputs_ready = false;
+                                }
+                            }
+                            SuperGraphAnyLink::String(x) => {
+                                if !data.strings.contains_key(x) {
+                                    all_inputs_ready = false;
+                                }
+                            }
+                            SuperGraphAnyLink::Model(x) => {
+                                if !data.models.contains_key(x) {
+                                    all_inputs_ready = false;
+                                }
+                            }
+                            SuperGraphAnyLink::Tokenizer(x) => {
+                                if !data.tokenizers.contains_key(x) {
+                                    all_inputs_ready = false;
+                                }
+                            }
+                        }
+                    }
+                    if all_inputs_ready {
+                        op_id_to_use = Some(op_id.clone());
+                        break;
+                    }
+                }
+                op_id_to_use
+            };
+            if let Some(op_id) = op_id_to_use {
+                let op = self.nodes.get(&op_id).unwrap();
+                op.eval(&mut data, backend)?;
+                remaining_ops.retain(|x| *x != op_id);
+            }
+            else {
+                break;
+            }
+        }
+
+        Ok(data.text_output)
+    }
 }
 
 pub struct SuperGraphBuilder {
@@ -59,39 +159,4 @@ impl SuperGraphBuilder {
             links: self.links
         }
     }
-}
-
-fn build_basic_supergraph() -> SuperGraph {
-    let mut builder = SuperGraphBuilder::new();
-
-    let model_load = SuperGraphNodeModelLoad::new_and_add(&mut builder, "test".to_string());
-
-    let text_input = SuperGraphNodeStringInput::new_and_add(&mut builder);
-
-    let tokenizer_link = SuperGraphNodeTokenizerLoad::new_and_add(&mut builder, TokenizerInfo::RWKVWorld);
-
-    let tokens = SuperGraphNodeTokenizerEncode::new_and_add(&mut builder, tokenizer_link.clone(), text_input);
-
-    let logit_output = {
-        let inputs = {
-            let mut inputs = HashMap::new();
-            inputs.insert(tokens.clone(), "tokens".to_string());
-            inputs
-        };
-        let (outputs, logit_output) = {
-            let mut outputs = HashMap::new();
-            let tensor = SuperGraphLinkTensor::new(builder.get_next_link_id());
-            outputs.insert("logits".to_string(), tensor.clone());
-            (outputs, tensor)
-        };
-        let node = SuperGraphNodeModelExecution::new(model_load, inputs, outputs);
-        builder.add_node(node.into());
-        logit_output
-    };
-
-    let text_output = SuperGraphNodeTokenizerDecode::new_and_add(&mut builder, tokenizer_link, logit_output);
-
-    SuperGraphNodeStringOutput::new_and_add(&mut builder, text_output);
-
-    builder.build()
 }
