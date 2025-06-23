@@ -52,7 +52,7 @@ fn build_matmul_pipeline(
     };
 
     let io_data_type_array = builder.type_runtime_array(stored_spirv_dtype);
-    builder.decorate(io_data_type_array, Decoration::ArrayStride, [Operand::LiteralBit32(stored_dtype.size() as u32)]);
+    builder.decorate(io_data_type_array, Decoration::ArrayStride, [Operand::LiteralBit32(stored_dtype.size().unwrap() as u32)]);
     let io_data_type_array_struct = builder.type_struct([io_data_type_array]);
     builder.decorate(io_data_type_array_struct, Decoration::Block, []);
     builder.member_decorate(io_data_type_array_struct, 0, Decoration::Offset, [Operand::LiteralBit32(0)]);
@@ -427,9 +427,9 @@ impl<R: Rank> VulkanTensor<R> {
 
         let op_metadata_vec = {
             let mut v = vec![];
-            v.push((a.offset as u32 + a.suballocation.offset as u32)/a.dtype().size() as u32);
-            v.push((b.offset as u32 + b.suballocation.offset as u32)/b.dtype().size() as u32);
-            v.push((output_tensor.offset as u32 + output_tensor.suballocation.offset as u32)/a.dtype().size() as u32);
+            v.push((a.offset as u32 + a.suballocation.offset as u32)/a.dtype().size().unwrap() as u32);
+            v.push((b.offset as u32 + b.suballocation.offset as u32)/b.dtype().size().unwrap() as u32);
+            v.push((output_tensor.offset as u32 + output_tensor.suballocation.offset as u32)/a.dtype().size().unwrap() as u32);
             v
         };
 

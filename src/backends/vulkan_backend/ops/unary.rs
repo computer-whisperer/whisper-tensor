@@ -51,7 +51,7 @@ fn build_unary_pipeline(
     };
 
     let input_data_type_array = b.type_runtime_array(input_data_type);
-    b.decorate(input_data_type_array, Decoration::ArrayStride, [Operand::LiteralBit32(input_dtype.size() as u32)]);
+    b.decorate(input_data_type_array, Decoration::ArrayStride, [Operand::LiteralBit32(input_dtype.size().unwrap() as u32)]);
     let input_data_type_array_struct = b.type_struct([input_data_type_array]);
     b.decorate(input_data_type_array_struct, Decoration::Block, []);
     b.member_decorate(input_data_type_array_struct, 0, Decoration::Offset, [Operand::LiteralBit32(0)]);
@@ -62,7 +62,7 @@ fn build_unary_pipeline(
 
     let output_data_type_array = b.type_runtime_array(output_data_type);
     if output_data_type_array != input_data_type_array {
-        b.decorate(output_data_type_array, Decoration::ArrayStride, [Operand::LiteralBit32(output_dtype.size() as u32)]);
+        b.decorate(output_data_type_array, Decoration::ArrayStride, [Operand::LiteralBit32(output_dtype.size().unwrap() as u32)]);
     }
     let output_data_type_array_struct = b.type_struct([output_data_type_array]);
     b.decorate(output_data_type_array_struct, Decoration::Block, []);
@@ -301,8 +301,8 @@ impl<R: Rank> VulkanTensor<R> {
 
         let op_metadata_vec = {
             let mut v = vec![];
-            v.push((self.offset as u32 + self.suballocation.offset as u32)/self.dtype().size() as u32);
-            v.push((output_tensor.offset as u32 + output_tensor.suballocation.offset as u32)/output_dtype.size() as u32);
+            v.push((self.offset as u32 + self.suballocation.offset as u32)/self.dtype().size().unwrap() as u32);
+            v.push((output_tensor.offset as u32 + output_tensor.suballocation.offset as u32)/output_dtype.size().unwrap() as u32);
             v.push((self.shape().dim_product() as u32));
             for dim in self.shape().as_slice() {
                 v.push(*dim as u32);
@@ -699,6 +699,7 @@ impl<R: Rank> VulkanTensor<R> {
                                 let const_zero = b.f_convert(input_data_type, None, const_zero).unwrap();
                                 Ok(b.f_unord_not_equal(output_data_type, None, i, const_zero).unwrap())
                             }
+                            _ => Err(VulkanError::UnsupportedByBackendError),
                         }
                     }
                     DType::I64 | DType::I32 | DType::I16 | DType::I8 => {
@@ -721,6 +722,7 @@ impl<R: Rank> VulkanTensor<R> {
                                 let const_zero = b.s_convert(input_data_type, None, const_zero).unwrap();
                                 Ok(b.i_not_equal(output_data_type, None, i, const_zero).unwrap())
                             }
+                            _ => Err(VulkanError::UnsupportedByBackendError),
                         }
                     }
                     DType::U64 | DType::U32 | DType::U16 | DType::U8 => {
@@ -743,6 +745,7 @@ impl<R: Rank> VulkanTensor<R> {
                                 let const_zero = b.u_convert(input_data_type, None, const_zero).unwrap();
                                 Ok(b.i_not_equal(output_data_type, None, i, const_zero).unwrap())
                             }
+                            _ => Err(VulkanError::UnsupportedByBackendError),
                         }
                     }
                     DType::BOOL => {
@@ -771,8 +774,10 @@ impl<R: Rank> VulkanTensor<R> {
                             DType::BOOL => {
                                 Ok(i)
                             }
+                            _ => Err(VulkanError::UnsupportedByBackendError),
                         }
                     }
+                    _ => Err(VulkanError::UnsupportedByBackendError),
                 }
             }
         })

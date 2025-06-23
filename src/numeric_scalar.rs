@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use crate::dtype::{DType, DTypeOfPrimitive};
 use crate::TrigOp;
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum NumericScalar {
     F64(f64),
     F32(f32),
@@ -18,7 +18,8 @@ pub enum NumericScalar {
     I16(i16),
     U8(u8),
     I8(i8),
-    BOOL(bool)
+    BOOL(bool),
+    STRING(String)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -42,6 +43,7 @@ impl NumericScalar {
             NumericScalar::U8(_) => DType::U8,
             NumericScalar::I8(_) => DType::I8,
             NumericScalar::BOOL(_) => DType::BOOL,
+            NumericScalar::STRING(_) => DType::STRING
         }
     }
     
@@ -60,6 +62,7 @@ impl NumericScalar {
             DType::U8 => NumericScalar::U8(0),
             DType::I8 => NumericScalar::I8(0),
             DType::BOOL => NumericScalar::BOOL(false),
+            DType::STRING => NumericScalar::STRING(String::new()),
         }
     }
     
@@ -263,6 +266,7 @@ impl NumericScalar {
             NumericScalar::U8(x) => x.to_le_bytes().to_vec(),
             NumericScalar::I8(x) => x.to_le_bytes().to_vec(),
             NumericScalar::BOOL(x) => vec![*x as u8],
+            NumericScalar::STRING(_) => panic!()
         }
     }
 }

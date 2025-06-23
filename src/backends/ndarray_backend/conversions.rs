@@ -122,5 +122,6 @@ impl_type_ndarray_backend!(i16, I16);
 impl_type_ndarray_backend!(u8, U8);
 impl_type_ndarray_backend!(i8, I8);
 impl_type_ndarray_backend!(bool, BOOL);
+impl_type_ndarray_backend!(String, STRING);
 
 

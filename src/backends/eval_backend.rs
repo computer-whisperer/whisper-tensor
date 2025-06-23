@@ -24,6 +24,24 @@ impl core::fmt::Display for EvalBackend {
     }
 }
 
+impl EvalBackend {
+    pub fn supports_dtype(&self, dtype: DType) -> bool {
+        match self {
+            #[cfg(feature = "candle")]
+            EvalBackend::Candle(_) => match dtype {
+                DType::F32 | DType::F64 | DType::BF16 | DType::F16 | DType::U32 | DType::I64 | DType::U8 => true,
+                _ => false,
+            },
+            EvalBackend::NDArray => true,
+            #[cfg(feature = "vulkan")]
+            EvalBackend::Vulkan(_) => match dtype {
+                DType::STRING => false,
+                _ => true,
+            },
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum EvalRuntimeError {
     #[error("Disabled Eval Backend: {0}")]

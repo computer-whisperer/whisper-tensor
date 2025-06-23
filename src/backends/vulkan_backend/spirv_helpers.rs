@@ -15,7 +15,8 @@ pub fn get_spirv_datatype(b: &mut rspirv::dr::Builder, dtype: DType) -> Result<r
         DType::U16 => b.type_int(16, 0),
         DType::I8 => b.type_int(8, 1),
         DType::U8 => b.type_int(8, 0),
-        DType::BOOL => b.type_bool()
+        DType::BOOL => b.type_bool(),
+        DType::STRING => panic!()
     })
 }
 

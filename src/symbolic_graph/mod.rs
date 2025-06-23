@@ -331,6 +331,15 @@ impl TryFrom<&onnx::TensorProto> for NDArrayNumericTensor<DynRank> {
                 _ => Err(ONNXDecodingError::UnsupportedONNX("Unsupported dtype in int32_data field!".to_string()))?
             }
         }
+        else if !tensor.string_data.is_empty() {
+            match dtype {
+                DType::STRING => {
+                    let strings = tensor.string_data.iter().map(|x| String::from_utf8(x.clone()).unwrap()).collect::<Vec<_>>();
+                    NDArrayNumericTensor::from_vec_shape(strings, &shape)?
+                },
+                _ => Err(ONNXDecodingError::UnsupportedONNX("Unsupported dtype in string field!".to_string()))?
+            }
+        }
         else {
             NDArrayNumericTensor::fill(NumericScalar::zero_of(dtype), &shape)?
         };

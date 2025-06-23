@@ -1,7 +1,7 @@
 use std::fmt::{Display, Formatter};
-use std::ops::{BitAnd, BitOr, BitXor, Not, Range};
+use std::ops::{Not, Range};
 use half::{bf16, f16};
-use ndarray::{ArcArray, IxDyn, SliceInfo, SliceInfoElem, StrideShape};
+use ndarray::{ArcArray, IxDyn, SliceInfo, SliceInfoElem};
 use serde::{Deserialize, Serialize};
 use typenum::P1;
 use crate::dtype::DType;
@@ -48,6 +48,7 @@ pub enum NDArrayNumericTensor<R: Rank>
     U8(ArcArray<u8, R::NDArrayDim>),
     I8(ArcArray<i8, R::NDArrayDim>),
     BOOL(ArcArray<bool, R::NDArrayDim>),
+    STRING(ArcArray<String, R::NDArrayDim>),
 }
 
 impl<R: Rank> Display for NDArrayNumericTensor<R> {
@@ -66,6 +67,7 @@ impl<R: Rank> Display for NDArrayNumericTensor<R> {
             NDArrayNumericTensor::U8(x) => x.fmt(f),
             NDArrayNumericTensor::I8(x) => x.fmt(f),
             NDArrayNumericTensor::BOOL(x) => x.fmt(f),
+            NDArrayNumericTensor::STRING(x) => x.fmt(f),
         }
     }
 }
@@ -87,6 +89,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
             NDArrayNumericTensor::<R>::U8(x) => NDArrayNumericTensor::<R1>::U8(x.to_owned().into_dimensionality()?.to_shared()),
             NDArrayNumericTensor::<R>::I8(x) => NDArrayNumericTensor::<R1>::I8(x.to_owned().into_dimensionality()?.to_shared()),
             NDArrayNumericTensor::<R>::BOOL(x) => NDArrayNumericTensor::<R1>::BOOL(x.to_owned().into_dimensionality()?.to_shared()),
+            NDArrayNumericTensor::<R>::STRING(x) => NDArrayNumericTensor::<R1>::STRING(x.to_owned().into_dimensionality()?.to_shared()),
         })
     }
     
@@ -112,7 +115,8 @@ impl<R: Rank> NDArrayNumericTensor<R> {
             NDArrayNumericTensor::I16(_) => DType::I16,
             NDArrayNumericTensor::U8(_) => DType::U8,
             NDArrayNumericTensor::I8(_) => DType::I8,
-            NDArrayNumericTensor::BOOL(_) => DType::BOOL
+            NDArrayNumericTensor::BOOL(_) => DType::BOOL,
+            NDArrayNumericTensor::STRING(_) => DType::STRING,
         }
     }
 
@@ -130,7 +134,8 @@ impl<R: Rank> NDArrayNumericTensor<R> {
             NDArrayNumericTensor::I16(x) => x.shape(),
             NDArrayNumericTensor::U8(x) => x.shape(),
             NDArrayNumericTensor::I8(x) => x.shape(),
-            NDArrayNumericTensor::BOOL(x) => x.shape()
+            NDArrayNumericTensor::BOOL(x) => x.shape(),
+            NDArrayNumericTensor::STRING(x) => x.shape(),
         };
         let s2 = s.iter().map(|x| *x as u64).collect::<Vec<_>>();
         R::KnownDims::try_from_slice(s2.as_slice()).unwrap()
@@ -151,6 +156,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
             NDArrayNumericTensor::U8(x) => x.len(),
             NDArrayNumericTensor::I8(x) => x.len(),
             NDArrayNumericTensor::BOOL(x) => x.len(),
+            NDArrayNumericTensor::STRING(x) => x.len(),
         }
     }
     
@@ -171,6 +177,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
             NDArrayNumericTensor::I8(x) => NumericScalar::I8(*x.get(index)?),
             NDArrayNumericTensor::U8(x) => NumericScalar::U8(*x.get(index)?),
             NDArrayNumericTensor::BOOL(x) => NumericScalar::BOOL(*x.get(index)?),
+            NDArrayNumericTensor::STRING(_) => panic!("Cannot get element from string tensor")
         })
     }
 
@@ -189,6 +196,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
             NDArrayNumericTensor::I8(x) => NumericScalar::I8(x.to_owned().as_slice().unwrap()[0]),
             NDArrayNumericTensor::U8(x) => NumericScalar::U8(x.to_owned().as_slice().unwrap()[0]),
             NDArrayNumericTensor::BOOL(x) => NumericScalar::BOOL(x.to_owned().as_slice().unwrap()[0]),
+            NDArrayNumericTensor::STRING(_) => panic!("Cannot get element from string tensor")
         }
     }
     
@@ -294,6 +302,9 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                     v.push(bytes[i] != 0);
                 }
                 Self::from_slice_shape_stride(v, shape, stride)?
+            }
+            _ => {
+                return Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("from_bytes".to_string(), vec![dtype]));
             }
         })
     }
@@ -544,6 +555,9 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                     DType::I8 => Ok(NDArrayNumericTensor::I8(x.map(|x| *x as i8).to_shared())),
                     DType::U8 => Ok(NDArrayNumericTensor::U8(x.map(|x| *x as u8).to_shared())),
                     DType::BOOL => Ok(NDArrayNumericTensor::BOOL(x.map(|x| *x != 0).to_shared())),
+                    _ => {
+                        Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("cast".to_string(), vec![dtype]))?
+                    }
                 }
             }
             NDArrayNumericTensor::I32(x) => {
@@ -561,6 +575,9 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                     DType::I8 => Ok(NDArrayNumericTensor::I8(x.map(|x| *x as i8).to_shared())),
                     DType::U8 => Ok(NDArrayNumericTensor::U8(x.map(|x| *x as u8).to_shared())),
                     DType::BOOL => Ok(NDArrayNumericTensor::BOOL(x.map(|x| *x != 0).to_shared())),
+                    _ => {
+                        Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("cast".to_string(), vec![dtype]))?
+                    }
                 }
             }
             NDArrayNumericTensor::U64(x) => {
@@ -578,6 +595,9 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                     DType::I8 => Ok(NDArrayNumericTensor::I8(x.map(|x| *x as i8).to_shared())),
                     DType::U8 => Ok(NDArrayNumericTensor::U8(x.map(|x| *x as u8).to_shared())),
                     DType::BOOL => Ok(NDArrayNumericTensor::BOOL(x.map(|x| *x != 0).to_shared())),
+                    _ => {
+                        Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("cast".to_string(), vec![dtype]))?
+                    }
                 }
             }
             NDArrayNumericTensor::I64(x) => {
@@ -595,6 +615,9 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                     DType::I8 => Ok(NDArrayNumericTensor::I8(x.map(|x| *x as i8).to_shared())),
                     DType::U8 => Ok(NDArrayNumericTensor::U8(x.map(|x| *x as u8).to_shared())),
                     DType::BOOL => Ok(NDArrayNumericTensor::BOOL(x.map(|x| *x != 0).to_shared())),
+                    _ => {
+                        Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("cast".to_string(), vec![dtype]))?
+                    }
                 }
             }
             NDArrayNumericTensor::U16(x) => {
@@ -612,6 +635,9 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                     DType::I16 => Ok(NDArrayNumericTensor::I16(x.map(|x| *x as i16).to_shared())),
                     DType::U8 => Ok(NDArrayNumericTensor::U8(x.map(|x| *x as u8).to_shared())),
                     DType::BOOL => Ok(NDArrayNumericTensor::BOOL(x.map(|x| *x != 0).to_shared())),
+                    _ => {
+                        Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("cast".to_string(), vec![dtype]))?
+                    }
                 }
             }
             NDArrayNumericTensor::I16(x) => {
@@ -629,6 +655,9 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                     DType::I16 => Ok(NDArrayNumericTensor::I16(x.clone())),
                     DType::U8 => Ok(NDArrayNumericTensor::U8(x.map(|x| *x as u8).to_shared())),
                     DType::BOOL => Ok(NDArrayNumericTensor::BOOL(x.map(|x| *x != 0).to_shared())),
+                    _ => {
+                        Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("cast".to_string(), vec![dtype]))?
+                    }
                 }
             }
             NDArrayNumericTensor::I8(x) => {
@@ -646,6 +675,9 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                     DType::U8 => Ok(NDArrayNumericTensor::I8(x.clone())),
                     DType::I8 => Ok(NDArrayNumericTensor::U8(x.map(|x| *x as u8).to_shared())),
                     DType::BOOL => Ok(NDArrayNumericTensor::BOOL(x.map(|x| *x != 0).to_shared())),
+                    _ => {
+                        Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("cast".to_string(), vec![dtype]))?
+                    }
                 }
             }
             NDArrayNumericTensor::U8(x) => {
@@ -663,6 +695,9 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                     DType::I8 => Ok(NDArrayNumericTensor::I8(x.map(|x| *x as i8).to_shared())),
                     DType::U8 => Ok(NDArrayNumericTensor::U8(x.clone())),
                     DType::BOOL => Ok(NDArrayNumericTensor::BOOL(x.map(|x| *x != 0).to_shared())),
+                    _ => {
+                        Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("cast".to_string(), vec![dtype]))?
+                    }
                 }
             }
             NDArrayNumericTensor::BOOL(x) => {
@@ -683,6 +718,9 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                     _ => Err(NDArrayNumericTensorError::InvalidCastOperation(self.dtype(), dtype)),
                 }
             }
+            _ => {
+                Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("cast".to_string(), vec![dtype]))?
+            }
         }
     }
     
@@ -701,6 +739,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
             NDArrayNumericTensor::U8(x) => NDArrayNumericTensor::<P1>::U8(x.flatten().to_shared()),
             NDArrayNumericTensor::I8(x) => NDArrayNumericTensor::<P1>::I8(x.flatten().to_shared()),
             NDArrayNumericTensor::BOOL(x) => NDArrayNumericTensor::<P1>::BOOL(x.flatten().to_shared()),
+            NDArrayNumericTensor::STRING(x) => NDArrayNumericTensor::<P1>::STRING(x.flatten().to_shared()),
         }
     }
 
@@ -720,6 +759,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
             NDArrayNumericTensor::U8(x) => Ok(NDArrayNumericTensor::U8(ops::reshape(x.clone(), new_shape)?)),
             NDArrayNumericTensor::I8(x) => Ok(NDArrayNumericTensor::I8(ops::reshape(x.clone(), new_shape)?)),
             NDArrayNumericTensor::BOOL(x) => Ok(NDArrayNumericTensor::BOOL(ops::reshape(x.clone(), new_shape)?)),
+            NDArrayNumericTensor::STRING(x) => Ok(NDArrayNumericTensor::STRING(ops::reshape(x.clone(), new_shape)?)),
         }
     }
 
@@ -777,6 +817,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
             NumericScalar::U8(x) => Self::U8(ArcArray::from_elem(shape, x)),
             NumericScalar::I8(x) => Self::I8(ArcArray::from_elem(shape, x)),
             NumericScalar::BOOL(x) => Self::BOOL(ArcArray::from_elem(shape, x)),
+            NumericScalar::STRING(x) => Self::STRING(ArcArray::from_elem(shape, x)),
         })
     }
 }
@@ -941,6 +982,7 @@ impl NDArrayNumericTensor<DynRank> {
             NDArrayNumericTensor::I8(x) => NDArrayNumericTensor::I64(ops::nonzero(x.clone())?),
             NDArrayNumericTensor::U8(x) => NDArrayNumericTensor::I64(ops::nonzero(x.clone())?),
             NDArrayNumericTensor::BOOL(x) => NDArrayNumericTensor::I64(ops::nonzero(x.clone())?),
+            NDArrayNumericTensor::STRING(_) => Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("nonzero".to_string(), vec![self.dtype()]))?
         })
     }
 
@@ -985,6 +1027,9 @@ impl NDArrayNumericTensor<DynRank> {
             NDArrayNumericTensor::BOOL(a) => {
                 Some(NDArrayNumericTensor::BOOL(ops::transpose(a.clone(), axes)?))
             }
+            NDArrayNumericTensor::STRING(a) => {
+                Some(NDArrayNumericTensor::STRING(ops::transpose(a.clone(), axes)?))
+            }
         };
         v.ok_or(NDArrayNumericTensorError::UnsupportedOperationForDTypes("Transpose".to_string(), vec![self.dtype()]))
     }
@@ -1006,6 +1051,7 @@ impl NDArrayNumericTensor<DynRank> {
             NDArrayNumericTensor::U8(x) => NDArrayNumericTensor::U8(ops::gather(axis, x.clone(), indices)?),
             NDArrayNumericTensor::I8(x) => NDArrayNumericTensor::I8(ops::gather(axis, x.clone(), indices)?),
             NDArrayNumericTensor::BOOL(x) => NDArrayNumericTensor::BOOL(ops::gather(axis, x.clone(), indices)?),
+            NDArrayNumericTensor::STRING(_) => Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("gather".to_string(), vec![data.dtype()]))?
         })
     }
 
@@ -1168,6 +1214,17 @@ impl NDArrayNumericTensor<DynRank> {
                 }
                 Ok(NDArrayNumericTensor::BOOL(ops::concat(axis, &selected_arrays)?))
             }
+            NDArrayNumericTensor::STRING(_) => {
+                let mut selected_arrays = vec![];
+                for t in tensors {
+                    if let NDArrayNumericTensor::STRING(x) = t {
+                        selected_arrays.push(x.clone());
+                    } else {
+                        return Err(NDArrayNumericTensorError::InvalidCastOperation(t.dtype(), DType::STRING));
+                    }
+                }
+                Ok(NDArrayNumericTensor::STRING(ops::concat(axis, &selected_arrays)?))
+            }
         }
     }
 
@@ -1224,6 +1281,9 @@ impl NDArrayNumericTensor<DynRank> {
                 let data = data.into_iter().map(|x| *x != 0).collect();
                 NDArrayNumericTensor::from_vec_shape(data, &shape)?
             }
+            _ => {
+                Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("from_raw_data".to_string(), vec![dtype]))?
+            }
         })
     }
 
@@ -1267,6 +1327,7 @@ impl NDArrayNumericTensor<DynRank> {
             NDArrayNumericTensor::I8(x) => ops::split(x.clone(), axis, split)?.into_iter().map(|x| NDArrayNumericTensor::I8(x)).collect(),
             NDArrayNumericTensor::U8(x) => ops::split(x.clone(), axis, split)?.into_iter().map(|x| NDArrayNumericTensor::U8(x)).collect(),
             NDArrayNumericTensor::BOOL(x) => ops::split(x.clone(), axis, split)?.into_iter().map(|x| NDArrayNumericTensor::BOOL(x)).collect(),
+            NDArrayNumericTensor::STRING(x) => ops::split(x.clone(), axis, split)?.into_iter().map(|x| NDArrayNumericTensor::STRING(x)).collect(),
         })
     }
 
@@ -1441,6 +1502,9 @@ impl NDArrayNumericTensor<DynRank> {
             NDArrayNumericTensor::BOOL(_) => {
                 None
             }
+            NDArrayNumericTensor::STRING(_) => {
+                None
+            }
         };
         if let Some(result) = result {
             Ok(result)
@@ -1496,7 +1560,23 @@ impl NDArrayNumericTensor<DynRank> {
     }
 
     pub fn equal(a: &Self, b: &Self) -> Result<Self, NDArrayNumericTensorError> {
-        Self::binary_op_bool_out(a, b, NativeNumericTensorBinaryOperationBoolOut::Equal)
+        match (a, b) {
+            (Self::F64(a), Self::F64(b)) => Ok(Self::BOOL(ops::equal(a.clone(), b.clone())?)),
+            (Self::F32(a), Self::F32(b)) => Ok(Self::BOOL(ops::equal(a.clone(), b.clone())?)),
+            (Self::BF16(a), Self::BF16(b)) => Ok(Self::BOOL(ops::equal(a.clone(), b.clone())?)),
+            (Self::F16(a), Self::F16(b)) => Ok(Self::BOOL(ops::equal(a.clone(), b.clone())?)),
+            (Self::I64(a), Self::I64(b)) => Ok(Self::BOOL(ops::equal(a.clone(), b.clone())?)),
+            (Self::U64(a), Self::U64(b)) => Ok(Self::BOOL(ops::equal(a.clone(), b.clone())?)),
+            (Self::I32(a), Self::I32(b)) => Ok(Self::BOOL(ops::equal(a.clone(), b.clone())?)),
+            (Self::U32(a), Self::U32(b)) => Ok(Self::BOOL(ops::equal(a.clone(), b.clone())?)),
+            (Self::I16(a), Self::I16(b)) => Ok(Self::BOOL(ops::equal(a.clone(), b.clone())?)),
+            (Self::U16(a), Self::U16(b)) => Ok(Self::BOOL(ops::equal(a.clone(), b.clone())?)),
+            (Self::I8(a), Self::I8(b)) => Ok(Self::BOOL(ops::equal(a.clone(), b.clone())?)),
+            (Self::U8(a), Self::U8(b)) => Ok(Self::BOOL(ops::equal(a.clone(), b.clone())?)),
+            (Self::BOOL(a), Self::BOOL(b)) => Ok(Self::BOOL(ops::equal(a.clone(), b.clone())?)),
+            (Self::STRING(a), Self::STRING(b)) => Ok(Self::BOOL(ops::equal(a.clone(), b.clone())?)),
+            _ => Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("equal".to_string(), vec![a.dtype(), b.dtype()])),
+        }
     }
 
     pub fn greater(a: &Self, b: &Self) -> Result<Self, NDArrayNumericTensorError> {
@@ -1641,6 +1721,7 @@ impl NDArrayNumericTensor<DynRank> {
             NDArrayNumericTensor::U8(x) => { NDArrayNumericTensor::U8(x.slice(s).to_shared())}
             NDArrayNumericTensor::I8(x) => { NDArrayNumericTensor::I8(x.slice(s).to_shared())}
             NDArrayNumericTensor::BOOL(x) => { NDArrayNumericTensor::BOOL(x.slice(s).to_shared())}
+            NDArrayNumericTensor::STRING(x) => { NDArrayNumericTensor::STRING(x.slice(s).to_shared())}
         })
     }
     
@@ -1660,6 +1741,7 @@ impl NDArrayNumericTensor<DynRank> {
             NDArrayNumericTensor::U8(x) => NDArrayNumericTensor::U8(ops::expand(x, &shape)?),
             NDArrayNumericTensor::I8(x) => NDArrayNumericTensor::I8(ops::expand(x, &shape)?),
             NDArrayNumericTensor::BOOL(x) => NDArrayNumericTensor::BOOL(ops::expand(x, &shape)?),
+            NDArrayNumericTensor::STRING(x) => NDArrayNumericTensor::STRING(ops::expand(x, &shape)?),
         })
     }
 
@@ -1678,7 +1760,7 @@ impl NDArrayNumericTensor<DynRank> {
             NDArrayNumericTensor::I16(x) => {ops::argmax(x, axis, keepdims, select_last_index)?}
             NDArrayNumericTensor::U8(x) => {ops::argmax(x, axis, keepdims, select_last_index)?}
             NDArrayNumericTensor::I8(x) => {ops::argmax(x, axis, keepdims, select_last_index)?}
-            NDArrayNumericTensor::BOOL(_) => Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("argmax".to_string(), vec![self.dtype()]))?
+            _ => Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("argmax".to_string(), vec![self.dtype()]))?
         }))
     }
 
@@ -1697,14 +1779,14 @@ impl NDArrayNumericTensor<DynRank> {
             NDArrayNumericTensor::I16(x) => {ops::argmin(x, axis, keepdims, select_last_index)?}
             NDArrayNumericTensor::U8(x) => {ops::argmin(x, axis, keepdims, select_last_index)?}
             NDArrayNumericTensor::I8(x) => {ops::argmin(x, axis, keepdims, select_last_index)?}
-            NDArrayNumericTensor::BOOL(_) => Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("argmin".to_string(), vec![self.dtype()]))?
+            _ => Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes("argmin".to_string(), vec![self.dtype()]))?
         }))
     }
 }
 
 impl NDArrayNumericTensor<P1> {
     pub fn range(start: NumericScalar, end: NumericScalar, step: NumericScalar) -> Result<Self, NDArrayNumericTensorError> {
-        match (start, end, step) {
+        match (start.clone(), end.clone(), step.clone()) {
             (NumericScalar::F64(start), NumericScalar::F64(end), NumericScalar::F64(step)) => Ok(NDArrayNumericTensor::F64(ops::range(start, end, step))),
             (NumericScalar::F32(start), NumericScalar::F32(end), NumericScalar::F32(step)) => Ok(NDArrayNumericTensor::F32(ops::range(start, end, step))),
             (NumericScalar::BF16(start), NumericScalar::BF16(end), NumericScalar::BF16(step)) => Ok(NDArrayNumericTensor::BF16(ops::range(start, end, step))),

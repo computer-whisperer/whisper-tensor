@@ -1189,7 +1189,7 @@ impl Operation for ConstantOfShapeOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let out = graph.push_op(AnyMilliOp::ConstantOfShape(MilliOpConstantOfShape::new(
-            self.value,
+            self.value.clone(),
             input_map[&self.input]
         )));
         let mut output_map = HashMap::new();

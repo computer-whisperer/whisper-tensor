@@ -32,7 +32,7 @@ impl<R: Rank> VulkanTensor<R> {
     }
 
     pub unsafe fn new_uninitialized(shape: R::KnownDims, dtype: DType, executor: &mut VulkanImmediateExecutor) -> Result<Self, VulkanError> {
-        let needed_space = shape.as_slice().iter().product::<u64>() as usize*dtype.size();
+        let needed_space = shape.as_slice().iter().product::<u64>() as usize*dtype.size().unwrap();
         let (buffer, suballocation) = executor.alloc_space(needed_space);
 
         let stride = Self::get_standard_stride(&shape);
@@ -64,7 +64,7 @@ impl<R: Rank> VulkanTensor<R> {
                 let value = source.get(&index).unwrap().to_bytes();
                 // Calculate destination
                 let outer_offset = tensor.suballocation.offset as usize;
-                let inner_offset = index.as_slice().iter().zip(tensor.stride.as_slice().iter()).map(|(a, b)| a*b).sum::<u64>() as usize * tensor.dtype.size();
+                let inner_offset = index.as_slice().iter().zip(tensor.stride.as_slice().iter()).map(|(a, b)| a*b).sum::<u64>() as usize * tensor.dtype.size().unwrap();
                 writer[outer_offset+inner_offset..outer_offset+inner_offset+value.len()].copy_from_slice(&value);
             }
         }
@@ -74,7 +74,7 @@ impl<R: Rank> VulkanTensor<R> {
     pub fn to_ndarray(&self) -> NDArrayNumericTensor<R> {
         {
             let reader = self.buffer.read().unwrap();
-            let bytes_to_read = (self.shape.as_slice().iter().zip(self.stride.as_slice().iter()).map(|(a, b)| (a-1)*b).sum::<u64>() + 1) as usize*self.dtype.size();
+            let bytes_to_read = (self.shape.as_slice().iter().zip(self.stride.as_slice().iter()).map(|(a, b)| (a-1)*b).sum::<u64>() + 1) as usize*self.dtype.size().unwrap();
             let start_offset = self.suballocation.offset as usize + self.offset;
             NDArrayNumericTensor::from_bytes(
                 &reader[start_offset ..start_offset + bytes_to_read],

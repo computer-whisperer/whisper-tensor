@@ -16,6 +16,7 @@ use whisper_tensor::symbolic_graph::ONNXDecodingError;
 use whisper_tensor::tensor_rank::DynRank;
 use whisper_tensor::backends::vulkan_backend::{VulkanContext, VulkanImmediateExecutor};
 use paste::paste;
+use whisper_tensor::onnx;
 
 // Structure to hold a test case
 struct OnnxNodeTest {
@@ -288,6 +289,13 @@ fn run_ndarray_test(path: &Path) {
     test.run(&mut EvalBackend::NDArray).unwrap()
 }
 
+#[cfg(feature = "candle")]
+fn run_candle_test(path: &Path) {
+    let test = OnnxNodeTest::from_directory(&path).unwrap();
+    test.run(&mut EvalBackend::Candle(candle_core::Device::Cpu)).unwrap()
+}
+
+#[cfg(feature = "vulkan")]
 fn run_vulkan_test(path: &Path) {
     let vulkan_context = VulkanContext::new().unwrap();
     let vulkan_runtime = VulkanImmediateExecutor::new(vulkan_context).unwrap();
@@ -296,6 +304,7 @@ fn run_vulkan_test(path: &Path) {
     let test = OnnxNodeTest::from_directory(&path).unwrap();
     test.run(&mut eval_backend).unwrap()
 }
+
 
 macro_rules! do_test {
     ($runner_fn:expr, $runner_name:ident, $test_name:ident) => {
@@ -825,8 +834,8 @@ macro_rules! do_tests {
         
         do_test!($runner_fn, $runner_name, test_equal);
         do_test!($runner_fn, $runner_name, test_equal_bcast);
-        //do_test!($runner_fn, $runner_name, test_equal_string);
-        //do_test!($runner_fn, $runner_name, test_equal_string_broadcast);
+        do_test!($runner_fn, $runner_name, test_equal_string);
+        do_test!($runner_fn, $runner_name, test_equal_string_broadcast);
         
         //do_test!($runner_fn, $runner_name, test_erf);
         do_test!($runner_fn, $runner_name, test_exp);
@@ -1986,4 +1995,8 @@ macro_rules! do_tests {
 }
 
 do_tests!(run_ndarray_test, ndarray);
+#[cfg(feature = "vulkan")]
 do_tests!(run_vulkan_test, vulkan);
+
+//#[cfg(feature = "candle")]
+//do_tests!(run_candle_test, candle);

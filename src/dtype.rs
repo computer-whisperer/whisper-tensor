@@ -27,25 +27,27 @@ pub enum DType {
     I16,
     U8,
     I8,
-    BOOL
+    BOOL,
+    STRING
 }
 
 impl DType {
-    pub fn size(&self) -> usize {
+    pub fn size(&self) -> Option<usize> {
         match self {
-            DType::F64 => 8,
-            DType::F32 => 4,
-            DType::BF16 => 2,
-            DType::F16 => 2,
-            DType::U64 => 8,
-            DType::I64 => 8,
-            DType::U32 => 4,
-            DType::I32 => 4,
-            DType::U16 => 2,
-            DType::I16 => 2,
-            DType::U8 => 1,
-            DType::I8 => 1,
-            DType::BOOL => 1
+            DType::F64 => Some(8),
+            DType::F32 => Some(4),
+            DType::BF16 => Some(2),
+            DType::F16 => Some(2),
+            DType::U64 => Some(8),
+            DType::I64 => Some(8),
+            DType::U32 => Some(4),
+            DType::I32 => Some(4),
+            DType::U16 => Some(2),
+            DType::I16 => Some(2),
+            DType::U8 => Some(1),
+            DType::I8 => Some(1),
+            DType::BOOL => Some(1),
+            DType::STRING => None
         }
     }
 }
@@ -67,6 +69,7 @@ impl TryFrom<onnx::tensor_proto::DataType> for DType {
             onnx::tensor_proto::DataType::Uint8 => DType::U8,
             onnx::tensor_proto::DataType::Int8 => DType::I8,
             onnx::tensor_proto::DataType::Bool => DType::BOOL,
+            onnx::tensor_proto::DataType::String => DType::STRING,
             _ => Err(DTypeError::UnsupportedONNXDtype(onnx_dtype))?
         })
     }
@@ -87,7 +90,8 @@ impl From<DType> for onnx::tensor_proto::DataType {
             DType::I16 => onnx::tensor_proto::DataType::Int16,
             DType::U8 => onnx::tensor_proto::DataType::Uint8,
             DType::I8 => onnx::tensor_proto::DataType::Int8,
-            DType::BOOL => onnx::tensor_proto::DataType::Bool
+            DType::BOOL => onnx::tensor_proto::DataType::Bool,
+            DType::STRING => onnx::tensor_proto::DataType::String,
         }
     }
 }
@@ -107,7 +111,8 @@ impl std::fmt::Display for DType {
             DType::U16 => write!(f, "UInt16"),
             DType::U8 => write!(f, "UInt8"),
             DType::I8 => write!(f, "Int8"),
-            DType::BOOL => write!(f, "Bool")
+            DType::BOOL => write!(f, "Bool"),
+            DType::STRING => write!(f, "String"),
         }
     }
 }
@@ -161,3 +166,4 @@ impl DTypeOfPrimitive for u16 { const DTYPE: DType = DType::U16; }
 impl DTypeOfPrimitive for i8 { const DTYPE: DType = DType::I8; }
 impl DTypeOfPrimitive for u8 { const DTYPE: DType = DType::U8; }
 impl DTypeOfPrimitive for bool { const DTYPE: DType = DType::BOOL; }
+impl DTypeOfPrimitive for String { const DTYPE: DType = DType::STRING; }

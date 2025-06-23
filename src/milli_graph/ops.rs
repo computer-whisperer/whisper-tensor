@@ -109,9 +109,9 @@ impl MilliOp for MilliOpRange {
             (start, end, delta) {
             // We have enough info, so just resolve it
             TensorInfo::from(NumericTensor::<P1>::range(
-                *start,
-                *end,
-                *delta,
+                start.clone(),
+                end.clone(),
+                delta.clone(),
                 backend
             )?)
         } 
@@ -194,12 +194,12 @@ impl MilliOp for MilliOpConstantOfShape {
                         for i in 0..tensor.shape()[0] {
                             new_shape.push(tensor.get(&[i]).unwrap().clone());
                         }
-                        Ok(TensorInfo::from(TensorInfoRanked::<DynRank>::new(ScalarInfo::Numeric(self.value), new_shape, symbolic_resolver)))
+                        Ok(TensorInfo::from(TensorInfoRanked::<DynRank>::new(ScalarInfo::Numeric(self.value.clone()), new_shape, symbolic_resolver)))
                     }
                 }
             }
             TensorInfoTypedRanked::Ranked(tensor) => {
-                Ok(TensorInfo::new_from_first_element_and_rank(ScalarInfo::Numeric(self.value), tensor.shape()[0].cast(), symbolic_resolver))
+                Ok(TensorInfo::new_from_first_element_and_rank(ScalarInfo::Numeric(self.value.clone()), tensor.shape()[0].cast(), symbolic_resolver))
             }
         }
     }

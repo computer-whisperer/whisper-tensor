@@ -23,7 +23,8 @@ impl From<DType> for ort::tensor::TensorElementType {
             DType::I16 => ort::tensor::TensorElementType::Int16,
             DType::I8 => ort::tensor::TensorElementType::Int8,
             DType::U8 => ort::tensor::TensorElementType::Uint8,
-            DType::BOOL => ort::tensor::TensorElementType::Bool
+            DType::BOOL => ort::tensor::TensorElementType::Bool,
+            DType::STRING => ort::tensor::TensorElementType::String,
         }
     }
 }
@@ -111,6 +112,9 @@ impl TryFrom<&NDArrayNumericTensor<DynRank>> for ORTNumericTensor {
             }
             NDArrayNumericTensor::BOOL(x) => {
                 ort::value::Value::from_array(x.to_owned())?.into_dyn()
+            }
+            NDArrayNumericTensor::STRING(_) => {
+                unimplemented!()
             }
         }))
     }

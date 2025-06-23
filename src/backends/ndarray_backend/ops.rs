@@ -585,6 +585,27 @@ impl NativeNumericTensorBinaryOperationBoolOut {
     }
 }
 
+pub(crate) fn equal<'a, T: 'a>(a: ArcArray<T, IxDyn>, b: ArcArray<T, IxDyn>) -> Result<ArcArray<bool, IxDyn>, NDArrayOperationError> where
+    T: Clone + PartialEq + PartialOrd,
+{
+    let a = if let Some(a) = a.broadcast(b.shape()) {
+        a
+    } else {
+        a.view()
+    };
+
+    let b = if let Some(b) = b.broadcast(a.shape()) {
+        b
+    }
+    else {
+        b.view()
+    };
+
+    let o = ndarray::Zip::from(a).and(b).map_collect(|a, b| a.clone() == b.clone());
+
+    Ok(o.to_shared())
+}
+
 impl NativeNumericTensorBitwiseBinaryOperation {
     pub(crate) fn apply<'a, T: 'a>(&self, a: ArcArray<T, IxDyn>, b: ArcArray<T, IxDyn>) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError> where
         T: Clone + Copy + BitAnd<Output=T> + BitOr<Output=T> + BitXor<Output=T>,
