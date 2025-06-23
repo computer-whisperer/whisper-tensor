@@ -13,8 +13,8 @@ use crate::backends::onnx_reference_backend::{self, ONNXReferenceTensor};
 use crate::symbolic_graph::{ ONNXDecodingError, SymbolicGraph, SymbolicGraphMutator};
 use crate::symbolic_graph::tensor_store::TensorStore;
 
-#[cfg(feature = "ort")]
-use crate::backends::ort_backend::ORTNumericTensor;
+//#[cfg(feature = "ort")]
+//use crate::backends::ort_backend::ORTNumericTensor;
 use crate::DynRank;
 use crate::scalar_info::ScalarInfoTyped;
 

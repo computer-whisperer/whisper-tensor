@@ -2045,7 +2045,7 @@ impl Operation for LogSoftmaxOperation {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub(crate) struct SizeOperation {
+pub struct SizeOperation {
     input: TensorId,
     output: TensorId
 }
@@ -2276,7 +2276,7 @@ impl Operation for ConstantOperation {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub(crate) struct IdentityOperation {
+pub struct IdentityOperation {
     input: TensorId,
     output: TensorId
 }
@@ -2321,7 +2321,7 @@ impl Operation for IdentityOperation {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub(crate) struct IsInfOperation {
+pub struct IsInfOperation {
     input: TensorId,
     output: TensorId,
     detect_negative: Option<bool>,
@@ -2374,7 +2374,7 @@ impl Operation for IsInfOperation {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub(crate) struct ModuloOperation {
+pub struct ModuloOperation {
     a: TensorId,
     b: TensorId,
     output: TensorId,
@@ -2428,7 +2428,7 @@ impl Operation for ModuloOperation {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub(crate) struct ClipOperation {
+pub struct ClipOperation {
     input: TensorId,
     min: Option<TensorId>,
     max: Option<TensorId>,
@@ -2497,7 +2497,7 @@ impl Operation for ClipOperation {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub(crate) struct ExpandOperation {
+pub struct ExpandOperation {
     input: TensorId,
     shape: TensorId,
     output: TensorId
@@ -2557,7 +2557,7 @@ pub(crate) enum ConvOperationAutoPad {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub(crate) struct ConvOperation {
+pub struct ConvOperation {
     input: TensorId,
     output: TensorId,
     weight: TensorId,
@@ -2637,7 +2637,7 @@ impl Operation for ConvOperation {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub(crate) struct InstanceNormalizationOperation {
+pub struct InstanceNormalizationOperation {
     input: TensorId,
     scale: TensorId,
     bias: TensorId,
@@ -2715,7 +2715,7 @@ pub(crate) enum ResizeNearestMode {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub(crate) struct ResizeOperation {
+pub struct ResizeOperation {
     input: TensorId,
     roi: Option<TensorId>,
     scales: Option<TensorId>,
@@ -2833,7 +2833,7 @@ pub(crate) enum PadMode {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub(crate) struct PadOperation {
+pub struct PadOperation {
     input: TensorId,
     pads: TensorId,
     constant_value: Option<TensorId>,
@@ -2897,7 +2897,7 @@ impl Operation for PadOperation {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub(crate) struct RandomNormalLikeOperation {
+pub struct RandomNormalLikeOperation {
     input: TensorId,
     output: TensorId,
     dtype: Option<DType>,
@@ -2957,7 +2957,7 @@ impl Operation for RandomNormalLikeOperation {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub(crate) struct ArgMaxOperation {
+pub struct ArgMaxOperation {
     axis: i64,
     keepdims: bool,
     select_last_index: bool,
@@ -3019,7 +3019,7 @@ impl Operation for ArgMaxOperation {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub(crate) struct ArgMinOperation {
+pub struct ArgMinOperation {
     axis: i64,
     keepdims: bool,
     select_last_index: bool,
@@ -3081,7 +3081,7 @@ impl Operation for ArgMinOperation {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub(crate) struct MaxOperation {
+pub struct MaxOperation {
     inputs: Vec<TensorId>,
     output: TensorId
 }
@@ -3130,7 +3130,7 @@ impl Operation for MaxOperation {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub(crate) struct MinOperation {
+pub struct MinOperation {
     inputs: Vec<TensorId>,
     output: TensorId
 }
@@ -3199,6 +3199,8 @@ pub enum AnyOperation {
     ReduceMean(ReduceMeanOperation),
     ReduceSum(ReduceSumOperation),
     ReduceProd(ReduceProdOperation),
+    ReduceMin(ReduceMinOperation),
+    ReduceMax(ReduceMaxOperation),
     Pow(PowOperation),
     Gemm(GemmOperation),
     Split(SplitOperation),
@@ -3248,6 +3250,8 @@ impl AnyOperation {
             AnyOperation::ReduceMean(op) => op,
             AnyOperation::ReduceSum(op) => op,
             AnyOperation::ReduceProd(op) => op,
+            AnyOperation::ReduceMin(op) => op,
+            AnyOperation::ReduceMax(op) => op,
             AnyOperation::Pow(op) => op,
             AnyOperation::Gemm(op) => op,
             AnyOperation::Split(op) => op,
@@ -3302,6 +3306,8 @@ impl Operation for AnyOperation {
             AnyOperation::ReduceMean(op) => op.get_inputs(),
             AnyOperation::ReduceSum(op) => op.get_inputs(),
             AnyOperation::ReduceProd(op) => op.get_inputs(),
+            AnyOperation::ReduceMin(op) => op.get_inputs(),
+            AnyOperation::ReduceMax(op) => op.get_inputs(),
             AnyOperation::Pow(op) => op.get_inputs(),
             AnyOperation::Gemm(op) => op.get_inputs(),
             AnyOperation::Split(op) => op.get_inputs(),
@@ -3350,6 +3356,8 @@ impl Operation for AnyOperation {
             AnyOperation::ReduceMean(op) => op.get_outputs(),
             AnyOperation::ReduceSum(op) => op.get_outputs(),
             AnyOperation::ReduceProd(op) => op.get_outputs(),
+            AnyOperation::ReduceMin(op) => op.get_outputs(),
+            AnyOperation::ReduceMax(op) => op.get_outputs(),
             AnyOperation::Pow(op) => op.get_outputs(),
             AnyOperation::Gemm(op) => op.get_outputs(),
             AnyOperation::Split(op) => op.get_outputs(),
@@ -3399,6 +3407,8 @@ impl Operation for AnyOperation {
             AnyOperation::ReduceMean(op) => op.get_milli_op_graph(),
             AnyOperation::ReduceSum(op) => op.get_milli_op_graph(),
             AnyOperation::ReduceProd(op) => op.get_milli_op_graph(),
+            AnyOperation::ReduceMax(op) => op.get_milli_op_graph(),
+            AnyOperation::ReduceMin(op) => op.get_milli_op_graph(),
             AnyOperation::Pow(op) => op.get_milli_op_graph(),
             AnyOperation::Gemm(op) => op.get_milli_op_graph(),
             AnyOperation::Split(op) => op.get_milli_op_graph(),

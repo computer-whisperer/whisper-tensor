@@ -86,7 +86,6 @@ fn load_onnx_file(model_path: &Path, hint: Option<ModelTypeHint>) -> Result<Vec:
 }
 
 fn try_inject_onnx_metadata_for_simple_llm(mut onnx_data: Vec<u8>, tokenizer_info: TokenizerInfo) -> Result<Vec::<u8>, Error> {
-    let mut do_reencode = false;
     let mut model_proto = ModelProto::decode(onnx_data.as_slice())?;
     let metadata = ModelMetadata{
         tokenizer_infos: vec![tokenizer_info],
@@ -96,7 +95,7 @@ fn try_inject_onnx_metadata_for_simple_llm(mut onnx_data: Vec<u8>, tokenizer_inf
         key: "whisper_tensor_metadata".to_string(),
         value: serde_json::to_string(&metadata).unwrap()
     });
-    do_reencode = true;
+    let mut do_reencode = true;
     if let Some(graph) = &mut model_proto.graph {
         let mut token_input = None;
         if graph.input.len() == 1 {

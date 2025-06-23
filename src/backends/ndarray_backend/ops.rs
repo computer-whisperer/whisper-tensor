@@ -1,7 +1,6 @@
-use std::ops::{Add, BitAnd, BitOr, BitXor, Mul, Not};
-use half::bf16;
-use ndarray::{concatenate, s, ArcArray, Array, Array2, ArrayD, ArrayView2, ArrayViewD, ArrayViewMut2, ArrayViewMutD, Axis, Dimension, Ix1, Ix2, IxDyn, LinalgScalar, ScalarOperand, ShapeError, SliceInfoElem, Zip};
-use ndarray::linalg::{general_mat_mul, Dot};
+use std::ops::{Add, BitAnd, BitOr, BitXor, Mul};
+use ndarray::{concatenate, s, ArcArray, Array, Array2, ArrayD, ArrayView2, ArrayViewD, ArrayViewMut2, Axis, Dimension, Ix1, Ix2, IxDyn, LinalgScalar, ShapeError, SliceInfoElem, Zip};
+use ndarray::linalg::{general_mat_mul};
 use num_traits::{Float, FromPrimitive, Num, NumCast, One, Zero};
 use num_traits::real::Real;
 use serde::{Deserialize, Serialize};
@@ -298,7 +297,6 @@ where
     T: Clone + Zero + NumCast + std::ops::Div<Output = T> + Copy
 {
     let input_shape = tensor.shape().to_vec();
-    let rank = input_shape.len();
 
     // 1) Normalize axes list
     let mut ax = axes;
@@ -463,6 +461,7 @@ impl core::fmt::Display for NativeNumericTensorBinaryOperation {
     }
 }
 
+#[allow(dead_code)]
 fn try_multidirectional_broadcasting(a: &[usize], b: &[usize]) -> Result<Vec<usize>, NDArrayOperationError> {
     let mut a = a.to_vec();
     let mut b = b.to_vec();
@@ -662,9 +661,9 @@ impl NativeNumericTensorUnaryOperation {
             NativeNumericTensorUnaryOperation::Log => a.mapv(|x| x.ln()).to_shared(),
             NativeNumericTensorUnaryOperation::Floor => a.mapv(|x| x.floor()).to_shared(),
             NativeNumericTensorUnaryOperation::Ceil => a.mapv(|x| x.ceil()).to_shared(),
-            _ => {
+            /*_ => {
                 Err(NDArrayOperationError::UnimplementedOp(format!("{self:?}")))?
-            } 
+            } */
         })
     }
 }
@@ -700,9 +699,9 @@ where
 /// - C: optional, broadcastable to (M,N)
 /// - trans_a/trans_b: if true, transpose A/B first
 pub fn gemm<T>(
-    A: ArcArray<T, IxDyn>,
-    B: ArcArray<T, IxDyn>,
-    C: Option<ArcArray<T, IxDyn>>,
+    a: ArcArray<T, IxDyn>,
+    b: ArcArray<T, IxDyn>,
+    c: Option<ArcArray<T, IxDyn>>,
     alpha: T,
     beta: T,
     trans_a: bool,
@@ -712,20 +711,20 @@ where
     T: Clone + Zero + One + Mul<Output = T> + Add<Output = T> + LinalgScalar,
 {
     // 1) Convert to 2-D views
-    let Av = A.view().into_dimensionality::<Ix2>()?;
-    let Bv = B.view().into_dimensionality::<Ix2>()?;
-    let A2 = if trans_a { Av.reversed_axes() } else { Av };
-    let B2 = if trans_b { Bv.reversed_axes() } else { Bv };
+    let av = a.view().into_dimensionality::<Ix2>()?;
+    let bv = b.view().into_dimensionality::<Ix2>()?;
+    let a2 = if trans_a { av.reversed_axes() } else { av };
+    let b2 = if trans_b { bv.reversed_axes() } else { bv };
 
     // 2) Check inner dims
-    let (m, k1) = A2.dim();
-    let (k2, n) = B2.dim();
+    let (m, k1) = a2.dim();
+    let (k2, n) = b2.dim();
     if k1 != k2 {
         return Err(NDArrayOperationError::IncompatibleShape);
     }
 
     // 3) Prepare output buffer (m×n): if C is provided and broadcastable, clone it; else zeros
-    let mut Cmat: Array2<T> = match C {
+    let mut cmat: Array2<T> = match c {
         Some(c_arr) => {
             c_arr.broadcast((m, n))
                 .ok_or_else(|| NDArrayOperationError::IncompatibleShape)?
@@ -735,10 +734,10 @@ where
     };
 
     // 4) Call the BLAS‐style routine
-    general_mat_mul(alpha, &A2, &B2, beta, &mut Cmat);
+    general_mat_mul(alpha, &a2, &b2, beta, &mut cmat);
 
     // 5) Wrap back into dynamic ArcArray
-    Ok(ArcArray::from(Cmat.into_dyn()))
+    Ok(ArcArray::from(cmat.into_dyn()))
 }
 
 
@@ -837,6 +836,7 @@ fn broadcast_shapes(
     Ok(out)
 }
 
+#[allow(dead_code)]
 /// Helper: compute row-major strides for a shape.
 fn compute_strides(shape: &[usize]) -> Vec<usize> {
     let ndim = shape.len();
@@ -962,7 +962,7 @@ where
     let mut final_shape = batch_shape;
     final_shape.extend([m, p]);
     let mut result = out
-        .into_shape(IxDyn(&final_shape))
+        .into_shape_with_order(IxDyn(&final_shape))
         .map_err(|_| NDArrayOperationError::Internal)?;
 
     // Remove the axes we temporarily added for 1-D inputs.
@@ -1057,7 +1057,7 @@ where
     // Safe because we only collapse contiguous trailing axes.
     let x3: Array<T, _> = x
         .view()
-        .into_shape((n, num_groups, elems_per_grp))
+        .into_shape_with_order((n, num_groups, elems_per_grp))
         .map_err(|_| NDArrayOperationError::Internal)?
         .to_owned();     // keep contiguous for fast SIMD
 
@@ -1077,7 +1077,7 @@ where
 
     // ---------- 4. Reshape back to (N,C,…) ----------
     let mut y = y3
-        .into_shape(IxDyn(&[n, c, spatial_size]))
+        .into_shape_with_order(IxDyn(&[n, c, spatial_size]))
         .map_err(|_| NDArrayOperationError::Internal)?;
 
     // ---------- 5. Apply scale (γ) and bias (β) ----------
@@ -1104,7 +1104,7 @@ where
     let mut final_shape = x.shape().to_vec();
     final_shape[0] = n;
     y = y
-        .into_shape(IxDyn(&final_shape))
+        .into_shape_with_order(IxDyn(&final_shape))
         .map_err(|_| NDArrayOperationError::Internal)?;
 
     Ok(y.into_shared())

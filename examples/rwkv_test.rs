@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
-use llm_samplers::prelude::{SampleGreedy, SampleTemperature, SamplerChain, SimpleSamplerResources};
+use llm_samplers::prelude::{SampleGreedy, SamplerChain, SimpleSamplerResources};
 use rand::prelude::StdRng;
 use rand::SeedableRng;
 use typenum::P1;
@@ -20,7 +20,7 @@ fn main() {
     let input_path = Path::new("/mnt/secondary/rwkv7-g1/rwkv7-g1-0.1b-20250307-ctx4096.pth");
     //let input_path = Path::new("/ceph-fuse/public/neural_models/llms/rwkv7-g1/rwkv7-g1-0.1b-20250307-ctx4096.pth");
     let onnx_out = Path::new("out.onnx");
-    let bin_out = Path::new("out.bin");
+    let _bin_out = Path::new("out.bin");
     let onnx_data = identify_and_load(input_path, WeightStorageStrategy::EmbeddedData, Some(ModelTypeHint::RWKV7)).unwrap();
     File::create(onnx_out).unwrap().write_all(&onnx_data).unwrap();
 

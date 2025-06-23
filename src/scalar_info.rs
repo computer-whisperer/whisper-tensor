@@ -67,10 +67,12 @@ where
         matches!(self, ScalarInfoTyped::Numeric(_))
     }
 
+    #[allow(dead_code)]
     pub(crate) fn is_symbolic(&self) -> bool {
         matches!(self, ScalarInfoTyped::Symbolic(_))
     }
-    
+
+    #[allow(dead_code)]
     pub(crate) fn as_numeric(&self) -> Option<&T> {
         if let Self::Numeric(x) = self {
             Some(x)
@@ -78,7 +80,8 @@ where
             None
         }
     }
-    
+
+    #[allow(dead_code)]
     pub(crate) fn as_symbolic(&self) -> Option<&SymbolicScalarTyped<T>> {
         if let Self::Symbolic(x) = self {
             Some(x)
@@ -89,7 +92,7 @@ where
 }
 
 #[derive(Clone, Debug)]
-pub(crate) enum ScalarInfo {
+pub enum ScalarInfo {
     Numeric(NumericScalar),
     Symbolic(SymbolicScalar)
 }
@@ -111,11 +114,13 @@ impl ScalarInfo {
             ScalarInfo::Symbolic(scalar) => ScalarInfoTyped::<T>::Symbolic(scalar.cast())
         }
     }
-    
+
+    #[allow(dead_code)]
     pub(crate) fn is_numeric(&self) -> bool {
         matches!(self, ScalarInfo::Numeric(_))
     }
 
+    #[allow(dead_code)]
     pub(crate) fn is_symbolic(&self) -> bool {
         matches!(self, ScalarInfo::Symbolic(_))
     }

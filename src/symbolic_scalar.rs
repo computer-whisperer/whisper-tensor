@@ -24,7 +24,7 @@ impl<T> SymbolicScalarTyped<T> where
         }
     }
 
-    pub(crate) fn dtype() -> DType {
+    pub fn dtype() -> DType {
         T::DTYPE
     }
     
@@ -66,7 +66,7 @@ impl<T> SymbolicScalarTyped<T> where
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct SymbolicScalar {
+pub struct SymbolicScalar {
     offset: i64,
     dtype: DType,
     symbol_idx: usize,
@@ -85,7 +85,7 @@ impl SymbolicScalar {
         self.dtype
     }
 
-    pub(crate) fn try_eq(&self, other: &Self) -> Option<bool> {
+    pub fn try_eq(&self, other: &Self) -> Option<bool> {
         if self.symbol_idx == other.symbol_idx {
             Some(self.offset == other.offset)
         } else { 
@@ -106,7 +106,7 @@ impl SymbolicScalar {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct SymbolicResolver {
+pub struct SymbolicResolver {
     next_symbolic_id: usize
 }
 

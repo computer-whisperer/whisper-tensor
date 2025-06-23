@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use typenum::P1;
-use whisper_tensor_import::onnx_graph::tensor::Tensor;
 use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::conversions::NDArrayNumericTensorType;
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
@@ -17,7 +16,7 @@ use crate::TrigOp;
 
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) enum MilliOpTensorIDOrLiteral {
+pub enum MilliOpTensorIDOrLiteral {
     TensorID(MilliOpGraphTensorId),
     Literal(NDArrayNumericTensor<DynRank>)
 }
@@ -314,7 +313,7 @@ fn infer_multidirectional_broadcasting_shape(shapes: &[Vec<ScalarInfoTyped<u64>>
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-enum SimpleBinaryOp {
+pub(crate) enum SimpleBinaryOp {
     Add,
     Sub,
     Mul,
@@ -344,10 +343,6 @@ pub struct MilliOpSimpleBinary {
 
 
 impl MilliOpSimpleBinary {
-    pub(crate) fn new(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId, which_op: SimpleBinaryOp) -> Self {
-        Self { a, b, which_op }
-    }
-
     pub fn add(a: MilliOpGraphTensorId, b: MilliOpGraphTensorId) -> Self {
         Self { a, b, which_op: SimpleBinaryOp::Add }
     }
@@ -665,6 +660,7 @@ trait SimpleUnaryMilliOp {
 
     fn eval(&self, inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>, backend: &mut EvalBackend) -> Result<NumericTensor<DynRank>, MilliOpGraphError>;
 
+    #[allow(dead_code)]
     fn eval_scalar(&self, input: &NumericScalar) -> Result<NumericScalar, MilliOpGraphError>;
 }
 
@@ -1710,7 +1706,7 @@ impl MilliOp for MilliOpGather {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct MilliOpConcat {
+pub struct MilliOpConcat {
     inputs: Vec<MilliOpGraphTensorId>,
     axis: i64
 }

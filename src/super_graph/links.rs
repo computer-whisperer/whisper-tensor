@@ -87,6 +87,7 @@ pub enum SuperGraphAnyLink {
 }
 
 impl SuperGraphAnyLink {
+    #[allow(dead_code)]
     fn id(&self) -> SuperGraphLinkId {
         match self {
             SuperGraphAnyLink::Tensor(link) => link.id(),

@@ -772,6 +772,12 @@ impl SymbolicGraphMutator {
             "ReduceProd" => {
                 Some(AnyOperation::ReduceProd(ops::ReduceProdOperation::from_onnx(&input_tensors, &output_tensors, &onnx_node.attribute)?))
             }
+            "ReduceMin" => {
+                Some(AnyOperation::ReduceMin(ops::ReduceMinOperation::from_onnx(&input_tensors, &output_tensors, &onnx_node.attribute)?))
+            }
+            "ReduceMax" => {
+                Some(AnyOperation::ReduceMax(ops::ReduceMaxOperation::from_onnx(&input_tensors, &output_tensors, &onnx_node.attribute)?))
+            }
             "Flatten" => {
                 Some(AnyOperation::Flatten(ops::FlattenOperation::from_onnx(&input_tensors, &output_tensors, &onnx_node.attribute)?))
             }

@@ -9,7 +9,7 @@ use whisper_tensor::model::{Model};
 use whisper_tensor::numeric_tensor::{NumericTensor};
 use whisper_tensor::sampler::{LLMSamplersBundle};
 use whisper_tensor::tokenizer::Tokenizer;
-use whisper_tensor::backends::vulkan_backend::{VulkanContext, VulkanImmediateExecutor};
+//use whisper_tensor::backends::vulkan_backend::{VulkanContext, VulkanImmediateExecutor};
 use whisper_tensor_import::{identify_and_load, ModelTypeHint};
 use whisper_tensor_import::onnx_graph::WeightStorageStrategy;
 
@@ -45,8 +45,8 @@ fn main() {
         }
     };
 
-    let vulkan_context = VulkanContext::new().unwrap();
-    let mut vulkan_runtime = VulkanImmediateExecutor::new(vulkan_context).unwrap();
+    //let vulkan_context = VulkanContext::new().unwrap();
+    //let mut vulkan_runtime = VulkanImmediateExecutor::new(vulkan_context).unwrap();
     
     let (output, _) = llm.run(input_tensor.clone(), None, &mut sampler, &mut EvalBackend::NDArray).unwrap();
     let output_tensor = output.squeeze(0).unwrap()

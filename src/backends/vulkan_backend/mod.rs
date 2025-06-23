@@ -2,15 +2,14 @@ pub mod tensor;
 pub mod ops;
 mod spirv_helpers;
 
-use std::any::TypeId;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
 use std::io::{BufWriter, Write};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc};
 use vulkano::device::{Device, DeviceCreateInfo, DeviceExtensions, DeviceFeatures, Queue, QueueCreateInfo, QueueFlags};
 use vulkano::instance::{Instance, InstanceCreateFlags, InstanceCreateInfo};
 use vulkano::memory::allocator::{AllocationCreateInfo, AllocationType, DeviceLayout, FreeListAllocator, MemoryTypeFilter, StandardMemoryAllocator, Suballocation, Suballocator};
-use vulkano::{DeviceSize, VulkanLibrary};
+use vulkano::{VulkanLibrary};
 use vulkano::buffer::{AllocateBufferError, Buffer, BufferCreateInfo, BufferUsage, Subbuffer};
 use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
@@ -21,7 +20,6 @@ use vulkano::memory::DeviceAlignment;
 use vulkano::pipeline::{ComputePipeline, PipelineLayout};
 use vulkano::shader::ShaderStages;
 use crate::dtype::DType;
-use crate::tensor_rank::{DimContainer, Rank};
 
 #[derive(Debug, thiserror::Error)]
 pub enum VulkanError {
@@ -158,7 +156,7 @@ pub struct VulkanImmediateExecutor {
     context: VulkanContext,
     buffers: Vec<VulkanImmediateExecutorBuffer>,
     descriptor_set_layouts: HashMap<BTreeSet<u32>, Arc<DescriptorSetLayout>>,
-    descriptor_set_cache: HashMap<(BTreeMap<u32, Subbuffer<[u8]>>), Arc<DescriptorSet>>,
+    descriptor_set_cache: HashMap<BTreeMap<u32, Subbuffer<[u8]>>, Arc<DescriptorSet>>,
     pipeline_cache: PipelineCache
 }
 

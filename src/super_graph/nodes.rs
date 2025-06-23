@@ -5,7 +5,6 @@ use rwkv_tokenizer::WorldTokenizer;
 use whisper_tensor_import::onnx_graph::TokenizerInfo;
 use crate::backends::eval_backend::EvalBackend;
 use crate::milli_graph::MilliOpGraph;
-use crate::milli_graph::ops::MilliOp;
 use crate::numeric_tensor::NumericTensor;
 use crate::super_graph::links::{SuperGraphAnyLink, SuperGraphLink, SuperGraphLinkModel, SuperGraphLinkString, SuperGraphLinkTensor, SuperGraphLinkTokenizer};
 use crate::super_graph::{SuperGraphBuilder, SuperGraphData, SuperGraphError};
@@ -218,7 +217,7 @@ impl SuperGraphNode for SuperGraphNodeTokenizerEncode {
     fn eval(&self, data: &mut SuperGraphData, _backend: &mut EvalBackend) -> Result<(), SuperGraphError> {
         let text = data.strings.get(&self.text_input).unwrap();
         let tokenizer = data.tokenizers.get(&self.tokenizer).unwrap();
-        let tokens = tokenizer.encode(text).iter().map(|x| *x as i64).collect::<Vec<_>>();;
+        let tokens = tokenizer.encode(text).iter().map(|x| *x as i64).collect::<Vec<_>>();
         let input_tensor = NumericTensor::from_vec(tokens).to_dyn_rank().unsqueeze(0).unwrap().unsqueeze(0).unwrap();
         data.tensors.insert(self.tensor_output.clone(), input_tensor);
         Ok(())

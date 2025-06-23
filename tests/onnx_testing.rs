@@ -9,14 +9,13 @@ use prost::Message;
 use whisper_tensor::numeric_tensor::NumericTensor;
 use whisper_tensor::dtype::{DType, DTypeError};
 use whisper_tensor::backends::eval_backend::EvalBackend;
-use whisper_tensor::model::{Model, ModelExecutionRuntime};
+use whisper_tensor::model::{Model};
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::onnx::TensorProto;
 use whisper_tensor::symbolic_graph::ONNXDecodingError;
 use whisper_tensor::tensor_rank::DynRank;
 use whisper_tensor::backends::vulkan_backend::{VulkanContext, VulkanImmediateExecutor};
 use paste::paste;
-use whisper_tensor::onnx;
 
 // Structure to hold a test case
 struct OnnxNodeTest {
@@ -99,7 +98,7 @@ impl OnnxNodeTest {
         let model_bytes = fs::read(&self.model_path)
             .map_err(|e| format!("Failed to read model file: {}", e))?;
 
-        let mut model = Model::new_from_onnx(
+        let model = Model::new_from_onnx(
             &model_bytes
         ).map_err(|e| format!("Failed to load model: {:?}", e))?;
 
@@ -235,65 +234,17 @@ impl TestDataSet {
     }
 }
 
-// Function to parse TensorProto to NumericTensor
-fn parse_tensor_proto(proto_data: &[u8]) -> Result<NumericTensor<DynRank>, String> {
-    let tensor_proto = TensorProto::decode(proto_data).unwrap();
-    Ok(NDArrayNumericTensor::try_from(&tensor_proto).unwrap().into())
-}
-
-// Function to discover and run all node tests
-fn run_node_tests(backend: &mut EvalBackend) -> (usize, usize) {
-    // Path to the ONNX node tests
-    let node_test_path = PathBuf::from(
-        std::env::var("ONNX_NODE_TEST_PATH")
-            .unwrap_or_else(|_| "libs/onnx/onnx/backend/test/data/node".to_string())
-    );
-
-    if !node_test_path.exists() {
-        panic!("ONNX node test path not found: {}", node_test_path.display());
-    }
-
-    let mut total = 0;
-    let mut passed = 0;
-
-    // Iterate through test directories
-    for entry in fs::read_dir(node_test_path).expect("Failed to read node test directory") {
-        let entry = entry.expect("Failed to read directory entry");
-        let path = entry.path();
-
-        if path.is_dir() {
-            total += 1;
-
-            // Parse and run the test
-            if let Some(test) = OnnxNodeTest::from_directory(&path) {
-                match test.run(backend) {
-                    Ok(_) => {
-                        log::info!("✅ Test passed: {}", test.name);
-                        passed += 1;
-                    },
-                    Err(error) => {
-                        log::error!("❌ Test failed: {}\nError: {}", test.name, error);
-                    }
-                }
-            } else {
-                log::warn!("⚠️ Could not parse test: {}", path.display());
-            }
-        }
-    }
-
-    (passed, total)
-}
-
 fn run_ndarray_test(path: &Path) {
     let test = OnnxNodeTest::from_directory(&path).unwrap();
     test.run(&mut EvalBackend::NDArray).unwrap()
 }
 
+/*
 #[cfg(feature = "candle")]
 fn run_candle_test(path: &Path) {
     let test = OnnxNodeTest::from_directory(&path).unwrap();
     test.run(&mut EvalBackend::Candle(candle_core::Device::Cpu)).unwrap()
-}
+}*/
 
 #[cfg(feature = "vulkan")]
 fn run_vulkan_test(path: &Path) {
@@ -309,6 +260,7 @@ fn run_vulkan_test(path: &Path) {
 macro_rules! do_test {
     ($runner_fn:expr, $runner_name:ident, $test_name:ident) => {
         paste! {
+            #[allow(non_snake_case)]
             #[test]
             fn [<$runner_name _ $test_name>]() {
                 $runner_fn(PathBuf::from(concat!("libs/onnx/onnx/backend/test/data/node/", stringify!($test_name))).as_path());

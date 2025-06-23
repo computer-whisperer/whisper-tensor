@@ -13,7 +13,7 @@ use vulkano::shader::{ShaderModule, ShaderModuleCreateInfo, ShaderStages};
 use vulkano::sync::GpuFuture;
 use crate::dtype::DType;
 use crate::DynRank;
-use crate::tensor_rank::{DimContainer, DimProduct, Rank};
+use crate::tensor_rank::{DimContainer, Rank};
 use crate::backends::vulkan_backend::tensor::VulkanTensor;
 use crate::backends::vulkan_backend::{VulkanError, VulkanImmediateExecutor};
 use crate::backends::vulkan_backend::spirv_helpers::{cast_bf16_to_f32, cast_f32_to_bf16, get_spirv_datatype};
@@ -99,7 +99,7 @@ fn build_matmul_pipeline(
 
     let void = builder.type_void();
     let voidf = builder.type_function(void, []);
-    let main_fn = builder.begin_function(void, None, (spirv::FunctionControl::DONT_INLINE), voidf).unwrap();
+    let main_fn = builder.begin_function(void, None, spirv::FunctionControl::DONT_INLINE, voidf).unwrap();
     builder.entry_point(ExecutionModel::GLCompute, main_fn, "main", [gid, metadata_var, output_var, input_0_var, input_1_var]);
     builder.execution_mode(main_fn, ExecutionMode::LocalSize, [8, 8, 1]);
     builder.begin_block(None).unwrap();
@@ -506,6 +506,7 @@ impl<R: Rank> VulkanTensor<R> {
     }
 }
 
+#[cfg(test)]
 mod test {
     use crate::dtype::DType;
     use crate::backends::ndarray_backend::NDArrayNumericTensor;

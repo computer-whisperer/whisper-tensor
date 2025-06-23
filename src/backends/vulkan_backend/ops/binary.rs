@@ -125,7 +125,7 @@ fn build_binary_pipeline(
     b.decorate(gid, Decoration::BuiltIn,[Operand::BuiltIn(BuiltIn::GlobalInvocationId)]);
 
     let voidf = b.type_function(void, []);
-    let main_fn = b.begin_function(void, None, (spirv::FunctionControl::DONT_INLINE), voidf).unwrap();
+    let main_fn = b.begin_function(void, None, spirv::FunctionControl::DONT_INLINE, voidf).unwrap();
     b.entry_point(ExecutionModel::GLCompute, main_fn, "main", [gid, metadata_var, output_0_var, input_0_var, input_1_var]);
     b.execution_mode(main_fn, ExecutionMode::LocalSize, [64, 1, 1]);
     b.begin_block(None).unwrap();
@@ -371,7 +371,7 @@ impl<R: Rank> VulkanTensor<R> {
             v.push((a.offset as u32 + a.suballocation.offset as u32)/a.dtype().size().unwrap() as u32);
             v.push((b.offset as u32 + b.suballocation.offset as u32)/b.dtype().size().unwrap() as u32);
             v.push((output_tensor.offset as u32 + output_tensor.suballocation.offset as u32)/output_dtype.size().unwrap() as u32);
-            v.push((output_shape.dim_product() as u32));
+            v.push(output_shape.dim_product() as u32);
             for dim in output_shape.as_slice() {
                 v.push(*dim as u32);
             }
@@ -447,7 +447,7 @@ impl<R: Rank> VulkanTensor<R> {
     }
 
     pub fn add(a: &Self, b: &Self, vulkan_immediate_executor: &mut VulkanImmediateExecutor) -> Result<VulkanTensor<R>, VulkanError> {
-        Self::binary(a, b, a.dtype(), vulkan_immediate_executor, 0, |builder, a, b, input_0_dtype, input_1_dtype, output_dtype| {
+        Self::binary(a, b, a.dtype(), vulkan_immediate_executor, 0, |builder, a, b, input_0_dtype, _input_1_dtype, output_dtype| {
             let data_type = get_spirv_datatype(builder, output_dtype)?;
             match input_0_dtype {
                 DType::F16 | DType::F32 | DType::F64 => Ok(builder.f_add(data_type, None, a, b).unwrap()),
@@ -458,7 +458,7 @@ impl<R: Rank> VulkanTensor<R> {
     }
 
     pub fn sub(a: &Self, b: &Self, vulkan_immediate_executor: &mut VulkanImmediateExecutor) -> Result<VulkanTensor<R>, VulkanError> {
-        Self::binary(a, b, a.dtype(), vulkan_immediate_executor, 1, |builder, a, b, input_0_dtype, input_1_dtype, output_dtype| {
+        Self::binary(a, b, a.dtype(), vulkan_immediate_executor, 1, |builder, a, b, input_0_dtype, _input_1_dtype, output_dtype| {
             let data_type = get_spirv_datatype(builder, output_dtype)?;
             match input_0_dtype {
                 DType::F16 | DType::F32 | DType::F64 => Ok(builder.f_sub(data_type, None, a, b).unwrap()),
@@ -469,7 +469,7 @@ impl<R: Rank> VulkanTensor<R> {
     }
 
     pub fn mul(a: &Self, b: &Self, vulkan_immediate_executor: &mut VulkanImmediateExecutor) -> Result<VulkanTensor<R>, VulkanError> {
-        Self::binary(a, b, a.dtype(), vulkan_immediate_executor, 2, |builder, a, b, input_0_dtype, input_1_dtype, output_dtype| {
+        Self::binary(a, b, a.dtype(), vulkan_immediate_executor, 2, |builder, a, b, input_0_dtype, _input_1_dtype, output_dtype| {
             let data_type = get_spirv_datatype(builder, output_dtype)?;
             match input_0_dtype {
                 DType::F16 | DType::F32 | DType::F64 => Ok(builder.f_mul(data_type, None, a, b).unwrap()),
@@ -480,7 +480,7 @@ impl<R: Rank> VulkanTensor<R> {
     }
 
     pub fn div(a: &Self, b: &Self, vulkan_immediate_executor: &mut VulkanImmediateExecutor) -> Result<VulkanTensor<R>, VulkanError> {
-        Self::binary(a, b, a.dtype(), vulkan_immediate_executor, 3, |builder, a, b, input_0_dtype, input_1_dtype, output_dtype| {
+        Self::binary(a, b, a.dtype(), vulkan_immediate_executor, 3, |builder, a, b, input_0_dtype, _input_1_dtype, output_dtype| {
             let data_type = get_spirv_datatype(builder, output_dtype)?;
             match input_0_dtype {
                 DType::F16 | DType::F32 | DType::F64 => Ok(builder.f_div(data_type, None, a, b).unwrap()),
@@ -492,7 +492,7 @@ impl<R: Rank> VulkanTensor<R> {
     }
 
     pub fn imod(a: &Self, b: &Self, vulkan_immediate_executor: &mut VulkanImmediateExecutor) -> Result<VulkanTensor<R>, VulkanError> {
-        Self::binary(a, b, a.dtype(), vulkan_immediate_executor, 4, |builder, a, b, input_0_dtype, input_1_dtype, output_dtype| {
+        Self::binary(a, b, a.dtype(), vulkan_immediate_executor, 4, |builder, a, b, input_0_dtype, _input_1_dtype, output_dtype| {
             let data_type = get_spirv_datatype(builder, output_dtype)?;
             match input_0_dtype {
                 DType::I64 | DType::I32 | DType::I16 | DType::I8 => Ok(builder.s_mod(data_type, None, a, b).unwrap()),
@@ -503,7 +503,7 @@ impl<R: Rank> VulkanTensor<R> {
     }
 
     pub fn fmod(a: &Self, b: &Self, vulkan_immediate_executor: &mut VulkanImmediateExecutor) -> Result<VulkanTensor<R>, VulkanError> {
-        Self::binary(a, b, a.dtype(), vulkan_immediate_executor, 5, |builder, a, b, input_0_dtype, input_1_dtype, output_dtype| {
+        Self::binary(a, b, a.dtype(), vulkan_immediate_executor, 5, |builder, a, b, input_0_dtype, _input_1_dtype, output_dtype| {
             let data_type = get_spirv_datatype(builder, output_dtype)?;
             match input_0_dtype {
                 DType::F16 | DType::F32 | DType::F64 => Ok(builder.f_rem(data_type, None, a, b).unwrap()),
@@ -514,7 +514,7 @@ impl<R: Rank> VulkanTensor<R> {
     }
 
     pub fn and(a: &Self, b: &Self, vulkan_immediate_executor: &mut VulkanImmediateExecutor) -> Result<VulkanTensor<R>, VulkanError> {
-        Self::binary(a, b, a.dtype(), vulkan_immediate_executor, 6, |builder, a, b, input_0_dtype, input_1_dtype, output_dtype| {
+        Self::binary(a, b, a.dtype(), vulkan_immediate_executor, 6, |builder, a, b, input_0_dtype, _input_1_dtype, output_dtype| {
             let data_type = get_spirv_datatype(builder, output_dtype)?;
             match input_0_dtype {
                 DType::BOOL => Ok(builder.logical_and(data_type, None, a, b).unwrap()),
@@ -524,7 +524,7 @@ impl<R: Rank> VulkanTensor<R> {
     }
 
     pub fn or(a: &Self, b: &Self, vulkan_immediate_executor: &mut VulkanImmediateExecutor) -> Result<VulkanTensor<R>, VulkanError> {
-        Self::binary(a, b, a.dtype(), vulkan_immediate_executor, 7, |builder, a, b, input_0_dtype, input_1_dtype, output_dtype| {
+        Self::binary(a, b, a.dtype(), vulkan_immediate_executor, 7, |builder, a, b, input_0_dtype, _input_1_dtype, output_dtype| {
             let data_type = get_spirv_datatype(builder, output_dtype)?;
             match input_0_dtype {
                 DType::BOOL => Ok(builder.logical_or(data_type, None, a, b).unwrap()),
@@ -534,7 +534,7 @@ impl<R: Rank> VulkanTensor<R> {
     }
 
     pub fn xor(a: &Self, b: &Self, vulkan_immediate_executor: &mut VulkanImmediateExecutor) -> Result<VulkanTensor<R>, VulkanError> {
-        Self::binary(a, b, a.dtype(), vulkan_immediate_executor, 8, |builder, a, b, input_0_dtype, input_1_dtype, output_dtype| {
+        Self::binary(a, b, a.dtype(), vulkan_immediate_executor, 8, |builder, a, b, input_0_dtype, _input_1_dtype, output_dtype| {
             let data_type = get_spirv_datatype(builder, output_dtype)?;
             match input_0_dtype {
                 DType::BOOL => Ok(builder.logical_not_equal(data_type, None, a, b).unwrap()),
@@ -544,7 +544,7 @@ impl<R: Rank> VulkanTensor<R> {
     }
 
     pub fn bitwise_and(a: &Self, b: &Self, vulkan_immediate_executor: &mut VulkanImmediateExecutor) -> Result<VulkanTensor<R>, VulkanError> {
-        Self::binary(a, b, a.dtype(), vulkan_immediate_executor, 9, |builder, a, b, input_0_dtype, input_1_dtype, output_dtype| {
+        Self::binary(a, b, a.dtype(), vulkan_immediate_executor, 9, |builder, a, b, input_0_dtype, _input_1_dtype, output_dtype| {
             let data_type = get_spirv_datatype(builder, output_dtype)?;
             match input_0_dtype {
                 DType::I64 | DType::I32 | DType::I16 | DType::I8 | DType::U64 | DType::U32 | DType::U16 | DType::U8 => Ok(builder.bitwise_and(data_type, None, a, b).unwrap()),
@@ -554,7 +554,7 @@ impl<R: Rank> VulkanTensor<R> {
     }
 
     pub fn bitwise_or(a: &Self, b: &Self, vulkan_immediate_executor: &mut VulkanImmediateExecutor) -> Result<VulkanTensor<R>, VulkanError> {
-        Self::binary(a, b, a.dtype(), vulkan_immediate_executor, 10, |builder, a, b, input_0_dtype, input_1_dtype, output_dtype| {
+        Self::binary(a, b, a.dtype(), vulkan_immediate_executor, 10, |builder, a, b, input_0_dtype, _input_1_dtype, output_dtype| {
             let data_type = get_spirv_datatype(builder, output_dtype)?;
             match input_0_dtype {
                 DType::I64 | DType::I32 | DType::I16 | DType::I8 | DType::U64 | DType::U32 | DType::U16 | DType::U8 => Ok(builder.bitwise_or(data_type, None, a, b).unwrap()),
@@ -564,7 +564,7 @@ impl<R: Rank> VulkanTensor<R> {
     }
 
     pub fn bitwise_xor(a: &Self, b: &Self, vulkan_immediate_executor: &mut VulkanImmediateExecutor) -> Result<VulkanTensor<R>, VulkanError> {
-        Self::binary(a, b, a.dtype(), vulkan_immediate_executor, 11, |builder, a, b, input_0_dtype, input_1_dtype, output_dtype| {
+        Self::binary(a, b, a.dtype(), vulkan_immediate_executor, 11, |builder, a, b, input_0_dtype, _input_1_dtype, output_dtype| {
             let data_type = get_spirv_datatype(builder, output_dtype)?;
             match input_0_dtype {
                 DType::I64 | DType::I32 | DType::I16 | DType::I8 | DType::U64 | DType::U32 | DType::U16 | DType::U8 => Ok(builder.bitwise_xor(data_type, None, a, b).unwrap()),
@@ -574,7 +574,7 @@ impl<R: Rank> VulkanTensor<R> {
     }
 
     pub fn max(a: &Self, b: &Self, vulkan_immediate_executor: &mut VulkanImmediateExecutor) -> Result<VulkanTensor<R>, VulkanError> {
-        Self::binary(a, b, a.dtype(), vulkan_immediate_executor, 12, |builder, a, b, input_0_dtype, input_1_dtype, output_dtype| {
+        Self::binary(a, b, a.dtype(), vulkan_immediate_executor, 12, |builder, a, b, input_0_dtype, _input_1_dtype, output_dtype| {
             let data_type = get_spirv_datatype(builder, output_dtype)?;
             let glsl   = builder.ext_inst_import("GLSL.std.450");
             match input_0_dtype {
@@ -593,7 +593,7 @@ impl<R: Rank> VulkanTensor<R> {
     }
 
     pub fn min(a: &Self, b: &Self, vulkan_immediate_executor: &mut VulkanImmediateExecutor) -> Result<VulkanTensor<R>, VulkanError> {
-        Self::binary(a, b, a.dtype(), vulkan_immediate_executor, 13, |builder, a, b, input_0_dtype, input_1_dtype, output_dtype| {
+        Self::binary(a, b, a.dtype(), vulkan_immediate_executor, 13, |builder, a, b, input_0_dtype, _input_1_dtype, output_dtype| {
             let data_type = get_spirv_datatype(builder, output_dtype)?;
             let glsl   = builder.ext_inst_import("GLSL.std.450");
             match input_0_dtype {
@@ -612,7 +612,7 @@ impl<R: Rank> VulkanTensor<R> {
     }
 
     pub fn equal(a: &Self, b: &Self, vulkan_immediate_executor: &mut VulkanImmediateExecutor) -> Result<VulkanTensor<R>, VulkanError> {
-        Self::binary(a, b, DType::BOOL, vulkan_immediate_executor, 14, |builder, a, b, input_0_dtype, input_1_dtype, output_dtype| {
+        Self::binary(a, b, DType::BOOL, vulkan_immediate_executor, 14, |builder, a, b, input_0_dtype, _input_1_dtype, output_dtype| {
             let data_type = get_spirv_datatype(builder, output_dtype)?;
             match input_0_dtype {
                 DType::F16 | DType::F32 | DType::F64 => Ok(builder.f_unord_equal(data_type, None, a, b).unwrap()),
@@ -623,7 +623,7 @@ impl<R: Rank> VulkanTensor<R> {
     }
 
     pub fn greater(a: &Self, b: &Self, vulkan_immediate_executor: &mut VulkanImmediateExecutor) -> Result<VulkanTensor<R>, VulkanError> {
-        Self::binary(a, b, DType::BOOL, vulkan_immediate_executor, 15, |builder, a, b, input_0_dtype, input_1_dtype, output_dtype| {
+        Self::binary(a, b, DType::BOOL, vulkan_immediate_executor, 15, |builder, a, b, input_0_dtype, _input_1_dtype, output_dtype| {
             let data_type = get_spirv_datatype(builder, output_dtype)?;
             match input_0_dtype {
                 DType::F16 | DType::F32 | DType::F64 => Ok(builder.f_unord_greater_than(data_type, None, a, b).unwrap()),
@@ -635,7 +635,7 @@ impl<R: Rank> VulkanTensor<R> {
     }
 
     pub fn greater_or_equal(a: &Self, b: &Self, vulkan_immediate_executor: &mut VulkanImmediateExecutor) -> Result<VulkanTensor<R>, VulkanError> {
-        Self::binary(a, b, DType::BOOL, vulkan_immediate_executor, 16, |builder, a, b, input_0_dtype, input_1_dtype, output_dtype| {
+        Self::binary(a, b, DType::BOOL, vulkan_immediate_executor, 16, |builder, a, b, input_0_dtype, _input_1_dtype, output_dtype| {
             let data_type = get_spirv_datatype(builder, output_dtype)?;
             match input_0_dtype {
                 DType::F16 | DType::F32 | DType::F64 => Ok(builder.f_unord_greater_than_equal(data_type, None, a, b).unwrap()),
@@ -647,7 +647,7 @@ impl<R: Rank> VulkanTensor<R> {
     }
 
     pub fn less(a: &Self, b: &Self, vulkan_immediate_executor: &mut VulkanImmediateExecutor) -> Result<VulkanTensor<R>, VulkanError> {
-        Self::binary(a, b, DType::BOOL, vulkan_immediate_executor, 17, |builder, a, b, input_0_dtype, input_1_dtype, output_dtype| {
+        Self::binary(a, b, DType::BOOL, vulkan_immediate_executor, 17, |builder, a, b, input_0_dtype, _input_1_dtype, output_dtype| {
             let data_type = get_spirv_datatype(builder, output_dtype)?;
             match input_0_dtype {
                 DType::F16 | DType::F32 | DType::F64 => Ok(builder.f_unord_less_than(data_type, None, a, b).unwrap()),
@@ -659,7 +659,7 @@ impl<R: Rank> VulkanTensor<R> {
     }
 
     pub fn less_or_equal(a: &Self, b: &Self, vulkan_immediate_executor: &mut VulkanImmediateExecutor) -> Result<VulkanTensor<R>, VulkanError> {
-        Self::binary(a, b, DType::BOOL, vulkan_immediate_executor, 18, |builder, a, b, input_0_dtype, input_1_dtype, output_dtype| {
+        Self::binary(a, b, DType::BOOL, vulkan_immediate_executor, 18, |builder, a, b, input_0_dtype, _input_1_dtype, output_dtype| {
             let data_type = get_spirv_datatype(builder, output_dtype)?;
             match input_0_dtype {
                 DType::F16 | DType::F32 | DType::F64 => Ok(builder.f_unord_less_than_equal(data_type, None, a, b).unwrap()),
@@ -723,6 +723,7 @@ impl<R: Rank> VulkanTensor<R> {
     }
 }
 
+#[cfg(test)]
 mod test {
     use crate::backends::ndarray_backend::NDArrayNumericTensor;
     use crate::backends::vulkan_backend::{VulkanContext, VulkanImmediateExecutor};

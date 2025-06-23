@@ -1,6 +1,4 @@
-use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet};
-use std::hash::Hash;
 use std::sync::{Arc};
 use rspirv::binary::Assemble;
 use rspirv::dr::{Operand};
@@ -13,7 +11,6 @@ use vulkano::pipeline::compute::ComputePipelineCreateInfo;
 use vulkano::pipeline::layout::{PipelineLayoutCreateInfo, PushConstantRange};
 use vulkano::shader::{ShaderModule, ShaderModuleCreateInfo, ShaderStages};
 use vulkano::sync::GpuFuture;
-use zerocopy::IntoBytes;
 use crate::dtype::DType;
 use crate::tensor_rank::{DimContainer, DimProduct, Rank};
 use crate::TrigOp;
@@ -102,7 +99,7 @@ fn build_unary_pipeline(
     b.decorate(gid, Decoration::BuiltIn,[Operand::BuiltIn(BuiltIn::GlobalInvocationId)]);
 
     let voidf = b.type_function(void, []);
-    let main_fn = b.begin_function(void, None, (spirv::FunctionControl::DONT_INLINE), voidf).unwrap();
+    let main_fn = b.begin_function(void, None, spirv::FunctionControl::DONT_INLINE, voidf).unwrap();
     b.entry_point(ExecutionModel::GLCompute, main_fn, "main", [gid, metadata_var, output_0_var, input_0_var]);
     b.execution_mode(main_fn, ExecutionMode::LocalSize, [64, 1, 1]);
     b.begin_block(None).unwrap();
@@ -303,7 +300,7 @@ impl<R: Rank> VulkanTensor<R> {
             let mut v = vec![];
             v.push((self.offset as u32 + self.suballocation.offset as u32)/self.dtype().size().unwrap() as u32);
             v.push((output_tensor.offset as u32 + output_tensor.suballocation.offset as u32)/output_dtype.size().unwrap() as u32);
-            v.push((self.shape().dim_product() as u32));
+            v.push(self.shape().dim_product() as u32);
             for dim in self.shape().as_slice() {
                 v.push(*dim as u32);
             }
@@ -674,7 +671,7 @@ impl<R: Rank> VulkanTensor<R> {
         if self.is_contiguous() {
             Ok(self.clone())
         } else {
-            self.unary(vulkan_immediate_executor, 25, self.dtype, |b, i, input_dtype, output_dtype| {
+            self.unary(vulkan_immediate_executor, 25, self.dtype, |_b, i, _input_dtype, _output_dtype| {
                 Ok(i)
             })
         }
@@ -784,6 +781,7 @@ impl<R: Rank> VulkanTensor<R> {
     }
 }
 
+#[cfg(test)]
 mod test {
     use typenum::P1;
     use crate::backends::ndarray_backend::NDArrayNumericTensor;

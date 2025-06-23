@@ -22,11 +22,6 @@ pub enum NumericScalar {
     STRING(String)
 }
 
-#[derive(Debug, thiserror::Error)]
-enum NumericScalarError {
-    
-}
-
 impl NumericScalar {
     pub fn dtype(&self) -> DType {
         match self {

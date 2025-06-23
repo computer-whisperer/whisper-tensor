@@ -31,7 +31,7 @@ pub enum SuperGraphError {
     TypedNumericTensorError(#[from] TypedNumericTensorError),
 }
 
-struct SuperGraphData {
+pub(crate) struct SuperGraphData {
     tensors: HashMap<SuperGraphLinkTensor, NumericTensor<DynRank>>,
     strings: HashMap<SuperGraphLinkString, String>,
     tokenizers: HashMap<SuperGraphLinkTokenizer, AnyTokenizer>,

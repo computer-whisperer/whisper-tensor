@@ -24,7 +24,7 @@ pub enum TensorInfoError {
     NumericTensorError(#[from] NumericTensorError)
 }
 
-trait TensorInfoType: Clone + PartialEq + Copy + NumericScalarType + NDArrayNumericTensorType {
+pub trait TensorInfoType: Clone + PartialEq + Copy + NumericScalarType + NDArrayNumericTensorType {
     fn typed_shaped_tensor_into_shaped_tensor<R: Rank>(value: ShapedTensorTyped<Self, R>) -> ShapedTensor<R>;
     fn try_shaped_tensor_into_typed_shaped_tensor<R: Rank>(value: &ShapedTensor<R>) -> Result<&ShapedTensorTyped<Self, R>, TensorInfoError>;
 }
@@ -53,7 +53,7 @@ impl_type!(u64, U64);
 impl_type!(i64, I64);
 
 #[derive(Clone, Debug)]
-pub(crate) struct ShapedTensorTyped<T, R: Rank>
+pub struct ShapedTensorTyped<T, R: Rank>
 where
     T: Clone + PartialEq + Copy + NumericScalarType,
 {
@@ -116,6 +116,7 @@ where
         T::typed_shaped_tensor_into_shaped_tensor(self.clone())
     }
 
+    #[allow(dead_code)]
     pub(crate) fn try_upgrade_as_numeric_tensor(&self) -> Option<NumericTensor<R>> {
         let mut are_all_known = true;
         let mut entries = vec![];
@@ -136,7 +137,7 @@ where
 }
 
 #[derive(Clone, Debug)]
-pub(crate) enum ShapedTensor<R: Rank> {
+pub enum ShapedTensor<R: Rank> {
     F64(ShapedTensorTyped<f64, R>),
     F32(ShapedTensorTyped<f32, R>),
     U64(ShapedTensorTyped<u64, R>),
@@ -176,6 +177,7 @@ impl<R: Rank> ShapedTensor<R> {
             ShapedTensor::U64(x) => x.first_element().promote(),
         }
     }
+    #[allow(dead_code)]
     pub(crate) fn get(&self, index: &R::KnownDims) -> Option<ScalarInfo> {
         Some(match self {
             ShapedTensor::F64(x) => x.get(index)?.promote(),
@@ -192,6 +194,8 @@ impl<R: Rank> ShapedTensor<R> {
             ShapedTensor::U64(x) => Self::U64(x.reshape(new_shape)),
         }
     }
+
+    #[allow(dead_code)]
     pub(crate) fn try_upgrade_as_numeric_tensor(&self) -> Option<NumericTensor<R>> {
         match self {
             ShapedTensor::F64(x) => x.try_upgrade_as_numeric_tensor(),
@@ -231,7 +235,7 @@ impl<R: Rank> ShapedTensor<R> {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct RankedTensorTyped<T, R: Rank>
+pub struct RankedTensorTyped<T, R: Rank>
 where
     T: Clone + Copy + PartialEq + NumericScalarType,
 {
@@ -270,11 +274,13 @@ impl<T: Clone + Copy + PartialEq + NumericScalarType, R: Rank> RankedTensorTyped
     pub(crate) fn shape(&self) -> &R::UnknownDims {
         &self.shape
     }
-    
+
+    #[allow(dead_code)]
     pub(crate) fn rank(&self) -> usize {
         self.shape.len()
     }
-    
+
+    #[allow(dead_code)]
     pub(crate) fn first_element(&self) -> &ScalarInfoTyped<T> {
         &self.first_element
     }
@@ -282,7 +288,7 @@ impl<T: Clone + Copy + PartialEq + NumericScalarType, R: Rank> RankedTensorTyped
 
 
 #[derive(Clone, Debug)]
-pub(crate) struct RankedTensor<R: Rank> {
+pub struct RankedTensor<R: Rank> {
     first_element: ScalarInfo,
     shape: R::UnknownDims
 }
@@ -323,7 +329,8 @@ impl<R: Rank> RankedTensor<R> {
     pub(crate) fn to_dyn_rank(&self) -> RankedTensor<DynRank> {
         self.try_to_rank().unwrap()
     }
-    
+
+    #[allow(dead_code)]
     pub(crate) fn reshape(&self, new_shape: R::UnknownDims) -> Self {
         Self {
             first_element: self.first_element.clone(),
@@ -333,7 +340,7 @@ impl<R: Rank> RankedTensor<R> {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct MinimalTensorTyped<T>
+pub struct MinimalTensorTyped<T>
 where
     T: TensorInfoType,
 {
@@ -345,20 +352,22 @@ impl <T> MinimalTensorTyped<T>
 where
     T: TensorInfoType,
 {
+    #[allow(dead_code)]
     pub(crate) fn to_dyn_type(&self) -> MinimalTensor {
         MinimalTensor {
             first_element: self.first_element.to_dyn_type(),
             rank: self.rank.clone()
         }
-    } 
-    
+    }
+
+    #[allow(dead_code)]
     pub(crate) fn rank(&self) -> &SymbolicScalarTyped<u32> {
         &self.rank
     }
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct MinimalTensor {
+pub struct MinimalTensor {
     first_element: ScalarInfo,
     rank: SymbolicScalarTyped<u32>
 }
@@ -377,6 +386,7 @@ impl MinimalTensor {
     pub(crate) fn first_element(&self) -> &ScalarInfo {
         &self.first_element
     }
+    #[allow(dead_code)]
     pub(crate) fn rank(&self) -> &SymbolicScalarTyped<u32> {
         &self.rank
     }
@@ -389,7 +399,7 @@ impl MinimalTensor {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) enum TensorInfoTypedShaped<T, R: Rank>
+pub enum TensorInfoTypedShaped<T, R: Rank>
 where
     T: TensorInfoType,
 {
@@ -425,14 +435,16 @@ where
             TensorInfoTypedShaped::Shaped(shaped) => shaped.shape().clone()
         }
     }
-    
+
+    #[allow(dead_code)]
     pub(crate) fn rank(&self) -> usize {
         match self {
             TensorInfoTypedShaped::Numeric(numeric) => numeric.rank(),
             TensorInfoTypedShaped::Shaped(shaped) => shaped.rank()
         }
     }
-    
+
+    #[allow(dead_code)]
     pub(crate) fn get(&self, index: &R::KnownDims) -> Option<ScalarInfoTyped<T>> {
         match self {
             TensorInfoTypedShaped::Numeric(numeric) => Some(ScalarInfoTyped::Numeric(*numeric.get(index)?)),
@@ -463,7 +475,7 @@ where
 }
 
 #[derive(Clone, Debug)]
-pub(crate) enum TensorInfoTypedRanked<T, R: Rank>
+pub enum TensorInfoTypedRanked<T, R: Rank>
 where
     T: TensorInfoType,
 {
@@ -482,7 +494,8 @@ where
             TensorInfoTypedRanked::Ranked(ranked) => ranked.shape().clone()
         }
     }
-    
+
+    #[allow(dead_code)]
     pub(crate) fn rank(&self) -> usize {
         match self {
             TensorInfoTypedRanked::Shaped(shaped) => shaped.rank(),
@@ -526,7 +539,7 @@ where
     }
 }
 
-pub(crate) enum TensorInfoTyped<T>
+pub enum TensorInfoTyped<T>
 where
     T: TensorInfoType,
 {
@@ -538,13 +551,15 @@ impl<T> TensorInfoTyped<T>
 where
     T: TensorInfoType,
 {
+    #[allow(dead_code)]
     pub(crate) fn rank(&self) -> ScalarInfoTyped<u32> {
         match self {
             TensorInfoTyped::Ranked(ranked) => ScalarInfoTyped::Numeric(ranked.rank() as u32),
             TensorInfoTyped::Minimal(minimal) => ScalarInfoTyped::Symbolic(minimal.rank().clone())
         }
     }
-    
+
+    #[allow(dead_code)]
     pub(crate) fn to_dyn_type(&self) -> TensorInfo {
         match self {
             TensorInfoTyped::Ranked(ranked) => TensorInfo::Ranked(ranked.to_dyn_type()),
@@ -552,6 +567,7 @@ where
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn as_ranked(&self) -> Option<&TensorInfoTypedRanked<T, DynRank>> {
         match self {
             TensorInfoTyped::Ranked(tensor) => Some(tensor),
@@ -559,6 +575,7 @@ where
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn as_shaped(&self) -> Option<&TensorInfoTypedShaped<T, DynRank>> {
         match self {
             TensorInfoTyped::Ranked(tensor) => tensor.as_shaped(),
@@ -566,6 +583,7 @@ where
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn as_numeric(&self) -> Option<&NumericTensorTyped<T, DynRank>> {
         match self {
             TensorInfoTyped::Ranked(ranked) => ranked.as_numeric(),
@@ -575,7 +593,7 @@ where
 }
 
 #[derive(Clone, Debug)]
-pub(crate) enum TensorInfoShaped<R: Rank> {
+pub enum TensorInfoShaped<R: Rank> {
     Numeric(NumericTensor<R>),
     Symbolic(ShapedTensor<R>),
 }
@@ -654,7 +672,7 @@ impl<R: Rank> TensorInfoShaped<R> {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) enum TensorInfoRanked<R: Rank> {
+pub enum TensorInfoRanked<R: Rank> {
     Shaped(TensorInfoShaped<R>),
     Ranked(RankedTensor<R>)
 }
@@ -756,7 +774,7 @@ impl<R: Rank> TensorInfoRanked<R> {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) enum TensorInfo {
+pub enum TensorInfo {
     Ranked(TensorInfoRanked<DynRank>),
     Minimal(MinimalTensor)
 }
@@ -824,7 +842,8 @@ impl TensorInfo {
             TensorInfo::Minimal(tensor) => tensor.first_element().clone()
         }
     }
-    
+
+    #[allow(dead_code)]
     pub(crate) fn get(&self, index: &Vec<u64>, symbolic_resolver: &mut SymbolicResolver) -> Option<ScalarInfo> {
         if index.iter().all(|x| *x == 0) {
             return Some(self.first_element())

@@ -24,7 +24,7 @@ impl Tokenizer for AnyTokenizer {
             AnyTokenizer::Tokenizers(x) => <_ as Tokenizer>::encode(x, text),
             #[cfg(feature = "rwkv-tokenizer")]
             AnyTokenizer::Rwkv(x) => <_ as Tokenizer>::encode(x, text),
-            _ => unimplemented!()
+            //_ => unimplemented!()
         }
     }
     fn decode(&self, tokens: &[u32]) -> Result<String, TokenizerError> {
@@ -33,7 +33,7 @@ impl Tokenizer for AnyTokenizer {
             AnyTokenizer::Tokenizers(x) => <_ as Tokenizer>::decode(x, tokens),
             #[cfg(feature = "rwkv-tokenizer")]
             AnyTokenizer::Rwkv(x) => <_ as Tokenizer>::decode(x, tokens),
-            _ => unimplemented!()
+            //_ => unimplemented!()
         }
     }
 }

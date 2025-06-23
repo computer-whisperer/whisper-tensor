@@ -28,9 +28,9 @@ impl HiddenAct {
 
 pub struct Llama4Config {
     num_hidden_layers: usize,
-    num_attention_heads: usize,
+    _num_attention_heads: usize,
     moe_layers: Vec<usize>,
-    num_key_value_heads: usize,
+    _num_key_value_heads: usize,
     rms_norm_eps: f32,
     num_experts_per_tok: usize,
     hidden_act: HiddenAct
@@ -85,8 +85,8 @@ impl Llama4Config {
         
         Ok(Self {
             num_hidden_layers,
-            num_attention_heads,
-            num_key_value_heads,
+            _num_attention_heads: num_attention_heads,
+            _num_key_value_heads: num_key_value_heads,
             num_experts_per_tok,
             rms_norm_eps,
             moe_layers,
@@ -147,7 +147,7 @@ pub fn load_llama4(weight_manager: impl WeightManager, config: Llama4Config, out
             
             todo!();
 
-            reshape(hidden_state, vec![1, 1, model_dim as i64])?
+            //reshape(hidden_state, vec![1, 1, model_dim as i64])?
         } else {
             // MLP layer
             let x = linear(&layer_weight_manager.prefix("feed_forward.gate_proj"), hidden_state.clone())?;

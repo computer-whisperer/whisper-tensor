@@ -20,8 +20,6 @@ pub mod symbolic_scalar;
 pub use tensor_rank::DynRank;
 
 
-mod model_cache;
-
 pub mod onnx {
     include!(concat!(env!("OUT_DIR"), "/onnx.rs"));
 }
