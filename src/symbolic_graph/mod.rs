@@ -1,15 +1,16 @@
 pub mod ops;
 pub mod tensor_store;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use crate::dtype::DType;
 use crate::backends::ndarray_backend::{NDArrayNumericTensor, NDArrayNumericTensorError};
 use crate::{onnx, TrigOp};
+use crate::backends::eval_backend::{EvalBackend};
 use crate::numeric_scalar::NumericScalar;
 use crate::numeric_tensor::NumericTensor;
-use crate::symbolic_graph::ops::AnyOperation;
+use crate::symbolic_graph::ops::{AnyOperation, EvalError, Operation};
 use crate::scalar_info::ScalarInfoTyped;
 use crate::symbolic_scalar::{SymbolicResolver, SymbolicScalar, SymbolicScalarTyped};
 use crate::symbolic_graph::tensor_store::{StoredTensor, TensorStore, TensorStoreTensorId};
@@ -133,6 +134,17 @@ fn query_attribute_tensor(attributes: &[onnx::AttributeProto], name: &str) -> Op
     None
 }
 
+fn query_attribute_graph<'a>(attributes: &'a [onnx::AttributeProto], name: &str) -> Option<&'a onnx::GraphProto> {
+    for attr in attributes{
+        if attr.name == name {
+            if attr.r#type == onnx::attribute_proto::AttributeType::Graph as i32 {
+                return attr.g.as_ref()
+            }
+        }
+    }
+    None
+}
+
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum StoredOrNotTensor {
@@ -190,6 +202,29 @@ impl ONNXTensorInfo {
     pub fn name(&self) -> Option<String> { self.onnx_name.clone() }
 }
 
+pub fn check_tensor_matches(tensor: &NumericTensor<DynRank>, tensor_info: &ONNXTensorInfo) -> Result<(), EvalError> {
+    if let Some(shape) = tensor_info.shape() {
+        if shape.len() != tensor.shape().len() {
+            Err(EvalError::UnexpectedRank(shape.len(), tensor.shape().len()))?;
+        }
+        for (a, b) in shape.iter().zip(tensor.shape()) {
+            match a {
+                ScalarInfoTyped::Numeric(a) => if *a != b as u64 {
+                    Err(EvalError::UnexpectedDimension(*a, b as u64, tensor.shape()))?
+                },
+                _ => {}
+            }
+        }
+    }
+    if let Some(dtype) = tensor_info.dtype() {
+        let tensor_dtype =  tensor.dtype();
+        if dtype != tensor_dtype {
+            Err(EvalError::UnexpectedDType(dtype, tensor_dtype))?
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GraphOperation {
     pub name: Option<String>,
@@ -197,21 +232,21 @@ pub struct GraphOperation {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct SymbolicGraph {
-    unknown_dimensions: HashMap<String, SymbolicScalar>,
+pub(crate) struct InnerGraph {
     tensors: HashMap<TensorId, ONNXTensorInfo>,
+    ordered_outputs: Vec<TensorId>,
     operations: HashMap<OperationId, GraphOperation>
 }
 
-impl SymbolicGraph {
+impl InnerGraph {
     pub fn new() -> Self {
         Self {
-            unknown_dimensions: HashMap::new(),
             tensors: HashMap::new(),
+            ordered_outputs: Vec::new(),
             operations: HashMap::new()
         }
     }
-    
+
     pub fn get_tensors_by_name(&self) -> HashMap<String, TensorId> {
         let mut tensors_by_name = HashMap::new();
         for (id, tensor) in &self.tensors {
@@ -220,10 +255,6 @@ impl SymbolicGraph {
             }
         }
         tensors_by_name
-    }
-
-    pub fn get_unknown_dimensions_by_name(&self) -> &HashMap<String, SymbolicScalar> {
-        &self.unknown_dimensions
     }
 
     pub fn get_operations(&self) -> &HashMap<OperationId, GraphOperation> {
@@ -254,6 +285,19 @@ impl SymbolicGraph {
         results
     }
 
+    pub fn get_foreign_tensor_ids(&self) -> HashSet<TensorId> {
+        let mut results = HashSet::new();
+        for (_, op) in &self.operations {
+            let inputs = op.op.get_inputs();
+            for input in inputs {
+                if !self.tensors.contains_key(&input) {
+                    results.insert(input);
+                }
+            }
+        }
+        results
+    }
+
     pub fn get_tensor_name(&self, tensor_id: TensorId) -> Option<&str> {
         if let Some(tensor) = self.tensors.get(&tensor_id) {
             tensor.onnx_name.as_deref()
@@ -262,14 +306,14 @@ impl SymbolicGraph {
             None
         }
     }
-    
+
     pub fn get_tensor_info(&self, tensor_id: TensorId) -> Option<&ONNXTensorInfo> {
         self.tensors.get(&tensor_id)
     }
-    
+
     pub fn get_initialized_tensors(&self, tensor_store: &TensorStore) -> HashMap<TensorId, NumericTensor<DynRank>> {
         let mut out = HashMap::new();
-        
+
         for (key, tensor) in &self.tensors {
             match &tensor.tensor_type {
                 TensorType::Constant(x) => {out.insert(*key, x.get_tensor(tensor_store));}
@@ -277,8 +321,171 @@ impl SymbolicGraph {
                 _ => {}
             }
         }
-        
+
         out
+    }
+
+
+    fn populate(&mut self, graph_mutator: &mut SymbolicGraphMutator, onnx_graph: &onnx::GraphProto, core_opset_version: usize) -> Result<(), ONNXDecodingError> {
+        for t in onnx_graph.input.iter() {
+            graph_mutator.new_tensor_from_tensor_info(self, t, TensorType::Input(None))?;
+        }
+        for t in onnx_graph.output.iter() {
+            let tensor_id = graph_mutator.new_tensor_from_tensor_info(self, t, TensorType::Output)?;
+            self.ordered_outputs.push(tensor_id);
+        }
+        for t in onnx_graph.value_info.iter() {
+            graph_mutator.new_tensor_from_tensor_info(self, t, TensorType::Intermediate)?;
+        }
+
+        for t in &onnx_graph.initializer {
+            let numeric_tensor = NDArrayNumericTensor::try_from(t)?;
+            let tensor = if numeric_tensor.num_elements() > 100 {
+                // Larger tensors go into tensor store
+                let id = graph_mutator.tensor_store.add_tensor(StoredTensor::Numeric(NumericTensor::NDArray(numeric_tensor)));
+                StoredOrNotTensor::Stored(id)
+            }
+            else {
+                StoredOrNotTensor::NotStored(numeric_tensor)
+            };
+
+            if let Some(x) = graph_mutator.tensors_by_name.get(&t.name) {
+                let tensor_type = &mut self.tensors.get_mut(x).unwrap().tensor_type;
+                match tensor_type.clone() {
+                    TensorType::Input(_) => {
+                        *tensor_type = TensorType::Input(Some(tensor));
+                    }
+                    TensorType::Constant(_) => {
+                        *tensor_type = TensorType::Constant(tensor);
+                    }
+                    _ => {
+                        *tensor_type = TensorType::Constant(tensor);
+                    }
+                }
+            } else {
+                match tensor {
+                    StoredOrNotTensor::Stored(x) => {
+                        graph_mutator.new_stored_tensor(self, x, Some(t.name.clone()));
+                    }
+                    StoredOrNotTensor::NotStored(x) => {
+                        graph_mutator.new_constant_tensor(self, x, Some(t.name.clone()));
+                    }
+                }
+            }
+        }
+
+        for node in &onnx_graph.node {
+            graph_mutator.new_node_from_onnx_node(self, core_opset_version, node)?;
+        }
+
+        Ok(())
+    }
+
+    fn eval(&self, inputs: &HashMap<TensorId, NumericTensor<DynRank>>, eval_backend: &mut EvalBackend) -> Result<HashMap<TensorId, NumericTensor<DynRank>>, EvalError> {
+        let mut active_tensors: HashMap<TensorId, NumericTensor<DynRank>> = inputs.clone();
+
+        let ops = self.get_operations();
+        let mut remaining_ops_to_complete: Vec<OperationId> = ops.keys().map(|op_id| *op_id).collect();
+        let mut total_ops_completed: Vec<OperationId> = vec![];
+        loop {
+            let mut ops_completed_now = vec![];
+
+            for op_id in &remaining_ops_to_complete {
+                let GraphOperation{ name: _, op } = ops.get(op_id).unwrap();
+                let input_ids = op.get_inputs();
+                let mut input_values = HashMap::new();
+                // Collect all inputs, abort if we can't do this one yet
+                let mut failed_to_fetch = false;
+                for tensor_id in &input_ids {
+                    if let Some(value) = active_tensors.get(&tensor_id) {
+                        // Validate shape and dtype
+                        if let Some(tensor_info) = self.get_tensor_info(*tensor_id) {
+                            check_tensor_matches(value, tensor_info)?;
+                        }
+                        input_values.insert(*tensor_id, value.clone());
+                    }
+                    else {
+                        // Can't do this one yet
+                        failed_to_fetch = true;
+                        continue
+                    }
+                }
+                if failed_to_fetch {
+                    continue
+                }
+                let outputs = op.eval(eval_backend, &input_values)?;
+                for (tensor_id, value) in outputs {
+                    //assert_eq!(value.has_nan().unwrap(), false);
+
+                    // Validate shape and dtype
+                    if let Some(tensor_info) = self.get_tensor_info(tensor_id) {
+                        check_tensor_matches(&value, tensor_info)?;
+                    }
+                    active_tensors.insert(tensor_id, value);
+                }
+                ops_completed_now.push(*op_id)
+            }
+            remaining_ops_to_complete.retain(|&x| !ops_completed_now.contains(&x));
+            if ops_completed_now.is_empty() {
+                // Hopefully we are done now
+                break;
+            }
+
+            total_ops_completed.extend(ops_completed_now);
+        }
+
+        Ok(active_tensors)
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SymbolicGraph {
+    unknown_dimensions: HashMap<String, SymbolicScalar>,
+    inner_graph: InnerGraph
+}
+
+impl SymbolicGraph {
+    pub fn new() -> Self {
+        Self {
+            unknown_dimensions: HashMap::new(),
+            inner_graph: InnerGraph::new()
+        }
+    }
+    
+    pub fn get_tensors_by_name(&self) -> HashMap<String, TensorId> {
+        self.inner_graph.get_tensors_by_name()
+    }
+
+    pub fn get_unknown_dimensions_by_name(&self) -> &HashMap<String, SymbolicScalar> {
+        &self.unknown_dimensions
+    }
+
+    pub fn get_operations(&self) -> &HashMap<OperationId, GraphOperation> {
+        self.inner_graph.get_operations()
+    }
+
+    pub fn get_tensors(&self) -> &HashMap<TensorId, ONNXTensorInfo> {
+        self.inner_graph.get_tensors()
+    }
+
+    pub fn get_outputs(&self) -> Vec<TensorId> {
+        self.inner_graph.get_outputs()
+    }
+
+    pub fn get_inputs(&self) -> Vec<TensorId> {
+        self.inner_graph.get_inputs()
+    }
+
+    pub fn get_tensor_name(&self, tensor_id: TensorId) -> Option<&str> {
+        self.inner_graph.get_tensor_name(tensor_id)
+    }
+    
+    pub fn get_tensor_info(&self, tensor_id: TensorId) -> Option<&ONNXTensorInfo> {
+        self.inner_graph.get_tensor_info(tensor_id)
+    }
+    
+    pub fn get_initialized_tensors(&self, tensor_store: &TensorStore) -> HashMap<TensorId, NumericTensor<DynRank>> {
+        self.inner_graph.get_initialized_tensors(tensor_store)
     }
 }
 
@@ -349,13 +556,13 @@ impl TryFrom<&onnx::TensorProto> for NDArrayNumericTensor<DynRank> {
 }
 
 pub struct SymbolicGraphMutator {
-    graph: SymbolicGraph,
+    graph: Option<SymbolicGraph>,
     tensors_by_name: HashMap<String, TensorId>,
     unknown_dimensions_by_name: HashMap<String, SymbolicScalarTyped<u64>>,
     next_tensor_id: TensorId,
     symbolic_resolver: SymbolicResolver,
     next_operation_id: OperationId,
-    tensor_store: TensorStore
+    tensor_store: TensorStore,
 }
 
 impl SymbolicGraphMutator {
@@ -364,19 +571,19 @@ impl SymbolicGraphMutator {
     }
 
     pub fn get_inner(self) -> (SymbolicGraph, TensorStore) {
-        (self.graph, self.tensor_store)
+        (self.graph.unwrap(), self.tensor_store)
     }
 
     pub fn from_graph(graph: SymbolicGraph, tensor_store: TensorStore) -> Self {
-        let next_tensor_id = graph.tensors.keys().max().map(|x| x + 1).unwrap_or(0);
+        let next_tensor_id = graph.inner_graph.tensors.keys().max().map(|x| x + 1).unwrap_or(0);
         let mut dimension_resolver = SymbolicResolver::new();
         for (_, dim) in &graph.unknown_dimensions {
             dimension_resolver.update_last_assigned(dim.clone())
         }
-        let next_operation_id = graph.operations.keys().max().map(|x| x + 1).unwrap_or(0);
+        let next_operation_id = graph.inner_graph.operations.keys().max().map(|x| x + 1).unwrap_or(0);
         Self {
             tensors_by_name: graph.get_tensors_by_name(),
-            graph,
+            graph: Some(graph),
             next_tensor_id,
             symbolic_resolver: dimension_resolver,
             unknown_dimensions_by_name: HashMap::new(),
@@ -390,7 +597,7 @@ impl SymbolicGraphMutator {
         Self::from_onnx_model_proto(model)
     }
 
-    pub fn new_unknown_tensor(&mut self, name: &str, tensor_type: TensorType) -> TensorId {
+    pub(crate) fn new_unknown_tensor(&mut self, inner_graph: &mut InnerGraph, name: &str, tensor_type: TensorType) -> TensorId {
         let tensor_id = self.next_tensor_id;
         self.next_tensor_id += 1;
         let tensor = ONNXTensorInfo {
@@ -399,12 +606,12 @@ impl SymbolicGraphMutator {
             dtype: None,
             shape: None
         };
-        self.graph.tensors.insert(tensor_id, tensor);
+        inner_graph.tensors.insert(tensor_id, tensor);
         self.tensors_by_name.insert(name.to_string(), tensor_id);
         tensor_id
     }
 
-    pub fn new_tensor_from_tensor_info(&mut self, tensor_info: &onnx::ValueInfoProto, tensor_type: TensorType) -> Result<(), ONNXDecodingError> {
+    pub(crate) fn new_tensor_from_tensor_info(&mut self, inner_graph: &mut InnerGraph, tensor_info: &onnx::ValueInfoProto, tensor_type: TensorType) -> Result<TensorId, ONNXDecodingError> {
         let tensor_id = self.next_tensor_id;
         self.next_tensor_id += 1;
         let onnx_tensor_type = tensor_info.r#type.as_ref().ok_or(ONNXDecodingError::MissingField("value_info.type"))?;
@@ -455,17 +662,17 @@ impl SymbolicGraphMutator {
         let name = tensor_info.name.clone();
 
         self.tensors_by_name.insert(name.clone(), tensor_id);
-        self.graph.tensors.insert(tensor_id,
+        inner_graph.tensors.insert(tensor_id,
                                   ONNXTensorInfo {
                                       onnx_name: Some(name),
                                       dtype: Some(dtype),
                                       shape: Some(dimensions),
                                       tensor_type
                                   });
-        Ok(())
+        Ok(tensor_id)
     }
 
-    pub fn new_constant_tensor(&mut self, value: NDArrayNumericTensor<DynRank>, name: Option<String>) -> TensorId {
+    pub(crate) fn new_constant_tensor(&mut self, inner_graph: &mut InnerGraph, value: NDArrayNumericTensor<DynRank>, name: Option<String>) -> TensorId {
         let tensor_id = self.next_tensor_id;
         self.next_tensor_id += 1;
 
@@ -474,7 +681,7 @@ impl SymbolicGraphMutator {
             shape.push(ScalarInfoTyped::Numeric(s as u64))
         }
 
-        self.graph.tensors.insert(
+        inner_graph.tensors.insert(
             tensor_id,
             ONNXTensorInfo {
                 onnx_name: name.clone(),
@@ -492,7 +699,7 @@ impl SymbolicGraphMutator {
         tensor_id
     }
 
-    pub fn new_stored_tensor(&mut self, id: TensorStoreTensorId, name: Option<String>) -> TensorId {
+    pub(crate) fn new_stored_tensor(&mut self, inner_graph: &mut InnerGraph, id: TensorStoreTensorId, name: Option<String>) -> TensorId {
         let tensor_id = self.next_tensor_id;
         self.next_tensor_id += 1;
 
@@ -503,7 +710,7 @@ impl SymbolicGraphMutator {
             shape.push(ScalarInfoTyped::Numeric(s))
         }
 
-        self.graph.tensors.insert(
+        inner_graph.tensors.insert(
             tensor_id,
             ONNXTensorInfo {
                 onnx_name: name.clone(),
@@ -521,13 +728,13 @@ impl SymbolicGraphMutator {
         tensor_id
     }
 
-    pub fn new_node_from_onnx_node(&mut self, _core_opset_version: usize, onnx_node: &onnx::NodeProto) -> Result<(), ONNXDecodingError> {
+    pub(crate) fn new_node_from_onnx_node(&mut self, inner_graph: &mut InnerGraph, core_opset_version: usize, onnx_node: &onnx::NodeProto) -> Result<(), ONNXDecodingError> {
         let mut input_tensors = vec![];
         for input in &onnx_node.input {
             input_tensors.push(if let Some(tensor_id) = self.tensors_by_name.get(input) {
                 *tensor_id
             } else {
-                self.new_unknown_tensor(input, TensorType::Intermediate)
+                self.new_unknown_tensor(inner_graph, input, TensorType::Intermediate)
             });
         }
 
@@ -536,7 +743,7 @@ impl SymbolicGraphMutator {
             output_tensors.push(if let Some(tensor_id) = self.tensors_by_name.get(output) {
                 *tensor_id
             } else {
-                self.new_unknown_tensor(output, TensorType::Intermediate)
+                self.new_unknown_tensor(inner_graph, output, TensorType::Intermediate)
             });
         }
         
@@ -861,6 +1068,9 @@ impl SymbolicGraphMutator {
             "ArgMin" => {
                 Some(AnyOperation::ArgMin(ops::ArgMinOperation::from_onnx(&input_tensors, &output_tensors, &onnx_node.attribute)?))
             }
+            "If" => {
+                Some(AnyOperation::If(ops::IfOperation::from_onnx(&input_tensors, &output_tensors, &onnx_node.attribute, self, core_opset_version)?))
+            }
             x => Err(ONNXDecodingError::UnsupportedONNXType(x.to_string()))?
         };
 
@@ -874,7 +1084,7 @@ impl SymbolicGraphMutator {
             
             let operation_id = self.next_operation_id;
             self.next_operation_id += 1;
-            self.graph.operations.insert(operation_id, op);
+            inner_graph.operations.insert(operation_id, op);
         }
 
         Ok(())
@@ -890,58 +1100,11 @@ impl SymbolicGraphMutator {
 
         let onnx_graph = model_proto.graph.ok_or(ONNXDecodingError::MissingField("graph"))?;
         let mut graph_mutator = Self::new();
+        let SymbolicGraph{ mut inner_graph, unknown_dimensions } = graph_mutator.graph.take().unwrap();
 
-        for t in onnx_graph.input.iter() {
-            graph_mutator.new_tensor_from_tensor_info(t, TensorType::Input(None))?;
-        }
-        for t in onnx_graph.output.iter() {
-            graph_mutator.new_tensor_from_tensor_info(t, TensorType::Output)?;
-        }
-        for t in onnx_graph.value_info.iter() {
-            graph_mutator.new_tensor_from_tensor_info(t, TensorType::Intermediate)?;
-        }
+        inner_graph.populate(&mut graph_mutator, &onnx_graph, core_opset_version)?;
 
-        for t in onnx_graph.initializer {
-            let numeric_tensor = NDArrayNumericTensor::try_from(&t)?;
-            let tensor = if numeric_tensor.num_elements() > 100 {
-                // Larger tensors go into tensor store
-                let id = graph_mutator.tensor_store.add_tensor(StoredTensor::Numeric(NumericTensor::NDArray(numeric_tensor)));
-                StoredOrNotTensor::Stored(id)
-            }
-            else {
-                StoredOrNotTensor::NotStored(numeric_tensor)
-            };
-
-            if let Some(x) = graph_mutator.tensors_by_name.get(&t.name) {
-                let tensor_type = &mut graph_mutator.graph.tensors.get_mut(x).unwrap().tensor_type;
-                match tensor_type.clone() {
-                    TensorType::Input(_) => {
-                        *tensor_type = TensorType::Input(Some(tensor));
-                    }
-                    TensorType::Constant(_) => {
-                        *tensor_type = TensorType::Constant(tensor);
-                    }
-                    _ => {
-                        *tensor_type = TensorType::Constant(tensor);
-                    }
-                }
-            } else {
-                match tensor {
-                    StoredOrNotTensor::Stored(x) => {
-                        graph_mutator.new_stored_tensor(x, Some(t.name));
-                    }
-                    StoredOrNotTensor::NotStored(x) => {
-                        graph_mutator.new_constant_tensor(x, Some(t.name));
-                    }
-                }
-            }
-        }
-        
-        for node in &onnx_graph.node {
-            graph_mutator.new_node_from_onnx_node(core_opset_version, node)?;
-        }
-        
-
+        graph_mutator.graph = Some(SymbolicGraph{ inner_graph, unknown_dimensions });
 
         Ok(graph_mutator)
     }

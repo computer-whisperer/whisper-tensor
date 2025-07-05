@@ -554,7 +554,8 @@ impl NumericScalarType for bool {
     }
     fn cast_from_numeric_scalar(value: &NumericScalar) -> Self {
         match value {
-            _ => panic!("Cannot cast from {:?} to i8", value),
+            NumericScalar::BOOL(v) => *v,
+            _ => panic!("Cannot cast from {:?} to bool", value),
         }
     }
 }
@@ -565,3 +566,8 @@ impl<T: NumericScalarType> From<T> for NumericScalar {
     }
 }
 
+impl From<NumericScalar> for bool {
+    fn from(value: NumericScalar) -> Self {
+        Self::cast_from_numeric_scalar(&value)
+    }
+}

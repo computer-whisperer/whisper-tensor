@@ -929,9 +929,9 @@ macro_rules! do_tests {
         //do_test!($runner_fn, $runner_name, test_identity_opt);
         //do_test!($runner_fn, $runner_name, test_identity_sequence);
 
-        /*
+        
         do_test!($runner_fn, $runner_name, test_if);
-        do_test!($runner_fn, $runner_name, test_if_opt);
+        /*do_test!($runner_fn, $runner_name, test_if_opt);
         do_test!($runner_fn, $runner_name, test_if_seq);*/
 
         /*

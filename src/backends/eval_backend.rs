@@ -1,9 +1,8 @@
 use std::collections::HashMap;
 use crate::dtype::{DType, DTypeError};
 use crate::numeric_tensor::NumericTensor;
-use crate::symbolic_graph::{GraphOperation, OperationId, SymbolicGraph, TensorId, ONNXTensorInfo};
+use crate::symbolic_graph::{GraphOperation, OperationId, SymbolicGraph, TensorId, check_tensor_matches};
 use crate::symbolic_graph::ops::{EvalError, Operation};
-use crate::scalar_info::ScalarInfoTyped;
 use crate::symbolic_graph::tensor_store::TensorStore;
 use crate::tensor_rank::DynRank;
 #[cfg(feature = "vulkan")]
@@ -60,29 +59,6 @@ pub enum EvalRuntimeError {
     EvalError(Option<String>, EvalError)
 }
 
-fn check_tensor_matches(tensor: &NumericTensor<DynRank>, tensor_info: &ONNXTensorInfo) -> Result<(), EvalRuntimeError> {
-    if let Some(shape) = tensor_info.shape() {
-        if shape.len() != tensor.shape().len() {
-            Err(EvalRuntimeError::UnexpectedRank(shape.len(), tensor.shape().len()))?;
-        }
-        for (a, b) in shape.iter().zip(tensor.shape()) {
-            match a {
-                ScalarInfoTyped::Numeric(a) => if *a != b as u64 {
-                    Err(EvalRuntimeError::UnexpectedDimension(*a, b as u64, tensor.shape()))?
-                },
-                _ => {}
-            }
-        }
-    }
-    if let Some(dtype) = tensor_info.dtype() {
-        let tensor_dtype =  tensor.dtype();
-        if dtype != tensor_dtype {
-            Err(EvalRuntimeError::UnexpectedDType(dtype, tensor_dtype))?
-        }
-    }
-    Ok(())
-}
-
 pub fn run(model: &SymbolicGraph, tensor_store: &TensorStore, eval_backend: &mut EvalBackend, inputs: HashMap<String, NumericTensor<DynRank>>) -> Result<HashMap<String, NumericTensor<DynRank>>, EvalRuntimeError>{
     let initialized_tensors = model.get_initialized_tensors(&tensor_store);
     let mut active_tensors: HashMap<TensorId, NumericTensor<DynRank>> = HashMap::new();
@@ -112,7 +88,7 @@ pub fn run(model: &SymbolicGraph, tensor_store: &TensorStore, eval_backend: &mut
                 if let Some(value) = active_tensors.get(&tensor_id) {
                     // Validate shape and dtype
                     let tensor_info = model.get_tensor_info(*tensor_id).unwrap();
-                    check_tensor_matches(value, tensor_info)?;
+                    check_tensor_matches(value, tensor_info).map_err(|x| EvalRuntimeError::EvalError(name.clone(), x))?;
                     input_values.insert(*tensor_id, value.clone());
                 }
                 else {
@@ -130,7 +106,7 @@ pub fn run(model: &SymbolicGraph, tensor_store: &TensorStore, eval_backend: &mut
 
                 // Validate shape and dtype
                 let tensor_info = model.get_tensor_info(tensor_id).unwrap();
-                check_tensor_matches(&value, tensor_info)?;
+                check_tensor_matches(&value, tensor_info).map_err(|x| EvalRuntimeError::EvalError(name.clone(), x))?;
 
                 active_tensors.insert(tensor_id, value);
             }

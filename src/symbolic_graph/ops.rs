@@ -1,13 +1,13 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
-use crate::dtype::DType;
+use crate::dtype::{DType, DTypeError};
 use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::{NDArrayNumericTensor, NDArrayNumericTensorError};
 use crate::numeric_scalar::NumericScalar;
 use crate::numeric_tensor::{NumericTensor, NumericTensorError};
 use crate::{onnx, TrigOp};
 use crate::milli_graph::{ops_helpers, MilliOpGraph, MilliOpGraphError};
-use crate::symbolic_graph::{query_attribute_bool, query_attribute_float, query_attribute_floats, query_attribute_int, query_attribute_ints, query_attribute_string, query_attribute_tensor, ONNXDecodingError, SymbolicGraphError, TensorId};
+use crate::symbolic_graph::{query_attribute_bool, query_attribute_float, query_attribute_floats, query_attribute_graph, query_attribute_int, query_attribute_ints, query_attribute_string, query_attribute_tensor, InnerGraph, ONNXDecodingError, SymbolicGraphError, SymbolicGraphMutator, TensorId};
 use crate::milli_graph::ops::*;
 use crate::tensor_rank::DynRank;
 
@@ -25,6 +25,16 @@ pub enum EvalError {
     MilliOpGraphError(#[from] MilliOpGraphError),
     #[error("Invalid input for operation {0}")]
     InvalidInput(String),
+    #[error("Disabled Eval Backend: {0}")]
+    DisabledBackend(EvalBackend),
+    #[error(transparent)]
+    DTypeError(#[from] DTypeError),
+    #[error("Unexpected shape: expected {0:?}, got {1:?} in shape {2:?}")]
+    UnexpectedDimension(u64, u64, Vec<u64>),
+    #[error("Unexpected rank: expected {0}, got {1}")]
+    UnexpectedRank(usize, usize),
+    #[error("Missing input tensor: {0} {1:?} {2:?}")]
+    MissingInputTensor(String, Option<DType>, Option<Vec<usize>>),
 }
 
 pub trait Operation {
@@ -3178,6 +3188,92 @@ impl Operation for MinOperation {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct IfOperation {
+    outputs: Vec<TensorId>,
+    condition: TensorId,
+    then_branch: InnerGraph,
+    else_branch: InnerGraph,
+}
+
+impl IfOperation {
+    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], attributes: &[onnx::AttributeProto], symbolic_graph_mutator: &mut SymbolicGraphMutator, core_opset_version: usize) -> Result<Self, ONNXDecodingError> {
+        if inputs.len() != 1 {
+            return Err(ONNXDecodingError::GraphConstructionError("If".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+        }
+        if outputs.len() < 1 {
+            return Err(ONNXDecodingError::GraphConstructionError("If".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+        }
+
+        let then_branch_graph = query_attribute_graph(attributes, "then_branch")
+            .ok_or(ONNXDecodingError::MissingField("then_branch"))?;
+        let then_branch_graph = {
+            let mut inner_graph = InnerGraph::new();
+            inner_graph.populate(symbolic_graph_mutator, then_branch_graph, core_opset_version)?;
+            inner_graph
+        };
+        let else_branch_graph = query_attribute_graph(attributes, "else_branch")
+            .ok_or(ONNXDecodingError::MissingField("else_branch"))?;
+        let else_branch_graph = {
+            let mut inner_graph = InnerGraph::new();
+            inner_graph.populate(symbolic_graph_mutator, else_branch_graph, core_opset_version)?;
+            inner_graph
+        };
+
+        Ok(Self {
+            condition: inputs[0],
+            outputs: outputs.to_vec(),
+            then_branch: then_branch_graph,
+            else_branch: else_branch_graph,
+        })
+    }
+}
+
+impl Operation for IfOperation {
+    fn get_op_type_name(&self) -> String {
+        "If".to_string()
+    }
+
+    fn get_inputs(&self) -> Vec<TensorId> {
+        let mut inputs_set = HashSet::new();
+        inputs_set.insert(self.condition);
+        inputs_set.extend(self.then_branch.get_foreign_tensor_ids());
+        inputs_set.extend(self.else_branch.get_foreign_tensor_ids());
+        let mut inputs_vec: Vec<_> = inputs_set.into_iter().collect();
+        inputs_vec.sort(); // Deterministic ordering
+        inputs_vec
+    }
+
+    fn get_outputs(&self) -> Vec<TensorId> {
+        self.outputs.clone()
+    }
+
+    fn eval(&self, backend: &mut EvalBackend, inputs: &HashMap<TensorId, NumericTensor<DynRank>>) -> Result<HashMap<TensorId, NumericTensor<DynRank>>, EvalError> {
+        let condition = inputs.get(&self.condition).unwrap();
+        let condition: bool = condition.first_element().into();
+        let (active_tensors, output_ids) = if condition {
+            let tensors = self.then_branch.eval(inputs, backend)?;
+            (tensors, &self.then_branch.ordered_outputs)
+        } else {
+            let tensors = self.else_branch.eval(inputs, backend)?;
+            (tensors, &self.else_branch.ordered_outputs)
+        };
+
+        // Get all outputs
+        let mut outputs = HashMap::new();
+        for (to_id, from_id) in self.outputs.iter().zip(output_ids.iter()) {
+            outputs.insert(*to_id, active_tensors.get(from_id).unwrap().clone());
+        }
+        Ok(outputs)
+    }
+
+    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
+        todo!()
+    }
+}
+
+
+
 #[derive(Clone, Debug, strum_macros::VariantNames, Serialize, Deserialize)]
 pub enum AnyOperation {
     Unary(UnaryOperation),
@@ -3226,6 +3322,7 @@ pub enum AnyOperation {
     ArgMin(ArgMinOperation),
     Max(MaxOperation),
     Min(MinOperation),
+    If(IfOperation),
 }
 
 impl AnyOperation {
@@ -3277,6 +3374,7 @@ impl AnyOperation {
             AnyOperation::ArgMin(op) => op,
             AnyOperation::Max(op) => op,
             AnyOperation::Min(op) => op,
+            AnyOperation::If(op) => op,
         }
     }
 }
@@ -3333,6 +3431,7 @@ impl Operation for AnyOperation {
             AnyOperation::ArgMin(op) => op.get_inputs(),
             AnyOperation::Max(op) => op.get_inputs(),
             AnyOperation::Min(op) => op.get_inputs(),
+            AnyOperation::If(op) => op.get_inputs(),
         }
     }
     fn get_outputs(&self) -> Vec<TensorId> {
@@ -3383,6 +3482,7 @@ impl Operation for AnyOperation {
             AnyOperation::ArgMin(op) => op.get_outputs(),
             AnyOperation::Max(op) => op.get_outputs(),
             AnyOperation::Min(op) => op.get_outputs(),
+            AnyOperation::If(op) => op.get_outputs(),
         }
     }
 
@@ -3434,6 +3534,59 @@ impl Operation for AnyOperation {
             AnyOperation::ArgMin(op) => op.get_milli_op_graph(),
             AnyOperation::Max(op) => op.get_milli_op_graph(),
             AnyOperation::Min(op) => op.get_milli_op_graph(),
+            AnyOperation::If(op) => op.get_milli_op_graph(),
+        }
+    }
+
+    fn eval(&self, backend: &mut EvalBackend, inputs: &HashMap<TensorId, NumericTensor<DynRank>>) -> Result<HashMap<TensorId, NumericTensor<DynRank>>, EvalError>  {
+        match self {
+            AnyOperation::Unary(op) => op.eval(backend, inputs),
+            AnyOperation::Binary(op) => op.eval(backend, inputs),
+            AnyOperation::Cast(op) => op.eval(backend, inputs),
+            AnyOperation::CastLike(op) => op.eval(backend, inputs),
+            AnyOperation::Squeeze(op) => op.eval(backend, inputs),
+            AnyOperation::Unsqueeze(op) => op.eval(backend, inputs),
+            AnyOperation::Transpose(op) => op.eval(backend, inputs),
+            AnyOperation::Reshape(op) => op.eval(backend, inputs),
+            AnyOperation::CumSum(op) => op.eval(backend, inputs),
+            AnyOperation::Gather(op) => op.eval(backend, inputs),
+            AnyOperation::LpNormalization(op) => op.eval(backend, inputs),
+            AnyOperation::GroupNormalization(op) => op.eval(backend, inputs),
+            AnyOperation::LayerNormalization(op) => op.eval(backend, inputs),
+            AnyOperation::Shape(op) => op.eval(backend, inputs),
+            AnyOperation::Concat(op) => op.eval(backend, inputs),
+            AnyOperation::ConstantOfShape(op) => op.eval(backend, inputs),
+            AnyOperation::ReduceMean(op) => op.eval(backend, inputs),
+            AnyOperation::ReduceSum(op) => op.eval(backend, inputs),
+            AnyOperation::ReduceProd(op) => op.eval(backend, inputs),
+            AnyOperation::ReduceMax(op) => op.eval(backend, inputs),
+            AnyOperation::ReduceMin(op) => op.eval(backend, inputs),
+            AnyOperation::Pow(op) => op.eval(backend, inputs),
+            AnyOperation::Gemm(op) => op.eval(backend, inputs),
+            AnyOperation::Split(op) => op.eval(backend, inputs),
+            AnyOperation::Slice(op) => op.eval(backend, inputs),
+            AnyOperation::Where(op) => op.eval(backend, inputs),
+            AnyOperation::Softmax(op) => op.eval(backend, inputs),
+            AnyOperation::LogSoftmax(op) => op.eval(backend, inputs),
+            AnyOperation::Size(op) => op.eval(backend, inputs),
+            AnyOperation::Range(op) => op.eval(backend, inputs),
+            AnyOperation::Flatten(op) => op.eval(backend, inputs),
+            AnyOperation::Constant(op) => op.eval(backend, inputs),
+            AnyOperation::Identity(op) => op.eval(backend, inputs),
+            AnyOperation::IsInf(op) => op.eval(backend, inputs),
+            AnyOperation::Clip(op) => op.eval(backend, inputs),
+            AnyOperation::Modulo(op) => op.eval(backend, inputs),
+            AnyOperation::Expand(op) => op.eval(backend, inputs),
+            AnyOperation::Conv(op) => op.eval(backend, inputs),
+            AnyOperation::InstanceNormalization(op) => op.eval(backend, inputs),
+            AnyOperation::Resize(op) => op.eval(backend, inputs),
+            AnyOperation::Pad(op) => op.eval(backend, inputs),
+            AnyOperation::RandomNormalLike(op) => op.eval(backend, inputs),
+            AnyOperation::ArgMax(op) => op.eval(backend, inputs),
+            AnyOperation::ArgMin(op) => op.eval(backend, inputs),
+            AnyOperation::Max(op) => op.eval(backend, inputs),
+            AnyOperation::Min(op) => op.eval(backend, inputs),
+            AnyOperation::If(op) => op.eval(backend, inputs),
         }
     }
 }
