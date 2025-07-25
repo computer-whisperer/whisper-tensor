@@ -3272,7 +3272,206 @@ impl Operation for IfOperation {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ScanOperation {
+    inputs: Vec<TensorId>,
+    outputs: Vec<TensorId>,
+    num_scan_inputs: i64,
+    scan_input_axes: Option<Vec<i64>>,
+    scan_input_directions: Option<Vec<i64>>,
+    scan_output_axes: Option<Vec<i64>>,
+    scan_output_directions: Option<Vec<i64>>,
+    body: InnerGraph,
+}
 
+impl ScanOperation {
+    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], attributes: &[onnx::AttributeProto], symbolic_graph_mutator: &mut SymbolicGraphMutator, core_opset_version: usize) -> Result<Self, ONNXDecodingError> {
+
+        let body = query_attribute_graph(attributes, "body")
+            .ok_or(ONNXDecodingError::MissingField("body"))?;
+        let body = {
+            let mut inner_graph = InnerGraph::new();
+            inner_graph.populate(symbolic_graph_mutator, body, core_opset_version)?;
+            inner_graph
+        };
+
+        let num_scan_inputs = query_attribute_int(attributes, "num_scan_inputs").ok_or(ONNXDecodingError::MissingField("num_scan_inputs"))?;
+
+        let scan_input_axes = query_attribute_ints(attributes, "scan_input_axes");
+        let scan_input_directions = query_attribute_ints(attributes, "scan_input_directions");
+        let scan_output_axes = query_attribute_ints(attributes, "scan_output_axes");
+        let scan_output_directions = query_attribute_ints(attributes, "scan_output_directions");
+
+        let inputs = inputs.to_vec();
+
+        assert!(num_scan_inputs <= inputs.len() as i64);
+        assert!(num_scan_inputs >= 1);
+        Ok(Self {
+            inputs,
+            outputs: outputs.to_vec(),
+            body,
+            num_scan_inputs,
+            scan_input_axes,
+            scan_input_directions,
+            scan_output_axes,
+            scan_output_directions,
+        })
+    }
+}
+
+impl Operation for ScanOperation {
+    fn get_op_type_name(&self) -> String {
+        "Scan".to_string()
+    }
+
+    fn get_inputs(&self) -> Vec<TensorId> {
+
+        let mut inputs_set = HashSet::new();
+        inputs_set.extend(self.inputs.iter());
+        inputs_set.extend(self.body.get_foreign_tensor_ids());
+        let mut inputs_vec: Vec<_> = inputs_set.into_iter().collect();
+        inputs_vec.sort(); // Deterministic ordering
+        inputs_vec
+    }
+
+    fn get_outputs(&self) -> Vec<TensorId> {
+        self.outputs.clone()
+    }
+
+    fn eval(&self, backend: &mut EvalBackend, inputs: &HashMap<TensorId, NumericTensor<DynRank>>) -> Result<HashMap<TensorId, NumericTensor<DynRank>>, EvalError> {
+        let init_inputs = {
+            let mut init_inputs = Vec::new();
+            for i in 0..(self.inputs.len() - self.num_scan_inputs as usize) {
+                init_inputs.push(inputs[&self.inputs[i]].clone());
+            }
+            init_inputs
+        };
+        let scan_inputs = {
+            let mut scan_inputs = Vec::new();
+            for i in (self.inputs.len() - self.num_scan_inputs as usize)..self.inputs.len() {
+                scan_inputs.push(inputs[&self.inputs[i]].clone());
+            }
+            scan_inputs
+        };
+
+        let scan_input_axes = if let Some(scan_input_axes) = &self.scan_input_axes {
+            let mut output = Vec::new();
+            for (i, axis) in scan_input_axes.iter().enumerate() {
+                if *axis >= 0 {
+                    output.push(*axis as usize);
+                } else {
+                    output.push((scan_inputs[i].rank() as i64 + *axis) as usize);
+                }
+                assert!(output[i] < scan_inputs[i].rank());
+            }
+            output
+        } else {
+            vec![0; self.num_scan_inputs as usize]
+        };
+
+        let iter_count = scan_inputs[0].shape()[scan_input_axes[0]];
+
+        assert!(self.scan_input_directions.is_none());
+        assert!(self.scan_output_directions.is_none());
+
+        let mut accumulated_scan_outputs = Vec::new();
+        for _ in 0..self.num_scan_inputs {
+            accumulated_scan_outputs.push(Vec::new());
+        }
+
+        let mut next_temp_inputs = init_inputs;
+
+        for i in 0..iter_count {
+            let iter_scan_inputs = {
+                let mut iter_scan_inputs = Vec::new();
+                for j in 0..scan_inputs.len() {
+                    let mut slice_indexes = Vec::new();
+                    for k in 0..scan_inputs[j].rank() {
+                        if k == scan_input_axes[j] {
+                            slice_indexes.push(0..scan_inputs[j].shape()[k]);
+                        } else {
+                            slice_indexes.push(i..i+1);
+                        }
+                    }
+                    let sliced = scan_inputs[i as usize].slice(slice_indexes.as_slice(), backend)?;
+                    let squeezed = sliced.squeeze(scan_input_axes[j])?;
+                    iter_scan_inputs.push(squeezed);
+                }
+                iter_scan_inputs
+            };
+
+            let input_map = {
+                let mut input_map = HashMap::new();
+                let mut i = 0;
+                for input in &next_temp_inputs {
+                    input_map.insert(self.body.ordered_inputs[i], input.clone());
+                    i += 1;
+                }
+                for input in &iter_scan_inputs {
+                    input_map.insert(self.body.ordered_inputs[i], input.clone());
+                    i += 1;
+                }
+                for input in self.body.get_foreign_tensor_ids() {
+                    input_map.insert(input, inputs[&input].clone());
+                }
+                input_map
+            };
+
+            let eval_outputs = self.body.eval(&input_map, backend)?;
+
+
+            let temp_outputs = self.body.ordered_outputs[0..next_temp_inputs.len()].iter().map(|x| eval_outputs[x].clone()).collect::<Vec<_>>();
+            let scan_outputs = self.body.ordered_outputs[next_temp_inputs.len()..].iter().map(|x| eval_outputs[x].clone()).collect::<Vec<_>>();
+
+            for (i, output) in scan_outputs.iter().enumerate() {
+                accumulated_scan_outputs[i].push(output.clone());
+            }
+            next_temp_inputs = temp_outputs;
+        }
+
+        // Concatenate the accumulated outputs
+        let scan_outputs = {
+            let mut scan_outputs: Vec<NumericTensor<DynRank>> = Vec::new();
+            for (i, outputs) in accumulated_scan_outputs.iter().enumerate() {
+                let concat_dim = if let Some(x) = &self.scan_output_axes {
+                    let v = x[i];
+                    if v < 0 {
+                        (v + (scan_outputs[0].rank() + 1) as i64) as usize
+                    }
+                    else {
+                        v as usize
+                    }
+                } else {
+                    0
+                };
+                let mut unsqueezed_outputs = Vec::new();
+                for output in outputs {
+                    unsqueezed_outputs.push(output.unsqueeze(concat_dim)?);
+                }
+                let mut unsqueezed_outputs_refs = Vec::new();
+                for output in &unsqueezed_outputs {
+                    unsqueezed_outputs_refs.push(output);
+                }
+                scan_outputs.push(NumericTensor::concat(unsqueezed_outputs_refs.as_slice(), concat_dim, backend)?);
+            }
+            scan_outputs
+        };
+
+        let mut outputs = HashMap::new();
+        for i in 0..next_temp_inputs.len() {
+            outputs.insert(self.body.ordered_outputs[i].clone(), next_temp_inputs[i].clone());
+        }
+        for i in 0..scan_outputs.len() {
+            outputs.insert(self.body.ordered_outputs[next_temp_inputs.len() + i].clone(), scan_outputs[i].clone());
+        }
+
+        Ok(outputs)
+    }
+
+    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
+        todo!()
+    }
+}
 
 #[derive(Clone, Debug, strum_macros::VariantNames, Serialize, Deserialize)]
 pub enum AnyOperation {
@@ -3323,6 +3522,7 @@ pub enum AnyOperation {
     Max(MaxOperation),
     Min(MinOperation),
     If(IfOperation),
+    Scan(ScanOperation),
 }
 
 impl AnyOperation {
@@ -3375,6 +3575,7 @@ impl AnyOperation {
             AnyOperation::Max(op) => op,
             AnyOperation::Min(op) => op,
             AnyOperation::If(op) => op,
+            AnyOperation::Scan(op) => op,
         }
     }
 }
@@ -3432,6 +3633,7 @@ impl Operation for AnyOperation {
             AnyOperation::Max(op) => op.get_inputs(),
             AnyOperation::Min(op) => op.get_inputs(),
             AnyOperation::If(op) => op.get_inputs(),
+            AnyOperation::Scan(op) => op.get_inputs(),
         }
     }
     fn get_outputs(&self) -> Vec<TensorId> {
@@ -3483,6 +3685,7 @@ impl Operation for AnyOperation {
             AnyOperation::Max(op) => op.get_outputs(),
             AnyOperation::Min(op) => op.get_outputs(),
             AnyOperation::If(op) => op.get_outputs(),
+            AnyOperation::Scan(op) => op.get_outputs(),
         }
     }
 
@@ -3535,6 +3738,7 @@ impl Operation for AnyOperation {
             AnyOperation::Max(op) => op.get_milli_op_graph(),
             AnyOperation::Min(op) => op.get_milli_op_graph(),
             AnyOperation::If(op) => op.get_milli_op_graph(),
+            AnyOperation::Scan(op) => op.get_milli_op_graph(),
         }
     }
 
@@ -3587,6 +3791,7 @@ impl Operation for AnyOperation {
             AnyOperation::Max(op) => op.eval(backend, inputs),
             AnyOperation::Min(op) => op.eval(backend, inputs),
             AnyOperation::If(op) => op.eval(backend, inputs),
+            AnyOperation::Scan(op) => op.eval(backend, inputs),
         }
     }
 }

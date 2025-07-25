@@ -235,6 +235,7 @@ pub struct GraphOperation {
 pub(crate) struct InnerGraph {
     tensors: HashMap<TensorId, ONNXTensorInfo>,
     ordered_outputs: Vec<TensorId>,
+    ordered_inputs: Vec<TensorId>,
     operations: HashMap<OperationId, GraphOperation>
 }
 
@@ -243,6 +244,7 @@ impl InnerGraph {
         Self {
             tensors: HashMap::new(),
             ordered_outputs: Vec::new(),
+            ordered_inputs: Vec::new(),
             operations: HashMap::new()
         }
     }
@@ -328,7 +330,8 @@ impl InnerGraph {
 
     fn populate(&mut self, graph_mutator: &mut SymbolicGraphMutator, onnx_graph: &onnx::GraphProto, core_opset_version: usize) -> Result<(), ONNXDecodingError> {
         for t in onnx_graph.input.iter() {
-            graph_mutator.new_tensor_from_tensor_info(self, t, TensorType::Input(None))?;
+            let tensor_id = graph_mutator.new_tensor_from_tensor_info(self, t, TensorType::Input(None))?;
+            self.ordered_inputs.push(tensor_id);
         }
         for t in onnx_graph.output.iter() {
             let tensor_id = graph_mutator.new_tensor_from_tensor_info(self, t, TensorType::Output)?;
@@ -1070,6 +1073,9 @@ impl SymbolicGraphMutator {
             }
             "If" => {
                 Some(AnyOperation::If(ops::IfOperation::from_onnx(&input_tensors, &output_tensors, &onnx_node.attribute, self, core_opset_version)?))
+            }
+            "Scan" => {
+                Some(AnyOperation::Scan(ops::ScanOperation::from_onnx(&input_tensors, &output_tensors, &onnx_node.attribute, self, core_opset_version)?))
             }
             x => Err(ONNXDecodingError::UnsupportedONNXType(x.to_string()))?
         };

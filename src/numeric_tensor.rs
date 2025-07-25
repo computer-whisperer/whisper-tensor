@@ -222,6 +222,7 @@ impl<R: Rank> NumericTensor<R> {
 
     pub fn ln(&self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         if backend.supports_dtype(self.dtype()) {
+            #[cfg(feature = "vulkan")]
             if let EvalBackend::Vulkan(executor) = backend {
                 return Ok(NumericTensor::Vulkan(self.to_vulkan(executor)?.ln(executor)?))
             }
@@ -363,6 +364,7 @@ impl NumericTensor<DynRank> {
 
     pub fn slice(&self, indices: &[Range<u64>], _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
         Ok(match self {
+            #[cfg(feature = "vulkan")]
             NumericTensor::Vulkan(tensor) => {
                 NumericTensor::Vulkan(tensor.slice(indices)?)
             }
@@ -375,9 +377,11 @@ impl NumericTensor<DynRank> {
 
     pub fn unsqueeze(&self, axis: usize) -> Result<Self, NumericTensorError> {
         Ok(match self {
+            #[cfg(feature = "candle")]
             NumericTensor::Candle(x) => {
                 NumericTensor::Candle(x.unsqueeze(axis)?)
             }
+            #[cfg(feature = "vulkan")]
             NumericTensor::Vulkan(x) => {
                 NumericTensor::Vulkan(x.unsqueeze(axis)?)
             }
@@ -389,9 +393,11 @@ impl NumericTensor<DynRank> {
 
     pub fn squeeze(&self, axis: usize) -> Result<Self, NumericTensorError> {
         Ok(match self {
+            #[cfg(feature = "candle")]
             NumericTensor::Candle(x) => {
                 NumericTensor::Candle(x.squeeze(axis)?)
             }
+            #[cfg(feature = "vulkan")]
             NumericTensor::Vulkan(x) => {
                 NumericTensor::Vulkan(x.squeeze(axis)?)
             }
@@ -722,6 +728,7 @@ impl NumericTensor<DynRank> {
 
     pub fn transpose(&self, axes: Option<Vec<i64>>, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
         Ok(match self {
+            #[cfg(feature = "vulkan")]
             NumericTensor::Vulkan(tensor) => {
                 let axes = match axes {
                     Some(axes) => {

@@ -155,6 +155,7 @@ impl SuperGraphNode for SuperGraphNodeTokenizerLoad {
         SuperGraphAnyNode::TokenizerLoad(self)
     }
     fn eval(&self, data: &mut SuperGraphData, _backend: &mut EvalBackend) -> Result<(), SuperGraphError> {
+        /*
         let tokenizer = match &self.info {
             TokenizerInfo::HFTokenizer(name) => {
                 #[cfg(all(feature = "tokenizers", feature = "http"))]
@@ -169,7 +170,8 @@ impl SuperGraphNode for SuperGraphNodeTokenizerLoad {
                 }
             }
         };
-        data.tokenizers.insert(self.output.clone(), tokenizer);
+        data.tokenizers.insert(self.output.clone(), tokenizer);*/
+        todo!();
         Ok(())
     }
 }
