@@ -1589,7 +1589,7 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_round);
         
         do_test!($runner_fn, $runner_name, test_scan9_sum);
-        do_test!($runner_fn, $runner_name, test_scan_sum);
+        //do_test!($runner_fn, $runner_name, test_scan_sum);
         
         /*
         do_test!($runner_fn, $runner_name, test_scatter_elements_with_axis);

@@ -17,17 +17,11 @@ use crate::symbolic_graph::tensor_store::{StoredTensor, TensorStore, TensorStore
 use crate::tensor_rank::DynRank;
 
 #[derive(Debug, thiserror::Error)]
-pub enum SymbolicGraphError {
-    #[error("Invalid operator inputs")]
-    InvalidOperatorInputs,
-    #[error("Invalid operator outputs")]
-    InvalidOperatorOutputs,
-}
-
-#[derive(Debug, thiserror::Error)]
 pub enum ONNXDecodingError {
-    #[error("Error constructing graph node {0}, {1}")]
-    GraphConstructionError(String, SymbolicGraphError),
+    #[error("Invalid operator inputs")]
+    InvalidOperatorInputs(&'static str),
+    #[error("Invalid operator outputs")]
+    InvalidOperatorOutputs(&'static str),
     #[error("Missing field \"{0}\"")]
     MissingField(&'static str),
     #[error("Unsupported Tensor Type: {0:?}")]
@@ -734,20 +728,32 @@ impl SymbolicGraphMutator {
     pub(crate) fn new_node_from_onnx_node(&mut self, inner_graph: &mut InnerGraph, core_opset_version: usize, onnx_node: &onnx::NodeProto) -> Result<(), ONNXDecodingError> {
         let mut input_tensors = vec![];
         for input in &onnx_node.input {
-            input_tensors.push(if let Some(tensor_id) = self.tensors_by_name.get(input) {
-                *tensor_id
-            } else {
-                self.new_unknown_tensor(inner_graph, input, TensorType::Intermediate)
-            });
+            input_tensors.push(
+                if input.is_empty() {
+                    None
+                } else {
+                    if let Some(tensor_id) = self.tensors_by_name.get(input) {
+                        Some(*tensor_id)
+                    } else {
+                        Some(self.new_unknown_tensor(inner_graph, input, TensorType::Intermediate))
+                    }
+                }
+            );
         }
 
         let mut output_tensors = vec![];
         for output in &onnx_node.output {
-            output_tensors.push(if let Some(tensor_id) = self.tensors_by_name.get(output) {
-                *tensor_id
-            } else {
-                self.new_unknown_tensor(inner_graph, output, TensorType::Intermediate)
-            });
+            output_tensors.push(
+                if output.is_empty() {
+                    None
+                } else {
+                    if let Some(tensor_id) = self.tensors_by_name.get(output) {
+                        Some(*tensor_id)
+                    } else {
+                        Some(self.new_unknown_tensor(inner_graph, output, TensorType::Intermediate))
+                    }
+                }
+                );
         }
         
         let name = if onnx_node.name.is_empty() {
@@ -764,211 +770,175 @@ impl SymbolicGraphMutator {
                 Some(AnyOperation::Min(ops::MinOperation::from_onnx(&input_tensors, &output_tensors, &onnx_node.attribute)?))
             },
             "Add" => {
-                Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichBinaryOperation::Add)
-                    .map_err(|x| ONNXDecodingError::GraphConstructionError(onnx_node.name.clone(), x))?
-                ))
+                Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(&input_tensors, &output_tensors, ops::WhichBinaryOperation::Add)?))
             },
             "Mod" => {
                 Some(AnyOperation::Modulo(ops::ModuloOperation::from_onnx(&input_tensors, &output_tensors, &onnx_node.attribute)?))
             },
             "Sub" => {
-                Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichBinaryOperation::Sub)
-                    .map_err(|x| ONNXDecodingError::GraphConstructionError(onnx_node.name.clone(), x))?
-                ))
+                Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(&input_tensors, &output_tensors, ops::WhichBinaryOperation::Sub)?))
             }
             "Mul" => {
-                Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichBinaryOperation::Mul)
-                    .map_err(|x| ONNXDecodingError::GraphConstructionError(onnx_node.name.clone(), x))?
-                ))
+                Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(&input_tensors, &output_tensors, ops::WhichBinaryOperation::Mul)?))
             }
             "Div" => {
-                Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichBinaryOperation::Div)
-                    .map_err(|x| ONNXDecodingError::GraphConstructionError(onnx_node.name.clone(), x))?
-                ))
+                Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(&input_tensors, &output_tensors, ops::WhichBinaryOperation::Div)?))
             }
             "MatMul" => {
-                Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichBinaryOperation::MatMul)
-                    .map_err(|x| ONNXDecodingError::GraphConstructionError(onnx_node.name.clone(), x))?
-                ))
+                Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(&input_tensors, &output_tensors, ops::WhichBinaryOperation::MatMul)?))
             }
             "Equal" => {
-                Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichBinaryOperation::Equal)
-                    .map_err(|x| ONNXDecodingError::GraphConstructionError(onnx_node.name.clone(), x))?
-                ))
+                Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(&input_tensors, &output_tensors, ops::WhichBinaryOperation::Equal)?))
             },
             "Greater" => {
-                Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichBinaryOperation::Greater)
-                    .map_err(|x| ONNXDecodingError::GraphConstructionError(onnx_node.name.clone(), x))?
-                ))
+                Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(&input_tensors, &output_tensors, ops::WhichBinaryOperation::Greater)?))
             },
             "GreaterOrEqual" => {
-                Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichBinaryOperation::GreaterOrEqual)
-                    .map_err(|x| ONNXDecodingError::GraphConstructionError(onnx_node.name.clone(), x))?
-                ))
+                Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(&input_tensors, &output_tensors, ops::WhichBinaryOperation::GreaterOrEqual)?))
             },
             "Less" => {
-                Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichBinaryOperation::Less)
-                    .map_err(|x| ONNXDecodingError::GraphConstructionError(onnx_node.name.clone(), x))?
-                ))
+                Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(&input_tensors, &output_tensors, ops::WhichBinaryOperation::Less)?))
             },
             "LessOrEqual" => {
-                Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichBinaryOperation::LessOrEqual)
-                    .map_err(|x| ONNXDecodingError::GraphConstructionError(onnx_node.name.clone(), x))?
-                ))
+                Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(&input_tensors, &output_tensors, ops::WhichBinaryOperation::LessOrEqual)?))
             },
             "And" => {
-                Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichBinaryOperation::And)
-                    .map_err(|x| ONNXDecodingError::GraphConstructionError(onnx_node.name.clone(), x))?
-                ))
+                Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(&input_tensors, &output_tensors, ops::WhichBinaryOperation::And)?))
             },
             "Or" => {
-                Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichBinaryOperation::Or)
-                    .map_err(|x| ONNXDecodingError::GraphConstructionError(onnx_node.name.clone(), x))?
-                ))
+                Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(&input_tensors, &output_tensors, ops::WhichBinaryOperation::Or)?))
             },
             "Xor" => {
-                Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichBinaryOperation::Xor)
-                    .map_err(|x| ONNXDecodingError::GraphConstructionError(onnx_node.name.clone(), x))?
-                ))
+                Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(&input_tensors, &output_tensors, ops::WhichBinaryOperation::Xor)?))
             },
             "BitwiseAnd" => {
-                Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichBinaryOperation::BitwiseAnd)
-                    .map_err(|x| ONNXDecodingError::GraphConstructionError(onnx_node.name.clone(), x))?
-                ))
+                Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(&input_tensors, &output_tensors, ops::WhichBinaryOperation::BitwiseAnd)?))
             },
             "BitwiseOr" => {
-                Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichBinaryOperation::BitwiseOr)
-                    .map_err(|x| ONNXDecodingError::GraphConstructionError(onnx_node.name.clone(), x))?
-                ))
+                Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(&input_tensors, &output_tensors, ops::WhichBinaryOperation::BitwiseOr)?))
             },
             "BitwiseXor" => {
-                Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichBinaryOperation::BitwiseXor)
-                    .map_err(|x| ONNXDecodingError::GraphConstructionError(onnx_node.name.clone(), x))?
-                ))
+                Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(&input_tensors, &output_tensors, ops::WhichBinaryOperation::BitwiseXor)?))
             },
             "Relu" => {
-                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichUnaryOperation::Relu)?))
+                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(&input_tensors, &output_tensors, ops::WhichUnaryOperation::Relu)?))
             }
             "Sigmoid" => {
-                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichUnaryOperation::Sigmoid)?))
+                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(&input_tensors, &output_tensors, ops::WhichUnaryOperation::Sigmoid)?))
             }
             "Asin" => {
-                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichUnaryOperation::Trig(TrigOp::Asin))?))
+                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(&input_tensors, &output_tensors, ops::WhichUnaryOperation::Trig(TrigOp::Asin))?))
             }
             "Asinh" => {
-                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichUnaryOperation::Trig(TrigOp::Asinh))?))
+                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(&input_tensors, &output_tensors, ops::WhichUnaryOperation::Trig(TrigOp::Asinh))?))
             }
             "Acos" => {
-                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichUnaryOperation::Trig(TrigOp::Acos))?))
+                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(&input_tensors, &output_tensors, ops::WhichUnaryOperation::Trig(TrigOp::Acos))?))
             }
             "Acosh" => {
-                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichUnaryOperation::Trig(TrigOp::Acosh))?))
+                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(&input_tensors, &output_tensors, ops::WhichUnaryOperation::Trig(TrigOp::Acosh))?))
             }
             "Atan" => {
-                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichUnaryOperation::Trig(TrigOp::Atan))?))
+                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(&input_tensors, &output_tensors, ops::WhichUnaryOperation::Trig(TrigOp::Atan))?))
             }
             "Atanh" => {
-                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichUnaryOperation::Trig(TrigOp::Atanh))?))
+                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(&input_tensors, &output_tensors, ops::WhichUnaryOperation::Trig(TrigOp::Atanh))?))
             }
             "Sin" => {
-                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichUnaryOperation::Trig(TrigOp::Sin))?))
+                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(&input_tensors, &output_tensors, ops::WhichUnaryOperation::Trig(TrigOp::Sin))?))
             }
             "Sinh" => {
-                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichUnaryOperation::Trig(TrigOp::Sinh))?))
+                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(&input_tensors, &output_tensors, ops::WhichUnaryOperation::Trig(TrigOp::Sinh))?))
             }
             "Cos" => {
-                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichUnaryOperation::Trig(TrigOp::Cos))?))
+                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(&input_tensors, &output_tensors, ops::WhichUnaryOperation::Trig(TrigOp::Cos))?))
             }
             "Cosh" => {
-                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichUnaryOperation::Trig(TrigOp::Cosh))?))
+                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(&input_tensors, &output_tensors, ops::WhichUnaryOperation::Trig(TrigOp::Cosh))?))
             }
             "Tan" => {
-                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichUnaryOperation::Trig(TrigOp::Tan))?))
+                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(&input_tensors, &output_tensors, ops::WhichUnaryOperation::Trig(TrigOp::Tan))?))
             }
             "Tanh" => {
-                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichUnaryOperation::Trig(TrigOp::Tanh))?))
+                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(&input_tensors, &output_tensors, ops::WhichUnaryOperation::Trig(TrigOp::Tanh))?))
             }
             "Exp" => {
-                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichUnaryOperation::Exp)?))
+                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(&input_tensors, &output_tensors, ops::WhichUnaryOperation::Exp)?))
             }
             "Log" => {
-                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichUnaryOperation::Log)?))
+                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(&input_tensors, &output_tensors, ops::WhichUnaryOperation::Log)?))
             }
             "Sqrt" => {
-                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichUnaryOperation::Sqrt)?))
+                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(&input_tensors, &output_tensors, ops::WhichUnaryOperation::Sqrt)?))
             }
             "BitwiseNot" => {
-                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichUnaryOperation::BitwiseNot)?))
+                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(&input_tensors, &output_tensors, ops::WhichUnaryOperation::BitwiseNot)?))
             }
             "Not" => {
-                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichUnaryOperation::Not)?))
+                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(&input_tensors, &output_tensors, ops::WhichUnaryOperation::Not)?))
             }
             "Softplus" => {
-                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichUnaryOperation::Softplus)?))
+                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(&input_tensors, &output_tensors, ops::WhichUnaryOperation::Softplus)?))
             }
             "Neg" => {
-                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichUnaryOperation::Neg)?))
+                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(&input_tensors, &output_tensors, ops::WhichUnaryOperation::Neg)?))
             }
             "Abs" => {
-                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichUnaryOperation::Abs)?))
+                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(&input_tensors, &output_tensors, ops::WhichUnaryOperation::Abs)?))
             }
             "Sign" => {
-                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichUnaryOperation::Sign)?))
+                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(&input_tensors, &output_tensors, ops::WhichUnaryOperation::Sign)?))
             }
             "IsNaN" => {
-                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichUnaryOperation::IsNan)?))
+                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(&input_tensors, &output_tensors, ops::WhichUnaryOperation::IsNan)?))
             }
             "Erf" => {
-                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichUnaryOperation::Erf)?))
+                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(&input_tensors, &output_tensors, ops::WhichUnaryOperation::Erf)?))
             }
             "IsInf" => {
                 Some(AnyOperation::IsInf(ops::IsInfOperation::from_onnx(&input_tensors, &output_tensors, &onnx_node.attribute)?))
             }
             "Floor" => {
-                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichUnaryOperation::Floor)?))
+                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(&input_tensors, &output_tensors, ops::WhichUnaryOperation::Floor)?))
             }
             "Ceil" => {
-                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichUnaryOperation::Ceil)?))
+                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(&input_tensors, &output_tensors, ops::WhichUnaryOperation::Ceil)?))
             }
             "Round" => {
-                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichUnaryOperation::Round)?))
+                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(&input_tensors, &output_tensors, ops::WhichUnaryOperation::Round)?))
             }
             "Clip" => {
                 Some(AnyOperation::Clip(ops::ClipOperation::from_onnx(&input_tensors, &output_tensors, &onnx_node.attribute)?))
             }
             "Reciprocal" => {
-                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichUnaryOperation::Reciprocal)?))
+                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(&input_tensors, &output_tensors, ops::WhichUnaryOperation::Reciprocal)?))
             }
             "Size" => {
                 Some(AnyOperation::Size(ops::SizeOperation::from_onnx(&input_tensors, &output_tensors)?))
             }
             "NonZero" => {
-                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(input_tensors, output_tensors, ops::WhichUnaryOperation::NonZero)?))
+                Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(&input_tensors, &output_tensors, ops::WhichUnaryOperation::NonZero)?))
             }
             "LpNormalization" => {
-                Some(AnyOperation::LpNormalization(ops::LpNormalizationOperation::from_onnx(input_tensors, output_tensors, &onnx_node.attribute)
-                    .map_err(|x| ONNXDecodingError::GraphConstructionError(onnx_node.name.clone(), x))?
-                ))
+                Some(AnyOperation::LpNormalization(ops::LpNormalizationOperation::from_onnx(&input_tensors, &output_tensors, &onnx_node.attribute)?))
             }
             "GroupNormalization" => {
-                Some(AnyOperation::GroupNormalization(ops::GroupNormalizationOperation::from_onnx(input_tensors, output_tensors, &onnx_node.attribute)?))
+                Some(AnyOperation::GroupNormalization(ops::GroupNormalizationOperation::from_onnx(&input_tensors, &output_tensors, &onnx_node.attribute)?))
             }
             "LayerNormalization" => {
                 Some(AnyOperation::LayerNormalization(ops::LayerNormalizationOperation::from_onnx(&input_tensors, &output_tensors, &onnx_node.attribute)?))
             }
             "CumSum" => {
-                Some(AnyOperation::CumSum(ops::CumSumOperation::from_onnx(input_tensors, output_tensors)
-                    .map_err(|x| ONNXDecodingError::GraphConstructionError(onnx_node.name.clone(), x))?
-                ))
+                Some(AnyOperation::CumSum(ops::CumSumOperation::from_onnx(&input_tensors, &output_tensors)?))
             }
             "Gather" => {
                 Some(AnyOperation::Gather(ops::GatherOperation::from_onnx(&input_tensors, &output_tensors, &onnx_node.attribute)?))
             }
             "Cast" => {
-                Some(AnyOperation::Cast(ops::CastOperation::from_onnx(input_tensors, output_tensors, &onnx_node.attribute)?))
+                Some(AnyOperation::Cast(ops::CastOperation::from_onnx(&input_tensors, &output_tensors, &onnx_node.attribute)?))
             }
             "CastLike" => {
-                Some(AnyOperation::CastLike(ops::CastLikeOperation::from_onnx(input_tensors, output_tensors, &onnx_node.attribute)?))
+                Some(AnyOperation::CastLike(ops::CastLikeOperation::from_onnx(&input_tensors, &output_tensors, &onnx_node.attribute)?))
             }
             "Pow" => {
                 Some(AnyOperation::Pow(ops::PowOperation::from_onnx(&input_tensors, &output_tensors, &onnx_node.attribute)?))
@@ -995,24 +965,16 @@ impl SymbolicGraphMutator {
                 Some(AnyOperation::Expand(ops::ExpandOperation::from_onnx(&input_tensors, &output_tensors, &onnx_node.attribute)?))
             }
             "Squeeze" => {
-                Some(AnyOperation::Squeeze(ops::SqueezeOperation::from_onnx(&input_tensors, &output_tensors, &onnx_node.attribute)
-                    .map_err(|x| ONNXDecodingError::GraphConstructionError(onnx_node.name.clone(), x))?
-                ))
+                Some(AnyOperation::Squeeze(ops::SqueezeOperation::from_onnx(&input_tensors, &output_tensors, &onnx_node.attribute)?))
             }
             "Unsqueeze" => {
-                Some(AnyOperation::Unsqueeze(ops::UnsqueezeOperation::from_onnx(&input_tensors, &output_tensors, &onnx_node.attribute)
-                    .map_err(|x| ONNXDecodingError::GraphConstructionError(onnx_node.name.clone(), x))?
-                ))
+                Some(AnyOperation::Unsqueeze(ops::UnsqueezeOperation::from_onnx(&input_tensors, &output_tensors, &onnx_node.attribute)?))
             }
             "Transpose" => {
-                Some(AnyOperation::Transpose(ops::TransposeOperation::from_onnx(input_tensors, output_tensors, &onnx_node.attribute)
-                    .map_err(|x| ONNXDecodingError::GraphConstructionError(onnx_node.name.clone(), x))?
-                ))
+                Some(AnyOperation::Transpose(ops::TransposeOperation::from_onnx(&input_tensors, &output_tensors, &onnx_node.attribute)?))
             }
             "Reshape" => {
-                Some(AnyOperation::Reshape(ops::ReshapeOperation::from_onnx(input_tensors, output_tensors, &onnx_node.attribute)
-                    .map_err(|x| ONNXDecodingError::GraphConstructionError(onnx_node.name.clone(), x))?
-                ))
+                Some(AnyOperation::Reshape(ops::ReshapeOperation::from_onnx(&input_tensors, &output_tensors, &onnx_node.attribute)?))
             }
             "Shape" => {
                 Some(AnyOperation::Shape(ops::ShapeOperation::from_onnx(&input_tensors, &output_tensors, &onnx_node.attribute)?))

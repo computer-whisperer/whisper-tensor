@@ -7,7 +7,7 @@ use crate::numeric_scalar::NumericScalar;
 use crate::numeric_tensor::{NumericTensor, NumericTensorError};
 use crate::{onnx, TrigOp};
 use crate::milli_graph::{ops_helpers, MilliOpGraph, MilliOpGraphError};
-use crate::symbolic_graph::{query_attribute_bool, query_attribute_float, query_attribute_floats, query_attribute_graph, query_attribute_int, query_attribute_ints, query_attribute_string, query_attribute_tensor, InnerGraph, ONNXDecodingError, SymbolicGraphError, SymbolicGraphMutator, TensorId};
+use crate::symbolic_graph::{query_attribute_bool, query_attribute_float, query_attribute_floats, query_attribute_graph, query_attribute_int, query_attribute_ints, query_attribute_string, query_attribute_tensor, InnerGraph, ONNXDecodingError, SymbolicGraphMutator, TensorId};
 use crate::milli_graph::ops::*;
 use crate::tensor_rank::DynRank;
 
@@ -81,17 +81,17 @@ pub struct BinaryOperation {
 }
 
 impl BinaryOperation {
-    pub(crate) fn from_onnx(inputs: Vec<TensorId>, outputs: Vec<TensorId>, which: WhichBinaryOperation) -> Result<Self, SymbolicGraphError> {
+    pub(crate) fn from_onnx(inputs: &[Option<TensorId>], outputs: &[Option<TensorId>], which: WhichBinaryOperation) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 2 {
-            return Err(SymbolicGraphError::InvalidOperatorInputs);
+            return Err(ONNXDecodingError::InvalidOperatorInputs("Binary"));
         }
         if outputs.len() != 1 {
-            return Err(SymbolicGraphError::InvalidOperatorOutputs);
+            return Err(ONNXDecodingError::InvalidOperatorInputs("Binary"));
         }
         Ok(BinaryOperation {
-            a: inputs[0],
-            b: inputs[1],
-            output: outputs[0],
+            a: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Binary"))?,
+            b: inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs("Binary"))?,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Binary"))?,
             which
         })
     }
@@ -172,17 +172,17 @@ pub struct UnaryOperation {
 
 impl UnaryOperation {
 
-    pub(crate) fn from_onnx(inputs: Vec<TensorId>, outputs: Vec<TensorId>, which: WhichUnaryOperation) -> Result<Self, ONNXDecodingError> {
+    pub(crate) fn from_onnx(inputs: &[Option<TensorId>], outputs: &[Option<TensorId>], which: WhichUnaryOperation) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 1  {
-            return Err(ONNXDecodingError::GraphConstructionError("Unary".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+            return Err(ONNXDecodingError::InvalidOperatorInputs("Unary"));
         }
         if outputs.len() != 1 {
-            return Err(ONNXDecodingError::GraphConstructionError("Unary".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("Unary"));
         }
 
         Ok(Self {
-            input: inputs[0],
-            output: outputs[0],
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Unary"))?,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Unary"))?,
             which
         })
     }
@@ -260,17 +260,17 @@ pub struct CumSumOperation {
 }
 
 impl CumSumOperation {
-    pub(crate) fn from_onnx(inputs: Vec<TensorId>, outputs: Vec<TensorId>) -> Result<Self, SymbolicGraphError> {
+    pub(crate) fn from_onnx(inputs: &[Option<TensorId>], outputs: &[Option<TensorId>]) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 2 {
-            return Err(SymbolicGraphError::InvalidOperatorInputs);
+            return Err(ONNXDecodingError::InvalidOperatorInputs("CumSum"));
         }
         if outputs.len() != 1 {
-            return Err(SymbolicGraphError::InvalidOperatorOutputs);
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("CumSum"));
         }
         Ok(Self {
-            input: inputs[0],
-            axis: inputs[1],
-            output: outputs[0],
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Unary"))?,
+            axis: inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs("Unary"))?,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Unary"))?,
             exclusive: false,
             reverse: false
         })
@@ -311,12 +311,12 @@ pub struct LpNormalizationOperation {
 }
 
 impl LpNormalizationOperation {
-    pub fn from_onnx(inputs: Vec<TensorId>, outputs: Vec<TensorId>, attributes: &[onnx::AttributeProto]) -> Result<Self, SymbolicGraphError> {
+    pub fn from_onnx(inputs: &[Option<TensorId>], outputs: &[Option<TensorId>], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 1 {
-            return Err(SymbolicGraphError::InvalidOperatorInputs);
+            return Err(ONNXDecodingError::InvalidOperatorInputs("LpNormalization"));
         }
         if outputs.len() != 1 {
-            return Err(SymbolicGraphError::InvalidOperatorOutputs);
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("LpNormalization"));
         }
         let mut axis = -1;
         let mut p = 2;
@@ -329,12 +329,12 @@ impl LpNormalizationOperation {
         }
         match p {
             1 | 2 => {},
-            _ => return Err(SymbolicGraphError::InvalidOperatorInputs),
+            _ => return Err(ONNXDecodingError::InvalidOperatorInputs("LpNormalization")),
         }
 
         Ok(Self {
-            input: inputs[0],
-            output: outputs[0],
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("LpNormalization"))?,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("LpNormalization"))?,
             axis,
             p,
         })
@@ -392,12 +392,12 @@ pub struct GroupNormalizationOperation {
 }
 
 impl GroupNormalizationOperation {
-    pub fn from_onnx(inputs: Vec<TensorId>, outputs: Vec<TensorId>, attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+    pub fn from_onnx(inputs: &[Option<TensorId>], outputs: &[Option<TensorId>], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 3 {
-            return Err(ONNXDecodingError::GraphConstructionError("GroupNormalization".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+            return Err(ONNXDecodingError::InvalidOperatorInputs("GroupNormalization"));
         }
         if outputs.len() != 1 {
-            return Err(ONNXDecodingError::GraphConstructionError("GroupNormalization".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("GroupNormalization"));
         }
         let mut epsilon = 1e-5;
         let mut num_groups = None;
@@ -410,10 +410,10 @@ impl GroupNormalizationOperation {
         }
         let num_groups = num_groups.ok_or(ONNXDecodingError::MissingAttribute("GroupNormalization".to_string(), "num_groups".to_string()))? as usize;
         Ok(Self {
-            input: inputs[0],
-            scale: inputs[1],
-            bias: inputs[2],
-            output: outputs[0],
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("GroupNormalization"))?,
+            scale: inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs("GroupNormalization"))?,
+            bias: inputs[2].ok_or(ONNXDecodingError::InvalidOperatorInputs("GroupNormalization"))?,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("GroupNormalization"))?,
             epsilon,
             num_groups
         })
@@ -520,18 +520,18 @@ pub struct SqueezeOperation {
 }
 
 impl SqueezeOperation {
-    pub fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], attributes: &[onnx::AttributeProto]) -> Result<Self, SymbolicGraphError> {
+    pub fn from_onnx(inputs: &[Option<TensorId>], outputs: &[Option<TensorId>], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
         if inputs.len() < 1 || inputs.len() > 2 {
-            return Err(SymbolicGraphError::InvalidOperatorInputs);
+            return Err(ONNXDecodingError::InvalidOperatorInputs("Squeeze"));
         }
         if outputs.len() != 1 {
-            return Err(SymbolicGraphError::InvalidOperatorOutputs);
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("Squeeze"));
         }
         let axes_attribute = query_attribute_ints(attributes, "axes");
         Ok(Self {
-            input: inputs[0],
-            axes: if inputs.len() > 1 {Some(inputs[1])} else {None},
-            output: outputs[0],
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Squeeze"))?,
+            axes: if inputs.len() > 1 {Some(inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs("Squeeze"))?)} else {None},
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Squeeze"))?,
             axes_attribute
         })
     }
@@ -586,18 +586,18 @@ pub struct UnsqueezeOperation {
 }
 
 impl UnsqueezeOperation {
-    pub fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], attributes: &[onnx::AttributeProto]) -> Result<Self, SymbolicGraphError> {
+    pub fn from_onnx(inputs: &[Option<TensorId>], outputs: &[Option<TensorId>], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
         if inputs.len() < 1 || inputs.len() > 2 {
-            return Err(SymbolicGraphError::InvalidOperatorInputs);
+            return Err(ONNXDecodingError::InvalidOperatorInputs("Unsqueeze"));
         }
         if outputs.len() != 1 {
-            return Err(SymbolicGraphError::InvalidOperatorOutputs);
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("Unsqueeze"));
         }
         let axes_attribute = query_attribute_ints(attributes, "axes");
         Ok(Self {
-            input: inputs[0],
-            axes: if inputs.len() > 1 {Some(inputs[1])} else {None},
-            output: outputs[0],
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Unsqueeze"))?,
+            axes: if inputs.len() > 1 {Some(inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs("Unsqueeze"))?)} else {None},
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Unsqueeze"))?,
             axes_attribute
         })
     }
@@ -650,16 +650,16 @@ pub struct TransposeOperation {
 }
 
 impl TransposeOperation {
-    pub fn from_onnx(inputs: Vec<TensorId>, outputs: Vec<TensorId>, attributes: &[onnx::AttributeProto]) -> Result<Self, SymbolicGraphError> {
+    pub fn from_onnx(inputs: &[Option<TensorId>], outputs: &[Option<TensorId>], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 1 {
-            return Err(SymbolicGraphError::InvalidOperatorInputs);
+            return Err(ONNXDecodingError::InvalidOperatorInputs("Transpose"));
         }
         if outputs.len() != 1 {
-            return Err(SymbolicGraphError::InvalidOperatorOutputs);
+            return Err(ONNXDecodingError::InvalidOperatorInputs("Transpose"));
         }
         Ok(Self {
-            input: inputs[0],
-            output: outputs[0],
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Transpose"))?,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Transpose"))?,
             perm: query_attribute_ints(attributes, "perm")
         })
     }
@@ -698,17 +698,17 @@ pub struct ReshapeOperation {
 }
 
 impl ReshapeOperation {
-    pub fn from_onnx(inputs: Vec<TensorId>, outputs: Vec<TensorId>, _attributes: &[onnx::AttributeProto]) -> Result<Self, SymbolicGraphError> {
+    pub fn from_onnx(inputs: &[Option<TensorId>], outputs: &[Option<TensorId>], _attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 2 {
-            return Err(SymbolicGraphError::InvalidOperatorInputs);
+            return Err(ONNXDecodingError::InvalidOperatorInputs("Reshape"));
         }
         if outputs.len() != 1 {
-            return Err(SymbolicGraphError::InvalidOperatorOutputs);
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("Reshape"));
         }
         Ok(Self {
-            input: inputs[0],
-            shape: inputs[1],
-            output: outputs[0],
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Reshape"))?,
+            shape: inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs("Reshape"))?,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Reshape"))?,
         })
     }
 }
@@ -747,17 +747,17 @@ pub struct CastLikeOperation {
 }
 
 impl CastLikeOperation {
-    pub fn from_onnx(inputs: Vec<TensorId>, outputs: Vec<TensorId>, _attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+    pub fn from_onnx(inputs: &[Option<TensorId>], outputs: &[Option<TensorId>], _attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 2 {
-            return Err(ONNXDecodingError::GraphConstructionError("CastLike".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+            return Err(ONNXDecodingError::InvalidOperatorInputs("CastLike"));
         }
         if outputs.len() != 1 {
-            return Err(ONNXDecodingError::GraphConstructionError("CastLike".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("CastLike"));
         }
         Ok(Self {
-            input: inputs[0],
-            target_type: inputs[1],
-            output: outputs[0],
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("CastLike"))?,
+            target_type: inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs("CastLike"))?,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("CastLike"))?,
         })
     }
 }
@@ -795,20 +795,20 @@ pub struct CastOperation {
 }
 
 impl CastOperation {
-    pub fn from_onnx(inputs: Vec<TensorId>, outputs: Vec<TensorId>, attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+    pub fn from_onnx(inputs: &[Option<TensorId>], outputs: &[Option<TensorId>], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 1 {
-            return Err(ONNXDecodingError::GraphConstructionError("Cast".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+            return Err(ONNXDecodingError::InvalidOperatorInputs("Cast"));
         }
         if outputs.len() != 1 {
-            return Err(ONNXDecodingError::GraphConstructionError("Cast".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("Cast"));
         }
         let to_i = attributes.iter().find(|a| a.name == "to")
             .ok_or(ONNXDecodingError::MissingAttribute("Cast".to_string(), "to".to_string()))?.i as i32;
         let to_datatype = onnx::tensor_proto::DataType::try_from(to_i).map_err(|x| ONNXDecodingError::ProtobufDecodeError(x.into()))?;
         let to = DType::try_from(to_datatype)?;
         Ok(Self {
-            input: inputs[0],
-            output: outputs[0],
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Cast"))?,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Cast"))?,
             to,
         })
     }
@@ -852,12 +852,12 @@ pub struct LayerNormalizationOperation {
 }
 
 impl LayerNormalizationOperation {
-    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+    pub(crate) fn from_onnx(inputs: &[Option<TensorId>], outputs: &[Option<TensorId>], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
         if inputs.len() < 2 || inputs.len() > 3  {
-            return Err(ONNXDecodingError::GraphConstructionError("LayerNormalization".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+            return Err(ONNXDecodingError::InvalidOperatorInputs("LayerNormalization"));
         }
         if outputs.len() < 1 || outputs.len() > 3 {
-            return Err(ONNXDecodingError::GraphConstructionError("LayerNormalization".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("LayerNormalization"));
         }
         let mut axis = -1;
         let mut epsilon = 1e-5;
@@ -873,12 +873,12 @@ impl LayerNormalizationOperation {
             }
         }
         Ok(Self {
-            input: inputs[0],
-            scale: inputs[1],
-            bias: if inputs.len() == 3 { Some(inputs[2]) } else { None },
-            output: outputs[0],
-            mean_output: if outputs.len() > 1 {Some(outputs[1])} else {None},
-            inv_std_dev_output: if outputs.len() > 2 {Some(outputs[2])} else {None},
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("LayerNormalization"))?,
+            scale: inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs("LayerNormalization"))?,
+            bias: if inputs.len() == 3 { Some(inputs[2].ok_or(ONNXDecodingError::InvalidOperatorInputs("LayerNormalization"))?) } else { None },
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("LayerNormalization"))?,
+            mean_output: if outputs.len() > 1 {Some(outputs[1].ok_or(ONNXDecodingError::InvalidOperatorOutputs("LayerNormalization"))?)} else {None},
+            inv_std_dev_output: if outputs.len() > 2 {Some(outputs[2].ok_or(ONNXDecodingError::InvalidOperatorOutputs("LayerNormalization"))?)} else {None},
             axis,
             epsilon
         })
@@ -969,12 +969,12 @@ pub struct GatherOperation {
 }
 
 impl GatherOperation {
-    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+    pub(crate) fn from_onnx(inputs: &[Option<TensorId>], outputs: &[Option<TensorId>], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 2 {
-            return Err(ONNXDecodingError::GraphConstructionError("Gather".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+            return Err(ONNXDecodingError::InvalidOperatorInputs("Gather"));
         }
         if outputs.len() != 1 {
-            return Err(ONNXDecodingError::GraphConstructionError("Gather".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("Gather"));
         }
         let mut axis = 0;
         for attribute in attributes {
@@ -986,9 +986,9 @@ impl GatherOperation {
             }
         }
         Ok(Self {
-            input: inputs[0],
-            indices: inputs[1],
-            output: outputs[0],
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Gather"))?,
+            indices: inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs("Gather"))?,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Gather"))?,
             axis
         })
     }
@@ -1029,12 +1029,12 @@ pub struct ShapeOperation {
 }
 
 impl ShapeOperation {
-    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+    pub(crate) fn from_onnx(inputs: &[Option<TensorId>], outputs: &[Option<TensorId>], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 1 {
-            return Err(ONNXDecodingError::GraphConstructionError("Shape".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+            return Err(ONNXDecodingError::InvalidOperatorInputs("Shape"));
         }
         if outputs.len() != 1 {
-            return Err(ONNXDecodingError::GraphConstructionError("Shape".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("Shape"));
         }
         let mut end = None;
         let mut start = None;
@@ -1050,8 +1050,8 @@ impl ShapeOperation {
             }
         }
         Ok(Self {
-            input: inputs[0],
-            output: outputs[0],
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Shape"))?,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Shape"))?,
             start,
             end
         })
@@ -1108,9 +1108,9 @@ pub struct ConcatOperation {
 }
 
 impl ConcatOperation {
-    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+    pub(crate) fn from_onnx(inputs: &[Option<TensorId>], outputs: &[Option<TensorId>], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
         if outputs.len() != 1 {
-            return Err(ONNXDecodingError::GraphConstructionError("Concat".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("Concat"));
         }
         let mut axis = 0;
         for attribute in attributes {
@@ -1121,8 +1121,8 @@ impl ConcatOperation {
 
         Ok(Self{
             axis,
-            inputs: inputs.to_vec(),
-            output: outputs[0]
+            inputs: inputs.iter().map(|x| x.ok_or(ONNXDecodingError::InvalidOperatorInputs("Concat"))).collect::<Result<_, _>>()?,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Concat"))?
         })
     }
 }
@@ -1164,12 +1164,12 @@ pub struct ConstantOfShapeOperation {
 }
 
 impl ConstantOfShapeOperation {
-    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+    pub(crate) fn from_onnx(inputs: &[Option<TensorId>], outputs: &[Option<TensorId>], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 1 {
-            return Err(ONNXDecodingError::GraphConstructionError("ConstantOfShape".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+            return Err(ONNXDecodingError::InvalidOperatorInputs("ConstantOfShape"));
         }
         if outputs.len() != 1 {
-            return Err(ONNXDecodingError::GraphConstructionError("ConstantOfShape".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("ConstantOfShape"));
         }
 
         let value = query_attribute_tensor(attributes, "value")
@@ -1178,8 +1178,8 @@ impl ConstantOfShapeOperation {
 
         Ok(Self{
             value,
-            input: inputs[0],
-            output: outputs[0]
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("ConstantOfShape"))?,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("ConstantOfShape"))?
         })
     }
 }
@@ -1220,12 +1220,12 @@ pub struct ReduceMeanOperation {
 }
 
 impl ReduceMeanOperation {
-    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+    pub(crate) fn from_onnx(inputs: &[Option<TensorId>], outputs: &[Option<TensorId>], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
         if inputs.len() < 1 || inputs.len() > 2 {
-            return Err(ONNXDecodingError::GraphConstructionError("ReduceMean".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+            return Err(ONNXDecodingError::InvalidOperatorInputs("ReduceMean"));
         }
         if outputs.len() != 1 {
-            return Err(ONNXDecodingError::GraphConstructionError("ReduceMean".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("ReduceMean"));
         }
 
         let axes_attr = query_attribute_ints(attributes, "axes");
@@ -1237,9 +1237,9 @@ impl ReduceMeanOperation {
             Self {
                 keepdims,
                 noop_with_empty_axes,
-                input_data: inputs[0],
-                input_axes: if inputs.len() > 1 {Some(inputs[1])} else {None},
-                output: outputs[0],
+                input_data: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("ReduceMean"))?,
+                input_axes: if inputs.len() > 1 {Some(inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs("ReduceMean"))?)} else {None},
+                output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("ReduceMean"))?,
                 axes_attr
             }
         )
@@ -1297,12 +1297,12 @@ pub struct ReduceSumOperation {
 }
 
 impl ReduceSumOperation {
-    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+    pub(crate) fn from_onnx(inputs: &[Option<TensorId>], outputs: &[Option<TensorId>], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
         if inputs.len() < 1 || inputs.len() > 2 {
-            return Err(ONNXDecodingError::GraphConstructionError("ReduceSum".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+            return Err(ONNXDecodingError::InvalidOperatorInputs("ReduceSum"));
         }
         if outputs.len() != 1 {
-            return Err(ONNXDecodingError::GraphConstructionError("ReduceSum".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("ReduceSum"));
         }
 
         let axes_attr = query_attribute_ints(attributes, "attr");
@@ -1313,9 +1313,9 @@ impl ReduceSumOperation {
             Self {
                 keepdims,
                 noop_with_empty_axes,
-                input_data: inputs[0],
-                input_axes: if inputs.len() > 1 {Some(inputs[1])} else {None},
-                output: outputs[0],
+                input_data: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("ReduceSum"))?,
+                input_axes: if inputs.len() > 1 {Some(inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs("ReduceSum"))?)} else {None},
+                output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("ReduceSum"))?,
                 axes_attr
             }
         )
@@ -1375,12 +1375,12 @@ pub struct ReduceMaxOperation {
 }
 
 impl ReduceMaxOperation {
-    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+    pub(crate) fn from_onnx(inputs: &[Option<TensorId>], outputs: &[Option<TensorId>], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
         if inputs.len() < 1 || inputs.len() > 2 {
-            return Err(ONNXDecodingError::GraphConstructionError("ReduceMax".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+            return Err(ONNXDecodingError::InvalidOperatorInputs("ReduceMax"));
         }
         if outputs.len() != 1 {
-            return Err(ONNXDecodingError::GraphConstructionError("ReduceMax".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("ReduceMax"));
         }
 
         let axes_attr = query_attribute_ints(attributes, "attr");
@@ -1391,9 +1391,9 @@ impl ReduceMaxOperation {
             Self {
                 keepdims,
                 noop_with_empty_axes,
-                input_data: inputs[0],
-                input_axes: if inputs.len() > 1 {Some(inputs[1])} else {None},
-                output: outputs[0],
+                input_data: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("ReduceMax"))?,
+                input_axes: if inputs.len() > 1 {Some(inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs("ReduceMax"))?)} else {None},
+                output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("ReduceMax"))?,
                 axes_attr
             }
         )
@@ -1452,12 +1452,12 @@ pub struct ReduceMinOperation {
 }
 
 impl ReduceMinOperation {
-    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+    pub(crate) fn from_onnx(inputs: &[Option<TensorId>], outputs: &[Option<TensorId>], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
         if inputs.len() < 1 || inputs.len() > 2 {
-            return Err(ONNXDecodingError::GraphConstructionError("ReduceMin".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+            return Err(ONNXDecodingError::InvalidOperatorInputs("ReduceMin"));
         }
         if outputs.len() != 1 {
-            return Err(ONNXDecodingError::GraphConstructionError("ReduceMin".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("ReduceMin"));
         }
 
         let axes_attr = query_attribute_ints(attributes, "attr");
@@ -1468,9 +1468,9 @@ impl ReduceMinOperation {
             Self {
                 keepdims,
                 noop_with_empty_axes,
-                input_data: inputs[0],
-                input_axes: if inputs.len() > 1 {Some(inputs[1])} else {None},
-                output: outputs[0],
+                input_data: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("ReduceMin"))?,
+                input_axes: if inputs.len() > 1 {Some(inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs("ReduceMin"))?)} else {None},
+                output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("ReduceMin"))?,
                 axes_attr
             }
         )
@@ -1530,12 +1530,12 @@ pub struct ReduceProdOperation {
 }
 
 impl ReduceProdOperation {
-    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+    pub(crate) fn from_onnx(inputs: &[Option<TensorId>], outputs: &[Option<TensorId>], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
         if inputs.len() < 1 || inputs.len() > 2 {
-            return Err(ONNXDecodingError::GraphConstructionError("ReduceProd".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+            return Err(ONNXDecodingError::InvalidOperatorInputs("ReduceProd"));
         }
         if outputs.len() != 1 {
-            return Err(ONNXDecodingError::GraphConstructionError("ReduceProd".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("ReduceProd"));
         }
 
         let axes_attr = query_attribute_ints(attributes, "attr");
@@ -1546,9 +1546,9 @@ impl ReduceProdOperation {
             Self {
                 keepdims,
                 noop_with_empty_axes,
-                input_data: inputs[0],
-                input_axes: if inputs.len() > 1 {Some(inputs[1])} else {None},
-                output: outputs[0],
+                input_data: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("ReduceProd"))?,
+                input_axes: if inputs.len() > 1 {Some(inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs("ReduceProd"))?)} else {None},
+                output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("ReduceProd"))?,
                 axes_attr
             }
         )
@@ -1606,17 +1606,17 @@ pub struct PowOperation {
 }
 
 impl PowOperation {
-    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], _attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+    pub(crate) fn from_onnx(inputs: &[Option<TensorId>], outputs: &[Option<TensorId>], _attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 2 {
-            return Err(ONNXDecodingError::GraphConstructionError("Pow".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+            return Err(ONNXDecodingError::InvalidOperatorInputs("Pow"));
         }
         if outputs.len() != 1 {
-            return Err(ONNXDecodingError::GraphConstructionError("Pow".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("Pow"));
         }
         Ok(Self{
-            input_x: inputs[0],
-            input_y: inputs[1],
-            output: outputs[0]
+            input_x: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Pow"))?,
+            input_y: inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs("Pow"))?,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Pow"))?
         })
     }
 }
@@ -1659,12 +1659,12 @@ pub struct GemmOperation {
 }
 
 impl GemmOperation {
-    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+    pub(crate) fn from_onnx(inputs: &[Option<TensorId>], outputs: &[Option<TensorId>], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
         if inputs.len() < 2 || inputs.len() > 3  {
-            return Err(ONNXDecodingError::GraphConstructionError("Gemm".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+            return Err(ONNXDecodingError::InvalidOperatorInputs("Gemm"));
         }
         if outputs.len() != 1 {
-            return Err(ONNXDecodingError::GraphConstructionError("Gemm".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("Gemm"));
         }
 
         let trans_a = query_attribute_bool(attributes, "transA");
@@ -1677,10 +1677,10 @@ impl GemmOperation {
             trans_b,
             alpha,
             beta,
-            input_a: inputs[0],
-            input_b: inputs[1],
-            input_c: if inputs.len() > 2 {Some(inputs[2])} else {None},
-            output: outputs[0]
+            input_a: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Gemm"))?,
+            input_b: inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs("Gemm"))?,
+            input_c: if inputs.len() > 2 {Some(inputs[2].ok_or(ONNXDecodingError::InvalidOperatorInputs("Gemm"))?)} else {None},
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Gemm"))?
         })
     }
 }
@@ -1769,9 +1769,9 @@ pub struct SplitOperation {
 }
 
 impl SplitOperation {
-    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+    pub(crate) fn from_onnx(inputs: &[Option<TensorId>], outputs: &[Option<TensorId>], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
         if inputs.len() < 1 || inputs.len() > 2  {
-            return Err(ONNXDecodingError::GraphConstructionError("Split".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+            return Err(ONNXDecodingError::InvalidOperatorInputs("Split"));
         }
 
         let axis = query_attribute_int(attributes, "axis");
@@ -1779,9 +1779,9 @@ impl SplitOperation {
         let split_attribute = query_attribute_ints(attributes, "split");
 
         Ok(Self{
-            input: inputs[0],
-            split: if inputs.len() > 1 {Some(inputs[1])} else {None},
-            outputs: outputs.to_vec(),
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Split"))?,
+            split: if inputs.len() > 1 {Some(inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs("Split"))?)} else {None},
+            outputs: outputs.iter().map(|x| x.ok_or(ONNXDecodingError::InvalidOperatorOutputs("Split"))).collect::<Result<_, _>>()?,
             split_attribute,
             axis,
             num_outputs
@@ -1845,21 +1845,21 @@ pub struct SliceOperation {
 }
 
 impl SliceOperation {
-    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], _attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+    pub(crate) fn from_onnx(inputs: &[Option<TensorId>], outputs: &[Option<TensorId>], _attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
         if inputs.len() < 3 || inputs.len() > 5  {
-            return Err(ONNXDecodingError::GraphConstructionError("Slice".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+            return Err(ONNXDecodingError::InvalidOperatorInputs("Slice"));
         }
         if outputs.len() != 1 {
-            return Err(ONNXDecodingError::GraphConstructionError("Slice".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("Slice"));
         }
 
         Ok(Self{
-            data: inputs[0],
-            starts: inputs[1],
-            ends: inputs[2],
-            axes: if inputs.len() > 3 {Some(inputs[3])} else {None},
-            steps: if inputs.len() > 4 {Some(inputs[4])} else {None},
-            output: outputs[0]
+            data: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Slice"))?,
+            starts: inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs("Slice"))?,
+            ends: inputs[2].ok_or(ONNXDecodingError::InvalidOperatorInputs("Slice"))?,
+            axes: if inputs.len() > 3 {Some(inputs[3].ok_or(ONNXDecodingError::InvalidOperatorInputs("Slice"))?)} else {None},
+            steps: if inputs.len() > 4 {Some(inputs[4].ok_or(ONNXDecodingError::InvalidOperatorInputs("Slice"))?)} else {None},
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Slice"))?
         })
     }
 }
@@ -1909,19 +1909,19 @@ pub struct WhereOperation {
 }
 
 impl WhereOperation {
-    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], _attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+    pub(crate) fn from_onnx(inputs: &[Option<TensorId>], outputs: &[Option<TensorId>], _attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 3  {
-            return Err(ONNXDecodingError::GraphConstructionError("Where".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+            return Err(ONNXDecodingError::InvalidOperatorInputs("Where"));
         }
         if outputs.len() != 1 {
-            return Err(ONNXDecodingError::GraphConstructionError("Where".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("Where"));
         }
 
         Ok(Self{
-            condition: inputs[0],
-            x: inputs[1],
-            y: inputs[2],
-            output: outputs[0]
+            condition: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Where"))?,
+            x: inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs("Where"))?,
+            y: inputs[2].ok_or(ONNXDecodingError::InvalidOperatorInputs("Where"))?,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Where"))?
         })
     }
 }
@@ -1960,18 +1960,18 @@ pub struct SoftmaxOperation {
 }
 
 impl SoftmaxOperation {
-    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+    pub(crate) fn from_onnx(inputs: &[Option<TensorId>], outputs: &[Option<TensorId>], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 1  {
-            return Err(ONNXDecodingError::GraphConstructionError("Softmax".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+            return Err(ONNXDecodingError::InvalidOperatorInputs("Softmax"));
         }
         if outputs.len() != 1 {
-            return Err(ONNXDecodingError::GraphConstructionError("Softmax".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("Softmax"));
         }
 
         Ok(Self{
             axis: query_attribute_int(attributes, "axis"),
-            input: inputs[0],
-            output: outputs[0]
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Softmax"))?,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Softmax"))?
         })
     }
 }
@@ -2011,18 +2011,18 @@ pub struct LogSoftmaxOperation {
 }
 
 impl LogSoftmaxOperation {
-    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+    pub(crate) fn from_onnx(inputs: &[Option<TensorId>], outputs: &[Option<TensorId>], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 1  {
-            return Err(ONNXDecodingError::GraphConstructionError("LogSoftmax".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+            return Err(ONNXDecodingError::InvalidOperatorInputs("LogSoftmax"));
         }
         if outputs.len() != 1 {
-            return Err(ONNXDecodingError::GraphConstructionError("LogSoftmax".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("LogSoftmax"));
         }
 
         Ok(Self{
             axis: query_attribute_int(attributes, "axis"),
-            input: inputs[0],
-            output: outputs[0]
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("LogSoftmax"))?,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("LogSoftmax"))?
         })
     }
 }
@@ -2061,16 +2061,16 @@ pub struct SizeOperation {
 }
 
 impl SizeOperation {
-    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId]) -> Result<Self, ONNXDecodingError> {
+    pub(crate) fn from_onnx(inputs: &[Option<TensorId>], outputs: &[Option<TensorId>]) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 1  {
-            return Err(ONNXDecodingError::GraphConstructionError("Size".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+            return Err(ONNXDecodingError::InvalidOperatorInputs("Size"));
         }
         if outputs.len() != 1 {
-            return Err(ONNXDecodingError::GraphConstructionError("Size".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("Size"));
         }
         Ok(Self{
-            input: inputs[0],
-            output: outputs[0]
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Size"))?,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Size"))?
         })
     }
 }
@@ -2109,18 +2109,18 @@ pub struct RangeOperation {
 }
 
 impl RangeOperation {
-    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId]) -> Result<Self, ONNXDecodingError> {
+    pub(crate) fn from_onnx(inputs: &[Option<TensorId>], outputs: &[Option<TensorId>]) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 3  {
-            return Err(ONNXDecodingError::GraphConstructionError("Range".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+            return Err(ONNXDecodingError::InvalidOperatorInputs("Range"));
         }
         if outputs.len() != 1 {
-            return Err(ONNXDecodingError::GraphConstructionError("Range".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("Range"));
         }
         Ok(Self{
-            start: inputs[0],
-            end: inputs[1],
-            delta: inputs[2],
-            output: outputs[0]
+            start: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Range"))?,
+            end: inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs("Range"))?,
+            delta: inputs[2].ok_or(ONNXDecodingError::InvalidOperatorInputs("Range"))?,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Range"))?
         })
     }
 }
@@ -2161,18 +2161,18 @@ pub struct FlattenOperation {
 }
 
 impl FlattenOperation {
-    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+    pub(crate) fn from_onnx(inputs: &[Option<TensorId>], outputs: &[Option<TensorId>], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 1  {
-            return Err(ONNXDecodingError::GraphConstructionError("Flatten".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+            return Err(ONNXDecodingError::InvalidOperatorInputs("Flatten"));
         }
         if outputs.len() != 1 {
-            return Err(ONNXDecodingError::GraphConstructionError("Flatten".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("Flatten"));
         }
         let axis = query_attribute_int(attributes, "axis").unwrap_or(1);
         Ok(Self{
-            input: inputs[0],
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Flatten"))?,
             axis,
-            output: outputs[0]
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Flatten"))?
         })
     }
 }
@@ -2226,12 +2226,12 @@ pub struct ConstantOperation {
 }
 
 impl ConstantOperation {
-    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+    pub(crate) fn from_onnx(inputs: &[Option<TensorId>], outputs: &[Option<TensorId>], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 0  {
-            return Err(ONNXDecodingError::GraphConstructionError("Constant".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+            return Err(ONNXDecodingError::InvalidOperatorInputs("Constant"));
         }
         if outputs.len() != 1 {
-            return Err(ONNXDecodingError::GraphConstructionError("Constant".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("Constant"));
         }
         
         let value = if let Some(tensor) = query_attribute_tensor(attributes, "value") {
@@ -2255,7 +2255,7 @@ impl ConstantOperation {
         
         Ok(Self{
             value,
-            output: outputs[0]
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Constant"))?
         })
     }
 }
@@ -2292,17 +2292,17 @@ pub struct IdentityOperation {
 }
 
 impl IdentityOperation {
-    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], _attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+    pub(crate) fn from_onnx(inputs: &[Option<TensorId>], outputs: &[Option<TensorId>], _attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 1  {
-            return Err(ONNXDecodingError::GraphConstructionError("Identity".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+            return Err(ONNXDecodingError::InvalidOperatorInputs("Identity"));
         }
         if outputs.len() != 1 {
-            return Err(ONNXDecodingError::GraphConstructionError("Identity".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("Identity"));
         }
 
         Ok(Self{
-            input: inputs[0],
-            output: outputs[0]
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Identity"))?,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Identity"))?
         })
     }
 }
@@ -2339,20 +2339,20 @@ pub struct IsInfOperation {
 }
 
 impl IsInfOperation {
-    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+    pub(crate) fn from_onnx(inputs: &[Option<TensorId>], outputs: &[Option<TensorId>], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 1  {
-            return Err(ONNXDecodingError::GraphConstructionError("IsInf".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+            return Err(ONNXDecodingError::InvalidOperatorInputs("IsInf"));
         }
         if outputs.len() != 1 {
-            return Err(ONNXDecodingError::GraphConstructionError("IsInf".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("IsInf"));
         }
 
         let detect_negative = query_attribute_int(attributes, "detect_negative").map(|x| x != 0);
         let detect_positive = query_attribute_int(attributes, "detect_positive").map(|x| x != 0);
 
         Ok(Self{
-            input: inputs[0],
-            output: outputs[0],
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("IsInf"))?,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("IsInf"))?,
             detect_negative,
             detect_positive
         })
@@ -2392,20 +2392,20 @@ pub struct ModuloOperation {
 }
 
 impl ModuloOperation {
-    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+    pub(crate) fn from_onnx(inputs: &[Option<TensorId>], outputs: &[Option<TensorId>], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 2  {
-            return Err(ONNXDecodingError::GraphConstructionError("Modulo".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+            return Err(ONNXDecodingError::InvalidOperatorInputs("Modulo"));
         }
         if outputs.len() != 1 {
-            return Err(ONNXDecodingError::GraphConstructionError("Modulo".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("Modulo"));
         }
 
         let fmod = query_attribute_int(attributes, "fmod").map(|x| x != 0);
 
         Ok(Self{
-            a: inputs[0],
-            b: inputs[1],
-            output: outputs[0],
+            a: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Modulo"))?,
+            b: inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs("Modulo"))?,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Modulo"))?,
             fmod,
         })
     }
@@ -2446,19 +2446,19 @@ pub struct ClipOperation {
 }
 
 impl ClipOperation {
-    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], _attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+    pub(crate) fn from_onnx(inputs: &[Option<TensorId>], outputs: &[Option<TensorId>], _attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
         if inputs.len() < 1 || inputs.len() > 3  {
-            return Err(ONNXDecodingError::GraphConstructionError("Clip".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+            return Err(ONNXDecodingError::InvalidOperatorInputs("Clip"));
         }
         if outputs.len() != 1 {
-            return Err(ONNXDecodingError::GraphConstructionError("Clip".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("Clip"));
         }
 
         Ok(Self{
-            input: inputs[0],
-            min: if inputs.len() > 1 { Some(inputs[1]) } else { None },
-            max: if inputs.len() > 2 { Some(inputs[2]) } else { None },
-            output: outputs[0]
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Clip"))?,
+            min: if inputs.len() > 1 { Some(inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs("Clip"))?) } else { None },
+            max: if inputs.len() > 2 { Some(inputs[2].ok_or(ONNXDecodingError::InvalidOperatorInputs("Clip"))?) } else { None },
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Clip"))?
         })
     }
 }
@@ -2514,18 +2514,18 @@ pub struct ExpandOperation {
 }
 
 impl ExpandOperation {
-    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], _attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+    pub(crate) fn from_onnx(inputs: &[Option<TensorId>], outputs: &[Option<TensorId>], _attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 2  {
-            return Err(ONNXDecodingError::GraphConstructionError("Expand".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+            return Err(ONNXDecodingError::InvalidOperatorInputs("Expand"));
         }
         if outputs.len() != 1 {
-            return Err(ONNXDecodingError::GraphConstructionError("Expand".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("Expand"));
         }
 
         Ok(Self{
-            input: inputs[0],
-            shape: inputs[1],
-            output: outputs[0]
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Expand"))?,
+            shape: inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs("Expand"))?,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Expand"))?
         })
     }
 }
@@ -2581,12 +2581,12 @@ pub struct ConvOperation {
 }
 
 impl ConvOperation {
-    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+    pub(crate) fn from_onnx(inputs: &[Option<TensorId>], outputs: &[Option<TensorId>], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
         if inputs.len() < 2 || inputs.len() > 3  {
-            return Err(ONNXDecodingError::GraphConstructionError("Conv".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+            return Err(ONNXDecodingError::InvalidOperatorInputs("Conv"));
         }
         if outputs.len() != 1 {
-            return Err(ONNXDecodingError::GraphConstructionError("Conv".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("Conv"));
         }
 
         let auto_pad_str = query_attribute_string(attributes, "auto_pad");
@@ -2610,10 +2610,10 @@ impl ConvOperation {
         let strides = query_attribute_ints(attributes, "strides").unwrap_or_default();
 
         Ok(Self{
-            input: inputs[0],
-            weight: inputs[1],
-            bias: if inputs.len() > 2 {Some(inputs[2])} else {None},
-            output: outputs[0],
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Conv"))?,
+            weight: inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs("Conv"))?,
+            bias: if inputs.len() > 2 {Some(inputs[2].ok_or(ONNXDecodingError::InvalidOperatorInputs("Conv"))?)} else {None},
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Conv"))?,
             auto_pad,
             dilations,
             group,
@@ -2656,20 +2656,20 @@ pub struct InstanceNormalizationOperation {
 }
 
 impl InstanceNormalizationOperation {
-    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+    pub(crate) fn from_onnx(inputs: &[Option<TensorId>], outputs: &[Option<TensorId>], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 3  {
-            return Err(ONNXDecodingError::GraphConstructionError("InstanceNormalization".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+            return Err(ONNXDecodingError::InvalidOperatorInputs("InstanceNormalization"));
         }
         if outputs.len() != 1 {
-            return Err(ONNXDecodingError::GraphConstructionError("InstanceNormalization".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("InstanceNormalization"));
         }
         let epsilon = query_attribute_float(attributes, "epsilon");
 
         Ok(Self {
-            input: inputs[0],
-            scale: inputs[1],
-            bias: inputs[2],
-            output: outputs[0],
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("InstanceNormalization"))?,
+            scale: inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs("InstanceNormalization"))?,
+            bias: inputs[2].ok_or(ONNXDecodingError::InvalidOperatorInputs("InstanceNormalization"))?,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("InstanceNormalization"))?,
             epsilon
         })
     }
@@ -2743,12 +2743,12 @@ pub struct ResizeOperation {
 }
 
 impl ResizeOperation {
-    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+    pub(crate) fn from_onnx(inputs: &[Option<TensorId>], outputs: &[Option<TensorId>], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
         if inputs.len() < 1 || inputs.len() > 4 {
-            return Err(ONNXDecodingError::GraphConstructionError("Resize".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+            return Err(ONNXDecodingError::InvalidOperatorInputs("Resize"));
         }
         if outputs.len() != 1 {
-            return Err(ONNXDecodingError::GraphConstructionError("Resize".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("Resize"));
         }
 
         let antialias = query_attribute_bool(attributes, "antialias").unwrap_or(false);
@@ -2788,11 +2788,11 @@ impl ResizeOperation {
         };
 
         Ok(Self {
-            input: inputs[0],
-            roi: if inputs.len() > 1 {Some(inputs[1])} else {None},
-            scales: if inputs.len() > 2 {Some(inputs[2])} else {None},
-            sizes: if inputs.len() > 3 {Some(inputs[3])} else {None},
-            output: outputs[0],
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Resize"))?,
+            roi: if inputs.len() > 1 {Some(inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs("Resize"))?)} else {None},
+            scales: if inputs.len() > 2 {Some(inputs[2].ok_or(ONNXDecodingError::InvalidOperatorInputs("Resize"))?)} else {None},
+            sizes: if inputs.len() > 3 {Some(inputs[3].ok_or(ONNXDecodingError::InvalidOperatorInputs("Resize"))?)} else {None},
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Resize"))?,
             antialias,
             axes,
             coordinate_transformation_mode,
@@ -2853,12 +2853,12 @@ pub struct PadOperation {
 }
 
 impl PadOperation {
-    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+    pub(crate) fn from_onnx(inputs: &[Option<TensorId>], outputs: &[Option<TensorId>], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
         if inputs.len() < 2 || inputs.len() > 4 {
-            return Err(ONNXDecodingError::GraphConstructionError("Pad".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+            return Err(ONNXDecodingError::InvalidOperatorInputs("Pad"));
         }
         if outputs.len() != 1 {
-            return Err(ONNXDecodingError::GraphConstructionError("Pad".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("Pad"));
         }
         
         let pad_mode = query_attribute_string(attributes, "mode").unwrap_or("constant".to_string());
@@ -2871,12 +2871,12 @@ impl PadOperation {
         };
         
         Ok(Self{
-            input: inputs[0],
-            pads: inputs[1],
-            constant_value: if inputs.len() > 2 { Some(inputs[2]) } else { None },
-            axes: if inputs.len() > 3 { Some(inputs[3]) } else { None },
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Pad"))?,
+            pads: inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs("Pad"))?,
+            constant_value: if inputs.len() > 2 { Some(inputs[2].ok_or(ONNXDecodingError::InvalidOperatorInputs("Pad"))?) } else { None },
+            axes: if inputs.len() > 3 { Some(inputs[3].ok_or(ONNXDecodingError::InvalidOperatorInputs("Pad"))?) } else { None },
             mode: pad_mode,
-            output: outputs[0]
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Pad"))?
         })
     }
 }
@@ -2917,12 +2917,12 @@ pub struct RandomNormalLikeOperation {
 }
 
 impl RandomNormalLikeOperation {
-    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+    pub(crate) fn from_onnx(inputs: &[Option<TensorId>], outputs: &[Option<TensorId>], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 1 {
-            return Err(ONNXDecodingError::GraphConstructionError("RandomNormalLike".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+            return Err(ONNXDecodingError::InvalidOperatorInputs("RandomNormalLike"));
         }
         if outputs.len() != 1 {
-            return Err(ONNXDecodingError::GraphConstructionError("RandomNormalLike".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("RandomNormalLike"));
         }
 
         let dtype = attributes.iter().find(|a| a.name == "dtype");
@@ -2938,8 +2938,8 @@ impl RandomNormalLikeOperation {
         let seed = query_attribute_float(attributes, "seed");
 
         Ok(Self {
-            input: inputs[0],
-            output: outputs[0],
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("RandomNormalLike"))?,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("RandomNormalLike"))?,
             dtype,
             mean,
             scale,
@@ -2976,12 +2976,12 @@ pub struct ArgMaxOperation {
 }
 
 impl ArgMaxOperation {
-    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+    pub(crate) fn from_onnx(inputs: &[Option<TensorId>], outputs: &[Option<TensorId>], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 1 {
-            return Err(ONNXDecodingError::GraphConstructionError("ArgMax".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+            return Err(ONNXDecodingError::InvalidOperatorInputs("ArgMax"));
         }
         if outputs.len() != 1 {
-            return Err(ONNXDecodingError::GraphConstructionError("ArgMax".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("ArgMax"));
         }
 
         let axis = query_attribute_int(attributes, "axis").unwrap_or(0);
@@ -2989,8 +2989,8 @@ impl ArgMaxOperation {
         let select_last_index = query_attribute_bool(attributes, "select_last_index").unwrap_or(false);
 
         Ok(Self {
-            input: inputs[0],
-            output: outputs[0],
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("ArgMax"))?,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("ArgMax"))?,
             axis,
             keepdims,
             select_last_index
@@ -3038,12 +3038,12 @@ pub struct ArgMinOperation {
 }
 
 impl ArgMinOperation {
-    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+    pub(crate) fn from_onnx(inputs: &[Option<TensorId>], outputs: &[Option<TensorId>], attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 1 {
-            return Err(ONNXDecodingError::GraphConstructionError("ArgMin".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+            return Err(ONNXDecodingError::InvalidOperatorInputs("ArgMin"));
         }
         if outputs.len() != 1 {
-            return Err(ONNXDecodingError::GraphConstructionError("ArgMin".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("ArgMin"));
         }
 
         let axis = query_attribute_int(attributes, "axis").unwrap_or(0);
@@ -3051,8 +3051,8 @@ impl ArgMinOperation {
         let select_last_index = query_attribute_bool(attributes, "select_last_index").unwrap_or(false);
 
         Ok(Self {
-            input: inputs[0],
-            output: outputs[0],
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("ArgMin"))?,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("ArgMin"))?,
             axis,
             keepdims,
             select_last_index
@@ -3097,17 +3097,17 @@ pub struct MaxOperation {
 }
 
 impl MaxOperation {
-    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], _attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+    pub(crate) fn from_onnx(inputs: &[Option<TensorId>], outputs: &[Option<TensorId>], _attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
         if inputs.len() == 0 {
-            return Err(ONNXDecodingError::GraphConstructionError("Max".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+            return Err(ONNXDecodingError::InvalidOperatorInputs("Max"));
         }
         if outputs.len() != 1 {
-            return Err(ONNXDecodingError::GraphConstructionError("Max".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+            return Err(ONNXDecodingError::InvalidOperatorInputs("Max"));
         }
 
         Ok(Self {
-            inputs: inputs.to_vec(),
-            output: outputs[0]
+            inputs: inputs.iter().map(|x| x.ok_or(ONNXDecodingError::InvalidOperatorInputs("Max"))).collect::<Result<_, _>>()?,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Max"))?
         })
     }
 }
@@ -3146,17 +3146,17 @@ pub struct MinOperation {
 }
 
 impl MinOperation {
-    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], _attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
+    pub(crate) fn from_onnx(inputs: &[Option<TensorId>], outputs: &[Option<TensorId>], _attributes: &[onnx::AttributeProto]) -> Result<Self, ONNXDecodingError> {
         if inputs.len() == 0 {
-            return Err(ONNXDecodingError::GraphConstructionError("Min".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+            return Err(ONNXDecodingError::InvalidOperatorInputs("Min"));
         }
         if outputs.len() != 1 {
-            return Err(ONNXDecodingError::GraphConstructionError("Min".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("Min"));
         }
 
         Ok(Self {
-            inputs: inputs.to_vec(),
-            output: outputs[0]
+            inputs: inputs.iter().map(|x| x.ok_or(ONNXDecodingError::InvalidOperatorInputs("Min"))).collect::<Result<_, _>>()?,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Min"))?
         })
     }
 }
@@ -3197,12 +3197,12 @@ pub struct IfOperation {
 }
 
 impl IfOperation {
-    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], attributes: &[onnx::AttributeProto], symbolic_graph_mutator: &mut SymbolicGraphMutator, core_opset_version: usize) -> Result<Self, ONNXDecodingError> {
+    pub(crate) fn from_onnx(inputs: &[Option<TensorId>], outputs: &[Option<TensorId>], attributes: &[onnx::AttributeProto], symbolic_graph_mutator: &mut SymbolicGraphMutator, core_opset_version: usize) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 1 {
-            return Err(ONNXDecodingError::GraphConstructionError("If".to_string(), SymbolicGraphError::InvalidOperatorInputs));
+            return Err(ONNXDecodingError::InvalidOperatorInputs("If"));
         }
         if outputs.len() < 1 {
-            return Err(ONNXDecodingError::GraphConstructionError("If".to_string(), SymbolicGraphError::InvalidOperatorOutputs));
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("If"));
         }
 
         let then_branch_graph = query_attribute_graph(attributes, "then_branch")
@@ -3221,8 +3221,8 @@ impl IfOperation {
         };
 
         Ok(Self {
-            condition: inputs[0],
-            outputs: outputs.to_vec(),
+            condition: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("If"))?,
+            outputs: outputs.iter().map(|x| x.ok_or(ONNXDecodingError::InvalidOperatorOutputs("Min"))).collect::<Result<_, _>>()?,
             then_branch: then_branch_graph,
             else_branch: else_branch_graph,
         })
@@ -3274,9 +3274,10 @@ impl Operation for IfOperation {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ScanOperation {
-    inputs: Vec<TensorId>,
-    outputs: Vec<TensorId>,
-    num_scan_inputs: i64,
+    scan_inputs: Vec<Option<TensorId>>,
+    state_inputs: Vec<Option<TensorId>>,
+    scan_outputs: Vec<Option<TensorId>>,
+    state_outputs: Vec<Option<TensorId>>,
     scan_input_axes: Option<Vec<i64>>,
     scan_input_directions: Option<Vec<i64>>,
     scan_output_axes: Option<Vec<i64>>,
@@ -3285,7 +3286,7 @@ pub struct ScanOperation {
 }
 
 impl ScanOperation {
-    pub(crate) fn from_onnx(inputs: &[TensorId], outputs: &[TensorId], attributes: &[onnx::AttributeProto], symbolic_graph_mutator: &mut SymbolicGraphMutator, core_opset_version: usize) -> Result<Self, ONNXDecodingError> {
+    pub(crate) fn from_onnx(inputs: &[Option<TensorId>], outputs: &[Option<TensorId>], attributes: &[onnx::AttributeProto], symbolic_graph_mutator: &mut SymbolicGraphMutator, core_opset_version: usize) -> Result<Self, ONNXDecodingError> {
 
         let body = query_attribute_graph(attributes, "body")
             .ok_or(ONNXDecodingError::MissingField("body"))?;
@@ -3295,22 +3296,35 @@ impl ScanOperation {
             inner_graph
         };
 
+        let scan_inputs_start = if core_opset_version < 9 {
+            1
+        } else {
+            0
+        };
+
         let num_scan_inputs = query_attribute_int(attributes, "num_scan_inputs").ok_or(ONNXDecodingError::MissingField("num_scan_inputs"))?;
+        assert!(num_scan_inputs <= inputs.len() as i64);
+        assert!(num_scan_inputs >= 1);
+        let num_state_tensors = (inputs.len()-scan_inputs_start) - num_scan_inputs as usize;
 
         let scan_input_axes = query_attribute_ints(attributes, "scan_input_axes");
         let scan_input_directions = query_attribute_ints(attributes, "scan_input_directions");
         let scan_output_axes = query_attribute_ints(attributes, "scan_output_axes");
         let scan_output_directions = query_attribute_ints(attributes, "scan_output_directions");
 
-        let inputs = inputs.to_vec();
+        let state_inputs = inputs[scan_inputs_start..num_state_tensors].to_vec();
+        let scan_inputs = inputs[scan_inputs_start+num_state_tensors..].to_vec();
 
-        assert!(num_scan_inputs <= inputs.len() as i64);
-        assert!(num_scan_inputs >= 1);
+        let state_outputs = outputs[..num_state_tensors].to_vec();
+        let scan_outputs = outputs[num_state_tensors..].to_vec();
+
+
         Ok(Self {
-            inputs,
-            outputs: outputs.to_vec(),
+            state_inputs,
+            scan_inputs,
+            state_outputs,
+            scan_outputs,
             body,
-            num_scan_inputs,
             scan_input_axes,
             scan_input_directions,
             scan_output_axes,
@@ -3327,7 +3341,8 @@ impl Operation for ScanOperation {
     fn get_inputs(&self) -> Vec<TensorId> {
 
         let mut inputs_set = HashSet::new();
-        inputs_set.extend(self.inputs.iter());
+        inputs_set.extend(self.state_inputs.iter().filter_map(|x| x.clone()));
+        inputs_set.extend(self.scan_inputs.iter().filter_map(|x| x.clone()));
         inputs_set.extend(self.body.get_foreign_tensor_ids());
         let mut inputs_vec: Vec<_> = inputs_set.into_iter().collect();
         inputs_vec.sort(); // Deterministic ordering
@@ -3335,24 +3350,15 @@ impl Operation for ScanOperation {
     }
 
     fn get_outputs(&self) -> Vec<TensorId> {
-        self.outputs.clone()
+        let mut outputs = Vec::new();
+        outputs.extend(self.state_outputs.iter().filter_map(|x| x.clone()));
+        outputs.extend(self.scan_outputs.iter().filter_map(|x| x.clone()));
+        outputs
     }
 
     fn eval(&self, backend: &mut EvalBackend, inputs: &HashMap<TensorId, NumericTensor<DynRank>>) -> Result<HashMap<TensorId, NumericTensor<DynRank>>, EvalError> {
-        let init_inputs = {
-            let mut init_inputs = Vec::new();
-            for i in 0..(self.inputs.len() - self.num_scan_inputs as usize) {
-                init_inputs.push(inputs[&self.inputs[i]].clone());
-            }
-            init_inputs
-        };
-        let scan_inputs = {
-            let mut scan_inputs = Vec::new();
-            for i in (self.inputs.len() - self.num_scan_inputs as usize)..self.inputs.len() {
-                scan_inputs.push(inputs[&self.inputs[i]].clone());
-            }
-            scan_inputs
-        };
+        let state_inputs: Vec<_> = self.state_inputs.iter().map(|x| x.map(|x| inputs[&x].clone())).collect();
+        let scan_inputs: Vec<_> =  self.scan_inputs.iter().map(|x| inputs[&x.unwrap()].clone()).collect();
 
         let scan_input_axes = if let Some(scan_input_axes) = &self.scan_input_axes {
             let mut output = Vec::new();
@@ -3366,7 +3372,7 @@ impl Operation for ScanOperation {
             }
             output
         } else {
-            vec![0; self.num_scan_inputs as usize]
+            vec![0; scan_inputs.len()]
         };
 
         let iter_count = scan_inputs[0].shape()[scan_input_axes[0]];
@@ -3375,11 +3381,11 @@ impl Operation for ScanOperation {
         assert!(self.scan_output_directions.is_none());
 
         let mut accumulated_scan_outputs = Vec::new();
-        for _ in 0..self.num_scan_inputs {
+        for _ in 0..self.scan_outputs.len() {
             accumulated_scan_outputs.push(Vec::new());
         }
 
-        let mut next_temp_inputs = init_inputs;
+        let mut state_tensors = state_inputs;
 
         for i in 0..iter_count {
             let iter_scan_inputs = {
@@ -3388,12 +3394,12 @@ impl Operation for ScanOperation {
                     let mut slice_indexes = Vec::new();
                     for k in 0..scan_inputs[j].rank() {
                         if k == scan_input_axes[j] {
-                            slice_indexes.push(0..scan_inputs[j].shape()[k]);
-                        } else {
                             slice_indexes.push(i..i+1);
+                        } else {
+                            slice_indexes.push(0..scan_inputs[j].shape()[k]);
                         }
                     }
-                    let sliced = scan_inputs[i as usize].slice(slice_indexes.as_slice(), backend)?;
+                    let sliced = scan_inputs[j].slice(slice_indexes.as_slice(), backend)?;
                     let squeezed = sliced.squeeze(scan_input_axes[j])?;
                     iter_scan_inputs.push(squeezed);
                 }
@@ -3403,9 +3409,11 @@ impl Operation for ScanOperation {
             let input_map = {
                 let mut input_map = HashMap::new();
                 let mut i = 0;
-                for input in &next_temp_inputs {
-                    input_map.insert(self.body.ordered_inputs[i], input.clone());
-                    i += 1;
+                for input in &state_tensors {
+                    if let Some(input) = input {
+                        input_map.insert(self.body.ordered_inputs[i], input.clone());
+                        i += 1;
+                    }
                 }
                 for input in &iter_scan_inputs {
                     input_map.insert(self.body.ordered_inputs[i], input.clone());
@@ -3420,13 +3428,13 @@ impl Operation for ScanOperation {
             let eval_outputs = self.body.eval(&input_map, backend)?;
 
 
-            let temp_outputs = self.body.ordered_outputs[0..next_temp_inputs.len()].iter().map(|x| eval_outputs[x].clone()).collect::<Vec<_>>();
-            let scan_outputs = self.body.ordered_outputs[next_temp_inputs.len()..].iter().map(|x| eval_outputs[x].clone()).collect::<Vec<_>>();
+            let temp_outputs = self.body.ordered_outputs[0..state_tensors.len()].iter().map(|x| eval_outputs[x].clone()).collect::<Vec<_>>();
+            let scan_outputs = self.body.ordered_outputs[state_tensors.len()..].iter().map(|x| eval_outputs[x].clone()).collect::<Vec<_>>();
 
             for (i, output) in scan_outputs.iter().enumerate() {
                 accumulated_scan_outputs[i].push(output.clone());
             }
-            next_temp_inputs = temp_outputs;
+            state_tensors = temp_outputs.iter().map(|x| Some(x.clone())).collect::<Vec<_>>();
         }
 
         // Concatenate the accumulated outputs
@@ -3458,11 +3466,15 @@ impl Operation for ScanOperation {
         };
 
         let mut outputs = HashMap::new();
-        for i in 0..next_temp_inputs.len() {
-            outputs.insert(self.body.ordered_outputs[i].clone(), next_temp_inputs[i].clone());
+        for i in 0..state_tensors.len() {
+            if let Some(x) = self.state_outputs[i] {
+                outputs.insert(x, state_tensors[i].clone().unwrap());
+            }
         }
         for i in 0..scan_outputs.len() {
-            outputs.insert(self.body.ordered_outputs[next_temp_inputs.len() + i].clone(), scan_outputs[i].clone());
+            if let Some(x) = self.scan_outputs[i] {
+                outputs.insert(x, scan_outputs[i].clone());
+            }
         }
 
         Ok(outputs)
