@@ -1,7 +1,9 @@
 pub mod links;
 pub mod nodes;
+pub mod data;
+mod interfaces;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use crate::backends::eval_backend::EvalBackend;
@@ -10,8 +12,10 @@ use crate::milli_graph::MilliOpGraphError;
 use crate::model::{Model, ModelError};
 use crate::numeric_tensor::{NumericTensor, NumericTensorError};
 use crate::numeric_tensor_typed::TypedNumericTensorError;
+use crate::super_graph::data::SuperGraphData;
 use crate::super_graph::links::{SuperGraphAnyLink, SuperGraphLinkId, SuperGraphLinkModel, SuperGraphLinkString, SuperGraphLinkTensor, SuperGraphLinkTokenizer};
 use crate::super_graph::nodes::{SuperGraphAnyNode};
+use crate::tensor_rank::DimContainer;
 use crate::tokenizer::{AnyTokenizer, TokenizerError};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -29,41 +33,32 @@ pub enum SuperGraphError {
     NumericTensorError(#[from] NumericTensorError),
     #[error(transparent)]
     TypedNumericTensorError(#[from] TypedNumericTensorError),
-}
-
-pub(crate) struct SuperGraphData {
-    tensors: HashMap<SuperGraphLinkTensor, NumericTensor<DynRank>>,
-    strings: HashMap<SuperGraphLinkString, String>,
-    tokenizers: HashMap<SuperGraphLinkTokenizer, AnyTokenizer>,
-    models: HashMap<SuperGraphLinkModel, Arc<Model>>,
-    text_input: String,
-    text_output: Option<String>,
-    loaded_models: Vec<Arc<Model>>
-}
-
-impl SuperGraphData {
-    pub fn new(text_input: String, loaded_models: Vec<Arc<Model>>) -> Self {
-        Self {
-            tensors: HashMap::new(),
-            strings: HashMap::new(),
-            tokenizers: HashMap::new(),
-            models: HashMap::new(),
-            text_input,
-            text_output: None,
-            loaded_models
-        }
-    }
+    #[error("Missing link")]
+    MissingLinkError()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SuperGraph {
-    nodes: HashMap<SuperGraphNodeId, SuperGraphAnyNode>,
-    links: Vec<SuperGraphAnyLink>
+    inner: SuperGraphInner
 }
 
 impl SuperGraph {
-    pub fn run(&self, models: &[Arc<Model>], input: String, backend: &mut EvalBackend) -> Result<Option<String>, SuperGraphError> {
-        let mut data = SuperGraphData::new(input, models.to_vec());
+    pub fn run(&self, data: SuperGraphData, backend: &mut EvalBackend) -> Result<SuperGraphData, SuperGraphError> {
+        self.inner.eval(data, backend)
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SuperGraphInner {
+    input_links: HashSet<SuperGraphAnyLink>,
+    output_links: HashSet<SuperGraphAnyLink>,
+    nodes: HashMap<SuperGraphNodeId, SuperGraphAnyNode>,
+    links: HashSet<SuperGraphAnyLink>
+}
+
+impl SuperGraphInner {
+    pub fn eval(&self, data: SuperGraphData, backend: &mut EvalBackend) -> Result<SuperGraphData, SuperGraphError> {
+        let mut data = data;
 
         let mut remaining_ops = self.nodes.keys().map(|x| x.clone()).collect::<Vec<_>>();
 
@@ -114,7 +109,9 @@ impl SuperGraph {
             }
         }
 
-        Ok(data.text_output)
+        let output_data = data.select(self.output_links.iter().map(|x| x.clone()).collect::<Vec<_>>().as_slice())?;
+
+        Ok(output_data)
     }
 }
 
@@ -122,7 +119,7 @@ pub struct SuperGraphBuilder {
     next_node_id: u32,
     next_link_id: u32,
     nodes: HashMap<SuperGraphNodeId, SuperGraphAnyNode>,
-    links: Vec<SuperGraphAnyLink>
+    links: HashSet<SuperGraphAnyLink>
 }
 
 impl SuperGraphBuilder {
@@ -131,7 +128,7 @@ impl SuperGraphBuilder {
             next_node_id: 0,
             next_link_id: 0,
             nodes: HashMap::new(),
-            links: Vec::new()
+            links: HashSet::new()
         }
     }
 
@@ -153,10 +150,14 @@ impl SuperGraphBuilder {
         id
     }
 
-    pub fn build(self) -> SuperGraph {
+    pub fn build(self, input_links: &[SuperGraphAnyLink], output_links: &[SuperGraphAnyLink]) -> SuperGraph {
         SuperGraph {
-            nodes: self.nodes,
-            links: self.links
+            inner: SuperGraphInner {
+                nodes: self.nodes,
+                links: self.links,
+                input_links: HashSet::from_iter(input_links.iter().map(|x| x.clone())),
+                output_links: HashSet::from_iter(output_links.iter().map(|x| x.clone())),
+            }
         }
     }
 }

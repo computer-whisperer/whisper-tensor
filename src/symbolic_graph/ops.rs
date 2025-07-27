@@ -3297,7 +3297,8 @@ impl ScanOperation {
         };
 
         let scan_inputs_start = if core_opset_version < 9 {
-            1
+            //1
+            panic!("We don't support this version of scan!")
         } else {
             0
         };
@@ -3701,59 +3702,6 @@ impl Operation for AnyOperation {
         }
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
-        match self {
-            AnyOperation::Unary(op) => op.get_milli_op_graph(),
-            AnyOperation::Binary(op) => op.get_milli_op_graph(),
-            AnyOperation::Cast(op) => op.get_milli_op_graph(),
-            AnyOperation::CastLike(op) => op.get_milli_op_graph(),
-            AnyOperation::Squeeze(op) => op.get_milli_op_graph(),
-            AnyOperation::Unsqueeze(op) => op.get_milli_op_graph(),
-            AnyOperation::Transpose(op) => op.get_milli_op_graph(),
-            AnyOperation::Reshape(op) => op.get_milli_op_graph(),
-            AnyOperation::CumSum(op) => op.get_milli_op_graph(),
-            AnyOperation::Gather(op) => op.get_milli_op_graph(),
-            AnyOperation::LpNormalization(op) => op.get_milli_op_graph(),
-            AnyOperation::GroupNormalization(op) => op.get_milli_op_graph(),
-            AnyOperation::LayerNormalization(op) => op.get_milli_op_graph(),
-            AnyOperation::Shape(op) => op.get_milli_op_graph(),
-            AnyOperation::Concat(op) => op.get_milli_op_graph(),
-            AnyOperation::ConstantOfShape(op) => op.get_milli_op_graph(),
-            AnyOperation::ReduceMean(op) => op.get_milli_op_graph(),
-            AnyOperation::ReduceSum(op) => op.get_milli_op_graph(),
-            AnyOperation::ReduceProd(op) => op.get_milli_op_graph(),
-            AnyOperation::ReduceMax(op) => op.get_milli_op_graph(),
-            AnyOperation::ReduceMin(op) => op.get_milli_op_graph(),
-            AnyOperation::Pow(op) => op.get_milli_op_graph(),
-            AnyOperation::Gemm(op) => op.get_milli_op_graph(),
-            AnyOperation::Split(op) => op.get_milli_op_graph(),
-            AnyOperation::Slice(op) => op.get_milli_op_graph(),
-            AnyOperation::Where(op) => op.get_milli_op_graph(),
-            AnyOperation::Softmax(op) => op.get_milli_op_graph(),
-            AnyOperation::LogSoftmax(op) => op.get_milli_op_graph(),
-            AnyOperation::Size(op) => op.get_milli_op_graph(),
-            AnyOperation::Range(op) => op.get_milli_op_graph(),
-            AnyOperation::Flatten(op) => op.get_milli_op_graph(),
-            AnyOperation::Constant(op) => op.get_milli_op_graph(),
-            AnyOperation::Identity(op) => op.get_milli_op_graph(),
-            AnyOperation::IsInf(op) => op.get_milli_op_graph(),
-            AnyOperation::Clip(op) => op.get_milli_op_graph(),
-            AnyOperation::Modulo(op) => op.get_milli_op_graph(),
-            AnyOperation::Expand(op) => op.get_milli_op_graph(),
-            AnyOperation::Conv(op) => op.get_milli_op_graph(),
-            AnyOperation::InstanceNormalization(op) => op.get_milli_op_graph(),
-            AnyOperation::Resize(op) => op.get_milli_op_graph(),
-            AnyOperation::Pad(op) => op.get_milli_op_graph(),
-            AnyOperation::RandomNormalLike(op) => op.get_milli_op_graph(),
-            AnyOperation::ArgMax(op) => op.get_milli_op_graph(),
-            AnyOperation::ArgMin(op) => op.get_milli_op_graph(),
-            AnyOperation::Max(op) => op.get_milli_op_graph(),
-            AnyOperation::Min(op) => op.get_milli_op_graph(),
-            AnyOperation::If(op) => op.get_milli_op_graph(),
-            AnyOperation::Scan(op) => op.get_milli_op_graph(),
-        }
-    }
-
     fn eval(&self, backend: &mut EvalBackend, inputs: &HashMap<TensorId, NumericTensor<DynRank>>) -> Result<HashMap<TensorId, NumericTensor<DynRank>>, EvalError>  {
         match self {
             AnyOperation::Unary(op) => op.eval(backend, inputs),
@@ -3804,6 +3752,59 @@ impl Operation for AnyOperation {
             AnyOperation::Min(op) => op.eval(backend, inputs),
             AnyOperation::If(op) => op.eval(backend, inputs),
             AnyOperation::Scan(op) => op.eval(backend, inputs),
+        }
+    }
+
+    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
+        match self {
+            AnyOperation::Unary(op) => op.get_milli_op_graph(),
+            AnyOperation::Binary(op) => op.get_milli_op_graph(),
+            AnyOperation::Cast(op) => op.get_milli_op_graph(),
+            AnyOperation::CastLike(op) => op.get_milli_op_graph(),
+            AnyOperation::Squeeze(op) => op.get_milli_op_graph(),
+            AnyOperation::Unsqueeze(op) => op.get_milli_op_graph(),
+            AnyOperation::Transpose(op) => op.get_milli_op_graph(),
+            AnyOperation::Reshape(op) => op.get_milli_op_graph(),
+            AnyOperation::CumSum(op) => op.get_milli_op_graph(),
+            AnyOperation::Gather(op) => op.get_milli_op_graph(),
+            AnyOperation::LpNormalization(op) => op.get_milli_op_graph(),
+            AnyOperation::GroupNormalization(op) => op.get_milli_op_graph(),
+            AnyOperation::LayerNormalization(op) => op.get_milli_op_graph(),
+            AnyOperation::Shape(op) => op.get_milli_op_graph(),
+            AnyOperation::Concat(op) => op.get_milli_op_graph(),
+            AnyOperation::ConstantOfShape(op) => op.get_milli_op_graph(),
+            AnyOperation::ReduceMean(op) => op.get_milli_op_graph(),
+            AnyOperation::ReduceSum(op) => op.get_milli_op_graph(),
+            AnyOperation::ReduceProd(op) => op.get_milli_op_graph(),
+            AnyOperation::ReduceMax(op) => op.get_milli_op_graph(),
+            AnyOperation::ReduceMin(op) => op.get_milli_op_graph(),
+            AnyOperation::Pow(op) => op.get_milli_op_graph(),
+            AnyOperation::Gemm(op) => op.get_milli_op_graph(),
+            AnyOperation::Split(op) => op.get_milli_op_graph(),
+            AnyOperation::Slice(op) => op.get_milli_op_graph(),
+            AnyOperation::Where(op) => op.get_milli_op_graph(),
+            AnyOperation::Softmax(op) => op.get_milli_op_graph(),
+            AnyOperation::LogSoftmax(op) => op.get_milli_op_graph(),
+            AnyOperation::Size(op) => op.get_milli_op_graph(),
+            AnyOperation::Range(op) => op.get_milli_op_graph(),
+            AnyOperation::Flatten(op) => op.get_milli_op_graph(),
+            AnyOperation::Constant(op) => op.get_milli_op_graph(),
+            AnyOperation::Identity(op) => op.get_milli_op_graph(),
+            AnyOperation::IsInf(op) => op.get_milli_op_graph(),
+            AnyOperation::Clip(op) => op.get_milli_op_graph(),
+            AnyOperation::Modulo(op) => op.get_milli_op_graph(),
+            AnyOperation::Expand(op) => op.get_milli_op_graph(),
+            AnyOperation::Conv(op) => op.get_milli_op_graph(),
+            AnyOperation::InstanceNormalization(op) => op.get_milli_op_graph(),
+            AnyOperation::Resize(op) => op.get_milli_op_graph(),
+            AnyOperation::Pad(op) => op.get_milli_op_graph(),
+            AnyOperation::RandomNormalLike(op) => op.get_milli_op_graph(),
+            AnyOperation::ArgMax(op) => op.get_milli_op_graph(),
+            AnyOperation::ArgMin(op) => op.get_milli_op_graph(),
+            AnyOperation::Max(op) => op.get_milli_op_graph(),
+            AnyOperation::Min(op) => op.get_milli_op_graph(),
+            AnyOperation::If(op) => op.get_milli_op_graph(),
+            AnyOperation::Scan(op) => op.get_milli_op_graph(),
         }
     }
 }

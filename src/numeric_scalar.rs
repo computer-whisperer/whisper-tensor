@@ -571,3 +571,9 @@ impl From<NumericScalar> for bool {
         Self::cast_from_numeric_scalar(&value)
     }
 }
+
+impl From<NumericScalar> for i64 {
+    fn from(value: NumericScalar) -> Self {
+        Self::cast_from_numeric_scalar(&value)
+    }
+}

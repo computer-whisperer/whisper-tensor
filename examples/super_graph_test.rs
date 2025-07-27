@@ -7,9 +7,10 @@ use whisper_tensor::model::{Model};
 use whisper_tensor::dtype::DType;
 use whisper_tensor::milli_graph::{MilliOpGraph};
 use whisper_tensor::milli_graph::ops::{AnyMilliOp, MilliOpArgMax, MilliOpCast, MilliOpConstant, MilliOpShape, MilliOpSimpleBinary, MilliOpSlice, MilliOpSqueeze, MilliOpUnsqueeze};
-use whisper_tensor::super_graph::links::SuperGraphLinkTensor;
-use whisper_tensor::super_graph::nodes::{SuperGraphNodeMilliOpGraph, SuperGraphNodeModelExecution, SuperGraphNodeModelLoad, SuperGraphNodeStringInput, SuperGraphNodeStringOutput, SuperGraphNodeTokenizerDecode, SuperGraphNodeTokenizerEncode, SuperGraphNodeTokenizerLoad};
+use whisper_tensor::super_graph::links::{SuperGraphLink, SuperGraphLinkModel, SuperGraphLinkString, SuperGraphLinkTensor};
+use whisper_tensor::super_graph::nodes::{SuperGraphNodeMilliOpGraph, SuperGraphNodeModelExecution, SuperGraphNodeTokenizerDecode, SuperGraphNodeTokenizerEncode, SuperGraphNodeTokenizerLoad};
 use whisper_tensor::super_graph::SuperGraphBuilder;
+use whisper_tensor::super_graph::data::SuperGraphData;
 use whisper_tensor_import::{identify_and_load, ModelTypeHint};
 use whisper_tensor_import::onnx_graph::{TokenizerInfo, WeightStorageStrategy};
 
@@ -19,17 +20,16 @@ fn main() {
     let input_path = Path::new("gpt2-lm-head-10.onnx");
     let onnx_data = identify_and_load(input_path, WeightStorageStrategy::EmbeddedData, Some(ModelTypeHint::GPT2)).unwrap();
 
-    let model = Model::new_from_onnx(&onnx_data).unwrap();
+    let model = Arc::new(Model::new_from_onnx(&onnx_data).unwrap());
 
     let mut builder = SuperGraphBuilder::new();
 
-    let model_load = SuperGraphNodeModelLoad::new_and_add(&mut builder, 0);
-
-    let text_input = SuperGraphNodeStringInput::new_and_add(&mut builder);
+    let model_link = SuperGraphLinkModel::new(builder.get_next_link_id());
+    let text_input_link = SuperGraphLinkString::new(builder.get_next_link_id());
 
     let tokenizer_link = SuperGraphNodeTokenizerLoad::new_and_add(&mut builder, TokenizerInfo::HFTokenizer("gpt2".to_string()));
 
-    let tokens = SuperGraphNodeTokenizerEncode::new_and_add(&mut builder, tokenizer_link.clone(), text_input);
+    let tokens = SuperGraphNodeTokenizerEncode::new_and_add(&mut builder, tokenizer_link.clone(), text_input_link.clone());
 
     // Model invocation
     let logit_output = {
@@ -44,7 +44,7 @@ fn main() {
             outputs.insert("output1".to_string(), tensor.clone());
             (outputs, tensor)
         };
-        let node = SuperGraphNodeModelExecution::new(model_load, inputs, outputs);
+        let node = SuperGraphNodeModelExecution::new(model_link.clone(), inputs, outputs);
         builder.add_node(node.into());
         logit_output
     };
@@ -91,10 +91,15 @@ fn main() {
 
     let text_output = SuperGraphNodeTokenizerDecode::new_and_add(&mut builder, tokenizer_link, chosen_token);
 
-    SuperGraphNodeStringOutput::new_and_add(&mut builder, text_output);
+    let inputs = vec![model_link.to_any(), text_input_link.to_any()];
+    let outputs = vec![text_output.to_any()];
 
-    let super_graph = builder.build();
+    let super_graph = builder.build(inputs.as_slice(), outputs.as_slice());
 
-    let res = super_graph.run(&vec![Arc::new(model)], "The fibonacci sequence is: 1, 1, 2, 3, 5, 8, 13,".to_string(), &mut EvalBackend::NDArray).unwrap();
+    let mut super_graph_data = SuperGraphData::new();
+    super_graph_data.models.insert(model_link, model);
+    super_graph_data.strings.insert(text_input_link, "The fibonacci sequence is: 1, 1, 2, 3, 5, 8, 13,".to_string());
+    let res = super_graph.run(super_graph_data, &mut EvalBackend::NDArray).unwrap();
+    let res = res.strings.get(&text_output).unwrap();
     println!("{:?}", res);
 }

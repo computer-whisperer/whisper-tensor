@@ -97,3 +97,65 @@ impl SuperGraphAnyLink {
         }
     }
 }
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub enum SuperGraphLinkDouble {
+    Tensor(SuperGraphLinkTensor, SuperGraphLinkTensor),
+    String(SuperGraphLinkString, SuperGraphLinkString),
+    Model(SuperGraphLinkModel, SuperGraphLinkModel),
+    Tokenizer(SuperGraphLinkTokenizer, SuperGraphLinkTokenizer)
+}
+
+impl SuperGraphLinkDouble {
+    pub fn first(&self) -> SuperGraphAnyLink {
+        match self {
+            SuperGraphLinkDouble::Tensor(t1, _) => SuperGraphAnyLink::Tensor(t1.clone()),
+            SuperGraphLinkDouble::String(s1, _) => SuperGraphAnyLink::String(s1.clone()),
+            SuperGraphLinkDouble::Model(m1, _) => SuperGraphAnyLink::Model(m1.clone()),
+            SuperGraphLinkDouble::Tokenizer(t1, _) => SuperGraphAnyLink::Tokenizer(t1.clone()),
+        }
+    }
+    pub fn second(&self) -> SuperGraphAnyLink {
+        match self {
+            SuperGraphLinkDouble::Tensor(_, t2) => SuperGraphAnyLink::Tensor(t2.clone()),
+            SuperGraphLinkDouble::String(_, s2) => SuperGraphAnyLink::String(s2.clone()),
+            SuperGraphLinkDouble::Model(_, m2) => SuperGraphAnyLink::Model(m2.clone()),
+            SuperGraphLinkDouble::Tokenizer(_, t2) => SuperGraphAnyLink::Tokenizer(t2.clone()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub enum SuperGraphLinkTriple {
+    Tensor(SuperGraphLinkTensor, SuperGraphLinkTensor, SuperGraphLinkTensor),
+    String(SuperGraphLinkString, SuperGraphLinkString, SuperGraphLinkString),
+    Model(SuperGraphLinkModel, SuperGraphLinkModel, SuperGraphLinkModel),
+    Tokenizer(SuperGraphLinkTokenizer, SuperGraphLinkTokenizer, SuperGraphLinkTokenizer)
+}
+
+impl SuperGraphLinkTriple {
+    pub fn first(&self) -> SuperGraphAnyLink {
+        match self {
+            SuperGraphLinkTriple::Tensor(t1, _, _) => SuperGraphAnyLink::Tensor(t1.clone()),
+            SuperGraphLinkTriple::String(s1, _, _) => SuperGraphAnyLink::String(s1.clone()),
+            SuperGraphLinkTriple::Model(m1, _, _) => SuperGraphAnyLink::Model(m1.clone()),
+            SuperGraphLinkTriple::Tokenizer(t1, _, _) => SuperGraphAnyLink::Tokenizer(t1.clone()),
+        }
+    }
+    pub fn second(&self) -> SuperGraphAnyLink {
+        match self {
+            SuperGraphLinkTriple::Tensor(_, t2, _) => SuperGraphAnyLink::Tensor(t2.clone()),
+            SuperGraphLinkTriple::String(_, s2, _) => SuperGraphAnyLink::String(s2.clone()),
+            SuperGraphLinkTriple::Model(_, m2, _) => SuperGraphAnyLink::Model(m2.clone()),
+            SuperGraphLinkTriple::Tokenizer(_, t2, _) => SuperGraphAnyLink::Tokenizer(t2.clone()),
+        }
+    }
+    pub fn third(&self) -> SuperGraphAnyLink {
+        match self {
+            SuperGraphLinkTriple::Tensor(_, _, t3) => SuperGraphAnyLink::Tensor(t3.clone()),
+            SuperGraphLinkTriple::String(_, _, s3) => SuperGraphAnyLink::String(s3.clone()),
+            SuperGraphLinkTriple::Model(_, _, m3) => SuperGraphAnyLink::Model(m3.clone()),
+            SuperGraphLinkTriple::Tokenizer(_, _, t3) => SuperGraphAnyLink::Tokenizer(t3.clone()),
+        }
+    }
+}

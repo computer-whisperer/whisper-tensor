@@ -4,10 +4,11 @@ use typenum::P1;
 use rwkv_tokenizer::WorldTokenizer;
 use whisper_tensor_import::onnx_graph::TokenizerInfo;
 use crate::backends::eval_backend::EvalBackend;
+use crate::DynRank;
 use crate::milli_graph::MilliOpGraph;
 use crate::numeric_tensor::NumericTensor;
-use crate::super_graph::links::{SuperGraphAnyLink, SuperGraphLink, SuperGraphLinkModel, SuperGraphLinkString, SuperGraphLinkTensor, SuperGraphLinkTokenizer};
-use crate::super_graph::{SuperGraphBuilder, SuperGraphData, SuperGraphError};
+use crate::super_graph::links::{SuperGraphAnyLink, SuperGraphLink, SuperGraphLinkDouble, SuperGraphLinkModel, SuperGraphLinkString, SuperGraphLinkTensor, SuperGraphLinkTokenizer, SuperGraphLinkTriple};
+use crate::super_graph::{SuperGraph, SuperGraphBuilder, SuperGraphData, SuperGraphError, SuperGraphInner};
 use crate::tokenizer::{AnyTokenizer, Tokenizer};
 
 trait SuperGraphNode {
@@ -26,49 +27,6 @@ impl <T: SuperGraphNode> From<T> for SuperGraphAnyNode {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ModelReference {
     idx: usize
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct SuperGraphNodeModelLoad {
-    model: ModelReference,
-    output: SuperGraphLinkModel
-}
-
-impl SuperGraphNodeModelLoad {
-    pub fn new(builder: &mut SuperGraphBuilder, idx: usize) -> Self {
-        Self {
-            model: ModelReference { idx },
-            output: SuperGraphLinkModel::new(builder.get_next_link_id())
-        }
-    }
-
-    pub fn new_and_add(builder: &mut SuperGraphBuilder, idx: usize) -> SuperGraphLinkModel {
-        let node = Self::new(builder, idx);
-        let output = node.get_model_output();
-        builder.add_node(node.into());
-        output
-    }
-
-    pub fn get_model_output(&self) -> SuperGraphLinkModel {
-        self.output.clone()
-    }
-}
-
-impl SuperGraphNode for SuperGraphNodeModelLoad {
-    fn get_inputs(&self) -> Vec<SuperGraphAnyLink> {
-        vec![]
-    }
-    fn get_outputs(&self) -> Vec<SuperGraphAnyLink> {
-        vec![self.output.to_any()]
-    }
-    fn to_any(self) -> SuperGraphAnyNode {
-        SuperGraphAnyNode::ModelLoad(self)
-    }
-    fn eval(&self, data: &mut SuperGraphData, _backend: &mut EvalBackend) -> Result<(), SuperGraphError> {
-        let model = data.loaded_models.get(self.model.idx).unwrap();
-        data.models.insert(self.output.clone(), model.clone());
-        Ok(())
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -155,12 +113,15 @@ impl SuperGraphNode for SuperGraphNodeTokenizerLoad {
         SuperGraphAnyNode::TokenizerLoad(self)
     }
     fn eval(&self, data: &mut SuperGraphData, _backend: &mut EvalBackend) -> Result<(), SuperGraphError> {
-        /*
         let tokenizer = match &self.info {
             TokenizerInfo::HFTokenizer(name) => {
                 #[cfg(all(feature = "tokenizers", feature = "http"))]
                 {
                     AnyTokenizer::Tokenizers(tokenizers::Tokenizer::from_pretrained(name, None).unwrap())
+                }
+                #[cfg(not(all(feature = "tokenizers", feature = "http")))]
+                {
+                    panic!("Huggingface tokenizer not supported")
                 }
             }
             TokenizerInfo::RWKVWorld => {
@@ -168,10 +129,13 @@ impl SuperGraphNode for SuperGraphNodeTokenizerLoad {
                 {
                     AnyTokenizer::Rwkv(WorldTokenizer::new(None).unwrap())
                 }
+                #[cfg(not(feature = "rwkv-tokenizer"))]
+                {
+                    panic!("RWKV tokenizer not supported")
+                }
             }
         };
-        data.tokenizers.insert(self.output.clone(), tokenizer);*/
-        todo!();
+        data.tokenizers.insert(self.output.clone(), tokenizer);
         Ok(())
     }
 }
@@ -226,80 +190,6 @@ impl SuperGraphNode for SuperGraphNodeTokenizerEncode {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct SuperGraphNodeStringInput {
-    text_output: SuperGraphLinkString
-}
-
-impl SuperGraphNodeStringInput {
-    pub fn new(builder: &mut SuperGraphBuilder) -> Self {
-        Self {
-            text_output: SuperGraphLinkString::new(builder.get_next_link_id())
-        }
-    }
-
-    pub fn new_and_add(builder: &mut SuperGraphBuilder) -> SuperGraphLinkString {
-        let node = Self::new(builder);
-        let output = node.get_string_output();
-        builder.add_node(node.into());
-        output
-    }
-
-    pub fn get_string_output(&self) -> SuperGraphLinkString {
-        self.text_output.clone()
-    }
-}
-
-impl SuperGraphNode for SuperGraphNodeStringInput {
-    fn get_inputs(&self) -> Vec<SuperGraphAnyLink> {
-        vec![]
-    }
-    fn get_outputs(&self) -> Vec<SuperGraphAnyLink> {
-        vec![self.text_output.to_any()]
-    }
-    fn to_any(self) -> SuperGraphAnyNode {
-        SuperGraphAnyNode::StringInput(self)
-    }
-    fn eval(&self, data: &mut SuperGraphData, _backend: &mut EvalBackend) -> Result<(), SuperGraphError> {
-        data.strings.insert(self.text_output.clone(), data.text_input.clone());
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct SuperGraphNodeStringOutput {
-    text_input: SuperGraphLinkString
-}
-
-impl SuperGraphNodeStringOutput {
-    pub fn new(text_input: SuperGraphLinkString) -> Self {
-        Self {
-            text_input
-        }
-    }
-
-    pub fn new_and_add(builder: &mut SuperGraphBuilder, text_input: SuperGraphLinkString) {
-        let node = Self::new(text_input);
-        builder.add_node(node.into());
-    }
-}
-
-impl SuperGraphNode for SuperGraphNodeStringOutput {
-    fn get_inputs(&self) -> Vec<SuperGraphAnyLink> {
-        vec![self.text_input.to_any()]
-    }
-    fn get_outputs(&self) -> Vec<SuperGraphAnyLink> {
-        vec![]
-    }
-    fn to_any(self) -> SuperGraphAnyNode {
-        SuperGraphAnyNode::StringOutput(self)
-    }
-    fn eval(&self, data: &mut SuperGraphData, _backend: &mut EvalBackend) -> Result<(), SuperGraphError> {
-        let string = data.strings.get(&self.text_input).unwrap();
-        data.text_output = Some(string.clone());
-        Ok(())
-    }
-}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SuperGraphNodeTokenizerDecode {
@@ -386,15 +276,205 @@ impl SuperGraphNode for SuperGraphNodeMilliOpGraph {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SuperGraphNodeScan {
+    inner_graph: SuperGraphInner,
+    iteration_count: SuperGraphLinkTensor,
+    simple_inputs: Vec<SuperGraphLinkDouble>,
+    state_links: Vec<SuperGraphLinkTriple>,
+    scan_inputs: Vec<(SuperGraphLinkTensor, SuperGraphLinkTensor, u32)>,
+    scan_outputs: Vec<(SuperGraphLinkTensor, SuperGraphLinkTensor, u32)>,
+    simple_outputs: Vec<SuperGraphLinkDouble>,
+}
+
+impl SuperGraphNodeScan {
+
+}
+
+impl SuperGraphNode for SuperGraphNodeScan {
+    fn get_inputs(&self) -> Vec<SuperGraphAnyLink> {
+        let mut inputs = Vec::new();
+        for link in &self.simple_inputs {
+            inputs.push(link.first());
+        }
+        for link in &self.state_links {
+            inputs.push(link.first());
+        }
+        for (input, _, _) in &self.scan_inputs {
+            inputs.push(input.to_any());
+        }
+        inputs
+    }
+
+    fn get_outputs(&self) -> Vec<SuperGraphAnyLink> {
+        let mut outputs = Vec::new();
+        for link in &self.simple_outputs {
+            outputs.push(link.second());
+        }
+        for (_, output, _) in &self.scan_outputs {
+            outputs.push(output.to_any());
+        }
+        outputs
+    }
+
+    fn to_any(self) -> SuperGraphAnyNode {
+        SuperGraphAnyNode::Scan(self)
+    }
+
+    fn eval(&self, data: &mut SuperGraphData, backend: &mut EvalBackend) -> Result<(), SuperGraphError> {
+        let iteration_count_tensor = data.tensors.get(&self.iteration_count).ok_or(SuperGraphError::MissingLinkError())?;
+        let iteration_count: i64 = iteration_count_tensor.first_element().into();
+
+        let simple_inputs = {
+            let mut simple_inputs = SuperGraphData::new();
+            for link in &self.simple_inputs {
+                match link {
+                    SuperGraphLinkDouble::Tensor(input, output) => {
+                        simple_inputs.tensors.insert(output.clone(), data.tensors.get(input).ok_or(SuperGraphError::MissingLinkError())?.clone());
+                    }
+                    SuperGraphLinkDouble::String(input, output) => {
+                        simple_inputs.strings.insert(output.clone(), data.strings.get(input).ok_or(SuperGraphError::MissingLinkError())?.clone());
+                    }
+                    SuperGraphLinkDouble::Model(input, output) => {
+                        simple_inputs.models.insert(output.clone(), data.models.get(input).ok_or(SuperGraphError::MissingLinkError())?.clone());
+                    }
+                    SuperGraphLinkDouble::Tokenizer(input, output) => {
+                        simple_inputs.tokenizers.insert(output.clone(), data.tokenizers.get(input).ok_or(SuperGraphError::MissingLinkError())?.clone());
+                    }
+                }
+            }
+            simple_inputs
+        };
+
+        let mut state_values = {
+            let mut state_values = SuperGraphData::new();
+            for link in &self.state_links {
+                match link {
+                    SuperGraphLinkTriple::Tensor(initial, inner_input, _inner_output) => {
+                        state_values.tensors.insert(inner_input.clone(), data.tensors.get(initial).ok_or(SuperGraphError::MissingLinkError())?.clone());
+                    }
+                    SuperGraphLinkTriple::String(initial, inner_input, _inner_output) => {
+                        state_values.strings.insert(inner_input.clone(), data.strings.get(initial).ok_or(SuperGraphError::MissingLinkError())?.clone());
+                    }
+                    SuperGraphLinkTriple::Model(initial, inner_input, _inner_output) => {
+                        state_values.models.insert(inner_input.clone(), data.models.get(initial).ok_or(SuperGraphError::MissingLinkError())?.clone());
+                    }
+                    SuperGraphLinkTriple::Tokenizer(initial, inner_input, _inner_output) => {
+                        state_values.tokenizers.insert(inner_input.clone(), data.tokenizers.get(initial).ok_or(SuperGraphError::MissingLinkError())?.clone());
+                    }
+                }
+            }
+            state_values
+        };
+
+        let mut prev_iter_outputs: Option<SuperGraphData> = None;
+
+        let mut output_scan_tensor_parts = HashMap::new();
+        for (outer, _inner, scan_axis) in &self.scan_outputs {
+            output_scan_tensor_parts.insert(outer.clone(), (Vec::new(), *scan_axis as usize));
+        }
+
+        for i in 0..iteration_count as u64 {
+            let iter_inputs = {
+                let mut iter_inputs = simple_inputs.clone();
+                iter_inputs.extend(&state_values);
+                for (outer, inner, scan_axis) in &self.scan_inputs {
+                    let tensor = data.tensors.get(&outer).ok_or(SuperGraphError::MissingLinkError())?;
+                    let slice_arg = {
+                        let mut slice_ranges = Vec::new();
+                        for j in 0..tensor.rank() {
+                            if j == *scan_axis as usize {
+                                slice_ranges.push(i..i+1);
+                            }
+                            else {
+                                slice_ranges.push(0..tensor.shape()[j]);
+                            }
+                        }
+                        slice_ranges
+                    };
+                    let sliced = tensor.slice(slice_arg.as_slice(), backend)?;
+                    let squeezed = sliced.squeeze(*scan_axis as usize)?;
+                    iter_inputs.tensors.insert(inner.clone(), squeezed);
+                }
+                iter_inputs
+            };
+            let iter_outputs = self.inner_graph.eval(iter_inputs, backend)?;
+
+
+            for (inner, outer, _scan_axis) in &self.scan_outputs {
+                let tensor = iter_outputs.tensors.get(inner).ok_or(SuperGraphError::MissingLinkError())?;
+                let (tensors, _) = output_scan_tensor_parts.get_mut(outer).ok_or(SuperGraphError::MissingLinkError())?;
+                tensors.push(tensor.clone());
+            }
+
+            state_values = {
+                let mut state_values = SuperGraphData::new();
+                for link in &self.state_links {
+                    match link {
+                        SuperGraphLinkTriple::Tensor(_initial, inner_input, inner_output) => {
+                            state_values.tensors.insert(inner_input.clone(), iter_outputs.tensors.get(inner_output).ok_or(SuperGraphError::MissingLinkError())?.clone());
+                        }
+                        SuperGraphLinkTriple::String(_initial, inner_input, inner_output) => {
+                            state_values.strings.insert(inner_input.clone(), iter_outputs.strings.get(inner_output).ok_or(SuperGraphError::MissingLinkError())?.clone());
+                        }
+                        SuperGraphLinkTriple::Tokenizer(_initial, inner_input, inner_output) => {
+                            state_values.tokenizers.insert(inner_input.clone(), iter_outputs.tokenizers.get(inner_output).ok_or(SuperGraphError::MissingLinkError())?.clone());
+                        }
+                        SuperGraphLinkTriple::Model(_initial, inner_input, inner_output) => {
+                            state_values.models.insert(inner_input.clone(), iter_outputs.models.get(inner_output).ok_or(SuperGraphError::MissingLinkError())?.clone());
+                        }
+                    }
+                }
+                state_values
+            };
+
+
+            prev_iter_outputs = Some(iter_outputs);
+        }
+
+        let mut output_data = SuperGraphData::new();
+
+        for link in &self.simple_outputs {
+            match link {
+                SuperGraphLinkDouble::Tensor(input, output) => {
+                    output_data.tensors
+                        .insert(output.clone(),
+                                prev_iter_outputs.as_ref().unwrap()
+                                    .tensors.get(input).ok_or(SuperGraphError::MissingLinkError())?.clone());
+                }
+                SuperGraphLinkDouble::String(input, output) => {
+                    output_data.strings
+                       .insert(output.clone(), prev_iter_outputs.as_ref().unwrap().strings.get(input).ok_or(SuperGraphError::MissingLinkError())?.clone());
+                }
+                SuperGraphLinkDouble::Tokenizer(input, output) => {
+                    output_data.tokenizers
+                       .insert(output.clone(), prev_iter_outputs.as_ref().unwrap().tokenizers.get(input).ok_or(SuperGraphError::MissingLinkError())?.clone());
+                }
+                SuperGraphLinkDouble::Model(input, output) => {
+                    output_data.models
+                       .insert(output.clone(), prev_iter_outputs.as_ref().unwrap().models.get(input).ok_or(SuperGraphError::MissingLinkError())?.clone());
+                }
+            }
+        };
+
+        for (link, (parts, axis)) in output_scan_tensor_parts {
+            let unsqueezed = parts.into_iter().map(|tensor| tensor.unsqueeze(axis)).collect::<Result<Vec<_>, _>>()?;
+            let unsqueezed_ref = unsqueezed.iter().collect::<Vec<_>>();
+            output_data.tensors.insert(link, NumericTensor::<DynRank>::concat(unsqueezed_ref.as_slice(), axis, backend)?);
+        }
+
+        data.extend(&output_data);
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SuperGraphAnyNode {
     ModelExecution(SuperGraphNodeModelExecution),
     TokenizerEncode(SuperGraphNodeTokenizerEncode),
     TokenizerDecode(SuperGraphNodeTokenizerDecode),
-    ModelLoad(SuperGraphNodeModelLoad),
     TokenizerLoad(SuperGraphNodeTokenizerLoad),
-    StringInput(SuperGraphNodeStringInput),
-    StringOutput(SuperGraphNodeStringOutput),
     MilliOpGraph(SuperGraphNodeMilliOpGraph),
+    Scan(SuperGraphNodeScan)
 }
 
 impl SuperGraphAnyNode {
@@ -403,11 +483,9 @@ impl SuperGraphAnyNode {
             SuperGraphAnyNode::ModelExecution(node) => node.get_outputs(),
             SuperGraphAnyNode::TokenizerEncode(node) => node.get_outputs(),
             SuperGraphAnyNode::TokenizerDecode(node) => node.get_outputs(),
-            SuperGraphAnyNode::ModelLoad(node) => node.get_outputs(),
             SuperGraphAnyNode::TokenizerLoad(node) => node.get_outputs(),
-            SuperGraphAnyNode::StringInput(node) => node.get_outputs(),
-            SuperGraphAnyNode::StringOutput(node) => node.get_outputs(),
-            SuperGraphAnyNode::MilliOpGraph(node) => node.get_outputs()
+            SuperGraphAnyNode::MilliOpGraph(node) => node.get_outputs(),
+            SuperGraphAnyNode::Scan(node) => node.get_outputs()
         }
     }
 
@@ -416,11 +494,9 @@ impl SuperGraphAnyNode {
             SuperGraphAnyNode::ModelExecution(node) => node.get_inputs(),
             SuperGraphAnyNode::TokenizerEncode(node) => node.get_inputs(),
             SuperGraphAnyNode::TokenizerDecode(node) => node.get_inputs(),
-            SuperGraphAnyNode::ModelLoad(node) => node.get_inputs(),
             SuperGraphAnyNode::TokenizerLoad(node) => node.get_inputs(),
-            SuperGraphAnyNode::StringInput(node) => node.get_inputs(),
-            SuperGraphAnyNode::StringOutput(node) => node.get_inputs(),
-            SuperGraphAnyNode::MilliOpGraph(node) => node.get_inputs()
+            SuperGraphAnyNode::MilliOpGraph(node) => node.get_inputs(),
+            SuperGraphAnyNode::Scan(node) => node.get_inputs()
         }
     }
 
@@ -429,11 +505,9 @@ impl SuperGraphAnyNode {
             SuperGraphAnyNode::ModelExecution(node) => node.eval(data, backend),
             SuperGraphAnyNode::TokenizerEncode(node) => node.eval(data, backend),
             SuperGraphAnyNode::TokenizerDecode(node) => node.eval(data, backend),
-            SuperGraphAnyNode::ModelLoad(node) => node.eval(data, backend),
             SuperGraphAnyNode::TokenizerLoad(node) => node.eval(data, backend),
-            SuperGraphAnyNode::StringInput(node) => node.eval(data, backend),
-            SuperGraphAnyNode::StringOutput(node) => node.eval(data, backend),
-            SuperGraphAnyNode::MilliOpGraph(node) => node.eval(data, backend)
+            SuperGraphAnyNode::MilliOpGraph(node) => node.eval(data, backend),
+            SuperGraphAnyNode::Scan(node) => node.eval(data, backend)
         }
     }
 }
