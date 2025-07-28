@@ -1,7 +1,6 @@
 pub mod links;
 pub mod nodes;
 pub mod data;
-mod interfaces;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;

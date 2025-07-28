@@ -577,3 +577,21 @@ impl From<NumericScalar> for i64 {
         Self::cast_from_numeric_scalar(&value)
     }
 }
+
+impl From<NumericScalar> for i32 {
+    fn from(value: NumericScalar) -> Self {
+        Self::cast_from_numeric_scalar(&value)
+    }
+}
+
+impl From<NumericScalar> for u64 {
+    fn from(value: NumericScalar) -> Self {
+        Self::cast_from_numeric_scalar(&value)
+    }
+}
+
+impl From<NumericScalar> for u32 {
+    fn from(value: NumericScalar) -> Self {
+        Self::cast_from_numeric_scalar(&value)
+    }
+}

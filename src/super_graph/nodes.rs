@@ -11,7 +11,7 @@ use crate::super_graph::links::{SuperGraphAnyLink, SuperGraphLink, SuperGraphLin
 use crate::super_graph::{SuperGraph, SuperGraphBuilder, SuperGraphData, SuperGraphError, SuperGraphInner};
 use crate::tokenizer::{AnyTokenizer, Tokenizer};
 
-trait SuperGraphNode {
+pub trait SuperGraphNode {
     fn get_inputs(&self) -> Vec<SuperGraphAnyLink>;
     fn get_outputs(&self) -> Vec<SuperGraphAnyLink>;
     fn to_any(self) -> SuperGraphAnyNode;

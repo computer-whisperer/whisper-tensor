@@ -1,6 +1,7 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 use prost::{DecodeError, Message};
-use whisper_tensor_import::onnx_graph::{InputMetadata, ModelMetadata, OutputMetadata};
+use whisper_tensor_import::onnx_graph::{InputMetadata, ModelInputType, ModelMetadata, OutputMetadata, TokenizerInfo};
 use crate::numeric_tensor::{NumericTensor, NumericTensorError};
 use crate::backends::{eval_backend};
 use crate::backends::eval_backend::{EvalBackend, EvalRuntimeError};
@@ -16,7 +17,9 @@ use crate::symbolic_graph::tensor_store::TensorStore;
 //#[cfg(feature = "ort")]
 //use crate::backends::ort_backend::ORTNumericTensor;
 use crate::DynRank;
+use crate::interfaces::{TextInferenceTokensInLogitOutInterface};
 use crate::scalar_info::ScalarInfoTyped;
+use crate::tokenizer::AnyTokenizer;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ModelError {
@@ -57,6 +60,7 @@ pub struct Model {
     model_metadata: Option<ModelMetadata>,
     pub model_inputs: HashMap<String, Option<InputMetadata>>,
     pub model_outputs: HashMap<String, Option<OutputMetadata>>,
+    pub text_inference_tokens_in_logits_out_interface: Option<TextInferenceTokensInLogitOutInterface>,
     // Runtimes
     #[cfg(feature = "onnx-reference")]
     onnx_reference_backend: Option<onnx_reference_backend::ONNXReferenceBackend>,
@@ -103,6 +107,19 @@ impl Model {
                 }
             }
         }
+
+        let text_inference_tokens_in_logits_out_interface = {
+            if let Some(meta) = model_metadata.as_ref() {
+                TextInferenceTokensInLogitOutInterface::try_from_onnx_metadata(
+                    meta,
+                    &model_inputs,
+                    &model_outputs
+                ).ok()
+            } else {
+                None
+            }
+        };
+
         let (symbolic_graph, tensor_store) = SymbolicGraphMutator::from_onnx_bytes(onnx_data)?.get_inner();
         Ok(Self {
             graph: symbolic_graph,
@@ -111,6 +128,7 @@ impl Model {
             model_metadata,
             model_inputs,
             model_outputs,
+            text_inference_tokens_in_logits_out_interface,
             #[cfg(feature = "onnx-reference")]
             onnx_reference_backend: None,
             #[cfg(feature = "ort")]
@@ -233,5 +251,4 @@ impl Model {
         }
         Ok(results)
     }
-
 }

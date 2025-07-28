@@ -91,7 +91,7 @@ pub struct OutputMetadata {
     pub model_output_type: ModelOutputType
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TokenizerInfo {
     HFTokenizer(String),
     RWKVWorld

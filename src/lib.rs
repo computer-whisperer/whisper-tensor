@@ -16,6 +16,7 @@ pub mod milli_graph;
 pub mod scalar_info;
 pub mod tensor_info;
 pub mod symbolic_scalar;
+pub mod interfaces;
 
 pub use tensor_rank::DynRank;
 

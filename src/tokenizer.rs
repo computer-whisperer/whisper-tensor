@@ -1,4 +1,5 @@
 use std::str::Utf8Error;
+use whisper_tensor_import::onnx_graph::TokenizerInfo;
 
 #[derive(Debug, thiserror::Error)]
 pub enum TokenizerError {
@@ -17,7 +18,35 @@ pub enum AnyTokenizer {
     Rwkv(rwkv_tokenizer::WorldTokenizer),
 }
 
+impl AnyTokenizer {
+    pub fn from_tokenizer_info(info: &TokenizerInfo) -> AnyTokenizer {
+        match &info {
+            TokenizerInfo::HFTokenizer(name) => {
+                #[cfg(all(feature = "tokenizers", feature = "http"))]
+                {
+                    AnyTokenizer::Tokenizers(tokenizers::Tokenizer::from_pretrained(name, None).unwrap())
+                }
+                #[cfg(not(all(feature = "tokenizers", feature = "http")))]
+                {
+                    panic!("Huggingface tokenizer not supported")
+                }
+            }
+            TokenizerInfo::RWKVWorld => {
+                #[cfg(feature = "rwkv-tokenizer")]
+                {
+                    AnyTokenizer::Rwkv(rwkv_tokenizer::WorldTokenizer::new(None).unwrap())
+                }
+                #[cfg(not(feature = "rwkv-tokenizer"))]
+                {
+                    panic!("RWKV tokenizer not supported")
+                }
+            }
+        }
+    }
+}
+
 impl Tokenizer for AnyTokenizer {
+
     fn encode(&self, text: &str) -> Vec<u32> {
         match self {
             #[cfg(feature = "tokenizers")]
