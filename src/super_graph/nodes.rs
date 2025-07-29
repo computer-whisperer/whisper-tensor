@@ -8,14 +8,14 @@ use crate::DynRank;
 use crate::milli_graph::MilliOpGraph;
 use crate::numeric_tensor::NumericTensor;
 use crate::super_graph::links::{SuperGraphAnyLink, SuperGraphLink, SuperGraphLinkDouble, SuperGraphLinkModel, SuperGraphLinkString, SuperGraphLinkTensor, SuperGraphLinkTokenizer, SuperGraphLinkTriple};
-use crate::super_graph::{SuperGraph, SuperGraphBuilder, SuperGraphData, SuperGraphError, SuperGraphInner};
+use crate::super_graph::{SuperGraphBuilder, SuperGraphData, SuperGraphError, SuperGraphInner};
 use crate::tokenizer::{AnyTokenizer, Tokenizer};
 
 pub trait SuperGraphNode {
     fn get_inputs(&self) -> Vec<SuperGraphAnyLink>;
     fn get_outputs(&self) -> Vec<SuperGraphAnyLink>;
     fn to_any(self) -> SuperGraphAnyNode;
-    fn eval(&self, data: &mut SuperGraphData, backend: &mut EvalBackend) -> Result<(), SuperGraphError>;
+    fn eval<'a>(&'a self, data: &mut SuperGraphData<'a>, backend: &mut EvalBackend) -> Result<(), SuperGraphError>;
 }
 
 impl <T: SuperGraphNode> From<T> for SuperGraphAnyNode {
@@ -320,7 +320,7 @@ impl SuperGraphNode for SuperGraphNodeScan {
         SuperGraphAnyNode::Scan(self)
     }
 
-    fn eval(&self, data: &mut SuperGraphData, backend: &mut EvalBackend) -> Result<(), SuperGraphError> {
+    fn eval<'a>(&'a self, data: &mut SuperGraphData<'a>, backend: &mut EvalBackend) -> Result<(), SuperGraphError> {
         let iteration_count_tensor = data.tensors.get(&self.iteration_count).ok_or(SuperGraphError::MissingLinkError())?;
         let iteration_count: i64 = iteration_count_tensor.first_element().into();
 
@@ -500,7 +500,7 @@ impl SuperGraphAnyNode {
         }
     }
 
-    pub(crate) fn eval(&self, data: &mut SuperGraphData, backend: &mut EvalBackend) -> Result<(), SuperGraphError> {
+    pub(crate) fn eval<'a>(&'a self, data: &mut SuperGraphData<'a>, backend: &mut EvalBackend) -> Result<(), SuperGraphError> {
         match self {
             SuperGraphAnyNode::ModelExecution(node) => node.eval(data, backend),
             SuperGraphAnyNode::TokenizerEncode(node) => node.eval(data, backend),

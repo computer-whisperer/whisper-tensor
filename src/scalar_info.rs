@@ -72,8 +72,7 @@ where
         matches!(self, ScalarInfoTyped::Symbolic(_))
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn as_numeric(&self) -> Option<&T> {
+    pub fn as_numeric(&self) -> Option<&T> {
         if let Self::Numeric(x) = self {
             Some(x)
         } else {

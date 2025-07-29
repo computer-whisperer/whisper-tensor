@@ -3,19 +3,17 @@ pub mod nodes;
 pub mod data;
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use crate::backends::eval_backend::EvalBackend;
-use crate::DynRank;
 use crate::milli_graph::MilliOpGraphError;
-use crate::model::{Model, ModelError};
-use crate::numeric_tensor::{NumericTensor, NumericTensorError};
+use crate::model::{ModelError};
+use crate::numeric_tensor::{NumericTensorError};
 use crate::numeric_tensor_typed::TypedNumericTensorError;
 use crate::super_graph::data::SuperGraphData;
-use crate::super_graph::links::{SuperGraphAnyLink, SuperGraphLinkId, SuperGraphLinkModel, SuperGraphLinkString, SuperGraphLinkTensor, SuperGraphLinkTokenizer};
+use crate::super_graph::links::{SuperGraphAnyLink, SuperGraphLinkId};
 use crate::super_graph::nodes::{SuperGraphAnyNode};
 use crate::tensor_rank::DimContainer;
-use crate::tokenizer::{AnyTokenizer, TokenizerError};
+use crate::tokenizer::{TokenizerError};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SuperGraphNodeId (pub(crate) u32);
@@ -42,7 +40,7 @@ pub struct SuperGraph {
 }
 
 impl SuperGraph {
-    pub fn run(&self, data: SuperGraphData, backend: &mut EvalBackend) -> Result<SuperGraphData, SuperGraphError> {
+    pub fn run<'a>(&'a self, data: SuperGraphData<'a>, backend: &mut EvalBackend) -> Result<SuperGraphData, SuperGraphError> {
         self.inner.eval(data, backend)
     }
 }
@@ -56,7 +54,7 @@ pub struct SuperGraphInner {
 }
 
 impl SuperGraphInner {
-    pub fn eval(&self, data: SuperGraphData, backend: &mut EvalBackend) -> Result<SuperGraphData, SuperGraphError> {
+    pub fn eval<'a>(&'a self, data: SuperGraphData<'a>, backend: &mut EvalBackend) -> Result<SuperGraphData, SuperGraphError> {
         let mut data = data;
 
         let mut remaining_ops = self.nodes.keys().map(|x| x.clone()).collect::<Vec<_>>();

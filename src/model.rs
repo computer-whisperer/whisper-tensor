@@ -108,19 +108,22 @@ impl Model {
             }
         }
 
+        let (symbolic_graph, tensor_store) = SymbolicGraphMutator::from_onnx_bytes(onnx_data)?.get_inner();
+
         let text_inference_tokens_in_logits_out_interface = {
             if let Some(meta) = model_metadata.as_ref() {
                 TextInferenceTokensInLogitOutInterface::try_from_onnx_metadata(
                     meta,
                     &model_inputs,
-                    &model_outputs
+                    &model_outputs,
+                    &symbolic_graph
                 ).ok()
             } else {
                 None
             }
         };
 
-        let (symbolic_graph, tensor_store) = SymbolicGraphMutator::from_onnx_bytes(onnx_data)?.get_inner();
+
         Ok(Self {
             graph: symbolic_graph,
             tensor_store,

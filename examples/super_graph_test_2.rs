@@ -21,7 +21,7 @@ fn main() {
     let input_path = Path::new("gpt2-lm-head-10.onnx");
     let onnx_data = identify_and_load(input_path, WeightStorageStrategy::EmbeddedData, Some(ModelTypeHint::GPT2)).unwrap();
 
-    let model = Arc::new(Model::new_from_onnx(&onnx_data).unwrap());
+    let model = Model::new_from_onnx(&onnx_data).unwrap();
 
     let bla = model.text_inference_tokens_in_logits_out_interface.clone().unwrap();
 
@@ -30,7 +30,7 @@ fn main() {
     print!("{:}", prompt);
     let mut context = prompt.clone();
     for _ in 0..10 {
-        let res = bla.run_string_in_string_out(model.clone(), context.clone(), &mut tokenizer_cache, &mut EvalBackend::NDArray).unwrap();
+        let res = model.text_inference_tokens_in_logits_out_interface.as_ref().unwrap().run_string_in_string_out(&model, context.clone(), &mut tokenizer_cache, &mut EvalBackend::NDArray).unwrap();
         print!("{:}", res);
         context.push_str(&res);
     }

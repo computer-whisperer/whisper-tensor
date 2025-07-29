@@ -8,14 +8,14 @@ use crate::super_graph::SuperGraphError;
 use crate::tokenizer::AnyTokenizer;
 
 #[derive(Clone)]
-pub struct SuperGraphData {
+pub struct SuperGraphData<'models> {
     pub tensors: HashMap<SuperGraphLinkTensor, NumericTensor<DynRank>>,
     pub strings: HashMap<SuperGraphLinkString, String>,
     pub tokenizers: HashMap<SuperGraphLinkTokenizer, AnyTokenizer>,
-    pub models: HashMap<SuperGraphLinkModel, Arc<Model>>,
+    pub models: HashMap<SuperGraphLinkModel, &'models Model>,
 }
 
-impl SuperGraphData {
+impl<'models> SuperGraphData<'models> {
     pub fn new() -> Self {
         Self {
             tensors: HashMap::new(),
