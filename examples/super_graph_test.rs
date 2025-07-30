@@ -20,7 +20,7 @@ fn main() {
     let input_path = Path::new("gpt2-lm-head-10.onnx");
     let onnx_data = identify_and_load(input_path, WeightStorageStrategy::EmbeddedData, Some(ModelTypeHint::GPT2)).unwrap();
 
-    let model = Arc::new(Model::new_from_onnx(&onnx_data).unwrap());
+    let model = Model::new_from_onnx(&onnx_data).unwrap();
 
     let mut builder = SuperGraphBuilder::new();
 
@@ -97,7 +97,7 @@ fn main() {
     let super_graph = builder.build(inputs.as_slice(), outputs.as_slice());
 
     let mut super_graph_data = SuperGraphData::new();
-    super_graph_data.models.insert(model_link, model);
+    super_graph_data.models.insert(model_link, &model);
     super_graph_data.strings.insert(text_input_link, "The fibonacci sequence is: 1, 1, 2, 3, 5, 8, 13,".to_string());
     let res = super_graph.run(super_graph_data, &mut EvalBackend::NDArray).unwrap();
     let res = res.strings.get(&text_output).unwrap();
