@@ -17,7 +17,7 @@ use whisper_tensor_import::{identify_and_load, ModelTypeHint};
 fn main() {
     tracing_subscriber::fmt::init();
 
-    let input_path = Path::new("/mnt/secondary/rwkv7-g1/rwkv7-g1-0.1b-20250307-ctx4096.pth");
+    let input_path = Path::new("/mnt/secondary/rwkv-7-world/RWKV-x070-World-0.1B-v2.8-20241210-ctx4096.pth");
     //let input_path = Path::new("/ceph-fuse/public/neural_models/llms/rwkv7-g1/rwkv7-g1-0.1b-20250307-ctx4096.pth");
     let onnx_out = Path::new("out.onnx");
     let _bin_out = Path::new("out.bin");
@@ -29,7 +29,7 @@ fn main() {
 
     let tokenizer = llm.get_tokenizer().unwrap();
 
-    let prompt = "The fibonacci sequence is a sequence of";
+    let prompt = "Mary had a little lamb";
     let input = tokenizer.encode(prompt).iter().map(|x| *x as i64).collect::<Vec<_>>();
     let input_tensor = NumericTensor::from_vec(input).to_dyn_rank().unsqueeze(0).unwrap();
 

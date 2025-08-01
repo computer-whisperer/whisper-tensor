@@ -1,19 +1,11 @@
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::Path;
-use std::sync::Arc;
 use whisper_tensor::backends::eval_backend::EvalBackend;
-use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
+use whisper_tensor::backends::vulkan_backend::{VulkanContext, VulkanImmediateExecutor};
 use whisper_tensor::model::{Model};
-use whisper_tensor::dtype::DType;
-use whisper_tensor::milli_graph::{MilliOpGraph};
-use whisper_tensor::milli_graph::ops::{AnyMilliOp, MilliOpArgMax, MilliOpCast, MilliOpConstant, MilliOpShape, MilliOpSimpleBinary, MilliOpSlice, MilliOpSqueeze, MilliOpUnsqueeze};
-use whisper_tensor::model::ModelExecutionRuntime::Eval;
-use whisper_tensor::super_graph::links::{SuperGraphLink, SuperGraphLinkModel, SuperGraphLinkString, SuperGraphLinkTensor};
-use whisper_tensor::super_graph::nodes::{SuperGraphNodeMilliOpGraph, SuperGraphNodeModelExecution, SuperGraphNodeTokenizerDecode, SuperGraphNodeTokenizerEncode, SuperGraphNodeTokenizerLoad};
-use whisper_tensor::super_graph::SuperGraphBuilder;
-use whisper_tensor::super_graph::data::SuperGraphData;
 use whisper_tensor_import::{identify_and_load, ModelTypeHint};
-use whisper_tensor_import::onnx_graph::{TokenizerInfo, WeightStorageStrategy};
+use whisper_tensor_import::onnx_graph::{WeightStorageStrategy};
 
 fn main() {
     tracing_subscriber::fmt::init();
@@ -23,15 +15,21 @@ fn main() {
 
     let model = Model::new_from_onnx(&onnx_data).unwrap();
 
-    let bla = model.text_inference_tokens_in_logits_out_interface.clone().unwrap();
-
     let prompt = "The fibonacci sequence is: 1, 1, 2, 3, 5, 8, 13,".to_string();
     let mut tokenizer_cache = HashMap::new();
     print!("{:}", prompt);
+    std::io::stdout().flush().unwrap();
     let mut context = prompt.clone();
+
+    let vulkan_context = VulkanContext::new().unwrap();
+    let vulkan_runtime = VulkanImmediateExecutor::new(vulkan_context).unwrap();
+
+    let mut eval_backend = EvalBackend::Vulkan(vulkan_runtime);
+
     for _ in 0..10 {
-        let res = model.text_inference_tokens_in_logits_out_interface.as_ref().unwrap().run_string_in_string_out(&model, context.clone(), &mut tokenizer_cache, &mut EvalBackend::NDArray).unwrap();
+        let res = model.text_inference_tokens_in_logits_out_interface.as_ref().unwrap().run_string_in_string_out(&model, context.clone(), &mut tokenizer_cache, &mut eval_backend).unwrap();
         print!("{:}", res);
+        std::io::stdout().flush().unwrap();
         context.push_str(&res);
     }
 }

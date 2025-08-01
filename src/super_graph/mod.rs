@@ -10,9 +10,8 @@ use crate::model::{ModelError};
 use crate::numeric_tensor::{NumericTensorError};
 use crate::numeric_tensor_typed::TypedNumericTensorError;
 use crate::super_graph::data::SuperGraphData;
-use crate::super_graph::links::{SuperGraphAnyLink, SuperGraphLinkId};
+use crate::super_graph::links::{SuperGraphAnyLink, SuperGraphLinkId, SuperGraphLinkModel, SuperGraphLinkTensor};
 use crate::super_graph::nodes::{SuperGraphAnyNode};
-use crate::tensor_rank::DimContainer;
 use crate::tokenizer::{TokenizerError};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -40,7 +39,7 @@ pub struct SuperGraph {
 }
 
 impl SuperGraph {
-    pub fn run<'a>(&'a self, data: SuperGraphData<'a>, backend: &mut EvalBackend) -> Result<SuperGraphData, SuperGraphError> {
+    pub fn run<'a>(&'a self, data: SuperGraphData<'a>, backend: &mut EvalBackend) -> Result<SuperGraphData<'a>, SuperGraphError> {
         self.inner.eval(data, backend)
     }
 }
@@ -50,11 +49,10 @@ pub struct SuperGraphInner {
     input_links: HashSet<SuperGraphAnyLink>,
     output_links: HashSet<SuperGraphAnyLink>,
     nodes: HashMap<SuperGraphNodeId, SuperGraphAnyNode>,
-    links: HashSet<SuperGraphAnyLink>
 }
 
 impl SuperGraphInner {
-    pub fn eval<'a>(&'a self, data: SuperGraphData<'a>, backend: &mut EvalBackend) -> Result<SuperGraphData, SuperGraphError> {
+    pub fn eval<'a>(&'a self, data: SuperGraphData<'a>, backend: &mut EvalBackend) -> Result<SuperGraphData<'a>, SuperGraphError> {
         let mut data = data;
 
         let mut remaining_ops = self.nodes.keys().map(|x| x.clone()).collect::<Vec<_>>();
@@ -70,21 +68,25 @@ impl SuperGraphInner {
                             SuperGraphAnyLink::Tensor(x) => {
                                 if !data.tensors.contains_key(x) {
                                     all_inputs_ready = false;
+                                    break;
                                 }
                             }
                             SuperGraphAnyLink::String(x) => {
                                 if !data.strings.contains_key(x) {
                                     all_inputs_ready = false;
+                                    break;
                                 }
                             }
                             SuperGraphAnyLink::Model(x) => {
                                 if !data.models.contains_key(x) {
                                     all_inputs_ready = false;
+                                    break;
                                 }
                             }
                             SuperGraphAnyLink::Tokenizer(x) => {
                                 if !data.tokenizers.contains_key(x) {
                                     all_inputs_ready = false;
+                                    break;
                                 }
                             }
                         }
@@ -116,7 +118,6 @@ pub struct SuperGraphBuilder {
     next_node_id: u32,
     next_link_id: u32,
     nodes: HashMap<SuperGraphNodeId, SuperGraphAnyNode>,
-    links: HashSet<SuperGraphAnyLink>
 }
 
 impl SuperGraphBuilder {
@@ -124,8 +125,7 @@ impl SuperGraphBuilder {
         Self {
             next_node_id: 0,
             next_link_id: 0,
-            nodes: HashMap::new(),
-            links: HashSet::new()
+            nodes: HashMap::new()
         }
     }
 
@@ -151,10 +151,25 @@ impl SuperGraphBuilder {
         SuperGraph {
             inner: SuperGraphInner {
                 nodes: self.nodes,
-                links: self.links,
                 input_links: HashSet::from_iter(input_links.iter().map(|x| x.clone())),
                 output_links: HashSet::from_iter(output_links.iter().map(|x| x.clone())),
             }
         }
+    }
+
+    pub fn build_inner(self, input_links: &[SuperGraphAnyLink], output_links: &[SuperGraphAnyLink]) -> SuperGraphInner {
+        SuperGraphInner {
+            nodes: self.nodes,
+            input_links: HashSet::from_iter(input_links.iter().map(|x| x.clone())),
+            output_links: HashSet::from_iter(output_links.iter().map(|x| x.clone())),
+        }
+    }
+
+    pub fn new_tensor_link(&mut self) -> SuperGraphLinkTensor {
+        SuperGraphLinkTensor::new(self.get_next_link_id())
+    }
+
+    pub fn new_model_link(&mut self) -> SuperGraphLinkModel {
+        SuperGraphLinkModel::new(self.get_next_link_id())
     }
 }

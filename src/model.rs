@@ -1,7 +1,7 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+
 use prost::{DecodeError, Message};
-use whisper_tensor_import::onnx_graph::{InputMetadata, ModelInputType, ModelMetadata, OutputMetadata, TokenizerInfo};
+use whisper_tensor_import::onnx_graph::{InputMetadata, ModelMetadata, OutputMetadata};
 use crate::numeric_tensor::{NumericTensor, NumericTensorError};
 use crate::backends::{eval_backend};
 use crate::backends::eval_backend::{EvalBackend, EvalRuntimeError};
@@ -19,7 +19,6 @@ use crate::symbolic_graph::tensor_store::TensorStore;
 use crate::DynRank;
 use crate::interfaces::{TextInferenceTokensInLogitOutInterface};
 use crate::scalar_info::ScalarInfoTyped;
-use crate::tokenizer::AnyTokenizer;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ModelError {

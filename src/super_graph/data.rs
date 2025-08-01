@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 use crate::DynRank;
 use crate::model::Model;
 use crate::numeric_tensor::NumericTensor;
@@ -45,8 +44,8 @@ impl<'models> SuperGraphData<'models> {
                         .ok_or(SuperGraphError::MissingLinkError())?.clone());
                 }
                 SuperGraphAnyLink::Model(m) => {
-                    models.insert(m.clone(), self.models.get(m)
-                        .ok_or(SuperGraphError::MissingLinkError())?.clone());
+                    models.insert(m.clone(), *self.models.get(m)
+                        .ok_or(SuperGraphError::MissingLinkError())?);
                 }
             }
         }
@@ -77,7 +76,7 @@ impl<'models> SuperGraphData<'models> {
                 }
                 SuperGraphLinkDouble::Model(input, output) => {
                     new_data.models.insert(output, self.models.get(&input)
-                        .ok_or(SuperGraphError::MissingLinkError())?.clone());
+                        .ok_or(SuperGraphError::MissingLinkError())?);
                 }
             }
         }
@@ -89,6 +88,6 @@ impl<'models> SuperGraphData<'models> {
         self.tensors.extend(other.tensors.iter().map(|(a, b)| (a.clone(), b.clone())));
         self.strings.extend(other.strings.iter().map(|(a, b)| (a.clone(), b.clone())));
         self.tokenizers.extend(other.tokenizers.iter().map(|(a, b)| (a.clone(), b.clone())));
-        self.models.extend(other.models.iter().map(|(a, b)| (a.clone(), b.clone())));
+        self.models.extend(other.models.iter().map(|(a, b)| (a.clone(), *b)));
     }
 }

@@ -287,12 +287,31 @@ pub struct SuperGraphNodeScan {
 }
 
 impl SuperGraphNodeScan {
-
+    pub fn new(
+        inner_graph: SuperGraphInner,
+        iteration_count: SuperGraphLinkTensor,
+        simple_inputs: Vec<SuperGraphLinkDouble>,
+        state_links: Vec<SuperGraphLinkTriple>,
+        scan_inputs: Vec<(SuperGraphLinkTensor, SuperGraphLinkTensor, u32)>,
+        scan_outputs: Vec<(SuperGraphLinkTensor, SuperGraphLinkTensor, u32)>,
+        simple_outputs: Vec<SuperGraphLinkDouble>,
+    ) -> Self {
+        Self {
+            inner_graph,
+            iteration_count,
+            simple_inputs,
+            state_links,
+            scan_inputs,
+            scan_outputs,
+            simple_outputs,
+        }
+    }
 }
 
 impl SuperGraphNode for SuperGraphNodeScan {
     fn get_inputs(&self) -> Vec<SuperGraphAnyLink> {
         let mut inputs = Vec::new();
+        inputs.push(self.iteration_count.to_any());
         for link in &self.simple_inputs {
             inputs.push(link.first());
         }
@@ -335,7 +354,7 @@ impl SuperGraphNode for SuperGraphNodeScan {
                         simple_inputs.strings.insert(output.clone(), data.strings.get(input).ok_or(SuperGraphError::MissingLinkError())?.clone());
                     }
                     SuperGraphLinkDouble::Model(input, output) => {
-                        simple_inputs.models.insert(output.clone(), data.models.get(input).ok_or(SuperGraphError::MissingLinkError())?.clone());
+                        simple_inputs.models.insert(output.clone(), *data.models.get(input).ok_or(SuperGraphError::MissingLinkError())?);
                     }
                     SuperGraphLinkDouble::Tokenizer(input, output) => {
                         simple_inputs.tokenizers.insert(output.clone(), data.tokenizers.get(input).ok_or(SuperGraphError::MissingLinkError())?.clone());
@@ -356,7 +375,7 @@ impl SuperGraphNode for SuperGraphNodeScan {
                         state_values.strings.insert(inner_input.clone(), data.strings.get(initial).ok_or(SuperGraphError::MissingLinkError())?.clone());
                     }
                     SuperGraphLinkTriple::Model(initial, inner_input, _inner_output) => {
-                        state_values.models.insert(inner_input.clone(), data.models.get(initial).ok_or(SuperGraphError::MissingLinkError())?.clone());
+                        state_values.models.insert(inner_input.clone(), *data.models.get(initial).ok_or(SuperGraphError::MissingLinkError())?);
                     }
                     SuperGraphLinkTriple::Tokenizer(initial, inner_input, _inner_output) => {
                         state_values.tokenizers.insert(inner_input.clone(), data.tokenizers.get(initial).ok_or(SuperGraphError::MissingLinkError())?.clone());
@@ -369,7 +388,7 @@ impl SuperGraphNode for SuperGraphNodeScan {
         let mut prev_iter_outputs: Option<SuperGraphData> = None;
 
         let mut output_scan_tensor_parts = HashMap::new();
-        for (outer, _inner, scan_axis) in &self.scan_outputs {
+        for (_inner, outer, scan_axis) in &self.scan_outputs {
             output_scan_tensor_parts.insert(outer.clone(), (Vec::new(), *scan_axis as usize));
         }
 
@@ -420,7 +439,7 @@ impl SuperGraphNode for SuperGraphNodeScan {
                             state_values.tokenizers.insert(inner_input.clone(), iter_outputs.tokenizers.get(inner_output).ok_or(SuperGraphError::MissingLinkError())?.clone());
                         }
                         SuperGraphLinkTriple::Model(_initial, inner_input, inner_output) => {
-                            state_values.models.insert(inner_input.clone(), iter_outputs.models.get(inner_output).ok_or(SuperGraphError::MissingLinkError())?.clone());
+                            state_values.models.insert(inner_input.clone(), *iter_outputs.models.get(inner_output).ok_or(SuperGraphError::MissingLinkError())?);
                         }
                     }
                 }
@@ -451,7 +470,7 @@ impl SuperGraphNode for SuperGraphNodeScan {
                 }
                 SuperGraphLinkDouble::Model(input, output) => {
                     output_data.models
-                       .insert(output.clone(), prev_iter_outputs.as_ref().unwrap().models.get(input).ok_or(SuperGraphError::MissingLinkError())?.clone());
+                       .insert(output.clone(), *prev_iter_outputs.as_ref().unwrap().models.get(input).ok_or(SuperGraphError::MissingLinkError())?);
                 }
             }
         };
