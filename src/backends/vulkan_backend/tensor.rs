@@ -1,12 +1,10 @@
-use std::sync::Arc;
-use vulkano::buffer::Subbuffer;
-use vulkano::memory::allocator::Suballocation;
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::backends::vulkan_backend::{VulkanError, VulkanImmediateExecutor};
 use crate::dtype::DType;
 use crate::tensor_rank::{DimContainer, DimProduct, Rank};
-
-
+use std::sync::Arc;
+use vulkano::buffer::Subbuffer;
+use vulkano::memory::allocator::Suballocation;
 
 #[derive(Debug, Clone)]
 pub struct VulkanTensor<R: Rank> {
@@ -15,11 +13,10 @@ pub struct VulkanTensor<R: Rank> {
     pub(crate) stride: R::KnownDims,
     pub(crate) suballocation: Arc<Suballocation>,
     pub(crate) offset: usize,
-    pub(crate) buffer: Subbuffer<[u8]>
+    pub(crate) buffer: Subbuffer<[u8]>,
 }
 
 impl<R: Rank> VulkanTensor<R> {
-
     pub fn get_standard_stride(shape: &R::KnownDims) -> R::KnownDims {
         let mut stride = vec![];
         let mut v = 1;
@@ -31,8 +28,13 @@ impl<R: Rank> VulkanTensor<R> {
         R::KnownDims::try_from_slice(stride.as_slice()).unwrap()
     }
 
-    pub unsafe fn new_uninitialized(shape: R::KnownDims, dtype: DType, executor: &mut VulkanImmediateExecutor) -> Result<Self, VulkanError> {
-        let needed_space = shape.as_slice().iter().product::<u64>() as usize*dtype.size().unwrap();
+    pub unsafe fn new_uninitialized(
+        shape: R::KnownDims,
+        dtype: DType,
+        executor: &mut VulkanImmediateExecutor,
+    ) -> Result<Self, VulkanError> {
+        let needed_space =
+            shape.as_slice().iter().product::<u64>() as usize * dtype.size().unwrap();
         let (buffer, suballocation) = executor.alloc_space(needed_space);
 
         let stride = Self::get_standard_stride(&shape);
@@ -43,14 +45,16 @@ impl<R: Rank> VulkanTensor<R> {
             suballocation: Arc::new(suballocation),
             offset: 0,
             buffer,
-            stride
+            stride,
         })
     }
-    
-    pub fn from_ndarray(source: NDArrayNumericTensor<R>, executor: &mut VulkanImmediateExecutor) -> Result<Self, VulkanError> {
 
-        let tensor = unsafe {Self::new_uninitialized(source.shape(), source.dtype(), executor)?};
-        
+    pub fn from_ndarray(
+        source: NDArrayNumericTensor<R>,
+        executor: &mut VulkanImmediateExecutor,
+    ) -> Result<Self, VulkanError> {
+        let tensor = unsafe { Self::new_uninitialized(source.shape(), source.dtype(), executor)? };
+
         {
             let mut writer = tensor.buffer.write().unwrap();
             for i in 0..tensor.shape.dim_product() {
@@ -64,8 +68,15 @@ impl<R: Rank> VulkanTensor<R> {
                 let value = source.get(&index).unwrap().to_bytes();
                 // Calculate destination
                 let outer_offset = tensor.suballocation.offset as usize;
-                let inner_offset = index.as_slice().iter().zip(tensor.stride.as_slice().iter()).map(|(a, b)| a*b).sum::<u64>() as usize * tensor.dtype.size().unwrap();
-                writer[outer_offset+inner_offset..outer_offset+inner_offset+value.len()].copy_from_slice(&value);
+                let inner_offset = index
+                    .as_slice()
+                    .iter()
+                    .zip(tensor.stride.as_slice().iter())
+                    .map(|(a, b)| a * b)
+                    .sum::<u64>() as usize
+                    * tensor.dtype.size().unwrap();
+                writer[outer_offset + inner_offset..outer_offset + inner_offset + value.len()]
+                    .copy_from_slice(&value);
             }
         }
         Ok(tensor)
@@ -74,11 +85,23 @@ impl<R: Rank> VulkanTensor<R> {
     pub fn to_ndarray(&self) -> NDArrayNumericTensor<R> {
         {
             let reader = self.buffer.read().unwrap();
-            let bytes_to_read = (self.shape.as_slice().iter().zip(self.stride.as_slice().iter()).map(|(a, b)| (a-1)*b).sum::<u64>() + 1) as usize*self.dtype.size().unwrap();
+            let bytes_to_read = (self
+                .shape
+                .as_slice()
+                .iter()
+                .zip(self.stride.as_slice().iter())
+                .map(|(a, b)| (a - 1) * b)
+                .sum::<u64>()
+                + 1) as usize
+                * self.dtype.size().unwrap();
             let start_offset = self.suballocation.offset as usize + self.offset;
             NDArrayNumericTensor::from_bytes(
-                &reader[start_offset ..start_offset + bytes_to_read],
-                self.dtype, &self.shape, &self.stride).unwrap()
+                &reader[start_offset..start_offset + bytes_to_read],
+                self.dtype,
+                &self.shape,
+                &self.stride,
+            )
+            .unwrap()
         }
     }
 
@@ -94,9 +117,7 @@ impl<R: Rank> VulkanTensor<R> {
         self.shape.len()
     }
 
-    pub fn broadcast<R2: Rank>(&self, dim: &R2::KnownDims) -> Option<VulkanTensor<R2>>
-    {
-        
+    pub fn broadcast<R2: Rank>(&self, dim: &R2::KnownDims) -> Option<VulkanTensor<R2>> {
         let mut new_stride = dim.as_slice().to_vec();
         // begin at the back (the least significant dimension)
         // size of the axis has to either agree or `from` has to be 1
@@ -106,7 +127,8 @@ impl<R: Rank> VulkanTensor<R> {
 
         {
             let mut new_stride_iter = new_stride.iter_mut().rev();
-            for ((er, es), dr) in self.shape()
+            for ((er, es), dr) in self
+                .shape()
                 .as_slice()
                 .iter()
                 .rev()
@@ -130,10 +152,10 @@ impl<R: Rank> VulkanTensor<R> {
                 *dr = 0;
             }
         }
-        
+
         let new_stride = R2::KnownDims::try_from_slice(&new_stride).unwrap();
-        
-        Some(VulkanTensor{
+
+        Some(VulkanTensor {
             shape: dim.clone(),
             stride: new_stride,
             suballocation: self.suballocation.clone(),
@@ -142,10 +164,10 @@ impl<R: Rank> VulkanTensor<R> {
             buffer: self.buffer.clone(),
         })
     }
-    
+
     pub fn is_contiguous(&self) -> bool {
         let mut v = 1;
-        for i in self.rank()-1..=0 {
+        for i in self.rank() - 1..=0 {
             if self.stride[i] != v {
                 return false;
             }

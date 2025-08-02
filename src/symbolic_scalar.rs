@@ -1,7 +1,7 @@
-use std::marker::PhantomData;
+use crate::dtype::DType;
+use crate::numeric_scalar::NumericScalarType;
 use serde::{Deserialize, Serialize};
-use crate::dtype::{DType};
-use crate::numeric_scalar::{NumericScalarType};
+use std::marker::PhantomData;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SymbolicScalarTyped<T>
@@ -13,37 +13,38 @@ where
     symbol_idx: usize,
 }
 
-impl<T> SymbolicScalarTyped<T> where
-    T: Clone + Copy + NumericScalarType
+impl<T> SymbolicScalarTyped<T>
+where
+    T: Clone + Copy + NumericScalarType,
 {
     pub(crate) fn new(resolver: &mut SymbolicResolver) -> Self {
         Self {
             _phantom_type: PhantomData,
             offset: 0,
-            symbol_idx: resolver.new_id()
+            symbol_idx: resolver.new_id(),
         }
     }
 
     pub fn dtype() -> DType {
         T::DTYPE
     }
-    
+
     pub(crate) fn to_dyn_type(&self) -> SymbolicScalar {
         SymbolicScalar {
             offset: self.offset,
             dtype: T::DTYPE,
-            symbol_idx: self.symbol_idx
+            symbol_idx: self.symbol_idx,
         }
     }
-    
+
     pub(crate) fn cast<T2>(&self) -> SymbolicScalarTyped<T2>
     where
         T2: Clone + Copy + NumericScalarType,
     {
-        SymbolicScalarTyped{
+        SymbolicScalarTyped {
             _phantom_type: PhantomData::<T2>,
             offset: self.offset,
-            symbol_idx: self.symbol_idx
+            symbol_idx: self.symbol_idx,
         }
     }
 
@@ -59,10 +60,9 @@ impl<T> SymbolicScalarTyped<T> where
         Self {
             offset: self.offset + offset,
             symbol_idx: self.symbol_idx,
-            _phantom_type: PhantomData
+            _phantom_type: PhantomData,
         }
     }
-    
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -77,10 +77,10 @@ impl SymbolicScalar {
         SymbolicScalar {
             offset: 0,
             dtype,
-            symbol_idx: resolver.new_id()
+            symbol_idx: resolver.new_id(),
         }
     }
-    
+
     pub(crate) fn dtype(&self) -> DType {
         self.dtype
     }
@@ -88,31 +88,33 @@ impl SymbolicScalar {
     pub fn try_eq(&self, other: &Self) -> Option<bool> {
         if self.symbol_idx == other.symbol_idx {
             Some(self.offset == other.offset)
-        } else { 
+        } else {
             None
         }
     }
-    
-    pub(crate) fn cast<T>(&self) -> SymbolicScalarTyped<T> 
+
+    pub(crate) fn cast<T>(&self) -> SymbolicScalarTyped<T>
     where
-       T: Copy + Clone + NumericScalarType
+        T: Copy + Clone + NumericScalarType,
     {
-        SymbolicScalarTyped{
+        SymbolicScalarTyped {
             _phantom_type: PhantomData,
             offset: self.offset,
-            symbol_idx: self.symbol_idx
+            symbol_idx: self.symbol_idx,
         }
     }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SymbolicResolver {
-    next_symbolic_id: usize
+    next_symbolic_id: usize,
 }
 
 impl SymbolicResolver {
     pub fn new() -> Self {
-        SymbolicResolver { next_symbolic_id: 0 }
+        SymbolicResolver {
+            next_symbolic_id: 0,
+        }
     }
     pub(crate) fn update_last_assigned(&mut self, scalar: SymbolicScalar) {
         if scalar.symbol_idx >= self.next_symbolic_id {

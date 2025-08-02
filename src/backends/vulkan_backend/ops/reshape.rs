@@ -1,10 +1,14 @@
-use std::ops::Range;
-use crate::tensor_rank::{DimContainer, DimProduct, Rank};
 use crate::backends::vulkan_backend::tensor::VulkanTensor;
 use crate::backends::vulkan_backend::{VulkanError, VulkanImmediateExecutor};
+use crate::tensor_rank::{DimContainer, DimProduct, Rank};
+use std::ops::Range;
 
 impl<R: Rank> VulkanTensor<R> {
-    pub fn reshape(&self, new_shape: R::KnownDims, vulkan_immediate_executor: &mut VulkanImmediateExecutor) -> Result<Self, VulkanError> {
+    pub fn reshape(
+        &self,
+        new_shape: R::KnownDims,
+        vulkan_immediate_executor: &mut VulkanImmediateExecutor,
+    ) -> Result<Self, VulkanError> {
         if new_shape.dim_product() != self.shape().dim_product() {
             return Err(VulkanError::InvalidShape);
         }
@@ -15,7 +19,7 @@ impl<R: Rank> VulkanTensor<R> {
             offset,
             ..
         } = self.to_contiguous(vulkan_immediate_executor)?;
-        
+
         let new_stride = {
             let mut stride = vec![];
             let mut v = 1;
@@ -26,14 +30,14 @@ impl<R: Rank> VulkanTensor<R> {
             stride.reverse();
             R::KnownDims::try_from_slice(stride.as_slice()).unwrap()
         };
-        
+
         Ok(VulkanTensor {
             shape: new_shape,
             stride: new_stride,
             dtype,
             suballocation,
             buffer,
-            offset
+            offset,
         })
     }
 
@@ -48,13 +52,13 @@ impl<R: Rank> VulkanTensor<R> {
             v.insert(axis, 1);
             R2::KnownDims::try_from_slice(v.as_slice()).unwrap()
         };
-        Ok(VulkanTensor::<R2>{
+        Ok(VulkanTensor::<R2> {
             shape: new_shape,
             stride: new_strides,
             dtype: self.dtype,
             suballocation: self.suballocation.clone(),
             buffer: self.buffer.clone(),
-            offset: self.offset
+            offset: self.offset,
         })
     }
 
@@ -70,16 +74,15 @@ impl<R: Rank> VulkanTensor<R> {
                 v.remove(axis);
                 R2::KnownDims::try_from_slice(v.as_slice()).unwrap()
             };
-            Ok(VulkanTensor::<R2>{
+            Ok(VulkanTensor::<R2> {
                 shape: new_shape,
                 stride: new_strides,
                 dtype: self.dtype,
                 suballocation: self.suballocation.clone(),
                 buffer: self.buffer.clone(),
-                offset: self.offset
+                offset: self.offset,
             })
-        }
-        else {
+        } else {
             Err(VulkanError::InvalidShape)
         }
     }
@@ -90,27 +93,34 @@ impl<R: Rank> VulkanTensor<R> {
         let new_shape = indices.iter().map(|r| r.end - r.start).collect::<Vec<_>>();
         let new_shape = R::KnownDims::try_from_slice(new_shape.as_slice()).unwrap();
         let new_strides = self.stride.clone();
-        let new_offset = self.offset + (self.stride.as_slice().iter().zip(start_index.iter()).map(|(s, i)| s * i).sum::<u64>() as usize);
-        Ok(VulkanTensor::<R>{
+        let new_offset = self.offset
+            + (self
+                .stride
+                .as_slice()
+                .iter()
+                .zip(start_index.iter())
+                .map(|(s, i)| s * i)
+                .sum::<u64>() as usize);
+        Ok(VulkanTensor::<R> {
             shape: R::KnownDims::try_from_slice(new_shape.as_slice()).unwrap(),
             stride: R::KnownDims::try_from_slice(new_strides.as_slice()).unwrap(),
             dtype: self.dtype,
             suballocation: self.suballocation.clone(),
             buffer: self.buffer.clone(),
-            offset: new_offset
+            offset: new_offset,
         })
     }
 
     pub fn transpose(&self, axes: &[usize]) -> Result<Self, VulkanError> {
         let new_shape = axes.iter().map(|&i| self.shape[i]).collect::<Vec<_>>();
         let new_strides = axes.iter().map(|&i| self.stride[i]).collect::<Vec<_>>();
-        Ok(VulkanTensor::<R>{
+        Ok(VulkanTensor::<R> {
             shape: R::KnownDims::try_from_slice(new_shape.as_slice()).unwrap(),
             stride: R::KnownDims::try_from_slice(new_strides.as_slice()).unwrap(),
             dtype: self.dtype,
             suballocation: self.suballocation.clone(),
             buffer: self.buffer.clone(),
-            offset: self.offset
+            offset: self.offset,
         })
     }
 }

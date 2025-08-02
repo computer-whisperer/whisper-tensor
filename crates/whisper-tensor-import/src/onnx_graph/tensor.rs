@@ -1,22 +1,30 @@
-use std::collections::{HashSet};
-use std::hash::{Hash, Hasher};
-use std::sync::Arc;
-use super::{onnx, Error};
 use super::node::{Node, SingleOutputNode};
 use super::onnx::{StringStringEntryProto, TensorProto, ValueInfoProto};
 use super::weights::WeightExternalOutputManager;
+use super::{Error, onnx};
 use core::fmt;
+use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 #[derive(Clone, Debug)]
 pub struct Dimension {
     pub value: Option<usize>,
     pub name: Option<String>,
-    pub denotation: Option<String>
+    pub denotation: Option<String>,
 }
 
 impl Dimension {
-    pub fn new(value: Option<usize>, name: Option<String>, denotation: Option<String>) -> Arc<Self> {
-        Arc::new(Dimension { value, name, denotation })
+    pub fn new(
+        value: Option<usize>,
+        name: Option<String>,
+        denotation: Option<String>,
+    ) -> Arc<Self> {
+        Arc::new(Dimension {
+            value,
+            name,
+            denotation,
+        })
     }
 
     pub fn resolve(&self) -> Result<usize, Error> {
@@ -28,26 +36,39 @@ impl From<&Dimension> for onnx::tensor_shape_proto::Dimension {
     fn from(value: &Dimension) -> Self {
         Self {
             value: match value.value {
-                Some(value) => Some(onnx::tensor_shape_proto::dimension::Value::DimValue(value as i64)),
+                Some(value) => Some(onnx::tensor_shape_proto::dimension::Value::DimValue(
+                    value as i64,
+                )),
                 None => match &value.name {
                     None => None,
-                    Some(name) => Some(onnx::tensor_shape_proto::dimension::Value::DimParam(name.clone()))
-                }
+                    Some(name) => Some(onnx::tensor_shape_proto::dimension::Value::DimParam(
+                        name.clone(),
+                    )),
+                },
             },
-            denotation: value.denotation.clone().unwrap_or_default()
+            denotation: value.denotation.clone().unwrap_or_default(),
         }
     }
 }
 
 impl From<usize> for Dimension {
     fn from(value: usize) -> Self {
-        Self { value: Some(value), name: None, denotation: None }
+        Self {
+            value: Some(value),
+            name: None,
+            denotation: None,
+        }
     }
 }
 
 impl PartialEq for &Dimension {
     fn eq(&self, other: &Self) -> bool {
-        core::ptr::eq(*self, *other) || if let (Some(a), Some(b)) = (self.value, other.value) {a == b} else {false}
+        core::ptr::eq(*self, *other)
+            || if let (Some(a), Some(b)) = (self.value, other.value) {
+                a == b
+            } else {
+                false
+            }
     }
 }
 
@@ -55,11 +76,9 @@ impl fmt::Display for Dimension {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(value) = self.value {
             write!(f, "{}", value)
-        }
-        else if let Some(name) = &self.name {
+        } else if let Some(name) = &self.name {
             write!(f, "{}", name)
-        }
-        else {
+        } else {
             write!(f, "?")
         }
     }
@@ -67,7 +86,7 @@ impl fmt::Display for Dimension {
 
 #[derive(Clone, Debug)]
 pub struct Shape {
-    pub dims: Vec<Arc<Dimension>>
+    pub dims: Vec<Arc<Dimension>>,
 }
 
 impl Shape {
@@ -85,7 +104,7 @@ impl Shape {
 
     pub fn transpose(&self) -> Self {
         Self {
-            dims: self.dims.iter().rev().cloned().collect()
+            dims: self.dims.iter().rev().cloned().collect(),
         }
     }
 
@@ -93,26 +112,24 @@ impl Shape {
         let rank = self.rank();
         let index = if index < 0 {
             rank - (-index) as usize
-        }
-        else {
+        } else {
             index as usize
         };
         &self.dims[index]
     }
-    
+
     pub fn unsqueeze(&self, axis: isize) -> Self {
         let rank = self.rank();
         let axis = if axis < 0 {
             rank - (-axis) as usize
-        }
-        else {
+        } else {
             axis as usize
         };
         let mut new_dims = self.dims.clone();
         new_dims.insert(axis, Dimension::new(Some(1), None, None));
         Self::new(new_dims)
     }
-    
+
     pub fn num_elements(&self) -> Result<usize, Error> {
         let mut v = 1;
         for dim in &self.dims {
@@ -124,13 +141,26 @@ impl Shape {
 
 impl fmt::Display for Shape {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.dims.iter().map(|x| x.to_string()).collect::<Vec<_>>().join("x"))
+        write!(
+            f,
+            "{}",
+            self.dims
+                .iter()
+                .map(|x| x.to_string())
+                .collect::<Vec<_>>()
+                .join("x")
+        )
     }
 }
 
 impl PartialEq for Shape {
     fn eq(&self, other: &Self) -> bool {
-        self.dims.len() == other.dims.len() && self.dims.iter().zip(other.dims.iter()).all(|(a, b)| a.as_ref() == b.as_ref())
+        self.dims.len() == other.dims.len()
+            && self
+                .dims
+                .iter()
+                .zip(other.dims.iter())
+                .all(|(a, b)| a.as_ref() == b.as_ref())
     }
 }
 
@@ -143,7 +173,7 @@ impl Shape {
 impl From<&Shape> for onnx::TensorShapeProto {
     fn from(value: &Shape) -> Self {
         Self {
-            dim: value.dims.iter().map(|x| x.as_ref().into()).collect()
+            dim: value.dims.iter().map(|x| x.as_ref().into()).collect(),
         }
     }
 }
@@ -151,20 +181,34 @@ impl From<&Shape> for onnx::TensorShapeProto {
 impl From<Shape> for onnx::TensorShapeProto {
     fn from(value: Shape) -> Self {
         Self {
-            dim: value.dims.iter().map(|x| x.as_ref().into()).collect()
+            dim: value.dims.iter().map(|x| x.as_ref().into()).collect(),
         }
     }
 }
 
 impl From<&candle_core::Shape> for Shape {
     fn from(value: &candle_core::Shape) -> Self {
-        Shape { dims: value.clone().dims().into_iter().map(|x| Dimension::new(Some(*x), None, None)).collect() }
+        Shape {
+            dims: value
+                .clone()
+                .dims()
+                .into_iter()
+                .map(|x| Dimension::new(Some(*x), None, None))
+                .collect(),
+        }
     }
 }
 
 impl From<candle_core::Shape> for Shape {
     fn from(value: candle_core::Shape) -> Self {
-        Shape { dims: value.clone().dims().into_iter().map(|x| Dimension::new(Some(*x), None, None)).collect() }
+        Shape {
+            dims: value
+                .clone()
+                .dims()
+                .into_iter()
+                .map(|x| Dimension::new(Some(*x), None, None))
+                .collect(),
+        }
     }
 }
 
@@ -176,21 +220,31 @@ impl core::ops::Index<usize> for Shape {
     }
 }
 
-impl <T: Clone> From<&[T]> for Shape
+impl<T: Clone> From<&[T]> for Shape
 where
-    Dimension: From<T>
+    Dimension: From<T>,
 {
     fn from(value: &[T]) -> Self {
-        Shape { dims: value.iter().map(|x| Arc::new(Dimension::from(x.clone()))).collect() }
+        Shape {
+            dims: value
+                .iter()
+                .map(|x| Arc::new(Dimension::from(x.clone())))
+                .collect(),
+        }
     }
 }
 
-impl <T> From<Vec<T>> for Shape
+impl<T> From<Vec<T>> for Shape
 where
-    Dimension: From<T>
+    Dimension: From<T>,
 {
     fn from(value: Vec<T>) -> Self {
-        Shape { dims: value.into_iter().map(|x| Arc::new(Dimension::from(x))).collect() }
+        Shape {
+            dims: value
+                .into_iter()
+                .map(|x| Arc::new(Dimension::from(x)))
+                .collect(),
+        }
     }
 }
 
@@ -201,7 +255,7 @@ pub enum DType {
     BF16,
     U16,
     I32,
-    I64
+    I64,
 }
 
 impl DType {
@@ -212,16 +266,16 @@ impl DType {
             safetensors::Dtype::BF16 => Ok(DType::BF16),
             safetensors::Dtype::U16 => Ok(DType::U16),
             safetensors::Dtype::I32 => Ok(DType::I32),
-            _ => Err(Error::UnsupportedDTypeError)
+            _ => Err(Error::UnsupportedDTypeError),
         }
     }
-    
+
     pub fn from_candle(dtype: candle_core::DType) -> Result<Self, Error> {
         match dtype {
             candle_core::DType::F32 => Ok(DType::F32),
             candle_core::DType::BF16 => Ok(DType::BF16),
             candle_core::DType::F16 => Ok(DType::F16),
-            _ => Err(Error::UnsupportedDTypeError)
+            _ => Err(Error::UnsupportedDTypeError),
         }
     }
 }
@@ -245,28 +299,29 @@ impl core::fmt::Display for DType {
     }
 }
 
-pub trait Tensor  {
+pub trait Tensor {
     fn dtype(&self) -> DType;
     fn shape(&self) -> &Shape;
     fn rank(&self) -> usize {
         self.shape().rank()
     }
     fn to_value_info_proto(&self, name: String, metadata: Vec<(String, String)>) -> ValueInfoProto {
-        ValueInfoProto{
+        ValueInfoProto {
             name,
-            r#type: Some(
-                onnx::TypeProto{
-                    value: Some(
-                        onnx::type_proto::Value::TensorType(onnx::type_proto::Tensor {
-                            elem_type: onnx::tensor_proto::DataType::from(self.dtype()) as i32,
-                            shape: Some(self.shape().into())
-                        })
-                    ),
-                    denotation: "TENSOR".to_string()
-                }
-            ),
+            r#type: Some(onnx::TypeProto {
+                value: Some(onnx::type_proto::Value::TensorType(
+                    onnx::type_proto::Tensor {
+                        elem_type: onnx::tensor_proto::DataType::from(self.dtype()) as i32,
+                        shape: Some(self.shape().into()),
+                    },
+                )),
+                denotation: "TENSOR".to_string(),
+            }),
             doc_string: String::new(),
-            metadata_props: metadata.into_iter().map(|(key, value)| StringStringEntryProto{key, value}).collect()
+            metadata_props: metadata
+                .into_iter()
+                .map(|(key, value)| StringStringEntryProto { key, value })
+                .collect(),
         }
     }
 
@@ -274,7 +329,10 @@ pub trait Tensor  {
 
     fn get_nodes<'a>(&'a self, _table: &mut HashSet<&'a dyn Node>) {}
 
-    fn get_tensors<'a>(&'a self, table: &mut HashSet<&'a dyn Tensor>) where Self: Sized {
+    fn get_tensors<'a>(&'a self, table: &mut HashSet<&'a dyn Tensor>)
+    where
+        Self: Sized,
+    {
         let self_dyn = self as &dyn Tensor;
         if table.contains(&self_dyn) {
             table.insert(self as &dyn Tensor);
@@ -286,28 +344,32 @@ pub trait Tensor  {
 
     fn gather_weights<'a>(&'a self, _manager: &mut dyn WeightExternalOutputManager<'a>) {}
 
-    fn get_initializer<'a>(&'a self, _name: String, _manager: &mut dyn WeightExternalOutputManager<'a>) -> Result<Option<onnx::TensorProto>, Error> {
+    fn get_initializer<'a>(
+        &'a self,
+        _name: String,
+        _manager: &mut dyn WeightExternalOutputManager<'a>,
+    ) -> Result<Option<onnx::TensorProto>, Error> {
         Ok(None)
     }
 
     fn get_name(&self) -> Option<&str> {
         None
     }
-    
+
     fn resolve_data(&self) -> Option<TensorData> {
         None
     }
-    
+
     fn is_input(&self) -> bool;
 }
 
-impl<'a> PartialEq for &'a dyn Tensor{
-    fn eq(&self, other:&Self) -> bool{
+impl<'a> PartialEq for &'a dyn Tensor {
+    fn eq(&self, other: &Self) -> bool {
         std::ptr::addr_eq(*self, *other)
     }
 }
 
-impl<'a> Eq for &'a dyn Tensor{}
+impl<'a> Eq for &'a dyn Tensor {}
 
 impl<'a> Hash for &'a dyn Tensor {
     fn hash<H: Hasher>(&self, state: &mut H) {
@@ -317,8 +379,7 @@ impl<'a> Hash for &'a dyn Tensor {
     }
 }
 
-
-impl <T: SingleOutputNode> Tensor for T {
+impl<T: SingleOutputNode> Tensor for T {
     fn dtype(&self) -> DType {
         self.get_output_dtype()
     }
@@ -326,7 +387,7 @@ impl <T: SingleOutputNode> Tensor for T {
     fn shape(&self) -> &Shape {
         self.get_output_shape()
     }
-    
+
     fn resolve_data(&self) -> Option<TensorData> {
         self.resolve_output_data()
     }
@@ -338,7 +399,7 @@ impl <T: SingleOutputNode> Tensor for T {
     fn get_sub_tensors<'a>(&'a self, table: &mut HashSet<&'a dyn Tensor>) {
         <Self as Node>::get_tensors(self, table);
     }
-    
+
     fn is_input(&self) -> bool {
         false
     }
@@ -347,12 +408,16 @@ impl <T: SingleOutputNode> Tensor for T {
 pub struct InputTensor {
     data_type: DType,
     name: String,
-    shape: Shape
+    shape: Shape,
 }
 
 impl InputTensor {
     pub fn new(name: String, data_type: DType, shape: Shape) -> Arc<Self> {
-        Arc::new(Self {name, data_type, shape })
+        Arc::new(Self {
+            name,
+            data_type,
+            shape,
+        })
     }
 }
 
@@ -368,7 +433,7 @@ impl Tensor for InputTensor {
     fn get_name(&self) -> Option<&str> {
         Some(&self.name)
     }
-    
+
     fn is_input(&self) -> bool {
         true
     }
@@ -376,12 +441,15 @@ impl Tensor for InputTensor {
 
 pub struct InputTensorInitialized {
     name: String,
-    initial_value: TensorData
+    initial_value: TensorData,
 }
 
 impl InputTensorInitialized {
     pub fn new(name: String, initial_value: TensorData) -> Arc<Self> {
-        Arc::new(Self {name, initial_value})
+        Arc::new(Self {
+            name,
+            initial_value,
+        })
     }
 }
 
@@ -401,20 +469,24 @@ impl Tensor for InputTensorInitialized {
     fn is_input(&self) -> bool {
         true
     }
-    
-    fn get_initializer<'a>(&'a self, name: String, _manager: &mut dyn WeightExternalOutputManager<'a>) -> Result<Option<TensorProto>, Error> {
+
+    fn get_initializer<'a>(
+        &'a self,
+        name: String,
+        _manager: &mut dyn WeightExternalOutputManager<'a>,
+    ) -> Result<Option<TensorProto>, Error> {
         Ok(Some(self.initial_value.to_tensor_data_proto(Some(name))?))
     }
 }
 
 pub struct StubTensor {
     shape: Shape,
-    dtype: DType
+    dtype: DType,
 }
 
 impl StubTensor {
     pub(crate) fn new(shape: Shape, dtype: DType) -> Arc<Self> {
-        Arc::new(Self {shape, dtype})
+        Arc::new(Self { shape, dtype })
     }
 }
 
@@ -449,7 +521,7 @@ impl TensorDataValue {
             TensorDataValue::I64(v) => v.len(),
         }
     }
-    
+
     pub fn dtype(&self) -> DType {
         match self {
             TensorDataValue::F32(_) => DType::F32,
@@ -459,7 +531,7 @@ impl TensorDataValue {
             TensorDataValue::I64(_) => DType::I64,
         }
     }
-    
+
     pub fn get_raw_encoding(&self) -> Vec<u8> {
         match self {
             TensorDataValue::F32(v) => v.iter().flat_map(|x| x.to_le_bytes()).collect(),
@@ -469,31 +541,37 @@ impl TensorDataValue {
             TensorDataValue::I64(v) => v.iter().flat_map(|x| x.to_le_bytes()).collect(),
         }
     }
-    
+
     pub fn from_raw_encoding(dtype: DType, data: &[u8]) -> Result<Self, Error> {
         match dtype {
             DType::F32 => {
                 let mut v = Vec::new();
                 for i in 0..data.len() / 4 {
-                    v.push(f32::from_le_bytes(data[i * 4..i * 4 + 4].try_into().unwrap()));
+                    v.push(f32::from_le_bytes(
+                        data[i * 4..i * 4 + 4].try_into().unwrap(),
+                    ));
                 }
                 Ok(TensorDataValue::F32(v))
             }
             DType::F16 => {
                 let mut v = Vec::new();
                 for i in 0..data.len() / 2 {
-                    v.push(half::f16::from_le_bytes(data[i * 2..i * 2 + 2].try_into().unwrap()));
+                    v.push(half::f16::from_le_bytes(
+                        data[i * 2..i * 2 + 2].try_into().unwrap(),
+                    ));
                 }
                 Ok(TensorDataValue::F16(v))
             }
             DType::BF16 => {
                 let mut v = Vec::new();
                 for i in 0..data.len() / 2 {
-                    v.push(half::bf16::from_le_bytes(data[i * 2..i * 2 + 2].try_into().unwrap()));
+                    v.push(half::bf16::from_le_bytes(
+                        data[i * 2..i * 2 + 2].try_into().unwrap(),
+                    ));
                 }
                 Ok(TensorDataValue::BF16(v))
             }
-            _ => Err(Error::UnsupportedDTypeError)
+            _ => Err(Error::UnsupportedDTypeError),
         }
     }
 }
@@ -531,7 +609,7 @@ impl From<Vec<i64>> for TensorDataValue {
 #[derive(Debug, Clone)]
 pub struct TensorData {
     value: TensorDataValue,
-    shape: Shape
+    shape: Shape,
 }
 
 impl TensorData {
@@ -541,8 +619,8 @@ impl TensorData {
         }
         Ok(Self { value, shape })
     }
-    
-    pub fn fill<T>(shape: Shape, value: T) -> Result<Self, Error> 
+
+    pub fn fill<T>(shape: Shape, value: T) -> Result<Self, Error>
     where
         T: Copy,
         TensorDataValue: From<Vec<T>>,
@@ -551,7 +629,7 @@ impl TensorData {
         let data = vec![value; num_elements];
         Ok(Self::new(TensorDataValue::from(data), shape)?)
     }
-    
+
     pub fn zeros(shape: Shape, dtype: DType) -> Result<Self, Error> {
         match dtype {
             DType::F32 => Self::fill(shape, 0.0f32),
@@ -562,15 +640,15 @@ impl TensorData {
             _ => Err(Error::UnsupportedDTypeError),
         }
     }
-    
+
     pub fn dtype(&self) -> DType {
         self.value.dtype()
     }
-    
+
     pub fn shape(&self) -> &Shape {
         &self.shape
     }
-    
+
     pub fn to_int_vec(&self) -> Result<Vec<i64>, Error> {
         match &self.value {
             TensorDataValue::I32(x) => Ok(x.iter().map(|x| *x as i64).collect()),
@@ -578,9 +656,9 @@ impl TensorData {
             _ => Err(Error::UnsupportedDTypeError),
         }
     }
-    
+
     pub fn to_tensor_data_proto(&self, name: Option<String>) -> Result<TensorProto, Error> {
-        Ok(TensorProto{
+        Ok(TensorProto {
             name: name.unwrap_or_default(),
             data_type: (onnx::tensor_proto::DataType::from(self.value.dtype()) as i32),
             dims: self.shape.resolve()?.iter().map(|x| *x as i64).collect(),
@@ -588,34 +666,43 @@ impl TensorData {
             ..Default::default()
         })
     }
-    
+
     pub fn from_candle_tensor(tensor: candle_core::Tensor) -> Result<Self, Error> {
         let shape = Shape::from(tensor.shape());
         let value = match tensor.dtype() {
             candle_core::DType::F32 => {
-                let f_vec: Vec<f32> = tensor.flatten_all().unwrap().to_vec1().map_err(|x| Error::CandleCoreError(x))?;
+                let f_vec: Vec<f32> = tensor
+                    .flatten_all()
+                    .unwrap()
+                    .to_vec1()
+                    .map_err(|x| Error::CandleCoreError(x))?;
                 TensorDataValue::F32(f_vec)
             }
             candle_core::DType::BF16 => {
-                let f_vec: Vec<half::bf16> = tensor.flatten_all().unwrap().to_vec1().map_err(|x| Error::CandleCoreError(x))?;
+                let f_vec: Vec<half::bf16> = tensor
+                    .flatten_all()
+                    .unwrap()
+                    .to_vec1()
+                    .map_err(|x| Error::CandleCoreError(x))?;
                 TensorDataValue::BF16(f_vec)
             }
             candle_core::DType::F16 => {
-                let f_vec: Vec<half::f16> = tensor.flatten_all().unwrap().to_vec1().map_err(|x| Error::CandleCoreError(x))?;
+                let f_vec: Vec<half::f16> = tensor
+                    .flatten_all()
+                    .unwrap()
+                    .to_vec1()
+                    .map_err(|x| Error::CandleCoreError(x))?;
                 TensorDataValue::F16(f_vec)
             }
             _ => return Err(Error::UnsupportedDTypeError),
         };
-        Ok(Self{
-            shape,
-            value
-        })
+        Ok(Self { shape, value })
     }
-    
+
     pub(crate) fn to_raw_encoding(&self) -> Vec<u8> {
         self.value.get_raw_encoding()
     }
-    
+
     pub fn from_safetensors_view(tensor: safetensors::tensor::TensorView) -> Result<Self, Error> {
         let dtype = DType::from_safetensors(tensor.dtype())?;
         let shape = Shape::from(tensor.shape());
@@ -623,9 +710,6 @@ impl TensorData {
         if shape.num_elements()? != value.len() {
             Err(Error::OtherError)?;
         }
-        Ok(Self{
-            shape,
-            value
-        })
+        Ok(Self { shape, value })
     }
 }

@@ -24,7 +24,9 @@ impl AnyTokenizer {
             TokenizerInfo::HFTokenizer(name) => {
                 #[cfg(all(feature = "tokenizers", feature = "http"))]
                 {
-                    AnyTokenizer::Tokenizers(tokenizers::Tokenizer::from_pretrained(name, None).unwrap())
+                    AnyTokenizer::Tokenizers(
+                        tokenizers::Tokenizer::from_pretrained(name, None).unwrap(),
+                    )
                 }
                 #[cfg(not(all(feature = "tokenizers", feature = "http")))]
                 {
@@ -46,7 +48,6 @@ impl AnyTokenizer {
 }
 
 impl Tokenizer for AnyTokenizer {
-
     fn encode(&self, text: &str) -> Vec<u32> {
         match self {
             #[cfg(feature = "tokenizers")]
@@ -75,7 +76,10 @@ pub trait Tokenizer {
 #[cfg(feature = "tokenizers")]
 impl Tokenizer for tokenizers::Tokenizer {
     fn encode(&self, text: &str) -> Vec<u32> {
-        tokenizers::TokenizerImpl::encode(self, text, false).unwrap().get_ids().to_vec()
+        tokenizers::TokenizerImpl::encode(self, text, false)
+            .unwrap()
+            .get_ids()
+            .to_vec()
     }
     fn decode(&self, tokens: &[u32]) -> Result<String, TokenizerError> {
         Ok(tokenizers::TokenizerImpl::decode(self, tokens, false)?)

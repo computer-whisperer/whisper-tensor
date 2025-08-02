@@ -58,7 +58,7 @@ jobs:
       - name: Install Mesa Vulkan (lavapipe) + tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y mesa-vulkan-drivers libvulkan-dev vulkan-tools vulkan-validationlayers
+          sudo apt-get install -y mesa-vulkan-drivers libvulkan-dev vulkan-tools vulkan-validationlayers jq
 
       - name: Select lavapipe ICD
         shell: bash
@@ -75,14 +75,33 @@ jobs:
         run: |
           vulkaninfo | head -n 50 || (echo "vulkaninfo failed" && exit 1)
 
-      - name: Check formatting
-        run: cargo fmt --all -- --check
+      - name: Compute package filters (exclude /libs)
+        id: pkgs
+        shell: bash
+        run: |
+          META=$(cargo metadata --no-deps --format-version 1)
+          # Packages located under /libs/
+          mapfile -t EXCL < <(echo "$META" | jq -r '.packages[] | select(.manifest_path | test("/libs/")) | .name')
+          # Packages NOT under /libs/ (used for rustfmt which lacks --exclude)
+          mapfile -t INCL < <(echo "$META" | jq -r '.packages[] | select(.manifest_path | test("/libs/") | not) | .name')
+          
+          EXCLUDE_ARGS=""
+          for p in "${EXCL[@]}"; do EXCLUDE_ARGS+=" --exclude $p"; done
+          
+          FMT_ARGS=""
+          for p in "${INCL[@]}"; do FMT_ARGS+=" -p $p"; done
+          
+          echo "exclude_args=${EXCLUDE_ARGS}" >> "$GITHUB_OUTPUT"
+          echo "fmt_args=${FMT_ARGS}" >> "$GITHUB_OUTPUT"
 
-      - name: Clippy (fail on warnings)
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Check formatting (exclude /libs)
+        run: cargo fmt ${{ steps.pkgs.outputs.fmt_args }} -- --check
 
-      - name: Build (workspace)
-        run: cargo build --workspace --all-features --locked --verbose
+      - name: Clippy (fail on warnings; exclude /libs)
+        run: cargo clippy --workspace --all-targets --all-features ${{ steps.pkgs.outputs.exclude_args }} -- -D warnings
 
-      - name: Test (workspace)
-        run: cargo test --workspace --all-features --locked --verbose
+      - name: Build (workspace; exclude /libs)
+        run: cargo build --workspace --all-features --locked --verbose ${{ steps.pkgs.outputs.exclude_args }}
+
+      - name: Test (workspace; exclude /libs)
+        run: cargo test --workspace --all-features --locked --verbose ${{ steps.pkgs.outputs.exclude_args }}

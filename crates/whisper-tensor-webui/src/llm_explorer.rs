@@ -1,11 +1,13 @@
+use crate::app::{LoadedModels, LoadedTokenizers, ModelLoadState};
 use egui::{Color32, CursorIcon, Event, EventFilter, Label, RichText, Sense, Widget};
 use log::info;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use whisper_tensor::tokenizer::Tokenizer;
 use whisper_tensor_import::onnx_graph::TokenizerInfo;
-use whisper_tensor_server::{ForwardLogitRequest, LoadedModelId, ModelTypeMetadata, WebsocketClientServerMessage};
-use crate::app::{LoadedModels, LoadedTokenizers, ModelLoadState};
+use whisper_tensor_server::{
+    ForwardLogitRequest, LoadedModelId, ModelTypeMetadata, WebsocketClientServerMessage,
+};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct LLMExplorerState {
@@ -48,30 +50,43 @@ fn escape_token_text(input: &str) -> String {
 
 pub(crate) struct LLMExplorerApp {
     llm_explorer_cached_token_list: Option<Vec<u32>>,
-    pub(crate) latest_logits: Option<(LoadedModelId, Vec<u32>, Result<Vec<Vec<(u32, f32)>>, String>)>
+    pub(crate) latest_logits: Option<(
+        LoadedModelId,
+        Vec<u32>,
+        Result<Vec<Vec<(u32, f32)>>, String>,
+    )>,
 }
 
 impl LLMExplorerApp {
     pub fn new() -> Self {
         Self {
             llm_explorer_cached_token_list: None,
-            latest_logits: None
+            latest_logits: None,
         }
     }
 
-    pub fn update(&mut self,
-                  state: &mut LLMExplorerState,
-                  loaded_models: &mut LoadedModels,
-                  loaded_tokenizers: &mut LoadedTokenizers,
-                  websocket_client_server_sender: &mpsc::UnboundedSender<WebsocketClientServerMessage>,
-                  ui: &mut egui::Ui) {
+    pub fn update(
+        &mut self,
+        state: &mut LLMExplorerState,
+        loaded_models: &mut LoadedModels,
+        loaded_tokenizers: &mut LoadedTokenizers,
+        websocket_client_server_sender: &mpsc::UnboundedSender<WebsocketClientServerMessage>,
+        ui: &mut egui::Ui,
+    ) {
         ui.horizontal(|ui| {
             if loaded_models.current_models.is_empty() {
                 ui.label("No Models Loaded");
             }
             for model in &loaded_models.current_models {
                 if let ModelTypeMetadata::LLM(_) = model.model_type_metadata {
-                    if ui.selectable_value(&mut state.llm_explorer_selected_model_id, Some(model.model_id), format!("({}) {}", model.model_id, model.model_name.clone())).clicked() {
+                    if ui
+                        .selectable_value(
+                            &mut state.llm_explorer_selected_model_id,
+                            Some(model.model_id),
+                            format!("({}) {}", model.model_id, model.model_name.clone()),
+                        )
+                        .clicked()
+                    {
                         // Good!
                         self.llm_explorer_cached_token_list = None;
                     };
@@ -82,7 +97,7 @@ impl LLMExplorerApp {
             };
         });
 
-        let model = if let Some(selected_model_id) =  state.llm_explorer_selected_model_id {
+        let model = if let Some(selected_model_id) = state.llm_explorer_selected_model_id {
             let mut ret = None;
             for model in &loaded_models.current_models {
                 if model.model_id == selected_model_id {
@@ -101,10 +116,8 @@ impl LLMExplorerApp {
 
         let tokenizer = if let Some(model) = model {
             match loaded_tokenizers.loaded_tokenizers.get(&model.model_id) {
-                Some(x) => {
-                    x.as_ref()
-                },
-                _ => { None }
+                Some(x) => x.as_ref(),
+                _ => None,
             }
         } else {
             None
@@ -117,9 +130,7 @@ impl LLMExplorerApp {
                         TokenizerInfo::HFTokenizer(x) => {
                             format!("Huggingface: {x}")
                         }
-                        TokenizerInfo::RWKVWorld => {
-                            "RWKV World".to_string()
-                        }
+                        TokenizerInfo::RWKVWorld => "RWKV World".to_string(),
                     };
                     ui.label(format!("Using tokenizer: {v}"));
                 }
@@ -137,14 +148,13 @@ impl LLMExplorerApp {
                     // Generate tokens if needed
                     if self.llm_explorer_cached_token_list.is_none() {
                         // Generate it
-                        self.llm_explorer_cached_token_list = Some(
-                            tokenizer.encode(&state.current_llm_text)
-                        );
+                        self.llm_explorer_cached_token_list =
+                            Some(tokenizer.encode(&state.current_llm_text));
                     }
 
                     // Display
 
-                    if let Some(tokens) = &self.llm_explorer_cached_token_list{
+                    if let Some(tokens) = &self.llm_explorer_cached_token_list {
                         let color_wheel = [
                             Color32::from_rgb(50, 0, 0),
                             Color32::from_rgb(0, 50, 0),
@@ -160,7 +170,7 @@ impl LLMExplorerApp {
                             let mut idx = 0;
                             let mut is_good = true;
                             loop {
-                                let color = color_wheel[idx%color_wheel.len()];
+                                let color = color_wheel[idx % color_wheel.len()];
                                 if idx >= tokens.len() && !is_good {
                                     break;
                                 }
@@ -171,20 +181,20 @@ impl LLMExplorerApp {
                                     let mut next_is_good = is_good;
                                     if let Some(chosen_token) = chosen_token_id {
                                         let label_text = match tokenizer.decode(&[*chosen_token]) {
-                                            Ok(token_str) => {
-                                                escape_token_text(&token_str)
-                                            }
-                                            Err(_) => {
-                                                "(?)".to_string()
-                                            }
+                                            Ok(token_str) => escape_token_text(&token_str),
+                                            Err(_) => "(?)".to_string(),
                                         };
 
                                         // Token string
-                                        let text = RichText::new(label_text).background_color(color).size(20.0);
+                                        let text = RichText::new(label_text)
+                                            .background_color(color)
+                                            .size(20.0);
                                         Label::new(text).ui(ui);
 
                                         // Token id
-                                        let text = RichText::new(chosen_token.to_string()).background_color(color).size(8.0);
+                                        let text = RichText::new(chosen_token.to_string())
+                                            .background_color(color)
+                                            .size(8.0);
                                         Label::new(text).ui(ui);
 
                                         // Validate logits
@@ -193,8 +203,7 @@ impl LLMExplorerApp {
                                                 next_is_good &= b[idx] == *chosen_token
                                             }
                                         }
-                                    }
-                                    else {
+                                    } else {
                                         next_is_good = false;
                                     }
                                     {
@@ -204,22 +213,31 @@ impl LLMExplorerApp {
                                     }
                                     if is_good {
                                         if let Some((a, b, c)) = &self.latest_logits {
-                                            if *a == model.model_id && idx-1 < b.len() {
+                                            if *a == model.model_id && idx - 1 < b.len() {
                                                 if let Ok(c) = c {
-                                                    let logits = &c[idx-1];
+                                                    let logits = &c[idx - 1];
                                                     for j in 0..5 {
                                                         if j >= logits.len() {
                                                             break;
                                                         }
                                                         let (token_id, value) = &logits[j];
-                                                        let token_str = tokenizer.decode(&[*token_id]).unwrap_or("?".to_string());
-                                                        let token_str = escape_token_text(&token_str);
+                                                        let token_str = tokenizer
+                                                            .decode(&[*token_id])
+                                                            .unwrap_or("?".to_string());
+                                                        let token_str =
+                                                            escape_token_text(&token_str);
                                                         //ui.label(format!("{token_id}, {value}, {token_str}"));
-                                                        let text = RichText::new(token_str).background_color(Color32::from_rgb(20, 20, 20)).size(15.0);
+                                                        let text = RichText::new(token_str)
+                                                            .background_color(Color32::from_rgb(
+                                                                20, 20, 20,
+                                                            ))
+                                                            .size(15.0);
                                                         ui.label(text);
                                                         //let text = RichText::new(token_id.to_string()).size(8.0);
                                                         //ui.label(text);
-                                                        let text = RichText::new(format!("{value:.02}")).size(8.0);
+                                                        let text =
+                                                            RichText::new(format!("{value:.02}"))
+                                                                .size(8.0);
                                                         ui.label(text);
                                                     }
                                                 }
@@ -228,7 +246,6 @@ impl LLMExplorerApp {
                                     }
                                     is_good = next_is_good;
                                 });
-
 
                                 idx += 1;
                             }
@@ -257,15 +274,17 @@ impl LLMExplorerApp {
                                     state.current_llm_text.push_str(&x);
                                     self.llm_explorer_cached_token_list = None;
                                 }
-                                Event::Key{
+                                Event::Key {
                                     key: egui::Key::Backspace,
                                     pressed: true,
                                     ..
                                 } => {
-                                    state.current_llm_text.remove(state.current_llm_text.len() - 1);
+                                    state
+                                        .current_llm_text
+                                        .remove(state.current_llm_text.len() - 1);
                                     self.llm_explorer_cached_token_list = None;
                                 }
-                                Event::PointerMoved(_) | Event::PointerGone | Event::Key{..} => {
+                                Event::PointerMoved(_) | Event::PointerGone | Event::Key { .. } => {
                                     // Don't care
                                 }
                                 _ => {
@@ -282,14 +301,13 @@ impl LLMExplorerApp {
                     // Generate tokens if needed
                     if self.llm_explorer_cached_token_list.is_none() {
                         // Generate it
-                        self.llm_explorer_cached_token_list = Some(
-                            tokenizer.encode(&state.current_llm_text)
-                        );
+                        self.llm_explorer_cached_token_list =
+                            Some(tokenizer.encode(&state.current_llm_text));
                     }
                     let tokens = self.llm_explorer_cached_token_list.clone().unwrap();
-                    let msg = WebsocketClientServerMessage::GetLogits(ForwardLogitRequest{
+                    let msg = WebsocketClientServerMessage::GetLogits(ForwardLogitRequest {
                         model_id: model.model_id,
-                        context_tokens: tokens
+                        context_tokens: tokens,
                     });
                     websocket_client_server_sender.send(msg).unwrap();
                     self.latest_logits = None;

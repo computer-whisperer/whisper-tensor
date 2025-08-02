@@ -1,10 +1,13 @@
-use std::collections::HashMap;
 use crate::DynRank;
 use crate::model::Model;
 use crate::numeric_tensor::NumericTensor;
-use crate::super_graph::links::{SuperGraphAnyLink, SuperGraphLinkDouble, SuperGraphLinkHash, SuperGraphLinkModel, SuperGraphLinkString, SuperGraphLinkTensor, SuperGraphLinkTokenizer};
 use crate::super_graph::SuperGraphError;
+use crate::super_graph::links::{
+    SuperGraphAnyLink, SuperGraphLinkDouble, SuperGraphLinkHash, SuperGraphLinkModel,
+    SuperGraphLinkString, SuperGraphLinkTensor, SuperGraphLinkTokenizer,
+};
 use crate::tokenizer::AnyTokenizer;
+use std::collections::HashMap;
 
 #[derive(Clone)]
 pub struct SuperGraphData<'models> {
@@ -12,7 +15,7 @@ pub struct SuperGraphData<'models> {
     pub strings: HashMap<SuperGraphLinkString, String>,
     pub tokenizers: HashMap<SuperGraphLinkTokenizer, AnyTokenizer>,
     pub models: HashMap<SuperGraphLinkModel, &'models Model>,
-    pub hashes: HashMap<SuperGraphLinkHash, u64>
+    pub hashes: HashMap<SuperGraphLinkHash, u64>,
 }
 
 impl<'models> SuperGraphData<'models> {
@@ -22,7 +25,7 @@ impl<'models> SuperGraphData<'models> {
             strings: HashMap::new(),
             tokenizers: HashMap::new(),
             models: HashMap::new(),
-            hashes: HashMap::new()
+            hashes: HashMap::new(),
         }
     }
 
@@ -35,24 +38,49 @@ impl<'models> SuperGraphData<'models> {
         for link in links {
             match link {
                 SuperGraphAnyLink::Tensor(t) => {
-                    tensors.insert(t.clone(), self.tensors.get(t)
-                        .ok_or(SuperGraphError::MissingLinkError())?.clone());
+                    tensors.insert(
+                        t.clone(),
+                        self.tensors
+                            .get(t)
+                            .ok_or(SuperGraphError::MissingLinkError())?
+                            .clone(),
+                    );
                 }
                 SuperGraphAnyLink::String(s) => {
-                    strings.insert(s.clone(), self.strings.get(s)
-                        .ok_or(SuperGraphError::MissingLinkError())?.clone());
+                    strings.insert(
+                        s.clone(),
+                        self.strings
+                            .get(s)
+                            .ok_or(SuperGraphError::MissingLinkError())?
+                            .clone(),
+                    );
                 }
                 SuperGraphAnyLink::Tokenizer(t) => {
-                    tokenizers.insert(t.clone(), self.tokenizers.get(t)
-                        .ok_or(SuperGraphError::MissingLinkError())?.clone());
+                    tokenizers.insert(
+                        t.clone(),
+                        self.tokenizers
+                            .get(t)
+                            .ok_or(SuperGraphError::MissingLinkError())?
+                            .clone(),
+                    );
                 }
                 SuperGraphAnyLink::Model(m) => {
-                    models.insert(m.clone(), *self.models.get(m)
-                        .ok_or(SuperGraphError::MissingLinkError())?);
+                    models.insert(
+                        m.clone(),
+                        *self
+                            .models
+                            .get(m)
+                            .ok_or(SuperGraphError::MissingLinkError())?,
+                    );
                 }
                 SuperGraphAnyLink::Hash(h) => {
-                    hashes.insert(h.clone(), self.hashes.get(h)
-                        .ok_or(SuperGraphError::MissingLinkError())?.clone());
+                    hashes.insert(
+                        h.clone(),
+                        self.hashes
+                            .get(h)
+                            .ok_or(SuperGraphError::MissingLinkError())?
+                            .clone(),
+                    );
                 }
             }
         }
@@ -65,30 +93,54 @@ impl<'models> SuperGraphData<'models> {
         })
     }
 
-    pub fn remap(&self, map: Vec<SuperGraphLinkDouble>,) -> Result<Self, SuperGraphError> {
+    pub fn remap(&self, map: Vec<SuperGraphLinkDouble>) -> Result<Self, SuperGraphError> {
         let mut new_data = Self::new();
 
         for link in map {
             match link {
                 SuperGraphLinkDouble::Tensor(input, output) => {
-                    new_data.tensors.insert(output, self.tensors.get(&input)
-                        .ok_or(SuperGraphError::MissingLinkError())?.clone());
+                    new_data.tensors.insert(
+                        output,
+                        self.tensors
+                            .get(&input)
+                            .ok_or(SuperGraphError::MissingLinkError())?
+                            .clone(),
+                    );
                 }
                 SuperGraphLinkDouble::String(input, output) => {
-                    new_data.strings.insert(output, self.strings.get(&input)
-                        .ok_or(SuperGraphError::MissingLinkError())?.clone());
+                    new_data.strings.insert(
+                        output,
+                        self.strings
+                            .get(&input)
+                            .ok_or(SuperGraphError::MissingLinkError())?
+                            .clone(),
+                    );
                 }
                 SuperGraphLinkDouble::Tokenizer(input, output) => {
-                    new_data.tokenizers.insert(output, self.tokenizers.get(&input)
-                        .ok_or(SuperGraphError::MissingLinkError())?.clone());
+                    new_data.tokenizers.insert(
+                        output,
+                        self.tokenizers
+                            .get(&input)
+                            .ok_or(SuperGraphError::MissingLinkError())?
+                            .clone(),
+                    );
                 }
                 SuperGraphLinkDouble::Model(input, output) => {
-                    new_data.models.insert(output, self.models.get(&input)
-                        .ok_or(SuperGraphError::MissingLinkError())?);
+                    new_data.models.insert(
+                        output,
+                        self.models
+                            .get(&input)
+                            .ok_or(SuperGraphError::MissingLinkError())?,
+                    );
                 }
                 SuperGraphLinkDouble::Hash(input, output) => {
-                    new_data.hashes.insert(output, self.hashes.get(&input)
-                        .ok_or(SuperGraphError::MissingLinkError())?.clone());
+                    new_data.hashes.insert(
+                        output,
+                        self.hashes
+                            .get(&input)
+                            .ok_or(SuperGraphError::MissingLinkError())?
+                            .clone(),
+                    );
                 }
             }
         }
@@ -97,10 +149,15 @@ impl<'models> SuperGraphData<'models> {
     }
 
     pub fn extend(&mut self, other: &Self) {
-        self.tensors.extend(other.tensors.iter().map(|(a, b)| (a.clone(), b.clone())));
-        self.strings.extend(other.strings.iter().map(|(a, b)| (a.clone(), b.clone())));
-        self.tokenizers.extend(other.tokenizers.iter().map(|(a, b)| (a.clone(), b.clone())));
-        self.models.extend(other.models.iter().map(|(a, b)| (a.clone(), *b)));
-        self.hashes.extend(other.hashes.iter().map(|(a, b)| (a.clone(), b.clone())));
+        self.tensors
+            .extend(other.tensors.iter().map(|(a, b)| (a.clone(), b.clone())));
+        self.strings
+            .extend(other.strings.iter().map(|(a, b)| (a.clone(), b.clone())));
+        self.tokenizers
+            .extend(other.tokenizers.iter().map(|(a, b)| (a.clone(), b.clone())));
+        self.models
+            .extend(other.models.iter().map(|(a, b)| (a.clone(), *b)));
+        self.hashes
+            .extend(other.hashes.iter().map(|(a, b)| (a.clone(), b.clone())));
     }
 }

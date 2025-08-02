@@ -1,17 +1,17 @@
-pub mod operators;
-pub mod weights;
-pub mod tensor;
 mod node;
+pub mod operators;
 pub mod pytorch;
+pub mod tensor;
+pub mod weights;
 
+use node::*;
+use onnx::StringStringEntryProto;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::path::{PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tensor::*;
-use node::*;
-use serde::{Deserialize, Serialize};
-use onnx::StringStringEntryProto;
-use weights::{WeightExternalOutputManager};
+use weights::WeightExternalOutputManager;
 
 pub mod onnx {
     include!(concat!(env!("OUT_DIR"), "/onnx.rs"));
@@ -50,21 +50,25 @@ pub enum Error {
     #[error("Other error")]
     OtherError,
     #[error(transparent)]
-    SerdeJsonError(#[from] serde_json::Error)
+    SerdeJsonError(#[from] serde_json::Error),
 }
 
 pub enum WeightStorageStrategy {
     None,
     BinFile(PathBuf),
-    EmbeddedData
+    EmbeddedData,
 }
 
 impl WeightStorageStrategy {
     fn get_manager<'a>(&'a self) -> Result<Box<dyn WeightExternalOutputManager<'a> + 'a>, Error> {
         match self {
             WeightStorageStrategy::None => Ok(Box::new(weights::NullOutputManager::new())),
-            WeightStorageStrategy::BinFile(path) => Ok(Box::new(weights::BinOutputManager::<'a>::new(path))),
-            WeightStorageStrategy::EmbeddedData => Ok(Box::new(weights::EmbeddedOutputManager::<'a>::new()))
+            WeightStorageStrategy::BinFile(path) => {
+                Ok(Box::new(weights::BinOutputManager::<'a>::new(path)))
+            }
+            WeightStorageStrategy::EmbeddedData => {
+                Ok(Box::new(weights::EmbeddedOutputManager::<'a>::new()))
+            }
         }
     }
 }
@@ -72,50 +76,49 @@ impl WeightStorageStrategy {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ModelInputType {
     TokenID(usize), // Tokenizer ID number
-    PreviousInternal(usize)
+    PreviousInternal(usize),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InputMetadata {
-    pub model_input_type: ModelInputType
+    pub model_input_type: ModelInputType,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ModelOutputType {
     TokenID(usize), // Tokenizer ID number
-    NextInternal(usize)
+    NextInternal(usize),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutputMetadata {
-    pub model_output_type: ModelOutputType
+    pub model_output_type: ModelOutputType,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TokenizerInfo {
     HFTokenizer(String),
-    RWKVWorld
+    RWKVWorld,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelMetadata {
     pub tokenizer_infos: Vec<TokenizerInfo>,
-    pub max_token_batch: Option<usize>
+    pub max_token_batch: Option<usize>,
 }
 
 pub fn build_proto(
     inputs: &[(Arc<dyn Tensor>, Option<InputMetadata>)],
     outputs: &[(String, Arc<dyn Tensor>, Option<OutputMetadata>)],
     weight_storage: WeightStorageStrategy,
-    model_metadata: Option<ModelMetadata>
+    model_metadata: Option<ModelMetadata>,
 ) -> Result<onnx::ModelProto, Error> {
-    
     // Get all nodes in graph
     let mut nodes = HashSet::new();
     for (_, tensor, _) in outputs {
         tensor.get_nodes(&mut nodes);
     }
-    
+
     // Get requested node names
     let mut chosen_node_names: HashSet<String> = HashSet::new();
     let mut node_names: HashMap<&dyn Node, String> = HashMap::new();
@@ -152,7 +155,7 @@ pub fn build_proto(
     let mut tensor_names: HashMap<&dyn Tensor, String> = HashMap::new();
 
     // Assign requested names
-    for tensor in &tensors { 
+    for tensor in &tensors {
         if let Some(name) = tensor.get_name() {
             let name = name.to_string();
             if chosen_tensor_names.contains(&name) {
@@ -177,7 +180,7 @@ pub fn build_proto(
                 }
                 next_tensor_id += 1;
             };
-            
+
             tensor_names.insert(*tensor, name.clone());
             chosen_tensor_names.insert(name);
             next_tensor_id += 1;
@@ -190,24 +193,30 @@ pub fn build_proto(
         tensor.gather_weights(data_manager.as_mut());
     }
     data_manager.finalize_tensor_data();
-    
+
     // Find tensors that are not input or output, and add initializer sections
     let mut tensors_to_enumerate = vec![];
     for tensor in &tensors {
         // Check if tensor is not in inputs and outputs
-        if !inputs.iter().any(|(t, _)| (t.as_ref() as &dyn Tensor) == *tensor) && !outputs.iter().any(|(_, t, _)| t.as_ref() == *tensor) {
+        if !inputs
+            .iter()
+            .any(|(t, _)| (t.as_ref() as &dyn Tensor) == *tensor)
+            && !outputs.iter().any(|(_, t, _)| t.as_ref() == *tensor)
+        {
             tensors_to_enumerate.push(*tensor);
         }
     }
-    
+
     // Generate initializer blocks
     let mut initializers = vec![];
     for tensor in tensors {
-        if let Some(initializer) = tensor.get_initializer(tensor_names[&tensor].clone(), data_manager.as_mut())? {
+        if let Some(initializer) =
+            tensor.get_initializer(tensor_names[&tensor].clone(), data_manager.as_mut())?
+        {
             initializers.push(initializer);
         }
     }
-    
+
     // Order nodes so that dependencies are before dependents
     let sorted_nodes = {
         let mut provided_tensors: HashSet<&dyn Tensor> = HashSet::new();
@@ -226,10 +235,9 @@ pub fn build_proto(
                 if all_dependencies_provided {
                     sorted_nodes.push(node);
                     for output in node.get_output_tensors() {
-                        provided_tensors.insert(output); 
+                        provided_tensors.insert(output);
                     }
-                }
-                else {
+                } else {
                     new_remaining_nodes.push(node);
                 }
             }
@@ -237,32 +245,56 @@ pub fn build_proto(
         }
         sorted_nodes
     };
-    
-    let graph_inputs = inputs.iter().map(|(tensor, metadata)| {
-        let json_str = serde_json::to_string(&metadata).unwrap();
-        tensor.to_value_info_proto(tensor_names[&(tensor.as_ref())].clone(), vec![("whisper_tensor_metadata".to_string(), json_str)])
-    }).collect();
-    let graph_outputs = outputs.iter().map(|(name, tensor, metadata)| {
-        let json_str = serde_json::to_string(&metadata).unwrap();
-        tensor.to_value_info_proto(name.to_string(), vec![("whisper_tensor_metadata".to_string(), json_str)])
-    }).collect();
-    
-    
+
+    let graph_inputs = inputs
+        .iter()
+        .map(|(tensor, metadata)| {
+            let json_str = serde_json::to_string(&metadata).unwrap();
+            tensor.to_value_info_proto(
+                tensor_names[&(tensor.as_ref())].clone(),
+                vec![("whisper_tensor_metadata".to_string(), json_str)],
+            )
+        })
+        .collect();
+    let graph_outputs = outputs
+        .iter()
+        .map(|(name, tensor, metadata)| {
+            let json_str = serde_json::to_string(&metadata).unwrap();
+            tensor.to_value_info_proto(
+                name.to_string(),
+                vec![("whisper_tensor_metadata".to_string(), json_str)],
+            )
+        })
+        .collect();
+
     let graph = onnx::GraphProto {
         name: "model".to_string(),
-        node: sorted_nodes.iter().map(|node| node.to_node_proto(node_names.get(node).map(|name| name.clone()), &tensor_names)).collect(),
+        node: sorted_nodes
+            .iter()
+            .map(|node| {
+                node.to_node_proto(node_names.get(node).map(|name| name.clone()), &tensor_names)
+            })
+            .collect(),
         initializer: initializers,
         doc_string: String::new(),
         input: graph_inputs,
         output: graph_outputs,
-        value_info: tensors_to_enumerate.iter().map(|tensor| tensor.to_value_info_proto(tensor_names.get(tensor).unwrap().to_string(), vec![])).collect(),
+        value_info: tensors_to_enumerate
+            .iter()
+            .map(|tensor| {
+                tensor.to_value_info_proto(tensor_names.get(tensor).unwrap().to_string(), vec![])
+            })
+            .collect(),
         metadata_props: vec![],
-        .. Default::default()
+        ..Default::default()
     };
-    
+
     let model_metadata = if let Some(metadata) = model_metadata {
         let json_str = serde_json::to_string(&metadata)?;
-        vec![StringStringEntryProto{key: "whisper_tensor_metadata".to_string(), value: json_str}]
+        vec![StringStringEntryProto {
+            key: "whisper_tensor_metadata".to_string(),
+            value: json_str,
+        }]
     } else {
         vec![]
     };
@@ -270,7 +302,10 @@ pub fn build_proto(
     let own_version = env!("CARGO_PKG_VERSION").to_string();
     Ok(onnx::ModelProto {
         ir_version: onnx::Version::IrVersion2024325 as i64,
-        opset_import: vec![onnx::OperatorSetIdProto{version: 22, domain: "".to_string()}],
+        opset_import: vec![onnx::OperatorSetIdProto {
+            version: 22,
+            domain: "".to_string(),
+        }],
         producer_version: own_version,
         domain: String::new(),
         model_version: 0,
@@ -279,6 +314,6 @@ pub fn build_proto(
         metadata_props: model_metadata,
         training_info: vec![],
         functions: vec![],
-        .. Default::default()
+        ..Default::default()
     })
 }

@@ -1,25 +1,24 @@
 use num_traits::Float;
 use serde::{Deserialize, Serialize};
-pub mod symbolic_graph;
-pub mod numeric_tensor;
-pub mod dtype;
-pub mod sampler;
-pub mod language_model;
-pub mod tokenizer;
 pub mod backends;
-pub mod numeric_scalar;
-pub mod tensor_rank;
-pub mod numeric_tensor_typed;
-pub mod model;
-pub mod super_graph;
-pub mod milli_graph;
-pub mod scalar_info;
-pub mod tensor_info;
-pub mod symbolic_scalar;
+pub mod dtype;
 pub mod interfaces;
+pub mod language_model;
+pub mod milli_graph;
+pub mod model;
+pub mod numeric_scalar;
+pub mod numeric_tensor;
+pub mod numeric_tensor_typed;
+pub mod sampler;
+pub mod scalar_info;
+pub mod super_graph;
+pub mod symbolic_graph;
+pub mod symbolic_scalar;
+pub mod tensor_info;
+pub mod tensor_rank;
+pub mod tokenizer;
 
 pub use tensor_rank::DynRank;
-
 
 pub mod onnx {
     include!(concat!(env!("OUT_DIR"), "/onnx.rs"));
@@ -38,7 +37,7 @@ pub enum TrigOp {
     Cos,
     Cosh,
     Tan,
-    Tanh
+    Tanh,
 }
 
 impl TrigOp {
@@ -55,9 +54,7 @@ impl TrigOp {
             TrigOp::Cos => x.cos(),
             TrigOp::Cosh => x.cosh(),
             TrigOp::Tan => x.tan(),
-            TrigOp::Tanh => x.tanh()
+            TrigOp::Tanh => x.tanh(),
         }
     }
 }
-
-

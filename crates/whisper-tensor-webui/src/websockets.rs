@@ -1,11 +1,13 @@
 use tokio::sync::mpsc;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::Closure;
-use web_sys::{js_sys, WebSocket};
+use web_sys::{WebSocket, js_sys};
 use whisper_tensor_server::{WebsocketClientServerMessage, WebsocketServerClientMessage};
 
-pub (crate) async fn websocket_task(server_client_sender: mpsc::UnboundedSender<WebsocketServerClientMessage>,
-                                    mut client_server_receiver: mpsc::UnboundedReceiver<WebsocketClientServerMessage>) {
+pub(crate) async fn websocket_task(
+    server_client_sender: mpsc::UnboundedSender<WebsocketServerClientMessage>,
+    mut client_server_receiver: mpsc::UnboundedReceiver<WebsocketClientServerMessage>,
+) {
     let ws = WebSocket::new("/ws").unwrap();
 
     // Set up event handlers
@@ -24,22 +26,25 @@ pub (crate) async fn websocket_task(server_client_sender: mpsc::UnboundedSender<
                 let fr_c = fr.clone();
                 // create onLoadEnd callback
                 let sender_clone = server_client_sender_clone.clone();
-                let onloadend_cb = Closure::<dyn FnMut(_)>::new(move |_e: web_sys::ProgressEvent| {
-                    let array = js_sys::Uint8Array::new(&fr_c.result().unwrap());
-                    let vec = array.to_vec();
-                    log::info!("Blob received {} bytes: {:?}", vec.len(), vec);
-                    // here you can for example use the received image/png data
+                let onloadend_cb =
+                    Closure::<dyn FnMut(_)>::new(move |_e: web_sys::ProgressEvent| {
+                        let array = js_sys::Uint8Array::new(&fr_c.result().unwrap());
+                        let vec = array.to_vec();
+                        log::info!("Blob received {} bytes: {:?}", vec.len(), vec);
+                        // here you can for example use the received image/png data
 
-                    match ciborium::from_reader::<WebsocketServerClientMessage, _>(vec.as_slice()) {
-                        Ok(msg) => {
-                            log::debug!("Decoded message: {:?}", msg);
-                            sender_clone.send(msg).unwrap();
+                        match ciborium::from_reader::<WebsocketServerClientMessage, _>(
+                            vec.as_slice(),
+                        ) {
+                            Ok(msg) => {
+                                log::debug!("Decoded message: {:?}", msg);
+                                sender_clone.send(msg).unwrap();
+                            }
+                            Err(err) => {
+                                log::warn!("Failed to decode message: {:?}", err);
+                            }
                         }
-                        Err(err) => {
-                            log::warn!("Failed to decode message: {:?}", err);
-                        }
-                    }
-                });
+                    });
                 fr.set_onloadend(Some(onloadend_cb.as_ref().unchecked_ref()));
                 fr.read_as_array_buffer(&blob).expect("blob not readable");
                 onloadend_cb.forget();

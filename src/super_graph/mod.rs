@@ -1,23 +1,26 @@
+pub mod cache;
+pub mod data;
 pub mod links;
 pub mod nodes;
-pub mod data;
-pub mod cache;
 
-use std::collections::{HashMap, HashSet};
-use serde::{Deserialize, Serialize};
 use crate::backends::eval_backend::EvalBackend;
 use crate::milli_graph::MilliOpGraphError;
-use crate::model::{ModelError};
-use crate::numeric_tensor::{NumericTensorError};
+use crate::model::ModelError;
+use crate::numeric_tensor::NumericTensorError;
 use crate::numeric_tensor_typed::TypedNumericTensorError;
 use crate::super_graph::cache::SuperGraphCache;
 use crate::super_graph::data::SuperGraphData;
-use crate::super_graph::links::{SuperGraphAnyLink, SuperGraphLinkHash, SuperGraphLinkId, SuperGraphLinkModel, SuperGraphLinkString, SuperGraphLinkTensor, SuperGraphLinkTokenizer};
-use crate::super_graph::nodes::{SuperGraphAnyNode};
-use crate::tokenizer::{TokenizerError};
+use crate::super_graph::links::{
+    SuperGraphAnyLink, SuperGraphLinkHash, SuperGraphLinkId, SuperGraphLinkModel,
+    SuperGraphLinkString, SuperGraphLinkTensor, SuperGraphLinkTokenizer,
+};
+use crate::super_graph::nodes::SuperGraphAnyNode;
+use crate::tokenizer::TokenizerError;
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct SuperGraphNodeId (pub(crate) u32);
+pub struct SuperGraphNodeId(pub(crate) u32);
 
 #[derive(Debug, thiserror::Error)]
 pub enum SuperGraphError {
@@ -32,16 +35,21 @@ pub enum SuperGraphError {
     #[error(transparent)]
     TypedNumericTensorError(#[from] TypedNumericTensorError),
     #[error("Missing link")]
-    MissingLinkError()
+    MissingLinkError(),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SuperGraph {
-    inner: SuperGraphInner
+    inner: SuperGraphInner,
 }
 
 impl SuperGraph {
-    pub fn run<'a>(&'a self, data: SuperGraphData<'a>, caches: Option<&mut SuperGraphCache>, backend: &mut EvalBackend) -> Result<SuperGraphData<'a>, SuperGraphError> {
+    pub fn run<'a>(
+        &'a self,
+        data: SuperGraphData<'a>,
+        caches: Option<&mut SuperGraphCache>,
+        backend: &mut EvalBackend,
+    ) -> Result<SuperGraphData<'a>, SuperGraphError> {
         self.inner.eval(data, caches, backend)
     }
 }
@@ -54,7 +62,12 @@ pub struct SuperGraphInner {
 }
 
 impl SuperGraphInner {
-    pub fn eval<'a>(&'a self, data: SuperGraphData<'a>, mut caches: Option<&mut SuperGraphCache>, backend: &mut EvalBackend) -> Result<SuperGraphData<'a>, SuperGraphError> {
+    pub fn eval<'a>(
+        &'a self,
+        data: SuperGraphData<'a>,
+        mut caches: Option<&mut SuperGraphCache>,
+        backend: &mut EvalBackend,
+    ) -> Result<SuperGraphData<'a>, SuperGraphError> {
         let mut data = data;
 
         let mut remaining_ops = self.nodes.keys().map(|x| x.clone()).collect::<Vec<_>>();
@@ -110,13 +123,18 @@ impl SuperGraphInner {
                 let op = self.nodes.get(&op_id).unwrap();
                 op.eval(&mut data, caches.as_deref_mut(), backend)?;
                 remaining_ops.retain(|x| *x != op_id);
-            }
-            else {
+            } else {
                 break;
             }
         }
 
-        let output_data = data.select(self.output_links.iter().map(|x| x.clone()).collect::<Vec<_>>().as_slice())?;
+        let output_data = data.select(
+            self.output_links
+                .iter()
+                .map(|x| x.clone())
+                .collect::<Vec<_>>()
+                .as_slice(),
+        )?;
 
         Ok(output_data)
     }
@@ -133,7 +151,7 @@ impl SuperGraphBuilder {
         Self {
             next_node_id: 0,
             next_link_id: 0,
-            nodes: HashMap::new()
+            nodes: HashMap::new(),
         }
     }
 
@@ -155,17 +173,25 @@ impl SuperGraphBuilder {
         id
     }
 
-    pub fn build(self, input_links: &[SuperGraphAnyLink], output_links: &[SuperGraphAnyLink]) -> SuperGraph {
+    pub fn build(
+        self,
+        input_links: &[SuperGraphAnyLink],
+        output_links: &[SuperGraphAnyLink],
+    ) -> SuperGraph {
         SuperGraph {
             inner: SuperGraphInner {
                 nodes: self.nodes,
                 input_links: HashSet::from_iter(input_links.iter().map(|x| x.clone())),
                 output_links: HashSet::from_iter(output_links.iter().map(|x| x.clone())),
-            }
+            },
         }
     }
 
-    pub fn build_inner(self, input_links: &[SuperGraphAnyLink], output_links: &[SuperGraphAnyLink]) -> SuperGraphInner {
+    pub fn build_inner(
+        self,
+        input_links: &[SuperGraphAnyLink],
+        output_links: &[SuperGraphAnyLink],
+    ) -> SuperGraphInner {
         SuperGraphInner {
             nodes: self.nodes,
             input_links: HashSet::from_iter(input_links.iter().map(|x| x.clone())),

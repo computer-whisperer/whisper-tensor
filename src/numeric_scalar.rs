@@ -1,8 +1,8 @@
+use crate::TrigOp;
+use crate::dtype::{DType, DTypeOfPrimitive};
 use half::{bf16, f16};
 use num_traits::Float;
 use serde::{Deserialize, Serialize};
-use crate::dtype::{DType, DTypeOfPrimitive};
-use crate::TrigOp;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum NumericScalar {
@@ -19,7 +19,7 @@ pub enum NumericScalar {
     U8(u8),
     I8(i8),
     BOOL(bool),
-    STRING(String)
+    STRING(String),
 }
 
 impl NumericScalar {
@@ -38,10 +38,10 @@ impl NumericScalar {
             NumericScalar::U8(_) => DType::U8,
             NumericScalar::I8(_) => DType::I8,
             NumericScalar::BOOL(_) => DType::BOOL,
-            NumericScalar::STRING(_) => DType::STRING
+            NumericScalar::STRING(_) => DType::STRING,
         }
     }
-    
+
     pub fn zero_of(dtype: DType) -> Self {
         match dtype {
             DType::F64 => NumericScalar::F64(0.0),
@@ -60,7 +60,7 @@ impl NumericScalar {
             DType::STRING => NumericScalar::STRING(String::new()),
         }
     }
-    
+
     pub fn neg(&self) -> Self {
         match self {
             NumericScalar::F64(x) => Self::F64(-x),
@@ -158,8 +158,16 @@ impl NumericScalar {
         match self {
             NumericScalar::F64(x) => Self::F64(if *x == 0.0 { 0.0 } else { x.signum() }),
             NumericScalar::F32(x) => Self::F32(if *x == 0.0 { 0.0 } else { x.signum() }),
-            NumericScalar::BF16(x) => Self::BF16(if x.to_f32() == 0.0 { bf16::from_f32(0.0) } else { x.signum() }),
-            NumericScalar::F16(x) => Self::F16(if x.to_f32() == 0.0 { f16::from_f32(0.0) } else { x.signum() }),
+            NumericScalar::BF16(x) => Self::BF16(if x.to_f32() == 0.0 {
+                bf16::from_f32(0.0)
+            } else {
+                x.signum()
+            }),
+            NumericScalar::F16(x) => Self::F16(if x.to_f32() == 0.0 {
+                f16::from_f32(0.0)
+            } else {
+                x.signum()
+            }),
             NumericScalar::U64(x) => Self::U64(if *x == 0 { 0 } else { *x }),
             NumericScalar::U32(x) => Self::U32(if *x == 0 { 0 } else { *x }),
             NumericScalar::U16(x) => Self::U16(if *x == 0 { 0 } else { *x }),
@@ -174,10 +182,26 @@ impl NumericScalar {
 
     pub fn is_inf(&self, detect_positive: bool, detect_negative: bool) -> Self {
         match self {
-            NumericScalar::F64(x) => Self::BOOL(x.is_infinite() && ((detect_positive && x.is_sign_positive()) || (detect_negative && x.is_sign_negative()))),
-            NumericScalar::F32(x) => Self::BOOL(x.is_infinite() && ((detect_positive && x.is_sign_positive()) || (detect_negative && x.is_sign_negative()))),
-            NumericScalar::BF16(x) => Self::BOOL(x.is_infinite() && ((detect_positive && x.is_sign_positive()) || (detect_negative && x.is_sign_negative()))),
-            NumericScalar::F16(x) => Self::BOOL(x.is_infinite() && ((detect_positive && x.is_sign_positive()) || (detect_negative && x.is_sign_negative()))),
+            NumericScalar::F64(x) => Self::BOOL(
+                x.is_infinite()
+                    && ((detect_positive && x.is_sign_positive())
+                        || (detect_negative && x.is_sign_negative())),
+            ),
+            NumericScalar::F32(x) => Self::BOOL(
+                x.is_infinite()
+                    && ((detect_positive && x.is_sign_positive())
+                        || (detect_negative && x.is_sign_negative())),
+            ),
+            NumericScalar::BF16(x) => Self::BOOL(
+                x.is_infinite()
+                    && ((detect_positive && x.is_sign_positive())
+                        || (detect_negative && x.is_sign_negative())),
+            ),
+            NumericScalar::F16(x) => Self::BOOL(
+                x.is_infinite()
+                    && ((detect_positive && x.is_sign_positive())
+                        || (detect_negative && x.is_sign_negative())),
+            ),
             _ => panic!("Cannot is_inf this type"),
         }
     }
@@ -245,7 +269,7 @@ impl NumericScalar {
             _ => panic!("Cannot clamp_min this type"),
         }
     }
-    
+
     pub fn to_bytes(&self) -> Vec<u8> {
         match self {
             NumericScalar::F64(x) => x.to_le_bytes().to_vec(),
@@ -261,7 +285,7 @@ impl NumericScalar {
             NumericScalar::U8(x) => x.to_le_bytes().to_vec(),
             NumericScalar::I8(x) => x.to_le_bytes().to_vec(),
             NumericScalar::BOOL(x) => vec![*x as u8],
-            NumericScalar::STRING(_) => panic!()
+            NumericScalar::STRING(_) => panic!(),
         }
     }
 }
@@ -408,7 +432,6 @@ impl NumericScalarType for i64 {
         }
     }
 }
-
 
 impl NumericScalarType for u32 {
     fn to_numeric_scalar(self) -> NumericScalar {

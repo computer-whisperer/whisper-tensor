@@ -1,16 +1,19 @@
-use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
-use std::default::Default;
-use super::tensor::{Shape, TensorData};
-use super::tensor::Tensor;
 use super::DType;
+use super::tensor::Tensor;
+use super::tensor::{Shape, TensorData};
+use std::collections::{HashMap, HashSet};
+use std::default::Default;
+use std::hash::{Hash, Hasher};
 
 pub trait Node {
     fn get_input_tensors(&self) -> Vec<&dyn Tensor> {
         vec![]
     }
 
-    fn get_nodes<'a>(&'a self, table: &mut HashSet<&'a dyn Node>) where Self: Sized {
+    fn get_nodes<'a>(&'a self, table: &mut HashSet<&'a dyn Node>)
+    where
+        Self: Sized,
+    {
         let dyn_self: &dyn Node = self;
         if !table.contains(&dyn_self) {
             self.get_sub_nodes(table);
@@ -39,7 +42,6 @@ pub trait Node {
         None
     }
 
-
     fn get_onnx_type(&self) -> &str;
     fn get_onnx_domain(&self) -> &str {
         ""
@@ -47,26 +49,38 @@ pub trait Node {
 
     fn get_onnx_attributes(&self) -> Vec<super::onnx::AttributeProto>;
 
-    fn to_node_proto(&self, name: Option<String>, tensor_names: &HashMap<&dyn Tensor, String>) -> super::onnx::NodeProto {
+    fn to_node_proto(
+        &self,
+        name: Option<String>,
+        tensor_names: &HashMap<&dyn Tensor, String>,
+    ) -> super::onnx::NodeProto {
         super::onnx::NodeProto {
             name: name.unwrap_or_default(),
-            input: self.get_input_tensors().iter().map(|tensor| tensor_names[tensor].clone()).collect(),
-            output: self.get_output_tensors().iter().map(|tensor| tensor_names[tensor].clone()).collect(),
+            input: self
+                .get_input_tensors()
+                .iter()
+                .map(|tensor| tensor_names[tensor].clone())
+                .collect(),
+            output: self
+                .get_output_tensors()
+                .iter()
+                .map(|tensor| tensor_names[tensor].clone())
+                .collect(),
             op_type: self.get_onnx_type().to_string(),
             domain: self.get_onnx_domain().to_string(),
             attribute: self.get_onnx_attributes(),
-            .. Default::default()
+            ..Default::default()
         }
     }
 }
 
-impl<'a> PartialEq for &'a dyn Node{
-    fn eq(&self, other:&Self) -> bool{
+impl<'a> PartialEq for &'a dyn Node {
+    fn eq(&self, other: &Self) -> bool {
         std::ptr::addr_eq(*self, *other)
     }
 }
 
-impl<'a> Eq for &'a dyn Node{}
+impl<'a> Eq for &'a dyn Node {}
 
 impl<'a> Hash for &'a dyn Node {
     fn hash<H: Hasher>(&self, state: &mut H) {
@@ -80,7 +94,7 @@ pub(crate) trait SingleOutputNode: Node {
     fn get_output_shape(&self) -> &Shape;
 
     fn get_output_dtype(&self) -> DType;
-    
+
     fn resolve_output_data(&self) -> Option<TensorData> {
         None
     }

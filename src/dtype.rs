@@ -1,6 +1,6 @@
+use crate::onnx;
 use half::{bf16, f16};
 use serde::{Deserialize, Serialize};
-use crate::{onnx};
 
 #[derive(Debug, thiserror::Error)]
 pub enum DTypeError {
@@ -10,7 +10,7 @@ pub enum DTypeError {
     UnsupportedONNXDtype(onnx::tensor_proto::DataType),
     #[cfg(feature = "ort")]
     #[error("The ort dtype {0:?} is not supported")]
-    UnsupportedORTDtype(ort::tensor::TensorElementType)
+    UnsupportedORTDtype(ort::tensor::TensorElementType),
 }
 
 #[derive(Copy, Clone, Debug, Hash, Eq, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -28,7 +28,7 @@ pub enum DType {
     U8,
     I8,
     BOOL,
-    STRING
+    STRING,
 }
 
 impl DType {
@@ -47,7 +47,7 @@ impl DType {
             DType::U8 => Some(1),
             DType::I8 => Some(1),
             DType::BOOL => Some(1),
-            DType::STRING => None
+            DType::STRING => None,
         }
     }
 }
@@ -70,7 +70,7 @@ impl TryFrom<onnx::tensor_proto::DataType> for DType {
             onnx::tensor_proto::DataType::Int8 => DType::I8,
             onnx::tensor_proto::DataType::Bool => DType::BOOL,
             onnx::tensor_proto::DataType::String => DType::STRING,
-            _ => Err(DTypeError::UnsupportedONNXDtype(onnx_dtype))?
+            _ => Err(DTypeError::UnsupportedONNXDtype(onnx_dtype))?,
         })
     }
 }
@@ -129,7 +129,7 @@ impl TryFrom<DType> for candle_core::DType {
             DType::I64 => candle_core::DType::I64,
             DType::U32 => candle_core::DType::U32,
             DType::U8 => candle_core::DType::U8,
-            _ => Err(DTypeError::DTypeNotSupportedByBackend(value))?
+            _ => Err(DTypeError::DTypeNotSupportedByBackend(value))?,
         })
     }
 }
@@ -144,7 +144,7 @@ impl From<candle_core::DType> for DType {
             candle_core::DType::F16 => DType::F16,
             candle_core::DType::I64 => DType::I64,
             candle_core::DType::U8 => DType::U8,
-            candle_core::DType::U32 => DType::U32
+            candle_core::DType::U32 => DType::U32,
         }
     }
 }
@@ -153,17 +153,45 @@ pub trait DTypeOfPrimitive {
     const DTYPE: DType;
 }
 
-impl DTypeOfPrimitive for f64 { const DTYPE: DType = DType::F64; }
-impl DTypeOfPrimitive for f32 { const DTYPE: DType = DType::F32; }
-impl DTypeOfPrimitive for bf16 { const DTYPE: DType = DType::BF16; }
-impl DTypeOfPrimitive for f16 { const DTYPE: DType = DType::F16; }
-impl DTypeOfPrimitive for i64 { const DTYPE: DType = DType::I64; }
-impl DTypeOfPrimitive for u64 { const DTYPE: DType = DType::U64; }
-impl DTypeOfPrimitive for i32 { const DTYPE: DType = DType::I32; }
-impl DTypeOfPrimitive for u32 { const DTYPE: DType = DType::U32; }
-impl DTypeOfPrimitive for i16 { const DTYPE: DType = DType::I16; }
-impl DTypeOfPrimitive for u16 { const DTYPE: DType = DType::U16; }
-impl DTypeOfPrimitive for i8 { const DTYPE: DType = DType::I8; }
-impl DTypeOfPrimitive for u8 { const DTYPE: DType = DType::U8; }
-impl DTypeOfPrimitive for bool { const DTYPE: DType = DType::BOOL; }
-impl DTypeOfPrimitive for String { const DTYPE: DType = DType::STRING; }
+impl DTypeOfPrimitive for f64 {
+    const DTYPE: DType = DType::F64;
+}
+impl DTypeOfPrimitive for f32 {
+    const DTYPE: DType = DType::F32;
+}
+impl DTypeOfPrimitive for bf16 {
+    const DTYPE: DType = DType::BF16;
+}
+impl DTypeOfPrimitive for f16 {
+    const DTYPE: DType = DType::F16;
+}
+impl DTypeOfPrimitive for i64 {
+    const DTYPE: DType = DType::I64;
+}
+impl DTypeOfPrimitive for u64 {
+    const DTYPE: DType = DType::U64;
+}
+impl DTypeOfPrimitive for i32 {
+    const DTYPE: DType = DType::I32;
+}
+impl DTypeOfPrimitive for u32 {
+    const DTYPE: DType = DType::U32;
+}
+impl DTypeOfPrimitive for i16 {
+    const DTYPE: DType = DType::I16;
+}
+impl DTypeOfPrimitive for u16 {
+    const DTYPE: DType = DType::U16;
+}
+impl DTypeOfPrimitive for i8 {
+    const DTYPE: DType = DType::I8;
+}
+impl DTypeOfPrimitive for u8 {
+    const DTYPE: DType = DType::U8;
+}
+impl DTypeOfPrimitive for bool {
+    const DTYPE: DType = DType::BOOL;
+}
+impl DTypeOfPrimitive for String {
+    const DTYPE: DType = DType::STRING;
+}

@@ -1,11 +1,19 @@
-use candle_core::Device;
+use crate::backends::ndarray_backend::numeric_tensor::NDArrayNumericTensor;
 use crate::dtype::DTypeError;
-use crate::backends::ndarray_backend::numeric_tensor::{NDArrayNumericTensor};
 use crate::numeric_tensor::{NumericTensor, NumericTensorError};
 use crate::tensor_rank::{DimContainer, Rank};
+use candle_core::Device;
 
-pub(crate) fn load_to_device<R: Rank>(value: &NDArrayNumericTensor<R>, device: &Device) -> Result<candle_core::Tensor, NumericTensorError> {
-    let shape = value.shape().as_slice().into_iter().map(|x| *x as usize).collect::<Vec<_>>();
+pub(crate) fn load_to_device<R: Rank>(
+    value: &NDArrayNumericTensor<R>,
+    device: &Device,
+) -> Result<candle_core::Tensor, NumericTensorError> {
+    let shape = value
+        .shape()
+        .as_slice()
+        .into_iter()
+        .map(|x| *x as usize)
+        .collect::<Vec<_>>();
     Ok(match &value {
         NDArrayNumericTensor::F32(x) => {
             let x = x.as_slice_memory_order().unwrap();
@@ -35,9 +43,7 @@ pub(crate) fn load_to_device<R: Rank>(value: &NDArrayNumericTensor<R>, device: &
             let x = x.as_slice_memory_order().unwrap();
             candle_core::Tensor::from_slice(x, shape, device)?
         }
-        _ => {
-            Err(DTypeError::DTypeNotSupportedByBackend(value.dtype()))?
-        }
+        _ => Err(DTypeError::DTypeNotSupportedByBackend(value.dtype()))?,
     })
 }
 
@@ -47,7 +53,6 @@ impl<R: Rank> TryFrom<&NDArrayNumericTensor<R>> for candle_core::Tensor {
         load_to_device(value, &candle_core::Device::Cpu)
     }
 }
-
 
 impl<R: Rank> TryFrom<NDArrayNumericTensor<R>> for candle_core::Tensor {
     type Error = NumericTensorError;
@@ -66,7 +71,7 @@ impl<R: Rank> TryFrom<&candle_core::Tensor> for NDArrayNumericTensor<R> {
             candle_core::DType::F64 => {
                 let v = tensor_flat.to_vec1::<f64>()?;
                 NDArrayNumericTensor::try_from_vec_shape(v, shape)?
-            },
+            }
             candle_core::DType::U8 => {
                 let v = tensor_flat.to_vec1::<u8>()?;
                 NDArrayNumericTensor::try_from_vec_shape(v, shape)?
@@ -107,7 +112,7 @@ impl<R: Rank> TryFrom<NumericTensor<R>> for candle_core::Tensor {
     fn try_from(value: NumericTensor<R>) -> Result<Self, Self::Error> {
         Ok(match value {
             NumericTensor::Candle(x) => x,
-            _ => candle_core::Tensor::try_from(value.to_ndarray()?)?
+            _ => candle_core::Tensor::try_from(value.to_ndarray()?)?,
         })
     }
 }
@@ -117,7 +122,7 @@ impl<R: Rank> TryFrom<&NumericTensor<R>> for candle_core::Tensor {
     fn try_from(value: &NumericTensor<R>) -> Result<Self, Self::Error> {
         Ok(match value {
             NumericTensor::Candle(x) => x.clone(),
-            _ => candle_core::Tensor::try_from(value.to_ndarray()?)?
+            _ => candle_core::Tensor::try_from(value.to_ndarray()?)?,
         })
     }
 }

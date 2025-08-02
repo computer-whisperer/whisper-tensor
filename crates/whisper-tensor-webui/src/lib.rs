@@ -1,14 +1,14 @@
 #[cfg(target_arch = "wasm32")]
 mod app;
 #[cfg(target_arch = "wasm32")]
+mod graph_explorer;
+#[cfg(target_arch = "wasm32")]
 mod graph_layout;
+mod llm_explorer;
 #[cfg(target_arch = "wasm32")]
 mod websockets;
 #[cfg(target_arch = "wasm32")]
 mod widgets;
-#[cfg(target_arch = "wasm32")]
-mod graph_explorer;
-mod llm_explorer;
 
 #[cfg(target_arch = "wasm32")]
 pub use app::WebUIApp;
@@ -25,7 +25,6 @@ fn main() {
 
     let (server_client_sender, server_client_receiver) = mpsc::unbounded_channel();
     let (client_server_sender, client_server_receiver) = mpsc::unbounded_channel();
-
 
     // Redirect `log` message to `console.log` and friends:
     eframe::WebLogger::init(log::LevelFilter::Debug).ok();
@@ -53,9 +52,14 @@ fn main() {
                 canvas,
                 web_options,
                 Box::new(|cc| {
-                    Ok(Box::new(WebUIApp::new(cc, server_client_receiver, client_server_sender)))
+                    Ok(Box::new(WebUIApp::new(
+                        cc,
+                        server_client_receiver,
+                        client_server_sender,
+                    )))
                 }),
-            ).await;
+            )
+            .await;
 
         // Remove the loading text and spinner:
         if let Some(loading_text) = document.get_element_by_id("loading_text") {

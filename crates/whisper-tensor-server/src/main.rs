@@ -1,37 +1,37 @@
+use axum::{
+    Router,
+    extract::ws::{WebSocket, WebSocketUpgrade},
+    response::IntoResponse,
+    routing::{get, post},
+};
+use std::cmp::Ordering;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::cmp::Ordering;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32};
+use std::sync::atomic::AtomicU32;
 use std::time;
+use tokio::sync::RwLock;
+use tokio::sync::watch;
 use tokio::time::sleep;
 use tower_http::{
     services::{ServeDir, ServeFile},
     trace::TraceLayer,
 };
-use axum::{
-    extract::ws::{WebSocket, WebSocketUpgrade},
-    response::IntoResponse,
-    routing::{get, post},
-    Router,
-};
-use tokio::sync::RwLock;
-use whisper_tensor::{DynRank};
+use whisper_tensor::DynRank;
 use whisper_tensor::backends::eval_backend::EvalBackend;
-use tokio::sync::watch;
 
 struct ModelData {
     model: Model,
     model_id: LoadedModelId,
-    model_name: String
+    model_name: String,
 }
 
 pub(crate) struct ModelServer {
     models: RwLock<Vec<ModelData>>,
     next_model_id: AtomicU32,
     models_report_watch_sender: watch::Sender<Vec<CurrentModelsReportEntry>>,
-    models_report_watch_receiver: watch::Receiver<Vec<CurrentModelsReportEntry>>
+    models_report_watch_receiver: watch::Receiver<Vec<CurrentModelsReportEntry>>,
 }
 
 impl ModelServer {
@@ -41,39 +41,51 @@ impl ModelServer {
             models: RwLock::new(vec![]),
             next_model_id: AtomicU32::new(0),
             models_report_watch_sender,
-            models_report_watch_receiver
+            models_report_watch_receiver,
         }
     }
-    
+
     pub(crate) async fn generate_new_model_report(&self) {
         let guard = self.models.read().await;
         let mut new_vec = vec![];
 
         for model in guard.iter() {
             let model_type_metadata = ModelTypeMetadata::Other;
-            new_vec.push(CurrentModelsReportEntry{
+            new_vec.push(CurrentModelsReportEntry {
                 model_id: model.model_id,
                 model_name: model.model_name.clone(),
                 num_ops: model.model.get_symbolic_graph().get_operations().len() as u64,
-                model_type_metadata
+                model_type_metadata,
             })
         }
         self.models_report_watch_sender.send(new_vec).unwrap()
     }
 
-    pub(crate) async fn load_model(&self, model_path: &Path, model_hint: Option<ModelTypeHint>, model_load_type: ModelLoadType) -> Result<(), anyhow::Error> {
-        let onnx_data = identify_and_load(model_path, WeightStorageStrategy::EmbeddedData, model_hint)?;
-        
+    pub(crate) async fn load_model(
+        &self,
+        model_path: &Path,
+        model_hint: Option<ModelTypeHint>,
+        model_load_type: ModelLoadType,
+    ) -> Result<(), anyhow::Error> {
+        let onnx_data =
+            identify_and_load(model_path, WeightStorageStrategy::EmbeddedData, model_hint)?;
+
         let runtime_model = Model::new_from_onnx(&onnx_data)?;
-        let model_name = model_path.file_stem().unwrap_or_default().to_str().unwrap_or_default().to_string();
-        let model_id = self.next_model_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let model_name = model_path
+            .file_stem()
+            .unwrap_or_default()
+            .to_str()
+            .unwrap_or_default()
+            .to_string();
+        let model_id = self
+            .next_model_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut guard = self.models.write().await;
-        
-        
-        guard.push(ModelData{
+
+        guard.push(ModelData {
             model: runtime_model,
             model_id: LoadedModelId(model_id),
-            model_name
+            model_name,
         });
         drop(guard);
         self.generate_new_model_report().await;
@@ -87,51 +99,67 @@ impl ModelServer {
         self.generate_new_model_report().await;
         Ok(())
     }
-    
-    pub(crate) async fn with_model<T>(&self, model_id: LoadedModelId, f: impl FnOnce(&ModelData) -> T) -> Result<T, String>
-    {
+
+    pub(crate) async fn with_model<T>(
+        &self,
+        model_id: LoadedModelId,
+        f: impl FnOnce(&ModelData) -> T,
+    ) -> Result<T, String> {
         let guard = self.models.read().await;
         if let Some(model) = guard.iter().find(|model| model.model_id == model_id) {
             Ok(f(model))
-        }
-        else {
+        } else {
             Err(format!("Model with id {} not found", model_id))
         }
     }
-    
-    pub(crate) async fn get_stored_tensor_id(&self, model_id: LoadedModelId, stored_tensor_id: TensorStoreTensorId) -> Result<NumericTensor<DynRank>, String> {
+
+    pub(crate) async fn get_stored_tensor_id(
+        &self,
+        model_id: LoadedModelId,
+        stored_tensor_id: TensorStoreTensorId,
+    ) -> Result<NumericTensor<DynRank>, String> {
         let guard = self.models.read().await;
         if let Some(model) = guard.iter().find(|model| model.model_id == model_id) {
-            model.model.get_tensor_store().get_tensor(stored_tensor_id).map(|x| x.to_numeric()).ok_or("Tensor not found in Tensor Store".to_string())
-        }
-        else {
+            model
+                .model
+                .get_tensor_store()
+                .get_tensor(stored_tensor_id)
+                .map(|x| x.to_numeric())
+                .ok_or("Tensor not found in Tensor Store".to_string())
+        } else {
             Err(format!("Model with id {} not found", model_id))
         }
     }
 }
 
-async fn websocket_handler(ws: WebSocketUpgrade, model_server: Arc<ModelServer>) -> impl IntoResponse {
-    ws.on_upgrade(|socket: WebSocket| {handle_socket(socket, model_server)})
+async fn websocket_handler(
+    ws: WebSocketUpgrade,
+    model_server: Arc<ModelServer>,
+) -> impl IntoResponse {
+    ws.on_upgrade(|socket: WebSocket| handle_socket(socket, model_server))
 }
 
 use axum::extract::ws::Message;
-use tracing::Instrument;
-use whisper_tensor::language_model::LanguageModelManager;
-use whisper_tensor::numeric_tensor::NumericTensor;
-use whisper_tensor::symbolic_graph::SymbolicGraph;
-use whisper_tensor::symbolic_graph::tensor_store::TensorStoreTensorId;
-use whisper_tensor::tokenizer::AnyTokenizer;
-use whisper_tensor_import::{identify_and_load, ModelTypeHint};
-use whisper_tensor_import::onnx_graph::WeightStorageStrategy;
-use whisper_tensor_server::{CurrentModelsReportEntry, LLMMetadata, LoadedModelId, ModelLoadType, ModelTypeMetadata, WebsocketClientServerMessage, WebsocketServerClientMessage};
 use hf_hub::api::sync::Api;
 use hf_hub::api::tokio::ApiBuilder;
 use hf_hub::{Repo, RepoType};
 use log::info;
 use tokenizers::FromPretrainedParameters;
+use tracing::Instrument;
 use typenum::P1;
 use whisper_tensor::dtype::DType;
+use whisper_tensor::language_model::LanguageModelManager;
 use whisper_tensor::model::Model;
+use whisper_tensor::numeric_tensor::NumericTensor;
+use whisper_tensor::symbolic_graph::SymbolicGraph;
+use whisper_tensor::symbolic_graph::tensor_store::TensorStoreTensorId;
+use whisper_tensor::tokenizer::AnyTokenizer;
+use whisper_tensor_import::onnx_graph::WeightStorageStrategy;
+use whisper_tensor_import::{ModelTypeHint, identify_and_load};
+use whisper_tensor_server::{
+    CurrentModelsReportEntry, LLMMetadata, LoadedModelId, ModelLoadType, ModelTypeMetadata,
+    WebsocketClientServerMessage, WebsocketServerClientMessage,
+};
 
 async fn send_message(socket: &mut WebSocket, message: WebsocketServerClientMessage) {
     let mut data = Vec::<u8>::new();
@@ -186,12 +214,14 @@ pub async fn hf_from_pretrained<S: AsRef<str>>(
 }
 
 async fn handle_socket(mut socket: WebSocket, model_server: Arc<ModelServer>) {
-
-
     // Send opening state
     let mut receiver = model_server.models_report_watch_receiver.clone();
     let initial_value = receiver.borrow_and_update().clone();
-    send_message(&mut socket, WebsocketServerClientMessage::CurrentModelsReport(initial_value)).await;
+    send_message(
+        &mut socket,
+        WebsocketServerClientMessage::CurrentModelsReport(initial_value),
+    )
+    .await;
 
     loop {
         tokio::select! {
@@ -329,18 +359,37 @@ async fn main() {
     let model_server = Arc::new(ModelServer::new());
 
     // Load test models
-    model_server.load_model(Path::new("gpt2-lm-head-10.onnx"), Some(ModelTypeHint::GPT2), ModelLoadType::LLM).await.unwrap();
+    model_server
+        .load_model(
+            Path::new("gpt2-lm-head-10.onnx"),
+            Some(ModelTypeHint::GPT2),
+            ModelLoadType::LLM,
+        )
+        .await
+        .unwrap();
     model_server.load_model(Path::new("libs/onnx/onnx/backend/test/data/node/test_layer_normalization_2d_axis0_expanded/model.onnx"), None, ModelLoadType::Other).await.unwrap();
-    
+
     tokio::spawn(async move {
         let model_server = model_server.clone();
         let app = Router::new()
             .route("/health", get(|| async { "ok" }))
-            .route("/ws", get(move |ws: WebSocketUpgrade| {websocket_handler(ws, model_server.clone())}))  // Add WebSocket endpoint
+            .route(
+                "/ws",
+                get(move |ws: WebSocketUpgrade| websocket_handler(ws, model_server.clone())),
+            ) // Add WebSocket endpoint
             .nest_service("/pkg", ServeDir::new("./crates/whisper-tensor-webui/pkg/"))
-            .nest_service("/assets", ServeDir::new("./crates/whisper-tensor-webui/assets/"))
-            .route_service("/index.html", ServeFile::new("./crates/whisper-tensor-webui/assets/index.html"))
-            .route_service("/", ServeFile::new("./crates/whisper-tensor-webui/assets/index.html"))
+            .nest_service(
+                "/assets",
+                ServeDir::new("./crates/whisper-tensor-webui/assets/"),
+            )
+            .route_service(
+                "/index.html",
+                ServeFile::new("./crates/whisper-tensor-webui/assets/index.html"),
+            )
+            .route_service(
+                "/",
+                ServeFile::new("./crates/whisper-tensor-webui/assets/index.html"),
+            )
             .layer(TraceLayer::new_for_http());
 
         let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();

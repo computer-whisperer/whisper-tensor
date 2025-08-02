@@ -1,12 +1,12 @@
-use std::collections::HashMap;
-use std::hash::Hash;
-use serde::{Deserialize, Serialize};
+use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::dtype::DTypeError;
-use crate::DynRank;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::numeric_tensor::NumericTensor;
 use crate::tensor_info::TensorInfoError;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::hash::Hash;
 
 pub mod ops;
 pub(crate) mod ops_helpers;
@@ -26,7 +26,7 @@ pub enum MilliOpGraphError {
     #[error(transparent)]
     TensorInfoError(#[from] TensorInfoError),
     #[error("Unable to do any type if inference")]
-    UnableToInfer
+    UnableToInfer,
 }
 
 #[derive(Debug, Clone, Copy, Hash, Ord, PartialOrd, Eq, PartialEq, Serialize, Deserialize)]
@@ -34,13 +34,12 @@ pub struct MilliOpGraphTensorId {
     inner: usize,
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MilliOpGraph<ID: Hash + Clone + Eq> {
     input_map: HashMap<ID, MilliOpGraphTensorId>,
     output_map: Option<HashMap<MilliOpGraphTensorId, ID>>,
     ops: HashMap<MilliOpGraphTensorId, AnyMilliOp>,
-    next_op_id: usize
+    next_op_id: usize,
 }
 
 impl<ID: Hash + Clone + Eq> MilliOpGraph<ID> {
@@ -48,15 +47,18 @@ impl<ID: Hash + Clone + Eq> MilliOpGraph<ID> {
         let mut next_op_id = 0;
         let mut input_map = HashMap::new();
         for input in inputs {
-            input_map.insert(input.clone(), MilliOpGraphTensorId{inner:next_op_id});
+            input_map.insert(input.clone(), MilliOpGraphTensorId { inner: next_op_id });
             next_op_id += 1;
         }
-        (Self{
-            input_map: input_map.clone(),
-            ops: HashMap::new(),
-            output_map: None,
-            next_op_id
-        }, input_map)
+        (
+            Self {
+                input_map: input_map.clone(),
+                ops: HashMap::new(),
+                output_map: None,
+                next_op_id,
+            },
+            input_map,
+        )
     }
 
     pub fn get_inputs(&self) -> Vec<ID> {
@@ -66,8 +68,7 @@ impl<ID: Hash + Clone + Eq> MilliOpGraph<ID> {
     pub fn get_outputs(&self) -> Vec<ID> {
         if let Some(x) = &self.output_map {
             x.values().cloned().collect()
-        }
-        else {
+        } else {
             vec![]
         }
     }
@@ -78,13 +79,19 @@ impl<ID: Hash + Clone + Eq> MilliOpGraph<ID> {
     }
 
     pub fn push_op(&mut self, op: AnyMilliOp) -> MilliOpGraphTensorId {
-        let new_tensor_id = MilliOpGraphTensorId{inner:self.next_op_id};
+        let new_tensor_id = MilliOpGraphTensorId {
+            inner: self.next_op_id,
+        };
         self.next_op_id += 1;
         self.ops.insert(new_tensor_id, op);
         new_tensor_id
     }
 
-    pub(crate) fn eval(&self, inputs: &HashMap<ID, NumericTensor<DynRank>>, backend: &mut EvalBackend) -> Result<HashMap<ID, NumericTensor<DynRank>>, MilliOpGraphError> {
+    pub(crate) fn eval(
+        &self,
+        inputs: &HashMap<ID, NumericTensor<DynRank>>,
+        backend: &mut EvalBackend,
+    ) -> Result<HashMap<ID, NumericTensor<DynRank>>, MilliOpGraphError> {
         assert!(self.output_map.is_some());
 
         let op_ids_to_eval: Vec<_> = {

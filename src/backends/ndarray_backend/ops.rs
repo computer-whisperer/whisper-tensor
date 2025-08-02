@@ -1,10 +1,13 @@
-use std::ops::{Add, BitAnd, BitOr, BitXor, Mul};
-use ndarray::{concatenate, s, ArcArray, Array, Array2, ArrayD, ArrayView2, ArrayViewD, ArrayViewMut2, Axis, Dimension, Ix1, Ix2, IxDyn, LinalgScalar, ShapeError, SliceInfoElem, Zip};
-use ndarray::linalg::{general_mat_mul};
-use num_traits::{Float, FromPrimitive, Num, NumCast, One, Zero};
-use num_traits::real::Real;
-use serde::{Deserialize, Serialize};
 use crate::TrigOp;
+use ndarray::linalg::general_mat_mul;
+use ndarray::{
+    ArcArray, Array, Array2, ArrayD, ArrayView2, ArrayViewD, ArrayViewMut2, Axis, Dimension, Ix1,
+    Ix2, IxDyn, LinalgScalar, ShapeError, SliceInfoElem, Zip, concatenate, s,
+};
+use num_traits::real::Real;
+use num_traits::{Float, FromPrimitive, Num, NumCast, One, Zero};
+use serde::{Deserialize, Serialize};
+use std::ops::{Add, BitAnd, BitOr, BitXor, Mul};
 
 #[derive(Debug, thiserror::Error)]
 pub enum NDArrayOperationError {
@@ -26,7 +29,10 @@ pub enum NDArrayOperationError {
     EmptyInput,
 }
 
-pub(crate) fn reshape<T, D: Dimension>(input: ArcArray<T, D>, shape: D) -> Result<ArcArray<T, D>, ShapeError>
+pub(crate) fn reshape<T, D: Dimension>(
+    input: ArcArray<T, D>,
+    shape: D,
+) -> Result<ArcArray<T, D>, ShapeError>
 where
     T: Clone,
 {
@@ -60,7 +66,7 @@ pub(crate) fn gather<T: Clone>(
     let mut out_shape = Vec::with_capacity(rank - 1 + idx_shape.len());
     out_shape.extend(&data_shape[..dim]);
     out_shape.extend(idx_shape);
-    out_shape.extend(&data_shape[dim+1..]);
+    out_shape.extend(&data_shape[dim + 1..]);
     let out_len = out_shape.iter().product::<usize>();
 
     // 2) Compute row‐major strides for output
@@ -73,7 +79,7 @@ pub(crate) fn gather<T: Clone>(
             // check overflow just in case
             stride = stride
                 .checked_mul(out_shape[i])
-                .ok_or_else(||NDArrayOperationError::OutOfBounds)?;
+                .ok_or_else(|| NDArrayOperationError::OutOfBounds)?;
         }
     }
 
@@ -89,7 +95,7 @@ pub(crate) fn gather<T: Clone>(
         }
 
         // b) extract the slice that indexes into `indices`
-        let idx_inds = &idx_multi[dim .. dim + idx_shape.len()];
+        let idx_inds = &idx_multi[dim..dim + idx_shape.len()];
         let mut ix = indices[IxDyn(idx_inds)];
         // handle negative
         if ix < 0 {
@@ -170,9 +176,7 @@ pub fn concat<T: Clone>(
 /// # Errors
 /// - if the built buffer doesn’t match the computed [r,n]
 ///
-pub fn nonzero<T>(
-    tensor: ArcArray<T, IxDyn>,
-) -> Result<ArcArray<i64, IxDyn>, NDArrayOperationError>
+pub fn nonzero<T>(tensor: ArcArray<T, IxDyn>) -> Result<ArcArray<i64, IxDyn>, NDArrayOperationError>
 where
     T: Clone + PartialEq + Default + Copy,
 {
@@ -235,7 +239,7 @@ where
                 }
                 Ok(idx as usize)
             })
-            .collect::<Result<_,_>>()?
+            .collect::<Result<_, _>>()?
     } else {
         // default: reverse the axes
         (0..rank).rev().collect()
@@ -256,26 +260,32 @@ pub(crate) enum ReduceOp {
     Mean,
     Prod,
     Min,
-    Max
+    Max,
 }
 
 impl ReduceOp {
-    pub fn apply<T>(&self, tensor: ArcArray<T, IxDyn>,
-                    axes: Vec<usize>,
-                    keepdims: bool) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError>
+    pub fn apply<T>(
+        &self,
+        tensor: ArcArray<T, IxDyn>,
+        axes: Vec<usize>,
+        keepdims: bool,
+    ) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError>
     where
-        T: Clone + Zero + NumCast + std::ops::Div<Output = T> + Copy + One
+        T: Clone + Zero + NumCast + std::ops::Div<Output = T> + Copy + One,
     {
         Ok(match self {
             ReduceOp::Sum => reduce_sum(tensor, axes, keepdims)?,
             ReduceOp::Mean => reduce_mean(tensor, axes, keepdims)?,
             ReduceOp::Prod => reduce_prod(tensor, axes, keepdims)?,
-            ReduceOp::Min => Err(NDArrayOperationError::UnimplementedOp("ReduceMin".to_string()))?,
-            ReduceOp::Max => Err(NDArrayOperationError::UnimplementedOp("ReduceMax".to_string()))?,
+            ReduceOp::Min => Err(NDArrayOperationError::UnimplementedOp(
+                "ReduceMin".to_string(),
+            ))?,
+            ReduceOp::Max => Err(NDArrayOperationError::UnimplementedOp(
+                "ReduceMax".to_string(),
+            ))?,
         })
     }
 }
-
 
 /// ONNX ReduceMean: compute the mean over `axes` (or all axes if `None`),
 /// with `keepdims` controlling whether reduced dims remain as size 1.
@@ -294,7 +304,7 @@ pub fn reduce_mean<T>(
     keepdims: bool,
 ) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError>
 where
-    T: Clone + Zero + NumCast + std::ops::Div<Output = T> + Copy
+    T: Clone + Zero + NumCast + std::ops::Div<Output = T> + Copy,
 {
     let input_shape = tensor.shape().to_vec();
 
@@ -318,7 +328,6 @@ where
 
     // 3) For each axis, sum & divide, then optionally re-insert the dim
     for &axis in &ax {
-
         // a) sum over this axis
         let summed = result.sum_axis(Axis(axis));
         // b) divide by the count along that axis
@@ -344,10 +353,9 @@ pub fn reduce_sum<T>(
     keepdims: bool,
 ) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError>
 where
-    T: Clone + Zero + NumCast + std::ops::Div<Output = T> + Copy
+    T: Clone + Zero + NumCast + std::ops::Div<Output = T> + Copy,
 {
-
-    let mut ax =  axes;
+    let mut ax = axes;
 
     // 1a) Deduplicate & sort descending (so reductions don’t shift later axes)
     {
@@ -366,7 +374,6 @@ where
 
     // 3) For each axis, sum & divide, then optionally re-insert the dim
     for &axis in &ax {
-
         // a) sum over this axis
         let summed = result.sum_axis(Axis(axis));
 
@@ -388,9 +395,8 @@ pub fn reduce_prod<T>(
     keepdims: bool,
 ) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError>
 where
-    T: Clone + Zero + NumCast + std::ops::Div<Output = T> + Copy + One
+    T: Clone + Zero + NumCast + std::ops::Div<Output = T> + Copy + One,
 {
-
     // 1) Normalize axes list
     let mut ax = axes;
 
@@ -411,7 +417,6 @@ where
 
     // 3) For each axis, sum & divide, then optionally re-insert the dim
     for &axis in &ax {
-
         // a) sum over this axis
         let summed = result.product_axis(Axis(axis));
 
@@ -427,7 +432,6 @@ where
     Ok(ArcArray::from(result))
 }
 
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum NativeNumericTensorBinaryOperation {
     Add,
@@ -436,7 +440,7 @@ pub enum NativeNumericTensorBinaryOperation {
     Div,
     FMod,
     Max,
-    Min
+    Min,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -445,14 +449,14 @@ pub enum NativeNumericTensorBinaryOperationBoolOut {
     Less,
     LessOrEqual,
     Greater,
-    GreaterOrEqual
+    GreaterOrEqual,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum NativeNumericTensorBitwiseBinaryOperation {
     And,
     Or,
-    Xor
+    Xor,
 }
 
 impl core::fmt::Display for NativeNumericTensorBinaryOperation {
@@ -462,7 +466,10 @@ impl core::fmt::Display for NativeNumericTensorBinaryOperation {
 }
 
 #[allow(dead_code)]
-fn try_multidirectional_broadcasting(a: &[usize], b: &[usize]) -> Result<Vec<usize>, NDArrayOperationError> {
+fn try_multidirectional_broadcasting(
+    a: &[usize],
+    b: &[usize],
+) -> Result<Vec<usize>, NDArrayOperationError> {
     let mut a = a.to_vec();
     let mut b = b.to_vec();
 
@@ -475,32 +482,39 @@ fn try_multidirectional_broadcasting(a: &[usize], b: &[usize]) -> Result<Vec<usi
     }
     let mut output_dims = vec![];
     for i in 0..a.len() {
-        output_dims.push(
-            if a[i] == b[i] {
-                a[i].clone()
-            }
-            else {
-                if a[i] == 1 {
-                    b[i].clone()
-                }
-                else {
-                    if b[i] == 1 {
-                        a[i].clone()
-                    }
-                    else {
-                        Err(NDArrayOperationError::IncompatibleShape)?
-                    }
+        output_dims.push(if a[i] == b[i] {
+            a[i].clone()
+        } else {
+            if a[i] == 1 {
+                b[i].clone()
+            } else {
+                if b[i] == 1 {
+                    a[i].clone()
+                } else {
+                    Err(NDArrayOperationError::IncompatibleShape)?
                 }
             }
-        );
+        });
     }
 
     Ok(output_dims)
 }
 
 impl NativeNumericTensorBinaryOperation {
-    pub(crate) fn applyf<'a, T: 'a>(&self, a: ArcArray<T, IxDyn>, b: ArcArray<T, IxDyn>) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError> where
-        T: Clone + Copy + Real + std::ops::Add<Output = T> + std::ops::Sub<Output = T> + std::ops::Mul<Output = T> + std::ops::Div<Output = T> + std::ops::Rem<Output = T>,
+    pub(crate) fn applyf<'a, T: 'a>(
+        &self,
+        a: ArcArray<T, IxDyn>,
+        b: ArcArray<T, IxDyn>,
+    ) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError>
+    where
+        T: Clone
+            + Copy
+            + Real
+            + std::ops::Add<Output = T>
+            + std::ops::Sub<Output = T>
+            + std::ops::Mul<Output = T>
+            + std::ops::Div<Output = T>
+            + std::ops::Rem<Output = T>,
     {
         let a = if let Some(a) = a.broadcast(b.shape()) {
             a
@@ -510,8 +524,7 @@ impl NativeNumericTensorBinaryOperation {
 
         let b = if let Some(b) = b.broadcast(a.shape()) {
             b
-        }
-        else {
+        } else {
             b.view()
         };
 
@@ -521,13 +534,29 @@ impl NativeNumericTensorBinaryOperation {
             Self::Mul => (&a * &b).into(),
             Self::Div => (&a / &b).into(),
             Self::FMod => (&a % &b).into(),
-            Self::Max => ndarray::Zip::from(a).and(b).map_collect(|a, b| (*a).max(*b)),
-            Self::Min => ndarray::Zip::from(a).and(b).map_collect(|a, b| (*a).min(*b))
+            Self::Max => ndarray::Zip::from(a)
+                .and(b)
+                .map_collect(|a, b| (*a).max(*b)),
+            Self::Min => ndarray::Zip::from(a)
+                .and(b)
+                .map_collect(|a, b| (*a).min(*b)),
         };
         Ok(o.to_shared())
     }
-    pub(crate) fn applyi<'a, T: 'a>(&self, a: ArcArray<T, IxDyn>, b: ArcArray<T, IxDyn>) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError> where
-        T: Clone + Copy + Ord + std::ops::Add<Output = T> + std::ops::Sub<Output = T> + std::ops::Mul<Output = T> + std::ops::Div<Output = T> + std::ops::Rem<Output = T>,
+    pub(crate) fn applyi<'a, T: 'a>(
+        &self,
+        a: ArcArray<T, IxDyn>,
+        b: ArcArray<T, IxDyn>,
+    ) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError>
+    where
+        T: Clone
+            + Copy
+            + Ord
+            + std::ops::Add<Output = T>
+            + std::ops::Sub<Output = T>
+            + std::ops::Mul<Output = T>
+            + std::ops::Div<Output = T>
+            + std::ops::Rem<Output = T>,
     {
         let a = if let Some(a) = a.broadcast(b.shape()) {
             a
@@ -537,8 +566,7 @@ impl NativeNumericTensorBinaryOperation {
 
         let b = if let Some(b) = b.broadcast(a.shape()) {
             b
-        }
-        else {
+        } else {
             b.view()
         };
 
@@ -548,15 +576,24 @@ impl NativeNumericTensorBinaryOperation {
             Self::Mul => (&a * &b).into(),
             Self::Div => (&a / &b).into(),
             Self::FMod => (&a % &b).into(),
-            Self::Max => ndarray::Zip::from(a).and(b).map_collect(|a, b| (*a).max(*b)),
-            Self::Min => ndarray::Zip::from(a).and(b).map_collect(|a, b| (*a).min(*b))
+            Self::Max => ndarray::Zip::from(a)
+                .and(b)
+                .map_collect(|a, b| (*a).max(*b)),
+            Self::Min => ndarray::Zip::from(a)
+                .and(b)
+                .map_collect(|a, b| (*a).min(*b)),
         };
         Ok(o.to_shared())
     }
 }
 
 impl NativeNumericTensorBinaryOperationBoolOut {
-    pub(crate) fn apply<'a, T: 'a>(&self, a: ArcArray<T, IxDyn>, b: ArcArray<T, IxDyn>) -> Result<ArcArray<bool, IxDyn>, NDArrayOperationError> where
+    pub(crate) fn apply<'a, T: 'a>(
+        &self,
+        a: ArcArray<T, IxDyn>,
+        b: ArcArray<T, IxDyn>,
+    ) -> Result<ArcArray<bool, IxDyn>, NDArrayOperationError>
+    where
         T: Clone + Copy + PartialEq + PartialOrd,
     {
         let a = if let Some(a) = a.broadcast(b.shape()) {
@@ -567,24 +604,37 @@ impl NativeNumericTensorBinaryOperationBoolOut {
 
         let b = if let Some(b) = b.broadcast(a.shape()) {
             b
-        }
-        else {
+        } else {
             b.view()
         };
 
         let o = match self {
-            NativeNumericTensorBinaryOperationBoolOut::Equal => ndarray::Zip::from(a).and(b).map_collect(|a, b| a.clone() == b.clone()),
-            NativeNumericTensorBinaryOperationBoolOut::Less => ndarray::Zip::from(a).and(b).map_collect(|a, b| a.clone() < b.clone()),
-            NativeNumericTensorBinaryOperationBoolOut::LessOrEqual => ndarray::Zip::from(a).and(b).map_collect(|a, b| a.clone() <= b.clone()),
-            NativeNumericTensorBinaryOperationBoolOut::Greater => ndarray::Zip::from(a).and(b).map_collect(|a, b| a.clone() > b.clone()),
-            NativeNumericTensorBinaryOperationBoolOut::GreaterOrEqual => ndarray::Zip::from(a).and(b).map_collect(|a, b| a.clone() >= b.clone()),
+            NativeNumericTensorBinaryOperationBoolOut::Equal => ndarray::Zip::from(a)
+                .and(b)
+                .map_collect(|a, b| a.clone() == b.clone()),
+            NativeNumericTensorBinaryOperationBoolOut::Less => ndarray::Zip::from(a)
+                .and(b)
+                .map_collect(|a, b| a.clone() < b.clone()),
+            NativeNumericTensorBinaryOperationBoolOut::LessOrEqual => ndarray::Zip::from(a)
+                .and(b)
+                .map_collect(|a, b| a.clone() <= b.clone()),
+            NativeNumericTensorBinaryOperationBoolOut::Greater => ndarray::Zip::from(a)
+                .and(b)
+                .map_collect(|a, b| a.clone() > b.clone()),
+            NativeNumericTensorBinaryOperationBoolOut::GreaterOrEqual => ndarray::Zip::from(a)
+                .and(b)
+                .map_collect(|a, b| a.clone() >= b.clone()),
         };
 
         Ok(o.to_shared())
     }
 }
 
-pub(crate) fn equal<'a, T: 'a>(a: ArcArray<T, IxDyn>, b: ArcArray<T, IxDyn>) -> Result<ArcArray<bool, IxDyn>, NDArrayOperationError> where
+pub(crate) fn equal<'a, T: 'a>(
+    a: ArcArray<T, IxDyn>,
+    b: ArcArray<T, IxDyn>,
+) -> Result<ArcArray<bool, IxDyn>, NDArrayOperationError>
+where
     T: Clone + PartialEq + PartialOrd,
 {
     let a = if let Some(a) = a.broadcast(b.shape()) {
@@ -595,19 +645,25 @@ pub(crate) fn equal<'a, T: 'a>(a: ArcArray<T, IxDyn>, b: ArcArray<T, IxDyn>) -> 
 
     let b = if let Some(b) = b.broadcast(a.shape()) {
         b
-    }
-    else {
+    } else {
         b.view()
     };
 
-    let o = ndarray::Zip::from(a).and(b).map_collect(|a, b| a.clone() == b.clone());
+    let o = ndarray::Zip::from(a)
+        .and(b)
+        .map_collect(|a, b| a.clone() == b.clone());
 
     Ok(o.to_shared())
 }
 
 impl NativeNumericTensorBitwiseBinaryOperation {
-    pub(crate) fn apply<'a, T: 'a>(&self, a: ArcArray<T, IxDyn>, b: ArcArray<T, IxDyn>) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError> where
-        T: Clone + Copy + BitAnd<Output=T> + BitOr<Output=T> + BitXor<Output=T>,
+    pub(crate) fn apply<'a, T: 'a>(
+        &self,
+        a: ArcArray<T, IxDyn>,
+        b: ArcArray<T, IxDyn>,
+    ) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError>
+    where
+        T: Clone + Copy + BitAnd<Output = T> + BitOr<Output = T> + BitXor<Output = T>,
     {
         let a = if let Some(a) = a.broadcast(b.shape()) {
             a
@@ -617,8 +673,7 @@ impl NativeNumericTensorBitwiseBinaryOperation {
 
         let b = if let Some(b) = b.broadcast(a.shape()) {
             b
-        }
-        else {
+        } else {
             b.view()
         };
 
@@ -639,7 +694,7 @@ pub enum NativeNumericTensorUnaryOperation {
     Log,
     Floor,
     Ceil,
-    Softplus
+    Softplus,
 }
 
 impl core::fmt::Display for NativeNumericTensorUnaryOperation {
@@ -649,15 +704,24 @@ impl core::fmt::Display for NativeNumericTensorUnaryOperation {
 }
 
 impl NativeNumericTensorUnaryOperation {
-    pub fn apply<T, D: Dimension>(&self, a: ArcArray<T, D>) -> Result<ArcArray<T, D>, NDArrayOperationError>
+    pub fn apply<T, D: Dimension>(
+        &self,
+        a: ArcArray<T, D>,
+    ) -> Result<ArcArray<T, D>, NDArrayOperationError>
     where
-        T: Clone + num_traits::Float
+        T: Clone + num_traits::Float,
     {
         Ok(match self {
             NativeNumericTensorUnaryOperation::Exp => a.mapv(|x| x.exp()).to_shared(),
-            NativeNumericTensorUnaryOperation::Trig(trigop) => a.mapv(|x| trigop.apply(x)).to_shared(),
-            NativeNumericTensorUnaryOperation::Sigmoid => a.mapv(|x| T::one() / ( T::one() + T::exp(-x))).to_shared(),
-            NativeNumericTensorUnaryOperation::Softplus => a.mapv(|x| T::ln(T::exp(x) + T::one())).to_shared(),
+            NativeNumericTensorUnaryOperation::Trig(trigop) => {
+                a.mapv(|x| trigop.apply(x)).to_shared()
+            }
+            NativeNumericTensorUnaryOperation::Sigmoid => {
+                a.mapv(|x| T::one() / (T::one() + T::exp(-x))).to_shared()
+            }
+            NativeNumericTensorUnaryOperation::Softplus => {
+                a.mapv(|x| T::ln(T::exp(x) + T::one())).to_shared()
+            }
             NativeNumericTensorUnaryOperation::Log => a.mapv(|x| x.ln()).to_shared(),
             NativeNumericTensorUnaryOperation::Floor => a.mapv(|x| x.floor()).to_shared(),
             NativeNumericTensorUnaryOperation::Ceil => a.mapv(|x| x.ceil()).to_shared(),
@@ -668,12 +732,15 @@ impl NativeNumericTensorUnaryOperation {
     }
 }
 
-pub(crate) fn pow<T, TI, TO>(a: ArcArray<T, IxDyn>, b: ArcArray<TI, IxDyn>) -> Result<ArcArray<TO, IxDyn>, NDArrayOperationError>
+pub(crate) fn pow<T, TI, TO>(
+    a: ArcArray<T, IxDyn>,
+    b: ArcArray<TI, IxDyn>,
+) -> Result<ArcArray<TO, IxDyn>, NDArrayOperationError>
 where
     T: num_traits::Pow<TI, Output = TO>,
     T: Num + Clone,
     TI: Num + Clone,
-    TO: Num + Clone
+    TO: Num + Clone,
 {
     let a = if let Some(a) = a.broadcast(b.shape()) {
         a
@@ -683,16 +750,16 @@ where
 
     let b = if let Some(b) = b.broadcast(a.shape()) {
         b
-    }
-    else {
+    } else {
         b.view()
     };
 
-    let v = ndarray::Zip::from(a).and(b).map_collect(|a, b| a.clone().pow(b.clone()));
+    let v = ndarray::Zip::from(a)
+        .and(b)
+        .map_collect(|a, b| a.clone().pow(b.clone()));
 
     Ok(v.to_shared())
 }
-
 
 /// ONNX Gemm: Y = alpha * A'·B' + beta * C
 /// - A, B: must be 2-D (M×K) and (K×N) (after optional transposition)
@@ -725,11 +792,10 @@ where
 
     // 3) Prepare output buffer (m×n): if C is provided and broadcastable, clone it; else zeros
     let mut cmat: Array2<T> = match c {
-        Some(c_arr) => {
-            c_arr.broadcast((m, n))
-                .ok_or_else(|| NDArrayOperationError::IncompatibleShape)?
-                .to_owned()
-        }
+        Some(c_arr) => c_arr
+            .broadcast((m, n))
+            .ok_or_else(|| NDArrayOperationError::IncompatibleShape)?
+            .to_owned(),
         None => Array2::zeros((m, n)),
     };
 
@@ -739,7 +805,6 @@ where
     // 5) Wrap back into dynamic ArcArray
     Ok(ArcArray::from(cmat.into_dyn()))
 }
-
 
 /// Split `tensor` along `axis` into parts sized by `split` (or size=1 chunks if `split` is None).
 /// Returns a Vec of sub-tensors, preserving shared ownership via ArcArray.
@@ -799,7 +864,11 @@ where
         // build per-axis slice info: full for all but `ax`
         let mut info = shape
             .iter()
-            .map(|_| SliceInfoElem::Slice { start: 0, end: None, step: 1 })
+            .map(|_| SliceInfoElem::Slice {
+                start: 0,
+                end: None,
+                step: 1,
+            })
             .collect::<Vec<_>>();
         info[ax] = SliceInfoElem::Slice {
             start: start as isize,
@@ -817,10 +886,7 @@ where
 }
 
 /// Helper: broadcast two “batch” shapes with NumPy-style rules.
-fn broadcast_shapes(
-    a: &[usize],
-    b: &[usize],
-) -> Result<Vec<usize>, NDArrayOperationError> {
+fn broadcast_shapes(a: &[usize], b: &[usize]) -> Result<Vec<usize>, NDArrayOperationError> {
     let na = a.len();
     let nb = b.len();
     let n = na.max(nb);
@@ -848,7 +914,6 @@ fn compute_strides(shape: &[usize]) -> Vec<usize> {
     }
     strides
 }
-
 
 /// ONNX-style batched/broadcasted matrix multiplication.
 ///
@@ -934,7 +999,7 @@ where
     let a_b = a_view
         .broadcast(a_bcast_shape.clone())
         .ok_or(NDArrayOperationError::IncompatibleShape)?;
-    
+
     let a_b = a_b
         .to_shape((batch_shape.iter().product::<usize>(), m, k_left))
         .map_err(|_| NDArrayOperationError::Internal)?;
@@ -942,7 +1007,7 @@ where
     let b_b = b_view
         .broadcast(b_bcast_shape)
         .ok_or(NDArrayOperationError::IncompatibleShape)?;
-    
+
     let b_b = b_b
         .to_shape((batch_shape.iter().product::<usize>(), k_left, p))
         .map_err(|_| NDArrayOperationError::Internal)?;
@@ -995,16 +1060,24 @@ where
     let out_len = out_shape.iter().product::<usize>();
 
     // 2) Broadcast each input to the common shape
-    let cond_b = condition.broadcast(out_shape.as_slice())
+    let cond_b = condition
+        .broadcast(out_shape.as_slice())
         .ok_or_else(|| NDArrayOperationError::IncompatibleShape)?;
-    let x_b = x.broadcast(out_shape.as_slice())
+    let x_b = x
+        .broadcast(out_shape.as_slice())
         .ok_or_else(|| NDArrayOperationError::IncompatibleShape)?;
-    let y_b = y.broadcast(out_shape.as_slice())
+    let y_b = y
+        .broadcast(out_shape.as_slice())
         .ok_or_else(|| NDArrayOperationError::IncompatibleShape)?;
 
     // 3) Build the output buffer by iterating in lockstep
     let mut buf: Vec<T> = Vec::with_capacity(out_len);
-    for (&c, xv, yv) in cond_b.iter().zip(x_b.iter()).zip(y_b.iter()).map(|((c, x), y)| (c, x, y)) {
+    for (&c, xv, yv) in cond_b
+        .iter()
+        .zip(x_b.iter())
+        .zip(y_b.iter())
+        .map(|((c, x), y)| (c, x, y))
+    {
         buf.push(if c { xv.clone() } else { yv.clone() });
     }
 
@@ -1012,7 +1085,6 @@ where
     let arr = ArrayD::from_shape_vec(IxDyn(&out_shape), buf)?;
     Ok(ArcArray::from(arr))
 }
-
 
 /// ONNX GroupNormalization (op‑set ≥ 18)
 ///
@@ -1041,17 +1113,17 @@ where
     if rank < 3 {
         return Err(NDArrayOperationError::IncompatibleShape);
     }
-    let n  = x.shape()[0];
-    let c  = x.shape()[1];
+    let n = x.shape()[0];
+    let c = x.shape()[1];
     if c % num_groups != 0 {
         return Err(NDArrayOperationError::IncompatibleShape);
     }
     if scale.len() != c || bias.len() != c {
         return Err(NDArrayOperationError::IncompatibleShape);
     }
-    let group_size     = c / num_groups;
+    let group_size = c / num_groups;
     let spatial_size: usize = x.shape()[2..].iter().product();
-    let elems_per_grp  = group_size * spatial_size;
+    let elems_per_grp = group_size * spatial_size;
 
     // ---------- 1. Reshape to (N, G, elems_per_grp) ----------
     // Safe because we only collapse contiguous trailing axes.
@@ -1059,21 +1131,21 @@ where
         .view()
         .into_shape_with_order((n, num_groups, elems_per_grp))
         .map_err(|_| NDArrayOperationError::Internal)?
-        .to_owned();     // keep contiguous for fast SIMD
+        .to_owned(); // keep contiguous for fast SIMD
 
     // ---------- 2. Compute per‑(N,G) mean & variance ----------
     // ndarray’s `mean_axis`/`var_axis` give us vectors of shape (N, G)
-    let mean = x3.mean_axis(Axis(2)).expect("axis always exists");          // (N,G)
-    let var  = x3.var_axis(Axis(2), T::zero());                             // (N,G)  ddof = 0  :contentReference[oaicite:1]{index=1}
+    let mean = x3.mean_axis(Axis(2)).expect("axis always exists"); // (N,G)
+    let var = x3.var_axis(Axis(2), T::zero()); // (N,G)  ddof = 0  :contentReference[oaicite:1]{index=1}
 
     // Transient buffers for broadcasting to (N,G,elems_per_grp)
-    let mean_b = mean.insert_axis(Axis(2));          // (N,G,1) ➜ broadcast
-    let var_b  = var .insert_axis(Axis(2));
+    let mean_b = mean.insert_axis(Axis(2)); // (N,G,1) ➜ broadcast
+    let var_b = var.insert_axis(Axis(2));
     let eps: T = T::from_f64(epsilon).unwrap();
-    let denom  = var_b.mapv(|v| (v + eps).sqrt());   // std‑dev
+    let denom = var_b.mapv(|v| (v + eps).sqrt()); // std‑dev
 
     // ---------- 3. Normalize inside each group ----------
-    let y3 = (&x3 - &mean_b) / &denom;               // (N,G,E)
+    let y3 = (&x3 - &mean_b) / &denom; // (N,G,E)
 
     // ---------- 4. Reshape back to (N,C,…) ----------
     let mut y = y3
@@ -1082,16 +1154,12 @@ where
 
     // ---------- 5. Apply scale (γ) and bias (β) ----------
     // Broadcast γ/β to (1,C,spatial_size) then multiply/add in‑place.
-    let scale_a = scale.clone()
-        .insert_axis(Axis(0))
-        .insert_axis(Axis(2));
+    let scale_a = scale.clone().insert_axis(Axis(0)).insert_axis(Axis(2));
     let scale_b = scale_a
         .broadcast(y.raw_dim())
         .ok_or(NDArrayOperationError::Internal)?;
-    let bias_a = bias.to_owned()
-        .insert_axis(Axis(0))
-        .insert_axis(Axis(2));
-    let bias_b  = bias_a
+    let bias_a = bias.to_owned().insert_axis(Axis(0)).insert_axis(Axis(2));
+    let bias_b = bias_a
         .broadcast(y.raw_dim())
         .ok_or(NDArrayOperationError::Internal)?;
 
@@ -1110,9 +1178,9 @@ where
     Ok(y.into_shared())
 }
 
-
 pub fn range<T>(start: T, end: T, step: T) -> ArcArray<T, Ix1>
-where T: Num + Copy + PartialOrd + std::ops::AddAssign
+where
+    T: Num + Copy + PartialOrd + std::ops::AddAssign,
 {
     let mut out = vec![];
     let mut i = start;
@@ -1124,8 +1192,7 @@ where T: Num + Copy + PartialOrd + std::ops::AddAssign
             out.push(i);
             i += step;
         }
-    }
-    else {
+    } else {
         if step >= T::zero() {
             return ArcArray::from_vec(out);
         }
@@ -1138,77 +1205,182 @@ where T: Num + Copy + PartialOrd + std::ops::AddAssign
     ArcArray::from_vec(out)
 }
 
-pub fn imod_u64(a: ArcArray<u64, IxDyn>, b: ArcArray<u64, IxDyn>) -> Result<ArcArray<u64, IxDyn>, NDArrayOperationError>
-{
-    let a = if let Some(a) = a.broadcast(b.shape()) { a } else { a.view() };
-    let b = if let Some(b) = b.broadcast(a.shape()) { b } else { b.view() };
-    let v = ndarray::Zip::from(a).and(b).map_collect(|a, b| ((*a % *b) + *b) % *b);
+pub fn imod_u64(
+    a: ArcArray<u64, IxDyn>,
+    b: ArcArray<u64, IxDyn>,
+) -> Result<ArcArray<u64, IxDyn>, NDArrayOperationError> {
+    let a = if let Some(a) = a.broadcast(b.shape()) {
+        a
+    } else {
+        a.view()
+    };
+    let b = if let Some(b) = b.broadcast(a.shape()) {
+        b
+    } else {
+        b.view()
+    };
+    let v = ndarray::Zip::from(a)
+        .and(b)
+        .map_collect(|a, b| ((*a % *b) + *b) % *b);
     Ok(v.to_shared())
 }
 
-pub fn imod_i64(a: ArcArray<i64, IxDyn>, b: ArcArray<i64, IxDyn>) -> Result<ArcArray<i64, IxDyn>, NDArrayOperationError>
-{
-    let a = if let Some(a) = a.broadcast(b.shape()) { a } else { a.view() };
-    let b = if let Some(b) = b.broadcast(a.shape()) { b } else { b.view() };
-    let v = ndarray::Zip::from(a).and(b).map_collect(|a, b| ((*a % *b) + *b) % *b);
+pub fn imod_i64(
+    a: ArcArray<i64, IxDyn>,
+    b: ArcArray<i64, IxDyn>,
+) -> Result<ArcArray<i64, IxDyn>, NDArrayOperationError> {
+    let a = if let Some(a) = a.broadcast(b.shape()) {
+        a
+    } else {
+        a.view()
+    };
+    let b = if let Some(b) = b.broadcast(a.shape()) {
+        b
+    } else {
+        b.view()
+    };
+    let v = ndarray::Zip::from(a)
+        .and(b)
+        .map_collect(|a, b| ((*a % *b) + *b) % *b);
     Ok(v.to_shared())
 }
 
-pub fn imod_u32(a: ArcArray<u32, IxDyn>, b: ArcArray<u32, IxDyn>) -> Result<ArcArray<u32, IxDyn>, NDArrayOperationError>
-{
-    let a = if let Some(a) = a.broadcast(b.shape()) { a } else { a.view() };
-    let b = if let Some(b) = b.broadcast(a.shape()) { b } else { b.view() };
-    let v = ndarray::Zip::from(a).and(b).map_collect(|a, b| ((*a % *b) + *b) % *b);
+pub fn imod_u32(
+    a: ArcArray<u32, IxDyn>,
+    b: ArcArray<u32, IxDyn>,
+) -> Result<ArcArray<u32, IxDyn>, NDArrayOperationError> {
+    let a = if let Some(a) = a.broadcast(b.shape()) {
+        a
+    } else {
+        a.view()
+    };
+    let b = if let Some(b) = b.broadcast(a.shape()) {
+        b
+    } else {
+        b.view()
+    };
+    let v = ndarray::Zip::from(a)
+        .and(b)
+        .map_collect(|a, b| ((*a % *b) + *b) % *b);
     Ok(v.to_shared())
 }
 
-pub fn imod_i32(a: ArcArray<i32, IxDyn>, b: ArcArray<i32, IxDyn>) -> Result<ArcArray<i32, IxDyn>, NDArrayOperationError>
-{
-    let a = if let Some(a) = a.broadcast(b.shape()) { a } else { a.view() };
-    let b = if let Some(b) = b.broadcast(a.shape()) { b } else { b.view() };
-    let v = ndarray::Zip::from(a).and(b).map_collect(|a, b| ((*a % *b) + *b) % *b);
+pub fn imod_i32(
+    a: ArcArray<i32, IxDyn>,
+    b: ArcArray<i32, IxDyn>,
+) -> Result<ArcArray<i32, IxDyn>, NDArrayOperationError> {
+    let a = if let Some(a) = a.broadcast(b.shape()) {
+        a
+    } else {
+        a.view()
+    };
+    let b = if let Some(b) = b.broadcast(a.shape()) {
+        b
+    } else {
+        b.view()
+    };
+    let v = ndarray::Zip::from(a)
+        .and(b)
+        .map_collect(|a, b| ((*a % *b) + *b) % *b);
     Ok(v.to_shared())
 }
 
-pub fn imod_u16(a: ArcArray<u16, IxDyn>, b: ArcArray<u16, IxDyn>) -> Result<ArcArray<u16, IxDyn>, NDArrayOperationError>
-{
-    let a = if let Some(a) = a.broadcast(b.shape()) { a } else { a.view() };
-    let b = if let Some(b) = b.broadcast(a.shape()) { b } else { b.view() };
-    let v = ndarray::Zip::from(a).and(b).map_collect(|a, b| ((*a % *b) + *b) % *b);
+pub fn imod_u16(
+    a: ArcArray<u16, IxDyn>,
+    b: ArcArray<u16, IxDyn>,
+) -> Result<ArcArray<u16, IxDyn>, NDArrayOperationError> {
+    let a = if let Some(a) = a.broadcast(b.shape()) {
+        a
+    } else {
+        a.view()
+    };
+    let b = if let Some(b) = b.broadcast(a.shape()) {
+        b
+    } else {
+        b.view()
+    };
+    let v = ndarray::Zip::from(a)
+        .and(b)
+        .map_collect(|a, b| ((*a % *b) + *b) % *b);
     Ok(v.to_shared())
 }
 
-pub fn imod_i16(a: ArcArray<i16, IxDyn>, b: ArcArray<i16, IxDyn>) -> Result<ArcArray<i16, IxDyn>, NDArrayOperationError>
-{
-    let a = if let Some(a) = a.broadcast(b.shape()) { a } else { a.view() };
-    let b = if let Some(b) = b.broadcast(a.shape()) { b } else { b.view() };
-    let v = ndarray::Zip::from(a).and(b).map_collect(|a, b| ((*a % *b) + *b) % *b);
+pub fn imod_i16(
+    a: ArcArray<i16, IxDyn>,
+    b: ArcArray<i16, IxDyn>,
+) -> Result<ArcArray<i16, IxDyn>, NDArrayOperationError> {
+    let a = if let Some(a) = a.broadcast(b.shape()) {
+        a
+    } else {
+        a.view()
+    };
+    let b = if let Some(b) = b.broadcast(a.shape()) {
+        b
+    } else {
+        b.view()
+    };
+    let v = ndarray::Zip::from(a)
+        .and(b)
+        .map_collect(|a, b| ((*a % *b) + *b) % *b);
     Ok(v.to_shared())
 }
 
-
-pub fn imod_u8(a: ArcArray<u8, IxDyn>, b: ArcArray<u8, IxDyn>) -> Result<ArcArray<u8, IxDyn>, NDArrayOperationError>
-{
-    let a = if let Some(a) = a.broadcast(b.shape()) { a } else { a.view() };
-    let b = if let Some(b) = b.broadcast(a.shape()) { b } else { b.view() };
-    let v = ndarray::Zip::from(a).and(b).map_collect(|a, b| ((*a % *b) + *b) % *b);
+pub fn imod_u8(
+    a: ArcArray<u8, IxDyn>,
+    b: ArcArray<u8, IxDyn>,
+) -> Result<ArcArray<u8, IxDyn>, NDArrayOperationError> {
+    let a = if let Some(a) = a.broadcast(b.shape()) {
+        a
+    } else {
+        a.view()
+    };
+    let b = if let Some(b) = b.broadcast(a.shape()) {
+        b
+    } else {
+        b.view()
+    };
+    let v = ndarray::Zip::from(a)
+        .and(b)
+        .map_collect(|a, b| ((*a % *b) + *b) % *b);
     Ok(v.to_shared())
 }
 
-pub fn imod_i8(a: ArcArray<i8, IxDyn>, b: ArcArray<i8, IxDyn>) -> Result<ArcArray<i8, IxDyn>, NDArrayOperationError>
-{
-    let a = if let Some(a) = a.broadcast(b.shape()) { a } else { a.view() };
-    let b = if let Some(b) = b.broadcast(a.shape()) { b } else { b.view() };
-    let v = ndarray::Zip::from(a).and(b).map_collect(|a, b| ((*a % *b) + *b) % *b);
+pub fn imod_i8(
+    a: ArcArray<i8, IxDyn>,
+    b: ArcArray<i8, IxDyn>,
+) -> Result<ArcArray<i8, IxDyn>, NDArrayOperationError> {
+    let a = if let Some(a) = a.broadcast(b.shape()) {
+        a
+    } else {
+        a.view()
+    };
+    let b = if let Some(b) = b.broadcast(a.shape()) {
+        b
+    } else {
+        b.view()
+    };
+    let v = ndarray::Zip::from(a)
+        .and(b)
+        .map_collect(|a, b| ((*a % *b) + *b) % *b);
     Ok(v.to_shared())
 }
 
-pub fn expand<T: Clone>(x: &ArcArray<T, IxDyn>, shape: &[usize]) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError> {
-    let o = x.broadcast(shape).ok_or(NDArrayOperationError::IncompatibleShape)?;
+pub fn expand<T: Clone>(
+    x: &ArcArray<T, IxDyn>,
+    shape: &[usize],
+) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError> {
+    let o = x
+        .broadcast(shape)
+        .ok_or(NDArrayOperationError::IncompatibleShape)?;
     Ok(o.to_shared())
 }
 
-pub fn argmax<T: Clone + PartialOrd>(x: &ArcArray<T, IxDyn>, axis: usize, keepdims: bool, select_last_index: bool) -> Result<ArcArray<i64, IxDyn>, NDArrayOperationError> {
+pub fn argmax<T: Clone + PartialOrd>(
+    x: &ArcArray<T, IxDyn>,
+    axis: usize,
+    keepdims: bool,
+    select_last_index: bool,
+) -> Result<ArcArray<i64, IxDyn>, NDArrayOperationError> {
     let ndim = x.ndim();
     if ndim == 0 {
         return Err(NDArrayOperationError::EmptyInput);
@@ -1227,11 +1399,9 @@ pub fn argmax<T: Clone + PartialOrd>(x: &ArcArray<T, IxDyn>, axis: usize, keepdi
                 let v = v.clone();
                 if v > best_val {
                     (i, v)
-                }
-                else if select_last_index && v == best_val {
+                } else if select_last_index && v == best_val {
                     (i, v)
-                }
-                else {
+                } else {
                     (best_i, best_val)
                 }
             })
@@ -1250,7 +1420,12 @@ pub fn argmax<T: Clone + PartialOrd>(x: &ArcArray<T, IxDyn>, axis: usize, keepdi
     Ok(out.into_shared())
 }
 
-pub fn argmin<T: Clone + PartialOrd>(x: &ArcArray<T, IxDyn>, axis: usize, keepdims: bool, select_last_index: bool) -> Result<ArcArray<i64, IxDyn>, NDArrayOperationError> {
+pub fn argmin<T: Clone + PartialOrd>(
+    x: &ArcArray<T, IxDyn>,
+    axis: usize,
+    keepdims: bool,
+    select_last_index: bool,
+) -> Result<ArcArray<i64, IxDyn>, NDArrayOperationError> {
     let ndim = x.ndim();
     if ndim == 0 {
         return Err(NDArrayOperationError::EmptyInput);
@@ -1269,11 +1444,9 @@ pub fn argmin<T: Clone + PartialOrd>(x: &ArcArray<T, IxDyn>, axis: usize, keepdi
                 let v = v.clone();
                 if v < best_val {
                     (i, v)
-                }
-                else if select_last_index && v == best_val {
+                } else if select_last_index && v == best_val {
                     (i, v)
-                }
-                else {
+                } else {
                     (best_i, best_val)
                 }
             })
