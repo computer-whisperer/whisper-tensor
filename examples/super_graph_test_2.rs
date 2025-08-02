@@ -4,7 +4,6 @@ use std::path::Path;
 use whisper_tensor::backends::eval_backend::EvalBackend;
 use whisper_tensor::backends::vulkan_backend::{VulkanContext, VulkanImmediateExecutor};
 use whisper_tensor::model::{Model};
-use whisper_tensor::super_graph::SuperGraphCaches;
 use whisper_tensor_import::{identify_and_load, ModelTypeHint};
 use whisper_tensor_import::onnx_graph::{WeightStorageStrategy};
 
