@@ -35,7 +35,7 @@ impl LanguageModelManager {
     pub fn new(model: Model) -> Result<Self, LanguageModelManagerError> {
         let mut tokenizer: Option<Arc<AnyTokenizer>> = None;
         if let Some(meta) = model.get_model_metadata() {
-            if let Some(tokenizer_info) = meta.tokenizer_infos.get(0) {
+            if let Some(tokenizer_info) = meta.tokenizer_infos.first() {
                 match tokenizer_info {
                     TokenizerInfo::HFTokenizer(name) => {
                         #[cfg(all(feature = "tokenizers", feature = "http"))]
@@ -70,8 +70,8 @@ impl LanguageModelManager {
             self.forward(input_tokens, input_intermediate_values, eval_backend)?;
         let shape = output_tensor.shape();
         let mut output_slice = Vec::new();
-        for i in 0..shape.len() - 1 {
-            output_slice.push(shape[i] - 1..shape[i]);
+        for &dim in &shape {
+            output_slice.push(dim - 1..dim);
         }
         output_slice.push(0..shape[shape.len() - 1]);
         let sliced_output_tensor = output_tensor.slice(&output_slice, &EvalBackend::NDArray)?;
@@ -101,9 +101,7 @@ impl LanguageModelManager {
         let max_sequence_len = self
             .model
             .get_model_metadata()
-            .clone()
-            .map(|x| x.max_token_batch)
-            .flatten()
+            .and_then(|x| x.max_token_batch)
             .unwrap_or(input_sequence_len as usize);
         let mut intermediate_values = intermediate_values.clone();
 

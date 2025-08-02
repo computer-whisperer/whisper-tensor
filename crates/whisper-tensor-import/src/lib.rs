@@ -68,7 +68,7 @@ pub fn identify_and_load(
         if ext == "pth" {
             if let Some(ModelTypeHint::RWKV7) = hint {
                 Ok(rwkv7::load_rwkv7_pth(model_path, output_method)
-                    .map_err(|x| Error::ModelBuildError(x))?)
+                    .map_err(Error::ModelBuildError)?)
             } else {
                 Err(Error::CannotIdentifyModel(model_path.to_path_buf()))
             }
@@ -86,13 +86,11 @@ fn load_onnx_file(model_path: &Path, hint: Option<ModelTypeHint>) -> Result<Vec<
     let mut onnx_data = Vec::new();
     File::open(model_path)?.read_to_end(&mut onnx_data)?;
 
-    if let Some(hint) = hint {
-        if let ModelTypeHint::GPT2 = hint {
-            onnx_data = try_inject_onnx_metadata_for_simple_llm(
-                onnx_data,
-                TokenizerInfo::HFTokenizer("gpt2".to_string()),
-            )?;
-        }
+    if let Some(ModelTypeHint::GPT2) = hint {
+        onnx_data = try_inject_onnx_metadata_for_simple_llm(
+            onnx_data,
+            TokenizerInfo::HFTokenizer("gpt2".to_string()),
+        )?;
     }
 
     Ok(onnx_data)
@@ -133,7 +131,7 @@ fn try_inject_onnx_metadata_for_simple_llm(
         let mut token_output = None;
         if graph.output.len() == 1 {
             token_output = Some(&mut graph.input[0]);
-        } else if graph.output.len() > 0 {
+        } else if !graph.output.is_empty() {
             // Use the first one for now
             token_output = Some(&mut graph.output[0])
         } else {
@@ -171,7 +169,7 @@ fn load_transformers_format(
     let config_path = model_path.join("config.json");
     let config_file = File::open(config_path)?;
     let config: serde_json::Value =
-        serde_json::from_reader(config_file).map_err(|x| Error::ConfigFileParseError(x))?;
+        serde_json::from_reader(config_file).map_err(Error::ConfigFileParseError)?;
 
     // Load all safetensors files present
     let safetensors_files = {
@@ -180,7 +178,7 @@ fn load_transformers_format(
         for entry in std::fs::read_dir(model_path)? {
             let entry = entry.map_err(|x| Error::ModelLoadError(anyhow::Error::from(x)))?;
             let path = entry.path();
-            if path.is_file() && path.extension().map_or(false, |ext| ext == "safetensors") {
+            if path.is_file() && path.extension().is_some_and(|ext| ext == "safetensors") {
                 safetensors_files.push(path);
             }
         }
@@ -198,8 +196,8 @@ fn load_transformers_format(
     };
 
     let weight_manager = SafetensorsWeightManager::new(safetensors_mmaps)
-        .map_err(|x| anyhow::Error::from(x))
-        .map_err(|x| Error::ModelLoadError(x))?;
+        .map_err(anyhow::Error::from)
+        .map_err(Error::ModelLoadError)?;
 
     let model_type = config
         .get("model_type")
@@ -211,13 +209,13 @@ fn load_transformers_format(
             println!("Loading as Llama3");
             let config = llama3::Llama3Config::from_huggingface_transformers_json(&config)?;
             llama3::load_llama3(weight_manager, config, output_method)
-                .map_err(|x| Error::ModelBuildError(x))?
+                .map_err(Error::ModelBuildError)?
         }
         "llama4" => {
             println!("Loading as Llama4");
             let config = llama4::Llama4Config::from_huggingface_transformers_json(&config)?;
             llama4::load_llama4(weight_manager, config, output_method)
-                .map_err(|x| Error::ModelBuildError(x))?
+                .map_err(Error::ModelBuildError)?
         }
         model_type => Err(Error::UnknownModelType(model_type.to_string()))?,
     })

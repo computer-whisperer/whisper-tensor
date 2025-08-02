@@ -17,6 +17,7 @@ pub trait DimContainer<T: Clone> {
     where
         Self: Sized;
     fn len(&self) -> usize;
+    fn is_empty(&self) -> bool;
 }
 
 impl<T: Clone> DimContainer<T> for Vec<T> {
@@ -30,6 +31,10 @@ impl<T: Clone> DimContainer<T> for Vec<T> {
 
     fn len(&self) -> usize {
         self.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.is_empty()
     }
 }
 
@@ -45,6 +50,9 @@ impl<T: Clone, const L: usize> DimContainer<T> for [T; L] {
     }
     fn len(&self) -> usize {
         L
+    }
+    fn is_empty(&self) -> bool {
+        L == 0
     }
 }
 
@@ -109,19 +117,19 @@ impl Rank for DynRank {
     }
 
     fn cast_to_ndarray_dim(dims: &Self::KnownDims) -> Self::NDArrayDim {
-        let s = dims.into_iter().map(|x| *x as usize).collect::<Vec<_>>();
+        let s = dims.iter().map(|x| *x as usize).collect::<Vec<_>>();
         ndarray::IxDyn(s.as_slice())
     }
 
     fn known_to_unknown_dims(dims: &Self::KnownDims) -> Self::UnknownDims {
-        dims.into_iter()
+        dims.iter()
             .map(|x| ScalarInfoTyped::Numeric(*x))
             .collect::<Vec<_>>()
     }
 
     fn try_unknown_to_known_dims(dims: &Self::UnknownDims) -> Option<Self::KnownDims> {
-        dims.into_iter()
-            .map(|x| x.as_numeric().map(|x| *x))
+        dims.iter()
+            .map(|x| x.as_numeric().copied())
             .collect::<Option<Vec<_>>>()
     }
 }
@@ -133,7 +141,7 @@ impl Rank for P1 {
     type KnownDims = [u64; 1];
 
     fn try_cast_to_dim(dims: &[usize]) -> Result<Self::NDArrayDim, RankError> {
-        Ok(ndarray::Ix1(*dims.get(0).ok_or(RankError::CannotCastRank)?))
+        Ok(ndarray::Ix1(*dims.first().ok_or(RankError::CannotCastRank)?))
     }
 
     fn cast_to_ndarray_dim(dims: &Self::KnownDims) -> Self::NDArrayDim {
@@ -161,7 +169,7 @@ impl Rank for P2 {
 
     fn try_cast_to_dim(dims: &[usize]) -> Result<Self::NDArrayDim, RankError> {
         Ok(ndarray::Ix2(
-            *dims.get(0).ok_or(RankError::CannotCastRank)?,
+            *dims.first().ok_or(RankError::CannotCastRank)?,
             *dims.get(1).ok_or(RankError::CannotCastRank)?,
         ))
     }

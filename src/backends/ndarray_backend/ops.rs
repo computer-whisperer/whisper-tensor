@@ -501,13 +501,14 @@ fn try_multidirectional_broadcasting(
 }
 
 impl NativeNumericTensorBinaryOperation {
-    pub(crate) fn applyf<'a, T: 'a>(
+    pub(crate) fn applyf<'a, T>(
         &self,
         a: ArcArray<T, IxDyn>,
         b: ArcArray<T, IxDyn>,
     ) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError>
     where
-        T: Clone
+        T: 'a
+            +Clone
             + Copy
             + Real
             + std::ops::Add<Output = T>
@@ -543,13 +544,14 @@ impl NativeNumericTensorBinaryOperation {
         };
         Ok(o.to_shared())
     }
-    pub(crate) fn applyi<'a, T: 'a>(
+    pub(crate) fn applyi<'a, T>(
         &self,
         a: ArcArray<T, IxDyn>,
         b: ArcArray<T, IxDyn>,
     ) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError>
     where
-        T: Clone
+        T: 'a
+            +Clone
             + Copy
             + Ord
             + std::ops::Add<Output = T>
@@ -588,13 +590,13 @@ impl NativeNumericTensorBinaryOperation {
 }
 
 impl NativeNumericTensorBinaryOperationBoolOut {
-    pub(crate) fn apply<'a, T: 'a>(
+    pub(crate) fn apply<'a, T>(
         &self,
         a: ArcArray<T, IxDyn>,
         b: ArcArray<T, IxDyn>,
     ) -> Result<ArcArray<bool, IxDyn>, NDArrayOperationError>
     where
-        T: Clone + Copy + PartialEq + PartialOrd,
+        T: 'a + Clone + Copy + PartialEq + PartialOrd,
     {
         let a = if let Some(a) = a.broadcast(b.shape()) {
             a
@@ -630,12 +632,12 @@ impl NativeNumericTensorBinaryOperationBoolOut {
     }
 }
 
-pub(crate) fn equal<'a, T: 'a>(
+pub(crate) fn equal<'a, T>(
     a: ArcArray<T, IxDyn>,
     b: ArcArray<T, IxDyn>,
 ) -> Result<ArcArray<bool, IxDyn>, NDArrayOperationError>
 where
-    T: Clone + PartialEq + PartialOrd,
+    T: 'a + Clone + PartialEq + PartialOrd,
 {
     let a = if let Some(a) = a.broadcast(b.shape()) {
         a
@@ -657,13 +659,13 @@ where
 }
 
 impl NativeNumericTensorBitwiseBinaryOperation {
-    pub(crate) fn apply<'a, T: 'a>(
+    pub(crate) fn apply<'a, T>(
         &self,
         a: ArcArray<T, IxDyn>,
         b: ArcArray<T, IxDyn>,
     ) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError>
     where
-        T: Clone + Copy + BitAnd<Output = T> + BitOr<Output = T> + BitXor<Output = T>,
+        T: 'a + Clone + Copy + BitAnd<Output = T> + BitOr<Output = T> + BitXor<Output = T>,
     {
         let a = if let Some(a) = a.broadcast(b.shape()) {
             a

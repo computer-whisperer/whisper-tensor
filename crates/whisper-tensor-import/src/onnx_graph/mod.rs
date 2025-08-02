@@ -14,6 +14,7 @@ use tensor::*;
 use weights::WeightExternalOutputManager;
 
 pub mod onnx {
+    #![allow(clippy::all)]
     include!(concat!(env!("OUT_DIR"), "/onnx.rs"));
 }
 
@@ -130,7 +131,7 @@ pub fn build_proto(
             let name = if i == 0 {
                 base_name.to_string()
             } else {
-                format!("{}_{}", base_name, i)
+                format!("{base_name}_{i}")
             };
             if !chosen_node_names.contains(&name) {
                 node_names.insert(*node, name.clone());
@@ -174,7 +175,7 @@ pub fn build_proto(
     for tensor in &tensors {
         if !tensor_names.contains_key(tensor) {
             let name = loop {
-                let name = format!("tensor_{}", next_tensor_id);
+                let name = format!("tensor_{next_tensor_id}");
                 if !chosen_tensor_names.contains(&name) {
                     break name;
                 }
@@ -272,7 +273,7 @@ pub fn build_proto(
         node: sorted_nodes
             .iter()
             .map(|node| {
-                node.to_node_proto(node_names.get(node).map(|name| name.clone()), &tensor_names)
+                node.to_node_proto(node_names.get(node).cloned(), &tensor_names)
             })
             .collect(),
         initializer: initializers,

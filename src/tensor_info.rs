@@ -85,7 +85,7 @@ where
         shape: R::KnownDims,
         symbolic_resolver: &mut SymbolicResolver,
     ) -> Self {
-        let num_values = shape.as_slice().into_iter().product();
+        let num_values = shape.as_slice().iter().product();
         let mut values = vec![first_element];
         for _ in 1..num_values {
             values.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(
@@ -152,7 +152,7 @@ where
                     entries,
                     self.shape
                         .as_slice()
-                        .into_iter()
+                        .iter()
                         .map(|x| *x as usize)
                         .collect(),
                 )
@@ -585,7 +585,7 @@ where
         symbolic_resolver: &mut SymbolicResolver,
     ) -> Option<ScalarInfoTyped<T>> {
         match self {
-            TensorInfoTypedRanked::Shaped(shaped) => shaped.get(index).map(|x| x.clone()),
+            TensorInfoTypedRanked::Shaped(shaped) => shaped.get(index).clone(),
             TensorInfoTypedRanked::Ranked(_) => Some(ScalarInfoTyped::Symbolic(
                 SymbolicScalarTyped::new(symbolic_resolver),
             )),
@@ -708,7 +708,7 @@ impl<R: Rank> TensorInfoShaped<R> {
 
     fn get(&self, index: &R::KnownDims) -> Option<ScalarInfo> {
         match self {
-            TensorInfoShaped::Numeric(x) => x.get(index).map(|x| ScalarInfo::Numeric(x)),
+            TensorInfoShaped::Numeric(x) => x.get(index).map(ScalarInfo::Numeric),
             TensorInfoShaped::Symbolic(x) => x.get(index),
         }
     }

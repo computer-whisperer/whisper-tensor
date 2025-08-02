@@ -98,7 +98,7 @@ jobs:
         run: cargo fmt ${{ steps.pkgs.outputs.fmt_args }} -- --check
 
       - name: Clippy (fail on warnings; exclude /libs)
-        run: cargo clippy --workspace --all-targets --all-features ${{ steps.pkgs.outputs.exclude_args }} -- -D warnings
+        run: cargo clippy --workspace --all-targets --no-deps --all-features ${{ steps.pkgs.outputs.exclude_args }} -- -D warnings
 
       - name: Build (workspace; exclude /libs)
         run: cargo build --workspace --all-features --locked --verbose ${{ steps.pkgs.outputs.exclude_args }}

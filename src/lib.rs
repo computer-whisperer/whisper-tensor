@@ -21,6 +21,7 @@ pub mod tokenizer;
 pub use tensor_rank::DynRank;
 
 pub mod onnx {
+    #![allow(clippy::all)]
     include!(concat!(env!("OUT_DIR"), "/onnx.rs"));
 }
 

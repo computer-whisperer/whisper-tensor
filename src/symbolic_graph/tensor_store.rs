@@ -55,3 +55,9 @@ impl TensorStore {
         tensor_id
     }
 }
+
+impl Default for TensorStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}

@@ -338,7 +338,7 @@ impl TextInferenceTokensInLogitOutInterface {
                 };
                 let output_links = {
                     let mut output_links = vec![processed_logit_output_link.to_any()];
-                    for (_, link) in &state_output_links {
+                    for link in state_output_links.values() {
                         output_links.push(link.to_any());
                     }
                     output_links
@@ -396,19 +396,18 @@ impl TextInferenceTokensInLogitOutInterface {
             // Input processing
             let adjusted_token_context = {
                 // Convert dtype and reshape according to model
-                let input_tensor_id = symbolic_graph
+                let input_tensor_id = *symbolic_graph
                     .get_tensors_by_name()
                     .get(&tokens_input_name)
-                    .unwrap()
-                    .clone();
+                    .unwrap();
                 let input_tensor_info = symbolic_graph.get_tensor_info(input_tensor_id).unwrap();
                 let input_tensor_rank = input_tensor_info.shape.clone().unwrap().len();
-                let input_tensor_dtype = input_tensor_info.dtype.clone().unwrap();
+                let input_tensor_dtype = input_tensor_info.dtype.unwrap();
 
                 let (mut milli_graph, input_map) =
                     MilliOpGraph::new(&[token_context_input_link.clone()]);
                 let milli_op_graph_input =
-                    input_map.get(&token_context_input_link).unwrap().clone();
+                    *input_map.get(&token_context_input_link).unwrap();
                 let mut x = milli_graph.push_op(AnyMilliOp::Cast(MilliOpCast::new(
                     milli_op_graph_input,
                     input_tensor_dtype,
@@ -454,19 +453,18 @@ impl TextInferenceTokensInLogitOutInterface {
             );
 
             // Output processing
-            let processed_logit_output_link = {
+            {
                 // Convert dtype and reshape according to model
-                let output_tensor_id = symbolic_graph
+                let output_tensor_id = *symbolic_graph
                     .get_tensors_by_name()
                     .get(&logit_output_name)
-                    .unwrap()
-                    .clone();
+                    .unwrap();
                 let output_tensor_info = symbolic_graph.get_tensor_info(output_tensor_id).unwrap();
                 let output_tensor_rank = output_tensor_info.shape.clone().unwrap().len();
 
                 let (mut milli_graph, input_map) =
                     MilliOpGraph::new(&[raw_logit_output_link.clone()]);
-                let milli_op_graph_input = input_map.get(&raw_logit_output_link).unwrap().clone();
+                let milli_op_graph_input = *input_map.get(&raw_logit_output_link).unwrap();
                 let mut x = milli_op_graph_input;
                 let zero_const = milli_graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(
                     NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
@@ -484,9 +482,7 @@ impl TextInferenceTokensInLogitOutInterface {
                 let node = SuperGraphNodeMilliOpGraph::new(milli_graph);
                 super_graph_builder.add_node(node.into());
                 processed_logit_output_link
-            };
-
-            processed_logit_output_link
+            }
         };
 
         let super_graph_inputs = vec![model_input_link.to_any(), token_context_input_link.to_any()];

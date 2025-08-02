@@ -338,7 +338,7 @@ impl SuperGraphNode for SuperGraphNodeMilliOpGraph {
         let inputs = {
             let mut inputs = HashMap::new();
             for input in &self.graph.get_inputs() {
-                inputs.insert(input.clone(), data.tensors.get(&input).unwrap().clone());
+                inputs.insert(input.clone(), data.tensors.get(input).unwrap().clone());
             }
             inputs
         };
@@ -467,10 +467,9 @@ impl SuperGraphNode for SuperGraphNodeScan {
                     SuperGraphLinkDouble::Hash(input, output) => {
                         simple_inputs.hashes.insert(
                             output.clone(),
-                            data.hashes
+                            *data.hashes
                                 .get(input)
                                 .ok_or(SuperGraphError::MissingLinkError())?
-                                .clone(),
                         );
                     }
                 }
@@ -521,10 +520,9 @@ impl SuperGraphNode for SuperGraphNodeScan {
                     SuperGraphLinkTriple::Hash(initial, inner_input, _inner_output) => {
                         state_values.hashes.insert(
                             inner_input.clone(),
-                            data.hashes
+                            *data.hashes
                                 .get(initial)
                                 .ok_or(SuperGraphError::MissingLinkError())?
-                                .clone(),
                         );
                     }
                 }
@@ -546,7 +544,7 @@ impl SuperGraphNode for SuperGraphNodeScan {
                 for (outer, inner, scan_axis) in &self.scan_inputs {
                     let tensor = data
                         .tensors
-                        .get(&outer)
+                        .get(outer)
                         .ok_or(SuperGraphError::MissingLinkError())?;
                     let slice_arg = {
                         let mut slice_ranges = Vec::new();
@@ -626,11 +624,10 @@ impl SuperGraphNode for SuperGraphNodeScan {
                         SuperGraphLinkTriple::Hash(_initial, inner_input, inner_output) => {
                             state_values.hashes.insert(
                                 inner_input.clone(),
-                                iter_outputs
+                                *iter_outputs
                                     .hashes
                                     .get(inner_output)
                                     .ok_or(SuperGraphError::MissingLinkError())?
-                                    .clone(),
                             );
                         }
                     }
@@ -695,13 +692,12 @@ impl SuperGraphNode for SuperGraphNodeScan {
                 SuperGraphLinkDouble::Hash(input, output) => {
                     output_data.hashes.insert(
                         output.clone(),
-                        prev_iter_outputs
+                        *prev_iter_outputs
                             .as_ref()
                             .unwrap()
                             .hashes
                             .get(input)
                             .ok_or(SuperGraphError::MissingLinkError())?
-                            .clone(),
                     );
                 }
             }

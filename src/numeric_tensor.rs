@@ -390,20 +390,18 @@ impl NumericTensor<DynRank> {
     pub fn concat(
         tensors: &[&Self],
         axis: usize,
-        backend: &EvalBackend,
+        _backend: &EvalBackend,
     ) -> Result<Self, NumericTensorError> {
-        Ok(match backend {
-            _ => {
-                let ndarrays: Vec<NDArrayNumericTensor<DynRank>> = tensors
-                    .iter()
-                    .map(|x| NDArrayNumericTensor::<DynRank>::try_from(*x))
-                    .collect::<Result<Vec<NDArrayNumericTensor<DynRank>>, NumericTensorError>>()?;
-                let ndarrays_ref: Vec<&NDArrayNumericTensor<DynRank>> = ndarrays.iter().collect();
-                NumericTensor::NDArray(NDArrayNumericTensor::<DynRank>::concat(
-                    &ndarrays_ref,
-                    axis,
-                )?)
-            }
+        Ok({
+            let ndarrays: Vec<NDArrayNumericTensor<DynRank>> = tensors
+                .iter()
+                .map(|x| NDArrayNumericTensor::<DynRank>::try_from(*x))
+                .collect::<Result<Vec<NDArrayNumericTensor<DynRank>>, NumericTensorError>>()?;
+            let ndarrays_ref: Vec<&NDArrayNumericTensor<DynRank>> = ndarrays.iter().collect();
+            NumericTensor::NDArray(NDArrayNumericTensor::<DynRank>::concat(
+                &ndarrays_ref,
+                axis,
+            )?)
         })
     }
 
@@ -445,7 +443,7 @@ impl NumericTensor<DynRank> {
             NumericTensor::Vulkan(tensor) => NumericTensor::Vulkan(tensor.slice(indices)?),
             _ => {
                 let indices = indices
-                    .into_iter()
+                    .iter()
                     .map(|x| x.start as usize..x.end as usize)
                     .collect::<Vec<_>>();
                 NumericTensor::NDArray(
@@ -1046,6 +1044,7 @@ impl NumericTensor<DynRank> {
         ))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn gemm(
         a: &Self,
         b: &Self,
@@ -1060,7 +1059,7 @@ impl NumericTensor<DynRank> {
             NDArrayNumericTensor::<DynRank>::gemm(
                 &a.try_into()?,
                 &b.try_into()?,
-                c.map(|x| NDArrayNumericTensor::<DynRank>::try_from(x))
+                c.map(NDArrayNumericTensor::<DynRank>::try_from)
                     .transpose()?
                     .as_ref(),
                 alpha,
@@ -1075,17 +1074,15 @@ impl NumericTensor<DynRank> {
         &self,
         split: &[i64],
         axis: i64,
-        backend: &EvalBackend,
+        _backend: &EvalBackend,
     ) -> Result<Vec<Self>, NumericTensorError> {
-        Ok(match backend {
-            _ => {
-                let splits = NDArrayNumericTensor::<DynRank>::try_from(self)?.split(split, axis)?;
-                let mut out = Vec::new();
-                for split in splits {
-                    out.push(NumericTensor::NDArray(split));
-                }
-                out
+        Ok({
+            let splits = NDArrayNumericTensor::<DynRank>::try_from(self)?.split(split, axis)?;
+            let mut out = Vec::new();
+            for split in splits {
+                out.push(NumericTensor::NDArray(split));
             }
+            out
         })
     }
 

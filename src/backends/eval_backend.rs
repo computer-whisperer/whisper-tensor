@@ -51,8 +51,6 @@ impl EvalBackend {
 
 #[derive(Debug, thiserror::Error)]
 pub enum EvalRuntimeError {
-    #[error("Disabled Eval Backend: {0}")]
-    DisabledBackend(EvalBackend),
     #[error(transparent)]
     DTypeError(#[from] DTypeError),
     #[error("Unexpected shape: expected {0:?}, got {1:?} in shape {2:?}")]

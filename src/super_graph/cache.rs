@@ -2,9 +2,11 @@ use crate::DynRank;
 use crate::numeric_tensor::NumericTensor;
 use std::collections::HashMap;
 
-#[derive(Clone, Debug)]
+type RNNCache = HashMap<Vec<u32>, HashMap<String, NumericTensor<DynRank>>>;
+
+#[derive(Clone, Debug, Default)]
 pub struct SuperGraphCache {
-    pub rnn_cache: HashMap<u64, HashMap<Vec<u32>, HashMap<String, NumericTensor<DynRank>>>>,
+    pub rnn_cache: HashMap<u64, RNNCache>,
 }
 
 impl SuperGraphCache {

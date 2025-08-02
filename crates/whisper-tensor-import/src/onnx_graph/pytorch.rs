@@ -39,7 +39,7 @@ pub fn linear(
 pub fn reshape(input: Arc<dyn Tensor>, dims: Vec<i64>) -> Result<Arc<Reshape>, Error> {
     let shape = Shape::from(&[dims.len()][..]);
     let c = Constant::new(None, TensorData::new(dims.into(), shape)?);
-    Ok(Reshape::new(None, input, c)?)
+    Reshape::new(None, input, c)
 }
 
 pub fn unsqueeze(input: Arc<dyn Tensor>, dim: i64) -> Result<Arc<Unsqueeze>, Error> {
@@ -47,7 +47,7 @@ pub fn unsqueeze(input: Arc<dyn Tensor>, dim: i64) -> Result<Arc<Unsqueeze>, Err
         None,
         TensorData::new(vec![dim].into(), Shape::from(&[1][..]))?,
     );
-    Ok(Unsqueeze::new(None, input, c)?)
+    Unsqueeze::new(None, input, c)
 }
 
 pub fn squeeze(input: Arc<dyn Tensor>, dim: i64) -> Result<Arc<Squeeze>, Error> {
@@ -55,14 +55,14 @@ pub fn squeeze(input: Arc<dyn Tensor>, dim: i64) -> Result<Arc<Squeeze>, Error> 
         None,
         TensorData::new(vec![dim].into(), Shape::from(&[1][..]))?,
     );
-    Ok(Squeeze::new(None, input, c)?)
+    Squeeze::new(None, input, c)
 }
 
 pub fn slice(input: Arc<dyn Tensor>, start: Vec<i64>, end: Vec<i64>) -> Result<Arc<Slice>, Error> {
     let const_shape = Shape::new(vec![Dimension::new(Some(start.len()), None, None)]);
     let start = Constant::new(None, TensorData::new(start.into(), const_shape.clone())?);
     let end = Constant::new(None, TensorData::new(end.into(), const_shape)?);
-    Ok(Slice::new(None, input, start, end, None, None)?)
+    Slice::new(None, input, start, end, None, None)
 }
 
 pub fn cast(input: Arc<dyn Tensor>, dtype: DType) -> Arc<dyn Tensor> {
@@ -167,15 +167,16 @@ where
     let shape = Shape::new(vec![Dimension::new(Some(1), None, None)]);
     let constant = Constant::new(None, TensorData::fill(shape, scalar)?);
 
-    Ok(Div::new(None, input, constant)?)
+    Div::new(None, input, constant)
 }
 
 pub fn expand(input: Arc<dyn Tensor>, dims: Vec<i64>) -> Result<Arc<Expand>, Error> {
     let shape = Shape::from(&[dims.len()][..]);
     let c = Constant::new(None, TensorData::new(dims.into(), shape)?);
-    Ok(Expand::new(None, input, c)?)
+    Expand::new(None, input, c)
 }
 
+#[allow(clippy::type_complexity)]
 pub fn topk(
     input: Arc<dyn Tensor>,
     k: i64,

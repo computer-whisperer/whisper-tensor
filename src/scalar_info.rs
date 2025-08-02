@@ -39,7 +39,7 @@ where
         if let (Self::Numeric(a), Self::Numeric(b)) = (self, other) {
             Some(a == b)
         } else if let (Self::Symbolic(a), Self::Symbolic(b)) = (self, other) {
-            a.try_eq(&b)
+            a.try_eq(b)
         } else {
             None
         }
@@ -104,9 +104,9 @@ impl ScalarInfo {
         }
     }
 
-    pub(crate) fn cast<T: DTypeOfPrimitive>(&self) -> ScalarInfoTyped<T>
+    pub(crate) fn cast<T>(&self) -> ScalarInfoTyped<T>
     where
-        T: NumericScalarType + PartialEq + Copy + Clone,
+        T: DTypeOfPrimitive + NumericScalarType + PartialEq + Copy + Clone,
     {
         match self {
             ScalarInfo::Numeric(x) => ScalarInfoTyped::Numeric(T::cast_from_numeric_scalar(x)),

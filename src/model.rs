@@ -45,6 +45,7 @@ pub enum ModelError {
     UnconfiguredBackend,
 }
 
+#[allow(clippy::large_enum_variant)]
 pub enum ModelExecutionRuntime {
     ONNXReference,
     ORT,
@@ -269,6 +270,7 @@ impl Model {
         self.model_metadata.as_ref()
     }
 
+    #[allow(clippy::type_complexity)]
     pub fn get_input_tensor_info(
         &self,
     ) -> Result<HashMap<String, (DType, Vec<Option<u64>>)>, EvalRuntimeError> {

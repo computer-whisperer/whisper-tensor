@@ -74,15 +74,15 @@ pub trait Node {
     }
 }
 
-impl<'a> PartialEq for &'a dyn Node {
+impl PartialEq for & dyn Node {
     fn eq(&self, other: &Self) -> bool {
         std::ptr::addr_eq(*self, *other)
     }
 }
 
-impl<'a> Eq for &'a dyn Node {}
+impl Eq for & dyn Node {}
 
-impl<'a> Hash for &'a dyn Node {
+impl Hash for & dyn Node {
     fn hash<H: Hasher>(&self, state: &mut H) {
         let a: *const _ = *self;
         let address: *const u8 = a.cast();

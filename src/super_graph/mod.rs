@@ -70,7 +70,7 @@ impl SuperGraphInner {
     ) -> Result<SuperGraphData<'a>, SuperGraphError> {
         let mut data = data;
 
-        let mut remaining_ops = self.nodes.keys().map(|x| x.clone()).collect::<Vec<_>>();
+        let mut remaining_ops = self.nodes.keys().cloned().collect::<Vec<_>>();
 
         loop {
             let op_id_to_use = {
@@ -131,7 +131,7 @@ impl SuperGraphInner {
         let output_data = data.select(
             self.output_links
                 .iter()
-                .map(|x| x.clone())
+                .cloned()
                 .collect::<Vec<_>>()
                 .as_slice(),
         )?;
@@ -181,8 +181,8 @@ impl SuperGraphBuilder {
         SuperGraph {
             inner: SuperGraphInner {
                 nodes: self.nodes,
-                input_links: HashSet::from_iter(input_links.iter().map(|x| x.clone())),
-                output_links: HashSet::from_iter(output_links.iter().map(|x| x.clone())),
+                input_links: HashSet::from_iter(input_links.iter().cloned()),
+                output_links: HashSet::from_iter(output_links.iter().cloned()),
             },
         }
     }
@@ -194,8 +194,8 @@ impl SuperGraphBuilder {
     ) -> SuperGraphInner {
         SuperGraphInner {
             nodes: self.nodes,
-            input_links: HashSet::from_iter(input_links.iter().map(|x| x.clone())),
-            output_links: HashSet::from_iter(output_links.iter().map(|x| x.clone())),
+            input_links: HashSet::from_iter(input_links.iter().cloned()),
+            output_links: HashSet::from_iter(output_links.iter().cloned()),
         }
     }
 
@@ -217,5 +217,11 @@ impl SuperGraphBuilder {
 
     pub fn new_hash_link(&mut self) -> SuperGraphLinkHash {
         SuperGraphLinkHash::new(self.get_next_link_id())
+    }
+}
+
+impl Default for SuperGraphBuilder {
+    fn default() -> Self {
+        Self::new()
     }
 }

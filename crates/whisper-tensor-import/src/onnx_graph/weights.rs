@@ -27,8 +27,8 @@ pub trait WeightExternalOutputManager<'a> {
         let file_index = graph_tensor.file_index;
         let name = &graph_tensor.name;
         let st = SafeTensors::deserialize(&graph_tensor.inner.safetensors_files[file_index])
-            .map_err(|x| Error::SafeTensorError(x))?;
-        let data = st.tensor(name).map_err(|x| Error::SafeTensorError(x))?;
+            .map_err(Error::SafeTensorError)?;
+        let data = st.tensor(name).map_err(Error::SafeTensorError)?;
         self.write_tensor_data(graph_tensor, TensorData::from_safetensors_view(data)?)
     }
     fn write_tensor_data(
@@ -95,6 +95,13 @@ impl<'a> EmbeddedOutputManager<'a> {
         }
     }
 }
+
+impl<'a> Default for EmbeddedOutputManager<'a> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<'a> WeightExternalOutputManager<'a> for EmbeddedOutputManager<'a> {
     fn write_tensor_data(
         &mut self,
@@ -146,7 +153,7 @@ impl<'a> WeightExternalOutputManager<'a> for BinOutputManager<'a> {
         let data = data.to_raw_encoding();
         self.output
             .write_all(&data)
-            .map_err(|e| Error::IoError(e))?;
+            .map_err(Error::IoError)?;
         self.tensor_data_map
             .insert(graph_tensor, (offset, data.len()));
         Ok(())
@@ -279,7 +286,7 @@ pub trait WeightManager {
     fn get_tensor_names(&self) -> Vec<String>;
     fn print_weight_list(&self) {
         for name in self.get_tensor_names() {
-            println!("{}", name);
+            println!("{name}");
         }
     }
 }
@@ -303,7 +310,7 @@ impl PthWeightManager {
 impl WeightManager for PthWeightManager {
     fn prefix(&self, name: &str) -> Self {
         let prefix = Some(if let Some(prefix) = &self.prefix {
-            format!("{}.{}", prefix, name)
+            format!("{prefix}.{name}")
         } else {
             name.to_string()
         });
@@ -315,7 +322,7 @@ impl WeightManager for PthWeightManager {
     }
     fn get_tensor(&self, name: &str) -> Result<Arc<dyn Tensor>, Error> {
         let name = if let Some(prefix) = &self.prefix {
-            format!("{}.{}", prefix, name)
+            format!("{prefix}.{name}")
         } else {
             name.to_string()
         };
@@ -354,8 +361,8 @@ impl SafetensorsWeightManagerInner {
         let safetensors_metadata = {
             let mut out = vec![];
             for safetensors_mmap in &safetensors_files {
-                let metadata = SafeTensors::read_metadata(&safetensors_mmap)
-                    .map_err(|x| Error::SafeTensorError(x))?;
+                let metadata = SafeTensors::read_metadata(safetensors_mmap)
+                    .map_err(Error::SafeTensorError)?;
                 out.push(metadata);
             }
             out
@@ -379,7 +386,7 @@ impl SafetensorsWeightManagerInner {
         let mut out = vec![];
         for metadata in &self.safetensors_metadata {
             let tensors = metadata.1.tensors();
-            out.extend(tensors.keys().map(|x| x.clone()));
+            out.extend(tensors.keys().cloned());
         }
         out
     }
@@ -404,7 +411,7 @@ impl SafetensorsWeightManager {
 impl WeightManager for SafetensorsWeightManager {
     fn prefix(&self, name: &str) -> Self {
         let prefix = Some(if let Some(prefix) = &self.prefix {
-            format!("{}.{}", prefix, name)
+            format!("{prefix}.{name}")
         } else {
             name.to_string()
         });
@@ -416,7 +423,7 @@ impl WeightManager for SafetensorsWeightManager {
     }
     fn get_tensor(&self, name: &str) -> Result<Arc<dyn Tensor>, Error> {
         let full_name = if let Some(prefix) = &self.prefix {
-            format!("{}.{}", prefix, name)
+            format!("{prefix}.{name}")
         } else {
             name.to_string()
         };

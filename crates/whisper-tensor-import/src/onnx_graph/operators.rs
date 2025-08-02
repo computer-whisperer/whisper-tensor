@@ -27,32 +27,26 @@ fn try_multidirectional_broadcasting(a: &Shape, b: &Shape) -> Result<Shape, Erro
     for i in 0..a.rank() {
         output_dims.push(if a[i].as_ref() == b[i].as_ref() {
             a[i].clone()
-        } else {
-            if let Some(a_val) = a[i].resolve().ok() {
-                if a_val == 1 {
-                    b[i].clone()
-                } else {
-                    if let Some(b_val) = b[i].resolve().ok() {
-                        if b_val == 1 {
-                            a[i].clone()
-                        } else {
-                            Err(Error::ShapeMismatchError(a.clone(), b.clone()))?
-                        }
-                    } else {
-                        Err(Error::ShapeMismatchError(a.clone(), b.clone()))?
-                    }
-                }
-            } else {
-                if let Some(b_val) = b[i].resolve().ok() {
-                    if b_val == 1 {
-                        a[i].clone()
-                    } else {
-                        Err(Error::ShapeMismatchError(a.clone(), b.clone()))?
-                    }
+        } else if let Ok(a_val) = a[i].resolve() {
+            if a_val == 1 {
+                b[i].clone()
+            } else if let Ok(b_val) = b[i].resolve() {
+                if b_val == 1 {
+                    a[i].clone()
                 } else {
                     Err(Error::ShapeMismatchError(a.clone(), b.clone()))?
                 }
+            } else {
+                Err(Error::ShapeMismatchError(a.clone(), b.clone()))?
             }
+        } else if let Ok(b_val) = b[i].resolve() {
+            if b_val == 1 {
+                a[i].clone()
+            } else {
+                Err(Error::ShapeMismatchError(a.clone(), b.clone()))?
+            }
+        } else {
+            Err(Error::ShapeMismatchError(a.clone(), b.clone()))?
         });
     }
 
@@ -122,6 +116,7 @@ impl SingleOutputNode for Add {
 }
 
 impl Add {
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn new(
         name: Option<String>,
         a: Arc<dyn Tensor>,
@@ -148,7 +143,7 @@ impl Node for Add {
         vec![self]
     }
     fn get_name(&self) -> Option<&str> {
-        self.name.as_ref().map(|x| x.as_str())
+        self.name.as_deref()
     }
     fn get_onnx_type(&self) -> &str {
         "Add"
@@ -166,6 +161,7 @@ pub struct Sub {
 }
 
 impl Sub {
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn new(
         name: Option<String>,
         a: Arc<dyn Tensor>,
@@ -222,6 +218,7 @@ pub struct Mul {
 }
 
 impl Mul {
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn new(
         name: Option<String>,
         a: Arc<dyn Tensor>,
@@ -276,6 +273,7 @@ pub struct Div {
 }
 
 impl Div {
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn new(
         name: Option<String>,
         a: Arc<dyn Tensor>,
@@ -332,6 +330,7 @@ pub struct Gather {
 }
 
 impl Gather {
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn new(
         name: Option<String>,
         data: Arc<dyn Tensor>,
@@ -353,10 +352,8 @@ impl Gather {
         loop {
             if data_i != axis {
                 output_shape.push(data_shape[data_i].clone())
-            } else {
-                if indices_shape.rank() > 1 || indices_shape[0].resolve()? > 1 {
-                    output_shape.extend_from_slice(&indices_shape.dims[0..indices_shape.rank()])
-                }
+            } else if indices_shape.rank() > 1 || indices_shape[0].resolve()? > 1 {
+                output_shape.extend_from_slice(&indices_shape.dims[0..indices_shape.rank()])
             }
             data_i += 1;
             if data_i >= data_shape.rank() {
@@ -384,7 +381,7 @@ impl Node for Gather {
         vec![self]
     }
     fn get_name(&self) -> Option<&str> {
-        self.name.as_ref().map(|x| x.as_str())
+        self.name.as_deref()
     }
     fn get_onnx_type(&self) -> &str {
         "Gather"
@@ -426,6 +423,7 @@ impl SingleOutputNode for LayerNormalization {
 }
 
 impl LayerNormalization {
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn new(
         name: Option<String>,
         input: Arc<dyn Tensor>,
@@ -463,7 +461,7 @@ impl Node for LayerNormalization {
         vec![self]
     }
     fn get_name(&self) -> Option<&str> {
-        self.name.as_ref().map(|x| x.as_str())
+        self.name.as_deref()
     }
     fn get_onnx_type(&self) -> &str {
         "LayerNormalization"
@@ -486,6 +484,7 @@ pub struct MatMul {
 }
 
 impl MatMul {
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn new(
         name: Option<String>,
         a: Arc<dyn Tensor>,
@@ -525,31 +524,11 @@ impl MatMul {
         for i in 0..a_shape.rank() - 2 {
             output_dims.push(if a_shape[i].as_ref() != b_shape[i].as_ref() {
                 a_shape[i].clone()
-            } else {
-                if let Some(a_value) = a_shape[i].value {
-                    if a_value == 1 {
-                        b_shape[i].clone()
-                    } else {
-                        if let Some(b_value) = b_shape[i].value {
-                            if b_value == 1 {
-                                a_shape[i].clone()
-                            } else if a_value == b_value {
-                                a_shape[i].clone()
-                            } else {
-                                Err(Error::IncompatibleShapeError(
-                                    a_shape.clone(),
-                                    b_shape.clone(),
-                                ))?
-                            }
-                        } else {
-                            Err(Error::IncompatibleShapeError(
-                                a_shape.clone(),
-                                b_shape.clone(),
-                            ))?
-                        }
-                    }
+            } else if let Some(a_value) = a_shape[i].value {
+                if a_value == 1 {
+                    b_shape[i].clone()
                 } else if let Some(b_value) = b_shape[i].value {
-                    if b_value == 1 {
+                    if b_value == 1 || a_value == b_value {
                         a_shape[i].clone()
                     } else {
                         Err(Error::IncompatibleShapeError(
@@ -563,6 +542,20 @@ impl MatMul {
                         b_shape.clone(),
                     ))?
                 }
+            } else if let Some(b_value) = b_shape[i].value {
+                if b_value == 1 {
+                    a_shape[i].clone()
+                } else {
+                    Err(Error::IncompatibleShapeError(
+                        a_shape.clone(),
+                        b_shape.clone(),
+                    ))?
+                }
+            } else {
+                Err(Error::IncompatibleShapeError(
+                    a_shape.clone(),
+                    b_shape.clone(),
+                ))?
             })
         }
         // Add output dims
@@ -631,6 +624,8 @@ pub struct Gemm {
 }
 
 impl Gemm {
+    #[allow(clippy::arc_with_non_send_sync)]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         name: Option<String>,
         a: Arc<dyn Tensor>,
@@ -735,6 +730,7 @@ pub struct Concat {
 }
 
 impl Concat {
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn new(
         name: Option<String>,
         inputs: Vec<Arc<dyn Tensor>>,
@@ -765,10 +761,7 @@ impl Concat {
                 for input in &inputs {
                     let t = input.shape()[i].resolve();
                     v = match t {
-                        Ok(t) => match v {
-                            None => None,
-                            Some(v) => Some(v + t),
-                        },
+                        Ok(t) => v.map(|x| x + t),
                         Err(_) => None,
                     };
                 }
@@ -795,6 +788,7 @@ impl Concat {
         }))
     }
 
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn new_with_output_shape(
         name: Option<String>,
         inputs: Vec<Arc<dyn Tensor>>,
@@ -867,6 +861,7 @@ pub struct Sigmoid {
 }
 
 impl Sigmoid {
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn new(name: Option<String>, input: Arc<dyn Tensor>) -> Arc<Sigmoid> {
         Arc::new(Sigmoid { name, input })
     }
@@ -910,6 +905,7 @@ pub struct Softplus {
 }
 
 impl Softplus {
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn new(name: Option<String>, input: Arc<dyn Tensor>) -> Result<Arc<Softplus>, Error> {
         if input.dtype() != DType::F32
             && input.dtype() != DType::F16
@@ -960,6 +956,7 @@ pub struct Neg {
 }
 
 impl Neg {
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn new(name: Option<String>, input: Arc<dyn Tensor>) -> Arc<Neg> {
         Arc::new(Neg { name, input })
     }
@@ -1001,6 +998,7 @@ pub struct Tanh {
 }
 
 impl Tanh {
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn new(name: Option<String>, input: Arc<dyn Tensor>) -> Arc<Tanh> {
         Arc::new(Tanh { name, input })
     }
@@ -1044,6 +1042,7 @@ pub struct Constant {
 }
 
 impl Constant {
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn new(name: Option<String>, data: TensorData) -> Arc<Constant> {
         Arc::new(Constant { name, data })
     }
@@ -1073,7 +1072,7 @@ impl Node for Constant {
 
 impl SingleOutputNode for Constant {
     fn get_output_shape(&self) -> &Shape {
-        &self.data.shape()
+        self.data.shape()
     }
     fn get_output_dtype(&self) -> DType {
         self.data.dtype()
@@ -1090,6 +1089,7 @@ pub struct Cast {
 }
 
 impl Cast {
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn new(name: Option<String>, input: Arc<dyn Tensor>, to: DType) -> Arc<Cast> {
         Arc::new(Cast { name, input, to })
     }
@@ -1136,6 +1136,7 @@ pub struct Exp {
 }
 
 impl Exp {
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn new(name: Option<String>, input: Arc<dyn Tensor>) -> Arc<Exp> {
         Arc::new(Exp { name, input })
     }
@@ -1181,6 +1182,7 @@ pub struct LpNormalization {
 }
 
 impl LpNormalization {
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn new(
         name: Option<String>,
         input: Arc<dyn Tensor>,
@@ -1237,6 +1239,7 @@ pub struct Reshape {
 }
 
 impl Reshape {
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn new(
         name: Option<String>,
         data_input: Arc<dyn Tensor>,
@@ -1298,6 +1301,7 @@ impl Reshape {
         }))
     }
 
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn new_with_forced_output(
         name: Option<String>,
         data_input: Arc<dyn Tensor>,
@@ -1363,6 +1367,7 @@ pub struct Slice {
 }
 
 impl Slice {
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn new(
         name: Option<String>,
         data_input: Arc<dyn Tensor>,
@@ -1498,6 +1503,7 @@ pub struct Squeeze {
 }
 
 impl Squeeze {
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn new(
         name: Option<String>,
         data_input: Arc<dyn Tensor>,
@@ -1535,10 +1541,8 @@ impl Squeeze {
         for i in 0..data_input.rank() {
             if !axes.contains(&i) {
                 new_dims.push(data_input.shape()[i].clone());
-            } else {
-                if data_input.shape()[i].resolve()? != 1 {
-                    Err(Error::InvalidInputError)?;
-                }
+            } else if data_input.shape()[i].resolve()? != 1 {
+                Err(Error::InvalidInputError)?;
             }
         }
 
@@ -1593,6 +1597,7 @@ pub struct Unsqueeze {
 }
 
 impl Unsqueeze {
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn new(
         name: Option<String>,
         data_input: Arc<dyn Tensor>,
@@ -1691,6 +1696,7 @@ pub struct Transpose {
 }
 
 impl Transpose {
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn new(
         name: Option<String>,
         data_input: Arc<dyn Tensor>,
@@ -1758,6 +1764,7 @@ pub struct GroupNormalization {
 }
 
 impl GroupNormalization {
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn new(
         name: Option<String>,
         data_input: Arc<dyn Tensor>,
@@ -1805,7 +1812,7 @@ impl Node for GroupNormalization {
 
 impl SingleOutputNode for GroupNormalization {
     fn get_output_shape(&self) -> &Shape {
-        &self.data_input.shape()
+        self.data_input.shape()
     }
     fn get_output_dtype(&self) -> DType {
         self.data_input.dtype()
@@ -1820,6 +1827,7 @@ pub struct CumSum {
 }
 
 impl CumSum {
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn new(
         name: Option<String>,
         data_input: Arc<dyn Tensor>,
@@ -1900,6 +1908,7 @@ pub struct ReduceSum {
 }
 
 impl ReduceSum {
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn new(
         name: Option<String>,
         data_input: Arc<dyn Tensor>,
@@ -1989,6 +1998,7 @@ pub struct Relu {
 }
 
 impl Relu {
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn new(name: Option<String>, input: Arc<dyn Tensor>) -> Result<Arc<Self>, Error> {
         Ok(Arc::new(Self { name, input }))
     }
@@ -2030,6 +2040,7 @@ pub struct RMSNormalization {
 }
 
 impl RMSNormalization {
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn new(
         name: Option<String>,
         input: Arc<dyn Tensor>,
@@ -2093,13 +2104,14 @@ pub struct ShapeOp {
 }
 
 impl ShapeOp {
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn new(
         name: Option<String>,
         input: Arc<dyn Tensor>,
         start: Option<i64>,
         end: Option<i64>,
     ) -> Result<Arc<Self>, Error> {
-        let start_v = if let Some(start) = start { start } else { 0 };
+        let start_v = start.unwrap_or_default();
 
         let end_v = if let Some(end) = end {
             end
@@ -2175,6 +2187,8 @@ pub struct RotaryEmbedding {
 }
 
 impl RotaryEmbedding {
+    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn new(
         name: Option<String>,
         input_data: Arc<dyn Tensor>,
@@ -2262,6 +2276,7 @@ pub struct Softmax {
 }
 
 impl Softmax {
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn new(name: Option<String>, input: Arc<dyn Tensor>, axis: Option<i64>) -> Arc<Softmax> {
         Arc::new(Self { name, input, axis })
     }
@@ -2311,6 +2326,7 @@ pub struct Expand {
 }
 
 impl Expand {
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn new(
         name: Option<String>,
         input: Arc<dyn Tensor>,
@@ -2328,8 +2344,8 @@ impl Expand {
             .ok_or(Error::CannotResolveDataError)?
             .to_int_vec()?;
         let mut output_dims = vec![];
-        for i in 0..shape_dims.len() {
-            output_dims.push(Dimension::new(Some(shape_dims[i] as usize), None, None));
+        for item in shape_dims {
+            output_dims.push(Dimension::new(Some(item as usize), None, None));
         }
 
         let output_shape = Shape::new(output_dims);
@@ -2342,6 +2358,7 @@ impl Expand {
         }))
     }
 
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn new_with_forced_output(
         name: Option<String>,
         input: Arc<dyn Tensor>,
@@ -2408,6 +2425,7 @@ pub struct TopK {
 }
 
 impl TopK {
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn new(
         name: Option<String>,
         input: Arc<dyn Tensor>,

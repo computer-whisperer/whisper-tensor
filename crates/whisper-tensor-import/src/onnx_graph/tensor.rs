@@ -39,12 +39,9 @@ impl From<&Dimension> for onnx::tensor_shape_proto::Dimension {
                 Some(value) => Some(onnx::tensor_shape_proto::dimension::Value::DimValue(
                     value as i64,
                 )),
-                None => match &value.name {
-                    None => None,
-                    Some(name) => Some(onnx::tensor_shape_proto::dimension::Value::DimParam(
-                        name.clone(),
-                    )),
-                },
+                None => value.name.as_ref().map(|name| onnx::tensor_shape_proto::dimension::Value::DimParam(
+                    name.clone()
+                )),
             },
             denotation: value.denotation.clone().unwrap_or_default(),
         }
@@ -75,9 +72,9 @@ impl PartialEq for &Dimension {
 impl fmt::Display for Dimension {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(value) = self.value {
-            write!(f, "{}", value)
+            write!(f, "{value}")
         } else if let Some(name) = &self.name {
-            write!(f, "{}", name)
+            write!(f, "{name}")
         } else {
             write!(f, "?")
         }
@@ -192,7 +189,7 @@ impl From<&candle_core::Shape> for Shape {
             dims: value
                 .clone()
                 .dims()
-                .into_iter()
+                .iter()
                 .map(|x| Dimension::new(Some(*x), None, None))
                 .collect(),
         }
@@ -205,7 +202,7 @@ impl From<candle_core::Shape> for Shape {
             dims: value
                 .clone()
                 .dims()
-                .into_iter()
+                .iter()
                 .map(|x| Dimension::new(Some(*x), None, None))
                 .collect(),
         }
@@ -295,7 +292,7 @@ impl From<DType> for onnx::tensor_proto::DataType {
 
 impl core::fmt::Display for DType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{:?}", self)
+        write!(f, "{self:?}")
     }
 }
 
@@ -363,15 +360,15 @@ pub trait Tensor {
     fn is_input(&self) -> bool;
 }
 
-impl<'a> PartialEq for &'a dyn Tensor {
+impl PartialEq for & dyn Tensor {
     fn eq(&self, other: &Self) -> bool {
         std::ptr::addr_eq(*self, *other)
     }
 }
 
-impl<'a> Eq for &'a dyn Tensor {}
+impl Eq for & dyn Tensor {}
 
-impl<'a> Hash for &'a dyn Tensor {
+impl Hash for & dyn Tensor {
     fn hash<H: Hasher>(&self, state: &mut H) {
         let a: *const _ = *self;
         let address: *const u8 = a.cast();
@@ -459,7 +456,7 @@ impl Tensor for InputTensorInitialized {
     }
 
     fn shape(&self) -> &Shape {
-        &self.initial_value.shape()
+        self.initial_value.shape()
     }
 
     fn get_name(&self) -> Option<&str> {
@@ -520,6 +517,10 @@ impl TensorDataValue {
             TensorDataValue::F16(v) => v.len(),
             TensorDataValue::I64(v) => v.len(),
         }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     pub fn dtype(&self) -> DType {
@@ -627,7 +628,7 @@ impl TensorData {
     {
         let num_elements = shape.num_elements()?;
         let data = vec![value; num_elements];
-        Ok(Self::new(TensorDataValue::from(data), shape)?)
+        Self::new(TensorDataValue::from(data), shape)
     }
 
     pub fn zeros(shape: Shape, dtype: DType) -> Result<Self, Error> {
@@ -675,7 +676,7 @@ impl TensorData {
                     .flatten_all()
                     .unwrap()
                     .to_vec1()
-                    .map_err(|x| Error::CandleCoreError(x))?;
+                    .map_err(Error::CandleCoreError)?;
                 TensorDataValue::F32(f_vec)
             }
             candle_core::DType::BF16 => {
@@ -683,7 +684,7 @@ impl TensorData {
                     .flatten_all()
                     .unwrap()
                     .to_vec1()
-                    .map_err(|x| Error::CandleCoreError(x))?;
+                    .map_err(Error::CandleCoreError)?;
                 TensorDataValue::BF16(f_vec)
             }
             candle_core::DType::F16 => {
@@ -691,7 +692,7 @@ impl TensorData {
                     .flatten_all()
                     .unwrap()
                     .to_vec1()
-                    .map_err(|x| Error::CandleCoreError(x))?;
+                    .map_err(Error::CandleCoreError)?;
                 TensorDataValue::F16(f_vec)
             }
             _ => return Err(Error::UnsupportedDTypeError),

@@ -109,7 +109,7 @@ pub fn load_llama3(
 
     let mut layer_output: Arc<dyn Tensor> = x;
     for i in 0..config.num_hidden_layers {
-        let layer_weight_manager = model_weight_manager.prefix(&format!("layers.{}", i));
+        let layer_weight_manager = model_weight_manager.prefix(&format!("layers.{i}"));
         let layer_input = layer_output.clone();
         let att_norm = rms_norm(
             &layer_weight_manager.prefix("input_layernorm"),
@@ -154,13 +154,13 @@ pub fn load_llama3(
         );
 
         let kv_cache_input_k = InputTensor::new(
-            format!("kv_cache_input_k_{}", i),
+            format!("kv_cache_input_k_{i}"),
             kv_cache_input_type,
             kv_cache_input_shape.clone(),
         );
 
         let kv_cache_input_v = InputTensor::new(
-            format!("kv_cache_input_v_{}", i),
+            format!("kv_cache_input_v_{i}"),
             kv_cache_input_type,
             kv_cache_input_shape.clone(),
         );
@@ -211,7 +211,7 @@ pub fn load_llama3(
             }),
         ));
         output_tensors.push((
-            format!("kv_cache_output_k_{}", i),
+            format!("kv_cache_output_k_{i}"),
             k.clone(),
             Some(OutputMetadata {
                 model_output_type: ModelOutputType::NextInternal(next_io_id),
@@ -226,7 +226,7 @@ pub fn load_llama3(
             }),
         ));
         output_tensors.push((
-            format!("kv_cache_output_v_{}", i),
+            format!("kv_cache_output_v_{i}"),
             v.clone(),
             Some(OutputMetadata {
                 model_output_type: ModelOutputType::NextInternal(next_io_id),

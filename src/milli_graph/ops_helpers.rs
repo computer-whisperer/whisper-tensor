@@ -28,8 +28,7 @@ pub(crate) fn resolve_axes(
     let axes_2 = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::add(
         axes, rank,
     )));
-    let out = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::modulo(
+    graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::modulo(
         axes_2, rank, None,
-    )));
-    out
+    )))
 }

@@ -50,7 +50,7 @@ impl Sampler for LLMSamplersBundle {
         let out = self
             .chain
             .sample_token(&mut self.res, &mut logits)
-            .map_err(|x| SamplerError::LLMSamplersError(x.into()))?;
+            .map_err(SamplerError::LLMSamplersError)?;
         let out = out.unwrap();
         let mut output_shape = x_shape.clone();
         output_shape.remove(output_shape.len() - 1);

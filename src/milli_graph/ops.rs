@@ -12,7 +12,7 @@ use crate::tensor_info::{
     MinimalTensor, TensorInfo, TensorInfoRanked, TensorInfoShaped, TensorInfoTypedRanked,
     TensorInfoTypedShaped,
 };
-use crate::tensor_rank::DynRank;
+use crate::tensor_rank::{DynRank};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use typenum::P1;
@@ -71,8 +71,7 @@ impl MilliOpConstant {
     {
         Self {
             data: NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![v], &vec![1])
-                .unwrap()
-                .into(),
+                .unwrap(),
         }
     }
 }
@@ -316,7 +315,7 @@ fn infer_multidirectional_broadcasting_shape(
         ));
     }
 
-    let output_rank = shapes.into_iter().map(|x| x.len()).max().unwrap();
+    let output_rank = shapes.iter().map(|x| x.len()).max().unwrap();
 
     let mut output_shape = vec![];
     for i in 0..output_rank {
@@ -568,7 +567,7 @@ impl MilliOpSimpleBinary {
 
 impl MilliOp for MilliOpSimpleBinary {
     fn get_inputs(&self) -> Vec<MilliOpGraphTensorId> {
-        vec![self.a.clone(), self.b.clone()]
+        vec![self.a, self.b]
     }
 
     fn infer(
@@ -588,7 +587,7 @@ impl MilliOp for MilliOpSimpleBinary {
         )?;
 
         if let (Some(a), Some(b)) = (a.as_numeric(), b.as_numeric()) {
-            let inputs = HashMap::from([(self.a.clone(), a.clone()), (self.b.clone(), b.clone())]);
+            let inputs = HashMap::from([(self.a, a.clone()), (self.b, b.clone())]);
             Ok(TensorInfo::from(self.eval(&inputs, backend)?))
         } else if let (Some(a), Some(b)) = (a.as_ranked(), b.as_ranked()) {
             let output_shape = infer_multidirectional_broadcasting_shape(
@@ -688,7 +687,7 @@ impl MilliOp for MilliOpPow {
         )?;
 
         if let (Some(a), Some(b)) = (a.as_numeric(), b.as_numeric()) {
-            let inputs = HashMap::from([(self.a.clone(), a.clone()), (self.b.clone(), b.clone())]);
+            let inputs = HashMap::from([(self.a, a.clone()), (self.b, b.clone())]);
             Ok(TensorInfo::from(self.eval(&inputs, backend)?))
         } else if let (Some(a), Some(b)) = (a.as_ranked(), b.as_ranked()) {
             let output_shape = infer_multidirectional_broadcasting_shape(
@@ -748,7 +747,7 @@ impl MilliOp for MilliOpMatMul {
         let a = &known_inputs[&self.a];
         let b = &known_inputs[&self.b];
         if let (Some(a), Some(b)) = (a.as_numeric(), b.as_numeric()) {
-            let inputs = HashMap::from([(self.a.clone(), a.clone()), (self.b.clone(), b.clone())]);
+            let inputs = HashMap::from([(self.a, a.clone()), (self.b, b.clone())]);
             Ok(TensorInfo::from(self.eval(&inputs, backend)?))
         } else {
             let dtype = a.dtype();
@@ -1154,7 +1153,7 @@ impl MilliOp for MilliOpNonZero {
     ) -> Result<TensorInfo, MilliOpGraphError> {
         let input = &known_inputs[&self.input];
         if let Some(x) = input.as_numeric() {
-            let inputs = HashMap::from([(self.input.clone(), x.clone())]);
+            let inputs = HashMap::from([(self.input, x.clone())]);
             Ok(TensorInfo::from(self.eval(&inputs, backend)?))
         } else {
             // Don't even try shape inference for now
@@ -1295,15 +1294,13 @@ impl MilliOp for MilliOpReduceSum {
         let axes = if let Some(axes) = self.axes {
             Vec::<i64>::try_from(inputs[&axes].try_to_rank::<P1>()?)?
         } else {
-            (0i64..(data.shape().len() as i64)).into_iter().collect()
+            (0i64..(data.shape().len() as i64)).collect()
         };
-        let axes = if axes.len() == 0 {
+        let axes = if axes.is_empty() {
             if self.noop_with_empty_axes {
                 return Ok(data.clone());
             } else {
-                (0i64..(data.shape().len() as i64))
-                    .into_iter()
-                    .collect::<Vec<_>>()
+                (0i64..(data.shape().len() as i64)).collect::<Vec<_>>()
             }
         } else {
             axes
@@ -1361,15 +1358,13 @@ impl MilliOp for MilliOpReduceMin {
         let axes = if let Some(axes) = self.axes {
             Vec::<i64>::try_from(inputs[&axes].try_to_rank::<P1>()?)?
         } else {
-            (0i64..(data.shape().len() as i64)).into_iter().collect()
+            (0i64..(data.shape().len() as i64)).collect()
         };
-        let axes = if axes.len() == 0 {
+        let axes = if axes.is_empty() {
             if self.noop_with_empty_axes {
                 return Ok(data.clone());
             } else {
-                (0i64..(data.shape().len() as i64))
-                    .into_iter()
-                    .collect::<Vec<_>>()
+                (0i64..(data.shape().len() as i64)).collect::<Vec<_>>()
             }
         } else {
             axes
@@ -1427,15 +1422,13 @@ impl MilliOp for MilliOpReduceMax {
         let axes = if let Some(axes) = self.axes {
             Vec::<i64>::try_from(inputs[&axes].try_to_rank::<P1>()?)?
         } else {
-            (0i64..(data.shape().len() as i64)).into_iter().collect()
+            (0i64..(data.shape().len() as i64)).collect()
         };
-        let axes = if axes.len() == 0 {
+        let axes = if axes.is_empty() {
             if self.noop_with_empty_axes {
                 return Ok(data.clone());
             } else {
-                (0i64..(data.shape().len() as i64))
-                    .into_iter()
-                    .collect::<Vec<_>>()
+                (0i64..(data.shape().len() as i64)).collect::<Vec<_>>()
             }
         } else {
             axes
@@ -1493,15 +1486,13 @@ impl MilliOp for MilliOpReduceProd {
         let axes = if let Some(axes) = self.axes {
             Vec::<i64>::try_from(inputs[&axes].try_to_rank::<P1>()?)?
         } else {
-            (0i64..(data.shape().len() as i64)).into_iter().collect()
+            (0i64..(data.shape().len() as i64)).collect()
         };
-        let axes = if axes.len() == 0 {
+        let axes = if axes.is_empty() {
             if self.noop_with_empty_axes {
                 return Ok(data.clone());
             } else {
-                (0i64..(data.shape().len() as i64))
-                    .into_iter()
-                    .collect::<Vec<_>>()
+                (0i64..(data.shape().len() as i64)).collect::<Vec<_>>()
             }
         } else {
             axes
@@ -1559,13 +1550,13 @@ impl MilliOp for MilliOpReduceMean {
         let axes = if let Some(axes) = self.axes {
             Vec::<i64>::try_from(inputs[&axes].try_to_rank::<P1>()?)?
         } else {
-            (0i64..(data.rank() as i64)).into_iter().collect()
+            (0i64..(data.rank() as i64)).collect()
         };
-        let axes = if axes.len() == 0 {
+        let axes = if axes.is_empty() {
             if self.noop_with_empty_axes {
                 return Ok(data.clone());
             } else {
-                (0i64..(data.rank() as i64)).into_iter().collect::<Vec<_>>()
+                (0i64..(data.rank() as i64)).collect::<Vec<_>>()
             }
         } else {
             axes
@@ -1632,7 +1623,7 @@ impl MilliOp for MilliOpSlice {
                 .try_to_rank::<P1>()?
                 .try_into()?
         } else {
-            (0i64..(input_rank as i64)).into_iter().collect()
+            (0i64..(input_rank as i64)).collect()
         };
         let steps: Vec<i64> = if let Some(steps) = &self.steps {
             inputs[steps]
@@ -1651,8 +1642,8 @@ impl MilliOp for MilliOpSlice {
             .try_to_rank::<P1>()?
             .try_into()?;
         let mut output_slice = vec![];
-        for i in 0..input_rank {
-            output_slice.push(0..input_shape[i]);
+        for &dim in &input_shape {
+            output_slice.push(0..dim);
         }
         for (i, axis) in axes.into_iter().enumerate() {
             let axis = if axis < 0 {
@@ -1663,8 +1654,7 @@ impl MilliOp for MilliOpSlice {
             let step = steps[i];
             if step != 1 {
                 return Err(MilliOpGraphError::InvalidInput(format!(
-                    "Step {} is not supported",
-                    step
+                    "Step {step} is not supported"
                 )));
             }
 
@@ -1708,14 +1698,14 @@ impl MilliOpReshape {
 
     fn calculate_new_shape(
         &self,
-        data_input_shape: &Vec<u64>,
-        shape_input_value: &Vec<i64>,
+        data_input_shape: &[u64],
+        shape_input_value: &[i64],
     ) -> Result<Vec<u64>, MilliOpGraphError> {
         let mut new_shape_dims = vec![];
         let mut backfill_dim: Option<usize> = None;
         for i in 0..shape_input_value.len() {
             new_shape_dims.push(if shape_input_value[i] == 0 {
-                data_input_shape[i].clone()
+                data_input_shape[i]
             } else if shape_input_value[i] == -1 {
                 if backfill_dim.is_some() {
                     // Only one dimension can be inferred
@@ -1824,7 +1814,7 @@ impl MilliOp for MilliOpReshape {
                             new_shape.push(
                                 data_input
                                     .shape(symbolic_resolver)
-                                    .get(&[i as u64], symbolic_resolver)
+                                    .get(&[i], symbolic_resolver)
                                     .unwrap(),
                             );
                         } else {
@@ -1918,11 +1908,7 @@ impl MilliOp for MilliOpSqueeze {
                     for i in 0..data.rank() {
                         let mut found = false;
                         for axis in &axes {
-                            if axis >= &0 && i == *axis as usize {
-                                // Skip dim
-                                found = true;
-                                break;
-                            } else if axis < &0 && i == (data.rank() as i64 + axis) as usize {
+                            if (axis >= &0 && i == *axis as usize) || (axis < &0 && i == (data.rank() as i64 + axis) as usize) {
                                 // Skip dim
                                 found = true;
                                 break;
@@ -2059,11 +2045,7 @@ impl MilliOp for MilliOpUnsqueeze {
                     for i in 0..new_rank {
                         let mut found = false;
                         for axis in &axes {
-                            if axis >= &0 && i == *axis as usize {
-                                // Skip dim
-                                found = true;
-                                break;
-                            } else if axis < &0 && i == (new_rank as i64 + axis) as usize {
+                            if (axis >= &0 && i == *axis as usize) || (axis < &0 && i == (new_rank as i64 + axis) as usize) {
                                 // Skip dim
                                 found = true;
                                 break;
@@ -2444,7 +2426,7 @@ impl MilliOp for MilliOpSplit {
         let split: Vec<i64> = if let Some(split) = &self.split {
             match split {
                 MilliOpTensorIDOrLiteral::TensorID(split) => {
-                    inputs[&split].clone().try_to_rank::<P1>()?.try_into()?
+                    inputs[split].clone().try_to_rank::<P1>()?.try_into()?
                 }
                 MilliOpTensorIDOrLiteral::Literal(split) => {
                     split.try_to_rank::<P1>()?.try_into()?

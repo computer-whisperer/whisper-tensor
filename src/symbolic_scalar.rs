@@ -127,3 +127,10 @@ impl SymbolicResolver {
         id
     }
 }
+
+
+impl Default for SymbolicResolver {
+    fn default() -> Self {
+        Self::new()
+    }
+}

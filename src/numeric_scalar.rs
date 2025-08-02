@@ -313,7 +313,7 @@ impl NumericScalarType for f64 {
             NumericScalar::I16(v) => *v as f64,
             NumericScalar::U8(v) => *v as f64,
             NumericScalar::I8(v) => *v as f64,
-            _ => panic!("Cannot cast from {:?} to f64", value),
+            _ => panic!("Cannot cast from {value:?} to f64"),
         }
     }
 }
@@ -325,7 +325,7 @@ impl NumericScalarType for f32 {
     fn cast_from_numeric_scalar(value: &NumericScalar) -> Self {
         match value {
             NumericScalar::F64(v) => *v as f32,
-            NumericScalar::F32(v) => *v as f32,
+            NumericScalar::F32(v) => *v,
             NumericScalar::BF16(v) => v.to_f32(),
             NumericScalar::F16(v) => v.to_f32(),
             NumericScalar::U64(v) => *v as f32,
@@ -336,7 +336,7 @@ impl NumericScalarType for f32 {
             NumericScalar::I16(v) => *v as f32,
             NumericScalar::U8(v) => *v as f32,
             NumericScalar::I8(v) => *v as f32,
-            _ => panic!("Cannot cast from {:?} to f32", value),
+            _ => panic!("Cannot cast from {value:?} to f32"),
         }
     }
 }
@@ -359,7 +359,7 @@ impl NumericScalarType for bf16 {
             NumericScalar::I16(v) => bf16::from_f32(*v as f32),
             NumericScalar::U8(v) => bf16::from_f32(*v as f32),
             NumericScalar::I8(v) => bf16::from_f32(*v as f32),
-            _ => panic!("Cannot cast from {:?} to bf16", value),
+            _ => panic!("Cannot cast from {value:?} to bf16"),
         }
     }
 }
@@ -382,7 +382,7 @@ impl NumericScalarType for f16 {
             NumericScalar::I16(v) => f16::from_f32(*v as f32),
             NumericScalar::U8(v) => f16::from_f32(*v as f32),
             NumericScalar::I8(v) => f16::from_f32(*v as f32),
-            _ => panic!("Cannot cast from {:?} to f16", value),
+            _ => panic!("Cannot cast from {value:?} to f16"),
         }
     }
 }
@@ -405,7 +405,7 @@ impl NumericScalarType for u64 {
             NumericScalar::I16(v) => *v as u64,
             NumericScalar::U8(v) => *v as u64,
             NumericScalar::I8(v) => *v as u64,
-            _ => panic!("Cannot cast from {:?} to u64", value),
+            _ => panic!("Cannot cast from {value:?} to u64"),
         }
     }
 }
@@ -421,14 +421,14 @@ impl NumericScalarType for i64 {
             NumericScalar::BF16(v) => v.to_f32() as i64,
             NumericScalar::F16(v) => v.to_f32() as i64,
             NumericScalar::U64(v) => *v as i64,
-            NumericScalar::I64(v) => *v as i64,
+            NumericScalar::I64(v) => *v,
             NumericScalar::U32(v) => *v as i64,
             NumericScalar::I32(v) => *v as i64,
             NumericScalar::U16(v) => *v as i64,
             NumericScalar::I16(v) => *v as i64,
             NumericScalar::U8(v) => *v as i64,
             NumericScalar::I8(v) => *v as i64,
-            _ => panic!("Cannot cast from {:?} to i64", value),
+            _ => panic!("Cannot cast from {value:?} to i64"),
         }
     }
 }
@@ -445,13 +445,13 @@ impl NumericScalarType for u32 {
             NumericScalar::F16(v) => v.to_f32() as u32,
             NumericScalar::U64(v) => *v as u32,
             NumericScalar::I64(v) => *v as u32,
-            NumericScalar::U32(v) => *v as u32,
+            NumericScalar::U32(v) => *v,
             NumericScalar::I32(v) => *v as u32,
             NumericScalar::U16(v) => *v as u32,
             NumericScalar::I16(v) => *v as u32,
             NumericScalar::U8(v) => *v as u32,
             NumericScalar::I8(v) => *v as u32,
-            _ => panic!("Cannot cast from {:?} to u32", value),
+            _ => panic!("Cannot cast from {value:?} to u32"),
         }
     }
 }
@@ -469,12 +469,12 @@ impl NumericScalarType for i32 {
             NumericScalar::U64(v) => *v as i32,
             NumericScalar::I64(v) => *v as i32,
             NumericScalar::U32(v) => *v as i32,
-            NumericScalar::I32(v) => *v as i32,
+            NumericScalar::I32(v) => *v,
             NumericScalar::U16(v) => *v as i32,
             NumericScalar::I16(v) => *v as i32,
             NumericScalar::U8(v) => *v as i32,
             NumericScalar::I8(v) => *v as i32,
-            _ => panic!("Cannot cast from {:?} to i32", value),
+            _ => panic!("Cannot cast from {value:?} to i32"),
         }
     }
 }
@@ -493,11 +493,11 @@ impl NumericScalarType for u16 {
             NumericScalar::I64(v) => *v as u16,
             NumericScalar::U32(v) => *v as u16,
             NumericScalar::I32(v) => *v as u16,
-            NumericScalar::U16(v) => *v as u16,
+            NumericScalar::U16(v) => *v,
             NumericScalar::I16(v) => *v as u16,
             NumericScalar::U8(v) => *v as u16,
             NumericScalar::I8(v) => *v as u16,
-            _ => panic!("Cannot cast from {:?} to u16", value),
+            _ => panic!("Cannot cast from {value:?} to u16"),
         }
     }
 }
@@ -517,10 +517,10 @@ impl NumericScalarType for i16 {
             NumericScalar::U32(v) => *v as i16,
             NumericScalar::I32(v) => *v as i16,
             NumericScalar::U16(v) => *v as i16,
-            NumericScalar::I16(v) => *v as i16,
+            NumericScalar::I16(v) => *v,
             NumericScalar::U8(v) => *v as i16,
             NumericScalar::I8(v) => *v as i16,
-            _ => panic!("Cannot cast from {:?} to i16", value),
+            _ => panic!("Cannot cast from {value:?} to i16"),
         }
     }
 }
@@ -541,9 +541,9 @@ impl NumericScalarType for u8 {
             NumericScalar::I32(v) => *v as u8,
             NumericScalar::U16(v) => *v as u8,
             NumericScalar::I16(v) => *v as u8,
-            NumericScalar::U8(v) => *v as u8,
+            NumericScalar::U8(v) => *v,
             NumericScalar::I8(v) => *v as u8,
-            _ => panic!("Cannot cast from {:?} to u8", value),
+            _ => panic!("Cannot cast from {value:?} to u8"),
         }
     }
 }
@@ -565,8 +565,8 @@ impl NumericScalarType for i8 {
             NumericScalar::U16(v) => *v as i8,
             NumericScalar::I16(v) => *v as i8,
             NumericScalar::U8(v) => *v as i8,
-            NumericScalar::I8(v) => *v as i8,
-            _ => panic!("Cannot cast from {:?} to i8", value),
+            NumericScalar::I8(v) => *v,
+            _ => panic!("Cannot cast from {value:?} to i8", ),
         }
     }
 }
@@ -578,7 +578,7 @@ impl NumericScalarType for bool {
     fn cast_from_numeric_scalar(value: &NumericScalar) -> Self {
         match value {
             NumericScalar::BOOL(v) => *v,
-            _ => panic!("Cannot cast from {:?} to bool", value),
+            _ => panic!("Cannot cast from {value:?} to bool"),
         }
     }
 }

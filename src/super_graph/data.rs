@@ -9,7 +9,7 @@ use crate::super_graph::links::{
 use crate::tokenizer::AnyTokenizer;
 use std::collections::HashMap;
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct SuperGraphData<'models> {
     pub tensors: HashMap<SuperGraphLinkTensor, NumericTensor<DynRank>>,
     pub strings: HashMap<SuperGraphLinkString, String>,
@@ -76,10 +76,9 @@ impl<'models> SuperGraphData<'models> {
                 SuperGraphAnyLink::Hash(h) => {
                     hashes.insert(
                         h.clone(),
-                        self.hashes
+                        *self.hashes
                             .get(h)
-                            .ok_or(SuperGraphError::MissingLinkError())?
-                            .clone(),
+                            .ok_or(SuperGraphError::MissingLinkError())?,
                     );
                 }
             }
@@ -136,10 +135,9 @@ impl<'models> SuperGraphData<'models> {
                 SuperGraphLinkDouble::Hash(input, output) => {
                     new_data.hashes.insert(
                         output,
-                        self.hashes
+                        *self.hashes
                             .get(&input)
-                            .ok_or(SuperGraphError::MissingLinkError())?
-                            .clone(),
+                            .ok_or(SuperGraphError::MissingLinkError())?,
                     );
                 }
             }
@@ -158,6 +156,6 @@ impl<'models> SuperGraphData<'models> {
         self.models
             .extend(other.models.iter().map(|(a, b)| (a.clone(), *b)));
         self.hashes
-            .extend(other.hashes.iter().map(|(a, b)| (a.clone(), b.clone())));
+            .extend(other.hashes.iter().map(|(a, b)| (a.clone(), *b)));
     }
 }

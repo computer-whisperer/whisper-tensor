@@ -11,6 +11,7 @@ pub enum TokenizerError {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[allow(clippy::large_enum_variant)]
 pub enum AnyTokenizer {
     #[cfg(feature = "tokenizers")]
     Tokenizers(tokenizers::Tokenizer),

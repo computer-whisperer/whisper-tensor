@@ -51,10 +51,8 @@ pub type OperationId = usize;
 
 fn query_attribute_float(attributes: &[onnx::AttributeProto], name: &str) -> Option<f32> {
     for attr in attributes {
-        if attr.name == name {
-            if attr.r#type == onnx::attribute_proto::AttributeType::Float as i32 {
-                return Some(attr.f);
-            }
+        if attr.name == name && attr.r#type == onnx::attribute_proto::AttributeType::Float as i32 {
+            return Some(attr.f);
         }
     }
     None
@@ -62,10 +60,8 @@ fn query_attribute_float(attributes: &[onnx::AttributeProto], name: &str) -> Opt
 
 fn query_attribute_floats(attributes: &[onnx::AttributeProto], name: &str) -> Option<Vec<f32>> {
     for attr in attributes {
-        if attr.name == name {
-            if attr.r#type == onnx::attribute_proto::AttributeType::Floats as i32 {
-                return Some(attr.floats.clone());
-            }
+        if attr.name == name && attr.r#type == onnx::attribute_proto::AttributeType::Floats as i32 {
+            return Some(attr.floats.clone());
         }
     }
     None
@@ -73,10 +69,8 @@ fn query_attribute_floats(attributes: &[onnx::AttributeProto], name: &str) -> Op
 
 fn query_attribute_int(attributes: &[onnx::AttributeProto], name: &str) -> Option<i64> {
     for attr in attributes {
-        if attr.name == name {
-            if attr.r#type == onnx::attribute_proto::AttributeType::Int as i32 {
-                return Some(attr.i);
-            }
+        if attr.name == name && attr.r#type == onnx::attribute_proto::AttributeType::Int as i32 {
+            return Some(attr.i);
         }
     }
     None
@@ -84,10 +78,8 @@ fn query_attribute_int(attributes: &[onnx::AttributeProto], name: &str) -> Optio
 
 fn query_attribute_ints(attributes: &[onnx::AttributeProto], name: &str) -> Option<Vec<i64>> {
     for attr in attributes {
-        if attr.name == name {
-            if attr.r#type == onnx::attribute_proto::AttributeType::Ints as i32 {
-                return Some(attr.ints.clone());
-            }
+        if attr.name == name && attr.r#type == onnx::attribute_proto::AttributeType::Ints as i32 {
+            return Some(attr.ints.clone());
         }
     }
     None
@@ -95,10 +87,8 @@ fn query_attribute_ints(attributes: &[onnx::AttributeProto], name: &str) -> Opti
 
 fn query_attribute_string(attributes: &[onnx::AttributeProto], name: &str) -> Option<String> {
     for attr in attributes {
-        if attr.name == name {
-            if attr.r#type == onnx::attribute_proto::AttributeType::String as i32 {
-                return Some(String::from_utf8(attr.s.clone()).unwrap());
-            }
+        if attr.name == name && attr.r#type == onnx::attribute_proto::AttributeType::String as i32 {
+            return Some(String::from_utf8(attr.s.clone()).unwrap());
         }
     }
     None
@@ -106,10 +96,8 @@ fn query_attribute_string(attributes: &[onnx::AttributeProto], name: &str) -> Op
 
 fn query_attribute_bool(attributes: &[onnx::AttributeProto], name: &str) -> Option<bool> {
     for attr in attributes {
-        if attr.name == name {
-            if attr.r#type == onnx::attribute_proto::AttributeType::Int as i32 {
-                return Some(attr.i != 0);
-            }
+        if attr.name == name && attr.r#type == onnx::attribute_proto::AttributeType::Int as i32 {
+            return Some(attr.i != 0);
         }
     }
     None
@@ -120,11 +108,9 @@ fn query_attribute_tensor(
     name: &str,
 ) -> Option<NDArrayNumericTensor<DynRank>> {
     for attr in attributes {
-        if attr.name == name {
-            if attr.r#type == onnx::attribute_proto::AttributeType::Tensor as i32 {
-                if let Some(tensor_proto) = &attr.t {
-                    return NDArrayNumericTensor::try_from(tensor_proto).ok();
-                }
+        if attr.name == name && attr.r#type == onnx::attribute_proto::AttributeType::Tensor as i32 {
+            if let Some(tensor_proto) = &attr.t {
+                return NDArrayNumericTensor::try_from(tensor_proto).ok();
             }
         }
     }
@@ -136,10 +122,8 @@ fn query_attribute_graph<'a>(
     name: &str,
 ) -> Option<&'a onnx::GraphProto> {
     for attr in attributes {
-        if attr.name == name {
-            if attr.r#type == onnx::attribute_proto::AttributeType::Graph as i32 {
-                return attr.g.as_ref();
-            }
+        if attr.name == name &&  attr.r#type == onnx::attribute_proto::AttributeType::Graph as i32 {
+            return attr.g.as_ref();
         }
     }
     None
@@ -212,13 +196,10 @@ pub fn check_tensor_matches(
             Err(EvalError::UnexpectedRank(shape.len(), tensor.shape().len()))?;
         }
         for (a, b) in shape.iter().zip(tensor.shape()) {
-            match a {
-                ScalarInfoTyped::Numeric(a) => {
-                    if *a != b as u64 {
-                        Err(EvalError::UnexpectedDimension(*a, b as u64, tensor.shape()))?
-                    }
+            if let ScalarInfoTyped::Numeric(a) = a {
+                if *a != b {
+                    Err(EvalError::UnexpectedDimension(*a, b, tensor.shape()))?
                 }
-                _ => {}
             }
         }
     }
@@ -295,7 +276,7 @@ impl InnerGraph {
 
     pub fn get_foreign_tensor_ids(&self) -> HashSet<TensorId> {
         let mut results = HashSet::new();
-        for (_, op) in &self.operations {
+        for op in self.operations.values() {
             let inputs = op.op.get_inputs();
             for input in inputs {
                 if !self.tensors.contains_key(&input) {
@@ -412,7 +393,7 @@ impl InnerGraph {
 
         let ops = self.get_operations();
         let mut remaining_ops_to_complete: Vec<OperationId> =
-            ops.keys().map(|op_id| *op_id).collect();
+            ops.keys().copied().collect();
         let mut total_ops_completed: Vec<OperationId> = vec![];
         loop {
             let mut ops_completed_now = vec![];
@@ -424,7 +405,7 @@ impl InnerGraph {
                 // Collect all inputs, abort if we can't do this one yet
                 let mut failed_to_fetch = false;
                 for tensor_id in &input_ids {
-                    if let Some(value) = active_tensors.get(&tensor_id) {
+                    if let Some(value) = active_tensors.get(tensor_id) {
                         // Validate shape and dtype
                         if let Some(tensor_info) = self.get_tensor_info(*tensor_id) {
                             check_tensor_matches(value, tensor_info)?;
@@ -666,7 +647,7 @@ impl SymbolicGraphMutator {
             .map(|x| x + 1)
             .unwrap_or(0);
         let mut dimension_resolver = SymbolicResolver::new();
-        for (_, dim) in &graph.unknown_dimensions {
+        for dim in graph.unknown_dimensions.values() {
             dimension_resolver.update_last_assigned(dim.clone())
         }
         let next_operation_id = graph
@@ -802,7 +783,7 @@ impl SymbolicGraphMutator {
 
         let mut shape = Vec::new();
         for s in value.shape() {
-            shape.push(ScalarInfoTyped::Numeric(s as u64))
+            shape.push(ScalarInfoTyped::Numeric(s))
         }
 
         inner_graph.tensors.insert(
@@ -863,12 +844,10 @@ impl SymbolicGraphMutator {
         for input in &onnx_node.input {
             input_tensors.push(if input.is_empty() {
                 None
+            } else if let Some(tensor_id) = self.tensors_by_name.get(input) {
+                Some(*tensor_id)
             } else {
-                if let Some(tensor_id) = self.tensors_by_name.get(input) {
-                    Some(*tensor_id)
-                } else {
-                    Some(self.new_unknown_tensor(inner_graph, input, TensorType::Intermediate))
-                }
+                Some(self.new_unknown_tensor(inner_graph, input, TensorType::Intermediate))
             });
         }
 
@@ -876,12 +855,10 @@ impl SymbolicGraphMutator {
         for output in &onnx_node.output {
             output_tensors.push(if output.is_empty() {
                 None
+            } else if let Some(tensor_id) = self.tensors_by_name.get(output) {
+                Some(*tensor_id)
             } else {
-                if let Some(tensor_id) = self.tensors_by_name.get(output) {
-                    Some(*tensor_id)
-                } else {
-                    Some(self.new_unknown_tensor(inner_graph, output, TensorType::Intermediate))
-                }
+                Some(self.new_unknown_tensor(inner_graph, output, TensorType::Intermediate))
             });
         }
 
@@ -1410,5 +1387,17 @@ impl SymbolicGraphMutator {
         });
 
         Ok(graph_mutator)
+    }
+}
+
+impl Default for SymbolicGraphMutator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Default for SymbolicGraph {
+    fn default() -> Self {
+        Self::new()
     }
 }

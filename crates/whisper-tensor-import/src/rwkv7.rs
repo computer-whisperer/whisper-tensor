@@ -96,7 +96,7 @@ pub fn load_rwkv7_pth(
     // Survey tensor names
     let tensor_infos = tensors.tensor_infos();
     let mut layer_count = 0;
-    for (name, _info) in tensor_infos {
+    for name in tensor_infos.keys() {
         let name_split = name.split(".").collect::<Vec<&str>>();
         if name_split[0] == "blocks" {
             layer_count = layer_count.max(name_split[1].parse::<usize>()? + 1);
