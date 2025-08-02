@@ -5,8 +5,8 @@ on:
     branches: [ "main" ]
     paths:
       - "crates/whisper-tensor-webui/**"
-      - "src/**"                   # root crate source
-      - "crates/**"                # any other workspace crates that root may expose
+      - "src/**"                   # root crate source used by the webui
+      - "crates/**"                # any other workspace crates
       - "Cargo.toml"
       - "Cargo.lock"
       - "build.rs"
@@ -25,7 +25,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: '--cfg getrandom_backend="wasm_js"'
-  CARGO_TARGET_DIR: target   # ensure a single workspace-level target dir
+  CARGO_TARGET_DIR: target
 
 jobs:
   build-wasm:
@@ -41,6 +41,12 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+
+      # protoc for prost-build (runs in build.rs)
+      - name: Install protoc
+        uses: arduino/setup-protoc@v2
+        with:
+          version: "28.x"   # modern protoc; adjust if you need to pin
 
       - name: Cache cargo (registry, git, target)
         uses: actions/cache@v4
@@ -68,7 +74,7 @@ jobs:
 
       - name: Build webui crate (wasm)
         working-directory: crates/whisper-tensor-webui
-        # If the root crate has native-only default features, uncomment the last line and adjust features.
         run: |
           wasm-pack build --target web --locked
+          # If your workspace defaults pull in native-only features, use:
           # wasm-pack build --target web --locked -- --no-default-features --features web
