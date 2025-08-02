@@ -3,24 +3,86 @@ name: Rust
 on:
   push:
     branches: [ "main" ]
+    # paths-ignore:
+    #   - '**/*.md'
+    #   - 'docs/**'
   pull_request:
     branches: [ "main" ]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Avoid incremental artifacts flapping CI timings
+  CARGO_INCREMENTAL: 0
 
 jobs:
-  build:
-
+  build-test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
-    - uses: actions/checkout@v4
-      with:
-        submodules: recursive
-    - name: Install Dependencies
-      run: "sudo apt install -y libprotobuf-dev protobuf-compiler mesa-vulkan-drivers libvulkan1 vulkan-tools vulkan-validationlayers"
-    - name: Build
-      run: cargo build --verbose
-    - name: Run tests
-      run: cargo test --verbose
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust (stable) + components
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo (registry, git, target)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('.github/workflows/rust.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      # protoc for prost-build invoked from build.rs
+      - name: Install protoc
+        uses: arduino/setup-protoc@v2
+        with:
+          version: "28.x"
+
+      - name: Install Mesa Vulkan (lavapipe) + tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers libvulkan-dev vulkan-tools vulkan-validationlayers
+
+      - name: Select lavapipe ICD
+        shell: bash
+        run: |
+          ICD=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json | head -n1)
+          if [[ -z "$ICD" ]]; then
+            echo "lavapipe ICD not found"; exit 1
+          fi
+          echo "VK_ICD_FILENAMES=$ICD" >> "$GITHUB_ENV"
+          # Optional: prefer software everywhere
+          echo "LIBGL_ALWAYS_SOFTWARE=1" >> "$GITHUB_ENV"
+
+      - name: Smoke test Vulkan
+        run: |
+          vulkaninfo | head -n 50 || (echo "vulkaninfo failed" && exit 1)
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (fail on warnings)
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Build (workspace)
+        run: cargo build --workspace --all-features --locked --verbose
+
+      - name: Test (workspace)
+        run: cargo test --workspace --all-features --locked --verbose
