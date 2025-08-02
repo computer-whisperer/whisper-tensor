@@ -1,6 +1,7 @@
 pub mod links;
 pub mod nodes;
 pub mod data;
+pub mod cache;
 
 use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
@@ -9,8 +10,9 @@ use crate::milli_graph::MilliOpGraphError;
 use crate::model::{ModelError};
 use crate::numeric_tensor::{NumericTensorError};
 use crate::numeric_tensor_typed::TypedNumericTensorError;
+use crate::super_graph::cache::SuperGraphCache;
 use crate::super_graph::data::SuperGraphData;
-use crate::super_graph::links::{SuperGraphAnyLink, SuperGraphLinkId, SuperGraphLinkModel, SuperGraphLinkTensor};
+use crate::super_graph::links::{SuperGraphAnyLink, SuperGraphLinkHash, SuperGraphLinkId, SuperGraphLinkModel, SuperGraphLinkString, SuperGraphLinkTensor, SuperGraphLinkTokenizer};
 use crate::super_graph::nodes::{SuperGraphAnyNode};
 use crate::tokenizer::{TokenizerError};
 
@@ -39,8 +41,8 @@ pub struct SuperGraph {
 }
 
 impl SuperGraph {
-    pub fn run<'a>(&'a self, data: SuperGraphData<'a>, backend: &mut EvalBackend) -> Result<SuperGraphData<'a>, SuperGraphError> {
-        self.inner.eval(data, backend)
+    pub fn run<'a>(&'a self, data: SuperGraphData<'a>, caches: Option<&mut SuperGraphCache>, backend: &mut EvalBackend) -> Result<SuperGraphData<'a>, SuperGraphError> {
+        self.inner.eval(data, caches, backend)
     }
 }
 
@@ -52,7 +54,7 @@ pub struct SuperGraphInner {
 }
 
 impl SuperGraphInner {
-    pub fn eval<'a>(&'a self, data: SuperGraphData<'a>, backend: &mut EvalBackend) -> Result<SuperGraphData<'a>, SuperGraphError> {
+    pub fn eval<'a>(&'a self, data: SuperGraphData<'a>, mut caches: Option<&mut SuperGraphCache>, backend: &mut EvalBackend) -> Result<SuperGraphData<'a>, SuperGraphError> {
         let mut data = data;
 
         let mut remaining_ops = self.nodes.keys().map(|x| x.clone()).collect::<Vec<_>>();
@@ -89,6 +91,12 @@ impl SuperGraphInner {
                                     break;
                                 }
                             }
+                            SuperGraphAnyLink::Hash(x) => {
+                                if !data.hashes.contains_key(x) {
+                                    all_inputs_ready = false;
+                                    break;
+                                }
+                            }
                         }
                     }
                     if all_inputs_ready {
@@ -100,7 +108,7 @@ impl SuperGraphInner {
             };
             if let Some(op_id) = op_id_to_use {
                 let op = self.nodes.get(&op_id).unwrap();
-                op.eval(&mut data, backend)?;
+                op.eval(&mut data, caches.as_deref_mut(), backend)?;
                 remaining_ops.retain(|x| *x != op_id);
             }
             else {
@@ -171,5 +179,17 @@ impl SuperGraphBuilder {
 
     pub fn new_model_link(&mut self) -> SuperGraphLinkModel {
         SuperGraphLinkModel::new(self.get_next_link_id())
+    }
+
+    pub fn new_tokenizer_link(&mut self) -> SuperGraphLinkTokenizer {
+        SuperGraphLinkTokenizer::new(self.get_next_link_id())
+    }
+
+    pub fn new_string_link(&mut self) -> SuperGraphLinkString {
+        SuperGraphLinkString::new(self.get_next_link_id())
+    }
+
+    pub fn new_hash_link(&mut self) -> SuperGraphLinkHash {
+        SuperGraphLinkHash::new(self.get_next_link_id())
     }
 }

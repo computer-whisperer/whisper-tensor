@@ -52,7 +52,13 @@ pub enum ModelExecutionRuntime {
     Eval(EvalBackend),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ModelID {
+    pub name: String
+}
+
 pub struct Model {
+    id: ModelID,
     graph: SymbolicGraph,
     tensor_store: TensorStore,
     onnx_data: Vec<u8>,
@@ -71,6 +77,10 @@ pub struct Model {
 
 
 impl Model {
+    pub fn get_id(&self) -> &ModelID {
+        &self.id
+    }
+
     pub fn new_from_onnx(onnx_data: &[u8]) -> Result<Self, ModelError> {
         let model_info = ModelProto::decode(onnx_data)?;
         let mut model_metadata = None;
@@ -124,6 +134,9 @@ impl Model {
 
 
         Ok(Self {
+            id: ModelID{
+                name: "TEST".to_string()
+            },
             graph: symbolic_graph,
             tensor_store,
             onnx_data: onnx_data.to_vec(),

@@ -4,6 +4,7 @@ use std::path::Path;
 use whisper_tensor::backends::eval_backend::EvalBackend;
 use whisper_tensor::backends::vulkan_backend::{VulkanContext, VulkanImmediateExecutor};
 use whisper_tensor::model::{Model};
+use whisper_tensor::super_graph::SuperGraphCaches;
 use whisper_tensor_import::{identify_and_load, ModelTypeHint};
 use whisper_tensor_import::onnx_graph::{WeightStorageStrategy};
 
@@ -15,7 +16,7 @@ fn main() {
 
     let model = Model::new_from_onnx(&onnx_data).unwrap();
 
-    let prompt = "The fibonacci sequence is: 1, 1, 2, 3, 5, 8, 13,".to_string();
+    let prompt = "Mary had a little lamb".to_string();
     let mut tokenizer_cache = HashMap::new();
     print!("{:}", prompt);
     std::io::stdout().flush().unwrap();
@@ -25,9 +26,8 @@ fn main() {
     let vulkan_runtime = VulkanImmediateExecutor::new(vulkan_context).unwrap();
 
     let mut eval_backend = EvalBackend::Vulkan(vulkan_runtime);
-
     for _ in 0..10 {
-        let res = model.text_inference_tokens_in_logits_out_interface.as_ref().unwrap().run_string_in_string_out(&model, context.clone(), &mut tokenizer_cache, &mut eval_backend).unwrap();
+        let res = model.text_inference_tokens_in_logits_out_interface.as_ref().unwrap().run_string_in_string_out(&model, context.clone(), &mut tokenizer_cache, None, &mut EvalBackend::NDArray).unwrap();
         print!("{:}", res);
         std::io::stdout().flush().unwrap();
         context.push_str(&res);

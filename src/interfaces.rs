@@ -8,15 +8,17 @@ use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOpCast, MilliOpConstant, MilliOpShape, MilliOpSqueeze, MilliOpUnsqueeze};
 use crate::model::Model;
 use crate::numeric_tensor::NumericTensor;
-use crate::super_graph::links::{SuperGraphLink, SuperGraphLinkDouble, SuperGraphLinkModel, SuperGraphLinkTensor, SuperGraphLinkTriple};
+use crate::super_graph::links::{SuperGraphLink, SuperGraphLinkDouble, SuperGraphLinkHash, SuperGraphLinkModel, SuperGraphLinkTensor, SuperGraphLinkTriple};
 use crate::super_graph::{SuperGraph, SuperGraphBuilder, SuperGraphError};
+use crate::super_graph::cache::SuperGraphCache;
 use crate::super_graph::data::SuperGraphData;
-use crate::super_graph::nodes::{SuperGraphNode, SuperGraphNodeMilliOpGraph, SuperGraphNodeModelExecution, SuperGraphNodeScan};
+use crate::super_graph::nodes::{SuperGraphNode, SuperGraphNodeMilliOpGraph, SuperGraphNodeModelExecution, SuperGraphNodeRNNCacheRead, SuperGraphNodeRNNCacheWrite, SuperGraphNodeScan};
 use crate::symbolic_graph::SymbolicGraph;
 use crate::tokenizer::{AnyTokenizer, Tokenizer};
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct TextInferenceTokensInLogitOutInterface {
+    cache_key_input_link: SuperGraphLinkHash,
     token_context_input_link: SuperGraphLinkTensor,
     model_input_link: SuperGraphLinkModel,
     logit_output_link: SuperGraphLinkTensor,
@@ -73,18 +75,39 @@ impl TextInferenceTokensInLogitOutInterface {
 
         // Build super graph
         let mut super_graph_builder = SuperGraphBuilder::new();
-        let token_context_input_link = SuperGraphLinkTensor::new(super_graph_builder.get_next_link_id());
+        let token_context_input_link = super_graph_builder.new_tensor_link();
 
-        let model_input_link = SuperGraphLinkModel::new(super_graph_builder.get_next_link_id());
-        let raw_logit_output_link = SuperGraphLinkTensor::new(super_graph_builder.get_next_link_id());
+        let model_input_link = super_graph_builder.new_model_link();
+        let raw_logit_output_link =  super_graph_builder.new_tensor_link();
+
+        let cache_key = super_graph_builder.new_hash_link();
 
         let processed_logit_output_link = if Some(1) == model_metadata.max_token_batch {
             // RNN compatibility mode
+
+            let state_keys: Vec<_> = state_chain_input_names.keys().collect();
+            let state_init_links = state_keys.iter().map(|id| (**id, super_graph_builder.new_tensor_link())).collect::<HashMap<_, _>>();
+
+            // Cache
+            let (post_cache_tokens_input, post_cache_state_init_links) = {
+                let post_cache_state_init_links = state_keys.iter().map(|id| (**id, super_graph_builder.new_tensor_link())).collect::<HashMap<_, _>>();
+                let post_cache_tokens = super_graph_builder.new_tensor_link();
+                let node = SuperGraphNodeRNNCacheRead::new(
+                    cache_key.clone(),
+                    token_context_input_link.clone(),
+                    post_cache_tokens.clone(),
+                    post_cache_state_init_links.iter().map(|(id, link)| (id.to_string(), link.clone())).collect::<HashMap<_, _>>(),
+                    state_init_links.iter().map(|(id, link)| (id.to_string(), link.clone())).collect::<HashMap<_, _>>()
+                );
+                super_graph_builder.add_node(node.to_any());
+                (post_cache_tokens, post_cache_state_init_links)
+            };
+
             let loop_count_link = {
                 let loop_count_link = SuperGraphLinkTensor::new(super_graph_builder.get_next_link_id());
 
-                let (mut milli_graph, input_map) = MilliOpGraph::new(&[token_context_input_link.clone()]);
-                let milli_op_graph_input = input_map.get(&token_context_input_link).unwrap().clone();
+                let (mut milli_graph, input_map) = MilliOpGraph::new(&[post_cache_tokens_input.clone()]);
+                let milli_op_graph_input = input_map.get(&post_cache_tokens_input).unwrap().clone();
 
                 let shape_val = milli_graph.push_op(AnyMilliOp::Shape(MilliOpShape::new(milli_op_graph_input)));
                 // This should be a 1d tensor, able to be used as the input to the scan
@@ -99,12 +122,7 @@ impl TextInferenceTokensInLogitOutInterface {
             };
 
             // Sub graph
-            let processed_logit_output_link = {
-
-
-                let state_keys: Vec<_> = state_chain_input_names.keys().collect();
-                let state_init_links = state_keys.iter().map(|id| (**id, super_graph_builder.new_tensor_link())).collect::<HashMap<_, _>>();
-
+            let (processed_logit_output_link, final_state_outputs) = {
 
                 // State initialization
                 {
@@ -135,6 +153,7 @@ impl TextInferenceTokensInLogitOutInterface {
 
                 let state_input_links = state_keys.iter().map(|id| (**id, sub_builder.new_tensor_link())).collect::<HashMap<_, _>>();
                 let state_output_links = state_keys.iter().map(|id| (**id, sub_builder.new_tensor_link())).collect::<HashMap<_, _>>();
+                let final_state_output_links = state_keys.iter().map(|id| (**id, super_graph_builder.new_tensor_link())).collect::<HashMap<_, _>>();
 
                 // Input processing
                 let adjusted_token_context = {
@@ -227,7 +246,7 @@ impl TextInferenceTokensInLogitOutInterface {
 
                     for &id in state_keys {
                         let link_triple = SuperGraphLinkTriple::Tensor(
-                            state_init_links.get(&id).unwrap().clone(),
+                            post_cache_state_init_links.get(&id).unwrap().clone(),
                             state_input_links.get(&id).unwrap().clone(),
                             state_output_links.get(&id).unwrap().clone()
                         );
@@ -249,26 +268,46 @@ impl TextInferenceTokensInLogitOutInterface {
                 };
                 let output_links = {
                     let mut output_links = vec![processed_logit_output_link.to_any()];
-                    for (_, link) in state_output_links {
+                    for (_, link) in &state_output_links {
                         output_links.push(link.to_any());
                     }
                     output_links
                 };
 
                 let sub_graph_inner = sub_builder.build_inner(&input_links, &output_links);
+
+                let final_state_outputs = {
+                    let mut final_state_outputs = vec![];
+                    for (id, link) in &final_state_output_links {
+                        final_state_outputs.push(SuperGraphLinkDouble::Tensor(state_output_links.get(id).unwrap().clone(), link.clone()))
+                    }
+                    final_state_outputs
+                };
+
                 let scan_node = SuperGraphNodeScan::new(
                     sub_graph_inner,
                     loop_count_link,
                     vec![SuperGraphLinkDouble::Model(model_input_link.clone(), sub_model_input_link)],
                     state_links,
-                    vec![(token_context_input_link.clone(), sub_token_input, 0)],
+                    vec![(post_cache_tokens_input.clone(), sub_token_input, 0)],
                     vec![(processed_logit_output_link, outer_logit_output_link.clone(), 0)],
-                    vec![]
+                    final_state_outputs
                 );
                 super_graph_builder.add_node(scan_node.into());
 
-                outer_logit_output_link
+                (outer_logit_output_link, final_state_output_links)
             };
+
+            // Cache write
+            {
+                let node = SuperGraphNodeRNNCacheWrite::new(
+                    cache_key.clone(),
+                    token_context_input_link.clone(),
+                    final_state_outputs.iter().map(|(id, link)| (id.to_string(), link.clone())).collect::<HashMap<_, _>>()
+                );
+                super_graph_builder.add_node(node.into());
+            }
+
             processed_logit_output_link
         }
         else {
@@ -360,10 +399,11 @@ impl TextInferenceTokensInLogitOutInterface {
             token_context_input_link,
             logit_output_link: processed_logit_output_link,
             super_graph,
+            cache_key_input_link: cache_key.clone()
             })
     }
 
-    pub fn run_string_in_string_out(&self, model: &Model, text_in: String, tokenizer_cache: &mut HashMap<TokenizerInfo, Arc<AnyTokenizer>>, backend: &mut EvalBackend) -> Result<String, SuperGraphError> {
+    pub fn run_string_in_string_out(&self, model: &Model, text_in: String, tokenizer_cache: &mut HashMap<TokenizerInfo, Arc<AnyTokenizer>>, super_graph_caches: Option<&mut SuperGraphCache>, backend: &mut EvalBackend) -> Result<String, SuperGraphError> {
         let tokenizer = {
             if let Some(x) = tokenizer_cache.get(&self.tokenizer) {
                 x.clone()
@@ -381,10 +421,11 @@ impl TextInferenceTokensInLogitOutInterface {
             let mut super_graph_data = SuperGraphData::new();
             super_graph_data.models.insert(self.model_input_link.clone(), model);
             super_graph_data.tensors.insert(self.token_context_input_link.clone(), tokens_tensor);
+            super_graph_data.hashes.insert(self.cache_key_input_link.clone(), 0);
             super_graph_data
         };
 
-        let super_graph_output = self.super_graph.run(super_graph_data, backend)?;
+        let super_graph_output = self.super_graph.run(super_graph_data, super_graph_caches, backend)?;
         let logits = super_graph_output.tensors.get(&self.logit_output_link).unwrap();
         let logits_shape = logits.shape();
         // Select last position
