@@ -2,16 +2,21 @@
 mod app;
 #[cfg(target_arch = "wasm32")]
 mod graph_layout;
+#[cfg(target_arch = "wasm32")]
+mod websockets;
+#[cfg(target_arch = "wasm32")]
+mod widgets;
+#[cfg(target_arch = "wasm32")]
+mod graph_explorer;
+mod llm_explorer;
 
 #[cfg(target_arch = "wasm32")]
-pub use app::TemplateApp;
+pub use app::WebUIApp;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
 #[cfg(target_arch = "wasm32")]
 use tokio::sync::mpsc;
-#[cfg(target_arch = "wasm32")]
-use crate::app::websocket_task;
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen(start)]
@@ -28,7 +33,7 @@ fn main() {
     let web_options = eframe::WebOptions::default();
 
     wasm_bindgen_futures::spawn_local(async {
-        websocket_task(server_client_sender, client_server_receiver).await;
+        websockets::websocket_task(server_client_sender, client_server_receiver).await;
     });
 
     wasm_bindgen_futures::spawn_local(async {
@@ -48,7 +53,7 @@ fn main() {
                 canvas,
                 web_options,
                 Box::new(|cc| {
-                    Ok(Box::new(TemplateApp::new(cc, server_client_receiver, client_server_sender)))
+                    Ok(Box::new(WebUIApp::new(cc, server_client_receiver, client_server_sender)))
                 }),
             ).await;
 
