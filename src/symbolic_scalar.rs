@@ -128,7 +128,6 @@ impl SymbolicResolver {
     }
 }
 
-
 impl Default for SymbolicResolver {
     fn default() -> Self {
         Self::new()
