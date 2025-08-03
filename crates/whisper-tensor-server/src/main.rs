@@ -2,7 +2,7 @@ use axum::{
     Router,
     extract::ws::{WebSocket, WebSocketUpgrade},
     response::IntoResponse,
-    routing::{get},
+    routing::get,
 };
 use std::fs::File;
 use std::io::Read;
@@ -175,14 +175,18 @@ pub async fn hf_from_pretrained<S: AsRef<str>>(
         })
         .join(", "); // "'/', '-', '_', '.'"
     if !valid {
-        return Err(format!("Model \"{identifier}\" contains invalid characters, expected only alphanumeric or {valid_chars_stringified}"));
+        return Err(format!(
+            "Model \"{identifier}\" contains invalid characters, expected only alphanumeric or {valid_chars_stringified}"
+        ));
     }
     let params = params.unwrap_or_default();
 
     let revision = &params.revision;
     let valid_revision = revision.chars().all(is_valid_char);
     if !valid_revision {
-        return Err(format!("Revision \"{revision}\" contains invalid characters, expected only alphanumeric or {valid_chars_stringified}"));
+        return Err(format!(
+            "Revision \"{revision}\" contains invalid characters, expected only alphanumeric or {valid_chars_stringified}"
+        ));
     }
 
     let mut builder = ApiBuilder::new();

@@ -185,7 +185,9 @@ impl OnnxNodeTest {
             let abs_diff = (actual_value - expected_value).abs();
             let tolerance = self.atol + self.rtol * expected_value.abs();
             if abs_diff > tolerance {
-                Err(format!("Value mismatch: actual {actual_value} vs expected {expected_value}"))?;
+                Err(format!(
+                    "Value mismatch: actual {actual_value} vs expected {expected_value}"
+                ))?;
             }
         }
 
