@@ -414,9 +414,7 @@ impl Operation for LpNormalizationOperation {
         let axis_tensor = NDArrayNumericTensor::from(vec![self.axis])
             .try_to_rank::<DynRank>()
             .unwrap();
-        let axis = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(
-            axis_tensor,
-        )));
+        let axis = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(axis_tensor)));
         let x = graph.push_op(AnyMilliOp::ReduceSum(MilliOpReduceSum::new(
             x,
             Some(axis),
@@ -1497,9 +1495,7 @@ impl Operation for ReduceMeanOperation {
             Some(input_map[input_axes])
         } else if let Some(axes) = &self.axes_attr {
             let tensor = NDArrayNumericTensor::from(axes.clone());
-            Some(graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(
-                tensor.to_dyn(),
-            ))))
+            Some(graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(tensor.to_dyn()))))
         } else {
             None
         };
@@ -1582,9 +1578,7 @@ impl Operation for ReduceSumOperation {
             Some(input_map[input_axes])
         } else if let Some(axes) = &self.axes_attr {
             let tensor = NDArrayNumericTensor::from(axes.clone());
-            Some(graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(
-                tensor.to_dyn(),
-            ))))
+            Some(graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(tensor.to_dyn()))))
         } else {
             None
         };
@@ -1667,9 +1661,7 @@ impl Operation for ReduceMaxOperation {
             Some(input_map[input_axes])
         } else if let Some(axes) = &self.axes_attr {
             let tensor = NDArrayNumericTensor::from(axes.clone());
-            Some(graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(
-                tensor.to_dyn(),
-            ))))
+            Some(graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(tensor.to_dyn()))))
         } else {
             None
         };
@@ -1752,9 +1744,7 @@ impl Operation for ReduceMinOperation {
             Some(input_map[input_axes])
         } else if let Some(axes) = &self.axes_attr {
             let tensor = NDArrayNumericTensor::from(axes.clone());
-            Some(graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(
-                tensor.to_dyn(),
-            ))))
+            Some(graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(tensor.to_dyn()))))
         } else {
             None
         };
@@ -1837,9 +1827,7 @@ impl Operation for ReduceProdOperation {
             Some(input_map[input_axes])
         } else if let Some(axes) = &self.axes_attr {
             let tensor = NDArrayNumericTensor::from(axes.clone());
-            Some(graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(
-                tensor.to_dyn(),
-            ))))
+            Some(graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(tensor.to_dyn()))))
         } else {
             None
         };
@@ -2103,7 +2091,11 @@ impl Operation for SplitOperation {
         let split = if let Some(split) = self.split {
             Some(MilliOpTensorIDOrLiteral::TensorID(input_map[&split]))
         } else {
-            self.split_attribute.as_ref().map(|split| MilliOpTensorIDOrLiteral::Literal(NDArrayNumericTensor::from_vec(split.clone()).to_dyn() ))
+            self.split_attribute.as_ref().map(|split| {
+                MilliOpTensorIDOrLiteral::Literal(
+                    NDArrayNumericTensor::from_vec(split.clone()).to_dyn(),
+                )
+            })
         };
 
         for (output_id, output_tensor_id) in self.outputs.iter().enumerate() {
@@ -3188,7 +3180,7 @@ impl ResizeOperation {
             "pytorch_half_pixel" => ResizeCoordinateTransformationMode::PytorchHalfPixel,
             "tf_crop_and_resize" => ResizeCoordinateTransformationMode::TFCropAndResize,
             "half_pixel" => ResizeCoordinateTransformationMode::HalfPixel,
-            _ => ResizeCoordinateTransformationMode::HalfPixel
+            _ => ResizeCoordinateTransformationMode::HalfPixel,
         };
         let cubic_coeff_a = query_attribute_float(attributes, "cubic_coeff_a").unwrap_or(-0.75);
         let exclude_outside = query_attribute_bool(attributes, "exclude_outside").unwrap_or(false);

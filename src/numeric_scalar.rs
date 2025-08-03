@@ -566,7 +566,7 @@ impl NumericScalarType for i8 {
             NumericScalar::I16(v) => *v as i8,
             NumericScalar::U8(v) => *v as i8,
             NumericScalar::I8(v) => *v,
-            _ => panic!("Cannot cast from {value:?} to i8", ),
+            _ => panic!("Cannot cast from {value:?} to i8",),
         }
     }
 }

@@ -272,9 +272,7 @@ pub fn build_proto(
         name: "model".to_string(),
         node: sorted_nodes
             .iter()
-            .map(|node| {
-                node.to_node_proto(node_names.get(node).cloned(), &tensor_names)
-            })
+            .map(|node| node.to_node_proto(node_names.get(node).cloned(), &tensor_names))
             .collect(),
         initializer: initializers,
         doc_string: String::new(),

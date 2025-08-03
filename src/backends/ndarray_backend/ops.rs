@@ -79,7 +79,7 @@ pub(crate) fn gather<T: Clone>(
             // check overflow just in case
             stride = stride
                 .checked_mul(out_shape[i])
-                .ok_or_else(|| NDArrayOperationError::OutOfBounds)?;
+                .ok_or(NDArrayOperationError::OutOfBounds)?;
         }
     }
 
@@ -194,12 +194,12 @@ where
     }
 
     // 2) Number of nonzero elements
-    let n = coords_by_dim.get(0).map(|v| v.len()).unwrap_or(0);
+    let n = coords_by_dim.first().map(|v| v.len()).unwrap_or(0);
 
     // 3) Flatten in row-major order for shape [rank, n]
     let mut flat = Vec::with_capacity(rank * n);
-    for d in 0..rank {
-        flat.extend(&coords_by_dim[d]);
+    for d in &coords_by_dim {
+        flat.extend(d);
     }
 
     // 4) Build and wrap
@@ -461,7 +461,7 @@ pub enum NativeNumericTensorBitwiseBinaryOperation {
 
 impl core::fmt::Display for NativeNumericTensorBinaryOperation {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{:?}", self)
+        write!(f, "{self:?}")
     }
 }
 
@@ -483,17 +483,13 @@ fn try_multidirectional_broadcasting(
     let mut output_dims = vec![];
     for i in 0..a.len() {
         output_dims.push(if a[i] == b[i] {
-            a[i].clone()
+            a[i]
+        } else if a[i] == 1 {
+            b[i]
+        } else if b[i] == 1 {
+            a[i]
         } else {
-            if a[i] == 1 {
-                b[i].clone()
-            } else {
-                if b[i] == 1 {
-                    a[i].clone()
-                } else {
-                    Err(NDArrayOperationError::IncompatibleShape)?
-                }
-            }
+            Err(NDArrayOperationError::IncompatibleShape)?
         });
     }
 
@@ -508,7 +504,7 @@ impl NativeNumericTensorBinaryOperation {
     ) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError>
     where
         T: 'a
-            +Clone
+            + Clone
             + Copy
             + Real
             + std::ops::Add<Output = T>
@@ -530,11 +526,11 @@ impl NativeNumericTensorBinaryOperation {
         };
 
         let o: Array<T, IxDyn> = match self {
-            Self::Add => (&a + &b).into(),
-            Self::Sub => (&a - &b).into(),
-            Self::Mul => (&a * &b).into(),
-            Self::Div => (&a / &b).into(),
-            Self::FMod => (&a % &b).into(),
+            Self::Add => &a + &b,
+            Self::Sub => &a - &b,
+            Self::Mul => &a * &b,
+            Self::Div => &a / &b,
+            Self::FMod => &a % &b,
             Self::Max => ndarray::Zip::from(a)
                 .and(b)
                 .map_collect(|a, b| (*a).max(*b)),
@@ -551,7 +547,7 @@ impl NativeNumericTensorBinaryOperation {
     ) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError>
     where
         T: 'a
-            +Clone
+            + Clone
             + Copy
             + Ord
             + std::ops::Add<Output = T>
@@ -573,11 +569,11 @@ impl NativeNumericTensorBinaryOperation {
         };
 
         let o: Array<T, IxDyn> = match self {
-            Self::Add => (&a + &b).into(),
-            Self::Sub => (&a - &b).into(),
-            Self::Mul => (&a * &b).into(),
-            Self::Div => (&a / &b).into(),
-            Self::FMod => (&a % &b).into(),
+            Self::Add => &a + &b,
+            Self::Sub => &a - &b,
+            Self::Mul => &a * &b,
+            Self::Div => &a / &b,
+            Self::FMod => &a % &b,
             Self::Max => ndarray::Zip::from(a)
                 .and(b)
                 .map_collect(|a, b| (*a).max(*b)),
@@ -611,21 +607,21 @@ impl NativeNumericTensorBinaryOperationBoolOut {
         };
 
         let o = match self {
-            NativeNumericTensorBinaryOperationBoolOut::Equal => ndarray::Zip::from(a)
-                .and(b)
-                .map_collect(|a, b| a.clone() == b.clone()),
-            NativeNumericTensorBinaryOperationBoolOut::Less => ndarray::Zip::from(a)
-                .and(b)
-                .map_collect(|a, b| a.clone() < b.clone()),
-            NativeNumericTensorBinaryOperationBoolOut::LessOrEqual => ndarray::Zip::from(a)
-                .and(b)
-                .map_collect(|a, b| a.clone() <= b.clone()),
-            NativeNumericTensorBinaryOperationBoolOut::Greater => ndarray::Zip::from(a)
-                .and(b)
-                .map_collect(|a, b| a.clone() > b.clone()),
-            NativeNumericTensorBinaryOperationBoolOut::GreaterOrEqual => ndarray::Zip::from(a)
-                .and(b)
-                .map_collect(|a, b| a.clone() >= b.clone()),
+            NativeNumericTensorBinaryOperationBoolOut::Equal => {
+                ndarray::Zip::from(a).and(b).map_collect(|a, b| *a == *b)
+            }
+            NativeNumericTensorBinaryOperationBoolOut::Less => {
+                ndarray::Zip::from(a).and(b).map_collect(|a, b| *a < *b)
+            }
+            NativeNumericTensorBinaryOperationBoolOut::LessOrEqual => {
+                ndarray::Zip::from(a).and(b).map_collect(|a, b| *a <= *b)
+            }
+            NativeNumericTensorBinaryOperationBoolOut::Greater => {
+                ndarray::Zip::from(a).and(b).map_collect(|a, b| *a > *b)
+            }
+            NativeNumericTensorBinaryOperationBoolOut::GreaterOrEqual => {
+                ndarray::Zip::from(a).and(b).map_collect(|a, b| *a >= *b)
+            }
         };
 
         Ok(o.to_shared())
@@ -701,7 +697,7 @@ pub enum NativeNumericTensorUnaryOperation {
 
 impl core::fmt::Display for NativeNumericTensorUnaryOperation {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{:?}", self)
+        write!(f, "{self:?}")
     }
 }
 
@@ -796,7 +792,7 @@ where
     let mut cmat: Array2<T> = match c {
         Some(c_arr) => c_arr
             .broadcast((m, n))
-            .ok_or_else(|| NDArrayOperationError::IncompatibleShape)?
+            .ok_or(NDArrayOperationError::IncompatibleShape)?
             .to_owned(),
         None => Array2::zeros((m, n)),
     };
@@ -1064,13 +1060,13 @@ where
     // 2) Broadcast each input to the common shape
     let cond_b = condition
         .broadcast(out_shape.as_slice())
-        .ok_or_else(|| NDArrayOperationError::IncompatibleShape)?;
+        .ok_or(NDArrayOperationError::IncompatibleShape)?;
     let x_b = x
         .broadcast(out_shape.as_slice())
-        .ok_or_else(|| NDArrayOperationError::IncompatibleShape)?;
+        .ok_or(NDArrayOperationError::IncompatibleShape)?;
     let y_b = y
         .broadcast(out_shape.as_slice())
-        .ok_or_else(|| NDArrayOperationError::IncompatibleShape)?;
+        .ok_or(NDArrayOperationError::IncompatibleShape)?;
 
     // 3) Build the output buffer by iterating in lockstep
     let mut buf: Vec<T> = Vec::with_capacity(out_len);
@@ -1399,9 +1395,7 @@ pub fn argmax<T: Clone + PartialOrd>(
             .enumerate()
             .fold((0, start), |(best_i, best_val), (i, v)| {
                 let v = v.clone();
-                if v > best_val {
-                    (i, v)
-                } else if select_last_index && v == best_val {
+                if (v > best_val) || (select_last_index && v == best_val) {
                     (i, v)
                 } else {
                     (best_i, best_val)
@@ -1444,9 +1438,7 @@ pub fn argmin<T: Clone + PartialOrd>(
             .enumerate()
             .fold((0, start), |(best_i, best_val), (i, v)| {
                 let v = v.clone();
-                if v < best_val {
-                    (i, v)
-                } else if select_last_index && v == best_val {
+                if (v < best_val) || (select_last_index && v == best_val) {
                     (i, v)
                 } else {
                     (best_i, best_val)

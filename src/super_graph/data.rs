@@ -76,7 +76,8 @@ impl<'models> SuperGraphData<'models> {
                 SuperGraphAnyLink::Hash(h) => {
                     hashes.insert(
                         h.clone(),
-                        *self.hashes
+                        *self
+                            .hashes
                             .get(h)
                             .ok_or(SuperGraphError::MissingLinkError())?,
                     );
@@ -135,7 +136,8 @@ impl<'models> SuperGraphData<'models> {
                 SuperGraphLinkDouble::Hash(input, output) => {
                     new_data.hashes.insert(
                         output,
-                        *self.hashes
+                        *self
+                            .hashes
                             .get(&input)
                             .ok_or(SuperGraphError::MissingLinkError())?,
                     );

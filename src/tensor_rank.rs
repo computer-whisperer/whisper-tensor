@@ -141,7 +141,9 @@ impl Rank for P1 {
     type KnownDims = [u64; 1];
 
     fn try_cast_to_dim(dims: &[usize]) -> Result<Self::NDArrayDim, RankError> {
-        Ok(ndarray::Ix1(*dims.first().ok_or(RankError::CannotCastRank)?))
+        Ok(ndarray::Ix1(
+            *dims.first().ok_or(RankError::CannotCastRank)?,
+        ))
     }
 
     fn cast_to_ndarray_dim(dims: &Self::KnownDims) -> Self::NDArrayDim {

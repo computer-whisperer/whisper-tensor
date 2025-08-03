@@ -122,7 +122,7 @@ fn query_attribute_graph<'a>(
     name: &str,
 ) -> Option<&'a onnx::GraphProto> {
     for attr in attributes {
-        if attr.name == name &&  attr.r#type == onnx::attribute_proto::AttributeType::Graph as i32 {
+        if attr.name == name && attr.r#type == onnx::attribute_proto::AttributeType::Graph as i32 {
             return attr.g.as_ref();
         }
     }
@@ -392,8 +392,7 @@ impl InnerGraph {
         let mut active_tensors: HashMap<TensorId, NumericTensor<DynRank>> = inputs.clone();
 
         let ops = self.get_operations();
-        let mut remaining_ops_to_complete: Vec<OperationId> =
-            ops.keys().copied().collect();
+        let mut remaining_ops_to_complete: Vec<OperationId> = ops.keys().copied().collect();
         let mut total_ops_completed: Vec<OperationId> = vec![];
         loop {
             let mut ops_completed_now = vec![];

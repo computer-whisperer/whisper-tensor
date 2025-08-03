@@ -24,6 +24,7 @@ use vulkano::pipeline::{
 use vulkano::shader::{ShaderModule, ShaderModuleCreateInfo, ShaderStages};
 use vulkano::sync::GpuFuture;
 
+#[allow(clippy::type_complexity)]
 fn build_binary_pipeline(
     vulkan_immediate_executor: &mut VulkanImmediateExecutor,
     input_0_dtype: DType,
@@ -205,7 +206,7 @@ fn build_binary_pipeline(
     let c0 = b.constant_bit32(u32_t, 0);
 
     /* idx = gl_GlobalInvocationID.x */
-    let gid = b.load(vec3u32_t, None, gid.clone(), None, []).unwrap();
+    let gid = b.load(vec3u32_t, None, gid, None, []).unwrap();
     let idx = b.composite_extract(u32_t, None, gid, [0u32]).unwrap();
 
     /* size  = metadata.size */
@@ -250,8 +251,7 @@ fn build_binary_pipeline(
     let mut remaining_idx = idx;
     let index = {
         let mut v = vec![];
-        for i in 0..rank {
-            let shape_val = io_shape[i];
+        for &shape_val in io_shape {
             let rem = b.u_mod(u32_t, None, remaining_idx, shape_val).unwrap();
             let div = b.u_div(u32_t, None, remaining_idx, shape_val).unwrap();
             remaining_idx = div;
@@ -401,7 +401,17 @@ fn build_binary_pipeline(
     Ok((layout, compute_pipeline))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct BinaryCacheKey {
+    cache_id: u32,
+    dtype_a: DType,
+    dtype_b: DType,
+    dtype_output: DType,
+    rank: u32,
+}
+
 impl<R: Rank> VulkanTensor<R> {
+    #[allow(clippy::type_complexity)]
     fn binary(
         a: &Self,
         b: &Self,
@@ -442,7 +452,13 @@ impl<R: Rank> VulkanTensor<R> {
         let rank = output_shape.len();
 
         let (pipeline_layout, compute_pipeline) = {
-            let key = (cache_id, a.dtype(), b.dtype(), output_dtype, rank as u32);
+            let key = BinaryCacheKey {
+                cache_id,
+                dtype_a: a.dtype(),
+                dtype_b: b.dtype(),
+                dtype_output: output_dtype,
+                rank: rank as u32,
+            };
             let res = vulkan_immediate_executor.pipeline_cache.binary_op.get(&key);
             if let Some(res) = res {
                 res.clone()
@@ -479,20 +495,15 @@ impl<R: Rank> VulkanTensor<R> {
             ]))?;
 
         let op_metadata_vec = {
-            let mut v = vec![];
-            v.push(
+            let mut v = vec![
                 (a.offset as u32 + a.suballocation.offset as u32)
                     / a.dtype().size().unwrap() as u32,
-            );
-            v.push(
                 (b.offset as u32 + b.suballocation.offset as u32)
                     / b.dtype().size().unwrap() as u32,
-            );
-            v.push(
                 (output_tensor.offset as u32 + output_tensor.suballocation.offset as u32)
                     / output_dtype.size().unwrap() as u32,
-            );
-            v.push(output_shape.dim_product() as u32);
+                output_shape.dim_product() as u32,
+            ];
             for dim in output_shape.as_slice() {
                 v.push(*dim as u32);
             }

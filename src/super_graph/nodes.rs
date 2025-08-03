@@ -467,9 +467,10 @@ impl SuperGraphNode for SuperGraphNodeScan {
                     SuperGraphLinkDouble::Hash(input, output) => {
                         simple_inputs.hashes.insert(
                             output.clone(),
-                            *data.hashes
+                            *data
+                                .hashes
                                 .get(input)
-                                .ok_or(SuperGraphError::MissingLinkError())?
+                                .ok_or(SuperGraphError::MissingLinkError())?,
                         );
                     }
                 }
@@ -520,9 +521,10 @@ impl SuperGraphNode for SuperGraphNodeScan {
                     SuperGraphLinkTriple::Hash(initial, inner_input, _inner_output) => {
                         state_values.hashes.insert(
                             inner_input.clone(),
-                            *data.hashes
+                            *data
+                                .hashes
                                 .get(initial)
-                                .ok_or(SuperGraphError::MissingLinkError())?
+                                .ok_or(SuperGraphError::MissingLinkError())?,
                         );
                     }
                 }
@@ -627,7 +629,7 @@ impl SuperGraphNode for SuperGraphNodeScan {
                                 *iter_outputs
                                     .hashes
                                     .get(inner_output)
-                                    .ok_or(SuperGraphError::MissingLinkError())?
+                                    .ok_or(SuperGraphError::MissingLinkError())?,
                             );
                         }
                     }
@@ -697,7 +699,7 @@ impl SuperGraphNode for SuperGraphNodeScan {
                             .unwrap()
                             .hashes
                             .get(input)
-                            .ok_or(SuperGraphError::MissingLinkError())?
+                            .ok_or(SuperGraphError::MissingLinkError())?,
                     );
                 }
             }

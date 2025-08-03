@@ -11,6 +11,7 @@ use crate::tensor_rank::DynRank;
 use std::collections::HashMap;
 
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum EvalBackend {
     #[cfg(feature = "candle")]
     Candle(candle_core::Device),
@@ -21,7 +22,7 @@ pub enum EvalBackend {
 
 impl core::fmt::Display for EvalBackend {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{:?}", self)
+        write!(f, "{self:?}")
     }
 }
 
@@ -29,22 +30,19 @@ impl EvalBackend {
     pub fn supports_dtype(&self, dtype: DType) -> bool {
         match self {
             #[cfg(feature = "candle")]
-            EvalBackend::Candle(_) => match dtype {
+            EvalBackend::Candle(_) => matches!(
+                dtype,
                 DType::F32
-                | DType::F64
-                | DType::BF16
-                | DType::F16
-                | DType::U32
-                | DType::I64
-                | DType::U8 => true,
-                _ => false,
-            },
+                    | DType::F64
+                    | DType::BF16
+                    | DType::F16
+                    | DType::U32
+                    | DType::I64
+                    | DType::U8
+            ),
             EvalBackend::NDArray => true,
             #[cfg(feature = "vulkan")]
-            EvalBackend::Vulkan(_) => match dtype {
-                DType::STRING => false,
-                _ => true,
-            },
+            EvalBackend::Vulkan(_) => !matches!(dtype, DType::STRING),
         }
     }
 }
@@ -71,10 +69,10 @@ pub fn run(
     eval_backend: &mut EvalBackend,
     inputs: HashMap<String, NumericTensor<DynRank>>,
 ) -> Result<HashMap<String, NumericTensor<DynRank>>, EvalRuntimeError> {
-    let initialized_tensors = model.get_initialized_tensors(&tensor_store);
+    let initialized_tensors = model.get_initialized_tensors(tensor_store);
     let mut active_tensors: HashMap<TensorId, NumericTensor<DynRank>> = HashMap::new();
     for (tensor_id, tensor) in initialized_tensors {
-        active_tensors.insert(tensor_id, tensor.into());
+        active_tensors.insert(tensor_id, tensor);
     }
     let tensors_by_name = model.get_tensors_by_name();
     for (name, tensor) in inputs {
@@ -84,7 +82,7 @@ pub fn run(
     }
 
     let ops = model.get_operations();
-    let mut remaining_ops_to_complete: Vec<OperationId> = ops.keys().map(|op_id| *op_id).collect();
+    let mut remaining_ops_to_complete: Vec<OperationId> = ops.keys().copied().collect();
     let mut total_ops_completed: Vec<OperationId> = vec![];
     loop {
         let mut ops_completed_now = vec![];
@@ -96,7 +94,7 @@ pub fn run(
             // Collect all inputs, abort if we can't do this one yet
             let mut failed_to_fetch = false;
             for tensor_id in &input_ids {
-                if let Some(value) = active_tensors.get(&tensor_id) {
+                if let Some(value) = active_tensors.get(tensor_id) {
                     // Validate shape and dtype
                     let tensor_info = model.get_tensor_info(*tensor_id).unwrap();
                     check_tensor_matches(value, tensor_info)

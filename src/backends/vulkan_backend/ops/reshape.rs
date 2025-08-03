@@ -25,7 +25,7 @@ impl<R: Rank> VulkanTensor<R> {
             let mut v = 1;
             for &i in new_shape.as_slice().iter().rev() {
                 stride.push(v);
-                v = v * i;
+                v *= i;
             }
             stride.reverse();
             R::KnownDims::try_from_slice(stride.as_slice()).unwrap()

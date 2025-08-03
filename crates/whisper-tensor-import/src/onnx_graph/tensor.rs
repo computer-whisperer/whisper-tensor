@@ -39,9 +39,10 @@ impl From<&Dimension> for onnx::tensor_shape_proto::Dimension {
                 Some(value) => Some(onnx::tensor_shape_proto::dimension::Value::DimValue(
                     value as i64,
                 )),
-                None => value.name.as_ref().map(|name| onnx::tensor_shape_proto::dimension::Value::DimParam(
-                    name.clone()
-                )),
+                None => value
+                    .name
+                    .as_ref()
+                    .map(|name| onnx::tensor_shape_proto::dimension::Value::DimParam(name.clone())),
             },
             denotation: value.denotation.clone().unwrap_or_default(),
         }
@@ -360,15 +361,15 @@ pub trait Tensor {
     fn is_input(&self) -> bool;
 }
 
-impl PartialEq for & dyn Tensor {
+impl PartialEq for &dyn Tensor {
     fn eq(&self, other: &Self) -> bool {
         std::ptr::addr_eq(*self, *other)
     }
 }
 
-impl Eq for & dyn Tensor {}
+impl Eq for &dyn Tensor {}
 
-impl Hash for & dyn Tensor {
+impl Hash for &dyn Tensor {
     fn hash<H: Hasher>(&self, state: &mut H) {
         let a: *const _ = *self;
         let address: *const u8 = a.cast();

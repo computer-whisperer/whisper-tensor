@@ -2,7 +2,9 @@ pub mod ops;
 mod spirv_helpers;
 pub mod tensor;
 
-use crate::dtype::DType;
+use crate::backends::vulkan_backend::ops::binary::BinaryCacheKey;
+use crate::backends::vulkan_backend::ops::matmul::MatMulCacheKey;
+use crate::backends::vulkan_backend::ops::unary::UnaryCacheKey;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -60,7 +62,7 @@ pub struct VulkanContext {
 
 impl VulkanContext {
     pub fn new() -> Result<Self, VulkanError> {
-        let library = VulkanLibrary::new().map_err(|x| VulkanError::VulkanLoadingError(x))?;
+        let library = VulkanLibrary::new().map_err(VulkanError::VulkanLoadingError)?;
         let instance = Instance::new(
             library,
             InstanceCreateInfo {
@@ -68,7 +70,7 @@ impl VulkanContext {
                 ..Default::default()
             },
         )
-        .map_err(|x| VulkanError::ValidatedVulkanError(x))?;
+        .map_err(VulkanError::ValidatedVulkanError)?;
 
         let device_extensions = DeviceExtensions {
             ..DeviceExtensions::empty()
@@ -84,8 +86,8 @@ impl VulkanContext {
 
         let physical_device = instance
             .enumerate_physical_devices()
-            .map_err(|x| VulkanError::VulkanError(x))?
-            .filter(|p| {
+            .map_err(VulkanError::VulkanError)?
+            .find(|p| {
                 // Some devices may not support the extensions or features that your application,
                 // or report properties and limits that are not sufficient for your application.
                 // These should be filtered out here.
@@ -93,7 +95,6 @@ impl VulkanContext {
                 p.supported_extensions().contains(&device_extensions)
                     && p.supported_features().contains(&device_features)
             })
-            .next()
             .ok_or(VulkanError::NoSuitableVulkanDeviceError)?;
 
         let queue_family_index = physical_device
@@ -120,7 +121,7 @@ impl VulkanContext {
                 ..Default::default()
             },
         )
-        .map_err(|x| VulkanError::ValidatedVulkanError(x))?;
+        .map_err(VulkanError::ValidatedVulkanError)?;
 
         let queue = queues
             .next()
@@ -154,15 +155,11 @@ pub struct VulkanImmediateExecutorBuffer {
     allocator: FreeListAllocator,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct PipelineCache {
-    pub unary_op: HashMap<(u32, DType, DType, u32), (Arc<PipelineLayout>, Arc<ComputePipeline>)>,
-    pub binary_op:
-        HashMap<(u32, DType, DType, DType, u32), (Arc<PipelineLayout>, Arc<ComputePipeline>)>,
-    pub matmul_op: HashMap<
-        (DType, Vec<u64>, u64, u64, u64, Vec<u64>, Vec<u64>),
-        (Arc<PipelineLayout>, Arc<ComputePipeline>),
-    >,
+    pub(crate) unary_op: HashMap<UnaryCacheKey, (Arc<PipelineLayout>, Arc<ComputePipeline>)>,
+    pub(crate) binary_op: HashMap<BinaryCacheKey, (Arc<PipelineLayout>, Arc<ComputePipeline>)>,
+    pub(crate) matmul_op: HashMap<MatMulCacheKey, (Arc<PipelineLayout>, Arc<ComputePipeline>)>,
 }
 
 impl PipelineCache {
@@ -238,7 +235,7 @@ impl VulkanImmediateExecutor {
     ) -> Result<(Arc<DescriptorSet>, Arc<DescriptorSetLayout>), VulkanError> {
         let layout = self.get_descriptor_set_layout(input_buffer_ids.keys().cloned().collect())?;
 
-        if !self.descriptor_set_cache.contains_key(&input_buffer_ids) {
+        if !self.descriptor_set_cache.contains_key(input_buffer_ids) {
             // Build new one
             let writes = input_buffer_ids
                 .iter()
@@ -254,7 +251,7 @@ impl VulkanImmediateExecutor {
             self.descriptor_set_cache
                 .insert(input_buffer_ids.clone(), descriptor_set.clone());
         }
-        Ok((self.descriptor_set_cache[&input_buffer_ids].clone(), layout))
+        Ok((self.descriptor_set_cache[input_buffer_ids].clone(), layout))
     }
 
     pub fn allocate_buffer(&mut self, size: usize) -> Result<usize, VulkanError> {
@@ -271,7 +268,7 @@ impl VulkanImmediateExecutor {
             },
             size as u64,
         )
-        .map_err(|x| VulkanError::ValidatedVulkanAllocateBufferError(x))?;
+        .map_err(VulkanError::ValidatedVulkanAllocateBufferError)?;
         let allocator = FreeListAllocator::new(Region::new(0, buffer.size()).unwrap());
         let buffer = VulkanImmediateExecutorBuffer { buffer, allocator };
         self.buffers.push(buffer);
@@ -302,7 +299,7 @@ impl VulkanImmediateExecutor {
         let output_file = File::create("shader.spv").unwrap();
         let mut writer = BufWriter::new(output_file);
         for word in spirv {
-            writer.write(&word.to_le_bytes()).unwrap();
+            writer.write_all(&word.to_le_bytes()).unwrap();
         }
         writer.flush().unwrap();
     }

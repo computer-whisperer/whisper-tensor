@@ -11,7 +11,7 @@ pub(crate) fn load_to_device<R: Rank>(
     let shape = value
         .shape()
         .as_slice()
-        .into_iter()
+        .iter()
         .map(|x| *x as usize)
         .collect::<Vec<_>>();
     Ok(match &value {

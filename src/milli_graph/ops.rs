@@ -12,7 +12,7 @@ use crate::tensor_info::{
     MinimalTensor, TensorInfo, TensorInfoRanked, TensorInfoShaped, TensorInfoTypedRanked,
     TensorInfoTypedShaped,
 };
-use crate::tensor_rank::{DynRank};
+use crate::tensor_rank::DynRank;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use typenum::P1;
@@ -70,8 +70,7 @@ impl MilliOpConstant {
         T: NDArrayNumericTensorType,
     {
         Self {
-            data: NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![v], &vec![1])
-                .unwrap(),
+            data: NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![v], &vec![1]).unwrap(),
         }
     }
 }
@@ -1908,7 +1907,9 @@ impl MilliOp for MilliOpSqueeze {
                     for i in 0..data.rank() {
                         let mut found = false;
                         for axis in &axes {
-                            if (axis >= &0 && i == *axis as usize) || (axis < &0 && i == (data.rank() as i64 + axis) as usize) {
+                            if (axis >= &0 && i == *axis as usize)
+                                || (axis < &0 && i == (data.rank() as i64 + axis) as usize)
+                            {
                                 // Skip dim
                                 found = true;
                                 break;
@@ -2045,7 +2046,9 @@ impl MilliOp for MilliOpUnsqueeze {
                     for i in 0..new_rank {
                         let mut found = false;
                         for axis in &axes {
-                            if (axis >= &0 && i == *axis as usize) || (axis < &0 && i == (new_rank as i64 + axis) as usize) {
+                            if (axis >= &0 && i == *axis as usize)
+                                || (axis < &0 && i == (new_rank as i64 + axis) as usize)
+                            {
                                 // Skip dim
                                 found = true;
                                 break;

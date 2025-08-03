@@ -22,12 +22,15 @@ impl<R: Rank> VulkanTensor<R> {
         let mut v = 1;
         for &i in shape.as_slice().iter().rev() {
             stride.push(v);
-            v = v * i;
+            v *= i;
         }
         stride.reverse();
         R::KnownDims::try_from_slice(stride.as_slice()).unwrap()
     }
 
+    /// # Safety
+    ///
+    /// This function is unsafe because it does not initialize the tensor.
     pub unsafe fn new_uninitialized(
         shape: R::KnownDims,
         dtype: DType,
@@ -62,7 +65,7 @@ impl<R: Rank> VulkanTensor<R> {
                 let mut v = i;
                 for &j in tensor.shape.as_slice() {
                     index.push(v % j);
-                    v = v / j;
+                    v /= j;
                 }
                 let index = R::KnownDims::try_from_slice(index.as_slice()).unwrap();
                 let value = source.get(&index).unwrap().to_bytes();
@@ -160,7 +163,7 @@ impl<R: Rank> VulkanTensor<R> {
             stride: new_stride,
             suballocation: self.suballocation.clone(),
             offset: self.offset,
-            dtype: self.dtype.clone(),
+            dtype: self.dtype,
             buffer: self.buffer.clone(),
         })
     }
@@ -171,7 +174,7 @@ impl<R: Rank> VulkanTensor<R> {
             if self.stride[i] != v {
                 return false;
             }
-            v = v * self.shape[i];
+            v *= self.shape[i];
         }
         true
     }

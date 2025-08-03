@@ -150,11 +150,7 @@ where
             Some(
                 NumericTensor::from_vec_shape(
                     entries,
-                    self.shape
-                        .as_slice()
-                        .iter()
-                        .map(|x| *x as usize)
-                        .collect(),
+                    self.shape.as_slice().iter().map(|x| *x as usize).collect(),
                 )
                 .unwrap(),
             )

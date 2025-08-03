@@ -160,7 +160,7 @@ fn build_unary_pipeline(
     let c0 = b.constant_bit32(u32_t, 0);
 
     /* idx = gl_GlobalInvocationID.x */
-    let gid = b.load(vec3u32_t, None, gid.clone(), None, []).unwrap();
+    let gid = b.load(vec3u32_t, None, gid, None, []).unwrap();
     let idx = b.composite_extract(u32_t, None, gid, [0u32]).unwrap();
 
     /* size  = metadata.size */
@@ -203,8 +203,8 @@ fn build_unary_pipeline(
     let mut remaining_idx = idx;
     let index = {
         let mut v = vec![];
-        for i in 0..rank {
-            let shape_val = io_shape[i];
+        for &dim in io_shape {
+            let shape_val = dim;
             let rem = b.u_mod(u32_t, None, remaining_idx, shape_val).unwrap();
             let div = b.u_div(u32_t, None, remaining_idx, shape_val).unwrap();
             remaining_idx = div;
@@ -326,6 +326,14 @@ fn build_unary_pipeline(
     Ok((layout, compute_pipeline))
 }
 
+#[derive(Clone, Hash, Eq, PartialEq, Debug)]
+pub(crate) struct UnaryCacheKey {
+    cache_id: u32,
+    input_dtype: DType,
+    output_dtype: DType,
+    rank: u32,
+}
+
 impl<R: Rank> VulkanTensor<R> {
     fn unary(
         &self,
@@ -340,7 +348,12 @@ impl<R: Rank> VulkanTensor<R> {
         ) -> Result<rspirv::spirv::Word, VulkanError>,
     ) -> Result<VulkanTensor<R>, VulkanError> {
         let (pipeline_layout, compute_pipeline) = {
-            let key = (cache_id, self.dtype(), output_dtype, self.rank() as u32);
+            let key = UnaryCacheKey {
+                cache_id,
+                input_dtype: self.dtype(),
+                output_dtype,
+                rank: self.rank() as u32,
+            };
             let res = vulkan_immediate_executor.pipeline_cache.unary_op.get(&key);
             if let Some(res) = res {
                 res.clone()

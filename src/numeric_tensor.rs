@@ -2,7 +2,7 @@ use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::{NDArrayNumericTensor, NDArrayNumericTensorError};
 use crate::dtype::{DType, DTypeError};
 use std::fmt::{Debug, Formatter};
-use std::ops::Range;
+use std::ops::{Neg, Range};
 use typenum::P1;
 
 use crate::TrigOp;

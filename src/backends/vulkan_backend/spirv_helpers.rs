@@ -34,8 +34,7 @@ pub fn cast_bf16_to_f32(
 
     let as32 = b.u_convert(u32_t, None, input).unwrap();
     let sh = b.shift_left_logical(u32_t, None, as32, c16).unwrap();
-    let out = b.bitcast(f32_t, None, sh).unwrap();
-    out
+    b.bitcast(f32_t, None, sh).unwrap()
 }
 
 pub fn cast_f32_to_bf16(
@@ -51,6 +50,5 @@ pub fn cast_f32_to_bf16(
     let bits32 = b.bitcast(u32_t, None, input).unwrap();
     let rounded = b.i_add(u32_t, None, bits32, c8000).unwrap();
     let sh = b.shift_right_logical(u32_t, None, rounded, c16).unwrap();
-    let out = b.u_convert(u16_t, None, sh).unwrap();
-    out
+    b.u_convert(u16_t, None, sh).unwrap()
 }

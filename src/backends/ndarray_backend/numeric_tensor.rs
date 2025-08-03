@@ -342,8 +342,8 @@ impl<R: Rank> NDArrayNumericTensor<R> {
             }
             DType::U8 => {
                 let mut v = Vec::new();
-                for i in 0..shape.dim_product() as usize {
-                    v.push(bytes[i]);
+                for &byte in bytes.iter().take(shape.dim_product() as usize) {
+                    v.push(byte);
                 }
                 Self::from_slice_shape_stride(v, shape, stride)?
             }
@@ -356,8 +356,8 @@ impl<R: Rank> NDArrayNumericTensor<R> {
             }
             DType::BOOL => {
                 let mut v = Vec::new();
-                for i in 0..shape.dim_product() as usize {
-                    v.push(bytes[i] != 0);
+                for &byte in bytes.iter().take(shape.dim_product() as usize) {
+                    v.push(byte != 0);
                 }
                 Self::from_slice_shape_stride(v, shape, stride)?
             }
@@ -385,23 +385,6 @@ impl<R: Rank> NDArrayNumericTensor<R> {
             op.to_string(),
             vec![a.dtype()],
         ))
-    }
-
-    pub fn neg(self) -> Result<Self, NDArrayNumericTensorError> {
-        Ok(match self {
-            NDArrayNumericTensor::F32(x) => NDArrayNumericTensor::F32(x.map(|x| -x).to_shared()),
-            NDArrayNumericTensor::F64(x) => NDArrayNumericTensor::F64(x.map(|x| -x).to_shared()),
-            NDArrayNumericTensor::BF16(x) => NDArrayNumericTensor::BF16(x.map(|x| -x).to_shared()),
-            NDArrayNumericTensor::F16(x) => NDArrayNumericTensor::F16(x.map(|x| -x).to_shared()),
-            NDArrayNumericTensor::I64(x) => NDArrayNumericTensor::I64(x.map(|x| -x).to_shared()),
-            NDArrayNumericTensor::I32(x) => NDArrayNumericTensor::I32(x.map(|x| -x).to_shared()),
-            _ => {
-                return Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes(
-                    "neg".to_string(),
-                    vec![self.dtype()],
-                ));
-            }
-        })
     }
 
     pub fn round(self) -> Result<Self, NDArrayNumericTensorError> {
@@ -1203,6 +1186,26 @@ impl<R: Rank> NDArrayNumericTensor<R> {
             NumericScalar::I8(x) => Self::I8(ArcArray::from_elem(shape, x)),
             NumericScalar::BOOL(x) => Self::BOOL(ArcArray::from_elem(shape, x)),
             NumericScalar::STRING(x) => Self::STRING(ArcArray::from_elem(shape, x)),
+        })
+    }
+}
+
+impl<R: Rank> core::ops::Neg for NDArrayNumericTensor<R> {
+    type Output = Result<Self, NDArrayNumericTensorError>;
+    fn neg(self) -> Result<Self, NDArrayNumericTensorError> {
+        Ok(match self {
+            NDArrayNumericTensor::F32(x) => NDArrayNumericTensor::F32(x.map(|x| -x).to_shared()),
+            NDArrayNumericTensor::F64(x) => NDArrayNumericTensor::F64(x.map(|x| -x).to_shared()),
+            NDArrayNumericTensor::BF16(x) => NDArrayNumericTensor::BF16(x.map(|x| -x).to_shared()),
+            NDArrayNumericTensor::F16(x) => NDArrayNumericTensor::F16(x.map(|x| -x).to_shared()),
+            NDArrayNumericTensor::I64(x) => NDArrayNumericTensor::I64(x.map(|x| -x).to_shared()),
+            NDArrayNumericTensor::I32(x) => NDArrayNumericTensor::I32(x.map(|x| -x).to_shared()),
+            _ => {
+                return Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes(
+                    "neg".to_string(),
+                    vec![self.dtype()],
+                ));
+            }
         })
     }
 }
@@ -2102,11 +2105,11 @@ impl NDArrayNumericTensor<DynRank> {
             }
             DType::U8 => NDArrayNumericTensor::from_vec_shape(data.to_vec(), &shape)?,
             DType::I8 => {
-                let data = data.into_iter().map(|x| *x as i8).collect();
+                let data = data.iter().map(|x| *x as i8).collect();
                 NDArrayNumericTensor::from_vec_shape(data, &shape)?
             }
             DType::BOOL => {
-                let data = data.into_iter().map(|x| *x != 0).collect();
+                let data = data.iter().map(|x| *x != 0).collect();
                 NDArrayNumericTensor::from_vec_shape(data, &shape)?
             }
             _ => Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes(
@@ -2164,59 +2167,59 @@ impl NDArrayNumericTensor<DynRank> {
         Ok(match self {
             NDArrayNumericTensor::F32(x) => ops::split(x.clone(), axis, split)?
                 .into_iter()
-                .map(|x| NDArrayNumericTensor::F32(x))
+                .map(NDArrayNumericTensor::F32)
                 .collect(),
             NDArrayNumericTensor::F64(x) => ops::split(x.clone(), axis, split)?
                 .into_iter()
-                .map(|x| NDArrayNumericTensor::F64(x))
+                .map(NDArrayNumericTensor::F64)
                 .collect(),
             NDArrayNumericTensor::F16(x) => ops::split(x.clone(), axis, split)?
                 .into_iter()
-                .map(|x| NDArrayNumericTensor::F16(x))
+                .map(NDArrayNumericTensor::F16)
                 .collect(),
             NDArrayNumericTensor::BF16(x) => ops::split(x.clone(), axis, split)?
                 .into_iter()
-                .map(|x| NDArrayNumericTensor::BF16(x))
+                .map(NDArrayNumericTensor::BF16)
                 .collect(),
             NDArrayNumericTensor::U32(x) => ops::split(x.clone(), axis, split)?
                 .into_iter()
-                .map(|x| NDArrayNumericTensor::U32(x))
+                .map(NDArrayNumericTensor::U32)
                 .collect(),
             NDArrayNumericTensor::I32(x) => ops::split(x.clone(), axis, split)?
                 .into_iter()
-                .map(|x| NDArrayNumericTensor::I32(x))
+                .map(NDArrayNumericTensor::I32)
                 .collect(),
             NDArrayNumericTensor::U64(x) => ops::split(x.clone(), axis, split)?
                 .into_iter()
-                .map(|x| NDArrayNumericTensor::U64(x))
+                .map(NDArrayNumericTensor::U64)
                 .collect(),
             NDArrayNumericTensor::I64(x) => ops::split(x.clone(), axis, split)?
                 .into_iter()
-                .map(|x| NDArrayNumericTensor::I64(x))
+                .map(NDArrayNumericTensor::I64)
                 .collect(),
             NDArrayNumericTensor::U16(x) => ops::split(x.clone(), axis, split)?
                 .into_iter()
-                .map(|x| NDArrayNumericTensor::U16(x))
+                .map(NDArrayNumericTensor::U16)
                 .collect(),
             NDArrayNumericTensor::I16(x) => ops::split(x.clone(), axis, split)?
                 .into_iter()
-                .map(|x| NDArrayNumericTensor::I16(x))
+                .map(NDArrayNumericTensor::I16)
                 .collect(),
             NDArrayNumericTensor::I8(x) => ops::split(x.clone(), axis, split)?
                 .into_iter()
-                .map(|x| NDArrayNumericTensor::I8(x))
+                .map(NDArrayNumericTensor::I8)
                 .collect(),
             NDArrayNumericTensor::U8(x) => ops::split(x.clone(), axis, split)?
                 .into_iter()
-                .map(|x| NDArrayNumericTensor::U8(x))
+                .map(NDArrayNumericTensor::U8)
                 .collect(),
             NDArrayNumericTensor::BOOL(x) => ops::split(x.clone(), axis, split)?
                 .into_iter()
-                .map(|x| NDArrayNumericTensor::BOOL(x))
+                .map(NDArrayNumericTensor::BOOL)
                 .collect(),
             NDArrayNumericTensor::STRING(x) => ops::split(x.clone(), axis, split)?
                 .into_iter()
-                .map(|x| NDArrayNumericTensor::STRING(x))
+                .map(NDArrayNumericTensor::STRING)
                 .collect(),
         })
     }
@@ -3054,12 +3057,10 @@ impl NDArrayNumericTensor<P1> {
             (NumericScalar::I16(start), NumericScalar::I16(end), NumericScalar::I16(step)) => {
                 Ok(NDArrayNumericTensor::I16(ops::range(start, end, step)))
             }
-            _ => {
-                return Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes(
-                    "range".to_string(),
-                    vec![start.dtype(), end.dtype(), step.dtype()],
-                ));
-            }
+            _ => Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes(
+                "range".to_string(),
+                vec![start.dtype(), end.dtype(), step.dtype()],
+            )),
         }
     }
 }

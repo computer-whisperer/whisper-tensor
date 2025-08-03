@@ -50,7 +50,7 @@ impl ONNXReferenceTensor {
             let shape = shape.extract::<Vec<usize>>()?;
             Ok(NDArrayNumericTensor::try_from_vec_shape(v_flat, &shape))
         })
-        .map_err(|e| ONNXReferenceError::PyErr(e))?;
+        .map_err(ONNXReferenceError::PyErr)?;
         Ok(out?)
     }
 }
@@ -103,7 +103,7 @@ impl TryFrom<&NDArrayNumericTensor<DynRank>> for ONNXReferenceTensor {
                 value: np_array.unbind(),
             })
         })
-        .map_err(|e| ONNXReferenceError::PyErr(e))
+        .map_err(ONNXReferenceError::PyErr)
     }
 }
 
@@ -197,9 +197,10 @@ impl ONNXReferenceBackend {
             }
             Ok(outputs)
         })
-        .map_err(|e| ONNXReferenceError::PyErr(e))
+        .map_err(ONNXReferenceError::PyErr)
     }
 
+    #[allow(clippy::type_complexity)]
     pub fn get_input_tensor_info(
         &self,
     ) -> Result<HashMap<String, (DType, Vec<Option<u64>>)>, ONNXReferenceError> {
@@ -218,6 +219,6 @@ impl ONNXReferenceBackend {
             }
             Ok(output)
         })
-        .map_err(|e| ONNXReferenceError::PyErr(e))
+        .map_err(ONNXReferenceError::PyErr)
     }
 }

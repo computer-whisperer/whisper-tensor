@@ -151,9 +151,7 @@ impl<'a> WeightExternalOutputManager<'a> for BinOutputManager<'a> {
     ) -> Result<(), Error> {
         let offset = self.output.metadata().unwrap().len() as usize;
         let data = data.to_raw_encoding();
-        self.output
-            .write_all(&data)
-            .map_err(Error::IoError)?;
+        self.output.write_all(&data).map_err(Error::IoError)?;
         self.tensor_data_map
             .insert(graph_tensor, (offset, data.len()));
         Ok(())
@@ -361,8 +359,8 @@ impl SafetensorsWeightManagerInner {
         let safetensors_metadata = {
             let mut out = vec![];
             for safetensors_mmap in &safetensors_files {
-                let metadata = SafeTensors::read_metadata(safetensors_mmap)
-                    .map_err(Error::SafeTensorError)?;
+                let metadata =
+                    SafeTensors::read_metadata(safetensors_mmap).map_err(Error::SafeTensorError)?;
                 out.push(metadata);
             }
             out

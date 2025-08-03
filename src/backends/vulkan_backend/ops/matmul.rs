@@ -25,6 +25,7 @@ use vulkano::pipeline::{
 use vulkano::shader::{ShaderModule, ShaderModuleCreateInfo, ShaderStages};
 use vulkano::sync::GpuFuture;
 
+#[allow(clippy::too_many_arguments)]
 fn build_matmul_pipeline(
     vulkan_immediate_executor: &mut VulkanImmediateExecutor,
     base_shape: Vec<u64>,
@@ -138,9 +139,7 @@ fn build_matmul_pipeline(
     let c0 = builder.constant_bit32(u32_t, 0);
 
     /* idx = gl_GlobalInvocationID.x */
-    let gid = builder
-        .load(vec3u32_t, None, gid.clone(), None, [])
-        .unwrap();
+    let gid = builder.load(vec3u32_t, None, gid, None, []).unwrap();
     let x_idx = builder.composite_extract(u32_t, None, gid, [0u32]).unwrap();
     let y_idx = builder.composite_extract(u32_t, None, gid, [1u32]).unwrap();
     let z_idx = builder.composite_extract(u32_t, None, gid, [2u32]).unwrap();
@@ -194,8 +193,7 @@ fn build_matmul_pipeline(
     let mut remaining_idx = z_idx;
     let index = {
         let mut v = vec![];
-        for i in 0..base_shape.len() {
-            let shape_val = base_shape[i];
+        for &shape_val in &base_shape {
             let shape_val_const = builder.constant_bit32(u32_t, shape_val as u32);
             let rem = builder
                 .u_mod(u32_t, None, remaining_idx, shape_val_const)
@@ -392,6 +390,17 @@ fn build_matmul_pipeline(
     Ok((layout, compute_pipeline))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct MatMulCacheKey {
+    dtype: DType,
+    common_shape: Vec<u64>,
+    m: u64,
+    n: u64,
+    k: u64,
+    a_stride: Vec<u64>,
+    b_stride: Vec<u64>,
+}
+
 impl<R: Rank> VulkanTensor<R> {
     pub fn matmul(
         a: &Self,
@@ -458,15 +467,15 @@ impl<R: Rank> VulkanTensor<R> {
         let b_stride = b_stride.as_slice().to_vec();
 
         let (pipeline_layout, compute_pipeline) = {
-            let key = (
-                a.dtype(),
-                common_shape.clone(),
+            let key = MatMulCacheKey {
+                dtype: a.dtype(),
+                common_shape: common_shape.clone(),
                 m,
                 k,
                 n,
-                a_stride.clone(),
-                b_stride.clone(),
-            );
+                a_stride: a_stride.clone(),
+                b_stride: b_stride.clone(),
+            };
             let res = vulkan_immediate_executor.pipeline_cache.matmul_op.get(&key);
             if let Some(res) = res {
                 res.clone()
@@ -511,22 +520,12 @@ impl<R: Rank> VulkanTensor<R> {
                 (2, output_tensor.buffer.clone()),
             ]))?;
 
-        let op_metadata_vec = {
-            let mut v = vec![];
-            v.push(
-                (a.offset as u32 + a.suballocation.offset as u32)
-                    / a.dtype().size().unwrap() as u32,
-            );
-            v.push(
-                (b.offset as u32 + b.suballocation.offset as u32)
-                    / b.dtype().size().unwrap() as u32,
-            );
-            v.push(
-                (output_tensor.offset as u32 + output_tensor.suballocation.offset as u32)
-                    / a.dtype().size().unwrap() as u32,
-            );
-            v
-        };
+        let op_metadata_vec = [
+            (a.offset as u32 + a.suballocation.offset as u32) / a.dtype().size().unwrap() as u32,
+            (b.offset as u32 + b.suballocation.offset as u32) / b.dtype().size().unwrap() as u32,
+            (output_tensor.offset as u32 + output_tensor.suballocation.offset as u32)
+                / a.dtype().size().unwrap() as u32,
+        ];
 
         let mut builder = AutoCommandBufferBuilder::primary(
             vulkan_immediate_executor
@@ -562,8 +561,8 @@ impl<R: Rank> VulkanTensor<R> {
         // *dispatch* operation.
         unsafe {
             builder.dispatch([
-                ((m + 7) / 8) as u32,
-                ((n + 7) / 8) as u32,
+                n.div_ceil(8) as u32,
+                n.div_ceil(8) as u32,
                 common_shape.iter().product::<u64>() as u32,
             ])
         }
