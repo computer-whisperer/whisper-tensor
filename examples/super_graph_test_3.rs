@@ -25,7 +25,7 @@ fn main() {
     let mut super_graph_caches = SuperGraphCache::new();
     let prompt = "Mary had a little lamb".to_string();
     let mut tokenizer_cache = HashMap::new();
-    print!("{:}", prompt);
+    print!("{prompt:}");
     std::io::stdout().flush().unwrap();
     let mut context = prompt.clone();
     for _ in 0..50 {
@@ -41,7 +41,7 @@ fn main() {
                 &mut EvalBackend::NDArray,
             )
             .unwrap();
-        print!("{:}", res);
+        print!("{res:}");
         std::io::stdout().flush().unwrap();
         context.push_str(&res);
     }

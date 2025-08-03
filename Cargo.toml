@@ -55,6 +55,8 @@ vulkan = ["dep:vulkano", "dep:vulkano-shaders"]
 [build-dependencies]
 prost-build = "0.13.3"
 
+[dev-dependencies]
+rand = "0.8.5"
 
 [workspace]
 members = [ "crates/whisper-tensor-import", "crates/whisper-tensor-webui", "crates/whisper-tensor-server"]

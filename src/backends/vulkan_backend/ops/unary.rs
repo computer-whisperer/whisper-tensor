@@ -1328,12 +1328,13 @@ mod test {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)]
     fn test_exp() {
         let vulkan_context = VulkanContext::new().unwrap();
         let mut vulkan_runtime = VulkanImmediateExecutor::new(vulkan_context).unwrap();
 
         let start_data = vec![1.0, -2.0, 3.0, -4.0];
-        let expected_data = vec![2.718, 0.135, 20.0855, 0.01832];
+        let expected_data = [2.718, 0.135, 20.0855, 0.01832];
 
         let start_tensor = NDArrayNumericTensor::from(start_data).to_dyn();
 

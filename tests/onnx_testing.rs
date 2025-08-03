@@ -101,35 +101,35 @@ impl OnnxNodeTest {
 
         // Load the model
         let model_bytes =
-            fs::read(&self.model_path).map_err(|e| format!("Failed to read model file: {}", e))?;
+            fs::read(&self.model_path).map_err(|e| format!("Failed to read model file: {e}"))?;
 
         let model = Model::new_from_onnx(&model_bytes)
-            .map_err(|e| format!("Failed to load model: {:?}", e))?;
+            .map_err(|e| format!("Failed to load model: {e:?}"))?;
 
         // Run each test data set
         for (i, test_data_set) in self.test_data_sets.iter().enumerate() {
-            log::info!("  Running test data set {}", i);
+            log::info!("  Running test data set {i}");
 
             // Convert protobuf inputs to NumericTensor
             let inputs = test_data_set
                 .parse_inputs()
-                .map_err(|e| format!("Failed to parse inputs: {}", e))?;
+                .map_err(|e| format!("Failed to parse inputs: {e}"))?;
 
             // Parse expected outputs
             let expected = test_data_set
                 .parse_outputs()
-                .map_err(|e| format!("Failed to parse expected outputs: {}", e))?;
+                .map_err(|e| format!("Failed to parse expected outputs: {e}"))?;
 
             // Run the model
             let outputs = model
                 .eval(inputs, backend)
-                .map_err(|e| format!("Model execution failed: {:?}", e))?;
+                .map_err(|e| format!("Model execution failed: {e:?}"))?;
 
             // Compare outputs with expected values
             for (name, expected_tensor) in &expected {
                 let actual_tensor = outputs
                     .get(name)
-                    .ok_or_else(|| format!("Output '{}' not found in model results", name))?;
+                    .ok_or_else(|| format!("Output '{name}' not found in model results"))?;
 
                 // Compare tensors with tolerance
                 self.compare_tensors(actual_tensor, expected_tensor)?;
@@ -185,10 +185,7 @@ impl OnnxNodeTest {
             let abs_diff = (actual_value - expected_value).abs();
             let tolerance = self.atol + self.rtol * expected_value.abs();
             if abs_diff > tolerance {
-                Err(format!(
-                    "Value mismatch: actual {} vs expected {}",
-                    actual_value, expected_value
-                ))?;
+                Err(format!("Value mismatch: actual {actual_value} vs expected {expected_value}"))?;
             }
         }
 
@@ -242,7 +239,7 @@ impl TestDataSet {
 
         // This will need to use the model to get input names
         // For now, we'll use placeholder indices as names
-        for (_index, (_, proto_data)) in self.inputs.iter().enumerate() {
+        for proto_data in self.inputs.values() {
             let tensor_proto = TensorProto::decode(proto_data.as_slice()).unwrap();
             let tensor: NumericTensor<DynRank> =
                 NDArrayNumericTensor::try_from(&tensor_proto)?.into();
@@ -258,7 +255,7 @@ impl TestDataSet {
     fn parse_outputs(&self) -> Result<HashMap<String, NumericTensor<DynRank>>, ONNXDecodingError> {
         let mut result = HashMap::new();
 
-        for (_index, (_, proto_data)) in self.outputs.iter().enumerate() {
+        for proto_data in self.outputs.values() {
             let tensor_proto = TensorProto::decode(proto_data.as_slice()).unwrap();
             let tensor: NumericTensor<DynRank> =
                 NDArrayNumericTensor::try_from(&tensor_proto)?.into();
@@ -271,7 +268,7 @@ impl TestDataSet {
 }
 
 fn run_ndarray_test(path: &Path) {
-    let test = OnnxNodeTest::from_directory(&path).unwrap();
+    let test = OnnxNodeTest::from_directory(path).unwrap();
     test.run(&mut EvalBackend::NDArray).unwrap()
 }
 
@@ -288,7 +285,7 @@ fn run_vulkan_test(path: &Path) {
     let vulkan_runtime = VulkanImmediateExecutor::new(vulkan_context).unwrap();
     let mut eval_backend = EvalBackend::Vulkan(vulkan_runtime);
 
-    let test = OnnxNodeTest::from_directory(&path).unwrap();
+    let test = OnnxNodeTest::from_directory(path).unwrap();
     test.run(&mut eval_backend).unwrap()
 }
 

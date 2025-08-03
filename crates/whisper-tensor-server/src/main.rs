@@ -2,9 +2,8 @@ use axum::{
     Router,
     extract::ws::{WebSocket, WebSocketUpgrade},
     response::IntoResponse,
-    routing::{get, post},
+    routing::{get},
 };
-use std::cmp::Ordering;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -19,7 +18,6 @@ use tower_http::{
     trace::TraceLayer,
 };
 use whisper_tensor::DynRank;
-use whisper_tensor::backends::eval_backend::EvalBackend;
 
 struct ModelData {
     model: Model,
@@ -65,7 +63,7 @@ impl ModelServer {
         &self,
         model_path: &Path,
         model_hint: Option<ModelTypeHint>,
-        model_load_type: ModelLoadType,
+        _model_load_type: ModelLoadType,
     ) -> Result<(), anyhow::Error> {
         let onnx_data =
             identify_and_load(model_path, WeightStorageStrategy::EmbeddedData, model_hint)?;
@@ -109,7 +107,7 @@ impl ModelServer {
         if let Some(model) = guard.iter().find(|model| model.model_id == model_id) {
             Ok(f(model))
         } else {
-            Err(format!("Model with id {} not found", model_id))
+            Err(format!("Model with id {model_id} not found"))
         }
     }
 
@@ -127,7 +125,7 @@ impl ModelServer {
                 .map(|x| x.to_numeric())
                 .ok_or("Tensor not found in Tensor Store".to_string())
         } else {
-            Err(format!("Model with id {} not found", model_id))
+            Err(format!("Model with id {model_id} not found"))
         }
     }
 }
@@ -140,24 +138,16 @@ async fn websocket_handler(
 }
 
 use axum::extract::ws::Message;
-use hf_hub::api::sync::Api;
 use hf_hub::api::tokio::ApiBuilder;
 use hf_hub::{Repo, RepoType};
-use log::info;
 use tokenizers::FromPretrainedParameters;
-use tracing::Instrument;
-use typenum::P1;
-use whisper_tensor::dtype::DType;
-use whisper_tensor::language_model::LanguageModelManager;
 use whisper_tensor::model::Model;
 use whisper_tensor::numeric_tensor::NumericTensor;
-use whisper_tensor::symbolic_graph::SymbolicGraph;
 use whisper_tensor::symbolic_graph::tensor_store::TensorStoreTensorId;
-use whisper_tensor::tokenizer::AnyTokenizer;
 use whisper_tensor_import::onnx_graph::WeightStorageStrategy;
 use whisper_tensor_import::{ModelTypeHint, identify_and_load};
 use whisper_tensor_server::{
-    CurrentModelsReportEntry, LLMMetadata, LoadedModelId, ModelLoadType, ModelTypeMetadata,
+    CurrentModelsReportEntry, LoadedModelId, ModelLoadType, ModelTypeMetadata,
     WebsocketClientServerMessage, WebsocketServerClientMessage,
 };
 
@@ -180,27 +170,19 @@ pub async fn hf_from_pretrained<S: AsRef<str>>(
     let valid_chars_stringified = valid_chars
         .iter()
         .fold(vec![], |mut buf, x| {
-            buf.push(format!("'{}'", x));
+            buf.push(format!("'{x}'"));
             buf
         })
         .join(", "); // "'/', '-', '_', '.'"
     if !valid {
-        return Err(format!(
-            "Model \"{}\" contains invalid characters, expected only alphanumeric or {valid_chars_stringified}",
-            identifier
-        )
-            .into());
+        return Err(format!("Model \"{identifier}\" contains invalid characters, expected only alphanumeric or {valid_chars_stringified}"));
     }
     let params = params.unwrap_or_default();
 
     let revision = &params.revision;
     let valid_revision = revision.chars().all(is_valid_char);
     if !valid_revision {
-        return Err(format!(
-            "Revision \"{}\" contains invalid characters, expected only alphanumeric or {valid_chars_stringified}",
-            revision
-        )
-            .into());
+        return Err(format!("Revision \"{revision}\" contains invalid characters, expected only alphanumeric or {valid_chars_stringified}"));
     }
 
     let mut builder = ApiBuilder::new();
@@ -210,7 +192,7 @@ pub async fn hf_from_pretrained<S: AsRef<str>>(
     let api = builder.build().map_err(|x| x.to_string())?;
     let repo = Repo::with_revision(identifier, RepoType::Model, params.revision);
     let api = api.repo(repo);
-    Ok(api.get("tokenizer.json").await.map_err(|x| x.to_string())?)
+    api.get("tokenizer.json").await.map_err(|x| x.to_string())
 }
 
 async fn handle_socket(mut socket: WebSocket, model_server: Arc<ModelServer>) {
@@ -279,7 +261,7 @@ async fn handle_socket(mut socket: WebSocket, model_server: Arc<ModelServer>) {
                                             let msg_out = WebsocketServerClientMessage::HFTokenizerReturn(
                                                 hf_tokenizer_path.clone(), hf_from_pretrained(hf_tokenizer_path, None).await.map(|x| {
                                                     let mut v = vec![];
-                                                    File::open(x).unwrap().read_to_end(&mut v).unwrap();
+                                                    File::open(x.clone()).unwrap().read_to_end(&mut v).unwrap();
                                                     v
                                                 }));
                                             send_message(&mut socket, msg_out).await;
@@ -323,12 +305,12 @@ async fn handle_socket(mut socket: WebSocket, model_server: Arc<ModelServer>) {
                                             send_message(&mut socket, msg_out).await;
                                         }*/
                                         _ => {
-                                            log::debug!("Unhandled message: {:?}", msg)
+                                            log::debug!("Unhandled message: {msg:?}")
                                         }
                                     }
                                 }
                                 Err(err) => {
-                                    log::warn!("Failed to decode the message: {:?}", err);
+                                    log::warn!("Failed to decode the message: {err:?}");
                                 }
                             }
                         }

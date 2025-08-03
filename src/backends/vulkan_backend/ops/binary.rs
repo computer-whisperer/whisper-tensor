@@ -1420,7 +1420,7 @@ mod test {
 
         let start_data_a = vec![1.0, -2.0, 3.0, -4.0];
         let start_data_b = vec![1.0, -1.0, 3.0, 4.0];
-        let expected_data = vec![1.0, 2.0, 1.0, -1.0];
+        let expected_data = [1.0, 2.0, 1.0, -1.0];
         let end_shape = vec![1, 1, 4];
 
         let start_tensor_a = NDArrayNumericTensor::from(start_data_a).to_dyn();

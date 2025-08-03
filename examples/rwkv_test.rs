@@ -77,7 +77,7 @@ fn main() {
         .try_to_rank::<P1>()
         .unwrap();
     let output_values: Vec<u32> = output_tensor.to_vec();
-    println!("{:?}", output_values);
+    println!("{output_values:?}");
     let output = tokenizer.decode(&output_values).unwrap();
-    println!("{}", output);
+    println!("{output}");
 }

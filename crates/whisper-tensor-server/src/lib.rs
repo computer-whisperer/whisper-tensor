@@ -4,8 +4,6 @@ use whisper_tensor::symbolic_graph::tensor_store::TensorStoreTensorId;
 use whisper_tensor_import::ModelTypeHint;
 use whisper_tensor_import::onnx_graph::TokenizerInfo;
 
-mod applications;
-
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct LoadedModelId(pub u32);
 

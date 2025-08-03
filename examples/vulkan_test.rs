@@ -25,5 +25,5 @@ fn main() {
 
     let end_tensor = v1.to_ndarray().unwrap();
 
-    println!("{:?}", end_tensor);
+    println!("{end_tensor:?}");
 }

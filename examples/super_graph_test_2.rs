@@ -21,7 +21,7 @@ fn main() {
 
     let prompt = "Mary had a little lamb".to_string();
     let mut tokenizer_cache = HashMap::new();
-    print!("{:}", prompt);
+    print!("{prompt:}");
     std::io::stdout().flush().unwrap();
     let mut context = prompt.clone();
 
@@ -38,7 +38,7 @@ fn main() {
                 &mut EvalBackend::NDArray,
             )
             .unwrap();
-        print!("{:}", res);
+        print!("{res:}");
         std::io::stdout().flush().unwrap();
         context.push_str(&res);
     }

@@ -78,5 +78,5 @@ fn main() {
         .unwrap();
     let output_values: Vec<u32> = output_tensor.to_vec();
     let output = tokenizer.decode(&output_values).unwrap();
-    println!("{}", output);
+    println!("{output}");
 }
