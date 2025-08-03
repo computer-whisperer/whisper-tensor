@@ -38,6 +38,8 @@ pub enum SuperGraphError {
     MissingLinkError(),
 }
 
+pub type SuperGraphHash = u64;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SuperGraph {
     inner: SuperGraphInner,

@@ -4,6 +4,7 @@ use crate::graph_layout::{
     GraphLayoutNode, GraphLayoutNodeId, GraphLayoutNodeInitData, GraphLayoutNodeType,
 };
 use crate::llm_explorer::{LLMExplorerApp, LLMExplorerState};
+use crate::websockets::ServerRequestManager;
 use crate::widgets::toggle::toggle_ui;
 use egui::epaint::{CubicBezierShape, QuadraticBezierShape, RectShape};
 use egui::{
@@ -29,6 +30,7 @@ use wasm_bindgen_futures::js_sys::ArrayBuffer;
 use web_sys::WebSocket;
 use whisper_tensor::DynRank;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
+use whisper_tensor::interfaces::AnyInterface;
 use whisper_tensor::scalar_info::ScalarInfoTyped;
 use whisper_tensor::symbolic_graph::ops::{AnyOperation, Operation};
 use whisper_tensor::symbolic_graph::tensor_store::TensorStoreTensorId;
@@ -39,7 +41,7 @@ use whisper_tensor::tokenizer::{AnyTokenizer, Tokenizer, TokenizerError};
 use whisper_tensor_import::ModelTypeHint;
 use whisper_tensor_import::onnx_graph::TokenizerInfo;
 use whisper_tensor_server::{
-    CurrentModelsReportEntry, ForwardLogitRequest, LoadedModelId, ModelLoadType, ModelTypeMetadata,
+    CurrentModelsAndInterfacesReport, CurrentModelsReportEntry, LoadedModelId,
     WebsocketClientServerMessage, WebsocketServerClientMessage,
 };
 
@@ -61,7 +63,6 @@ struct AppState {
     selected_tab: SelectedTab,
     model_to_load_path_text: String,
     model_type_hint_selected: Option<ModelTypeHint>,
-    model_load_type_selected: ModelLoadType,
 
     graph_explorer_state: GraphExplorerState,
     llm_explorer_state: LLMExplorerState,
@@ -73,7 +74,6 @@ impl Default for AppState {
             selected_tab: SelectedTab::Models,
             model_to_load_path_text: String::new(),
             model_type_hint_selected: None,
-            model_load_type_selected: ModelLoadType::Other,
             graph_explorer_state: GraphExplorerState::default(),
             llm_explorer_state: LLMExplorerState::default(),
         }
@@ -82,12 +82,12 @@ impl Default for AppState {
 
 pub(crate) struct LoadedModels {
     pub(crate) model_load_state: Option<ModelLoadState>,
-    pub(crate) current_models: Vec<CurrentModelsReportEntry>,
+    pub(crate) current_models: CurrentModelsAndInterfacesReport,
     pub(crate) currently_requesting_model: Option<LoadedModelId>,
 }
 
 pub(crate) struct LoadedTokenizers {
-    pub(crate) loaded_tokenizers: HashMap<LoadedModelId, Option<Result<Arc<AnyTokenizer>, String>>>,
+    pub(crate) loaded_tokenizers: HashMap<TokenizerInfo, Option<Result<Arc<AnyTokenizer>, String>>>,
 }
 
 impl LoadedTokenizers {
@@ -100,7 +100,7 @@ impl LoadedTokenizers {
 
 pub struct WebUIApp {
     websocket_server_client_receiver: mpsc::UnboundedReceiver<WebsocketServerClientMessage>,
-    websocket_client_server_sender: mpsc::UnboundedSender<WebsocketClientServerMessage>,
+    server_request_manager: ServerRequestManager,
 
     loaded_models: LoadedModels,
     app_state: AppState,
@@ -131,11 +131,11 @@ impl WebUIApp {
         Self {
             loaded_models: LoadedModels {
                 model_load_state: None,
-                current_models: vec![],
+                current_models: CurrentModelsAndInterfacesReport::default(),
                 currently_requesting_model: None,
             },
+            server_request_manager: ServerRequestManager::new(websocket_client_server_sender),
             websocket_server_client_receiver,
-            websocket_client_server_sender,
             app_state,
             graph_explorer_app: GraphExplorerApp::new(),
             loaded_tokenizers: LoadedTokenizers::new(),
@@ -173,36 +173,39 @@ impl eframe::App for WebUIApp {
                         WebsocketServerClientMessage::CurrentModelsReport(res) => {
                             self.loaded_models.current_models = res;
                             // Prompt tokenizer loading
-                            for model in &self.loaded_models.current_models {
-                                if let ModelTypeMetadata::LLM(llm_metadata) =
-                                    &model.model_type_metadata
+                            let mut needed_tokenizers = Vec::new();
+                            for interface in self.loaded_models.current_models.interfaces.values() {
+                                if let AnyInterface::TextInferenceTokensInLogitOutInterface(
+                                    interface,
+                                ) = &interface.interface
                                 {
-                                    match &llm_metadata.tokenizer_info {
+                                    needed_tokenizers.push(interface.get_tokenizer().clone());
+                                }
+                            }
+                            for tokenizer_info in needed_tokenizers {
+                                if !self
+                                    .loaded_tokenizers
+                                    .loaded_tokenizers
+                                    .contains_key(&tokenizer_info)
+                                {
+                                    match &tokenizer_info {
                                         TokenizerInfo::HFTokenizer(x) => {
-                                            if !self
+                                            self.server_request_manager
+                                                .send(WebsocketClientServerMessage::GetHFTokenizer(
+                                                    x.clone(),
+                                                ))
+                                                .unwrap();
+                                            self.loaded_tokenizers
                                                 .loaded_tokenizers
-                                                .loaded_tokenizers
-                                                .contains_key(&model.model_id)
-                                            {
-                                                self.websocket_client_server_sender.send(WebsocketClientServerMessage::GetHFTokenizer(x.clone())).unwrap();
-                                                self.loaded_tokenizers
-                                                    .loaded_tokenizers
-                                                    .insert(model.model_id, None);
-                                            }
+                                                .insert(tokenizer_info, None);
                                         }
                                         TokenizerInfo::RWKVWorld => {
-                                            if !self
-                                                .loaded_tokenizers
-                                                .loaded_tokenizers
-                                                .contains_key(&model.model_id)
-                                            {
-                                                self.loaded_tokenizers.loaded_tokenizers.insert(
-                                                    model.model_id,
-                                                    Some(Ok(Arc::new(AnyTokenizer::Rwkv(
-                                                        WorldTokenizer::new_default(),
-                                                    )))),
-                                                );
-                                            }
+                                            self.loaded_tokenizers.loaded_tokenizers.insert(
+                                                tokenizer_info,
+                                                Some(Ok(Arc::new(AnyTokenizer::Rwkv(
+                                                    WorldTokenizer::new_default(),
+                                                )))),
+                                            );
                                         }
                                     }
                                 }
@@ -256,31 +259,19 @@ impl eframe::App for WebUIApp {
                                 Err(err) => Err(err),
                             };
 
-                            for model_entry in &self.loaded_models.current_models {
-                                if let ModelTypeMetadata::LLM(x) = &model_entry.model_type_metadata
-                                {
-                                    if let TokenizerInfo::HFTokenizer(model_hf_name) =
-                                        &x.tokenizer_info
-                                    {
-                                        if hf_name == *model_hf_name {
-                                            if let Some(x) = self
-                                                .loaded_tokenizers
-                                                .loaded_tokenizers
-                                                .get_mut(&model_entry.model_id)
-                                            {
-                                                if x.is_none() {
-                                                    *x = Some(tokenizer.clone())
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                            self.loaded_tokenizers.loaded_tokenizers.insert(
+                                TokenizerInfo::HFTokenizer(hf_name.clone()),
+                                Some(tokenizer.clone()),
+                            );
                         }
+                        WebsocketServerClientMessage::SuperGraphResponse(response) => {
+                            self.server_request_manager.new_response(response);
+                        }
+                        /*
                         WebsocketServerClientMessage::GetLogitsReturn(request, result) => {
                             self.llm_explorer_app.latest_logits =
                                 Some((request.model_id, request.context_tokens, result));
-                        }
+                        }*/
                         _ => {
                             log::debug!("Unhandled message: {:?}", msg);
                         }
@@ -359,33 +350,15 @@ impl eframe::App for WebUIApp {
                                         );
                                     }
                                 });
-                            egui::ComboBox::from_id_salt(1246)
-                                .selected_text(format!(
-                                    "{}",
-                                    &self.app_state.model_load_type_selected
-                                ))
-                                .show_ui(ui, |ui| {
-                                    for which in ModelLoadType::iter() {
-                                        ui.selectable_value(
-                                            &mut self.app_state.model_load_type_selected,
-                                            which.clone(),
-                                            which.to_string(),
-                                        );
-                                    }
-                                });
                         });
                         ui.horizontal(|ui| {
                             if ui.button("Load").clicked() {
-                                self.websocket_client_server_sender
+                                self.server_request_manager
                                     .send(WebsocketClientServerMessage::LoadModel {
                                         model_path: self.app_state.model_to_load_path_text.clone(),
                                         model_type_hint: self
                                             .app_state
                                             .model_type_hint_selected
-                                            .clone(),
-                                        model_load_type: self
-                                            .app_state
-                                            .model_load_type_selected
                                             .clone(),
                                     })
                                     .unwrap();
@@ -419,42 +392,12 @@ impl eframe::App for WebUIApp {
                         egui::Grid::new("loaded_models")
                             .striped(true)
                             .show(ui, |ui| {
-                                for model in &self.loaded_models.current_models {
+                                for model in &self.loaded_models.current_models.models {
                                     ui.label(model.model_id.to_string());
                                     ui.label(model.model_name.clone());
                                     ui.label(format!("Operations: {:?}", model.num_ops));
-                                    match model.model_type_metadata {
-                                        ModelTypeMetadata::Other => {
-                                            ui.label("Other");
-                                        }
-                                        ModelTypeMetadata::LLM(_) => {
-                                            ui.label("LLM");
-                                        }
-                                    }
-                                    if let Some(x) = self
-                                        .loaded_tokenizers
-                                        .loaded_tokenizers
-                                        .get(&model.model_id)
-                                    {
-                                        match x {
-                                            None => {
-                                                ui.label("Loading tokenizer...");
-                                            }
-                                            Some(Ok(_)) => {
-                                                ui.label("Loaded tokenizer");
-                                            }
-                                            Some(Err(err)) => {
-                                                ui.label(format!(
-                                                    "Error loading tokenizer: {}",
-                                                    err
-                                                ));
-                                            }
-                                        }
-                                    } else {
-                                        ui.label("N/A");
-                                    }
                                     if ui.button("Unload").clicked() {
-                                        self.websocket_client_server_sender
+                                        self.server_request_manager
                                             .send(WebsocketClientServerMessage::UnloadModel(
                                                 model.model_id,
                                             ))
@@ -468,7 +411,7 @@ impl eframe::App for WebUIApp {
                 SelectedTab::GraphExplorer => self.graph_explorer_app.update(
                     &mut self.app_state.graph_explorer_state,
                     &mut self.loaded_models,
-                    &self.websocket_client_server_sender,
+                    &mut self.server_request_manager,
                     ui,
                 ),
                 SelectedTab::LLMExplorer => {
@@ -476,7 +419,7 @@ impl eframe::App for WebUIApp {
                         &mut self.app_state.llm_explorer_state,
                         &mut self.loaded_models,
                         &mut self.loaded_tokenizers,
-                        &self.websocket_client_server_sender,
+                        &mut self.server_request_manager,
                         ui,
                     );
                 }
@@ -493,7 +436,7 @@ impl eframe::App for WebUIApp {
             self.graph_explorer_app.update_inspect_windows(
                 &mut self.app_state.graph_explorer_state,
                 ctx,
-                &self.websocket_client_server_sender,
+                &mut self.server_request_manager,
             )
         }
     }

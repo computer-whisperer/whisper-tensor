@@ -1,24 +1,29 @@
 use crate::app::{LoadedModels, LoadedTokenizers, ModelLoadState};
+use crate::websockets::ServerRequestManager;
 use egui::{Color32, CursorIcon, Event, EventFilter, Label, RichText, Sense, Widget};
 use log::info;
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
+use std::collections::HashMap;
 use tokio::sync::mpsc;
+use web_sys::js_sys::Atomics::load;
+use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
+use whisper_tensor::interfaces::AnyInterface;
+use whisper_tensor::super_graph::links::SuperGraphLinkTensor;
 use whisper_tensor::tokenizer::Tokenizer;
 use whisper_tensor_import::onnx_graph::TokenizerInfo;
-use whisper_tensor_server::{
-    ForwardLogitRequest, LoadedModelId, ModelTypeMetadata, WebsocketClientServerMessage,
-};
+use whisper_tensor_server::{LoadedModelId, SuperGraphRequest, WebsocketClientServerMessage};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct LLMExplorerState {
-    llm_explorer_selected_model_id: Option<LoadedModelId>,
+    llm_explorer_selected_interface_name: Option<String>,
     current_llm_text: String,
 }
 
 impl Default for LLMExplorerState {
     fn default() -> Self {
         Self {
-            llm_explorer_selected_model_id: None,
+            llm_explorer_selected_interface_name: None,
             current_llm_text: "This is example text".to_string(),
         }
     }
@@ -50,17 +55,15 @@ fn escape_token_text(input: &str) -> String {
 
 pub(crate) struct LLMExplorerApp {
     llm_explorer_cached_token_list: Option<Vec<u32>>,
-    pub(crate) latest_logits: Option<(
-        LoadedModelId,
-        Vec<u32>,
-        Result<Vec<Vec<(u32, f32)>>, String>,
-    )>,
+    pending_request: Option<(u64, SuperGraphLinkTensor, Vec<u32>)>,
+    pub(crate) latest_logits: Option<(Vec<u32>, Result<Vec<Vec<(u32, f32)>>, String>)>,
 }
 
 impl LLMExplorerApp {
     pub fn new() -> Self {
         Self {
             llm_explorer_cached_token_list: None,
+            pending_request: None,
             latest_logits: None,
         }
     }
@@ -70,41 +73,81 @@ impl LLMExplorerApp {
         state: &mut LLMExplorerState,
         loaded_models: &mut LoadedModels,
         loaded_tokenizers: &mut LoadedTokenizers,
-        websocket_client_server_sender: &mpsc::UnboundedSender<WebsocketClientServerMessage>,
+        server_request_manager: &mut ServerRequestManager,
         ui: &mut egui::Ui,
     ) {
+        // Handle pending requests
+        if let Some((request_id, link, tokens)) = self.pending_request.clone() {
+            if let Some(mut response) = server_request_manager.get_response(request_id) {
+                self.pending_request = None;
+                let mut response_tokens = response.tensor_outputs.remove(&link).unwrap();
+                let shape = response_tokens.shape();
+                let logits_per_token = shape[1];
+                let returned_tokens = shape[0];
+                let mut outputs = Vec::new();
+                for i in 0..returned_tokens as usize {
+                    let sliced_output_tensor = response_tokens
+                        .slice(&[i..i + 1, 0..logits_per_token as usize])
+                        .unwrap();
+                    let output = sliced_output_tensor.flatten();
+                    let output_vec: Vec<f32> = output.try_into().unwrap();
+                    let mut idx_and_val = output_vec
+                        .iter()
+                        .enumerate()
+                        .map(|(a, b)| (a as u32, *b))
+                        .collect::<Vec<_>>();
+                    idx_and_val.sort_by(|(_, a), (_, b)| {
+                        if a < b {
+                            Ordering::Greater
+                        } else {
+                            Ordering::Less
+                        }
+                    });
+                    let clipped_logits = idx_and_val[0..idx_and_val.len().min(100)].to_vec();
+                    outputs.push(clipped_logits)
+                }
+                self.latest_logits = Some((tokens, Ok(outputs)));
+            }
+        }
+
+        // Find llm interfaces
+        let mut llm_interfaces = HashMap::new();
+        for (name, interface) in &loaded_models.current_models.interfaces {
+            if let AnyInterface::TextInferenceTokensInLogitOutInterface(_x) = &interface.interface {
+                llm_interfaces.insert(name, interface);
+            }
+        }
+
         ui.horizontal(|ui| {
-            if loaded_models.current_models.is_empty() {
+            if llm_interfaces.is_empty() {
                 ui.label("No Models Loaded");
             }
-            for model in &loaded_models.current_models {
-                if let ModelTypeMetadata::LLM(_) = model.model_type_metadata {
-                    if ui
-                        .selectable_value(
-                            &mut state.llm_explorer_selected_model_id,
-                            Some(model.model_id),
-                            format!("({}) {}", model.model_id, model.model_name.clone()),
-                        )
-                        .clicked()
-                    {
-                        // Good!
-                        self.llm_explorer_cached_token_list = None;
-                    };
-                }
+            let mut keys = llm_interfaces.keys().collect::<Vec<_>>();
+            keys.sort();
+            for &interface_name in keys {
+                if ui
+                    .selectable_value(
+                        &mut state.llm_explorer_selected_interface_name,
+                        Some(interface_name.clone()),
+                        interface_name,
+                    )
+                    .clicked()
+                {
+                    // Good!
+                    self.llm_explorer_cached_token_list = None;
+                };
             }
             if ui.button("Load New Model").clicked() {
                 loaded_models.model_load_state = Some(ModelLoadState::DialogOpen(None));
             };
         });
 
-        let model = if let Some(selected_model_id) = state.llm_explorer_selected_model_id {
-            let mut ret = None;
-            for model in &loaded_models.current_models {
-                if model.model_id == selected_model_id {
-                    ret = Some(model);
-                }
-            }
-            ret
+        let interface = if let Some(selected_model_id) = &state.llm_explorer_selected_interface_name
+        {
+            loaded_models
+                .current_models
+                .interfaces
+                .get(selected_model_id)
         } else {
             None
         };
@@ -114,19 +157,25 @@ impl LLMExplorerApp {
             spacing_mut.item_spacing.y = 10.0;
         }
 
-        let tokenizer = if let Some(model) = model {
-            match loaded_tokenizers.loaded_tokenizers.get(&model.model_id) {
-                Some(x) => x.as_ref(),
-                _ => None,
-            }
+        let tokenizer = if let Some(interface) = interface {
+            let AnyInterface::TextInferenceTokensInLogitOutInterface(interface) =
+                &interface.interface;
+            let info = interface.get_tokenizer();
+            loaded_tokenizers
+                .loaded_tokenizers
+                .get(info)
+                .cloned()
+                .flatten()
         } else {
             None
         };
 
-        match (model, tokenizer) {
-            (Some(model), Some(Ok(tokenizer))) => {
-                if let ModelTypeMetadata::LLM(x) = &model.model_type_metadata {
-                    let v = match &x.tokenizer_info {
+        match (interface, tokenizer) {
+            (Some(interface), Some(Ok(tokenizer))) => {
+                let AnyInterface::TextInferenceTokensInLogitOutInterface(llm_interface) =
+                    &interface.interface;
+                {
+                    let v = match &llm_interface.get_tokenizer() {
                         TokenizerInfo::HFTokenizer(x) => {
                             format!("Huggingface: {x}")
                         }
@@ -198,7 +247,7 @@ impl LLMExplorerApp {
                                         Label::new(text).ui(ui);
 
                                         // Validate logits
-                                        if let Some((_a, b, _c)) = &self.latest_logits {
+                                        if let Some((b, _c)) = &self.latest_logits {
                                             if idx < b.len() {
                                                 next_is_good &= b[idx] == *chosen_token
                                             }
@@ -212,8 +261,8 @@ impl LLMExplorerApp {
                                         spacing_mut.item_spacing.y = 3.0;
                                     }
                                     if is_good {
-                                        if let Some((a, b, c)) = &self.latest_logits {
-                                            if *a == model.model_id && idx - 1 < b.len() {
+                                        if let Some((b, c)) = &self.latest_logits {
+                                            if idx - 1 < b.len() {
                                                 if let Ok(c) = c {
                                                     let logits = &c[idx - 1];
                                                     for j in 0..5 {
@@ -305,11 +354,27 @@ impl LLMExplorerApp {
                             Some(tokenizer.encode(&state.current_llm_text));
                     }
                     let tokens = self.llm_explorer_cached_token_list.clone().unwrap();
-                    let msg = WebsocketClientServerMessage::GetLogits(ForwardLogitRequest {
-                        model_id: model.model_id,
-                        context_tokens: tokens,
-                    });
-                    websocket_client_server_sender.send(msg).unwrap();
+                    let tokens_tensor = NDArrayNumericTensor::from_vec(tokens.clone()).to_dyn();
+                    let token =
+                        server_request_manager.submit_supergraph_request(SuperGraphRequest {
+                            attention_token: None,
+                            super_graph: llm_interface.super_graph.clone(),
+                            string_inputs: HashMap::new(),
+                            tensor_inputs: HashMap::from([(
+                                llm_interface.token_context_input_link.clone(),
+                                tokens_tensor,
+                            )]),
+                            model_inputs: HashMap::from([(
+                                llm_interface.model_input_link.clone(),
+                                interface.model_ids.first().unwrap().clone(),
+                            )]),
+                            hash_inputs: HashMap::from([(
+                                llm_interface.cache_key_input_link.clone(),
+                                0u64,
+                            )]),
+                        });
+                    self.pending_request =
+                        Some((token, llm_interface.logit_output_link.clone(), tokens));
                     self.latest_logits = None;
                 }
             }

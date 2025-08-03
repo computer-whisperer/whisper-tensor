@@ -1,11 +1,11 @@
 use crate::DynRank;
 use crate::model::Model;
 use crate::numeric_tensor::NumericTensor;
-use crate::super_graph::SuperGraphError;
 use crate::super_graph::links::{
     SuperGraphAnyLink, SuperGraphLinkDouble, SuperGraphLinkHash, SuperGraphLinkModel,
     SuperGraphLinkString, SuperGraphLinkTensor, SuperGraphLinkTokenizer,
 };
+use crate::super_graph::{SuperGraphError, SuperGraphHash};
 use crate::tokenizer::AnyTokenizer;
 use std::collections::HashMap;
 
@@ -15,7 +15,7 @@ pub struct SuperGraphData<'models> {
     pub strings: HashMap<SuperGraphLinkString, String>,
     pub tokenizers: HashMap<SuperGraphLinkTokenizer, AnyTokenizer>,
     pub models: HashMap<SuperGraphLinkModel, &'models Model>,
-    pub hashes: HashMap<SuperGraphLinkHash, u64>,
+    pub hashes: HashMap<SuperGraphLinkHash, SuperGraphHash>,
 }
 
 impl<'models> SuperGraphData<'models> {

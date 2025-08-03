@@ -1,8 +1,68 @@
+use std::collections::HashMap;
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::SendError;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::Closure;
 use web_sys::{WebSocket, js_sys};
-use whisper_tensor_server::{WebsocketClientServerMessage, WebsocketServerClientMessage};
+use whisper_tensor_server::{
+    SuperGraphRequest, SuperGraphResponse, WebsocketClientServerMessage,
+    WebsocketServerClientMessage,
+};
+
+pub struct ServerRequestManager {
+    client_server_sender: mpsc::UnboundedSender<WebsocketClientServerMessage>,
+    incoming_responses: HashMap<u64, SuperGraphResponse>,
+    cancelled_responses: Vec<u64>,
+    next_attention_token: u64,
+}
+
+impl ServerRequestManager {
+    pub fn new(client_server_sender: mpsc::UnboundedSender<WebsocketClientServerMessage>) -> Self {
+        Self {
+            client_server_sender,
+            incoming_responses: HashMap::new(),
+            cancelled_responses: Vec::new(),
+            next_attention_token: 0,
+        }
+    }
+
+    pub fn new_response(&mut self, resp: SuperGraphResponse) {
+        if let Some(attention_token) = resp.attention_token.clone() {
+            if self.cancelled_responses.contains(&attention_token) {
+                self.cancelled_responses.retain(|&x| x != attention_token);
+            } else {
+                self.incoming_responses.insert(attention_token, resp);
+            }
+        }
+    }
+
+    pub fn cancel_request(&mut self, attention_token: u64) {
+        self.cancelled_responses.push(attention_token);
+    }
+
+    pub fn submit_supergraph_request(&mut self, mut req: SuperGraphRequest) -> u64 {
+        if req.attention_token.is_none() {
+            req.attention_token = Some(self.next_attention_token);
+            self.next_attention_token += 1;
+        };
+        let ret = req.attention_token.unwrap();
+        self.client_server_sender
+            .send(WebsocketClientServerMessage::SuperGraphRequest(req))
+            .unwrap();
+        ret
+    }
+
+    pub fn get_response(&mut self, attention_token: u64) -> Option<SuperGraphResponse> {
+        self.incoming_responses.remove(&attention_token)
+    }
+
+    pub fn send(
+        &mut self,
+        message: WebsocketClientServerMessage,
+    ) -> Result<(), SendError<WebsocketClientServerMessage>> {
+        self.client_server_sender.send(message)
+    }
+}
 
 pub(crate) async fn websocket_task(
     server_client_sender: mpsc::UnboundedSender<WebsocketServerClientMessage>,

@@ -3,6 +3,7 @@ use crate::graph_layout::{
     GraphLayout, GraphLayoutIOOffsets, GraphLayoutLinkData, GraphLayoutLinkId, GraphLayoutLinkType,
     GraphLayoutNodeId, GraphLayoutNodeInitData, GraphLayoutNodeType,
 };
+use crate::websockets::ServerRequestManager;
 use crate::widgets::toggle::toggle_ui;
 use egui::epaint::CubicBezierShape;
 use egui::{
@@ -12,7 +13,6 @@ use egui::{
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
-use tokio::sync::mpsc;
 use whisper_tensor::DynRank;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::scalar_info::ScalarInfoTyped;
@@ -196,7 +196,7 @@ fn format_shape(val: &Vec<ScalarInfoTyped<u64>>) -> String {
         .iter()
         .map(|x| match x {
             ScalarInfoTyped::Numeric(x) => x.to_string(),
-            ScalarInfoTyped::Symbolic(x) => "?".to_string(),
+            ScalarInfoTyped::Symbolic(_x) => "?".to_string(),
         })
         .collect::<Vec<_>>()
         .join(", ");
@@ -220,17 +220,17 @@ impl GraphExplorerApp {
         &mut self,
         state: &mut GraphExplorerState,
         loaded_models: &mut LoadedModels,
-        websocket_client_server_sender: &mpsc::UnboundedSender<WebsocketClientServerMessage>,
+        server_request_manager: &mut ServerRequestManager,
         ui: &mut Ui,
     ) {
         self.explorer_hovered = self.next_explorer_hovered.clone();
         self.next_explorer_hovered = None;
 
         ui.horizontal(|ui| {
-            if loaded_models.current_models.is_empty() {
+            if loaded_models.current_models.models.is_empty() {
                 ui.label("No Models Loaded");
             }
-            for model in &loaded_models.current_models {
+            for model in &loaded_models.current_models.models {
                 if ui
                     .selectable_value(
                         &mut state.selected_model_id,
@@ -257,7 +257,7 @@ impl GraphExplorerApp {
 
         let model_id = if let Some(model_id) = state.selected_model_id {
             let mut ret = None;
-            for model in &loaded_models.current_models {
+            for model in &loaded_models.current_models.models {
                 if model.model_id == model_id {
                     ret = Some(model_id)
                 }
@@ -816,7 +816,7 @@ impl GraphExplorerApp {
                     .map(|id| id != model_id)
                     .unwrap_or(true)
                 {
-                    websocket_client_server_sender
+                    server_request_manager
                         .send(WebsocketClientServerMessage::GetModelGraph(model_id))
                         .unwrap();
                     loaded_models.currently_requesting_model = Some(model_id);
@@ -831,7 +831,7 @@ impl GraphExplorerApp {
         &mut self,
         state: &mut GraphExplorerState,
         ctx: &egui::Context,
-        websocket_client_server_sender: &mpsc::UnboundedSender<WebsocketClientServerMessage>,
+        server_request_manager: &mut ServerRequestManager,
     ) {
         let mut new_inspect_windows = vec![];
         self.inspect_windows.retain_mut(|inspect_window| {
@@ -1060,7 +1060,7 @@ impl GraphExplorerApp {
                                                 *model_id,
                                                 stored_tensor_id,
                                             );
-                                            websocket_client_server_sender.send(msg).unwrap();
+                                            server_request_manager.send(msg).unwrap();
                                         }
                                         if let Some(x) = &inspect_window_tensor.stored_value {
                                             match x {

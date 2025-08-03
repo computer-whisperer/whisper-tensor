@@ -1,5 +1,6 @@
 use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
+use crate::dtype::DType;
 use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::ops::{
     AnyMilliOp, MilliOpCast, MilliOpConstant, MilliOpShape, MilliOpSqueeze, MilliOpUnsqueeze,
@@ -26,14 +27,39 @@ use whisper_tensor_import::onnx_graph::{
     InputMetadata, ModelInputType, ModelMetadata, ModelOutputType, OutputMetadata, TokenizerInfo,
 };
 
-#[derive(Clone, Serialize, Deserialize)]
+pub fn get_automatic_interfaces_from_model(model: &Model) -> Vec<AnyInterface> {
+    let mut interfaces = Vec::new();
+
+    if let Some(x) = model.text_inference_tokens_in_logits_out_interface.clone() {
+        interfaces.push(x.to_any());
+    }
+
+    interfaces
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum AnyInterface {
+    TextInferenceTokensInLogitOutInterface(TextInferenceTokensInLogitOutInterface),
+}
+
+impl AnyInterface {
+    pub fn name(&self) -> String {
+        match self {
+            AnyInterface::TextInferenceTokensInLogitOutInterface(_) => {
+                "TextInferenceTokensInLogitsOut".to_string()
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TextInferenceTokensInLogitOutInterface {
-    cache_key_input_link: SuperGraphLinkHash,
-    token_context_input_link: SuperGraphLinkTensor,
-    model_input_link: SuperGraphLinkModel,
-    logit_output_link: SuperGraphLinkTensor,
-    super_graph: SuperGraph,
-    tokenizer: TokenizerInfo,
+    pub cache_key_input_link: SuperGraphLinkHash,
+    pub token_context_input_link: SuperGraphLinkTensor,
+    pub model_input_link: SuperGraphLinkModel,
+    pub logit_output_link: SuperGraphLinkTensor,
+    pub super_graph: SuperGraph,
+    pub tokenizer: TokenizerInfo,
 }
 
 pub enum Error {
@@ -310,6 +336,7 @@ impl TextInferenceTokensInLogitOutInterface {
                         x = milli_graph
                             .push_op(AnyMilliOp::Squeeze(MilliOpSqueeze::new(x, zero_const)));
                     }
+                    x = milli_graph.push_op(AnyMilliOp::Cast(MilliOpCast::new(x, DType::F32)));
 
                     let processed_logit_output_link = sub_builder.new_tensor_link();
                     let mut output_map = HashMap::new();
@@ -483,6 +510,7 @@ impl TextInferenceTokensInLogitOutInterface {
                     x = milli_graph
                         .push_op(AnyMilliOp::Squeeze(MilliOpSqueeze::new(x, zero_const)));
                 }
+                x = milli_graph.push_op(AnyMilliOp::Cast(MilliOpCast::new(x, DType::F32)));
 
                 let processed_logit_output_link = super_graph_builder.new_tensor_link();
                 let mut output_map = HashMap::new();
@@ -565,5 +593,13 @@ impl TextInferenceTokensInLogitOutInterface {
         let token_id: u32 = token_id.first_element().into();
         let token_str = tokenizer.decode(&[token_id])?;
         Ok(token_str)
+    }
+
+    pub fn get_tokenizer(&self) -> &TokenizerInfo {
+        &self.tokenizer
+    }
+
+    pub fn to_any(self) -> AnyInterface {
+        AnyInterface::TextInferenceTokensInLogitOutInterface(self)
     }
 }

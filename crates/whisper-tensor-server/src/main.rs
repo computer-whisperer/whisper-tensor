@@ -4,14 +4,15 @@ use axum::{
     response::IntoResponse,
     routing::get,
 };
+use std::default::Default;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
 use std::time;
-use tokio::sync::RwLock;
 use tokio::sync::watch;
+use tokio::sync::{RwLock, mpsc};
 use tokio::time::sleep;
 use tower_http::{
     services::{ServeDir, ServeFile},
@@ -19,8 +20,10 @@ use tower_http::{
 };
 use whisper_tensor::DynRank;
 
+mod scheduler;
+
 struct ModelData {
-    model: Model,
+    model: Arc<Model>,
     model_id: LoadedModelId,
     model_name: String,
 }
@@ -28,13 +31,14 @@ struct ModelData {
 pub(crate) struct ModelServer {
     models: RwLock<Vec<ModelData>>,
     next_model_id: AtomicU32,
-    models_report_watch_sender: watch::Sender<Vec<CurrentModelsReportEntry>>,
-    models_report_watch_receiver: watch::Receiver<Vec<CurrentModelsReportEntry>>,
+    models_report_watch_sender: watch::Sender<CurrentModelsAndInterfacesReport>,
+    models_report_watch_receiver: watch::Receiver<CurrentModelsAndInterfacesReport>,
 }
 
 impl ModelServer {
     pub(crate) fn new() -> Self {
-        let (models_report_watch_sender, models_report_watch_receiver) = watch::channel(vec![]);
+        let (models_report_watch_sender, models_report_watch_receiver) =
+            watch::channel(CurrentModelsAndInterfacesReport::new());
         Self {
             models: RwLock::new(vec![]),
             next_model_id: AtomicU32::new(0),
@@ -45,25 +49,34 @@ impl ModelServer {
 
     pub(crate) async fn generate_new_model_report(&self) {
         let guard = self.models.read().await;
-        let mut new_vec = vec![];
+        let mut new_report = CurrentModelsAndInterfacesReport::default();
 
         for model in guard.iter() {
-            let model_type_metadata = ModelTypeMetadata::Other;
-            new_vec.push(CurrentModelsReportEntry {
+            new_report.models.push(CurrentModelsReportEntry {
                 model_id: model.model_id,
                 model_name: model.model_name.clone(),
                 num_ops: model.model.get_symbolic_graph().get_operations().len() as u64,
-                model_type_metadata,
-            })
+            });
+
+            for interface in get_automatic_interfaces_from_model(&model.model) {
+                let name = model.model_name.clone() + "-" + &interface.name();
+                new_report.interfaces.insert(
+                    name.clone(),
+                    CurrentInterfacesReportEntry {
+                        model_ids: vec![model.model_id],
+                        interface,
+                        interface_name: name,
+                    },
+                );
+            }
         }
-        self.models_report_watch_sender.send(new_vec).unwrap()
+        self.models_report_watch_sender.send(new_report).unwrap()
     }
 
     pub(crate) async fn load_model(
         &self,
         model_path: &Path,
         model_hint: Option<ModelTypeHint>,
-        _model_load_type: ModelLoadType,
     ) -> Result<(), anyhow::Error> {
         let onnx_data =
             identify_and_load(model_path, WeightStorageStrategy::EmbeddedData, model_hint)?;
@@ -78,13 +91,15 @@ impl ModelServer {
         let model_id = self
             .next_model_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
         let mut guard = self.models.write().await;
 
         guard.push(ModelData {
-            model: runtime_model,
+            model: Arc::new(runtime_model),
             model_id: LoadedModelId(model_id),
             model_name,
         });
+
         drop(guard);
         self.generate_new_model_report().await;
         Ok(())
@@ -96,6 +111,14 @@ impl ModelServer {
         drop(guard);
         self.generate_new_model_report().await;
         Ok(())
+    }
+
+    pub(crate) async fn get_model(&self, model_id: LoadedModelId) -> Option<Arc<Model>> {
+        let guard = self.models.read().await;
+        guard
+            .iter()
+            .find(|model| model.model_id == model_id)
+            .map(|model| model.model.clone())
     }
 
     pub(crate) async fn with_model<T>(
@@ -132,23 +155,26 @@ impl ModelServer {
 
 async fn websocket_handler(
     ws: WebSocketUpgrade,
+    scheduler_sender: mpsc::Sender<SchedulerJob>,
     model_server: Arc<ModelServer>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(|socket: WebSocket| handle_socket(socket, model_server))
+    ws.on_upgrade(|socket: WebSocket| handle_socket(socket, scheduler_sender, model_server))
 }
 
+use crate::scheduler::{SchedulerJob, scheduler};
 use axum::extract::ws::Message;
 use hf_hub::api::tokio::ApiBuilder;
 use hf_hub::{Repo, RepoType};
 use tokenizers::FromPretrainedParameters;
+use whisper_tensor::interfaces::get_automatic_interfaces_from_model;
 use whisper_tensor::model::Model;
 use whisper_tensor::numeric_tensor::NumericTensor;
 use whisper_tensor::symbolic_graph::tensor_store::TensorStoreTensorId;
 use whisper_tensor_import::onnx_graph::WeightStorageStrategy;
 use whisper_tensor_import::{ModelTypeHint, identify_and_load};
 use whisper_tensor_server::{
-    CurrentModelsReportEntry, LoadedModelId, ModelLoadType, ModelTypeMetadata,
-    WebsocketClientServerMessage, WebsocketServerClientMessage,
+    CurrentInterfacesReportEntry, CurrentModelsAndInterfacesReport, CurrentModelsReportEntry,
+    LoadedModelId, WebsocketClientServerMessage, WebsocketServerClientMessage,
 };
 
 async fn send_message(socket: &mut WebSocket, message: WebsocketServerClientMessage) {
@@ -199,7 +225,11 @@ pub async fn hf_from_pretrained<S: AsRef<str>>(
     api.get("tokenizer.json").await.map_err(|x| x.to_string())
 }
 
-async fn handle_socket(mut socket: WebSocket, model_server: Arc<ModelServer>) {
+async fn handle_socket(
+    mut socket: WebSocket,
+    scheduler_sender: mpsc::Sender<SchedulerJob>,
+    model_server: Arc<ModelServer>,
+) {
     // Send opening state
     let mut receiver = model_server.models_report_watch_receiver.clone();
     let initial_value = receiver.borrow_and_update().clone();
@@ -209,8 +239,13 @@ async fn handle_socket(mut socket: WebSocket, model_server: Arc<ModelServer>) {
     )
     .await;
 
+    let (finished_supergraph_job_tx, mut finished_supergraph_job_rx) = mpsc::channel(100);
+
     loop {
         tokio::select! {
+            Some(response) = finished_supergraph_job_rx.recv() => {
+                send_message(&mut socket, WebsocketServerClientMessage::SuperGraphResponse(response)).await;
+            }
             Ok(_) = receiver.changed() => {
                 let current_value = receiver.borrow_and_update().clone();
                 send_message(&mut socket, WebsocketServerClientMessage::CurrentModelsReport(current_value)).await;
@@ -227,8 +262,8 @@ async fn handle_socket(mut socket: WebSocket, model_server: Arc<ModelServer>) {
                                         WebsocketClientServerMessage::Ping => {
                                             send_message(&mut socket, WebsocketServerClientMessage::Pong).await;
                                         }
-                                        WebsocketClientServerMessage::LoadModel{model_path, model_type_hint, model_load_type} => {
-                                            let res = model_server.load_model(Path::new(&model_path), model_type_hint, model_load_type).await;
+                                        WebsocketClientServerMessage::LoadModel{model_path, model_type_hint} => {
+                                            let res = model_server.load_model(Path::new(&model_path), model_type_hint).await;
                                             let msg_out = WebsocketServerClientMessage::ModelLoadReturn(res.map_err(|x| {x.to_string()}));
                                             send_message(&mut socket, msg_out).await;
                                         }
@@ -270,47 +305,14 @@ async fn handle_socket(mut socket: WebSocket, model_server: Arc<ModelServer>) {
                                                 }));
                                             send_message(&mut socket, msg_out).await;
                                         }
+                                        WebsocketClientServerMessage::SuperGraphRequest(request) => {
+                                            let job = SchedulerJob::SuperGraphRequest((request, finished_supergraph_job_tx.clone()));
+                                            scheduler_sender.send(job).await.unwrap();
+                                        }
                                         /*
-                                        WebsocketClientServerMessage::GetLogits(request) => {
-                                            let ret = model_server.with_llm_mut(request.model_id, |x| {
-                                                info!("Starting inference");
-                                                let input_tokens = NDArrayNumericTensor::from(request.context_tokens.clone()).to_dyn();
-                                                x.forward(input_tokens.into(), None)
-                                            }).await;
-                                            let ret = match ret {
-                                                Ok(Ok(x)) => Ok(x.0),
-                                                Ok(Err(err)) => Err(err.to_string()),
-                                                Err(err) => Err(err),
-                                            };
-                                            let ret = ret.map(|x| {
-                                                let mut outputs = vec![];
-                                                let shape = x.shape();
-                                                let num_tokens = shape[1];
-                                                let logits_per_token = shape[shape.len()-1];
-                                                let reshaped_x = x.reshape(vec![num_tokens, logits_per_token]).unwrap();
-                                                for i in 0..num_tokens {
-                                                    let sliced_output_tensor = reshaped_x.slice(&[
-                                                        i..i+1,
-                                                        0..logits_per_token
-                                                    ], &EvalBackend::NDArray).unwrap();
-                                                    let output = sliced_output_tensor.flatten().unwrap();
-                                                    let output_vec: Vec<f32> = output.to_ndarray().unwrap().cast(DType::F32).unwrap().try_into().unwrap();
-                                                    let mut idx_and_val = output_vec.iter().enumerate().map(|(a, b)| (a as u32, *b)).collect::<Vec<_>>();
-                                                    idx_and_val.sort_by(|(_, a), (_, b)| {if a < b {Ordering::Greater} else {Ordering::Less}});
-                                                    let clipped_logits = idx_and_val[0..idx_and_val.len().min(100)].to_vec();
-                                                    outputs.push(clipped_logits)
-                                                }
-                                                outputs
-                                            });
-                                            let msg_out = WebsocketServerClientMessage::GetLogitsReturn(
-                                                request,
-                                                ret
-                                            );
-                                            send_message(&mut socket, msg_out).await;
-                                        }*/
                                         _ => {
                                             log::debug!("Unhandled message: {msg:?}")
-                                        }
+                                        }*/
                                     }
                                 }
                                 Err(err) => {
@@ -346,14 +348,14 @@ async fn main() {
 
     // Load test models
     model_server
-        .load_model(
-            Path::new("gpt2-lm-head-10.onnx"),
-            Some(ModelTypeHint::GPT2),
-            ModelLoadType::LLM,
-        )
+        .load_model(Path::new("gpt2-lm-head-10.onnx"), Some(ModelTypeHint::GPT2))
         .await
         .unwrap();
-    model_server.load_model(Path::new("libs/onnx/onnx/backend/test/data/node/test_layer_normalization_2d_axis0_expanded/model.onnx"), None, ModelLoadType::Other).await.unwrap();
+    model_server.load_model(Path::new("libs/onnx/onnx/backend/test/data/node/test_layer_normalization_2d_axis0_expanded/model.onnx"), None).await.unwrap();
+
+    let (scheduler_tx, scheduler_rx) = mpsc::channel(100);
+
+    tokio::spawn(scheduler(scheduler_rx, model_server.clone()));
 
     tokio::spawn(async move {
         let model_server = model_server.clone();
@@ -361,7 +363,9 @@ async fn main() {
             .route("/health", get(|| async { "ok" }))
             .route(
                 "/ws",
-                get(move |ws: WebSocketUpgrade| websocket_handler(ws, model_server.clone())),
+                get(move |ws: WebSocketUpgrade| {
+                    websocket_handler(ws, scheduler_tx.clone(), model_server.clone())
+                }),
             ) // Add WebSocket endpoint
             .nest_service("/pkg", ServeDir::new("./crates/whisper-tensor-webui/pkg/"))
             .nest_service(
