@@ -1,7 +1,10 @@
+use crate::app::InterfaceId;
 use egui::{Rect, UiBuilder, vec2};
 use rand::{random, random_range};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
+use whisper_tensor::super_graph::links::SuperGraphAnyLink;
+use whisper_tensor_server::LoadedModelId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct GraphLayoutNodeId(pub(crate) usize);
@@ -17,8 +20,10 @@ pub(crate) struct GraphLayoutIOOffsets {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum GraphLayoutNodeType {
-    SymbolicGraphOperation(whisper_tensor::symbolic_graph::OperationId),
-    SymbolicGraphTensor(whisper_tensor::symbolic_graph::TensorId),
+    SymbolicGraphOperation((LoadedModelId, whisper_tensor::symbolic_graph::OperationId)),
+    SymbolicGraphTensor((LoadedModelId, whisper_tensor::symbolic_graph::TensorId)),
+    SuperGraphLink((InterfaceId, whisper_tensor::super_graph::SuperGraphAnyLink)),
+    SuperGraphNode((InterfaceId, whisper_tensor::super_graph::SuperGraphNodeId)),
     ConnectionByNameSrc(GraphLayoutLinkData),
     ConnectionByNameDest(GraphLayoutLinkData),
 }
@@ -43,7 +48,8 @@ pub(crate) struct GraphLayoutNodeInitData {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum GraphLayoutLinkType {
-    SymbolicGraphTensor(whisper_tensor::symbolic_graph::TensorId),
+    SymbolicGraphTensor((LoadedModelId, whisper_tensor::symbolic_graph::TensorId)),
+    SuperGraphLink((InterfaceId, SuperGraphAnyLink)),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

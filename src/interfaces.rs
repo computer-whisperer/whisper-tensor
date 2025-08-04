@@ -50,6 +50,12 @@ impl AnyInterface {
             }
         }
     }
+
+    pub fn get_super_graph(&self) -> &SuperGraph {
+        match self {
+            AnyInterface::TextInferenceTokensInLogitOutInterface(x) => &x.super_graph,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -68,14 +68,14 @@ pub struct CurrentInterfacesReportEntry {
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct CurrentModelsAndInterfacesReport {
     pub models: Vec<CurrentModelsReportEntry>,
-    pub interfaces: HashMap<String, CurrentInterfacesReportEntry>,
+    pub interfaces: Vec<CurrentInterfacesReportEntry>,
 }
 
 impl CurrentModelsAndInterfacesReport {
     pub fn new() -> Self {
         Self {
             models: Vec::new(),
-            interfaces: HashMap::new(),
+            interfaces: Vec::new(),
         }
     }
 }

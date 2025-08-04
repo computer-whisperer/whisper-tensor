@@ -1,4 +1,4 @@
-use crate::app::{LoadedModels, LoadedTokenizers, ModelLoadState};
+use crate::app::{InterfaceId, LoadedModels, LoadedTokenizers, ModelLoadState};
 use crate::websockets::ServerRequestManager;
 use egui::{Color32, CursorIcon, Event, EventFilter, Label, RichText, Sense, Widget};
 use log::info;
@@ -16,14 +16,12 @@ use whisper_tensor_server::{LoadedModelId, SuperGraphRequest, WebsocketClientSer
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct LLMExplorerState {
-    llm_explorer_selected_interface_name: Option<String>,
     current_llm_text: String,
 }
 
 impl Default for LLMExplorerState {
     fn default() -> Self {
         Self {
-            llm_explorer_selected_interface_name: None,
             current_llm_text: "This is example text".to_string(),
         }
     }
@@ -54,6 +52,7 @@ fn escape_token_text(input: &str) -> String {
 }
 
 pub(crate) struct LLMExplorerApp {
+    llm_explorer_selected_interface_id: Option<InterfaceId>,
     llm_explorer_cached_token_list: Option<Vec<u32>>,
     pending_request: Option<(u64, SuperGraphLinkTensor, Vec<u32>)>,
     pub(crate) latest_logits: Option<(Vec<u32>, Result<Vec<Vec<(u32, f32)>>, String>)>,
@@ -62,6 +61,7 @@ pub(crate) struct LLMExplorerApp {
 impl LLMExplorerApp {
     pub fn new() -> Self {
         Self {
+            llm_explorer_selected_interface_id: None,
             llm_explorer_cached_token_list: None,
             pending_request: None,
             latest_logits: None,
@@ -112,9 +112,9 @@ impl LLMExplorerApp {
 
         // Find llm interfaces
         let mut llm_interfaces = HashMap::new();
-        for (name, interface) in &loaded_models.current_models.interfaces {
+        for (&interface_id, interface) in &loaded_models.current_interfaces {
             if let AnyInterface::TextInferenceTokensInLogitOutInterface(_x) = &interface.interface {
-                llm_interfaces.insert(name, interface);
+                llm_interfaces.insert(interface.interface_name.clone(), interface_id);
             }
         }
 
@@ -122,14 +122,14 @@ impl LLMExplorerApp {
             if llm_interfaces.is_empty() {
                 ui.label("No Models Loaded");
             }
-            let mut keys = llm_interfaces.keys().collect::<Vec<_>>();
+            let mut keys = llm_interfaces.keys().cloned().collect::<Vec<_>>();
             keys.sort();
-            for &interface_name in keys {
+            for interface_name in keys {
                 if ui
                     .selectable_value(
-                        &mut state.llm_explorer_selected_interface_name,
-                        Some(interface_name.clone()),
-                        interface_name,
+                        &mut self.llm_explorer_selected_interface_id,
+                        Some(llm_interfaces[&interface_name]),
+                        interface_name.clone(),
                     )
                     .clicked()
                 {
@@ -142,12 +142,8 @@ impl LLMExplorerApp {
             };
         });
 
-        let interface = if let Some(selected_model_id) = &state.llm_explorer_selected_interface_name
-        {
-            loaded_models
-                .current_models
-                .interfaces
-                .get(selected_model_id)
+        let interface = if let Some(selected_model_id) = &self.llm_explorer_selected_interface_id {
+            loaded_models.current_interfaces.get(selected_model_id)
         } else {
             None
         };

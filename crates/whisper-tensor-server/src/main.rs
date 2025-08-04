@@ -60,14 +60,11 @@ impl ModelServer {
 
             for interface in get_automatic_interfaces_from_model(&model.model) {
                 let name = model.model_name.clone() + "-" + &interface.name();
-                new_report.interfaces.insert(
-                    name.clone(),
-                    CurrentInterfacesReportEntry {
-                        model_ids: vec![model.model_id],
-                        interface,
-                        interface_name: name,
-                    },
-                );
+                new_report.interfaces.push(CurrentInterfacesReportEntry {
+                    model_ids: vec![model.model_id],
+                    interface,
+                    interface_name: name,
+                });
             }
         }
         self.models_report_watch_sender.send(new_report).unwrap()

@@ -1,4 +1,6 @@
-use crate::graph_explorer::{GraphExplorerApp, GraphExplorerState, InspectWindow, OpOrTensorId};
+use crate::graph_explorer::{
+    GraphExplorerApp, GraphExplorerState, InspectWindow, OpOrTensorId, RootGraphSubjectIdentifier,
+};
 use crate::graph_layout::{
     GraphLayout, GraphLayoutIOOffsets, GraphLayoutLinkData, GraphLayoutLinkId, GraphLayoutLinkType,
     GraphLayoutNode, GraphLayoutNodeId, GraphLayoutNodeInitData, GraphLayoutNodeType,
@@ -41,8 +43,8 @@ use whisper_tensor::tokenizer::{AnyTokenizer, Tokenizer, TokenizerError};
 use whisper_tensor_import::ModelTypeHint;
 use whisper_tensor_import::onnx_graph::TokenizerInfo;
 use whisper_tensor_server::{
-    CurrentModelsAndInterfacesReport, CurrentModelsReportEntry, LoadedModelId,
-    WebsocketClientServerMessage, WebsocketServerClientMessage,
+    CurrentInterfacesReportEntry, CurrentModelsAndInterfacesReport, CurrentModelsReportEntry,
+    LoadedModelId, WebsocketClientServerMessage, WebsocketServerClientMessage,
 };
 
 #[derive(Clone, Debug)]
@@ -80,9 +82,12 @@ impl Default for AppState {
     }
 }
 
+pub(crate) type InterfaceId = u32;
+
 pub(crate) struct LoadedModels {
     pub(crate) model_load_state: Option<ModelLoadState>,
-    pub(crate) current_models: CurrentModelsAndInterfacesReport,
+    pub(crate) current_models: Vec<CurrentModelsReportEntry>,
+    pub(crate) current_interfaces: HashMap<InterfaceId, CurrentInterfacesReportEntry>,
     pub(crate) currently_requesting_model: Option<LoadedModelId>,
 }
 
@@ -101,7 +106,7 @@ impl LoadedTokenizers {
 pub struct WebUIApp {
     websocket_server_client_receiver: mpsc::UnboundedReceiver<WebsocketServerClientMessage>,
     server_request_manager: ServerRequestManager,
-
+    next_interface_id: InterfaceId,
     loaded_models: LoadedModels,
     app_state: AppState,
     graph_explorer_app: GraphExplorerApp,
@@ -131,10 +136,12 @@ impl WebUIApp {
         Self {
             loaded_models: LoadedModels {
                 model_load_state: None,
-                current_models: CurrentModelsAndInterfacesReport::default(),
+                current_models: Vec::new(),
+                current_interfaces: HashMap::new(),
                 currently_requesting_model: None,
             },
             server_request_manager: ServerRequestManager::new(websocket_client_server_sender),
+            next_interface_id: 0,
             websocket_server_client_receiver,
             app_state,
             graph_explorer_app: GraphExplorerApp::new(),
@@ -171,10 +178,33 @@ impl eframe::App for WebUIApp {
                             }
                         },
                         WebsocketServerClientMessage::CurrentModelsReport(res) => {
-                            self.loaded_models.current_models = res;
+                            self.loaded_models.current_models = res.models;
+                            // Rebuild interfaces list
+                            self.loaded_models.current_interfaces = {
+                                let mut new_interfaces = HashMap::new();
+                                for interface in res.interfaces {
+                                    let mut found = false;
+                                    for (&id, existing_interface) in
+                                        &self.loaded_models.current_interfaces
+                                    {
+                                        if interface.interface_name
+                                            == existing_interface.interface_name
+                                        {
+                                            new_interfaces.insert(id, existing_interface.clone());
+                                            found = true;
+                                            break;
+                                        }
+                                    }
+                                    if !found {
+                                        new_interfaces.insert(self.next_interface_id, interface);
+                                        self.next_interface_id += 1;
+                                    }
+                                }
+                                new_interfaces
+                            };
                             // Prompt tokenizer loading
                             let mut needed_tokenizers = Vec::new();
-                            for interface in self.loaded_models.current_models.interfaces.values() {
+                            for interface in self.loaded_models.current_interfaces.values() {
                                 if let AnyInterface::TextInferenceTokensInLogitOutInterface(
                                     interface,
                                 ) = &interface.interface
@@ -222,7 +252,7 @@ impl eframe::App for WebUIApp {
                                         graph_bin.as_slice(),
                                     )
                                     .unwrap();
-                                    self.graph_explorer_app.loaded_model_graph = Some((id, graph))
+                                    self.graph_explorer_app.loaded_models.insert(id, graph);
                                 }
                             }
                         }
@@ -231,8 +261,8 @@ impl eframe::App for WebUIApp {
                             stored_tensor_id,
                             res,
                         ) => {
-                            if let Some(selected_model_id) =
-                                self.app_state.graph_explorer_state.selected_model_id
+                            if let Some(RootGraphSubjectIdentifier::Model(selected_model_id)) =
+                                self.graph_explorer_app.selected_root_subject
                             {
                                 if selected_model_id == model_id {
                                     for window in &mut self.graph_explorer_app.inspect_windows {
@@ -267,11 +297,6 @@ impl eframe::App for WebUIApp {
                         WebsocketServerClientMessage::SuperGraphResponse(response) => {
                             self.server_request_manager.new_response(response);
                         }
-                        /*
-                        WebsocketServerClientMessage::GetLogitsReturn(request, result) => {
-                            self.llm_explorer_app.latest_logits =
-                                Some((request.model_id, request.context_tokens, result));
-                        }*/
                         _ => {
                             log::debug!("Unhandled message: {:?}", msg);
                         }
@@ -392,7 +417,7 @@ impl eframe::App for WebUIApp {
                         egui::Grid::new("loaded_models")
                             .striped(true)
                             .show(ui, |ui| {
-                                for model in &self.loaded_models.current_models.models {
+                                for model in &self.loaded_models.current_models {
                                     ui.label(model.model_id.to_string());
                                     ui.label(model.model_name.clone());
                                     ui.label(format!("Operations: {:?}", model.num_ops));

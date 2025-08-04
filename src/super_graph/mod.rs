@@ -10,7 +10,7 @@ use crate::numeric_tensor::NumericTensorError;
 use crate::numeric_tensor_typed::TypedNumericTensorError;
 use crate::super_graph::cache::SuperGraphCache;
 use crate::super_graph::data::SuperGraphData;
-use crate::super_graph::links::{
+pub use crate::super_graph::links::{
     SuperGraphAnyLink, SuperGraphLinkHash, SuperGraphLinkId, SuperGraphLinkModel,
     SuperGraphLinkString, SuperGraphLinkTensor, SuperGraphLinkTokenizer,
 };
@@ -42,7 +42,7 @@ pub type SuperGraphHash = u64;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SuperGraph {
-    inner: SuperGraphInner,
+    pub inner: SuperGraphInner,
 }
 
 impl SuperGraph {
@@ -54,13 +54,17 @@ impl SuperGraph {
     ) -> Result<SuperGraphData<'a>, SuperGraphError> {
         self.inner.eval(data, caches, backend)
     }
+
+    pub fn get_all_links(&self) -> HashSet<SuperGraphAnyLink> {
+        self.inner.get_all_links()
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SuperGraphInner {
-    input_links: HashSet<SuperGraphAnyLink>,
-    output_links: HashSet<SuperGraphAnyLink>,
-    nodes: HashMap<SuperGraphNodeId, SuperGraphAnyNode>,
+    pub input_links: HashSet<SuperGraphAnyLink>,
+    pub output_links: HashSet<SuperGraphAnyLink>,
+    pub nodes: HashMap<SuperGraphNodeId, SuperGraphAnyNode>,
 }
 
 impl SuperGraphInner {
@@ -139,6 +143,15 @@ impl SuperGraphInner {
         )?;
 
         Ok(output_data)
+    }
+
+    pub fn get_all_links(&self) -> HashSet<SuperGraphAnyLink> {
+        let mut links = HashSet::new();
+        for node in self.nodes.values() {
+            links.extend(node.get_inputs());
+            links.extend(node.get_outputs());
+        }
+        links
     }
 }
 
