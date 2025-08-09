@@ -639,10 +639,8 @@ impl Gemm {
         if a.dtype() != b.dtype() {
             return Err(Error::DTypeMismatchError(a.dtype(), b.dtype()));
         }
-        if let Some(c) = &c {
-            if c.dtype() != a.dtype() {
-                return Err(Error::DTypeMismatchError(c.dtype(), a.dtype()));
-            }
+        if let Some(c) = &c && c.dtype() != a.dtype() {
+            return Err(Error::DTypeMismatchError(c.dtype(), a.dtype()));
         }
         let a_shape = if trans_a {
             a.shape().transpose()
