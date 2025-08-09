@@ -306,7 +306,7 @@ impl SuperGraphNode for SuperGraphNodeTokenizerDecode {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SuperGraphNodeMilliOpGraph {
-    graph: MilliOpGraph<SuperGraphLinkTensor>,
+    pub graph: MilliOpGraph<SuperGraphLinkTensor>,
 }
 
 impl SuperGraphNodeMilliOpGraph {
@@ -963,6 +963,27 @@ impl SuperGraphAnyNode {
             SuperGraphAnyNode::Scan(node) => node.eval(data, caches, backend),
             SuperGraphAnyNode::RNNCacheWrite(node) => node.eval(data, caches, backend),
             SuperGraphAnyNode::RNNCacheRead(node) => node.eval(data, caches, backend),
+        }
+    }
+
+    pub fn get_name(&self) -> String {
+        match self {
+            SuperGraphAnyNode::ModelExecution(_node) => "Model Execution",
+            SuperGraphAnyNode::TokenizerEncode(_node) => "Tokenizer Encode",
+            SuperGraphAnyNode::TokenizerDecode(_node) => "Tokenizer Decode",
+            SuperGraphAnyNode::TokenizerLoad(_node) => "Tokenizer Load",
+            SuperGraphAnyNode::MilliOpGraph(_node) => "Milli Op Graph",
+            SuperGraphAnyNode::Scan(_node) => "Scan",
+            SuperGraphAnyNode::RNNCacheRead(_node) => "RNN Cache Read",
+            SuperGraphAnyNode::RNNCacheWrite(_node) => "RNN Cache Write",
+        }
+        .to_string()
+    }
+
+    pub fn get_sub_graph(&self) -> Option<&SuperGraphInner> {
+        match self {
+            SuperGraphAnyNode::Scan(x) => Some(&x.inner_graph),
+            _ => None,
         }
     }
 }

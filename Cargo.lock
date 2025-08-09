@@ -5389,6 +5389,7 @@ dependencies = [
  "rwkv-tokenizer",
  "serde",
  "strum",
+ "thiserror 2.0.12",
  "tokenizers",
  "tokio",
  "tracing-subscriber",

@@ -3,8 +3,8 @@ use egui::{Rect, UiBuilder, vec2};
 use rand::{random, random_range};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
+use whisper_tensor::milli_graph::MilliOpGraphTensorId;
 use whisper_tensor::super_graph::links::SuperGraphAnyLink;
-use whisper_tensor_server::LoadedModelId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct GraphLayoutNodeId(pub(crate) usize);
@@ -20,10 +20,13 @@ pub(crate) struct GraphLayoutIOOffsets {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum GraphLayoutNodeType {
-    SymbolicGraphOperation((LoadedModelId, whisper_tensor::symbolic_graph::OperationId)),
-    SymbolicGraphTensor((LoadedModelId, whisper_tensor::symbolic_graph::TensorId)),
-    SuperGraphLink((InterfaceId, whisper_tensor::super_graph::SuperGraphAnyLink)),
-    SuperGraphNode((InterfaceId, whisper_tensor::super_graph::SuperGraphNodeId)),
+    SymbolicGraphOperation(whisper_tensor::symbolic_graph::OperationId),
+    SymbolicGraphTensor(whisper_tensor::symbolic_graph::TensorId),
+    SuperGraphLink(whisper_tensor::super_graph::SuperGraphAnyLink),
+    SuperGraphNode(whisper_tensor::super_graph::SuperGraphNodeId),
+    MilliOpGraphNode(MilliOpGraphTensorId),
+    MilliOpGraphInput(MilliOpGraphTensorId),
+    MilliOpGraphOutput(MilliOpGraphTensorId),
     ConnectionByNameSrc(GraphLayoutLinkData),
     ConnectionByNameDest(GraphLayoutLinkData),
 }
@@ -48,8 +51,9 @@ pub(crate) struct GraphLayoutNodeInitData {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum GraphLayoutLinkType {
-    SymbolicGraphTensor((LoadedModelId, whisper_tensor::symbolic_graph::TensorId)),
-    SuperGraphLink((InterfaceId, SuperGraphAnyLink)),
+    SymbolicGraphTensor(whisper_tensor::symbolic_graph::TensorId),
+    SuperGraphLink(SuperGraphAnyLink),
+    MilliOpGraphTensor(MilliOpGraphTensorId),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -73,6 +77,12 @@ pub(crate) struct GraphLayout {
     link_data: HashMap<GraphLayoutLinkId, GraphLayoutLinkData>,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum GraphLayoutError {
+    #[error("Invalid link")]
+    InvalidLinkError,
+}
+
 fn calculate_height(
     node_id: GraphLayoutNodeId,
     nodes: &HashMap<GraphLayoutNodeId, GraphLayoutNodeInitData>,
@@ -84,9 +94,11 @@ fn calculate_height(
     } else {
         let mut min_height = 0;
         for link_id in &nodes[&node_id].inputs {
-            let node_id = upstream_node_for_link[link_id].0;
-            min_height = min_height
-                .max(1 + calculate_height(node_id, nodes, upstream_node_for_link, node_heights));
+            if let Some((node_id, _)) = upstream_node_for_link.get(link_id) {
+                min_height = min_height.max(
+                    1 + calculate_height(*node_id, nodes, upstream_node_for_link, node_heights),
+                );
+            }
         }
         node_heights.insert(node_id, min_height);
         min_height
@@ -129,7 +141,7 @@ impl GraphLayout {
         link_data: HashMap<GraphLayoutLinkId, GraphLayoutLinkData>,
         ui: &mut egui::Ui,
         node_render_tester: impl Fn(&mut egui::Ui, &GraphLayoutNodeInitData) -> GraphLayoutIOOffsets,
-    ) -> Self {
+    ) -> Result<Self, GraphLayoutError> {
         let mut max_existing_node_id = 0;
         let mut max_existing_link_id = 0;
         for (id, data) in &input_node_init_data {
@@ -184,14 +196,16 @@ impl GraphLayout {
         for (node_id, _) in nodes_and_heights.iter() {
             let mut upper_bound = None;
             for link_id in &input_node_init_data[node_id].outputs {
-                for (node_id, _) in &downstream_nodes_for_link[link_id] {
-                    let height = &node_heights[&node_id];
-                    if let Some(x) = upper_bound.clone() {
-                        if *height < x {
+                if let Some(downstream_nodes) = downstream_nodes_for_link.get(link_id) {
+                    for (node_id, _) in downstream_nodes {
+                        let height = &node_heights[&node_id];
+                        if let Some(x) = upper_bound.clone() {
+                            if *height < x {
+                                upper_bound = Some(*height);
+                            }
+                        } else {
                             upper_bound = Some(*height);
                         }
-                    } else {
-                        upper_bound = Some(*height);
                     }
                 }
             }
@@ -209,7 +223,9 @@ impl GraphLayout {
             let node = &input_node_init_data[node_id];
             let mut new_node_inputs = vec![];
             for link_id in &node.inputs {
-                let (upstream_node_id, _) = upstream_node_for_link[link_id];
+                let (upstream_node_id, _) = upstream_node_for_link
+                    .get(link_id)
+                    .ok_or(GraphLayoutError::InvalidLinkError)?;
                 let height_delta = node_heights[node_id] - node_heights[&upstream_node_id];
                 if height_delta > 10 {
                     // Break into connection by name
@@ -333,12 +349,16 @@ impl GraphLayout {
                     let mut num = 0;
                     let mut total = 0.0;
                     for link_id in &node.outputs {
-                        for (downstream_node_id, input_idx) in &downstream_nodes_for_link[link_id] {
-                            let link_offset = (*input_idx as f32
-                                / node_init_data[downstream_node_id].inputs.len() as f32)
-                                * 0.2;
-                            num += 1;
-                            total += node_y_positions[downstream_node_id] + link_offset;
+                        if let Some(downstream_nodes_for_link) =
+                            downstream_nodes_for_link.get(link_id)
+                        {
+                            for (downstream_node_id, input_idx) in downstream_nodes_for_link {
+                                let link_offset = (*input_idx as f32
+                                    / node_init_data[downstream_node_id].inputs.len() as f32)
+                                    * 0.2;
+                                num += 1;
+                                total += node_y_positions[downstream_node_id] + link_offset;
+                            }
                         }
                     }
                     if num > 0 {
@@ -417,7 +437,7 @@ impl GraphLayout {
 
         let bounding_rect = Self::get_bounding_rect_from_nodes(&nodes);
 
-        Self {
+        Ok(Self {
             nodes,
             node_map,
             edges,
@@ -427,7 +447,7 @@ impl GraphLayout {
             upstream_node_for_link,
             downstream_nodes_for_link,
             link_data,
-        }
+        })
     }
 
     pub(crate) fn get_nodes(&self) -> &HashMap<GraphLayoutNodeId, GraphLayoutNode> {

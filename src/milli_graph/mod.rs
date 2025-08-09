@@ -5,7 +5,7 @@ use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::numeric_tensor::NumericTensor;
 use crate::tensor_info::TensorInfoError;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 
 pub mod ops;
@@ -36,8 +36,8 @@ pub struct MilliOpGraphTensorId {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MilliOpGraph<ID: Hash + Clone + Eq> {
-    input_map: HashMap<ID, MilliOpGraphTensorId>,
-    output_map: Option<HashMap<MilliOpGraphTensorId, ID>>,
+    pub input_map: HashMap<ID, MilliOpGraphTensorId>,
+    pub output_map: Option<HashMap<MilliOpGraphTensorId, ID>>,
     ops: HashMap<MilliOpGraphTensorId, AnyMilliOp>,
     next_op_id: usize,
 }
@@ -61,8 +61,23 @@ impl<ID: Hash + Clone + Eq> MilliOpGraph<ID> {
         )
     }
 
+    pub fn get_op(&self, id: &MilliOpGraphTensorId) -> Option<&AnyMilliOp> {
+        self.ops.get(id)
+    }
+
     pub fn get_inputs(&self) -> Vec<ID> {
         self.input_map.keys().cloned().collect()
+    }
+
+    pub fn get_all_tensors(&self) -> HashSet<MilliOpGraphTensorId> {
+        let mut result = HashSet::new();
+        result.extend(self.input_map.values());
+        result.extend(self.ops.keys());
+        result
+    }
+
+    pub fn get_all_ops(&self) -> &HashMap<MilliOpGraphTensorId, AnyMilliOp> {
+        &self.ops
     }
 
     pub fn get_outputs(&self) -> Vec<ID> {

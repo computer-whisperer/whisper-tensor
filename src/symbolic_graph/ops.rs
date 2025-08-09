@@ -6,7 +6,7 @@ use crate::milli_graph::{MilliOpGraph, MilliOpGraphError, ops_helpers};
 use crate::numeric_scalar::NumericScalar;
 use crate::numeric_tensor::{NumericTensor, NumericTensorError};
 use crate::symbolic_graph::{
-    InnerGraph, ONNXDecodingError, SymbolicGraphMutator, TensorId, query_attribute_bool,
+    ONNXDecodingError, SymbolicGraphInner, SymbolicGraphMutator, TensorId, query_attribute_bool,
     query_attribute_float, query_attribute_floats, query_attribute_graph, query_attribute_int,
     query_attribute_ints, query_attribute_string, query_attribute_tensor,
 };
@@ -56,6 +56,9 @@ pub trait Operation {
         Ok(milli_graph.eval(inputs, backend)?)
     }
     fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId>;
+    fn get_sub_graphs(&self) -> Vec<&SymbolicGraphInner> {
+        vec![]
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, strum_macros::Display, Serialize, Deserialize)]
@@ -3673,8 +3676,8 @@ impl Operation for MinOperation {
 pub struct IfOperation {
     outputs: Vec<TensorId>,
     condition: TensorId,
-    then_branch: InnerGraph,
-    else_branch: InnerGraph,
+    then_branch: SymbolicGraphInner,
+    else_branch: SymbolicGraphInner,
 }
 
 impl IfOperation {
@@ -3695,7 +3698,7 @@ impl IfOperation {
         let then_branch_graph = query_attribute_graph(attributes, "then_branch")
             .ok_or(ONNXDecodingError::MissingField("then_branch"))?;
         let then_branch_graph = {
-            let mut inner_graph = InnerGraph::new();
+            let mut inner_graph = SymbolicGraphInner::new();
             inner_graph.populate(
                 symbolic_graph_mutator,
                 then_branch_graph,
@@ -3706,7 +3709,7 @@ impl IfOperation {
         let else_branch_graph = query_attribute_graph(attributes, "else_branch")
             .ok_or(ONNXDecodingError::MissingField("else_branch"))?;
         let else_branch_graph = {
-            let mut inner_graph = InnerGraph::new();
+            let mut inner_graph = SymbolicGraphInner::new();
             inner_graph.populate(
                 symbolic_graph_mutator,
                 else_branch_graph,
@@ -3784,7 +3787,7 @@ pub struct ScanOperation {
     scan_input_directions: Option<Vec<i64>>,
     scan_output_axes: Option<Vec<i64>>,
     scan_output_directions: Option<Vec<i64>>,
-    body: InnerGraph,
+    body: SymbolicGraphInner,
 }
 
 impl ScanOperation {
@@ -3798,7 +3801,7 @@ impl ScanOperation {
         let body = query_attribute_graph(attributes, "body")
             .ok_or(ONNXDecodingError::MissingField("body"))?;
         let body = {
-            let mut inner_graph = InnerGraph::new();
+            let mut inner_graph = SymbolicGraphInner::new();
             inner_graph.populate(symbolic_graph_mutator, body, core_opset_version)?;
             inner_graph
         };

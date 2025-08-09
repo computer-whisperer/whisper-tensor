@@ -529,7 +529,11 @@ impl TextInferenceTokensInLogitOutInterface {
             }
         };
 
-        let super_graph_inputs = vec![model_input_link.to_any(), token_context_input_link.to_any()];
+        let super_graph_inputs = vec![
+            cache_key.to_any(),
+            model_input_link.to_any(),
+            token_context_input_link.to_any(),
+        ];
         let super_graph_outputs = vec![processed_logit_output_link.to_any()];
         let super_graph = super_graph_builder.build(
             super_graph_inputs.as_slice(),

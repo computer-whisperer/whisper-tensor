@@ -58,4 +58,21 @@ impl TrigOp {
             TrigOp::Tanh => x.tanh(),
         }
     }
+
+    fn get_name(&self) -> &'static str {
+        match self {
+            TrigOp::Asin => "Asin",
+            TrigOp::Asinh => "Asinh",
+            TrigOp::Acos => "Acos",
+            TrigOp::Acosh => "Acosh",
+            TrigOp::Atan => "Atan",
+            TrigOp::Atanh => "Atanh",
+            TrigOp::Sin => "Sin",
+            TrigOp::Sinh => "Sinh",
+            TrigOp::Cos => "Cos",
+            TrigOp::Cosh => "Cosh",
+            TrigOp::Tan => "Tan",
+            TrigOp::Tanh => "Tanh",
+        }
+    }
 }

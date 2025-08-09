@@ -147,6 +147,8 @@ impl SuperGraphInner {
 
     pub fn get_all_links(&self) -> HashSet<SuperGraphAnyLink> {
         let mut links = HashSet::new();
+        links.extend(self.input_links.iter().cloned());
+        links.extend(self.output_links.iter().cloned());
         for node in self.nodes.values() {
             links.extend(node.get_inputs());
             links.extend(node.get_outputs());
@@ -194,11 +196,7 @@ impl SuperGraphBuilder {
         output_links: &[SuperGraphAnyLink],
     ) -> SuperGraph {
         SuperGraph {
-            inner: SuperGraphInner {
-                nodes: self.nodes,
-                input_links: HashSet::from_iter(input_links.iter().cloned()),
-                output_links: HashSet::from_iter(output_links.iter().cloned()),
-            },
+            inner: Self::build_inner(self, input_links, output_links),
         }
     }
 
@@ -207,6 +205,27 @@ impl SuperGraphBuilder {
         input_links: &[SuperGraphAnyLink],
         output_links: &[SuperGraphAnyLink],
     ) -> SuperGraphInner {
+        // Validate that all input and output links are present in the graph
+        let mut sourced_links = HashSet::new();
+        let mut sinked_links = HashSet::new();
+        sinked_links.extend(output_links.iter().cloned());
+        sourced_links.extend(input_links.iter().cloned());
+
+        for node in self.nodes.values() {
+            for link in node.get_outputs() {
+                if !sourced_links.insert(link.clone()) {
+                    panic!("Link {link:?} is sourced multiple times");
+                }
+            }
+            sinked_links.extend(node.get_inputs().iter().cloned());
+        }
+
+        for link in sinked_links {
+            if !sourced_links.contains(&link) {
+                panic!("Link {link:?} is not sourced");
+            }
+        }
+
         SuperGraphInner {
             nodes: self.nodes,
             input_links: HashSet::from_iter(input_links.iter().cloned()),

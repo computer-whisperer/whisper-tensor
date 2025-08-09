@@ -218,15 +218,15 @@ pub struct GraphOperation {
     pub op: AnyOperation,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct InnerGraph {
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct SymbolicGraphInner {
     tensors: HashMap<TensorId, ONNXTensorInfo>,
     ordered_outputs: Vec<TensorId>,
     ordered_inputs: Vec<TensorId>,
     operations: HashMap<OperationId, GraphOperation>,
 }
 
-impl InnerGraph {
+impl SymbolicGraphInner {
     pub fn new() -> Self {
         Self {
             tensors: HashMap::new(),
@@ -447,14 +447,14 @@ impl InnerGraph {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SymbolicGraph {
     unknown_dimensions: HashMap<String, SymbolicScalar>,
-    inner_graph: InnerGraph,
+    pub inner_graph: SymbolicGraphInner,
 }
 
 impl SymbolicGraph {
     pub fn new() -> Self {
         Self {
             unknown_dimensions: HashMap::new(),
-            inner_graph: InnerGraph::new(),
+            inner_graph: SymbolicGraphInner::new(),
         }
     }
 
@@ -675,7 +675,7 @@ impl SymbolicGraphMutator {
 
     pub(crate) fn new_unknown_tensor(
         &mut self,
-        inner_graph: &mut InnerGraph,
+        inner_graph: &mut SymbolicGraphInner,
         name: &str,
         tensor_type: TensorType,
     ) -> TensorId {
@@ -694,7 +694,7 @@ impl SymbolicGraphMutator {
 
     pub(crate) fn new_tensor_from_tensor_info(
         &mut self,
-        inner_graph: &mut InnerGraph,
+        inner_graph: &mut SymbolicGraphInner,
         tensor_info: &onnx::ValueInfoProto,
         tensor_type: TensorType,
     ) -> Result<TensorId, ONNXDecodingError> {
@@ -773,7 +773,7 @@ impl SymbolicGraphMutator {
 
     pub(crate) fn new_constant_tensor(
         &mut self,
-        inner_graph: &mut InnerGraph,
+        inner_graph: &mut SymbolicGraphInner,
         value: NDArrayNumericTensor<DynRank>,
         name: Option<String>,
     ) -> TensorId {
@@ -803,7 +803,7 @@ impl SymbolicGraphMutator {
 
     pub(crate) fn new_stored_tensor(
         &mut self,
-        inner_graph: &mut InnerGraph,
+        inner_graph: &mut SymbolicGraphInner,
         id: TensorStoreTensorId,
         name: Option<String>,
     ) -> TensorId {
@@ -835,7 +835,7 @@ impl SymbolicGraphMutator {
 
     pub(crate) fn new_node_from_onnx_node(
         &mut self,
-        inner_graph: &mut InnerGraph,
+        inner_graph: &mut SymbolicGraphInner,
         core_opset_version: usize,
         onnx_node: &onnx::NodeProto,
     ) -> Result<(), ONNXDecodingError> {

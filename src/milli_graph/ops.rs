@@ -53,6 +53,8 @@ pub trait MilliOp {
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
         _backend: &mut EvalBackend,
     ) -> Result<NumericTensor<DynRank>, MilliOpGraphError>;
+
+    fn get_name(&self) -> String;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,6 +96,10 @@ impl MilliOp for MilliOpConstant {
         _backend: &mut EvalBackend,
     ) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
         Ok(self.data.clone().into())
+    }
+
+    fn get_name(&self) -> String {
+        "Constant".to_string()
     }
 }
 
@@ -169,6 +175,10 @@ impl MilliOp for MilliOpRange {
         )?
         .to_dyn_rank())
     }
+
+    fn get_name(&self) -> String {
+        "Range".to_string()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -205,6 +215,10 @@ impl MilliOp for MilliOpExpand {
             .map(|(a, b)| std::cmp::max(*a, *b))
             .collect::<Vec<u64>>();
         Ok(x.expand(&shape_u)?)
+    }
+
+    fn get_name(&self) -> String {
+        "Expand".to_string()
     }
 }
 
@@ -272,6 +286,10 @@ impl MilliOp for MilliOpConstantOfShape {
         let shape: Vec<i64> = inputs[&self.shape].try_to_rank::<P1>()?.try_into()?;
         let shape_usize = shape.iter().map(|x| *x as u64).collect::<Vec<_>>();
         Ok(NDArrayNumericTensor::<DynRank>::fill(self.value.clone(), &shape_usize)?.into())
+    }
+
+    fn get_name(&self) -> String {
+        "Constant of Shape".to_string()
     }
 }
 
@@ -650,6 +668,30 @@ impl MilliOp for MilliOpSimpleBinary {
             SimpleBinaryOp::Min => NumericTensor::<DynRank>::min(a, b, backend)?,
         })
     }
+
+    fn get_name(&self) -> String {
+        match self.which_op {
+            SimpleBinaryOp::Add => "Add",
+            SimpleBinaryOp::Sub => "Sub",
+            SimpleBinaryOp::Mul => "Mul",
+            SimpleBinaryOp::Div => "Div",
+            SimpleBinaryOp::Modulo(_) => "Modulo",
+            SimpleBinaryOp::And => "And",
+            SimpleBinaryOp::Or => "Or",
+            SimpleBinaryOp::Xor => "Xor",
+            SimpleBinaryOp::BitwiseAnd => "Bitwise And",
+            SimpleBinaryOp::BitwiseOr => "Bitwise Or",
+            SimpleBinaryOp::BitwiseXor => "Bitwise Xor",
+            SimpleBinaryOp::Equal => "Equal",
+            SimpleBinaryOp::Greater => "Greater",
+            SimpleBinaryOp::GreaterOrEqual => "Greater or Equal",
+            SimpleBinaryOp::Less => "Less",
+            SimpleBinaryOp::LessOrEqual => "Less or Equal",
+            SimpleBinaryOp::Max => "Max",
+            SimpleBinaryOp::Min => "Min",
+        }
+        .to_string()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -717,6 +759,10 @@ impl MilliOp for MilliOpPow {
             &inputs[&self.b],
             backend,
         )?)
+    }
+
+    fn get_name(&self) -> String {
+        "Pow".to_string()
     }
 }
 
@@ -863,6 +909,10 @@ impl MilliOp for MilliOpMatMul {
             backend,
         )?)
     }
+
+    fn get_name(&self) -> String {
+        "MatMul".to_string()
+    }
 }
 
 trait SimpleUnaryMilliOp {
@@ -876,6 +926,8 @@ trait SimpleUnaryMilliOp {
 
     #[allow(dead_code)]
     fn eval_scalar(&self, input: &NumericScalar) -> Result<NumericScalar, MilliOpGraphError>;
+
+    fn get_name(&self) -> String;
 }
 
 impl<T: SimpleUnaryMilliOp> MilliOp for T {
@@ -927,6 +979,10 @@ impl<T: SimpleUnaryMilliOp> MilliOp for T {
         backend: &mut EvalBackend,
     ) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
         <T as SimpleUnaryMilliOp>::eval(self, inputs, backend)
+    }
+
+    fn get_name(&self) -> String {
+        <T as SimpleUnaryMilliOp>::get_name(self)
     }
 }
 
@@ -1096,6 +1152,28 @@ impl SimpleUnaryMilliOp for MilliOpSimpleUnary {
             SimpleUnaryOp::Erf => Ok(input.erf()),
         }
     }
+
+    fn get_name(&self) -> String {
+        match self.op {
+            SimpleUnaryOp::Neg => "Neg",
+            SimpleUnaryOp::Abs => "Abs",
+            SimpleUnaryOp::Exp => "Exp",
+            SimpleUnaryOp::Ln => "Ln",
+            SimpleUnaryOp::Sqrt => "Sqrt",
+            SimpleUnaryOp::Not => "Not",
+            SimpleUnaryOp::Sign => "Sign",
+            SimpleUnaryOp::BitwiseNot => "Bitwise Not",
+            SimpleUnaryOp::Reciprocal => "Reciprocal",
+            SimpleUnaryOp::Trig(trig_op) => trig_op.get_name(),
+            SimpleUnaryOp::Floor => "Floor",
+            SimpleUnaryOp::Ceil => "Ceil",
+            SimpleUnaryOp::Round => "Round",
+            SimpleUnaryOp::IsNan => "IsNan",
+            SimpleUnaryOp::IsInf { .. } => "IsInf",
+            SimpleUnaryOp::Erf => "Erf",
+        }
+        .to_string()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1125,6 +1203,10 @@ impl SimpleUnaryMilliOp for MilliOpClampMin {
 
     fn eval_scalar(&self, input: &NumericScalar) -> Result<NumericScalar, MilliOpGraphError> {
         Ok(input.clamp_min(self.value))
+    }
+
+    fn get_name(&self) -> String {
+        "Clamp Min".to_string()
     }
 }
 
@@ -1170,6 +1252,10 @@ impl MilliOp for MilliOpNonZero {
     ) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
         Ok(inputs[&self.input].nonzero(backend)?)
     }
+
+    fn get_name(&self) -> String {
+        "NonZero".to_string()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1210,6 +1296,10 @@ impl MilliOp for MilliOpCumSum {
             "CumSum".to_string(),
         ))?;
         todo!()
+    }
+
+    fn get_name(&self) -> String {
+        "CumSum".to_string()
     }
 }
 
@@ -1252,6 +1342,10 @@ impl MilliOp for MilliOpShape {
         Ok(NDArrayNumericTensor::<P1>::from(output_shape)
             .to_dyn()
             .into())
+    }
+
+    fn get_name(&self) -> String {
+        "Shape".to_string()
     }
 }
 
@@ -1317,6 +1411,10 @@ impl MilliOp for MilliOpReduceSum {
         let out = data.reduce_sum(axes, self.keepdims, backend)?;
         Ok(out)
     }
+
+    fn get_name(&self) -> String {
+        "ReduceSum".to_string()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1380,6 +1478,10 @@ impl MilliOp for MilliOpReduceMin {
             .collect::<Vec<_>>();
         let out = data.reduce_min(axes, self.keepdims, backend)?;
         Ok(out)
+    }
+
+    fn get_name(&self) -> String {
+        "ReduceMin".to_string()
     }
 }
 
@@ -1445,6 +1547,10 @@ impl MilliOp for MilliOpReduceMax {
         let out = data.reduce_max(axes, self.keepdims, backend)?;
         Ok(out)
     }
+
+    fn get_name(&self) -> String {
+        "ReduceMax".to_string()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1509,6 +1615,10 @@ impl MilliOp for MilliOpReduceProd {
         let out = data.reduce_prod(axes, self.keepdims, backend)?;
         Ok(out)
     }
+
+    fn get_name(&self) -> String {
+        "ReduceProd".to_string()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1566,6 +1676,10 @@ impl MilliOp for MilliOpReduceMean {
             .collect::<Vec<_>>();
         let out = data.reduce_mean(axes, self.keepdims, backend)?;
         Ok(out)
+    }
+
+    fn get_name(&self) -> String {
+        "ReduceMean".to_string()
     }
 }
 
@@ -1676,6 +1790,10 @@ impl MilliOp for MilliOpSlice {
         }
         let output = data_input.slice(&output_slice, backend)?;
         Ok(output)
+    }
+
+    fn get_name(&self) -> String {
+        "Slice".to_string()
     }
 }
 
@@ -1863,6 +1981,10 @@ impl MilliOp for MilliOpReshape {
 
         Ok(output_value)
     }
+
+    fn get_name(&self) -> String {
+        "Reshape".to_string()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1999,6 +2121,10 @@ impl MilliOp for MilliOpSqueeze {
             let output = inputs[&self.data].reshape(output_shape, backend)?;
             Ok(output)
         }
+    }
+
+    fn get_name(&self) -> String {
+        "Squeeze".to_string()
     }
 }
 
@@ -2144,6 +2270,10 @@ impl MilliOp for MilliOpUnsqueeze {
             Ok(output)
         }
     }
+
+    fn get_name(&self) -> String {
+        "Unsqueeze".to_string()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2169,6 +2299,10 @@ impl MilliOp for MilliOpCast {
         backend: &mut EvalBackend,
     ) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
         Ok(inputs[&self.data].cast(self.dtype, backend)?)
+    }
+
+    fn get_name(&self) -> String {
+        "Cast".to_string()
     }
 }
 
@@ -2196,6 +2330,10 @@ impl MilliOp for MilliOpCastLike {
     ) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
         Ok(inputs[&self.data].cast(inputs[&self.target_type].dtype(), backend)?)
     }
+
+    fn get_name(&self) -> String {
+        "CastLike".to_string()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2221,6 +2359,10 @@ impl MilliOp for MilliOpTranspose {
         backend: &mut EvalBackend,
     ) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
         Ok(inputs[&self.data].transpose(self.perm.clone(), backend)?)
+    }
+
+    fn get_name(&self) -> String {
+        "Transpose".to_string()
     }
 }
 
@@ -2257,6 +2399,10 @@ impl MilliOp for MilliOpGather {
             self.axis,
             backend,
         )?)
+    }
+
+    fn get_name(&self) -> String {
+        "Gather".to_string()
     }
 }
 
@@ -2296,6 +2442,10 @@ impl MilliOp for MilliOpConcat {
             axis,
             backend,
         )?)
+    }
+
+    fn get_name(&self) -> String {
+        "Concat".to_string()
     }
 }
 
@@ -2342,6 +2492,10 @@ impl MilliOp for MilliOpArgMax {
         let max = input.argmax(axis, self.keepdims, self.select_last_index, backend)?;
         Ok(max)
     }
+
+    fn get_name(&self) -> String {
+        "ArgMax".to_string()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2386,6 +2540,10 @@ impl MilliOp for MilliOpArgMin {
         } as usize;
         let max = input.argmin(axis, self.keepdims, self.select_last_index, backend)?;
         Ok(max)
+    }
+
+    fn get_name(&self) -> String {
+        "ArgMin".to_string()
     }
 }
 
@@ -2443,6 +2601,10 @@ impl MilliOp for MilliOpSplit {
         let outs = inputs[&self.data].split(&split, self.axis, backend)?;
         Ok(outs[self.output_id].clone())
     }
+
+    fn get_name(&self) -> String {
+        "Split".to_string()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2473,6 +2635,10 @@ impl MilliOp for MilliOpWhere {
         backend: &mut EvalBackend,
     ) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
         Ok(inputs[&self.condition].where_op(&inputs[&self.x], &inputs[&self.y], backend)?)
+    }
+
+    fn get_name(&self) -> String {
+        "Where".to_string()
     }
 }
 
@@ -2622,6 +2788,41 @@ impl MilliOp for AnyMilliOp {
             AnyMilliOp::Expand(x) => x.eval(inputs, backend),
             AnyMilliOp::ArgMax(x) => x.eval(inputs, backend),
             AnyMilliOp::ArgMin(x) => x.eval(inputs, backend),
+        }
+    }
+
+    fn get_name(&self) -> String {
+        match self {
+            AnyMilliOp::Constant(x) => x.get_name(),
+            AnyMilliOp::ConstantOfShape(x) => x.get_name(),
+            AnyMilliOp::SimpleBinary(x) => x.get_name(),
+            AnyMilliOp::MatMul(x) => x.get_name(),
+            AnyMilliOp::Pow(x) => x.get_name(),
+            AnyMilliOp::SimpleUnary(x) => <_ as MilliOp>::get_name(x),
+            AnyMilliOp::ClampMin(x) => <_ as MilliOp>::get_name(x),
+            AnyMilliOp::NonZero(x) => <_ as MilliOp>::get_name(x),
+            AnyMilliOp::CumSum(x) => x.get_name(),
+            AnyMilliOp::Shape(x) => x.get_name(),
+            AnyMilliOp::Reshape(x) => x.get_name(),
+            AnyMilliOp::Slice(x) => x.get_name(),
+            AnyMilliOp::ReduceSum(x) => x.get_name(),
+            AnyMilliOp::ReduceMin(x) => x.get_name(),
+            AnyMilliOp::ReduceMax(x) => x.get_name(),
+            AnyMilliOp::ReduceProd(x) => x.get_name(),
+            AnyMilliOp::ReduceMean(x) => x.get_name(),
+            AnyMilliOp::Cast(x) => x.get_name(),
+            AnyMilliOp::CastLike(x) => x.get_name(),
+            AnyMilliOp::Transpose(x) => x.get_name(),
+            AnyMilliOp::Squeeze(x) => x.get_name(),
+            AnyMilliOp::Unsqueeze(x) => x.get_name(),
+            AnyMilliOp::Gather(x) => x.get_name(),
+            AnyMilliOp::Concat(x) => x.get_name(),
+            AnyMilliOp::Split(x) => x.get_name(),
+            AnyMilliOp::Where(x) => x.get_name(),
+            AnyMilliOp::Range(x) => x.get_name(),
+            AnyMilliOp::Expand(x) => x.get_name(),
+            AnyMilliOp::ArgMax(x) => x.get_name(),
+            AnyMilliOp::ArgMin(x) => x.get_name(),
         }
     }
 }

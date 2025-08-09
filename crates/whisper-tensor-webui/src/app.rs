@@ -1,5 +1,5 @@
 use crate::graph_explorer::{
-    GraphExplorerApp, GraphExplorerState, InspectWindow, OpOrTensorId, RootGraphSubjectIdentifier,
+    GraphExplorerApp, GraphExplorerLayerSelection, GraphExplorerState, InspectWindow, OpOrTensorId,
 };
 use crate::graph_layout::{
     GraphLayout, GraphLayoutIOOffsets, GraphLayoutLinkData, GraphLayoutLinkId, GraphLayoutLinkType,
@@ -261,10 +261,10 @@ impl eframe::App for WebUIApp {
                             stored_tensor_id,
                             res,
                         ) => {
-                            if let Some(RootGraphSubjectIdentifier::Model(selected_model_id)) =
-                                self.graph_explorer_app.selected_root_subject
+                            if let Some(GraphExplorerLayerSelection::Model(selected_model_id)) =
+                                self.graph_explorer_app.graph_subject_path.first()
                             {
-                                if selected_model_id == model_id {
+                                if *selected_model_id == model_id {
                                     for window in &mut self.graph_explorer_app.inspect_windows {
                                         if let InspectWindow::Tensor(inspect_window_tensor) = window
                                         {
