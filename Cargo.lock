@@ -2335,18 +2335,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4ce301924b7887e9d637144fdade93f9dfff9b60981d4ac161db09720d39aa5"
 
 [[package]]
-name = "llm-samplers"
-version = "0.0.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7e85df656cd89e7702cb56171d75aa77c7bec828af7d2054d9987c34411cf896"
-dependencies = [
- "anyhow",
- "num-traits",
- "rand 0.8.5",
- "thiserror 1.0.69",
-]
-
-[[package]]
 name = "lock_api"
 version = "0.4.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5299,13 +5287,10 @@ name = "whisper-tensor"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "bytemuck",
  "candle-core",
  "candle-onnx",
  "env_logger",
- "futures",
  "half",
- "llm-samplers",
  "log",
  "ndarray",
  "num-traits",
@@ -5313,7 +5298,6 @@ dependencies = [
  "paste",
  "prost 0.13.5",
  "prost-build 0.13.5",
- "prost-types 0.13.5",
  "pyo3",
  "rand 0.8.5",
  "rspirv",
@@ -5330,8 +5314,6 @@ dependencies = [
  "vulkano",
  "vulkano-shaders",
  "whisper-tensor-import",
- "zerocopy",
- "zerocopy-derive",
 ]
 
 [[package]]

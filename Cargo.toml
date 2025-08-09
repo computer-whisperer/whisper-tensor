@@ -4,12 +4,11 @@ license = "MIT OR Apache-2.0"
 version = "0.1.0"
 edition = "2024"
 resolver = "2"
+readme = "README.md"
 
 [dependencies]
 whisper-tensor-import = {workspace=true}
 prost = "0.13.5"
-prost-types = "0.13.3"
-futures = "0.3.31"
 vulkano = { version = "0.35.1", optional=true, default-features = false, features = ["serde"] }
 vulkano-shaders = {version = "0.35.0", optional=true}
 candle-core = {optional=true, workspace=true, default-features=false}
@@ -25,9 +24,6 @@ tempfile = "3.19.1"
 
 pyo3 = {optional=true, version = "0.24.0", features = ["auto-initialize"]}
 tokenizers = {optional=true, version="0.21.1", default-features = false, features = ["unstable_wasm"]}
-llm-samplers = { optional=true, version="0.0.7" }
-zerocopy = "0.8.25"
-zerocopy-derive = "0.8.25"
 rspirv = "0.12.0"
 
 ndarray = { version = "0.16.1", features = ["serde", "rayon", "matrixmultiply-threading"] }
@@ -39,17 +35,15 @@ rand = { version = "0.8.5", optional = true }
 typenum = { version="1.18.0", features=["const-generics"] }
 strum = "0.27"
 strum_macros = "0.27"
-bytemuck = "1.23.0"
 paste = "1.0.15"
 
 [features]
-default = ["ort", "candle", "onnx-reference", "tokenizers", "llm-samplers", "rwkv-tokenizer", "dep:rand", "http", "vulkan"]
+default = ["tokenizers", "rwkv-tokenizer", "dep:rand", "http"]
 onnx-reference = ["pyo3"]
 ort = ["dep:ort"]
 candle = ["candle-onnx", "candle-core"]
 tokenizers = ["dep:tokenizers"]
 http = ["tokenizers?/http"]
-llm-samplers = ["dep:llm-samplers"]
 rwkv-tokenizer = ["dep:rwkv-tokenizer"]
 vulkan = ["dep:vulkano", "dep:vulkano-shaders"]
 
