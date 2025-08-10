@@ -43,15 +43,15 @@ pub struct ModelReference {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SuperGraphNodeModelExecution {
     model: SuperGraphLinkModel,
-    tensor_inputs: HashMap<SuperGraphLinkTensor, String>,
-    tensor_outputs: HashMap<String, SuperGraphLinkTensor>,
+    tensor_inputs: Vec<(SuperGraphLinkTensor, String)>,
+    tensor_outputs: Vec<(String, SuperGraphLinkTensor)>,
 }
 
 impl SuperGraphNodeModelExecution {
     pub fn new(
         model: SuperGraphLinkModel,
-        tensor_inputs: HashMap<SuperGraphLinkTensor, String>,
-        tensor_outputs: HashMap<String, SuperGraphLinkTensor>,
+        tensor_inputs: Vec<(SuperGraphLinkTensor, String)>,
+        tensor_outputs: Vec<(String, SuperGraphLinkTensor)>,
     ) -> Self {
         Self {
             model,
@@ -63,12 +63,12 @@ impl SuperGraphNodeModelExecution {
 
 impl SuperGraphNode for SuperGraphNodeModelExecution {
     fn get_inputs(&self) -> Vec<SuperGraphAnyLink> {
-        let mut ret: Vec<_> = self.tensor_inputs.keys().map(|x| x.to_any()).collect();
+        let mut ret: Vec<_> = self.tensor_inputs.iter().map(|x| x.0.to_any()).collect();
         ret.push(self.model.to_any());
         ret
     }
     fn get_outputs(&self) -> Vec<SuperGraphAnyLink> {
-        self.tensor_outputs.values().map(|x| x.to_any()).collect()
+        self.tensor_outputs.iter().map(|x| x.1.to_any()).collect()
     }
     fn to_any(self) -> SuperGraphAnyNode {
         SuperGraphAnyNode::ModelExecution(self)
@@ -91,7 +91,7 @@ impl SuperGraphNode for SuperGraphNodeModelExecution {
         let outputs = model.eval(inputs, backend)?;
         for (name, link) in &self.tensor_outputs {
             data.tensors
-                .insert(link.clone(), outputs.get(name).unwrap().clone());
+                .insert(*link, outputs.get(name).unwrap().clone());
         }
         Ok(())
     }
@@ -122,7 +122,7 @@ impl SuperGraphNodeTokenizerLoad {
     }
 
     pub fn get_tokenizer_output(&self) -> SuperGraphLinkTokenizer {
-        self.output.clone()
+        self.output
     }
 }
 
@@ -166,7 +166,7 @@ impl SuperGraphNode for SuperGraphNodeTokenizerLoad {
                 }
             }
         };
-        data.tokenizers.insert(self.output.clone(), tokenizer);
+        data.tokenizers.insert(self.output, tokenizer);
         Ok(())
     }
 }
@@ -203,7 +203,7 @@ impl SuperGraphNodeTokenizerEncode {
     }
 
     pub fn get_tensor_output(&self) -> SuperGraphLinkTensor {
-        self.tensor_output.clone()
+        self.tensor_output
     }
 }
 
@@ -238,8 +238,7 @@ impl SuperGraphNode for SuperGraphNodeTokenizerEncode {
             .unwrap()
             .unsqueeze(0)
             .unwrap();
-        data.tensors
-            .insert(self.tensor_output.clone(), input_tensor);
+        data.tensors.insert(self.tensor_output, input_tensor);
         Ok(())
     }
 }
@@ -264,7 +263,7 @@ impl SuperGraphNodeTokenizerDecode {
         }
     }
     pub fn get_string_output(&self) -> SuperGraphLinkString {
-        self.text_output.clone()
+        self.text_output
     }
     pub fn new_and_add(
         builder: &mut SuperGraphBuilder,
@@ -299,7 +298,7 @@ impl SuperGraphNode for SuperGraphNodeTokenizerDecode {
         let tensor = tensor.try_to_type::<u32>()?.try_to_rank::<P1>()?;
         let output_values: Vec<u32> = tensor.to_vec();
         let text = tokenizer.decode(&output_values)?;
-        data.strings.insert(self.text_output.clone(), text);
+        data.strings.insert(self.text_output, text);
         Ok(())
     }
 }
@@ -338,7 +337,7 @@ impl SuperGraphNode for SuperGraphNodeMilliOpGraph {
         let inputs = {
             let mut inputs = HashMap::new();
             for input in &self.graph.get_inputs() {
-                inputs.insert(input.clone(), data.tensors.get(input).unwrap().clone());
+                inputs.insert(*input, data.tensors.get(input).unwrap().clone());
             }
             inputs
         };
@@ -430,7 +429,7 @@ impl SuperGraphNode for SuperGraphNodeScan {
                 match link {
                     SuperGraphLinkDouble::Tensor(input, output) => {
                         simple_inputs.tensors.insert(
-                            output.clone(),
+                            *output,
                             data.tensors
                                 .get(input)
                                 .ok_or(SuperGraphError::MissingLinkError())?
@@ -439,7 +438,7 @@ impl SuperGraphNode for SuperGraphNodeScan {
                     }
                     SuperGraphLinkDouble::String(input, output) => {
                         simple_inputs.strings.insert(
-                            output.clone(),
+                            *output,
                             data.strings
                                 .get(input)
                                 .ok_or(SuperGraphError::MissingLinkError())?
@@ -448,7 +447,7 @@ impl SuperGraphNode for SuperGraphNodeScan {
                     }
                     SuperGraphLinkDouble::Model(input, output) => {
                         simple_inputs.models.insert(
-                            output.clone(),
+                            *output,
                             *data
                                 .models
                                 .get(input)
@@ -457,7 +456,7 @@ impl SuperGraphNode for SuperGraphNodeScan {
                     }
                     SuperGraphLinkDouble::Tokenizer(input, output) => {
                         simple_inputs.tokenizers.insert(
-                            output.clone(),
+                            *output,
                             data.tokenizers
                                 .get(input)
                                 .ok_or(SuperGraphError::MissingLinkError())?
@@ -466,7 +465,7 @@ impl SuperGraphNode for SuperGraphNodeScan {
                     }
                     SuperGraphLinkDouble::Hash(input, output) => {
                         simple_inputs.hashes.insert(
-                            output.clone(),
+                            *output,
                             *data
                                 .hashes
                                 .get(input)
@@ -484,7 +483,7 @@ impl SuperGraphNode for SuperGraphNodeScan {
                 match link {
                     SuperGraphLinkTriple::Tensor(initial, inner_input, _inner_output) => {
                         state_values.tensors.insert(
-                            inner_input.clone(),
+                            *inner_input,
                             data.tensors
                                 .get(initial)
                                 .ok_or(SuperGraphError::MissingLinkError())?
@@ -493,7 +492,7 @@ impl SuperGraphNode for SuperGraphNodeScan {
                     }
                     SuperGraphLinkTriple::String(initial, inner_input, _inner_output) => {
                         state_values.strings.insert(
-                            inner_input.clone(),
+                            *inner_input,
                             data.strings
                                 .get(initial)
                                 .ok_or(SuperGraphError::MissingLinkError())?
@@ -502,7 +501,7 @@ impl SuperGraphNode for SuperGraphNodeScan {
                     }
                     SuperGraphLinkTriple::Model(initial, inner_input, _inner_output) => {
                         state_values.models.insert(
-                            inner_input.clone(),
+                            *inner_input,
                             *data
                                 .models
                                 .get(initial)
@@ -511,7 +510,7 @@ impl SuperGraphNode for SuperGraphNodeScan {
                     }
                     SuperGraphLinkTriple::Tokenizer(initial, inner_input, _inner_output) => {
                         state_values.tokenizers.insert(
-                            inner_input.clone(),
+                            *inner_input,
                             data.tokenizers
                                 .get(initial)
                                 .ok_or(SuperGraphError::MissingLinkError())?
@@ -520,7 +519,7 @@ impl SuperGraphNode for SuperGraphNodeScan {
                     }
                     SuperGraphLinkTriple::Hash(initial, inner_input, _inner_output) => {
                         state_values.hashes.insert(
-                            inner_input.clone(),
+                            *inner_input,
                             *data
                                 .hashes
                                 .get(initial)
@@ -536,7 +535,7 @@ impl SuperGraphNode for SuperGraphNodeScan {
 
         let mut output_scan_tensor_parts = HashMap::new();
         for (_inner, outer, scan_axis) in &self.scan_outputs {
-            output_scan_tensor_parts.insert(outer.clone(), (Vec::new(), *scan_axis as usize));
+            output_scan_tensor_parts.insert(*outer, (Vec::new(), *scan_axis as usize));
         }
 
         for i in 0..iteration_count as u64 {
@@ -561,7 +560,7 @@ impl SuperGraphNode for SuperGraphNodeScan {
                     };
                     let sliced = tensor.slice(slice_arg.as_slice(), backend)?;
                     let squeezed = sliced.squeeze(*scan_axis as usize)?;
-                    iter_inputs.tensors.insert(inner.clone(), squeezed);
+                    iter_inputs.tensors.insert(*inner, squeezed);
                 }
                 iter_inputs
             };
@@ -586,7 +585,7 @@ impl SuperGraphNode for SuperGraphNodeScan {
                     match link {
                         SuperGraphLinkTriple::Tensor(_initial, inner_input, inner_output) => {
                             state_values.tensors.insert(
-                                inner_input.clone(),
+                                *inner_input,
                                 iter_outputs
                                     .tensors
                                     .get(inner_output)
@@ -596,7 +595,7 @@ impl SuperGraphNode for SuperGraphNodeScan {
                         }
                         SuperGraphLinkTriple::String(_initial, inner_input, inner_output) => {
                             state_values.strings.insert(
-                                inner_input.clone(),
+                                *inner_input,
                                 iter_outputs
                                     .strings
                                     .get(inner_output)
@@ -606,7 +605,7 @@ impl SuperGraphNode for SuperGraphNodeScan {
                         }
                         SuperGraphLinkTriple::Tokenizer(_initial, inner_input, inner_output) => {
                             state_values.tokenizers.insert(
-                                inner_input.clone(),
+                                *inner_input,
                                 iter_outputs
                                     .tokenizers
                                     .get(inner_output)
@@ -616,7 +615,7 @@ impl SuperGraphNode for SuperGraphNodeScan {
                         }
                         SuperGraphLinkTriple::Model(_initial, inner_input, inner_output) => {
                             state_values.models.insert(
-                                inner_input.clone(),
+                                *inner_input,
                                 *iter_outputs
                                     .models
                                     .get(inner_output)
@@ -625,7 +624,7 @@ impl SuperGraphNode for SuperGraphNodeScan {
                         }
                         SuperGraphLinkTriple::Hash(_initial, inner_input, inner_output) => {
                             state_values.hashes.insert(
-                                inner_input.clone(),
+                                *inner_input,
                                 *iter_outputs
                                     .hashes
                                     .get(inner_output)
@@ -646,7 +645,7 @@ impl SuperGraphNode for SuperGraphNodeScan {
             match link {
                 SuperGraphLinkDouble::Tensor(input, output) => {
                     output_data.tensors.insert(
-                        output.clone(),
+                        *output,
                         prev_iter_outputs
                             .as_ref()
                             .unwrap()
@@ -658,7 +657,7 @@ impl SuperGraphNode for SuperGraphNodeScan {
                 }
                 SuperGraphLinkDouble::String(input, output) => {
                     output_data.strings.insert(
-                        output.clone(),
+                        *output,
                         prev_iter_outputs
                             .as_ref()
                             .unwrap()
@@ -670,7 +669,7 @@ impl SuperGraphNode for SuperGraphNodeScan {
                 }
                 SuperGraphLinkDouble::Tokenizer(input, output) => {
                     output_data.tokenizers.insert(
-                        output.clone(),
+                        *output,
                         prev_iter_outputs
                             .as_ref()
                             .unwrap()
@@ -682,7 +681,7 @@ impl SuperGraphNode for SuperGraphNodeScan {
                 }
                 SuperGraphLinkDouble::Model(input, output) => {
                     output_data.models.insert(
-                        output.clone(),
+                        *output,
                         *prev_iter_outputs
                             .as_ref()
                             .unwrap()
@@ -693,7 +692,7 @@ impl SuperGraphNode for SuperGraphNodeScan {
                 }
                 SuperGraphLinkDouble::Hash(input, output) => {
                     output_data.hashes.insert(
-                        output.clone(),
+                        *output,
                         *prev_iter_outputs
                             .as_ref()
                             .unwrap()
@@ -727,8 +726,8 @@ pub struct SuperGraphNodeRNNCacheRead {
     key_input: SuperGraphLinkHash,
     tokens_input: SuperGraphLinkTensor,
     tokens_output: SuperGraphLinkTensor,
-    state_outputs: HashMap<String, SuperGraphLinkTensor>,
-    default_state_inputs: HashMap<String, SuperGraphLinkTensor>,
+    state_outputs: Vec<(String, SuperGraphLinkTensor)>,
+    default_state_inputs: Vec<(String, SuperGraphLinkTensor)>,
 }
 
 impl SuperGraphNodeRNNCacheRead {
@@ -736,8 +735,8 @@ impl SuperGraphNodeRNNCacheRead {
         key_input: SuperGraphLinkHash,
         tokens_input: SuperGraphLinkTensor,
         tokens_output: SuperGraphLinkTensor,
-        state_outputs: HashMap<String, SuperGraphLinkTensor>,
-        default_state_inputs: HashMap<String, SuperGraphLinkTensor>,
+        state_outputs: Vec<(String, SuperGraphLinkTensor)>,
+        default_state_inputs: Vec<(String, SuperGraphLinkTensor)>,
     ) -> Self {
         Self {
             key_input,
@@ -753,14 +752,14 @@ impl SuperGraphNode for SuperGraphNodeRNNCacheRead {
     fn get_inputs(&self) -> Vec<SuperGraphAnyLink> {
         vec![self.key_input.to_any(), self.tokens_input.to_any()]
             .into_iter()
-            .chain(self.default_state_inputs.values().map(|x| x.to_any()))
+            .chain(self.default_state_inputs.iter().map(|x| x.1.to_any()))
             .collect()
     }
 
     fn get_outputs(&self) -> Vec<SuperGraphAnyLink> {
         vec![self.tokens_output.to_any()]
             .into_iter()
-            .chain(self.state_outputs.values().map(|x| x.to_any()))
+            .chain(self.state_outputs.iter().map(|x| x.1.to_any()))
             .collect()
     }
 
@@ -799,8 +798,10 @@ impl SuperGraphNode for SuperGraphNodeRNNCacheRead {
                     if let Some(state) = rnn_cache.get(matched_tokens) {
                         found = true;
                         for (key, value) in state.iter() {
-                            if let Some(output_link) = self.state_outputs.get(key) {
-                                data.tensors.insert(output_link.clone(), value.clone());
+                            if let Some((_, output_link)) =
+                                self.state_outputs.iter().find(|(k, _)| k == key)
+                            {
+                                data.tensors.insert(*output_link, value.clone());
                             }
                         }
                         // Emit remaining tokens
@@ -809,7 +810,7 @@ impl SuperGraphNode for SuperGraphNodeRNNCacheRead {
                             NDArrayNumericTensor::from_vec(remaining_tokens.to_vec()).to_dyn(),
                         );
                         data.tensors
-                            .insert(self.tokens_output.clone(), remaining_tokens_tensor.clone());
+                            .insert(self.tokens_output, remaining_tokens_tensor.clone());
                         break;
                     }
                 }
@@ -823,12 +824,12 @@ impl SuperGraphNode for SuperGraphNodeRNNCacheRead {
                     .tensors
                     .get(value)
                     .ok_or(SuperGraphError::MissingLinkError())?;
-                if let Some(output_link) = self.state_outputs.get(key) {
-                    data.tensors.insert(output_link.clone(), value.clone());
+                if let Some((_, output_link)) = self.state_outputs.iter().find(|x| x.0 == *key) {
+                    data.tensors.insert(*output_link, value.clone());
                 }
             }
             data.tensors
-                .insert(self.tokens_output.clone(), tokens_input.clone());
+                .insert(self.tokens_output, tokens_input.clone());
         }
         Ok(())
     }
@@ -838,14 +839,14 @@ impl SuperGraphNode for SuperGraphNodeRNNCacheRead {
 pub struct SuperGraphNodeRNNCacheWrite {
     key_input: SuperGraphLinkHash,
     tokens_input: SuperGraphLinkTensor,
-    state_inputs: HashMap<String, SuperGraphLinkTensor>,
+    state_inputs: Vec<(String, SuperGraphLinkTensor)>,
 }
 
 impl SuperGraphNodeRNNCacheWrite {
     pub fn new(
         key_input: SuperGraphLinkHash,
         tokens_input: SuperGraphLinkTensor,
-        state_inputs: HashMap<String, SuperGraphLinkTensor>,
+        state_inputs: Vec<(String, SuperGraphLinkTensor)>,
     ) -> Self {
         Self {
             key_input,
@@ -859,7 +860,7 @@ impl SuperGraphNode for SuperGraphNodeRNNCacheWrite {
     fn get_inputs(&self) -> Vec<SuperGraphAnyLink> {
         vec![self.key_input.to_any(), self.tokens_input.to_any()]
             .into_iter()
-            .chain(self.state_inputs.values().map(|x| x.to_any()))
+            .chain(self.state_inputs.iter().map(|x| x.1.to_any()))
             .collect()
     }
 

@@ -1,5 +1,6 @@
 use crate::app::InterfaceId;
-use egui::{Rect, UiBuilder, vec2};
+use crate::graph_explorer::GraphExplorerSelectable;
+use egui::{Pos2, Rect, UiBuilder, Vec2, vec2};
 use rand::{random, random_range};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -31,6 +32,48 @@ pub(crate) enum GraphLayoutNodeType {
     ConnectionByNameDest(GraphLayoutLinkData),
 }
 
+impl GraphLayoutNodeType {
+    pub(crate) fn get_graph_selectable(&self) -> GraphExplorerSelectable {
+        match self {
+            GraphLayoutNodeType::SymbolicGraphOperation(op_id) => {
+                GraphExplorerSelectable::SymbolicGraphOperationId(*op_id)
+            }
+            GraphLayoutNodeType::SymbolicGraphTensor(tensor_id) => {
+                GraphExplorerSelectable::SymbolicGraphTensorId(*tensor_id)
+            }
+            GraphLayoutNodeType::SuperGraphNode(node_id) => {
+                GraphExplorerSelectable::SuperGraphNodeId(*node_id)
+            }
+            GraphLayoutNodeType::SuperGraphLink(link) => {
+                GraphExplorerSelectable::SuperGraphLink(link.clone())
+            }
+            GraphLayoutNodeType::MilliOpGraphInput(tensor) => {
+                GraphExplorerSelectable::MilliOpGraphTensor(tensor.clone())
+            }
+            GraphLayoutNodeType::MilliOpGraphOutput(tensor) => {
+                GraphExplorerSelectable::MilliOpGraphTensor(tensor.clone())
+            }
+            GraphLayoutNodeType::MilliOpGraphNode(tensor) => {
+                GraphExplorerSelectable::MilliOpGraphTensor(tensor.clone())
+            }
+            GraphLayoutNodeType::ConnectionByNameSrc(tensor_data)
+            | GraphLayoutNodeType::ConnectionByNameDest(tensor_data) => {
+                match &tensor_data.link_type {
+                    GraphLayoutLinkType::SymbolicGraphTensor(tensor_id) => {
+                        GraphExplorerSelectable::SymbolicGraphTensorId(*tensor_id)
+                    }
+                    GraphLayoutLinkType::SuperGraphLink(link) => {
+                        GraphExplorerSelectable::SuperGraphLink(link.clone())
+                    }
+                    GraphLayoutLinkType::MilliOpGraphTensor(tensor) => {
+                        GraphExplorerSelectable::MilliOpGraphTensor(tensor.clone())
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct GraphLayoutNode {
     pub(crate) node_type: GraphLayoutNodeType,
@@ -54,6 +97,20 @@ pub(crate) enum GraphLayoutLinkType {
     SymbolicGraphTensor(whisper_tensor::symbolic_graph::TensorId),
     SuperGraphLink(SuperGraphAnyLink),
     MilliOpGraphTensor(MilliOpGraphTensorId),
+}
+
+impl GraphLayoutLinkType {
+    pub(crate) fn get_graph_selectable(&self) -> GraphExplorerSelectable {
+        match self {
+            GraphLayoutLinkType::SymbolicGraphTensor(x) => {
+                GraphExplorerSelectable::SymbolicGraphTensorId(*x)
+            }
+            GraphLayoutLinkType::SuperGraphLink(x) => GraphExplorerSelectable::SuperGraphLink(*x),
+            GraphLayoutLinkType::MilliOpGraphTensor(x) => {
+                GraphExplorerSelectable::MilliOpGraphTensor(*x)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -468,22 +525,61 @@ impl GraphLayout {
         &self.link_data
     }
 
-    pub(crate) fn get_nodes_mut(&mut self) -> &mut HashMap<GraphLayoutNodeId, GraphLayoutNode> {
-        &mut self.nodes
-    }
-
     pub(crate) fn get_bounding_rect(&self) -> Rect {
         self.bounding_rect
     }
 
-    fn get_bounding_rect_from_nodes(nodes: &HashMap<GraphLayoutNodeId, GraphLayoutNode>) -> Rect {
-        let mut min_vec = egui::pos2(0.0, 0.0);
-        let mut max_vec = egui::pos2(0.0, 0.0);
-        for (_id, node) in nodes {
-            min_vec = min_vec.min(node.position - node.shape / 2.0);
-            max_vec = max_vec.max(node.position + node.shape / 2.0);
+    pub(crate) fn move_node(
+        &mut self,
+        node_id: GraphLayoutNodeId,
+        new_position: Pos2,
+        new_velocity: Vec2,
+    ) {
+        self.move_node_inner(node_id, new_position, new_velocity);
+        self.bounding_rect = Self::get_bounding_rect_from_nodes(&self.nodes)
+    }
+
+    fn move_node_inner(
+        &mut self,
+        node_id: GraphLayoutNodeId,
+        new_position: Pos2,
+        new_velocity: Vec2,
+    ) {
+        if let Some(node) = self.nodes.get_mut(&node_id) {
+            let old_index = Self::get_index_for(&node.position);
+            let new_index = Self::get_index_for(&new_position);
+            if old_index != new_index {
+                // Update position on map
+                if let Some(x) = self.node_map.get_mut(&old_index) {
+                    // Remove
+                    x.retain_mut(|x| *x != node_id);
+                } else {
+                    // Should not be possible
+                    panic!();
+                }
+                // Add to map
+                self.node_map
+                    .entry(new_index)
+                    .or_insert(Vec::new())
+                    .push(node_id);
+            }
+            node.position = new_position;
+            node.velocity = new_velocity;
         }
-        Rect::from_min_max(min_vec, max_vec)
+    }
+
+    fn get_bounding_rect_from_nodes(nodes: &HashMap<GraphLayoutNodeId, GraphLayoutNode>) -> Rect {
+        if let Some(first) = nodes.values().next() {
+            let mut min_vec = first.position - first.shape / 2.0;
+            let mut max_vec = first.position + first.shape / 2.0;
+            for (_id, node) in nodes {
+                min_vec = min_vec.min(node.position - node.shape / 2.0);
+                max_vec = max_vec.max(node.position + node.shape / 2.0);
+            }
+            Rect::from_min_max(min_vec, max_vec)
+        } else {
+            panic!()
+        }
     }
 
     pub(crate) fn update_layout(&mut self, max_nodes_to_update: u32) -> bool {
@@ -590,27 +686,7 @@ impl GraphLayout {
             let min_movement = self.layout_clock / 6000.0;
             if velocity_magnitude.is_finite() && velocity_magnitude > min_movement {
                 did_update = true;
-                let old_index = Self::get_index_for(&node_data.position);
-                let new_position = node_data.position + velocity;
-                let new_index = Self::get_index_for(&new_position);
-                if old_index != new_index {
-                    // Update position on map
-                    if let Some(x) = self.node_map.get_mut(&old_index) {
-                        // Remove
-                        x.retain_mut(|x| *x != op_id);
-                    } else {
-                        // Should not be possible
-                        panic!();
-                    }
-                    // Add to map
-                    self.node_map
-                        .entry(new_index)
-                        .or_insert(Vec::new())
-                        .push(op_id);
-                }
-
-                self.nodes.get_mut(&op_id).unwrap().position = new_position;
-                self.nodes.get_mut(&op_id).unwrap().velocity = velocity;
+                self.move_node_inner(op_id, node_data.position + velocity, velocity);
             } else {
                 self.nodes.get_mut(&op_id).unwrap().velocity = vec2(0.0, 0.0);
             }

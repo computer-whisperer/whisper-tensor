@@ -44,33 +44,25 @@ fn main() {
         TokenizerInfo::HFTokenizer("gpt2".to_string()),
     );
 
-    let tokens = SuperGraphNodeTokenizerEncode::new_and_add(
-        &mut builder,
-        tokenizer_link.clone(),
-        text_input_link.clone(),
-    );
+    let tokens =
+        SuperGraphNodeTokenizerEncode::new_and_add(&mut builder, tokenizer_link, text_input_link);
 
     // Model invocation
     let logit_output = {
-        let inputs = {
-            let mut inputs = HashMap::new();
-            inputs.insert(tokens.clone(), "input1".to_string());
-            inputs
-        };
+        let inputs = vec![(tokens, "input1".to_string())];
         let (outputs, logit_output) = {
-            let mut outputs = HashMap::new();
             let tensor = SuperGraphLinkTensor::new(builder.get_next_link_id());
-            outputs.insert("output1".to_string(), tensor.clone());
+            let outputs = vec![("output1".to_string(), tensor)];
             (outputs, tensor)
         };
-        let node = SuperGraphNodeModelExecution::new(model_link.clone(), inputs, outputs);
+        let node = SuperGraphNodeModelExecution::new(model_link, inputs, outputs);
         builder.add_node(node.into());
         logit_output
     };
 
     // Sampler
     let chosen_token = {
-        let (mut milli_graph, inputs_map) = MilliOpGraph::new(&[logit_output.clone()]);
+        let (mut milli_graph, inputs_map) = MilliOpGraph::new(&[logit_output]);
         let logits_input = inputs_map[&logit_output];
 
         // Slice to last token
@@ -118,7 +110,7 @@ fn main() {
         let mut output_map = HashMap::new();
 
         let output_tensor = SuperGraphLinkTensor::new(builder.get_next_link_id());
-        output_map.insert(output, output_tensor.clone());
+        output_map.insert(output, output_tensor);
         milli_graph.set_output_map(output_map);
 
         let node = SuperGraphNodeMilliOpGraph::new(milli_graph);

@@ -29,7 +29,7 @@ pub async fn scheduler(mut input: mpsc::Receiver<SchedulerJob>, model_server: Ar
                         for (link, &model_id) in &req.model_inputs {
                             let model = model_server.get_model(model_id).await;
                             if let Some(model) = model {
-                                models.insert(link.clone(), model);
+                                models.insert(*link, model);
                             }
                         }
                         models
@@ -37,7 +37,7 @@ pub async fn scheduler(mut input: mpsc::Receiver<SchedulerJob>, model_server: Ar
                     // Populate data with refs
                     for link in req.model_inputs.keys() {
                         if let Some(model) = models.get(link) {
-                            super_graph_data.models.insert(link.clone(), model);
+                            super_graph_data.models.insert(*link, model);
                         }
                     }
                     for (link, data) in req.string_inputs {
@@ -54,7 +54,7 @@ pub async fn scheduler(mut input: mpsc::Receiver<SchedulerJob>, model_server: Ar
                     let tensor_outputs = res
                         .tensors
                         .iter()
-                        .map(|(k, v)| (k.clone(), v.to_ndarray().unwrap()))
+                        .map(|(k, v)| (*k, v.to_ndarray().unwrap()))
                         .collect();
                     let string_outputs = res.strings;
                     let hash_outputs = res.hashes;

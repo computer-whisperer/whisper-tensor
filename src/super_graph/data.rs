@@ -39,7 +39,7 @@ impl<'models> SuperGraphData<'models> {
             match link {
                 SuperGraphAnyLink::Tensor(t) => {
                     tensors.insert(
-                        t.clone(),
+                        *t,
                         self.tensors
                             .get(t)
                             .ok_or(SuperGraphError::MissingLinkError())?
@@ -48,7 +48,7 @@ impl<'models> SuperGraphData<'models> {
                 }
                 SuperGraphAnyLink::String(s) => {
                     strings.insert(
-                        s.clone(),
+                        *s,
                         self.strings
                             .get(s)
                             .ok_or(SuperGraphError::MissingLinkError())?
@@ -57,7 +57,7 @@ impl<'models> SuperGraphData<'models> {
                 }
                 SuperGraphAnyLink::Tokenizer(t) => {
                     tokenizers.insert(
-                        t.clone(),
+                        *t,
                         self.tokenizers
                             .get(t)
                             .ok_or(SuperGraphError::MissingLinkError())?
@@ -66,7 +66,7 @@ impl<'models> SuperGraphData<'models> {
                 }
                 SuperGraphAnyLink::Model(m) => {
                     models.insert(
-                        m.clone(),
+                        *m,
                         *self
                             .models
                             .get(m)
@@ -75,7 +75,7 @@ impl<'models> SuperGraphData<'models> {
                 }
                 SuperGraphAnyLink::Hash(h) => {
                     hashes.insert(
-                        h.clone(),
+                        *h,
                         *self
                             .hashes
                             .get(h)
@@ -150,14 +150,14 @@ impl<'models> SuperGraphData<'models> {
 
     pub fn extend(&mut self, other: &Self) {
         self.tensors
-            .extend(other.tensors.iter().map(|(a, b)| (a.clone(), b.clone())));
+            .extend(other.tensors.iter().map(|(a, b)| (*a, b.clone())));
         self.strings
-            .extend(other.strings.iter().map(|(a, b)| (a.clone(), b.clone())));
+            .extend(other.strings.iter().map(|(a, b)| (*a, b.clone())));
         self.tokenizers
-            .extend(other.tokenizers.iter().map(|(a, b)| (a.clone(), b.clone())));
+            .extend(other.tokenizers.iter().map(|(a, b)| (*a, b.clone())));
         self.models
-            .extend(other.models.iter().map(|(a, b)| (a.clone(), *b)));
+            .extend(other.models.iter().map(|(a, b)| (*a, *b)));
         self.hashes
-            .extend(other.hashes.iter().map(|(a, b)| (a.clone(), *b)));
+            .extend(other.hashes.iter().map(|(a, b)| (*a, *b)));
     }
 }

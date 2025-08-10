@@ -37,7 +37,9 @@ pub struct MilliOpGraphTensorId {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MilliOpGraph<ID: Hash + Clone + Eq> {
     pub input_map: HashMap<ID, MilliOpGraphTensorId>,
+    pub input_ordering: Vec<ID>,
     pub output_map: Option<HashMap<MilliOpGraphTensorId, ID>>,
+    pub output_ordering: Option<Vec<ID>>,
     ops: HashMap<MilliOpGraphTensorId, AnyMilliOp>,
     next_op_id: usize,
 }
@@ -46,12 +48,16 @@ impl<ID: Hash + Clone + Eq> MilliOpGraph<ID> {
     pub fn new(inputs: &[ID]) -> (Self, HashMap<ID, MilliOpGraphTensorId>) {
         let mut next_op_id = 0;
         let mut input_map = HashMap::new();
+        let mut input_ordering = Vec::new();
         for input in inputs {
+            input_ordering.push(input.clone());
             input_map.insert(input.clone(), MilliOpGraphTensorId { inner: next_op_id });
             next_op_id += 1;
         }
         (
             Self {
+                input_ordering,
+                output_ordering: None,
                 input_map: input_map.clone(),
                 ops: HashMap::new(),
                 output_map: None,
@@ -66,7 +72,7 @@ impl<ID: Hash + Clone + Eq> MilliOpGraph<ID> {
     }
 
     pub fn get_inputs(&self) -> Vec<ID> {
-        self.input_map.keys().cloned().collect()
+        self.input_ordering.clone()
     }
 
     pub fn get_all_tensors(&self) -> HashSet<MilliOpGraphTensorId> {
@@ -81,7 +87,9 @@ impl<ID: Hash + Clone + Eq> MilliOpGraph<ID> {
     }
 
     pub fn get_outputs(&self) -> Vec<ID> {
-        if let Some(x) = &self.output_map {
+        if let Some(x) = &self.output_ordering {
+            x.clone()
+        } else if let Some(x) = &self.output_map {
             x.values().cloned().collect()
         } else {
             vec![]
@@ -91,6 +99,17 @@ impl<ID: Hash + Clone + Eq> MilliOpGraph<ID> {
     pub fn set_output_map(&mut self, output_map: HashMap<MilliOpGraphTensorId, ID>) {
         assert!(self.output_map.is_none());
         self.output_map = Some(output_map)
+    }
+
+    pub fn set_output_map_ordered(
+        &mut self,
+        output_map: HashMap<MilliOpGraphTensorId, ID>,
+        output_ordering: Vec<ID>,
+    ) {
+        assert!(self.output_map.is_none());
+        assert!(self.output_ordering.is_none());
+        self.output_map = Some(output_map);
+        self.output_ordering = Some(output_ordering);
     }
 
     pub fn push_op(&mut self, op: AnyMilliOp) -> MilliOpGraphTensorId {

@@ -19,7 +19,7 @@ use crate::tokenizer::TokenizerError;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SuperGraphNodeId(pub(crate) u32);
 
 #[derive(Debug, thiserror::Error)]
@@ -119,13 +119,14 @@ impl SuperGraphInner {
                         }
                     }
                     if all_inputs_ready {
-                        op_id_to_use = Some(op_id.clone());
+                        op_id_to_use = Some(op_id);
                         break;
                     }
                 }
                 op_id_to_use
             };
             if let Some(op_id) = op_id_to_use {
+                let op_id = *op_id;
                 let op = self.nodes.get(&op_id).unwrap();
                 op.eval(&mut data, caches.as_deref_mut(), backend)?;
                 remaining_ops.retain(|x| *x != op_id);
@@ -186,7 +187,7 @@ impl SuperGraphBuilder {
 
     pub fn add_node(&mut self, node: SuperGraphAnyNode) -> SuperGraphNodeId {
         let id = self.get_next_node_id();
-        self.nodes.insert(id.clone(), node);
+        self.nodes.insert(id, node);
         id
     }
 
@@ -213,7 +214,7 @@ impl SuperGraphBuilder {
 
         for node in self.nodes.values() {
             for link in node.get_outputs() {
-                if !sourced_links.insert(link.clone()) {
+                if !sourced_links.insert(link) {
                     panic!("Link {link:?} is sourced multiple times");
                 }
             }
