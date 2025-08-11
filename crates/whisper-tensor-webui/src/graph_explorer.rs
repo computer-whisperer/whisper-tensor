@@ -1,16 +1,18 @@
-use crate::app::{InterfaceId, LoadedModels, ModelLoadState};
+use crate::app::{InterfaceId, LoadedModels, LoadedTokenizers, ModelLoadState};
 use crate::graph_layout::{
     GraphLayout, GraphLayoutError, GraphLayoutIOOffsets, GraphLayoutLinkData, GraphLayoutLinkId,
     GraphLayoutLinkType, GraphLayoutNodeId, GraphLayoutNodeInitData, GraphLayoutNodeType,
 };
 use crate::websockets::ServerRequestManager;
 use crate::widgets::toggle::toggle_ui;
+use crate::widgets::tokenized_rich_text::TokenizedRichText;
 use egui::epaint::CubicBezierShape;
 use egui::{
     Color32, Label, Margin, Rect, Response, RichText, Sense, Shape, Stroke, StrokeKind, Ui,
-    UiBuilder, Vec2, vec2,
+    UiBuilder, Vec2, Widget, vec2,
 };
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use whisper_tensor::DynRank;
@@ -28,8 +30,10 @@ use whisper_tensor::symbolic_graph::tensor_store::TensorStoreTensorId;
 use whisper_tensor::symbolic_graph::{
     OperationId, StoredOrNotTensor, SymbolicGraph, SymbolicGraphInner, TensorId, TensorType,
 };
+use whisper_tensor::tokenizer::Tokenizer;
+use whisper_tensor_import::onnx_graph::TokenizerInfo;
 use whisper_tensor_import::onnx_graph::tensor::Tensor;
-use whisper_tensor_server::{LoadedModelId, WebsocketClientServerMessage};
+use whisper_tensor_server::{LoadedModelId, SuperGraphRequest, WebsocketClientServerMessage};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct GraphExplorerState {
@@ -69,6 +73,13 @@ pub(crate) enum GraphExplorerSelectable {
     MilliOpGraphTensor(MilliOpGraphTensorId),
 }
 
+#[derive(Clone, Debug, Default)]
+struct TextInferenceData {
+    tokens: Vec<u32>,
+    logits: HashMap<Vec<u32>, Vec<(u32, f32)>>,
+    pending_request: Option<(u64, SuperGraphLinkTensor, Vec<u32>)>,
+}
+
 pub(crate) struct GraphExplorerApp {
     pub(crate) explorer_selection: Option<GraphExplorerSelectable>,
     pub(crate) explorer_hovered: Option<GraphExplorerSelectable>,
@@ -79,6 +90,7 @@ pub(crate) struct GraphExplorerApp {
     model_view_scene_rects: HashMap<Vec<GraphExplorerLayerSelection>, Rect>,
     pub(crate) graph_subject_path: Vec<GraphExplorerLayerSelection>,
     pub(crate) next_graph_subject_path: Option<Vec<GraphExplorerLayerSelection>>,
+    pub(crate) text_inference_data: HashMap<InterfaceId, TextInferenceData>,
 }
 
 fn render_node_contents<'a>(
@@ -295,6 +307,7 @@ impl GraphExplorerApp {
             model_view_scene_rects: HashMap::new(),
             graph_subject_path: Vec::new(),
             next_graph_subject_path: None,
+            text_inference_data: HashMap::new(),
         }
     }
 
@@ -302,6 +315,7 @@ impl GraphExplorerApp {
         &mut self,
         state: &mut GraphExplorerState,
         loaded_models: &mut LoadedModels,
+        loaded_tokenizers: &mut LoadedTokenizers,
         server_request_manager: &mut ServerRequestManager,
         ui: &mut Ui,
     ) {
@@ -359,7 +373,7 @@ impl GraphExplorerApp {
             self.inspect_windows.clear();
         }
 
-        let (graph_subjects, selected_interface) = {
+        let (graph_subjects, selected_interface, selected_interface_id, is_loading) = {
             let mut graph_subjects: Vec<(
                 GraphSubject,
                 Vec<GraphExplorerLayerSelection>,
@@ -367,15 +381,34 @@ impl GraphExplorerApp {
             )> = vec![];
             let mut compiled_path = vec![];
             let mut selected_interface = None;
+            let mut selected_interface_id = None;
+            let mut is_loading = false;
             for layer_selection in &self.graph_subject_path {
                 let layer_subject = match layer_selection {
-                    GraphExplorerLayerSelection::Model(model_id) => self
-                        .loaded_models
-                        .get(model_id)
-                        .map(|x| GraphSubject::SymbolicGraphInner(&x.inner_graph)),
+                    GraphExplorerLayerSelection::Model(model_id) => {
+                        let res = self
+                            .loaded_models
+                            .get(model_id)
+                            .map(|x| GraphSubject::SymbolicGraphInner(&x.inner_graph));
+                        if res.is_none() {
+                            is_loading = true;
+                            if loaded_models
+                                .currently_requesting_model
+                                .map(|id| id != *model_id)
+                                .unwrap_or(true)
+                            {
+                                server_request_manager
+                                    .send(WebsocketClientServerMessage::GetModelGraph(*model_id))
+                                    .unwrap();
+                                loaded_models.currently_requesting_model = Some(*model_id);
+                            }
+                        }
+                        res
+                    }
                     GraphExplorerLayerSelection::Interface(interface_id) => {
                         if let Some(interface) = loaded_models.current_interfaces.get(interface_id)
                         {
+                            selected_interface_id = Some(*interface_id);
                             selected_interface = Some(interface);
                             Some(GraphSubject::SuperGraphInner(
                                 &interface.interface.get_super_graph().inner,
@@ -408,6 +441,32 @@ impl GraphExplorerApp {
                             let node = graph_subject.nodes.get(node_id);
                             if let Some(node) = node {
                                 match node {
+                                    SuperGraphAnyNode::ModelExecution(_) => {
+                                        if let Some(interface) = selected_interface
+                                            && let Some(model_id) = interface.model_ids.first()
+                                        {
+                                            let res = self.loaded_models.get(model_id).map(|x| {
+                                                GraphSubject::SymbolicGraphInner(&x.inner_graph)
+                                            });
+                                            if res.is_none() {
+                                                is_loading = true;
+                                                if loaded_models
+                                                    .currently_requesting_model
+                                                    .map(|id| id != *model_id)
+                                                    .unwrap_or(true)
+                                                {
+                                                    server_request_manager
+                                                        .send(WebsocketClientServerMessage::GetModelGraph(*model_id))
+                                                        .unwrap();
+                                                    loaded_models.currently_requesting_model =
+                                                        Some(*model_id);
+                                                }
+                                            }
+                                            res
+                                        } else {
+                                            None
+                                        }
+                                    }
                                     SuperGraphAnyNode::MilliOpGraph(x) => {
                                         Some(GraphSubject::MilliOpGraphB(&x.graph))
                                     }
@@ -435,14 +494,25 @@ impl GraphExplorerApp {
                     graph_subjects.push((layer_subject, compiled_path.clone(), None));
                 }
             }
-            (graph_subjects, selected_interface)
+            (
+                graph_subjects,
+                selected_interface,
+                selected_interface_id,
+                is_loading,
+            )
         };
 
         ui.horizontal(|ui| {
             if state.explorer_minimap {
-                let num_subjects = graph_subjects.len();
-                let subject_width = (ui.available_size_before_wrap().x / num_subjects as f32) - 5.0;
-                for (_graph_subject, graph_subject_path, selected_entry) in &graph_subjects {
+                for (i, (_graph_subject, graph_subject_path, selected_entry)) in
+                    graph_subjects.iter().enumerate()
+                {
+                    let maps_left = graph_subjects.len() - i;
+                    let subject_width = if maps_left <= 1 {
+                        ui.available_size_before_wrap().x
+                    } else {
+                        (ui.available_size_before_wrap().x / (maps_left as f32)) - 5.0
+                    };
                     if let Some(Ok(graph_layout)) = self.graph_layouts.get(graph_subject_path) {
                         let node_bounding_rect = graph_layout.get_bounding_rect().expand(15.0);
 
@@ -566,9 +636,12 @@ impl GraphExplorerApp {
         });
 
         let do_interface_panel = selected_interface.is_some();
-        let interface_panel_height = 100.0;
+        let interface_panel_height = 150.0;
 
-        if let Some((graph_subject, _, _)) = graph_subjects.last() {
+        if is_loading {
+            ui.label("Loading Model Graph...");
+            ui.spinner();
+        } else if let Some((graph_subject, _, _)) = graph_subjects.last() {
             if !self.graph_layouts.contains_key(&self.graph_subject_path) {
                 match graph_subject {
                     GraphSubject::SymbolicGraphInner(graph) => {
@@ -923,239 +996,250 @@ impl GraphExplorerApp {
                             ui.ctx().request_repaint_after(Duration::from_millis(20));
                         }
                     }
-                    let frame = egui::Frame::default().stroke(ui.visuals().window_stroke);
-                    frame.show(ui, |ui| {
-                        let mut frame_shape = ui.max_rect().size();
-                        if do_interface_panel {
-                            frame_shape.y -= interface_panel_height;
-                        }
-                        let mut scene_rect =  if let Some(x) =  self.model_view_scene_rects.get(&self.graph_subject_path) {
-                            x.clone()
-                        } else {
-                            // No bound of graph should exceed this (unless necessary for aspect ratio)
-                            let max_frame = graph_layout.get_bounding_rect().expand(30.0);
+                    let mut frame_shape = ui.available_size_before_wrap();
+                    if do_interface_panel {
+                        frame_shape.y -= interface_panel_height;
+                    }
+                    let frame_base = ui.available_rect_before_wrap().min;
+                    let ui_builder = UiBuilder::new()
+                        .max_rect(Rect::from_min_max(frame_base, frame_base + frame_shape));
+                    ui.scope_builder(ui_builder, |ui| {
+                        let frame = egui::Frame::default().stroke(ui.visuals().window_stroke);
+                        frame.show(ui, |ui| {
 
-                            let (min_x, max_x) = if max_frame.width() > frame_shape.x{
-                                (max_frame.min.x, max_frame.min.x + frame_shape.x)
+                            let mut scene_rect =  if let Some(x) =  self.model_view_scene_rects.get(&self.graph_subject_path) {
+                                x.clone()
                             } else {
-                                (max_frame.min.x, max_frame.max.x)
+                                // No bound of graph should exceed this (unless necessary for aspect ratio)
+                                let max_frame = graph_layout.get_bounding_rect().expand(30.0);
+
+                                let (min_x, max_x) = if max_frame.width() > frame_shape.x{
+                                    (max_frame.min.x, max_frame.min.x + frame_shape.x)
+                                } else {
+                                    (max_frame.min.x, max_frame.max.x)
+                                };
+
+                                let center_y = max_frame.center().y;
+                                let center_pos = egui::pos2(min_x + (max_x - min_x) / 2.0, center_y);
+                                let scale = (frame_shape.x / (max_x - min_x)).max(0.0).min(0.8);
+
+                                Rect::from_center_size(
+                                    center_pos,
+                                    frame_shape * scale,
+                                )
                             };
-
-                            let center_y = max_frame.center().y;
-                            let center_pos = egui::pos2(min_x + (max_x - min_x) / 2.0, center_y);
-                            let scale = (frame_shape.x / (max_x - min_x)).max(0.0).min(0.8);
-
-                            Rect::from_center_size(
-                                center_pos,
-                                frame_shape * scale,
-                            )
-                        };
-                        let cull_rect = scene_rect.expand(300.0);
-                        let scene = egui::Scene::new().max_inner_size(frame_shape);
-                        scene.show(ui, &mut scene_rect, |ui| {
-                            // Find all ops actually in scene
-                            let mut nodes_to_render_vec = graph_layout
-                                .find_nodes_within(&cull_rect.center(), cull_rect.size().length() / 2.0)
-                                .clone();
-                            let mut nodes_to_render = HashSet::<GraphLayoutNodeId>::from_iter(
-                                nodes_to_render_vec.iter().map(|x| *x),
-                            );
-
-                            let mut edges_to_render = vec![];
-
-                            // Render both sides of all visible edges
-                            for ((src_id, src_id_i), (dst_id, dst_id_i), link_id) in
-                                graph_layout.get_edges()
-                            {
-                                if nodes_to_render.contains(src_id) || nodes_to_render.contains(dst_id) {
-                                    if !nodes_to_render.contains(dst_id) {
-                                        nodes_to_render.insert(*dst_id);
-                                        nodes_to_render_vec.push(*dst_id);
-                                    }
-                                    if !nodes_to_render.contains(src_id) {
-                                        nodes_to_render.insert(*src_id);
-                                        nodes_to_render_vec.push(*src_id);
-                                    }
-                                    // Pre-allocate the shape in the paint queue
-                                    let shape_idx = ui.painter().add(Shape::Noop);
-                                    edges_to_render.push((
-                                        (*src_id, *src_id_i),
-                                        (*dst_id, *dst_id_i),
-                                        *link_id,
-                                        shape_idx,
-                                    ));
-                                }
-                            }
-
-                            let mut node_io_connections = HashMap::new();
-                            let mut node_bounding_boxes = HashMap::new();
-
-                            let current_node_data = graph_layout.get_nodes();
-                            let mut node_position_updates = HashMap::new();
-                            for node_id in nodes_to_render_vec {
-                                let pos = current_node_data[&node_id].position;
-                                let cell_shape = current_node_data[&node_id].shape;
-                                let op_rect = Rect::from_min_max(
-                                    pos.clone() - cell_shape / 2.0,
-                                    pos.clone() + cell_shape,
+                            let cull_rect = scene_rect.expand(300.0);
+                            let scene = egui::Scene::new().max_inner_size(frame_shape);
+                            scene.show(ui, &mut scene_rect, |ui| {
+                                // Find all ops actually in scene
+                                let mut nodes_to_render_vec = graph_layout
+                                    .find_nodes_within(&cull_rect.center(), cull_rect.size().length() / 2.0)
+                                    .clone();
+                                let mut nodes_to_render = HashSet::<GraphLayoutNodeId>::from_iter(
+                                    nodes_to_render_vec.iter().map(|x| *x),
                                 );
-                                let ui_builder = UiBuilder::new().max_rect(op_rect);
-                                let mut ui_child = ui.new_child(ui_builder);
 
-                                let this_selectable = current_node_data[&node_id].node_type.get_graph_selectable();
+                                let mut edges_to_render = vec![];
 
-                                let is_selected = if let Some(selected) = &self.explorer_selection {
-                                    this_selectable == *selected
-                                } else {
-                                    false
-                                };
-                                let is_hovered = if let Some(hovered) = &self.explorer_hovered {
-                                    this_selectable == *hovered
-                                } else {
-                                    false
-                                };
-
-                                let (resp, io_connections) = render_node_contents(
-                                    &mut ui_child,
-                                    &current_node_data[&node_id].node_type,
-                                    current_node_data[&node_id].inputs.len(),
-                                    current_node_data[&node_id].outputs.len(),
-                                    &graph_subject,
-                                    is_selected,
-                                    is_hovered,
-                                );
-                                node_io_connections.insert(node_id, io_connections);
-                                node_bounding_boxes.insert(node_id, ui_child.min_rect());
-
-                                if resp.hovered() {
-                                    self.next_explorer_hovered = Some(this_selectable.clone());
-                                }
-                                if resp.clicked() {
-                                    self.explorer_selection = Some(this_selectable);
-                                }
-                                if resp.dragged() {
-                                    node_position_updates.insert(node_id, current_node_data.get(&node_id).unwrap().position + resp.drag_delta());
-                                }
-                                if resp.double_clicked() {
-                                    match &current_node_data[&node_id].node_type {
-                                        GraphLayoutNodeType::SymbolicGraphOperation(op_id) => {
-                                            let new_inspect = OpOrTensorId::Op(*op_id);
-                                            if !InspectWindow::check_if_already_exists(
-                                                &self.inspect_windows,
-                                                &new_inspect,
-                                            ) {
-                                                self.inspect_windows.push(InspectWindow::new(new_inspect));
-                                            }
+                                // Render both sides of all visible edges
+                                for ((src_id, src_id_i), (dst_id, dst_id_i), link_id) in
+                                    graph_layout.get_edges()
+                                {
+                                    if nodes_to_render.contains(src_id) || nodes_to_render.contains(dst_id) {
+                                        if !nodes_to_render.contains(dst_id) {
+                                            nodes_to_render.insert(*dst_id);
+                                            nodes_to_render_vec.push(*dst_id);
                                         }
-                                        GraphLayoutNodeType::SymbolicGraphTensor(tensor_id) => {
-                                            let new_inspect = OpOrTensorId::Tensor(*tensor_id);
-                                            if !InspectWindow::check_if_already_exists(
-                                                &self.inspect_windows,
-                                                &new_inspect,
-                                            ) {
-                                                self.inspect_windows.push(InspectWindow::new(new_inspect));
-                                            }
+                                        if !nodes_to_render.contains(src_id) {
+                                            nodes_to_render.insert(*src_id);
+                                            nodes_to_render_vec.push(*src_id);
                                         }
-                                        GraphLayoutNodeType::SuperGraphNode(node_id) => {
-                                            if let GraphSubject::SuperGraphInner(x) = &graph_subject {
-                                                if let Some(node) = x.nodes.get(node_id) {
-                                                    match node {
-                                                        SuperGraphAnyNode::MilliOpGraph(_) => {
-                                                            let mut path = self.graph_subject_path.clone();
-                                                            path.push(GraphExplorerLayerSelection::SuperGraphNodeId(node_id.clone()));
-                                                            self.next_graph_subject_path = Some(path);
-                                                        }
-                                                        _ => {
-                                                            if let Some(_) = node.get_sub_graph() {
+                                        // Pre-allocate the shape in the paint queue
+                                        let shape_idx = ui.painter().add(Shape::Noop);
+                                        edges_to_render.push((
+                                            (*src_id, *src_id_i),
+                                            (*dst_id, *dst_id_i),
+                                            *link_id,
+                                            shape_idx,
+                                        ));
+                                    }
+                                }
+
+                                let mut node_io_connections = HashMap::new();
+                                let mut node_bounding_boxes = HashMap::new();
+
+                                let current_node_data = graph_layout.get_nodes();
+                                let mut node_position_updates = HashMap::new();
+                                for node_id in nodes_to_render_vec {
+                                    let pos = current_node_data[&node_id].position;
+                                    let cell_shape = current_node_data[&node_id].shape;
+                                    let op_rect = Rect::from_min_max(
+                                        pos.clone() - cell_shape / 2.0,
+                                        pos.clone() + cell_shape,
+                                    );
+                                    let ui_builder = UiBuilder::new().max_rect(op_rect);
+                                    let mut ui_child = ui.new_child(ui_builder);
+
+                                    let this_selectable = current_node_data[&node_id].node_type.get_graph_selectable();
+
+                                    let is_selected = if let Some(selected) = &self.explorer_selection {
+                                        this_selectable == *selected
+                                    } else {
+                                        false
+                                    };
+                                    let is_hovered = if let Some(hovered) = &self.explorer_hovered {
+                                        this_selectable == *hovered
+                                    } else {
+                                        false
+                                    };
+
+                                    let (resp, io_connections) = render_node_contents(
+                                        &mut ui_child,
+                                        &current_node_data[&node_id].node_type,
+                                        current_node_data[&node_id].inputs.len(),
+                                        current_node_data[&node_id].outputs.len(),
+                                        &graph_subject,
+                                        is_selected,
+                                        is_hovered,
+                                    );
+                                    node_io_connections.insert(node_id, io_connections);
+                                    node_bounding_boxes.insert(node_id, ui_child.min_rect());
+
+                                    if resp.hovered() {
+                                        self.next_explorer_hovered = Some(this_selectable.clone());
+                                    }
+                                    if resp.clicked() {
+                                        self.explorer_selection = Some(this_selectable);
+                                    }
+                                    if resp.dragged() {
+                                        node_position_updates.insert(node_id, current_node_data.get(&node_id).unwrap().position + resp.drag_delta());
+                                    }
+                                    if resp.double_clicked() {
+                                        match &current_node_data[&node_id].node_type {
+                                            GraphLayoutNodeType::SymbolicGraphOperation(op_id) => {
+                                                let new_inspect = OpOrTensorId::Op(*op_id);
+                                                if !InspectWindow::check_if_already_exists(
+                                                    &self.inspect_windows,
+                                                    &new_inspect,
+                                                ) {
+                                                    self.inspect_windows.push(InspectWindow::new(new_inspect));
+                                                }
+                                            }
+                                            GraphLayoutNodeType::SymbolicGraphTensor(tensor_id) => {
+                                                let new_inspect = OpOrTensorId::Tensor(*tensor_id);
+                                                if !InspectWindow::check_if_already_exists(
+                                                    &self.inspect_windows,
+                                                    &new_inspect,
+                                                ) {
+                                                    self.inspect_windows.push(InspectWindow::new(new_inspect));
+                                                }
+                                            }
+                                            GraphLayoutNodeType::SuperGraphNode(node_id) => {
+                                                if let GraphSubject::SuperGraphInner(x) = &graph_subject {
+                                                    if let Some(node) = x.nodes.get(node_id) {
+                                                        match node {
+                                                            SuperGraphAnyNode::MilliOpGraph(_) => {
                                                                 let mut path = self.graph_subject_path.clone();
                                                                 path.push(GraphExplorerLayerSelection::SuperGraphNodeId(node_id.clone()));
                                                                 self.next_graph_subject_path = Some(path);
                                                             }
+                                                            SuperGraphAnyNode::ModelExecution(_) => {
+                                                                let mut path = self.graph_subject_path.clone();
+                                                                path.push(GraphExplorerLayerSelection::SuperGraphNodeId(node_id.clone()));
+                                                                self.next_graph_subject_path = Some(path);
+                                                            }
+                                                            _ => {
+                                                                if let Some(_) = node.get_sub_graph() {
+                                                                    let mut path = self.graph_subject_path.clone();
+                                                                    path.push(GraphExplorerLayerSelection::SuperGraphNodeId(node_id.clone()));
+                                                                    self.next_graph_subject_path = Some(path);
+                                                                }
+                                                            }
+                                                        }
+
+                                                    }
+                                                }
+                                                // TODO: Inspect this
+                                            }
+                                            GraphLayoutNodeType::ConnectionByNameSrc(link_data)
+                                            | GraphLayoutNodeType::ConnectionByNameDest(link_data) => {
+                                                match &link_data.link_type {
+                                                    GraphLayoutLinkType::SymbolicGraphTensor(
+                                                        tensor_id,
+                                                    ) => {
+                                                        let new_inspect = OpOrTensorId::Tensor(*tensor_id);
+                                                        if !InspectWindow::check_if_already_exists(
+                                                            &self.inspect_windows,
+                                                            &new_inspect,
+                                                        ) {
+                                                            self.inspect_windows
+                                                                .push(InspectWindow::new(new_inspect));
                                                         }
                                                     }
-
-                                                }
-                                            }
-                                            // TODO: Inspect this
-                                        }
-                                        GraphLayoutNodeType::ConnectionByNameSrc(link_data)
-                                        | GraphLayoutNodeType::ConnectionByNameDest(link_data) => {
-                                            match &link_data.link_type {
-                                                GraphLayoutLinkType::SymbolicGraphTensor(
-                                                    tensor_id,
-                                                ) => {
-                                                    let new_inspect = OpOrTensorId::Tensor(*tensor_id);
-                                                    if !InspectWindow::check_if_already_exists(
-                                                        &self.inspect_windows,
-                                                        &new_inspect,
-                                                    ) {
-                                                        self.inspect_windows
-                                                            .push(InspectWindow::new(new_inspect));
+                                                    _ => {
+                                                        // TODO: inspect other types
                                                     }
                                                 }
-                                                _ => {
-                                                    // TODO: inspect other types
-                                                }
                                             }
-                                        }
-                                        _ => {
-                                            // TODO: Inspect other types
+                                            _ => {
+                                                // TODO: Inspect other types
+                                            }
                                         }
                                     }
                                 }
-                            }
-                            for (node_id, position) in node_position_updates {
-                                graph_layout.move_node(node_id, position, Vec2::ZERO)
-                            }
+                                for (node_id, position) in node_position_updates {
+                                    graph_layout.move_node(node_id, position, Vec2::ZERO)
+                                }
 
-                            // Draw lines
-                            let link_data = graph_layout.get_link_data();
-                            for ((src_id, src_id_i), (dst_id, dst_id_i), link_id, paint_idx) in
-                                edges_to_render
-                            {
-                                let source_connection = node_bounding_boxes[&src_id].center()
-                                    + node_io_connections[&src_id].outputs[src_id_i];
-                                let dest_connection = node_bounding_boxes[&dst_id].center()
-                                    + node_io_connections[&dst_id].inputs[dst_id_i];
-                                let points = [
-                                    source_connection,
-                                    egui::pos2(source_connection.x + 40.0, source_connection.y),
-                                    egui::pos2(dest_connection.x - 40.0, dest_connection.y),
-                                    dest_connection,
-                                ];
+                                // Draw lines
+                                let link_data = graph_layout.get_link_data();
+                                for ((src_id, src_id_i), (dst_id, dst_id_i), link_id, paint_idx) in
+                                    edges_to_render
+                                {
+                                    let source_connection = node_bounding_boxes[&src_id].center()
+                                        + node_io_connections[&src_id].outputs[src_id_i];
+                                    let dest_connection = node_bounding_boxes[&dst_id].center()
+                                        + node_io_connections[&dst_id].inputs[dst_id_i];
+                                    let points = [
+                                        source_connection,
+                                        egui::pos2(source_connection.x + 40.0, source_connection.y),
+                                        egui::pos2(dest_connection.x - 40.0, dest_connection.y),
+                                        dest_connection,
+                                    ];
 
-                                let (is_selected, is_hovered) =
-                                    if let Some(link_data) = link_data.get(&link_id) {
-                                        let this_selectable = link_data.link_type.get_graph_selectable();
-                                        let is_selected = self.explorer_selection == Some(this_selectable.clone());
-                                        let is_hovered = self.explorer_hovered == Some(this_selectable);
-                                        (is_selected, is_hovered)
+                                    let (is_selected, is_hovered) =
+                                        if let Some(link_data) = link_data.get(&link_id) {
+                                            let this_selectable = link_data.link_type.get_graph_selectable();
+                                            let is_selected = self.explorer_selection == Some(this_selectable.clone());
+                                            let is_hovered = self.explorer_hovered == Some(this_selectable);
+                                            (is_selected, is_hovered)
+                                        } else {
+                                            (false, false)
+                                        };
+
+                                    let stroke = if is_selected {
+                                        Stroke {
+                                            width: ui.visuals().widgets.active.fg_stroke.width,
+                                            color: egui::Color32::from_rgb(64, 64, 255),
+                                        }
+                                    } else if is_hovered {
+                                        ui.visuals().widgets.hovered.fg_stroke
                                     } else {
-                                        (false, false)
+                                        ui.visuals().widgets.noninteractive.fg_stroke
                                     };
 
-                                let stroke = if is_selected {
-                                    Stroke {
-                                        width: ui.visuals().widgets.active.fg_stroke.width,
-                                        color: egui::Color32::from_rgb(64, 64, 255),
-                                    }
-                                } else if is_hovered {
-                                    ui.visuals().widgets.hovered.fg_stroke
-                                } else {
-                                    ui.visuals().widgets.noninteractive.fg_stroke
-                                };
-
-                                let shape = CubicBezierShape::from_points_stroke(
-                                    points,
-                                    false,
-                                    Color32::TRANSPARENT,
-                                    stroke,
-                                );
-                                ui.painter().set(paint_idx, shape);
-                            }
+                                    let shape = CubicBezierShape::from_points_stroke(
+                                        points,
+                                        false,
+                                        Color32::TRANSPARENT,
+                                        stroke,
+                                    );
+                                    ui.painter().set(paint_idx, shape);
+                                }
+                            });
+                            self.model_view_scene_rects
+                                .insert(self.graph_subject_path.clone(), scene_rect);
                         });
-                        self.model_view_scene_rects
-                            .insert(self.graph_subject_path.clone(), scene_rect);
                     });
                 }
                 Some(Err(error)) => {
@@ -1165,38 +1249,199 @@ impl GraphExplorerApp {
                     ui.label("No graph generated");
                 }
             }
-        } else if let Some(graph_subject_id) = &self.graph_subject_path.first() {
-            if let GraphExplorerLayerSelection::Model(model_id) = graph_subject_id {
-                ui.label("Loading Model Graph...");
-                ui.spinner();
-                if loaded_models
-                    .currently_requesting_model
-                    .map(|id| id != *model_id)
-                    .unwrap_or(true)
-                {
-                    server_request_manager
-                        .send(WebsocketClientServerMessage::GetModelGraph(*model_id))
-                        .unwrap();
-                    loaded_models.currently_requesting_model = Some(*model_id);
-                }
-            }
         } else {
             ui.label("No graph selected");
         }
 
         if let Some(interface) = selected_interface {
+            let interface_id = selected_interface_id.unwrap();
             let frame = egui::Frame::default().stroke(ui.visuals().window_stroke);
             frame.show(ui, |ui| {
-                let (outer_rect, outer_response) =
-                    ui.allocate_exact_size(ui.max_rect().size(), Sense::click());
                 match &interface.interface {
                     AnyInterface::TextInferenceTokensInLogitOutInterface(llm_interface) => {
-                        ui.label("Text Inference Tokens In Logits Out Interface");
+                        ui.horizontal_top(|ui| {
+                            let tokenizer_info = llm_interface.get_tokenizer();
+                            if let Some(tokenizer) = loaded_tokenizers
+                                .loaded_tokenizers
+                                .get(tokenizer_info)
+                                .cloned()
+                                .flatten()
+                            {
+                                match tokenizer {
+                                    Ok(tokenizer) => {
+                                        let mut text_inference_data = {
+                                            if let Some(text_inference_data) =
+                                                self.text_inference_data.get_mut(&interface_id)
+                                            {
+                                                text_inference_data
+                                            } else {
+                                                let mut inference_data =
+                                                    TextInferenceData::default();
+                                                inference_data.tokens =
+                                                    tokenizer.encode("Hello World!");
+                                                self.text_inference_data
+                                                    .insert(interface_id, inference_data);
+                                                self.text_inference_data
+                                                    .get_mut(&interface_id)
+                                                    .unwrap()
+                                            }
+                                        };
+                                        if let Some((request_id, _, _)) =
+                                            &text_inference_data.pending_request
+                                        {
+                                            if let Some(mut response) =
+                                                server_request_manager.get_response(*request_id)
+                                            {
+                                                let (_, link, tokens) = text_inference_data
+                                                    .pending_request
+                                                    .take()
+                                                    .unwrap();
+                                                text_inference_data.pending_request = None;
+                                                let mut response_tokens =
+                                                    response.tensor_outputs.remove(&link).unwrap();
+                                                let shape = response_tokens.shape();
+                                                let logits_per_token = shape[1];
+                                                let returned_tokens = shape[0];
+                                                for i in 0..returned_tokens as usize {
+                                                    let sliced_output_tensor = response_tokens
+                                                        .slice(&[
+                                                            i..i + 1,
+                                                            0..logits_per_token as usize,
+                                                        ])
+                                                        .unwrap();
+                                                    let output = sliced_output_tensor.flatten();
+                                                    let output_vec: Vec<f32> =
+                                                        output.try_into().unwrap();
+                                                    let mut idx_and_val = output_vec
+                                                        .iter()
+                                                        .enumerate()
+                                                        .map(|(a, b)| (a as u32, *b))
+                                                        .collect::<Vec<_>>();
+                                                    idx_and_val.sort_by(|(_, a), (_, b)| {
+                                                        if a < b {
+                                                            Ordering::Greater
+                                                        } else {
+                                                            Ordering::Less
+                                                        }
+                                                    });
+                                                    let clipped_logits = idx_and_val
+                                                        [0..idx_and_val.len().min(100)]
+                                                        .to_vec();
+                                                    let context = tokens[0..i + 1].to_vec();
+                                                    text_inference_data
+                                                        .logits
+                                                        .insert(context, clipped_logits);
+                                                }
+                                            }
+                                        }
+                                        let frame = egui::Frame::default()
+                                            .stroke(ui.visuals().window_stroke)
+                                            .inner_margin(5.0);
+                                        frame.show(ui, |ui| {
+                                            ui.vertical(|ui| {
+                                                ui.heading("Text Inference");
+                                                {
+                                                    let v = match &tokenizer_info {
+                                                        TokenizerInfo::HFTokenizer(x) => {
+                                                            format!("Huggingface: {x}")
+                                                        }
+                                                        TokenizerInfo::RWKVWorld => {
+                                                            "RWKV World".to_string()
+                                                        }
+                                                    };
+                                                    ui.label(format!("Tokenizer: {v}"));
+                                                }
+                                                if text_inference_data.pending_request.is_some() {
+                                                    ui.spinner();
+                                                } else {
+                                                    if ui.button("Run").clicked() {
+                                                        let tokens =
+                                                            text_inference_data.tokens.clone();
+                                                        let tokens_tensor =
+                                                            NDArrayNumericTensor::from_vec(
+                                                                tokens.clone(),
+                                                            )
+                                                            .to_dyn();
+                                                        let token = server_request_manager
+                                                            .submit_supergraph_request(
+                                                            SuperGraphRequest {
+                                                                attention_token: None,
+                                                                super_graph: llm_interface
+                                                                    .super_graph
+                                                                    .clone(),
+                                                                string_inputs: HashMap::new(),
+                                                                tensor_inputs: HashMap::from([(
+                                                                    llm_interface
+                                                                        .token_context_input_link
+                                                                        .clone(),
+                                                                    tokens_tensor,
+                                                                )]),
+                                                                model_inputs: HashMap::from([(
+                                                                    llm_interface
+                                                                        .model_input_link
+                                                                        .clone(),
+                                                                    interface
+                                                                        .model_ids
+                                                                        .first()
+                                                                        .unwrap()
+                                                                        .clone(),
+                                                                )]),
+                                                                hash_inputs: HashMap::from([(
+                                                                    llm_interface
+                                                                        .cache_key_input_link
+                                                                        .clone(),
+                                                                    0u64,
+                                                                )]),
+                                                            },
+                                                        );
+                                                        text_inference_data.pending_request =
+                                                            Some((
+                                                                token,
+                                                                llm_interface
+                                                                    .logit_output_link
+                                                                    .clone(),
+                                                                tokens,
+                                                            ));
+                                                    }
+                                                }
+                                            });
+                                        });
+                                        let logits = {
+                                            let mut logits = vec![];
+                                            let mut context = vec![];
+                                            for token in &text_inference_data.tokens {
+                                                context.push(token.clone());
+                                                if let Some(x) =
+                                                    text_inference_data.logits.get(&context)
+                                                {
+                                                    logits.push(x.as_slice());
+                                                } else {
+                                                    break;
+                                                }
+                                            }
+                                            logits
+                                        };
+                                        TokenizedRichText::new().ui(
+                                            ui,
+                                            tokenizer.as_ref(),
+                                            &mut text_inference_data.tokens,
+                                            Some(&logits),
+                                        );
+                                    }
+                                    Err(e) => {
+                                        ui.label(format!("Error loading tokenizer: {}", e));
+                                    }
+                                }
+                            } else {
+                                ui.label("Tokenizer not loaded");
+                            }
+                        });
                     }
                     _ => {
                         ui.label("Unsupported Interface");
                     }
                 }
+                ui.allocate_exact_size(ui.available_size_before_wrap(), Sense::click());
             });
         }
     }

@@ -436,6 +436,7 @@ impl eframe::App for WebUIApp {
                 SelectedTab::GraphExplorer => self.graph_explorer_app.update(
                     &mut self.app_state.graph_explorer_state,
                     &mut self.loaded_models,
+                    &mut self.loaded_tokenizers,
                     &mut self.server_request_manager,
                     ui,
                 ),
