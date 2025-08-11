@@ -136,10 +136,10 @@ pub fn run(
     let mut output_tensors = HashMap::new();
     let model_output_ids = model.get_outputs();
     for id in model_output_ids {
-        if let Some(name) = model.get_tensor_name(id) {
-            if let Some(tensor) = active_tensors.get(&id) {
-                output_tensors.insert(name.to_string(), tensor.clone());
-            }
+        if let Some(name) = model.get_tensor_name(id)
+            && let Some(tensor) = active_tensors.get(&id)
+        {
+            output_tensors.insert(name.to_string(), tensor.clone());
         }
     }
 

@@ -277,19 +277,18 @@ impl Model {
         let input_ids = self.graph.get_inputs();
         let mut results = HashMap::new();
         for tensor_id in input_ids {
-            if let Some(tensor_info) = self.graph.get_tensor_info(tensor_id) {
-                if let (Some(dtype), Some(name), Some(shape)) =
+            if let Some(tensor_info) = self.graph.get_tensor_info(tensor_id)
+                && let (Some(dtype), Some(name), Some(shape)) =
                     (tensor_info.dtype(), tensor_info.name(), tensor_info.shape())
-                {
-                    let shape: Vec<_> = shape
-                        .iter()
-                        .map(|x| match x {
-                            ScalarInfoTyped::Numeric(a) => Some(*a),
-                            _ => None,
-                        })
-                        .collect();
-                    results.insert(name, (dtype, shape));
-                }
+            {
+                let shape: Vec<_> = shape
+                    .iter()
+                    .map(|x| match x {
+                        ScalarInfoTyped::Numeric(a) => Some(*a),
+                        _ => None,
+                    })
+                    .collect();
+                results.insert(name.clone(), (dtype, shape));
             }
         }
         Ok(results)

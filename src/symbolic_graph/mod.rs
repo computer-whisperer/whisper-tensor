@@ -108,10 +108,11 @@ fn query_attribute_tensor(
     name: &str,
 ) -> Option<NDArrayNumericTensor<DynRank>> {
     for attr in attributes {
-        if attr.name == name && attr.r#type == onnx::attribute_proto::AttributeType::Tensor as i32 {
-            if let Some(tensor_proto) = &attr.t {
-                return NDArrayNumericTensor::try_from(tensor_proto).ok();
-            }
+        if attr.name == name
+            && attr.r#type == onnx::attribute_proto::AttributeType::Tensor as i32
+            && let Some(tensor_proto) = &attr.t
+        {
+            return NDArrayNumericTensor::try_from(tensor_proto).ok();
         }
     }
     None
@@ -196,10 +197,10 @@ pub fn check_tensor_matches(
             Err(EvalError::UnexpectedRank(shape.len(), tensor.shape().len()))?;
         }
         for (a, b) in shape.iter().zip(tensor.shape()) {
-            if let ScalarInfoTyped::Numeric(a) = a {
-                if *a != b {
-                    Err(EvalError::UnexpectedDimension(*a, b, tensor.shape()))?
-                }
+            if let ScalarInfoTyped::Numeric(a) = a
+                && *a != b
+            {
+                Err(EvalError::UnexpectedDimension(*a, b, tensor.shape()))?
             }
         }
     }

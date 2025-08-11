@@ -74,10 +74,9 @@ impl OnnxNodeTest {
                     .file_name()?
                     .to_string_lossy()
                     .starts_with("test_data_set_")
+                && let Some(data_set) = TestDataSet::from_directory(&path)
             {
-                if let Some(data_set) = TestDataSet::from_directory(&path) {
-                    test_data_sets.push(data_set);
-                }
+                test_data_sets.push(data_set);
             }
         }
 
