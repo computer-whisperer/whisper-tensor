@@ -6,7 +6,9 @@ pub mod nodes;
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
-use crate::milli_graph::{MilliOpGraphError, MilliOpGraphNodePath, MilliOpGraphTensorPath};
+use crate::milli_graph::{
+    MilliOpGraphError, MilliOpGraphNodePath, MilliOpGraphTensorId, MilliOpGraphTensorPath,
+};
 use crate::model::ModelError;
 use crate::numeric_tensor::NumericTensorError;
 use crate::numeric_tensor_typed::TypedNumericTensorError;
@@ -17,7 +19,9 @@ pub use crate::super_graph::links::{
     SuperGraphLinkString, SuperGraphLinkTensor, SuperGraphLinkTokenizer,
 };
 use crate::super_graph::nodes::SuperGraphAnyNode;
-use crate::symbolic_graph::{SymbolicGraphNodePath, SymbolicGraphTensorPath};
+use crate::symbolic_graph::{
+    SymbolicGraphNodePath, SymbolicGraphOperationId, SymbolicGraphTensorId, SymbolicGraphTensorPath,
+};
 use crate::tokenizer::TokenizerError;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -169,7 +173,7 @@ impl SuperGraphInner {
 
         if let Some(telemetry_request) = &telemetry_request {
             for (link, tensor) in &data.tensors {
-                let path = SuperGraphTensorPath::Link(*link);
+                let path = SuperGraphTensorPath::SuperGraphLink(vec![], *link);
                 if telemetry_request.subscribed_tensors.contains(&path) {
                     telemetry_response
                         .subscribed_tensors
@@ -306,16 +310,109 @@ impl Default for SuperGraphBuilder {
 
 #[derive(Clone, Debug, Serialize, Deserialize, Hash, PartialEq, Eq)]
 pub enum SuperGraphTensorPath {
-    Link(SuperGraphLinkTensor),
-    SubSuperGraph(SuperGraphNodeId, Box<SuperGraphTensorPath>),
-    SymbolicGraphTensor(SuperGraphNodeId, SymbolicGraphTensorPath),
-    MilliOpGraphTensor(SuperGraphNodeId, MilliOpGraphTensorPath),
+    SuperGraphLink(Vec<SuperGraphNodeId>, SuperGraphLinkTensor),
+    SymbolicGraphTensor(Vec<SuperGraphNodeId>, SymbolicGraphTensorPath),
+    MilliOpGraphTensor(Vec<SuperGraphNodeId>, MilliOpGraphTensorPath),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Hash, PartialEq, Eq)]
 pub enum SuperGraphNodePath {
-    Node(SuperGraphNodeId),
-    SubSuperGraph(SuperGraphNodeId, Box<SuperGraphNodePath>),
-    SymbolicGraphNode(SuperGraphNodeId, SymbolicGraphNodePath),
-    MilliOpGraphNode(SuperGraphNodeId, MilliOpGraphNodePath),
+    SuperGraphNode(Vec<SuperGraphNodeId>),
+    SymbolicGraphNode(Vec<SuperGraphNodeId>, SymbolicGraphNodePath),
+    MilliOpGraphNode(Vec<SuperGraphNodeId>, MilliOpGraphNodePath),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Hash, PartialEq, Eq)]
+pub enum SuperGraphGraphPath {
+    SymbolicGraph(Vec<SuperGraphNodeId>),
+    SuperGraph(Vec<SuperGraphNodeId>),
+    MilliOpGraph(Vec<SuperGraphNodeId>),
+}
+
+impl SuperGraphGraphPath {
+    pub fn push_symbolic_node(&self, node: SymbolicGraphOperationId) -> SuperGraphNodePath {
+        if let SuperGraphGraphPath::SymbolicGraph(path) = self {
+            SuperGraphNodePath::SymbolicGraphNode(path.clone(), SymbolicGraphNodePath::Node(node))
+        } else {
+            panic!();
+        }
+    }
+
+    pub fn push_symbolic_tensor(&self, tensor: SymbolicGraphTensorId) -> SuperGraphTensorPath {
+        if let SuperGraphGraphPath::SymbolicGraph(path) = self {
+            SuperGraphTensorPath::SymbolicGraphTensor(
+                path.clone(),
+                SymbolicGraphTensorPath::Tensor(tensor),
+            )
+        } else {
+            panic!();
+        }
+    }
+
+    pub fn push_super_node(&self, node: SuperGraphNodeId) -> SuperGraphNodePath {
+        if let SuperGraphGraphPath::SuperGraph(a) = self {
+            let mut path = a.clone();
+            path.push(node);
+            SuperGraphNodePath::SuperGraphNode(path)
+        } else {
+            panic!();
+        }
+    }
+
+    pub fn push_super_node_graph(&self, node: SuperGraphNodeId) -> SuperGraphGraphPath {
+        if let SuperGraphGraphPath::SuperGraph(a) = self {
+            let mut path = a.clone();
+            path.push(node);
+            SuperGraphGraphPath::SuperGraph(path)
+        } else {
+            panic!();
+        }
+    }
+
+    pub fn push_model_execution_node_graph(&self, node: SuperGraphNodeId) -> SuperGraphGraphPath {
+        if let SuperGraphGraphPath::SuperGraph(a) = self {
+            let mut path = a.clone();
+            path.push(node);
+            SuperGraphGraphPath::SymbolicGraph(path)
+        } else {
+            panic!();
+        }
+    }
+
+    pub fn push_super_milli_op_node_graph(&self, node: SuperGraphNodeId) -> SuperGraphGraphPath {
+        if let SuperGraphGraphPath::SuperGraph(a) = self {
+            let mut path = a.clone();
+            path.push(node);
+            SuperGraphGraphPath::MilliOpGraph(path)
+        } else {
+            panic!();
+        }
+    }
+
+    pub fn push_super_tensor(&self, link: SuperGraphLinkTensor) -> SuperGraphTensorPath {
+        if let SuperGraphGraphPath::SuperGraph(a) = self {
+            SuperGraphTensorPath::SuperGraphLink(a.clone(), link)
+        } else {
+            panic!();
+        }
+    }
+
+    pub fn push_milli_op_node(&self, id: MilliOpGraphTensorId) -> SuperGraphNodePath {
+        if let SuperGraphGraphPath::MilliOpGraph(path) = self {
+            SuperGraphNodePath::MilliOpGraphNode(path.clone(), MilliOpGraphNodePath::Op(id))
+        } else {
+            panic!();
+        }
+    }
+
+    pub fn push_milli_op_tensor(&self, id: MilliOpGraphTensorId) -> SuperGraphTensorPath {
+        if let SuperGraphGraphPath::MilliOpGraph(path) = self {
+            SuperGraphTensorPath::MilliOpGraphTensor(
+                path.clone(),
+                MilliOpGraphTensorPath::Tensor(id),
+            )
+        } else {
+            panic!();
+        }
+    }
 }

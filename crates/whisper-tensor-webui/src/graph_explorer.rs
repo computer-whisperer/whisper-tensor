@@ -23,7 +23,8 @@ use whisper_tensor::milli_graph::{MilliOpGraph, MilliOpGraphTensorId};
 use whisper_tensor::scalar_info::ScalarInfoTyped;
 use whisper_tensor::super_graph::nodes::SuperGraphAnyNode;
 use whisper_tensor::super_graph::{
-    SuperGraphAnyLink, SuperGraphInner, SuperGraphLinkTensor, SuperGraphNodeId,
+    SuperGraphAnyLink, SuperGraphGraphPath, SuperGraphInner, SuperGraphLinkTensor,
+    SuperGraphNodeId, SuperGraphTensorPath,
 };
 use whisper_tensor::symbolic_graph::ops::{AnyOperation, Operation};
 use whisper_tensor::symbolic_graph::tensor_store::TensorStoreTensorId;
@@ -85,6 +86,9 @@ pub(crate) struct GraphExplorerApp {
     pub(crate) explorer_selection: Option<GraphExplorerSelectable>,
     pub(crate) explorer_hovered: Option<GraphExplorerSelectable>,
     pub(crate) next_explorer_hovered: Option<GraphExplorerSelectable>,
+    inspect_window_tensor_subscriptions: HashSet<SuperGraphTensorPath>,
+    inspect_window_tensor_subscription_returns:
+        HashMap<SuperGraphTensorPath, NDArrayNumericTensor<DynRank>>,
     pub inspect_windows: Vec<InspectWindow>,
     graph_layouts: HashMap<Vec<GraphExplorerLayerSelection>, Result<GraphLayout, GraphLayoutError>>,
     pub loaded_models: HashMap<LoadedModelId, SymbolicGraph>,
@@ -302,6 +306,8 @@ impl GraphExplorerApp {
             explorer_selection: None,
             explorer_hovered: None,
             next_explorer_hovered: None,
+            inspect_window_tensor_subscription_returns: HashMap::new(),
+            inspect_window_tensor_subscriptions: HashSet::new(),
             inspect_windows: Vec::new(),
             graph_layouts: HashMap::new(),
             loaded_models: HashMap::new(),
@@ -1292,6 +1298,7 @@ impl GraphExplorerApp {
                                             if let Some(mut response) =
                                                 server_request_manager.get_response(*request_id)
                                             {
+                                                self.inspect_window_tensor_subscription_returns = response.subscribed_tensors;
                                                 let (_, link, tokens) = text_inference_data
                                                     .pending_request
                                                     .take()
@@ -1370,7 +1377,7 @@ impl GraphExplorerApp {
                                                                     .super_graph
                                                                     .clone(),
                                                                 string_inputs: HashMap::new(),
-                                                                subscribed_tensors: Vec::new(),
+                                                                subscribed_tensors: self.inspect_window_tensor_subscriptions.iter().cloned().collect(),
                                                                 tensor_inputs: HashMap::from([(
                                                                     llm_interface
                                                                         .token_context_input_link
@@ -1528,6 +1535,86 @@ impl GraphExplorerApp {
         model_scope
     }
 
+    pub(crate) fn get_super_graph_graph_path(
+        &self,
+        loaded_models: &LoadedModels,
+    ) -> Option<SuperGraphGraphPath> {
+        let mut path: Option<SuperGraphGraphPath> = None;
+        let mut subject = None;
+        let mut implied_model = None;
+        for a in &self.graph_subject_path {
+            (path, subject) = match (a, &path, &subject) {
+                (GraphExplorerLayerSelection::Model(_model_id), _, _) => {
+                    // No super graph if the root selection is a model
+                    (None, None)
+                }
+                (GraphExplorerLayerSelection::Interface(interface_id), _, _) => {
+                    if let Some(x) = loaded_models.current_interfaces.get(interface_id) {
+                        implied_model = x.model_ids.first();
+                        (
+                            Some(SuperGraphGraphPath::SuperGraph(vec![])),
+                            Some(GraphSubject::SuperGraphInner(
+                                &x.interface.get_super_graph().inner,
+                            )),
+                        )
+                    } else {
+                        (None, None)
+                    }
+                }
+                (
+                    GraphExplorerLayerSelection::SymbolicGraphOperationId((_a, _b)),
+                    Some(_path),
+                    _,
+                ) => {
+                    todo!();
+                    // Don't support symbolic graph nesting yet
+                }
+                (
+                    GraphExplorerLayerSelection::SuperGraphNodeId(node_id),
+                    Some(path),
+                    Some(GraphSubject::SuperGraphInner(subject)),
+                ) => {
+                    if let Some(x) = subject.nodes.get(node_id) {
+                        match x {
+                            SuperGraphAnyNode::MilliOpGraph(x) => (
+                                Some(path.push_super_milli_op_node_graph(*node_id)),
+                                Some(GraphSubject::MilliOpGraphB(&x.graph)),
+                            ),
+                            SuperGraphAnyNode::ModelExecution(x) => {
+                                if let Some(model_id) = implied_model
+                                    && let Some(symbolic_graph) = self.loaded_models.get(model_id)
+                                {
+                                    (
+                                        Some(path.push_model_execution_node_graph(*node_id)),
+                                        Some(GraphSubject::SymbolicGraphInner(
+                                            &symbolic_graph.inner_graph,
+                                        )),
+                                    )
+                                } else {
+                                    (None, None)
+                                }
+                            }
+                            _ => {
+                                if let Some(x) = x.get_sub_graph() {
+                                    (
+                                        Some(path.push_super_node_graph(*node_id)),
+                                        Some(GraphSubject::SuperGraphInner(x)),
+                                    )
+                                } else {
+                                    (None, None)
+                                }
+                            }
+                        }
+                    } else {
+                        (None, None)
+                    }
+                }
+                _ => (None, None),
+            };
+        }
+        path
+    }
+
     pub(crate) fn update_inspect_windows(
         &mut self,
         _state: &mut GraphExplorerState,
@@ -1610,6 +1697,8 @@ impl GraphExplorerApp {
             }
             (graph_subject, model_scope)
         };
+        let mut new_subscribed_tensors = HashSet::new();
+        let super_graph_path = self.get_super_graph_graph_path(loaded_models);
         if let Some(graph_subject) = graph_subject {
             let mut new_inspect_windows = vec![];
             self.inspect_windows.retain_mut(|inspect_window| {
@@ -1799,6 +1888,7 @@ impl GraphExplorerApp {
                                                 .unwrap_or("N/A".to_string())
                                         )));
                             let mut stored_tensor = None;
+                            let mut subscribed_tensor = None;
                             match &tensor_info.tensor_type {
                                 TensorType::Input(x) => {
                                     resp = resp.union(ui.label("Tensor Type: Model Input"));
@@ -1815,9 +1905,15 @@ impl GraphExplorerApp {
                                 }
                                 TensorType::Output => {
                                     resp = resp.union(ui.label("Tensor Type: Model Output"));
+                                    if let Some(x) = &super_graph_path {
+                                        subscribed_tensor = Some(x.push_symbolic_tensor(tensor_id));
+                                    }
                                 }
                                 TensorType::Intermediate => {
                                     resp = resp.union(ui.label("Tensor Type: Intermediate"));
+                                    if let Some(x) = &super_graph_path {
+                                        subscribed_tensor = Some(x.push_symbolic_tensor(tensor_id));
+                                    }
                                 }
                                 TensorType::Constant(x) => {
                                     resp = resp.union(ui.label("Tensor Type: Constant"));
@@ -1861,6 +1957,16 @@ impl GraphExplorerApp {
                                     resp = resp.union(ui.spinner());
                                 }
                             }
+                            if let Some(x) = subscribed_tensor {
+                                if let Some(x) =
+                                    self.inspect_window_tensor_subscription_returns.get(&x)
+                                {
+                                    resp = resp.union(ui.label(format!("Last Value: {x}")));
+                                } else {
+                                    resp = resp.union(ui.label("No Value Received Yet"));
+                                }
+                                new_subscribed_tensors.insert(x);
+                            }
                             if resp.clicked() {
                                 self.explorer_selection =
                                     Some(GraphExplorerSelectable::SymbolicGraphTensorId(tensor_id));
@@ -1887,6 +1993,7 @@ impl GraphExplorerApp {
                 }
             }
         }
+        self.inspect_window_tensor_subscriptions = new_subscribed_tensors;
     }
 }
 

@@ -103,7 +103,7 @@ impl SuperGraphNode for SuperGraphNodeModelExecution {
             let mut subscribed_tensors = HashSet::new();
             for path in &x.subscribed_tensors {
                 if let SuperGraphTensorPath::SymbolicGraphTensor(a, b) = path
-                    && *a == node_id
+                    && *a == vec![node_id]
                 {
                     subscribed_tensors.insert(b.clone());
                 }
@@ -119,9 +119,10 @@ impl SuperGraphNode for SuperGraphNodeModelExecution {
                 .insert(*link, outputs.get(name).unwrap().clone());
         }
         for (a, b) in inner_telemetry_response.subscribed_tensors {
-            telemetry_response
-                .subscribed_tensors
-                .insert(SuperGraphTensorPath::SymbolicGraphTensor(node_id, a), b);
+            telemetry_response.subscribed_tensors.insert(
+                SuperGraphTensorPath::SymbolicGraphTensor(vec![node_id], a),
+                b,
+            );
         }
         Ok(())
     }
@@ -387,7 +388,7 @@ impl SuperGraphNode for SuperGraphNodeMilliOpGraph {
             let mut subscribed_tensors = HashSet::new();
             for tensor in &telemetry_request.subscribed_tensors {
                 if let SuperGraphTensorPath::MilliOpGraphTensor(a, b) = tensor
-                    && *a == node_id
+                    && *a == vec![node_id]
                 {
                     subscribed_tensors.insert(b.clone());
                 }
@@ -400,9 +401,10 @@ impl SuperGraphNode for SuperGraphNodeMilliOpGraph {
             self.graph
                 .eval(&inputs, telemetry_request_inner.as_ref(), backend)?;
         for (a, b) in telemetry_response_inner.subscribed_tensors {
-            telemetry_response
-                .subscribed_tensors
-                .insert(SuperGraphTensorPath::MilliOpGraphTensor(node_id, a), b);
+            telemetry_response.subscribed_tensors.insert(
+                SuperGraphTensorPath::MilliOpGraphTensor(vec![node_id], a),
+                b,
+            );
         }
         data.tensors.extend(res);
         Ok(())
@@ -606,10 +608,41 @@ impl SuperGraphNode for SuperGraphNodeScan {
         let inner_telemetry_request = if let Some(telemetry_request) = telemetry_request {
             let mut inner_subscribed_tensors = HashSet::new();
             for tensor in &telemetry_request.subscribed_tensors {
-                if let SuperGraphTensorPath::SubSuperGraph(a, b) = tensor
-                    && *a == node_id
-                {
-                    inner_subscribed_tensors.insert(*b.clone());
+                match tensor {
+                    SuperGraphTensorPath::SuperGraphLink(a, b) => {
+                        if let Some(x) = a.first()
+                            && *x == node_id
+                        {
+                            inner_subscribed_tensors.insert(SuperGraphTensorPath::SuperGraphLink(
+                                a[1..].to_vec(),
+                                *b,
+                            ));
+                        }
+                    }
+                    SuperGraphTensorPath::SymbolicGraphTensor(a, b) => {
+                        if let Some(x) = a.first()
+                            && *x == node_id
+                        {
+                            inner_subscribed_tensors.insert(
+                                SuperGraphTensorPath::SymbolicGraphTensor(
+                                    a[1..].to_vec(),
+                                    b.clone(),
+                                ),
+                            );
+                        }
+                    }
+                    SuperGraphTensorPath::MilliOpGraphTensor(a, b) => {
+                        if let Some(x) = a.first()
+                            && *x == node_id
+                        {
+                            inner_subscribed_tensors.insert(
+                                SuperGraphTensorPath::MilliOpGraphTensor(
+                                    a[1..].to_vec(),
+                                    b.clone(),
+                                ),
+                            );
+                        }
+                    }
                 }
             }
             Some(SuperGraphExecutionTelemetryRequest {
@@ -653,7 +686,23 @@ impl SuperGraphNode for SuperGraphNodeScan {
             )?;
             for (a, b) in inner_telemetry_response.subscribed_tensors {
                 telemetry_response.subscribed_tensors.insert(
-                    SuperGraphTensorPath::SubSuperGraph(node_id, Box::new(a.clone())),
+                    match a {
+                        SuperGraphTensorPath::SuperGraphLink(a, b) => {
+                            let mut path = vec![node_id];
+                            path.extend(a);
+                            SuperGraphTensorPath::SuperGraphLink(path, b)
+                        }
+                        SuperGraphTensorPath::SymbolicGraphTensor(a, b) => {
+                            let mut path = vec![node_id];
+                            path.extend(a);
+                            SuperGraphTensorPath::SymbolicGraphTensor(path, b)
+                        }
+                        SuperGraphTensorPath::MilliOpGraphTensor(a, b) => {
+                            let mut path = vec![node_id];
+                            path.extend(a);
+                            SuperGraphTensorPath::MilliOpGraphTensor(path, b)
+                        }
+                    },
                     b,
                 );
             }
