@@ -21,8 +21,8 @@ pub(crate) struct GraphLayoutIOOffsets {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum GraphLayoutNodeType {
-    SymbolicGraphOperation(whisper_tensor::symbolic_graph::OperationId),
-    SymbolicGraphTensor(whisper_tensor::symbolic_graph::TensorId),
+    SymbolicGraphOperation(whisper_tensor::symbolic_graph::SymbolicGraphOperationId),
+    SymbolicGraphTensor(whisper_tensor::symbolic_graph::SymbolicGraphTensorId),
     SuperGraphLink(whisper_tensor::super_graph::SuperGraphAnyLink),
     SuperGraphNode(whisper_tensor::super_graph::SuperGraphNodeId),
     MilliOpGraphNode(MilliOpGraphTensorId),
@@ -94,7 +94,7 @@ pub(crate) struct GraphLayoutNodeInitData {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum GraphLayoutLinkType {
-    SymbolicGraphTensor(whisper_tensor::symbolic_graph::TensorId),
+    SymbolicGraphTensor(whisper_tensor::symbolic_graph::SymbolicGraphTensorId),
     SuperGraphLink(SuperGraphAnyLink),
     MilliOpGraphTensor(MilliOpGraphTensorId),
 }

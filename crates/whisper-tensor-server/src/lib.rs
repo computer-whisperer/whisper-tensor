@@ -5,7 +5,7 @@ use whisper_tensor::interfaces::AnyInterface;
 use whisper_tensor::super_graph::links::{
     SuperGraphLinkHash, SuperGraphLinkModel, SuperGraphLinkString, SuperGraphLinkTensor,
 };
-use whisper_tensor::super_graph::{SuperGraph, SuperGraphHash};
+use whisper_tensor::super_graph::{SuperGraph, SuperGraphHash, SuperGraphTensorPath};
 use whisper_tensor::symbolic_graph::tensor_store::TensorStoreTensorId;
 use whisper_tensor_import::ModelTypeHint;
 
@@ -26,6 +26,7 @@ pub struct SuperGraphRequest {
     pub hash_inputs: HashMap<SuperGraphLinkHash, SuperGraphHash>,
     pub tensor_inputs: HashMap<SuperGraphLinkTensor, NDArrayNumericTensor<DynRank>>,
     pub model_inputs: HashMap<SuperGraphLinkModel, LoadedModelId>,
+    pub subscribed_tensors: Vec<SuperGraphTensorPath>
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -34,6 +35,7 @@ pub struct SuperGraphResponse {
     pub string_outputs: HashMap<SuperGraphLinkString, String>,
     pub hash_outputs: HashMap<SuperGraphLinkHash, SuperGraphHash>,
     pub tensor_outputs: HashMap<SuperGraphLinkTensor, NDArrayNumericTensor<DynRank>>,
+    pub subscribed_tensors: HashMap<SuperGraphTensorPath, NDArrayNumericTensor<DynRank>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

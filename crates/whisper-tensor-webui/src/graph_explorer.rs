@@ -27,9 +27,7 @@ use whisper_tensor::super_graph::{
 };
 use whisper_tensor::symbolic_graph::ops::{AnyOperation, Operation};
 use whisper_tensor::symbolic_graph::tensor_store::TensorStoreTensorId;
-use whisper_tensor::symbolic_graph::{
-    OperationId, StoredOrNotTensor, SymbolicGraph, SymbolicGraphInner, TensorId, TensorType,
-};
+use whisper_tensor::symbolic_graph::{SymbolicGraphOperationId, StoredOrNotTensor, SymbolicGraph, SymbolicGraphInner, SymbolicGraphTensorId, TensorType, SymbolicGraphTensorPath};
 use whisper_tensor::tokenizer::Tokenizer;
 use whisper_tensor_import::onnx_graph::TokenizerInfo;
 use whisper_tensor_import::onnx_graph::tensor::Tensor;
@@ -60,18 +58,19 @@ pub(crate) enum GraphSubject<'a> {
 pub(crate) enum GraphExplorerLayerSelection {
     Model(LoadedModelId),
     Interface(InterfaceId),
-    SymbolicGraphOperationId((OperationId, usize)),
+    SymbolicGraphOperationId((SymbolicGraphOperationId, usize)),
     SuperGraphNodeId(SuperGraphNodeId),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum GraphExplorerSelectable {
-    SymbolicGraphOperationId(OperationId),
-    SymbolicGraphTensorId(TensorId),
+    SymbolicGraphOperationId(SymbolicGraphOperationId),
+    SymbolicGraphTensorId(SymbolicGraphTensorId),
     SuperGraphNodeId(SuperGraphNodeId),
     SuperGraphLink(SuperGraphAnyLink),
     MilliOpGraphTensor(MilliOpGraphTensorId),
 }
+
 
 #[derive(Clone, Debug, Default)]
 struct TextInferenceData {
@@ -541,7 +540,9 @@ impl GraphExplorerApp {
                                             Rect::from_center_size(inner_pos, selected_area.size());
                                     }
                                 }
-                                self.next_graph_subject_path = Some(graph_subject_path.clone());
+                                if maps_left > 1 {
+                                    self.next_graph_subject_path = Some(graph_subject_path.clone());
+                                }
                             }
                             for (_node_id, node) in graph_layout.get_nodes() {
                                 let pos = (node.position - node_bounding_rect.min) * transform;
@@ -1370,6 +1371,7 @@ impl GraphExplorerApp {
                                                                     .super_graph
                                                                     .clone(),
                                                                 string_inputs: HashMap::new(),
+                                                                subscribed_tensors: Vec::new(),
                                                                 tensor_inputs: HashMap::from([(
                                                                     llm_interface
                                                                         .token_context_input_link
@@ -1490,7 +1492,7 @@ impl GraphExplorerApp {
                                 fn format_tensor_row(
                                     ui: &mut egui::Ui,
                                     i: usize,
-                                    tensor_id: TensorId,
+                                    tensor_id: SymbolicGraphTensorId,
                                     model_graph: &SymbolicGraph,
                                     new_inspect_windows: &mut Vec<OpOrTensorId>,
                                 ) -> Response {
@@ -1737,20 +1739,20 @@ impl GraphExplorerApp {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum OpOrTensorId {
-    Op(OperationId),
-    Tensor(TensorId),
+    Op(SymbolicGraphOperationId),
+    Tensor(SymbolicGraphTensorId),
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct InspectWindowTensor {
-    pub(crate) tensor_id: TensorId,
+    pub(crate) tensor_id: SymbolicGraphTensorId,
     pub(crate) stored_value_requested: Option<TensorStoreTensorId>,
     pub(crate) stored_value: Option<Result<NDArrayNumericTensor<DynRank>, String>>,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) enum InspectWindow {
-    Operation(OperationId),
+    Operation(SymbolicGraphOperationId),
     Tensor(InspectWindowTensor),
 }
 

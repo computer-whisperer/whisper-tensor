@@ -355,6 +355,7 @@ impl LLMExplorerApp {
                         server_request_manager.submit_supergraph_request(SuperGraphRequest {
                             attention_token: None,
                             super_graph: llm_interface.super_graph.clone(),
+                            subscribed_tensors: Vec::new(),
                             string_inputs: HashMap::new(),
                             tensor_inputs: HashMap::from([(
                                 llm_interface.token_context_input_link.clone(),

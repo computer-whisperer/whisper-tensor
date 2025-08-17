@@ -6,7 +6,7 @@ use crate::milli_graph::{MilliOpGraph, MilliOpGraphError, ops_helpers};
 use crate::numeric_scalar::NumericScalar;
 use crate::numeric_tensor::{NumericTensor, NumericTensorError};
 use crate::symbolic_graph::{
-    ONNXDecodingError, SymbolicGraphInner, SymbolicGraphMutator, TensorId, query_attribute_bool,
+    ONNXDecodingError, SymbolicGraphInner, SymbolicGraphMutator, SymbolicGraphTensorId, query_attribute_bool,
     query_attribute_float, query_attribute_floats, query_attribute_graph, query_attribute_int,
     query_attribute_ints, query_attribute_string, query_attribute_tensor,
 };
@@ -44,18 +44,18 @@ pub trait Operation {
         type_name_of_val(self).to_string()
     }*/
     fn get_op_type_name(&self) -> String;
-    fn get_inputs(&self) -> Vec<TensorId>;
-    fn get_outputs(&self) -> Vec<TensorId>;
+    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId>;
+    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId>;
 
     fn eval(
         &self,
         backend: &mut EvalBackend,
-        inputs: &HashMap<TensorId, NumericTensor<DynRank>>,
-    ) -> Result<HashMap<TensorId, NumericTensor<DynRank>>, EvalError> {
+        inputs: &HashMap<SymbolicGraphTensorId, NumericTensor<DynRank>>,
+    ) -> Result<HashMap<SymbolicGraphTensorId, NumericTensor<DynRank>>, EvalError> {
         let milli_graph = self.get_milli_op_graph();
-        Ok(milli_graph.eval(inputs, backend)?)
+        Ok(milli_graph.eval(inputs, None, backend)?.0)
     }
-    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId>;
+    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId>;
     fn get_sub_graphs(&self) -> Vec<&SymbolicGraphInner> {
         vec![]
     }
@@ -83,16 +83,16 @@ pub(crate) enum WhichBinaryOperation {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BinaryOperation {
-    a: TensorId,
-    b: TensorId,
-    output: TensorId,
+    a: SymbolicGraphTensorId,
+    b: SymbolicGraphTensorId,
+    output: SymbolicGraphTensorId,
     which: WhichBinaryOperation,
 }
 
 impl BinaryOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<TensorId>],
-        outputs: &[Option<TensorId>],
+        inputs: &[Option<SymbolicGraphTensorId>],
+        outputs: &[Option<SymbolicGraphTensorId>],
         which: WhichBinaryOperation,
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 2 {
@@ -115,15 +115,15 @@ impl Operation for BinaryOperation {
         self.which.to_string()
     }
 
-    fn get_inputs(&self) -> Vec<TensorId> {
+    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.a, self.b]
     }
 
-    fn get_outputs(&self) -> Vec<TensorId> {
+    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let a = input_map[&self.a];
         let b = input_map[&self.b];
@@ -192,15 +192,15 @@ pub(crate) enum WhichUnaryOperation {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct UnaryOperation {
-    input: TensorId,
-    output: TensorId,
+    input: SymbolicGraphTensorId,
+    output: SymbolicGraphTensorId,
     which: WhichUnaryOperation,
 }
 
 impl UnaryOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<TensorId>],
-        outputs: &[Option<TensorId>],
+        inputs: &[Option<SymbolicGraphTensorId>],
+        outputs: &[Option<SymbolicGraphTensorId>],
         which: WhichUnaryOperation,
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 1 {
@@ -226,15 +226,15 @@ impl Operation for UnaryOperation {
         }
     }
 
-    fn get_inputs(&self) -> Vec<TensorId> {
+    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.input]
     }
 
-    fn get_outputs(&self) -> Vec<TensorId> {
+    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let a = input_map[&self.input];
         let res = match &self.which {
@@ -287,17 +287,17 @@ impl Operation for UnaryOperation {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CumSumOperation {
-    input: TensorId,
-    output: TensorId,
-    axis: TensorId,
+    input: SymbolicGraphTensorId,
+    output: SymbolicGraphTensorId,
+    axis: SymbolicGraphTensorId,
     exclusive: bool,
     reverse: bool,
 }
 
 impl CumSumOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<TensorId>],
-        outputs: &[Option<TensorId>],
+        inputs: &[Option<SymbolicGraphTensorId>],
+        outputs: &[Option<SymbolicGraphTensorId>],
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 2 {
             return Err(ONNXDecodingError::InvalidOperatorInputs("CumSum"));
@@ -319,14 +319,14 @@ impl Operation for CumSumOperation {
         "CumSum".to_string()
     }
 
-    fn get_inputs(&self) -> Vec<TensorId> {
+    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.input, self.axis]
     }
-    fn get_outputs(&self) -> Vec<TensorId> {
+    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let a = input_map[&self.input];
         let b = input_map[&self.axis];
@@ -347,16 +347,16 @@ impl Operation for CumSumOperation {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LpNormalizationOperation {
-    input: TensorId,
-    output: TensorId,
+    input: SymbolicGraphTensorId,
+    output: SymbolicGraphTensorId,
     axis: i64,
     p: i64,
 }
 
 impl LpNormalizationOperation {
     pub fn from_onnx(
-        inputs: &[Option<TensorId>],
-        outputs: &[Option<TensorId>],
+        inputs: &[Option<SymbolicGraphTensorId>],
+        outputs: &[Option<SymbolicGraphTensorId>],
         attributes: &[onnx::AttributeProto],
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 1 {
@@ -394,14 +394,14 @@ impl Operation for LpNormalizationOperation {
         "LpNormalization".to_string()
     }
 
-    fn get_inputs(&self) -> Vec<TensorId> {
+    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.input]
     }
-    fn get_outputs(&self) -> Vec<TensorId> {
+    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let input = input_map[&self.input];
 
@@ -440,18 +440,18 @@ impl Operation for LpNormalizationOperation {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GroupNormalizationOperation {
-    input: TensorId,
-    scale: TensorId,
-    bias: TensorId,
-    output: TensorId,
+    input: SymbolicGraphTensorId,
+    scale: SymbolicGraphTensorId,
+    bias: SymbolicGraphTensorId,
+    output: SymbolicGraphTensorId,
     epsilon: f32,
     num_groups: usize,
 }
 
 impl GroupNormalizationOperation {
     pub fn from_onnx(
-        inputs: &[Option<TensorId>],
-        outputs: &[Option<TensorId>],
+        inputs: &[Option<SymbolicGraphTensorId>],
+        outputs: &[Option<SymbolicGraphTensorId>],
         attributes: &[onnx::AttributeProto],
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 3 {
@@ -501,14 +501,14 @@ impl Operation for GroupNormalizationOperation {
         "GroupNormalization".to_string()
     }
 
-    fn get_inputs(&self) -> Vec<TensorId> {
+    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.input, self.scale, self.bias]
     }
-    fn get_outputs(&self) -> Vec<TensorId> {
+    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let input = input_map[&self.input];
 
@@ -625,16 +625,16 @@ impl Operation for GroupNormalizationOperation {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SqueezeOperation {
-    input: TensorId,
-    axes: Option<TensorId>,
+    input: SymbolicGraphTensorId,
+    axes: Option<SymbolicGraphTensorId>,
     axes_attribute: Option<Vec<i64>>,
-    output: TensorId,
+    output: SymbolicGraphTensorId,
 }
 
 impl SqueezeOperation {
     pub fn from_onnx(
-        inputs: &[Option<TensorId>],
-        outputs: &[Option<TensorId>],
+        inputs: &[Option<SymbolicGraphTensorId>],
+        outputs: &[Option<SymbolicGraphTensorId>],
         attributes: &[onnx::AttributeProto],
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.is_empty() || inputs.len() > 2 {
@@ -662,7 +662,7 @@ impl Operation for SqueezeOperation {
         "Squeeze".to_string()
     }
 
-    fn get_inputs(&self) -> Vec<TensorId> {
+    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
         if let Some(axes) = self.axes {
             vec![self.input, axes]
         } else {
@@ -670,11 +670,11 @@ impl Operation for SqueezeOperation {
         }
     }
 
-    fn get_outputs(&self) -> Vec<TensorId> {
+    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let axes_input = if let Some(axes) = self.axes {
             input_map[&axes]
@@ -700,16 +700,16 @@ impl Operation for SqueezeOperation {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct UnsqueezeOperation {
-    input: TensorId,
-    axes: Option<TensorId>,
+    input: SymbolicGraphTensorId,
+    axes: Option<SymbolicGraphTensorId>,
     axes_attribute: Option<Vec<i64>>,
-    output: TensorId,
+    output: SymbolicGraphTensorId,
 }
 
 impl UnsqueezeOperation {
     pub fn from_onnx(
-        inputs: &[Option<TensorId>],
-        outputs: &[Option<TensorId>],
+        inputs: &[Option<SymbolicGraphTensorId>],
+        outputs: &[Option<SymbolicGraphTensorId>],
         attributes: &[onnx::AttributeProto],
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.is_empty() || inputs.len() > 2 {
@@ -737,7 +737,7 @@ impl Operation for UnsqueezeOperation {
         "Unsqueeze".to_string()
     }
 
-    fn get_inputs(&self) -> Vec<TensorId> {
+    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
         if let Some(axes) = self.axes {
             vec![self.input, axes]
         } else {
@@ -745,11 +745,11 @@ impl Operation for UnsqueezeOperation {
         }
     }
 
-    fn get_outputs(&self) -> Vec<TensorId> {
+    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let axes_input = if let Some(axes) = self.axes {
             input_map[&axes]
@@ -775,15 +775,15 @@ impl Operation for UnsqueezeOperation {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TransposeOperation {
-    input: TensorId,
-    output: TensorId,
+    input: SymbolicGraphTensorId,
+    output: SymbolicGraphTensorId,
     perm: Option<Vec<i64>>,
 }
 
 impl TransposeOperation {
     pub fn from_onnx(
-        inputs: &[Option<TensorId>],
-        outputs: &[Option<TensorId>],
+        inputs: &[Option<SymbolicGraphTensorId>],
+        outputs: &[Option<SymbolicGraphTensorId>],
         attributes: &[onnx::AttributeProto],
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 1 {
@@ -805,14 +805,14 @@ impl Operation for TransposeOperation {
         "Transpose".to_string()
     }
 
-    fn get_inputs(&self) -> Vec<TensorId> {
+    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.input]
     }
-    fn get_outputs(&self) -> Vec<TensorId> {
+    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let out = graph.push_op(AnyMilliOp::Transpose(MilliOpTranspose::new(
             input_map[&self.input],
@@ -827,15 +827,15 @@ impl Operation for TransposeOperation {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ReshapeOperation {
-    input: TensorId,
-    shape: TensorId,
-    output: TensorId,
+    input: SymbolicGraphTensorId,
+    shape: SymbolicGraphTensorId,
+    output: SymbolicGraphTensorId,
 }
 
 impl ReshapeOperation {
     pub fn from_onnx(
-        inputs: &[Option<TensorId>],
-        outputs: &[Option<TensorId>],
+        inputs: &[Option<SymbolicGraphTensorId>],
+        outputs: &[Option<SymbolicGraphTensorId>],
         _attributes: &[onnx::AttributeProto],
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 2 {
@@ -857,14 +857,14 @@ impl Operation for ReshapeOperation {
         "Reshape".to_string()
     }
 
-    fn get_inputs(&self) -> Vec<TensorId> {
+    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.input, self.shape]
     }
-    fn get_outputs(&self) -> Vec<TensorId> {
+    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let out = graph.push_op(AnyMilliOp::Reshape(MilliOpReshape::new(
             input_map[&self.input],
@@ -880,15 +880,15 @@ impl Operation for ReshapeOperation {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CastLikeOperation {
-    input: TensorId,
-    target_type: TensorId,
-    output: TensorId,
+    input: SymbolicGraphTensorId,
+    target_type: SymbolicGraphTensorId,
+    output: SymbolicGraphTensorId,
 }
 
 impl CastLikeOperation {
     pub fn from_onnx(
-        inputs: &[Option<TensorId>],
-        outputs: &[Option<TensorId>],
+        inputs: &[Option<SymbolicGraphTensorId>],
+        outputs: &[Option<SymbolicGraphTensorId>],
         _attributes: &[onnx::AttributeProto],
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 2 {
@@ -910,14 +910,14 @@ impl Operation for CastLikeOperation {
         "Cast Like".to_string()
     }
 
-    fn get_inputs(&self) -> Vec<TensorId> {
+    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.input, self.target_type]
     }
-    fn get_outputs(&self) -> Vec<TensorId> {
+    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let out = graph.push_op(AnyMilliOp::CastLike(MilliOpCastLike::new(
             input_map[&self.input],
@@ -932,15 +932,15 @@ impl Operation for CastLikeOperation {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CastOperation {
-    input: TensorId,
-    output: TensorId,
+    input: SymbolicGraphTensorId,
+    output: SymbolicGraphTensorId,
     to: DType,
 }
 
 impl CastOperation {
     pub fn from_onnx(
-        inputs: &[Option<TensorId>],
-        outputs: &[Option<TensorId>],
+        inputs: &[Option<SymbolicGraphTensorId>],
+        outputs: &[Option<SymbolicGraphTensorId>],
         attributes: &[onnx::AttributeProto],
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 1 {
@@ -973,14 +973,14 @@ impl Operation for CastOperation {
         "Cast".to_string()
     }
 
-    fn get_inputs(&self) -> Vec<TensorId> {
+    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.input]
     }
-    fn get_outputs(&self) -> Vec<TensorId> {
+    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let out = graph.push_op(AnyMilliOp::Cast(MilliOpCast::new(
             input_map[&self.input],
@@ -995,20 +995,20 @@ impl Operation for CastOperation {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LayerNormalizationOperation {
-    input: TensorId,
-    scale: TensorId,
-    bias: Option<TensorId>,
-    output: TensorId,
-    mean_output: Option<TensorId>,
-    inv_std_dev_output: Option<TensorId>,
+    input: SymbolicGraphTensorId,
+    scale: SymbolicGraphTensorId,
+    bias: Option<SymbolicGraphTensorId>,
+    output: SymbolicGraphTensorId,
+    mean_output: Option<SymbolicGraphTensorId>,
+    inv_std_dev_output: Option<SymbolicGraphTensorId>,
     axis: i64,
     epsilon: f32,
 }
 
 impl LayerNormalizationOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<TensorId>],
-        outputs: &[Option<TensorId>],
+        inputs: &[Option<SymbolicGraphTensorId>],
+        outputs: &[Option<SymbolicGraphTensorId>],
         attributes: &[onnx::AttributeProto],
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() < 2 || inputs.len() > 3 {
@@ -1076,14 +1076,14 @@ impl Operation for LayerNormalizationOperation {
         "Layer Normalization".to_string()
     }
 
-    fn get_inputs(&self) -> Vec<TensorId> {
+    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
         let mut v = vec![self.input, self.scale];
         if let Some(bias) = self.bias {
             v.push(bias);
         }
         v
     }
-    fn get_outputs(&self) -> Vec<TensorId> {
+    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
         let mut res = vec![self.output];
         if let Some(mean_output) = self.mean_output {
             res.push(mean_output);
@@ -1094,7 +1094,7 @@ impl Operation for LayerNormalizationOperation {
         res
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let input_data = input_map[&self.input];
         let input_scale = input_map[&self.scale];
@@ -1176,16 +1176,16 @@ impl Operation for LayerNormalizationOperation {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GatherOperation {
-    input: TensorId,
-    indices: TensorId,
-    output: TensorId,
+    input: SymbolicGraphTensorId,
+    indices: SymbolicGraphTensorId,
+    output: SymbolicGraphTensorId,
     axis: i64,
 }
 
 impl GatherOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<TensorId>],
-        outputs: &[Option<TensorId>],
+        inputs: &[Option<SymbolicGraphTensorId>],
+        outputs: &[Option<SymbolicGraphTensorId>],
         attributes: &[onnx::AttributeProto],
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 2 {
@@ -1214,14 +1214,14 @@ impl Operation for GatherOperation {
         "Gather".to_string()
     }
 
-    fn get_inputs(&self) -> Vec<TensorId> {
+    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.input, self.indices]
     }
-    fn get_outputs(&self) -> Vec<TensorId> {
+    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let out = graph.push_op(AnyMilliOp::Gather(MilliOpGather::new(
             input_map[&self.input],
@@ -1239,14 +1239,14 @@ impl Operation for GatherOperation {
 pub struct ShapeOperation {
     start: Option<i64>,
     end: Option<i64>,
-    input: TensorId,
-    output: TensorId,
+    input: SymbolicGraphTensorId,
+    output: SymbolicGraphTensorId,
 }
 
 impl ShapeOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<TensorId>],
-        outputs: &[Option<TensorId>],
+        inputs: &[Option<SymbolicGraphTensorId>],
+        outputs: &[Option<SymbolicGraphTensorId>],
         attributes: &[onnx::AttributeProto],
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 1 {
@@ -1282,14 +1282,14 @@ impl Operation for ShapeOperation {
         "Shape".to_string()
     }
 
-    fn get_inputs(&self) -> Vec<TensorId> {
+    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.input]
     }
-    fn get_outputs(&self) -> Vec<TensorId> {
+    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let out = graph.push_op(AnyMilliOp::Shape(MilliOpShape::new(input_map[&self.input])));
         let out = if self.start.is_some() || self.end.is_some() {
@@ -1315,14 +1315,14 @@ impl Operation for ShapeOperation {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ConcatOperation {
     axis: i64,
-    inputs: Vec<TensorId>,
-    output: TensorId,
+    inputs: Vec<SymbolicGraphTensorId>,
+    output: SymbolicGraphTensorId,
 }
 
 impl ConcatOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<TensorId>],
-        outputs: &[Option<TensorId>],
+        inputs: &[Option<SymbolicGraphTensorId>],
+        outputs: &[Option<SymbolicGraphTensorId>],
         attributes: &[onnx::AttributeProto],
     ) -> Result<Self, ONNXDecodingError> {
         if outputs.len() != 1 {
@@ -1351,14 +1351,14 @@ impl Operation for ConcatOperation {
         "Concat".to_string()
     }
 
-    fn get_inputs(&self) -> Vec<TensorId> {
+    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
         self.inputs.clone()
     }
-    fn get_outputs(&self) -> Vec<TensorId> {
+    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let mut milli_inputs = vec![];
         for input in &self.inputs {
@@ -1378,14 +1378,14 @@ impl Operation for ConcatOperation {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ConstantOfShapeOperation {
     value: NumericScalar,
-    input: TensorId,
-    output: TensorId,
+    input: SymbolicGraphTensorId,
+    output: SymbolicGraphTensorId,
 }
 
 impl ConstantOfShapeOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<TensorId>],
-        outputs: &[Option<TensorId>],
+        inputs: &[Option<SymbolicGraphTensorId>],
+        outputs: &[Option<SymbolicGraphTensorId>],
         attributes: &[onnx::AttributeProto],
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 1 {
@@ -1413,14 +1413,14 @@ impl Operation for ConstantOfShapeOperation {
         "Constant of Shape".to_string()
     }
 
-    fn get_inputs(&self) -> Vec<TensorId> {
+    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.input]
     }
-    fn get_outputs(&self) -> Vec<TensorId> {
+    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let out = graph.push_op(AnyMilliOp::ConstantOfShape(MilliOpConstantOfShape::new(
             self.value.clone(),
@@ -1437,16 +1437,16 @@ impl Operation for ConstantOfShapeOperation {
 pub struct ReduceMeanOperation {
     keepdims: Option<bool>,
     noop_with_empty_axes: Option<bool>,
-    input_data: TensorId,
-    input_axes: Option<TensorId>,
+    input_data: SymbolicGraphTensorId,
+    input_axes: Option<SymbolicGraphTensorId>,
     axes_attr: Option<Vec<i64>>,
-    output: TensorId,
+    output: SymbolicGraphTensorId,
 }
 
 impl ReduceMeanOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<TensorId>],
-        outputs: &[Option<TensorId>],
+        inputs: &[Option<SymbolicGraphTensorId>],
+        outputs: &[Option<SymbolicGraphTensorId>],
         attributes: &[onnx::AttributeProto],
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.is_empty() || inputs.len() > 2 {
@@ -1481,18 +1481,18 @@ impl Operation for ReduceMeanOperation {
         "Reduce Mean".to_string()
     }
 
-    fn get_inputs(&self) -> Vec<TensorId> {
+    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
         if let Some(input_axes) = self.input_axes {
             vec![self.input_data, input_axes]
         } else {
             vec![self.input_data]
         }
     }
-    fn get_outputs(&self) -> Vec<TensorId> {
+    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let axes = if let Some(input_axes) = &self.input_axes {
             Some(input_map[input_axes])
@@ -1519,16 +1519,16 @@ impl Operation for ReduceMeanOperation {
 pub struct ReduceSumOperation {
     keepdims: Option<bool>,
     noop_with_empty_axes: Option<bool>,
-    input_data: TensorId,
-    input_axes: Option<TensorId>,
+    input_data: SymbolicGraphTensorId,
+    input_axes: Option<SymbolicGraphTensorId>,
     axes_attr: Option<Vec<i64>>,
-    output: TensorId,
+    output: SymbolicGraphTensorId,
 }
 
 impl ReduceSumOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<TensorId>],
-        outputs: &[Option<TensorId>],
+        inputs: &[Option<SymbolicGraphTensorId>],
+        outputs: &[Option<SymbolicGraphTensorId>],
         attributes: &[onnx::AttributeProto],
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.is_empty() || inputs.len() > 2 {
@@ -1563,7 +1563,7 @@ impl Operation for ReduceSumOperation {
         "Reduce Sum".to_string()
     }
 
-    fn get_inputs(&self) -> Vec<TensorId> {
+    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
         if let Some(input_axes) = self.input_axes {
             vec![self.input_data, input_axes]
         } else {
@@ -1571,11 +1571,11 @@ impl Operation for ReduceSumOperation {
         }
     }
 
-    fn get_outputs(&self) -> Vec<TensorId> {
+    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let axes = if let Some(input_axes) = &self.input_axes {
             Some(input_map[input_axes])
@@ -1602,16 +1602,16 @@ impl Operation for ReduceSumOperation {
 pub struct ReduceMaxOperation {
     keepdims: Option<bool>,
     noop_with_empty_axes: Option<bool>,
-    input_data: TensorId,
-    input_axes: Option<TensorId>,
+    input_data: SymbolicGraphTensorId,
+    input_axes: Option<SymbolicGraphTensorId>,
     axes_attr: Option<Vec<i64>>,
-    output: TensorId,
+    output: SymbolicGraphTensorId,
 }
 
 impl ReduceMaxOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<TensorId>],
-        outputs: &[Option<TensorId>],
+        inputs: &[Option<SymbolicGraphTensorId>],
+        outputs: &[Option<SymbolicGraphTensorId>],
         attributes: &[onnx::AttributeProto],
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.is_empty() || inputs.len() > 2 {
@@ -1646,7 +1646,7 @@ impl Operation for ReduceMaxOperation {
         "Reduce Max".to_string()
     }
 
-    fn get_inputs(&self) -> Vec<TensorId> {
+    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
         if let Some(input_axes) = self.input_axes {
             vec![self.input_data, input_axes]
         } else {
@@ -1654,11 +1654,11 @@ impl Operation for ReduceMaxOperation {
         }
     }
 
-    fn get_outputs(&self) -> Vec<TensorId> {
+    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let axes = if let Some(input_axes) = &self.input_axes {
             Some(input_map[input_axes])
@@ -1685,16 +1685,16 @@ impl Operation for ReduceMaxOperation {
 pub struct ReduceMinOperation {
     keepdims: Option<bool>,
     noop_with_empty_axes: Option<bool>,
-    input_data: TensorId,
-    input_axes: Option<TensorId>,
+    input_data: SymbolicGraphTensorId,
+    input_axes: Option<SymbolicGraphTensorId>,
     axes_attr: Option<Vec<i64>>,
-    output: TensorId,
+    output: SymbolicGraphTensorId,
 }
 
 impl ReduceMinOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<TensorId>],
-        outputs: &[Option<TensorId>],
+        inputs: &[Option<SymbolicGraphTensorId>],
+        outputs: &[Option<SymbolicGraphTensorId>],
         attributes: &[onnx::AttributeProto],
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.is_empty() || inputs.len() > 2 {
@@ -1729,7 +1729,7 @@ impl Operation for ReduceMinOperation {
         "Reduce Min".to_string()
     }
 
-    fn get_inputs(&self) -> Vec<TensorId> {
+    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
         if let Some(input_axes) = self.input_axes {
             vec![self.input_data, input_axes]
         } else {
@@ -1737,11 +1737,11 @@ impl Operation for ReduceMinOperation {
         }
     }
 
-    fn get_outputs(&self) -> Vec<TensorId> {
+    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let axes = if let Some(input_axes) = &self.input_axes {
             Some(input_map[input_axes])
@@ -1768,16 +1768,16 @@ impl Operation for ReduceMinOperation {
 pub struct ReduceProdOperation {
     keepdims: Option<bool>,
     noop_with_empty_axes: Option<bool>,
-    input_data: TensorId,
-    input_axes: Option<TensorId>,
+    input_data: SymbolicGraphTensorId,
+    input_axes: Option<SymbolicGraphTensorId>,
     axes_attr: Option<Vec<i64>>,
-    output: TensorId,
+    output: SymbolicGraphTensorId,
 }
 
 impl ReduceProdOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<TensorId>],
-        outputs: &[Option<TensorId>],
+        inputs: &[Option<SymbolicGraphTensorId>],
+        outputs: &[Option<SymbolicGraphTensorId>],
         attributes: &[onnx::AttributeProto],
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.is_empty() || inputs.len() > 2 {
@@ -1812,7 +1812,7 @@ impl Operation for ReduceProdOperation {
         "Reduce Prod".to_string()
     }
 
-    fn get_inputs(&self) -> Vec<TensorId> {
+    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
         if let Some(input_axes) = self.input_axes {
             vec![self.input_data, input_axes]
         } else {
@@ -1820,11 +1820,11 @@ impl Operation for ReduceProdOperation {
         }
     }
 
-    fn get_outputs(&self) -> Vec<TensorId> {
+    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let axes = if let Some(input_axes) = &self.input_axes {
             Some(input_map[input_axes])
@@ -1849,15 +1849,15 @@ impl Operation for ReduceProdOperation {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PowOperation {
-    input_x: TensorId,
-    input_y: TensorId,
-    output: TensorId,
+    input_x: SymbolicGraphTensorId,
+    input_y: SymbolicGraphTensorId,
+    output: SymbolicGraphTensorId,
 }
 
 impl PowOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<TensorId>],
-        outputs: &[Option<TensorId>],
+        inputs: &[Option<SymbolicGraphTensorId>],
+        outputs: &[Option<SymbolicGraphTensorId>],
         _attributes: &[onnx::AttributeProto],
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 2 {
@@ -1879,14 +1879,14 @@ impl Operation for PowOperation {
         "Pow".to_string()
     }
 
-    fn get_inputs(&self) -> Vec<TensorId> {
+    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.input_x, self.input_y]
     }
-    fn get_outputs(&self) -> Vec<TensorId> {
+    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let out = graph.push_op(AnyMilliOp::Pow(MilliOpPow::new(
             input_map[&self.input_x],
@@ -1905,16 +1905,16 @@ pub struct GemmOperation {
     beta: Option<f32>,
     trans_a: Option<bool>,
     trans_b: Option<bool>,
-    input_a: TensorId,
-    input_b: TensorId,
-    input_c: Option<TensorId>,
-    output: TensorId,
+    input_a: SymbolicGraphTensorId,
+    input_b: SymbolicGraphTensorId,
+    input_c: Option<SymbolicGraphTensorId>,
+    output: SymbolicGraphTensorId,
 }
 
 impl GemmOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<TensorId>],
-        outputs: &[Option<TensorId>],
+        inputs: &[Option<SymbolicGraphTensorId>],
+        outputs: &[Option<SymbolicGraphTensorId>],
         attributes: &[onnx::AttributeProto],
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() < 2 || inputs.len() > 3 {
@@ -1951,18 +1951,18 @@ impl Operation for GemmOperation {
         "Gemm".to_string()
     }
 
-    fn get_inputs(&self) -> Vec<TensorId> {
+    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
         if let Some(input_c) = self.input_c {
             vec![self.input_a, self.input_b, input_c]
         } else {
             vec![self.input_a, self.input_b]
         }
     }
-    fn get_outputs(&self) -> Vec<TensorId> {
+    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
 
         let a = input_map[&self.input_a];
@@ -2032,16 +2032,16 @@ impl Operation for GemmOperation {
 pub struct SplitOperation {
     axis: Option<i64>,
     num_outputs: Option<i64>,
-    input: TensorId,
-    split: Option<TensorId>,
+    input: SymbolicGraphTensorId,
+    split: Option<SymbolicGraphTensorId>,
     split_attribute: Option<Vec<i64>>,
-    outputs: Vec<TensorId>,
+    outputs: Vec<SymbolicGraphTensorId>,
 }
 
 impl SplitOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<TensorId>],
-        outputs: &[Option<TensorId>],
+        inputs: &[Option<SymbolicGraphTensorId>],
+        outputs: &[Option<SymbolicGraphTensorId>],
         attributes: &[onnx::AttributeProto],
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.is_empty() || inputs.len() > 2 {
@@ -2075,18 +2075,18 @@ impl Operation for SplitOperation {
         "Split".to_string()
     }
 
-    fn get_inputs(&self) -> Vec<TensorId> {
+    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
         if let Some(split) = self.split {
             vec![self.input, split]
         } else {
             vec![self.input]
         }
     }
-    fn get_outputs(&self) -> Vec<TensorId> {
+    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
         self.outputs.clone()
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
 
         let mut output_map = HashMap::new();
@@ -2119,18 +2119,18 @@ impl Operation for SplitOperation {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SliceOperation {
-    data: TensorId,
-    starts: TensorId,
-    ends: TensorId,
-    axes: Option<TensorId>,
-    steps: Option<TensorId>,
-    output: TensorId,
+    data: SymbolicGraphTensorId,
+    starts: SymbolicGraphTensorId,
+    ends: SymbolicGraphTensorId,
+    axes: Option<SymbolicGraphTensorId>,
+    steps: Option<SymbolicGraphTensorId>,
+    output: SymbolicGraphTensorId,
 }
 
 impl SliceOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<TensorId>],
-        outputs: &[Option<TensorId>],
+        inputs: &[Option<SymbolicGraphTensorId>],
+        outputs: &[Option<SymbolicGraphTensorId>],
         _attributes: &[onnx::AttributeProto],
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() < 3 || inputs.len() > 5 {
@@ -2164,7 +2164,7 @@ impl Operation for SliceOperation {
         "Slice".to_string()
     }
 
-    fn get_inputs(&self) -> Vec<TensorId> {
+    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
         if let Some(axes) = self.axes {
             if let Some(steps) = self.steps {
                 vec![self.data, self.starts, self.ends, axes, steps]
@@ -2175,11 +2175,11 @@ impl Operation for SliceOperation {
             vec![self.data, self.starts, self.ends]
         }
     }
-    fn get_outputs(&self) -> Vec<TensorId> {
+    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let out = graph.push_op(AnyMilliOp::Slice(MilliOpSlice::new(
             input_map[&self.data],
@@ -2197,16 +2197,16 @@ impl Operation for SliceOperation {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WhereOperation {
-    condition: TensorId,
-    x: TensorId,
-    y: TensorId,
-    output: TensorId,
+    condition: SymbolicGraphTensorId,
+    x: SymbolicGraphTensorId,
+    y: SymbolicGraphTensorId,
+    output: SymbolicGraphTensorId,
 }
 
 impl WhereOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<TensorId>],
-        outputs: &[Option<TensorId>],
+        inputs: &[Option<SymbolicGraphTensorId>],
+        outputs: &[Option<SymbolicGraphTensorId>],
         _attributes: &[onnx::AttributeProto],
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 3 {
@@ -2230,14 +2230,14 @@ impl Operation for WhereOperation {
         "Where".to_string()
     }
 
-    fn get_inputs(&self) -> Vec<TensorId> {
+    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.condition, self.x, self.y]
     }
-    fn get_outputs(&self) -> Vec<TensorId> {
+    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let out = graph.push_op(AnyMilliOp::Where(MilliOpWhere::new(
             input_map[&self.condition],
@@ -2254,14 +2254,14 @@ impl Operation for WhereOperation {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SoftmaxOperation {
     axis: Option<i64>,
-    input: TensorId,
-    output: TensorId,
+    input: SymbolicGraphTensorId,
+    output: SymbolicGraphTensorId,
 }
 
 impl SoftmaxOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<TensorId>],
-        outputs: &[Option<TensorId>],
+        inputs: &[Option<SymbolicGraphTensorId>],
+        outputs: &[Option<SymbolicGraphTensorId>],
         attributes: &[onnx::AttributeProto],
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 1 {
@@ -2284,14 +2284,14 @@ impl Operation for SoftmaxOperation {
         "Softmax".to_string()
     }
 
-    fn get_inputs(&self) -> Vec<TensorId> {
+    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.input]
     }
-    fn get_outputs(&self) -> Vec<TensorId> {
+    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
 
         let e = graph.push_op(AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::exp(
@@ -2317,14 +2317,14 @@ impl Operation for SoftmaxOperation {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LogSoftmaxOperation {
     axis: Option<i64>,
-    input: TensorId,
-    output: TensorId,
+    input: SymbolicGraphTensorId,
+    output: SymbolicGraphTensorId,
 }
 
 impl LogSoftmaxOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<TensorId>],
-        outputs: &[Option<TensorId>],
+        inputs: &[Option<SymbolicGraphTensorId>],
+        outputs: &[Option<SymbolicGraphTensorId>],
         attributes: &[onnx::AttributeProto],
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 1 {
@@ -2347,14 +2347,14 @@ impl Operation for LogSoftmaxOperation {
         "LogSoftmax".to_string()
     }
 
-    fn get_inputs(&self) -> Vec<TensorId> {
+    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.input]
     }
-    fn get_outputs(&self) -> Vec<TensorId> {
+    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
 
         let e = graph.push_op(AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::exp(
@@ -2380,14 +2380,14 @@ impl Operation for LogSoftmaxOperation {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SizeOperation {
-    input: TensorId,
-    output: TensorId,
+    input: SymbolicGraphTensorId,
+    output: SymbolicGraphTensorId,
 }
 
 impl SizeOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<TensorId>],
-        outputs: &[Option<TensorId>],
+        inputs: &[Option<SymbolicGraphTensorId>],
+        outputs: &[Option<SymbolicGraphTensorId>],
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 1 {
             return Err(ONNXDecodingError::InvalidOperatorInputs("Size"));
@@ -2407,14 +2407,14 @@ impl Operation for SizeOperation {
         "Size".to_string()
     }
 
-    fn get_inputs(&self) -> Vec<TensorId> {
+    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.input]
     }
-    fn get_outputs(&self) -> Vec<TensorId> {
+    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
 
         let shape = graph.push_op(AnyMilliOp::Shape(MilliOpShape::new(input_map[&self.input])));
@@ -2431,16 +2431,16 @@ impl Operation for SizeOperation {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RangeOperation {
-    start: TensorId,
-    end: TensorId,
-    delta: TensorId,
-    output: TensorId,
+    start: SymbolicGraphTensorId,
+    end: SymbolicGraphTensorId,
+    delta: SymbolicGraphTensorId,
+    output: SymbolicGraphTensorId,
 }
 
 impl RangeOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<TensorId>],
-        outputs: &[Option<TensorId>],
+        inputs: &[Option<SymbolicGraphTensorId>],
+        outputs: &[Option<SymbolicGraphTensorId>],
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 3 {
             return Err(ONNXDecodingError::InvalidOperatorInputs("Range"));
@@ -2462,14 +2462,14 @@ impl Operation for RangeOperation {
         "Range".to_string()
     }
 
-    fn get_inputs(&self) -> Vec<TensorId> {
+    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.start, self.end, self.delta]
     }
-    fn get_outputs(&self) -> Vec<TensorId> {
+    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
 
         let out = graph.push_op(AnyMilliOp::Range(MilliOpRange::new(
@@ -2487,15 +2487,15 @@ impl Operation for RangeOperation {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FlattenOperation {
-    input: TensorId,
-    output: TensorId,
+    input: SymbolicGraphTensorId,
+    output: SymbolicGraphTensorId,
     axis: i64,
 }
 
 impl FlattenOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<TensorId>],
-        outputs: &[Option<TensorId>],
+        inputs: &[Option<SymbolicGraphTensorId>],
+        outputs: &[Option<SymbolicGraphTensorId>],
         attributes: &[onnx::AttributeProto],
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 1 {
@@ -2518,15 +2518,15 @@ impl Operation for FlattenOperation {
         "Flatten".to_string()
     }
 
-    fn get_inputs(&self) -> Vec<TensorId> {
+    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.input]
     }
 
-    fn get_outputs(&self) -> Vec<TensorId> {
+    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let input = input_map[&self.input];
 
@@ -2579,13 +2579,13 @@ impl Operation for FlattenOperation {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ConstantOperation {
     pub value: NDArrayNumericTensor<DynRank>,
-    output: TensorId,
+    output: SymbolicGraphTensorId,
 }
 
 impl ConstantOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<TensorId>],
-        outputs: &[Option<TensorId>],
+        inputs: &[Option<SymbolicGraphTensorId>],
+        outputs: &[Option<SymbolicGraphTensorId>],
         attributes: &[onnx::AttributeProto],
     ) -> Result<Self, ONNXDecodingError> {
         if !inputs.is_empty() {
@@ -2624,15 +2624,15 @@ impl Operation for ConstantOperation {
         "Constant".to_string()
     }
 
-    fn get_inputs(&self) -> Vec<TensorId> {
+    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![]
     }
 
-    fn get_outputs(&self) -> Vec<TensorId> {
+    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, _input_map) = MilliOpGraph::new(&self.get_inputs());
 
         let out = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(
@@ -2648,14 +2648,14 @@ impl Operation for ConstantOperation {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct IdentityOperation {
-    input: TensorId,
-    output: TensorId,
+    input: SymbolicGraphTensorId,
+    output: SymbolicGraphTensorId,
 }
 
 impl IdentityOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<TensorId>],
-        outputs: &[Option<TensorId>],
+        inputs: &[Option<SymbolicGraphTensorId>],
+        outputs: &[Option<SymbolicGraphTensorId>],
         _attributes: &[onnx::AttributeProto],
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 1 {
@@ -2677,15 +2677,15 @@ impl Operation for IdentityOperation {
         "Identity".to_string()
     }
 
-    fn get_inputs(&self) -> Vec<TensorId> {
+    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.input]
     }
 
-    fn get_outputs(&self) -> Vec<TensorId> {
+    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let input = input_map[&self.input];
         let mut output_map = HashMap::new();
@@ -2697,16 +2697,16 @@ impl Operation for IdentityOperation {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct IsInfOperation {
-    input: TensorId,
-    output: TensorId,
+    input: SymbolicGraphTensorId,
+    output: SymbolicGraphTensorId,
     detect_negative: Option<bool>,
     detect_positive: Option<bool>,
 }
 
 impl IsInfOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<TensorId>],
-        outputs: &[Option<TensorId>],
+        inputs: &[Option<SymbolicGraphTensorId>],
+        outputs: &[Option<SymbolicGraphTensorId>],
         attributes: &[onnx::AttributeProto],
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 1 {
@@ -2733,15 +2733,15 @@ impl Operation for IsInfOperation {
         "Is Inf".to_string()
     }
 
-    fn get_inputs(&self) -> Vec<TensorId> {
+    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.input]
     }
 
-    fn get_outputs(&self) -> Vec<TensorId> {
+    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let input = input_map[&self.input];
         let output = graph.push_op(AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::is_inf(
@@ -2758,16 +2758,16 @@ impl Operation for IsInfOperation {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ModuloOperation {
-    a: TensorId,
-    b: TensorId,
-    output: TensorId,
+    a: SymbolicGraphTensorId,
+    b: SymbolicGraphTensorId,
+    output: SymbolicGraphTensorId,
     fmod: Option<bool>,
 }
 
 impl ModuloOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<TensorId>],
-        outputs: &[Option<TensorId>],
+        inputs: &[Option<SymbolicGraphTensorId>],
+        outputs: &[Option<SymbolicGraphTensorId>],
         attributes: &[onnx::AttributeProto],
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 2 {
@@ -2793,15 +2793,15 @@ impl Operation for ModuloOperation {
         "Modulo".to_string()
     }
 
-    fn get_inputs(&self) -> Vec<TensorId> {
+    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.a, self.b]
     }
 
-    fn get_outputs(&self) -> Vec<TensorId> {
+    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let a = input_map[&self.a];
         let b = input_map[&self.b];
@@ -2818,16 +2818,16 @@ impl Operation for ModuloOperation {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ClipOperation {
-    input: TensorId,
-    min: Option<TensorId>,
-    max: Option<TensorId>,
-    output: TensorId,
+    input: SymbolicGraphTensorId,
+    min: Option<SymbolicGraphTensorId>,
+    max: Option<SymbolicGraphTensorId>,
+    output: SymbolicGraphTensorId,
 }
 
 impl ClipOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<TensorId>],
-        outputs: &[Option<TensorId>],
+        inputs: &[Option<SymbolicGraphTensorId>],
+        outputs: &[Option<SymbolicGraphTensorId>],
         _attributes: &[onnx::AttributeProto],
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.is_empty() || inputs.len() > 3 {
@@ -2859,7 +2859,7 @@ impl Operation for ClipOperation {
         "Clip".to_string()
     }
 
-    fn get_inputs(&self) -> Vec<TensorId> {
+    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
         let mut o = vec![self.input];
         if let Some(min) = self.min {
             o.push(min);
@@ -2870,11 +2870,11 @@ impl Operation for ClipOperation {
         o
     }
 
-    fn get_outputs(&self) -> Vec<TensorId> {
+    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let x = input_map[&self.input];
         let x = if let Some(min) = self.min {
@@ -2898,15 +2898,15 @@ impl Operation for ClipOperation {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ExpandOperation {
-    input: TensorId,
-    shape: TensorId,
-    output: TensorId,
+    input: SymbolicGraphTensorId,
+    shape: SymbolicGraphTensorId,
+    output: SymbolicGraphTensorId,
 }
 
 impl ExpandOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<TensorId>],
-        outputs: &[Option<TensorId>],
+        inputs: &[Option<SymbolicGraphTensorId>],
+        outputs: &[Option<SymbolicGraphTensorId>],
         _attributes: &[onnx::AttributeProto],
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 2 {
@@ -2929,15 +2929,15 @@ impl Operation for ExpandOperation {
         "Expand".to_string()
     }
 
-    fn get_inputs(&self) -> Vec<TensorId> {
+    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.input, self.shape]
     }
 
-    fn get_outputs(&self) -> Vec<TensorId> {
+    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
 
         let x = graph.push_op(AnyMilliOp::Expand(MilliOpExpand::new(
@@ -2962,10 +2962,10 @@ pub(crate) enum ConvOperationAutoPad {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ConvOperation {
-    input: TensorId,
-    output: TensorId,
-    weight: TensorId,
-    bias: Option<TensorId>,
+    input: SymbolicGraphTensorId,
+    output: SymbolicGraphTensorId,
+    weight: SymbolicGraphTensorId,
+    bias: Option<SymbolicGraphTensorId>,
     auto_pad: ConvOperationAutoPad,
     dilations: Vec<i64>,
     group: i64,
@@ -2976,8 +2976,8 @@ pub struct ConvOperation {
 
 impl ConvOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<TensorId>],
-        outputs: &[Option<TensorId>],
+        inputs: &[Option<SymbolicGraphTensorId>],
+        outputs: &[Option<SymbolicGraphTensorId>],
         attributes: &[onnx::AttributeProto],
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() < 2 || inputs.len() > 3 {
@@ -3029,7 +3029,7 @@ impl Operation for ConvOperation {
         "Conv".to_string()
     }
 
-    fn get_inputs(&self) -> Vec<TensorId> {
+    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
         if let Some(bias) = self.bias {
             vec![self.input, self.weight, bias]
         } else {
@@ -3037,28 +3037,28 @@ impl Operation for ConvOperation {
         }
     }
 
-    fn get_outputs(&self) -> Vec<TensorId> {
+    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         unimplemented!();
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct InstanceNormalizationOperation {
-    input: TensorId,
-    scale: TensorId,
-    bias: TensorId,
-    output: TensorId,
+    input: SymbolicGraphTensorId,
+    scale: SymbolicGraphTensorId,
+    bias: SymbolicGraphTensorId,
+    output: SymbolicGraphTensorId,
     epsilon: Option<f32>,
 }
 
 impl InstanceNormalizationOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<TensorId>],
-        outputs: &[Option<TensorId>],
+        inputs: &[Option<SymbolicGraphTensorId>],
+        outputs: &[Option<SymbolicGraphTensorId>],
         attributes: &[onnx::AttributeProto],
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 3 {
@@ -3096,15 +3096,15 @@ impl Operation for InstanceNormalizationOperation {
         "Instance Normalization".to_string()
     }
 
-    fn get_inputs(&self) -> Vec<TensorId> {
+    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.input, self.scale, self.bias]
     }
 
-    fn get_outputs(&self) -> Vec<TensorId> {
+    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         unimplemented!();
     }
 }
@@ -3142,11 +3142,11 @@ pub(crate) enum ResizeNearestMode {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ResizeOperation {
-    input: TensorId,
-    roi: Option<TensorId>,
-    scales: Option<TensorId>,
-    sizes: Option<TensorId>,
-    output: TensorId,
+    input: SymbolicGraphTensorId,
+    roi: Option<SymbolicGraphTensorId>,
+    scales: Option<SymbolicGraphTensorId>,
+    sizes: Option<SymbolicGraphTensorId>,
+    output: SymbolicGraphTensorId,
     antialias: bool,
     axes: Vec<i64>,
     coordinate_transformation_mode: ResizeCoordinateTransformationMode,
@@ -3160,8 +3160,8 @@ pub struct ResizeOperation {
 
 impl ResizeOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<TensorId>],
-        outputs: &[Option<TensorId>],
+        inputs: &[Option<SymbolicGraphTensorId>],
+        outputs: &[Option<SymbolicGraphTensorId>],
         attributes: &[onnx::AttributeProto],
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.is_empty() || inputs.len() > 4 {
@@ -3250,7 +3250,7 @@ impl Operation for ResizeOperation {
         "Resize".to_string()
     }
 
-    fn get_inputs(&self) -> Vec<TensorId> {
+    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
         let mut ret = vec![self.input];
         if let Some(roi) = &self.roi {
             ret.push(*roi);
@@ -3264,11 +3264,11 @@ impl Operation for ResizeOperation {
         ret
     }
 
-    fn get_outputs(&self) -> Vec<TensorId> {
+    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         todo!()
     }
 }
@@ -3283,18 +3283,18 @@ pub(crate) enum PadMode {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PadOperation {
-    input: TensorId,
-    pads: TensorId,
-    constant_value: Option<TensorId>,
-    axes: Option<TensorId>,
+    input: SymbolicGraphTensorId,
+    pads: SymbolicGraphTensorId,
+    constant_value: Option<SymbolicGraphTensorId>,
+    axes: Option<SymbolicGraphTensorId>,
     mode: PadMode,
-    output: TensorId,
+    output: SymbolicGraphTensorId,
 }
 
 impl PadOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<TensorId>],
-        outputs: &[Option<TensorId>],
+        inputs: &[Option<SymbolicGraphTensorId>],
+        outputs: &[Option<SymbolicGraphTensorId>],
         attributes: &[onnx::AttributeProto],
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() < 2 || inputs.len() > 4 {
@@ -3337,7 +3337,7 @@ impl Operation for PadOperation {
         "Pad".to_string()
     }
 
-    fn get_inputs(&self) -> Vec<TensorId> {
+    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
         let mut ret = vec![self.input, self.pads];
         if let Some(constant_value) = self.constant_value {
             ret.push(constant_value);
@@ -3348,19 +3348,19 @@ impl Operation for PadOperation {
         ret
     }
 
-    fn get_outputs(&self) -> Vec<TensorId> {
+    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         todo!()
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RandomNormalLikeOperation {
-    input: TensorId,
-    output: TensorId,
+    input: SymbolicGraphTensorId,
+    output: SymbolicGraphTensorId,
     dtype: Option<DType>,
     mean: f32,
     scale: f32,
@@ -3369,8 +3369,8 @@ pub struct RandomNormalLikeOperation {
 
 impl RandomNormalLikeOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<TensorId>],
-        outputs: &[Option<TensorId>],
+        inputs: &[Option<SymbolicGraphTensorId>],
+        outputs: &[Option<SymbolicGraphTensorId>],
         attributes: &[onnx::AttributeProto],
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 1 {
@@ -3413,15 +3413,15 @@ impl Operation for RandomNormalLikeOperation {
         "Random Normal Like".to_string()
     }
 
-    fn get_inputs(&self) -> Vec<TensorId> {
+    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.input]
     }
 
-    fn get_outputs(&self) -> Vec<TensorId> {
+    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         todo!()
     }
 }
@@ -3431,14 +3431,14 @@ pub struct ArgMaxOperation {
     axis: i64,
     keepdims: bool,
     select_last_index: bool,
-    input: TensorId,
-    output: TensorId,
+    input: SymbolicGraphTensorId,
+    output: SymbolicGraphTensorId,
 }
 
 impl ArgMaxOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<TensorId>],
-        outputs: &[Option<TensorId>],
+        inputs: &[Option<SymbolicGraphTensorId>],
+        outputs: &[Option<SymbolicGraphTensorId>],
         attributes: &[onnx::AttributeProto],
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 1 {
@@ -3468,15 +3468,15 @@ impl Operation for ArgMaxOperation {
         "ArgMax".to_string()
     }
 
-    fn get_inputs(&self) -> Vec<TensorId> {
+    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.input]
     }
 
-    fn get_outputs(&self) -> Vec<TensorId> {
+    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
 
         let x = graph.push_op(AnyMilliOp::ArgMax(MilliOpArgMax::new(
@@ -3498,14 +3498,14 @@ pub struct ArgMinOperation {
     axis: i64,
     keepdims: bool,
     select_last_index: bool,
-    input: TensorId,
-    output: TensorId,
+    input: SymbolicGraphTensorId,
+    output: SymbolicGraphTensorId,
 }
 
 impl ArgMinOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<TensorId>],
-        outputs: &[Option<TensorId>],
+        inputs: &[Option<SymbolicGraphTensorId>],
+        outputs: &[Option<SymbolicGraphTensorId>],
         attributes: &[onnx::AttributeProto],
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 1 {
@@ -3535,15 +3535,15 @@ impl Operation for ArgMinOperation {
         "ArgMin".to_string()
     }
 
-    fn get_inputs(&self) -> Vec<TensorId> {
+    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.input]
     }
 
-    fn get_outputs(&self) -> Vec<TensorId> {
+    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
 
         let x = graph.push_op(AnyMilliOp::ArgMin(MilliOpArgMin::new(
@@ -3562,14 +3562,14 @@ impl Operation for ArgMinOperation {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MaxOperation {
-    inputs: Vec<TensorId>,
-    output: TensorId,
+    inputs: Vec<SymbolicGraphTensorId>,
+    output: SymbolicGraphTensorId,
 }
 
 impl MaxOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<TensorId>],
-        outputs: &[Option<TensorId>],
+        inputs: &[Option<SymbolicGraphTensorId>],
+        outputs: &[Option<SymbolicGraphTensorId>],
         _attributes: &[onnx::AttributeProto],
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.is_empty() {
@@ -3594,15 +3594,15 @@ impl Operation for MaxOperation {
         "Max".to_string()
     }
 
-    fn get_inputs(&self) -> Vec<TensorId> {
+    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
         self.inputs.clone()
     }
 
-    fn get_outputs(&self) -> Vec<TensorId> {
+    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let mut x = input_map[&self.inputs[0]];
         for input in &self.inputs[1..] {
@@ -3618,14 +3618,14 @@ impl Operation for MaxOperation {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MinOperation {
-    inputs: Vec<TensorId>,
-    output: TensorId,
+    inputs: Vec<SymbolicGraphTensorId>,
+    output: SymbolicGraphTensorId,
 }
 
 impl MinOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<TensorId>],
-        outputs: &[Option<TensorId>],
+        inputs: &[Option<SymbolicGraphTensorId>],
+        outputs: &[Option<SymbolicGraphTensorId>],
         _attributes: &[onnx::AttributeProto],
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.is_empty() {
@@ -3650,15 +3650,15 @@ impl Operation for MinOperation {
         "Min".to_string()
     }
 
-    fn get_inputs(&self) -> Vec<TensorId> {
+    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
         self.inputs.clone()
     }
 
-    fn get_outputs(&self) -> Vec<TensorId> {
+    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
         vec![self.output]
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let mut x = input_map[&self.inputs[0]];
         for input in &self.inputs[1..] {
@@ -3674,16 +3674,16 @@ impl Operation for MinOperation {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct IfOperation {
-    outputs: Vec<TensorId>,
-    condition: TensorId,
+    outputs: Vec<SymbolicGraphTensorId>,
+    condition: SymbolicGraphTensorId,
     then_branch: SymbolicGraphInner,
     else_branch: SymbolicGraphInner,
 }
 
 impl IfOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<TensorId>],
-        outputs: &[Option<TensorId>],
+        inputs: &[Option<SymbolicGraphTensorId>],
+        outputs: &[Option<SymbolicGraphTensorId>],
         attributes: &[onnx::AttributeProto],
         symbolic_graph_mutator: &mut SymbolicGraphMutator,
         core_opset_version: usize,
@@ -3735,7 +3735,7 @@ impl Operation for IfOperation {
         "If".to_string()
     }
 
-    fn get_inputs(&self) -> Vec<TensorId> {
+    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
         let mut inputs_set = HashSet::new();
         inputs_set.insert(self.condition);
         inputs_set.extend(self.then_branch.get_foreign_tensor_ids());
@@ -3745,15 +3745,15 @@ impl Operation for IfOperation {
         inputs_vec
     }
 
-    fn get_outputs(&self) -> Vec<TensorId> {
+    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
         self.outputs.clone()
     }
 
     fn eval(
         &self,
         backend: &mut EvalBackend,
-        inputs: &HashMap<TensorId, NumericTensor<DynRank>>,
-    ) -> Result<HashMap<TensorId, NumericTensor<DynRank>>, EvalError> {
+        inputs: &HashMap<SymbolicGraphTensorId, NumericTensor<DynRank>>,
+    ) -> Result<HashMap<SymbolicGraphTensorId, NumericTensor<DynRank>>, EvalError> {
         let condition = inputs.get(&self.condition).unwrap();
         let condition: bool = condition.first_element().into();
         let (active_tensors, output_ids) = if condition {
@@ -3772,17 +3772,17 @@ impl Operation for IfOperation {
         Ok(outputs)
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         todo!()
     }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ScanOperation {
-    scan_inputs: Vec<Option<TensorId>>,
-    state_inputs: Vec<Option<TensorId>>,
-    scan_outputs: Vec<Option<TensorId>>,
-    state_outputs: Vec<Option<TensorId>>,
+    scan_inputs: Vec<Option<SymbolicGraphTensorId>>,
+    state_inputs: Vec<Option<SymbolicGraphTensorId>>,
+    scan_outputs: Vec<Option<SymbolicGraphTensorId>>,
+    state_outputs: Vec<Option<SymbolicGraphTensorId>>,
     scan_input_axes: Option<Vec<i64>>,
     scan_input_directions: Option<Vec<i64>>,
     scan_output_axes: Option<Vec<i64>>,
@@ -3792,8 +3792,8 @@ pub struct ScanOperation {
 
 impl ScanOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<TensorId>],
-        outputs: &[Option<TensorId>],
+        inputs: &[Option<SymbolicGraphTensorId>],
+        outputs: &[Option<SymbolicGraphTensorId>],
         attributes: &[onnx::AttributeProto],
         symbolic_graph_mutator: &mut SymbolicGraphMutator,
         core_opset_version: usize,
@@ -3849,7 +3849,7 @@ impl Operation for ScanOperation {
         "Scan".to_string()
     }
 
-    fn get_inputs(&self) -> Vec<TensorId> {
+    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
         let mut inputs_set = HashSet::new();
         inputs_set.extend(self.state_inputs.iter().filter_map(|x| *x));
         inputs_set.extend(self.scan_inputs.iter().filter_map(|x| *x));
@@ -3859,7 +3859,7 @@ impl Operation for ScanOperation {
         inputs_vec
     }
 
-    fn get_outputs(&self) -> Vec<TensorId> {
+    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
         let mut outputs = Vec::new();
         outputs.extend(self.state_outputs.iter().filter_map(|x| *x));
         outputs.extend(self.scan_outputs.iter().filter_map(|x| *x));
@@ -3869,8 +3869,8 @@ impl Operation for ScanOperation {
     fn eval(
         &self,
         backend: &mut EvalBackend,
-        inputs: &HashMap<TensorId, NumericTensor<DynRank>>,
-    ) -> Result<HashMap<TensorId, NumericTensor<DynRank>>, EvalError> {
+        inputs: &HashMap<SymbolicGraphTensorId, NumericTensor<DynRank>>,
+    ) -> Result<HashMap<SymbolicGraphTensorId, NumericTensor<DynRank>>, EvalError> {
         let state_inputs: Vec<_> = self
             .state_inputs
             .iter()
@@ -4011,7 +4011,7 @@ impl Operation for ScanOperation {
         Ok(outputs)
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         todo!()
     }
 }
@@ -4127,7 +4127,7 @@ impl Operation for AnyOperation {
     fn get_op_type_name(&self) -> String {
         self.as_dyn().get_op_type_name()
     }
-    fn get_inputs(&self) -> Vec<TensorId> {
+    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
         match self {
             AnyOperation::Unary(op) => op.get_inputs(),
             AnyOperation::Binary(op) => op.get_inputs(),
@@ -4179,7 +4179,7 @@ impl Operation for AnyOperation {
             AnyOperation::Scan(op) => op.get_inputs(),
         }
     }
-    fn get_outputs(&self) -> Vec<TensorId> {
+    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
         match self {
             AnyOperation::Unary(op) => op.get_outputs(),
             AnyOperation::Binary(op) => op.get_outputs(),
@@ -4235,8 +4235,8 @@ impl Operation for AnyOperation {
     fn eval(
         &self,
         backend: &mut EvalBackend,
-        inputs: &HashMap<TensorId, NumericTensor<DynRank>>,
-    ) -> Result<HashMap<TensorId, NumericTensor<DynRank>>, EvalError> {
+        inputs: &HashMap<SymbolicGraphTensorId, NumericTensor<DynRank>>,
+    ) -> Result<HashMap<SymbolicGraphTensorId, NumericTensor<DynRank>>, EvalError> {
         match self {
             AnyOperation::Unary(op) => op.eval(backend, inputs),
             AnyOperation::Binary(op) => op.eval(backend, inputs),
@@ -4289,7 +4289,7 @@ impl Operation for AnyOperation {
         }
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph<TensorId> {
+    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         match self {
             AnyOperation::Unary(op) => op.get_milli_op_graph(),
             AnyOperation::Binary(op) => op.get_milli_op_graph(),

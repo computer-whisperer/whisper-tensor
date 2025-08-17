@@ -4,7 +4,7 @@ pub mod links;
 pub mod nodes;
 
 use crate::backends::eval_backend::EvalBackend;
-use crate::milli_graph::MilliOpGraphError;
+use crate::milli_graph::{MilliOpGraphError, MilliOpGraphNodePath, MilliOpGraphTensorPath};
 use crate::model::ModelError;
 use crate::numeric_tensor::NumericTensorError;
 use crate::numeric_tensor_typed::TypedNumericTensorError;
@@ -18,6 +18,9 @@ use crate::super_graph::nodes::SuperGraphAnyNode;
 use crate::tokenizer::TokenizerError;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use crate::backends::ndarray_backend::NDArrayNumericTensor;
+use crate::DynRank;
+use crate::symbolic_graph::{SymbolicGraphNodePath, SymbolicGraphTensorPath};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SuperGraphNodeId(pub(crate) u32);
@@ -40,6 +43,22 @@ pub enum SuperGraphError {
 
 pub type SuperGraphHash = u64;
 
+#[derive(Clone, Debug, Default)]
+pub struct SuperGraphExecutionTelemetryRequest {
+    pub subscribed_tensors: HashSet<SuperGraphTensorPath>
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SuperGraphExecutionTelemetryResponse {
+    pub subscribed_tensors: HashMap<SuperGraphTensorPath, NDArrayNumericTensor<DynRank>>
+}
+
+impl SuperGraphExecutionTelemetryRequest {
+    pub fn extend(&mut self, other: SuperGraphExecutionTelemetryRequest) {
+        self.subscribed_tensors.extend(other.subscribed_tensors);
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SuperGraph {
     pub inner: SuperGraphInner,
@@ -50,9 +69,10 @@ impl SuperGraph {
         &'a self,
         data: SuperGraphData<'a>,
         caches: Option<&mut SuperGraphCache>,
+        telemetry_request: Option<&SuperGraphExecutionTelemetryRequest>,
         backend: &mut EvalBackend,
-    ) -> Result<SuperGraphData<'a>, SuperGraphError> {
-        self.inner.eval(data, caches, backend)
+    ) -> Result<(SuperGraphData<'a>, SuperGraphExecutionTelemetryResponse), SuperGraphError> {
+        self.inner.eval(data, caches, telemetry_request, backend)
     }
 
     pub fn get_all_links(&self) -> HashSet<SuperGraphAnyLink> {
@@ -72,11 +92,16 @@ impl SuperGraphInner {
         &'a self,
         data: SuperGraphData<'a>,
         mut caches: Option<&mut SuperGraphCache>,
+        telemetry_request: Option<&SuperGraphExecutionTelemetryRequest>,
         backend: &mut EvalBackend,
-    ) -> Result<SuperGraphData<'a>, SuperGraphError> {
+    ) -> Result<(SuperGraphData<'a>, SuperGraphExecutionTelemetryResponse), SuperGraphError> {
         let mut data = data;
 
         let mut remaining_ops = self.nodes.keys().cloned().collect::<Vec<_>>();
+
+        let mut telemetry_response = SuperGraphExecutionTelemetryResponse {
+            subscribed_tensors: HashMap::new()
+        };
 
         loop {
             let op_id_to_use = {
@@ -128,10 +153,19 @@ impl SuperGraphInner {
             if let Some(op_id) = op_id_to_use {
                 let op_id = *op_id;
                 let op = self.nodes.get(&op_id).unwrap();
-                op.eval(&mut data, caches.as_deref_mut(), backend)?;
+                op.eval(op_id, &mut data, caches.as_deref_mut(), telemetry_request, &mut telemetry_response, backend)?;
                 remaining_ops.retain(|x| *x != op_id);
             } else {
                 break;
+            }
+        }
+
+        if let Some(telemetry_request) = &telemetry_request {
+            for (link, tensor) in &data.tensors {
+               let path = SuperGraphTensorPath::Link(link.clone());
+               if telemetry_request.subscribed_tensors.contains(&path) {
+                   telemetry_response.subscribed_tensors.insert(path, tensor.to_ndarray()?);
+               }
             }
         }
 
@@ -143,7 +177,7 @@ impl SuperGraphInner {
                 .as_slice(),
         )?;
 
-        Ok(output_data)
+        Ok((output_data, telemetry_response))
     }
 
     pub fn get_all_links(&self) -> HashSet<SuperGraphAnyLink> {
@@ -259,4 +293,20 @@ impl Default for SuperGraphBuilder {
     fn default() -> Self {
         Self::new()
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Hash, PartialEq, Eq)]
+pub enum SuperGraphTensorPath {
+    Link(SuperGraphLinkTensor),
+    SubSuperGraph(SuperGraphNodeId, Box<SuperGraphTensorPath>),
+    SymbolicGraphTensor(SuperGraphNodeId, SymbolicGraphTensorPath),
+    MilliOpGraphTensor(SuperGraphNodeId, MilliOpGraphTensorPath),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Hash, PartialEq, Eq)]
+pub enum SuperGraphNodePath {
+    Node(SuperGraphNodeId),
+    SubSuperGraph(SuperGraphNodeId, Box<SuperGraphNodePath>),
+    SymbolicGraphNode(SuperGraphNodeId, SymbolicGraphNodePath),
+    MilliOpGraphNode(SuperGraphNodeId, MilliOpGraphNodePath),
 }

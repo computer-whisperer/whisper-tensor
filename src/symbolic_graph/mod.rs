@@ -46,8 +46,8 @@ pub enum ONNXDecodingError {
     UnsupportedONNX(String),
 }
 
-pub type TensorId = usize;
-pub type OperationId = usize;
+pub type SymbolicGraphTensorId = usize;
+pub type SymbolicGraphOperationId = usize;
 
 fn query_attribute_float(attributes: &[onnx::AttributeProto], name: &str) -> Option<f32> {
     for attr in attributes {
@@ -221,10 +221,10 @@ pub struct GraphOperation {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SymbolicGraphInner {
-    tensors: HashMap<TensorId, ONNXTensorInfo>,
-    ordered_outputs: Vec<TensorId>,
-    ordered_inputs: Vec<TensorId>,
-    operations: HashMap<OperationId, GraphOperation>,
+    tensors: HashMap<SymbolicGraphTensorId, ONNXTensorInfo>,
+    ordered_outputs: Vec<SymbolicGraphTensorId>,
+    ordered_inputs: Vec<SymbolicGraphTensorId>,
+    operations: HashMap<SymbolicGraphOperationId, GraphOperation>,
 }
 
 impl SymbolicGraphInner {
@@ -237,7 +237,7 @@ impl SymbolicGraphInner {
         }
     }
 
-    pub fn get_tensors_by_name(&self) -> HashMap<String, TensorId> {
+    pub fn get_tensors_by_name(&self) -> HashMap<String, SymbolicGraphTensorId> {
         let mut tensors_by_name = HashMap::new();
         for (id, tensor) in &self.tensors {
             if let Some(name) = &tensor.onnx_name {
@@ -247,15 +247,15 @@ impl SymbolicGraphInner {
         tensors_by_name
     }
 
-    pub fn get_operations(&self) -> &HashMap<OperationId, GraphOperation> {
+    pub fn get_operations(&self) -> &HashMap<SymbolicGraphOperationId, GraphOperation> {
         &self.operations
     }
 
-    pub fn get_tensors(&self) -> &HashMap<TensorId, ONNXTensorInfo> {
+    pub fn get_tensors(&self) -> &HashMap<SymbolicGraphTensorId, ONNXTensorInfo> {
         &self.tensors
     }
 
-    pub fn get_outputs(&self) -> Vec<TensorId> {
+    pub fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
         let mut results = Vec::new();
         for (id, info) in &self.tensors {
             if let TensorType::Output = info.tensor_type {
@@ -265,7 +265,7 @@ impl SymbolicGraphInner {
         results
     }
 
-    pub fn get_inputs(&self) -> Vec<TensorId> {
+    pub fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
         let mut results = Vec::new();
         for (id, info) in &self.tensors {
             if let TensorType::Input(_) = info.tensor_type {
@@ -275,7 +275,7 @@ impl SymbolicGraphInner {
         results
     }
 
-    pub fn get_foreign_tensor_ids(&self) -> HashSet<TensorId> {
+    pub fn get_foreign_tensor_ids(&self) -> HashSet<SymbolicGraphTensorId> {
         let mut results = HashSet::new();
         for op in self.operations.values() {
             let inputs = op.op.get_inputs();
@@ -288,7 +288,7 @@ impl SymbolicGraphInner {
         results
     }
 
-    pub fn get_tensor_name(&self, tensor_id: TensorId) -> Option<&str> {
+    pub fn get_tensor_name(&self, tensor_id: SymbolicGraphTensorId) -> Option<&str> {
         if let Some(tensor) = self.tensors.get(&tensor_id) {
             tensor.onnx_name.as_deref()
         } else {
@@ -296,14 +296,14 @@ impl SymbolicGraphInner {
         }
     }
 
-    pub fn get_tensor_info(&self, tensor_id: TensorId) -> Option<&ONNXTensorInfo> {
+    pub fn get_tensor_info(&self, tensor_id: SymbolicGraphTensorId) -> Option<&ONNXTensorInfo> {
         self.tensors.get(&tensor_id)
     }
 
     pub fn get_initialized_tensors(
         &self,
         tensor_store: &TensorStore,
-    ) -> HashMap<TensorId, NumericTensor<DynRank>> {
+    ) -> HashMap<SymbolicGraphTensorId, NumericTensor<DynRank>> {
         let mut out = HashMap::new();
 
         for (key, tensor) in &self.tensors {
@@ -387,14 +387,14 @@ impl SymbolicGraphInner {
 
     fn eval(
         &self,
-        inputs: &HashMap<TensorId, NumericTensor<DynRank>>,
+        inputs: &HashMap<SymbolicGraphTensorId, NumericTensor<DynRank>>,
         eval_backend: &mut EvalBackend,
-    ) -> Result<HashMap<TensorId, NumericTensor<DynRank>>, EvalError> {
-        let mut active_tensors: HashMap<TensorId, NumericTensor<DynRank>> = inputs.clone();
+    ) -> Result<HashMap<SymbolicGraphTensorId, NumericTensor<DynRank>>, EvalError> {
+        let mut active_tensors: HashMap<SymbolicGraphTensorId, NumericTensor<DynRank>> = inputs.clone();
 
         let ops = self.get_operations();
-        let mut remaining_ops_to_complete: Vec<OperationId> = ops.keys().copied().collect();
-        let mut total_ops_completed: Vec<OperationId> = vec![];
+        let mut remaining_ops_to_complete: Vec<SymbolicGraphOperationId> = ops.keys().copied().collect();
+        let mut total_ops_completed: Vec<SymbolicGraphOperationId> = vec![];
         loop {
             let mut ops_completed_now = vec![];
 
@@ -459,7 +459,7 @@ impl SymbolicGraph {
         }
     }
 
-    pub fn get_tensors_by_name(&self) -> HashMap<String, TensorId> {
+    pub fn get_tensors_by_name(&self) -> HashMap<String, SymbolicGraphTensorId> {
         self.inner_graph.get_tensors_by_name()
     }
 
@@ -467,34 +467,34 @@ impl SymbolicGraph {
         &self.unknown_dimensions
     }
 
-    pub fn get_operations(&self) -> &HashMap<OperationId, GraphOperation> {
+    pub fn get_operations(&self) -> &HashMap<SymbolicGraphOperationId, GraphOperation> {
         self.inner_graph.get_operations()
     }
 
-    pub fn get_tensors(&self) -> &HashMap<TensorId, ONNXTensorInfo> {
+    pub fn get_tensors(&self) -> &HashMap<SymbolicGraphTensorId, ONNXTensorInfo> {
         self.inner_graph.get_tensors()
     }
 
-    pub fn get_outputs(&self) -> Vec<TensorId> {
+    pub fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
         self.inner_graph.get_outputs()
     }
 
-    pub fn get_inputs(&self) -> Vec<TensorId> {
+    pub fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
         self.inner_graph.get_inputs()
     }
 
-    pub fn get_tensor_name(&self, tensor_id: TensorId) -> Option<&str> {
+    pub fn get_tensor_name(&self, tensor_id: SymbolicGraphTensorId) -> Option<&str> {
         self.inner_graph.get_tensor_name(tensor_id)
     }
 
-    pub fn get_tensor_info(&self, tensor_id: TensorId) -> Option<&ONNXTensorInfo> {
+    pub fn get_tensor_info(&self, tensor_id: SymbolicGraphTensorId) -> Option<&ONNXTensorInfo> {
         self.inner_graph.get_tensor_info(tensor_id)
     }
 
     pub fn get_initialized_tensors(
         &self,
         tensor_store: &TensorStore,
-    ) -> HashMap<TensorId, NumericTensor<DynRank>> {
+    ) -> HashMap<SymbolicGraphTensorId, NumericTensor<DynRank>> {
         self.inner_graph.get_initialized_tensors(tensor_store)
     }
 }
@@ -621,11 +621,11 @@ impl TryFrom<&onnx::TensorProto> for NDArrayNumericTensor<DynRank> {
 
 pub struct SymbolicGraphMutator {
     graph: Option<SymbolicGraph>,
-    tensors_by_name: HashMap<String, TensorId>,
+    tensors_by_name: HashMap<String, SymbolicGraphTensorId>,
     unknown_dimensions_by_name: HashMap<String, SymbolicScalarTyped<u64>>,
-    next_tensor_id: TensorId,
+    next_tensor_id: SymbolicGraphTensorId,
     symbolic_resolver: SymbolicResolver,
-    next_operation_id: OperationId,
+    next_operation_id: SymbolicGraphOperationId,
     tensor_store: TensorStore,
 }
 
@@ -679,7 +679,7 @@ impl SymbolicGraphMutator {
         inner_graph: &mut SymbolicGraphInner,
         name: &str,
         tensor_type: TensorType,
-    ) -> TensorId {
+    ) -> SymbolicGraphTensorId {
         let tensor_id = self.next_tensor_id;
         self.next_tensor_id += 1;
         let tensor = ONNXTensorInfo {
@@ -698,7 +698,7 @@ impl SymbolicGraphMutator {
         inner_graph: &mut SymbolicGraphInner,
         tensor_info: &onnx::ValueInfoProto,
         tensor_type: TensorType,
-    ) -> Result<TensorId, ONNXDecodingError> {
+    ) -> Result<SymbolicGraphTensorId, ONNXDecodingError> {
         let tensor_id = self.next_tensor_id;
         self.next_tensor_id += 1;
         let onnx_tensor_type = tensor_info
@@ -777,7 +777,7 @@ impl SymbolicGraphMutator {
         inner_graph: &mut SymbolicGraphInner,
         value: NDArrayNumericTensor<DynRank>,
         name: Option<String>,
-    ) -> TensorId {
+    ) -> SymbolicGraphTensorId {
         let tensor_id = self.next_tensor_id;
         self.next_tensor_id += 1;
 
@@ -807,7 +807,7 @@ impl SymbolicGraphMutator {
         inner_graph: &mut SymbolicGraphInner,
         id: TensorStoreTensorId,
         name: Option<String>,
-    ) -> TensorId {
+    ) -> SymbolicGraphTensorId {
         let tensor_id = self.next_tensor_id;
         self.next_tensor_id += 1;
 
@@ -1400,4 +1400,24 @@ impl Default for SymbolicGraph {
     fn default() -> Self {
         Self::new()
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Hash, PartialEq, Eq)]
+pub enum SymbolicGraphTensorPath {
+    Tensor(SymbolicGraphTensorId)
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Hash, PartialEq, Eq)]
+pub enum SymbolicGraphNodePath {
+    Node(SymbolicGraphOperationId)
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SymbolicGraphTelemetryRequest {
+    pub subscribed_tensors: HashSet<SymbolicGraphTensorPath>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SymbolicGraphTelemetryResponse {
+    pub subscribed_tensors: HashMap<SymbolicGraphTensorPath, NDArrayNumericTensor<DynRank>>,
 }

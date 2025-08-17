@@ -7,6 +7,7 @@ use crate::tensor_info::TensorInfoError;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
+use crate::backends::ndarray_backend::NDArrayNumericTensor;
 
 pub mod ops;
 pub(crate) mod ops_helpers;
@@ -124,8 +125,9 @@ impl<ID: Hash + Clone + Eq> MilliOpGraph<ID> {
     pub(crate) fn eval(
         &self,
         inputs: &HashMap<ID, NumericTensor<DynRank>>,
+        telemetry_request: Option<&MilliOpGraphTelemetryRequest>,
         backend: &mut EvalBackend,
-    ) -> Result<HashMap<ID, NumericTensor<DynRank>>, MilliOpGraphError> {
+    ) -> Result<(HashMap<ID, NumericTensor<DynRank>>, MilliOpGraphTelemetryResponse), MilliOpGraphError> {
         assert!(self.output_map.is_some());
 
         let op_ids_to_eval: Vec<_> = {
@@ -151,6 +153,37 @@ impl<ID: Hash + Clone + Eq> MilliOpGraph<ID> {
             outputs.insert(b.clone(), intermediate_values[a].clone());
         }
 
-        Ok(outputs)
+        let mut telemetry_response = MilliOpGraphTelemetryResponse::default();
+        if let Some(telemetry_request) = telemetry_request {
+            for tensor_path in &telemetry_request.subscribed_tensors {
+                match tensor_path {
+                    MilliOpGraphTensorPath::Tensor(tensor_id) => {
+                        telemetry_response.subscribed_tensors.insert(tensor_path.clone(), intermediate_values[tensor_id].to_ndarray()?);
+                    }
+                }
+            }
+        }
+
+        Ok((outputs, telemetry_response))
     }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct MilliOpGraphTelemetryRequest {
+    pub subscribed_tensors: HashSet<MilliOpGraphTensorPath>
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct MilliOpGraphTelemetryResponse {
+    pub subscribed_tensors: HashMap<MilliOpGraphTensorPath, NDArrayNumericTensor<DynRank>>
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Hash, PartialEq, Eq)]
+pub enum MilliOpGraphTensorPath {
+    Tensor(MilliOpGraphTensorId)
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Hash, PartialEq, Eq)]
+pub enum MilliOpGraphNodePath {
+    Op(MilliOpGraphTensorId)
 }

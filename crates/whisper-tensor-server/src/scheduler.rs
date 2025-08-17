@@ -6,6 +6,7 @@ use tokio::sync::mpsc;
 use whisper_tensor::backends::eval_backend::EvalBackend;
 use whisper_tensor::numeric_tensor::NumericTensor;
 use whisper_tensor::super_graph::data::SuperGraphData;
+use whisper_tensor::super_graph::SuperGraphExecutionTelemetryRequest;
 use whisper_tensor_server::{SuperGraphRequest, SuperGraphResponse};
 
 pub enum SchedulerJob {
@@ -46,9 +47,12 @@ pub async fn scheduler(mut input: mpsc::Receiver<SchedulerJob>, model_server: Ar
                     for (link, hash) in req.hash_inputs {
                         super_graph_data.hashes.insert(link, hash);
                     }
-                    let res = req
+                    let telemetry_request = SuperGraphExecutionTelemetryRequest {
+                        subscribed_tensors: req.subscribed_tensors.iter().cloned().collect(),
+                    };
+                    let (res, telemetry_response) = req
                         .super_graph
-                        .run(super_graph_data, None, &mut EvalBackend::NDArray)
+                        .run(super_graph_data, None, Some(&telemetry_request), &mut EvalBackend::NDArray)
                         .unwrap();
 
                     let tensor_outputs = res
@@ -63,6 +67,7 @@ pub async fn scheduler(mut input: mpsc::Receiver<SchedulerJob>, model_server: Ar
                         attention_token: req.attention_token,
                         tensor_outputs,
                         string_outputs,
+                        subscribed_tensors: telemetry_response.subscribed_tensors,
                         hash_outputs,
                     };
                     if let Err(e) = resp_sender.send(resp).await {

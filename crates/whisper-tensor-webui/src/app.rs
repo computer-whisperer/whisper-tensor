@@ -37,7 +37,7 @@ use whisper_tensor::scalar_info::ScalarInfoTyped;
 use whisper_tensor::symbolic_graph::ops::{AnyOperation, Operation};
 use whisper_tensor::symbolic_graph::tensor_store::TensorStoreTensorId;
 use whisper_tensor::symbolic_graph::{
-    OperationId, StoredOrNotTensor, SymbolicGraph, TensorId, TensorType,
+    SymbolicGraphOperationId, StoredOrNotTensor, SymbolicGraph, SymbolicGraphTensorId, TensorType,
 };
 use whisper_tensor::tokenizer::{AnyTokenizer, Tokenizer, TokenizerError};
 use whisper_tensor_import::ModelTypeHint;
