@@ -5,8 +5,8 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use whisper_tensor::backends::eval_backend::EvalBackend;
 use whisper_tensor::numeric_tensor::NumericTensor;
-use whisper_tensor::super_graph::data::SuperGraphData;
 use whisper_tensor::super_graph::SuperGraphExecutionTelemetryRequest;
+use whisper_tensor::super_graph::data::SuperGraphData;
 use whisper_tensor_server::{SuperGraphRequest, SuperGraphResponse};
 
 pub enum SchedulerJob {
@@ -52,7 +52,12 @@ pub async fn scheduler(mut input: mpsc::Receiver<SchedulerJob>, model_server: Ar
                     };
                     let (res, telemetry_response) = req
                         .super_graph
-                        .run(super_graph_data, None, Some(&telemetry_request), &mut EvalBackend::NDArray)
+                        .run(
+                            super_graph_data,
+                            None,
+                            Some(&telemetry_request),
+                            &mut EvalBackend::NDArray,
+                        )
                         .unwrap();
 
                     let tensor_outputs = res

@@ -26,7 +26,7 @@ pub struct SuperGraphRequest {
     pub hash_inputs: HashMap<SuperGraphLinkHash, SuperGraphHash>,
     pub tensor_inputs: HashMap<SuperGraphLinkTensor, NDArrayNumericTensor<DynRank>>,
     pub model_inputs: HashMap<SuperGraphLinkModel, LoadedModelId>,
-    pub subscribed_tensors: Vec<SuperGraphTensorPath>
+    pub subscribed_tensors: Vec<SuperGraphTensorPath>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

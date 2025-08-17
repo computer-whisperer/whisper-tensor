@@ -1,5 +1,5 @@
 use crate::graph_explorer::{
-    GraphExplorerApp, GraphExplorerLayerSelection, GraphExplorerState, InspectWindow, OpOrTensorId,
+    GraphExplorerApp, GraphExplorerLayerSelection, GraphExplorerState, InspectWindow,
 };
 use crate::graph_layout::{
     GraphLayout, GraphLayoutIOOffsets, GraphLayoutLinkData, GraphLayoutLinkId, GraphLayoutLinkType,
@@ -37,7 +37,7 @@ use whisper_tensor::scalar_info::ScalarInfoTyped;
 use whisper_tensor::symbolic_graph::ops::{AnyOperation, Operation};
 use whisper_tensor::symbolic_graph::tensor_store::TensorStoreTensorId;
 use whisper_tensor::symbolic_graph::{
-    SymbolicGraphOperationId, StoredOrNotTensor, SymbolicGraph, SymbolicGraphTensorId, TensorType,
+    StoredOrNotTensor, SymbolicGraph, SymbolicGraphOperationId, SymbolicGraphTensorId, TensorType,
 };
 use whisper_tensor::tokenizer::{AnyTokenizer, Tokenizer, TokenizerError};
 use whisper_tensor_import::ModelTypeHint;
@@ -261,12 +261,14 @@ impl eframe::App for WebUIApp {
                             stored_tensor_id,
                             res,
                         ) => {
-                            if let Some(GraphExplorerLayerSelection::Model(selected_model_id)) =
-                                self.graph_explorer_app.graph_subject_path.first()
+                            if let Some(selected_model_id) =
+                                self.graph_explorer_app.get_model_scope(&self.loaded_models)
                             {
-                                if *selected_model_id == model_id {
+                                if selected_model_id == model_id {
                                     for window in &mut self.graph_explorer_app.inspect_windows {
-                                        if let InspectWindow::Tensor(inspect_window_tensor) = window
+                                        if let InspectWindow::SymbolicGraphTensor(
+                                            inspect_window_tensor,
+                                        ) = window
                                         {
                                             if let Some(x) =
                                                 inspect_window_tensor.stored_value_requested
@@ -462,6 +464,7 @@ impl eframe::App for WebUIApp {
             self.graph_explorer_app.update_inspect_windows(
                 &mut self.app_state.graph_explorer_state,
                 ctx,
+                &mut self.loaded_models,
                 &mut self.server_request_manager,
             )
         }

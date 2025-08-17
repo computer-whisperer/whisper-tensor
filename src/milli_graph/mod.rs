@@ -1,5 +1,6 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
+use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::dtype::DTypeError;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::numeric_tensor::NumericTensor;
@@ -7,7 +8,6 @@ use crate::tensor_info::TensorInfoError;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
-use crate::backends::ndarray_backend::NDArrayNumericTensor;
 
 pub mod ops;
 pub(crate) mod ops_helpers;
@@ -127,7 +127,13 @@ impl<ID: Hash + Clone + Eq> MilliOpGraph<ID> {
         inputs: &HashMap<ID, NumericTensor<DynRank>>,
         telemetry_request: Option<&MilliOpGraphTelemetryRequest>,
         backend: &mut EvalBackend,
-    ) -> Result<(HashMap<ID, NumericTensor<DynRank>>, MilliOpGraphTelemetryResponse), MilliOpGraphError> {
+    ) -> Result<
+        (
+            HashMap<ID, NumericTensor<DynRank>>,
+            MilliOpGraphTelemetryResponse,
+        ),
+        MilliOpGraphError,
+    > {
         assert!(self.output_map.is_some());
 
         let op_ids_to_eval: Vec<_> = {
@@ -158,7 +164,10 @@ impl<ID: Hash + Clone + Eq> MilliOpGraph<ID> {
             for tensor_path in &telemetry_request.subscribed_tensors {
                 match tensor_path {
                     MilliOpGraphTensorPath::Tensor(tensor_id) => {
-                        telemetry_response.subscribed_tensors.insert(tensor_path.clone(), intermediate_values[tensor_id].to_ndarray()?);
+                        telemetry_response.subscribed_tensors.insert(
+                            tensor_path.clone(),
+                            intermediate_values[tensor_id].to_ndarray()?,
+                        );
                     }
                 }
             }
@@ -170,20 +179,20 @@ impl<ID: Hash + Clone + Eq> MilliOpGraph<ID> {
 
 #[derive(Clone, Debug, Default)]
 pub struct MilliOpGraphTelemetryRequest {
-    pub subscribed_tensors: HashSet<MilliOpGraphTensorPath>
+    pub subscribed_tensors: HashSet<MilliOpGraphTensorPath>,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct MilliOpGraphTelemetryResponse {
-    pub subscribed_tensors: HashMap<MilliOpGraphTensorPath, NDArrayNumericTensor<DynRank>>
+    pub subscribed_tensors: HashMap<MilliOpGraphTensorPath, NDArrayNumericTensor<DynRank>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Hash, PartialEq, Eq)]
 pub enum MilliOpGraphTensorPath {
-    Tensor(MilliOpGraphTensorId)
+    Tensor(MilliOpGraphTensorId),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Hash, PartialEq, Eq)]
 pub enum MilliOpGraphNodePath {
-    Op(MilliOpGraphTensorId)
+    Op(MilliOpGraphTensorId),
 }

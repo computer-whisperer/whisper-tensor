@@ -132,8 +132,8 @@ fn main() {
         text_input_link,
         "The fibonacci sequence is: 1, 1, 2, 3, 5, 8, 13,".to_string(),
     );
-    let res = super_graph
-        .run(super_graph_data, None, &mut EvalBackend::NDArray)
+    let (res, _) = super_graph
+        .run(super_graph_data, None, None, &mut EvalBackend::NDArray)
         .unwrap();
     let res = res.strings.get(&text_output).unwrap();
     println!("{res:?}");

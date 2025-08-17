@@ -27,7 +27,10 @@ use whisper_tensor::super_graph::{
 };
 use whisper_tensor::symbolic_graph::ops::{AnyOperation, Operation};
 use whisper_tensor::symbolic_graph::tensor_store::TensorStoreTensorId;
-use whisper_tensor::symbolic_graph::{SymbolicGraphOperationId, StoredOrNotTensor, SymbolicGraph, SymbolicGraphInner, SymbolicGraphTensorId, TensorType, SymbolicGraphTensorPath};
+use whisper_tensor::symbolic_graph::{
+    StoredOrNotTensor, SymbolicGraph, SymbolicGraphInner, SymbolicGraphOperationId,
+    SymbolicGraphTensorId, SymbolicGraphTensorPath, TensorType,
+};
 use whisper_tensor::tokenizer::Tokenizer;
 use whisper_tensor_import::onnx_graph::TokenizerInfo;
 use whisper_tensor_import::onnx_graph::tensor::Tensor;
@@ -62,7 +65,7 @@ pub(crate) enum GraphExplorerLayerSelection {
     SuperGraphNodeId(SuperGraphNodeId),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum GraphExplorerSelectable {
     SymbolicGraphOperationId(SymbolicGraphOperationId),
     SymbolicGraphTensorId(SymbolicGraphTensorId),
@@ -70,7 +73,6 @@ pub(crate) enum GraphExplorerSelectable {
     SuperGraphLink(SuperGraphAnyLink),
     MilliOpGraphTensor(MilliOpGraphTensorId),
 }
-
 
 #[derive(Clone, Debug, Default)]
 struct TextInferenceData {
@@ -1110,29 +1112,27 @@ impl GraphExplorerApp {
                                         self.next_explorer_hovered = Some(this_selectable.clone());
                                     }
                                     if resp.clicked() {
-                                        self.explorer_selection = Some(this_selectable);
+                                        self.explorer_selection = Some(this_selectable.clone());
                                     }
                                     if resp.dragged() {
                                         node_position_updates.insert(node_id, current_node_data.get(&node_id).unwrap().position + resp.drag_delta());
                                     }
                                     if resp.double_clicked() {
                                         match &current_node_data[&node_id].node_type {
-                                            GraphLayoutNodeType::SymbolicGraphOperation(op_id) => {
-                                                let new_inspect = OpOrTensorId::Op(*op_id);
+                                            GraphLayoutNodeType::SymbolicGraphOperation(_) => {
                                                 if !InspectWindow::check_if_already_exists(
                                                     &self.inspect_windows,
-                                                    &new_inspect,
-                                                ) {
-                                                    self.inspect_windows.push(InspectWindow::new(new_inspect));
+                                                    &this_selectable.clone(),
+                                                ) && let Some(x) = InspectWindow::new(this_selectable){
+                                                    self.inspect_windows.push(x);
                                                 }
                                             }
-                                            GraphLayoutNodeType::SymbolicGraphTensor(tensor_id) => {
-                                                let new_inspect = OpOrTensorId::Tensor(*tensor_id);
+                                            GraphLayoutNodeType::SymbolicGraphTensor(_tensor_id) => {
                                                 if !InspectWindow::check_if_already_exists(
                                                     &self.inspect_windows,
-                                                    &new_inspect,
-                                                ) {
-                                                    self.inspect_windows.push(InspectWindow::new(new_inspect));
+                                                    &this_selectable.clone(),
+                                                ) && let Some(x) = InspectWindow::new(this_selectable){
+                                                    self.inspect_windows.push(x);
                                                 }
                                             }
                                             GraphLayoutNodeType::SuperGraphNode(node_id) => {
@@ -1168,13 +1168,12 @@ impl GraphExplorerApp {
                                                     GraphLayoutLinkType::SymbolicGraphTensor(
                                                         tensor_id,
                                                     ) => {
-                                                        let new_inspect = OpOrTensorId::Tensor(*tensor_id);
+                                                        let new_inspect = GraphExplorerSelectable::SymbolicGraphTensorId(*tensor_id);
                                                         if !InspectWindow::check_if_already_exists(
                                                             &self.inspect_windows,
                                                             &new_inspect,
-                                                        ) {
-                                                            self.inspect_windows
-                                                                .push(InspectWindow::new(new_inspect));
+                                                        ) && let Some(x) = InspectWindow::new(new_inspect) {
+                                                            self.inspect_windows.push(x);
                                                         }
                                                     }
                                                     _ => {
@@ -1448,190 +1447,343 @@ impl GraphExplorerApp {
         }
     }
 
+    pub(crate) fn get_model_scope(
+        &mut self,
+        loaded_models: &LoadedModels,
+    ) -> Option<LoadedModelId> {
+        let (_graph_subject, model_scope) = {
+            let mut graph_subject = None;
+            let mut implied_model = None;
+            let mut model_scope = None;
+            for a in &self.graph_subject_path {
+                match a {
+                    GraphExplorerLayerSelection::Model(model_id) => {
+                        if let Some(x) = self.loaded_models.get(model_id) {
+                            graph_subject = Some(GraphSubject::SymbolicGraphInner(&x.inner_graph));
+                            model_scope = Some(*model_id);
+                        } else {
+                            graph_subject = None;
+                        }
+                    }
+                    GraphExplorerLayerSelection::Interface(interface_id) => {
+                        if let Some(x) = loaded_models.current_interfaces.get(interface_id) {
+                            implied_model = x.model_ids.first();
+                            graph_subject = Some(GraphSubject::SuperGraphInner(
+                                &x.interface.get_super_graph().inner,
+                            ));
+                        } else {
+                            graph_subject = None;
+                        }
+                    }
+                    GraphExplorerLayerSelection::SymbolicGraphOperationId((
+                        op_id,
+                        sub_graph_idx,
+                    )) => {
+                        if let Some(GraphSubject::SymbolicGraphInner(symbolic_graph)) =
+                            graph_subject
+                            && let Some(x) = symbolic_graph.get_operations().get(op_id)
+                            && let Some(inner_graph) = x.op.get_sub_graphs().get(*sub_graph_idx)
+                        {
+                            graph_subject = Some(GraphSubject::SymbolicGraphInner(inner_graph));
+                        } else {
+                            graph_subject = None;
+                        }
+                    }
+                    GraphExplorerLayerSelection::SuperGraphNodeId(node_id) => {
+                        if let Some(GraphSubject::SuperGraphInner(graph)) = graph_subject
+                            && let Some(node) = graph.nodes.get(node_id)
+                        {
+                            match node {
+                                SuperGraphAnyNode::ModelExecution(_) => {
+                                    if let Some(model_id) = implied_model
+                                        && let Some(model_graph) = self.loaded_models.get(model_id)
+                                    {
+                                        model_scope = Some(*model_id);
+                                        graph_subject = Some(GraphSubject::SymbolicGraphInner(
+                                            &model_graph.inner_graph,
+                                        ));
+                                    } else {
+                                        graph_subject = None;
+                                    }
+                                }
+                                SuperGraphAnyNode::MilliOpGraph(node) => {
+                                    graph_subject = Some(GraphSubject::MilliOpGraphB(&node.graph));
+                                }
+                                _ => {
+                                    if let Some(x) = node.get_sub_graph() {
+                                        graph_subject = Some(GraphSubject::SuperGraphInner(x));
+                                    } else {
+                                        graph_subject = None;
+                                    }
+                                }
+                            }
+                        } else {
+                            graph_subject = None;
+                        }
+                    }
+                }
+            }
+            (graph_subject, model_scope)
+        };
+        model_scope
+    }
+
     pub(crate) fn update_inspect_windows(
         &mut self,
         _state: &mut GraphExplorerState,
         ctx: &egui::Context,
+        loaded_models: &mut LoadedModels,
         server_request_manager: &mut ServerRequestManager,
     ) {
-        let mut new_inspect_windows = vec![];
-        self.inspect_windows.retain_mut(|inspect_window| {
-            let mut local_open = true;
-            let default_pos = ctx.input(|x| x.pointer.latest_pos());
-            if let Some(GraphExplorerLayerSelection::Model(model_id)) =
-                &self.graph_subject_path.first()
-            {
-                if let Some(model_graph) = self.loaded_models.get(model_id) {
-                    match inspect_window {
-                        InspectWindow::Operation(op_id) => {
-                            let mut is_hovering_tensor = false;
-                            let op_info = &model_graph.get_operations()[op_id];
-                            let name = op_info
-                                .name
-                                .clone()
-                                .map(|x| format!("Op: {x}"))
-                                .unwrap_or(format!("Op Id: {op_id:?}"));
-                            let mut window =
-                                egui::Window::new(RichText::from(name.clone()).size(14.))
-                                    .open(&mut local_open)
-                                    .resizable(false);
-                            if let Some(default_pos) = default_pos {
-                                window = window.default_pos(default_pos);
+        // Resolve context
+        let (graph_subject, model_scope) = {
+            let mut graph_subject = None;
+            let mut implied_model = None;
+            let mut model_scope = None;
+            for a in &self.graph_subject_path {
+                match a {
+                    GraphExplorerLayerSelection::Model(model_id) => {
+                        if let Some(x) = self.loaded_models.get(model_id) {
+                            graph_subject = Some(GraphSubject::SymbolicGraphInner(&x.inner_graph));
+                            model_scope = Some(model_id);
+                        } else {
+                            graph_subject = None;
+                        }
+                    }
+                    GraphExplorerLayerSelection::Interface(interface_id) => {
+                        if let Some(x) = loaded_models.current_interfaces.get(interface_id) {
+                            implied_model = x.model_ids.first();
+                            graph_subject = Some(GraphSubject::SuperGraphInner(
+                                &x.interface.get_super_graph().inner,
+                            ));
+                        } else {
+                            graph_subject = None;
+                        }
+                    }
+                    GraphExplorerLayerSelection::SymbolicGraphOperationId((
+                        op_id,
+                        sub_graph_idx,
+                    )) => {
+                        if let Some(GraphSubject::SymbolicGraphInner(symbolic_graph)) =
+                            graph_subject
+                            && let Some(x) = symbolic_graph.get_operations().get(op_id)
+                            && let Some(inner_graph) = x.op.get_sub_graphs().get(*sub_graph_idx)
+                        {
+                            graph_subject = Some(GraphSubject::SymbolicGraphInner(inner_graph));
+                        } else {
+                            graph_subject = None;
+                        }
+                    }
+                    GraphExplorerLayerSelection::SuperGraphNodeId(node_id) => {
+                        if let Some(GraphSubject::SuperGraphInner(graph)) = graph_subject
+                            && let Some(node) = graph.nodes.get(node_id)
+                        {
+                            match node {
+                                SuperGraphAnyNode::ModelExecution(_) => {
+                                    if let Some(model_id) = implied_model
+                                        && let Some(model_graph) = self.loaded_models.get(model_id)
+                                    {
+                                        model_scope = Some(model_id);
+                                        graph_subject = Some(GraphSubject::SymbolicGraphInner(
+                                            &model_graph.inner_graph,
+                                        ));
+                                    } else {
+                                        graph_subject = None;
+                                    }
+                                }
+                                SuperGraphAnyNode::MilliOpGraph(node) => {
+                                    graph_subject = Some(GraphSubject::MilliOpGraphB(&node.graph));
+                                }
+                                _ => {
+                                    if let Some(x) = node.get_sub_graph() {
+                                        graph_subject = Some(GraphSubject::SuperGraphInner(x));
+                                    } else {
+                                        graph_subject = None;
+                                    }
+                                }
                             }
-                            let resp = window.show(ctx, |ui| {
-                                let mut resp = ui.label(format!(
-                                    "ONNX Name: {:}",
-                                    op_info.name.clone().unwrap_or("N/A".to_string())
+                        } else {
+                            graph_subject = None;
+                        }
+                    }
+                }
+            }
+            (graph_subject, model_scope)
+        };
+        if let Some(graph_subject) = graph_subject {
+            let mut new_inspect_windows = vec![];
+            self.inspect_windows.retain_mut(|inspect_window| {
+                let mut local_open = true;
+                let default_pos = ctx.input(|x| x.pointer.latest_pos());
+                match (inspect_window, &graph_subject) {
+                    (
+                        InspectWindow::SymbolicGraphOperation(op_id),
+                        GraphSubject::SymbolicGraphInner(model_graph),
+                    ) => {
+                        let mut is_hovering_tensor = false;
+                        let op_info = &model_graph.get_operations()[op_id];
+                        let name = op_info
+                            .name
+                            .clone()
+                            .map(|x| format!("Op: {x}"))
+                            .unwrap_or(format!("Op Id: {op_id:?}"));
+                        let mut window = egui::Window::new(RichText::from(name.clone()).size(14.))
+                            .open(&mut local_open)
+                            .resizable(false);
+                        if let Some(default_pos) = default_pos {
+                            window = window.default_pos(default_pos);
+                        }
+                        let resp = window.show(ctx, |ui| {
+                            let mut resp = ui.label(format!(
+                                "ONNX Name: {:}",
+                                op_info.name.clone().unwrap_or("N/A".to_string())
+                            ));
+                            resp = resp.union(
+                                ui.label(format!("Op Type: {:}", op_info.op.get_op_type_name())),
+                            );
+                            resp = resp.union(ui.label("Inputs:"));
+                            fn format_tensor_row(
+                                ui: &mut egui::Ui,
+                                i: usize,
+                                tensor_id: SymbolicGraphTensorId,
+                                model_graph: &SymbolicGraphInner,
+                                new_inspect_windows: &mut Vec<GraphExplorerSelectable>,
+                            ) -> Response {
+                                let tensor_info = model_graph.get_tensor_info(tensor_id).unwrap();
+                                let mut response = ui.label(format!("{i}"));
+                                response = response.union(ui.label(format!("{tensor_id:?}")));
+                                response = response.union(ui.label(
+                                    tensor_info.onnx_name.clone().unwrap_or("N/A".to_string()),
                                 ));
-                                resp =
-                                    resp.union(ui.label(format!(
-                                        "Op Type: {:}",
-                                        op_info.op.get_op_type_name()
-                                    )));
-                                resp = resp.union(ui.label("Inputs:"));
-                                fn format_tensor_row(
-                                    ui: &mut egui::Ui,
-                                    i: usize,
-                                    tensor_id: SymbolicGraphTensorId,
-                                    model_graph: &SymbolicGraph,
-                                    new_inspect_windows: &mut Vec<OpOrTensorId>,
-                                ) -> Response {
-                                    let tensor_info =
-                                        model_graph.get_tensor_info(tensor_id).unwrap();
-                                    let mut response = ui.label(format!("{i}"));
-                                    response = response.union(ui.label(format!("{tensor_id:?}")));
-                                    response = response.union(ui.label(
-                                        tensor_info.onnx_name.clone().unwrap_or("N/A".to_string()),
-                                    ));
-                                    response = response.union(
-                                        ui.label(
-                                            tensor_info
-                                                .dtype
-                                                .map(|x| x.to_string())
-                                                .clone()
-                                                .unwrap_or("N/A".to_string()),
-                                        ),
+                                response = response.union(
+                                    ui.label(
+                                        tensor_info
+                                            .dtype
+                                            .map(|x| x.to_string())
+                                            .clone()
+                                            .unwrap_or("N/A".to_string()),
+                                    ),
+                                );
+                                response = response.union(
+                                    ui.label(
+                                        tensor_info
+                                            .shape()
+                                            .map(|x| format_shape(&x))
+                                            .unwrap_or("N/A".to_string()),
+                                    ),
+                                );
+                                if ui.button("Inspect").clicked() || response.double_clicked() {
+                                    new_inspect_windows.push(
+                                        GraphExplorerSelectable::SymbolicGraphTensorId(tensor_id),
                                     );
-                                    response = response.union(
-                                        ui.label(
-                                            tensor_info
-                                                .shape()
-                                                .map(|x| format_shape(&x))
-                                                .unwrap_or("N/A".to_string()),
-                                        ),
-                                    );
-                                    if ui.button("Inspect").clicked() || response.double_clicked() {
-                                        new_inspect_windows.push(OpOrTensorId::Tensor(tensor_id));
-                                    }
-                                    ui.end_row();
-                                    response
                                 }
-                                egui::Grid::new(egui::Id::new(("grid_inputs", name.clone())))
-                                    .striped(true)
-                                    .show(ui, |ui| {
-                                        for (i, tensor_id) in
-                                            op_info.op.get_inputs().iter().enumerate()
-                                        {
-                                            let resp = format_tensor_row(
-                                                ui,
-                                                i,
-                                                *tensor_id,
-                                                &model_graph,
-                                                &mut new_inspect_windows,
-                                            );
-                                            if resp.hovered() {
-                                                self.next_explorer_hovered = Some(
-                                                    GraphExplorerSelectable::SymbolicGraphTensorId(
-                                                        *tensor_id,
-                                                    ),
-                                                );
-                                                is_hovering_tensor = true;
-                                            }
-                                            if resp.clicked() {
-                                                self.explorer_selection = Some(
-                                                    GraphExplorerSelectable::SymbolicGraphTensorId(
-                                                        *tensor_id,
-                                                    ),
-                                                );
-                                            }
-                                        }
-                                    });
-                                resp = resp.union(ui.label("Outputs:"));
-                                egui::Grid::new(egui::Id::new(("grid_outputs", name)))
-                                    .striped(true)
-                                    .show(ui, |ui| {
-                                        for (i, tensor_id) in
-                                            op_info.op.get_outputs().iter().enumerate()
-                                        {
-                                            let resp = format_tensor_row(
-                                                ui,
-                                                i,
-                                                *tensor_id,
-                                                &model_graph,
-                                                &mut new_inspect_windows,
-                                            );
-                                            if resp.hovered() {
-                                                self.next_explorer_hovered = Some(
-                                                    GraphExplorerSelectable::SymbolicGraphTensorId(
-                                                        *tensor_id,
-                                                    ),
-                                                );
-                                                is_hovering_tensor = true;
-                                            }
-                                            if resp.clicked() {
-                                                self.explorer_selection = Some(
-                                                    GraphExplorerSelectable::SymbolicGraphTensorId(
-                                                        *tensor_id,
-                                                    ),
-                                                );
-                                            }
-                                        }
-                                    });
-                                match &op_info.op {
-                                    AnyOperation::Constant(x) => {
-                                        resp = resp.union(
-                                            ui.label(format!("Value: {}", x.value.to_string())),
+                                ui.end_row();
+                                response
+                            }
+                            egui::Grid::new(egui::Id::new(("grid_inputs", name.clone())))
+                                .striped(true)
+                                .show(ui, |ui| {
+                                    for (i, tensor_id) in op_info.op.get_inputs().iter().enumerate()
+                                    {
+                                        let resp = format_tensor_row(
+                                            ui,
+                                            i,
+                                            *tensor_id,
+                                            &model_graph,
+                                            &mut new_inspect_windows,
                                         );
+                                        if resp.hovered() {
+                                            self.next_explorer_hovered = Some(
+                                                GraphExplorerSelectable::SymbolicGraphTensorId(
+                                                    *tensor_id,
+                                                ),
+                                            );
+                                            is_hovering_tensor = true;
+                                        }
+                                        if resp.clicked() {
+                                            self.explorer_selection = Some(
+                                                GraphExplorerSelectable::SymbolicGraphTensorId(
+                                                    *tensor_id,
+                                                ),
+                                            );
+                                        }
                                     }
-                                    _ => {}
+                                });
+                            resp = resp.union(ui.label("Outputs:"));
+                            egui::Grid::new(egui::Id::new(("grid_outputs", name)))
+                                .striped(true)
+                                .show(ui, |ui| {
+                                    for (i, tensor_id) in
+                                        op_info.op.get_outputs().iter().enumerate()
+                                    {
+                                        let resp = format_tensor_row(
+                                            ui,
+                                            i,
+                                            *tensor_id,
+                                            &model_graph,
+                                            &mut new_inspect_windows,
+                                        );
+                                        if resp.hovered() {
+                                            self.next_explorer_hovered = Some(
+                                                GraphExplorerSelectable::SymbolicGraphTensorId(
+                                                    *tensor_id,
+                                                ),
+                                            );
+                                            is_hovering_tensor = true;
+                                        }
+                                        if resp.clicked() {
+                                            self.explorer_selection = Some(
+                                                GraphExplorerSelectable::SymbolicGraphTensorId(
+                                                    *tensor_id,
+                                                ),
+                                            );
+                                        }
+                                    }
+                                });
+                            match &op_info.op {
+                                AnyOperation::Constant(x) => {
+                                    resp = resp
+                                        .union(ui.label(format!("Value: {}", x.value.to_string())));
                                 }
+                                _ => {}
+                            }
 
-                                if resp.clicked() {
-                                    self.explorer_selection = Some(
-                                        GraphExplorerSelectable::SymbolicGraphOperationId(*op_id),
-                                    );
-                                }
-                            });
-                            if let Some(resp) = resp {
-                                if resp.response.contains_pointer() && !is_hovering_tensor {
-                                    self.next_explorer_hovered = Some(
-                                        GraphExplorerSelectable::SymbolicGraphOperationId(*op_id),
-                                    )
-                                }
+                            if resp.clicked() {
+                                self.explorer_selection =
+                                    Some(GraphExplorerSelectable::SymbolicGraphOperationId(*op_id));
+                            }
+                        });
+                        if let Some(resp) = resp {
+                            if resp.response.contains_pointer() && !is_hovering_tensor {
+                                self.next_explorer_hovered =
+                                    Some(GraphExplorerSelectable::SymbolicGraphOperationId(*op_id))
                             }
                         }
-                        InspectWindow::Tensor(inspect_window_tensor) => {
-                            let tensor_id = inspect_window_tensor.tensor_id;
-                            let tensor_info = model_graph.get_tensor_info(tensor_id).unwrap();
-                            let name = tensor_info
-                                .onnx_name
-                                .clone()
-                                .map(|x| format!("Tensor: {x}"))
-                                .unwrap_or(format!("Tensor Id: {tensor_id}"));
-                            let mut window =
-                                egui::Window::new(RichText::from(name.clone()).size(14.))
-                                    .open(&mut local_open)
-                                    .resizable(false);
-                            if let Some(default_pos) = default_pos {
-                                window = window.default_pos(default_pos);
-                            }
+                    }
+                    (
+                        InspectWindow::SymbolicGraphTensor(inspect_window_tensor),
+                        GraphSubject::SymbolicGraphInner(model_graph),
+                    ) => {
+                        let tensor_id = inspect_window_tensor.tensor_id;
+                        let tensor_info = model_graph.get_tensor_info(tensor_id).unwrap();
+                        let name = tensor_info
+                            .onnx_name
+                            .clone()
+                            .map(|x| format!("Tensor: {x}"))
+                            .unwrap_or(format!("Tensor Id: {tensor_id}"));
+                        let mut window = egui::Window::new(RichText::from(name.clone()).size(14.))
+                            .open(&mut local_open)
+                            .resizable(false);
+                        if let Some(default_pos) = default_pos {
+                            window = window.default_pos(default_pos);
+                        }
 
-                            let resp = window.show(ctx, |ui| {
-                                let mut resp = ui.label(format!(
-                                    "ONNX Name: {:}",
-                                    tensor_info.onnx_name.clone().unwrap_or("N/A".to_string())
-                                ));
-                                resp = resp.union(ui.label(format!(
+                        let resp = window.show(ctx, |ui| {
+                            let mut resp = ui.label(format!(
+                                "ONNX Name: {:}",
+                                tensor_info.onnx_name.clone().unwrap_or("N/A".to_string())
+                            ));
+                            resp = resp.union(ui.label(format!(
                                             "DType: {:}",
                                             tensor_info
                                                 .dtype
@@ -1639,112 +1791,107 @@ impl GraphExplorerApp {
                                                 .clone()
                                                 .unwrap_or("N/A".to_string())
                                         )));
-                                resp = resp.union(ui.label(format!(
+                            resp = resp.union(ui.label(format!(
                                             "Shape: {:}",
                                             tensor_info
                                                 .shape()
                                                 .map(|x| format_shape(&x))
                                                 .unwrap_or("N/A".to_string())
                                         )));
-                                let mut stored_tensor = None;
-                                match &tensor_info.tensor_type {
-                                    TensorType::Input(x) => {
-                                        resp = resp.union(ui.label("Tensor Type: Model Input"));
-                                        if let Some(x) = x {
-                                            match x {
-                                                StoredOrNotTensor::Stored(stored_tensor_id) => {
-                                                    stored_tensor = Some(*stored_tensor_id);
-                                                }
-                                                StoredOrNotTensor::NotStored(x) => {
-                                                    ui.label(format!("Initial Value: {x}"));
-                                                }
-                                            };
-                                        }
-                                    }
-                                    TensorType::Output => {
-                                        resp = resp.union(ui.label("Tensor Type: Model Output"));
-                                    }
-                                    TensorType::Intermediate => {
-                                        resp = resp.union(ui.label("Tensor Type: Intermediate"));
-                                    }
-                                    TensorType::Constant(x) => {
-                                        resp = resp.union(ui.label("Tensor Type: Constant"));
+                            let mut stored_tensor = None;
+                            match &tensor_info.tensor_type {
+                                TensorType::Input(x) => {
+                                    resp = resp.union(ui.label("Tensor Type: Model Input"));
+                                    if let Some(x) = x {
                                         match x {
                                             StoredOrNotTensor::Stored(stored_tensor_id) => {
                                                 stored_tensor = Some(*stored_tensor_id);
                                             }
                                             StoredOrNotTensor::NotStored(x) => {
-                                                resp = resp.union(ui.label(format!("Value: {x}")));
+                                                ui.label(format!("Initial Value: {x}"));
                                             }
                                         };
                                     }
                                 }
-                                if let Some(stored_tensor_id) = stored_tensor {
-                                    if inspect_window_tensor.stored_value_requested.is_none() {
-                                        inspect_window_tensor.stored_value_requested =
-                                            Some(stored_tensor_id);
-                                        let msg = WebsocketClientServerMessage::GetStoredTensor(
-                                            *model_id,
-                                            stored_tensor_id,
-                                        );
-                                        server_request_manager.send(msg).unwrap();
-                                    }
-                                    if let Some(x) = &inspect_window_tensor.stored_value {
-                                        match x {
-                                            Ok(x) => {
-                                                resp = resp.union(ui.label(format!("Value: {x}")));
-                                            }
-                                            Err(err) => {
-                                                ui.scope(|ui| {
-                                                    ui.visuals_mut().override_text_color =
-                                                        Some(egui::Color32::RED);
-                                                    ui.style_mut().override_text_style =
-                                                        Some(egui::TextStyle::Monospace);
-                                                    ui.label(err);
-                                                });
-                                            }
+                                TensorType::Output => {
+                                    resp = resp.union(ui.label("Tensor Type: Model Output"));
+                                }
+                                TensorType::Intermediate => {
+                                    resp = resp.union(ui.label("Tensor Type: Intermediate"));
+                                }
+                                TensorType::Constant(x) => {
+                                    resp = resp.union(ui.label("Tensor Type: Constant"));
+                                    match x {
+                                        StoredOrNotTensor::Stored(stored_tensor_id) => {
+                                            stored_tensor = Some(*stored_tensor_id);
                                         }
-                                    } else {
-                                        resp = resp.union(ui.label("Loading Tensor..."));
-                                        resp = resp.union(ui.spinner());
-                                    }
+                                        StoredOrNotTensor::NotStored(x) => {
+                                            resp = resp.union(ui.label(format!("Value: {x}")));
+                                        }
+                                    };
                                 }
-                                if resp.clicked() {
-                                    self.explorer_selection = Some(
-                                        GraphExplorerSelectable::SymbolicGraphTensorId(tensor_id),
+                            }
+                            if let Some(stored_tensor_id) = stored_tensor {
+                                if inspect_window_tensor.stored_value_requested.is_none() {
+                                    inspect_window_tensor.stored_value_requested =
+                                        Some(stored_tensor_id);
+                                    let msg = WebsocketClientServerMessage::GetStoredTensor(
+                                        *model_scope.unwrap(),
+                                        stored_tensor_id,
                                     );
+                                    server_request_manager.send(msg).unwrap();
                                 }
-                            });
-                            if let Some(resp) = resp {
-                                if resp.response.contains_pointer() {
-                                    self.next_explorer_hovered = Some(
-                                        GraphExplorerSelectable::SymbolicGraphTensorId(tensor_id),
-                                    )
+                                if let Some(x) = &inspect_window_tensor.stored_value {
+                                    match x {
+                                        Ok(x) => {
+                                            resp = resp.union(ui.label(format!("Value: {x}")));
+                                        }
+                                        Err(err) => {
+                                            ui.scope(|ui| {
+                                                ui.visuals_mut().override_text_color =
+                                                    Some(egui::Color32::RED);
+                                                ui.style_mut().override_text_style =
+                                                    Some(egui::TextStyle::Monospace);
+                                                ui.label(err);
+                                            });
+                                        }
+                                    }
+                                } else {
+                                    resp = resp.union(ui.label("Loading Tensor..."));
+                                    resp = resp.union(ui.spinner());
                                 }
+                            }
+                            if resp.clicked() {
+                                self.explorer_selection =
+                                    Some(GraphExplorerSelectable::SymbolicGraphTensorId(tensor_id));
+                            }
+                        });
+                        if let Some(resp) = resp {
+                            if resp.response.contains_pointer() {
+                                self.next_explorer_hovered =
+                                    Some(GraphExplorerSelectable::SymbolicGraphTensorId(tensor_id))
                             }
                         }
                     }
+                    _ => {}
                 }
-            }
-            local_open
-        });
-        for new_inspect_window in new_inspect_windows {
-            if !InspectWindow::check_if_already_exists(&self.inspect_windows, &new_inspect_window) {
-                self.inspect_windows
-                    .push(InspectWindow::new(new_inspect_window));
+                local_open
+            });
+            for new_inspect_window in new_inspect_windows {
+                if !InspectWindow::check_if_already_exists(
+                    &self.inspect_windows,
+                    &new_inspect_window,
+                ) && let Some(x) = InspectWindow::new(new_inspect_window)
+                {
+                    self.inspect_windows.push(x);
+                }
             }
         }
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum OpOrTensorId {
-    Op(SymbolicGraphOperationId),
-    Tensor(SymbolicGraphTensorId),
-}
-
 #[derive(Clone, Debug)]
-pub(crate) struct InspectWindowTensor {
+pub(crate) struct InspectWindowSymbolicGraphTensor {
     pub(crate) tensor_id: SymbolicGraphTensorId,
     pub(crate) stored_value_requested: Option<TensorStoreTensorId>,
     pub(crate) stored_value: Option<Result<NDArrayNumericTensor<DynRank>, String>>,
@@ -1752,38 +1899,47 @@ pub(crate) struct InspectWindowTensor {
 
 #[derive(Clone, Debug)]
 pub(crate) enum InspectWindow {
-    Operation(SymbolicGraphOperationId),
-    Tensor(InspectWindowTensor),
+    SymbolicGraphOperation(SymbolicGraphOperationId),
+    SymbolicGraphTensor(InspectWindowSymbolicGraphTensor),
 }
 
 impl InspectWindow {
-    fn to_op_or_tensor_id(&self) -> OpOrTensorId {
+    fn to_graph_selectable(&self) -> GraphExplorerSelectable {
         match self {
-            InspectWindow::Operation(op_id) => OpOrTensorId::Op(*op_id),
-            InspectWindow::Tensor(x) => OpOrTensorId::Tensor(x.tensor_id),
+            InspectWindow::SymbolicGraphOperation(op_id) => {
+                GraphExplorerSelectable::SymbolicGraphOperationId(*op_id)
+            }
+            InspectWindow::SymbolicGraphTensor(x) => {
+                GraphExplorerSelectable::SymbolicGraphTensorId(x.tensor_id)
+            }
         }
     }
 
     pub(crate) fn check_if_already_exists(
         windows: &[Self],
-        op_or_tensor_id: &OpOrTensorId,
+        subject: &GraphExplorerSelectable,
     ) -> bool {
         for window in windows {
-            if window.to_op_or_tensor_id() == *op_or_tensor_id {
+            if window.to_graph_selectable() == *subject {
                 return true;
             }
         }
         false
     }
 
-    pub(crate) fn new(op_or_tensor_id: OpOrTensorId) -> Self {
-        match op_or_tensor_id {
-            OpOrTensorId::Op(op_id) => Self::Operation(op_id),
-            OpOrTensorId::Tensor(tensor_id) => Self::Tensor(InspectWindowTensor {
-                tensor_id,
-                stored_value_requested: None,
-                stored_value: None,
-            }),
+    pub(crate) fn new(subject: GraphExplorerSelectable) -> Option<Self> {
+        match subject {
+            GraphExplorerSelectable::SymbolicGraphOperationId(op_id) => {
+                Some(Self::SymbolicGraphOperation(op_id))
+            }
+            GraphExplorerSelectable::SymbolicGraphTensorId(tensor_id) => Some(
+                Self::SymbolicGraphTensor(InspectWindowSymbolicGraphTensor {
+                    tensor_id,
+                    stored_value_requested: None,
+                    stored_value: None,
+                }),
+            ),
+            _ => None,
         }
     }
 }

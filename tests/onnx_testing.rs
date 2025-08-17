@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Once;
 use whisper_tensor::backends::eval_backend::EvalBackend;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
+#[cfg(feature = "vulkan")]
 use whisper_tensor::backends::vulkan_backend::{VulkanContext, VulkanImmediateExecutor};
 use whisper_tensor::dtype::{DType, DTypeError};
 use whisper_tensor::model::Model;
@@ -120,8 +121,8 @@ impl OnnxNodeTest {
                 .map_err(|e| format!("Failed to parse expected outputs: {e}"))?;
 
             // Run the model
-            let outputs = model
-                .eval(inputs, backend)
+            let (outputs, _) = model
+                .eval(inputs, None, backend)
                 .map_err(|e| format!("Model execution failed: {e:?}"))?;
 
             // Compare outputs with expected values

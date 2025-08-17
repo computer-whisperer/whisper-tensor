@@ -6,9 +6,9 @@ use crate::milli_graph::{MilliOpGraph, MilliOpGraphError, ops_helpers};
 use crate::numeric_scalar::NumericScalar;
 use crate::numeric_tensor::{NumericTensor, NumericTensorError};
 use crate::symbolic_graph::{
-    ONNXDecodingError, SymbolicGraphInner, SymbolicGraphMutator, SymbolicGraphTensorId, query_attribute_bool,
-    query_attribute_float, query_attribute_floats, query_attribute_graph, query_attribute_int,
-    query_attribute_ints, query_attribute_string, query_attribute_tensor,
+    ONNXDecodingError, SymbolicGraphInner, SymbolicGraphMutator, SymbolicGraphTensorId,
+    query_attribute_bool, query_attribute_float, query_attribute_floats, query_attribute_graph,
+    query_attribute_int, query_attribute_ints, query_attribute_string, query_attribute_tensor,
 };
 use crate::tensor_rank::DynRank;
 use crate::{TrigOp, onnx};

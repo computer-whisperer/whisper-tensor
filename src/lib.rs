@@ -15,7 +15,6 @@ pub mod symbolic_scalar;
 pub mod tensor_info;
 pub mod tensor_rank;
 pub mod tokenizer;
-mod meta;
 
 pub use tensor_rank::DynRank;
 

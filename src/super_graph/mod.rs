@@ -3,7 +3,9 @@ pub mod data;
 pub mod links;
 pub mod nodes;
 
+use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
+use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::milli_graph::{MilliOpGraphError, MilliOpGraphNodePath, MilliOpGraphTensorPath};
 use crate::model::ModelError;
 use crate::numeric_tensor::NumericTensorError;
@@ -15,12 +17,10 @@ pub use crate::super_graph::links::{
     SuperGraphLinkString, SuperGraphLinkTensor, SuperGraphLinkTokenizer,
 };
 use crate::super_graph::nodes::SuperGraphAnyNode;
+use crate::symbolic_graph::{SymbolicGraphNodePath, SymbolicGraphTensorPath};
 use crate::tokenizer::TokenizerError;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use crate::backends::ndarray_backend::NDArrayNumericTensor;
-use crate::DynRank;
-use crate::symbolic_graph::{SymbolicGraphNodePath, SymbolicGraphTensorPath};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SuperGraphNodeId(pub(crate) u32);
@@ -45,12 +45,12 @@ pub type SuperGraphHash = u64;
 
 #[derive(Clone, Debug, Default)]
 pub struct SuperGraphExecutionTelemetryRequest {
-    pub subscribed_tensors: HashSet<SuperGraphTensorPath>
+    pub subscribed_tensors: HashSet<SuperGraphTensorPath>,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct SuperGraphExecutionTelemetryResponse {
-    pub subscribed_tensors: HashMap<SuperGraphTensorPath, NDArrayNumericTensor<DynRank>>
+    pub subscribed_tensors: HashMap<SuperGraphTensorPath, NDArrayNumericTensor<DynRank>>,
 }
 
 impl SuperGraphExecutionTelemetryRequest {
@@ -100,7 +100,7 @@ impl SuperGraphInner {
         let mut remaining_ops = self.nodes.keys().cloned().collect::<Vec<_>>();
 
         let mut telemetry_response = SuperGraphExecutionTelemetryResponse {
-            subscribed_tensors: HashMap::new()
+            subscribed_tensors: HashMap::new(),
         };
 
         loop {
@@ -153,7 +153,14 @@ impl SuperGraphInner {
             if let Some(op_id) = op_id_to_use {
                 let op_id = *op_id;
                 let op = self.nodes.get(&op_id).unwrap();
-                op.eval(op_id, &mut data, caches.as_deref_mut(), telemetry_request, &mut telemetry_response, backend)?;
+                op.eval(
+                    op_id,
+                    &mut data,
+                    caches.as_deref_mut(),
+                    telemetry_request,
+                    &mut telemetry_response,
+                    backend,
+                )?;
                 remaining_ops.retain(|x| *x != op_id);
             } else {
                 break;
@@ -162,10 +169,12 @@ impl SuperGraphInner {
 
         if let Some(telemetry_request) = &telemetry_request {
             for (link, tensor) in &data.tensors {
-               let path = SuperGraphTensorPath::Link(link.clone());
-               if telemetry_request.subscribed_tensors.contains(&path) {
-                   telemetry_response.subscribed_tensors.insert(path, tensor.to_ndarray()?);
-               }
+                let path = SuperGraphTensorPath::Link(*link);
+                if telemetry_request.subscribed_tensors.contains(&path) {
+                    telemetry_response
+                        .subscribed_tensors
+                        .insert(path, tensor.to_ndarray()?);
+                }
             }
         }
 

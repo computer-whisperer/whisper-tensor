@@ -390,10 +390,12 @@ impl SymbolicGraphInner {
         inputs: &HashMap<SymbolicGraphTensorId, NumericTensor<DynRank>>,
         eval_backend: &mut EvalBackend,
     ) -> Result<HashMap<SymbolicGraphTensorId, NumericTensor<DynRank>>, EvalError> {
-        let mut active_tensors: HashMap<SymbolicGraphTensorId, NumericTensor<DynRank>> = inputs.clone();
+        let mut active_tensors: HashMap<SymbolicGraphTensorId, NumericTensor<DynRank>> =
+            inputs.clone();
 
         let ops = self.get_operations();
-        let mut remaining_ops_to_complete: Vec<SymbolicGraphOperationId> = ops.keys().copied().collect();
+        let mut remaining_ops_to_complete: Vec<SymbolicGraphOperationId> =
+            ops.keys().copied().collect();
         let mut total_ops_completed: Vec<SymbolicGraphOperationId> = vec![];
         loop {
             let mut ops_completed_now = vec![];
@@ -1404,12 +1406,12 @@ impl Default for SymbolicGraph {
 
 #[derive(Clone, Debug, Serialize, Deserialize, Hash, PartialEq, Eq)]
 pub enum SymbolicGraphTensorPath {
-    Tensor(SymbolicGraphTensorId)
+    Tensor(SymbolicGraphTensorId),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Hash, PartialEq, Eq)]
 pub enum SymbolicGraphNodePath {
-    Node(SymbolicGraphOperationId)
+    Node(SymbolicGraphOperationId),
 }
 
 #[derive(Clone, Debug, Default)]

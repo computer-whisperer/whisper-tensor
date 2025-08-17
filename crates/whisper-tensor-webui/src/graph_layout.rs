@@ -1,11 +1,9 @@
-use crate::app::InterfaceId;
 use crate::graph_explorer::GraphExplorerSelectable;
 use egui::{Pos2, Rect, UiBuilder, Vec2, vec2};
 use rand::{random, random_range};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use whisper_tensor::milli_graph::MilliOpGraphTensorId;
-use whisper_tensor::super_graph::links::SuperGraphAnyLink;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct GraphLayoutNodeId(pub(crate) usize);
@@ -95,7 +93,7 @@ pub(crate) struct GraphLayoutNodeInitData {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum GraphLayoutLinkType {
     SymbolicGraphTensor(whisper_tensor::symbolic_graph::SymbolicGraphTensorId),
-    SuperGraphLink(SuperGraphAnyLink),
+    SuperGraphLink(whisper_tensor::super_graph::SuperGraphAnyLink),
     MilliOpGraphTensor(MilliOpGraphTensorId),
 }
 

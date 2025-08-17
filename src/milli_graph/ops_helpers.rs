@@ -11,7 +11,10 @@ pub(crate) fn rank(
     graph.push_op(AnyMilliOp::Shape(MilliOpShape::new(shape)))
 }
 
-pub(crate) fn scalar_const<T>(graph: &mut MilliOpGraph<SymbolicGraphTensorId>, value: T) -> MilliOpGraphTensorId
+pub(crate) fn scalar_const<T>(
+    graph: &mut MilliOpGraph<SymbolicGraphTensorId>,
+    value: T,
+) -> MilliOpGraphTensorId
 where
     T: NDArrayNumericTensorType,
 {

@@ -4,7 +4,11 @@ use crate::dtype::{DType, DTypeError};
 use crate::numeric_tensor::NumericTensor;
 use crate::symbolic_graph::ops::{EvalError, Operation};
 use crate::symbolic_graph::tensor_store::TensorStore;
-use crate::symbolic_graph::{GraphOperation, SymbolicGraphOperationId, SymbolicGraph, SymbolicGraphTensorId, check_tensor_matches, SymbolicGraphTensorPath, SymbolicGraphTelemetryRequest, SymbolicGraphTelemetryResponse};
+use crate::symbolic_graph::{
+    GraphOperation, SymbolicGraph, SymbolicGraphOperationId, SymbolicGraphTelemetryRequest,
+    SymbolicGraphTelemetryResponse, SymbolicGraphTensorId, SymbolicGraphTensorPath,
+    check_tensor_matches,
+};
 use crate::tensor_rank::DynRank;
 use std::collections::HashMap;
 
@@ -61,17 +65,21 @@ pub enum EvalRuntimeError {
     EvalError(Option<String>, EvalError),
 }
 
-
-
 pub fn run(
     model: &SymbolicGraph,
     tensor_store: &TensorStore,
     eval_backend: &mut EvalBackend,
     telemetry_request: Option<&SymbolicGraphTelemetryRequest>,
     inputs: HashMap<String, NumericTensor<DynRank>>,
-) -> Result<(HashMap<String, NumericTensor<DynRank>>, SymbolicGraphTelemetryResponse), EvalRuntimeError> {
+) -> Result<
+    (
+        HashMap<String, NumericTensor<DynRank>>,
+        SymbolicGraphTelemetryResponse,
+    ),
+    EvalRuntimeError,
+> {
     let initialized_tensors = model.get_initialized_tensors(tensor_store);
-    let mut telemetry_response = SymbolicGraphTelemetryResponse{
+    let mut telemetry_response = SymbolicGraphTelemetryResponse {
         subscribed_tensors: HashMap::new(),
     };
     let mut active_tensors: HashMap<SymbolicGraphTensorId, NumericTensor<DynRank>> = HashMap::new();
@@ -86,7 +94,8 @@ pub fn run(
     }
 
     let ops = model.get_operations();
-    let mut remaining_ops_to_complete: Vec<SymbolicGraphOperationId> = ops.keys().copied().collect();
+    let mut remaining_ops_to_complete: Vec<SymbolicGraphOperationId> =
+        ops.keys().copied().collect();
     let mut total_ops_completed: Vec<SymbolicGraphOperationId> = vec![];
     loop {
         let mut ops_completed_now = vec![];
@@ -150,8 +159,10 @@ pub fn run(
     if let Some(req) = telemetry_request {
         for subscribed_path in &req.subscribed_tensors {
             let SymbolicGraphTensorPath::Tensor(tensor_id) = subscribed_path;
-            if let Some(tensor) = active_tensors.get(&tensor_id) {
-                telemetry_response.subscribed_tensors.insert(subscribed_path.clone(), tensor.to_ndarray().unwrap());
+            if let Some(tensor) = active_tensors.get(tensor_id) {
+                telemetry_response
+                    .subscribed_tensors
+                    .insert(subscribed_path.clone(), tensor.to_ndarray().unwrap());
             }
         }
     }
