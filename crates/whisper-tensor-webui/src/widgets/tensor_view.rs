@@ -1,23 +1,25 @@
-use whisper_tensor::DynRank;
-use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use egui::{self, Align, FontId, Id, Response, Ui};
 use egui_extras::{Column, TableBuilder};
+use whisper_tensor::DynRank;
+use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::numeric_scalar::NumericScalarType;
 
 pub fn tensor_view_old(ui: &mut Ui, value: &NDArrayNumericTensor<DynRank>) -> Response {
     let frame = egui::Frame::default()
         .inner_margin(2.0)
         .stroke(ui.visuals().window_stroke);
-    frame.show(ui, |ui| {
-        ui.horizontal(|ui| {
-            ui.label(format!("{:}, {:?}", value.dtype(), value.shape()));
-            if ui.button("Copy Full").clicked() {
-                let text = format!("{:#}", value);
-                ui.output_mut(|o| o.copied_text = text);
-            }
-        });
-        ui.label(value.to_string());
-    }).response
+    frame
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(format!("{:}, {:?}", value.dtype(), value.shape()));
+                if ui.button("Copy Full").clicked() {
+                    let text = format!("{:#}", value);
+                    ui.output_mut(|o| o.copied_text = text);
+                }
+            });
+            ui.label(value.to_string());
+        })
+        .response
 }
 
 /// State you should persist in your egui app.
@@ -44,7 +46,7 @@ pub struct TensorViewState {
     pub scientific: bool,
     pub monospace: bool,
     pub auto_axes: bool,
-    pub last_shape: Vec<u64>
+    pub last_shape: Vec<u64>,
 }
 
 impl TensorViewState {
@@ -59,22 +61,28 @@ impl TensorViewState {
             fixed_idx,
             row_offset: 0,
             col_offset: 0,
-            rows_per_page: 8,  // good default; TableBuilder virtualizes rows
-            cols_per_page: 8,  // we page horizontally
+            rows_per_page: 8, // good default; TableBuilder virtualizes rows
+            cols_per_page: 8, // we page horizontally
             row_height: 20.0,
             col_width: 60.0,
             precision: 4,
             scientific: false,
             monospace: true,
             auto_axes: true,
-            last_shape: shape.to_vec()
+            last_shape: shape.to_vec(),
         }
     }
 
     fn clamp_to(&mut self, shape: &[u64]) {
         let n = shape.len();
 
-        // Unknown or scalar handled specially
+        // Detect shape change (so we don't override manual picks every frame)
+        let shape_changed = self.last_shape != shape;
+        if shape_changed {
+            self.last_shape = shape.to_vec();
+        }
+
+        // Unknown/scalar-ish (no axes or all dims missing)
         if n == 0 {
             self.fixed_idx.clear();
             self.row_axis = 0;
@@ -86,21 +94,67 @@ impl TensorViewState {
             return;
         }
 
-        // Keep indices sized to rank
+        // Ensure fixed_idx length
         if self.fixed_idx.len() != n {
             self.fixed_idx.resize(n, 0);
         }
 
-        // Distinct axes for rank >= 2
-        self.row_axis = self.row_axis.min(n - 1);
-        self.col_axis = self.col_axis.min(n - 1);
-        if n >= 2 && self.row_axis == self.col_axis {
-            self.col_axis = if self.row_axis + 1 < n { self.row_axis + 1 } else { self.row_axis - 1 };
+        // Identify non-singleton axes (dims > 1)
+        let nz = non_singleton_axes(shape);
+
+        // Check if current axes selection is "degenerate" for the current shape
+        let axes_degenerate = match nz.len() {
+            0 => true, // scalar-like
+            1 => !(self.row_axis == nz[0] && self.col_axis == nz[0]),
+            _ => {
+                self.row_axis == self.col_axis
+                    || !nz.contains(&self.row_axis)
+                    || !nz.contains(&self.col_axis)
+            }
+        };
+
+        // Auto-pick only when (a) enabled and (b) shape changed or degenerate
+        if self.auto_axes && (shape_changed || axes_degenerate) {
+            match nz.len() {
+                0 => {
+                    // scalar-like
+                    self.row_axis = 0;
+                    self.col_axis = if n > 1 { 1 } else { 0 };
+                }
+                1 => {
+                    // vector-like (e.g., (1,1,768))
+                    self.row_axis = nz[0];
+                    self.col_axis = nz[0];
+                }
+                _ => {
+                    // pick the last two non-singleton axes: rows = next-to-last, cols = last
+                    self.col_axis = *nz.last().unwrap();
+                    self.row_axis = nz[nz.len() - 2];
+                }
+            }
         }
 
-        // Vector specialization
-        if n == 1 {
-            let len = shape[0];
+        // Keep indices in range
+        self.row_axis = self.row_axis.min(n - 1);
+        self.col_axis = self.col_axis.min(n - 1);
+
+        // Clamp fixed indices
+        for (i, fi) in self.fixed_idx.iter_mut().enumerate() {
+            *fi = (*fi).min(shape[i].saturating_sub(1));
+        }
+
+        // Effective shape for row/col and paging:
+        let non_singleton_count = nz.len();
+        if non_singleton_count == 0 {
+            // scalar-like
+            self.row_offset = 0;
+            self.col_offset = 0;
+            self.rows_per_page = 1;
+            self.cols_per_page = 1;
+            return;
+        } else if non_singleton_count == 1 {
+            // vector-like: one axis carries data (on both row/col axes in state)
+            let len = shape[self.col_axis]; // same as shape[self.row_axis]
             self.row_offset = 0;
             self.rows_per_page = 1;
             self.col_offset = self.col_offset.min(len.saturating_sub(1));
@@ -109,9 +163,6 @@ impl TensorViewState {
         }
 
         // Normal 2D case
-        for (i, fi) in self.fixed_idx.iter_mut().enumerate() {
-            *fi = (*fi).min(shape[i].saturating_sub(1));
-        }
         let rows_total = shape[self.row_axis];
         let cols_total = shape[self.col_axis];
         self.row_offset = self.row_offset.min(rows_total.saturating_sub(1));
@@ -130,9 +181,9 @@ impl Default for TensorViewState {
             row_offset: 0,
             col_offset: 0,
             rows_per_page: 8,
-            cols_per_page: 8,
+            cols_per_page: 12,
             row_height: 20.0,
-            col_width: 60.0,
+            col_width: 50.0,
             precision: 4,
             scientific: false,
             monospace: true,
@@ -143,12 +194,12 @@ impl Default for TensorViewState {
 }
 
 fn non_singleton_axes(shape: &[u64]) -> Vec<usize> {
-    shape.iter()
+    shape
+        .iter()
         .enumerate()
         .filter_map(|(i, &d)| if d > 1 { Some(i) } else { None })
         .collect()
 }
-
 
 pub fn tensor_view(
     ui: &mut Ui,
@@ -158,231 +209,274 @@ pub fn tensor_view(
     let shape = tensor.shape().to_vec();
     let ndim = shape.len();
     state.clamp_to(&shape);
-    let is_vector = ndim==1;
+
+    // Count non-singleton dims (used for vector/scalar-like handling)
+    let non_singleton_count = shape.iter().filter(|&&d| d > 1).count();
+    let is_scalar_like = non_singleton_count == 0 || ndim == 0;
+    let is_vector_like = non_singleton_count == 1;
+
+    // Existing scalar fast-path (keep if you already added it):
+    if is_scalar_like {
+        let frame = egui::Frame::default()
+            .inner_margin(4.0)
+            .stroke(ui.visuals().window_stroke);
+        return frame
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(format!("{}  {:?}", tensor.dtype(), shape));
+                    if ui.button("Copy Full").clicked() {
+                        ui.output_mut(|o| o.copied_text = format!("{:#}", tensor));
+                    }
+                });
+                // All zeros index
+                let idx = vec![0u64; ndim];
+                let txt = tensor
+                    .get(&idx)
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "—".into());
+                ui.monospace(txt);
+            })
+            .response;
+    }
 
     let frame = egui::Frame::default()
         .inner_margin(4.0)
         .stroke(ui.visuals().window_stroke);
 
-    frame.show(ui, |ui| {
-        // Top bar: dtype, shape, copy buttons, format options.
-        ui.horizontal(|ui| {
-            ui.label(format!("{}  {:?}", tensor.dtype(), shape));
-            if ui.button("Copy Full").clicked() {
-                let text = format!("{:#}", tensor);
-                ui.output_mut(|o| o.copied_text = text);
-            }
-            if ui.button("Copy Visible Slice").clicked() {
-                let txt = slice_to_string(tensor, state);
-                ui.output_mut(|o| o.copied_text = txt);
-            }
+    frame
+        .show(ui, |ui| {
+            // Top bar: dtype, shape, copy buttons, format options.
+            ui.horizontal(|ui| {
+                ui.label(format!("{}  {:?}", tensor.dtype(), shape));
+                if ui.button("Copy Full").clicked() {
+                    let text = format!("{:#}", tensor);
+                    ui.output_mut(|o| o.copied_text = text);
+                }
+                if ui.button("Copy Visible Slice").clicked() {
+                    let txt = slice_to_string(tensor, state);
+                    ui.output_mut(|o| o.copied_text = txt);
+                }
+                ui.separator();
+
+                ui.label("fmt:");
+                ui.checkbox(&mut state.monospace, "mono");
+                ui.checkbox(&mut state.scientific, "sci");
+                ui.add(
+                    egui::DragValue::new(&mut state.precision)
+                        .clamp_range(0..=12)
+                        .speed(0.1)
+                        .prefix("prec "),
+                );
+            });
+
+            // Axis selection & index pickers for fixed axes
+            ui.horizontal_wrapped(|ui| {
+                ui.label("row axis:");
+                axis_combo(ui, Id::new("row_axis"), &mut state.row_axis, ndim);
+                ui.label("col axis:");
+                axis_combo(ui, Id::new("col_axis"), &mut state.col_axis, ndim);
+
+                // Keep distinct if user picked same axis twice
+                if state.row_axis == state.col_axis && non_singleton_count > 1 {
+                    state.col_axis = (state.row_axis + 1) % ndim;
+                }
+
+                ui.separator();
+                // Fixed axes controls
+                for ax in 0..ndim {
+                    if ax != state.row_axis && ax != state.col_axis {
+                        let max = shape[ax].saturating_sub(1);
+                        ui.add(
+                            egui::DragValue::new(&mut state.fixed_idx[ax])
+                                .clamp_range(0..=max as i64)
+                                .prefix(format!("axis{ax}=")),
+                        );
+                    }
+                }
+                ui.separator();
+                ui.checkbox(&mut state.auto_axes, "smart axes");
+            });
+
+            ui.horizontal(|ui| {
+                // Paging / offsets
+                let rmax = shape[state.row_axis].saturating_sub(1);
+                let cmax = shape[state.col_axis].saturating_sub(1);
+                if ui.button("⬆ prev rows").clicked() {
+                    if is_vector_like {
+                        state.row_offset = 0;
+                        state.rows_per_page = 1;
+                    } else {
+                        state.row_offset = state.row_offset.saturating_sub(state.rows_per_page);
+                    }
+                }
+                if ui.button("⬇ next rows").clicked() {
+                    if is_vector_like {
+                        state.row_offset = 0;
+                        state.rows_per_page = 1;
+                    } else {
+                        state.row_offset = (state.row_offset + state.rows_per_page).min(rmax);
+                    }
+                }
+                ui.add(
+                    egui::DragValue::new(&mut state.row_offset)
+                        .clamp_range(0..=rmax as i64)
+                        .prefix("row@"),
+                );
+                ui.add(
+                    egui::DragValue::new(&mut state.rows_per_page)
+                        .clamp_range(1..=shape[state.row_axis] as i64)
+                        .prefix("rows/page "),
+                );
+
+                ui.separator();
+
+                if ui.button("⬅ prev cols").clicked() {
+                    state.col_offset = state.col_offset.saturating_sub(state.cols_per_page);
+                }
+                if ui.button("➡ next cols").clicked() {
+                    state.col_offset = (state.col_offset + state.cols_per_page).min(cmax);
+                }
+                ui.add(
+                    egui::DragValue::new(&mut state.col_offset)
+                        .clamp_range(0..=cmax as i64)
+                        .prefix("col@"),
+                );
+                ui.add(
+                    egui::DragValue::new(&mut state.cols_per_page)
+                        .clamp_range(1..=shape[state.col_axis] as i64)
+                        .prefix("cols/page "),
+                );
+
+                ui.separator();
+
+                // Quick "fit" based on current available size and rough cell metrics
+                if ui.button("Fit to view").clicked() {
+                    let avail = ui.available_size();
+                    if is_vector_like {
+                        let approx_cols =
+                            ((avail.x - 80.0) / state.col_width).floor().max(1.0) as u64;
+                        state.cols_per_page = approx_cols.min(shape[state.col_axis].max(1));
+                        state.rows_per_page = 1; // vector
+                    } else {
+                        let row_h = state.row_height.max(12.0);
+                        let approx_cols =
+                            ((avail.x - 80.0) / state.col_width).floor().max(1.0) as u64;
+                        let approx_rows = (avail.y / row_h).floor().max(1.0) as u64;
+                        state.cols_per_page = approx_cols.min(shape[state.col_axis].max(1));
+                        state.rows_per_page = approx_rows.min(shape[state.row_axis].max(1));
+                    }
+                }
+            });
+
             ui.separator();
 
-            ui.label("fmt:");
-            ui.checkbox(&mut state.monospace, "mono");
-            ui.checkbox(&mut state.scientific, "sci");
-            ui.add(
-                egui::DragValue::new(&mut state.precision)
-                    .clamp_range(0..=12)
-                    .speed(0.1)
-                    .prefix("prec "),
-            );
-        });
+            // Table: 1 index column + visible data columns
+            let (rows_total, cols_total) = if is_vector_like {
+                (1, shape[state.col_axis])
+            } else {
+                (shape[state.row_axis], shape[state.col_axis])
+            };
 
-        // Axis selection & index pickers for fixed axes
-        ui.horizontal_wrapped(|ui| {
-            ui.label("row axis:");
-            axis_combo(ui, Id::new("row_axis"), &mut state.row_axis, ndim);
-            ui.label("col axis:");
-            axis_combo(ui, Id::new("col_axis"), &mut state.col_axis, ndim);
+            let rows_vis = rows_total
+                .saturating_sub(state.row_offset)
+                .min(state.rows_per_page);
+            let cols_vis = cols_total
+                .saturating_sub(state.col_offset)
+                .min(state.cols_per_page);
 
-            // Keep distinct if user picked same axis twice
-            if state.row_axis == state.col_axis && ndim > 1 {
-                state.col_axis = (state.row_axis + 1) % ndim;
+            let mut table = TableBuilder::new(ui)
+                .striped(true)
+                .vscroll(true)
+                .resizable(true)
+                .cell_layout(egui::Layout::left_to_right(Align::Center));
+
+            // Row-index column
+            table = table.column(Column::initial(72.0).resizable(true));
+
+            // Data columns (paged)
+            for _ in 0..cols_vis {
+                table = table.column(Column::initial(state.col_width).resizable(true));
             }
 
-            ui.separator();
-            // Fixed axes controls
-            for ax in 0..ndim {
-                if ax != state.row_axis && ax != state.col_axis {
-                    let max = shape[ax].saturating_sub(1);
-                    ui.add(
-                        egui::DragValue::new(&mut state.fixed_idx[ax])
-                            .clamp_range(0..=max as i64)
-                            .prefix(format!("axis{ax}=")),
-                    );
-                }
-            }
-        });
+            let font = if state.monospace {
+                FontId::monospace(11.0)
+            } else {
+                FontId::proportional(11.0)
+            };
 
-        ui.horizontal(|ui| {
-            // Paging / offsets
-            let rmax = shape[state.row_axis].saturating_sub(1);
-            let cmax = shape[state.col_axis].saturating_sub(1);
-            if ui.button("⬆ prev rows").clicked() {
-                if is_vector {
-                    state.row_offset = 0;
-                    state.rows_per_page = 1;
-                } else {
-                    state.row_offset = state.row_offset.saturating_sub(state.rows_per_page);
-                }
-            }
-            if ui.button("⬇ next rows").clicked() {
-                if is_vector {
-                    state.row_offset = 0;
-                    state.rows_per_page = 1;
-                } else {
-                    state.row_offset = (state.row_offset + state.rows_per_page).min(rmax);
-                }
-            }
-            ui.add(
-                egui::DragValue::new(&mut state.row_offset)
-                    .clamp_range(0..=rmax as i64)
-                    .prefix("row@"),
-            );
-            ui.add(
-                egui::DragValue::new(&mut state.rows_per_page)
-                    .clamp_range(1..=shape[state.row_axis] as i64)
-                    .prefix("rows/page "),
-            );
-
-            ui.separator();
-
-            if ui.button("⬅ prev cols").clicked() {
-                state.col_offset = state.col_offset.saturating_sub(state.cols_per_page);
-            }
-            if ui.button("➡ next cols").clicked() {
-                state.col_offset = (state.col_offset + state.cols_per_page).min(cmax);
-            }
-            ui.add(
-                egui::DragValue::new(&mut state.col_offset)
-                    .clamp_range(0..=cmax as i64)
-                    .prefix("col@"),
-            );
-            ui.add(
-                egui::DragValue::new(&mut state.cols_per_page)
-                    .clamp_range(1..=shape[state.col_axis] as i64)
-                    .prefix("cols/page "),
-            );
-
-            ui.separator();
-
-            // Quick "fit" based on current available size and rough cell metrics
-            if ui.button("Fit to view").clicked() {
-                let avail = ui.available_size();
-                if is_vector {
-                    let approx_cols = ((avail.x - 80.0) / state.col_width).floor().max(1.0) as u64;
-                    state.cols_per_page = approx_cols.min(shape[state.col_axis].max(1));
-                    state.rows_per_page = 1; // vector
-                } else {
-                    let row_h = state.row_height.max(12.0);
-                    let approx_cols = ((avail.x - 80.0) / state.col_width).floor().max(1.0) as u64;
-                    let approx_rows = (avail.y / row_h).floor().max(1.0) as u64;
-                    state.cols_per_page = approx_cols.min(shape[state.col_axis].max(1));
-                    state.rows_per_page = approx_rows.min(shape[state.row_axis].max(1));
-                }
-            }
-        });
-
-        ui.separator();
-
-        let is_vector = ndim==1;
-        // Table: 1 index column + visible data columns
-        let (rows_total, cols_total) = if is_vector {
-            (1, shape[0])
-        } else {
-            (shape[state.row_axis], shape[state.col_axis])
-        };
-
-        let rows_vis = rows_total.saturating_sub(state.row_offset).min(state.rows_per_page);
-        let cols_vis = cols_total.saturating_sub(state.col_offset).min(state.cols_per_page);
-
-        let mut table = TableBuilder::new(ui)
-            .striped(true)
-            .vscroll(true)
-            .resizable(true)
-            .cell_layout(egui::Layout::left_to_right(Align::Center));
-
-        // Row-index column
-        table = table.column(Column::initial(72.0).resizable(true));
-
-        // Data columns (paged)
-        for _ in 0..cols_vis {
-            table = table.column(Column::initial(state.col_width).resizable(true));
-        }
-
-        let font = if state.monospace {
-            FontId::monospace(13.0)
-        } else {
-            FontId::proportional(13.0)
-        };
-
-        // Header with column indices
-        table
-            .header(22.0, |mut header| {
-                let hdr = if is_vector {
-                    "axis0".to_string()
-                } else {
-                    format!("axis{} \\ axis{}", state.row_axis, state.col_axis)
-                };
-                header.col(|ui| {ui.strong(hdr);});
-
-                for j in 0..cols_vis {
-                    let col_idx = state.col_offset + j;
+            // Header with column indices
+            table
+                .header(22.0, |mut header| {
+                    let hdr = if is_vector_like {
+                        format!("axis{}", state.col_axis)
+                    } else {
+                        format!("axis{} \\ axis{}", state.row_axis, state.col_axis)
+                    };
                     header.col(|ui| {
-                        ui.monospace(format!("{col_idx}"));
-                    });
-                }
-            })
-            .body(|mut body| {
-                body.rows(state.row_height, rows_vis as usize, |mut row| {
-                    let row_idx = row.index();
-                    let r = state.row_offset + row_idx as u64;
-                    row.col(|ui| {
-                        ui.monospace(format!("{r}"));
+                        ui.strong(hdr);
                     });
 
                     for j in 0..cols_vis {
-                        let c = state.col_offset + j;
-
-                        let mut idx = vec![0u64; ndim];
-                        if is_vector {
-                            // Only one axis
-                            idx[0] = c;
-                        } else {
-                            // Distinct axes, no overwrite
-                            idx[state.row_axis] = r;
-                            idx[state.col_axis] = c;
-                            // Other axes come from state.fixed_idx (already clamped)
-                            for ax in 0..ndim {
-                                if ax != state.row_axis && ax != state.col_axis {
-                                    idx[ax] = state.fixed_idx[ax];
-                                }
-                            }
-                        }
-
-                        let txt = match tensor.get(&idx) {
-                            Some(v) => format_number(f64::cast_from_numeric_scalar(&v), state.precision, state.scientific),
-                            None => String::from("—"),
-                        };
-
-                        row.col(|ui| {
-                            let mut job = egui::text::LayoutJob::default();
-                            job.append(
-                                &txt,
-                                0.0,
-                                egui::TextFormat {
-                                    font_id: font.clone(),
-                                    color: ui.visuals().text_color(),
-                                    ..Default::default()
-                                },
-                            );
-                            ui.label(job);
+                        let col_idx = state.col_offset + j;
+                        header.col(|ui| {
+                            ui.monospace(format!("{col_idx}"));
                         });
                     }
+                })
+                .body(|mut body| {
+                    body.rows(state.row_height, rows_vis as usize, |mut row| {
+                        let row_idx = row.index();
+                        let r = state.row_offset + row_idx as u64;
+                        row.col(|ui| {
+                            ui.monospace(format!("{r}"));
+                        });
+
+                        for j in 0..cols_vis {
+                            let c = state.col_offset + j;
+
+                            let mut idx = vec![0u64; ndim];
+                            if is_vector_like {
+                                // Only one axis
+                                idx[state.col_axis] = c;
+                            } else {
+                                // Distinct axes, no overwrite
+                                idx[state.row_axis] = r;
+                                idx[state.col_axis] = c;
+                                // Other axes come from state.fixed_idx (already clamped)
+                                for ax in 0..ndim {
+                                    if ax != state.row_axis && ax != state.col_axis {
+                                        idx[ax] = state.fixed_idx[ax];
+                                    }
+                                }
+                            }
+
+                            let txt = match tensor.get(&idx) {
+                                Some(v) => format_number(
+                                    f64::cast_from_numeric_scalar(&v),
+                                    state.precision,
+                                    state.scientific,
+                                ),
+                                None => String::from("—"),
+                            };
+
+                            row.col(|ui| {
+                                let mut job = egui::text::LayoutJob::default();
+                                job.append(
+                                    &txt,
+                                    0.0,
+                                    egui::TextFormat {
+                                        font_id: font.clone(),
+                                        color: ui.visuals().text_color(),
+                                        ..Default::default()
+                                    },
+                                );
+                                ui.label(job);
+                            });
+                        }
+                    });
                 });
-            });
-    }).response
+        })
+        .response
 }
 
 fn axis_combo(ui: &mut Ui, id: Id, axis: &mut usize, ndim: usize) {
@@ -397,9 +491,13 @@ fn axis_combo(ui: &mut Ui, id: Id, axis: &mut usize, ndim: usize) {
 
 fn format_number(v: f64, precision: usize, scientific: bool) -> String {
     if !v.is_finite() {
-        if v.is_nan() { "NaN".to_string() }
-        else if v.is_sign_negative() { "-∞".to_string() }
-        else { "∞".to_string() }
+        if v.is_nan() {
+            "NaN".to_string()
+        } else if v.is_sign_negative() {
+            "-∞".to_string()
+        } else {
+            "∞".to_string()
+        }
     } else if scientific {
         format!("{:.*e}", precision, v)
     } else {
@@ -415,22 +513,27 @@ fn slice_to_string(t: &NDArrayNumericTensor<DynRank>, s: &TensorViewState) -> St
         return t.first_element().to_string();
     }
 
-
     let is_vector = ndim == 1;
     if is_vector {
         let total = shape[0];
-        let cols = total.saturating_sub(s.col_offset).min(s.cols_per_page.max(1));
+        let cols = total
+            .saturating_sub(s.col_offset)
+            .min(s.cols_per_page.max(1));
         let mut out = String::from("vector slice axis0\n[");
         for j in 0..cols {
             let c = s.col_offset + j;
-            let val = t.get(&vec![c]).map(|x| f64::cast_from_numeric_scalar(&x)).unwrap_or(f64::NAN);
-            if j > 0 { out.push_str(", "); }
+            let val = t
+                .get(&vec![c])
+                .map(|x| f64::cast_from_numeric_scalar(&x))
+                .unwrap_or(f64::NAN);
+            if j > 0 {
+                out.push_str(", ");
+            }
             out.push_str(&format!("{}", val));
         }
         out.push(']');
         out
     } else {
-
         let rows_total = shape[s.row_axis];
         let cols_total = shape[s.col_axis];
         let rows_vis = rows_total.saturating_sub(s.row_offset).min(s.rows_per_page);
@@ -448,11 +551,18 @@ fn slice_to_string(t: &NDArrayNumericTensor<DynRank>, s: &TensorViewState) -> St
             for j in 0..cols_vis {
                 let c = s.col_offset + j;
                 let mut idx = s.fixed_idx.clone();
-                if idx.len() != ndim { idx.resize(ndim, 0); }
+                if idx.len() != ndim {
+                    idx.resize(ndim, 0);
+                }
                 idx[s.row_axis] = r;
                 idx[s.col_axis] = c;
-                let val = t.get(&idx).map(|x| f64::cast_from_numeric_scalar(&x)).unwrap_or(f64::NAN);
-                if j > 0 { out.push_str(", "); }
+                let val = t
+                    .get(&idx)
+                    .map(|x| f64::cast_from_numeric_scalar(&x))
+                    .unwrap_or(f64::NAN);
+                if j > 0 {
+                    out.push_str(", ");
+                }
                 out.push_str(&format!("{}", val));
             }
             out.push_str("]\n");

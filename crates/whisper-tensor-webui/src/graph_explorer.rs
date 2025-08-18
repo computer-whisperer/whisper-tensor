@@ -4,7 +4,7 @@ use crate::graph_layout::{
     GraphLayoutLinkType, GraphLayoutNodeId, GraphLayoutNodeInitData, GraphLayoutNodeType,
 };
 use crate::websockets::ServerRequestManager;
-use crate::widgets::tensor_view::{tensor_view, TensorViewState};
+use crate::widgets::tensor_view::{TensorViewState, tensor_view};
 use crate::widgets::toggle::toggle_ui;
 use crate::widgets::tokenized_rich_text::TokenizedRichText;
 use egui::epaint::CubicBezierShape;
@@ -1835,7 +1835,11 @@ impl GraphExplorerApp {
                                 });
                             match &op_info.op {
                                 AnyOperation::Constant(x) => {
-                                    resp = resp.union(tensor_view(ui, &x.value, &mut inspect_window.value_view_state));
+                                    resp = resp.union(tensor_view(
+                                        ui,
+                                        &x.value,
+                                        &mut inspect_window.value_view_state,
+                                    ));
                                 }
                                 _ => {}
                             }
@@ -1902,7 +1906,11 @@ impl GraphExplorerApp {
                                             }
                                             StoredOrNotTensor::NotStored(x) => {
                                                 resp = resp.union(ui.label("Initial Value:"));
-                                                resp = resp.union(tensor_view(ui, &x, &mut inspect_window_tensor.value_view_state));
+                                                resp = resp.union(tensor_view(
+                                                    ui,
+                                                    &x,
+                                                    &mut inspect_window_tensor.value_view_state,
+                                                ));
                                             }
                                         };
                                     }
@@ -1927,7 +1935,11 @@ impl GraphExplorerApp {
                                         }
                                         StoredOrNotTensor::NotStored(x) => {
                                             resp = resp.union(ui.label("Value:"));
-                                            resp = resp.union(tensor_view(ui, &x, &mut inspect_window_tensor.value_view_state));
+                                            resp = resp.union(tensor_view(
+                                                ui,
+                                                &x,
+                                                &mut inspect_window_tensor.value_view_state,
+                                            ));
                                         }
                                     };
                                 }
@@ -1946,7 +1958,11 @@ impl GraphExplorerApp {
                                     match x {
                                         Ok(x) => {
                                             resp = resp.union(ui.label("Value:"));
-                                            resp = resp.union(tensor_view(ui, &x, &mut inspect_window_tensor.value_view_state));
+                                            resp = resp.union(tensor_view(
+                                                ui,
+                                                &x,
+                                                &mut inspect_window_tensor.value_view_state,
+                                            ));
                                         }
                                         Err(err) => {
                                             ui.scope(|ui| {
@@ -1968,7 +1984,11 @@ impl GraphExplorerApp {
                                     self.inspect_window_tensor_subscription_returns.get(&x)
                                 {
                                     resp = resp.union(ui.label("Last value:"));
-                                    resp = resp.union(tensor_view(ui, &x, &mut inspect_window_tensor.subscribed_view_state));
+                                    resp = resp.union(tensor_view(
+                                        ui,
+                                        &x,
+                                        &mut inspect_window_tensor.subscribed_view_state,
+                                    ));
                                 } else {
                                     resp = resp.union(ui.label("No Value Received Yet"));
                                 }
@@ -2051,12 +2071,12 @@ impl InspectWindow {
 
     pub(crate) fn new(subject: GraphExplorerSelectable) -> Option<Self> {
         match subject {
-            GraphExplorerSelectable::SymbolicGraphOperationId(op_id) => {
-                Some(Self::SymbolicGraphOperation(InspectWindowSymbolicGraphOperation{
+            GraphExplorerSelectable::SymbolicGraphOperationId(op_id) => Some(
+                Self::SymbolicGraphOperation(InspectWindowSymbolicGraphOperation {
                     op_id,
-                    value_view_state: TensorViewState::default()
-                }))
-            }
+                    value_view_state: TensorViewState::default(),
+                }),
+            ),
             GraphExplorerSelectable::SymbolicGraphTensorId(tensor_id) => Some(
                 Self::SymbolicGraphTensor(InspectWindowSymbolicGraphTensor {
                     tensor_id,

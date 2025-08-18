@@ -3,6 +3,7 @@ use crate::dtype::{DType, DTypeOfPrimitive};
 use half::{bf16, f16};
 use num_traits::Float;
 use serde::{Deserialize, Serialize};
+use std::fmt::Formatter;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum NumericScalar {
@@ -22,26 +23,28 @@ pub enum NumericScalar {
     STRING(String),
 }
 
-impl NumericScalar {
-    pub fn to_string(&self) -> String {
+impl std::fmt::Display for NumericScalar {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            NumericScalar::F64(v) => v.to_string(),
-            NumericScalar::F32(v) => v.to_string(),
-            NumericScalar::BF16(v) => v.to_string(),
-            NumericScalar::F16(v) => v.to_string(),
-            NumericScalar::U64(v) => v.to_string(),
-            NumericScalar::I64(v) => v.to_string(),
-            NumericScalar::U32(v) => v.to_string(),
-            NumericScalar::I32(v) => v.to_string(),
-            NumericScalar::U16(v) => v.to_string(),
-            NumericScalar::I16(v) => v.to_string(),
-            NumericScalar::U8(v) => v.to_string(),
-            NumericScalar::I8(v) => v.to_string(),
-            NumericScalar::BOOL(v) => v.to_string(),
-            NumericScalar::STRING(v) => v.to_string(),
+            NumericScalar::F64(v) => write!(f, "{}", v),
+            NumericScalar::F32(v) => write!(f, "{}", v),
+            NumericScalar::BF16(v) => write!(f, "{}", v),
+            NumericScalar::F16(v) => write!(f, "{}", v),
+            NumericScalar::U64(v) => write!(f, "{}", v),
+            NumericScalar::I64(v) => write!(f, "{}", v),
+            NumericScalar::U32(v) => write!(f, "{}", v),
+            NumericScalar::I32(v) => write!(f, "{}", v),
+            NumericScalar::U16(v) => write!(f, "{}", v),
+            NumericScalar::I16(v) => write!(f, "{}", v),
+            NumericScalar::U8(v) => write!(f, "{}", v),
+            NumericScalar::I8(v) => write!(f, "{}", v),
+            NumericScalar::BOOL(v) => write!(f, "{}", v),
+            NumericScalar::STRING(v) => write!(f, "{}", v),
         }
     }
+}
 
+impl NumericScalar {
     pub fn dtype(&self) -> DType {
         match self {
             NumericScalar::F64(_) => DType::F64,
