@@ -4,6 +4,7 @@ use crate::graph_layout::{
     GraphLayoutLinkType, GraphLayoutNodeId, GraphLayoutNodeInitData, GraphLayoutNodeType,
 };
 use crate::websockets::ServerRequestManager;
+use crate::widgets::tensor_view::{tensor_view, TensorViewState};
 use crate::widgets::toggle::toggle_ui;
 use crate::widgets::tokenized_rich_text::TokenizedRichText;
 use egui::epaint::CubicBezierShape;
@@ -377,6 +378,8 @@ impl GraphExplorerApp {
             self.graph_subject_path = next_path;
             self.explorer_selection = None;
             self.explorer_hovered = None;
+            self.inspect_window_tensor_subscription_returns.clear();
+            self.inspect_window_tensor_subscriptions.clear();
             self.inspect_windows.clear();
         }
 
@@ -1580,7 +1583,7 @@ impl GraphExplorerApp {
                                 Some(path.push_super_milli_op_node_graph(*node_id)),
                                 Some(GraphSubject::MilliOpGraphB(&x.graph)),
                             ),
-                            SuperGraphAnyNode::ModelExecution(x) => {
+                            SuperGraphAnyNode::ModelExecution(_x) => {
                                 if let Some(model_id) = implied_model
                                     && let Some(symbolic_graph) = self.loaded_models.get(model_id)
                                 {
@@ -1706,11 +1709,12 @@ impl GraphExplorerApp {
                 let default_pos = ctx.input(|x| x.pointer.latest_pos());
                 match (inspect_window, &graph_subject) {
                     (
-                        InspectWindow::SymbolicGraphOperation(op_id),
+                        InspectWindow::SymbolicGraphOperation(inspect_window),
                         GraphSubject::SymbolicGraphInner(model_graph),
                     ) => {
+                        let op_id = inspect_window.op_id;
                         let mut is_hovering_tensor = false;
-                        let op_info = &model_graph.get_operations()[op_id];
+                        let op_info = &model_graph.get_operations()[&op_id];
                         let name = op_info
                             .name
                             .clone()
@@ -1831,21 +1835,20 @@ impl GraphExplorerApp {
                                 });
                             match &op_info.op {
                                 AnyOperation::Constant(x) => {
-                                    resp = resp
-                                        .union(ui.label(format!("Value: {}", x.value.to_string())));
+                                    resp = resp.union(tensor_view(ui, &x.value, &mut inspect_window.value_view_state));
                                 }
                                 _ => {}
                             }
 
                             if resp.clicked() {
                                 self.explorer_selection =
-                                    Some(GraphExplorerSelectable::SymbolicGraphOperationId(*op_id));
+                                    Some(GraphExplorerSelectable::SymbolicGraphOperationId(op_id));
                             }
                         });
                         if let Some(resp) = resp {
                             if resp.response.contains_pointer() && !is_hovering_tensor {
                                 self.next_explorer_hovered =
-                                    Some(GraphExplorerSelectable::SymbolicGraphOperationId(*op_id))
+                                    Some(GraphExplorerSelectable::SymbolicGraphOperationId(op_id))
                             }
                         }
                     }
@@ -1898,7 +1901,8 @@ impl GraphExplorerApp {
                                                 stored_tensor = Some(*stored_tensor_id);
                                             }
                                             StoredOrNotTensor::NotStored(x) => {
-                                                ui.label(format!("Initial Value: {x}"));
+                                                resp = resp.union(ui.label("Initial Value:"));
+                                                resp = resp.union(tensor_view(ui, &x, &mut inspect_window_tensor.value_view_state));
                                             }
                                         };
                                     }
@@ -1922,7 +1926,8 @@ impl GraphExplorerApp {
                                             stored_tensor = Some(*stored_tensor_id);
                                         }
                                         StoredOrNotTensor::NotStored(x) => {
-                                            resp = resp.union(ui.label(format!("Value: {x}")));
+                                            resp = resp.union(ui.label("Value:"));
+                                            resp = resp.union(tensor_view(ui, &x, &mut inspect_window_tensor.value_view_state));
                                         }
                                     };
                                 }
@@ -1940,7 +1945,8 @@ impl GraphExplorerApp {
                                 if let Some(x) = &inspect_window_tensor.stored_value {
                                     match x {
                                         Ok(x) => {
-                                            resp = resp.union(ui.label(format!("Value: {x}")));
+                                            resp = resp.union(ui.label("Value:"));
+                                            resp = resp.union(tensor_view(ui, &x, &mut inspect_window_tensor.value_view_state));
                                         }
                                         Err(err) => {
                                             ui.scope(|ui| {
@@ -1961,7 +1967,8 @@ impl GraphExplorerApp {
                                 if let Some(x) =
                                     self.inspect_window_tensor_subscription_returns.get(&x)
                                 {
-                                    resp = resp.union(ui.label(format!("Last Value: {x}")));
+                                    resp = resp.union(ui.label("Last value:"));
+                                    resp = resp.union(tensor_view(ui, &x, &mut inspect_window_tensor.subscribed_view_state));
                                 } else {
                                     resp = resp.union(ui.label("No Value Received Yet"));
                                 }
@@ -2002,19 +2009,27 @@ pub(crate) struct InspectWindowSymbolicGraphTensor {
     pub(crate) tensor_id: SymbolicGraphTensorId,
     pub(crate) stored_value_requested: Option<TensorStoreTensorId>,
     pub(crate) stored_value: Option<Result<NDArrayNumericTensor<DynRank>, String>>,
+    pub(crate) value_view_state: TensorViewState,
+    pub(crate) subscribed_view_state: TensorViewState,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct InspectWindowSymbolicGraphOperation {
+    pub(crate) op_id: SymbolicGraphOperationId,
+    pub(crate) value_view_state: TensorViewState,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) enum InspectWindow {
-    SymbolicGraphOperation(SymbolicGraphOperationId),
+    SymbolicGraphOperation(InspectWindowSymbolicGraphOperation),
     SymbolicGraphTensor(InspectWindowSymbolicGraphTensor),
 }
 
 impl InspectWindow {
     fn to_graph_selectable(&self) -> GraphExplorerSelectable {
         match self {
-            InspectWindow::SymbolicGraphOperation(op_id) => {
-                GraphExplorerSelectable::SymbolicGraphOperationId(*op_id)
+            InspectWindow::SymbolicGraphOperation(x) => {
+                GraphExplorerSelectable::SymbolicGraphOperationId(x.op_id)
             }
             InspectWindow::SymbolicGraphTensor(x) => {
                 GraphExplorerSelectable::SymbolicGraphTensorId(x.tensor_id)
@@ -2037,13 +2052,18 @@ impl InspectWindow {
     pub(crate) fn new(subject: GraphExplorerSelectable) -> Option<Self> {
         match subject {
             GraphExplorerSelectable::SymbolicGraphOperationId(op_id) => {
-                Some(Self::SymbolicGraphOperation(op_id))
+                Some(Self::SymbolicGraphOperation(InspectWindowSymbolicGraphOperation{
+                    op_id,
+                    value_view_state: TensorViewState::default()
+                }))
             }
             GraphExplorerSelectable::SymbolicGraphTensorId(tensor_id) => Some(
                 Self::SymbolicGraphTensor(InspectWindowSymbolicGraphTensor {
                     tensor_id,
                     stored_value_requested: None,
                     stored_value: None,
+                    value_view_state: TensorViewState::default(),
+                    subscribed_view_state: TensorViewState::default(),
                 }),
             ),
             _ => None,

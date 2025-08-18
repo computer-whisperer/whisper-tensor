@@ -613,10 +613,8 @@ impl SuperGraphNode for SuperGraphNodeScan {
                         if let Some(x) = a.first()
                             && *x == node_id
                         {
-                            inner_subscribed_tensors.insert(SuperGraphTensorPath::SuperGraphLink(
-                                a[1..].to_vec(),
-                                *b,
-                            ));
+                            inner_subscribed_tensors
+                                .insert(SuperGraphTensorPath::SuperGraphLink(a[1..].to_vec(), *b));
                         }
                     }
                     SuperGraphTensorPath::SymbolicGraphTensor(a, b) => {

@@ -23,6 +23,25 @@ pub enum NumericScalar {
 }
 
 impl NumericScalar {
+    pub fn to_string(&self) -> String {
+        match self {
+            NumericScalar::F64(v) => v.to_string(),
+            NumericScalar::F32(v) => v.to_string(),
+            NumericScalar::BF16(v) => v.to_string(),
+            NumericScalar::F16(v) => v.to_string(),
+            NumericScalar::U64(v) => v.to_string(),
+            NumericScalar::I64(v) => v.to_string(),
+            NumericScalar::U32(v) => v.to_string(),
+            NumericScalar::I32(v) => v.to_string(),
+            NumericScalar::U16(v) => v.to_string(),
+            NumericScalar::I16(v) => v.to_string(),
+            NumericScalar::U8(v) => v.to_string(),
+            NumericScalar::I8(v) => v.to_string(),
+            NumericScalar::BOOL(v) => v.to_string(),
+            NumericScalar::STRING(v) => v.to_string(),
+        }
+    }
+
     pub fn dtype(&self) -> DType {
         match self {
             NumericScalar::F64(_) => DType::F64,
