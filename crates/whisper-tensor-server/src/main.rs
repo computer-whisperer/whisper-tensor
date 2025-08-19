@@ -11,9 +11,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
 use std::time;
-use tokio::sync::watch;
+use std::time::Duration;
+use tokio::sync::{Mutex, Notify, watch};
 use tokio::sync::{RwLock, mpsc};
-use tokio::time::sleep;
+use tokio::time::{Instant, sleep};
 use tower_http::{
     services::{ServeDir, ServeFile},
     trace::TraceLayer,
@@ -158,8 +159,9 @@ async fn websocket_handler(
     ws.on_upgrade(|socket: WebSocket| handle_socket(socket, scheduler_sender, model_server))
 }
 
-use crate::scheduler::{SchedulerJob, scheduler};
+use crate::scheduler::{SchedulerJob, SchedulerReport, SchedulerReporter, scheduler};
 use axum::extract::ws::Message;
+use crossbeam::queue::ArrayQueue;
 use hf_hub::api::tokio::ApiBuilder;
 use hf_hub::{Repo, RepoType};
 use tokenizers::FromPretrainedParameters;
@@ -171,7 +173,8 @@ use whisper_tensor_import::onnx_graph::WeightStorageStrategy;
 use whisper_tensor_import::{ModelTypeHint, identify_and_load};
 use whisper_tensor_server::{
     CurrentInterfacesReportEntry, CurrentModelsAndInterfacesReport, CurrentModelsReportEntry,
-    LoadedModelId, WebsocketClientServerMessage, WebsocketServerClientMessage,
+    LoadedModelId, SuperGraphExecutionReport, WebsocketClientServerMessage,
+    WebsocketServerClientMessage,
 };
 
 async fn send_message(socket: &mut WebSocket, message: WebsocketServerClientMessage) {
@@ -229,6 +232,8 @@ async fn handle_socket(
 ) {
     // Send opening state
     let mut receiver = model_server.models_report_watch_receiver.clone();
+    let report_queue = Arc::new(ArrayQueue::new(1000));
+    let report_notify = Arc::new(Notify::new());
     let initial_value = receiver.borrow_and_update().clone();
     send_message(
         &mut socket,
@@ -238,14 +243,74 @@ async fn handle_socket(
 
     let (finished_supergraph_job_tx, mut finished_supergraph_job_rx) = mpsc::channel(100);
 
+    let report_buffer = Mutex::new(Vec::<SchedulerReport>::new());
+    let mut last_report_time = Instant::now();
+    let mut flush_report = async |socket: &mut WebSocket| {
+        let mut report_buffer = report_buffer.lock().await;
+        while !report_buffer.is_empty() {
+            let mut report = SuperGraphExecutionReport {
+                attention: report_buffer.first().unwrap().get_attention_token(),
+                node_executions: Vec::new(),
+                tensor_assignments: Vec::new(),
+                abbreviated_tensor_assignments: Vec::new(),
+            };
+            report_buffer.retain(|x| {
+                if x.get_attention_token() == report.attention {
+                    match x {
+                        SchedulerReport::SuperGraphNodeExecuted(x) => {
+                            let delta = (Instant::now() - x.timestamp).as_micros() as u32;
+                            report.node_executions.push((x.path.clone(), delta));
+                        }
+                        SchedulerReport::SuperGraphTensorAssignedFull(x) => {
+                            report
+                                .tensor_assignments
+                                .push((x.path.clone(), x.value.clone()));
+                        }
+                        SchedulerReport::SuperGraphTensorAssignedAbbreviated(x) => {
+                            report
+                                .abbreviated_tensor_assignments
+                                .push((x.path.clone(), x.value.clone()));
+                        }
+                    }
+                    false
+                } else {
+                    true
+                }
+            });
+            send_message(
+                socket,
+                WebsocketServerClientMessage::SuperGraphExecutionReport(report),
+            )
+            .await;
+        }
+    };
     loop {
         tokio::select! {
             Some(response) = finished_supergraph_job_rx.recv() => {
+                {
+                    let mut report_buffer = report_buffer.lock().await;
+                    while let Some(report) = report_queue.pop() {
+                        report_buffer.push(report);
+                    }
+                }
+                flush_report(&mut socket).await;
                 send_message(&mut socket, WebsocketServerClientMessage::SuperGraphResponse(response)).await;
             }
             Ok(_) = receiver.changed() => {
                 let current_value = receiver.borrow_and_update().clone();
                 send_message(&mut socket, WebsocketServerClientMessage::CurrentModelsReport(current_value)).await;
+            }
+            _ = report_notify.notified() => {
+                {
+                    let mut report_buffer = report_buffer.lock().await;
+                    while let Some(report) = report_queue.pop() {
+                        report_buffer.push(report);
+                    }
+                }
+                if Instant::now() - last_report_time > Duration::from_millis(50) {
+                    flush_report(&mut socket).await;
+                    last_report_time = Instant::now();
+                }
             }
             Some(msg) = socket.recv() => {
                 if let Ok(msg) = msg {
@@ -257,6 +322,7 @@ async fn handle_socket(
                                 Ok(msg) => {
                                     match msg {
                                         WebsocketClientServerMessage::Ping => {
+                                            tracing::debug!("Ping");
                                             send_message(&mut socket, WebsocketServerClientMessage::Pong).await;
                                         }
                                         WebsocketClientServerMessage::LoadModel{model_path, model_type_hint} => {
@@ -268,6 +334,7 @@ async fn handle_socket(
                                             model_server.unload_model(model_id).await.ok();
                                         }
                                         WebsocketClientServerMessage::GetStoredTensor(model_id, stored_tensor_id) => {
+                                            tracing::debug!("Getting stored tensor");
                                             let res = model_server.get_stored_tensor_id(model_id, stored_tensor_id).await;
                                             let msg_out = WebsocketServerClientMessage::TensorStoreReturn(
                                                 model_id, stored_tensor_id, res.map(|x| x.to_ndarray().unwrap())
@@ -275,6 +342,7 @@ async fn handle_socket(
                                             send_message(&mut socket, msg_out).await;
                                         }
                                         WebsocketClientServerMessage::GetModelGraph(model_id) => {
+                                            tracing::debug!("Getting model graph");
                                             let ret = match model_server.with_model(model_id, |model| {
                                                 let graph = &model.model.get_symbolic_graph();
                                                 let mut data = Vec::<u8>::new();
@@ -294,6 +362,7 @@ async fn handle_socket(
                                             send_message(&mut socket, ret).await;
                                         }
                                         WebsocketClientServerMessage::GetHFTokenizer(hf_tokenizer_path) => {
+                                            tracing::debug!("Getting HF tokenizer");
                                             let msg_out = WebsocketServerClientMessage::HFTokenizerReturn(
                                                 hf_tokenizer_path.clone(), hf_from_pretrained(hf_tokenizer_path, None).await.map(|x| {
                                                     let mut v = vec![];
@@ -303,7 +372,7 @@ async fn handle_socket(
                                             send_message(&mut socket, msg_out).await;
                                         }
                                         WebsocketClientServerMessage::SuperGraphRequest(request) => {
-                                            let job = SchedulerJob::SuperGraphRequest((request, finished_supergraph_job_tx.clone()));
+                                            let job = SchedulerJob::SuperGraphRequest((request, finished_supergraph_job_tx.clone(), Some(SchedulerReporter::new(report_queue.clone(), report_notify.clone()))));
                                             scheduler_sender.send(job).await.unwrap();
                                         }
                                         /*

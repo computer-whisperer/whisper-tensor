@@ -299,6 +299,9 @@ impl eframe::App for WebUIApp {
                         WebsocketServerClientMessage::SuperGraphResponse(response) => {
                             self.server_request_manager.new_response(response);
                         }
+                        WebsocketServerClientMessage::SuperGraphExecutionReport(report) => {
+                            self.server_request_manager.new_execution_report(report);
+                        }
                         _ => {
                             log::debug!("Unhandled message: {:?}", msg);
                         }

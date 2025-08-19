@@ -1,11 +1,15 @@
 use std::collections::HashMap;
 use whisper_tensor::DynRank;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
+use whisper_tensor::dtype::DType;
 use whisper_tensor::interfaces::AnyInterface;
+use whisper_tensor::numeric_tensor::NumericTensor;
 use whisper_tensor::super_graph::links::{
     SuperGraphLinkHash, SuperGraphLinkModel, SuperGraphLinkString, SuperGraphLinkTensor,
 };
-use whisper_tensor::super_graph::{SuperGraph, SuperGraphHash, SuperGraphTensorPath};
+use whisper_tensor::super_graph::{
+    SuperGraph, SuperGraphHash, SuperGraphNodePath, SuperGraphTensorPath,
+};
 use whisper_tensor::symbolic_graph::tensor_store::TensorStoreTensorId;
 use whisper_tensor_import::ModelTypeHint;
 
@@ -27,6 +31,8 @@ pub struct SuperGraphRequest {
     pub tensor_inputs: HashMap<SuperGraphLinkTensor, NDArrayNumericTensor<DynRank>>,
     pub model_inputs: HashMap<SuperGraphLinkModel, LoadedModelId>,
     pub subscribed_tensors: Vec<SuperGraphTensorPath>,
+    pub do_node_execution_reports: bool,
+    pub do_abbreviated_tensor_assignment_reports: Option<u32>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -35,7 +41,6 @@ pub struct SuperGraphResponse {
     pub string_outputs: HashMap<SuperGraphLinkString, String>,
     pub hash_outputs: HashMap<SuperGraphLinkHash, SuperGraphHash>,
     pub tensor_outputs: HashMap<SuperGraphLinkTensor, NDArrayNumericTensor<DynRank>>,
-    pub subscribed_tensors: HashMap<SuperGraphTensorPath, NDArrayNumericTensor<DynRank>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -67,6 +72,35 @@ pub struct CurrentInterfacesReportEntry {
     pub interface: AnyInterface,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AbbreviatedTensorValue {
+    pub digest: Vec<u8>,
+    pub dtype: DType,
+    pub shape: Vec<u64>,
+}
+
+impl AbbreviatedTensorValue {
+    fn get_digest(tensor: &NumericTensor<DynRank>, digest_len: u32) -> Vec<u8> {
+        vec![]
+    }
+
+    pub fn from_tensor(tensor: &NumericTensor<DynRank>, digest_len: u32) -> Self {
+        Self {
+            digest: Self::get_digest(tensor, digest_len),
+            dtype: tensor.dtype(),
+            shape: tensor.shape().to_vec(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SuperGraphExecutionReport {
+    pub attention: Option<u64>,
+    pub node_executions: Vec<(SuperGraphNodePath, u32)>,
+    pub abbreviated_tensor_assignments: Vec<(SuperGraphTensorPath, AbbreviatedTensorValue)>,
+    pub tensor_assignments: Vec<(SuperGraphTensorPath, NDArrayNumericTensor<DynRank>)>,
+}
+
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct CurrentModelsAndInterfacesReport {
     pub models: Vec<CurrentModelsReportEntry>,
@@ -95,4 +129,5 @@ pub enum WebsocketServerClientMessage {
     ),
     HFTokenizerReturn(String, Result<Vec<u8>, String>),
     SuperGraphResponse(SuperGraphResponse),
+    SuperGraphExecutionReport(SuperGraphExecutionReport),
 }

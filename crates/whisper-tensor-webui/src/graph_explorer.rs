@@ -15,7 +15,7 @@ use egui::{
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
-use std::time::Duration;
+use web_time::{Duration, Instant};
 use whisper_tensor::DynRank;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::interfaces::AnyInterface;
@@ -25,13 +25,13 @@ use whisper_tensor::scalar_info::ScalarInfoTyped;
 use whisper_tensor::super_graph::nodes::SuperGraphAnyNode;
 use whisper_tensor::super_graph::{
     SuperGraphAnyLink, SuperGraphGraphPath, SuperGraphInner, SuperGraphLinkTensor,
-    SuperGraphNodeId, SuperGraphTensorPath,
+    SuperGraphNodeId, SuperGraphNodePath, SuperGraphTensorPath,
 };
 use whisper_tensor::symbolic_graph::ops::{AnyOperation, Operation};
 use whisper_tensor::symbolic_graph::tensor_store::TensorStoreTensorId;
 use whisper_tensor::symbolic_graph::{
     StoredOrNotTensor, SymbolicGraph, SymbolicGraphInner, SymbolicGraphOperationId,
-    SymbolicGraphTensorId, SymbolicGraphTensorPath, TensorType,
+    SymbolicGraphTensorId, TensorType,
 };
 use whisper_tensor::tokenizer::Tokenizer;
 use whisper_tensor_import::onnx_graph::TokenizerInfo;
@@ -42,6 +42,9 @@ use whisper_tensor_server::{LoadedModelId, SuperGraphRequest, WebsocketClientSer
 pub(crate) struct GraphExplorerState {
     explorer_physics: bool,
     explorer_minimap: bool,
+    explorer_swatches: bool,
+    explorer_node_wave: bool,
+    swatch_dimension: u32,
 }
 
 impl Default for GraphExplorerState {
@@ -49,6 +52,9 @@ impl Default for GraphExplorerState {
         Self {
             explorer_physics: false,
             explorer_minimap: false,
+            explorer_swatches: false,
+            explorer_node_wave: false,
+            swatch_dimension: 32,
         }
     }
 }
@@ -97,6 +103,7 @@ pub(crate) struct GraphExplorerApp {
     pub(crate) graph_subject_path: Vec<GraphExplorerLayerSelection>,
     pub(crate) next_graph_subject_path: Option<Vec<GraphExplorerLayerSelection>>,
     pub(crate) text_inference_data: HashMap<InterfaceId, TextInferenceData>,
+    pub(crate) node_execution_timestamps: HashMap<SuperGraphNodePath, Instant>,
 }
 
 fn render_node_contents<'a>(
@@ -107,6 +114,7 @@ fn render_node_contents<'a>(
     graph_subject: &GraphSubject<'a>,
     is_selected: bool,
     is_hovered: bool,
+    time_since_exec: Option<Duration>,
 ) -> (Response, GraphLayoutIOOffsets) {
     // Decide corner radius
     let corner_radius = match node_type {
@@ -248,6 +256,17 @@ fn render_node_contents<'a>(
 
     let response = ui.allocate_rect(content_rect, Sense::HOVER | Sense::CLICK | Sense::DRAG);
 
+    let active_pulse = if let Some(x) = time_since_exec {
+        (1.0f32 - x.as_secs_f32() / 0.5f32).max(0.0f32)
+    } else {
+        0.0
+    };
+
+    let active_color_border =
+        egui::Color32::from_rgba_unmultiplied(255, 222, 33, (active_pulse * 128.0) as u8);
+    let active_color_fill =
+        egui::Color32::from_rgba_unmultiplied(255, 222, 33, (active_pulse * 64.0) as u8);
+
     let (fill, stroke) = if is_selected {
         (
             ui.visuals().widgets.active.bg_fill,
@@ -267,8 +286,11 @@ fn render_node_contents<'a>(
             ui.visuals().widgets.inactive.fg_stroke,
         )
     };
-    frame.frame.fill = fill;
-    frame.frame.stroke = stroke;
+    frame.frame.fill = fill + active_color_fill;
+    frame.frame.stroke = Stroke {
+        width: stroke.width,
+        color: stroke.color + active_color_border,
+    };
     frame.paint(ui);
 
     // Get positions for io ports
@@ -316,6 +338,7 @@ impl GraphExplorerApp {
             graph_subject_path: Vec::new(),
             next_graph_subject_path: None,
             text_inference_data: HashMap::new(),
+            node_execution_timestamps: HashMap::new(),
         }
     }
 
@@ -371,10 +394,17 @@ impl GraphExplorerApp {
                 ui.label("Minimap:");
                 toggle_ui(ui, &mut state.explorer_physics);
                 ui.label("Physics:");
+                toggle_ui(ui, &mut state.explorer_node_wave);
+                ui.label("Node Wave:");
+                toggle_ui(ui, &mut state.explorer_swatches);
+                ui.label("Swatches:");
             })
         });
 
         if let Some(next_path) = self.next_graph_subject_path.take() {
+            if next_path.first() != self.graph_subject_path.first() {
+                self.node_execution_timestamps.clear();
+            }
             self.graph_subject_path = next_path;
             self.explorer_selection = None;
             self.explorer_hovered = None;
@@ -387,15 +417,18 @@ impl GraphExplorerApp {
             let mut graph_subjects: Vec<(
                 GraphSubject,
                 Vec<GraphExplorerLayerSelection>,
+                Option<SuperGraphGraphPath>,
                 Option<GraphExplorerLayerSelection>,
             )> = vec![];
             let mut compiled_path = vec![];
+            let mut current_graph_path = None;
             let mut selected_interface = None;
             let mut selected_interface_id = None;
             let mut is_loading = false;
             for layer_selection in &self.graph_subject_path {
                 let layer_subject = match layer_selection {
                     GraphExplorerLayerSelection::Model(model_id) => {
+                        current_graph_path = None;
                         let res = self
                             .loaded_models
                             .get(model_id)
@@ -420,6 +453,7 @@ impl GraphExplorerApp {
                         {
                             selected_interface_id = Some(*interface_id);
                             selected_interface = Some(interface);
+                            current_graph_path = Some(SuperGraphGraphPath::SuperGraph(vec![]));
                             Some(GraphSubject::SuperGraphInner(
                                 &interface.interface.get_super_graph().inner,
                             ))
@@ -428,7 +462,11 @@ impl GraphExplorerApp {
                         }
                     }
                     GraphExplorerLayerSelection::SymbolicGraphOperationId((operation_id, i)) => {
-                        if let Some((GraphSubject::SymbolicGraphInner(graph_subject), _, _)) =
+                        if let Some(_x) = &current_graph_path {
+                            // todo: when we have nested symbolic graph support
+                            current_graph_path = None;
+                        }
+                        if let Some((GraphSubject::SymbolicGraphInner(graph_subject), _, _, _)) =
                             graph_subjects.last()
                         {
                             graph_subject
@@ -445,7 +483,7 @@ impl GraphExplorerApp {
                         }
                     }
                     GraphExplorerLayerSelection::SuperGraphNodeId(node_id) => {
-                        if let Some((GraphSubject::SuperGraphInner(graph_subject), _, _)) =
+                        if let Some((GraphSubject::SuperGraphInner(graph_subject), _, _, _)) =
                             graph_subjects.last()
                         {
                             let node = graph_subject.nodes.get(node_id);
@@ -455,6 +493,11 @@ impl GraphExplorerApp {
                                         if let Some(interface) = selected_interface
                                             && let Some(model_id) = interface.model_ids.first()
                                         {
+                                            if let Some(x) = &current_graph_path {
+                                                current_graph_path = Some(
+                                                    x.push_model_execution_node_graph(*node_id),
+                                                );
+                                            }
                                             let res = self.loaded_models.get(model_id).map(|x| {
                                                 GraphSubject::SymbolicGraphInner(&x.inner_graph)
                                             });
@@ -478,10 +521,18 @@ impl GraphExplorerApp {
                                         }
                                     }
                                     SuperGraphAnyNode::MilliOpGraph(x) => {
+                                        if let Some(x) = &current_graph_path {
+                                            current_graph_path =
+                                                Some(x.push_super_milli_op_node_graph(*node_id));
+                                        }
                                         Some(GraphSubject::MilliOpGraphB(&x.graph))
                                     }
                                     _ => {
                                         if let Some(inner_graph) = node.get_sub_graph() {
+                                            if let Some(x) = &current_graph_path {
+                                                current_graph_path =
+                                                    Some(x.push_super_node_graph(*node_id));
+                                            }
                                             Some(GraphSubject::SuperGraphInner(inner_graph))
                                         } else {
                                             None
@@ -498,10 +549,15 @@ impl GraphExplorerApp {
                 };
                 compiled_path.push(layer_selection.clone());
                 if let Some(x) = graph_subjects.last_mut() {
-                    x.2 = Some(layer_selection.clone());
+                    x.3 = Some(layer_selection.clone());
                 }
                 if let Some(layer_subject) = layer_subject {
-                    graph_subjects.push((layer_subject, compiled_path.clone(), None));
+                    graph_subjects.push((
+                        layer_subject,
+                        compiled_path.clone(),
+                        current_graph_path.clone(),
+                        None,
+                    ));
                 }
             }
             (
@@ -512,9 +568,11 @@ impl GraphExplorerApp {
             )
         };
 
+        let current_time = Instant::now();
         ui.horizontal(|ui| {
             if state.explorer_minimap {
-                for (i, (_graph_subject, graph_subject_path, selected_entry)) in
+                let mut do_request_redraw = false;
+                for (i, (_graph_subject, graph_subject_path, super_graph_path, selected_entry)) in
                     graph_subjects.iter().enumerate()
                 {
                     let maps_left = graph_subjects.len() - i;
@@ -567,6 +625,47 @@ impl GraphExplorerApp {
                                     == Some(this_selectable.clone())
                                     && selected_entry.is_none();
 
+                                let node_path = if let Some(graph_path) = super_graph_path {
+                                    match &node.node_type {
+                                        GraphLayoutNodeType::SuperGraphNode(super_graph_node) => {
+                                            Some(graph_path.push_super_node(*super_graph_node))
+                                        }
+                                        GraphLayoutNodeType::SymbolicGraphOperation(x) => {
+                                            Some(graph_path.push_symbolic_node(*x))
+                                        }
+                                        GraphLayoutNodeType::SymbolicGraphTensor(_x) => None,
+                                        GraphLayoutNodeType::SuperGraphLink(_x) => None,
+                                        GraphLayoutNodeType::MilliOpGraphNode(x) => {
+                                            Some(graph_path.push_milli_op_node(*x))
+                                        }
+                                        GraphLayoutNodeType::MilliOpGraphInput(_x) => None,
+                                        GraphLayoutNodeType::MilliOpGraphOutput(_x) => None,
+                                        GraphLayoutNodeType::ConnectionByNameSrc(_x) => None,
+                                        GraphLayoutNodeType::ConnectionByNameDest(_x) => None,
+                                    }
+                                } else {
+                                    None
+                                };
+
+                                let time_since_last_eval: Option<Duration> = if let Some(x) =
+                                    node_path
+                                    && let Some(eval_time) = self.node_execution_timestamps.get(&x)
+                                {
+                                    Some(current_time - *eval_time)
+                                } else {
+                                    None
+                                };
+
+                                let active_pulse = if let Some(x) = time_since_last_eval {
+                                    (1.0f32 - x.as_secs_f32() / 0.5f32).max(0.0f32)
+                                } else {
+                                    0.0
+                                };
+
+                                if active_pulse > 0.0 {
+                                    do_request_redraw = true;
+                                }
+
                                 let is_selected_subgraph = match &node.node_type {
                                     GraphLayoutNodeType::SymbolicGraphOperation(op_id) => {
                                         if let Some(
@@ -602,6 +701,15 @@ impl GraphExplorerApp {
                                 } else {
                                     egui::Color32::from_rgba_unmultiplied(64, 64, 64, 128)
                                 };
+
+                                let active_color = egui::Color32::from_rgba_unmultiplied(
+                                    255,
+                                    222,
+                                    33,
+                                    (active_pulse * 128.0) as u8,
+                                );
+
+                                let color = color + active_color;
 
                                 let mut size = node.shape * transform;
                                 size.x = size.x.max(2.0);
@@ -644,6 +752,9 @@ impl GraphExplorerApp {
                         });
                     }
                 }
+                if do_request_redraw {
+                    ui.ctx().request_repaint_after(Duration::from_millis(20));
+                }
             }
         });
 
@@ -653,7 +764,7 @@ impl GraphExplorerApp {
         if is_loading {
             ui.label("Loading Model Graph...");
             ui.spinner();
-        } else if let Some((graph_subject, _, _)) = graph_subjects.last() {
+        } else if let Some((graph_subject, _, graph_path, _)) = graph_subjects.last() {
             if !self.graph_layouts.contains_key(&self.graph_subject_path) {
                 match graph_subject {
                     GraphSubject::SymbolicGraphInner(graph) => {
@@ -786,6 +897,7 @@ impl GraphExplorerApp {
                                     &graph_subject,
                                     false,
                                     false,
+                                    None,
                                 )
                                 .1
                             },
@@ -890,6 +1002,7 @@ impl GraphExplorerApp {
                                     &graph_subject,
                                     false,
                                     false,
+                                    None,
                                 )
                                 .1
                             },
@@ -990,6 +1103,7 @@ impl GraphExplorerApp {
                                     &graph_subject,
                                     false,
                                     false,
+                                    None,
                                 )
                                 .1
                             },
@@ -1080,9 +1194,46 @@ impl GraphExplorerApp {
                                 let mut node_io_connections = HashMap::new();
                                 let mut node_bounding_boxes = HashMap::new();
 
+                                let current_time = Instant::now();
                                 let current_node_data = graph_layout.get_nodes();
                                 let mut node_position_updates = HashMap::new();
                                 for node_id in nodes_to_render_vec {
+                                    let node_path = if let Some(graph_path) = graph_path {
+                                        match &current_node_data[&node_id].node_type {
+                                            GraphLayoutNodeType::SuperGraphNode(super_graph_node) => {
+                                                Some(graph_path.push_super_node(*super_graph_node))
+                                            }
+                                            GraphLayoutNodeType::SymbolicGraphOperation(x) => {
+                                                Some(graph_path.push_symbolic_node(*x))
+                                            }
+                                            GraphLayoutNodeType::SymbolicGraphTensor(_x) => {
+                                                None
+                                            }
+                                            GraphLayoutNodeType::SuperGraphLink(_x) => {
+                                                None
+                                            }
+                                            GraphLayoutNodeType::MilliOpGraphNode(x) => {
+                                                Some(graph_path.push_milli_op_node(*x))
+                                            }
+                                            GraphLayoutNodeType::MilliOpGraphInput(_x) => {
+                                                None
+                                            }
+                                            GraphLayoutNodeType::MilliOpGraphOutput(_x) => {None}
+                                            GraphLayoutNodeType::ConnectionByNameSrc(_x) => {None}
+                                            GraphLayoutNodeType::ConnectionByNameDest(_x) => {None}
+                                        }
+                                    } else {
+                                        None
+                                    };
+                                    let duration_since_eval = if let Some(node_path) = &node_path {
+                                        if let Some(x) = self.node_execution_timestamps.get(node_path) {
+                                            Some(current_time - *x)
+                                        } else {
+                                            None
+                                        }
+                                    } else {
+                                        None
+                                    };
                                     let pos = current_node_data[&node_id].position;
                                     let cell_shape = current_node_data[&node_id].shape;
                                     let op_rect = Rect::from_min_max(
@@ -1113,6 +1264,7 @@ impl GraphExplorerApp {
                                         &graph_subject,
                                         is_selected,
                                         is_hovered,
+                                        duration_since_eval,
                                     );
                                     node_io_connections.insert(node_id, io_connections);
                                     node_bounding_boxes.insert(node_id, ui_child.min_rect());
@@ -1298,10 +1450,22 @@ impl GraphExplorerApp {
                                         if let Some((request_id, _, _)) =
                                             &text_inference_data.pending_request
                                         {
+                                            if let Some(reports) = server_request_manager.get_reports(*request_id) {
+                                                let time_now = Instant::now();
+                                                for report in reports {
+                                                    for (path, value) in report.tensor_assignments {
+                                                        self.inspect_window_tensor_subscription_returns.insert(path, value);
+                                                    }
+                                                    for (node_path, age_us) in report.node_executions {
+                                                        let age = Duration::from_micros(age_us as u64);
+                                                        let time = time_now - age;
+                                                        self.node_execution_timestamps.insert(node_path, time);
+                                                    }
+                                                }
+                                            }
                                             if let Some(mut response) =
                                                 server_request_manager.get_response(*request_id)
                                             {
-                                                self.inspect_window_tensor_subscription_returns = response.subscribed_tensors;
                                                 let (_, link, tokens) = text_inference_data
                                                     .pending_request
                                                     .take()
@@ -1375,6 +1539,8 @@ impl GraphExplorerApp {
                                                         let token = server_request_manager
                                                             .submit_supergraph_request(
                                                             SuperGraphRequest {
+                                                                do_abbreviated_tensor_assignment_reports: if state.explorer_swatches {Some(state.swatch_dimension*state.swatch_dimension)} else {None},
+                                                                do_node_execution_reports: state.explorer_node_wave,
                                                                 attention_token: None,
                                                                 super_graph: llm_interface
                                                                     .super_graph

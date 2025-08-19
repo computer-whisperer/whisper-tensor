@@ -8,6 +8,7 @@ pub mod model;
 pub mod numeric_scalar;
 pub mod numeric_tensor;
 pub mod numeric_tensor_typed;
+pub mod paths;
 pub mod scalar_info;
 pub mod super_graph;
 pub mod symbolic_graph;

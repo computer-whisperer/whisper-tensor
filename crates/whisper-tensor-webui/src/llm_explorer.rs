@@ -353,6 +353,8 @@ impl LLMExplorerApp {
                     let tokens_tensor = NDArrayNumericTensor::from_vec(tokens.clone()).to_dyn();
                     let token =
                         server_request_manager.submit_supergraph_request(SuperGraphRequest {
+                            do_node_execution_reports: false,
+                            do_abbreviated_tensor_assignment_reports: None,
                             attention_token: None,
                             super_graph: llm_interface.super_graph.clone(),
                             subscribed_tensors: Vec::new(),
