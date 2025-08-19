@@ -563,9 +563,9 @@ impl TextInferenceTokensInLogitOutInterface {
             super_graph_data
         };
 
-        let (super_graph_output, _) =
+        let super_graph_output =
             self.super_graph
-                .run(super_graph_data, super_graph_caches, None, backend)?;
+                .run(super_graph_data, super_graph_caches, &mut (), backend)?;
         let logits = super_graph_output
             .tensors
             .get(&self.logit_output_link)

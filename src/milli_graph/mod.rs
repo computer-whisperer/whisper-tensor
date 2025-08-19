@@ -1,7 +1,7 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
-use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::dtype::DTypeError;
+use crate::milli_graph::observer::MilliOpGraphObserver;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::numeric_tensor::NumericTensor;
 use crate::tensor_info::TensorInfoError;
@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 
+pub mod observer;
 pub mod ops;
 pub(crate) mod ops_helpers;
 
@@ -122,18 +123,12 @@ impl<ID: Hash + Clone + Eq> MilliOpGraph<ID> {
         new_tensor_id
     }
 
-    pub(crate) fn eval(
+    pub(crate) fn eval<T: MilliOpGraphObserver>(
         &self,
         inputs: &HashMap<ID, NumericTensor<DynRank>>,
-        telemetry_request: Option<&MilliOpGraphTelemetryRequest>,
+        observer: &mut T,
         backend: &mut EvalBackend,
-    ) -> Result<
-        (
-            HashMap<ID, NumericTensor<DynRank>>,
-            MilliOpGraphTelemetryResponse,
-        ),
-        MilliOpGraphError,
-    > {
+    ) -> Result<HashMap<ID, NumericTensor<DynRank>>, MilliOpGraphError> {
         assert!(self.output_map.is_some());
 
         let op_ids_to_eval: Vec<_> = {
@@ -150,6 +145,8 @@ impl<ID: Hash + Clone + Eq> MilliOpGraph<ID> {
         for op_id in op_ids_to_eval {
             let op = &self.ops[op_id];
             let out = op.eval(&intermediate_values, backend)?;
+            observer.on_node_executed(&MilliOpGraphNodePath::Op(*op_id));
+            observer.on_tensor_assigned(&MilliOpGraphTensorPath::Tensor(*op_id), &out);
             //assert_eq!(out.has_nan()?, false);
             intermediate_values.insert(*op_id, out);
         }
@@ -159,32 +156,8 @@ impl<ID: Hash + Clone + Eq> MilliOpGraph<ID> {
             outputs.insert(b.clone(), intermediate_values[a].clone());
         }
 
-        let mut telemetry_response = MilliOpGraphTelemetryResponse::default();
-        if let Some(telemetry_request) = telemetry_request {
-            for tensor_path in &telemetry_request.subscribed_tensors {
-                match tensor_path {
-                    MilliOpGraphTensorPath::Tensor(tensor_id) => {
-                        telemetry_response.subscribed_tensors.insert(
-                            tensor_path.clone(),
-                            intermediate_values[tensor_id].to_ndarray()?,
-                        );
-                    }
-                }
-            }
-        }
-
-        Ok((outputs, telemetry_response))
+        Ok(outputs)
     }
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct MilliOpGraphTelemetryRequest {
-    pub subscribed_tensors: HashSet<MilliOpGraphTensorPath>,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct MilliOpGraphTelemetryResponse {
-    pub subscribed_tensors: HashMap<MilliOpGraphTensorPath, NDArrayNumericTensor<DynRank>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Hash, PartialEq, Eq)]

@@ -1,16 +1,37 @@
 use crate::ModelServer;
 use log::error;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use whisper_tensor::DynRank;
 use whisper_tensor::backends::eval_backend::EvalBackend;
+use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::numeric_tensor::NumericTensor;
-use whisper_tensor::super_graph::SuperGraphExecutionTelemetryRequest;
 use whisper_tensor::super_graph::data::SuperGraphData;
+use whisper_tensor::super_graph::observer::SuperGraphObserver;
+use whisper_tensor::super_graph::{SuperGraphNodePath, SuperGraphTensorPath};
 use whisper_tensor_server::{SuperGraphRequest, SuperGraphResponse};
 
 pub enum SchedulerJob {
     SuperGraphRequest((SuperGraphRequest, mpsc::Sender<SuperGraphResponse>)),
+}
+
+struct LocalSuperGraphObserver {
+    subscribed_tensors: HashSet<SuperGraphTensorPath>,
+    returned_tensors: HashMap<SuperGraphTensorPath, NDArrayNumericTensor<DynRank>>,
+}
+
+impl SuperGraphObserver for LocalSuperGraphObserver {
+    fn on_node_executed(&mut self, _path: &SuperGraphNodePath) {
+        // Do nothing yet
+    }
+
+    fn on_tensor_assigned(&mut self, path: &SuperGraphTensorPath, tensor: &NumericTensor<DynRank>) {
+        if self.subscribed_tensors.contains(path) {
+            self.returned_tensors
+                .insert(path.clone(), tensor.to_ndarray().unwrap());
+        }
+    }
 }
 
 pub async fn scheduler(mut input: mpsc::Receiver<SchedulerJob>, model_server: Arc<ModelServer>) {
@@ -47,15 +68,16 @@ pub async fn scheduler(mut input: mpsc::Receiver<SchedulerJob>, model_server: Ar
                     for (link, hash) in req.hash_inputs {
                         super_graph_data.hashes.insert(link, hash);
                     }
-                    let telemetry_request = SuperGraphExecutionTelemetryRequest {
+                    let mut observer = LocalSuperGraphObserver {
                         subscribed_tensors: req.subscribed_tensors.iter().cloned().collect(),
+                        returned_tensors: HashMap::new(),
                     };
-                    let (res, telemetry_response) = req
+                    let res = req
                         .super_graph
                         .run(
                             super_graph_data,
                             None,
-                            Some(&telemetry_request),
+                            &mut observer,
                             &mut EvalBackend::NDArray,
                         )
                         .unwrap();
@@ -72,7 +94,7 @@ pub async fn scheduler(mut input: mpsc::Receiver<SchedulerJob>, model_server: Ar
                         attention_token: req.attention_token,
                         tensor_outputs,
                         string_outputs,
-                        subscribed_tensors: telemetry_response.subscribed_tensors,
+                        subscribed_tensors: observer.returned_tensors,
                         hash_outputs,
                     };
                     if let Err(e) = resp_sender.send(resp).await {

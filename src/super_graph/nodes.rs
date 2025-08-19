@@ -1,7 +1,8 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
-use crate::milli_graph::{MilliOpGraph, MilliOpGraphTelemetryRequest};
+use crate::milli_graph::observer::MilliOpGraphObserver;
+use crate::milli_graph::{MilliOpGraph, MilliOpGraphNodePath, MilliOpGraphTensorPath};
 use crate::numeric_tensor::NumericTensor;
 use crate::super_graph::cache::SuperGraphCache;
 use crate::super_graph::links::{
@@ -9,15 +10,17 @@ use crate::super_graph::links::{
     SuperGraphLinkModel, SuperGraphLinkString, SuperGraphLinkTensor, SuperGraphLinkTokenizer,
     SuperGraphLinkTriple,
 };
+use crate::super_graph::observer::SuperGraphObserver;
 use crate::super_graph::{
-    SuperGraphBuilder, SuperGraphData, SuperGraphError, SuperGraphExecutionTelemetryRequest,
-    SuperGraphExecutionTelemetryResponse, SuperGraphInner, SuperGraphNodeId, SuperGraphTensorPath,
+    SuperGraphBuilder, SuperGraphData, SuperGraphError, SuperGraphInner, SuperGraphNodeId,
+    SuperGraphNodePath, SuperGraphTensorPath,
 };
-use crate::symbolic_graph::SymbolicGraphTelemetryRequest;
+use crate::symbolic_graph::observer::SymbolicGraphObserver;
+use crate::symbolic_graph::{SymbolicGraphNodePath, SymbolicGraphTensorPath};
 use crate::tokenizer::{AnyTokenizer, Tokenizer};
 use rwkv_tokenizer::WorldTokenizer;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use typenum::P1;
 use whisper_tensor_import::onnx_graph::TokenizerInfo;
 
@@ -25,13 +28,12 @@ pub trait SuperGraphNode {
     fn get_inputs(&self) -> Vec<SuperGraphAnyLink>;
     fn get_outputs(&self) -> Vec<SuperGraphAnyLink>;
     fn to_any(self) -> SuperGraphAnyNode;
-    fn eval<'a>(
+    fn eval<'a, T: SuperGraphObserver>(
         &'a self,
-        node_id: SuperGraphNodeId,
+        this_path: &[SuperGraphNodeId],
         data: &mut SuperGraphData<'a>,
         caches: Option<&mut SuperGraphCache>,
-        _telemetry_request: Option<&SuperGraphExecutionTelemetryRequest>,
-        _telemetry_response: &mut SuperGraphExecutionTelemetryResponse,
+        observer: &mut T,
         backend: &mut EvalBackend,
     ) -> Result<(), SuperGraphError>;
 }
@@ -68,6 +70,41 @@ impl SuperGraphNodeModelExecution {
     }
 }
 
+struct SymbolicGraphObserverWrapper<'a, T: SuperGraphObserver> {
+    inner: &'a mut T,
+    node_path: Vec<SuperGraphNodeId>,
+}
+
+impl<'a, T: SuperGraphObserver> SymbolicGraphObserverWrapper<'a, T> {
+    fn new(inner: &'a mut T, node_path: &[SuperGraphNodeId]) -> Self {
+        Self {
+            inner,
+            node_path: node_path.to_vec(),
+        }
+    }
+}
+
+impl<'a, T: SuperGraphObserver> SymbolicGraphObserver for SymbolicGraphObserverWrapper<'a, T> {
+    fn on_op_executed(&mut self, node_path: &SymbolicGraphNodePath) {
+        self.inner
+            .on_node_executed(&SuperGraphNodePath::SymbolicGraphNode(
+                self.node_path.clone(),
+                node_path.clone(),
+            ))
+    }
+
+    fn on_tensor_assigned(
+        &mut self,
+        tensor_path: &SymbolicGraphTensorPath,
+        tensor: &NumericTensor<DynRank>,
+    ) {
+        self.inner.on_tensor_assigned(
+            &SuperGraphTensorPath::SymbolicGraphTensor(self.node_path.clone(), tensor_path.clone()),
+            tensor,
+        )
+    }
+}
+
 impl SuperGraphNode for SuperGraphNodeModelExecution {
     fn get_inputs(&self) -> Vec<SuperGraphAnyLink> {
         let mut ret: Vec<_> = self.tensor_inputs.iter().map(|x| x.0.to_any()).collect();
@@ -80,13 +117,12 @@ impl SuperGraphNode for SuperGraphNodeModelExecution {
     fn to_any(self) -> SuperGraphAnyNode {
         SuperGraphAnyNode::ModelExecution(self)
     }
-    fn eval(
+    fn eval<T: SuperGraphObserver>(
         &self,
-        node_id: SuperGraphNodeId,
+        node_path: &[SuperGraphNodeId],
         data: &mut SuperGraphData,
         _caches: Option<&mut SuperGraphCache>,
-        telemetry_request: Option<&SuperGraphExecutionTelemetryRequest>,
-        telemetry_response: &mut SuperGraphExecutionTelemetryResponse,
+        observer: &mut T,
         backend: &mut EvalBackend,
     ) -> Result<(), SuperGraphError> {
         let model = data.models.get(&self.model).unwrap();
@@ -99,30 +135,11 @@ impl SuperGraphNode for SuperGraphNodeModelExecution {
             inputs
         };
 
-        let symbolic_graph_telemetry_request = if let Some(x) = telemetry_request {
-            let mut subscribed_tensors = HashSet::new();
-            for path in &x.subscribed_tensors {
-                if let SuperGraphTensorPath::SymbolicGraphTensor(a, b) = path
-                    && *a == vec![node_id]
-                {
-                    subscribed_tensors.insert(b.clone());
-                }
-            }
-            Some(SymbolicGraphTelemetryRequest { subscribed_tensors })
-        } else {
-            None
-        };
-        let (outputs, inner_telemetry_response) =
-            model.eval(inputs, symbolic_graph_telemetry_request.as_ref(), backend)?;
+        let mut observer = SymbolicGraphObserverWrapper::new(observer, node_path);
+        let outputs = model.eval(inputs, &mut observer, backend)?;
         for (name, link) in &self.tensor_outputs {
             data.tensors
                 .insert(*link, outputs.get(name).unwrap().clone());
-        }
-        for (a, b) in inner_telemetry_response.subscribed_tensors {
-            telemetry_response.subscribed_tensors.insert(
-                SuperGraphTensorPath::SymbolicGraphTensor(vec![node_id], a),
-                b,
-            );
         }
         Ok(())
     }
@@ -167,13 +184,12 @@ impl SuperGraphNode for SuperGraphNodeTokenizerLoad {
     fn to_any(self) -> SuperGraphAnyNode {
         SuperGraphAnyNode::TokenizerLoad(self)
     }
-    fn eval(
+    fn eval<T: SuperGraphObserver>(
         &self,
-        _node_id: SuperGraphNodeId,
+        _this_path: &[SuperGraphNodeId],
         data: &mut SuperGraphData,
         _caches: Option<&mut SuperGraphCache>,
-        _telemetry_request: Option<&SuperGraphExecutionTelemetryRequest>,
-        _telemetry_response: &mut SuperGraphExecutionTelemetryResponse,
+        _observer: &mut T,
         _backend: &mut EvalBackend,
     ) -> Result<(), SuperGraphError> {
         let tokenizer = match &self.info {
@@ -253,13 +269,12 @@ impl SuperGraphNode for SuperGraphNodeTokenizerEncode {
     fn to_any(self) -> SuperGraphAnyNode {
         SuperGraphAnyNode::TokenizerEncode(self)
     }
-    fn eval(
+    fn eval<T: SuperGraphObserver>(
         &self,
-        _node_id: SuperGraphNodeId,
+        _this_path: &[SuperGraphNodeId],
         data: &mut SuperGraphData,
         _caches: Option<&mut SuperGraphCache>,
-        _telemetry_request: Option<&SuperGraphExecutionTelemetryRequest>,
-        _telemetry_response: &mut SuperGraphExecutionTelemetryResponse,
+        _observer: &mut T,
         _backend: &mut EvalBackend,
     ) -> Result<(), SuperGraphError> {
         let text = data.strings.get(&self.text_input).unwrap();
@@ -324,13 +339,12 @@ impl SuperGraphNode for SuperGraphNodeTokenizerDecode {
     fn to_any(self) -> SuperGraphAnyNode {
         SuperGraphAnyNode::TokenizerDecode(self)
     }
-    fn eval(
+    fn eval<T: SuperGraphObserver>(
         &self,
-        _node_id: SuperGraphNodeId,
+        _node_path: &[SuperGraphNodeId],
         data: &mut SuperGraphData,
         _caches: Option<&mut SuperGraphCache>,
-        _telemetry_request: Option<&SuperGraphExecutionTelemetryRequest>,
-        _telemetry_response: &mut SuperGraphExecutionTelemetryResponse,
+        _observer: &mut T,
         _backend: &mut EvalBackend,
     ) -> Result<(), SuperGraphError> {
         let tensor = data.tensors.get(&self.tensor_input).unwrap();
@@ -354,6 +368,41 @@ impl SuperGraphNodeMilliOpGraph {
     }
 }
 
+struct MilliOpGraphObserverWrapper<'a, T: SuperGraphObserver> {
+    inner: &'a mut T,
+    node_path: Vec<SuperGraphNodeId>,
+}
+
+impl<'a, T: SuperGraphObserver> MilliOpGraphObserverWrapper<'a, T> {
+    fn new(inner: &'a mut T, node_path: &[SuperGraphNodeId]) -> Self {
+        Self {
+            inner,
+            node_path: node_path.to_vec(),
+        }
+    }
+}
+
+impl<'a, T: SuperGraphObserver> MilliOpGraphObserver for MilliOpGraphObserverWrapper<'a, T> {
+    fn on_tensor_assigned(
+        &mut self,
+        tensor_path: &MilliOpGraphTensorPath,
+        tensor: &NumericTensor<DynRank>,
+    ) {
+        self.inner.on_tensor_assigned(
+            &SuperGraphTensorPath::MilliOpGraphTensor(self.node_path.clone(), tensor_path.clone()),
+            tensor,
+        );
+    }
+
+    fn on_node_executed(&mut self, node_path: &MilliOpGraphNodePath) {
+        self.inner
+            .on_node_executed(&SuperGraphNodePath::MilliOpGraphNode(
+                self.node_path.clone(),
+                node_path.clone(),
+            ));
+    }
+}
+
 impl SuperGraphNode for SuperGraphNodeMilliOpGraph {
     fn get_inputs(&self) -> Vec<SuperGraphAnyLink> {
         self.graph.get_inputs().iter().map(|x| x.to_any()).collect()
@@ -368,13 +417,12 @@ impl SuperGraphNode for SuperGraphNodeMilliOpGraph {
     fn to_any(self) -> SuperGraphAnyNode {
         SuperGraphAnyNode::MilliOpGraph(self)
     }
-    fn eval(
+    fn eval<T: SuperGraphObserver>(
         &self,
-        node_id: SuperGraphNodeId,
+        node_path: &[SuperGraphNodeId],
         data: &mut SuperGraphData,
         _caches: Option<&mut SuperGraphCache>,
-        telemetry_request: Option<&SuperGraphExecutionTelemetryRequest>,
-        telemetry_response: &mut SuperGraphExecutionTelemetryResponse,
+        observer: &mut T,
         backend: &mut EvalBackend,
     ) -> Result<(), SuperGraphError> {
         let inputs = {
@@ -384,28 +432,8 @@ impl SuperGraphNode for SuperGraphNodeMilliOpGraph {
             }
             inputs
         };
-        let telemetry_request_inner = if let Some(telemetry_request) = telemetry_request {
-            let mut subscribed_tensors = HashSet::new();
-            for tensor in &telemetry_request.subscribed_tensors {
-                if let SuperGraphTensorPath::MilliOpGraphTensor(a, b) = tensor
-                    && *a == vec![node_id]
-                {
-                    subscribed_tensors.insert(b.clone());
-                }
-            }
-            Some(MilliOpGraphTelemetryRequest { subscribed_tensors })
-        } else {
-            None
-        };
-        let (res, telemetry_response_inner) =
-            self.graph
-                .eval(&inputs, telemetry_request_inner.as_ref(), backend)?;
-        for (a, b) in telemetry_response_inner.subscribed_tensors {
-            telemetry_response.subscribed_tensors.insert(
-                SuperGraphTensorPath::MilliOpGraphTensor(vec![node_id], a),
-                b,
-            );
-        }
+        let mut observer = MilliOpGraphObserverWrapper::new(observer, node_path);
+        let res = self.graph.eval(&inputs, &mut observer, backend)?;
         data.tensors.extend(res);
         Ok(())
     }
@@ -475,13 +503,12 @@ impl SuperGraphNode for SuperGraphNodeScan {
         SuperGraphAnyNode::Scan(self)
     }
 
-    fn eval<'a>(
+    fn eval<'a, T: SuperGraphObserver>(
         &'a self,
-        node_id: SuperGraphNodeId,
+        node_path: &[SuperGraphNodeId],
         data: &mut SuperGraphData<'a>,
         mut caches: Option<&mut SuperGraphCache>,
-        telemetry_request: Option<&SuperGraphExecutionTelemetryRequest>,
-        telemetry_response: &mut SuperGraphExecutionTelemetryResponse,
+        observer: &mut T,
         backend: &mut EvalBackend,
     ) -> Result<(), SuperGraphError> {
         let iteration_count_tensor = data
@@ -605,51 +632,6 @@ impl SuperGraphNode for SuperGraphNodeScan {
             output_scan_tensor_parts.insert(*outer, (Vec::new(), *scan_axis as usize));
         }
 
-        let inner_telemetry_request = if let Some(telemetry_request) = telemetry_request {
-            let mut inner_subscribed_tensors = HashSet::new();
-            for tensor in &telemetry_request.subscribed_tensors {
-                match tensor {
-                    SuperGraphTensorPath::SuperGraphLink(a, b) => {
-                        if let Some(x) = a.first()
-                            && *x == node_id
-                        {
-                            inner_subscribed_tensors
-                                .insert(SuperGraphTensorPath::SuperGraphLink(a[1..].to_vec(), *b));
-                        }
-                    }
-                    SuperGraphTensorPath::SymbolicGraphTensor(a, b) => {
-                        if let Some(x) = a.first()
-                            && *x == node_id
-                        {
-                            inner_subscribed_tensors.insert(
-                                SuperGraphTensorPath::SymbolicGraphTensor(
-                                    a[1..].to_vec(),
-                                    b.clone(),
-                                ),
-                            );
-                        }
-                    }
-                    SuperGraphTensorPath::MilliOpGraphTensor(a, b) => {
-                        if let Some(x) = a.first()
-                            && *x == node_id
-                        {
-                            inner_subscribed_tensors.insert(
-                                SuperGraphTensorPath::MilliOpGraphTensor(
-                                    a[1..].to_vec(),
-                                    b.clone(),
-                                ),
-                            );
-                        }
-                    }
-                }
-            }
-            Some(SuperGraphExecutionTelemetryRequest {
-                subscribed_tensors: inner_subscribed_tensors,
-            })
-        } else {
-            None
-        };
-
         for i in 0..iteration_count as u64 {
             let iter_inputs = {
                 let mut iter_inputs = simple_inputs.clone();
@@ -676,34 +658,13 @@ impl SuperGraphNode for SuperGraphNodeScan {
                 }
                 iter_inputs
             };
-            let (iter_outputs, inner_telemetry_response) = self.inner_graph.eval(
+            let iter_outputs = self.inner_graph.eval(
+                node_path,
                 iter_inputs,
                 caches.as_deref_mut(),
-                inner_telemetry_request.as_ref(),
+                observer,
                 backend,
             )?;
-            for (a, b) in inner_telemetry_response.subscribed_tensors {
-                telemetry_response.subscribed_tensors.insert(
-                    match a {
-                        SuperGraphTensorPath::SuperGraphLink(a, b) => {
-                            let mut path = vec![node_id];
-                            path.extend(a);
-                            SuperGraphTensorPath::SuperGraphLink(path, b)
-                        }
-                        SuperGraphTensorPath::SymbolicGraphTensor(a, b) => {
-                            let mut path = vec![node_id];
-                            path.extend(a);
-                            SuperGraphTensorPath::SymbolicGraphTensor(path, b)
-                        }
-                        SuperGraphTensorPath::MilliOpGraphTensor(a, b) => {
-                            let mut path = vec![node_id];
-                            path.extend(a);
-                            SuperGraphTensorPath::MilliOpGraphTensor(path, b)
-                        }
-                    },
-                    b,
-                );
-            }
 
             for (inner, outer, _scan_axis) in &self.scan_outputs {
                 let tensor = iter_outputs
@@ -904,13 +865,12 @@ impl SuperGraphNode for SuperGraphNodeRNNCacheRead {
         SuperGraphAnyNode::RNNCacheRead(self)
     }
 
-    fn eval<'a>(
+    fn eval<'a, T: SuperGraphObserver>(
         &'a self,
-        _node_id: SuperGraphNodeId,
+        _node_path: &[SuperGraphNodeId],
         data: &mut SuperGraphData<'a>,
         caches: Option<&mut SuperGraphCache>,
-        _telemetry_request: Option<&SuperGraphExecutionTelemetryRequest>,
-        _telemetry_response: &mut SuperGraphExecutionTelemetryResponse,
+        _observer: &mut T,
         _backend: &mut EvalBackend,
     ) -> Result<(), SuperGraphError> {
         let tokens_input = data
@@ -1012,13 +972,12 @@ impl SuperGraphNode for SuperGraphNodeRNNCacheWrite {
         SuperGraphAnyNode::RNNCacheWrite(self)
     }
 
-    fn eval<'a>(
+    fn eval<'a, T: SuperGraphObserver>(
         &'a self,
-        _node_id: SuperGraphNodeId,
+        _node_path: &[SuperGraphNodeId],
         data: &mut SuperGraphData<'a>,
         caches: Option<&mut SuperGraphCache>,
-        _telemetry_request: Option<&SuperGraphExecutionTelemetryRequest>,
-        _telemetry_response: &mut SuperGraphExecutionTelemetryResponse,
+        _observer: &mut T,
         _backend: &mut EvalBackend,
     ) -> Result<(), SuperGraphError> {
         if let Some(caches) = caches {
@@ -1092,80 +1051,37 @@ impl SuperGraphAnyNode {
         }
     }
 
-    pub(crate) fn eval<'a>(
+    pub(crate) fn eval<'a, T: SuperGraphObserver>(
         &'a self,
-        node_id: SuperGraphNodeId,
+        node_path: &[SuperGraphNodeId],
         data: &mut SuperGraphData<'a>,
         caches: Option<&mut SuperGraphCache>,
-        telemetry_request: Option<&SuperGraphExecutionTelemetryRequest>,
-        telemetry_response: &mut SuperGraphExecutionTelemetryResponse,
+        observer: &mut T,
         backend: &mut EvalBackend,
     ) -> Result<(), SuperGraphError> {
         match self {
-            SuperGraphAnyNode::ModelExecution(node) => node.eval(
-                node_id,
-                data,
-                caches,
-                telemetry_request,
-                telemetry_response,
-                backend,
-            ),
-            SuperGraphAnyNode::TokenizerEncode(node) => node.eval(
-                node_id,
-                data,
-                caches,
-                telemetry_request,
-                telemetry_response,
-                backend,
-            ),
-            SuperGraphAnyNode::TokenizerDecode(node) => node.eval(
-                node_id,
-                data,
-                caches,
-                telemetry_request,
-                telemetry_response,
-                backend,
-            ),
-            SuperGraphAnyNode::TokenizerLoad(node) => node.eval(
-                node_id,
-                data,
-                caches,
-                telemetry_request,
-                telemetry_response,
-                backend,
-            ),
-            SuperGraphAnyNode::MilliOpGraph(node) => node.eval(
-                node_id,
-                data,
-                caches,
-                telemetry_request,
-                telemetry_response,
-                backend,
-            ),
-            SuperGraphAnyNode::Scan(node) => node.eval(
-                node_id,
-                data,
-                caches,
-                telemetry_request,
-                telemetry_response,
-                backend,
-            ),
-            SuperGraphAnyNode::RNNCacheWrite(node) => node.eval(
-                node_id,
-                data,
-                caches,
-                telemetry_request,
-                telemetry_response,
-                backend,
-            ),
-            SuperGraphAnyNode::RNNCacheRead(node) => node.eval(
-                node_id,
-                data,
-                caches,
-                telemetry_request,
-                telemetry_response,
-                backend,
-            ),
+            SuperGraphAnyNode::ModelExecution(node) => {
+                node.eval(node_path, data, caches, observer, backend)
+            }
+            SuperGraphAnyNode::TokenizerEncode(node) => {
+                node.eval(node_path, data, caches, observer, backend)
+            }
+            SuperGraphAnyNode::TokenizerDecode(node) => {
+                node.eval(node_path, data, caches, observer, backend)
+            }
+            SuperGraphAnyNode::TokenizerLoad(node) => {
+                node.eval(node_path, data, caches, observer, backend)
+            }
+            SuperGraphAnyNode::MilliOpGraph(node) => {
+                node.eval(node_path, data, caches, observer, backend)
+            }
+            SuperGraphAnyNode::Scan(node) => node.eval(node_path, data, caches, observer, backend),
+            SuperGraphAnyNode::RNNCacheWrite(node) => {
+                node.eval(node_path, data, caches, observer, backend)
+            }
+            SuperGraphAnyNode::RNNCacheRead(node) => {
+                node.eval(node_path, data, caches, observer, backend)
+            }
         }
     }
 

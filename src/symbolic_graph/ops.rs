@@ -53,7 +53,7 @@ pub trait Operation {
         inputs: &HashMap<SymbolicGraphTensorId, NumericTensor<DynRank>>,
     ) -> Result<HashMap<SymbolicGraphTensorId, NumericTensor<DynRank>>, EvalError> {
         let milli_graph = self.get_milli_op_graph();
-        Ok(milli_graph.eval(inputs, None, backend)?.0)
+        Ok(milli_graph.eval(inputs, &mut (), backend)?)
     }
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId>;
     fn get_sub_graphs(&self) -> Vec<&SymbolicGraphInner> {

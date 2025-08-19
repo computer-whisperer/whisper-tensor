@@ -1,3 +1,4 @@
+pub mod observer;
 pub mod ops;
 pub mod tensor_store;
 
@@ -1413,14 +1414,4 @@ pub enum SymbolicGraphTensorPath {
 #[derive(Clone, Debug, Serialize, Deserialize, Hash, PartialEq, Eq)]
 pub enum SymbolicGraphNodePath {
     Node(SymbolicGraphOperationId),
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct SymbolicGraphTelemetryRequest {
-    pub subscribed_tensors: HashSet<SymbolicGraphTensorPath>,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct SymbolicGraphTelemetryResponse {
-    pub subscribed_tensors: HashMap<SymbolicGraphTensorPath, NDArrayNumericTensor<DynRank>>,
 }

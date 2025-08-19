@@ -12,16 +12,14 @@ use whisper_tensor_import::onnx_graph::{InputMetadata, ModelMetadata, OutputMeta
 use crate::backends::onnx_reference_backend::{self, ONNXReferenceTensor};
 
 use crate::symbolic_graph::tensor_store::TensorStore;
-use crate::symbolic_graph::{
-    ONNXDecodingError, SymbolicGraph, SymbolicGraphMutator, SymbolicGraphTelemetryRequest,
-    SymbolicGraphTelemetryResponse,
-};
+use crate::symbolic_graph::{ONNXDecodingError, SymbolicGraph, SymbolicGraphMutator};
 
 //#[cfg(feature = "ort")]
 //use crate::backends::ort_backend::ORTNumericTensor;
 use crate::DynRank;
 use crate::interfaces::TextInferenceTokensInLogitOutInterface;
 use crate::scalar_info::ScalarInfoTyped;
+use crate::symbolic_graph::observer::SymbolicGraphObserver;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ModelError {
@@ -182,15 +180,9 @@ impl Model {
     pub fn run(
         &self,
         inputs: HashMap<String, NumericTensor<DynRank>>,
-        telemetry_request: Option<&SymbolicGraphTelemetryRequest>,
+        observer: &mut impl SymbolicGraphObserver,
         selected_runtime: &mut ModelExecutionRuntime,
-    ) -> Result<
-        (
-            HashMap<String, NumericTensor<DynRank>>,
-            SymbolicGraphTelemetryResponse,
-        ),
-        ModelError,
-    > {
+    ) -> Result<HashMap<String, NumericTensor<DynRank>>, ModelError> {
         Ok(match selected_runtime {
             #[cfg(feature = "onnx-reference")]
             ModelExecutionRuntime::ONNXReference => {
@@ -207,7 +199,7 @@ impl Model {
                 for (name, tensor) in res {
                     output_tensors.insert(name, NumericTensor::from(tensor));
                 }
-                (output_tensors, SymbolicGraphTelemetryResponse::default())
+                output_tensors
             }
             /*
             #[cfg(feature = "ort")]
@@ -226,7 +218,7 @@ impl Model {
                 for (key, value) in res.into_iter() {
                     output_tensors.insert(key.to_string(), NumericTensor::from(ORTNumericTensor(value)));
                 }
-                (output_tensors, SymbolicGraphTelemetryResponse::default())
+                output_tensors
             }*/
             #[cfg(feature = "candle")]
             ModelExecutionRuntime::Candle => {
@@ -244,13 +236,13 @@ impl Model {
                 for (key, tensor) in res {
                     output_tensors.insert(key, NumericTensor::from(tensor));
                 }
-                (output_tensors, SymbolicGraphTelemetryResponse::default())
+                output_tensors
             }
             ModelExecutionRuntime::Eval(eval_backend) => eval_backend::run(
                 &self.graph,
                 &self.tensor_store,
                 eval_backend,
-                telemetry_request,
+                observer,
                 inputs,
             )?,
             _ => {
@@ -259,23 +251,17 @@ impl Model {
         })
     }
 
-    pub fn eval(
+    pub fn eval<T: SymbolicGraphObserver>(
         &self,
         inputs: HashMap<String, NumericTensor<DynRank>>,
-        telemetry_request: Option<&SymbolicGraphTelemetryRequest>,
+        observer: &mut T,
         eval_backend: &mut EvalBackend,
-    ) -> Result<
-        (
-            HashMap<String, NumericTensor<DynRank>>,
-            SymbolicGraphTelemetryResponse,
-        ),
-        ModelError,
-    > {
+    ) -> Result<HashMap<String, NumericTensor<DynRank>>, ModelError> {
         Ok(eval_backend::run(
             &self.graph,
             &self.tensor_store,
             eval_backend,
-            telemetry_request,
+            observer,
             inputs,
         )?)
     }

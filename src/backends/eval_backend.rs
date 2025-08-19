@@ -2,12 +2,12 @@
 use crate::backends::vulkan_backend::VulkanImmediateExecutor;
 use crate::dtype::{DType, DTypeError};
 use crate::numeric_tensor::NumericTensor;
+use crate::symbolic_graph::observer::SymbolicGraphObserver;
 use crate::symbolic_graph::ops::{EvalError, Operation};
 use crate::symbolic_graph::tensor_store::TensorStore;
 use crate::symbolic_graph::{
-    GraphOperation, SymbolicGraph, SymbolicGraphOperationId, SymbolicGraphTelemetryRequest,
-    SymbolicGraphTelemetryResponse, SymbolicGraphTensorId, SymbolicGraphTensorPath,
-    check_tensor_matches,
+    GraphOperation, SymbolicGraph, SymbolicGraphNodePath, SymbolicGraphOperationId,
+    SymbolicGraphTensorId, SymbolicGraphTensorPath, check_tensor_matches,
 };
 use crate::tensor_rank::DynRank;
 use std::collections::HashMap;
@@ -65,23 +65,14 @@ pub enum EvalRuntimeError {
     EvalError(Option<String>, EvalError),
 }
 
-pub fn run(
+pub fn run<T: SymbolicGraphObserver>(
     model: &SymbolicGraph,
     tensor_store: &TensorStore,
     eval_backend: &mut EvalBackend,
-    telemetry_request: Option<&SymbolicGraphTelemetryRequest>,
+    observer: &mut T,
     inputs: HashMap<String, NumericTensor<DynRank>>,
-) -> Result<
-    (
-        HashMap<String, NumericTensor<DynRank>>,
-        SymbolicGraphTelemetryResponse,
-    ),
-    EvalRuntimeError,
-> {
+) -> Result<HashMap<String, NumericTensor<DynRank>>, EvalRuntimeError> {
     let initialized_tensors = model.get_initialized_tensors(tensor_store);
-    let mut telemetry_response = SymbolicGraphTelemetryResponse {
-        subscribed_tensors: HashMap::new(),
-    };
     let mut active_tensors: HashMap<SymbolicGraphTensorId, NumericTensor<DynRank>> = HashMap::new();
     for (tensor_id, tensor) in initialized_tensors {
         active_tensors.insert(tensor_id, tensor);
@@ -125,6 +116,7 @@ pub fn run(
             let outputs = op
                 .eval(eval_backend, &input_values)
                 .map_err(|x| EvalRuntimeError::EvalError(name.clone(), x))?;
+            observer.on_op_executed(&SymbolicGraphNodePath::Node(*op_id));
             for (tensor_id, value) in outputs {
                 //assert_eq!(value.has_nan().unwrap(), false);
 
@@ -133,6 +125,7 @@ pub fn run(
                 check_tensor_matches(&value, tensor_info)
                     .map_err(|x| EvalRuntimeError::EvalError(name.clone(), x))?;
 
+                observer.on_tensor_assigned(&SymbolicGraphTensorPath::Tensor(tensor_id), &value);
                 active_tensors.insert(tensor_id, value);
             }
             ops_completed_now.push(*op_id)
@@ -156,16 +149,5 @@ pub fn run(
         }
     }
 
-    if let Some(req) = telemetry_request {
-        for subscribed_path in &req.subscribed_tensors {
-            let SymbolicGraphTensorPath::Tensor(tensor_id) = subscribed_path;
-            if let Some(tensor) = active_tensors.get(tensor_id) {
-                telemetry_response
-                    .subscribed_tensors
-                    .insert(subscribed_path.clone(), tensor.to_ndarray().unwrap());
-            }
-        }
-    }
-
-    Ok((output_tensors, telemetry_response))
+    Ok(output_tensors)
 }

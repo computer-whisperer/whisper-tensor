@@ -121,8 +121,8 @@ impl OnnxNodeTest {
                 .map_err(|e| format!("Failed to parse expected outputs: {e}"))?;
 
             // Run the model
-            let (outputs, _) = model
-                .eval(inputs, None, backend)
+            let outputs = model
+                .eval(inputs, &mut (), backend)
                 .map_err(|e| format!("Model execution failed: {e:?}"))?;
 
             // Compare outputs with expected values
