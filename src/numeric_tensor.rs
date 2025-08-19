@@ -387,6 +387,18 @@ impl<R: Rank> NumericTensor<R> {
 }
 
 impl NumericTensor<DynRank> {
+    pub fn cumsum(
+        &self,
+        axis: Option<isize>,
+        exclusive: bool,
+        reverse: bool,
+        _backend: &mut EvalBackend,
+    ) -> Result<Self, NumericTensorError> {
+        Ok(NumericTensor::NDArray(
+            self.to_ndarray()?.cumsum(axis, exclusive, reverse)?,
+        ))
+    }
+
     pub fn concat(
         tensors: &[&Self],
         axis: usize,

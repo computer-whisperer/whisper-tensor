@@ -4,7 +4,7 @@ use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::backends::ndarray_backend::conversions::NDArrayNumericTensorType;
 use crate::dtype::DType;
 use crate::milli_graph::{MilliOpGraphError, MilliOpGraphTensorId};
-use crate::numeric_scalar::NumericScalar;
+use crate::numeric_scalar::{NumericScalar, NumericScalarType};
 use crate::numeric_tensor::NumericTensor;
 use crate::scalar_info::{ScalarInfo, ScalarInfoTyped};
 use crate::symbolic_scalar::{SymbolicResolver, SymbolicScalar, SymbolicScalarTyped};
@@ -1260,7 +1260,7 @@ impl MilliOp for MilliOpNonZero {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MilliOpCumSum {
-    a: MilliOpGraphTensorId,
+    input: MilliOpGraphTensorId,
     axis: MilliOpGraphTensorId,
     exclusive: bool,
     reverse: bool,
@@ -1268,13 +1268,13 @@ pub struct MilliOpCumSum {
 
 impl MilliOpCumSum {
     pub(crate) fn new(
-        a: MilliOpGraphTensorId,
+        input: MilliOpGraphTensorId,
         axis: MilliOpGraphTensorId,
         exclusive: bool,
         reverse: bool,
     ) -> Self {
         Self {
-            a,
+            input,
             axis,
             exclusive,
             reverse,
@@ -1284,18 +1284,18 @@ impl MilliOpCumSum {
 
 impl MilliOp for MilliOpCumSum {
     fn get_inputs(&self) -> Vec<MilliOpGraphTensorId> {
-        vec![self.a, self.axis]
+        vec![self.input, self.axis]
     }
 
     fn eval(
         &self,
-        _inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
-        _backend: &mut EvalBackend,
+        inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
+        backend: &mut EvalBackend,
     ) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
-        Err(MilliOpGraphError::UnimplementedOperatorError(
-            "CumSum".to_string(),
-        ))?;
-        todo!()
+        let data = &inputs[&self.input];
+        let axis = i64::cast_from_numeric_scalar(&inputs[&self.axis].first_element());
+        let out = data.cumsum(Some(axis as isize), self.exclusive, self.reverse, backend)?;
+        Ok(out)
     }
 
     fn get_name(&self) -> String {

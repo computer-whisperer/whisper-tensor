@@ -739,13 +739,13 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_cosh);
         do_test!($runner_fn, $runner_name, test_cosh_example);
 
-        /*do_test!($runner_fn, $runner_name, test_cumsum_1d);
+        do_test!($runner_fn, $runner_name, test_cumsum_1d);
         do_test!($runner_fn, $runner_name, test_cumsum_1d_exclusive);
         do_test!($runner_fn, $runner_name, test_cumsum_1d_reverse);
         do_test!($runner_fn, $runner_name, test_cumsum_1d_reverse_exclusive);
         do_test!($runner_fn, $runner_name, test_cumsum_2d_axis_0);
         do_test!($runner_fn, $runner_name, test_cumsum_2d_axis_1);
-        do_test!($runner_fn, $runner_name, test_cumsum_2d_negative_axis);*/
+        do_test!($runner_fn, $runner_name, test_cumsum_2d_negative_axis);
 
         /*
         do_test!($runner_fn, $runner_name, test_deform_conv_with_mask_bias);

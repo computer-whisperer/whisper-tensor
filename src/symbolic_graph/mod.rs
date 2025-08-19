@@ -1154,6 +1154,7 @@ impl SymbolicGraphMutator {
             "CumSum" => Some(AnyOperation::CumSum(ops::CumSumOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
+                &onnx_node.attribute,
             )?)),
             "Gather" => Some(AnyOperation::Gather(ops::GatherOperation::from_onnx(
                 &input_tensors,

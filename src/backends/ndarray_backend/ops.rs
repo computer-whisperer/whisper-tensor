@@ -2,7 +2,7 @@ use crate::TrigOp;
 use ndarray::linalg::general_mat_mul;
 use ndarray::{
     ArcArray, Array, Array2, ArrayD, ArrayView2, ArrayViewD, ArrayViewMut2, Axis, Dimension, Ix1,
-    Ix2, IxDyn, LinalgScalar, ShapeError, SliceInfoElem, Zip, concatenate, s,
+    Ix2, IxDyn, LinalgScalar, RemoveAxis, ShapeError, SliceInfoElem, Zip, concatenate, s,
 };
 use num_traits::real::Real;
 use num_traits::{Float, FromPrimitive, Num, NumCast, One, Zero};
@@ -13,6 +13,8 @@ use std::ops::{Add, BitAnd, BitOr, BitXor, Mul};
 pub enum NDArrayOperationError {
     #[error(transparent)]
     ShapeError(#[from] ShapeError),
+    #[error("Invalid axis: {axis} {rank}")]
+    InvalidAxis { axis: isize, rank: usize },
     #[error("out of bounds")]
     OutOfBounds,
     #[error("incompatible shape")]
@@ -430,6 +432,85 @@ where
 
     // 4) Wrap in ArcArray and return
     Ok(ArcArray::from(result))
+}
+
+/// ONNX CumSum
+/// - `axis`: None => default 0 (ONNX behavior), negative allowed (normalized)
+/// - `exclusive`: if true, current element is not included
+/// - `reverse`: if true, accumulate from the end toward the beginning
+pub fn cumsum_nd<T, D>(
+    tensor: ArcArray<T, D>,
+    axis: Option<isize>,
+    exclusive: bool,
+    reverse: bool,
+) -> Result<ArcArray<T, D>, NDArrayOperationError>
+where
+    T: Copy + Zero + Add<Output = T>,
+    D: Dimension + RemoveAxis,
+{
+    let x = tensor.view();
+    let rank = x.ndim() as isize;
+
+    // ONNX: default axis is 0; negatives allowed and wrap around
+    let ax_in = axis.unwrap_or(0);
+    if ax_in < -rank || ax_in >= rank {
+        return Err(NDArrayOperationError::InvalidAxis {
+            axis: ax_in,
+            rank: rank as usize,
+        });
+    }
+    let ax = if ax_in < 0 {
+        (rank + ax_in) as usize
+    } else {
+        ax_in as usize
+    };
+    let axis = Axis(ax);
+
+    let mut out = Array::<T, D>::zeros(x.raw_dim());
+    let len = x.len_of(axis);
+
+    // Running accumulator has the shape with the given axis removed.
+    let mut accum: Array<T, D::Smaller> = Array::zeros(x.raw_dim().remove_axis(axis));
+
+    if reverse {
+        for i in (0..len).rev() {
+            let slice = x.index_axis(axis, i);
+            let mut out_slice = out.index_axis_mut(axis, i);
+
+            if exclusive {
+                // Write current running total, then include the current slice
+                out_slice.assign(&accum);
+                Zip::from(&mut accum).and(&slice).for_each(|a, &b| {
+                    *a = *a + b;
+                });
+            } else {
+                // Include current slice, then write the running total
+                Zip::from(&mut accum).and(&slice).for_each(|a, &b| {
+                    *a = *a + b;
+                });
+                out_slice.assign(&accum);
+            }
+        }
+    } else {
+        for i in 0..len {
+            let slice = x.index_axis(axis, i);
+            let mut out_slice = out.index_axis_mut(axis, i);
+
+            if exclusive {
+                out_slice.assign(&accum);
+                Zip::from(&mut accum).and(&slice).for_each(|a, &b| {
+                    *a = *a + b;
+                });
+            } else {
+                Zip::from(&mut accum).and(&slice).for_each(|a, &b| {
+                    *a = *a + b;
+                });
+                out_slice.assign(&accum);
+            }
+        }
+    }
+
+    Ok(out.into_shared())
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

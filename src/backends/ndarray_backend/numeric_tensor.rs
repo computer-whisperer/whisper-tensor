@@ -8,7 +8,7 @@ use crate::dtype::DType;
 use crate::numeric_scalar::NumericScalar;
 use crate::tensor_rank::{DimContainer, DimProduct, DynRank, Rank, RankError};
 use half::{bf16, f16};
-use ndarray::{ArcArray, IxDyn, SliceInfo, SliceInfoElem};
+use ndarray::{ArcArray, IxDyn, RemoveAxis, SliceInfo, SliceInfoElem};
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter};
 use std::ops::{Not, Range};
@@ -1186,6 +1186,64 @@ impl<R: Rank> NDArrayNumericTensor<R> {
             NumericScalar::I8(x) => Self::I8(ArcArray::from_elem(shape, x)),
             NumericScalar::BOOL(x) => Self::BOOL(ArcArray::from_elem(shape, x)),
             NumericScalar::STRING(x) => Self::STRING(ArcArray::from_elem(shape, x)),
+        })
+    }
+}
+
+impl<R> NDArrayNumericTensor<R>
+where
+    R: Rank,
+    R::NDArrayDim: RemoveAxis,
+{
+    pub fn cumsum(
+        &self,
+        axis: Option<isize>,
+        exclusive: bool,
+        reverse: bool,
+    ) -> Result<Self, NDArrayNumericTensorError> {
+        Ok(match self {
+            NDArrayNumericTensor::F32(x) => {
+                Self::F32(ops::cumsum_nd(x.clone(), axis, exclusive, reverse)?)
+            }
+            NDArrayNumericTensor::F64(x) => {
+                Self::F64(ops::cumsum_nd(x.clone(), axis, exclusive, reverse)?)
+            }
+            NDArrayNumericTensor::BF16(x) => {
+                Self::BF16(ops::cumsum_nd(x.clone(), axis, exclusive, reverse)?)
+            }
+            NDArrayNumericTensor::F16(x) => {
+                Self::F16(ops::cumsum_nd(x.clone(), axis, exclusive, reverse)?)
+            }
+            NDArrayNumericTensor::U64(x) => {
+                Self::U64(ops::cumsum_nd(x.clone(), axis, exclusive, reverse)?)
+            }
+            NDArrayNumericTensor::I64(x) => {
+                Self::I64(ops::cumsum_nd(x.clone(), axis, exclusive, reverse)?)
+            }
+            NDArrayNumericTensor::U32(x) => {
+                Self::U32(ops::cumsum_nd(x.clone(), axis, exclusive, reverse)?)
+            }
+            NDArrayNumericTensor::I32(x) => {
+                Self::I32(ops::cumsum_nd(x.clone(), axis, exclusive, reverse)?)
+            }
+            NDArrayNumericTensor::U16(x) => {
+                Self::U16(ops::cumsum_nd(x.clone(), axis, exclusive, reverse)?)
+            }
+            NDArrayNumericTensor::I16(x) => {
+                Self::I16(ops::cumsum_nd(x.clone(), axis, exclusive, reverse)?)
+            }
+            NDArrayNumericTensor::U8(x) => {
+                Self::U8(ops::cumsum_nd(x.clone(), axis, exclusive, reverse)?)
+            }
+            NDArrayNumericTensor::I8(x) => {
+                Self::I8(ops::cumsum_nd(x.clone(), axis, exclusive, reverse)?)
+            }
+            _ => {
+                return Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes(
+                    "cumsum".to_string(),
+                    vec![self.dtype()],
+                ));
+            }
         })
     }
 }

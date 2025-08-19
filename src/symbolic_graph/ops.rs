@@ -298,6 +298,7 @@ impl CumSumOperation {
     pub(crate) fn from_onnx(
         inputs: &[Option<SymbolicGraphTensorId>],
         outputs: &[Option<SymbolicGraphTensorId>],
+        attributes: &[onnx::AttributeProto],
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 2 {
             return Err(ONNXDecodingError::InvalidOperatorInputs("CumSum"));
@@ -305,12 +306,14 @@ impl CumSumOperation {
         if outputs.len() != 1 {
             return Err(ONNXDecodingError::InvalidOperatorOutputs("CumSum"));
         }
+        let exclusive = query_attribute_int(attributes, "exclusive").unwrap_or_default() != 0;
+        let reverse = query_attribute_int(attributes, "reverse").unwrap_or_default() != 0;
         Ok(Self {
             input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Unary"))?,
             axis: inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs("Unary"))?,
             output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Unary"))?,
-            exclusive: false,
-            reverse: false,
+            exclusive,
+            reverse,
         })
     }
 }
