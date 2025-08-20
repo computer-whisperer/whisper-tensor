@@ -147,7 +147,7 @@ impl SuperGraphInner {
                     observer,
                     backend,
                 )?;
-                observer.on_node_executed(&SuperGraphNodePath::SuperGraphNode(this_path));
+                observer.on_node_executed(&SuperGraphNodePath::SuperGraphNode(this_path), backend);
                 remaining_ops.retain(|x| *x != op_id);
             } else {
                 break;

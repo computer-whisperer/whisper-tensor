@@ -85,22 +85,23 @@ impl<'a, T: SuperGraphObserver> SymbolicGraphObserverWrapper<'a, T> {
 }
 
 impl<'a, T: SuperGraphObserver> SymbolicGraphObserver for SymbolicGraphObserverWrapper<'a, T> {
-    fn on_op_executed(&mut self, node_path: &SymbolicGraphNodePath) {
-        self.inner
-            .on_node_executed(&SuperGraphNodePath::SymbolicGraphNode(
-                self.node_path.clone(),
-                node_path.clone(),
-            ))
+    fn on_op_executed(&mut self, node_path: &SymbolicGraphNodePath, backend: &mut EvalBackend) {
+        self.inner.on_node_executed(
+            &SuperGraphNodePath::SymbolicGraphNode(self.node_path.clone(), node_path.clone()),
+            backend,
+        )
     }
 
     fn on_tensor_assigned(
         &mut self,
         tensor_path: &SymbolicGraphTensorPath,
         tensor: &NumericTensor<DynRank>,
+        backend: &mut EvalBackend,
     ) {
         self.inner.on_tensor_assigned(
             &SuperGraphTensorPath::SymbolicGraphTensor(self.node_path.clone(), tensor_path.clone()),
             tensor,
+            backend,
         )
     }
 }
@@ -387,19 +388,20 @@ impl<'a, T: SuperGraphObserver> MilliOpGraphObserver for MilliOpGraphObserverWra
         &mut self,
         tensor_path: &MilliOpGraphTensorPath,
         tensor: &NumericTensor<DynRank>,
+        backend: &mut EvalBackend,
     ) {
         self.inner.on_tensor_assigned(
             &SuperGraphTensorPath::MilliOpGraphTensor(self.node_path.clone(), tensor_path.clone()),
             tensor,
+            backend,
         );
     }
 
-    fn on_node_executed(&mut self, node_path: &MilliOpGraphNodePath) {
-        self.inner
-            .on_node_executed(&SuperGraphNodePath::MilliOpGraphNode(
-                self.node_path.clone(),
-                node_path.clone(),
-            ));
+    fn on_node_executed(&mut self, node_path: &MilliOpGraphNodePath, backend: &mut EvalBackend) {
+        self.inner.on_node_executed(
+            &SuperGraphNodePath::MilliOpGraphNode(self.node_path.clone(), node_path.clone()),
+            backend,
+        );
     }
 }
 

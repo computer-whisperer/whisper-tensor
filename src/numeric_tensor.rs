@@ -257,6 +257,10 @@ impl<R: Rank> NumericTensor<R> {
         Ok(NumericTensor::NDArray(self.to_ndarray()?.ln()?))
     }
 
+    pub fn ones_like(&self, _backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
+        Ok(NumericTensor::NDArray(self.to_ndarray()?.ones_like()?))
+    }
+
     pub fn floor(&self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         if backend.supports_dtype(self.dtype()) {
             #[cfg(feature = "vulkan")]

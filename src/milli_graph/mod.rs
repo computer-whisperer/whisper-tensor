@@ -145,8 +145,8 @@ impl<ID: Hash + Clone + Eq> MilliOpGraph<ID> {
         for op_id in op_ids_to_eval {
             let op = &self.ops[op_id];
             let out = op.eval(&intermediate_values, backend)?;
-            observer.on_node_executed(&MilliOpGraphNodePath::Op(*op_id));
-            observer.on_tensor_assigned(&MilliOpGraphTensorPath::Tensor(*op_id), &out);
+            observer.on_node_executed(&MilliOpGraphNodePath::Op(*op_id), backend);
+            observer.on_tensor_assigned(&MilliOpGraphTensorPath::Tensor(*op_id), &out, backend);
             //assert_eq!(out.has_nan()?, false);
             intermediate_values.insert(*op_id, out);
         }

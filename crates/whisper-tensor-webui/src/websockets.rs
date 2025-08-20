@@ -121,7 +121,7 @@ pub(crate) async fn websocket_task(
                             vec.as_slice(),
                         ) {
                             Ok(msg) => {
-                                log::debug!("Decoded message: {:?}", msg);
+                                //log::debug!("Decoded message: {:?}", msg);
                                 sender_clone.send(msg).unwrap();
                             }
                             Err(err) => {

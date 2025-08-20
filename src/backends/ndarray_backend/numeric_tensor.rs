@@ -1188,6 +1188,32 @@ impl<R: Rank> NDArrayNumericTensor<R> {
             NumericScalar::STRING(x) => Self::STRING(ArcArray::from_elem(shape, x)),
         })
     }
+
+    pub fn ones_like(&self) -> Result<Self, NDArrayNumericTensorError> {
+        Ok(match self {
+            NDArrayNumericTensor::F32(x) => Self::F32(ArcArray::from_elem(x.dim(), 1.0)),
+            NDArrayNumericTensor::F64(x) => Self::F64(ArcArray::from_elem(x.dim(), 1.0)),
+            NDArrayNumericTensor::BF16(x) => {
+                Self::BF16(ArcArray::from_elem(x.dim(), bf16::from_f32(1.0)))
+            }
+            NDArrayNumericTensor::F16(x) => {
+                Self::F16(ArcArray::from_elem(x.dim(), f16::from_f32(1.0)))
+            }
+            NDArrayNumericTensor::U64(x) => Self::U64(ArcArray::from_elem(x.dim(), 1)),
+            NDArrayNumericTensor::I64(x) => Self::I64(ArcArray::from_elem(x.dim(), 1)),
+            NDArrayNumericTensor::U32(x) => Self::U32(ArcArray::from_elem(x.dim(), 1)),
+            NDArrayNumericTensor::I32(x) => Self::I32(ArcArray::from_elem(x.dim(), 1)),
+            NDArrayNumericTensor::U16(x) => Self::U16(ArcArray::from_elem(x.dim(), 1)),
+            NDArrayNumericTensor::I16(x) => Self::I16(ArcArray::from_elem(x.dim(), 1)),
+            NDArrayNumericTensor::U8(x) => Self::U8(ArcArray::from_elem(x.dim(), 1)),
+            NDArrayNumericTensor::I8(x) => Self::I8(ArcArray::from_elem(x.dim(), 1)),
+            NDArrayNumericTensor::BOOL(x) => Self::BOOL(ArcArray::from_elem(x.dim(), true)),
+            _ => Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes(
+                "sign".to_string(),
+                vec![self.dtype()],
+            ))?,
+        })
+    }
 }
 
 impl<R> NDArrayNumericTensor<R>

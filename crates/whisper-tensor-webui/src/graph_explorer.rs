@@ -3,18 +3,20 @@ use crate::graph_layout::{
     GraphLayout, GraphLayoutError, GraphLayoutIOOffsets, GraphLayoutLinkData, GraphLayoutLinkId,
     GraphLayoutLinkType, GraphLayoutNodeId, GraphLayoutNodeInitData, GraphLayoutNodeType,
 };
+use crate::tensor_swatch::build_tensor_swatch;
 use crate::websockets::ServerRequestManager;
 use crate::widgets::tensor_view::{TensorViewState, tensor_view};
 use crate::widgets::toggle::toggle_ui;
 use crate::widgets::tokenized_rich_text::TokenizedRichText;
 use egui::epaint::CubicBezierShape;
 use egui::{
-    Color32, Label, Margin, Rect, Response, RichText, Sense, Shape, Stroke, StrokeKind, Ui,
-    UiBuilder, Vec2, Widget, vec2,
+    Color32, ColorImage, Context, ImageData, Label, Margin, Mesh, Pos2, Rect, Response, RichText,
+    Sense, Shape, Stroke, StrokeKind, TextureHandle, Ui, UiBuilder, Vec2, Widget, vec2,
 };
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use web_time::{Duration, Instant};
 use whisper_tensor::DynRank;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
@@ -36,7 +38,9 @@ use whisper_tensor::symbolic_graph::{
 use whisper_tensor::tokenizer::Tokenizer;
 use whisper_tensor_import::onnx_graph::TokenizerInfo;
 use whisper_tensor_import::onnx_graph::tensor::Tensor;
-use whisper_tensor_server::{LoadedModelId, SuperGraphRequest, WebsocketClientServerMessage};
+use whisper_tensor_server::{
+    AbbreviatedTensorValue, LoadedModelId, SuperGraphRequest, WebsocketClientServerMessage,
+};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct GraphExplorerState {
@@ -44,7 +48,7 @@ pub(crate) struct GraphExplorerState {
     explorer_minimap: bool,
     explorer_swatches: bool,
     explorer_node_wave: bool,
-    swatch_dimension: u32,
+    swatch_dimension: usize,
 }
 
 impl Default for GraphExplorerState {
@@ -103,7 +107,9 @@ pub(crate) struct GraphExplorerApp {
     pub(crate) graph_subject_path: Vec<GraphExplorerLayerSelection>,
     pub(crate) next_graph_subject_path: Option<Vec<GraphExplorerLayerSelection>>,
     pub(crate) text_inference_data: HashMap<InterfaceId, TextInferenceData>,
-    pub(crate) node_execution_timestamps: HashMap<SuperGraphNodePath, Instant>,
+    node_execution_timestamps: HashMap<SuperGraphNodePath, Instant>,
+    abbreviated_tensor_reports: HashMap<SuperGraphTensorPath, AbbreviatedTensorValue>,
+    rendered_tensor_swatches: HashMap<SuperGraphTensorPath, TextureHandle>,
 }
 
 fn render_node_contents<'a>(
@@ -339,6 +345,36 @@ impl GraphExplorerApp {
             next_graph_subject_path: None,
             text_inference_data: HashMap::new(),
             node_execution_timestamps: HashMap::new(),
+            abbreviated_tensor_reports: HashMap::new(),
+            rendered_tensor_swatches: HashMap::new(),
+        }
+    }
+
+    pub(crate) fn get_tensor_swatch(
+        rendered_tensor_swatches: &mut HashMap<SuperGraphTensorPath, TextureHandle>,
+        abbreviated_tensor_reports: &HashMap<SuperGraphTensorPath, AbbreviatedTensorValue>,
+        state: &mut GraphExplorerState,
+        ctx: &Context,
+        path: &SuperGraphTensorPath,
+    ) -> Option<TextureHandle> {
+        if let Some(swatch) = rendered_tensor_swatches.get(&path) {
+            Some(swatch.clone())
+        } else if let Some(x) = abbreviated_tensor_reports.get(path) {
+            if let Some(raw_texture) =
+                build_tensor_swatch(x, state.swatch_dimension, state.swatch_dimension)
+            {
+                let image_data = Arc::new(ColorImage::new(
+                    [state.swatch_dimension, state.swatch_dimension],
+                    raw_texture,
+                ));
+                let texture = ctx.load_texture("swatch", image_data, egui::TextureOptions::NEAREST);
+                rendered_tensor_swatches.insert(path.clone(), texture.clone());
+                Some(texture)
+            } else {
+                None
+            }
+        } else {
+            None
         }
     }
 
@@ -404,6 +440,8 @@ impl GraphExplorerApp {
         if let Some(next_path) = self.next_graph_subject_path.take() {
             if next_path.first() != self.graph_subject_path.first() {
                 self.node_execution_timestamps.clear();
+                self.abbreviated_tensor_reports.clear();
+                self.rendered_tensor_swatches.clear();
             }
             self.graph_subject_path = next_path;
             self.explorer_selection = None;
@@ -1181,15 +1219,17 @@ impl GraphExplorerApp {
                                             nodes_to_render_vec.push(*src_id);
                                         }
                                         // Pre-allocate the shape in the paint queue
-                                        let shape_idx = ui.painter().add(Shape::Noop);
+                                        let shape_idx_a = ui.painter().add(Shape::Noop);
                                         edges_to_render.push((
                                             (*src_id, *src_id_i),
                                             (*dst_id, *dst_id_i),
                                             *link_id,
-                                            shape_idx,
+                                            shape_idx_a,
                                         ));
                                     }
                                 }
+                                // Also allocate shapes for swatches, but at a higher level
+                                let edges_to_render = edges_to_render.into_iter().map(|x| (x.0, x.1, x.2, (x.3, ui.painter().add(Shape::Noop), ui.painter().add(Shape::Noop)))).collect::<Vec<_>>();
 
                                 let mut node_io_connections = HashMap::new();
                                 let mut node_bounding_boxes = HashMap::new();
@@ -1354,7 +1394,7 @@ impl GraphExplorerApp {
 
                                 // Draw lines
                                 let link_data = graph_layout.get_link_data();
-                                for ((src_id, src_id_i), (dst_id, dst_id_i), link_id, paint_idx) in
+                                for ((src_id, src_id_i), (dst_id, dst_id_i), link_id, (paint_idx_a, paint_idx_b, paint_idx_c)) in
                                     edges_to_render
                                 {
                                     let source_connection = node_bounding_boxes[&src_id].center()
@@ -1395,7 +1435,44 @@ impl GraphExplorerApp {
                                         Color32::TRANSPARENT,
                                         stroke,
                                     );
-                                    ui.painter().set(paint_idx, shape);
+                                    ui.painter().set(paint_idx_a, shape);
+
+                                    // Render swatch
+                                    if let Some(graph_path) = graph_path &&
+                                        let Some(link_data) = link_data.get(&link_id) {
+
+                                        let path = match link_data.link_type {
+                                            GraphLayoutLinkType::SymbolicGraphTensor(x) => {
+                                                Some(graph_path.push_symbolic_tensor(x))
+                                            }
+                                            GraphLayoutLinkType::SuperGraphLink(x) => {
+                                                match x {
+                                                    SuperGraphAnyLink::Tensor(x) => {
+                                                        Some(graph_path.push_super_tensor(x))
+                                                    }
+                                                    _ => None
+                                                }
+                                            }
+                                            GraphLayoutLinkType::MilliOpGraphTensor(x) => {
+                                                Some(graph_path.push_milli_op_tensor(x))
+                                            }
+                                        };
+                                        if let Some(path) = path && let Some(texture) = Self::get_tensor_swatch(
+                                            &mut self.rendered_tensor_swatches,
+                                            &self.abbreviated_tensor_reports,
+                                            state, ui.ctx(), &path) {
+                                            let midpoint = points[1].lerp(points[2], 0.5);
+                                            let rect = Rect::from_center_size(midpoint, Vec2::splat(32.0));
+                                            let mut shape = Mesh::with_texture(texture.id());
+                                            shape.add_rect_with_uv(rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+                                            ui.painter().set(paint_idx_c, shape);
+                                            let color = ui.visuals().widgets.inactive.bg_fill;
+                                            let shape = egui::Shape::rect_filled(rect.expand(4.0), 4.0, color);
+                                            ui.painter().set(paint_idx_b, shape);
+                                        }
+                                    }
+
+
                                 }
                             });
                             self.model_view_scene_rects
@@ -1460,6 +1537,10 @@ impl GraphExplorerApp {
                                                         let age = Duration::from_micros(age_us as u64);
                                                         let time = time_now - age;
                                                         self.node_execution_timestamps.insert(node_path, time);
+                                                    }
+                                                    for (tensor_path, value) in report.abbreviated_tensor_assignments {
+                                                        self.rendered_tensor_swatches.remove(&tensor_path);
+                                                        self.abbreviated_tensor_reports.insert(tensor_path, value);
                                                     }
                                                 }
                                             }
@@ -1539,7 +1620,7 @@ impl GraphExplorerApp {
                                                         let token = server_request_manager
                                                             .submit_supergraph_request(
                                                             SuperGraphRequest {
-                                                                do_abbreviated_tensor_assignment_reports: if state.explorer_swatches {Some(state.swatch_dimension*state.swatch_dimension)} else {None},
+                                                                do_abbreviated_tensor_assignment_reports: if state.explorer_swatches {Some((state.swatch_dimension*state.swatch_dimension) as u64)} else {None},
                                                                 do_node_execution_reports: state.explorer_node_wave,
                                                                 attention_token: None,
                                                                 super_graph: llm_interface

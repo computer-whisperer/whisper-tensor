@@ -116,7 +116,7 @@ pub fn run<T: SymbolicGraphObserver>(
             let outputs = op
                 .eval(eval_backend, &input_values)
                 .map_err(|x| EvalRuntimeError::EvalError(name.clone(), x))?;
-            observer.on_op_executed(&SymbolicGraphNodePath::Node(*op_id));
+            observer.on_op_executed(&SymbolicGraphNodePath::Node(*op_id), eval_backend);
             for (tensor_id, value) in outputs {
                 //assert_eq!(value.has_nan().unwrap(), false);
 
@@ -125,7 +125,11 @@ pub fn run<T: SymbolicGraphObserver>(
                 check_tensor_matches(&value, tensor_info)
                     .map_err(|x| EvalRuntimeError::EvalError(name.clone(), x))?;
 
-                observer.on_tensor_assigned(&SymbolicGraphTensorPath::Tensor(tensor_id), &value);
+                observer.on_tensor_assigned(
+                    &SymbolicGraphTensorPath::Tensor(tensor_id),
+                    &value,
+                    eval_backend,
+                );
                 active_tensors.insert(tensor_id, value);
             }
             ops_completed_now.push(*op_id)

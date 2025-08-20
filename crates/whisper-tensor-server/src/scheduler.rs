@@ -91,13 +91,13 @@ pub enum SchedulerJob {
 struct LocalSuperGraphObserver {
     attention: Option<u64>,
     do_node_execute_report: bool,
-    do_abbreviated_tensor_assign_report: Option<u32>,
+    do_abbreviated_tensor_assign_report: Option<u64>,
     reporter: Option<SchedulerReporter>,
     subscribed_tensors: HashSet<SuperGraphTensorPath>,
 }
 
 impl SuperGraphObserver for LocalSuperGraphObserver {
-    fn on_node_executed(&mut self, path: &SuperGraphNodePath) {
+    fn on_node_executed(&mut self, path: &SuperGraphNodePath, _backend: &mut EvalBackend) {
         if let Some(reporter) = &mut self.reporter
             && self.do_node_execute_report
         {
@@ -111,7 +111,12 @@ impl SuperGraphObserver for LocalSuperGraphObserver {
         }
     }
 
-    fn on_tensor_assigned(&mut self, path: &SuperGraphTensorPath, tensor: &NumericTensor<DynRank>) {
+    fn on_tensor_assigned(
+        &mut self,
+        path: &SuperGraphTensorPath,
+        tensor: &NumericTensor<DynRank>,
+        backend: &mut EvalBackend,
+    ) {
         if let Some(reporter) = &mut self.reporter {
             if self.subscribed_tensors.contains(path) {
                 let report = SchedulerReport::SuperGraphTensorAssignedFull(
@@ -128,7 +133,7 @@ impl SuperGraphObserver for LocalSuperGraphObserver {
                     SchedulerReportSuperGraphTensorAssignedAbbreviated {
                         attention: self.attention.clone(),
                         path: path.clone(),
-                        value: AbbreviatedTensorValue::from_tensor(tensor, x),
+                        value: AbbreviatedTensorValue::from_tensor(tensor, x, backend),
                     },
                 );
                 reporter.push_report(report);
