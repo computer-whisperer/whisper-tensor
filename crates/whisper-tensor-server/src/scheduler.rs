@@ -104,7 +104,7 @@ impl SuperGraphObserver for LocalSuperGraphObserver {
         {
             let report =
                 SchedulerReport::SuperGraphNodeExecuted(SchedulerReportSuperGraphNodeExecuted {
-                    attention: *self.attention,
+                    attention: self.attention,
                     path: path.clone(),
                     timestamp: Instant::now(),
                 });
@@ -122,7 +122,7 @@ impl SuperGraphObserver for LocalSuperGraphObserver {
             if self.subscribed_tensors.contains(path) {
                 let report = SchedulerReport::SuperGraphTensorAssignedFull(
                     SchedulerReportSuperGraphTensorAssigned {
-                        attention: *self.attention,
+                        attention: self.attention,
                         path: path.clone(),
                         value: tensor.to_ndarray().unwrap(),
                     },
@@ -132,7 +132,7 @@ impl SuperGraphObserver for LocalSuperGraphObserver {
             if let Some(x) = self.do_abbreviated_tensor_assign_report {
                 let report = SchedulerReport::SuperGraphTensorAssignedAbbreviated(
                     SchedulerReportSuperGraphTensorAssignedAbbreviated {
-                        attention: *self.attention,
+                        attention: self.attention,
                         path: path.clone(),
                         value: AbbreviatedTensorValue::from_tensor(tensor, x, backend),
                     },
