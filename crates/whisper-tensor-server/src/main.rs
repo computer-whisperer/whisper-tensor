@@ -245,7 +245,7 @@ async fn handle_socket(
 
     let report_buffer = Mutex::new(Vec::<SchedulerReport>::new());
     let mut last_report_time = Instant::now();
-    let mut flush_report = async |socket: &mut WebSocket| {
+    let flush_report = async |socket: &mut WebSocket| {
         let mut report_buffer = report_buffer.lock().await;
         while !report_buffer.is_empty() {
             let mut report = SuperGraphExecutionReport {
