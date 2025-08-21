@@ -2160,6 +2160,11 @@ impl GraphExplorerApp {
                                                 ));
                                             }
                                         };
+                                    } else {
+                                        if let Some(x) = &super_graph_path {
+                                            subscribed_tensor =
+                                                Some(x.push_symbolic_tensor(tensor_id));
+                                        }
                                     }
                                 }
                                 TensorType::Output => {

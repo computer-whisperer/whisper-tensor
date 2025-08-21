@@ -1,4 +1,5 @@
 pub mod conversions;
+mod matmul;
 pub mod numeric_tensor;
 pub mod ops;
 

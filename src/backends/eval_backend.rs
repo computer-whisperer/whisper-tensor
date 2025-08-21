@@ -80,6 +80,11 @@ pub fn run<T: SymbolicGraphObserver>(
     let tensors_by_name = model.get_tensors_by_name();
     for (name, tensor) in inputs {
         if let Some(tensor_id) = tensors_by_name.get(&name) {
+            observer.on_tensor_assigned(
+                &SymbolicGraphTensorPath::Tensor(*tensor_id),
+                &tensor,
+                eval_backend,
+            );
             active_tensors.insert(*tensor_id, tensor);
         }
     }

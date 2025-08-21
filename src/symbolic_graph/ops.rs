@@ -240,12 +240,14 @@ impl Operation for UnaryOperation {
         let res = match &self.which {
             WhichUnaryOperation::Relu => AnyMilliOp::ClampMin(MilliOpClampMin::new(a, 0.0)),
             WhichUnaryOperation::Sigmoid => {
-                let x = graph.push_op(AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::neg(a)));
-                let x = graph.push_op(AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::exp(x)));
+                let xn = graph.push_op(AnyMilliOp::Cast(MilliOpCast::new(a, DType::F32)));
+                let xn = graph.push_op(AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::neg(xn)));
+                let xn = graph.push_op(AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::exp(xn)));
                 let c = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new_scalar(1.0f32)));
-                let c = graph.push_op(AnyMilliOp::CastLike(MilliOpCastLike::new(c, x)));
-                let x = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::add(x, c)));
-                AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::reciprocal(x))
+                let c = graph.push_op(AnyMilliOp::CastLike(MilliOpCastLike::new(c, xn)));
+                let o = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::add(xn, c)));
+                let o = graph.push_op(AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::reciprocal(o)));
+                AnyMilliOp::CastLike(MilliOpCastLike::new(o, a))
             }
             WhichUnaryOperation::Exp => AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::exp(a)),
             WhichUnaryOperation::Log => AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::ln(a)),
@@ -421,6 +423,7 @@ impl Operation for LpNormalizationOperation {
             .try_to_rank::<DynRank>()
             .unwrap();
         let axis = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(axis_tensor)));
+        let x = graph.push_op(AnyMilliOp::Cast(MilliOpCast::new(x, DType::F32)));
         let x = graph.push_op(AnyMilliOp::ReduceSum(MilliOpReduceSum::new(
             x,
             Some(axis),
@@ -432,7 +435,11 @@ impl Operation for LpNormalizationOperation {
             2 => graph.push_op(AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::sqrt(x))),
             _ => panic!(),
         };
-        let out = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::div(input, x)));
+        let input_cast = graph.push_op(AnyMilliOp::Cast(MilliOpCast::new(input, DType::F32)));
+        let out = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::div(
+            input_cast, x,
+        )));
+        let out = graph.push_op(AnyMilliOp::CastLike(MilliOpCastLike::new(out, input)));
 
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
@@ -449,6 +456,7 @@ pub struct GroupNormalizationOperation {
     output: SymbolicGraphTensorId,
     epsilon: f32,
     num_groups: usize,
+    stash_type: DType,
 }
 
 impl GroupNormalizationOperation {
@@ -476,6 +484,11 @@ impl GroupNormalizationOperation {
                 _ => {}
             }
         }
+        let stash_type = if query_attribute_int(attributes, "stash_type").unwrap_or(1) == 1 {
+            DType::F32
+        } else {
+            DType::BF16
+        };
         let num_groups = num_groups.ok_or(ONNXDecodingError::MissingAttribute(
             "GroupNormalization".to_string(),
             "num_groups".to_string(),
@@ -495,6 +508,7 @@ impl GroupNormalizationOperation {
             ))?,
             epsilon,
             num_groups,
+            stash_type,
         })
     }
 }
@@ -513,9 +527,13 @@ impl Operation for GroupNormalizationOperation {
 
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
-        let input = input_map[&self.input];
+        let original_input = input_map[&self.input];
+        let input_cast = graph.push_op(AnyMilliOp::Cast(MilliOpCast::new(
+            original_input,
+            self.stash_type,
+        )));
 
-        let input_shape = graph.push_op(AnyMilliOp::Shape(MilliOpShape::new(input)));
+        let input_shape = graph.push_op(AnyMilliOp::Shape(MilliOpShape::new(input_cast)));
         let num_channels = {
             let starts = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new_scalar(1i64)));
             let ends = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new_scalar(2i64)));
@@ -534,7 +552,7 @@ impl Operation for GroupNormalizationOperation {
                 new_shape_tensor.to_dyn(),
             )));
             graph.push_op(AnyMilliOp::Reshape(MilliOpReshape::new(
-                input, new_shape, false,
+                input_cast, new_shape, false,
             )))
         };
 
@@ -598,18 +616,22 @@ impl Operation for GroupNormalizationOperation {
         };
 
         let y = {
-            let scale = graph.push_op(AnyMilliOp::Unsqueeze(MilliOpUnsqueeze::new(
+            let scale_cast = graph.push_op(AnyMilliOp::Cast(MilliOpCast::new(
                 input_map[&self.scale],
-                one,
+                self.stash_type,
+            )));
+            let scale = graph.push_op(AnyMilliOp::Unsqueeze(MilliOpUnsqueeze::new(
+                scale_cast, one,
             )));
             graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::mul(y, scale)))
         };
 
         let y = {
-            let bias = graph.push_op(AnyMilliOp::Unsqueeze(MilliOpUnsqueeze::new(
+            let bias_cast = graph.push_op(AnyMilliOp::Cast(MilliOpCast::new(
                 input_map[&self.bias],
-                one,
+                self.stash_type,
             )));
+            let bias = graph.push_op(AnyMilliOp::Unsqueeze(MilliOpUnsqueeze::new(bias_cast, one)));
             graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::add(y, bias)))
         };
 
@@ -617,6 +639,11 @@ impl Operation for GroupNormalizationOperation {
             y,
             input_shape,
             false,
+        )));
+
+        let out = graph.push_op(AnyMilliOp::CastLike(MilliOpCastLike::new(
+            out,
+            original_input,
         )));
 
         let mut output_map = HashMap::new();
@@ -1006,6 +1033,7 @@ pub struct LayerNormalizationOperation {
     inv_std_dev_output: Option<SymbolicGraphTensorId>,
     axis: i64,
     epsilon: f32,
+    stash_type: DType,
 }
 
 impl LayerNormalizationOperation {
@@ -1037,6 +1065,11 @@ impl LayerNormalizationOperation {
                 _ => {}
             }
         }
+        let stash_type = if query_attribute_int(attributes, "stash_type").unwrap_or(1) == 1 {
+            DType::F32
+        } else {
+            DType::BF16
+        };
         Ok(Self {
             input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs(
                 "LayerNormalization",
@@ -1070,6 +1103,7 @@ impl LayerNormalizationOperation {
             },
             axis,
             epsilon,
+            stash_type,
         })
     }
 }
@@ -1102,6 +1136,11 @@ impl Operation for LayerNormalizationOperation {
         let input_data = input_map[&self.input];
         let input_scale = input_map[&self.scale];
 
+        let input_f32 = graph.push_op(AnyMilliOp::Cast(MilliOpCast::new(
+            input_data,
+            self.stash_type,
+        )));
+
         let axis = ops_helpers::scalar_const(&mut graph, self.axis);
         let axis = ops_helpers::resolve_axes(&mut graph, axis, input_data);
 
@@ -1115,14 +1154,14 @@ impl Operation for LayerNormalizationOperation {
         };
 
         let mean = graph.push_op(AnyMilliOp::ReduceMean(MilliOpReduceMean::new(
-            input_data,
+            input_f32,
             Some(normalized_axes),
             true,
             false,
         )));
 
         let d = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::sub(
-            input_data, mean,
+            input_f32, mean,
         )));
         let dd = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::mul(d, d)));
         let variance = graph.push_op(AnyMilliOp::ReduceMean(MilliOpReduceMean::new(
@@ -1146,23 +1185,52 @@ impl Operation for LayerNormalizationOperation {
         let inv_stddev = graph.push_op(AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::reciprocal(
             stddev,
         )));
+
         let normalized = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::mul(
             d, inv_stddev,
         )));
 
+        /*
+                let normalized_cast = graph.push_op(AnyMilliOp::CastLike(MilliOpCastLike::new(
+                    normalized, input_data,
+                )));
+
+                let out = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::mul(
+                    normalized_cast,
+                    input_scale,
+                )));
+
+                let out = if let Some(bias) = self.bias {
+                    graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::add(
+                        out,
+                        input_map[&bias],
+                    )))
+                } else {
+                    out
+                };
+        */
+        let input_scale_cast = graph.push_op(AnyMilliOp::Cast(MilliOpCast::new(
+            input_scale,
+            self.stash_type,
+        )));
         let out = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::mul(
             normalized,
-            input_scale,
+            input_scale_cast,
         )));
 
         let out = if let Some(bias) = self.bias {
-            graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::add(
-                out,
+            let bias_cast = graph.push_op(AnyMilliOp::Cast(MilliOpCast::new(
                 input_map[&bias],
+                self.stash_type,
+            )));
+            graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::add(
+                out, bias_cast,
             )))
         } else {
             out
         };
+
+        let out = graph.push_op(AnyMilliOp::CastLike(MilliOpCastLike::new(out, input_data)));
 
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);

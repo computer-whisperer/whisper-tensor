@@ -903,9 +903,16 @@ impl MilliOp for MilliOpMatMul {
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
     ) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
+        let a_input = &inputs[&self.a];
+        let b_input = &inputs[&self.b];
+        let accumulate_dtype = match a_input.dtype() {
+            DType::BF16 | DType::F16 => Some(DType::F32),
+            _ => None,
+        };
         Ok(NumericTensor::<DynRank>::matmul(
-            &inputs[&self.a],
-            &inputs[&self.b],
+            a_input,
+            b_input,
+            accumulate_dtype,
             backend,
         )?)
     }
@@ -1408,7 +1415,17 @@ impl MilliOp for MilliOpReduceSum {
                 }) as usize
             })
             .collect::<Vec<_>>();
-        let out = data.reduce_sum(axes, self.keepdims, backend)?;
+        let data_cast = match data.dtype() {
+            DType::BF16 | DType::F16 => data.cast(DType::F32, backend)?,
+            _ => data.clone(),
+        };
+        let out = data_cast.reduce_sum(axes, self.keepdims, backend)?;
+        let out = if out.dtype() != data.dtype() {
+            out.cast(data.dtype(), backend)?
+        } else {
+            out
+        };
+
         Ok(out)
     }
 

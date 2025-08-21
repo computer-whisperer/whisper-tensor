@@ -1,6 +1,5 @@
 use crate::onnx_graph::operators::{
-    Add, Cast, Constant, Exp, Gather, LpNormalization, MatMul, Mul, Neg, Relu, Sigmoid, Softplus,
-    Sub, Tanh,
+    Add, Cast, Constant, Exp, Gather, LpNormalization, MatMul, Mul, Relu, Sigmoid, Sub, Tanh,
 };
 use crate::onnx_graph::pytorch::{
     cast, group_norm, layer_norm, linear, reshape, squeeze, sum_dim, transpose,
@@ -285,19 +284,22 @@ pub fn load_rwkv7(
             decay_lerp,
         )?;
         let log_neg_log_of_decay = Cast::new(None, log_neg_log_of_decay, DType::F32);
-        let log_neg_log_of_decay = add_scalar(
+        /*let log_neg_log_of_decay = add_scalar(
             Neg::new(
                 None,
                 Softplus::new(None, Neg::new(None, log_neg_log_of_decay))?,
             ),
             -0.5f32,
-        )?;
-
-        let log_of_decay = Neg::new(
+        )?;*/
+        let constant = Constant::new(
             None,
-            Exp::new(None, Cast::new(None, log_neg_log_of_decay, DType::F32)),
+            TensorData::fill(
+                Shape::new(vec![Dimension::new(Some(1), None, None)]),
+                -0.606531,
+            )?,
         );
-        let decay = Exp::new(None, log_of_decay);
+        let w_sig = Sigmoid::new(None, log_neg_log_of_decay);
+        let decay = Exp::new(None, Mul::new(None, constant, w_sig)?);
 
         let deformed_key = Mul::new(
             None,

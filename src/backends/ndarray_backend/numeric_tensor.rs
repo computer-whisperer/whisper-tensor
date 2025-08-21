@@ -1,8 +1,8 @@
-use super::ops;
 use super::ops::{
     NativeNumericTensorBinaryOperation, NativeNumericTensorBinaryOperationBoolOut,
     NativeNumericTensorBitwiseBinaryOperation, NativeNumericTensorUnaryOperation, ReduceOp,
 };
+use super::{matmul, ops};
 use crate::TrigOp;
 use crate::dtype::DType;
 use crate::numeric_scalar::NumericScalar;
@@ -2962,31 +2962,35 @@ impl NDArrayNumericTensor<DynRank> {
         })
     }
 
-    pub fn matmul(a: &Self, b: &Self) -> Result<Self, NDArrayNumericTensorError> {
+    pub fn matmul(
+        a: &Self,
+        b: &Self,
+        accumulate_dtype: Option<DType>,
+    ) -> Result<Self, NDArrayNumericTensorError> {
         Ok(match (a, b) {
             (NDArrayNumericTensor::F32(a), NDArrayNumericTensor::F32(b)) => {
-                NDArrayNumericTensor::F32(ops::matmul(a, b)?)
+                NDArrayNumericTensor::F32(matmul::matmul_with_accum_dtype(a, b, accumulate_dtype)?)
             }
             (NDArrayNumericTensor::F64(a), NDArrayNumericTensor::F64(b)) => {
-                NDArrayNumericTensor::F64(ops::matmul(a, b)?)
+                NDArrayNumericTensor::F64(matmul::matmul_with_accum_dtype(a, b, accumulate_dtype)?)
             }
             (NDArrayNumericTensor::BF16(a), NDArrayNumericTensor::BF16(b)) => {
-                NDArrayNumericTensor::BF16(ops::matmul(a, b)?)
+                NDArrayNumericTensor::BF16(matmul::matmul_with_accum_dtype(a, b, accumulate_dtype)?)
             }
             (NDArrayNumericTensor::F16(a), NDArrayNumericTensor::F16(b)) => {
-                NDArrayNumericTensor::F16(ops::matmul(a, b)?)
+                NDArrayNumericTensor::F16(matmul::matmul_with_accum_dtype(a, b, accumulate_dtype)?)
             }
             (NDArrayNumericTensor::U64(a), NDArrayNumericTensor::U64(b)) => {
-                NDArrayNumericTensor::U64(ops::matmul(a, b)?)
+                NDArrayNumericTensor::U64(matmul::matmul_with_accum_dtype(a, b, accumulate_dtype)?)
             }
             (NDArrayNumericTensor::I64(a), NDArrayNumericTensor::I64(b)) => {
-                NDArrayNumericTensor::I64(ops::matmul(a, b)?)
+                NDArrayNumericTensor::I64(matmul::matmul_with_accum_dtype(a, b, accumulate_dtype)?)
             }
             (NDArrayNumericTensor::U32(a), NDArrayNumericTensor::U32(b)) => {
-                NDArrayNumericTensor::U32(ops::matmul(a, b)?)
+                NDArrayNumericTensor::U32(matmul::matmul_with_accum_dtype(a, b, accumulate_dtype)?)
             }
             (NDArrayNumericTensor::I32(a), NDArrayNumericTensor::I32(b)) => {
-                NDArrayNumericTensor::I32(ops::matmul(a, b)?)
+                NDArrayNumericTensor::I32(matmul::matmul_with_accum_dtype(a, b, accumulate_dtype)?)
             }
             _ => {
                 return Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes(

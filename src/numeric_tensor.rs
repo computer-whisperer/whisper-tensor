@@ -622,6 +622,7 @@ impl NumericTensor<DynRank> {
     pub fn matmul(
         a: &Self,
         b: &Self,
+        accumulate_dtype: Option<DType>,
         backend: &mut EvalBackend,
     ) -> Result<Self, NumericTensorError> {
         if backend.supports_dtype(a.dtype()) && backend.supports_dtype(b.dtype()) {
@@ -643,6 +644,7 @@ impl NumericTensor<DynRank> {
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::matmul(
             &a.try_into()?,
             &b.try_into()?,
+            accumulate_dtype,
         )?))
     }
 
