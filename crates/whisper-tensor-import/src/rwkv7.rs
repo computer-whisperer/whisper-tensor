@@ -58,21 +58,6 @@ fn lora_forward_sigmoid(
     })
 }
 
-fn lora_forward_tanh(
-    a: Arc<dyn Tensor>,
-    b: Arc<dyn Tensor>,
-    c: Option<Arc<dyn Tensor>>,
-    x: Arc<dyn Tensor>,
-) -> Result<Arc<dyn Tensor>, crate::onnx_graph::Error> {
-    let x1 = MatMul::new(None, x, a)?;
-    let x2 = MatMul::new(None, Tanh::new(None, x1), b)?;
-    Ok(if let Some(c) = c {
-        Add::new(None, x2, c)?
-    } else {
-        x2
-    })
-}
-
 pub fn add_scalar<T>(
     x: Arc<dyn Tensor>,
     scalar: T,
@@ -277,13 +262,22 @@ pub fn load_rwkv7(
             gate_lerp,
         )?;
 
+        /*
         let log_neg_log_of_decay = lora_forward_tanh(
             block_weight_manager.get_tensor("att.w1")?,
             block_weight_manager.get_tensor("att.w2")?,
             Some(block_weight_manager.get_tensor("att.w0")?),
             decay_lerp,
+        )?;*/
+        let x1 = MatMul::new(None, decay_lerp, block_weight_manager.get_tensor("att.w1")?)?;
+        let x2 = MatMul::new(
+            None,
+            Tanh::new(None, x1),
+            block_weight_manager.get_tensor("att.w2")?,
         )?;
-        let log_neg_log_of_decay = Cast::new(None, log_neg_log_of_decay, DType::F32);
+        let x2 = Cast::new(None, x2, DType::F32);
+        let c = Cast::new(None, block_weight_manager.get_tensor("att.w0")?, DType::F32);
+        let log_neg_log_of_decay = Add::new(None, x2, c)?;
         /*let log_neg_log_of_decay = add_scalar(
             Neg::new(
                 None,
@@ -399,7 +393,7 @@ pub fn load_rwkv7(
         let out = group_norm(
             &block_weight_manager.prefix("att.ln_x"),
             out,
-            1e-5,
+            1e-5 * ((hidden_dim.resolve().unwrap() / n_heads) as f32),
             n_heads as i64,
         )?;
 

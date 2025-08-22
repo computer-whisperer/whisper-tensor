@@ -23,7 +23,7 @@ fn main() {
     let model = Model::new_from_onnx(&onnx_data).unwrap();
 
     let mut super_graph_caches = SuperGraphCache::new();
-    let prompt = "Mary had a little lamb".to_string();
+    let prompt = "User: what are the first numbers in the fibonacci sequence starting with 1, 1?\n\nAssistant: The first numbers in the Fibonacci sequence starting with 1, 1 are 1, 1, 2,".to_string();
     let mut tokenizer_cache = HashMap::new();
     print!("{prompt:}");
     std::io::stdout().flush().unwrap();
