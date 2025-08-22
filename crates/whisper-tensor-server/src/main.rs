@@ -258,7 +258,7 @@ async fn handle_socket(
                 if x.get_attention_token() == report.attention {
                     match x {
                         SchedulerReport::SuperGraphNodeExecuted(x) => {
-                            let delta = (Instant::now() - x.end_instant);
+                            let delta = Instant::now() - x.end_instant;
                             let duration = x.end_instant - x.start_instant;
                             report
                                 .node_executions

@@ -1,3 +1,4 @@
+use half::{bf16, f16};
 use ndarray::linalg::general_mat_mul;
 use ndarray::{Array, Array3, ArrayView2, ArrayView3, ArrayViewMut2, Axis, Ix3, IxDyn, s};
 use num_traits::{FromPrimitive, One, ToPrimitive, Zero};
@@ -120,7 +121,6 @@ where
             let c64 = batched_gemm_in_type::<f64>(a64.view(), b64.view())?;
             cast3_back::<f64, T>(c64.view())?
         }
-        /*
         Some(DType::BF16) => {
             let ab = cast3_via_f32::<T, bf16>(a_b.view())?;
             let bb = cast3_via_f32::<T, bf16>(b_b.view())?;
@@ -132,7 +132,7 @@ where
             let bh = cast3_via_f32::<T, f16>(b_b.view())?;
             let ch = batched_naive::<f16>(ah.view(), bh.view());
             cast3_via_f32_back::<f16, T>(ch.view())?
-        }*/
+        }
         // Extend here for other accumulator types if you add them to DType.
         _ => return Err(NDArrayOperationError::Internal),
     };
@@ -347,17 +347,19 @@ where
 {
     cast3::<U, T>(src)
 }
-/*
+
 // Cast via f32 round-trip for half/bfloat16 where FromPrimitive/ToPrimitive may be partial.
 fn cast3_via_f32<T, U>(src: ArrayView3<'_, T>) -> Result<Array3<U>, NDArrayOperationError>
 where
     T: Copy + ToPrimitive,
-    U: Copy,
-// expecting: U = half::bf16 or half::f16
+    U: Copy + 'static,
+    // expecting: U = half::bf16 or half::f16
 {
     let mut out = Array::<U, Ix3>::uninit(src.dim());
     for ((i, j, k), slot) in out.indexed_iter_mut() {
-        let x = src[(i, j, k)].to_f32().ok_or(NDArrayOperationError::Internal)?;
+        let x = src[(i, j, k)]
+            .to_f32()
+            .ok_or(NDArrayOperationError::Internal)?;
         let y: U = if core::any::TypeId::of::<U>() == core::any::TypeId::of::<bf16>() {
             // SAFETY: type-id checked
             let v = bf16::from_f32(x);
@@ -376,7 +378,7 @@ where
 
 fn cast3_via_f32_back<U, T>(src: ArrayView3<'_, U>) -> Result<Array3<T>, NDArrayOperationError>
 where
-    U: Copy,
+    U: Copy + 'static,
     T: Copy + FromPrimitive,
 {
     let mut out = Array::<T, Ix3>::uninit(src.dim());
@@ -397,4 +399,3 @@ where
     }
     Ok(unsafe { out.assume_init() })
 }
-*/
