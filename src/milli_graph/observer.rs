@@ -2,6 +2,7 @@ use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::milli_graph::{MilliOpGraphNodePath, MilliOpGraphTensorPath};
 use crate::numeric_tensor::NumericTensor;
+use std::time::Instant;
 
 pub trait MilliOpGraphObserver {
     fn on_tensor_assigned(
@@ -10,7 +11,13 @@ pub trait MilliOpGraphObserver {
         tensor: &NumericTensor<DynRank>,
         backend: &mut EvalBackend,
     );
-    fn on_node_executed(&mut self, node_path: &MilliOpGraphNodePath, backend: &mut EvalBackend);
+    fn on_node_executed(
+        &mut self,
+        node_path: &MilliOpGraphNodePath,
+        start_instant: Instant,
+        end_instant: Instant,
+        backend: &mut EvalBackend,
+    );
 }
 
 impl MilliOpGraphObserver for () {
@@ -21,5 +28,13 @@ impl MilliOpGraphObserver for () {
         _backend: &mut EvalBackend,
     ) {
     }
-    fn on_node_executed(&mut self, _node_path: &MilliOpGraphNodePath, _backend: &mut EvalBackend) {}
+
+    fn on_node_executed(
+        &mut self,
+        _node_path: &MilliOpGraphNodePath,
+        _start_instant: Instant,
+        _end_instant: Instant,
+        _backend: &mut EvalBackend,
+    ) {
+    }
 }

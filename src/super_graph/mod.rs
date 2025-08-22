@@ -25,6 +25,7 @@ use crate::symbolic_graph::{
 use crate::tokenizer::TokenizerError;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::time::Instant;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SuperGraphNodeId(pub(crate) u32);
@@ -140,6 +141,7 @@ impl SuperGraphInner {
                 let mut this_path = node_path.to_vec();
                 this_path.push(op_id);
                 let op = self.nodes.get(&op_id).unwrap();
+                let start_instant = Instant::now();
                 op.eval(
                     &this_path,
                     &mut data,
@@ -147,7 +149,13 @@ impl SuperGraphInner {
                     observer,
                     backend,
                 )?;
-                observer.on_node_executed(&SuperGraphNodePath::SuperGraphNode(this_path), backend);
+                let end_instant = Instant::now();
+                observer.on_node_executed(
+                    &SuperGraphNodePath::SuperGraphNode(this_path),
+                    start_instant,
+                    end_instant,
+                    backend,
+                );
                 remaining_ops.retain(|x| *x != op_id);
             } else {
                 break;

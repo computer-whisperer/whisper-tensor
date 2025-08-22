@@ -10,8 +10,8 @@ use crate::widgets::toggle::toggle_ui;
 use crate::widgets::tokenized_rich_text::TokenizedRichText;
 use egui::epaint::CubicBezierShape;
 use egui::{
-    Color32, ColorImage, Context, ImageData, Label, Margin, Mesh, Pos2, Rect, Response, RichText,
-    Sense, Shape, Stroke, StrokeKind, TextureHandle, Ui, UiBuilder, Vec2, Widget, vec2,
+    Color32, ColorImage, Context, Label, Margin, Mesh, Pos2, Rect, Response, RichText, Sense,
+    Shape, Stroke, StrokeKind, TextureHandle, Ui, UiBuilder, Vec2, Widget, vec2,
 };
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
@@ -39,14 +39,16 @@ use whisper_tensor::tokenizer::Tokenizer;
 use whisper_tensor_import::onnx_graph::TokenizerInfo;
 use whisper_tensor_import::onnx_graph::tensor::Tensor;
 use whisper_tensor_server::{
-    AbbreviatedTensorValue, LoadedModelId, SuperGraphRequest, WebsocketClientServerMessage,
+    AbbreviatedTensorReportSettings, AbbreviatedTensorValue, LoadedModelId, SuperGraphRequest,
+    WebsocketClientServerMessage,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct GraphExplorerState {
     explorer_physics: bool,
     explorer_minimap: bool,
-    explorer_swatches: bool,
+    do_all_explorer_swatches: bool,
+    do_explorer_swatches_in_view: bool,
     explorer_node_wave: bool,
     swatch_dimension: usize,
 }
@@ -56,7 +58,8 @@ impl Default for GraphExplorerState {
         Self {
             explorer_physics: false,
             explorer_minimap: false,
-            explorer_swatches: false,
+            do_all_explorer_swatches: false,
+            do_explorer_swatches_in_view: false,
             explorer_node_wave: false,
             swatch_dimension: 32,
         }
@@ -108,8 +111,11 @@ pub(crate) struct GraphExplorerApp {
     pub(crate) next_graph_subject_path: Option<Vec<GraphExplorerLayerSelection>>,
     pub(crate) text_inference_data: HashMap<InterfaceId, TextInferenceData>,
     node_execution_timestamps: HashMap<SuperGraphNodePath, Instant>,
+    node_execution_durations: HashMap<SuperGraphNodePath, Duration>,
     abbreviated_tensor_reports: HashMap<SuperGraphTensorPath, AbbreviatedTensorValue>,
     rendered_tensor_swatches: HashMap<SuperGraphTensorPath, TextureHandle>,
+    tensors_in_view: HashSet<SuperGraphTensorPath>,
+    nodes_in_view: HashSet<SuperGraphNodePath>,
 }
 
 fn render_node_contents<'a>(
@@ -345,8 +351,11 @@ impl GraphExplorerApp {
             next_graph_subject_path: None,
             text_inference_data: HashMap::new(),
             node_execution_timestamps: HashMap::new(),
+            node_execution_durations: HashMap::new(),
             abbreviated_tensor_reports: HashMap::new(),
             rendered_tensor_swatches: HashMap::new(),
+            nodes_in_view: HashSet::new(),
+            tensors_in_view: HashSet::new(),
         }
     }
 
@@ -390,37 +399,39 @@ impl GraphExplorerApp {
         self.next_explorer_hovered = None;
 
         ui.horizontal(|ui| {
-            if loaded_models.current_models.is_empty() {
-                ui.label("No Models Loaded");
-            }
-            let mut value = self.graph_subject_path.first().cloned();
-            for model in &loaded_models.current_models {
-                if ui
-                    .selectable_value(
-                        &mut value,
-                        Some(GraphExplorerLayerSelection::Model(model.model_id)),
+            let model_selector_options = {
+                let mut options = vec![];
+                for (interface_id, interface) in &loaded_models.current_interfaces {
+                    options.push((
+                        GraphExplorerLayerSelection::Interface(*interface_id),
+                        format!("({}) {}", interface_id, interface.interface_name.clone()),
+                    ));
+                }
+                for model in &loaded_models.current_models {
+                    options.push((
+                        GraphExplorerLayerSelection::Model(model.model_id),
                         format!("({}) {}", model.model_id, model.model_name.clone()),
-                    )
-                    .clicked()
-                {
-                    if let Some(x) = &value {
-                        self.next_graph_subject_path = Some(vec![x.clone()]);
+                    ));
+                }
+                options
+            };
+            let mut value = self.graph_subject_path.first().cloned();
+            let initial_value = value.clone();
+            egui::ComboBox::from_id_salt(123662)
+                .selected_text(
+                    model_selector_options
+                        .iter()
+                        .find(|(a, b)| value.as_ref().map(|x| x == a).unwrap_or(false))
+                        .map(|(a, b)| b.clone())
+                        .unwrap_or("Select a model or interface".to_string()),
+                )
+                .show_ui(ui, |ui| {
+                    for (a, b) in model_selector_options {
+                        ui.selectable_value(&mut value, Some(a), b.to_string());
                     }
-                };
-            }
-            for (interface_id, interface) in &loaded_models.current_interfaces {
-                if ui
-                    .selectable_value(
-                        &mut value,
-                        Some(GraphExplorerLayerSelection::Interface(interface_id.clone())),
-                        interface.interface_name.clone(),
-                    )
-                    .clicked()
-                {
-                    if let Some(x) = &value {
-                        self.next_graph_subject_path = Some(vec![x.clone()]);
-                    }
-                };
+                });
+            if value != initial_value {
+                self.next_graph_subject_path = value.map(|x| vec![x]);
             }
             if ui.button("Load New Model").clicked() {
                 loaded_models.model_load_state = Some(ModelLoadState::DialogOpen(None));
@@ -431,9 +442,11 @@ impl GraphExplorerApp {
                 toggle_ui(ui, &mut state.explorer_physics);
                 ui.label("Physics:");
                 toggle_ui(ui, &mut state.explorer_node_wave);
-                ui.label("Node Wave:");
-                toggle_ui(ui, &mut state.explorer_swatches);
-                ui.label("Swatches:");
+                ui.label("Activity:");
+                toggle_ui(ui, &mut state.do_all_explorer_swatches);
+                ui.label("All Swatches:");
+                toggle_ui(ui, &mut state.do_explorer_swatches_in_view);
+                ui.label("Swatches In-frame:");
             })
         });
 
@@ -1234,6 +1247,7 @@ impl GraphExplorerApp {
                                 let mut node_io_connections = HashMap::new();
                                 let mut node_bounding_boxes = HashMap::new();
 
+                                self.nodes_in_view.clear();
                                 let current_time = Instant::now();
                                 let current_node_data = graph_layout.get_nodes();
                                 let mut node_position_updates = HashMap::new();
@@ -1265,6 +1279,9 @@ impl GraphExplorerApp {
                                     } else {
                                         None
                                     };
+                                    if let Some(node_path) = &node_path {
+                                        self.nodes_in_view.insert(node_path.clone());
+                                    }
                                     let duration_since_eval = if let Some(node_path) = &node_path {
                                         if let Some(x) = self.node_execution_timestamps.get(node_path) {
                                             Some(current_time - *x)
@@ -1393,6 +1410,7 @@ impl GraphExplorerApp {
                                 }
 
                                 // Draw lines
+                                self.tensors_in_view.clear();
                                 let link_data = graph_layout.get_link_data();
                                 for ((src_id, src_id_i), (dst_id, dst_id_i), link_id, (paint_idx_a, paint_idx_b, paint_idx_c)) in
                                     edges_to_render
@@ -1457,6 +1475,9 @@ impl GraphExplorerApp {
                                                 Some(graph_path.push_milli_op_tensor(x))
                                             }
                                         };
+                                        if let Some(path) = &path {
+                                            self.tensors_in_view.insert(path.clone());
+                                        }
                                         if let Some(path) = path && let Some(texture) = Self::get_tensor_swatch(
                                             &mut self.rendered_tensor_swatches,
                                             &self.abbreviated_tensor_reports,
@@ -1533,10 +1554,10 @@ impl GraphExplorerApp {
                                                     for (path, value) in report.tensor_assignments {
                                                         self.inspect_window_tensor_subscription_returns.insert(path, value);
                                                     }
-                                                    for (node_path, age_us) in report.node_executions {
-                                                        let age = Duration::from_micros(age_us as u64);
+                                                    for (node_path, age, execution_duration) in report.node_executions {
                                                         let time = time_now - age;
-                                                        self.node_execution_timestamps.insert(node_path, time);
+                                                        self.node_execution_timestamps.insert(node_path.clone(), time);
+                                                        self.node_execution_durations.insert(node_path, execution_duration);
                                                     }
                                                     for (tensor_path, value) in report.abbreviated_tensor_assignments {
                                                         self.rendered_tensor_swatches.remove(&tensor_path);
@@ -1617,10 +1638,19 @@ impl GraphExplorerApp {
                                                                 tokens.clone(),
                                                             )
                                                             .to_dyn();
+                                                        let mut swatch_settings = if state.do_explorer_swatches_in_view || state.do_all_explorer_swatches {
+                                                            Some(AbbreviatedTensorReportSettings{
+                                                                downsampled_size: (state.swatch_dimension*state.swatch_dimension) as u64,
+                                                                subscribed_tensors: self.tensors_in_view.iter().cloned().collect(),
+                                                                do_all: state.do_all_explorer_swatches,
+                                                            })
+                                                        } else {
+                                                            None
+                                                        };
                                                         let token = server_request_manager
                                                             .submit_supergraph_request(
                                                             SuperGraphRequest {
-                                                                do_abbreviated_tensor_assignment_reports: if state.explorer_swatches {Some((state.swatch_dimension*state.swatch_dimension) as u64)} else {None},
+                                                                abbreviated_tensor_report_settings: swatch_settings,
                                                                 do_node_execution_reports: state.explorer_node_wave,
                                                                 attention_token: None,
                                                                 super_graph: llm_interface
@@ -1981,6 +2011,14 @@ impl GraphExplorerApp {
                             resp = resp.union(
                                 ui.label(format!("Op Type: {:}", op_info.op.get_op_type_name())),
                             );
+                            if let Some(super_graph_path) = &super_graph_path {
+                                let node_path = super_graph_path.push_symbolic_node(op_id);
+                                if let Some(x) = self.node_execution_durations.get(&node_path) {
+                                    resp = resp.union(
+                                        ui.label(format!("Last execution duration: {:?}", x)),
+                                    );
+                                }
+                            }
                             resp = resp.union(ui.label("Inputs:"));
                             fn format_tensor_row(
                                 ui: &mut egui::Ui,

@@ -8,6 +8,7 @@ use crate::tensor_info::TensorInfoError;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
+use std::time::Instant;
 
 pub mod observer;
 pub mod ops;
@@ -144,8 +145,15 @@ impl<ID: Hash + Clone + Eq> MilliOpGraph<ID> {
 
         for op_id in op_ids_to_eval {
             let op = &self.ops[op_id];
+            let start_instant = Instant::now();
             let out = op.eval(&intermediate_values, backend)?;
-            observer.on_node_executed(&MilliOpGraphNodePath::Op(*op_id), backend);
+            let end_instant = Instant::now();
+            observer.on_node_executed(
+                &MilliOpGraphNodePath::Op(*op_id),
+                start_instant,
+                end_instant,
+                backend,
+            );
             observer.on_tensor_assigned(&MilliOpGraphTensorPath::Tensor(*op_id), &out, backend);
             //assert_eq!(out.has_nan()?, false);
             intermediate_values.insert(*op_id, out);

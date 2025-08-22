@@ -11,10 +11,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
 use std::time;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Notify, watch};
 use tokio::sync::{RwLock, mpsc};
-use tokio::time::{Instant, sleep};
+use tokio::time::sleep;
 use tower_http::{
     services::{ServeDir, ServeFile},
     trace::TraceLayer,
@@ -258,8 +258,11 @@ async fn handle_socket(
                 if x.get_attention_token() == report.attention {
                     match x {
                         SchedulerReport::SuperGraphNodeExecuted(x) => {
-                            let delta = (Instant::now() - x.timestamp).as_micros() as u32;
-                            report.node_executions.push((x.path.clone(), delta));
+                            let delta = (Instant::now() - x.end_instant);
+                            let duration = x.end_instant - x.start_instant;
+                            report
+                                .node_executions
+                                .push((x.path.clone(), delta, duration));
                         }
                         SchedulerReport::SuperGraphTensorAssignedFull(x) => {
                             report

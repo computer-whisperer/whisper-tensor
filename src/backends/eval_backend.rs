@@ -11,6 +11,7 @@ use crate::symbolic_graph::{
 };
 use crate::tensor_rank::DynRank;
 use std::collections::HashMap;
+use std::time::Instant;
 
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
@@ -118,10 +119,17 @@ pub fn run<T: SymbolicGraphObserver>(
             if failed_to_fetch {
                 continue;
             }
+            let start_instant = Instant::now();
             let outputs = op
                 .eval(eval_backend, &input_values)
                 .map_err(|x| EvalRuntimeError::EvalError(name.clone(), x))?;
-            observer.on_op_executed(&SymbolicGraphNodePath::Node(*op_id), eval_backend);
+            let end_instant = Instant::now();
+            observer.on_op_executed(
+                &SymbolicGraphNodePath::Node(*op_id),
+                start_instant,
+                end_instant,
+                eval_backend,
+            );
             for (tensor_id, value) in outputs {
                 //assert_eq!(value.has_nan().unwrap(), false);
 

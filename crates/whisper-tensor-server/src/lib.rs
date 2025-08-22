@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::Duration;
 use whisper_tensor::DynRank;
 use whisper_tensor::backends::eval_backend::EvalBackend;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
@@ -24,6 +25,13 @@ impl core::fmt::Display for LoadedModelId {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AbbreviatedTensorReportSettings {
+    pub downsampled_size: u64,
+    pub subscribed_tensors: Vec<SuperGraphTensorPath>,
+    pub do_all: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SuperGraphRequest {
     pub attention_token: Option<u64>,
     pub super_graph: SuperGraph,
@@ -33,7 +41,7 @@ pub struct SuperGraphRequest {
     pub model_inputs: HashMap<SuperGraphLinkModel, LoadedModelId>,
     pub subscribed_tensors: Vec<SuperGraphTensorPath>,
     pub do_node_execution_reports: bool,
-    pub do_abbreviated_tensor_assignment_reports: Option<u64>,
+    pub abbreviated_tensor_report_settings: Option<AbbreviatedTensorReportSettings>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -286,7 +294,7 @@ impl AbbreviatedTensorValue {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SuperGraphExecutionReport {
     pub attention: Option<u64>,
-    pub node_executions: Vec<(SuperGraphNodePath, u32)>,
+    pub node_executions: Vec<(SuperGraphNodePath, Duration, Duration)>,
     pub abbreviated_tensor_assignments: Vec<(SuperGraphTensorPath, AbbreviatedTensorValue)>,
     pub tensor_assignments: Vec<(SuperGraphTensorPath, NDArrayNumericTensor<DynRank>)>,
 }

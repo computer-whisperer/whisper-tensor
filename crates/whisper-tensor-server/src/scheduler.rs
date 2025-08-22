@@ -3,8 +3,8 @@ use crossbeam::queue::ArrayQueue;
 use log::error;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::{Notify, mpsc};
-use tokio::time::Instant;
 use whisper_tensor::DynRank;
 use whisper_tensor::backends::eval_backend::EvalBackend;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
@@ -12,12 +12,15 @@ use whisper_tensor::numeric_tensor::NumericTensor;
 use whisper_tensor::super_graph::data::SuperGraphData;
 use whisper_tensor::super_graph::observer::SuperGraphObserver;
 use whisper_tensor::super_graph::{SuperGraphNodePath, SuperGraphTensorPath};
-use whisper_tensor_server::{AbbreviatedTensorValue, SuperGraphRequest, SuperGraphResponse};
+use whisper_tensor_server::{
+    AbbreviatedTensorReportSettings, AbbreviatedTensorValue, SuperGraphRequest, SuperGraphResponse,
+};
 
 #[derive(Debug)]
 pub struct SchedulerReportSuperGraphNodeExecuted {
     pub attention: Option<u64>,
-    pub timestamp: Instant,
+    pub start_instant: Instant,
+    pub end_instant: Instant,
     pub path: SuperGraphNodePath,
 }
 
@@ -92,13 +95,42 @@ pub enum SchedulerJob {
 struct LocalSuperGraphObserver {
     attention: Option<u64>,
     do_node_execute_report: bool,
-    do_abbreviated_tensor_assign_report: Option<u64>,
     reporter: Option<SchedulerReporter>,
     subscribed_tensors: HashSet<SuperGraphTensorPath>,
+    abbreviated_tensor_settings: Option<AbbreviatedTensorReportSettings>,
+    abbreviated_tensor_subscribed_table: Option<HashSet<SuperGraphTensorPath>>,
+}
+
+impl LocalSuperGraphObserver {
+    pub fn new(
+        attention: Option<u64>,
+        do_node_execute_report: bool,
+        abbreviated_tensor_settings: Option<AbbreviatedTensorReportSettings>,
+        reporter: Option<SchedulerReporter>,
+        subscribed_tensors: HashSet<SuperGraphTensorPath>,
+    ) -> Self {
+        let abbreviated_tensor_subscribed_table = abbreviated_tensor_settings
+            .as_ref()
+            .map(|settings| settings.subscribed_tensors.iter().cloned().collect());
+        Self {
+            attention,
+            do_node_execute_report,
+            abbreviated_tensor_settings,
+            reporter,
+            subscribed_tensors,
+            abbreviated_tensor_subscribed_table,
+        }
+    }
 }
 
 impl SuperGraphObserver for LocalSuperGraphObserver {
-    fn on_node_executed(&mut self, path: &SuperGraphNodePath, _backend: &mut EvalBackend) {
+    fn on_node_executed(
+        &mut self,
+        path: &SuperGraphNodePath,
+        start_instant: Instant,
+        end_instant: Instant,
+        _backend: &mut EvalBackend,
+    ) {
         if let Some(reporter) = &mut self.reporter
             && self.do_node_execute_report
         {
@@ -106,7 +138,8 @@ impl SuperGraphObserver for LocalSuperGraphObserver {
                 SchedulerReport::SuperGraphNodeExecuted(SchedulerReportSuperGraphNodeExecuted {
                     attention: self.attention,
                     path: path.clone(),
-                    timestamp: Instant::now(),
+                    start_instant,
+                    end_instant,
                 });
             reporter.push_report(report);
         }
@@ -129,15 +162,27 @@ impl SuperGraphObserver for LocalSuperGraphObserver {
                 );
                 reporter.push_report(report);
             }
-            if let Some(x) = self.do_abbreviated_tensor_assign_report {
-                let report = SchedulerReport::SuperGraphTensorAssignedAbbreviated(
-                    SchedulerReportSuperGraphTensorAssignedAbbreviated {
-                        attention: self.attention,
-                        path: path.clone(),
-                        value: AbbreviatedTensorValue::from_tensor(tensor, x, backend),
-                    },
-                );
-                reporter.push_report(report);
+            if let Some(settings) = &self.abbreviated_tensor_settings {
+                let do_it = settings.do_all
+                    || if let Some(x) = &self.abbreviated_tensor_subscribed_table {
+                        x.contains(path)
+                    } else {
+                        false
+                    };
+                if do_it {
+                    let report = SchedulerReport::SuperGraphTensorAssignedAbbreviated(
+                        SchedulerReportSuperGraphTensorAssignedAbbreviated {
+                            attention: self.attention,
+                            path: path.clone(),
+                            value: AbbreviatedTensorValue::from_tensor(
+                                tensor,
+                                settings.downsampled_size,
+                                backend,
+                            ),
+                        },
+                    );
+                    reporter.push_report(report);
+                }
             }
         }
     }
@@ -179,14 +224,13 @@ pub async fn scheduler(mut input: mpsc::Receiver<SchedulerJob>, model_server: Ar
                         for (link, hash) in req.hash_inputs {
                             super_graph_data.hashes.insert(link, hash);
                         }
-                        let mut observer = LocalSuperGraphObserver {
-                            attention: req.attention_token,
-                            do_node_execute_report: req.do_node_execution_reports,
-                            do_abbreviated_tensor_assign_report: req
-                                .do_abbreviated_tensor_assignment_reports,
-                            subscribed_tensors: req.subscribed_tensors.iter().cloned().collect(),
+                        let mut observer = LocalSuperGraphObserver::new(
+                            req.attention_token,
+                            req.do_node_execution_reports,
+                            req.abbreviated_tensor_report_settings,
                             reporter,
-                        };
+                            req.subscribed_tensors.iter().cloned().collect(),
+                        );
                         let res = req
                             .super_graph
                             .run(

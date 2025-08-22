@@ -21,6 +21,7 @@ use crate::tokenizer::{AnyTokenizer, Tokenizer};
 use rwkv_tokenizer::WorldTokenizer;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::time::Instant;
 use typenum::P1;
 use whisper_tensor_import::onnx_graph::TokenizerInfo;
 
@@ -85,9 +86,17 @@ impl<'a, T: SuperGraphObserver> SymbolicGraphObserverWrapper<'a, T> {
 }
 
 impl<'a, T: SuperGraphObserver> SymbolicGraphObserver for SymbolicGraphObserverWrapper<'a, T> {
-    fn on_op_executed(&mut self, node_path: &SymbolicGraphNodePath, backend: &mut EvalBackend) {
+    fn on_op_executed(
+        &mut self,
+        node_path: &SymbolicGraphNodePath,
+        start_instant: Instant,
+        end_instant: Instant,
+        backend: &mut EvalBackend,
+    ) {
         self.inner.on_node_executed(
             &SuperGraphNodePath::SymbolicGraphNode(self.node_path.clone(), node_path.clone()),
+            start_instant,
+            end_instant,
             backend,
         )
     }
@@ -397,9 +406,17 @@ impl<'a, T: SuperGraphObserver> MilliOpGraphObserver for MilliOpGraphObserverWra
         );
     }
 
-    fn on_node_executed(&mut self, node_path: &MilliOpGraphNodePath, backend: &mut EvalBackend) {
+    fn on_node_executed(
+        &mut self,
+        node_path: &MilliOpGraphNodePath,
+        start_instant: Instant,
+        end_instant: Instant,
+        backend: &mut EvalBackend,
+    ) {
         self.inner.on_node_executed(
             &SuperGraphNodePath::MilliOpGraphNode(self.node_path.clone(), node_path.clone()),
+            start_instant,
+            end_instant,
             backend,
         );
     }
