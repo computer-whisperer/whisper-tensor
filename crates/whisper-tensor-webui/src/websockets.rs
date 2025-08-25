@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
-use tokio::sync::mpsc;
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc::error::SendError;
+use tokio::sync::{Notify, mpsc};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::Closure;
 use web_sys::{WebSocket, js_sys};
@@ -91,6 +93,7 @@ impl ServerRequestManager {
 pub(crate) async fn websocket_task(
     server_client_sender: mpsc::UnboundedSender<WebsocketServerClientMessage>,
     mut client_server_receiver: mpsc::UnboundedReceiver<WebsocketClientServerMessage>,
+    context: egui::Context,
 ) {
     let ws = WebSocket::new("/ws").unwrap();
 
@@ -104,6 +107,7 @@ pub(crate) async fn websocket_task(
     // Handle messages coming from the server
     let server_client_sender_clone = server_client_sender.clone();
     let onmessage_callback = Closure::wrap(Box::new(move |e: web_sys::MessageEvent| {
+        let context = context.clone();
         match e.data().dyn_into::<web_sys::Blob>() {
             Ok(blob) => {
                 let fr = web_sys::FileReader::new().unwrap();
@@ -123,6 +127,7 @@ pub(crate) async fn websocket_task(
                             Ok(msg) => {
                                 //log::debug!("Decoded message: {:?}", msg);
                                 sender_clone.send(msg).unwrap();
+                                context.request_repaint_after(Duration::from_millis(20));
                             }
                             Err(err) => {
                                 log::warn!("Failed to decode message: {:?}", err);
