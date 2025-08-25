@@ -3,11 +3,7 @@ mod app;
 #[cfg(target_arch = "wasm32")]
 mod graph_explorer;
 #[cfg(target_arch = "wasm32")]
-mod graph_layout;
-#[cfg(target_arch = "wasm32")]
 mod llm_explorer;
-#[cfg(target_arch = "wasm32")]
-mod tensor_swatch;
 #[cfg(target_arch = "wasm32")]
 mod websockets;
 #[cfg(target_arch = "wasm32")]

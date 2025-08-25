@@ -1,10 +1,5 @@
-use crate::graph_explorer::{
-    GraphExplorerApp, GraphExplorerLayerSelection, GraphExplorerState, InspectWindow,
-};
-use crate::graph_layout::{
-    GraphLayout, GraphLayoutIOOffsets, GraphLayoutLinkData, GraphLayoutLinkId, GraphLayoutLinkType,
-    GraphLayoutNode, GraphLayoutNodeId, GraphLayoutNodeInitData, GraphLayoutNodeType,
-};
+use crate::graph_explorer::inspect_windows::InspectWindow;
+use crate::graph_explorer::{GraphExplorerApp, GraphExplorerLayerSelection, GraphExplorerState};
 use crate::llm_explorer::{LLMExplorerApp, LLMExplorerState};
 use crate::websockets;
 use crate::websockets::ServerRequestManager;
