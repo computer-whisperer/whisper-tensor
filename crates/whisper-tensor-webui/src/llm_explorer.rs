@@ -12,7 +12,10 @@ use whisper_tensor::interfaces::AnyInterface;
 use whisper_tensor::super_graph::links::SuperGraphLinkTensor;
 use whisper_tensor::tokenizer::Tokenizer;
 use whisper_tensor_import::onnx_graph::TokenizerInfo;
-use whisper_tensor_server::{LoadedModelId, SuperGraphRequest, WebsocketClientServerMessage};
+use whisper_tensor_server::{
+    LoadedModelId, SuperGraphRequest, SuperGraphRequestBackendMode, SuperGraphResponseData,
+    WebsocketClientServerMessage,
+};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct LLMExplorerState {
@@ -80,33 +83,41 @@ impl LLMExplorerApp {
         if let Some((request_id, link, tokens)) = self.pending_request.clone() {
             if let Some(mut response) = server_request_manager.get_response(request_id) {
                 self.pending_request = None;
-                let mut response_tokens = response.tensor_outputs.remove(&link).unwrap();
-                let shape = response_tokens.shape();
-                let logits_per_token = shape[1];
-                let returned_tokens = shape[0];
-                let mut outputs = Vec::new();
-                for i in 0..returned_tokens as usize {
-                    let sliced_output_tensor = response_tokens
-                        .slice(&[i..i + 1, 0..logits_per_token as usize])
-                        .unwrap();
-                    let output = sliced_output_tensor.flatten();
-                    let output_vec: Vec<f32> = output.try_into().unwrap();
-                    let mut idx_and_val = output_vec
-                        .iter()
-                        .enumerate()
-                        .map(|(a, b)| (a as u32, *b))
-                        .collect::<Vec<_>>();
-                    idx_and_val.sort_by(|(_, a), (_, b)| {
-                        if a < b {
-                            Ordering::Greater
-                        } else {
-                            Ordering::Less
+                match response.result {
+                    Ok(mut data) => {
+                        let mut response_tokens = data.tensor_outputs.remove(&link).unwrap();
+                        let shape = response_tokens.shape();
+                        let logits_per_token = shape[1];
+                        let returned_tokens = shape[0];
+                        let mut outputs = Vec::new();
+                        for i in 0..returned_tokens as usize {
+                            let sliced_output_tensor = response_tokens
+                                .slice(&[i..i + 1, 0..logits_per_token as usize])
+                                .unwrap();
+                            let output = sliced_output_tensor.flatten();
+                            let output_vec: Vec<f32> = output.try_into().unwrap();
+                            let mut idx_and_val = output_vec
+                                .iter()
+                                .enumerate()
+                                .map(|(a, b)| (a as u32, *b))
+                                .collect::<Vec<_>>();
+                            idx_and_val.sort_by(|(_, a), (_, b)| {
+                                if a < b {
+                                    Ordering::Greater
+                                } else {
+                                    Ordering::Less
+                                }
+                            });
+                            let clipped_logits =
+                                idx_and_val[0..idx_and_val.len().min(100)].to_vec();
+                            outputs.push(clipped_logits)
                         }
-                    });
-                    let clipped_logits = idx_and_val[0..idx_and_val.len().min(100)].to_vec();
-                    outputs.push(clipped_logits)
+                        self.latest_logits = Some((tokens, Ok(outputs)));
+                    }
+                    Err(err) => {
+                        println!("Error: {err}");
+                    }
                 }
-                self.latest_logits = Some((tokens, Ok(outputs)));
             }
         }
 
@@ -359,6 +370,8 @@ impl LLMExplorerApp {
                             super_graph: llm_interface.super_graph.clone(),
                             subscribed_tensors: Vec::new(),
                             string_inputs: HashMap::new(),
+                            use_cache: None,
+                            backend_mode: SuperGraphRequestBackendMode::NDArray,
                             tensor_inputs: HashMap::from([(
                                 llm_interface.token_context_input_link.clone(),
                                 tokens_tensor,

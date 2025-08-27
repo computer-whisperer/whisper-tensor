@@ -40,7 +40,7 @@ use whisper_tensor_import::ModelTypeHint;
 use whisper_tensor_import::onnx_graph::TokenizerInfo;
 use whisper_tensor_server::{
     CurrentInterfacesReportEntry, CurrentModelsAndInterfacesReport, CurrentModelsReportEntry,
-    LoadedModelId, WebsocketClientServerMessage, WebsocketServerClientMessage,
+    LoadedModelId, ServerConfigReport, WebsocketClientServerMessage, WebsocketServerClientMessage,
 };
 
 #[derive(Clone, Debug)]
@@ -108,6 +108,7 @@ pub struct WebUIApp {
     graph_explorer_app: GraphExplorerApp,
     llm_explorer_app: LLMExplorerApp,
     loaded_tokenizers: LoadedTokenizers,
+    server_config_report: Option<ServerConfigReport>,
 }
 
 impl WebUIApp {
@@ -146,16 +147,12 @@ impl WebUIApp {
             graph_explorer_app: GraphExplorerApp::new(),
             loaded_tokenizers: LoadedTokenizers::new(),
             llm_explorer_app: LLMExplorerApp::new(),
+            server_config_report: None,
         }
     }
 }
 
 impl eframe::App for WebUIApp {
-    /// Called by the frame work to save state before shutdown.
-    fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        eframe::set_value(storage, eframe::APP_KEY, &self.app_state);
-    }
-
     /// Called each time the UI needs repainting, which may be many times per second.
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Put your widgets into a `SidePanel`, `TopBottomPanel`, `CentralPanel`, `Window` or `Area`.
@@ -301,6 +298,9 @@ impl eframe::App for WebUIApp {
                         WebsocketServerClientMessage::SuperGraphExecutionReport(report) => {
                             self.server_request_manager.new_execution_report(report);
                         }
+                        WebsocketServerClientMessage::ServerConfigReport(config) => {
+                            self.server_config_report = Some(config);
+                        }
                         _ => {
                             log::debug!("Unhandled message: {:?}", msg);
                         }
@@ -437,13 +437,18 @@ impl eframe::App for WebUIApp {
                             });
                     });
                 }
-                SelectedTab::GraphExplorer => self.graph_explorer_app.update(
-                    &mut self.app_state.graph_explorer_state,
-                    &mut self.loaded_models,
-                    &mut self.loaded_tokenizers,
-                    &mut self.server_request_manager,
-                    ui,
-                ),
+                SelectedTab::GraphExplorer => {
+                    if let Some(server_config_report) = &self.server_config_report {
+                        self.graph_explorer_app.update(
+                            &mut self.app_state.graph_explorer_state,
+                            &mut self.loaded_models,
+                            &mut self.loaded_tokenizers,
+                            &mut self.server_request_manager,
+                            server_config_report,
+                            ui,
+                        )
+                    }
+                }
                 SelectedTab::LLMExplorer => {
                     self.llm_explorer_app.update(
                         &mut self.app_state.llm_explorer_state,
@@ -470,5 +475,10 @@ impl eframe::App for WebUIApp {
                 &mut self.server_request_manager,
             )
         }
+    }
+
+    /// Called by the frame work to save state before shutdown.
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        eframe::set_value(storage, eframe::APP_KEY, &self.app_state);
     }
 }

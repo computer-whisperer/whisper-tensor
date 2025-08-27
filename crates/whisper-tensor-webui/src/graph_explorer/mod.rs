@@ -5,13 +5,12 @@ mod tensor_swatch;
 use crate::app::{InterfaceId, LoadedModels, LoadedTokenizers, ModelLoadState};
 use crate::graph_explorer::inspect_windows::InspectWindow;
 use crate::websockets::ServerRequestManager;
-use crate::widgets::tensor_view::tensor_view;
 use crate::widgets::toggle::toggle_ui;
 use crate::widgets::tokenized_rich_text::TokenizedRichText;
 use egui::epaint::CubicBezierShape;
 use egui::{
-    Color32, ColorImage, Context, Label, Margin, Mesh, Pos2, Rect, Response, RichText, Sense,
-    Shape, Stroke, StrokeKind, TextureHandle, Ui, UiBuilder, Vec2, Widget, vec2,
+    Color32, ColorImage, Context, Label, Margin, Mesh, Pos2, Rect, Response, Sense, Shape, Stroke,
+    StrokeKind, TextureHandle, Ui, UiBuilder, Vec2, Widget, vec2,
 };
 use graph_layout::{
     GraphLayout, GraphLayoutError, GraphLayoutIOOffsets, GraphLayoutLinkData, GraphLayoutLinkId,
@@ -43,8 +42,8 @@ use whisper_tensor::tokenizer::Tokenizer;
 use whisper_tensor_import::onnx_graph::TokenizerInfo;
 use whisper_tensor_import::onnx_graph::tensor::Tensor;
 use whisper_tensor_server::{
-    AbbreviatedTensorReportSettings, AbbreviatedTensorValue, LoadedModelId, SuperGraphRequest,
-    WebsocketClientServerMessage,
+    AbbreviatedTensorReportSettings, AbbreviatedTensorValue, LoadedModelId, ServerConfigReport,
+    SuperGraphRequest, SuperGraphRequestBackendMode, WebsocketClientServerMessage,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -98,6 +97,8 @@ struct TextInferenceData {
     tokens: Vec<u32>,
     logits: HashMap<Vec<u32>, Vec<(u32, f32)>>,
     pending_request: Option<(u64, SuperGraphLinkTensor, Vec<u32>)>,
+    use_cache: bool,
+    selected_mode: SuperGraphRequestBackendMode,
 }
 
 pub(crate) struct GraphExplorerApp {
@@ -120,6 +121,7 @@ pub(crate) struct GraphExplorerApp {
     rendered_tensor_swatches: HashMap<SuperGraphTensorPath, TextureHandle>,
     tensors_in_view: HashSet<SuperGraphTensorPath>,
     nodes_in_view: HashSet<SuperGraphNodePath>,
+    error_popup: Option<String>,
 }
 
 fn render_node_contents<'a>(
@@ -360,6 +362,7 @@ impl GraphExplorerApp {
             rendered_tensor_swatches: HashMap::new(),
             nodes_in_view: HashSet::new(),
             tensors_in_view: HashSet::new(),
+            error_popup: None,
         }
     }
 
@@ -397,8 +400,22 @@ impl GraphExplorerApp {
         loaded_models: &mut LoadedModels,
         loaded_tokenizers: &mut LoadedTokenizers,
         server_request_manager: &mut ServerRequestManager,
+        server_config_report: &ServerConfigReport,
         ui: &mut Ui,
     ) {
+        if let Some(err) = self.error_popup.clone() {
+            egui::Modal::new(egui::Id::new("Eval Error")).show(ui.ctx(), |ui| {
+                ui.scope(|ui| {
+                    ui.visuals_mut().override_text_color = Some(egui::Color32::RED);
+                    ui.style_mut().override_text_style = Some(egui::TextStyle::Monospace);
+                    ui.label(err);
+                });
+                if ui.button("Dismiss").clicked() {
+                    self.error_popup = None;
+                }
+            });
+        }
+
         self.explorer_hovered = self.next_explorer_hovered.clone();
         self.next_explorer_hovered = None;
 
@@ -1577,40 +1594,48 @@ impl GraphExplorerApp {
                                                     .take()
                                                     .unwrap();
                                                 text_inference_data.pending_request = None;
-                                                let mut response_tokens =
-                                                    response.tensor_outputs.remove(&link).unwrap();
-                                                let shape = response_tokens.shape();
-                                                let logits_per_token = shape[1];
-                                                let returned_tokens = shape[0];
-                                                for i in 0..returned_tokens as usize {
-                                                    let sliced_output_tensor = response_tokens
-                                                        .slice(&[
-                                                            i..i + 1,
-                                                            0..logits_per_token as usize,
-                                                        ])
-                                                        .unwrap();
-                                                    let output = sliced_output_tensor.flatten();
-                                                    let output_vec: Vec<f32> =
-                                                        output.try_into().unwrap();
-                                                    let mut idx_and_val = output_vec
-                                                        .iter()
-                                                        .enumerate()
-                                                        .map(|(a, b)| (a as u32, *b))
-                                                        .collect::<Vec<_>>();
-                                                    idx_and_val.sort_by(|(_, a), (_, b)| {
-                                                        if a < b {
-                                                            Ordering::Greater
-                                                        } else {
-                                                            Ordering::Less
+                                                match response.result {
+                                                    Ok(mut data) => {
+                                                        let mut response_tokens =
+                                                            data.tensor_outputs.remove(&link).unwrap();
+                                                        let shape = response_tokens.shape();
+                                                        let logits_per_token = shape[1];
+                                                        let returned_tokens = shape[0];
+                                                        for i in 0..returned_tokens as usize {
+                                                            let sliced_output_tensor = response_tokens
+                                                                .slice(&[
+                                                                    i..i + 1,
+                                                                    0..logits_per_token as usize,
+                                                                ])
+                                                                .unwrap();
+                                                            let output = sliced_output_tensor.flatten();
+                                                            let output_vec: Vec<f32> =
+                                                                output.try_into().unwrap();
+                                                            let mut idx_and_val = output_vec
+                                                                .iter()
+                                                                .enumerate()
+                                                                .map(|(a, b)| (a as u32, *b))
+                                                                .collect::<Vec<_>>();
+                                                            idx_and_val.sort_by(|(_, a), (_, b)| {
+                                                                if a < b {
+                                                                    Ordering::Greater
+                                                                } else {
+                                                                    Ordering::Less
+                                                                }
+                                                            });
+                                                            let clipped_logits = idx_and_val
+                                                                [0..idx_and_val.len().min(100)]
+                                                                .to_vec();
+                                                            let context_end = tokens.len() - returned_tokens as usize + i + 1;
+                                                            let context = tokens[0..context_end].to_vec();
+                                                            text_inference_data
+                                                                .logits
+                                                                .insert(context, clipped_logits);
                                                         }
-                                                    });
-                                                    let clipped_logits = idx_and_val
-                                                        [0..idx_and_val.len().min(100)]
-                                                        .to_vec();
-                                                    let context = tokens[0..i + 1].to_vec();
-                                                    text_inference_data
-                                                        .logits
-                                                        .insert(context, clipped_logits);
+                                                    }
+                                                    Err(err) => {
+                                                        self.error_popup = Some(err);
+                                                    }
                                                 }
                                             }
                                         }
@@ -1634,6 +1659,24 @@ impl GraphExplorerApp {
                                                 if text_inference_data.pending_request.is_some() {
                                                     ui.spinner();
                                                 } else {
+                                                    ui.horizontal(|ui| {
+                                                        toggle_ui(ui, &mut text_inference_data.use_cache);
+                                                        ui.label("Cache");
+                                                    });
+                                                    egui::ComboBox::from_id_salt(121151)
+                                                        .selected_text(text_inference_data.selected_mode.to_string())
+                                                        .show_ui(ui, |ui| {
+                                                            ui.selectable_value(
+                                                                &mut text_inference_data.selected_mode,
+                                                                SuperGraphRequestBackendMode::NDArray,
+                                                                SuperGraphRequestBackendMode::NDArray.to_string());
+                                                            if server_config_report.vulkan_available {
+                                                                ui.selectable_value(
+                                                                    &mut text_inference_data.selected_mode,
+                                                                    SuperGraphRequestBackendMode::Vulkan,
+                                                                    SuperGraphRequestBackendMode::Vulkan.to_string());
+                                                            }
+                                                    });
                                                     if ui.button("Run").clicked() {
                                                         let tokens =
                                                             text_inference_data.tokens.clone();
@@ -1682,8 +1725,10 @@ impl GraphExplorerApp {
                                                                         llm_interface
                                                                             .cache_key_input_link
                                                                             .clone(),
-                                                                        0u64,
+                                                                        12u64,
                                                                     )]),
+                                                                    use_cache: if text_inference_data.use_cache {Some(100 + interface_id as u64)} else {None},
+                                                                    backend_mode: text_inference_data.selected_mode
                                                                 },
                                                             );
                                                         text_inference_data.pending_request =

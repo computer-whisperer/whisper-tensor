@@ -47,11 +47,11 @@ pub enum ModelError {
 }
 
 #[allow(clippy::large_enum_variant)]
-pub enum ModelExecutionRuntime {
+pub enum ModelExecutionRuntime<'a> {
     ONNXReference,
     ORT,
     Candle,
-    Eval(EvalBackend),
+    Eval(EvalBackend<'a>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

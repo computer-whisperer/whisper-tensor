@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt::Display;
 use std::time::Duration;
 use whisper_tensor::DynRank;
 use whisper_tensor::backends::eval_backend::EvalBackend;
@@ -31,10 +32,33 @@ pub struct AbbreviatedTensorReportSettings {
     pub do_all: bool,
 }
 
+#[derive(Copy, Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum SuperGraphRequestBackendMode {
+    NDArray,
+    Vulkan,
+}
+
+impl Display for SuperGraphRequestBackendMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SuperGraphRequestBackendMode::NDArray => write!(f, "NDArray"),
+            SuperGraphRequestBackendMode::Vulkan => write!(f, "Vulkan"),
+        }
+    }
+}
+
+impl Default for SuperGraphRequestBackendMode {
+    fn default() -> Self {
+        SuperGraphRequestBackendMode::NDArray
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SuperGraphRequest {
     pub attention_token: Option<u64>,
     pub super_graph: SuperGraph,
+    pub use_cache: Option<u64>,
+    pub backend_mode: SuperGraphRequestBackendMode,
     pub string_inputs: HashMap<SuperGraphLinkString, String>,
     pub hash_inputs: HashMap<SuperGraphLinkHash, SuperGraphHash>,
     pub tensor_inputs: HashMap<SuperGraphLinkTensor, NDArrayNumericTensor<DynRank>>,
@@ -45,11 +69,16 @@ pub struct SuperGraphRequest {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SuperGraphResponse {
-    pub attention_token: Option<u64>,
+pub struct SuperGraphResponseData {
     pub string_outputs: HashMap<SuperGraphLinkString, String>,
     pub hash_outputs: HashMap<SuperGraphLinkHash, SuperGraphHash>,
     pub tensor_outputs: HashMap<SuperGraphLinkTensor, NDArrayNumericTensor<DynRank>>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SuperGraphResponse {
+    pub attention_token: Option<u64>,
+    pub result: Result<SuperGraphResponseData, String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -314,9 +343,15 @@ impl CurrentModelsAndInterfacesReport {
     }
 }
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ServerConfigReport {
+    pub vulkan_available: bool,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum WebsocketServerClientMessage {
     Pong,
+    ServerConfigReport(ServerConfigReport),
     ModelLoadReturn(Result<(), String>),
     CurrentModelsReport(CurrentModelsAndInterfacesReport),
     ModelGraphReturn(Result<(LoadedModelId, Vec<u8>), String>),

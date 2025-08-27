@@ -2,18 +2,21 @@ use crate::ModelServer;
 use crossbeam::queue::ArrayQueue;
 use log::error;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::sync::{Notify, mpsc};
+use typenum::op;
 use whisper_tensor::DynRank;
 use whisper_tensor::backends::eval_backend::EvalBackend;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::numeric_tensor::NumericTensor;
+use whisper_tensor::super_graph::cache::SuperGraphCache;
 use whisper_tensor::super_graph::data::SuperGraphData;
 use whisper_tensor::super_graph::observer::SuperGraphObserver;
 use whisper_tensor::super_graph::{SuperGraphNodePath, SuperGraphTensorPath};
 use whisper_tensor_server::{
-    AbbreviatedTensorReportSettings, AbbreviatedTensorValue, SuperGraphRequest, SuperGraphResponse,
+    AbbreviatedTensorReportSettings, AbbreviatedTensorValue, SuperGraphRequest,
+    SuperGraphRequestBackendMode, SuperGraphResponse, SuperGraphResponseData,
 };
 
 #[derive(Debug)]
@@ -189,8 +192,19 @@ impl SuperGraphObserver for LocalSuperGraphObserver {
 }
 
 pub async fn scheduler(mut input: mpsc::Receiver<SchedulerJob>, model_server: Arc<ModelServer>) {
+    #[cfg(feature = "vulkan")]
+    let vulkan_runtime = {
+        use whisper_tensor::backends::vulkan_backend::{VulkanContext, VulkanImmediateExecutor};
+        let vulkan_context = VulkanContext::new().unwrap();
+        Arc::new(Mutex::new(
+            VulkanImmediateExecutor::new(vulkan_context).unwrap(),
+        ))
+    };
+    let caches = Arc::new(Mutex::new(HashMap::new()));
     loop {
         if let Some(x) = input.recv().await {
+            let vulkan_runtime = vulkan_runtime.clone();
+            let caches = caches.clone();
             match x {
                 SchedulerJob::SuperGraphRequest((req, resp_sender, reporter)) => {
                     // Collect links to needed models
@@ -205,63 +219,89 @@ pub async fn scheduler(mut input: mpsc::Receiver<SchedulerJob>, model_server: Ar
                         models
                     };
                     // Dispatch tight loop
-                    let resp = tokio::task::spawn_blocking(move || {
-                        let mut super_graph_data = SuperGraphData::new();
-                        for (link, tensor) in req.tensor_inputs {
-                            super_graph_data
-                                .tensors
-                                .insert(link, NumericTensor::from(tensor));
-                        }
-                        // Populate data with refs
-                        for link in req.model_inputs.keys() {
-                            if let Some(model) = models.get(link) {
-                                super_graph_data.models.insert(*link, model);
+                    let result = tokio::task::spawn_blocking(move || {
+                        let mut ndarray_backend = EvalBackend::NDArray;
+                        #[cfg(feature = "vulkan")]
+                        let mut vulkan_runtime = vulkan_runtime.lock().unwrap();
+                        #[cfg(feature = "vulkan")]
+                        let mut vulkan_backend = EvalBackend::Vulkan(&mut vulkan_runtime);
+                        let backend: Result<&mut EvalBackend, String> = match req.backend_mode {
+                            SuperGraphRequestBackendMode::NDArray => Ok(&mut ndarray_backend),
+                            SuperGraphRequestBackendMode::Vulkan => {
+                                #[cfg(feature = "vulkan")]
+                                let res = Ok(&mut vulkan_backend);
+                                #[cfg(not(feature = "vulkan"))]
+                                let res = Err("Vulkan feature not enabled!".to_string());
+                                res
                             }
-                        }
-                        for (link, data) in req.string_inputs {
-                            super_graph_data.strings.insert(link, data);
-                        }
-                        for (link, hash) in req.hash_inputs {
-                            super_graph_data.hashes.insert(link, hash);
-                        }
-                        let mut observer = LocalSuperGraphObserver::new(
-                            req.attention_token,
-                            req.do_node_execution_reports,
-                            req.abbreviated_tensor_report_settings,
-                            reporter,
-                            req.subscribed_tensors.iter().cloned().collect(),
-                        );
-                        let res = req
-                            .super_graph
-                            .run(
-                                super_graph_data,
-                                None,
-                                &mut observer,
-                                &mut EvalBackend::NDArray,
-                            )
-                            .unwrap();
+                        };
 
-                        let SuperGraphData {
-                            tensors,
-                            strings,
-                            hashes,
-                            ..
-                        } = res;
+                        match backend {
+                            Ok(backend) => {
+                                let mut super_graph_data = SuperGraphData::new();
+                                for (link, tensor) in req.tensor_inputs {
+                                    super_graph_data
+                                        .tensors
+                                        .insert(link, NumericTensor::from(tensor));
+                                }
+                                // Populate data with refs
+                                for link in req.model_inputs.keys() {
+                                    if let Some(model) = models.get(link) {
+                                        super_graph_data.models.insert(*link, model);
+                                    }
+                                }
+                                for (link, data) in req.string_inputs {
+                                    super_graph_data.strings.insert(link, data);
+                                }
+                                for (link, hash) in req.hash_inputs {
+                                    super_graph_data.hashes.insert(link, hash);
+                                }
+                                let mut observer = LocalSuperGraphObserver::new(
+                                    req.attention_token,
+                                    req.do_node_execution_reports,
+                                    req.abbreviated_tensor_report_settings,
+                                    reporter,
+                                    req.subscribed_tensors.iter().cloned().collect(),
+                                );
+                                let mut caches = caches.lock().unwrap();
+                                let cache = if let Some(x) = req.use_cache {
+                                    Some(caches.entry(x).or_insert_with(SuperGraphCache::new))
+                                } else {
+                                    None
+                                };
+                                let res = req
+                                    .super_graph
+                                    .run(super_graph_data, cache, &mut observer, backend)
+                                    .map_err(|x| x.to_string())?;
 
-                        let tensor_outputs = tensors
-                            .iter()
-                            .map(|(k, v)| (*k, v.to_ndarray().unwrap()))
-                            .collect();
+                                let SuperGraphData {
+                                    tensors,
+                                    strings,
+                                    hashes,
+                                    ..
+                                } = res;
 
-                        SuperGraphResponse {
-                            attention_token: req.attention_token,
-                            tensor_outputs,
-                            string_outputs: strings,
-                            hash_outputs: hashes,
+                                let tensor_outputs = tensors
+                                    .iter()
+                                    .map(|(k, v)| (*k, v.to_ndarray().unwrap()))
+                                    .collect();
+
+                                Ok(SuperGraphResponseData {
+                                    tensor_outputs,
+                                    string_outputs: strings,
+                                    hash_outputs: hashes,
+                                })
+                            }
+                            Err(e) => Err(e),
                         }
                     })
                     .await
                     .unwrap();
+
+                    let resp = SuperGraphResponse {
+                        attention_token: req.attention_token,
+                        result,
+                    };
 
                     if let Err(e) = resp_sender.send(resp).await {
                         error!("Failed to send response: {e}");

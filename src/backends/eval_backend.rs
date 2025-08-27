@@ -11,25 +11,27 @@ use crate::symbolic_graph::{
 };
 use crate::tensor_rank::DynRank;
 use std::collections::HashMap;
+use std::marker::PhantomData;
 use std::time::Instant;
 
 #[derive(Debug)]
-#[allow(clippy::large_enum_variant)]
-pub enum EvalBackend {
+#[allow(unused_lifetimes)]
+pub enum EvalBackend<'a> {
     #[cfg(feature = "candle")]
     Candle(candle_core::Device),
     NDArray,
     #[cfg(feature = "vulkan")]
-    Vulkan(VulkanImmediateExecutor),
+    Vulkan(&'a mut VulkanImmediateExecutor),
+    NotUsed(PhantomData<&'a ()>),
 }
 
-impl core::fmt::Display for EvalBackend {
+impl<'a> core::fmt::Display for EvalBackend<'a> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{self:?}")
     }
 }
 
-impl EvalBackend {
+impl<'a> EvalBackend<'a> {
     pub fn supports_dtype(&self, dtype: DType) -> bool {
         match self {
             #[cfg(feature = "candle")]
@@ -46,6 +48,7 @@ impl EvalBackend {
             EvalBackend::NDArray => true,
             #[cfg(feature = "vulkan")]
             EvalBackend::Vulkan(_) => !matches!(dtype, DType::STRING),
+            _ => false,
         }
     }
 }

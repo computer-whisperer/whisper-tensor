@@ -8,9 +8,9 @@ fn main() {
     tracing_subscriber::fmt::init();
 
     let vulkan_context = VulkanContext::new().unwrap();
-    let vulkan_runtime = VulkanImmediateExecutor::new(vulkan_context).unwrap();
+    let mut vulkan_runtime = VulkanImmediateExecutor::new(vulkan_context).unwrap();
 
-    let mut eval_backend = EvalBackend::Vulkan(vulkan_runtime);
+    let mut eval_backend = EvalBackend::Vulkan(&mut vulkan_runtime);
 
     let start_data = vec![1.0f64, -2.0, 3.0, -4.0];
 

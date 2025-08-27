@@ -284,8 +284,8 @@ fn run_candle_test(path: &Path) {
 #[cfg(feature = "vulkan")]
 fn run_vulkan_test(path: &Path) {
     let vulkan_context = VulkanContext::new().unwrap();
-    let vulkan_runtime = VulkanImmediateExecutor::new(vulkan_context).unwrap();
-    let mut eval_backend = EvalBackend::Vulkan(vulkan_runtime);
+    let mut vulkan_runtime = VulkanImmediateExecutor::new(vulkan_context).unwrap();
+    let mut eval_backend = EvalBackend::Vulkan(&mut vulkan_runtime);
 
     let test = OnnxNodeTest::from_directory(path).unwrap();
     test.run(&mut eval_backend).unwrap()

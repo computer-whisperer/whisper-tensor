@@ -30,3 +30,4 @@ tokenizers = {version="0.21.1", default-features = false, features = ["unstable_
 
 [features]
 default = ["whisper-tensor/default"]
+vulkan = ["whisper-tensor/vulkan"]

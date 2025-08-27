@@ -155,8 +155,16 @@ async fn websocket_handler(
     ws: WebSocketUpgrade,
     scheduler_sender: mpsc::Sender<SchedulerJob>,
     model_server: Arc<ModelServer>,
+    server_config_report: ServerConfigReport,
 ) -> impl IntoResponse {
-    ws.on_upgrade(|socket: WebSocket| handle_socket(socket, scheduler_sender, model_server))
+    ws.on_upgrade(move |socket: WebSocket| {
+        handle_socket(
+            socket,
+            scheduler_sender,
+            model_server,
+            server_config_report.clone(),
+        )
+    })
 }
 
 use crate::scheduler::{SchedulerJob, SchedulerReport, SchedulerReporter, scheduler};
@@ -173,7 +181,7 @@ use whisper_tensor_import::onnx_graph::WeightStorageStrategy;
 use whisper_tensor_import::{ModelTypeHint, identify_and_load};
 use whisper_tensor_server::{
     CurrentInterfacesReportEntry, CurrentModelsAndInterfacesReport, CurrentModelsReportEntry,
-    LoadedModelId, SuperGraphExecutionReport, WebsocketClientServerMessage,
+    LoadedModelId, ServerConfigReport, SuperGraphExecutionReport, WebsocketClientServerMessage,
     WebsocketServerClientMessage,
 };
 
@@ -229,6 +237,7 @@ async fn handle_socket(
     mut socket: WebSocket,
     scheduler_sender: mpsc::Sender<SchedulerJob>,
     model_server: Arc<ModelServer>,
+    server_config_report: ServerConfigReport,
 ) {
     // Send opening state
     let mut receiver = model_server.models_report_watch_receiver.clone();
@@ -238,6 +247,11 @@ async fn handle_socket(
     send_message(
         &mut socket,
         WebsocketServerClientMessage::CurrentModelsReport(initial_value),
+    )
+    .await;
+    send_message(
+        &mut socket,
+        WebsocketServerClientMessage::ServerConfigReport(server_config_report),
     )
     .await;
 
@@ -408,7 +422,7 @@ async fn handle_socket(
 
 #[tokio::main]
 async fn main() {
-    // initialize tracing
+    {} // initialize tracing
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .init();
@@ -424,6 +438,13 @@ async fn main() {
 
     let (scheduler_tx, scheduler_rx) = mpsc::channel(100);
 
+    #[cfg(feature = "vulkan")]
+    let vulkan_available = true;
+    #[cfg(not(feature = "vulkan"))]
+    let vulkan_available = false;
+
+    let server_config_report = ServerConfigReport { vulkan_available };
+
     tokio::spawn(scheduler(scheduler_rx, model_server.clone()));
 
     tokio::spawn(async move {
@@ -433,7 +454,12 @@ async fn main() {
             .route(
                 "/ws",
                 get(move |ws: WebSocketUpgrade| {
-                    websocket_handler(ws, scheduler_tx.clone(), model_server.clone())
+                    websocket_handler(
+                        ws,
+                        scheduler_tx.clone(),
+                        model_server.clone(),
+                        server_config_report.clone(),
+                    )
                 }),
             ) // Add WebSocket endpoint
             .nest_service("/pkg", ServeDir::new("./crates/whisper-tensor-webui/pkg/"))
