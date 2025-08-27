@@ -5,7 +5,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::sync::{Notify, mpsc};
-use typenum::op;
 use whisper_tensor::DynRank;
 use whisper_tensor::backends::eval_backend::EvalBackend;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
@@ -264,11 +263,9 @@ pub async fn scheduler(mut input: mpsc::Receiver<SchedulerJob>, model_server: Ar
                                     req.subscribed_tensors.iter().cloned().collect(),
                                 );
                                 let mut caches = caches.lock().unwrap();
-                                let cache = if let Some(x) = req.use_cache {
-                                    Some(caches.entry(x).or_insert_with(SuperGraphCache::new))
-                                } else {
-                                    None
-                                };
+                                let cache = req
+                                    .use_cache
+                                    .map(|x| caches.entry(x).or_insert_with(SuperGraphCache::new));
                                 let res = req
                                     .super_graph
                                     .run(super_graph_data, cache, &mut observer, backend)

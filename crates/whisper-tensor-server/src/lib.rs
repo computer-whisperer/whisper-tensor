@@ -32,8 +32,9 @@ pub struct AbbreviatedTensorReportSettings {
     pub do_all: bool,
 }
 
-#[derive(Copy, Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Copy, Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum SuperGraphRequestBackendMode {
+    #[default]
     NDArray,
     Vulkan,
 }
@@ -44,12 +45,6 @@ impl Display for SuperGraphRequestBackendMode {
             SuperGraphRequestBackendMode::NDArray => write!(f, "NDArray"),
             SuperGraphRequestBackendMode::Vulkan => write!(f, "Vulkan"),
         }
-    }
-}
-
-impl Default for SuperGraphRequestBackendMode {
-    fn default() -> Self {
-        SuperGraphRequestBackendMode::NDArray
     }
 }
 
