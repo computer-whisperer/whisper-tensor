@@ -393,6 +393,7 @@ fn build_matmul_pipeline(
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct MatMulCacheKey {
     dtype: DType,
+    accumulate_dtype: DType,
     common_shape: Vec<u64>,
     m: u64,
     n: u64,
@@ -405,9 +406,11 @@ impl<R: Rank> VulkanTensor<R> {
     pub fn matmul(
         a: &Self,
         b: &Self,
+        accumulate_dtype: Option<DType>,
         vulkan_immediate_executor: &mut VulkanImmediateExecutor,
     ) -> Result<Self, VulkanError> {
         assert_eq!(a.dtype(), b.dtype());
+        let accumulate_dtype = accumulate_dtype.unwrap_or(a.dtype());
 
         let drop_first_axis_after = a.rank() == 1;
         let mut a = if drop_first_axis_after {
@@ -469,6 +472,7 @@ impl<R: Rank> VulkanTensor<R> {
         let (pipeline_layout, compute_pipeline) = {
             let key = MatMulCacheKey {
                 dtype: a.dtype(),
+                accumulate_dtype,
                 common_shape: common_shape.clone(),
                 m,
                 k,
@@ -643,9 +647,13 @@ mod test {
             VulkanTensor::from_ndarray(start_tensor_a, &mut vulkan_runtime).unwrap();
         let start_tensor_b_vk =
             VulkanTensor::from_ndarray(start_tensor_b, &mut vulkan_runtime).unwrap();
-        let end_tensor_vk =
-            VulkanTensor::matmul(&start_tensor_a_vk, &start_tensor_b_vk, &mut vulkan_runtime)
-                .unwrap();
+        let end_tensor_vk = VulkanTensor::matmul(
+            &start_tensor_a_vk,
+            &start_tensor_b_vk,
+            None,
+            &mut vulkan_runtime,
+        )
+        .unwrap();
         let end_tensor = end_tensor_vk.to_ndarray();
         let end_tensor_ranked = end_tensor.flatten();
         let end_data: Vec<f32> = end_tensor_ranked.try_to_vec().unwrap();
@@ -682,9 +690,13 @@ mod test {
                 VulkanTensor::from_ndarray(start_tensor_a_cast, &mut vulkan_runtime).unwrap();
             let start_tensor_b_vk =
                 VulkanTensor::from_ndarray(start_tensor_b_cast, &mut vulkan_runtime).unwrap();
-            let end_tensor_vk =
-                VulkanTensor::matmul(&start_tensor_a_vk, &start_tensor_b_vk, &mut vulkan_runtime)
-                    .unwrap();
+            let end_tensor_vk = VulkanTensor::matmul(
+                &start_tensor_a_vk,
+                &start_tensor_b_vk,
+                None,
+                &mut vulkan_runtime,
+            )
+            .unwrap();
             let end_tensor = end_tensor_vk.to_ndarray();
             let end_tensor_ranked = end_tensor.cast(DType::F64).unwrap().flatten();
             let end_data: Vec<f64> = end_tensor_ranked.try_to_vec().unwrap();
