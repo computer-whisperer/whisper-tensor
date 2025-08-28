@@ -288,7 +288,7 @@ fn build_unary_pipeline(
     let module = b.module();
     let code = module.assemble();
 
-    VulkanImmediateExecutor::debug_dump_spirv(&code);
+    //VulkanImmediateExecutor::debug_dump_spirv(&code);
 
     let shader = unsafe {
         ShaderModule::new(

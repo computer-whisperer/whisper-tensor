@@ -1,6 +1,7 @@
 use crate::numeric_tensor_tests::{test_eq_bf16, test_eq_f16, test_eq_f32};
 use half::{bf16, f16};
 use whisper_tensor::backends::eval_backend::EvalBackend;
+use whisper_tensor::dtype::DType;
 use whisper_tensor::numeric_tensor::NumericTensor;
 
 pub fn test_add_bf16(backend: &mut EvalBackend) {
@@ -218,4 +219,48 @@ pub fn test_div_fp32(backend: &mut EvalBackend) {
     let result = NumericTensor::div(&tensor_a, &tensor_b, backend).unwrap();
     let correct = NumericTensor::from_vec(vec![0.11295524f32, 63.28971, 0.77941835]).to_dyn_rank();
     test_eq_f32(result, correct);
+}
+
+pub fn test_pow_fp32(backend: &mut EvalBackend) {
+    let tensor_a =
+        NumericTensor::from_vec(vec![0.15163845f32, -0.31361532, 5.393808, 38.25]).to_dyn_rank();
+    let tensor_b = NumericTensor::from_vec(vec![2.0f32]).to_dyn_rank();
+    let result = NumericTensor::pow(&tensor_a, &tensor_b, backend).unwrap();
+    let correct = NumericTensor::from_vec(vec![0.022994218f32, 0.09835457, 29.093164, 1463.0625])
+        .to_dyn_rank();
+    test_eq_f32(result, correct);
+}
+
+pub fn test_pow_bf16(backend: &mut EvalBackend) {
+    let tensor_a = NumericTensor::from_vec(vec![0.15163845f32, -0.31361532, 5.393808, 38.25])
+        .to_dyn_rank()
+        .cast(DType::BF16, backend)
+        .unwrap();
+    let tensor_b = NumericTensor::from_vec(vec![2.0f32])
+        .to_dyn_rank()
+        .cast(DType::BF16, backend)
+        .unwrap();
+    let result = NumericTensor::pow(&tensor_a, &tensor_b, backend).unwrap();
+    let correct = NumericTensor::from_vec(vec![0.022994218f32, 0.09835457, 29.093164, 1463.0625])
+        .to_dyn_rank()
+        .cast(DType::BF16, backend)
+        .unwrap();
+    test_eq_bf16(result, correct);
+}
+
+pub fn test_pow_f16(backend: &mut EvalBackend) {
+    let tensor_a = NumericTensor::from_vec(vec![0.15163845f32, -0.31361532, 5.393808, 38.25])
+        .to_dyn_rank()
+        .cast(DType::F16, backend)
+        .unwrap();
+    let tensor_b = NumericTensor::from_vec(vec![2.0f32])
+        .to_dyn_rank()
+        .cast(DType::F16, backend)
+        .unwrap();
+    let result = NumericTensor::pow(&tensor_a, &tensor_b, backend).unwrap();
+    let correct = NumericTensor::from_vec(vec![0.022994218f32, 0.09844971, 29.093164, 1463.0625])
+        .to_dyn_rank()
+        .cast(DType::F16, backend)
+        .unwrap();
+    test_eq_f16(result, correct);
 }

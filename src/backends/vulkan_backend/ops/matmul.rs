@@ -352,7 +352,7 @@ fn build_matmul_pipeline(
     let module = builder.module();
     let code = module.assemble();
 
-    VulkanImmediateExecutor::debug_dump_spirv(&code);
+    //VulkanImmediateExecutor::debug_dump_spirv(&code);
 
     let shader = unsafe {
         ShaderModule::new(

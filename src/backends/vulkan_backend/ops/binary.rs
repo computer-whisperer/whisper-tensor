@@ -363,7 +363,7 @@ fn build_binary_pipeline(
     let module = b.module();
     let code = module.assemble();
 
-    VulkanImmediateExecutor::debug_dump_spirv(&code);
+    //VulkanImmediateExecutor::debug_dump_spirv(&code);
 
     let shader = unsafe {
         ShaderModule::new(
@@ -1162,19 +1162,78 @@ impl<R: Rank> VulkanTensor<R> {
             vulkan_immediate_executor,
             19,
             |builder, a, b, input_0_dtype, input_1_dtype, output_dtype| {
-                let output_data_type = get_spirv_datatype(builder, output_dtype)?;
+                let f32_t = builder.type_float(32);
+                let bool_t = builder.type_bool();
+                let i32_t = builder.type_int(32, 1);
                 let glsl = builder.ext_inst_import("GLSL.std.450");
+                let output_data_type = get_spirv_datatype(builder, output_dtype)?;
+
                 match input_0_dtype {
                     DType::BF16 | DType::F16 | DType::F32 | DType::F64 => match input_1_dtype {
-                        DType::BF16 | DType::F16 | DType::F32 | DType::F64 => Ok(builder
-                            .ext_inst(
-                                output_data_type,
-                                None,
-                                glsl,
-                                GLOp::Pow as u32,
-                                [rspirv::dr::Operand::IdRef(a), rspirv::dr::Operand::IdRef(b)],
-                            )
-                            .unwrap()),
+                        DType::BF16 | DType::F16 | DType::F32 | DType::F64 => {
+                            let p_raw = builder
+                                .ext_inst(
+                                    output_data_type,
+                                    None,
+                                    glsl,
+                                    GLOp::Pow as u32,
+                                    [a.into(), b.into()],
+                                )
+                                .unwrap();
+                            let a_abs = builder
+                                .ext_inst(
+                                    output_data_type,
+                                    None,
+                                    glsl,
+                                    GLOp::FAbs as u32,
+                                    [a.into()],
+                                )
+                                .unwrap();
+                            let p_abs = builder
+                                .ext_inst(
+                                    output_data_type,
+                                    None,
+                                    glsl,
+                                    GLOp::Pow as u32,
+                                    [a_abs.into(), b.into()],
+                                )
+                                .unwrap();
+                            // classify b in f32
+                            let b32 = builder.f_convert(f32_t, None, b).unwrap();
+                            let btrunc = builder
+                                .ext_inst(f32_t, None, glsl, GLOp::Trunc as u32, [b32.into()])
+                                .unwrap();
+                            let is_int = builder.f_ord_equal(bool_t, None, b32, btrunc).unwrap();
+
+                            // oddness
+                            let bi = builder.convert_f_to_s(i32_t, None, btrunc).unwrap();
+                            let one_i32 = builder.constant_bit32(i32_t, 1);
+                            let zero_i32 = builder.constant_bit32(i32_t, 0);
+                            let parity = builder.bitwise_and(i32_t, None, bi, one_i32).unwrap();
+                            let is_odd =
+                                builder.i_not_equal(bool_t, None, parity, zero_i32).unwrap();
+
+                            // a < 0?
+                            let zero_f = builder.constant_bit32(output_data_type, 0);
+                            let a_neg = builder.f_ord_less_than(bool_t, None, a, zero_f).unwrap();
+
+                            let need_fix =
+                                builder.logical_and(bool_t, None, a_neg, is_int).unwrap();
+
+                            // apply sign when needed and odd
+                            let neg_p_abs =
+                                builder.f_negate(output_data_type, None, p_abs).unwrap();
+                            let signed_mag = builder
+                                .select(output_data_type, None, is_odd, neg_p_abs, p_abs)
+                                .unwrap();
+
+                            // choose between fixed magnitude and raw pow
+                            let result = builder
+                                .select(output_data_type, None, need_fix, signed_mag, p_raw)
+                                .unwrap();
+
+                            Ok(result)
+                        }
                         DType::U64 | DType::U32 | DType::U16 | DType::U8 => {
                             let exp = builder.convert_u_to_f(output_data_type, None, b).unwrap();
                             Ok(builder
@@ -1508,5 +1567,48 @@ mod test {
         let end_tensor_ranked = end_tensor.flatten();
         let end_data: Vec<bool> = end_tensor_ranked.try_to_vec().unwrap();
         assert_eq!(end_data, expected_data)
+    }
+
+    #[test]
+    fn test_pow() {
+        let vulkan_context = VulkanContext::new().unwrap();
+        let mut vulkan_runtime = VulkanImmediateExecutor::new(vulkan_context).unwrap();
+
+        let start_data_a = vec![1.0, -2.0, 3.0, -4.0];
+        let start_data_b = vec![2.0];
+        let expected_data = vec![1.0, 4.0, 9.0, 16.0];
+        let end_shape = vec![1, 1, 4];
+
+        let start_tensor_a = NDArrayNumericTensor::from(start_data_a).to_dyn();
+        let start_tensor_a = start_tensor_a.reshape(&vec![1, 1, 4]).unwrap();
+        let start_tensor_b = NDArrayNumericTensor::from(start_data_b).to_dyn();
+
+        let dtypes_to_test = [
+            // DType::F64,
+            DType::F32,
+            DType::F16,
+            DType::BF16,
+            //  DType::I64,
+            //  DType::I32,
+            //  DType::I16,
+            //  DType::I8,
+        ];
+
+        for dtype in dtypes_to_test {
+            let start_tensor_a_cast = start_tensor_a.cast(dtype).unwrap();
+            let start_tensor_b_cast = start_tensor_b.cast(dtype).unwrap();
+            let start_tensor_a_vk =
+                VulkanTensor::from_ndarray(start_tensor_a_cast, &mut vulkan_runtime).unwrap();
+            let start_tensor_b_vk =
+                VulkanTensor::from_ndarray(start_tensor_b_cast, &mut vulkan_runtime).unwrap();
+            let end_tensor_vk =
+                VulkanTensor::pow(&start_tensor_a_vk, &start_tensor_b_vk, &mut vulkan_runtime)
+                    .unwrap();
+            let end_tensor = end_tensor_vk.to_ndarray();
+            assert_eq!(end_tensor.shape().clone(), end_shape);
+            let end_tensor_ranked = end_tensor.cast(DType::F64).unwrap().flatten();
+            let end_data: Vec<f64> = end_tensor_ranked.try_to_vec().unwrap();
+            assert_eq!(end_data, expected_data);
+        }
     }
 }
