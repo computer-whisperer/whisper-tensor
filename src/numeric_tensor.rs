@@ -11,6 +11,8 @@ use crate::backends::candle_backend;
 use crate::backends::ndarray_backend::conversions::NDArrayNumericTensorType;
 #[cfg(feature = "ort")]
 use crate::backends::ort_backend;
+#[cfg(feature = "tch")]
+use crate::backends::tch_backend::{self, TCHNumericTensor};
 #[cfg(feature = "vulkan")]
 use crate::backends::vulkan_backend::tensor::VulkanTensor;
 #[cfg(feature = "vulkan")]
@@ -37,6 +39,9 @@ pub enum NumericTensorError {
     #[cfg(feature = "vulkan")]
     #[error(transparent)]
     Vulkan(#[from] VulkanError),
+    #[cfg(feature = "tch")]
+    #[error(transparent)]
+    TCH(#[from] tch_backend::TCHNumericTensorError),
 }
 
 #[derive(Debug, Clone)]
@@ -50,6 +55,8 @@ pub enum NumericTensor<R: Rank> {
     ORT(ort_backend::ORTNumericTensor),
     #[cfg(feature = "vulkan")]
     Vulkan(VulkanTensor<R>),
+    #[cfg(feature = "tch")]
+    TCH(tch_backend::TCHNumericTensor<R>),
 }
 
 impl<R: Rank> NumericTensor<R> {
@@ -64,6 +71,8 @@ impl<R: Rank> NumericTensor<R> {
             NumericTensor::ORT(x) => Ok(x.try_into()?),
             #[cfg(feature = "vulkan")]
             NumericTensor::Vulkan(x) => Ok(x.to_ndarray()),
+            #[cfg(feature = "tch")]
+            NumericTensor::TCH(x) => Ok(x.to_ndarray()?),
         }
     }
 
@@ -78,6 +87,8 @@ impl<R: Rank> NumericTensor<R> {
             NumericTensor::ORT(x) => Ok(x.try_into()?),
             #[cfg(feature = "vulkan")]
             NumericTensor::Vulkan(x) => Ok(x.to_ndarray()),
+            #[cfg(feature = "tch")]
+            NumericTensor::TCH(x) => Ok(x.to_ndarray()?),
         }
     }
 
@@ -105,6 +116,15 @@ impl<R: Rank> NumericTensor<R> {
                 self.to_ndarray()?,
                 vulkan_immediate_executor,
             )?)
+        }
+    }
+
+    #[cfg(feature = "tch")]
+    pub fn to_tch(&self) -> TCHNumericTensor<R> {
+        if let NumericTensor::TCH(x) = self {
+            x.clone()
+        } else {
+            TCHNumericTensor::<R>::from_ndarray(self.to_ndarray().unwrap()).unwrap()
         }
     }
 
@@ -157,6 +177,8 @@ impl<R: Rank> NumericTensor<R> {
             NumericTensor::ORT(x) => x.dtype().unwrap(),
             #[cfg(feature = "vulkan")]
             NumericTensor::Vulkan(x) => x.dtype(),
+            #[cfg(feature = "tch")]
+            NumericTensor::TCH(x) => x.dtype(),
         }
     }
 
@@ -183,6 +205,8 @@ impl<R: Rank> NumericTensor<R> {
             }
             #[cfg(feature = "vulkan")]
             NumericTensor::Vulkan(x) => x.shape().clone(),
+            #[cfg(feature = "tch")]
+            NumericTensor::TCH(x) => x.shape(),
         }
     }
 
@@ -197,6 +221,8 @@ impl<R: Rank> NumericTensor<R> {
             NumericTensor::ORT(x) => x.rank(),
             #[cfg(feature = "vulkan")]
             NumericTensor::Vulkan(x) => x.rank(),
+            #[cfg(feature = "tch")]
+            NumericTensor::TCH(x) => x.rank(),
         }
     }
 
@@ -509,6 +535,13 @@ impl NumericTensor<DynRank> {
                     executor,
                 )?));
             }
+            #[cfg(feature = "tch")]
+            if let EvalBackend::TCH = backend {
+                return Ok(NumericTensor::TCH(TCHNumericTensor::add(
+                    &a.to_tch(),
+                    &b.to_tch(),
+                )?));
+            }
         }
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::add(
             &a.try_into()?,
@@ -530,6 +563,13 @@ impl NumericTensor<DynRank> {
                     &a.to_vulkan(executor)?,
                     &b.to_vulkan(executor)?,
                     executor,
+                )?));
+            }
+            #[cfg(feature = "tch")]
+            if let EvalBackend::TCH = backend {
+                return Ok(NumericTensor::TCH(TCHNumericTensor::sub(
+                    &a.to_tch(),
+                    &b.to_tch(),
                 )?));
             }
         }
@@ -555,6 +595,13 @@ impl NumericTensor<DynRank> {
                     executor,
                 )?));
             }
+            #[cfg(feature = "tch")]
+            if let EvalBackend::TCH = backend {
+                return Ok(NumericTensor::TCH(TCHNumericTensor::div(
+                    &a.to_tch(),
+                    &b.to_tch(),
+                )?));
+            }
         }
         Ok(NumericTensor::NDArray(NDArrayNumericTensor::div(
             &a.try_into()?,
@@ -576,6 +623,13 @@ impl NumericTensor<DynRank> {
                     &a.to_vulkan(executor)?,
                     &b.to_vulkan(executor)?,
                     executor,
+                )?));
+            }
+            #[cfg(feature = "tch")]
+            if let EvalBackend::TCH = backend {
+                return Ok(NumericTensor::TCH(TCHNumericTensor::mul(
+                    &a.to_tch(),
+                    &b.to_tch(),
                 )?));
             }
         }
@@ -638,6 +692,14 @@ impl NumericTensor<DynRank> {
                     &a.to_vulkan(executor)?,
                     &b.to_vulkan(executor)?,
                     executor,
+                )?));
+            }
+            #[cfg(feature = "tch")]
+            if let EvalBackend::TCH = backend {
+                return Ok(NumericTensor::TCH(TCHNumericTensor::matmul(
+                    &a.to_tch(),
+                    &b.to_tch(),
+                    accumulate_dtype,
                 )?));
             }
         }

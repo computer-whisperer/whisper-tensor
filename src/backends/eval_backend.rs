@@ -22,6 +22,8 @@ pub enum EvalBackend<'a> {
     NDArray,
     #[cfg(feature = "vulkan")]
     Vulkan(&'a mut VulkanImmediateExecutor),
+    #[cfg(feature = "tch")]
+    TCH,
     NotUsed(PhantomData<&'a ()>),
 }
 
@@ -48,6 +50,20 @@ impl<'a> EvalBackend<'a> {
             EvalBackend::NDArray => true,
             #[cfg(feature = "vulkan")]
             EvalBackend::Vulkan(_) => !matches!(dtype, DType::STRING),
+            #[cfg(feature = "tch")]
+            EvalBackend::TCH => matches!(
+                dtype,
+                DType::F64
+                    | DType::F32
+                    | DType::BF16
+                    | DType::F16
+                    | DType::I64
+                    | DType::I32
+                    | DType::I16
+                    | DType::I8
+                    | DType::U8
+                    | DType::BOOL
+            ),
             _ => false,
         }
     }

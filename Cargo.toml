@@ -25,6 +25,7 @@ tempfile = "3.19.1"
 pyo3 = {optional=true, version = "0.24.0", features = ["auto-initialize"]}
 tokenizers = {optional=true, version="0.21.1", default-features = false, features = ["unstable_wasm"]}
 rspirv = "0.12.0"
+tch = {optional=true, version="0.20.0"}
 
 ndarray = { version = "0.16.1", features = ["serde", "rayon", "matrixmultiply-threading"] }
 rwkv-tokenizer = {workspace=true, optional=true, features = ["serde"] }
@@ -46,6 +47,7 @@ tokenizers = ["dep:tokenizers"]
 http = ["tokenizers?/http"]
 rwkv-tokenizer = ["dep:rwkv-tokenizer"]
 vulkan = ["dep:vulkano", "dep:vulkano-shaders"]
+tch = ["dep:tch"]
 
 [build-dependencies]
 prost-build = "0.13.3"

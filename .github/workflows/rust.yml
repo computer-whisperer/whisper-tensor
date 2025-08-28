@@ -21,6 +21,8 @@ env:
   RUST_BACKTRACE: 1
   # Avoid incremental artifacts flapping CI timings
   CARGO_INCREMENTAL: 0
+  # Let tch-rs use the Python Pytorch install for libtorch (simple CPU-only path)
+  LIBTORCH_USE_PYTORCH: "1"
 
 jobs:
   build-test:
@@ -54,6 +56,27 @@ jobs:
         uses: arduino/setup-protoc@v2
         with:
           version: "28.x"
+
+
+        # Install a CPU-only PyTorch wheel and expose its lib directory
+      - name: Set up Python (for libtorch via PyTorch)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install PyTorch (CPU) and export library path
+        shell: bash
+        run: |
+            python -m pip install --upgrade pip
+            # tch-rs currently requires libtorch v2.8.0
+            python -m pip install --no-cache-dir torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu
+            TORCH_LIB=$(python - <<'PY'
+import os, torch
+print(os.path.join(os.path.dirname(torch.__file__), "lib"))
+PY
+)
+            echo "LD_LIBRARY_PATH=$TORCH_LIB:$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
+          echo "Using torch from: $TORCH_LIB"
 
       - name: Install Mesa Vulkan (lavapipe) + tools
         run: |

@@ -8,6 +8,9 @@ pub enum DTypeError {
     DTypeNotSupportedByBackend(DType),
     #[error("The onnx dtype {0:?} is not supported")]
     UnsupportedONNXDtype(onnx::tensor_proto::DataType),
+    #[cfg(feature = "tch")]
+    #[error("The tch dtype {0:?} is not supported")]
+    UnsupportedTCHDType(tch::Kind),
     #[cfg(feature = "ort")]
     #[error("The ort dtype {0:?} is not supported")]
     UnsupportedORTDtype(ort::tensor::TensorElementType),
@@ -48,6 +51,46 @@ impl DType {
             DType::I8 => Some(1),
             DType::BOOL => Some(1),
             DType::STRING => None,
+        }
+    }
+}
+
+#[cfg(feature = "tch")]
+impl TryFrom<tch::Kind> for DType {
+    type Error = DTypeError;
+    fn try_from(v: tch::Kind) -> Result<Self, Self::Error> {
+        match v {
+            tch::Kind::Uint8 => Ok(DType::U8),
+            tch::Kind::Int8 => Ok(DType::I8),
+            tch::Kind::Int16 => Ok(DType::I16),
+            tch::Kind::Int => Ok(DType::I32),
+            tch::Kind::Int64 => Ok(DType::I64),
+            tch::Kind::Half => Ok(DType::F16),
+            tch::Kind::Float => Ok(DType::F32),
+            tch::Kind::Double => Ok(DType::F64),
+            tch::Kind::Bool => Ok(DType::BOOL),
+            tch::Kind::BFloat16 => Ok(DType::BF16),
+            _ => Err(DTypeError::UnsupportedTCHDType(v)),
+        }
+    }
+}
+
+#[cfg(feature = "tch")]
+impl TryFrom<DType> for tch::Kind {
+    type Error = DTypeError;
+    fn try_from(v: DType) -> Result<Self, Self::Error> {
+        match v {
+            DType::F64 => Ok(tch::Kind::Double),
+            DType::F32 => Ok(tch::Kind::Float),
+            DType::BF16 => Ok(tch::Kind::BFloat16),
+            DType::F16 => Ok(tch::Kind::Half),
+            DType::I64 => Ok(tch::Kind::Int64),
+            DType::I32 => Ok(tch::Kind::Int),
+            DType::I16 => Ok(tch::Kind::Int16),
+            DType::U8 => Ok(tch::Kind::Uint8),
+            DType::I8 => Ok(tch::Kind::Int8),
+            DType::BOOL => Ok(tch::Kind::Bool),
+            _ => Err(DTypeError::DTypeNotSupportedByBackend(v)),
         }
     }
 }
