@@ -9,8 +9,6 @@ use crate::TrigOp;
 #[cfg(feature = "candle")]
 use crate::backends::candle_backend;
 use crate::backends::ndarray_backend::conversions::NDArrayNumericTensorType;
-#[cfg(feature = "ort")]
-use crate::backends::ort_backend;
 #[cfg(feature = "tch")]
 use crate::backends::tch_backend::{self, TCHNumericTensor};
 #[cfg(feature = "vulkan")]
@@ -33,9 +31,6 @@ pub enum NumericTensorError {
     #[cfg(feature = "onnx-reference")]
     #[error(transparent)]
     ONNXReference(#[from] crate::backends::onnx_reference_backend::ONNXReferenceError),
-    #[cfg(feature = "ort")]
-    #[error(transparent)]
-    ORT(#[from] ort::Error),
     #[cfg(feature = "vulkan")]
     #[error(transparent)]
     Vulkan(#[from] VulkanError),
@@ -51,8 +46,6 @@ pub enum NumericTensor<R: Rank> {
     ONNXReference(crate::backends::onnx_reference_backend::ONNXReferenceTensor),
     #[cfg(feature = "candle")]
     Candle(candle_core::Tensor),
-    #[cfg(feature = "ort")]
-    ORT(ort_backend::ORTNumericTensor),
     #[cfg(feature = "vulkan")]
     Vulkan(VulkanTensor<R>),
     #[cfg(feature = "tch")]
@@ -67,8 +60,6 @@ impl<R: Rank> NumericTensor<R> {
             NumericTensor::ONNXReference(x) => Ok(x.to_ndarray()?),
             #[cfg(feature = "candle")]
             NumericTensor::Candle(x) => Ok(x.try_into()?),
-            #[cfg(feature = "ort")]
-            NumericTensor::ORT(x) => Ok(x.try_into()?),
             #[cfg(feature = "vulkan")]
             NumericTensor::Vulkan(x) => Ok(x.to_ndarray()),
             #[cfg(feature = "tch")]
@@ -83,8 +74,6 @@ impl<R: Rank> NumericTensor<R> {
             NumericTensor::ONNXReference(x) => Ok(x.to_ndarray()?),
             #[cfg(feature = "candle")]
             NumericTensor::Candle(x) => Ok(x.try_into()?),
-            #[cfg(feature = "ort")]
-            NumericTensor::ORT(x) => Ok(x.try_into()?),
             #[cfg(feature = "vulkan")]
             NumericTensor::Vulkan(x) => Ok(x.to_ndarray()),
             #[cfg(feature = "tch")]
@@ -173,8 +162,6 @@ impl<R: Rank> NumericTensor<R> {
             NumericTensor::ONNXReference(x) => x.dtype(),
             #[cfg(feature = "candle")]
             NumericTensor::Candle(x) => x.dtype().into(),
-            #[cfg(feature = "ort")]
-            NumericTensor::ORT(x) => x.dtype().unwrap(),
             #[cfg(feature = "vulkan")]
             NumericTensor::Vulkan(x) => x.dtype(),
             #[cfg(feature = "tch")]
@@ -197,12 +184,6 @@ impl<R: Rank> NumericTensor<R> {
                 let s2 = s.iter().map(|x| *x as u64).collect::<Vec<_>>();
                 R::KnownDims::try_from_slice(s2.as_slice()).unwrap()
             }
-            #[cfg(feature = "ort")]
-            NumericTensor::ORT(x) => {
-                let s = x.shape();
-                let s2 = s.iter().map(|x| *x as u64).collect::<Vec<_>>();
-                R::KnownDims::try_from_slice(s2.as_slice()).unwrap()
-            }
             #[cfg(feature = "vulkan")]
             NumericTensor::Vulkan(x) => x.shape().clone(),
             #[cfg(feature = "tch")]
@@ -217,8 +198,6 @@ impl<R: Rank> NumericTensor<R> {
             NumericTensor::ONNXReference(x) => x.rank(),
             #[cfg(feature = "candle")]
             NumericTensor::Candle(x) => x.rank(),
-            #[cfg(feature = "ort")]
-            NumericTensor::ORT(x) => x.rank(),
             #[cfg(feature = "vulkan")]
             NumericTensor::Vulkan(x) => x.rank(),
             #[cfg(feature = "tch")]

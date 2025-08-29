@@ -125,8 +125,20 @@ jobs:
       - name: Clippy whisper-tensor-import (fail on warnings; exclude /libs)
         run: cargo clippy -p whisper-tensor-import --no-deps --all-features -- -D warnings
 
-      - name: Build (workspace; exclude /libs)
-        run: cargo build --workspace --all-features --locked --verbose ${{ steps.pkgs.outputs.exclude_args }}
+      - name: Build whisper-tensor (no features)
+        run: cargo build -p whisper-tensor --lib --locked --verbose
 
-      - name: Test (workspace; exclude /libs)
-        run: cargo test --workspace --all-features --locked --verbose ${{ steps.pkgs.outputs.exclude_args }}
+      - name: Build whisper-tensor (all features)
+        run: cargo build -p whisper-tensor --lib --locked --verbose --all-features
+
+      - name: Build whisper-tensor-server (no features)
+        run: cargo build -p whisper-tensor-server --locked --verbose
+
+      - name: Build whisper-tensor-server (all features)
+        run: cargo build -p whisper-tensor-server --locked --verbose --all-features
+
+      - name: Test whisper-tensor (all features)
+        run: cargo test -p whisper-tensor --all-features --locked --verbose
+
+      - name: Test whisper-tensor-server (all features)
+        run: cargo test -p whisper-tensor --all-features --locked --verbose

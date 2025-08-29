@@ -11,9 +11,6 @@ pub enum DTypeError {
     #[cfg(feature = "tch")]
     #[error("The tch dtype {0:?} is not supported")]
     UnsupportedTCHDType(tch::Kind),
-    #[cfg(feature = "ort")]
-    #[error("The ort dtype {0:?} is not supported")]
-    UnsupportedORTDtype(ort::tensor::TensorElementType),
 }
 
 #[derive(Copy, Clone, Debug, Hash, Eq, PartialEq, PartialOrd, Serialize, Deserialize)]

@@ -202,6 +202,7 @@ pub async fn scheduler(mut input: mpsc::Receiver<SchedulerJob>, model_server: Ar
     let caches = Arc::new(Mutex::new(HashMap::new()));
     loop {
         if let Some(x) = input.recv().await {
+            #[cfg(feature = "vulkan")]
             let vulkan_runtime = vulkan_runtime.clone();
             let caches = caches.clone();
             match x {

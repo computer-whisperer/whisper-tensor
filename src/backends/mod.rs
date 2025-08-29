@@ -2,8 +2,6 @@
 pub mod candle_backend;
 #[cfg(feature = "onnx-reference")]
 pub mod onnx_reference_backend;
-#[cfg(feature = "ort")]
-pub mod ort_backend;
 #[cfg(feature = "tch")]
 pub mod tch_backend;
 #[cfg(feature = "vulkan")]

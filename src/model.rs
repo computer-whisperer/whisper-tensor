@@ -37,9 +37,6 @@ pub enum ModelError {
     #[cfg(feature = "candle")]
     #[error(transparent)]
     Candle(#[from] candle_core::Error),
-    #[cfg(feature = "ort")]
-    #[error(transparent)]
-    ORT(#[from] ort::Error),
     #[error(transparent)]
     DecodeError(#[from] DecodeError),
     #[error("Unconfigured Backend")]
@@ -72,8 +69,6 @@ pub struct Model {
     // Runtimes
     #[cfg(feature = "onnx-reference")]
     onnx_reference_backend: Option<onnx_reference_backend::ONNXReferenceBackend>,
-    #[cfg(feature = "ort")]
-    ort_session: Option<ort::session::Session>,
     #[cfg(feature = "candle")]
     candle_proto: Option<candle_onnx::onnx::ModelProto>,
 }
@@ -149,22 +144,9 @@ impl Model {
             text_inference_tokens_in_logits_out_interface,
             #[cfg(feature = "onnx-reference")]
             onnx_reference_backend: None,
-            #[cfg(feature = "ort")]
-            ort_session: None,
             #[cfg(feature = "candle")]
             candle_proto: None,
         })
-    }
-
-    #[cfg(feature = "ort")]
-    pub fn setup_ort_backend(&mut self) -> Result<(), ort::Error> {
-        let mut builder = ort::session::Session::builder()?;
-        builder = builder
-            .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)?;
-        builder = builder.with_intra_threads(4)?;
-        //builder = builder.with_execution_providers([ort::execution_providers::CUDAExecutionProvider::default().build()])?;
-        self.ort_session = Some(builder.commit_from_memory(&self.onnx_data)?);
-        Ok(())
     }
 
     #[cfg(feature = "candle")]
@@ -201,25 +183,6 @@ impl Model {
                 }
                 output_tensors
             }
-            /*
-            #[cfg(feature = "ort")]
-            ModelExecutionRuntime::ORT => {
-                if self.ort_session.is_none() {
-                    Err(ModelError::UnconfiguredBackend)?;
-                }
-                let session = self.ort_session.as_mut().unwrap();
-                // Run the session
-                let mut converted_inputs: HashMap<String, ort::value::DynValue> = HashMap::new();
-                for (key, tensor) in inputs.into_iter() {
-                    converted_inputs.insert(key.to_string(), ORTNumericTensor::try_from(tensor)?.0);
-                }
-                let res = session.run(converted_inputs)?;
-                let mut output_tensors = HashMap::new();
-                for (key, value) in res.into_iter() {
-                    output_tensors.insert(key.to_string(), NumericTensor::from(ORTNumericTensor(value)));
-                }
-                output_tensors
-            }*/
             #[cfg(feature = "candle")]
             ModelExecutionRuntime::Candle => {
                 if self.candle_proto.is_none() {
