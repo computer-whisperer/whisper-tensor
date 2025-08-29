@@ -1117,12 +1117,7 @@ impl<R: Rank> VulkanTensor<R> {
         vulkan_immediate_executor: &mut VulkanImmediateExecutor,
         dtype: DType,
     ) -> Result<VulkanTensor<R>, VulkanError> {
-        self.unary(
-            vulkan_immediate_executor,
-            26,
-            dtype,
-            spirv_standard_cast,
-        )
+        self.unary(vulkan_immediate_executor, 26, dtype, spirv_standard_cast)
     }
 }
 
