@@ -67,6 +67,21 @@ impl<'a> EvalBackend<'a> {
             _ => false,
         }
     }
+
+    pub fn to_native_type(&mut self, tensor: &NumericTensor<DynRank>) -> NumericTensor<DynRank> {
+        match self {
+            #[cfg(feature = "candle")]
+            EvalBackend::Candle(x) => tensor.to_candle(x).unwrap().into(),
+            EvalBackend::NDArray => tensor.to_ndarray().unwrap().into(),
+            #[cfg(feature = "vulkan")]
+            EvalBackend::Vulkan(x) => NumericTensor::Vulkan(tensor.to_vulkan(x).unwrap()),
+            #[cfg(feature = "tch")]
+            EvalBackend::TCH => NumericTensor::TCH(tensor.to_tch()),
+            _ => {
+                unimplemented!()
+            }
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

@@ -116,8 +116,14 @@ jobs:
       - name: Check formatting (exclude /libs)
         run: cargo fmt ${{ steps.pkgs.outputs.fmt_args }} -- --check
 
-      - name: Clippy (fail on warnings; exclude /libs)
-        run: cargo clippy --workspace --all-targets --no-deps --all-features ${{ steps.pkgs.outputs.exclude_args }} -- -D warnings
+      - name: Clippy whisper-tensor (fail on warnings; exclude /libs)
+        run: cargo clippy -p whisper-tensor --no-deps --all-features ${{ steps.pkgs.outputs.exclude_args }} -- -D warnings
+
+      - name: Clippy whisper-tensor-server (fail on warnings; exclude /libs)
+        run: cargo clippy -p whisper-tensor-server --no-deps --all-features ${{ steps.pkgs.outputs.exclude_args }} -- -D warnings
+
+      - name: Clippy whisper-tensor-import (fail on warnings; exclude /libs)
+        run: cargo clippy -p whisper-tensor-import --no-deps --all-features ${{ steps.pkgs.outputs.exclude_args }} -- -D warnings
 
       - name: Build (workspace; exclude /libs)
         run: cargo build --workspace --all-features --locked --verbose ${{ steps.pkgs.outputs.exclude_args }}

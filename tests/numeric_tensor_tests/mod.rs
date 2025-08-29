@@ -4,6 +4,7 @@ use whisper_tensor::numeric_tensor::NumericTensor;
 
 pub mod basic_arith;
 pub mod basic_matmul;
+pub mod reshape;
 
 fn test_eq(value: NumericTensor<DynRank>, correct: NumericTensor<DynRank>, atol: f64, rtol: f64) {
     assert_eq!(value.shape(), correct.shape());

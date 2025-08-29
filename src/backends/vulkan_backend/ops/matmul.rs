@@ -1,6 +1,6 @@
 use crate::DynRank;
 use crate::backends::vulkan_backend::spirv_helpers::{
-    cast_bf16_to_f32, cast_f32_to_bf16, get_spirv_datatype,
+    cast_bf16_to_f32, cast_f32_to_bf16, get_spirv_datatype, spirv_standard_cast,
 };
 use crate::backends::vulkan_backend::tensor::VulkanTensor;
 use crate::backends::vulkan_backend::{VulkanError, VulkanImmediateExecutor};
@@ -35,6 +35,7 @@ fn build_matmul_pipeline(
     a_stride: Vec<u64>,
     b_stride: Vec<u64>,
     stored_dtype: DType,
+    accumulate_dtype: DType,
 ) -> Result<(Arc<PipelineLayout>, Arc<ComputePipeline>), VulkanError> {
     let output_shape = {
         let mut output_shape = base_shape.clone();
@@ -52,10 +53,30 @@ fn build_matmul_pipeline(
     builder.capability(Capability::Int8);
     builder.memory_model(spirv::AddressingModel::Logical, spirv::MemoryModel::GLSL450);
 
+    let prod_dtype = match stored_dtype {
+        DType::BF16 => DType::F32,
+        _ => stored_dtype,
+    };
+
+    let accumulate_dtype = match accumulate_dtype {
+        DType::BF16 => DType::F32,
+        _ => stored_dtype,
+    };
+
     let stored_spirv_dtype = match stored_dtype {
         DType::BF16 => builder.type_int(16, 0),
         DType::BOOL => builder.type_int(8, 0),
         _ => get_spirv_datatype(&mut builder, stored_dtype)?,
+    };
+
+    let prod_spirv_dtype = match prod_dtype {
+        DType::BOOL => builder.type_int(8, 0),
+        _ => get_spirv_datatype(&mut builder, prod_dtype)?,
+    };
+
+    let accumulate_spirv_dtype = match accumulate_dtype {
+        DType::BOOL => builder.type_int(8, 0),
+        _ => get_spirv_datatype(&mut builder, accumulate_dtype)?,
     };
 
     let io_data_type_array = builder.type_runtime_array(stored_spirv_dtype);
@@ -286,16 +307,18 @@ fn build_matmul_pipeline(
             _ => (a_val, stored_dtype),
         };
 
-        let (b_val, _b_dtype) = match stored_dtype {
+        let (b_val, b_dtype) = match stored_dtype {
             DType::BF16 => (cast_bf16_to_f32(&mut builder, b_val), DType::F32),
             _ => (b_val, stored_dtype),
         };
 
-        let a_spirv_type = get_spirv_datatype(&mut builder, a_dtype).unwrap();
+        // Cast a and b to prod_dtype
+        let a_val = spirv_standard_cast(&mut builder, a_val, a_dtype, prod_dtype)?;
+        let b_val = spirv_standard_cast(&mut builder, b_val, b_dtype, prod_dtype)?;
 
         let prod = match a_dtype {
             DType::BF16 | DType::F16 | DType::F32 | DType::F64 => {
-                builder.f_mul(a_spirv_type, None, a_val, b_val).unwrap()
+                builder.f_mul(prod_spirv_dtype, None, a_val, b_val).unwrap()
             }
             DType::I64
             | DType::I32
@@ -304,14 +327,21 @@ fn build_matmul_pipeline(
             | DType::U64
             | DType::U32
             | DType::U16
-            | DType::U8 => builder.i_mul(a_spirv_type, None, a_val, b_val).unwrap(),
+            | DType::U8 => builder.i_mul(prod_spirv_dtype, None, a_val, b_val).unwrap(),
             _ => Err(VulkanError::UnsupportedByBackendError)?,
         };
+
+        let prod_convert = spirv_standard_cast(&mut builder, prod, prod_dtype, accumulate_dtype)?;
 
         accumulated_value = match accumulated_value {
             Some(accumulated_value) => Some(match a_dtype {
                 DType::BF16 | DType::F16 | DType::F32 | DType::F64 => builder
-                    .f_add(a_spirv_type, None, accumulated_value, prod)
+                    .f_add(
+                        accumulate_spirv_dtype,
+                        None,
+                        accumulated_value,
+                        prod_convert,
+                    )
                     .unwrap(),
                 DType::I64
                 | DType::I32
@@ -321,17 +351,35 @@ fn build_matmul_pipeline(
                 | DType::U32
                 | DType::U16
                 | DType::U8 => builder
-                    .i_add(a_spirv_type, None, accumulated_value, prod)
+                    .i_add(
+                        accumulate_spirv_dtype,
+                        None,
+                        accumulated_value,
+                        prod_convert,
+                    )
                     .unwrap(),
                 _ => Err(VulkanError::UnsupportedByBackendError)?,
             }),
-            None => Some(prod),
+            None => Some(prod_convert),
         }
     }
 
     let out_val = match stored_dtype {
-        DType::BF16 => cast_f32_to_bf16(&mut builder, accumulated_value.unwrap()),
-        _ => accumulated_value.unwrap(),
+        DType::BF16 => {
+            let f_val = spirv_standard_cast(
+                &mut builder,
+                accumulated_value.unwrap(),
+                accumulate_dtype,
+                DType::F32,
+            )?;
+            cast_f32_to_bf16(&mut builder, f_val)
+        }
+        _ => spirv_standard_cast(
+            &mut builder,
+            accumulated_value.unwrap(),
+            accumulate_dtype,
+            stored_dtype,
+        )?,
     };
 
     /* store */
@@ -493,6 +541,7 @@ impl<R: Rank> VulkanTensor<R> {
                     a_stride.clone(),
                     b_stride.clone(),
                     a.dtype(),
+                    accumulate_dtype,
                 )?;
                 vulkan_immediate_executor
                     .pipeline_cache

@@ -1,6 +1,6 @@
 use crate::TrigOp;
 use crate::backends::vulkan_backend::spirv_helpers::{
-    cast_bf16_to_f32, cast_f32_to_bf16, get_spirv_datatype,
+    cast_bf16_to_f32, cast_f32_to_bf16, get_spirv_datatype, spirv_standard_cast,
 };
 use crate::backends::vulkan_backend::tensor::VulkanTensor;
 use crate::backends::vulkan_backend::{VulkanError, VulkanImmediateExecutor};
@@ -1121,126 +1121,7 @@ impl<R: Rank> VulkanTensor<R> {
             vulkan_immediate_executor,
             26,
             dtype,
-            |b, i, input_dtype, output_dtype| {
-                if input_dtype == output_dtype {
-                    Ok(i)
-                } else {
-                    let input_data_type = get_spirv_datatype(b, input_dtype)?;
-                    let output_data_type = get_spirv_datatype(b, output_dtype)?;
-                    match input_dtype {
-                        DType::BF16 | DType::F16 | DType::F32 | DType::F64 => match output_dtype {
-                            DType::BF16 | DType::F16 | DType::F32 | DType::F64 => {
-                                Ok(b.f_convert(output_data_type, None, i).unwrap())
-                            }
-                            DType::I64 | DType::I32 | DType::I16 | DType::I8 => {
-                                Ok(b.convert_f_to_s(output_data_type, None, i).unwrap())
-                            }
-                            DType::U64 | DType::U32 | DType::U16 | DType::U8 => {
-                                Ok(b.convert_f_to_u(output_data_type, None, i).unwrap())
-                            }
-                            DType::BOOL => {
-                                let f32_type = b.type_float(32);
-                                let const_zero = b.constant_bit32(f32_type, 0.0f32.to_bits());
-                                let const_zero =
-                                    b.f_convert(input_data_type, None, const_zero).unwrap();
-                                Ok(b.f_unord_not_equal(output_data_type, None, i, const_zero)
-                                    .unwrap())
-                            }
-                            _ => Err(VulkanError::UnsupportedByBackendError),
-                        },
-                        DType::I64 | DType::I32 | DType::I16 | DType::I8 => {
-                            match output_dtype {
-                                DType::BF16 | DType::F16 | DType::F32 | DType::F64 => {
-                                    Ok(b.convert_s_to_f(output_data_type, None, i).unwrap())
-                                }
-                                DType::I64 | DType::I32 | DType::I16 | DType::I8 => {
-                                    Ok(b.s_convert(output_data_type, None, i).unwrap())
-                                }
-                                DType::U64 | DType::U32 | DType::U16 | DType::U8 => {
-                                    let i64_type = b.type_int(64, 1);
-                                    let u64_type = b.type_int(64, 0);
-                                    // up-convert to i64
-                                    let i = b.s_convert(i64_type, None, i).unwrap();
-                                    // convert to u64
-                                    let i = b.bitcast(u64_type, None, i).unwrap();
-                                    // down-convert to output type
-                                    Ok(b.u_convert(output_data_type, None, i).unwrap())
-                                }
-                                DType::BOOL => {
-                                    let u32_type = b.type_int(32, 1);
-                                    let const_zero = b.constant_bit32(u32_type, 0);
-                                    let const_zero =
-                                        b.s_convert(input_data_type, None, const_zero).unwrap();
-                                    Ok(b.i_not_equal(output_data_type, None, i, const_zero)
-                                        .unwrap())
-                                }
-                                _ => Err(VulkanError::UnsupportedByBackendError),
-                            }
-                        }
-                        DType::U64 | DType::U32 | DType::U16 | DType::U8 => {
-                            match output_dtype {
-                                DType::BF16 | DType::F16 | DType::F32 | DType::F64 => {
-                                    Ok(b.convert_u_to_f(output_data_type, None, i).unwrap())
-                                }
-                                DType::I64 | DType::I32 | DType::I16 | DType::I8 => {
-                                    let i64_type = b.type_int(64, 1);
-                                    let u64_type = b.type_int(64, 0);
-                                    // up-convert to u64
-                                    let i = b.u_convert(u64_type, None, i).unwrap();
-                                    // convert to i64
-                                    let i = b.bitcast(i64_type, None, i).unwrap();
-                                    // down-convert to output type
-                                    Ok(b.u_convert(output_data_type, None, i).unwrap())
-                                }
-                                DType::U64 | DType::U32 | DType::U16 | DType::U8 => {
-                                    Ok(b.u_convert(output_data_type, None, i).unwrap())
-                                }
-                                DType::BOOL => {
-                                    let u32_type = b.type_int(32, 0);
-                                    let const_zero = b.constant_bit32(u32_type, 0);
-                                    let const_zero =
-                                        b.u_convert(input_data_type, None, const_zero).unwrap();
-                                    Ok(b.i_not_equal(output_data_type, None, i, const_zero)
-                                        .unwrap())
-                                }
-                                _ => Err(VulkanError::UnsupportedByBackendError),
-                            }
-                        }
-                        DType::BOOL => match output_dtype {
-                            DType::BF16 | DType::F16 | DType::F32 | DType::F64 => {
-                                let f32_type = b.type_float(32);
-                                let const_zero = b.constant_bit32(f32_type, 0.0f32.to_bits());
-                                let const_one = b.constant_bit32(f32_type, 1.0f32.to_bits());
-                                let tmp_out = b
-                                    .select(output_data_type, None, i, const_one, const_zero)
-                                    .unwrap();
-                                Ok(b.f_convert(output_data_type, None, tmp_out).unwrap())
-                            }
-                            DType::I64 | DType::I32 | DType::I16 | DType::I8 => {
-                                let i32_type = b.type_int(32, 1);
-                                let const_zero = b.constant_bit32(i32_type, 0);
-                                let const_one = b.constant_bit32(i32_type, 1);
-                                let tmp_out = b
-                                    .select(output_data_type, None, i, const_one, const_zero)
-                                    .unwrap();
-                                Ok(b.s_convert(output_data_type, None, tmp_out).unwrap())
-                            }
-                            DType::U64 | DType::U32 | DType::U16 | DType::U8 => {
-                                let u32_type = b.type_int(32, 0);
-                                let const_zero = b.constant_bit32(u32_type, 0);
-                                let const_one = b.constant_bit32(u32_type, 1);
-                                let tmp_out = b
-                                    .select(output_data_type, None, i, const_one, const_zero)
-                                    .unwrap();
-                                Ok(b.u_convert(output_data_type, None, tmp_out).unwrap())
-                            }
-                            DType::BOOL => Ok(i),
-                            _ => Err(VulkanError::UnsupportedByBackendError),
-                        },
-                        _ => Err(VulkanError::UnsupportedByBackendError),
-                    }
-                }
-            },
+            spirv_standard_cast,
         )
     }
 }

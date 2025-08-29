@@ -11,7 +11,6 @@ use crate::backends::candle_backend;
 use crate::backends::ndarray_backend::conversions::NDArrayNumericTensorType;
 #[cfg(feature = "ort")]
 use crate::backends::ort_backend;
-#[cfg(test)]
 #[cfg(feature = "tch")]
 use crate::backends::tch_backend::{self, TCHNumericTensor};
 #[cfg(feature = "vulkan")]
@@ -40,7 +39,6 @@ pub enum NumericTensorError {
     #[cfg(feature = "vulkan")]
     #[error(transparent)]
     Vulkan(#[from] VulkanError),
-    #[cfg(test)]
     #[cfg(feature = "tch")]
     #[error(transparent)]
     TCH(#[from] tch_backend::TCHNumericTensorError),
@@ -57,7 +55,6 @@ pub enum NumericTensor<R: Rank> {
     ORT(ort_backend::ORTNumericTensor),
     #[cfg(feature = "vulkan")]
     Vulkan(VulkanTensor<R>),
-    #[cfg(test)]
     #[cfg(feature = "tch")]
     TCH(tch_backend::TCHNumericTensor<R>),
 }
@@ -74,7 +71,6 @@ impl<R: Rank> NumericTensor<R> {
             NumericTensor::ORT(x) => Ok(x.try_into()?),
             #[cfg(feature = "vulkan")]
             NumericTensor::Vulkan(x) => Ok(x.to_ndarray()),
-            #[cfg(test)]
             #[cfg(feature = "tch")]
             NumericTensor::TCH(x) => Ok(x.to_ndarray()?),
         }
@@ -91,7 +87,6 @@ impl<R: Rank> NumericTensor<R> {
             NumericTensor::ORT(x) => Ok(x.try_into()?),
             #[cfg(feature = "vulkan")]
             NumericTensor::Vulkan(x) => Ok(x.to_ndarray()),
-            #[cfg(test)]
             #[cfg(feature = "tch")]
             NumericTensor::TCH(x) => Ok(x.to_ndarray()?),
         }
@@ -124,7 +119,6 @@ impl<R: Rank> NumericTensor<R> {
         }
     }
 
-    #[cfg(test)]
     #[cfg(feature = "tch")]
     pub fn to_tch(&self) -> TCHNumericTensor<R> {
         if let NumericTensor::TCH(x) = self {
@@ -183,7 +177,6 @@ impl<R: Rank> NumericTensor<R> {
             NumericTensor::ORT(x) => x.dtype().unwrap(),
             #[cfg(feature = "vulkan")]
             NumericTensor::Vulkan(x) => x.dtype(),
-            #[cfg(test)]
             #[cfg(feature = "tch")]
             NumericTensor::TCH(x) => x.dtype(),
         }
@@ -212,7 +205,6 @@ impl<R: Rank> NumericTensor<R> {
             }
             #[cfg(feature = "vulkan")]
             NumericTensor::Vulkan(x) => x.shape().clone(),
-            #[cfg(test)]
             #[cfg(feature = "tch")]
             NumericTensor::TCH(x) => x.shape(),
         }
@@ -229,7 +221,6 @@ impl<R: Rank> NumericTensor<R> {
             NumericTensor::ORT(x) => x.rank(),
             #[cfg(feature = "vulkan")]
             NumericTensor::Vulkan(x) => x.rank(),
-            #[cfg(test)]
             #[cfg(feature = "tch")]
             NumericTensor::TCH(x) => x.rank(),
         }
@@ -544,7 +535,6 @@ impl NumericTensor<DynRank> {
                     executor,
                 )?));
             }
-            #[cfg(test)]
             #[cfg(feature = "tch")]
             if let EvalBackend::TCH = backend {
                 return Ok(NumericTensor::TCH(TCHNumericTensor::add(
@@ -575,7 +565,6 @@ impl NumericTensor<DynRank> {
                     executor,
                 )?));
             }
-            #[cfg(test)]
             #[cfg(feature = "tch")]
             if let EvalBackend::TCH = backend {
                 return Ok(NumericTensor::TCH(TCHNumericTensor::sub(
@@ -606,7 +595,6 @@ impl NumericTensor<DynRank> {
                     executor,
                 )?));
             }
-            #[cfg(test)]
             #[cfg(feature = "tch")]
             if let EvalBackend::TCH = backend {
                 return Ok(NumericTensor::TCH(TCHNumericTensor::div(
@@ -637,7 +625,6 @@ impl NumericTensor<DynRank> {
                     executor,
                 )?));
             }
-            #[cfg(test)]
             #[cfg(feature = "tch")]
             if let EvalBackend::TCH = backend {
                 return Ok(NumericTensor::TCH(TCHNumericTensor::mul(
@@ -708,7 +695,6 @@ impl NumericTensor<DynRank> {
                     executor,
                 )?));
             }
-            #[cfg(test)]
             #[cfg(feature = "tch")]
             if let EvalBackend::TCH = backend {
                 return Ok(NumericTensor::TCH(TCHNumericTensor::matmul(

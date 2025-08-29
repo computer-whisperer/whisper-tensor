@@ -3,6 +3,7 @@ use whisper_tensor::backends::eval_backend::EvalBackend;
 mod numeric_tensor_tests;
 use numeric_tensor_tests::basic_arith::*;
 use numeric_tensor_tests::basic_matmul::*;
+use numeric_tensor_tests::reshape::*;
 
 fn run_ndarray_test(test: impl FnOnce(&mut EvalBackend)) {
     test(&mut EvalBackend::NDArray)
@@ -67,6 +68,8 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_pow_fp32);
         do_test!($runner_fn, $runner_name, test_pow_bf16);
         do_test!($runner_fn, $runner_name, test_pow_f16);
+        do_test!($runner_fn, $runner_name, test_reshape_fp32);
+        do_test!($runner_fn, $runner_name, test_transpose_reshape_fp32);
     };
 }
 

@@ -170,7 +170,7 @@ impl<R: Rank> VulkanTensor<R> {
 
     pub fn is_contiguous(&self) -> bool {
         let mut v = 1;
-        for i in self.rank() - 1..=0 {
+        for i in (0..self.rank()).rev() {
             if self.stride[i] != v {
                 return false;
             }
