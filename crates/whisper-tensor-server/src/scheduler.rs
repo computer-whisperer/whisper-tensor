@@ -273,6 +273,7 @@ pub async fn scheduler(mut input: mpsc::Receiver<SchedulerJob>, model_server: Ar
                                     req.subscribed_tensors.iter().cloned().collect(),
                                 );
                                 let mut caches = caches.lock().unwrap();
+                                #[cfg(feature = "vulkan")]
                                 let mut vulkan_tensor_load_caches =
                                     vulkan_tensor_load_caches.lock().unwrap();
 
@@ -310,11 +311,14 @@ pub async fn scheduler(mut input: mpsc::Receiver<SchedulerJob>, model_server: Ar
                                         .run(super_graph_data, &mut context)
                                         .map_err(|x| x.to_string())?;
                                     // Re-pack tensor caches
-                                    for (a, b) in super_graph_tensor_cache.caches {
-                                        for (aa, bb) in &model_id_map {
-                                            if ptr::addr_eq(a, bb.as_ref()) {
-                                                vulkan_tensor_load_caches.insert(*aa, b);
-                                                break;
+                                    #[cfg(feature = "vulkan")]
+                                    if let EvalBackend::Vulkan(_) = backend {
+                                        for (a, b) in super_graph_tensor_cache.caches {
+                                            for (aa, bb) in &model_id_map {
+                                                if ptr::addr_eq(a, bb.as_ref()) {
+                                                    vulkan_tensor_load_caches.insert(*aa, b);
+                                                    break;
+                                                }
                                             }
                                         }
                                     }
