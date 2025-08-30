@@ -50,7 +50,7 @@ pub enum VulkanError {
     InvalidShape,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct VulkanContext {
     pub instance: Arc<Instance>,
     pub queue: Arc<Queue>,
@@ -176,6 +176,7 @@ impl PipelineCache {
 pub struct VulkanImmediateExecutor {
     context: VulkanContext,
     buffers: Vec<VulkanImmediateExecutorBuffer>,
+    host_transfer_buffer: Option<Subbuffer<[u8]>>,
     descriptor_set_layouts: HashMap<BTreeSet<u32>, Arc<DescriptorSetLayout>>,
     descriptor_set_cache: HashMap<BTreeMap<u32, Subbuffer<[u8]>>, Arc<DescriptorSet>>,
     pipeline_cache: PipelineCache,
@@ -185,6 +186,7 @@ impl VulkanImmediateExecutor {
     pub fn new(context: VulkanContext) -> Result<Self, VulkanError> {
         Ok(Self {
             context,
+            host_transfer_buffer: None,
             descriptor_set_layouts: HashMap::new(),
             descriptor_set_cache: HashMap::new(),
             buffers: Vec::new(),
@@ -258,12 +260,11 @@ impl VulkanImmediateExecutor {
         let buffer = Buffer::new_slice(
             self.context.memory_allocator.clone(),
             BufferCreateInfo {
-                usage: BufferUsage::STORAGE_BUFFER,
+                usage: BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC,
                 ..Default::default()
             },
             AllocationCreateInfo {
-                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
-                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE,
                 ..Default::default()
             },
             size as u64,
@@ -273,6 +274,24 @@ impl VulkanImmediateExecutor {
         let buffer = VulkanImmediateExecutorBuffer { buffer, allocator };
         self.buffers.push(buffer);
         Ok(self.buffers.len() - 1)
+    }
+
+    pub fn allocate_host_transfer_buffer(&mut self, size: usize) -> Result<(), VulkanError> {
+        let buffer = Buffer::new_slice(
+            self.context.memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_HOST,
+                ..Default::default()
+            },
+            size as u64,
+        )
+            .map_err(VulkanError::ValidatedVulkanAllocateBufferError)?;
+        self.host_transfer_buffer = Some(buffer);
+        Ok(())
     }
 
     pub fn alloc_space(&mut self, size: usize) -> (Subbuffer<[u8]>, Suballocation) {

@@ -1,10 +1,19 @@
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
-use crate::backends::vulkan_backend::{VulkanError, VulkanImmediateExecutor};
+use crate::backends::vulkan_backend::{VulkanContext, VulkanError, VulkanImmediateExecutor};
 use crate::dtype::DType;
 use crate::tensor_rank::{DimContainer, DimProduct, Rank};
 use std::sync::Arc;
-use vulkano::buffer::Subbuffer;
+use vulkano::buffer::{Subbuffer};
+use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, CopyBufferInfo};
+use vulkano::device::DeviceOwned;
 use vulkano::memory::allocator::Suballocation;
+use vulkano::sync::GpuFuture;
+
+#[derive(Debug, Clone)]
+pub(crate) struct BufferTransferKit {
+    transfer_buffer: Subbuffer<[u8]>,
+    context: VulkanContext,
+}
 
 #[derive(Debug, Clone)]
 pub struct VulkanTensor<R: Rank> {
@@ -14,6 +23,7 @@ pub struct VulkanTensor<R: Rank> {
     pub(crate) suballocation: Arc<Suballocation>,
     pub(crate) offset: usize,
     pub(crate) buffer: Subbuffer<[u8]>,
+    pub(crate) buffer_transfer_kit: BufferTransferKit,
 }
 
 impl<R: Rank> VulkanTensor<R> {
@@ -40,7 +50,19 @@ impl<R: Rank> VulkanTensor<R> {
             shape.as_slice().iter().product::<u64>() as usize * dtype.size().unwrap();
         let (buffer, suballocation) = executor.alloc_space(needed_space);
 
+        let transfer_buffer = if let Some(x) = &executor.host_transfer_buffer && x.len() >= needed_space as u64 {
+            x
+        } else {
+            executor.allocate_host_transfer_buffer(needed_space*2) ?;
+            executor.host_transfer_buffer.as_ref().unwrap()
+        }.clone();
+
         let stride = Self::get_standard_stride(&shape);
+
+        let buffer_transfer_kit = BufferTransferKit{
+            context: executor.context.clone(),
+            transfer_buffer
+        };
 
         Ok(VulkanTensor {
             dtype,
@@ -49,6 +71,7 @@ impl<R: Rank> VulkanTensor<R> {
             offset: 0,
             buffer,
             stride,
+            buffer_transfer_kit
         })
     }
 
@@ -59,35 +82,77 @@ impl<R: Rank> VulkanTensor<R> {
         let tensor = unsafe { Self::new_uninitialized(source.shape(), source.dtype(), executor)? };
 
         {
-            let mut writer = tensor.buffer.write().unwrap();
-            for i in 0..tensor.shape.dim_product() {
-                let mut index = vec![];
-                let mut v = i;
-                for &j in tensor.shape.as_slice() {
-                    index.push(v % j);
-                    v /= j;
+            let bytes_needed = tensor.shape.dim_product()*tensor.dtype().size().unwrap() as u64;
+            let transfer_buffer = &tensor.buffer_transfer_kit.transfer_buffer;
+            {
+                let mut writer = transfer_buffer.write().unwrap();
+                for i in 0..tensor.shape.dim_product() {
+                    let mut index = vec![];
+                    let mut v = i;
+                    for &j in tensor.shape.as_slice() {
+                        index.push(v % j);
+                        v /= j;
+                    }
+                    let index = R::KnownDims::try_from_slice(index.as_slice()).unwrap();
+                    let value = source.get(&index).unwrap().to_bytes();
+                    // Calculate destination
+                    let inner_offset = index
+                        .as_slice()
+                        .iter()
+                        .zip(tensor.stride.as_slice().iter())
+                        .map(|(a, b)| a * b)
+                        .sum::<u64>() as usize
+                        * tensor.dtype.size().unwrap();
+                    writer[inner_offset..inner_offset + value.len()]
+                        .copy_from_slice(&value);
                 }
-                let index = R::KnownDims::try_from_slice(index.as_slice()).unwrap();
-                let value = source.get(&index).unwrap().to_bytes();
-                // Calculate destination
-                let outer_offset = tensor.suballocation.offset as usize;
-                let inner_offset = index
-                    .as_slice()
-                    .iter()
-                    .zip(tensor.stride.as_slice().iter())
-                    .map(|(a, b)| a * b)
-                    .sum::<u64>() as usize
-                    * tensor.dtype.size().unwrap();
-                writer[outer_offset + inner_offset..outer_offset + inner_offset + value.len()]
-                    .copy_from_slice(&value);
             }
+            let mut builder = AutoCommandBufferBuilder::primary(
+                executor
+                    .context
+                    .command_buffer_allocator
+                    .clone(),
+                executor.context.queue.queue_family_index(),
+                CommandBufferUsage::OneTimeSubmit,
+            )?;
+            let outer_offset = tensor.suballocation.offset as u64;
+            builder.copy_buffer(CopyBufferInfo::buffers(
+                transfer_buffer.clone(),
+                tensor.buffer.clone().slice(outer_offset..outer_offset+bytes_needed)
+            )).unwrap();
+            let command_buffer = builder.build()?;
+            // Let's execute this command buffer now.
+            let future = vulkano::sync::now(executor.context.device.clone())
+                .then_execute(
+                    executor.context.queue.clone(),
+                    command_buffer,
+                )
+                .unwrap()
+                // This line instructs the GPU to signal a *fence* once the command buffer has finished
+                // execution. A fence is a Vulkan object that allows the CPU to know when the GPU has
+                // reached a certain point. We need to signal a fence here because below we want to block
+                // the CPU until the GPU has reached that point in the execution.
+                .then_signal_fence_and_flush()
+                .unwrap();
+
+            // Blocks execution until the GPU has finished the operation. This method only exists on the
+            // future that corresponds to a signalled fence. In other words, this method wouldn't be
+            // available if we didn't call `.then_signal_fence_and_flush()` earlier. The `None` parameter
+            // is an optional timeout.
+            //
+            // Note however that dropping the `future` variable (with `drop(future)` for example) would
+            // block execution as well, and this would be the case even if we didn't call
+            // `.then_signal_fence_and_flush()`. Therefore the actual point of calling
+            // `.then_signal_fence_and_flush()` and `.wait()` is to make things more explicit. In the
+            // future, if the Rust language gets linear types vulkano may get modified so that only
+            // fence-signalled futures can get destroyed like this.
+            future.wait(None).unwrap()
         }
         Ok(tensor)
     }
 
     pub fn to_ndarray(&self) -> NDArrayNumericTensor<R> {
         {
-            let reader = self.buffer.read().unwrap();
             let bytes_to_read = (self
                 .shape
                 .as_slice()
@@ -97,9 +162,49 @@ impl<R: Rank> VulkanTensor<R> {
                 .sum::<u64>()
                 + 1) as usize
                 * self.dtype.size().unwrap();
-            let start_offset = self.suballocation.offset as usize + self.offset;
+            let start_offset = self.suballocation.offset as u64 + self.offset as u64;
+            let transfer_buffer = &self.buffer_transfer_kit.transfer_buffer;
+            let mut builder = AutoCommandBufferBuilder::primary(
+                self.buffer_transfer_kit.context.command_buffer_allocator
+                    .clone(),
+                self.buffer_transfer_kit.context.queue.queue_family_index(),
+                CommandBufferUsage::OneTimeSubmit,
+            ).unwrap();
+            builder.copy_buffer(CopyBufferInfo::buffers(
+                self.buffer.clone().slice(start_offset..start_offset+bytes_to_read as u64),
+                transfer_buffer.clone(),
+            )).unwrap();
+            let command_buffer = builder.build().unwrap();
+            // Let's execute this command buffer now.
+            let future = vulkano::sync::now(self.buffer_transfer_kit.context.device.clone())
+                .then_execute(
+                    self.buffer_transfer_kit.context.queue.clone(),
+                    command_buffer,
+                )
+                .unwrap()
+                // This line instructs the GPU to signal a *fence* once the command buffer has finished
+                // execution. A fence is a Vulkan object that allows the CPU to know when the GPU has
+                // reached a certain point. We need to signal a fence here because below we want to block
+                // the CPU until the GPU has reached that point in the execution.
+                .then_signal_fence_and_flush()
+                .unwrap();
+
+            // Blocks execution until the GPU has finished the operation. This method only exists on the
+            // future that corresponds to a signalled fence. In other words, this method wouldn't be
+            // available if we didn't call `.then_signal_fence_and_flush()` earlier. The `None` parameter
+            // is an optional timeout.
+            //
+            // Note however that dropping the `future` variable (with `drop(future)` for example) would
+            // block execution as well, and this would be the case even if we didn't call
+            // `.then_signal_fence_and_flush()`. Therefore the actual point of calling
+            // `.then_signal_fence_and_flush()` and `.wait()` is to make things more explicit. In the
+            // future, if the Rust language gets linear types vulkano may get modified so that only
+            // fence-signalled futures can get destroyed like this.
+            future.wait(None).unwrap();
+
+            let reader = transfer_buffer.read().unwrap();
             NDArrayNumericTensor::from_bytes(
-                &reader[start_offset..start_offset + bytes_to_read],
+                &reader[0..bytes_to_read],
                 self.dtype,
                 &self.shape,
                 &self.stride,
@@ -165,6 +270,7 @@ impl<R: Rank> VulkanTensor<R> {
             offset: self.offset,
             dtype: self.dtype,
             buffer: self.buffer.clone(),
+            buffer_transfer_kit: self.buffer_transfer_kit.clone(),
         })
     }
 
@@ -177,11 +283,5 @@ impl<R: Rank> VulkanTensor<R> {
             v *= self.shape[i];
         }
         true
-    }
-}
-
-impl<R: Rank> From<VulkanTensor<R>> for NDArrayNumericTensor<R> {
-    fn from(value: VulkanTensor<R>) -> Self {
-        value.to_ndarray()
     }
 }
