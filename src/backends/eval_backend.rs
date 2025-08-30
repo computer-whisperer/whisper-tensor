@@ -10,7 +10,7 @@ use crate::symbolic_graph::{
     SymbolicGraphTensorId, SymbolicGraphTensorPath, check_tensor_matches,
 };
 use crate::tensor_rank::DynRank;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
 use std::time::Instant;
 
@@ -124,46 +124,98 @@ pub fn run<T: SymbolicGraphObserver>(
         }
     }
 
+    let mut tensor_uses_left: HashMap<SymbolicGraphTensorId, usize> = HashMap::new();
+    for id in model.get_outputs() {
+        let val = tensor_uses_left.entry(id).or_insert_with(|| 0);
+        *val += 1;
+    }
     let ops = model.get_operations();
-    let mut remaining_ops_to_complete: Vec<SymbolicGraphOperationId> =
-        ops.keys().copied().collect();
-    let mut total_ops_completed: Vec<SymbolicGraphOperationId> = vec![];
-    loop {
-        let mut ops_completed_now = vec![];
+    for op in ops.values() {
+        for id in op.op.get_inputs() {
+            let val = tensor_uses_left.entry(id).or_insert_with(|| 0);
+            *val += 1;
+        }
+    }
 
+    let mut tensors_just_created = vec![];
+
+    let ops = model.get_operations();
+    let mut remaining_ops_to_complete: HashSet<SymbolicGraphOperationId> =
+        ops.keys().copied().collect();
+    loop {
+        // Pick the next op to use
+        let mut best_op_id = None;
+        let mut best_op_id_score = None;
         for op_id in &remaining_ops_to_complete {
-            let GraphOperation { name, op } = ops.get(op_id).unwrap();
-            let input_ids = op.get_inputs();
-            let mut input_values = HashMap::new();
-            // Collect all inputs, abort if we can't do this one yet
-            let mut failed_to_fetch = false;
-            for tensor_id in &input_ids {
-                if let Some(value) = active_tensors.get(tensor_id) {
-                    // Validate shape and dtype
-                    let tensor_info = model.get_tensor_info(*tensor_id).unwrap();
-                    check_tensor_matches(value, tensor_info)
-                        .map_err(|x| EvalRuntimeError::EvalError(name.clone(), x))?;
-                    input_values.insert(*tensor_id, value.clone());
-                } else {
-                    // Can't do this one yet
-                    failed_to_fetch = true;
-                    continue;
+            let GraphOperation { name: _, op } = ops.get(op_id).unwrap();
+            let mut n_dropped_tensor = 0;
+            let mut fast_reused_tensors = 0;
+            let mut are_inputs_present = true;
+            let inputs = op.get_inputs();
+            for input in &inputs {
+                if tensors_just_created.contains(input) {
+                    fast_reused_tensors += 1;
+                }
+                if let Some(x) = tensor_uses_left.get(input)
+                    && *x <= 1
+                {
+                    n_dropped_tensor += 1;
+                }
+                if !active_tensors.contains_key(input) {
+                    are_inputs_present = false;
                 }
             }
-            if failed_to_fetch {
-                continue;
+            if are_inputs_present {
+                let score = n_dropped_tensor + inputs.len() + fast_reused_tensors * 4;
+                if let Some(best_score) = best_op_id_score {
+                    if score > best_score {
+                        best_op_id_score = Some(score);
+                        best_op_id = Some(*op_id);
+                    }
+                } else {
+                    best_op_id_score = Some(score);
+                    best_op_id = Some(*op_id);
+                }
             }
+        }
+
+        if let Some(op_id) = best_op_id {
+            let GraphOperation { name, op } = ops.get(&op_id).unwrap();
+            let input_ids = op.get_inputs();
+            let mut input_values = HashMap::new();
+            for tensor_id in input_ids {
+                if let Some(value) = active_tensors.get(&tensor_id) {
+                    // Validate shape and dtype
+                    let tensor_info = model.get_tensor_info(tensor_id).unwrap();
+                    check_tensor_matches(value, tensor_info)
+                        .map_err(|x| EvalRuntimeError::EvalError(name.clone(), x))?;
+                    input_values.insert(tensor_id, value.clone());
+
+                    let entry = tensor_uses_left.entry(tensor_id).or_insert_with(|| 0);
+                    if *entry > 0 {
+                        *entry -= 1;
+                    }
+                    if *entry == 0 {
+                        active_tensors.remove(&tensor_id);
+                    }
+                } else {
+                    // Should not happen!
+                    panic!();
+                }
+            }
+
             let start_instant = Instant::now();
             let outputs = op
                 .eval(eval_backend, &input_values)
                 .map_err(|x| EvalRuntimeError::EvalError(name.clone(), x))?;
             let end_instant = Instant::now();
             observer.on_op_executed(
-                &SymbolicGraphNodePath::Node(*op_id),
+                &SymbolicGraphNodePath::Node(op_id),
                 start_instant,
                 end_instant,
                 eval_backend,
             );
+            let mut new_tensors = vec![];
             for (tensor_id, value) in outputs {
                 //assert_eq!(value.has_nan().unwrap(), false);
 
@@ -177,17 +229,19 @@ pub fn run<T: SymbolicGraphObserver>(
                     &value,
                     eval_backend,
                 );
-                active_tensors.insert(tensor_id, value);
+                if let Some(x) = tensor_uses_left.get(&tensor_id)
+                    && *x > 0
+                {
+                    active_tensors.insert(tensor_id, value);
+                    new_tensors.push(tensor_id);
+                }
             }
-            ops_completed_now.push(*op_id)
-        }
-        remaining_ops_to_complete.retain(|&x| !ops_completed_now.contains(&x));
-        if ops_completed_now.is_empty() {
-            // Hopefully we are done now
+            tensors_just_created = new_tensors;
+            remaining_ops_to_complete.remove(&op_id);
+        } else {
+            // No options, must exit
             break;
         }
-
-        total_ops_completed.extend(ops_completed_now);
     }
 
     let mut output_tensors = HashMap::new();
