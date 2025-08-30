@@ -11,7 +11,7 @@ use crate::milli_graph::{
 use crate::model::ModelError;
 use crate::numeric_tensor::NumericTensorError;
 use crate::numeric_tensor_typed::TypedNumericTensorError;
-use crate::super_graph::cache::SuperGraphCache;
+use crate::super_graph::cache::{SuperGraphCache, SuperGraphTensorCache};
 use crate::super_graph::data::SuperGraphData;
 pub use crate::super_graph::links::{
     SuperGraphAnyLink, SuperGraphLinkHash, SuperGraphLinkId, SuperGraphLinkModel,
@@ -48,20 +48,25 @@ pub enum SuperGraphError {
 
 pub type SuperGraphHash = u64;
 
+pub struct SuperGraphContext<'short, 'model, 'c, 'd, T: SuperGraphObserver> {
+    pub observer: &'short mut T,
+    pub eval_backend: &'c mut EvalBackend<'d>,
+    pub caches: Option<&'short mut SuperGraphCache>,
+    pub super_graph_tensor_cache: &'short mut SuperGraphTensorCache<'model>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SuperGraph {
     pub inner: SuperGraphInner,
 }
 
 impl SuperGraph {
-    pub fn run<'a, T: SuperGraphObserver>(
-        &'a self,
-        data: SuperGraphData<'a>,
-        caches: Option<&mut SuperGraphCache>,
-        observer: &mut T,
-        backend: &mut EvalBackend,
-    ) -> Result<SuperGraphData<'a>, SuperGraphError> {
-        self.inner.eval(&[], data, caches, observer, backend)
+    pub fn run<'short, 'model, 'c, 'd, T: SuperGraphObserver>(
+        &'short self,
+        data: SuperGraphData<'model>,
+        context: &mut SuperGraphContext<'short, 'model, 'c, 'd, T>,
+    ) -> Result<SuperGraphData<'model>, SuperGraphError> {
+        self.inner.eval(&[], data, context)
     }
 
     pub fn get_all_links(&self) -> HashSet<SuperGraphAnyLink> {
@@ -77,14 +82,12 @@ pub struct SuperGraphInner {
 }
 
 impl SuperGraphInner {
-    pub fn eval<'a, T: SuperGraphObserver>(
+    pub fn eval<'a, 'b, 'c, 'd, T: SuperGraphObserver>(
         &'a self,
         node_path: &[SuperGraphNodeId],
-        data: SuperGraphData<'a>,
-        mut caches: Option<&mut SuperGraphCache>,
-        observer: &mut T,
-        backend: &mut EvalBackend,
-    ) -> Result<SuperGraphData<'a>, SuperGraphError> {
+        data: SuperGraphData<'b>,
+        context: &mut SuperGraphContext<'a, 'b, 'c, 'd, T>,
+    ) -> Result<SuperGraphData<'b>, SuperGraphError> {
         let mut data = data;
 
         let mut remaining_ops = self.nodes.keys().cloned().collect::<Vec<_>>();
@@ -142,19 +145,13 @@ impl SuperGraphInner {
                 this_path.push(op_id);
                 let op = self.nodes.get(&op_id).unwrap();
                 let start_instant = Instant::now();
-                op.eval(
-                    &this_path,
-                    &mut data,
-                    caches.as_deref_mut(),
-                    observer,
-                    backend,
-                )?;
+                op.eval(&this_path, &mut data, context)?;
                 let end_instant = Instant::now();
-                observer.on_node_executed(
+                context.observer.on_node_executed(
                     &SuperGraphNodePath::SuperGraphNode(this_path),
                     start_instant,
                     end_instant,
-                    backend,
+                    context.eval_backend,
                 );
                 remaining_ops.retain(|x| *x != op_id);
             } else {

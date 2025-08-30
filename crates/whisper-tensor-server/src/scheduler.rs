@@ -2,19 +2,21 @@ use crate::ModelServer;
 use crossbeam::queue::ArrayQueue;
 use log::error;
 use std::collections::{HashMap, HashSet};
+use std::ptr;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::sync::{Notify, mpsc};
 use whisper_tensor::DynRank;
+use whisper_tensor::backends::ModelLoadedTensorCache;
 use whisper_tensor::backends::eval_backend::EvalBackend;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::numeric_tensor::NumericTensor;
-use whisper_tensor::super_graph::cache::SuperGraphCache;
+use whisper_tensor::super_graph::cache::{SuperGraphCache, SuperGraphTensorCache};
 use whisper_tensor::super_graph::data::SuperGraphData;
 use whisper_tensor::super_graph::observer::SuperGraphObserver;
-use whisper_tensor::super_graph::{SuperGraphNodePath, SuperGraphTensorPath};
+use whisper_tensor::super_graph::{SuperGraphContext, SuperGraphNodePath, SuperGraphTensorPath};
 use whisper_tensor_server::{
-    AbbreviatedTensorReportSettings, AbbreviatedTensorValue, SuperGraphRequest,
+    AbbreviatedTensorReportSettings, AbbreviatedTensorValue, LoadedModelId, SuperGraphRequest,
     SuperGraphRequestBackendMode, SuperGraphResponse, SuperGraphResponseData,
 };
 
@@ -200,20 +202,26 @@ pub async fn scheduler(mut input: mpsc::Receiver<SchedulerJob>, model_server: Ar
         ))
     };
     let caches = Arc::new(Mutex::new(HashMap::new()));
+    let vulkan_tensor_load_caches: Arc<Mutex<HashMap<LoadedModelId, ModelLoadedTensorCache>>> =
+        Arc::new(Mutex::new(HashMap::new()));
     loop {
         if let Some(x) = input.recv().await {
             #[cfg(feature = "vulkan")]
             let vulkan_runtime = vulkan_runtime.clone();
             let caches = caches.clone();
+            #[cfg(feature = "vulkan")]
+            let vulkan_tensor_load_caches = vulkan_tensor_load_caches.clone();
             match x {
                 SchedulerJob::SuperGraphRequest((req, resp_sender, reporter)) => {
                     // Collect links to needed models
+                    let mut model_id_map = HashMap::new();
                     let models = {
                         let mut models = HashMap::new();
                         for (link, &model_id) in &req.model_inputs {
                             let model = model_server.get_model(model_id).await;
                             if let Some(model) = model {
-                                models.insert(*link, model);
+                                models.insert(*link, model.clone());
+                                model_id_map.insert(model_id, model);
                             }
                         }
                         models
@@ -244,6 +252,7 @@ pub async fn scheduler(mut input: mpsc::Receiver<SchedulerJob>, model_server: Ar
                                         .tensors
                                         .insert(link, NumericTensor::from(tensor));
                                 }
+
                                 // Populate data with refs
                                 for link in req.model_inputs.keys() {
                                     if let Some(model) = models.get(link) {
@@ -264,13 +273,53 @@ pub async fn scheduler(mut input: mpsc::Receiver<SchedulerJob>, model_server: Ar
                                     req.subscribed_tensors.iter().cloned().collect(),
                                 );
                                 let mut caches = caches.lock().unwrap();
-                                let cache = req
-                                    .use_cache
-                                    .map(|x| caches.entry(x).or_insert_with(SuperGraphCache::new));
-                                let res = req
-                                    .super_graph
-                                    .run(super_graph_data, cache, &mut observer, backend)
-                                    .map_err(|x| x.to_string())?;
+                                let mut vulkan_tensor_load_caches =
+                                    vulkan_tensor_load_caches.lock().unwrap();
+
+                                // setup tensor caches
+                                let res = {
+                                    let mut super_graph_tensor_cache = {
+                                        let mut res = SuperGraphTensorCache::new();
+                                        #[cfg(feature = "vulkan")]
+                                        if let EvalBackend::Vulkan(_) = backend {
+                                            for (a, b) in &model_id_map {
+                                                if let Some(x) = vulkan_tensor_load_caches.remove(a)
+                                                {
+                                                    res.caches.push((b.as_ref(), x));
+                                                } else {
+                                                    res.caches.push((
+                                                        b.as_ref(),
+                                                        ModelLoadedTensorCache::default(),
+                                                    ));
+                                                }
+                                            }
+                                        }
+                                        res
+                                    };
+                                    let cache = req.use_cache.map(|x| {
+                                        caches.entry(x).or_insert_with(SuperGraphCache::new)
+                                    });
+                                    let mut context = SuperGraphContext {
+                                        observer: &mut observer,
+                                        eval_backend: backend,
+                                        caches: cache,
+                                        super_graph_tensor_cache: &mut super_graph_tensor_cache,
+                                    };
+                                    let ret = req
+                                        .super_graph
+                                        .run(super_graph_data, &mut context)
+                                        .map_err(|x| x.to_string())?;
+                                    // Re-pack tensor caches
+                                    for (a, b) in super_graph_tensor_cache.caches {
+                                        for (aa, bb) in &model_id_map {
+                                            if ptr::addr_eq(a, bb.as_ref()) {
+                                                vulkan_tensor_load_caches.insert(*aa, b);
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    ret
+                                };
 
                                 let SuperGraphData {
                                     tensors,

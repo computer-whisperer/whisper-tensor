@@ -122,7 +122,7 @@ impl OnnxNodeTest {
 
             // Run the model
             let outputs = model
-                .eval(inputs, &mut (), backend)
+                .eval(inputs, &mut (), None, backend)
                 .map_err(|e| format!("Model execution failed: {e:?}"))?;
 
             // Compare outputs with expected values

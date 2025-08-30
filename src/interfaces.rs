@@ -7,7 +7,7 @@ use crate::milli_graph::ops::{
 };
 use crate::model::Model;
 use crate::numeric_tensor::NumericTensor;
-use crate::super_graph::cache::SuperGraphCache;
+use crate::super_graph::cache::{SuperGraphCache, SuperGraphTensorCache};
 use crate::super_graph::data::SuperGraphData;
 use crate::super_graph::links::{
     SuperGraphLink, SuperGraphLinkDouble, SuperGraphLinkHash, SuperGraphLinkModel,
@@ -17,7 +17,7 @@ use crate::super_graph::nodes::{
     SuperGraphNode, SuperGraphNodeMilliOpGraph, SuperGraphNodeModelExecution,
     SuperGraphNodeRNNCacheRead, SuperGraphNodeRNNCacheWrite, SuperGraphNodeScan,
 };
-use crate::super_graph::{SuperGraph, SuperGraphBuilder, SuperGraphError};
+use crate::super_graph::{SuperGraph, SuperGraphBuilder, SuperGraphContext, SuperGraphError};
 use crate::symbolic_graph::SymbolicGraph;
 use crate::tokenizer::{AnyTokenizer, Tokenizer};
 use serde::{Deserialize, Serialize};
@@ -562,10 +562,16 @@ impl TextInferenceTokensInLogitOutInterface {
             super_graph_data.hashes.insert(self.cache_key_input_link, 0);
             super_graph_data
         };
-
-        let super_graph_output =
-            self.super_graph
-                .run(super_graph_data, super_graph_caches, &mut (), backend)?;
+        let super_graph_output = {
+            let mut observer = ();
+            let mut context = SuperGraphContext {
+                observer: &mut observer,
+                eval_backend: backend,
+                super_graph_tensor_cache: &mut SuperGraphTensorCache::new(),
+                caches: super_graph_caches,
+            };
+            self.super_graph.run(super_graph_data, &mut context)?
+        };
         let logits = super_graph_output
             .tensors
             .get(&self.logit_output_link)

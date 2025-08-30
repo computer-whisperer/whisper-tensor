@@ -174,7 +174,7 @@ impl PipelineCache {
 
 #[derive(Debug)]
 pub struct VulkanImmediateExecutor {
-    context: VulkanContext,
+    pub(crate) context: VulkanContext,
     buffers: Vec<VulkanImmediateExecutorBuffer>,
     host_transfer_buffer: Option<Subbuffer<[u8]>>,
     descriptor_set_layouts: HashMap<BTreeSet<u32>, Arc<DescriptorSetLayout>>,

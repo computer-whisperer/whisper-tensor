@@ -1,3 +1,4 @@
+use crate::backends::ModelLoadedTensorCache;
 #[cfg(feature = "vulkan")]
 use crate::backends::vulkan_backend::VulkanImmediateExecutor;
 use crate::dtype::{DType, DTypeError};
@@ -9,7 +10,7 @@ use crate::symbolic_graph::{
     GraphOperation, SymbolicGraph, SymbolicGraphNodePath, SymbolicGraphOperationId,
     SymbolicGraphTensorId, SymbolicGraphTensorPath, check_tensor_matches,
 };
-use crate::tensor_rank::DynRank;
+use crate::tensor_rank::{DynRank, Rank};
 use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
 use std::time::Instant;
@@ -82,6 +83,21 @@ impl<'a> EvalBackend<'a> {
             }
         }
     }
+
+    pub fn is_on_backend<R: Rank>(&self, tensor: &NumericTensor<R>) -> bool {
+        match (self, tensor) {
+            (EvalBackend::NDArray, NumericTensor::NDArray(_)) => true,
+            #[cfg(feature = "candle")]
+            (EvalBackend::Candle(_), NumericTensor::Candle(_)) => true,
+            #[cfg(feature = "vulkan")]
+            (EvalBackend::Vulkan(vk_executor), NumericTensor::Vulkan(vk_tensor)) => {
+                vk_executor.context.device == *vk_tensor.get_device()
+            }
+            #[cfg(feature = "tch")]
+            (EvalBackend::TCH, NumericTensor::TCH(_)) => true,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -103,13 +119,21 @@ pub enum EvalRuntimeError {
 pub fn run<T: SymbolicGraphObserver>(
     model: &SymbolicGraph,
     tensor_store: &TensorStore,
+    loaded_tensor_cache: Option<&mut ModelLoadedTensorCache>,
     eval_backend: &mut EvalBackend,
     observer: &mut T,
     inputs: HashMap<String, NumericTensor<DynRank>>,
 ) -> Result<HashMap<String, NumericTensor<DynRank>>, EvalRuntimeError> {
-    let initialized_tensors = model.get_initialized_tensors(tensor_store);
+    let initialized_tensors = if let Some(tensor_cache) = loaded_tensor_cache {
+        model.get_initialized_tensors_cached(tensor_store, tensor_cache, eval_backend)
+    } else {
+        model.get_initialized_tensors(tensor_store)
+    };
+    let mut tensor_uses_left: HashMap<SymbolicGraphTensorId, usize> = HashMap::new();
     let mut active_tensors: HashMap<SymbolicGraphTensorId, NumericTensor<DynRank>> = HashMap::new();
     for (tensor_id, tensor) in initialized_tensors {
+        // Start with 1 extra use with initialized tensors, assuming they will stay on-device after
+        *tensor_uses_left.entry(tensor_id).or_insert(0) += 1;
         active_tensors.insert(tensor_id, tensor);
     }
     let tensors_by_name = model.get_tensors_by_name();
@@ -124,7 +148,6 @@ pub fn run<T: SymbolicGraphObserver>(
         }
     }
 
-    let mut tensor_uses_left: HashMap<SymbolicGraphTensorId, usize> = HashMap::new();
     for id in model.get_outputs() {
         let val = tensor_uses_left.entry(id).or_insert_with(|| 0);
         *val += 1;

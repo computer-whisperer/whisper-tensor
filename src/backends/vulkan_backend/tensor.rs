@@ -5,6 +5,7 @@ use crate::tensor_rank::{DimContainer, DimProduct, Rank};
 use std::sync::Arc;
 use vulkano::buffer::Subbuffer;
 use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, CopyBufferInfo};
+use vulkano::device::Device;
 use vulkano::memory::allocator::Suballocation;
 use vulkano::sync::GpuFuture;
 
@@ -35,6 +36,10 @@ impl<R: Rank> VulkanTensor<R> {
         }
         stride.reverse();
         R::KnownDims::try_from_slice(stride.as_slice()).unwrap()
+    }
+
+    pub fn get_device(&self) -> &Arc<Device> {
+        &self.buffer_transfer_kit.context.device
     }
 
     /// # Safety

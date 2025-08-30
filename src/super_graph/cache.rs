@@ -1,4 +1,6 @@
 use crate::DynRank;
+use crate::backends::ModelLoadedTensorCache;
+use crate::model::Model;
 use crate::numeric_tensor::NumericTensor;
 use std::collections::HashMap;
 
@@ -14,5 +16,16 @@ impl SuperGraphCache {
         Self {
             rnn_cache: HashMap::new(),
         }
+    }
+}
+
+#[derive(Default)]
+pub struct SuperGraphTensorCache<'model> {
+    pub caches: Vec<(&'model Model, ModelLoadedTensorCache)>,
+}
+
+impl<'model> SuperGraphTensorCache<'model> {
+    pub fn new() -> Self {
+        Self { caches: Vec::new() }
     }
 }

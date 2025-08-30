@@ -9,7 +9,7 @@ use whisper_tensor::milli_graph::ops::{
     MilliOpSlice, MilliOpSqueeze, MilliOpUnsqueeze,
 };
 use whisper_tensor::model::Model;
-use whisper_tensor::super_graph::SuperGraphBuilder;
+use whisper_tensor::super_graph::cache::{SuperGraphCache, SuperGraphTensorCache};
 use whisper_tensor::super_graph::data::SuperGraphData;
 use whisper_tensor::super_graph::links::{
     SuperGraphLink, SuperGraphLinkModel, SuperGraphLinkString, SuperGraphLinkTensor,
@@ -18,6 +18,7 @@ use whisper_tensor::super_graph::nodes::{
     SuperGraphNodeMilliOpGraph, SuperGraphNodeModelExecution, SuperGraphNodeTokenizerDecode,
     SuperGraphNodeTokenizerEncode, SuperGraphNodeTokenizerLoad,
 };
+use whisper_tensor::super_graph::{SuperGraphBuilder, SuperGraphContext};
 use whisper_tensor_import::onnx_graph::{TokenizerInfo, WeightStorageStrategy};
 use whisper_tensor_import::{ModelTypeHint, identify_and_load};
 
@@ -133,7 +134,15 @@ fn main() {
         "The fibonacci sequence is: 1, 1, 2, 3, 5, 8, 13,".to_string(),
     );
     let res = super_graph
-        .run(super_graph_data, None, &mut (), &mut EvalBackend::NDArray)
+        .run(
+            super_graph_data,
+            &mut SuperGraphContext {
+                observer: &mut (),
+                eval_backend: &mut EvalBackend::NDArray,
+                caches: None,
+                super_graph_tensor_cache: &mut SuperGraphTensorCache::new(),
+            },
+        )
         .unwrap();
     let res = res.strings.get(&text_output).unwrap();
     println!("{res:?}");

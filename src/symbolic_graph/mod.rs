@@ -2,6 +2,7 @@ pub mod observer;
 pub mod ops;
 pub mod tensor_store;
 
+use crate::backends::ModelLoadedTensorCache;
 use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::{NDArrayNumericTensor, NDArrayNumericTensorError};
 use crate::dtype::DType;
@@ -301,6 +302,36 @@ impl SymbolicGraphInner {
         self.tensors.get(&tensor_id)
     }
 
+    pub fn get_initialized_tensors_cached(
+        &self,
+        tensor_store: &TensorStore,
+        loaded_tensor_cache: &mut ModelLoadedTensorCache,
+        eval_backend: &mut EvalBackend,
+    ) -> HashMap<SymbolicGraphTensorId, NumericTensor<DynRank>> {
+        let mut out = HashMap::new();
+
+        for (key, tensor) in &self.tensors {
+            if let Some(x) = loaded_tensor_cache.tensors.get(key) {
+                out.insert(*key, x.clone());
+            } else {
+                let tensor = match &tensor.tensor_type {
+                    TensorType::Constant(x) => Some(x.get_tensor(tensor_store)),
+                    TensorType::Input(Some(x)) => Some(x.get_tensor(tensor_store)),
+                    _ => None,
+                };
+                if let Some(tensor) = tensor {
+                    let loaded_tensor = eval_backend.to_native_type(&tensor);
+                    loaded_tensor_cache
+                        .tensors
+                        .insert(*key, loaded_tensor.clone());
+                    out.insert(*key, loaded_tensor);
+                }
+            }
+        }
+
+        out
+    }
+
     pub fn get_initialized_tensors(
         &self,
         tensor_store: &TensorStore,
@@ -499,6 +530,19 @@ impl SymbolicGraph {
         tensor_store: &TensorStore,
     ) -> HashMap<SymbolicGraphTensorId, NumericTensor<DynRank>> {
         self.inner_graph.get_initialized_tensors(tensor_store)
+    }
+
+    pub fn get_initialized_tensors_cached(
+        &self,
+        tensor_store: &TensorStore,
+        loaded_tensor_cache: &mut ModelLoadedTensorCache,
+        eval_backend: &mut EvalBackend,
+    ) -> HashMap<SymbolicGraphTensorId, NumericTensor<DynRank>> {
+        self.inner_graph.get_initialized_tensors_cached(
+            tensor_store,
+            loaded_tensor_cache,
+            eval_backend,
+        )
     }
 }
 

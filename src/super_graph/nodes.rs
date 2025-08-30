@@ -4,7 +4,6 @@ use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::milli_graph::observer::MilliOpGraphObserver;
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphNodePath, MilliOpGraphTensorPath};
 use crate::numeric_tensor::NumericTensor;
-use crate::super_graph::cache::SuperGraphCache;
 use crate::super_graph::links::{
     SuperGraphAnyLink, SuperGraphLink, SuperGraphLinkDouble, SuperGraphLinkHash,
     SuperGraphLinkModel, SuperGraphLinkString, SuperGraphLinkTensor, SuperGraphLinkTokenizer,
@@ -12,8 +11,8 @@ use crate::super_graph::links::{
 };
 use crate::super_graph::observer::SuperGraphObserver;
 use crate::super_graph::{
-    SuperGraphBuilder, SuperGraphData, SuperGraphError, SuperGraphInner, SuperGraphNodeId,
-    SuperGraphNodePath, SuperGraphTensorPath,
+    SuperGraphBuilder, SuperGraphContext, SuperGraphData, SuperGraphError, SuperGraphInner,
+    SuperGraphNodeId, SuperGraphNodePath, SuperGraphTensorPath,
 };
 use crate::symbolic_graph::observer::SymbolicGraphObserver;
 use crate::symbolic_graph::{SymbolicGraphNodePath, SymbolicGraphTensorPath};
@@ -21,6 +20,7 @@ use crate::tokenizer::{AnyTokenizer, Tokenizer};
 use rwkv_tokenizer::WorldTokenizer;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::ptr;
 use std::time::Instant;
 use typenum::P1;
 use whisper_tensor_import::onnx_graph::TokenizerInfo;
@@ -29,13 +29,11 @@ pub trait SuperGraphNode {
     fn get_inputs(&self) -> Vec<SuperGraphAnyLink>;
     fn get_outputs(&self) -> Vec<SuperGraphAnyLink>;
     fn to_any(self) -> SuperGraphAnyNode;
-    fn eval<'a, T: SuperGraphObserver>(
+    fn eval<'a, 'b, 'c, 'd, T: SuperGraphObserver>(
         &'a self,
         this_path: &[SuperGraphNodeId],
-        data: &mut SuperGraphData<'a>,
-        caches: Option<&mut SuperGraphCache>,
-        observer: &mut T,
-        backend: &mut EvalBackend,
+        data: &mut SuperGraphData<'b>,
+        context: &mut SuperGraphContext<'a, 'b, 'c, 'd, T>,
     ) -> Result<(), SuperGraphError>;
 }
 
@@ -131,9 +129,7 @@ impl SuperGraphNode for SuperGraphNodeModelExecution {
         &self,
         node_path: &[SuperGraphNodeId],
         data: &mut SuperGraphData,
-        _caches: Option<&mut SuperGraphCache>,
-        observer: &mut T,
-        backend: &mut EvalBackend,
+        context: &mut SuperGraphContext<T>,
     ) -> Result<(), SuperGraphError> {
         let model = data.models.get(&self.model).unwrap();
 
@@ -145,8 +141,21 @@ impl SuperGraphNode for SuperGraphNodeModelExecution {
             inputs
         };
 
-        let mut observer = SymbolicGraphObserverWrapper::new(observer, node_path);
-        let outputs = model.eval(inputs, &mut observer, backend)?;
+        let mut observer = SymbolicGraphObserverWrapper::new(context.observer, node_path);
+        let tensor_cache = {
+            let mut res = None;
+            for (a, b) in &mut context.super_graph_tensor_cache.caches {
+                if ptr::eq(*a, *model) {
+                    res = Some(b)
+                }
+            }
+            res
+        };
+        let outputs = if let Some(x) = tensor_cache {
+            model.eval(inputs, &mut observer, Some(x), context.eval_backend)?
+        } else {
+            model.eval(inputs, &mut observer, None, context.eval_backend)?
+        };
         for (name, link) in &self.tensor_outputs {
             data.tensors
                 .insert(*link, outputs.get(name).unwrap().clone());
@@ -198,9 +207,7 @@ impl SuperGraphNode for SuperGraphNodeTokenizerLoad {
         &self,
         _this_path: &[SuperGraphNodeId],
         data: &mut SuperGraphData,
-        _caches: Option<&mut SuperGraphCache>,
-        _observer: &mut T,
-        _backend: &mut EvalBackend,
+        _context: &mut SuperGraphContext<T>,
     ) -> Result<(), SuperGraphError> {
         let tokenizer = match &self.info {
             TokenizerInfo::HFTokenizer(name) => {
@@ -283,9 +290,7 @@ impl SuperGraphNode for SuperGraphNodeTokenizerEncode {
         &self,
         _this_path: &[SuperGraphNodeId],
         data: &mut SuperGraphData,
-        _caches: Option<&mut SuperGraphCache>,
-        _observer: &mut T,
-        _backend: &mut EvalBackend,
+        _context: &mut SuperGraphContext<T>,
     ) -> Result<(), SuperGraphError> {
         let text = data.strings.get(&self.text_input).unwrap();
         let tokenizer = data.tokenizers.get(&self.tokenizer).unwrap();
@@ -353,9 +358,7 @@ impl SuperGraphNode for SuperGraphNodeTokenizerDecode {
         &self,
         _node_path: &[SuperGraphNodeId],
         data: &mut SuperGraphData,
-        _caches: Option<&mut SuperGraphCache>,
-        _observer: &mut T,
-        _backend: &mut EvalBackend,
+        _context: &mut SuperGraphContext<T>,
     ) -> Result<(), SuperGraphError> {
         let tensor = data.tensors.get(&self.tensor_input).unwrap();
         let tokenizer = data.tokenizers.get(&self.tokenizer).unwrap();
@@ -440,9 +443,7 @@ impl SuperGraphNode for SuperGraphNodeMilliOpGraph {
         &self,
         node_path: &[SuperGraphNodeId],
         data: &mut SuperGraphData,
-        _caches: Option<&mut SuperGraphCache>,
-        observer: &mut T,
-        backend: &mut EvalBackend,
+        context: &mut SuperGraphContext<T>,
     ) -> Result<(), SuperGraphError> {
         let inputs = {
             let mut inputs = HashMap::new();
@@ -451,8 +452,10 @@ impl SuperGraphNode for SuperGraphNodeMilliOpGraph {
             }
             inputs
         };
-        let mut observer = MilliOpGraphObserverWrapper::new(observer, node_path);
-        let res = self.graph.eval(&inputs, &mut observer, backend)?;
+        let mut observer = MilliOpGraphObserverWrapper::new(context.observer, node_path);
+        let res = self
+            .graph
+            .eval(&inputs, &mut observer, context.eval_backend)?;
         data.tensors.extend(res);
         Ok(())
     }
@@ -522,13 +525,11 @@ impl SuperGraphNode for SuperGraphNodeScan {
         SuperGraphAnyNode::Scan(self)
     }
 
-    fn eval<'a, T: SuperGraphObserver>(
+    fn eval<'a, 'b, 'c, 'd, T: SuperGraphObserver>(
         &'a self,
         node_path: &[SuperGraphNodeId],
-        data: &mut SuperGraphData<'a>,
-        mut caches: Option<&mut SuperGraphCache>,
-        observer: &mut T,
-        backend: &mut EvalBackend,
+        data: &mut SuperGraphData<'b>,
+        context: &mut SuperGraphContext<'a, 'b, 'c, 'd, T>,
     ) -> Result<(), SuperGraphError> {
         let iteration_count_tensor = data
             .tensors
@@ -671,19 +672,13 @@ impl SuperGraphNode for SuperGraphNodeScan {
                         }
                         slice_ranges
                     };
-                    let sliced = tensor.slice(slice_arg.as_slice(), backend)?;
+                    let sliced = tensor.slice(slice_arg.as_slice(), context.eval_backend)?;
                     let squeezed = sliced.squeeze(*scan_axis as usize)?;
                     iter_inputs.tensors.insert(*inner, squeezed);
                 }
                 iter_inputs
             };
-            let iter_outputs = self.inner_graph.eval(
-                node_path,
-                iter_inputs,
-                caches.as_deref_mut(),
-                observer,
-                backend,
-            )?;
+            let iter_outputs = self.inner_graph.eval(node_path, iter_inputs, context)?;
 
             for (inner, outer, _scan_axis) in &self.scan_outputs {
                 let tensor = iter_outputs
@@ -829,7 +824,11 @@ impl SuperGraphNode for SuperGraphNodeScan {
             let unsqueezed_ref = unsqueezed.iter().collect::<Vec<_>>();
             output_data.tensors.insert(
                 link,
-                NumericTensor::<DynRank>::concat(unsqueezed_ref.as_slice(), axis, backend)?,
+                NumericTensor::<DynRank>::concat(
+                    unsqueezed_ref.as_slice(),
+                    axis,
+                    context.eval_backend,
+                )?,
             );
         }
 
@@ -884,13 +883,11 @@ impl SuperGraphNode for SuperGraphNodeRNNCacheRead {
         SuperGraphAnyNode::RNNCacheRead(self)
     }
 
-    fn eval<'a, T: SuperGraphObserver>(
-        &'a self,
+    fn eval<T: SuperGraphObserver>(
+        &self,
         _node_path: &[SuperGraphNodeId],
-        data: &mut SuperGraphData<'a>,
-        caches: Option<&mut SuperGraphCache>,
-        _observer: &mut T,
-        _backend: &mut EvalBackend,
+        data: &mut SuperGraphData,
+        context: &mut SuperGraphContext<T>,
     ) -> Result<(), SuperGraphError> {
         let tokens_input = data
             .tensors
@@ -898,7 +895,7 @@ impl SuperGraphNode for SuperGraphNodeRNNCacheRead {
             .ok_or(SuperGraphError::MissingLinkError())?
             .clone();
         let mut found = false;
-        if let Some(caches) = caches {
+        if let Some(caches) = &mut context.caches {
             let key_input = *data
                 .hashes
                 .get(&self.key_input)
@@ -991,15 +988,13 @@ impl SuperGraphNode for SuperGraphNodeRNNCacheWrite {
         SuperGraphAnyNode::RNNCacheWrite(self)
     }
 
-    fn eval<'a, T: SuperGraphObserver>(
-        &'a self,
+    fn eval<T: SuperGraphObserver>(
+        &self,
         _node_path: &[SuperGraphNodeId],
-        data: &mut SuperGraphData<'a>,
-        caches: Option<&mut SuperGraphCache>,
-        _observer: &mut T,
-        _backend: &mut EvalBackend,
+        data: &mut SuperGraphData,
+        context: &mut SuperGraphContext<T>,
     ) -> Result<(), SuperGraphError> {
-        if let Some(caches) = caches {
+        if let Some(caches) = &mut context.caches {
             let key_input = *data
                 .hashes
                 .get(&self.key_input)
@@ -1070,37 +1065,21 @@ impl SuperGraphAnyNode {
         }
     }
 
-    pub(crate) fn eval<'a, T: SuperGraphObserver>(
+    pub(crate) fn eval<'a, 'b, 'c, 'd, T: SuperGraphObserver>(
         &'a self,
         node_path: &[SuperGraphNodeId],
-        data: &mut SuperGraphData<'a>,
-        caches: Option<&mut SuperGraphCache>,
-        observer: &mut T,
-        backend: &mut EvalBackend,
+        data: &mut SuperGraphData<'b>,
+        context: &mut SuperGraphContext<'a, 'b, 'c, 'd, T>,
     ) -> Result<(), SuperGraphError> {
         match self {
-            SuperGraphAnyNode::ModelExecution(node) => {
-                node.eval(node_path, data, caches, observer, backend)
-            }
-            SuperGraphAnyNode::TokenizerEncode(node) => {
-                node.eval(node_path, data, caches, observer, backend)
-            }
-            SuperGraphAnyNode::TokenizerDecode(node) => {
-                node.eval(node_path, data, caches, observer, backend)
-            }
-            SuperGraphAnyNode::TokenizerLoad(node) => {
-                node.eval(node_path, data, caches, observer, backend)
-            }
-            SuperGraphAnyNode::MilliOpGraph(node) => {
-                node.eval(node_path, data, caches, observer, backend)
-            }
-            SuperGraphAnyNode::Scan(node) => node.eval(node_path, data, caches, observer, backend),
-            SuperGraphAnyNode::RNNCacheWrite(node) => {
-                node.eval(node_path, data, caches, observer, backend)
-            }
-            SuperGraphAnyNode::RNNCacheRead(node) => {
-                node.eval(node_path, data, caches, observer, backend)
-            }
+            SuperGraphAnyNode::ModelExecution(node) => node.eval(node_path, data, context),
+            SuperGraphAnyNode::TokenizerEncode(node) => node.eval(node_path, data, context),
+            SuperGraphAnyNode::TokenizerDecode(node) => node.eval(node_path, data, context),
+            SuperGraphAnyNode::TokenizerLoad(node) => node.eval(node_path, data, context),
+            SuperGraphAnyNode::MilliOpGraph(node) => node.eval(node_path, data, context),
+            SuperGraphAnyNode::Scan(node) => node.eval(node_path, data, context),
+            SuperGraphAnyNode::RNNCacheWrite(node) => node.eval(node_path, data, context),
+            SuperGraphAnyNode::RNNCacheRead(node) => node.eval(node_path, data, context),
         }
     }
 

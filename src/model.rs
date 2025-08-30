@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use crate::backends::eval_backend;
 use crate::backends::eval_backend::{EvalBackend, EvalRuntimeError};
+use crate::backends::{ModelLoadedTensorCache, eval_backend};
 use crate::dtype::DType;
 use crate::numeric_tensor::{NumericTensor, NumericTensorError};
 use crate::onnx::{ModelProto, StringStringEntryProto};
@@ -12,7 +12,7 @@ use whisper_tensor_import::onnx_graph::{InputMetadata, ModelMetadata, OutputMeta
 use crate::backends::onnx_reference_backend::{self, ONNXReferenceTensor};
 
 use crate::symbolic_graph::tensor_store::TensorStore;
-use crate::symbolic_graph::{ONNXDecodingError, SymbolicGraph, SymbolicGraphMutator};
+use crate::symbolic_graph::{ONNXDecodingError, SymbolicGraph, SymbolicGraphMutator, TensorType};
 
 //#[cfg(feature = "ort")]
 //use crate::backends::ort_backend::ORTNumericTensor;
@@ -150,6 +150,28 @@ impl Model {
         })
     }
 
+    pub fn load_tensors(
+        &self,
+        cache: &mut ModelLoadedTensorCache,
+        eval_backend: &mut EvalBackend,
+    ) -> Result<(), ModelError> {
+        for (key, tensor) in self.graph.get_tensors() {
+            if !cache.tensors.contains_key(key) {
+                let tensor = match &tensor.tensor_type {
+                    TensorType::Constant(x) => Some(x.get_tensor(&self.tensor_store)),
+                    TensorType::Input(Some(x)) => Some(x.get_tensor(&self.tensor_store)),
+                    _ => None,
+                };
+                if let Some(tensor) = tensor {
+                    cache
+                        .tensors
+                        .insert(*key, eval_backend.to_native_type(&tensor));
+                }
+            }
+        }
+        Ok(())
+    }
+
     #[cfg(feature = "candle")]
     pub fn setup_candle_backend(&mut self) -> Result<(), anyhow::Error> {
         // Emit to some temp file because bs
@@ -205,6 +227,7 @@ impl Model {
             ModelExecutionRuntime::Eval(eval_backend) => eval_backend::run(
                 &self.graph,
                 &self.tensor_store,
+                None,
                 eval_backend,
                 observer,
                 inputs,
@@ -219,11 +242,13 @@ impl Model {
         &self,
         inputs: HashMap<String, NumericTensor<DynRank>>,
         observer: &mut T,
+        tensor_cache: Option<&mut ModelLoadedTensorCache>,
         eval_backend: &mut EvalBackend,
     ) -> Result<HashMap<String, NumericTensor<DynRank>>, ModelError> {
         Ok(eval_backend::run(
             &self.graph,
             &self.tensor_store,
+            tensor_cache,
             eval_backend,
             observer,
             inputs,

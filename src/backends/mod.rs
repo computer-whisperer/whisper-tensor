@@ -1,3 +1,8 @@
+use crate::DynRank;
+use crate::numeric_tensor::NumericTensor;
+use crate::symbolic_graph::SymbolicGraphTensorId;
+use std::collections::HashMap;
+
 #[cfg(feature = "candle")]
 pub mod candle_backend;
 #[cfg(feature = "onnx-reference")]
@@ -9,3 +14,8 @@ pub mod vulkan_backend;
 
 pub mod eval_backend;
 pub mod ndarray_backend;
+
+#[derive(Default)]
+pub struct ModelLoadedTensorCache {
+    pub tensors: HashMap<SymbolicGraphTensorId, NumericTensor<DynRank>>,
+}
