@@ -614,7 +614,7 @@ impl<R: Rank> VulkanTensor<R> {
         // *dispatch* operation.
         unsafe {
             builder.dispatch([
-                n.div_ceil(8) as u32,
+                m.div_ceil(8) as u32,
                 n.div_ceil(8) as u32,
                 common_shape.iter().product::<u64>() as u32,
             ])

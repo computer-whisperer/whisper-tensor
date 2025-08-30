@@ -70,6 +70,7 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_pow_f16);
         do_test!($runner_fn, $runner_name, test_reshape_fp32);
         do_test!($runner_fn, $runner_name, test_transpose_reshape_fp32);
+        do_test!($runner_fn, $runner_name, test_matmul_rank4_fp32);
     };
 }
 

@@ -60,6 +60,7 @@ pub struct Model {
     id: ModelID,
     graph: SymbolicGraph,
     tensor_store: TensorStore,
+    #[allow(dead_code)]
     onnx_data: Vec<u8>,
     model_metadata: Option<ModelMetadata>,
     pub model_inputs: HashMap<String, Option<InputMetadata>>,
