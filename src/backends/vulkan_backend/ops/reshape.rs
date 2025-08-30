@@ -39,7 +39,7 @@ impl<R: Rank> VulkanTensor<R> {
             suballocation,
             buffer,
             offset,
-            buffer_transfer_kit
+            buffer_transfer_kit,
         })
     }
 
@@ -61,7 +61,7 @@ impl<R: Rank> VulkanTensor<R> {
             suballocation: self.suballocation.clone(),
             buffer: self.buffer.clone(),
             offset: self.offset,
-            buffer_transfer_kit: self.buffer_transfer_kit.clone()
+            buffer_transfer_kit: self.buffer_transfer_kit.clone(),
         })
     }
 
@@ -84,7 +84,7 @@ impl<R: Rank> VulkanTensor<R> {
                 suballocation: self.suballocation.clone(),
                 buffer: self.buffer.clone(),
                 offset: self.offset,
-                buffer_transfer_kit: self.buffer_transfer_kit.clone()
+                buffer_transfer_kit: self.buffer_transfer_kit.clone(),
             })
         } else {
             Err(VulkanError::InvalidShape)
@@ -112,7 +112,7 @@ impl<R: Rank> VulkanTensor<R> {
             suballocation: self.suballocation.clone(),
             buffer: self.buffer.clone(),
             offset: new_offset,
-            buffer_transfer_kit: self.buffer_transfer_kit.clone()
+            buffer_transfer_kit: self.buffer_transfer_kit.clone(),
         })
     }
 
@@ -126,7 +126,7 @@ impl<R: Rank> VulkanTensor<R> {
             suballocation: self.suballocation.clone(),
             buffer: self.buffer.clone(),
             offset: self.offset,
-            buffer_transfer_kit: self.buffer_transfer_kit.clone()
+            buffer_transfer_kit: self.buffer_transfer_kit.clone(),
         })
     }
 }

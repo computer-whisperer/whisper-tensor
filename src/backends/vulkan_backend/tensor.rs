@@ -3,9 +3,8 @@ use crate::backends::vulkan_backend::{VulkanContext, VulkanError, VulkanImmediat
 use crate::dtype::DType;
 use crate::tensor_rank::{DimContainer, DimProduct, Rank};
 use std::sync::Arc;
-use vulkano::buffer::{Subbuffer};
+use vulkano::buffer::Subbuffer;
 use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, CopyBufferInfo};
-use vulkano::device::DeviceOwned;
 use vulkano::memory::allocator::Suballocation;
 use vulkano::sync::GpuFuture;
 
@@ -50,18 +49,21 @@ impl<R: Rank> VulkanTensor<R> {
             shape.as_slice().iter().product::<u64>() as usize * dtype.size().unwrap();
         let (buffer, suballocation) = executor.alloc_space(needed_space);
 
-        let transfer_buffer = if let Some(x) = &executor.host_transfer_buffer && x.len() >= needed_space as u64 {
+        let transfer_buffer = if let Some(x) = &executor.host_transfer_buffer
+            && x.len() >= needed_space as u64
+        {
             x
         } else {
-            executor.allocate_host_transfer_buffer(needed_space*2) ?;
+            executor.allocate_host_transfer_buffer(needed_space * 2)?;
             executor.host_transfer_buffer.as_ref().unwrap()
-        }.clone();
+        }
+        .clone();
 
         let stride = Self::get_standard_stride(&shape);
 
-        let buffer_transfer_kit = BufferTransferKit{
+        let buffer_transfer_kit = BufferTransferKit {
             context: executor.context.clone(),
-            transfer_buffer
+            transfer_buffer,
         };
 
         Ok(VulkanTensor {
@@ -71,7 +73,7 @@ impl<R: Rank> VulkanTensor<R> {
             offset: 0,
             buffer,
             stride,
-            buffer_transfer_kit
+            buffer_transfer_kit,
         })
     }
 
@@ -82,7 +84,7 @@ impl<R: Rank> VulkanTensor<R> {
         let tensor = unsafe { Self::new_uninitialized(source.shape(), source.dtype(), executor)? };
 
         {
-            let bytes_needed = tensor.shape.dim_product()*tensor.dtype().size().unwrap() as u64;
+            let bytes_needed = tensor.shape.dim_product() * tensor.dtype().size().unwrap() as u64;
             let transfer_buffer = &tensor.buffer_transfer_kit.transfer_buffer;
             {
                 let mut writer = transfer_buffer.write().unwrap();
@@ -103,30 +105,28 @@ impl<R: Rank> VulkanTensor<R> {
                         .map(|(a, b)| a * b)
                         .sum::<u64>() as usize
                         * tensor.dtype.size().unwrap();
-                    writer[inner_offset..inner_offset + value.len()]
-                        .copy_from_slice(&value);
+                    writer[inner_offset..inner_offset + value.len()].copy_from_slice(&value);
                 }
             }
             let mut builder = AutoCommandBufferBuilder::primary(
-                executor
-                    .context
-                    .command_buffer_allocator
-                    .clone(),
+                executor.context.command_buffer_allocator.clone(),
                 executor.context.queue.queue_family_index(),
                 CommandBufferUsage::OneTimeSubmit,
             )?;
-            let outer_offset = tensor.suballocation.offset as u64;
-            builder.copy_buffer(CopyBufferInfo::buffers(
-                transfer_buffer.clone(),
-                tensor.buffer.clone().slice(outer_offset..outer_offset+bytes_needed)
-            )).unwrap();
+            let outer_offset = tensor.suballocation.offset;
+            builder
+                .copy_buffer(CopyBufferInfo::buffers(
+                    transfer_buffer.clone(),
+                    tensor
+                        .buffer
+                        .clone()
+                        .slice(outer_offset..outer_offset + bytes_needed),
+                ))
+                .unwrap();
             let command_buffer = builder.build()?;
             // Let's execute this command buffer now.
             let future = vulkano::sync::now(executor.context.device.clone())
-                .then_execute(
-                    executor.context.queue.clone(),
-                    command_buffer,
-                )
+                .then_execute(executor.context.queue.clone(), command_buffer)
                 .unwrap()
                 // This line instructs the GPU to signal a *fence* once the command buffer has finished
                 // execution. A fence is a Vulkan object that allows the CPU to know when the GPU has
@@ -162,18 +162,25 @@ impl<R: Rank> VulkanTensor<R> {
                 .sum::<u64>()
                 + 1) as usize
                 * self.dtype.size().unwrap();
-            let start_offset = self.suballocation.offset as u64 + self.offset as u64;
+            let start_offset = self.suballocation.offset + self.offset as u64;
             let transfer_buffer = &self.buffer_transfer_kit.transfer_buffer;
             let mut builder = AutoCommandBufferBuilder::primary(
-                self.buffer_transfer_kit.context.command_buffer_allocator
+                self.buffer_transfer_kit
+                    .context
+                    .command_buffer_allocator
                     .clone(),
                 self.buffer_transfer_kit.context.queue.queue_family_index(),
                 CommandBufferUsage::OneTimeSubmit,
-            ).unwrap();
-            builder.copy_buffer(CopyBufferInfo::buffers(
-                self.buffer.clone().slice(start_offset..start_offset+bytes_to_read as u64),
-                transfer_buffer.clone(),
-            )).unwrap();
+            )
+            .unwrap();
+            builder
+                .copy_buffer(CopyBufferInfo::buffers(
+                    self.buffer
+                        .clone()
+                        .slice(start_offset..start_offset + bytes_to_read as u64),
+                    transfer_buffer.clone(),
+                ))
+                .unwrap();
             let command_buffer = builder.build().unwrap();
             // Let's execute this command buffer now.
             let future = vulkano::sync::now(self.buffer_transfer_kit.context.device.clone())

@@ -260,7 +260,9 @@ impl VulkanImmediateExecutor {
         let buffer = Buffer::new_slice(
             self.context.memory_allocator.clone(),
             BufferCreateInfo {
-                usage: BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC,
+                usage: BufferUsage::STORAGE_BUFFER
+                    | BufferUsage::TRANSFER_DST
+                    | BufferUsage::TRANSFER_SRC,
                 ..Default::default()
             },
             AllocationCreateInfo {
@@ -289,7 +291,7 @@ impl VulkanImmediateExecutor {
             },
             size as u64,
         )
-            .map_err(VulkanError::ValidatedVulkanAllocateBufferError)?;
+        .map_err(VulkanError::ValidatedVulkanAllocateBufferError)?;
         self.host_transfer_buffer = Some(buffer);
         Ok(())
     }
