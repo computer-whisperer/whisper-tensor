@@ -1555,7 +1555,7 @@ macro_rules! do_tests {
         //do_test!($runner_fn, $runner_name, test_reversesequence_batch);
         //do_test!($runner_fn, $runner_name, test_reversesequence_time);
 
-        /*
+
         do_test!($runner_fn, $runner_name, test_rms_normalization_2d_axis0);
         do_test!($runner_fn, $runner_name, test_rms_normalization_2d_axis0_expanded);
         do_test!($runner_fn, $runner_name, test_rms_normalization_2d_axis1);
@@ -1593,7 +1593,7 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_rms_normalization_4d_axis_negative_4);
         do_test!($runner_fn, $runner_name, test_rms_normalization_4d_axis_negative_4_expanded);
         do_test!($runner_fn, $runner_name, test_rms_normalization_default_axis);
-        do_test!($runner_fn, $runner_name, test_rms_normalization_default_axis_expanded);*/
+        do_test!($runner_fn, $runner_name, test_rms_normalization_default_axis_expanded);
 
         //do_test!($runner_fn, $runner_name, test_rnn_seq_length);
 

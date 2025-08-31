@@ -1189,6 +1189,13 @@ impl SymbolicGraphMutator {
                     &onnx_node.attribute,
                 )?,
             )),
+            "RMSNormalization" => Some(AnyOperation::RMSNormalization(
+                ops::RMSNormalizationOperation::from_onnx(
+                    &input_tensors,
+                    &output_tensors,
+                    &onnx_node.attribute,
+                )?,
+            )),
             "LayerNormalization" => Some(AnyOperation::LayerNormalization(
                 ops::LayerNormalizationOperation::from_onnx(
                     &input_tensors,

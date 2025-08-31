@@ -1024,6 +1024,197 @@ impl Operation for CastOperation {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RMSNormalizationOperation {
+    input: SymbolicGraphTensorId,
+    scale: SymbolicGraphTensorId,
+    bias: Option<SymbolicGraphTensorId>,
+    output: SymbolicGraphTensorId,
+    mean_output: Option<SymbolicGraphTensorId>,
+    inv_std_dev_output: Option<SymbolicGraphTensorId>,
+    axis: i64,
+    epsilon: f32,
+    stash_type: DType,
+}
+
+impl RMSNormalizationOperation {
+    pub(crate) fn from_onnx(
+        inputs: &[Option<SymbolicGraphTensorId>],
+        outputs: &[Option<SymbolicGraphTensorId>],
+        attributes: &[onnx::AttributeProto],
+    ) -> Result<Self, ONNXDecodingError> {
+        if inputs.len() < 2 || inputs.len() > 3 {
+            return Err(ONNXDecodingError::InvalidOperatorInputs(
+                "LayerNormalization",
+            ));
+        }
+        if outputs.is_empty() || outputs.len() > 3 {
+            return Err(ONNXDecodingError::InvalidOperatorOutputs(
+                "LayerNormalization",
+            ));
+        }
+        let mut axis = -1;
+        let mut epsilon = 1e-5;
+        for attribute in attributes {
+            match attribute.name.as_str() {
+                "axis" => {
+                    axis = attribute.i;
+                }
+                "epsilon" => {
+                    epsilon = attribute.f;
+                }
+                _ => {}
+            }
+        }
+        let stash_type = if query_attribute_int(attributes, "stash_type").unwrap_or(1) == 1 {
+            DType::F32
+        } else {
+            DType::BF16
+        };
+        Ok(Self {
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs(
+                "LayerNormalization",
+            ))?,
+            scale: inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs(
+                "LayerNormalization",
+            ))?,
+            bias: if inputs.len() == 3 {
+                Some(inputs[2].ok_or(ONNXDecodingError::InvalidOperatorInputs(
+                    "LayerNormalization",
+                ))?)
+            } else {
+                None
+            },
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs(
+                "LayerNormalization",
+            ))?,
+            mean_output: if outputs.len() > 1 {
+                Some(outputs[1].ok_or(ONNXDecodingError::InvalidOperatorOutputs(
+                    "LayerNormalization",
+                ))?)
+            } else {
+                None
+            },
+            inv_std_dev_output: if outputs.len() > 2 {
+                Some(outputs[2].ok_or(ONNXDecodingError::InvalidOperatorOutputs(
+                    "LayerNormalization",
+                ))?)
+            } else {
+                None
+            },
+            axis,
+            epsilon,
+            stash_type,
+        })
+    }
+}
+
+impl Operation for RMSNormalizationOperation {
+    fn get_op_type_name(&self) -> String {
+        "RMS Normalization".to_string()
+    }
+
+    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
+        let mut v = vec![self.input, self.scale];
+        if let Some(bias) = self.bias {
+            v.push(bias);
+        }
+        v
+    }
+    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
+        let mut res = vec![self.output];
+        if let Some(mean_output) = self.mean_output {
+            res.push(mean_output);
+        }
+        if let Some(inv_std_dev_output) = self.inv_std_dev_output {
+            res.push(inv_std_dev_output);
+        }
+        res
+    }
+
+    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
+        let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
+        let input_data = input_map[&self.input];
+        let input_scale = input_map[&self.scale];
+
+        let input_f32 = graph.push_op(AnyMilliOp::Cast(MilliOpCast::new(
+            input_data,
+            self.stash_type,
+        )));
+
+        let axis = ops_helpers::scalar_const(&mut graph, self.axis);
+        let axis = ops_helpers::resolve_axes(&mut graph, axis, input_data);
+
+        let normalized_axes = {
+            let r = MilliOpRange::new(
+                axis,
+                ops_helpers::rank(&mut graph, input_data),
+                ops_helpers::scalar_const(&mut graph, 1i64),
+            );
+            graph.push_op(AnyMilliOp::Range(r))
+        };
+
+        let input_squared = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::mul(
+            input_f32, input_f32,
+        )));
+
+        let squared_mean = graph.push_op(AnyMilliOp::ReduceMean(MilliOpReduceMean::new(
+            input_squared,
+            Some(normalized_axes),
+            true,
+            false,
+        )));
+
+        let epsilon = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new_scalar(
+            self.epsilon,
+        )));
+        let epsilon = graph.push_op(AnyMilliOp::CastLike(MilliOpCastLike::new(
+            epsilon,
+            squared_mean,
+        )));
+        let mean_plus_eps = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::add(
+            squared_mean,
+            epsilon,
+        )));
+        let rms = graph.push_op(AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::sqrt(
+            mean_plus_eps,
+        )));
+        let rms_inv = graph.push_op(AnyMilliOp::SimpleUnary(MilliOpSimpleUnary::reciprocal(rms)));
+
+        let normalized = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::mul(
+            input_f32, rms_inv,
+        )));
+
+        let input_scale_cast = graph.push_op(AnyMilliOp::Cast(MilliOpCast::new(
+            input_scale,
+            self.stash_type,
+        )));
+        let out = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::mul(
+            normalized,
+            input_scale_cast,
+        )));
+
+        let out = if let Some(bias) = self.bias {
+            let bias_cast = graph.push_op(AnyMilliOp::Cast(MilliOpCast::new(
+                input_map[&bias],
+                self.stash_type,
+            )));
+            graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::add(
+                out, bias_cast,
+            )))
+        } else {
+            out
+        };
+
+        let out = graph.push_op(AnyMilliOp::CastLike(MilliOpCastLike::new(out, input_data)));
+
+        let mut output_map = HashMap::new();
+        output_map.insert(out, self.output);
+        graph.set_output_map(output_map);
+        graph
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LayerNormalizationOperation {
     input: SymbolicGraphTensorId,
     scale: SymbolicGraphTensorId,
@@ -4102,6 +4293,7 @@ pub enum AnyOperation {
     LpNormalization(LpNormalizationOperation),
     GroupNormalization(GroupNormalizationOperation),
     LayerNormalization(LayerNormalizationOperation),
+    RMSNormalization(RMSNormalizationOperation),
     Shape(ShapeOperation),
     Concat(ConcatOperation),
     ConstantOfShape(ConstantOfShapeOperation),
@@ -4155,6 +4347,7 @@ impl AnyOperation {
             AnyOperation::LpNormalization(op) => op,
             AnyOperation::GroupNormalization(op) => op,
             AnyOperation::LayerNormalization(op) => op,
+            AnyOperation::RMSNormalization(op) => op,
             AnyOperation::Shape(op) => op,
             AnyOperation::Concat(op) => op,
             AnyOperation::ConstantOfShape(op) => op,
@@ -4213,6 +4406,7 @@ impl Operation for AnyOperation {
             AnyOperation::LpNormalization(op) => op.get_inputs(),
             AnyOperation::GroupNormalization(op) => op.get_inputs(),
             AnyOperation::LayerNormalization(op) => op.get_inputs(),
+            AnyOperation::RMSNormalization(op) => op.get_inputs(),
             AnyOperation::Shape(op) => op.get_inputs(),
             AnyOperation::Concat(op) => op.get_inputs(),
             AnyOperation::ConstantOfShape(op) => op.get_inputs(),
@@ -4265,6 +4459,7 @@ impl Operation for AnyOperation {
             AnyOperation::LpNormalization(op) => op.get_outputs(),
             AnyOperation::GroupNormalization(op) => op.get_outputs(),
             AnyOperation::LayerNormalization(op) => op.get_outputs(),
+            AnyOperation::RMSNormalization(op) => op.get_outputs(),
             AnyOperation::Shape(op) => op.get_outputs(),
             AnyOperation::Concat(op) => op.get_outputs(),
             AnyOperation::ConstantOfShape(op) => op.get_outputs(),
@@ -4322,6 +4517,7 @@ impl Operation for AnyOperation {
             AnyOperation::LpNormalization(op) => op.eval(backend, inputs),
             AnyOperation::GroupNormalization(op) => op.eval(backend, inputs),
             AnyOperation::LayerNormalization(op) => op.eval(backend, inputs),
+            AnyOperation::RMSNormalization(op) => op.eval(backend, inputs),
             AnyOperation::Shape(op) => op.eval(backend, inputs),
             AnyOperation::Concat(op) => op.eval(backend, inputs),
             AnyOperation::ConstantOfShape(op) => op.eval(backend, inputs),
@@ -4375,6 +4571,7 @@ impl Operation for AnyOperation {
             AnyOperation::LpNormalization(op) => op.get_milli_op_graph(),
             AnyOperation::GroupNormalization(op) => op.get_milli_op_graph(),
             AnyOperation::LayerNormalization(op) => op.get_milli_op_graph(),
+            AnyOperation::RMSNormalization(op) => op.get_milli_op_graph(),
             AnyOperation::Shape(op) => op.get_milli_op_graph(),
             AnyOperation::Concat(op) => op.get_milli_op_graph(),
             AnyOperation::ConstantOfShape(op) => op.get_milli_op_graph(),

@@ -57,11 +57,7 @@ pub fn load_llama3(
     );
     let sequence_dimension = Dimension::new(Some(1), Some("seq_len".to_string()), None);
 
-    let input_shape = Shape::new(vec![
-        batch_dimension.clone(),
-        sequence_dimension.clone(),
-        Dimension::new(Some(1), None, None),
-    ]);
+    let input_shape = Shape::new(vec![batch_dimension.clone(), sequence_dimension.clone()]);
 
     let token_input = InputTensor::new("input_ids".to_string(), DType::I32, input_shape);
     input_tensors.push((
@@ -80,7 +76,7 @@ pub fn load_llama3(
 
     let kv_cache_seq_dim = Dimension::new(None, Some("kv_cache_sequence".to_string()), None);
 
-    let model_dim = x.shape().dims[2].resolve()?;
+    let model_dim = x.shape().dims.last().unwrap().resolve()?;
     let head_dim = model_dim / config.num_attention_heads;
     let kv_cache_input_type = x.dtype();
     let kv_cache_input_shape = Shape::new(vec![
