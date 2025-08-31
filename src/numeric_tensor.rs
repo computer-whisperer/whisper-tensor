@@ -1042,8 +1042,17 @@ impl NumericTensor<DynRank> {
         data: &Self,
         indices: &Self,
         axis: i64,
-        _backend: &EvalBackend,
+        backend: &mut EvalBackend,
     ) -> Result<Self, NumericTensorError> {
+        #[cfg(feature = "vulkan")]
+        if let EvalBackend::Vulkan(executor) = backend {
+            return Ok(NumericTensor::Vulkan(VulkanTensor::gather(
+                &data.to_vulkan(executor)?,
+                &indices.to_vulkan(executor)?,
+                axis,
+                executor,
+            )?));
+        }
         Ok(NumericTensor::NDArray(
             NDArrayNumericTensor::<DynRank>::gather(&data.try_into()?, &indices.try_into()?, axis)?,
         ))

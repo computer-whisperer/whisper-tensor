@@ -1,6 +1,5 @@
 use std::time::Instant;
 use whisper_tensor::backends::eval_backend::EvalBackend;
-use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::backends::vulkan_backend::{VulkanContext, VulkanImmediateExecutor};
 use whisper_tensor::dtype::DType;
 use whisper_tensor::numeric_tensor::NumericTensor;
@@ -109,6 +108,12 @@ fn main() {
     let tensor_b_tgt = backend.to_native_type(&tensor_b);
 
     let mut live_vec = tensor_b_tgt;
+    //warmup
+    let n = 20;
+    for _ in 0..n {
+        live_vec = NumericTensor::matmul(&tensor_a_tgt, &live_vec, Some(DType::F32), &mut backend)
+            .unwrap();
+    }
 
     let start_instant = Instant::now();
     let n = 100;
