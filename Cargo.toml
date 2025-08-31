@@ -17,10 +17,10 @@ serde = { version = "1.0.210", features = ["derive"] }
 thiserror = "2.0.12"
 anyhow = "1.0.91"
 num-traits = "0.2.19"
-half = { version="2.5.0", features = ["serde", "num-traits"] }
+half = { version="2.5.0", features = ["serde", "num-traits", "zerocopy"] }
 tracing-subscriber = { version = "0.3", features = [ "env-filter", "fmt" ] }
 tempfile = "3.19.1"
-
+zerocopy = "0.8.26"
 pyo3 = {optional=true, version = "0.24.0", features = ["auto-initialize"]}
 tokenizers = {optional=true, version="0.21.1", default-features = false, features = ["unstable_wasm"]}
 rspirv = "0.12.0"

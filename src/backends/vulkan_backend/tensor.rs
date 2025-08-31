@@ -1,13 +1,16 @@
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::backends::vulkan_backend::{VulkanContext, VulkanError, VulkanImmediateExecutor};
-use crate::dtype::DType;
-use crate::tensor_rank::{DimContainer, DimProduct, Rank};
+use crate::dtype::{DType, DTypeOfPrimitive};
+use crate::tensor_rank::{DimContainer, Rank};
+use ndarray::{ArcArray, CowArray};
+use std::iter::zip;
 use std::sync::Arc;
 use vulkano::buffer::Subbuffer;
 use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, CopyBufferInfo};
 use vulkano::device::Device;
 use vulkano::memory::allocator::Suballocation;
 use vulkano::sync::GpuFuture;
+use zerocopy::{Immutable, IntoBytes};
 
 #[derive(Debug, Clone)]
 pub(crate) struct BufferTransferKit {
@@ -50,8 +53,24 @@ impl<R: Rank> VulkanTensor<R> {
         dtype: DType,
         executor: &mut VulkanImmediateExecutor,
     ) -> Result<Self, VulkanError> {
-        let needed_space =
-            shape.as_slice().iter().product::<u64>() as usize * dtype.size().unwrap();
+        let stride = Self::get_standard_stride(&shape);
+        unsafe { Self::new_uninitialized_with_stride(shape, stride, dtype, executor) }
+    }
+
+    /// # Safety
+    ///
+    /// This function is unsafe because it does not initialize the tensor.
+    pub unsafe fn new_uninitialized_with_stride(
+        shape: R::KnownDims,
+        stride: R::KnownDims,
+        dtype: DType,
+        executor: &mut VulkanImmediateExecutor,
+    ) -> Result<Self, VulkanError> {
+        let needed_space = (zip(shape.as_slice(), stride.as_slice())
+            .map(|(a, b)| (a - 1) * b)
+            .sum::<u64>() as usize
+            + 1)
+            * dtype.size().unwrap();
         let (buffer, suballocation) = executor.alloc_space(needed_space);
 
         let transfer_buffer = if let Some(x) = &executor.host_transfer_buffer
@@ -63,8 +82,6 @@ impl<R: Rank> VulkanTensor<R> {
             executor.host_transfer_buffer.as_ref().unwrap()
         }
         .clone();
-
-        let stride = Self::get_standard_stride(&shape);
 
         let buffer_transfer_kit = BufferTransferKit {
             context: executor.context.clone(),
@@ -86,74 +103,173 @@ impl<R: Rank> VulkanTensor<R> {
         source: NDArrayNumericTensor<R>,
         executor: &mut VulkanImmediateExecutor,
     ) -> Result<Self, VulkanError> {
-        let tensor = unsafe { Self::new_uninitialized(source.shape(), source.dtype(), executor)? };
-
-        {
-            let bytes_needed = tensor.shape.dim_product() * tensor.dtype().size().unwrap() as u64;
-            let transfer_buffer = &tensor.buffer_transfer_kit.transfer_buffer;
-            {
-                let mut writer = transfer_buffer.write().unwrap();
-                for i in 0..tensor.shape.dim_product() {
-                    let mut index = vec![];
-                    let mut v = i;
-                    for &j in tensor.shape.as_slice() {
-                        index.push(v % j);
-                        v /= j;
-                    }
-                    let index = R::KnownDims::try_from_slice(index.as_slice()).unwrap();
-                    let value = source.get(&index).unwrap().to_bytes();
-                    // Calculate destination
-                    let inner_offset = index
-                        .as_slice()
-                        .iter()
-                        .zip(tensor.stride.as_slice().iter())
-                        .map(|(a, b)| a * b)
-                        .sum::<u64>() as usize
-                        * tensor.dtype.size().unwrap();
-                    writer[inner_offset..inner_offset + value.len()].copy_from_slice(&value);
-                }
+        match source {
+            NDArrayNumericTensor::F64(x) => Self::from_ndarray_inner(x, executor),
+            NDArrayNumericTensor::F32(x) => Self::from_ndarray_inner(x, executor),
+            NDArrayNumericTensor::BF16(x) => Self::from_ndarray_inner(x, executor),
+            NDArrayNumericTensor::F16(x) => Self::from_ndarray_inner(x, executor),
+            NDArrayNumericTensor::U64(x) => Self::from_ndarray_inner(x, executor),
+            NDArrayNumericTensor::I64(x) => Self::from_ndarray_inner(x, executor),
+            NDArrayNumericTensor::U32(x) => Self::from_ndarray_inner(x, executor),
+            NDArrayNumericTensor::I32(x) => Self::from_ndarray_inner(x, executor),
+            NDArrayNumericTensor::U16(x) => Self::from_ndarray_inner(x, executor),
+            NDArrayNumericTensor::I16(x) => Self::from_ndarray_inner(x, executor),
+            NDArrayNumericTensor::U8(x) => Self::from_ndarray_inner(x, executor),
+            NDArrayNumericTensor::I8(x) => Self::from_ndarray_inner(x, executor),
+            NDArrayNumericTensor::BOOL(x) => Self::from_ndarray_inner_bool(x, executor),
+            _ => {
+                unimplemented!()
             }
-            let mut builder = AutoCommandBufferBuilder::primary(
-                executor.context.command_buffer_allocator.clone(),
-                executor.context.queue.queue_family_index(),
-                CommandBufferUsage::OneTimeSubmit,
-            )?;
-            let outer_offset = tensor.suballocation.offset;
-            builder
-                .copy_buffer(CopyBufferInfo::buffers(
-                    transfer_buffer.clone(),
-                    tensor
-                        .buffer
-                        .clone()
-                        .slice(outer_offset..outer_offset + bytes_needed),
-                ))
-                .unwrap();
-            let command_buffer = builder.build()?;
-            // Let's execute this command buffer now.
-            let future = vulkano::sync::now(executor.context.device.clone())
-                .then_execute(executor.context.queue.clone(), command_buffer)
-                .unwrap()
-                // This line instructs the GPU to signal a *fence* once the command buffer has finished
-                // execution. A fence is a Vulkan object that allows the CPU to know when the GPU has
-                // reached a certain point. We need to signal a fence here because below we want to block
-                // the CPU until the GPU has reached that point in the execution.
-                .then_signal_fence_and_flush()
-                .unwrap();
-
-            // Blocks execution until the GPU has finished the operation. This method only exists on the
-            // future that corresponds to a signalled fence. In other words, this method wouldn't be
-            // available if we didn't call `.then_signal_fence_and_flush()` earlier. The `None` parameter
-            // is an optional timeout.
-            //
-            // Note however that dropping the `future` variable (with `drop(future)` for example) would
-            // block execution as well, and this would be the case even if we didn't call
-            // `.then_signal_fence_and_flush()`. Therefore the actual point of calling
-            // `.then_signal_fence_and_flush()` and `.wait()` is to make things more explicit. In the
-            // future, if the Rust language gets linear types vulkano may get modified so that only
-            // fence-signalled futures can get destroyed like this.
-            future.wait(None).unwrap()
         }
-        Ok(tensor)
+    }
+
+    fn from_ndarray_inner<T: DTypeOfPrimitive + IntoBytes + Clone + Immutable>(
+        source: ArcArray<T, R::NDArrayDim>,
+        executor: &mut VulkanImmediateExecutor,
+    ) -> Result<Self, VulkanError> {
+        let source = if source.as_slice_memory_order().is_none() {
+            source.as_standard_layout()
+        } else {
+            CowArray::from(source.view())
+        };
+        let source_dtype = T::DTYPE;
+        let source_data = source.as_slice_memory_order().unwrap();
+        let source_stride = source.strides();
+
+        let source_shape = source.shape().iter().map(|x| *x as u64).collect::<Vec<_>>();
+        let source_stride = source_stride.iter().map(|x| *x as u64).collect::<Vec<_>>();
+        let vk_tensor = unsafe {
+            Self::new_uninitialized_with_stride(
+                R::KnownDims::try_from_slice(source_shape.as_slice()).unwrap(),
+                R::KnownDims::try_from_slice(source_stride.as_slice()).unwrap(),
+                source_dtype,
+                executor,
+            )?
+        };
+
+        let raw_data = source_data.as_bytes();
+        let bytes_to_transfer = raw_data.len();
+        assert!(bytes_to_transfer <= vk_tensor.suballocation.size as usize);
+
+        let transfer_buffer = &vk_tensor.buffer_transfer_kit.transfer_buffer;
+        transfer_buffer.write().unwrap()[0..raw_data.len()].copy_from_slice(raw_data);
+
+        let mut builder = AutoCommandBufferBuilder::primary(
+            executor.context.command_buffer_allocator.clone(),
+            executor.context.queue.queue_family_index(),
+            CommandBufferUsage::OneTimeSubmit,
+        )?;
+        let outer_offset = vk_tensor.suballocation.offset;
+        builder
+            .copy_buffer(CopyBufferInfo::buffers(
+                transfer_buffer.clone(),
+                vk_tensor
+                    .buffer
+                    .clone()
+                    .slice(outer_offset..outer_offset + bytes_to_transfer as u64),
+            ))
+            .unwrap();
+        let command_buffer = builder.build()?;
+        // Let's execute this command buffer now.
+        let future = vulkano::sync::now(executor.context.device.clone())
+            .then_execute(executor.context.queue.clone(), command_buffer)
+            .unwrap()
+            // This line instructs the GPU to signal a *fence* once the command buffer has finished
+            // execution. A fence is a Vulkan object that allows the CPU to know when the GPU has
+            // reached a certain point. We need to signal a fence here because below we want to block
+            // the CPU until the GPU has reached that point in the execution.
+            .then_signal_fence_and_flush()
+            .unwrap();
+
+        // Blocks execution until the GPU has finished the operation. This method only exists on the
+        // future that corresponds to a signalled fence. In other words, this method wouldn't be
+        // available if we didn't call `.then_signal_fence_and_flush()` earlier. The `None` parameter
+        // is an optional timeout.
+        //
+        // Note however that dropping the `future` variable (with `drop(future)` for example) would
+        // block execution as well, and this would be the case even if we didn't call
+        // `.then_signal_fence_and_flush()`. Therefore the actual point of calling
+        // `.then_signal_fence_and_flush()` and `.wait()` is to make things more explicit. In the
+        // future, if the Rust language gets linear types vulkano may get modified so that only
+        // fence-signalled futures can get destroyed like this.
+        future.wait(None).unwrap();
+        Ok(vk_tensor)
+    }
+
+    fn from_ndarray_inner_bool(
+        source: ArcArray<bool, R::NDArrayDim>,
+        executor: &mut VulkanImmediateExecutor,
+    ) -> Result<Self, VulkanError> {
+        let source = if source.as_slice_memory_order().is_none() {
+            source.as_standard_layout()
+        } else {
+            CowArray::from(source.view())
+        };
+        let source_dtype = bool::DTYPE;
+        let source_data = source.as_slice_memory_order().unwrap();
+        let source_stride = source.strides();
+
+        let source_shape = source.shape().iter().map(|x| *x as u64).collect::<Vec<_>>();
+        let source_stride = source_stride.iter().map(|x| *x as u64).collect::<Vec<_>>();
+        let vk_tensor = unsafe {
+            Self::new_uninitialized_with_stride(
+                R::KnownDims::try_from_slice(source_shape.as_slice()).unwrap(),
+                R::KnownDims::try_from_slice(source_stride.as_slice()).unwrap(),
+                source_dtype,
+                executor,
+            )?
+        };
+
+        let raw_data = source_data
+            .iter()
+            .map(|x| if *x { 1u8 } else { 0u8 })
+            .collect::<Vec<_>>();
+        let bytes_to_transfer = raw_data.len();
+        assert!(bytes_to_transfer <= vk_tensor.suballocation.size as usize);
+
+        let transfer_buffer = &vk_tensor.buffer_transfer_kit.transfer_buffer;
+        transfer_buffer.write().unwrap()[0..raw_data.len()].copy_from_slice(&raw_data);
+
+        let mut builder = AutoCommandBufferBuilder::primary(
+            executor.context.command_buffer_allocator.clone(),
+            executor.context.queue.queue_family_index(),
+            CommandBufferUsage::OneTimeSubmit,
+        )?;
+        let outer_offset = vk_tensor.suballocation.offset;
+        builder
+            .copy_buffer(CopyBufferInfo::buffers(
+                transfer_buffer.clone(),
+                vk_tensor
+                    .buffer
+                    .clone()
+                    .slice(outer_offset..outer_offset + bytes_to_transfer as u64),
+            ))
+            .unwrap();
+        let command_buffer = builder.build()?;
+        // Let's execute this command buffer now.
+        let future = vulkano::sync::now(executor.context.device.clone())
+            .then_execute(executor.context.queue.clone(), command_buffer)
+            .unwrap()
+            // This line instructs the GPU to signal a *fence* once the command buffer has finished
+            // execution. A fence is a Vulkan object that allows the CPU to know when the GPU has
+            // reached a certain point. We need to signal a fence here because below we want to block
+            // the CPU until the GPU has reached that point in the execution.
+            .then_signal_fence_and_flush()
+            .unwrap();
+
+        // Blocks execution until the GPU has finished the operation. This method only exists on the
+        // future that corresponds to a signalled fence. In other words, this method wouldn't be
+        // available if we didn't call `.then_signal_fence_and_flush()` earlier. The `None` parameter
+        // is an optional timeout.
+        //
+        // Note however that dropping the `future` variable (with `drop(future)` for example) would
+        // block execution as well, and this would be the case even if we didn't call
+        // `.then_signal_fence_and_flush()`. Therefore the actual point of calling
+        // `.then_signal_fence_and_flush()` and `.wait()` is to make things more explicit. In the
+        // future, if the Rust language gets linear types vulkano may get modified so that only
+        // fence-signalled futures can get destroyed like this.
+        future.wait(None).unwrap();
+        Ok(vk_tensor)
     }
 
     pub fn to_ndarray(&self) -> NDArrayNumericTensor<R> {

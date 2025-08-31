@@ -35,6 +35,7 @@ fn main() {
                 context.clone(),
                 &mut tokenizer_cache,
                 None,
+                None,
                 &mut EvalBackend::NDArray,
             )
             .unwrap();

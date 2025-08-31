@@ -9,7 +9,7 @@ use whisper_tensor::milli_graph::ops::{
     MilliOpSlice, MilliOpSqueeze, MilliOpUnsqueeze,
 };
 use whisper_tensor::model::Model;
-use whisper_tensor::super_graph::cache::{SuperGraphCache, SuperGraphTensorCache};
+use whisper_tensor::super_graph::cache::SuperGraphTensorCache;
 use whisper_tensor::super_graph::data::SuperGraphData;
 use whisper_tensor::super_graph::links::{
     SuperGraphLink, SuperGraphLinkModel, SuperGraphLinkString, SuperGraphLinkTensor,
