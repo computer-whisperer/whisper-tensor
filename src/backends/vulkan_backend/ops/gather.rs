@@ -31,7 +31,6 @@ fn build_gather_pipeline(
     axis: usize,
 ) -> Result<(Arc<PipelineLayout>, Arc<ComputePipeline>), VulkanError> {
     assert!(axis < data_rank);
-    assert!(indices_rank >= 1);
     let mut b = rspirv::dr::Builder::new();
     b.capability(Capability::Shader);
     b.capability(Capability::Float64);
@@ -238,7 +237,7 @@ fn build_gather_pipeline(
                 num_elements = Some(*dim);
             }
         }
-        num_elements.unwrap()
+        num_elements.unwrap_or(b.constant_bit32(u32_t, 1))
     };
     /* cmp & branch */
 

@@ -1,3 +1,4 @@
+use crate::backends::ModelLoadedTensorCache;
 use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::dtype::DType;
@@ -538,6 +539,7 @@ impl TextInferenceTokensInLogitOutInterface {
         model: &Model,
         text_in: String,
         tokenizer_cache: &mut HashMap<TokenizerInfo, Arc<AnyTokenizer>>,
+        tensor_cache: Option<&mut ModelLoadedTensorCache>,
         super_graph_caches: Option<&mut SuperGraphCache>,
         backend: &mut EvalBackend,
     ) -> Result<String, SuperGraphError> {
@@ -564,13 +566,23 @@ impl TextInferenceTokensInLogitOutInterface {
         };
         let super_graph_output = {
             let mut observer = ();
+            let mut super_graph_tensor_cache = SuperGraphTensorCache::new();
+            if let Some(tensor_cache) = &tensor_cache {
+                super_graph_tensor_cache
+                    .caches
+                    .push((model, (*tensor_cache).clone()))
+            }
             let mut context = SuperGraphContext {
                 observer: &mut observer,
                 eval_backend: backend,
-                super_graph_tensor_cache: &mut SuperGraphTensorCache::new(),
+                super_graph_tensor_cache: &mut super_graph_tensor_cache,
                 caches: super_graph_caches,
             };
-            self.super_graph.run(super_graph_data, &mut context)?
+            let res = self.super_graph.run(super_graph_data, &mut context)?;
+            if let Some(tensor_cache) = tensor_cache {
+                *tensor_cache = context.super_graph_tensor_cache.caches.remove(0).1
+            }
+            res
         };
         let logits = super_graph_output
             .tensors

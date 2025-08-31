@@ -109,14 +109,14 @@ fn main() {
 
     let mut live_vec = tensor_b_tgt;
     //warmup
-    let n = 20;
+    let n = 200;
     for _ in 0..n {
         live_vec = NumericTensor::matmul(&tensor_a_tgt, &live_vec, Some(DType::F32), &mut backend)
             .unwrap();
     }
 
     let start_instant = Instant::now();
-    let n = 100;
+    let n = 1000;
     for _ in 0..n {
         live_vec = NumericTensor::matmul(&tensor_a_tgt, &live_vec, Some(DType::F32), &mut backend)
             .unwrap();

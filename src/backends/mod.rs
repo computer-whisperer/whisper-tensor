@@ -15,7 +15,13 @@ pub mod vulkan_backend;
 pub mod eval_backend;
 pub mod ndarray_backend;
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct ModelLoadedTensorCache {
     pub tensors: HashMap<SymbolicGraphTensorId, NumericTensor<DynRank>>,
+}
+
+impl ModelLoadedTensorCache {
+    pub fn new() -> ModelLoadedTensorCache {
+        ModelLoadedTensorCache::default()
+    }
 }
