@@ -1389,6 +1389,13 @@ impl SymbolicGraphMutator {
                 &output_tensors,
                 &onnx_node.attribute,
             )?)),
+            "RotaryEmbedding" => Some(AnyOperation::RotaryEmbedding(
+                ops::RotaryEmbeddingOperation::from_onnx(
+                    &input_tensors,
+                    &output_tensors,
+                    &onnx_node.attribute,
+                )?,
+            )),
             "If" => Some(AnyOperation::If(ops::IfOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,

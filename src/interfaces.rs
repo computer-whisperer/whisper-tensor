@@ -2,6 +2,7 @@ use crate::backends::ModelLoadedTensorCache;
 use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::dtype::DType;
+use crate::interfaces::Error::GeneralError;
 use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::ops::{
     AnyMilliOp, MilliOpCast, MilliOpConstant, MilliOpShape, MilliOpSqueeze, MilliOpUnsqueeze,
@@ -212,8 +213,8 @@ impl TextInferenceTokensInLogitOutInterface {
                             .clone()
                             .unwrap()
                             .iter()
-                            .map(|x| *x.as_numeric().unwrap())
-                            .collect::<Vec<_>>();
+                            .map(|x| x.as_numeric().ok_or(GeneralError).cloned())
+                            .collect::<Result<Vec<_>, Error>>()?;
                         let input_tensor_dtype = input_tensor_info.dtype.unwrap();
                         let num_elements = input_tensor_shape.iter().product::<u64>();
                         let input_tensor = NDArrayNumericTensor::from_vec_shape(

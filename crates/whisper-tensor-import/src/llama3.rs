@@ -20,7 +20,7 @@ pub struct Llama3Config {
 
 impl Llama3Config {
     pub fn from_huggingface_transformers_json(config: &serde_json::Value) -> Result<Self, Error> {
-        //println!("Config: {:?}", config);
+        println!("Config: {:?}", config);
         fn get_int(config: &serde_json::Value, key: &str) -> Result<i64, Error> {
             config
                 .get(key)
@@ -55,7 +55,7 @@ pub fn load_llama3(
         Some("batch_size".to_string()),
         Some("DATA_BATCH".to_string()),
     );
-    let sequence_dimension = Dimension::new(Some(1), Some("seq_len".to_string()), None);
+    let sequence_dimension = Dimension::new(None, Some("seq_len".to_string()), None);
 
     let input_shape = Shape::new(vec![batch_dimension.clone(), sequence_dimension.clone()]);
 
@@ -289,8 +289,10 @@ pub fn load_llama3(
 
     println!("Built graph, exporting...");
     let model_metadata = ModelMetadata {
-        tokenizer_infos: vec![TokenizerInfo::HFTokenizer("meta/llama3".to_string())],
-        max_token_batch: Some(1),
+        tokenizer_infos: vec![TokenizerInfo::HFTokenizer(
+            "meta-llama/Meta-Llama-3-8B".to_string(),
+        )],
+        max_token_batch: None,
     };
     let onnx_model = crate::onnx_graph::build_proto(
         &input_tensors,
