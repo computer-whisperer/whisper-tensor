@@ -53,6 +53,13 @@ pub enum NumericTensor<R: Rank> {
 }
 
 impl<R: Rank> NumericTensor<R> {
+    /// Convert this tensor to the NDArray backend without changing shape, dtype, or values.
+    ///
+    /// - If the tensor is already NDArray, this clones the underlying handle.
+    /// - Otherwise it performs a zero-copy view when supported by the backend, or a value-preserving copy.
+    /// - Errors if the target backend cannot represent the dtype/shape.
+    ///
+    /// Returns an NDArrayNumericTensor that contains the same data and metadata.
     pub fn to_ndarray(&self) -> Result<NDArrayNumericTensor<R>, NumericTensorError> {
         match self {
             NumericTensor::NDArray(x) => Ok(x.clone()),
@@ -67,6 +74,11 @@ impl<R: Rank> NumericTensor<R> {
         }
     }
 
+    /// Consume this tensor and convert it into the NDArray backend without changing shape, dtype, or values.
+    ///
+    /// - If already NDArray, returns the inner handle (clone of pointer/rc if applicable).
+    /// - Otherwise performs a zero-copy view when supported or a value-preserving copy.
+    /// - Errors if the target backend cannot represent the dtype/shape.
     pub fn into_ndarray(self) -> Result<NDArrayNumericTensor<R>, NumericTensorError> {
         match self {
             NumericTensor::NDArray(x) => Ok(x.clone()),
@@ -82,6 +94,10 @@ impl<R: Rank> NumericTensor<R> {
     }
 
     #[cfg(feature = "candle")]
+    /// Convert or move this tensor to a Candle tensor on the given device.
+    ///
+    /// - If already Candle, this will move/copy to the target device if needed.
+    /// - Otherwise converts from the current backend to Candle, preserving dtype and shape.
     pub fn to_candle(
         &self,
         device: &candle_core::Device,
@@ -94,6 +110,10 @@ impl<R: Rank> NumericTensor<R> {
     }
 
     #[cfg(feature = "vulkan")]
+    /// Convert this tensor to a Vulkan backend tensor using the provided immediate executor.
+    ///
+    /// - If already Vulkan, returns a clone.
+    /// - Otherwise uploads/converts from host/backend to Vulkan, preserving dtype and shape.
     pub fn to_vulkan(
         &self,
         vulkan_immediate_executor: &mut VulkanImmediateExecutor,
@@ -109,6 +129,8 @@ impl<R: Rank> NumericTensor<R> {
     }
 
     #[cfg(feature = "tch")]
+    /// Convert this tensor to the tch backend tensor, preserving shape and dtype.
+    /// If already tch, returns a clone of the handle.
     pub fn to_tch(&self) -> TCHNumericTensor<R> {
         if let NumericTensor::TCH(x) = self {
             x.clone()
@@ -117,6 +139,11 @@ impl<R: Rank> NumericTensor<R> {
         }
     }
 
+    /// Return a view or copy of this tensor with a new shape.
+    ///
+    /// - new_shape must have the same number of elements as the original shape.
+    /// - Implementation may choose the most efficient path (view or copy) while preserving values.
+    /// - Errors if reshape is not possible with given shape.
     pub fn reshape(
         &self,
         new_shape: R::KnownDims,
@@ -133,16 +160,21 @@ impl<R: Rank> NumericTensor<R> {
         ))
     }
 
+    /// Get the scalar value at the given multi-dimensional index. Returns None if out of bounds.
     pub fn get(&self, index: &R::KnownDims) -> Option<NumericScalar> {
         self.to_ndarray().unwrap().get(index)
     }
 
+    /// Attempt to reinterpret this tensor as another rank type without changing data.
+    /// Fails if the current shape is incompatible with the target rank type.
     pub fn try_to_rank<R1: Rank>(&self) -> Result<NumericTensor<R1>, NumericTensorError> {
         Ok(NumericTensor::<R1>::NDArray(
             self.to_ndarray()?.try_to_rank()?,
         ))
     }
 
+    /// View this tensor as a statically-typed NumericTensorTyped without changing underlying data.
+    /// Errors if the underlying dtype cannot be viewed as the target T.
     pub fn try_to_type<T: NDArrayNumericTensorType>(
         &self,
     ) -> Result<NumericTensorTyped<T, R>, NumericTensorError> {
@@ -151,10 +183,12 @@ impl<R: Rank> NumericTensor<R> {
         ))
     }
 
+    /// Convert to a dynamically-ranked tensor view (DynRank), preserving data and shape.
     pub fn to_dyn_rank(&self) -> NumericTensor<DynRank> {
         NumericTensor::NDArray(self.to_ndarray().unwrap().to_dyn())
     }
 
+    /// Return the element dtype of this tensor.
     pub fn dtype(&self) -> DType {
         match self {
             NumericTensor::NDArray(x) => x.dtype(),
@@ -169,6 +203,7 @@ impl<R: Rank> NumericTensor<R> {
         }
     }
 
+    /// Return the shape of this tensor as rank-typed dimensions.
     pub fn shape(&self) -> R::KnownDims {
         match self {
             NumericTensor::NDArray(x) => x.shape(),
@@ -191,6 +226,7 @@ impl<R: Rank> NumericTensor<R> {
         }
     }
 
+    /// Return the number of dimensions (rank) of this tensor.
     pub fn rank(&self) -> usize {
         match self {
             NumericTensor::NDArray(x) => x.rank(),
@@ -205,10 +241,12 @@ impl<R: Rank> NumericTensor<R> {
         }
     }
 
+    /// Return the total number of elements in this tensor (product of shape dims).
     pub fn num_elements(&self) -> u64 {
         self.shape().as_slice().iter().product()
     }
 
+    /// Create a tensor from a flat vector and explicit shape. Length must match the product of shape.
     pub fn from_vec_shape<T>(v: Vec<T>, shape: Vec<usize>) -> Result<Self, NumericTensorError>
     where
         T: NDArrayNumericTensorType,
@@ -218,6 +256,7 @@ impl<R: Rank> NumericTensor<R> {
         ))
     }
 
+    /// Element-wise negation (x -> -x).
     pub fn neg(&self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         if backend.supports_dtype(self.dtype()) {
             #[cfg(feature = "candle")]
@@ -234,6 +273,7 @@ impl<R: Rank> NumericTensor<R> {
         Ok(NumericTensor::NDArray(self.to_ndarray()?.neg()?))
     }
 
+    /// Element-wise natural exponential.
     pub fn exp(&self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         if backend.supports_dtype(self.dtype()) {
             #[cfg(feature = "candle")]
@@ -250,6 +290,7 @@ impl<R: Rank> NumericTensor<R> {
         Ok(NumericTensor::NDArray(self.to_ndarray()?.exp()?))
     }
 
+    /// Element-wise natural logarithm.
     pub fn ln(&self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         if backend.supports_dtype(self.dtype()) {
             #[cfg(feature = "vulkan")]
@@ -262,10 +303,12 @@ impl<R: Rank> NumericTensor<R> {
         Ok(NumericTensor::NDArray(self.to_ndarray()?.ln()?))
     }
 
+    /// Create a tensor of ones with the same shape and dtype as self.
     pub fn ones_like(&self, _backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(self.to_ndarray()?.ones_like()?))
     }
 
+    /// Element-wise floor (round toward negative infinity).
     pub fn floor(&self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         if backend.supports_dtype(self.dtype()) {
             #[cfg(feature = "vulkan")]
@@ -278,6 +321,7 @@ impl<R: Rank> NumericTensor<R> {
         Ok(NumericTensor::NDArray(self.to_ndarray()?.floor()?))
     }
 
+    /// Element-wise ceil (round toward positive infinity).
     pub fn ceil(&self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         if backend.supports_dtype(self.dtype()) {
             #[cfg(feature = "vulkan")]
@@ -290,6 +334,7 @@ impl<R: Rank> NumericTensor<R> {
         Ok(NumericTensor::NDArray(self.to_ndarray()?.ceil()?))
     }
 
+    /// Element-wise round to nearest integer. Ties are resolved to the nearest even integer.
     pub fn round(&self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         if backend.supports_dtype(self.dtype()) {
             #[cfg(feature = "vulkan")]
@@ -302,10 +347,12 @@ impl<R: Rank> NumericTensor<R> {
         Ok(NumericTensor::NDArray(self.to_ndarray()?.round()?))
     }
 
+    /// Element-wise Gauss error function.
     pub fn erf(&self, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(self.to_ndarray()?.erf()?))
     }
 
+    /// Element-wise absolute value.
     pub fn abs(&self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         if backend.supports_dtype(self.dtype()) {
             #[cfg(feature = "candle")]
@@ -322,10 +369,12 @@ impl<R: Rank> NumericTensor<R> {
         Ok(NumericTensor::NDArray(self.to_ndarray()?.abs()?))
     }
 
+    /// Clamp values below min up to min (element-wise).
     pub fn clamp_min(&self, min: f32, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(self.to_ndarray()?.clamp_min(min)?))
     }
 
+    /// Apply a trigonometric operation element-wise (sin, cos, tan, etc.), as specified by op.
     pub fn trig(&self, op: TrigOp, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         if backend.supports_dtype(self.dtype()) {
             #[cfg(feature = "vulkan")]
@@ -338,6 +387,7 @@ impl<R: Rank> NumericTensor<R> {
         Ok(NumericTensor::NDArray(self.to_ndarray()?.trig(op)?))
     }
 
+    /// Element-wise reciprocal (1/x).
     pub fn reciprocal(&self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         if backend.supports_dtype(self.dtype()) {
             #[cfg(feature = "vulkan")]
@@ -350,6 +400,7 @@ impl<R: Rank> NumericTensor<R> {
         Ok(NumericTensor::NDArray(self.to_ndarray()?.reciprocal()?))
     }
 
+    /// Element-wise square root.
     pub fn sqrt(&self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         if backend.supports_dtype(self.dtype()) {
             #[cfg(feature = "candle")]
@@ -366,6 +417,7 @@ impl<R: Rank> NumericTensor<R> {
         Ok(NumericTensor::NDArray(self.to_ndarray()?.sqrt()?))
     }
 
+    /// Logical NOT for boolean tensors (element-wise). For non-boolean tensors, elements are compared to zero and the result is logical negation of that predicate.
     pub fn not(&self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         if backend.supports_dtype(self.dtype()) {
             #[cfg(feature = "vulkan")]
@@ -378,6 +430,7 @@ impl<R: Rank> NumericTensor<R> {
         Ok(NumericTensor::NDArray(self.to_ndarray()?.not()?))
     }
 
+    /// Bitwise NOT for integer tensors (element-wise).
     pub fn bitwise_not(&self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         if backend.supports_dtype(self.dtype()) {
             #[cfg(feature = "vulkan")]
@@ -390,12 +443,18 @@ impl<R: Rank> NumericTensor<R> {
         Ok(NumericTensor::NDArray(self.to_ndarray()?.bitwise_not()?))
     }
 
+    /// Return the first element (in row-major order) as a scalar.
     pub fn first_element(&self) -> NumericScalar {
         self.to_ndarray().unwrap().first_element()
     }
 }
 
 impl NumericTensor<DynRank> {
+    /// Cumulative sum along an axis.
+    ///
+    /// - axis: None means flatten then cumsum; Some(i) reduces along that axis.
+    /// - exclusive: if true, uses exclusive cumsum (shifted right, first zero).
+    /// - reverse: if true, computes cumsum in reverse order.
     pub fn cumsum(
         &self,
         axis: Option<isize>,
@@ -408,6 +467,11 @@ impl NumericTensor<DynRank> {
         ))
     }
 
+    /// Concatenate tensors along a given axis.
+    ///
+    /// - All tensors must have the same shape on non-concatenated axes.
+    /// - axis is zero-based.
+    /// - Returns a new tensor whose size along axis is the sum of inputs.
     pub fn concat(
         tensors: &[&Self],
         axis: usize,
@@ -426,6 +490,11 @@ impl NumericTensor<DynRank> {
         })
     }
 
+    /// Indices of maximum values along an axis.
+    ///
+    /// - axis: zero-based axis to reduce over.
+    /// - keepdims: if true, retains reduced dimension with size 1.
+    /// - select_last_index: if true, returns the last index of the max; else first.
     pub fn argmax(
         &self,
         axis: usize,
@@ -440,6 +509,7 @@ impl NumericTensor<DynRank> {
         )?))
     }
 
+    /// Indices of minimum values along an axis. See argmax for semantics of keepdims and select_last_index.
     pub fn argmin(
         &self,
         axis: usize,
@@ -454,6 +524,10 @@ impl NumericTensor<DynRank> {
         )?))
     }
 
+    /// Slice ranges for each axis, start inclusive and end exclusive.
+    ///
+    /// - indices length must equal rank; use 0..dim to keep an axis unchanged.
+    /// - Returns a view or a copy depending on the underlying representation.
     pub fn slice(
         &self,
         indices: &[Range<u64>],
@@ -474,6 +548,10 @@ impl NumericTensor<DynRank> {
         })
     }
 
+    /// Insert a size-1 dimension at the given axis.
+    ///
+    /// - axis is zero-based and may be equal to rank to append a new trailing dim.
+    /// - Errors if axis > rank.
     pub fn unsqueeze(&self, axis: usize) -> Result<Self, NumericTensorError> {
         Ok(match self {
             #[cfg(feature = "candle")]
@@ -486,6 +564,9 @@ impl NumericTensor<DynRank> {
         })
     }
 
+    /// Remove a dimension of size 1 at the given axis.
+    ///
+    /// - Errors if the axis is out of bounds or the dimension is not 1.
     pub fn squeeze(&self, axis: usize) -> Result<Self, NumericTensorError> {
         Ok(match self {
             #[cfg(feature = "candle")]
@@ -498,6 +579,11 @@ impl NumericTensor<DynRank> {
         })
     }
 
+    /// Element-wise addition with NumPy-style broadcasting.
+    ///
+    /// - Shapes must be broadcast-compatible.
+    /// - DType promotion follows standard broadcasting and type-promotion rules; result dtype is the common type of the inputs.
+    /// - Errors if dtypes are unsupported or broadcasting fails.
     pub fn add(a: &Self, b: &Self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         if backend.supports_dtype(a.dtype()) && backend.supports_dtype(b.dtype()) {
             #[cfg(feature = "candle")]
@@ -528,6 +614,11 @@ impl NumericTensor<DynRank> {
         )?))
     }
 
+    /// Element-wise subtraction with NumPy/ONNX-style broadcasting: a - b.
+    ///
+    /// - Shapes must be broadcast-compatible.
+    /// - DType promotion follows standard type-promotion rules to a common result type.
+    /// - Behavior with NaN/Inf follows IEEE-754: NaN propagates; Inf - Inf = NaN of corresponding sign rules.
     pub fn sub(a: &Self, b: &Self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         if backend.supports_dtype(a.dtype()) && backend.supports_dtype(b.dtype()) {
             #[cfg(feature = "candle")]
@@ -558,6 +649,15 @@ impl NumericTensor<DynRank> {
         )?))
     }
 
+    /// Element-wise division with NumPy/ONNX-style broadcasting: a / b.
+    ///
+    /// ONNX semantics (explicit):
+    /// - Broadcasting applies across leading dimensions.
+    /// - Result dtype is the common promoted type of inputs.
+    /// - Integer division performs floor toward zero (truncating) for signed integers; for unsigned, standard truncating division.
+    /// - Division by zero:
+    ///   - For floating inputs: x/0 -> +/-inf depending on sign; 0/0 -> NaN.
+    ///   - For integer inputs: behavior is to raise error in typical runtimes; if supported here, results are implementation-defined and should not be relied upon.
     pub fn div(a: &Self, b: &Self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         if backend.supports_dtype(a.dtype()) && backend.supports_dtype(b.dtype()) {
             #[cfg(feature = "candle")]
@@ -588,6 +688,11 @@ impl NumericTensor<DynRank> {
         )?))
     }
 
+    /// Element-wise multiplication with NumPy/ONNX-style broadcasting: a * b.
+    ///
+    /// - Shapes must be broadcast-compatible.
+    /// - DType promotion follows standard rules; result is the common type.
+    /// - Overflows in integer types wrap per two's-complement arithmetic.
     pub fn mul(a: &Self, b: &Self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         if backend.supports_dtype(a.dtype()) && backend.supports_dtype(b.dtype()) {
             #[cfg(feature = "candle")]
@@ -618,6 +723,12 @@ impl NumericTensor<DynRank> {
         )?))
     }
 
+    /// Floating-point remainder (fmod) with broadcasting: remainder of a divided by b.
+    ///
+    /// ONNX-aligned semantics:
+    /// - For floating types, result has the same sign as a and magnitude less than |b|.
+    /// - For integer inputs, values are computed in floating domain when necessary to match ONNX behavior, then cast back as needed by the implementation.
+    /// - Division by zero yields NaN for floating inputs. For integer inputs, results are undefined and may error.
     pub fn fmod(a: &Self, b: &Self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         if backend.supports_dtype(a.dtype()) && backend.supports_dtype(b.dtype()) {
             #[cfg(feature = "vulkan")]
@@ -635,6 +746,11 @@ impl NumericTensor<DynRank> {
         )?))
     }
 
+    /// Integer modulo with broadcasting: a % b using truncation toward zero for the quotient (ONNX semantics).
+    ///
+    /// - The sign of the result follows ONNX: r = a - trunc(a/b)*b, so r has the same sign as a and |r| < |b| when b != 0.
+    /// - Division by zero is an error.
+    /// - Mixed dtypes are promoted to an integer common type when possible; otherwise integers may be promoted to float and the result cast as needed by the implementation.
     pub fn imod(a: &Self, b: &Self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         if backend.supports_dtype(a.dtype()) && backend.supports_dtype(b.dtype()) {
             #[cfg(feature = "vulkan")]
@@ -652,6 +768,11 @@ impl NumericTensor<DynRank> {
         )?))
     }
 
+    /// Matrix multiplication / batched matmul following ONNX semantics.
+    ///
+    /// - Supports broadcasting of leading batch dims.
+    /// - accumulate_dtype selects accumulator precision when supported; None uses default.
+    /// - Errors if inner dimensions are incompatible after broadcasting.
     pub fn matmul(
         a: &Self,
         b: &Self,
@@ -690,6 +811,10 @@ impl NumericTensor<DynRank> {
         )?))
     }
 
+    /// Element-wise logical AND with broadcasting over boolean tensors.
+    ///
+    /// - Non-boolean inputs are first compared to zero to obtain a boolean view.
+    /// - Broadcasting rules apply.
     pub fn and(a: &Self, b: &Self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         if backend.supports_dtype(a.dtype()) && backend.supports_dtype(b.dtype()) {
             #[cfg(feature = "vulkan")]
@@ -707,6 +832,10 @@ impl NumericTensor<DynRank> {
         )?))
     }
 
+    /// Element-wise logical OR with broadcasting over boolean tensors.
+    ///
+    /// - Non-boolean inputs are first compared to zero to obtain a boolean view.
+    /// - Broadcasting rules apply.
     pub fn or(a: &Self, b: &Self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         if backend.supports_dtype(a.dtype()) && backend.supports_dtype(b.dtype()) {
             #[cfg(feature = "vulkan")]
@@ -724,6 +853,10 @@ impl NumericTensor<DynRank> {
         )?))
     }
 
+    /// Element-wise logical XOR with broadcasting over boolean tensors.
+    ///
+    /// - Non-boolean inputs are first compared to zero to obtain a boolean view.
+    /// - Broadcasting rules apply.
     pub fn xor(a: &Self, b: &Self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         if backend.supports_dtype(a.dtype()) && backend.supports_dtype(b.dtype()) {
             #[cfg(feature = "vulkan")]
@@ -741,6 +874,10 @@ impl NumericTensor<DynRank> {
         )?))
     }
 
+    /// Element-wise bitwise AND on integer tensors with broadcasting. For boolean tensors, use `and`.
+    ///
+    /// - Inputs must be integer dtypes (signed or unsigned). Mixed integer widths are promoted to a common integer type.
+    /// - Broadcasting rules apply.
     pub fn bitwise_and(
         a: &Self,
         b: &Self,
@@ -762,6 +899,10 @@ impl NumericTensor<DynRank> {
         )?))
     }
 
+    /// Element-wise bitwise OR on integer tensors with broadcasting. For boolean tensors, use `or`.
+    ///
+    /// - Inputs must be integer dtypes (signed or unsigned). Mixed integer widths are promoted to a common integer type.
+    /// - Broadcasting rules apply.
     pub fn bitwise_or(
         a: &Self,
         b: &Self,
@@ -783,6 +924,10 @@ impl NumericTensor<DynRank> {
         )?))
     }
 
+    /// Element-wise bitwise XOR on integer tensors with broadcasting. For boolean tensors, use `xor`.
+    ///
+    /// - Inputs must be integer dtypes (signed or unsigned). Mixed integer widths are promoted to a common integer type.
+    /// - Broadcasting rules apply.
     pub fn bitwise_xor(
         a: &Self,
         b: &Self,
@@ -804,6 +949,11 @@ impl NumericTensor<DynRank> {
         )?))
     }
 
+    /// Element-wise maximum with broadcasting.
+    ///
+    /// ONNX semantics:
+    /// - If either operand is NaN at a position, the result is NaN (NaN propagates).
+    /// - Inputs are cast to a common type when necessary.
     pub fn max(a: &Self, b: &Self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         if backend.supports_dtype(a.dtype()) && backend.supports_dtype(b.dtype()) {
             #[cfg(feature = "vulkan")]
@@ -821,6 +971,11 @@ impl NumericTensor<DynRank> {
         )?))
     }
 
+    /// Element-wise minimum with broadcasting.
+    ///
+    /// ONNX semantics:
+    /// - If either operand is NaN at a position, the result is NaN (NaN propagates).
+    /// - Inputs are cast to a common type when necessary.
     pub fn min(a: &Self, b: &Self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         if backend.supports_dtype(a.dtype()) && backend.supports_dtype(b.dtype()) {
             #[cfg(feature = "vulkan")]
@@ -838,6 +993,12 @@ impl NumericTensor<DynRank> {
         )?))
     }
 
+    /// Element-wise equality comparison (a == b) with broadcasting.
+    ///
+    /// ONNX semantics:
+    /// - Returns a boolean tensor.
+    /// - NaN is not equal to anything, including NaN.
+    /// - Broadcasting and type promotion apply to compare values in a common type.
     pub fn equal(
         a: &Self,
         b: &Self,
@@ -859,6 +1020,11 @@ impl NumericTensor<DynRank> {
         )?))
     }
 
+    /// Element-wise greater-than comparison (a > b) with broadcasting.
+    ///
+    /// ONNX semantics:
+    /// - Returns a boolean tensor.
+    /// - Any comparison involving NaN yields false.
     pub fn greater(
         a: &Self,
         b: &Self,
@@ -880,6 +1046,11 @@ impl NumericTensor<DynRank> {
         )?))
     }
 
+    /// Element-wise greater-or-equal comparison (a >= b) with broadcasting.
+    ///
+    /// ONNX semantics:
+    /// - Returns a boolean tensor.
+    /// - Any comparison involving NaN yields false.
     pub fn greater_or_equal(
         a: &Self,
         b: &Self,
@@ -900,6 +1071,11 @@ impl NumericTensor<DynRank> {
         ))
     }
 
+    /// Element-wise less-than comparison (a < b) with broadcasting.
+    ///
+    /// ONNX semantics:
+    /// - Returns a boolean tensor.
+    /// - Any comparison involving NaN yields false.
     pub fn less(a: &Self, b: &Self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         if backend.supports_dtype(a.dtype()) && backend.supports_dtype(b.dtype()) {
             #[cfg(feature = "vulkan")]
@@ -917,6 +1093,11 @@ impl NumericTensor<DynRank> {
         )?))
     }
 
+    /// Element-wise less-or-equal comparison (a <= b) with broadcasting.
+    ///
+    /// ONNX semantics:
+    /// - Returns a boolean tensor.
+    /// - Any comparison involving NaN yields false.
     pub fn less_or_equal(
         a: &Self,
         b: &Self,
@@ -938,12 +1119,17 @@ impl NumericTensor<DynRank> {
         )?))
     }
 
+    /// Return indices of non-zero elements (like NumPy nonzero) as a 2-D tensor of shape [ndim, count].
     pub fn nonzero(&self, _backend: &EvalBackend) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(
             NDArrayNumericTensor::<DynRank>::try_from(self)?.nonzero()?,
         ))
     }
 
+    /// Element-wise power: self.pow(exponent)
+    ///
+    /// - Broadcasting is supported between base and exponent.
+    /// - Integer bases or exponents are supported; when necessary, values are promoted to a sufficient floating type to perform the operation.
     pub fn pow(
         &self,
         exponent: &Self,
@@ -975,6 +1161,11 @@ impl NumericTensor<DynRank> {
         ))
     }
 
+    /// Permute the axes of the tensor.
+    ///
+    /// - If axes is None, the order is fully reversed.
+    /// - If axes is Some, it must be a permutation of 0..rank.
+    /// - Returns a view or a copy depending on the underlying representation.
     pub fn transpose(
         &self,
         axes: Option<Vec<i64>>,
@@ -995,6 +1186,7 @@ impl NumericTensor<DynRank> {
         })
     }
 
+    /// Return a boolean tensor marking NaNs in self (element-wise).
     pub fn is_nan(&self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         if backend.supports_dtype(self.dtype()) {
             #[cfg(feature = "vulkan")]
@@ -1007,6 +1199,9 @@ impl NumericTensor<DynRank> {
         Ok(NumericTensor::NDArray(self.to_ndarray()?.is_nan()?))
     }
 
+    /// Return a boolean tensor marking +inf and/or -inf values in self (element-wise).
+    /// - detect_positive: include +inf
+    /// - detect_negative: include -inf
     pub fn is_inf(
         &self,
         detect_positive: bool,
@@ -1018,6 +1213,7 @@ impl NumericTensor<DynRank> {
         ))
     }
 
+    /// Element-wise sign: returns -1, 0, or 1 for negative, zero, positive. For floating tensors, returns -1.0, 0.0, or 1.0.
     pub fn sign(&self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         #[cfg(feature = "vulkan")]
         if let EvalBackend::Vulkan(executor) = backend {
@@ -1028,6 +1224,7 @@ impl NumericTensor<DynRank> {
         Ok(NumericTensor::NDArray(self.to_ndarray()?.sign()?))
     }
 
+    /// Return true if any element is NaN. If the is_nan operation is unavailable, returns false.
     pub fn has_nan(&self, backend: &mut EvalBackend) -> Result<bool, NumericTensorError> {
         let is_nan = if let Ok(is_nan) = self.is_nan(backend) {
             is_nan
@@ -1038,6 +1235,11 @@ impl NumericTensor<DynRank> {
         Ok(values.iter().any(|v| *v))
     }
 
+    /// Gather elements from data along an axis using indices (ONNX Gather).
+    ///
+    /// - axis is zero-based and can be negative like ONNX (negative counts from end).
+    /// - indices values select along the given axis; other axes are broadcast.
+    /// - Errors if indices are out of bounds or shapes are incompatible.
     pub fn gather(
         data: &Self,
         indices: &Self,
@@ -1058,6 +1260,7 @@ impl NumericTensor<DynRank> {
         ))
     }
 
+    /// Mean-reduction over the specified axes. Returns a tensor of the same dtype as the input unless a wider accumulation type is explicitly requested by the operation.
     pub fn reduce_mean(
         &self,
         axes: Vec<usize>,
@@ -1069,6 +1272,11 @@ impl NumericTensor<DynRank> {
         ))
     }
 
+    /// Sum-reduction over the specified axes.
+    ///
+    /// - axes are zero-based dimensions to reduce; must be valid for this tensor's rank.
+    /// - If keepdims is true, reduced axes are kept with size 1; otherwise they are removed.
+    /// - Returns a tensor with the same dtype; integer and floating types keep their type.
     pub fn reduce_sum(
         &self,
         axes: Vec<usize>,
@@ -1080,6 +1288,7 @@ impl NumericTensor<DynRank> {
         ))
     }
 
+    /// Min-reduction over the specified axes.
     pub fn reduce_min(
         &self,
         axes: Vec<usize>,
@@ -1091,6 +1300,7 @@ impl NumericTensor<DynRank> {
         ))
     }
 
+    /// Max-reduction over the specified axes.
     pub fn reduce_max(
         &self,
         axes: Vec<usize>,
@@ -1102,6 +1312,7 @@ impl NumericTensor<DynRank> {
         ))
     }
 
+    /// Product-reduction over the specified axes.
     pub fn reduce_prod(
         &self,
         axes: Vec<usize>,
@@ -1113,6 +1324,12 @@ impl NumericTensor<DynRank> {
         ))
     }
 
+    #[allow(clippy::too_many_arguments)]
+    /// General matrix multiply: alpha * (A op) @ (B op) + beta * C
+    ///
+    /// - trans_a/trans_b control whether A/B are transposed before matmul.
+    /// - C is optional; if provided, must be broadcastable to the resulting matmul shape.
+    /// - Accumulation is performed in the specified accumulate_dtype when provided; otherwise the operation uses a reasonable default for numerical stability.
     #[allow(clippy::too_many_arguments)]
     pub fn gemm(
         a: &Self,
@@ -1139,6 +1356,8 @@ impl NumericTensor<DynRank> {
         ))
     }
 
+    /// Split the tensor into multiple chunks along axis with given sizes in split.
+    /// The sum of split must equal the size of the axis.
     pub fn split(
         &self,
         split: &[i64],
@@ -1155,6 +1374,10 @@ impl NumericTensor<DynRank> {
         })
     }
 
+    /// Element-wise select: returns a where self (condition) is true, otherwise b.
+    ///
+    /// - self must be a boolean tensor broadcastable to a and b.
+    /// - a and b must be broadcast-compatible and castable to a common dtype if needed.
     pub fn where_op(
         &self,
         a: &Self,
@@ -1167,6 +1390,9 @@ impl NumericTensor<DynRank> {
         ))
     }
 
+    /// Cast this tensor to a different dtype, preserving shape and values where representable.
+    ///
+    /// - Errors if values are out of range for the target type or the cast is not supported.
     pub fn cast(
         &self,
         dtype: DType,
@@ -1199,6 +1425,7 @@ impl NumericTensor<DynRank> {
 }
 
 impl NumericTensor<P1> {
+    /// Construct a rank-1 tensor from a vector (shape [len]).
     pub fn from_vec<T>(v: Vec<T>) -> Self
     where
         T: NDArrayNumericTensorType,
