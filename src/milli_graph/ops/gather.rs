@@ -25,7 +25,7 @@ impl MilliOpGather {
 
 impl MilliOp for MilliOpGather {
     fn get_inputs(&self) -> Vec<MilliOpGraphTensorId> {
-        vec![self.data]
+        vec![self.data, self.indices]
     }
 
     fn eval(
