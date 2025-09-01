@@ -6,8 +6,8 @@ use whisper_tensor::backends::eval_backend::EvalBackend;
 use whisper_tensor::backends::vulkan_backend::{VulkanContext, VulkanImmediateExecutor};
 use whisper_tensor::model::Model;
 use whisper_tensor::super_graph::cache::SuperGraphCache;
+use whisper_tensor_import::identify_and_load;
 use whisper_tensor_import::onnx_graph::WeightStorageStrategy;
-use whisper_tensor_import::{ModelTypeHint, identify_and_load};
 
 fn main() {
     tracing_subscriber::fmt::init();
