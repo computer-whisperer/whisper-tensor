@@ -147,10 +147,10 @@ impl<R: Rank> NumericTensor<R> {
     pub fn reshape(
         &self,
         new_shape: R::KnownDims,
-        backend: &mut EvalBackend,
+        _backend: &mut EvalBackend,
     ) -> Result<Self, NumericTensorError> {
         #[cfg(feature = "vulkan")]
-        if let EvalBackend::Vulkan(executor) = backend {
+        if let EvalBackend::Vulkan(executor) = _backend {
             return Ok(NumericTensor::Vulkan(
                 self.to_vulkan(executor)?.reshape(new_shape, executor)?,
             ));
@@ -1260,9 +1260,9 @@ impl NumericTensor<DynRank> {
     }
 
     /// Element-wise sign: returns -1, 0, or 1 for negative, zero, positive. For floating tensors, returns -1.0, 0.0, or 1.0.
-    pub fn sign(&self, backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
+    pub fn sign(&self, _backend: &mut EvalBackend) -> Result<Self, NumericTensorError> {
         #[cfg(feature = "vulkan")]
-        if let EvalBackend::Vulkan(executor) = backend {
+        if let EvalBackend::Vulkan(executor) = _backend {
             return Ok(NumericTensor::Vulkan(
                 self.to_vulkan(executor)?.sign(executor)?,
             ));
@@ -1290,10 +1290,10 @@ impl NumericTensor<DynRank> {
         data: &Self,
         indices: &Self,
         axis: i64,
-        backend: &mut EvalBackend,
+        _backend: &mut EvalBackend,
     ) -> Result<Self, NumericTensorError> {
         #[cfg(feature = "vulkan")]
-        if let EvalBackend::Vulkan(executor) = backend {
+        if let EvalBackend::Vulkan(executor) = _backend {
             return Ok(NumericTensor::Vulkan(VulkanTensor::gather(
                 &data.to_vulkan(executor)?,
                 &indices.to_vulkan(executor)?,

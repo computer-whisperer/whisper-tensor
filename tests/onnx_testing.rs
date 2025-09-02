@@ -1813,19 +1813,19 @@ macro_rules! do_tests {
         //do_test!($runner_fn, $runner_name, test_spacetodepth);
         //test_do!($runner_fn, $runner_name, test_spacetodepth_example);
 
-        /*
+
         do_test!($runner_fn, $runner_name, test_split_1d_uneven_split_opset18);
         do_test!($runner_fn, $runner_name, test_split_2d_uneven_split_opset18);
-        do_test!($runner_fn, $runner_name, test_split_equal_parts_1d_opset13);
+        //do_test!($runner_fn, $runner_name, test_split_equal_parts_1d_opset13);
         do_test!($runner_fn, $runner_name, test_split_equal_parts_1d_opset18);
         do_test!($runner_fn, $runner_name, test_split_equal_parts_2d);
-        do_test!($runner_fn, $runner_name, test_split_equal_parts_2d_opset13);
-        do_test!($runner_fn, $runner_name, test_split_equal_parts_default_axis_opset13);
+        //do_test!($runner_fn, $runner_name, test_split_equal_parts_2d_opset13);
+        //do_test!($runner_fn, $runner_name, test_split_equal_parts_default_axis_opset13);
         do_test!($runner_fn, $runner_name, test_split_equal_parts_default_axis_opset18);
-        do_test!($runner_fn, $runner_name, test_split_to_sequence_1);
-        do_test!($runner_fn, $runner_name, test_split_to_sequence_2);
-        do_test!($runner_fn, $runner_name, test_split_to_sequence_nokeepdims);
-        */
+        //do_test!($runner_fn, $runner_name, test_split_to_sequence_1);
+        //do_test!($runner_fn, $runner_name, test_split_to_sequence_2);
+        //do_test!($runner_fn, $runner_name, test_split_to_sequence_nokeepdims);
+
 
         do_test!($runner_fn, $runner_name, test_split_variable_parts_1d_opset13);
         do_test!($runner_fn, $runner_name, test_split_variable_parts_1d_opset18);

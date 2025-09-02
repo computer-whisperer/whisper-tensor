@@ -35,11 +35,11 @@ impl<'a> core::fmt::Display for EvalBackend<'a> {
 }
 
 impl<'a> EvalBackend<'a> {
-    pub fn supports_dtype(&self, dtype: DType) -> bool {
+    pub fn supports_dtype(&self, _dtype: DType) -> bool {
         match self {
             #[cfg(feature = "candle")]
             EvalBackend::Candle(_) => matches!(
-                dtype,
+                _dtype,
                 DType::F32
                     | DType::F64
                     | DType::BF16
@@ -50,10 +50,10 @@ impl<'a> EvalBackend<'a> {
             ),
             EvalBackend::NDArray => true,
             #[cfg(feature = "vulkan")]
-            EvalBackend::Vulkan(_) => !matches!(dtype, DType::STRING),
+            EvalBackend::Vulkan(_) => !matches!(_dtype, DType::STRING),
             #[cfg(feature = "tch")]
             EvalBackend::TCH => matches!(
-                dtype,
+                _dtype,
                 DType::F64
                     | DType::F32
                     | DType::BF16
