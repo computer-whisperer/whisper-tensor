@@ -34,7 +34,16 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: recursive
-          lfs: true
+          lfs: false
+
+      - name: Fetch LFS model (RWKV .pth only)
+        shell: bash
+        run: |
+          git lfs version || { sudo apt-get update && sudo apt-get install -y git-lfs; }
+          git lfs install
+          git lfs fetch --include="test_models/*.pth" --exclude="*"
+          git lfs checkout -- test_models/*.pth
+          ls -lh test_models || true
 
       - name: Install Rust (stable) + components
         uses: dtolnay/rust-toolchain@stable

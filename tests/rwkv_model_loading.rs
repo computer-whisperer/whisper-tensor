@@ -3,6 +3,26 @@ use std::path::PathBuf;
 use whisper_tensor::backends::eval_backend::EvalBackend;
 use whisper_tensor::model::{Model, ModelExecutionRuntime};
 
+fn ensure_not_lfs_pointer(path: &std::path::Path) {
+    use std::fs;
+    let Ok(md) = fs::metadata(path) else {
+        return;
+    };
+    // LFS pointer files are tiny (typically < 200 bytes) and start with a known header
+    if md.len() < 1024 {
+        if let Ok(bytes) = fs::read(path) {
+            if bytes.starts_with(b"version https://git-lfs.github.com/spec/v1") {
+                panic!(
+                    "{} looks like a Git LFS pointer and not the real model file.\n\
+                     Please ensure Git LFS fetched this path. In CI, fetch just the RWKV pth via:\n\
+                     git lfs fetch --include=\"test_models/*.pth\" --exclude=\"*\" && git lfs checkout -- test_models/*.pth",
+                    path.display()
+                );
+            }
+        }
+    }
+}
+
 fn find_rwkv_pth() -> Option<PathBuf> {
     let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     dir.push("test_models");
@@ -33,6 +53,7 @@ fn rwkv01b_model_loads() {
         eprintln!("Skipping: no RWKV .pth found under test_models/");
         return;
     };
+    ensure_not_lfs_pointer(&pth_path);
     // Use EmbeddedData output method to avoid external file dependencies
     for strategy in [whisper_tensor_import::onnx_graph::WeightStorageStrategy::EmbeddedData] {
         let onnx_bytes = whisper_tensor_import::identify_and_load(
@@ -72,6 +93,7 @@ fn rwkv01b_single_step_runs_shape_sanity() {
         eprintln!("Skipping: no RWKV .pth found under test_models/");
         return;
     };
+    ensure_not_lfs_pointer(&pth_path);
     let onnx_bytes = whisper_tensor_import::identify_and_load(
         &pth_path,
         whisper_tensor_import::onnx_graph::WeightStorageStrategy::EmbeddedData,
@@ -130,6 +152,7 @@ fn rwkv01b_model_loads_with_binfile() {
         eprintln!("Skipping: no RWKV .pth found under test_models/");
         return;
     };
+    ensure_not_lfs_pointer(&pth_path);
 
     let tempdir = tempfile::tempdir().expect("create tempdir");
     let bin_path = tempdir.path().join("weights.bin");
@@ -172,6 +195,7 @@ fn rwkv01b_model_loads_with_origin_reference() {
         eprintln!("Skipping: no RWKV .pth found under test_models/");
         return;
     };
+    ensure_not_lfs_pointer(&pth_path);
 
     // Build ONNX with external_data entries pointing to the original .pth tensors
     let onnx_bytes = whisper_tensor_import::identify_and_load(

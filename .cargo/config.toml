@@ -1,4 +1,3 @@
-[target.wasm32-unknown-unknown]
-rustflags = [
-    "-C", "link-args=-z stack-size=15000000",
-]
+[alias]
+fmt-nolibs = "fmt -p whisper-tensor -p whisper-tensor-import -p whisper-tensor-server -p whisper-tensor-webui"
+fmtcheck-nolibs = "fmt -p whisper-tensor -p whisper-tensor-import -p whisper-tensor-server -p whisper-tensor-webui -- --check"

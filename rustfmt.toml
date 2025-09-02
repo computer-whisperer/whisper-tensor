@@ -1,0 +1,3 @@
+# rustfmt configuration (stable-safe)
+# Note: The `ignore` option is unstable on stable toolchains; use cargo aliases defined
+# in .cargo/config.toml (fmt-nolibs / fmtcheck-nolibs) to avoid formatting vendored libs/.
