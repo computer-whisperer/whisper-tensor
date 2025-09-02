@@ -19,7 +19,7 @@ Whisper Tensor is a **correctness-first** machine-learning runtime in Rust (Edit
 - Lowers to a **Milli-Op Graph** (decomposes complex nodes into a simpler op set; pre-execution inference resolves shapes/consts where possible).
 - Executes on a chosen backend (NDArray/Vulkan today), with **operation-level fallback** when a kernel isn’t implemented on a target.
 
-**Why:** determining the definitive “correct behavior” is often painful with existing engines. Whisper Tensor favors transparent IRs and a WebUI that lets you *see* structure and, increasingly, intermediate tensors so correctness bugs (e.g., with bf16/f16 on platforms without native primitives) can be isolated quickly.
+**Why:** determining the definitive “correct behavior” is often painful with existing engines. Whisper Tensor favors transparent IRs and a WebUI that lets you inspect structure and intermediate tensors (full introspection) so correctness bugs (e.g., with bf16/f16 on platforms without native primitives) can be isolated quickly.
 
 > **ONNX opsets:** Recent ONNX nodes are the priority (≥19 recommended). Some features as new as **opset 23** (e.g., bf16) are supported. Very old, pre-10 edge cases are intentionally low priority.
 
@@ -33,9 +33,9 @@ Whisper Tensor is a **correctness-first** machine-learning runtime in Rust (Edit
 
 ## Status snapshot
 
-- **GPT-2** runs end-to-end via the high-level Super Graph API.
-- **RWKV** executes but is still being debugged for correctness using the new introspection tooling.
-- **Vulkan** is partial; unimplemented ops automatically fall back to **NDArray** during a single execution.
+- **GPT-2** and **RWKV** both run end-to-end via the high-level Super Graph API.
+- **Backends**: **NDArray** and **Vulkan** both run GPT-2 and RWKV flows correctly; Vulkan continues to expand op coverage and falls back per‑op to NDArray when needed.
+- **WebUI**: supports full introspection; you can read intermediate graph tensors while running Super Graphs.
 
 ---
 
@@ -44,7 +44,7 @@ Whisper Tensor is a **correctness-first** machine-learning runtime in Rust (Edit
 - **`whisper-tensor`** — core library: ONNX ingest, Symbolic Graph, Milli-Op Graph, lowering, backend dispatch.
 - **`crates/whisper-tensor-import`** — loaders/recipes that turn raw weights (e.g., `.safetensors`, `.pth`) into canonical **ONNX** graphs.
 - **`crates/whisper-tensor-server`** — inference host (WebSocket APIs) and HTTP server for WebUI assets.
-- **`crates/whisper-tensor-webui`** — WASM + egui **Graph Explorer** for navigating nested graphs and (ongoing) tensor introspection.
+- **`crates/whisper-tensor-webui`** — WASM + egui **Graph Explorer** for navigating nested graphs and full introspection; can read intermediate graph tensors during Super Graph runs.
 - **`examples/`** — up-to-date runnable samples, including GPT-2 flows using the high-level Super Graph API.
 - **`tests/`** — includes the ONNX conformance harness for NDArray and Vulkan.
 - **`libs/`** — vendored submodules.
