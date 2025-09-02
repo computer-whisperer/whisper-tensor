@@ -35,15 +35,25 @@ jobs:
         with:
           submodules: recursive
           lfs: false
+          fetch-depth: 0
 
       - name: Fetch LFS model (RWKV .pth only)
         shell: bash
         run: |
           git lfs version || { sudo apt-get update && sudo apt-get install -y git-lfs; }
           git lfs install
-          git lfs fetch --include="test_models/*.pth" --exclude="*"
-          git lfs checkout -- test_models/*.pth
+          # Pull only the RWKV .pth via LFS; keep other LFS files (like large ONNX) as pointers
+          git lfs pull --include="test_models/*.pth" --exclude="*"
+          echo "Listing test_models after LFS pull:"
           ls -lh test_models || true
+          # Verify the .pth is not an LFS pointer (pointer files start with the LFS header and are tiny)
+          PTHTMP=$(ls test_models/*.pth 2>/dev/null | head -n1 || true)
+          if [[ -n "$PTHTMP" ]]; then
+            if head -n1 "$PTHTMP" | grep -q "version https://git-lfs.github.com/spec/v1"; then
+              echo "ERROR: $PTHTMP is still a Git LFS pointer; failing early." >&2
+              exit 1
+            fi
+          fi
 
       - name: Install Rust (stable) + components
         uses: dtolnay/rust-toolchain@stable
