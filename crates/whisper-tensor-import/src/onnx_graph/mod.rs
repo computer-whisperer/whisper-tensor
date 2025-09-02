@@ -58,10 +58,20 @@ pub enum WeightStorageStrategy {
     None,
     BinFile(PathBuf),
     EmbeddedData,
+    OriginReference,
 }
 
 impl WeightStorageStrategy {
-    fn get_manager<'a>(&'a self) -> Result<Box<dyn WeightExternalOutputManager<'a> + 'a>, Error> {
+    pub fn get_manager<'a>(
+        &'a self,
+    ) -> Result<Box<dyn WeightExternalOutputManager<'a> + 'a>, Error> {
+        self.get_manager_with_origin_path(None)
+    }
+
+    pub fn get_manager_with_origin_path<'a>(
+        &'a self,
+        origin_weight_path: Option<&std::path::Path>,
+    ) -> Result<Box<dyn WeightExternalOutputManager<'a> + 'a>, Error> {
         match self {
             WeightStorageStrategy::None => Ok(Box::new(weights::NullOutputManager::new())),
             WeightStorageStrategy::BinFile(path) => {
@@ -70,6 +80,9 @@ impl WeightStorageStrategy {
             WeightStorageStrategy::EmbeddedData => {
                 Ok(Box::new(weights::EmbeddedOutputManager::<'a>::new()))
             }
+            WeightStorageStrategy::OriginReference => Ok(Box::new(
+                weights::OriginReferenceOutputManager::<'a>::new(origin_weight_path),
+            )),
         }
     }
 }
@@ -113,6 +126,16 @@ pub fn build_proto(
     outputs: &[(String, Arc<dyn Tensor>, Option<OutputMetadata>)],
     weight_storage: WeightStorageStrategy,
     model_metadata: Option<ModelMetadata>,
+) -> Result<onnx::ModelProto, Error> {
+    build_proto_with_origin_path(inputs, outputs, weight_storage, model_metadata, None)
+}
+
+pub fn build_proto_with_origin_path(
+    inputs: &[(Arc<dyn Tensor>, Option<InputMetadata>)],
+    outputs: &[(String, Arc<dyn Tensor>, Option<OutputMetadata>)],
+    weight_storage: WeightStorageStrategy,
+    model_metadata: Option<ModelMetadata>,
+    origin_pth_path: Option<&std::path::Path>,
 ) -> Result<onnx::ModelProto, Error> {
     // Get all nodes in graph
     let mut nodes = HashSet::new();
@@ -189,7 +212,7 @@ pub fn build_proto(
     }
 
     // Gather tensor weights
-    let mut data_manager = weight_storage.get_manager()?;
+    let mut data_manager = weight_storage.get_manager_with_origin_path(origin_pth_path)?;
     for tensor in &tensors {
         tensor.gather_weights(data_manager.as_mut());
     }

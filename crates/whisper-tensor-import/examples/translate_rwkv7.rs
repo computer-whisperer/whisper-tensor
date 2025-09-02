@@ -11,7 +11,8 @@ fn main() {
     let bin_out = Path::new("out.bin");
     let onnx_data = identify_and_load(
         file_in,
-        WeightStorageStrategy::BinFile(bin_out.to_path_buf()),
+        //WeightStorageStrategy::BinFile(bin_out.to_path_buf()),
+        WeightStorageStrategy::OriginReference,
         Some(ModelTypeHint::RWKV7),
     )
     .unwrap();

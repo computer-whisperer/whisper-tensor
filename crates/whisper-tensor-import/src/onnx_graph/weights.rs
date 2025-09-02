@@ -207,12 +207,177 @@ impl<'a> WeightExternalOutputManager<'a> for BinOutputManager<'a> {
     }
 }
 
-/*
-struct InplaceWeightOutputManager {
-
+struct SafeTensorsTensorPath {
+    file_index: usize,
+    tensor_name: String,
 }
-impl WeightExternalOutputManager for InplaceWeightOutputManager {}
-*/
+
+enum StoredOriginReferenceTensor {
+    PthTensor(candle_core::pickle::TensorInfo),
+    SafeTensor(SafeTensorsTensorPath),
+}
+
+#[derive(Default)]
+pub(super) struct OriginReferenceOutputManager<'a> {
+    stored_tensors: HashMap<&'a dyn Tensor, StoredOriginReferenceTensor>,
+    origin_pth_path: Option<PathBuf>,
+}
+
+impl<'a> OriginReferenceOutputManager<'a> {
+    pub fn new(origin_weight_path: Option<&Path>) -> Self {
+        let origin_pth_path = origin_weight_path
+            .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()));
+        Self {
+            stored_tensors: HashMap::new(),
+            origin_pth_path,
+        }
+    }
+}
+
+impl<'a> WeightExternalOutputManager<'a> for OriginReferenceOutputManager<'a> {
+    fn write_pth_tensor_data(
+        &mut self,
+        graph_tensor: &'a dyn Tensor,
+        tensor_info: candle_core::pickle::TensorInfo,
+        _tensors: Arc<candle_core::pickle::PthTensors>,
+    ) -> Result<(), Error> {
+        self.stored_tensors.insert(
+            graph_tensor,
+            StoredOriginReferenceTensor::PthTensor(tensor_info),
+        );
+        Ok(())
+    }
+
+    fn write_safetensors_tensor_data(
+        &mut self,
+        graph_tensor: &'a SafetensorsTensor,
+    ) -> Result<(), Error> {
+        let file_index = graph_tensor.file_index;
+        let tensor_name = graph_tensor.name.clone();
+        self.stored_tensors.insert(
+            graph_tensor,
+            StoredOriginReferenceTensor::SafeTensor(SafeTensorsTensorPath {
+                file_index,
+                tensor_name,
+            }),
+        );
+        Ok(())
+    }
+
+    fn write_tensor_data(
+        &mut self,
+        _graph_tensor: &'a dyn Tensor,
+        _data: TensorData,
+    ) -> Result<(), Error> {
+        // In origin-reference mode we do not embed raw data; ignore.
+        Ok(())
+    }
+
+    fn get_initializer(
+        &mut self,
+        graph_tensor: &'a dyn Tensor,
+        tensor_name: String,
+    ) -> Result<Option<TensorProto>, Error> {
+        if let Some(stored_tensor) = self.stored_tensors.get(&graph_tensor) {
+            match stored_tensor {
+                StoredOriginReferenceTensor::PthTensor(tensor_info) => {
+                    // Compute byte length from dtype and shape
+                    let elem_size: usize = match graph_tensor.dtype() {
+                        DType::F32 => 4,
+                        DType::F16 => 2,
+                        DType::BF16 => 2,
+                        DType::I64 => 8,
+                        DType::I32 => 4,
+                        DType::U16 => 2,
+                    };
+                    let numel: usize = graph_tensor.shape().resolve()?.iter().product();
+                    let byte_len = elem_size * numel;
+
+                    // Choose origin .pth file path for external_data location.
+                    // Prefer the provided origin_pth_path (canonicalized),
+                    // falling back to tensor_info.path only if not set.
+                    let chosen_path_buf = if let Some(p) = &self.origin_pth_path {
+                        p.clone()
+                    } else {
+                        // Fallback: try to canonicalize the tensor_info.path (may be non-filesystem)
+                        let original_path_str = tensor_info.path.clone();
+                        let original_path = std::path::Path::new(&original_path_str);
+                        std::fs::canonicalize(original_path)
+                            .unwrap_or_else(|_| original_path.to_path_buf())
+                    };
+                    let location_str = chosen_path_buf.to_string_lossy().to_string();
+
+                    let external_data = vec![
+                        onnx::StringStringEntryProto {
+                            key: "format".to_string(),
+                            value: "pth".to_string(),
+                        },
+                        onnx::StringStringEntryProto {
+                            key: "tensor_name".to_string(),
+                            value: tensor_info.name.clone(),
+                        },
+                        onnx::StringStringEntryProto {
+                            key: "location".to_string(),
+                            value: location_str,
+                        },
+                        onnx::StringStringEntryProto {
+                            key: "offset".to_string(),
+                            value: format!("{}", tensor_info.layout.start_offset()),
+                        },
+                        onnx::StringStringEntryProto {
+                            key: "length".to_string(),
+                            value: format!("{byte_len}"),
+                        },
+                    ];
+                    Ok(Some(TensorProto {
+                        name: tensor_name,
+                        data_type: onnx::tensor_proto::DataType::from(graph_tensor.dtype()) as i32,
+                        dims: graph_tensor
+                            .shape()
+                            .resolve()?
+                            .iter()
+                            .map(|x| *x as i64)
+                            .collect(),
+                        data_location: onnx::tensor_proto::DataLocation::External as i32,
+                        external_data,
+                        ..Default::default()
+                    }))
+                }
+                StoredOriginReferenceTensor::SafeTensor(safe_path) => {
+                    let external_data = vec![
+                        onnx::StringStringEntryProto {
+                            key: "format".to_string(),
+                            value: "safetensors".to_string(),
+                        },
+                        onnx::StringStringEntryProto {
+                            key: "tensor_name".to_string(),
+                            value: safe_path.tensor_name.clone(),
+                        },
+                        onnx::StringStringEntryProto {
+                            key: "file_index".to_string(),
+                            value: format!("{}", safe_path.file_index),
+                        },
+                    ];
+                    Ok(Some(TensorProto {
+                        name: tensor_name,
+                        data_type: onnx::tensor_proto::DataType::from(graph_tensor.dtype()) as i32,
+                        dims: graph_tensor
+                            .shape()
+                            .resolve()?
+                            .iter()
+                            .map(|x| *x as i64)
+                            .collect(),
+                        data_location: onnx::tensor_proto::DataLocation::External as i32,
+                        external_data,
+                        ..Default::default()
+                    }))
+                }
+            }
+        } else {
+            Ok(None)
+        }
+    }
+}
 
 pub struct PthTensor {
     tensor_info: candle_core::pickle::TensorInfo,

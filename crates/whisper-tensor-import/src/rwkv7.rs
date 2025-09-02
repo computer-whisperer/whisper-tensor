@@ -89,13 +89,14 @@ pub fn load_rwkv7_pth(
 
     let weight_manager = crate::onnx_graph::weights::PthWeightManager::new(tensors.clone());
 
-    load_rwkv7(weight_manager, layer_count, output_method)
+    load_rwkv7(weight_manager, layer_count, output_method, Some(pth_path))
 }
 
 pub fn load_rwkv7(
     weight_manager: impl WeightManager,
     layer_count: usize,
     output_method: WeightStorageStrategy,
+    origin_pth_path: Option<&Path>,
 ) -> Result<Vec<u8>, anyhow::Error> {
     let mut input_tensors: Vec<(Arc<dyn Tensor>, Option<InputMetadata>)> = vec![];
     let mut output_tensors: Vec<(String, Arc<dyn Tensor>, Option<OutputMetadata>)> = vec![];
@@ -468,11 +469,12 @@ pub fn load_rwkv7(
         tokenizer_infos: vec![TokenizerInfo::RWKVWorld],
         max_token_batch: Some(1),
     };
-    let onnx_model = crate::onnx_graph::build_proto(
+    let onnx_model = crate::onnx_graph::build_proto_with_origin_path(
         &input_tensors,
         &output_tensors,
         output_method,
         Some(model_metadata),
+        origin_pth_path,
     )?;
 
     Ok(onnx_model.encode_to_vec())

@@ -76,8 +76,13 @@ impl ModelServer {
         model_path: &Path,
         model_hint: Option<ModelTypeHint>,
     ) -> Result<(), anyhow::Error> {
-        let onnx_data =
-            identify_and_load(model_path, WeightStorageStrategy::EmbeddedData, model_hint)?;
+        // Prefer OriginReference when built with Candle; otherwise embed data inline
+        let storage = if cfg!(feature = "candle") {
+            WeightStorageStrategy::OriginReference
+        } else {
+            WeightStorageStrategy::EmbeddedData
+        };
+        let onnx_data = identify_and_load(model_path, storage, model_hint)?;
 
         let runtime_model = Model::new_from_onnx(&onnx_data)?;
         let model_name = model_path
@@ -431,7 +436,10 @@ async fn main() {
 
     // Load test models
     model_server
-        .load_model(Path::new("gpt2-lm-head-10.onnx"), Some(ModelTypeHint::GPT2))
+        .load_model(
+            Path::new("test_models/gpt2-lm-head-10.onnx"),
+            Some(ModelTypeHint::GPT2),
+        )
         .await
         .unwrap();
     model_server.load_model(Path::new("libs/onnx/onnx/backend/test/data/node/test_layer_normalization_2d_axis0_expanded/model.onnx"), None).await.unwrap();

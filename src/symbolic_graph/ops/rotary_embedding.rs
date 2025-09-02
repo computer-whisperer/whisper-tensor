@@ -1,6 +1,6 @@
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
+use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::ops::*;
-use crate::milli_graph::{MilliOpGraph};
 use crate::onnx;
 use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{ONNXDecodingError, SymbolicGraphTensorId, query_attribute_int};

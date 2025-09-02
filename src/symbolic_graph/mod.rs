@@ -374,15 +374,132 @@ impl SymbolicGraphInner {
         }
 
         for t in &onnx_graph.initializer {
-            let numeric_tensor = NDArrayNumericTensor::try_from(t)?;
-            let tensor = if numeric_tensor.num_elements() > 100 {
-                // Larger tensors go into tensor store
-                let id = graph_mutator.tensor_store.add_tensor(StoredTensor::Numeric(
-                    NumericTensor::NDArray(numeric_tensor),
-                ));
-                StoredOrNotTensor::Stored(id)
+            // Detect external data reference
+            let uses_external = t.data_location
+                == onnx::tensor_proto::DataLocation::External as i32
+                || !t.external_data.is_empty();
+            let tensor: StoredOrNotTensor = if uses_external {
+                // Parse keys: location, offset, length
+                let mut map = std::collections::HashMap::new();
+                for kv in &t.external_data {
+                    map.insert(kv.key.clone(), kv.value.clone());
+                }
+                if let Some(fmt) = map.get("format") {
+                    if fmt == "pth" {
+                        if let (Some(location), Some(tensor_name)) =
+                            (map.get("location"), map.get("tensor_name"))
+                        {
+                            let dtype = DType::try_from(
+                                onnx::tensor_proto::DataType::try_from(t.data_type).map_err(
+                                    |x| {
+                                        ONNXDecodingError::ProtobufDecodeError(anyhow::Error::from(
+                                            x,
+                                        ))
+                                    },
+                                )?,
+                            )?;
+                            let shape = t.dims.iter().map(|x| *x as u64).collect::<Vec<_>>();
+                            let id =
+                                graph_mutator
+                                    .tensor_store
+                                    .add_tensor(StoredTensor::ExternalPth {
+                                        path: location.clone(),
+                                        tensor_name: tensor_name.clone(),
+                                        dtype,
+                                        shape: shape.clone(),
+                                    });
+                            StoredOrNotTensor::Stored(id)
+                        } else {
+                            // Missing required keys for pth; fallback to eager load
+                            let numeric_tensor = NDArrayNumericTensor::try_from(t)?;
+                            if numeric_tensor.num_elements() > 100 {
+                                let id = graph_mutator.tensor_store.add_tensor(
+                                    StoredTensor::Numeric(NumericTensor::NDArray(numeric_tensor)),
+                                );
+                                StoredOrNotTensor::Stored(id)
+                            } else {
+                                StoredOrNotTensor::NotStored(numeric_tensor)
+                            }
+                        }
+                    } else {
+                        // Not pth; try generic external binary with offset/length
+                        if let (Some(location), Some(offset), Some(length)) =
+                            (map.get("location"), map.get("offset"), map.get("length"))
+                        {
+                            let dtype = DType::try_from(
+                                onnx::tensor_proto::DataType::try_from(t.data_type).map_err(
+                                    |x| {
+                                        ONNXDecodingError::ProtobufDecodeError(anyhow::Error::from(
+                                            x,
+                                        ))
+                                    },
+                                )?,
+                            )?;
+                            let shape = t.dims.iter().map(|x| *x as u64).collect::<Vec<_>>();
+                            let id = graph_mutator.tensor_store.add_tensor(
+                                StoredTensor::ExternalBinary {
+                                    path: location.clone(),
+                                    offset: offset.parse().unwrap_or(0usize),
+                                    length: length.parse().unwrap_or(0usize),
+                                    dtype,
+                                    shape: shape.clone(),
+                                },
+                            );
+                            StoredOrNotTensor::Stored(id)
+                        } else {
+                            // Fallback to eager load when essential keys missing
+                            let numeric_tensor = NDArrayNumericTensor::try_from(t)?;
+                            if numeric_tensor.num_elements() > 100 {
+                                let id = graph_mutator.tensor_store.add_tensor(
+                                    StoredTensor::Numeric(NumericTensor::NDArray(numeric_tensor)),
+                                );
+                                StoredOrNotTensor::Stored(id)
+                            } else {
+                                StoredOrNotTensor::NotStored(numeric_tensor)
+                            }
+                        }
+                    }
+                } else if let (Some(location), Some(offset), Some(length)) =
+                    (map.get("location"), map.get("offset"), map.get("length"))
+                {
+                    let dtype = DType::try_from(
+                        onnx::tensor_proto::DataType::try_from(t.data_type).map_err(|x| {
+                            ONNXDecodingError::ProtobufDecodeError(anyhow::Error::from(x))
+                        })?,
+                    )?;
+                    let shape = t.dims.iter().map(|x| *x as u64).collect::<Vec<_>>();
+                    let id = graph_mutator
+                        .tensor_store
+                        .add_tensor(StoredTensor::ExternalBinary {
+                            path: location.clone(),
+                            offset: offset.parse().unwrap_or(0usize),
+                            length: length.parse().unwrap_or(0usize),
+                            dtype,
+                            shape: shape.clone(),
+                        });
+                    StoredOrNotTensor::Stored(id)
+                } else {
+                    // Fallback to eager load when essential keys missing
+                    let numeric_tensor = NDArrayNumericTensor::try_from(t)?;
+                    if numeric_tensor.num_elements() > 100 {
+                        let id = graph_mutator.tensor_store.add_tensor(StoredTensor::Numeric(
+                            NumericTensor::NDArray(numeric_tensor),
+                        ));
+                        StoredOrNotTensor::Stored(id)
+                    } else {
+                        StoredOrNotTensor::NotStored(numeric_tensor)
+                    }
+                }
             } else {
-                StoredOrNotTensor::NotStored(numeric_tensor)
+                let numeric_tensor = NDArrayNumericTensor::try_from(t)?;
+                if numeric_tensor.num_elements() > 100 {
+                    let id = graph_mutator.tensor_store.add_tensor(StoredTensor::Numeric(
+                        NumericTensor::NDArray(numeric_tensor),
+                    ));
+                    StoredOrNotTensor::Stored(id)
+                } else {
+                    StoredOrNotTensor::NotStored(numeric_tensor)
+                }
             };
 
             if let Some(x) = graph_mutator.tensors_by_name.get(&t.name) {
