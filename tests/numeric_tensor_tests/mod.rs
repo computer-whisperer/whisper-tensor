@@ -4,6 +4,7 @@ use whisper_tensor::numeric_tensor::NumericTensor;
 
 pub mod basic_arith;
 pub mod basic_matmul;
+pub mod cumsum;
 pub mod reshape;
 pub mod unary;
 

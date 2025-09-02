@@ -3,6 +3,7 @@ use whisper_tensor::backends::eval_backend::EvalBackend;
 mod numeric_tensor_tests;
 use numeric_tensor_tests::basic_arith::*;
 use numeric_tensor_tests::basic_matmul::*;
+use numeric_tensor_tests::cumsum::*;
 use numeric_tensor_tests::reshape::*;
 use numeric_tensor_tests::unary::*;
 
@@ -91,6 +92,25 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_round_fp32);
         do_test!($runner_fn, $runner_name, test_round_bf16);
         do_test!($runner_fn, $runner_name, test_round_f16);
+        // CumSum
+        do_test!(
+            $runner_fn,
+            $runner_name,
+            test_cumsum_1d_f32_inclusive_forward
+        );
+        do_test!(
+            $runner_fn,
+            $runner_name,
+            test_cumsum_1d_f32_exclusive_forward
+        );
+        do_test!(
+            $runner_fn,
+            $runner_name,
+            test_cumsum_1d_f32_inclusive_reverse
+        );
+        do_test!($runner_fn, $runner_name, test_cumsum_2d_axis0);
+        do_test!($runner_fn, $runner_name, test_cumsum_2d_axis1);
+        do_test!($runner_fn, $runner_name, test_cumsum_2d_negative_axis);
     };
 }
 

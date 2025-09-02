@@ -3,6 +3,7 @@ mod spirv_helpers;
 pub mod tensor;
 
 use crate::backends::vulkan_backend::ops::binary::BinaryCacheKey;
+use crate::backends::vulkan_backend::ops::cumsum::CumSumCacheKey;
 use crate::backends::vulkan_backend::ops::gather::GatherCacheKey;
 use crate::backends::vulkan_backend::ops::matmul::MatMulCacheKey;
 use crate::backends::vulkan_backend::ops::unary::UnaryCacheKey;
@@ -162,6 +163,7 @@ pub struct PipelineCache {
     pub(crate) binary_op: HashMap<BinaryCacheKey, (Arc<PipelineLayout>, Arc<ComputePipeline>)>,
     pub(crate) matmul_op: HashMap<MatMulCacheKey, (Arc<PipelineLayout>, Arc<ComputePipeline>)>,
     pub(crate) gather_op: HashMap<GatherCacheKey, (Arc<PipelineLayout>, Arc<ComputePipeline>)>,
+    pub(crate) cumsum_op: HashMap<CumSumCacheKey, (Arc<PipelineLayout>, Arc<ComputePipeline>)>,
 }
 
 impl PipelineCache {
@@ -171,6 +173,7 @@ impl PipelineCache {
             binary_op: HashMap::new(),
             matmul_op: HashMap::new(),
             gather_op: HashMap::new(),
+            cumsum_op: HashMap::new(),
         }
     }
 }

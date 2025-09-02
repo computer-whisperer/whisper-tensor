@@ -484,8 +484,30 @@ impl NumericTensor<DynRank> {
         axis: Option<isize>,
         exclusive: bool,
         reverse: bool,
-        _backend: &mut EvalBackend,
+        backend: &mut EvalBackend,
     ) -> Result<Self, NumericTensorError> {
+        if backend.supports_dtype(self.dtype()) {
+            #[cfg(feature = "tch")]
+            if let EvalBackend::TCH = backend {
+                let ax = axis.unwrap_or(0) as i64;
+                return Ok(NumericTensor::TCH(
+                    self.to_tch().cumsum_full(ax, exclusive, reverse)?,
+                ));
+            }
+            #[cfg(feature = "vulkan")]
+            if let EvalBackend::Vulkan(executor) = backend {
+                match self
+                    .to_vulkan(executor)?
+                    .cumsum(axis, exclusive, reverse, executor)
+                {
+                    Ok(vk) => return Ok(NumericTensor::Vulkan(vk)),
+                    Err(VulkanError::UnsupportedByBackendError) => {
+                        // Fallback to NDArray for unsupported dtypes on Vulkan
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            }
+        }
         Ok(NumericTensor::NDArray(
             self.to_ndarray()?.cumsum(axis, exclusive, reverse)?,
         ))

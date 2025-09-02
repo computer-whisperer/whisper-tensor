@@ -235,6 +235,40 @@ impl<R: Rank> TCHNumericTensor<R> {
         })
     }
 
+    pub fn cumsum_full(
+        &self,
+        axis: i64,
+        exclusive: bool,
+        reverse: bool,
+    ) -> Result<Self, TCHNumericTensorError> {
+        let kind = self.tensor.kind();
+        // normalize axis in range [0, rank)
+        let mut ax = axis;
+        let dims = self.tensor.size();
+        let rank = dims.len() as i64;
+        if ax < 0 {
+            ax += rank;
+        }
+        // compute possibly reversed input
+        let input = if reverse {
+            self.tensor.flip([ax])
+        } else {
+            self.tensor.shallow_clone()
+        };
+        let inclusive = input.cumsum(ax, kind);
+        let out = if exclusive {
+            // exclusive = inclusive - input
+            &inclusive - &input
+        } else {
+            inclusive
+        };
+        let out = if reverse { out.flip([ax]) } else { out };
+        Ok(Self {
+            tensor: out,
+            phantom_data: PhantomData::<R>,
+        })
+    }
+
     pub fn reduce_sum(&self, axes: &[i64], keepdims: bool) -> Result<Self, TCHNumericTensorError> {
         let kind = self.tensor.kind();
         Ok(Self {
