@@ -185,6 +185,86 @@ impl<R: Rank> TCHNumericTensor<R> {
         })
     }
 
+    pub fn exp(&self) -> Result<Self, TCHNumericTensorError> {
+        Ok(Self {
+            tensor: self.tensor.exp(),
+            phantom_data: PhantomData::<R>,
+        })
+    }
+
+    pub fn ln(&self) -> Result<Self, TCHNumericTensorError> {
+        Ok(Self {
+            tensor: self.tensor.log(),
+            phantom_data: PhantomData::<R>,
+        })
+    }
+
+    pub fn abs(&self) -> Result<Self, TCHNumericTensorError> {
+        Ok(Self {
+            tensor: self.tensor.abs(),
+            phantom_data: PhantomData::<R>,
+        })
+    }
+
+    pub fn floor(&self) -> Result<Self, TCHNumericTensorError> {
+        Ok(Self {
+            tensor: self.tensor.floor(),
+            phantom_data: PhantomData::<R>,
+        })
+    }
+
+    pub fn ceil(&self) -> Result<Self, TCHNumericTensorError> {
+        Ok(Self {
+            tensor: self.tensor.ceil(),
+            phantom_data: PhantomData::<R>,
+        })
+    }
+
+    pub fn round(&self) -> Result<Self, TCHNumericTensorError> {
+        Ok(Self {
+            tensor: self.tensor.round(),
+            phantom_data: PhantomData::<R>,
+        })
+    }
+
+    pub fn cumsum(&self, axis: i64) -> Result<Self, TCHNumericTensorError> {
+        let kind = self.tensor.kind();
+        Ok(Self {
+            tensor: self.tensor.cumsum(axis, kind),
+            phantom_data: PhantomData::<R>,
+        })
+    }
+
+    pub fn reduce_sum(&self, axes: &[i64], keepdims: bool) -> Result<Self, TCHNumericTensorError> {
+        let kind = self.tensor.kind();
+        Ok(Self {
+            tensor: self.tensor.sum_dim_intlist(axes, keepdims, kind),
+            phantom_data: PhantomData::<R>,
+        })
+    }
+
+    pub fn reduce_mean(&self, axes: &[i64], keepdims: bool) -> Result<Self, TCHNumericTensorError> {
+        // Implement mean as sum / count to avoid dtype surprises.
+        let sizes = self.tensor.size();
+        let mut count: i64 = 1;
+        for &ax in axes {
+            let idx = if ax < 0 {
+                (sizes.len() as i64 + ax) as usize
+            } else {
+                ax as usize
+            };
+            count *= sizes[idx];
+        }
+        let sum = self
+            .tensor
+            .sum_dim_intlist(axes, keepdims, self.tensor.kind());
+        let denom = Tensor::from(count as f64).to_kind(self.tensor.kind());
+        Ok(Self {
+            tensor: &sum / &denom,
+            phantom_data: PhantomData::<R>,
+        })
+    }
+
     pub fn matmul(
         a: &Self,
         b: &Self,

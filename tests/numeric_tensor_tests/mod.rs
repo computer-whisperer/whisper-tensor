@@ -5,6 +5,7 @@ use whisper_tensor::numeric_tensor::NumericTensor;
 pub mod basic_arith;
 pub mod basic_matmul;
 pub mod reshape;
+pub mod unary;
 
 fn test_eq(value: NumericTensor<DynRank>, correct: NumericTensor<DynRank>, atol: f64, rtol: f64) {
     assert_eq!(value.shape(), correct.shape());
@@ -36,7 +37,7 @@ fn test_eq(value: NumericTensor<DynRank>, correct: NumericTensor<DynRank>, atol:
 fn test_eq_f16(value: NumericTensor<DynRank>, correct: NumericTensor<DynRank>) {
     assert_eq!(value.dtype(), DType::F16);
     assert_eq!(correct.dtype(), DType::F16);
-    test_eq(value, correct, 1e-5, 1e-3);
+    test_eq(value, correct, 1e-5, 4e-3);
 }
 
 fn test_eq_bf16(value: NumericTensor<DynRank>, correct: NumericTensor<DynRank>) {

@@ -286,6 +286,10 @@ impl<R: Rank> NumericTensor<R> {
                     self.to_vulkan(executor)?.exp(executor)?,
                 ));
             }
+            #[cfg(feature = "tch")]
+            if let EvalBackend::TCH = backend {
+                return Ok(NumericTensor::TCH(self.to_tch().exp()?));
+            }
         }
         Ok(NumericTensor::NDArray(self.to_ndarray()?.exp()?))
     }
@@ -298,6 +302,10 @@ impl<R: Rank> NumericTensor<R> {
                 return Ok(NumericTensor::Vulkan(
                     self.to_vulkan(executor)?.ln(executor)?,
                 ));
+            }
+            #[cfg(feature = "tch")]
+            if let EvalBackend::TCH = backend {
+                return Ok(NumericTensor::TCH(self.to_tch().ln()?));
             }
         }
         Ok(NumericTensor::NDArray(self.to_ndarray()?.ln()?))
@@ -317,6 +325,10 @@ impl<R: Rank> NumericTensor<R> {
                     self.to_vulkan(executor)?.floor(executor)?,
                 ));
             }
+            #[cfg(feature = "tch")]
+            if let EvalBackend::TCH = backend {
+                return Ok(NumericTensor::TCH(self.to_tch().floor()?));
+            }
         }
         Ok(NumericTensor::NDArray(self.to_ndarray()?.floor()?))
     }
@@ -330,6 +342,10 @@ impl<R: Rank> NumericTensor<R> {
                     self.to_vulkan(executor)?.ceil(executor)?,
                 ));
             }
+            #[cfg(feature = "tch")]
+            if let EvalBackend::TCH = backend {
+                return Ok(NumericTensor::TCH(self.to_tch().ceil()?));
+            }
         }
         Ok(NumericTensor::NDArray(self.to_ndarray()?.ceil()?))
     }
@@ -342,6 +358,10 @@ impl<R: Rank> NumericTensor<R> {
                 return Ok(NumericTensor::Vulkan(
                     self.to_vulkan(executor)?.round(executor)?,
                 ));
+            }
+            #[cfg(feature = "tch")]
+            if let EvalBackend::TCH = backend {
+                return Ok(NumericTensor::TCH(self.to_tch().round()?));
             }
         }
         Ok(NumericTensor::NDArray(self.to_ndarray()?.round()?))
@@ -364,6 +384,10 @@ impl<R: Rank> NumericTensor<R> {
                 return Ok(NumericTensor::Vulkan(
                     self.to_vulkan(executor)?.abs(executor)?,
                 ));
+            }
+            #[cfg(feature = "tch")]
+            if let EvalBackend::TCH = backend {
+                return Ok(NumericTensor::TCH(self.to_tch().abs()?));
             }
         }
         Ok(NumericTensor::NDArray(self.to_ndarray()?.abs()?))

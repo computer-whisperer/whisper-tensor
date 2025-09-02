@@ -4,6 +4,7 @@ mod numeric_tensor_tests;
 use numeric_tensor_tests::basic_arith::*;
 use numeric_tensor_tests::basic_matmul::*;
 use numeric_tensor_tests::reshape::*;
+use numeric_tensor_tests::unary::*;
 
 fn run_ndarray_test(test: impl FnOnce(&mut EvalBackend)) {
     test(&mut EvalBackend::NDArray)
@@ -71,6 +72,25 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_reshape_fp32);
         do_test!($runner_fn, $runner_name, test_transpose_reshape_fp32);
         do_test!($runner_fn, $runner_name, test_matmul_rank4_fp32);
+        // Unary ops
+        do_test!($runner_fn, $runner_name, test_exp_fp32);
+        do_test!($runner_fn, $runner_name, test_exp_bf16);
+        do_test!($runner_fn, $runner_name, test_exp_f16);
+        do_test!($runner_fn, $runner_name, test_ln_fp32);
+        do_test!($runner_fn, $runner_name, test_ln_bf16);
+        do_test!($runner_fn, $runner_name, test_ln_f16);
+        do_test!($runner_fn, $runner_name, test_abs_fp32);
+        do_test!($runner_fn, $runner_name, test_abs_bf16);
+        do_test!($runner_fn, $runner_name, test_abs_f16);
+        do_test!($runner_fn, $runner_name, test_floor_fp32);
+        do_test!($runner_fn, $runner_name, test_floor_bf16);
+        do_test!($runner_fn, $runner_name, test_floor_f16);
+        do_test!($runner_fn, $runner_name, test_ceil_fp32);
+        do_test!($runner_fn, $runner_name, test_ceil_bf16);
+        do_test!($runner_fn, $runner_name, test_ceil_f16);
+        do_test!($runner_fn, $runner_name, test_round_fp32);
+        do_test!($runner_fn, $runner_name, test_round_bf16);
+        do_test!($runner_fn, $runner_name, test_round_f16);
     };
 }
 
