@@ -64,3 +64,18 @@ whisper-tensor-import = {path = "crates/whisper-tensor-import"}
 whisper-tensor-server = {path = "crates/whisper-tensor-server", default-features=false}
 candle-core = {version="0.9.0", default-features=false}
 candle-onnx = {version="0.9.0", default-features=false}
+
+[[example]]
+name = "vulkan_test"
+path = "examples/vulkan_test.rs"
+required-features = ["vulkan"]
+
+[[example]]
+name = "super_graph_test_3"
+path = "examples/super_graph_test_3.rs"
+required-features = ["vulkan"]
+
+[[example]]
+name = "matmul_perf_test"
+path = "examples/matmul_perf_test.rs"
+required-features = ["vulkan"]

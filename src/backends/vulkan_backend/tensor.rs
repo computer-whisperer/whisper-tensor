@@ -66,19 +66,27 @@ impl<R: Rank> VulkanTensor<R> {
         dtype: DType,
         executor: &mut VulkanImmediateExecutor,
     ) -> Result<Self, VulkanError> {
-        let needed_space = (zip(shape.as_slice(), stride.as_slice())
-            .map(|(a, b)| (a - 1) * b)
-            .sum::<u64>() as usize
-            + 1)
-            * dtype.size().unwrap();
-        let (buffer, suballocation) = executor.alloc_space(needed_space);
+        // Compute needed space carefully to handle zero-sized dimensions.
+        let has_zero_dim = shape.as_slice().contains(&0);
+        let needed_elems: u64 = if has_zero_dim {
+            0
+        } else {
+            zip(shape.as_slice(), stride.as_slice())
+                .map(|(a, b)| (a - 1) * b)
+                .sum::<u64>()
+                + 1
+        };
+        let needed_space = (needed_elems as usize) * dtype.size().unwrap();
+        // Ensure non-zero allocations for internal buffers; transfers will be skipped when size is zero.
+        let alloc_size = needed_space.max(1);
+        let (buffer, suballocation) = executor.alloc_space(alloc_size);
 
         let transfer_buffer = if let Some(x) = &executor.host_transfer_buffer
-            && x.len() >= needed_space as u64
+            && x.len() >= alloc_size as u64
         {
             x
         } else {
-            executor.allocate_host_transfer_buffer(needed_space * 2)?;
+            executor.allocate_host_transfer_buffer(alloc_size * 2)?;
             executor.host_transfer_buffer.as_ref().unwrap()
         }
         .clone();
@@ -150,6 +158,11 @@ impl<R: Rank> VulkanTensor<R> {
         let raw_data = source_data.as_bytes();
         let bytes_to_transfer = raw_data.len();
         assert!(bytes_to_transfer <= vk_tensor.suballocation.size as usize);
+
+        if bytes_to_transfer == 0 {
+            // Nothing to copy for zero-sized tensors.
+            return Ok(vk_tensor);
+        }
 
         let transfer_buffer = &vk_tensor.buffer_transfer_kit.transfer_buffer;
         transfer_buffer.write().unwrap()[0..raw_data.len()].copy_from_slice(raw_data);
@@ -227,6 +240,10 @@ impl<R: Rank> VulkanTensor<R> {
         let bytes_to_transfer = raw_data.len();
         assert!(bytes_to_transfer <= vk_tensor.suballocation.size as usize);
 
+        if bytes_to_transfer == 0 {
+            return Ok(vk_tensor);
+        }
+
         let transfer_buffer = &vk_tensor.buffer_transfer_kit.transfer_buffer;
         transfer_buffer.write().unwrap()[0..raw_data.len()].copy_from_slice(&raw_data);
 
@@ -274,6 +291,20 @@ impl<R: Rank> VulkanTensor<R> {
 
     pub fn to_ndarray(&self) -> NDArrayNumericTensor<R> {
         {
+            // Handle zero-sized dimensions: no bytes to read, construct empty NDArray directly.
+            if self.shape.as_slice().contains(&0) {
+                // Use zero strides to satisfy ndarray's bounds checks for empty arrays.
+                let zero_stride =
+                    R::KnownDims::try_from_slice(&vec![0u64; self.shape.len()]).unwrap();
+                return NDArrayNumericTensor::from_bytes(
+                    &[],
+                    self.dtype,
+                    &self.shape,
+                    &zero_stride,
+                )
+                .unwrap();
+            }
+
             let bytes_to_read = (self
                 .shape
                 .as_slice()
@@ -283,6 +314,17 @@ impl<R: Rank> VulkanTensor<R> {
                 .sum::<u64>()
                 + 1) as usize
                 * self.dtype.size().unwrap();
+
+            if bytes_to_read == 0 {
+                return NDArrayNumericTensor::from_bytes(
+                    &[],
+                    self.dtype,
+                    &self.shape,
+                    &self.stride,
+                )
+                .unwrap();
+            }
+
             let start_offset = self.suballocation.offset + self.offset as u64;
             let transfer_buffer = &self.buffer_transfer_kit.transfer_buffer;
             let mut builder = AutoCommandBufferBuilder::primary(

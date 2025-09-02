@@ -1611,4 +1611,33 @@ mod test {
             assert_eq!(end_data, expected_data);
         }
     }
+
+    #[test]
+    fn test_zero_sized_roundtrip_float_and_bool() {
+        let vulkan_context = VulkanContext::new().unwrap();
+        let mut vulkan_runtime = VulkanImmediateExecutor::new(vulkan_context).unwrap();
+
+        // Float types to test
+        let float_dtypes = [DType::F32, DType::F16, DType::BF16];
+        for &dtype in &float_dtypes {
+            let start = NDArrayNumericTensor::from(Vec::<f32>::new()).to_dyn();
+            let start = start
+                .cast(dtype)
+                .unwrap()
+                .reshape(&vec![2, 3, 4, 0])
+                .unwrap();
+            let vk = VulkanTensor::from_ndarray(start, &mut vulkan_runtime).unwrap();
+            let back = vk.to_ndarray();
+            assert_eq!(back.shape().as_slice(), &[2, 3, 4, 0]);
+            assert_eq!(back.num_elements(), 0);
+        }
+
+        // Bool type
+        let start_bool = NDArrayNumericTensor::from(Vec::<bool>::new()).to_dyn();
+        let start_bool = start_bool.reshape(&vec![2, 3, 4, 0]).unwrap();
+        let vk_bool = VulkanTensor::from_ndarray(start_bool, &mut vulkan_runtime).unwrap();
+        let back_bool = vk_bool.to_ndarray();
+        assert_eq!(back_bool.shape().as_slice(), &[2, 3, 4, 0]);
+        assert_eq!(back_bool.num_elements(), 0);
+    }
 }

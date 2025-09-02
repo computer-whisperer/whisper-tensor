@@ -1,8 +1,11 @@
-use crate::milli_graph::MilliOpGraph;
+use crate::backends::ndarray_backend::NDArrayNumericTensor;
+use crate::milli_graph::ops::*;
+use crate::milli_graph::{MilliOpGraph};
 use crate::onnx;
 use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{ONNXDecodingError, SymbolicGraphTensorId, query_attribute_int};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RotaryEmbeddingOperation {
@@ -67,6 +70,270 @@ impl Operation for RotaryEmbeddingOperation {
     }
 
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        todo!()
+        let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
+
+        let data = input_map[&self.data_input];
+        let cos_cache = input_map[&self.cos_cache];
+        let sin_cache = input_map[&self.sin_cache];
+        let pos_ids = self.position_ids.map(|x| input_map[&x]);
+
+        // Prepare input to shape [B, S, H, D]
+        let prepared = if self.num_heads.is_some() {
+            // 3D path: [B, S, hidden] -> [B, S, num_heads, head_size]
+            let new_shape = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(
+                NDArrayNumericTensor::from(vec![0i64, 0i64, self.num_heads.unwrap(), -1i64])
+                    .to_dyn(),
+            )));
+            graph.push_op(AnyMilliOp::Reshape(MilliOpReshape::new(
+                data, new_shape, false,
+            )))
+        } else {
+            // 4D path: [B, H, S, D] -> [B, S, H, D]
+            graph.push_op(AnyMilliOp::Transpose(MilliOpTranspose::new(
+                data,
+                Some(vec![0, 2, 1, 3]),
+            )))
+        };
+
+        // Determine rotary dimension handling
+        // If rotary_embedding_dim == 0 => use full head size.
+        let use_partial = self.rotary_embedding_dim > 0;
+
+        // Build 1D vector constants for slice parameters
+        let starts0v = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(
+            NDArrayNumericTensor::from(vec![0i64]).to_dyn(),
+        )));
+        let axeslastv = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(
+            NDArrayNumericTensor::from(vec![-1i64]).to_dyn(),
+        )));
+        let endsrotv = if use_partial {
+            graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(
+                NDArrayNumericTensor::from(vec![self.rotary_embedding_dim]).to_dyn(),
+            )))
+        } else {
+            graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(
+                NDArrayNumericTensor::from(vec![i64::MAX]).to_dyn(),
+            )))
+        };
+        let x_rotate = graph.push_op(AnyMilliOp::Slice(MilliOpSlice::new(
+            prepared,
+            starts0v,
+            endsrotv,
+            None,
+            Some(axeslastv),
+        )));
+
+        // x_not_rotate: from rotary_dim to end (empty if using full)
+        let startsrotv = if use_partial {
+            graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(
+                NDArrayNumericTensor::from(vec![self.rotary_embedding_dim]).to_dyn(),
+            )))
+        } else {
+            graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(
+                NDArrayNumericTensor::from(vec![i64::MAX]).to_dyn(),
+            )))
+        };
+        let endsbigv = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(
+            NDArrayNumericTensor::from(vec![i64::MAX]).to_dyn(),
+        )));
+        let x_not_rotate = graph.push_op(AnyMilliOp::Slice(MilliOpSlice::new(
+            prepared,
+            startsrotv,
+            endsbigv,
+            None,
+            Some(axeslastv),
+        )));
+
+        // Prepare cos/sin caches
+        let mut cos = if let Some(pid) = pos_ids {
+            graph.push_op(AnyMilliOp::Gather(MilliOpGather::new(cos_cache, pid, 0)))
+        } else {
+            cos_cache
+        };
+        let mut sin = if let Some(pid) = pos_ids {
+            graph.push_op(AnyMilliOp::Gather(MilliOpGather::new(sin_cache, pid, 0)))
+        } else {
+            sin_cache
+        };
+        // If position_ids is not provided, caches may be [B, S, D/2] or [S, D/2].
+        // Do not add an extra batch dimension; rely on broadcasting after unsqueezing axis=2 below to match ONNX reference behavior.
+
+        if use_partial {
+            // Slice cos/sin to rotary_dim/2 on last axis
+            let half = self.rotary_embedding_dim / 2;
+            let endshalfv = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(
+                NDArrayNumericTensor::from(vec![half]).to_dyn(),
+            )));
+            let cos_s = graph.push_op(AnyMilliOp::Slice(MilliOpSlice::new(
+                cos,
+                starts0v,
+                endshalfv,
+                None,
+                Some(axeslastv),
+            )));
+            let sin_s = graph.push_op(AnyMilliOp::Slice(MilliOpSlice::new(
+                sin,
+                starts0v,
+                endshalfv,
+                None,
+                Some(axeslastv),
+            )));
+            cos = cos_s;
+            sin = sin_s;
+        }
+
+        // Unsqueeze cos/sin at axis=2 to broadcast: [B, S, 1, D/2]
+        let axis2 = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(
+            NDArrayNumericTensor::from(vec![2i64]).to_dyn(),
+        )));
+        let cos = graph.push_op(AnyMilliOp::Unsqueeze(MilliOpUnsqueeze::new(cos, axis2)));
+        let sin = graph.push_op(AnyMilliOp::Unsqueeze(MilliOpUnsqueeze::new(sin, axis2)));
+
+        // Split x_rotate into x1 and x2 depending on interleaving
+        let (x1, x2) = if self.interleaved {
+            // Reshape [..., D] -> [..., -1, 2]
+            let new_shape = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(
+                NDArrayNumericTensor::from(vec![0i64, 0i64, 0i64, -1i64, 2i64]).to_dyn(),
+            )));
+            let xr5 = graph.push_op(AnyMilliOp::Reshape(MilliOpReshape::new(
+                x_rotate, new_shape, false,
+            )));
+            // Split last axis [1,1]
+            let split_sizes = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(
+                NDArrayNumericTensor::from(vec![1i64, 1i64]).to_dyn(),
+            )));
+            let x1u = graph.push_op(AnyMilliOp::Split(MilliOpSplit::new(
+                xr5,
+                Some(MilliOpTensorIDOrLiteral::TensorID(split_sizes)),
+                -1,
+                None,
+                0,
+            )));
+            let x2u = graph.push_op(AnyMilliOp::Split(MilliOpSplit::new(
+                xr5,
+                Some(MilliOpTensorIDOrLiteral::TensorID(split_sizes)),
+                -1,
+                None,
+                1,
+            )));
+            let ax_last = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(
+                NDArrayNumericTensor::from(vec![-1i64]).to_dyn(),
+            )));
+            let x1 = graph.push_op(AnyMilliOp::Squeeze(MilliOpSqueeze::new(x1u, ax_last)));
+            let x2 = graph.push_op(AnyMilliOp::Squeeze(MilliOpSqueeze::new(x2u, ax_last)));
+            (x1, x2)
+        } else {
+            // Split last axis [D/2, D/2]
+            if use_partial {
+                let half = self.rotary_embedding_dim / 2;
+                let split_sizes = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(
+                    NDArrayNumericTensor::from(vec![half, half]).to_dyn(),
+                )));
+                let x1 = graph.push_op(AnyMilliOp::Split(MilliOpSplit::new(
+                    x_rotate,
+                    Some(MilliOpTensorIDOrLiteral::TensorID(split_sizes)),
+                    -1,
+                    None,
+                    0,
+                )));
+                let x2 = graph.push_op(AnyMilliOp::Split(MilliOpSplit::new(
+                    x_rotate,
+                    Some(MilliOpTensorIDOrLiteral::TensorID(split_sizes)),
+                    -1,
+                    None,
+                    1,
+                )));
+                (x1, x2)
+            } else {
+                // For full rotation and non-interleaved: split into contiguous halves.
+                // Reshape [..., D] -> [..., 2, D/2], then split axis -2 and squeeze it.
+                let new_shape = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(
+                    NDArrayNumericTensor::from(vec![0i64, 0i64, 0i64, 2i64, -1i64]).to_dyn(),
+                )));
+                let xr5 = graph.push_op(AnyMilliOp::Reshape(MilliOpReshape::new(
+                    x_rotate, new_shape, false,
+                )));
+                let split_sizes = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(
+                    NDArrayNumericTensor::from(vec![1i64, 1i64]).to_dyn(),
+                )));
+                let x1u = graph.push_op(AnyMilliOp::Split(MilliOpSplit::new(
+                    xr5,
+                    Some(MilliOpTensorIDOrLiteral::TensorID(split_sizes)),
+                    -2,
+                    None,
+                    0,
+                )));
+                let x2u = graph.push_op(AnyMilliOp::Split(MilliOpSplit::new(
+                    xr5,
+                    Some(MilliOpTensorIDOrLiteral::TensorID(split_sizes)),
+                    -2,
+                    None,
+                    1,
+                )));
+                let ax_minus2 = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(
+                    NDArrayNumericTensor::from(vec![-2i64]).to_dyn(),
+                )));
+                let x1 = graph.push_op(AnyMilliOp::Squeeze(MilliOpSqueeze::new(x1u, ax_minus2)));
+                let x2 = graph.push_op(AnyMilliOp::Squeeze(MilliOpSqueeze::new(x2u, ax_minus2)));
+                (x1, x2)
+            }
+        };
+
+        // real = cos*x1 - sin*x2; imag = sin*x1 + cos*x2
+        let cos_x1 = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::mul(cos, x1)));
+        let sin_x2 = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::mul(sin, x2)));
+        let real = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::sub(
+            cos_x1, sin_x2,
+        )));
+        let sin_x1 = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::mul(sin, x1)));
+        let cos_x2 = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::mul(cos, x2)));
+        let imag = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::add(
+            sin_x1, cos_x2,
+        )));
+
+        // Reassemble rotated part
+        let rotated = if self.interleaved {
+            let ax_last = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(
+                NDArrayNumericTensor::from(vec![-1i64]).to_dyn(),
+            )));
+            let real_u = graph.push_op(AnyMilliOp::Unsqueeze(MilliOpUnsqueeze::new(real, ax_last)));
+            let imag_u = graph.push_op(AnyMilliOp::Unsqueeze(MilliOpUnsqueeze::new(imag, ax_last)));
+            let stacked = graph.push_op(AnyMilliOp::Concat(MilliOpConcat::new(
+                vec![real_u, imag_u],
+                -1,
+            )));
+            let new_shape = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(
+                NDArrayNumericTensor::from(vec![0i64, 0i64, 0i64, -1i64]).to_dyn(),
+            )));
+            graph.push_op(AnyMilliOp::Reshape(MilliOpReshape::new(
+                stacked, new_shape, false,
+            )))
+        } else {
+            graph.push_op(AnyMilliOp::Concat(MilliOpConcat::new(vec![real, imag], -1)))
+        };
+
+        // Combine with non-rotated tail
+        let combined = graph.push_op(AnyMilliOp::Concat(MilliOpConcat::new(
+            vec![rotated, x_not_rotate],
+            -1,
+        )));
+
+        // Return to original layout
+        let out = if self.num_heads.is_some() {
+            let data_shape = graph.push_op(AnyMilliOp::Shape(MilliOpShape::new(data)));
+            graph.push_op(AnyMilliOp::Reshape(MilliOpReshape::new(
+                combined, data_shape, false,
+            )))
+        } else {
+            graph.push_op(AnyMilliOp::Transpose(MilliOpTranspose::new(
+                combined,
+                Some(vec![0, 2, 1, 3]),
+            )))
+        };
+
+        let mut output_map = HashMap::new();
+        output_map.insert(out, self.data_output);
+        graph.set_output_map(output_map);
+        graph
     }
 }
