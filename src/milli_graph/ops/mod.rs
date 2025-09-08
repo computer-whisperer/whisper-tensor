@@ -77,7 +77,7 @@ pub trait MilliOp: Node<MilliOpGraphTensorId> {
         known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>,
         _symbolic_resolver: &mut SymbolicResolver,
         backend: &mut EvalBackend,
-    ) -> Result<TensorInfo, MilliOpGraphError> {
+    ) -> Result<impl Iterator<Item=(MilliOpGraphTensorId, TensorInfo)>, MilliOpGraphError> {
         let mut resolved_inputs = HashMap::new();
         for input in self.inputs() {
             if let Some(tensor_info) = known_inputs.get(&input) {
@@ -91,14 +91,14 @@ pub trait MilliOp: Node<MilliOpGraphTensorId> {
             }
         }
 
-        Ok(TensorInfo::from(self.eval(&resolved_inputs, backend)?))
+        Ok(self.eval(&resolved_inputs, backend)?.map(|a, b| (a, TensorInfo::from(b))))
     }
     //fn infer(&self, known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>, _symbolic_resolver: &mut SymbolicResolver, backend: &mut EvalBackend) -> Result<TensorInfo, MilliOpGraphError>;
     fn eval(
         &self,
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
         _backend: &mut EvalBackend,
-    ) -> Result<NumericTensor<DynRank>, MilliOpGraphError>;
+    ) -> Result<impl Iterator<Item=(MilliOpGraphTensorId, NumericTensor<DynRank>)>, MilliOpGraphError>;
 
     fn get_name(&self) -> String;
 }
@@ -257,36 +257,36 @@ macro_rules! delegate {
         fn $name(&self, $($arg: $ty),*) -> $ret {
             match self {
                 AnyMilliOp::Constant(x) => x.$name($($arg),*),
-                AnyMilliOp::ConstantOfShape(x) => b.$name($($arg),*),
-                AnyMilliOp::SimpleBinary(x) => b.$name($($arg),*),
-                AnyMilliOp::MatMul(x) => b.$name($($arg),*),
-                AnyMilliOp::Pow(x) => b.$name($($arg),*),
-                AnyMilliOp::SimpleUnary(x) => b.$name($($arg),*),
-                AnyMilliOp::ClampMin(x) => b.$name($($arg),*),
-                AnyMilliOp::NonZero(x) => b.$name($($arg),*),
-                AnyMilliOp::CumSum(x) => b.$name($($arg),*),
-                AnyMilliOp::Shape(x) => b.$name($($arg),*),
-                AnyMilliOp::Reshape(x) => b.$name($($arg),*),
-                AnyMilliOp::Slice(x) => b.$name($($arg),*),
-                AnyMilliOp::ReduceSum(x) => b.$name($($arg),*),
-                AnyMilliOp::ReduceSum(x) => b.$name($($arg),*),
-                AnyMilliOp::ReduceMin(x) => b.$name($($arg),*),
-                AnyMilliOp::ReduceMax(x) => b.$name($($arg),*),
-                AnyMilliOp::ReduceProd(x) => b.$name($($arg),*),
-                AnyMilliOp::ReduceMean(x) => b.$name($($arg),*),
-                AnyMilliOp::Cast(x) => b.$name($($arg),*),
-                AnyMilliOp::CastLike(x) => b.$name($($arg),*),
-                AnyMilliOp::Transpose(x) => b.$name($($arg),*),
-                AnyMilliOp::Squeeze(x) => b.$name($($arg),*),
-                AnyMilliOp::Unsqueeze(x) => b.$name($($arg),*),
-                AnyMilliOp::Gather(x) => b.$name($($arg),*),
-                AnyMilliOp::Concat(x) => b.$name($($arg),*),
-                AnyMilliOp::Split(x) => b.$name($($arg),*),
-                AnyMilliOp::Where(x) => b.$name($($arg),*),
-                AnyMilliOp::Range(x) => b.$name($($arg),*),
-                AnyMilliOp::Expand(x) => b.$name($($arg),*),
-                AnyMilliOp::ArgMax(x) => b.$name($($arg),*),
-                AnyMilliOp::ArgMin(x) => b.$name($($arg),*),
+                AnyMilliOp::ConstantOfShape(x) => x.$name($($arg),*),
+                AnyMilliOp::SimpleBinary(x) => x.$name($($arg),*),
+                AnyMilliOp::MatMul(x) => x.$name($($arg),*),
+                AnyMilliOp::Pow(x) => x.$name($($arg),*),
+                AnyMilliOp::SimpleUnary(x) => x.$name($($arg),*),
+                AnyMilliOp::ClampMin(x) => x.$name($($arg),*),
+                AnyMilliOp::NonZero(x) => x.$name($($arg),*),
+                AnyMilliOp::CumSum(x) => x.$name($($arg),*),
+                AnyMilliOp::Shape(x) => x.$name($($arg),*),
+                AnyMilliOp::Reshape(x) => x.$name($($arg),*),
+                AnyMilliOp::Slice(x) => x.$name($($arg),*),
+                AnyMilliOp::ReduceSum(x) => x.$name($($arg),*),
+                AnyMilliOp::ReduceSum(x) => x.$name($($arg),*),
+                AnyMilliOp::ReduceMin(x) => x.$name($($arg),*),
+                AnyMilliOp::ReduceMax(x) => x.$name($($arg),*),
+                AnyMilliOp::ReduceProd(x) => x.$name($($arg),*),
+                AnyMilliOp::ReduceMean(x) => x.$name($($arg),*),
+                AnyMilliOp::Cast(x) => x.$name($($arg),*),
+                AnyMilliOp::CastLike(x) => x.$name($($arg),*),
+                AnyMilliOp::Transpose(x) => x.$name($($arg),*),
+                AnyMilliOp::Squeeze(x) => x.$name($($arg),*),
+                AnyMilliOp::Unsqueeze(x) => x.$name($($arg),*),
+                AnyMilliOp::Gather(x) => x.$name($($arg),*),
+                AnyMilliOp::Concat(x) => x.$name($($arg),*),
+                AnyMilliOp::Split(x) => x.$name($($arg),*),
+                AnyMilliOp::Where(x) => x.$name($($arg),*),
+                AnyMilliOp::Range(x) => x.$name($($arg),*),
+                AnyMilliOp::Expand(x) => x.$name($($arg),*),
+                AnyMilliOp::ArgMax(x) => x.$name($($arg),*),
+                AnyMilliOp::ArgMin(x) => x.$name($($arg),*),
             }
         }
     }

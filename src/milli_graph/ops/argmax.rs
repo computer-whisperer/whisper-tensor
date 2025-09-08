@@ -41,7 +41,7 @@ impl MilliOp for MilliOpArgMax {
         &self,
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
-    ) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
+    ) -> Result<impl Iterator<Item=(MilliOpGraphTensorId, NumericTensor<DynRank>)>, MilliOpGraphError> {
         let input = inputs[&self.input].clone();
         let axis = if self.axis < 0 {
             input.shape().len() as i64 + self.axis
@@ -49,7 +49,7 @@ impl MilliOp for MilliOpArgMax {
             self.axis
         } as usize;
         let max = input.argmax(axis, self.keepdims, self.select_last_index, backend)?;
-        Ok(max)
+        Ok([(self.output, max)].iter())
     }
 
     fn get_name(&self) -> String {
