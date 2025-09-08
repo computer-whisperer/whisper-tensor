@@ -91,7 +91,11 @@ pub trait MilliOp: Node<MilliOpGraphTensorId> {
             }
         }
 
-        Ok(self.eval(&resolved_inputs, backend)?.map(|a, b| (a, TensorInfo::from(b))))
+        let collected: Vec<(MilliOpGraphTensorId, TensorInfo)> = self
+            .eval(&resolved_inputs, backend)?
+            .map(|(a, b)| (a, TensorInfo::from(b)))
+            .collect();
+        Ok(collected.into_iter())
     }
     //fn infer(&self, known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>, _symbolic_resolver: &mut SymbolicResolver, backend: &mut EvalBackend) -> Result<TensorInfo, MilliOpGraphError>;
     fn eval(
@@ -294,19 +298,100 @@ macro_rules! delegate {
 
 
 impl MilliOp for AnyMilliOp {
-    delegate!(infer(known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>,
-        symbolic_resolver: &mut SymbolicResolver,
-        backend: &mut EvalBackend) -> Result<TensorInfo, MilliOpGraphError>);
-
-    delegate!(eval(
+    fn eval(
+        &self,
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
-        backend: &mut EvalBackend
-    ) -> Result<impl Iterator<Item=(MilliOpGraphTensorId, NumericTensor<DynRank>)> MilliOpGraphError>);
+        backend: &mut EvalBackend,
+    ) -> Result<impl Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>, MilliOpGraphError> {
+        let collected: Vec<(MilliOpGraphTensorId, NumericTensor<DynRank>)> = match self {
+            AnyMilliOp::ArgMax(x) => x.eval(inputs, backend)?.collect(),
+            AnyMilliOp::ArgMin(x) => x.eval(inputs, backend)?.collect(),
+            AnyMilliOp::ReduceSum(x) => x.eval(inputs, backend)?.collect(),
+            AnyMilliOp::ReduceMin(x) => x.eval(inputs, backend)?.collect(),
+            AnyMilliOp::ReduceMax(x) => x.eval(inputs, backend)?.collect(),
+            AnyMilliOp::ReduceProd(x) => x.eval(inputs, backend)?.collect(),
+            AnyMilliOp::ReduceMean(x) => x.eval(inputs, backend)?.collect(),
+            AnyMilliOp::Transpose(x) => x.eval(inputs, backend)?.collect(),
+            AnyMilliOp::Reshape(x) => x.eval(inputs, backend)?.collect(),
+            AnyMilliOp::Squeeze(x) => x.eval(inputs, backend)?.collect(),
+            AnyMilliOp::Unsqueeze(x) => x.eval(inputs, backend)?.collect(),
+            _ => todo!("op not yet converted to new MilliOp::eval signature"),
+        };
+        Ok(collected.into_iter())
+    }
 
-    delegate!(get_name() -> String);
+    fn get_name(&self) -> String {
+        match self {
+            AnyMilliOp::ArgMax(x) => x.get_name(),
+            AnyMilliOp::ArgMin(x) => x.get_name(),
+            AnyMilliOp::ReduceSum(x) => x.get_name(),
+            AnyMilliOp::Constant(_) => "Constant".to_string(),
+            AnyMilliOp::ConstantOfShape(_) => "ConstantOfShape".to_string(),
+            AnyMilliOp::SimpleBinary(_) => "SimpleBinary".to_string(),
+            AnyMilliOp::MatMul(_) => "MatMul".to_string(),
+            AnyMilliOp::Pow(_) => "Pow".to_string(),
+            AnyMilliOp::SimpleUnary(_) => "SimpleUnary".to_string(),
+            AnyMilliOp::ClampMin(_) => "ClampMin".to_string(),
+            AnyMilliOp::NonZero(_) => "NonZero".to_string(),
+            AnyMilliOp::CumSum(_) => "CumSum".to_string(),
+            AnyMilliOp::Shape(x) => x.get_name(),
+            AnyMilliOp::Reshape(x) => x.get_name(),
+            AnyMilliOp::Slice(_) => "Slice".to_string(),
+            AnyMilliOp::ReduceMin(x) => x.get_name(),
+            AnyMilliOp::ReduceMax(x) => x.get_name(),
+            AnyMilliOp::ReduceProd(x) => x.get_name(),
+            AnyMilliOp::ReduceMean(x) => x.get_name(),
+            AnyMilliOp::Cast(_) => "Cast".to_string(),
+            AnyMilliOp::CastLike(_) => "CastLike".to_string(),
+            AnyMilliOp::Transpose(x) => x.get_name(),
+            AnyMilliOp::Squeeze(x) => x.get_name(),
+            AnyMilliOp::Unsqueeze(x) => x.get_name(),
+            AnyMilliOp::Gather(_) => "Gather".to_string(),
+            AnyMilliOp::Concat(_) => "Concat".to_string(),
+            AnyMilliOp::Split(_) => "Split".to_string(),
+            AnyMilliOp::Where(_) => "Where".to_string(),
+            AnyMilliOp::Range(_) => "Range".to_string(),
+            AnyMilliOp::Expand(_) => "Expand".to_string(),
+        }
+    }
 }
 
-impl Node<MilliOpGraphTensorId> for AnyMilliOp{
-    delegate!(inputs() -> impl Iterator<Item=MilliOpGraphTensorId>);
-    delegate!(outputs() -> impl Iterator<Item=MilliOpGraphTensorId>);
+impl Node<MilliOpGraphTensorId> for AnyMilliOp {
+    fn inputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
+        let it: Box<dyn Iterator<Item = MilliOpGraphTensorId>> = match self {
+            AnyMilliOp::ArgMax(x) => Box::new(x.inputs()),
+            AnyMilliOp::ArgMin(x) => Box::new(x.inputs()),
+            AnyMilliOp::ReduceSum(x) => Box::new(x.inputs()),
+            AnyMilliOp::Shape(x) => Box::new(x.inputs()),
+            AnyMilliOp::ReduceMin(x) => Box::new(x.inputs()),
+            AnyMilliOp::ReduceMax(x) => Box::new(x.inputs()),
+            AnyMilliOp::ReduceProd(x) => Box::new(x.inputs()),
+            AnyMilliOp::ReduceMean(x) => Box::new(x.inputs()),
+            AnyMilliOp::Transpose(x) => Box::new(x.inputs()),
+            AnyMilliOp::Reshape(x) => Box::new(x.inputs()),
+            AnyMilliOp::Squeeze(x) => Box::new(x.inputs()),
+            AnyMilliOp::Unsqueeze(x) => Box::new(x.inputs()),
+            _ => todo!("op not yet converted to new Node::inputs signature"),
+        };
+        it
+    }
+
+    fn outputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
+        let it: Box<dyn Iterator<Item = MilliOpGraphTensorId>> = match self {
+            AnyMilliOp::ArgMax(x) => Box::new(x.outputs()),
+            AnyMilliOp::ArgMin(x) => Box::new(x.outputs()),
+            AnyMilliOp::ReduceSum(x) => Box::new(x.outputs()),
+            AnyMilliOp::Shape(x) => Box::new(x.outputs()),
+            AnyMilliOp::ReduceMin(x) => Box::new(x.outputs()),
+            AnyMilliOp::ReduceMax(x) => Box::new(x.outputs()),
+            AnyMilliOp::ReduceProd(x) => Box::new(x.outputs()),
+            AnyMilliOp::ReduceMean(x) => Box::new(x.outputs()),
+            AnyMilliOp::Transpose(x) => Box::new(x.outputs()),
+            AnyMilliOp::Reshape(x) => Box::new(x.outputs()),
+            AnyMilliOp::Squeeze(x) => Box::new(x.outputs()),
+            AnyMilliOp::Unsqueeze(x) => Box::new(x.outputs()),
+            _ => todo!("op not yet converted to new Node::outputs signature"),
+        };
+        it
+    }
 }

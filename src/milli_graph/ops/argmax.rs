@@ -16,8 +16,8 @@ pub struct MilliOpArgMax {
     select_last_index: bool,
 }
 
-impl<T> MilliOpArgMax {
-    pub fn new(
+impl MilliOpArgMax {
+    pub fn new<T: std::hash::Hash + Clone + Eq>(
         graph: &mut MilliOpGraph<T>,
         input: MilliOpGraphTensorId,
         axis: i64,
@@ -49,7 +49,7 @@ impl MilliOp for MilliOpArgMax {
             self.axis
         } as usize;
         let max = input.argmax(axis, self.keepdims, self.select_last_index, backend)?;
-        Ok([(self.output, max)].iter())
+        Ok([(self.output, max)].into_iter())
     }
 
     fn get_name(&self) -> String {
@@ -59,9 +59,9 @@ impl MilliOp for MilliOpArgMax {
 
 impl Node<MilliOpGraphTensorId> for MilliOpArgMax {
     fn inputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> {
-        [self.input].iter().cloned()
+        vec![self.input].into_iter()
     }
     fn outputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId>{
-        [self.output].iter().cloned()
+        vec![self.output].into_iter()
     }
 }

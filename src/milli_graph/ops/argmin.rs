@@ -48,7 +48,7 @@ impl MilliOp for MilliOpArgMin {
             self.axis
         } as usize;
         let min = input.argmin(axis, self.keepdims, self.select_last_index, backend)?;
-        Ok([(self.output, min)].iter())
+        Ok([(self.output, min)].into_iter())
     }
 
     fn get_name(&self) -> String {
@@ -59,9 +59,9 @@ impl MilliOp for MilliOpArgMin {
 
 impl Node<MilliOpGraphTensorId> for MilliOpArgMin {
     fn inputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> {
-        [self.input].iter().cloned()
+        vec![self.input].into_iter()
     }
     fn outputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId>{
-        [self.output].iter().cloned()
+        vec![self.output].into_iter()
     }
 }
