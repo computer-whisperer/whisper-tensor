@@ -1,13 +1,15 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
-use crate::milli_graph::ops::MilliOp;
-use crate::milli_graph::{MilliOpGraphError, MilliOpGraphTensorId};
+use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
+use crate::milli_graph::{MilliOpGraph, MilliOpGraphError, MilliOpGraphNodeId, MilliOpGraphTensorId};
 use crate::numeric_tensor::NumericTensor;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use crate::graph::Node;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MilliOpArgMin {
+    output: MilliOpGraphTensorId,
     input: MilliOpGraphTensorId,
     axis: i64,
     keepdims: bool,
@@ -16,25 +18,24 @@ pub struct MilliOpArgMin {
 
 impl MilliOpArgMin {
     pub fn new(
+        graph: &mut MilliOpGraph<MilliOpGraphTensorId>,
         input: MilliOpGraphTensorId,
         axis: i64,
         keepdims: bool,
         select_last_index: bool,
-    ) -> Self {
-        Self {
+    ) -> MilliOpGraphNodeId {
+        let node = Self {
+            output: graph.get_new_tensor_id(),
             input,
             axis,
             keepdims,
             select_last_index,
-        }
+        };
+        graph.push_op(AnyMilliOp::ArgMin(node))
     }
 }
 
 impl MilliOp for MilliOpArgMin {
-    fn get_inputs(&self) -> Vec<MilliOpGraphTensorId> {
-        vec![self.input]
-    }
-
     fn eval(
         &self,
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
@@ -52,5 +53,15 @@ impl MilliOp for MilliOpArgMin {
 
     fn get_name(&self) -> String {
         "ArgMin".to_string()
+    }
+}
+
+
+impl Node<MilliOpGraphTensorId> for MilliOpArgMin {
+    fn inputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> {
+        [self.input].iter().cloned()
+    }
+    fn outputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId>{
+        [self.output].iter().cloned()
     }
 }

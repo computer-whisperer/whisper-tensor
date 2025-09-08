@@ -12,6 +12,7 @@ pub mod paths;
 pub mod scalar_info;
 pub mod super_graph;
 pub mod symbolic_graph;
+pub mod graph;
 pub mod symbolic_scalar;
 pub mod tensor_info;
 pub mod tensor_rank;

@@ -1605,20 +1605,20 @@ macro_rules! do_tests {
 
         do_test!($runner_fn, $runner_name, test_rotary_embedding);
         do_test!($runner_fn, $runner_name, test_rotary_embedding_3d_input);
-       // do_test!($runner_fn, $runner_name, test_rotary_embedding_3d_input_expanded);
-      //  do_test!($runner_fn, $runner_name, test_rotary_embedding_expanded);
-      //  do_test!($runner_fn, $runner_name, test_rotary_embedding_interleaved);
-      //  do_test!($runner_fn, $runner_name, test_rotary_embedding_interleaved_expanded);
+        do_test!($runner_fn, $runner_name, test_rotary_embedding_3d_input_expanded);
+        do_test!($runner_fn, $runner_name, test_rotary_embedding_expanded);
+        //do_test!($runner_fn, $runner_name, test_rotary_embedding_interleaved);
+        //do_test!($runner_fn, $runner_name, test_rotary_embedding_interleaved_expanded);
         do_test!($runner_fn, $runner_name, test_rotary_embedding_no_position_ids);
-      //  do_test!($runner_fn, $runner_name, test_rotary_embedding_no_position_ids_expanded);
-      //  do_test!($runner_fn, $runner_name, test_rotary_embedding_no_position_ids_interleaved);
-      //  do_test!($runner_fn, $runner_name, test_rotary_embedding_no_position_ids_interleaved_expanded);
+        do_test!($runner_fn, $runner_name, test_rotary_embedding_no_position_ids_expanded);
+        //do_test!($runner_fn, $runner_name, test_rotary_embedding_no_position_ids_interleaved);
+        //do_test!($runner_fn, $runner_name, test_rotary_embedding_no_position_ids_interleaved_expanded);
         do_test!($runner_fn, $runner_name, test_rotary_embedding_no_position_ids_rotary_dim);
-      //  do_test!($runner_fn, $runner_name, test_rotary_embedding_no_position_ids_rotary_dim_expanded);
-      //  do_test!($runner_fn, $runner_name, test_rotary_embedding_with_interleaved_rotary_dim);
-      //  do_test!($runner_fn, $runner_name, test_rotary_embedding_with_interleaved_rotary_dim_expanded);
+        do_test!($runner_fn, $runner_name, test_rotary_embedding_no_position_ids_rotary_dim_expanded);
+        //do_test!($runner_fn, $runner_name, test_rotary_embedding_with_interleaved_rotary_dim);
+        //do_test!($runner_fn, $runner_name, test_rotary_embedding_with_interleaved_rotary_dim_expanded);
         do_test!($runner_fn, $runner_name, test_rotary_embedding_with_rotary_dim);
-      //  do_test!($runner_fn, $runner_name, test_rotary_embedding_with_rotary_dim_expanded);
+        do_test!($runner_fn, $runner_name, test_rotary_embedding_with_rotary_dim_expanded);
 
         do_test!($runner_fn, $runner_name, test_round);
 
