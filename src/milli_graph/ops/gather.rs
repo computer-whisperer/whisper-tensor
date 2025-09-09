@@ -1,44 +1,47 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
-use crate::milli_graph::ops::MilliOp;
-use crate::milli_graph::{MilliOpGraphError, MilliOpGraphTensorId};
+use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
+use crate::milli_graph::{MilliOpGraph, MilliOpGraphError, MilliOpGraphTensorId};
 use crate::numeric_tensor::NumericTensor;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use crate::graph::Node;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MilliOpGather {
+    output: MilliOpGraphTensorId,
     data: MilliOpGraphTensorId,
     indices: MilliOpGraphTensorId,
     axis: i64,
 }
 
 impl MilliOpGather {
-    pub fn new(data: MilliOpGraphTensorId, indices: MilliOpGraphTensorId, axis: i64) -> Self {
-        Self {
-            data,
-            indices,
-            axis,
-        }
+    pub fn new<T: std::hash::Hash + Clone + Eq>(graph: &mut MilliOpGraph<T>, data: MilliOpGraphTensorId, indices: MilliOpGraphTensorId, axis: i64) -> MilliOpGraphTensorId {
+        let output = graph.get_new_tensor_id();
+        let node = Self { output, data, indices, axis };
+        graph.push_op(AnyMilliOp::Gather(node));
+        output
     }
 }
 
-impl MilliOp for MilliOpGather {
-    fn get_inputs(&self) -> Vec<MilliOpGraphTensorId> {
-        vec![self.data, self.indices]
-    }
+impl Node<MilliOpGraphTensorId> for MilliOpGather {
+    fn inputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> { vec![self.data, self.indices].into_iter() }
+    fn outputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> { vec![self.output].into_iter() }
+}
 
+impl MilliOp for MilliOpGather {
     fn eval(
         &self,
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
-    ) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
-        Ok(NumericTensor::<DynRank>::gather(
+    ) -> Result<impl Iterator<Item=(MilliOpGraphTensorId, NumericTensor<DynRank>)>, MilliOpGraphError> {
+        let out = NumericTensor::<DynRank>::gather(
             &inputs[&self.data],
             &inputs[&self.indices],
             self.axis,
             backend,
-        )?)
+        )?;
+        Ok([(self.output, out)].into_iter())
     }
 
     fn get_name(&self) -> String {

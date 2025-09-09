@@ -2,6 +2,7 @@ use crate::milli_graph::ops::*;
 use crate::milli_graph::{MilliOpGraph, ops_helpers};
 use crate::onnx;
 use crate::symbolic_graph::ops::Operation;
+use crate::graph::{Graph, Node, InnerGraph};
 use crate::symbolic_graph::{ONNXDecodingError, SymbolicGraphTensorId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -62,17 +63,17 @@ impl Operation for ShapeOperation {
 
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
-        let out = graph.push_op(AnyMilliOp::Shape(MilliOpShape::new(input_map[&self.input])));
+        let out = MilliOpShape::new(&mut graph, input_map[&self.input]);
         let out = if self.start.is_some() || self.end.is_some() {
             let start = ops_helpers::scalar_const(&mut graph, self.start.unwrap_or(0));
             let end = if let Some(end) = self.end {
                 ops_helpers::scalar_const(&mut graph, end)
             } else {
-                graph.push_op(AnyMilliOp::Shape(MilliOpShape::new(out)))
+                MilliOpShape::new(&mut graph, out)
             };
-            graph.push_op(AnyMilliOp::Slice(MilliOpSlice::new(
-                out, start, end, None, None,
-            )))
+            MilliOpSlice::new(
+                &mut graph, out, start, end, None, None,
+            )
         } else {
             out
         };
@@ -122,13 +123,17 @@ impl Operation for SizeOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
 
-        let shape = graph.push_op(AnyMilliOp::Shape(MilliOpShape::new(input_map[&self.input])));
-        let size = graph.push_op(AnyMilliOp::ReduceProd(MilliOpReduceProd::new(
-            shape, None, false, false,
-        )));
+        let shape_tid = MilliOpShape::new(&mut graph, input_map[&self.input]);
+        let size_node = MilliOpReduceProd::new(
+            &mut graph, shape_tid, None, false, false,
+        );
+        let size_tid = match graph.inner(&()).get_node(&size_node) {
+            Some(AnyMilliOp::ReduceProd(op)) => op.outputs().next().unwrap(),
+            _ => unreachable!(),
+        };
 
         let mut output_map = HashMap::new();
-        output_map.insert(size, self.output);
+        output_map.insert(size_tid, self.output);
         graph.set_output_map(output_map);
         graph
     }

@@ -1,7 +1,7 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
-use crate::milli_graph::{MilliOpGraph, MilliOpGraphError, MilliOpGraphNodeId, MilliOpGraphTensorId};
+use crate::milli_graph::{MilliOpGraph, MilliOpGraphError, MilliOpGraphTensorId};
 use crate::numeric_tensor::NumericTensor;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -23,15 +23,17 @@ impl MilliOpArgMax {
         axis: i64,
         keepdims: bool,
         select_last_index: bool,
-    ) -> MilliOpGraphNodeId {
+    ) -> MilliOpGraphTensorId {
+        let output = graph.get_new_tensor_id();
         let node = Self {
-            output: graph.get_new_tensor_id(),
+            output,
             input,
             axis,
             keepdims,
             select_last_index,
         };
-        graph.push_op(AnyMilliOp::ArgMax(node))
+        graph.push_op(AnyMilliOp::ArgMax(node));
+        output
     }
 }
 

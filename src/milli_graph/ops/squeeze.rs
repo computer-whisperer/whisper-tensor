@@ -3,11 +3,8 @@ use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::dtype::DType;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
-use crate::milli_graph::{MilliOpGraph, MilliOpGraphError, MilliOpGraphNodeId, MilliOpGraphTensorId};
+use crate::milli_graph::{MilliOpGraph, MilliOpGraphError, MilliOpGraphTensorId};
 use crate::numeric_tensor::NumericTensor;
-use crate::scalar_info::ScalarInfoTyped;
-use crate::symbolic_scalar::{SymbolicResolver, SymbolicScalarTyped};
-use crate::tensor_info::TensorInfo;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use typenum::P1;
@@ -21,9 +18,11 @@ pub struct MilliOpSqueeze {
 }
 
 impl MilliOpSqueeze {
-    pub fn new<T: std::hash::Hash + Clone + Eq>(graph: &mut MilliOpGraph<T>, data: MilliOpGraphTensorId, axes: MilliOpGraphTensorId) -> MilliOpGraphNodeId {
-        let node = Self { output: graph.get_new_tensor_id(), data, axes };
-        graph.push_op(AnyMilliOp::Squeeze(node))
+    pub fn new<T: std::hash::Hash + Clone + Eq>(graph: &mut MilliOpGraph<T>, data: MilliOpGraphTensorId, axes: MilliOpGraphTensorId) -> MilliOpGraphTensorId {
+        let output = graph.get_new_tensor_id();
+        let node = Self { output, data, axes };
+        graph.push_op(AnyMilliOp::Squeeze(node));
+        output
     }
 }
 

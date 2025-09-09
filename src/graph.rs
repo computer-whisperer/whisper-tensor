@@ -55,7 +55,7 @@ pub trait InnerGraph {
     fn output_links(&self) -> impl Iterator<Item = (Self::OutputLinkId, Self::LinkId)>;
 
     /// Optional topological order of node handles.
-    fn topological_order(&self) -> Option<impl Iterator<Item = Self::NodeId>> {
+    fn topological_order(&self) -> Option<Box<dyn Iterator<Item = Self::NodeId>>> {
         None
     }
 }

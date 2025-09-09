@@ -75,41 +75,26 @@ impl Operation for BinaryOperation {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let a = input_map[&self.a];
         let b = input_map[&self.b];
-        let res = match self.which {
-            WhichBinaryOperation::Add => AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::add(a, b)),
-            WhichBinaryOperation::Sub => AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::sub(a, b)),
-            WhichBinaryOperation::Mul => AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::mul(a, b)),
-            WhichBinaryOperation::Div => AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::div(a, b)),
-            WhichBinaryOperation::MatMul => AnyMilliOp::MatMul(MilliOpMatMul::new(a, b)),
-            WhichBinaryOperation::And => AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::and(a, b)),
-            WhichBinaryOperation::Or => AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::or(a, b)),
-            WhichBinaryOperation::Xor => AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::xor(a, b)),
-            WhichBinaryOperation::BitwiseAnd => {
-                AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::bitwise_and(a, b))
-            }
-            WhichBinaryOperation::BitwiseOr => {
-                AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::bitwise_or(a, b))
-            }
-            WhichBinaryOperation::BitwiseXor => {
-                AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::bitwise_xor(a, b))
-            }
-            WhichBinaryOperation::Equal => {
-                AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::equal(a, b))
-            }
-            WhichBinaryOperation::Greater => {
-                AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::greater(a, b))
-            }
-            WhichBinaryOperation::GreaterOrEqual => {
-                AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::greater_or_equal(a, b))
-            }
-            WhichBinaryOperation::Less => AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::less(a, b)),
-            WhichBinaryOperation::LessOrEqual => {
-                AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::less_or_equal(a, b))
-            }
+        let out_tid = match self.which {
+            WhichBinaryOperation::Add => MilliOpSimpleBinary::add(&mut graph, a, b),
+            WhichBinaryOperation::Sub => MilliOpSimpleBinary::sub(&mut graph, a, b),
+            WhichBinaryOperation::Mul => MilliOpSimpleBinary::mul(&mut graph, a, b),
+            WhichBinaryOperation::Div => MilliOpSimpleBinary::div(&mut graph, a, b),
+            WhichBinaryOperation::MatMul => MilliOpMatMul::new(&mut graph, a, b),
+            WhichBinaryOperation::And => MilliOpSimpleBinary::and(&mut graph, a, b),
+            WhichBinaryOperation::Or => MilliOpSimpleBinary::or(&mut graph, a, b),
+            WhichBinaryOperation::Xor => MilliOpSimpleBinary::xor(&mut graph, a, b),
+            WhichBinaryOperation::BitwiseAnd => MilliOpSimpleBinary::bitwise_and(&mut graph, a, b),
+            WhichBinaryOperation::BitwiseOr => MilliOpSimpleBinary::bitwise_or(&mut graph, a, b),
+            WhichBinaryOperation::BitwiseXor => MilliOpSimpleBinary::bitwise_xor(&mut graph, a, b),
+            WhichBinaryOperation::Equal => MilliOpSimpleBinary::equal(&mut graph, a, b),
+            WhichBinaryOperation::Greater => MilliOpSimpleBinary::greater(&mut graph, a, b),
+            WhichBinaryOperation::GreaterOrEqual => MilliOpSimpleBinary::greater_or_equal(&mut graph, a, b),
+            WhichBinaryOperation::Less => MilliOpSimpleBinary::less(&mut graph, a, b),
+            WhichBinaryOperation::LessOrEqual => MilliOpSimpleBinary::less_or_equal(&mut graph, a, b),
         };
         let mut output_map = HashMap::new();
-        let out = graph.push_op(res);
-        output_map.insert(out, self.output);
+        output_map.insert(out_tid, self.output);
         graph.set_output_map(output_map);
         graph
     }

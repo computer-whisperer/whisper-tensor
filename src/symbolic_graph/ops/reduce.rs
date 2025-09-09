@@ -6,6 +6,7 @@ use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{
     ONNXDecodingError, SymbolicGraphTensorId, query_attribute_int, query_attribute_ints,
 };
+use crate::graph::{Graph, InnerGraph, Node};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -58,12 +59,13 @@ impl Operation for CumSumOperation {
         let a = input_map[&self.input];
         let b = input_map[&self.axis];
 
-        let out = graph.push_op(AnyMilliOp::CumSum(MilliOpCumSum::new(
+        let out = MilliOpCumSum::new(
+            &mut graph,
             a,
             b,
             self.exclusive,
             self.reverse,
-        )));
+        );
 
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
@@ -137,16 +139,22 @@ impl Operation for ReduceMeanOperation {
             Some(input_map[input_axes])
         } else if let Some(axes) = &self.axes_attr {
             let tensor = NDArrayNumericTensor::from(axes.clone());
-            Some(graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(tensor.to_dyn()))))
+            let node = MilliOpConstant::new(&mut graph, tensor.to_dyn());
+            let tid = match graph.inner(&()).get_node(&node) {
+                Some(AnyMilliOp::Constant(op)) => op.outputs().next().unwrap(),
+                _ => unreachable!(),
+            };
+            Some(tid)
         } else {
             None
         };
-        let out = graph.push_op(AnyMilliOp::ReduceMean(MilliOpReduceMean::new(
+        let out = MilliOpReduceMean::new(
+            &mut graph,
             input_map[&self.input_data],
             axes,
             self.keepdims.unwrap_or(true),
             self.noop_with_empty_axes.unwrap_or(false),
-        )));
+        );
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
         graph.set_output_map(output_map);
@@ -220,16 +228,22 @@ impl Operation for ReduceSumOperation {
             Some(input_map[input_axes])
         } else if let Some(axes) = &self.axes_attr {
             let tensor = NDArrayNumericTensor::from(axes.clone());
-            Some(graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(tensor.to_dyn()))))
+            let node = MilliOpConstant::new(&mut graph, tensor.to_dyn());
+            let tid = match graph.inner(&()).get_node(&node) {
+                Some(AnyMilliOp::Constant(op)) => op.outputs().next().unwrap(),
+                _ => unreachable!(),
+            };
+            Some(tid)
         } else {
             None
         };
-        let out = graph.push_op(AnyMilliOp::ReduceSum(MilliOpReduceSum::new(
+        let out = MilliOpReduceSum::new(
+            &mut graph,
             input_map[&self.input_data],
             axes,
             self.keepdims.unwrap_or(true),
             self.noop_with_empty_axes.unwrap_or(false),
-        )));
+        );
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
         graph.set_output_map(output_map);
@@ -303,16 +317,22 @@ impl Operation for ReduceMaxOperation {
             Some(input_map[input_axes])
         } else if let Some(axes) = &self.axes_attr {
             let tensor = NDArrayNumericTensor::from(axes.clone());
-            Some(graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(tensor.to_dyn()))))
+            let node = MilliOpConstant::new(&mut graph, tensor.to_dyn());
+            let tid = match graph.inner(&()).get_node(&node) {
+                Some(AnyMilliOp::Constant(op)) => op.outputs().next().unwrap(),
+                _ => unreachable!(),
+            };
+            Some(tid)
         } else {
             None
         };
-        let out = graph.push_op(AnyMilliOp::ReduceMax(MilliOpReduceMax::new(
+        let out = MilliOpReduceMax::new(
+            &mut graph,
             input_map[&self.input_data],
             axes,
             self.keepdims.unwrap_or(true),
             self.noop_with_empty_axes.unwrap_or(false),
-        )));
+        );
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
         graph.set_output_map(output_map);
@@ -386,16 +406,22 @@ impl Operation for ReduceMinOperation {
             Some(input_map[input_axes])
         } else if let Some(axes) = &self.axes_attr {
             let tensor = NDArrayNumericTensor::from(axes.clone());
-            Some(graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(tensor.to_dyn()))))
+            let node = MilliOpConstant::new(&mut graph, tensor.to_dyn());
+            let tid = match graph.inner(&()).get_node(&node) {
+                Some(AnyMilliOp::Constant(op)) => op.outputs().next().unwrap(),
+                _ => unreachable!(),
+            };
+            Some(tid)
         } else {
             None
         };
-        let out = graph.push_op(AnyMilliOp::ReduceMin(MilliOpReduceMin::new(
+        let out = MilliOpReduceMin::new(
+            &mut graph,
             input_map[&self.input_data],
             axes,
             self.keepdims.unwrap_or(true),
             self.noop_with_empty_axes.unwrap_or(false),
-        )));
+        );
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
         graph.set_output_map(output_map);
@@ -469,16 +495,22 @@ impl Operation for ReduceProdOperation {
             Some(input_map[input_axes])
         } else if let Some(axes) = &self.axes_attr {
             let tensor = NDArrayNumericTensor::from(axes.clone());
-            Some(graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(tensor.to_dyn()))))
+            let node = MilliOpConstant::new(&mut graph, tensor.to_dyn());
+            let tid = match graph.inner(&()).get_node(&node) {
+                Some(AnyMilliOp::Constant(op)) => op.outputs().next().unwrap(),
+                _ => unreachable!(),
+            };
+            Some(tid)
         } else {
             None
         };
-        let out = graph.push_op(AnyMilliOp::ReduceProd(MilliOpReduceProd::new(
+        let out = MilliOpReduceProd::new(
+            &mut graph,
             input_map[&self.input_data],
             axes,
             self.keepdims.unwrap_or(true),
             self.noop_with_empty_axes.unwrap_or(false),
-        )));
+        );
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
         graph.set_output_map(output_map);

@@ -69,8 +69,7 @@ fn main() {
         // Slice to last token
 
         let logits_in = {
-            let input_shape =
-                milli_graph.push_op(AnyMilliOp::Shape(MilliOpShape::new(logits_input)));
+            let input_shape = MilliOpShape::new(&mut milli_graph, logits_input);
             let const_a = milli_graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(
                 NDArrayNumericTensor::from_vec(vec![0i64, 0, 1, 0]).to_dyn(),
             )));

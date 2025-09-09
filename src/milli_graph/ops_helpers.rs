@@ -1,14 +1,15 @@
 use super::ops::*;
 use crate::backends::ndarray_backend::conversions::NDArrayNumericTensorType;
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphTensorId};
+use crate::graph::{Graph, InnerGraph, Node};
 use crate::symbolic_graph::SymbolicGraphTensorId;
 
 pub(crate) fn rank(
     graph: &mut MilliOpGraph<SymbolicGraphTensorId>,
     tensor: MilliOpGraphTensorId,
 ) -> MilliOpGraphTensorId {
-    let shape = graph.push_op(AnyMilliOp::Shape(MilliOpShape::new(tensor)));
-    graph.push_op(AnyMilliOp::Shape(MilliOpShape::new(shape)))
+    let shape_tid = MilliOpShape::new(graph, tensor);
+    MilliOpShape::new(graph, shape_tid)
 }
 
 pub(crate) fn scalar_const<T>(
@@ -18,7 +19,11 @@ pub(crate) fn scalar_const<T>(
 where
     T: NDArrayNumericTensorType,
 {
-    graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new_scalar(value)))
+    let node = MilliOpConstant::new_scalar(graph, value);
+    match graph.inner(&()).get_node(&node) {
+        Some(AnyMilliOp::Constant(op)) => op.outputs().next().unwrap(),
+        _ => unreachable!(),
+    }
 }
 
 pub(crate) fn resolve_axes(
@@ -26,12 +31,8 @@ pub(crate) fn resolve_axes(
     axes: MilliOpGraphTensorId,
     tensor: MilliOpGraphTensorId,
 ) -> MilliOpGraphTensorId {
-    let shape = graph.push_op(AnyMilliOp::Shape(MilliOpShape::new(tensor)));
-    let rank = graph.push_op(AnyMilliOp::Shape(MilliOpShape::new(shape)));
-    let axes_2 = graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::add(
-        axes, rank,
-    )));
-    graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::modulo(
-        axes_2, rank, None,
-    )))
+    let shape_tid = MilliOpShape::new(graph, tensor);
+    let rank_tid = MilliOpShape::new(graph, shape_tid);
+    let axes2_tid = MilliOpSimpleBinary::add(graph, axes, rank_tid);
+    MilliOpSimpleBinary::modulo(graph, axes2_tid, rank_tid, None)
 }

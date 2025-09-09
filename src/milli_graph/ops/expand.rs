@@ -1,7 +1,7 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
-use crate::milli_graph::ops::MilliOp;
-use crate::milli_graph::{MilliOpGraphError, MilliOpGraphTensorId};
+use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
+use crate::milli_graph::{MilliOpGraph, MilliOpGraphError, MilliOpGraphTensorId};
 use crate::numeric_tensor::NumericTensor;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -9,26 +9,35 @@ use typenum::P1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MilliOpExpand {
+    output: MilliOpGraphTensorId,
     input: MilliOpGraphTensorId,
     shape: MilliOpGraphTensorId,
 }
 
 impl MilliOpExpand {
-    pub fn new(input: MilliOpGraphTensorId, shape: MilliOpGraphTensorId) -> Self {
-        Self { input, shape }
+    pub fn new<T: std::hash::Hash + Clone + Eq>(
+        graph: &mut MilliOpGraph<T>,
+        input: MilliOpGraphTensorId,
+        shape: MilliOpGraphTensorId,
+    ) -> MilliOpGraphTensorId {
+        let output = graph.get_new_tensor_id();
+        let node = Self { output, input, shape };
+        graph.push_op(AnyMilliOp::Expand(node));
+        output
     }
 }
 
-impl MilliOp for MilliOpExpand {
-    fn get_inputs(&self) -> Vec<MilliOpGraphTensorId> {
-        vec![self.input, self.shape]
-    }
+impl crate::graph::Node<MilliOpGraphTensorId> for MilliOpExpand {
+    fn inputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> { vec![self.input, self.shape].into_iter() }
+    fn outputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> { vec![self.output].into_iter() }
+}
 
+impl MilliOp for MilliOpExpand {
     fn eval(
         &self,
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
         _backend: &mut EvalBackend,
-    ) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
+    ) -> Result<impl Iterator<Item=(MilliOpGraphTensorId, NumericTensor<DynRank>)>, MilliOpGraphError> {
         let shape: Vec<i64> = inputs[&self.shape].try_to_rank::<P1>()?.try_into()?;
         let shape_u = shape.iter().map(|x| *x as u64).collect::<Vec<u64>>();
         let mut x = inputs[&self.input].clone();
@@ -40,7 +49,8 @@ impl MilliOp for MilliOpExpand {
             .zip(x.shape().iter())
             .map(|(a, b)| std::cmp::max(*a, *b))
             .collect::<Vec<u64>>();
-        Ok(x.expand(&shape_u)?)
+        let out = x.expand(&shape_u)?;
+        Ok([(self.output, out)].into_iter())
     }
 
     fn get_name(&self) -> String {

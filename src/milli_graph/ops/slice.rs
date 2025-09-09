@@ -1,8 +1,8 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::dtype::DType;
-use crate::milli_graph::ops::MilliOp;
-use crate::milli_graph::{MilliOpGraphError, MilliOpGraphTensorId};
+use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
+use crate::milli_graph::{MilliOpGraph, MilliOpGraphError, MilliOpGraphTensorId};
 use crate::numeric_tensor::NumericTensor;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -10,6 +10,7 @@ use typenum::P1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MilliOpSlice {
+    output: MilliOpGraphTensorId,
     data: MilliOpGraphTensorId,
     starts: MilliOpGraphTensorId,
     ends: MilliOpGraphTensorId,
@@ -18,40 +19,44 @@ pub struct MilliOpSlice {
 }
 
 impl MilliOpSlice {
-    pub fn new(
+    pub fn new<T: std::hash::Hash + Clone + Eq>(
+        graph: &mut MilliOpGraph<T>,
         data: MilliOpGraphTensorId,
         starts: MilliOpGraphTensorId,
         ends: MilliOpGraphTensorId,
         steps: Option<MilliOpGraphTensorId>,
         axes: Option<MilliOpGraphTensorId>,
-    ) -> Self {
-        Self {
+    ) -> MilliOpGraphTensorId {
+        let output = graph.get_new_tensor_id();
+        let node = Self {
+            output,
             data,
             starts,
             ends,
             steps,
             axes,
-        }
+        };
+        graph.push_op(AnyMilliOp::Slice(node));
+        output
     }
 }
 
-impl MilliOp for MilliOpSlice {
-    fn get_inputs(&self) -> Vec<MilliOpGraphTensorId> {
+impl crate::graph::Node<MilliOpGraphTensorId> for MilliOpSlice {
+    fn inputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> {
         let mut res = vec![self.data, self.starts, self.ends];
-        if let Some(steps) = &self.steps {
-            res.push(*steps);
-        }
-        if let Some(axes) = &self.axes {
-            res.push(*axes);
-        }
-        res
+        if let Some(steps) = &self.steps { res.push(*steps); }
+        if let Some(axes) = &self.axes { res.push(*axes); }
+        res.into_iter()
     }
+    fn outputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> { vec![self.output].into_iter() }
+}
 
+impl MilliOp for MilliOpSlice {
     fn eval(
         &self,
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
-    ) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
+    ) -> Result<impl Iterator<Item=(MilliOpGraphTensorId, NumericTensor<DynRank>)>, MilliOpGraphError> {
         let data_input = &inputs[&self.data];
         let input_shape = data_input.shape();
         let input_rank = data_input.rank();
@@ -114,7 +119,7 @@ impl MilliOp for MilliOpSlice {
             output_slice[axis] = start..end;
         }
         let output = data_input.slice(&output_slice, backend)?;
-        Ok(output)
+        Ok([(self.output, output)].into_iter())
     }
 
     fn get_name(&self) -> String {

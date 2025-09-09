@@ -2,7 +2,7 @@ use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::dtype::DType;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
-use crate::milli_graph::{MilliOpGraph, MilliOpGraphError, MilliOpGraphNodeId, MilliOpGraphTensorId};
+use crate::milli_graph::{MilliOpGraph, MilliOpGraphError, MilliOpGraphTensorId};
 use crate::numeric_tensor::NumericTensor;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -25,15 +25,17 @@ impl MilliOpReduceSum {
         axes: Option<MilliOpGraphTensorId>,
         keepdims: bool,
         noop_with_empty_axes: bool,
-    ) -> MilliOpGraphNodeId {
+    ) -> MilliOpGraphTensorId {
+        let output = graph.get_new_tensor_id();
         let node = Self {
-            output: graph.get_new_tensor_id(),
+            output,
             data,
             axes,
             keepdims,
             noop_with_empty_axes,
         };
-        graph.push_op(AnyMilliOp::ReduceSum(node))
+        graph.push_op(AnyMilliOp::ReduceSum(node));
+        output
     }
 }
 

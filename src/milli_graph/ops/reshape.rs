@@ -2,11 +2,8 @@ use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::dtype::DType;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
-use crate::milli_graph::{MilliOpGraph, MilliOpGraphError, MilliOpGraphNodeId, MilliOpGraphTensorId};
+use crate::milli_graph::{MilliOpGraph, MilliOpGraphError, MilliOpGraphTensorId};
 use crate::numeric_tensor::NumericTensor;
-use crate::scalar_info::ScalarInfoTyped;
-use crate::symbolic_scalar::{SymbolicResolver, SymbolicScalarTyped};
-use crate::tensor_info::{TensorInfo, TensorInfoRanked, TensorInfoShaped};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use typenum::P1;
@@ -21,14 +18,16 @@ pub struct MilliOpReshape {
 }
 
 impl MilliOpReshape {
-    pub fn new<T: std::hash::Hash + Clone + Eq>(graph: &mut MilliOpGraph<T>, data: MilliOpGraphTensorId, shape: MilliOpGraphTensorId, allowzero: bool) -> MilliOpGraphNodeId {
+    pub fn new<T: std::hash::Hash + Clone + Eq>(graph: &mut MilliOpGraph<T>, data: MilliOpGraphTensorId, shape: MilliOpGraphTensorId, allowzero: bool) -> MilliOpGraphTensorId {
+        let output = graph.get_new_tensor_id();
         let node = Self {
-            output: graph.get_new_tensor_id(),
+            output,
             data,
             shape,
             allowzero,
         };
-        graph.push_op(AnyMilliOp::Reshape(node))
+        graph.push_op(AnyMilliOp::Reshape(node));
+        output
     }
 
     fn calculate_new_shape(

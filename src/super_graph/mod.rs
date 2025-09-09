@@ -5,9 +5,7 @@ pub mod nodes;
 pub mod observer;
 
 use crate::backends::eval_backend::EvalBackend;
-use crate::milli_graph::{
-    MilliOpGraphError, MilliOpGraphNodePath, MilliOpGraphTensorId, MilliOpGraphTensorPath,
-};
+use crate::milli_graph::{MilliOpGraphError, MilliOpGraphNodeId, MilliOpGraphNodePath, MilliOpGraphTensorId, MilliOpGraphTensorPath};
 use crate::model::ModelError;
 use crate::numeric_tensor::NumericTensorError;
 use crate::numeric_tensor_typed::TypedNumericTensorError;
@@ -414,7 +412,7 @@ impl SuperGraphGraphPath {
         }
     }
 
-    pub fn push_milli_op_node(&self, id: MilliOpGraphTensorId) -> SuperGraphNodePath {
+    pub fn push_milli_op_node(&self, id: MilliOpGraphNodeId) -> SuperGraphNodePath {
         if let SuperGraphGraphPath::MilliOpGraph(path) = self {
             SuperGraphNodePath::MilliOpGraphNode(path.clone(), MilliOpGraphNodePath::Op(id))
         } else {

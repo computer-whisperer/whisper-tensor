@@ -1,35 +1,41 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::dtype::DType;
-use crate::milli_graph::ops::MilliOp;
-use crate::milli_graph::{MilliOpGraphError, MilliOpGraphTensorId};
+use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
+use crate::milli_graph::{MilliOpGraph, MilliOpGraphError, MilliOpGraphTensorId};
 use crate::numeric_tensor::NumericTensor;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MilliOpCast {
+    output: MilliOpGraphTensorId,
     data: MilliOpGraphTensorId,
     dtype: DType,
 }
 
 impl MilliOpCast {
-    pub fn new(data: MilliOpGraphTensorId, dtype: DType) -> Self {
-        Self { data, dtype }
+    pub fn new<T: std::hash::Hash + Clone + Eq>(graph: &mut MilliOpGraph<T>, data: MilliOpGraphTensorId, dtype: DType) -> MilliOpGraphTensorId {
+        let output = graph.get_new_tensor_id();
+        let node = Self { output, data, dtype };
+        graph.push_op(AnyMilliOp::Cast(node));
+        output
     }
 }
 
-impl MilliOp for MilliOpCast {
-    fn get_inputs(&self) -> Vec<MilliOpGraphTensorId> {
-        vec![self.data]
-    }
+impl crate::graph::Node<MilliOpGraphTensorId> for MilliOpCast {
+    fn inputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> { vec![self.data].into_iter() }
+    fn outputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> { vec![self.output].into_iter() }
+}
 
+impl MilliOp for MilliOpCast {
     fn eval(
         &self,
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
-    ) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
-        Ok(inputs[&self.data].cast(self.dtype, backend)?)
+    ) -> Result<impl Iterator<Item=(MilliOpGraphTensorId, NumericTensor<DynRank>)>, MilliOpGraphError> {
+        let out = inputs[&self.data].cast(self.dtype, backend)?;
+        Ok([(self.output, out)].into_iter())
     }
 
     fn get_name(&self) -> String {

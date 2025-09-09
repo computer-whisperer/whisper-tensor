@@ -1,85 +1,11 @@
 use crate::backends::eval_backend::EvalBackend;
-use crate::milli_graph::ops::MilliOp;
-use crate::milli_graph::{MilliOpGraphError, MilliOpGraphTensorId};
-use crate::numeric_scalar::NumericScalar;
+use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
+use crate::milli_graph::{MilliOpGraph, MilliOpGraphError, MilliOpGraphTensorId};
 use crate::numeric_tensor::NumericTensor;
-use crate::scalar_info::{ScalarInfo, ScalarInfoTyped};
-use crate::symbolic_scalar::{SymbolicResolver, SymbolicScalar};
-use crate::tensor_info::{TensorInfo, TensorInfoRanked, TensorInfoShaped};
 use crate::{DynRank, TrigOp};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-
-trait SimpleUnaryMilliOp {
-    fn get_inputs(&self) -> Vec<MilliOpGraphTensorId>;
-
-    fn eval(
-        &self,
-        inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
-        backend: &mut EvalBackend,
-    ) -> Result<NumericTensor<DynRank>, MilliOpGraphError>;
-
-    #[allow(dead_code)]
-    fn eval_scalar(&self, input: &NumericScalar) -> Result<NumericScalar, MilliOpGraphError>;
-
-    fn get_name(&self) -> String;
-}
-
-impl<T: SimpleUnaryMilliOp> MilliOp for T {
-    fn get_inputs(&self) -> Vec<MilliOpGraphTensorId> {
-        <T as SimpleUnaryMilliOp>::get_inputs(self)
-    }
-
-    fn infer(
-        &self,
-        known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>,
-        symbolic_resolver: &mut SymbolicResolver,
-        backend: &mut EvalBackend,
-    ) -> Result<TensorInfo, MilliOpGraphError> {
-        let input_id = self.get_inputs()[0];
-        let input = &known_inputs[&input_id];
-
-        if let Some(input) = input.as_shaped() {
-            match input {
-                TensorInfoShaped::Numeric(input) => {
-                    let inputs = HashMap::from([(input_id, input.clone())]);
-                    Ok(TensorInfo::from(self.eval(&inputs, backend)?))
-                }
-                TensorInfoShaped::Symbolic(input) => {
-                    // For now, just decay this to a ranked tensor
-                    Ok(TensorInfo::from(TensorInfoRanked::<DynRank>::new(
-                        ScalarInfo::Symbolic(SymbolicScalar::new(input.dtype(), symbolic_resolver)),
-                        input
-                            .shape()
-                            .iter()
-                            .map(|x| ScalarInfoTyped::Numeric(*x))
-                            .collect::<Vec<_>>(),
-                        symbolic_resolver,
-                    )))
-                }
-            }
-        } else {
-            // For now, just decay this to a ranked tensor
-            Ok(TensorInfo::new_from_first_element_and_shape(
-                ScalarInfo::Symbolic(SymbolicScalar::new(input.dtype(), symbolic_resolver)),
-                input.shape(symbolic_resolver),
-                symbolic_resolver,
-            ))
-        }
-    }
-
-    fn eval(
-        &self,
-        inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
-        backend: &mut EvalBackend,
-    ) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
-        <T as SimpleUnaryMilliOp>::eval(self, inputs, backend)
-    }
-
-    fn get_name(&self) -> String {
-        <T as SimpleUnaryMilliOp>::get_name(self)
-    }
-}
+use crate::graph::Node;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) enum SimpleUnaryOp {
@@ -106,146 +32,68 @@ pub(crate) enum SimpleUnaryOp {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MilliOpSimpleUnary {
+    output: MilliOpGraphTensorId,
     input: MilliOpGraphTensorId,
     op: SimpleUnaryOp,
 }
 
 impl MilliOpSimpleUnary {
-    pub(crate) fn new(input: MilliOpGraphTensorId, op: SimpleUnaryOp) -> Self {
-        Self { input, op }
+    fn new_internal<T: std::hash::Hash + Clone + Eq>(graph: &mut MilliOpGraph<T>, input: MilliOpGraphTensorId, op: SimpleUnaryOp) -> MilliOpGraphTensorId {
+        let output = graph.get_new_tensor_id();
+        let node = Self { output, input, op };
+        graph.push_op(AnyMilliOp::SimpleUnary(node));
+        output
     }
 
-    pub fn neg(input: MilliOpGraphTensorId) -> Self {
-        Self::new(input, SimpleUnaryOp::Neg)
-    }
-
-    pub fn abs(input: MilliOpGraphTensorId) -> Self {
-        Self::new(input, SimpleUnaryOp::Abs)
-    }
-
-    pub fn exp(input: MilliOpGraphTensorId) -> Self {
-        Self::new(input, SimpleUnaryOp::Exp)
-    }
-
-    pub fn ln(input: MilliOpGraphTensorId) -> Self {
-        Self::new(input, SimpleUnaryOp::Ln)
-    }
-
-    pub fn sqrt(input: MilliOpGraphTensorId) -> Self {
-        Self::new(input, SimpleUnaryOp::Sqrt)
-    }
-
-    pub fn not(input: MilliOpGraphTensorId) -> Self {
-        Self::new(input, SimpleUnaryOp::Not)
-    }
-
-    pub fn sign(input: MilliOpGraphTensorId) -> Self {
-        Self::new(input, SimpleUnaryOp::Sign)
-    }
-
-    pub fn bitwise_not(input: MilliOpGraphTensorId) -> Self {
-        Self::new(input, SimpleUnaryOp::BitwiseNot)
-    }
-
-    pub fn reciprocal(input: MilliOpGraphTensorId) -> Self {
-        Self::new(input, SimpleUnaryOp::Reciprocal)
-    }
-
-    pub fn trig(input: MilliOpGraphTensorId, trig_op: TrigOp) -> Self {
-        Self::new(input, SimpleUnaryOp::Trig(trig_op))
-    }
-
-    pub fn floor(input: MilliOpGraphTensorId) -> Self {
-        Self::new(input, SimpleUnaryOp::Floor)
-    }
-
-    pub fn ceil(input: MilliOpGraphTensorId) -> Self {
-        Self::new(input, SimpleUnaryOp::Ceil)
-    }
-
-    pub fn round(input: MilliOpGraphTensorId) -> Self {
-        Self::new(input, SimpleUnaryOp::Round)
-    }
-
-    pub fn is_inf(
-        input: MilliOpGraphTensorId,
-        detect_positive: bool,
-        detect_negative: bool,
-    ) -> Self {
-        Self::new(
-            input,
-            SimpleUnaryOp::IsInf {
-                detect_positive,
-                detect_negative,
-            },
-        )
-    }
-
-    pub fn is_nan(input: MilliOpGraphTensorId) -> Self {
-        Self::new(input, SimpleUnaryOp::IsNan)
-    }
-
-    pub fn erf(input: MilliOpGraphTensorId) -> Self {
-        Self::new(input, SimpleUnaryOp::Erf)
-    }
+    pub fn neg<T: std::hash::Hash + Clone + Eq>(graph: &mut MilliOpGraph<T>, input: MilliOpGraphTensorId) -> MilliOpGraphTensorId { Self::new_internal(graph, input, SimpleUnaryOp::Neg) }
+    pub fn abs<T: std::hash::Hash + Clone + Eq>(graph: &mut MilliOpGraph<T>, input: MilliOpGraphTensorId) -> MilliOpGraphTensorId { Self::new_internal(graph, input, SimpleUnaryOp::Abs) }
+    pub fn exp<T: std::hash::Hash + Clone + Eq>(graph: &mut MilliOpGraph<T>, input: MilliOpGraphTensorId) -> MilliOpGraphTensorId { Self::new_internal(graph, input, SimpleUnaryOp::Exp) }
+    pub fn ln<T: std::hash::Hash + Clone + Eq>(graph: &mut MilliOpGraph<T>, input: MilliOpGraphTensorId) -> MilliOpGraphTensorId { Self::new_internal(graph, input, SimpleUnaryOp::Ln) }
+    pub fn sqrt<T: std::hash::Hash + Clone + Eq>(graph: &mut MilliOpGraph<T>, input: MilliOpGraphTensorId) -> MilliOpGraphTensorId { Self::new_internal(graph, input, SimpleUnaryOp::Sqrt) }
+    pub fn not<T: std::hash::Hash + Clone + Eq>(graph: &mut MilliOpGraph<T>, input: MilliOpGraphTensorId) -> MilliOpGraphTensorId { Self::new_internal(graph, input, SimpleUnaryOp::Not) }
+    pub fn sign<T: std::hash::Hash + Clone + Eq>(graph: &mut MilliOpGraph<T>, input: MilliOpGraphTensorId) -> MilliOpGraphTensorId { Self::new_internal(graph, input, SimpleUnaryOp::Sign) }
+    pub fn bitwise_not<T: std::hash::Hash + Clone + Eq>(graph: &mut MilliOpGraph<T>, input: MilliOpGraphTensorId) -> MilliOpGraphTensorId { Self::new_internal(graph, input, SimpleUnaryOp::BitwiseNot) }
+    pub fn reciprocal<T: std::hash::Hash + Clone + Eq>(graph: &mut MilliOpGraph<T>, input: MilliOpGraphTensorId) -> MilliOpGraphTensorId { Self::new_internal(graph, input, SimpleUnaryOp::Reciprocal) }
+    pub fn trig<T: std::hash::Hash + Clone + Eq>(graph: &mut MilliOpGraph<T>, input: MilliOpGraphTensorId, trig_op: TrigOp) -> MilliOpGraphTensorId { Self::new_internal(graph, input, SimpleUnaryOp::Trig(trig_op)) }
+    pub fn floor<T: std::hash::Hash + Clone + Eq>(graph: &mut MilliOpGraph<T>, input: MilliOpGraphTensorId) -> MilliOpGraphTensorId { Self::new_internal(graph, input, SimpleUnaryOp::Floor) }
+    pub fn ceil<T: std::hash::Hash + Clone + Eq>(graph: &mut MilliOpGraph<T>, input: MilliOpGraphTensorId) -> MilliOpGraphTensorId { Self::new_internal(graph, input, SimpleUnaryOp::Ceil) }
+    pub fn round<T: std::hash::Hash + Clone + Eq>(graph: &mut MilliOpGraph<T>, input: MilliOpGraphTensorId) -> MilliOpGraphTensorId { Self::new_internal(graph, input, SimpleUnaryOp::Round) }
+    pub fn is_inf<T: std::hash::Hash + Clone + Eq>(graph: &mut MilliOpGraph<T>, input: MilliOpGraphTensorId, detect_positive: bool, detect_negative: bool) -> MilliOpGraphTensorId { Self::new_internal(graph, input, SimpleUnaryOp::IsInf{detect_positive, detect_negative}) }
+    pub fn is_nan<T: std::hash::Hash + Clone + Eq>(graph: &mut MilliOpGraph<T>, input: MilliOpGraphTensorId) -> MilliOpGraphTensorId { Self::new_internal(graph, input, SimpleUnaryOp::IsNan) }
+    pub fn erf<T: std::hash::Hash + Clone + Eq>(graph: &mut MilliOpGraph<T>, input: MilliOpGraphTensorId) -> MilliOpGraphTensorId { Self::new_internal(graph, input, SimpleUnaryOp::Erf) }
 }
 
-impl SimpleUnaryMilliOp for MilliOpSimpleUnary {
-    fn get_inputs(&self) -> Vec<MilliOpGraphTensorId> {
-        vec![self.input]
-    }
+impl Node<MilliOpGraphTensorId> for MilliOpSimpleUnary {
+    fn inputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> { vec![self.input].into_iter() }
+    fn outputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> { vec![self.output].into_iter() }
+}
 
+impl MilliOp for MilliOpSimpleUnary {
     fn eval(
         &self,
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
-    ) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
+    ) -> Result<impl Iterator<Item=(MilliOpGraphTensorId, NumericTensor<DynRank>)>, MilliOpGraphError> {
         let input = &inputs[&self.input];
-        match self.op {
-            SimpleUnaryOp::Neg => Ok(input.neg(backend)?),
-            SimpleUnaryOp::Abs => Ok(input.abs(backend)?),
-            SimpleUnaryOp::Exp => Ok(input.exp(backend)?),
-            SimpleUnaryOp::Ln => Ok(input.ln(backend)?),
-            SimpleUnaryOp::Sqrt => Ok(input.sqrt(backend)?),
-            SimpleUnaryOp::Not => Ok(input.not(backend)?),
-            SimpleUnaryOp::Sign => Ok(input.sign(backend)?),
-            SimpleUnaryOp::BitwiseNot => Ok(input.bitwise_not(backend)?),
-            SimpleUnaryOp::Reciprocal => Ok(input.reciprocal(backend)?),
-            SimpleUnaryOp::Trig(trig_op) => Ok(input.trig(trig_op, backend)?),
-            SimpleUnaryOp::Floor => Ok(input.floor(backend)?),
-            SimpleUnaryOp::Ceil => Ok(input.ceil(backend)?),
-            SimpleUnaryOp::Round => Ok(input.round(backend)?),
-            SimpleUnaryOp::IsInf {
-                detect_positive,
-                detect_negative,
-            } => Ok(input.is_inf(detect_positive, detect_negative)?),
-            SimpleUnaryOp::IsNan => Ok(input.is_nan(backend)?),
-            SimpleUnaryOp::Erf => Ok(input.erf(backend)?),
-        }
-    }
-
-    fn eval_scalar(&self, input: &NumericScalar) -> Result<NumericScalar, MilliOpGraphError> {
-        match self.op {
-            SimpleUnaryOp::Neg => Ok(input.neg()),
-            SimpleUnaryOp::Abs => Ok(input.abs()),
-            SimpleUnaryOp::Exp => Ok(input.exp()),
-            SimpleUnaryOp::Ln => Ok(input.ln()),
-            SimpleUnaryOp::Sqrt => Ok(input.sqrt()),
-            SimpleUnaryOp::Not => Ok(input.not()),
-            SimpleUnaryOp::Sign => Ok(input.sign()),
-            SimpleUnaryOp::BitwiseNot => Ok(input.bitwise_not()),
-            SimpleUnaryOp::Reciprocal => Ok(input.recip()),
-            SimpleUnaryOp::Trig(trig_op) => Ok(input.trig(trig_op)),
-            SimpleUnaryOp::Floor => Ok(input.floor()),
-            SimpleUnaryOp::Ceil => Ok(input.ceil()),
-            SimpleUnaryOp::Round => Ok(input.round()),
-            SimpleUnaryOp::IsInf {
-                detect_positive,
-                detect_negative,
-            } => Ok(input.is_inf(detect_positive, detect_negative)),
-            SimpleUnaryOp::IsNan => Ok(input.is_nan()),
-            SimpleUnaryOp::Erf => Ok(input.erf()),
-        }
+        let out = match self.op {
+            SimpleUnaryOp::Neg => input.neg(backend)?,
+            SimpleUnaryOp::Abs => input.abs(backend)?,
+            SimpleUnaryOp::Exp => input.exp(backend)?,
+            SimpleUnaryOp::Ln => input.ln(backend)?,
+            SimpleUnaryOp::Sqrt => input.sqrt(backend)?,
+            SimpleUnaryOp::Not => input.not(backend)?,
+            SimpleUnaryOp::Sign => input.sign(backend)?,
+            SimpleUnaryOp::BitwiseNot => input.bitwise_not(backend)?,
+            SimpleUnaryOp::Reciprocal => input.reciprocal(backend)?,
+            SimpleUnaryOp::Trig(trig_op) => input.trig(trig_op, backend)?,
+            SimpleUnaryOp::Floor => input.floor(backend)?,
+            SimpleUnaryOp::Ceil => input.ceil(backend)?,
+            SimpleUnaryOp::Round => input.round(backend)?,
+            SimpleUnaryOp::IsInf { detect_positive, detect_negative } => input.is_inf(detect_positive, detect_negative)?,
+            SimpleUnaryOp::IsNan => input.is_nan(backend)?,
+            SimpleUnaryOp::Erf => input.erf(backend)?,
+        };
+        Ok([(self.output, out)].into_iter())
     }
 
     fn get_name(&self) -> String {
@@ -273,31 +121,33 @@ impl SimpleUnaryMilliOp for MilliOpSimpleUnary {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MilliOpClampMin {
+    output: MilliOpGraphTensorId,
     input: MilliOpGraphTensorId,
     value: f32,
 }
 
 impl MilliOpClampMin {
-    pub fn new(a: MilliOpGraphTensorId, value: f32) -> Self {
-        Self { input: a, value }
+    pub fn new<T: std::hash::Hash + Clone + Eq>(graph: &mut MilliOpGraph<T>, a: MilliOpGraphTensorId, value: f32) -> MilliOpGraphTensorId {
+        let output = graph.get_new_tensor_id();
+        let node = Self { output, input: a, value };
+        graph.push_op(AnyMilliOp::ClampMin(node));
+        output
     }
 }
 
-impl SimpleUnaryMilliOp for MilliOpClampMin {
-    fn get_inputs(&self) -> Vec<MilliOpGraphTensorId> {
-        vec![self.input]
-    }
+impl Node<MilliOpGraphTensorId> for MilliOpClampMin {
+    fn inputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> { vec![self.input].into_iter() }
+    fn outputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> { vec![self.output].into_iter() }
+}
 
+impl MilliOp for MilliOpClampMin {
     fn eval(
         &self,
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
-    ) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
-        Ok(inputs[&self.input].clamp_min(self.value, backend)?)
-    }
-
-    fn eval_scalar(&self, input: &NumericScalar) -> Result<NumericScalar, MilliOpGraphError> {
-        Ok(input.clamp_min(self.value))
+    ) -> Result<impl Iterator<Item=(MilliOpGraphTensorId, NumericTensor<DynRank>)>, MilliOpGraphError> {
+        let out = inputs[&self.input].clamp_min(self.value, backend)?;
+        Ok([(self.output, out)].into_iter())
     }
 
     fn get_name(&self) -> String {

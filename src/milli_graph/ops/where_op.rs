@@ -1,39 +1,42 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
-use crate::milli_graph::ops::MilliOp;
-use crate::milli_graph::{MilliOpGraphError, MilliOpGraphTensorId};
+use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
+use crate::milli_graph::{MilliOpGraph, MilliOpGraphError, MilliOpGraphTensorId};
 use crate::numeric_tensor::NumericTensor;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use crate::graph::Node;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MilliOpWhere {
+    output: MilliOpGraphTensorId,
     condition: MilliOpGraphTensorId,
     x: MilliOpGraphTensorId,
     y: MilliOpGraphTensorId,
 }
 
 impl MilliOpWhere {
-    pub(crate) fn new(
-        condition: MilliOpGraphTensorId,
-        x: MilliOpGraphTensorId,
-        y: MilliOpGraphTensorId,
-    ) -> Self {
-        Self { condition, x, y }
+    pub fn new<T: std::hash::Hash + Clone + Eq>(graph: &mut MilliOpGraph<T>, condition: MilliOpGraphTensorId, x: MilliOpGraphTensorId, y: MilliOpGraphTensorId) -> MilliOpGraphTensorId {
+        let output = graph.get_new_tensor_id();
+        let node = Self { output, condition, x, y };
+        graph.push_op(AnyMilliOp::Where(node));
+        output
     }
 }
 
-impl MilliOp for MilliOpWhere {
-    fn get_inputs(&self) -> Vec<MilliOpGraphTensorId> {
-        vec![self.condition, self.x, self.y]
-    }
+impl Node<MilliOpGraphTensorId> for MilliOpWhere {
+    fn inputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> { vec![self.condition, self.x, self.y].into_iter() }
+    fn outputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> { vec![self.output].into_iter() }
+}
 
+impl MilliOp for MilliOpWhere {
     fn eval(
         &self,
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
-    ) -> Result<NumericTensor<DynRank>, MilliOpGraphError> {
-        Ok(inputs[&self.condition].where_op(&inputs[&self.x], &inputs[&self.y], backend)?)
+    ) -> Result<impl Iterator<Item=(MilliOpGraphTensorId, NumericTensor<DynRank>)>, MilliOpGraphError> {
+        let out = inputs[&self.condition].where_op(&inputs[&self.x], &inputs[&self.y], backend)?;
+        Ok([(self.output, out)].into_iter())
     }
 
     fn get_name(&self) -> String {
