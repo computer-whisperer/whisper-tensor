@@ -3,7 +3,7 @@ use egui::{Pos2, Rect, UiBuilder, Vec2, vec2};
 use rand::{random, random_range};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
-use whisper_tensor::milli_graph::MilliOpGraphTensorId;
+use whisper_tensor::milli_graph::{MilliOpGraphNodeId, MilliOpGraphTensorId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct GraphLayoutNodeId(pub(crate) usize);
@@ -23,7 +23,7 @@ pub(crate) enum GraphLayoutNodeType {
     SymbolicGraphTensor(whisper_tensor::symbolic_graph::SymbolicGraphTensorId),
     SuperGraphLink(whisper_tensor::super_graph::SuperGraphAnyLink),
     SuperGraphNode(whisper_tensor::super_graph::SuperGraphNodeId),
-    MilliOpGraphNode(MilliOpGraphTensorId),
+    MilliOpGraphNode(MilliOpGraphNodeId),
     MilliOpGraphInput(MilliOpGraphTensorId),
     MilliOpGraphOutput(MilliOpGraphTensorId),
     ConnectionByNameSrc(GraphLayoutLinkData),
@@ -51,8 +51,8 @@ impl GraphLayoutNodeType {
             GraphLayoutNodeType::MilliOpGraphOutput(tensor) => {
                 GraphExplorerSelectable::MilliOpGraphTensor(tensor.clone())
             }
-            GraphLayoutNodeType::MilliOpGraphNode(tensor) => {
-                GraphExplorerSelectable::MilliOpGraphTensor(tensor.clone())
+            GraphLayoutNodeType::MilliOpGraphNode(node_id) => {
+                GraphExplorerSelectable::MilliOpGraphNode(*node_id)
             }
             GraphLayoutNodeType::ConnectionByNameSrc(tensor_data)
             | GraphLayoutNodeType::ConnectionByNameDest(tensor_data) => {

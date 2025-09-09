@@ -24,9 +24,10 @@ use tensor_swatch::build_tensor_swatch;
 use web_time::{Duration, Instant};
 use whisper_tensor::DynRank;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
+use whisper_tensor::graph::{InnerGraph, Node};
 use whisper_tensor::interfaces::AnyInterface;
 use whisper_tensor::milli_graph::ops::MilliOp;
-use whisper_tensor::milli_graph::{MilliOpGraph, MilliOpGraphTensorId};
+use whisper_tensor::milli_graph::{MilliOpGraph, MilliOpGraphNodeId, MilliOpGraphTensorId};
 use whisper_tensor::scalar_info::ScalarInfoTyped;
 use whisper_tensor::super_graph::nodes::SuperGraphAnyNode;
 use whisper_tensor::super_graph::{
@@ -90,6 +91,7 @@ pub(crate) enum GraphExplorerSelectable {
     SuperGraphNodeId(SuperGraphNodeId),
     SuperGraphLink(SuperGraphAnyLink),
     MilliOpGraphTensor(MilliOpGraphTensorId),
+    MilliOpGraphNode(MilliOpGraphNodeId),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -211,9 +213,9 @@ fn render_node_contents<'a>(
                     }
                 }
             }
-            GraphLayoutNodeType::MilliOpGraphNode(tensor_id) => {
+            GraphLayoutNodeType::MilliOpGraphNode(node_id) => {
                 if let GraphSubject::MilliOpGraphB(milli_graph) = graph_subject {
-                    if let Some(op) = milli_graph.get_op(tensor_id) {
+                    if let Some(op) = milli_graph.get_node(node_id) {
                         ui.add(Label::new(op.get_name()).selectable(false));
                     }
                 }
@@ -1103,21 +1105,24 @@ impl GraphExplorerApp {
                         let mut sourced_links = HashSet::new();
                         let mut next_node_id = 0;
                         let mut node_init_data = HashMap::new();
-                        for (node_id, node) in milli_op_graph.get_all_ops().iter() {
+                        for node_id in milli_op_graph.nodes() {
                             let new_node_id = GraphLayoutNodeId(next_node_id);
                             next_node_id += 1;
 
+                            let node = milli_op_graph.get_node(&node_id).expect("node exists");
+
                             let mut inputs = vec![];
-                            for tensor_id in node.get_inputs() {
+                            for tensor_id in node.inputs() {
                                 inputs.push(link_ids[&tensor_id]);
                             }
-                            let mut outputs = vec![link_ids[&node_id]];
+                            let mut outputs = vec![];
+                            for tensor_id in node.outputs() {
+                                outputs.push(link_ids[&tensor_id]);
+                            }
                             node_init_data.insert(
                                 new_node_id,
                                 GraphLayoutNodeInitData {
-                                    node_type: GraphLayoutNodeType::MilliOpGraphNode(
-                                        node_id.clone(),
-                                    ),
+                                    node_type: GraphLayoutNodeType::MilliOpGraphNode(node_id),
                                     inputs,
                                     outputs,
                                 },
