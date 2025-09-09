@@ -59,7 +59,7 @@ impl Operation for CumSumOperation {
         let a = input_map[&self.input];
         let b = input_map[&self.axis];
 
-        let out = MilliOpCumSum::new(
+        let out = CumSum::new(
             &mut graph,
             a,
             b,
@@ -139,7 +139,7 @@ impl Operation for ReduceMeanOperation {
             Some(input_map[input_axes])
         } else if let Some(axes) = &self.axes_attr {
             let tensor = NDArrayNumericTensor::from(axes.clone());
-            let node = MilliOpConstant::new(&mut graph, tensor.to_dyn());
+            let node = Constant::new(&mut graph, tensor.to_dyn());
             let tid = match graph.inner(&()).get_node(&node) {
                 Some(AnyMilliOp::Constant(op)) => op.outputs().next().unwrap(),
                 _ => unreachable!(),
@@ -148,7 +148,7 @@ impl Operation for ReduceMeanOperation {
         } else {
             None
         };
-        let out = MilliOpReduceMean::new(
+        let out = ReduceMean::new(
             &mut graph,
             input_map[&self.input_data],
             axes,
@@ -228,7 +228,7 @@ impl Operation for ReduceSumOperation {
             Some(input_map[input_axes])
         } else if let Some(axes) = &self.axes_attr {
             let tensor = NDArrayNumericTensor::from(axes.clone());
-            let node = MilliOpConstant::new(&mut graph, tensor.to_dyn());
+            let node = Constant::new(&mut graph, tensor.to_dyn());
             let tid = match graph.inner(&()).get_node(&node) {
                 Some(AnyMilliOp::Constant(op)) => op.outputs().next().unwrap(),
                 _ => unreachable!(),
@@ -237,7 +237,7 @@ impl Operation for ReduceSumOperation {
         } else {
             None
         };
-        let out = MilliOpReduceSum::new(
+        let out = ReduceSum::new(
             &mut graph,
             input_map[&self.input_data],
             axes,
@@ -317,7 +317,7 @@ impl Operation for ReduceMaxOperation {
             Some(input_map[input_axes])
         } else if let Some(axes) = &self.axes_attr {
             let tensor = NDArrayNumericTensor::from(axes.clone());
-            let node = MilliOpConstant::new(&mut graph, tensor.to_dyn());
+            let node = Constant::new(&mut graph, tensor.to_dyn());
             let tid = match graph.inner(&()).get_node(&node) {
                 Some(AnyMilliOp::Constant(op)) => op.outputs().next().unwrap(),
                 _ => unreachable!(),
@@ -326,7 +326,7 @@ impl Operation for ReduceMaxOperation {
         } else {
             None
         };
-        let out = MilliOpReduceMax::new(
+        let out = ReduceMax::new(
             &mut graph,
             input_map[&self.input_data],
             axes,
@@ -406,7 +406,7 @@ impl Operation for ReduceMinOperation {
             Some(input_map[input_axes])
         } else if let Some(axes) = &self.axes_attr {
             let tensor = NDArrayNumericTensor::from(axes.clone());
-            let node = MilliOpConstant::new(&mut graph, tensor.to_dyn());
+            let node = Constant::new(&mut graph, tensor.to_dyn());
             let tid = match graph.inner(&()).get_node(&node) {
                 Some(AnyMilliOp::Constant(op)) => op.outputs().next().unwrap(),
                 _ => unreachable!(),
@@ -415,7 +415,7 @@ impl Operation for ReduceMinOperation {
         } else {
             None
         };
-        let out = MilliOpReduceMin::new(
+        let out = ReduceMin::new(
             &mut graph,
             input_map[&self.input_data],
             axes,
@@ -495,7 +495,7 @@ impl Operation for ReduceProdOperation {
             Some(input_map[input_axes])
         } else if let Some(axes) = &self.axes_attr {
             let tensor = NDArrayNumericTensor::from(axes.clone());
-            let node = MilliOpConstant::new(&mut graph, tensor.to_dyn());
+            let node = Constant::new(&mut graph, tensor.to_dyn());
             let tid = match graph.inner(&()).get_node(&node) {
                 Some(AnyMilliOp::Constant(op)) => op.outputs().next().unwrap(),
                 _ => unreachable!(),
@@ -504,7 +504,7 @@ impl Operation for ReduceProdOperation {
         } else {
             None
         };
-        let out = MilliOpReduceProd::new(
+        let out = ReduceProd::new(
             &mut graph,
             input_map[&self.input_data],
             axes,

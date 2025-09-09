@@ -8,14 +8,14 @@ use std::collections::HashMap;
 use crate::graph::Node;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MilliOpGather {
+pub struct Gather {
     output: MilliOpGraphTensorId,
     data: MilliOpGraphTensorId,
     indices: MilliOpGraphTensorId,
     axis: i64,
 }
 
-impl MilliOpGather {
+impl Gather {
     pub fn new<T: std::hash::Hash + Clone + Eq>(graph: &mut MilliOpGraph<T>, data: MilliOpGraphTensorId, indices: MilliOpGraphTensorId, axis: i64) -> MilliOpGraphTensorId {
         let output = graph.get_new_tensor_id();
         let node = Self { output, data, indices, axis };
@@ -24,12 +24,12 @@ impl MilliOpGather {
     }
 }
 
-impl Node<MilliOpGraphTensorId> for MilliOpGather {
+impl Node<MilliOpGraphTensorId> for Gather {
     fn inputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> { vec![self.data, self.indices].into_iter() }
     fn outputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> { vec![self.output].into_iter() }
 }
 
-impl MilliOp for MilliOpGather {
+impl MilliOp for Gather {
     fn eval(
         &self,
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,

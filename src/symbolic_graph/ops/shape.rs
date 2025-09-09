@@ -63,15 +63,15 @@ impl Operation for ShapeOperation {
 
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
-        let out = MilliOpShape::new(&mut graph, input_map[&self.input]);
+        let out = Shape::new(&mut graph, input_map[&self.input]);
         let out = if self.start.is_some() || self.end.is_some() {
             let start = ops_helpers::scalar_const(&mut graph, self.start.unwrap_or(0));
             let end = if let Some(end) = self.end {
                 ops_helpers::scalar_const(&mut graph, end)
             } else {
-                MilliOpShape::new(&mut graph, out)
+                Shape::new(&mut graph, out)
             };
-            MilliOpSlice::new(
+            Slice::new(
                 &mut graph, out, start, end, None, None,
             )
         } else {
@@ -123,8 +123,8 @@ impl Operation for SizeOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
 
-        let shape_tid = MilliOpShape::new(&mut graph, input_map[&self.input]);
-        let size_node = MilliOpReduceProd::new(
+        let shape_tid = Shape::new(&mut graph, input_map[&self.input]);
+        let size_node = ReduceProd::new(
             &mut graph, shape_tid, None, false, false,
         );
         let size_tid = match graph.inner(&()).get_node(&size_node) {

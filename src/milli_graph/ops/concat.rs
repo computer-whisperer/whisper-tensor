@@ -7,13 +7,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MilliOpConcat {
+pub struct Concat {
     output: MilliOpGraphTensorId,
     inputs: Vec<MilliOpGraphTensorId>,
     axis: i64,
 }
 
-impl MilliOpConcat {
+impl Concat {
     pub fn new<T: std::hash::Hash + Clone + Eq>(graph: &mut MilliOpGraph<T>, inputs: Vec<MilliOpGraphTensorId>, axis: i64) -> MilliOpGraphTensorId {
         let output = graph.get_new_tensor_id();
         let node = Self { output, inputs, axis };
@@ -22,12 +22,12 @@ impl MilliOpConcat {
     }
 }
 
-impl crate::graph::Node<MilliOpGraphTensorId> for MilliOpConcat {
+impl crate::graph::Node<MilliOpGraphTensorId> for Concat {
     fn inputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> { self.inputs.clone().into_iter() }
     fn outputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> { vec![self.output].into_iter() }
 }
 
-impl MilliOp for MilliOpConcat {
+impl MilliOp for Concat {
     fn eval(
         &self,
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,

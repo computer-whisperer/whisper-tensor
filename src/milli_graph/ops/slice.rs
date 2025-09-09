@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use typenum::P1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MilliOpSlice {
+pub struct Slice {
     output: MilliOpGraphTensorId,
     data: MilliOpGraphTensorId,
     starts: MilliOpGraphTensorId,
@@ -18,7 +18,7 @@ pub struct MilliOpSlice {
     axes: Option<MilliOpGraphTensorId>,
 }
 
-impl MilliOpSlice {
+impl Slice {
     pub fn new<T: std::hash::Hash + Clone + Eq>(
         graph: &mut MilliOpGraph<T>,
         data: MilliOpGraphTensorId,
@@ -41,7 +41,7 @@ impl MilliOpSlice {
     }
 }
 
-impl crate::graph::Node<MilliOpGraphTensorId> for MilliOpSlice {
+impl crate::graph::Node<MilliOpGraphTensorId> for Slice {
     fn inputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> {
         let mut res = vec![self.data, self.starts, self.ends];
         if let Some(steps) = &self.steps { res.push(*steps); }
@@ -51,7 +51,7 @@ impl crate::graph::Node<MilliOpGraphTensorId> for MilliOpSlice {
     fn outputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> { vec![self.output].into_iter() }
 }
 
-impl MilliOp for MilliOpSlice {
+impl MilliOp for Slice {
     fn eval(
         &self,
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,

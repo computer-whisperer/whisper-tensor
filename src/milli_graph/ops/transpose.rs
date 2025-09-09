@@ -8,13 +8,13 @@ use std::collections::HashMap;
 use crate::graph::Node;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MilliOpTranspose {
+pub struct Transpose {
     output: MilliOpGraphTensorId,
     data: MilliOpGraphTensorId,
     perm: Option<Vec<i64>>,
 }
 
-impl MilliOpTranspose {
+impl Transpose {
     pub fn new<T: std::hash::Hash + Clone + Eq>(graph: &mut MilliOpGraph<T>, data: MilliOpGraphTensorId, perm: Option<Vec<i64>>) -> MilliOpGraphTensorId {
         let output = graph.get_new_tensor_id();
         let node = Self { output, data, perm };
@@ -23,12 +23,12 @@ impl MilliOpTranspose {
     }
 }
 
-impl Node<MilliOpGraphTensorId> for MilliOpTranspose {
+impl Node<MilliOpGraphTensorId> for Transpose {
     fn inputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> { vec![self.data].into_iter() }
     fn outputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> { vec![self.output].into_iter() }
 }
 
-impl MilliOp for MilliOpTranspose {
+impl MilliOp for Transpose {
     fn eval(
         &self,
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,

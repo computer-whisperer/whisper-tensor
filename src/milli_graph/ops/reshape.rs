@@ -10,14 +10,14 @@ use typenum::P1;
 use crate::graph::Node;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MilliOpReshape {
+pub struct Reshape {
     output: MilliOpGraphTensorId,
     data: MilliOpGraphTensorId,
     shape: MilliOpGraphTensorId,
     allowzero: bool,
 }
 
-impl MilliOpReshape {
+impl Reshape {
     pub fn new<T: std::hash::Hash + Clone + Eq>(graph: &mut MilliOpGraph<T>, data: MilliOpGraphTensorId, shape: MilliOpGraphTensorId, allowzero: bool) -> MilliOpGraphTensorId {
         let output = graph.get_new_tensor_id();
         let node = Self {
@@ -80,12 +80,12 @@ impl MilliOpReshape {
     }
 }
 
-impl Node<MilliOpGraphTensorId> for MilliOpReshape {
+impl Node<MilliOpGraphTensorId> for Reshape {
     fn inputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> { vec![self.data, self.shape].into_iter() }
     fn outputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> { vec![self.output].into_iter() }
 }
 
-impl MilliOp for MilliOpReshape {
+impl MilliOp for Reshape {
     fn eval(
         &self,
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,

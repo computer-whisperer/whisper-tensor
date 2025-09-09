@@ -7,13 +7,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MilliOpCastLike {
+pub struct CastLike {
     output: MilliOpGraphTensorId,
     data: MilliOpGraphTensorId,
     target_type: MilliOpGraphTensorId,
 }
 
-impl MilliOpCastLike {
+impl CastLike {
     pub fn new<T: std::hash::Hash + Clone + Eq>(graph: &mut MilliOpGraph<T>, data: MilliOpGraphTensorId, target_type: MilliOpGraphTensorId) -> MilliOpGraphTensorId {
         let output = graph.get_new_tensor_id();
         let node = Self { output, data, target_type };
@@ -22,12 +22,12 @@ impl MilliOpCastLike {
     }
 }
 
-impl crate::graph::Node<MilliOpGraphTensorId> for MilliOpCastLike {
+impl crate::graph::Node<MilliOpGraphTensorId> for CastLike {
     fn inputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> { vec![self.data, self.target_type].into_iter() }
     fn outputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> { vec![self.output].into_iter() }
 }
 
-impl MilliOp for MilliOpCastLike {
+impl MilliOp for CastLike {
     fn eval(
         &self,
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,

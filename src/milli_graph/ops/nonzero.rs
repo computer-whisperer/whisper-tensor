@@ -12,12 +12,12 @@ use std::collections::HashMap;
 use crate::graph::Node;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MilliOpNonZero {
+pub struct NonZero {
     output: MilliOpGraphTensorId,
     input: MilliOpGraphTensorId,
 }
 
-impl MilliOpNonZero {
+impl NonZero {
     pub fn new<T: std::hash::Hash + Clone + Eq>(graph: &mut MilliOpGraph<T>, input: MilliOpGraphTensorId) -> MilliOpGraphTensorId {
         let output = graph.get_new_tensor_id();
         let node = Self { output, input };
@@ -26,12 +26,12 @@ impl MilliOpNonZero {
     }
 }
 
-impl Node<MilliOpGraphTensorId> for MilliOpNonZero {
+impl Node<MilliOpGraphTensorId> for NonZero {
     fn inputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> { vec![self.input].into_iter() }
     fn outputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> { vec![self.output].into_iter() }
 }
 
-impl MilliOp for MilliOpNonZero {
+impl MilliOp for NonZero {
     fn infer(
         &self,
         known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>,

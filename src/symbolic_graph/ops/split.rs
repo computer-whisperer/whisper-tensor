@@ -83,7 +83,7 @@ impl Operation for SplitOperation {
         };
 
         for (output_id, output_tensor_id) in self.outputs.iter().enumerate() {
-            let out = MilliOpSplit::new(
+            let out = Split::new(
                 &mut graph,
                 input_map[&self.input],
                 split.clone(),

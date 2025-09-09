@@ -56,7 +56,7 @@ impl Operation for WhereOperation {
 
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
-        let out = graph.push_op(AnyMilliOp::Where(MilliOpWhere::new(
+        let out = graph.push_op(AnyMilliOp::Where(Where::new(
             input_map[&self.condition],
             input_map[&self.x],
             input_map[&self.y],
@@ -370,7 +370,7 @@ impl Operation for ExpandOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
 
-        let x = graph.push_op(AnyMilliOp::Expand(MilliOpExpand::new(
+        let x = graph.push_op(AnyMilliOp::Expand(Expand::new(
             input_map[&self.input],
             input_map[&self.shape],
         )));
@@ -445,13 +445,13 @@ impl Operation for ClipOperation {
         let x = input_map[&self.input];
         let x = if let Some(min) = self.min {
             let min = input_map[&min];
-            graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::max(x, min)))
+            graph.push_op(AnyMilliOp::SimpleBinary(SimpleBinary::max(x, min)))
         } else {
             x
         };
         let x = if let Some(max) = self.max {
             let max = input_map[&max];
-            graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::min(x, max)))
+            graph.push_op(AnyMilliOp::SimpleBinary(SimpleBinary::min(x, max)))
         } else {
             x
         };
@@ -505,7 +505,7 @@ impl Operation for RangeOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
 
-        let out = graph.push_op(AnyMilliOp::Range(MilliOpRange::new(
+        let out = graph.push_op(AnyMilliOp::Range(Range::new(
             input_map[&self.start],
             input_map[&self.end],
             input_map[&self.delta],

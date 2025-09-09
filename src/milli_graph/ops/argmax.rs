@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use crate::graph::Node;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MilliOpArgMax {
+pub struct ArgMax {
     output: MilliOpGraphTensorId,
     input: MilliOpGraphTensorId,
     axis: i64,
@@ -16,7 +16,7 @@ pub struct MilliOpArgMax {
     select_last_index: bool,
 }
 
-impl MilliOpArgMax {
+impl ArgMax {
     pub fn new<T: std::hash::Hash + Clone + Eq>(
         graph: &mut MilliOpGraph<T>,
         input: MilliOpGraphTensorId,
@@ -37,7 +37,7 @@ impl MilliOpArgMax {
     }
 }
 
-impl MilliOp for MilliOpArgMax {
+impl MilliOp for ArgMax {
 
     fn eval(
         &self,
@@ -59,7 +59,7 @@ impl MilliOp for MilliOpArgMax {
     }
 }
 
-impl Node<MilliOpGraphTensorId> for MilliOpArgMax {
+impl Node<MilliOpGraphTensorId> for ArgMax {
     fn inputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> {
         vec![self.input].into_iter()
     }

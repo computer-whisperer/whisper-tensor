@@ -8,14 +8,14 @@ use std::collections::HashMap;
 use crate::graph::Node;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MilliOpWhere {
+pub struct Where {
     output: MilliOpGraphTensorId,
     condition: MilliOpGraphTensorId,
     x: MilliOpGraphTensorId,
     y: MilliOpGraphTensorId,
 }
 
-impl MilliOpWhere {
+impl Where {
     pub fn new<T: std::hash::Hash + Clone + Eq>(graph: &mut MilliOpGraph<T>, condition: MilliOpGraphTensorId, x: MilliOpGraphTensorId, y: MilliOpGraphTensorId) -> MilliOpGraphTensorId {
         let output = graph.get_new_tensor_id();
         let node = Self { output, condition, x, y };
@@ -24,12 +24,12 @@ impl MilliOpWhere {
     }
 }
 
-impl Node<MilliOpGraphTensorId> for MilliOpWhere {
+impl Node<MilliOpGraphTensorId> for Where {
     fn inputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> { vec![self.condition, self.x, self.y].into_iter() }
     fn outputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> { vec![self.output].into_iter() }
 }
 
-impl MilliOp for MilliOpWhere {
+impl MilliOp for Where {
     fn eval(
         &self,
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,

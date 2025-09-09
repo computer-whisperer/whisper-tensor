@@ -66,14 +66,14 @@ impl Operation for SqueezeOperation {
             input_map[&axes]
         } else if let Some(axes) = &self.axes_attribute {
             let axes_tensor = NDArrayNumericTensor::from_vec(axes.clone());
-            graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(
+            graph.push_op(AnyMilliOp::Constant(Constant::new(
                 axes_tensor.to_dyn(),
             )))
         } else {
             panic!();
         };
 
-        let out = graph.push_op(AnyMilliOp::Squeeze(MilliOpSqueeze::new(
+        let out = graph.push_op(AnyMilliOp::Squeeze(Squeeze::new(
             input_map[&self.input],
             axes_input,
         )));
@@ -141,14 +141,14 @@ impl Operation for UnsqueezeOperation {
             input_map[&axes]
         } else if let Some(axes) = &self.axes_attribute {
             let axes_tensor = NDArrayNumericTensor::from_vec(axes.clone());
-            graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(
+            graph.push_op(AnyMilliOp::Constant(Constant::new(
                 axes_tensor.to_dyn(),
             )))
         } else {
             panic!();
         };
 
-        let out = graph.push_op(AnyMilliOp::Unsqueeze(MilliOpUnsqueeze::new(
+        let out = graph.push_op(AnyMilliOp::Unsqueeze(Unsqueeze::new(
             input_map[&self.input],
             axes_input,
         )));
@@ -200,7 +200,7 @@ impl Operation for ReshapeOperation {
 
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
-        let out = graph.push_op(AnyMilliOp::Reshape(MilliOpReshape::new(
+        let out = graph.push_op(AnyMilliOp::Reshape(Reshape::new(
             input_map[&self.input],
             input_map[&self.shape],
             false,
@@ -260,37 +260,37 @@ impl Operation for FlattenOperation {
         let shape_tensor = if self.axis == 0 {
             let output_shape = vec![1i64, -1i64];
             let shape_tensor = NDArrayNumericTensor::from(output_shape);
-            graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(
+            graph.push_op(AnyMilliOp::Constant(Constant::new(
                 shape_tensor.to_dyn(),
             )))
         } else {
-            let input_shape = graph.push_op(AnyMilliOp::Shape(MilliOpShape::new(input)));
-            let zero_const = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(
+            let input_shape = graph.push_op(AnyMilliOp::Shape(Shape::new(input)));
+            let zero_const = graph.push_op(AnyMilliOp::Constant(Constant::new(
                 NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
             )));
-            let axis_const = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(
+            let axis_const = graph.push_op(AnyMilliOp::Constant(Constant::new(
                 NDArrayNumericTensor::from_vec_shape(vec![self.axis], &vec![1]).unwrap(),
             )));
-            let first_dims = graph.push_op(AnyMilliOp::Slice(MilliOpSlice::new(
+            let first_dims = graph.push_op(AnyMilliOp::Slice(Slice::new(
                 input_shape,
                 zero_const,
                 axis_const,
                 None,
                 None,
             )));
-            let prod = graph.push_op(AnyMilliOp::ReduceProd(MilliOpReduceProd::new(
+            let prod = graph.push_op(AnyMilliOp::ReduceProd(ReduceProd::new(
                 first_dims, None, true, false,
             )));
-            let neg_one_const = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(
+            let neg_one_const = graph.push_op(AnyMilliOp::Constant(Constant::new(
                 NDArrayNumericTensor::from_vec_shape(vec![-1i64], &vec![1]).unwrap(),
             )));
-            graph.push_op(AnyMilliOp::Concat(MilliOpConcat::new(
+            graph.push_op(AnyMilliOp::Concat(Concat::new(
                 vec![prod, neg_one_const],
                 0,
             )))
         };
 
-        let out = graph.push_op(AnyMilliOp::Reshape(MilliOpReshape::new(
+        let out = graph.push_op(AnyMilliOp::Reshape(Reshape::new(
             input,
             shape_tensor,
             false,

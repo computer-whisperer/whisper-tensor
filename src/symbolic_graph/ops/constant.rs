@@ -58,7 +58,7 @@ impl Operation for ConstantOfShapeOperation {
 
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
-        let out = graph.push_op(AnyMilliOp::ConstantOfShape(MilliOpConstantOfShape::new(
+        let out = graph.push_op(AnyMilliOp::ConstantOfShape(ConstantOfShape::new(
             self.value.clone(),
             input_map[&self.input],
         )));
@@ -128,7 +128,7 @@ impl Operation for ConstantOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, _input_map) = MilliOpGraph::new(&self.get_inputs());
 
-        let out = graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(
+        let out = graph.push_op(AnyMilliOp::Constant(Constant::new(
             self.value.clone(),
         )));
 

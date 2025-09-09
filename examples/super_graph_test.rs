@@ -5,8 +5,8 @@ use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::dtype::DType;
 use whisper_tensor::milli_graph::MilliOpGraph;
 use whisper_tensor::milli_graph::ops::{
-    AnyMilliOp, MilliOpArgMax, MilliOpCast, MilliOpConstant, MilliOpShape, MilliOpSimpleBinary,
-    MilliOpSlice, MilliOpSqueeze, MilliOpUnsqueeze,
+    AnyMilliOp, ArgMax, Cast, Constant, Shape, SimpleBinary,
+    Slice, Squeeze, Unsqueeze,
 };
 use whisper_tensor::model::Model;
 use whisper_tensor::super_graph::cache::SuperGraphTensorCache;
@@ -69,18 +69,18 @@ fn main() {
         // Slice to last token
 
         let logits_in = {
-            let input_shape = MilliOpShape::new(&mut milli_graph, logits_input);
-            let const_a = milli_graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(
+            let input_shape = Shape::new(&mut milli_graph, logits_input);
+            let const_a = milli_graph.push_op(AnyMilliOp::Constant(Constant::new(
                 NDArrayNumericTensor::from_vec(vec![0i64, 0, 1, 0]).to_dyn(),
             )));
-            let value = milli_graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::mul(
+            let value = milli_graph.push_op(AnyMilliOp::SimpleBinary(SimpleBinary::mul(
                 input_shape,
                 const_a,
             )));
-            let value = milli_graph.push_op(AnyMilliOp::SimpleBinary(MilliOpSimpleBinary::sub(
+            let value = milli_graph.push_op(AnyMilliOp::SimpleBinary(SimpleBinary::sub(
                 value, const_a,
             )));
-            milli_graph.push_op(AnyMilliOp::Slice(MilliOpSlice::new(
+            milli_graph.push_op(AnyMilliOp::Slice(Slice::new(
                 logits_input,
                 value,
                 input_shape,
@@ -90,21 +90,21 @@ fn main() {
         };
 
         // Cull unnecessary dims
-        let const_0 = milli_graph.push_op(AnyMilliOp::Constant(MilliOpConstant::new(
+        let const_0 = milli_graph.push_op(AnyMilliOp::Constant(Constant::new(
             NDArrayNumericTensor::from_vec(vec![0i64]).to_dyn(),
         )));
         let logits_in =
-            milli_graph.push_op(AnyMilliOp::Squeeze(MilliOpSqueeze::new(logits_in, const_0)));
+            milli_graph.push_op(AnyMilliOp::Squeeze(Squeeze::new(logits_in, const_0)));
         let logits_in =
-            milli_graph.push_op(AnyMilliOp::Squeeze(MilliOpSqueeze::new(logits_in, const_0)));
+            milli_graph.push_op(AnyMilliOp::Squeeze(Squeeze::new(logits_in, const_0)));
         let logits_in =
-            milli_graph.push_op(AnyMilliOp::Squeeze(MilliOpSqueeze::new(logits_in, const_0)));
+            milli_graph.push_op(AnyMilliOp::Squeeze(Squeeze::new(logits_in, const_0)));
 
-        let output = milli_graph.push_op(AnyMilliOp::ArgMax(MilliOpArgMax::new(
+        let output = milli_graph.push_op(AnyMilliOp::ArgMax(ArgMax::new(
             logits_in, 0, false, false,
         )));
-        let output = milli_graph.push_op(AnyMilliOp::Cast(MilliOpCast::new(output, DType::U32)));
-        let output = milli_graph.push_op(AnyMilliOp::Unsqueeze(MilliOpUnsqueeze::new(
+        let output = milli_graph.push_op(AnyMilliOp::Cast(Cast::new(output, DType::U32)));
+        let output = milli_graph.push_op(AnyMilliOp::Unsqueeze(Unsqueeze::new(
             output, const_0,
         )));
         let mut output_map = HashMap::new();

@@ -9,7 +9,7 @@ use typenum::P1;
 use crate::graph::Node;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MilliOpReduceMean {
+pub struct ReduceMean {
     output: MilliOpGraphTensorId,
     data: MilliOpGraphTensorId,
     axes: Option<MilliOpGraphTensorId>,
@@ -17,7 +17,7 @@ pub struct MilliOpReduceMean {
     noop_with_empty_axes: bool,
 }
 
-impl MilliOpReduceMean {
+impl ReduceMean {
     pub fn new<T: std::hash::Hash + Clone + Eq>(
         graph: &mut MilliOpGraph<T>,
         data: MilliOpGraphTensorId,
@@ -38,14 +38,14 @@ impl MilliOpReduceMean {
     }
 }
 
-impl Node<MilliOpGraphTensorId> for MilliOpReduceMean {
+impl Node<MilliOpGraphTensorId> for ReduceMean {
     fn inputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> {
         match self.axes { Some(ax) => vec![self.data, ax].into_iter(), None => vec![self.data].into_iter() }
     }
     fn outputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> { vec![self.output].into_iter() }
 }
 
-impl MilliOp for MilliOpReduceMean {
+impl MilliOp for ReduceMean {
     fn eval(
         &self,
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,

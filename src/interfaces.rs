@@ -5,7 +5,7 @@ use crate::dtype::DType;
 use crate::interfaces::Error::GeneralError;
 use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::ops::{
-    AnyMilliOp, MilliOpCast, MilliOpConstant, MilliOpShape, MilliOpSqueeze, MilliOpUnsqueeze,
+    AnyMilliOp, Cast, Constant, Shape, Squeeze, Unsqueeze,
 };
 use crate::graph::{Graph, InnerGraph, Node};
 use crate::model::Model;
@@ -181,7 +181,7 @@ impl TextInferenceTokensInLogitOutInterface {
                 let (mut milli_graph, input_map) = MilliOpGraph::new(&[post_cache_tokens_input]);
                 let milli_op_graph_input = *input_map.get(&post_cache_tokens_input).unwrap();
 
-                let shape_out = MilliOpShape::new(&mut milli_graph, milli_op_graph_input);
+                let shape_out = Shape::new(&mut milli_graph, milli_op_graph_input);
                 let mut output_map = HashMap::new();
                 output_map.insert(shape_out, loop_count_link);
                 milli_graph.set_output_map(output_map);
@@ -222,7 +222,7 @@ impl TextInferenceTokensInLogitOutInterface {
                         .unwrap()
                         .cast(input_tensor_dtype)
                         .unwrap();
-                        let input_const_node = MilliOpConstant::new(&mut milli_graph, input_tensor);
+                        let input_const_node = Constant::new(&mut milli_graph, input_tensor);
                         let input_tensor = match milli_graph.inner(&()).get_node(&input_const_node) {
                             Some(AnyMilliOp::Constant(op)) => op.outputs().next().unwrap(),
                             _ => unreachable!(),
@@ -268,14 +268,14 @@ impl TextInferenceTokensInLogitOutInterface {
 
                     let (mut milli_graph, input_map) = MilliOpGraph::new(&[sub_token_input]);
                     let milli_op_graph_input = *input_map.get(&sub_token_input).unwrap();
-                    let mut x = MilliOpCast::new(&mut milli_graph, milli_op_graph_input, input_tensor_dtype);
-                    let zero_node = MilliOpConstant::new(&mut milli_graph, NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap());
+                    let mut x = Cast::new(&mut milli_graph, milli_op_graph_input, input_tensor_dtype);
+                    let zero_node = Constant::new(&mut milli_graph, NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap());
                     let zero_tid = match milli_graph.inner(&()).get_node(&zero_node) {
                         Some(AnyMilliOp::Constant(op)) => op.outputs().next().unwrap(),
                         _ => unreachable!(),
                     };
                     for _ in 0..input_tensor_rank {
-                        x = MilliOpUnsqueeze::new(&mut milli_graph, x, zero_tid);
+                        x = Unsqueeze::new(&mut milli_graph, x, zero_tid);
                     }
 
                     let processed_input_link = sub_builder.new_tensor_link();
@@ -335,15 +335,15 @@ impl TextInferenceTokensInLogitOutInterface {
                     let (mut milli_graph, input_map) = MilliOpGraph::new(&[sub_logit_output]);
                     let milli_op_graph_input = *input_map.get(&sub_logit_output).unwrap();
                     let mut x = milli_op_graph_input;
-                    let zero_node = MilliOpConstant::new(&mut milli_graph, NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap());
+                    let zero_node = Constant::new(&mut milli_graph, NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap());
                     let zero_tid = match milli_graph.inner(&()).get_node(&zero_node) {
                         Some(AnyMilliOp::Constant(op)) => op.outputs().next().unwrap(),
                         _ => unreachable!(),
                     };
                     for _ in 0..(output_tensor_rank - 1) {
-                        x = MilliOpSqueeze::new(&mut milli_graph, x, zero_tid);
+                        x = Squeeze::new(&mut milli_graph, x, zero_tid);
                     }
-                    x = MilliOpCast::new(&mut milli_graph, x, DType::F32);
+                    x = Cast::new(&mut milli_graph, x, DType::F32);
 
                     let processed_logit_output_link = sub_builder.new_tensor_link();
                     let mut output_map = HashMap::new();
@@ -447,14 +447,14 @@ impl TextInferenceTokensInLogitOutInterface {
 
                 let (mut milli_graph, input_map) = MilliOpGraph::new(&[token_context_input_link]);
                 let milli_op_graph_input = *input_map.get(&token_context_input_link).unwrap();
-                let mut x = MilliOpCast::new(&mut milli_graph, milli_op_graph_input, input_tensor_dtype);
-                let zero_node = MilliOpConstant::new(&mut milli_graph, NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap());
+                let mut x = Cast::new(&mut milli_graph, milli_op_graph_input, input_tensor_dtype);
+                let zero_node = Constant::new(&mut milli_graph, NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap());
                 let zero_tid = match milli_graph.inner(&()).get_node(&zero_node) {
                     Some(AnyMilliOp::Constant(op)) => op.outputs().next().unwrap(),
                     _ => unreachable!(),
                 };
                 for _ in 0..(input_tensor_rank - 1) {
-                    x = MilliOpUnsqueeze::new(&mut milli_graph, x, zero_tid);
+                    x = Unsqueeze::new(&mut milli_graph, x, zero_tid);
                 }
 
                 let processed_input_link =
@@ -490,15 +490,15 @@ impl TextInferenceTokensInLogitOutInterface {
                 let (mut milli_graph, input_map) = MilliOpGraph::new(&[raw_logit_output_link]);
                 let milli_op_graph_input = *input_map.get(&raw_logit_output_link).unwrap();
                 let mut x = milli_op_graph_input;
-                let zero_node = MilliOpConstant::new(&mut milli_graph, NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap());
+                let zero_node = Constant::new(&mut milli_graph, NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap());
                 let zero_tid = match milli_graph.inner(&()).get_node(&zero_node) {
                     Some(AnyMilliOp::Constant(op)) => op.outputs().next().unwrap(),
                     _ => unreachable!(),
                 };
                 for _ in 0..(output_tensor_rank - 2) {
-                    x = MilliOpSqueeze::new(&mut milli_graph, x, zero_tid);
+                    x = Squeeze::new(&mut milli_graph, x, zero_tid);
                 }
-                x = MilliOpCast::new(&mut milli_graph, x, DType::F32);
+                x = Cast::new(&mut milli_graph, x, DType::F32);
 
                 let processed_logit_output_link = super_graph_builder.new_tensor_link();
                 let mut output_map = HashMap::new();

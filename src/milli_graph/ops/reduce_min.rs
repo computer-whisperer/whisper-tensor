@@ -9,7 +9,7 @@ use typenum::P1;
 use crate::graph::Node;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MilliOpReduceMin {
+pub struct ReduceMin {
     output: MilliOpGraphTensorId,
     data: MilliOpGraphTensorId,
     axes: Option<MilliOpGraphTensorId>,
@@ -17,7 +17,7 @@ pub struct MilliOpReduceMin {
     noop_with_empty_axes: bool,
 }
 
-impl MilliOpReduceMin {
+impl ReduceMin {
     pub fn new<T: std::hash::Hash + Clone + Eq>(
         graph: &mut MilliOpGraph<T>,
         data: MilliOpGraphTensorId,
@@ -38,7 +38,7 @@ impl MilliOpReduceMin {
     }
 }
 
-impl MilliOp for MilliOpReduceMin {
+impl MilliOp for ReduceMin {
     fn eval(
         &self,
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
@@ -79,7 +79,7 @@ impl MilliOp for MilliOpReduceMin {
     }
 }
 
-impl Node<MilliOpGraphTensorId> for MilliOpReduceMin {
+impl Node<MilliOpGraphTensorId> for ReduceMin {
     fn inputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> {
         match self.axes { Some(ax) => vec![self.data, ax].into_iter(), None => vec![self.data].into_iter() }
     }

@@ -8,14 +8,14 @@ use std::collections::HashMap;
 use typenum::P1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MilliOpRange {
+pub struct Range {
     output: MilliOpGraphTensorId,
     start: MilliOpGraphTensorId,
     end: MilliOpGraphTensorId,
     delta: MilliOpGraphTensorId,
 }
 
-impl MilliOpRange {
+impl Range {
     pub fn new<T: std::hash::Hash + Clone + Eq>(
         graph: &mut MilliOpGraph<T>,
         start: MilliOpGraphTensorId,
@@ -29,12 +29,12 @@ impl MilliOpRange {
     }
 }
 
-impl crate::graph::Node<MilliOpGraphTensorId> for MilliOpRange {
+impl crate::graph::Node<MilliOpGraphTensorId> for Range {
     fn inputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> { vec![self.start, self.end, self.delta].into_iter() }
     fn outputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> { vec![self.output].into_iter() }
 }
 
-impl MilliOp for MilliOpRange {
+impl MilliOp for Range {
     fn eval(
         &self,
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,

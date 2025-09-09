@@ -11,13 +11,13 @@ use typenum::P1;
 use crate::graph::Node;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MilliOpSqueeze {
+pub struct Squeeze {
     output: MilliOpGraphTensorId,
     data: MilliOpGraphTensorId,
     axes: MilliOpGraphTensorId,
 }
 
-impl MilliOpSqueeze {
+impl Squeeze {
     pub fn new<T: std::hash::Hash + Clone + Eq>(graph: &mut MilliOpGraph<T>, data: MilliOpGraphTensorId, axes: MilliOpGraphTensorId) -> MilliOpGraphTensorId {
         let output = graph.get_new_tensor_id();
         let node = Self { output, data, axes };
@@ -26,12 +26,12 @@ impl MilliOpSqueeze {
     }
 }
 
-impl Node<MilliOpGraphTensorId> for MilliOpSqueeze {
+impl Node<MilliOpGraphTensorId> for Squeeze {
     fn inputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> { vec![self.data, self.axes].into_iter() }
     fn outputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> { vec![self.output].into_iter() }
 }
 
-impl MilliOp for MilliOpSqueeze {
+impl MilliOp for Squeeze {
     fn eval(
         &self,
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,

@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use crate::graph::Node;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MilliOpArgMin {
+pub struct ArgMin {
     output: MilliOpGraphTensorId,
     input: MilliOpGraphTensorId,
     axis: i64,
@@ -16,7 +16,7 @@ pub struct MilliOpArgMin {
     select_last_index: bool,
 }
 
-impl MilliOpArgMin {
+impl ArgMin {
     pub fn new(
         graph: &mut MilliOpGraph<MilliOpGraphTensorId>,
         input: MilliOpGraphTensorId,
@@ -37,7 +37,7 @@ impl MilliOpArgMin {
     }
 }
 
-impl MilliOp for MilliOpArgMin {
+impl MilliOp for ArgMin {
     fn eval(
         &self,
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
@@ -59,7 +59,7 @@ impl MilliOp for MilliOpArgMin {
 }
 
 
-impl Node<MilliOpGraphTensorId> for MilliOpArgMin {
+impl Node<MilliOpGraphTensorId> for ArgMin {
     fn inputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> {
         vec![self.input].into_iter()
     }

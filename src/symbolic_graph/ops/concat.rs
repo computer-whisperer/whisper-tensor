@@ -58,7 +58,7 @@ impl Operation for ConcatOperation {
         for input in &self.inputs {
             milli_inputs.push(input_map[input]);
         }
-        let out = graph.push_op(AnyMilliOp::Concat(MilliOpConcat::new(
+        let out = graph.push_op(AnyMilliOp::Concat(Concat::new(
             milli_inputs,
             self.axis,
         )));

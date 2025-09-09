@@ -13,12 +13,12 @@ use std::collections::HashMap;
 use typenum::P1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MilliOpConstant {
+pub struct Constant {
     output: MilliOpGraphTensorId,
     data: NDArrayNumericTensor<DynRank>,
 }
 
-impl MilliOpConstant {
+impl Constant {
     pub fn new<T: std::hash::Hash + Clone + Eq>(graph: &mut MilliOpGraph<T>, a: NDArrayNumericTensor<DynRank>) -> MilliOpGraphNodeId {
         let node = Self { output: graph.get_new_tensor_id(), data: a };
         graph.push_op(AnyMilliOp::Constant(node))
@@ -34,12 +34,12 @@ impl MilliOpConstant {
     }
 }
 
-impl Node<MilliOpGraphTensorId> for MilliOpConstant {
+impl Node<MilliOpGraphTensorId> for Constant {
     fn inputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> { std::iter::empty() }
     fn outputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> { vec![self.output].into_iter() }
 }
 
-impl MilliOp for MilliOpConstant {
+impl MilliOp for Constant {
     fn eval(
         &self,
         _inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
@@ -54,25 +54,25 @@ impl MilliOp for MilliOpConstant {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MilliOpConstantOfShape {
+pub struct ConstantOfShape {
     output: MilliOpGraphTensorId,
     value: NumericScalar,
     shape: MilliOpGraphTensorId,
 }
 
-impl MilliOpConstantOfShape {
+impl ConstantOfShape {
     pub fn new<T: std::hash::Hash + Clone + Eq>(graph: &mut MilliOpGraph<T>, value: NumericScalar, shape: MilliOpGraphTensorId) -> MilliOpGraphNodeId {
         let node = Self { output: graph.get_new_tensor_id(), value, shape };
         graph.push_op(AnyMilliOp::ConstantOfShape(node))
     }
 }
 
-impl Node<MilliOpGraphTensorId> for MilliOpConstantOfShape {
+impl Node<MilliOpGraphTensorId> for ConstantOfShape {
     fn inputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> { vec![self.shape].into_iter() }
     fn outputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> { vec![self.output].into_iter() }
 }
 
-impl MilliOp for MilliOpConstantOfShape {
+impl MilliOp for ConstantOfShape {
     fn eval(
         &self,
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,

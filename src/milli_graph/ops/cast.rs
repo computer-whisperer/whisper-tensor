@@ -8,13 +8,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MilliOpCast {
+pub struct Cast {
     output: MilliOpGraphTensorId,
     data: MilliOpGraphTensorId,
     dtype: DType,
 }
 
-impl MilliOpCast {
+impl Cast {
     pub fn new<T: std::hash::Hash + Clone + Eq>(graph: &mut MilliOpGraph<T>, data: MilliOpGraphTensorId, dtype: DType) -> MilliOpGraphTensorId {
         let output = graph.get_new_tensor_id();
         let node = Self { output, data, dtype };
@@ -23,12 +23,12 @@ impl MilliOpCast {
     }
 }
 
-impl crate::graph::Node<MilliOpGraphTensorId> for MilliOpCast {
+impl crate::graph::Node<MilliOpGraphTensorId> for Cast {
     fn inputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> { vec![self.data].into_iter() }
     fn outputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> { vec![self.output].into_iter() }
 }
 
-impl MilliOp for MilliOpCast {
+impl MilliOp for Cast {
     fn eval(
         &self,
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,

@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MilliOpCumSum {
+pub struct CumSum {
     output: MilliOpGraphTensorId,
     input: MilliOpGraphTensorId,
     axis: MilliOpGraphTensorId,
@@ -17,7 +17,7 @@ pub struct MilliOpCumSum {
     reverse: bool,
 }
 
-impl MilliOpCumSum {
+impl CumSum {
     pub fn new<T: std::hash::Hash + Clone + Eq>(graph: &mut MilliOpGraph<T>, input: MilliOpGraphTensorId, axis: MilliOpGraphTensorId, exclusive: bool, reverse: bool) -> MilliOpGraphTensorId {
         let output = graph.get_new_tensor_id();
         let node = Self { output, input, axis, exclusive, reverse };
@@ -28,12 +28,12 @@ impl MilliOpCumSum {
 
 use crate::graph::Node;
 
-impl Node<MilliOpGraphTensorId> for MilliOpCumSum {
+impl Node<MilliOpGraphTensorId> for CumSum {
     fn inputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> { vec![self.input, self.axis].into_iter() }
     fn outputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> { vec![self.output].into_iter() }
 }
 
-impl MilliOp for MilliOpCumSum {
+impl MilliOp for CumSum {
     fn eval(
         &self,
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
