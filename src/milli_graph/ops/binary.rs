@@ -42,7 +42,7 @@ use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::ops::AnyMilliOp;
 
 impl SimpleBinary {
-    fn push_new<T: std::hash::Hash + Clone + Eq>(
+    fn push_new<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         a: MilliOpGraphTensorId,
         b: MilliOpGraphTensorId,
@@ -58,7 +58,7 @@ impl SimpleBinary {
         graph.push_op(AnyMilliOp::SimpleBinary(node));
         output
     }
-    pub fn add<T: std::hash::Hash + Clone + Eq>(
+    pub fn add<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         a: MilliOpGraphTensorId,
         b: MilliOpGraphTensorId,
@@ -66,7 +66,7 @@ impl SimpleBinary {
         Self::push_new(graph, a, b, WhichSimpleBinaryOp::Add)
     }
 
-    pub fn sub<T: std::hash::Hash + Clone + Eq>(
+    pub fn sub<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         a: MilliOpGraphTensorId,
         b: MilliOpGraphTensorId,
@@ -74,7 +74,7 @@ impl SimpleBinary {
         Self::push_new(graph, a, b, WhichSimpleBinaryOp::Sub)
     }
 
-    pub fn mul<T: std::hash::Hash + Clone + Eq>(
+    pub fn mul<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         a: MilliOpGraphTensorId,
         b: MilliOpGraphTensorId,
@@ -82,7 +82,7 @@ impl SimpleBinary {
         Self::push_new(graph, a, b, WhichSimpleBinaryOp::Mul)
     }
 
-    pub fn div<T: std::hash::Hash + Clone + Eq>(
+    pub fn div<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         a: MilliOpGraphTensorId,
         b: MilliOpGraphTensorId,
@@ -90,7 +90,7 @@ impl SimpleBinary {
         Self::push_new(graph, a, b, WhichSimpleBinaryOp::Div)
     }
 
-    pub fn modulo<T: std::hash::Hash + Clone + Eq>(
+    pub fn modulo<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         a: MilliOpGraphTensorId,
         b: MilliOpGraphTensorId,
@@ -98,7 +98,7 @@ impl SimpleBinary {
     ) -> MilliOpGraphTensorId {
         Self::push_new(graph, a, b, WhichSimpleBinaryOp::Modulo(fmod))
     }
-    pub fn and<T: std::hash::Hash + Clone + Eq>(
+    pub fn and<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         a: MilliOpGraphTensorId,
         b: MilliOpGraphTensorId,
@@ -106,7 +106,7 @@ impl SimpleBinary {
         Self::push_new(graph, a, b, WhichSimpleBinaryOp::And)
     }
 
-    pub fn or<T: std::hash::Hash + Clone + Eq>(
+    pub fn or<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         a: MilliOpGraphTensorId,
         b: MilliOpGraphTensorId,
@@ -114,7 +114,7 @@ impl SimpleBinary {
         Self::push_new(graph, a, b, WhichSimpleBinaryOp::Or)
     }
 
-    pub fn xor<T: std::hash::Hash + Clone + Eq>(
+    pub fn xor<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         a: MilliOpGraphTensorId,
         b: MilliOpGraphTensorId,
@@ -122,7 +122,7 @@ impl SimpleBinary {
         Self::push_new(graph, a, b, WhichSimpleBinaryOp::Xor)
     }
 
-    pub fn bitwise_and<T: std::hash::Hash + Clone + Eq>(
+    pub fn bitwise_and<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         a: MilliOpGraphTensorId,
         b: MilliOpGraphTensorId,
@@ -130,7 +130,7 @@ impl SimpleBinary {
         Self::push_new(graph, a, b, WhichSimpleBinaryOp::BitwiseAnd)
     }
 
-    pub fn bitwise_or<T: std::hash::Hash + Clone + Eq>(
+    pub fn bitwise_or<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         a: MilliOpGraphTensorId,
         b: MilliOpGraphTensorId,
@@ -138,7 +138,7 @@ impl SimpleBinary {
         Self::push_new(graph, a, b, WhichSimpleBinaryOp::BitwiseOr)
     }
 
-    pub fn bitwise_xor<T: std::hash::Hash + Clone + Eq>(
+    pub fn bitwise_xor<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         a: MilliOpGraphTensorId,
         b: MilliOpGraphTensorId,
@@ -146,7 +146,7 @@ impl SimpleBinary {
         Self::push_new(graph, a, b, WhichSimpleBinaryOp::BitwiseXor)
     }
 
-    pub fn equal<T: std::hash::Hash + Clone + Eq>(
+    pub fn equal<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         a: MilliOpGraphTensorId,
         b: MilliOpGraphTensorId,
@@ -154,7 +154,7 @@ impl SimpleBinary {
         Self::push_new(graph, a, b, WhichSimpleBinaryOp::Equal)
     }
 
-    pub fn greater<T: std::hash::Hash + Clone + Eq>(
+    pub fn greater<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         a: MilliOpGraphTensorId,
         b: MilliOpGraphTensorId,
@@ -162,7 +162,7 @@ impl SimpleBinary {
         Self::push_new(graph, a, b, WhichSimpleBinaryOp::Greater)
     }
 
-    pub fn greater_or_equal<T: std::hash::Hash + Clone + Eq>(
+    pub fn greater_or_equal<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         a: MilliOpGraphTensorId,
         b: MilliOpGraphTensorId,
@@ -170,7 +170,7 @@ impl SimpleBinary {
         Self::push_new(graph, a, b, WhichSimpleBinaryOp::GreaterOrEqual)
     }
 
-    pub fn less<T: std::hash::Hash + Clone + Eq>(
+    pub fn less<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         a: MilliOpGraphTensorId,
         b: MilliOpGraphTensorId,
@@ -178,7 +178,7 @@ impl SimpleBinary {
         Self::push_new(graph, a, b, WhichSimpleBinaryOp::Less)
     }
 
-    pub fn less_or_equal<T: std::hash::Hash + Clone + Eq>(
+    pub fn less_or_equal<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         a: MilliOpGraphTensorId,
         b: MilliOpGraphTensorId,
@@ -186,7 +186,7 @@ impl SimpleBinary {
         Self::push_new(graph, a, b, WhichSimpleBinaryOp::LessOrEqual)
     }
 
-    pub fn max<T: std::hash::Hash + Clone + Eq>(
+    pub fn max<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         a: MilliOpGraphTensorId,
         b: MilliOpGraphTensorId,
@@ -194,7 +194,7 @@ impl SimpleBinary {
         Self::push_new(graph, a, b, WhichSimpleBinaryOp::Max)
     }
 
-    pub fn min<T: std::hash::Hash + Clone + Eq>(
+    pub fn min<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         a: MilliOpGraphTensorId,
         b: MilliOpGraphTensorId,
@@ -267,7 +267,7 @@ pub struct Pow {
 }
 
 impl Pow {
-    pub fn push_new<T: std::hash::Hash + Clone + Eq>(
+    pub fn push_new<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         a: MilliOpGraphTensorId,
         b: MilliOpGraphTensorId,
@@ -301,7 +301,7 @@ pub struct MatMul {
 }
 
 impl MatMul {
-    pub fn push_new<T: std::hash::Hash + Clone + Eq>(
+    pub fn push_new<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         a: MilliOpGraphTensorId,
         b: MilliOpGraphTensorId,

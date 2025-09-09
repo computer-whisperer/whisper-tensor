@@ -62,7 +62,7 @@ fn main() {
 
     // Sampler
     let chosen_token = {
-        let (mut milli_graph, inputs_map) = MilliOpGraph::new(&[logit_output]);
+        let (mut milli_graph, inputs_map) = MilliOpGraph::new([logit_output]);
         let logits_input = inputs_map[&logit_output];
 
         // Slice to last token

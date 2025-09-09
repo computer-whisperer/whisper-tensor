@@ -1,5 +1,5 @@
-use crate::milli_graph::MilliOpGraph;
-use crate::milli_graph::ops::*;
+use crate::graph::Node;
+use crate::milli_graph::{self, MilliOpGraph};
 use crate::onnx;
 use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{ONNXDecodingError, SymbolicGraphTensorId};
@@ -48,29 +48,29 @@ impl SliceOperation {
     }
 }
 
-impl Operation for SliceOperation {
-    fn get_op_type_name(&self) -> String {
+impl Node<SymbolicGraphTensorId> for SliceOperation {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
         "Slice".to_string()
     }
-
-    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
-        if let Some(axes) = self.axes {
-            if let Some(steps) = self.steps {
-                vec![self.data, self.starts, self.ends, axes, steps]
-            } else {
-                vec![self.data, self.starts, self.ends, axes]
-            }
-        } else {
-            vec![self.data, self.starts, self.ends]
+    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        let mut v = vec![self.data, self.starts, self.ends];
+        if let Some(axes) = &self.axes {
+            v.push(*axes);
         }
+        if let Some(steps) = &self.steps {
+            v.push(*steps);
+        }
+        Box::new(v.into_iter())
     }
-    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.output]
+    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new(std::iter::once(self.output))
     }
-
+}
+impl Operation for SliceOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
-        let out = Slice::push_new(
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs());
+        let out = milli_graph::ops::Slice::push_new(
             &mut graph,
             input_map[&self.data],
             input_map[&self.starts],

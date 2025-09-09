@@ -18,7 +18,7 @@ pub struct CumSum {
 }
 
 impl CumSum {
-    pub fn push_new<T: std::hash::Hash + Clone + Eq>(
+    pub fn push_new<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         input: MilliOpGraphTensorId,
         axis: MilliOpGraphTensorId,

@@ -1,5 +1,5 @@
-use crate::milli_graph::ops::*;
-use crate::milli_graph::{MilliOpGraph, ops_helpers};
+use crate::graph::Node;
+use crate::milli_graph::{self, MilliOpGraph, ops_helpers};
 use crate::onnx;
 use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{ONNXDecodingError, SymbolicGraphTensorId};
@@ -48,29 +48,30 @@ impl ShapeOperation {
     }
 }
 
-impl Operation for ShapeOperation {
-    fn get_op_type_name(&self) -> String {
+impl Node<SymbolicGraphTensorId> for ShapeOperation {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
         "Shape".to_string()
     }
-
-    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.input]
+    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new(std::iter::once(self.input))
     }
-    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.output]
+    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new(std::iter::once(self.output))
     }
-
+}
+impl Operation for ShapeOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
-        let out = Shape::push_new(&mut graph, input_map[&self.input]);
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs());
+        let out = milli_graph::ops::Shape::push_new(&mut graph, input_map[&self.input]);
         let out = if self.start.is_some() || self.end.is_some() {
             let start = ops_helpers::scalar_const(&mut graph, self.start.unwrap_or(0));
             let end = if let Some(end) = self.end {
                 ops_helpers::scalar_const(&mut graph, end)
             } else {
-                Shape::push_new(&mut graph, out)
+                milli_graph::ops::Shape::push_new(&mut graph, out)
             };
-            Slice::push_new(&mut graph, out, start, end, None, None)
+            milli_graph::ops::Slice::push_new(&mut graph, out, start, end, None, None)
         } else {
             out
         };
@@ -105,23 +106,26 @@ impl SizeOperation {
     }
 }
 
-impl Operation for SizeOperation {
-    fn get_op_type_name(&self) -> String {
+impl Node<SymbolicGraphTensorId> for SizeOperation {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
         "Size".to_string()
     }
-
-    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.input]
+    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new(std::iter::once(self.input))
     }
-    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.output]
+    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new(std::iter::once(self.output))
     }
+}
 
+impl Operation for SizeOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs());
 
-        let shape_tid = Shape::push_new(&mut graph, input_map[&self.input]);
-        let size_tid = ReduceProd::push_new(&mut graph, shape_tid, None, false, false);
+        let shape_tid = milli_graph::ops::Shape::push_new(&mut graph, input_map[&self.input]);
+        let size_tid =
+            milli_graph::ops::ReduceProd::push_new(&mut graph, shape_tid, None, false, false);
 
         let mut output_map = HashMap::new();
         output_map.insert(size_tid, self.output);

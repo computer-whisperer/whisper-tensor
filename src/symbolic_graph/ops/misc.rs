@@ -1,5 +1,6 @@
 use crate::backends::eval_backend::EvalBackend;
 use crate::dtype::DType;
+use crate::graph::Node;
 use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::ops::*;
 use crate::numeric_tensor::NumericTensor;
@@ -42,20 +43,22 @@ impl WhereOperation {
     }
 }
 
-impl Operation for WhereOperation {
-    fn get_op_type_name(&self) -> String {
+impl Node<SymbolicGraphTensorId> for WhereOperation {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
         "Where".to_string()
     }
-
-    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.condition, self.x, self.y]
+    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new([self.condition, self.x, self.y].into_iter())
     }
-    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.output]
+    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new(std::iter::once(self.output))
     }
+}
 
+impl Operation for WhereOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs());
         let out = Where::push_new(
             &mut graph,
             input_map[&self.condition],
@@ -127,30 +130,32 @@ impl IfOperation {
     }
 }
 
-impl Operation for IfOperation {
-    fn get_op_type_name(&self) -> String {
+impl Node<SymbolicGraphTensorId> for IfOperation {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
         "If".to_string()
     }
-
-    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
         let mut inputs_set = HashSet::new();
         inputs_set.insert(self.condition);
         inputs_set.extend(self.then_branch.get_foreign_tensor_ids());
         inputs_set.extend(self.else_branch.get_foreign_tensor_ids());
         let mut inputs_vec: Vec<_> = inputs_set.into_iter().collect();
         inputs_vec.sort(); // Deterministic ordering
-        inputs_vec
+        Box::new(inputs_vec.into_iter())
     }
-
-    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
-        self.outputs.clone()
+    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new(self.outputs.clone().into_iter())
     }
+}
 
+impl Operation for IfOperation {
     fn eval(
         &self,
         backend: &mut EvalBackend,
         inputs: &HashMap<SymbolicGraphTensorId, NumericTensor<DynRank>>,
-    ) -> Result<HashMap<SymbolicGraphTensorId, NumericTensor<DynRank>>, EvalError> {
+    ) -> Result<Box<dyn Iterator<Item = (SymbolicGraphTensorId, NumericTensor<DynRank>)>>, EvalError>
+    {
         let condition = inputs.get(&self.condition).unwrap();
         let condition: bool = condition.first_element().into();
         let (active_tensors, output_ids) = if condition {
@@ -166,7 +171,7 @@ impl Operation for IfOperation {
         for (to_id, from_id) in self.outputs.iter().zip(output_ids.iter()) {
             outputs.insert(*to_id, active_tensors.get(from_id).unwrap().clone());
         }
-        Ok(outputs)
+        Ok(Box::new(outputs.into_iter()))
     }
 
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
@@ -233,12 +238,14 @@ impl PadOperation {
     }
 }
 
-impl Operation for PadOperation {
-    fn get_op_type_name(&self) -> String {
+impl Node<SymbolicGraphTensorId> for PadOperation {
+    type OpKind = String;
+
+    fn op_kind(&self) -> Self::OpKind {
         "Pad".to_string()
     }
 
-    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
         let mut ret = vec![self.input, self.pads];
         if let Some(constant_value) = self.constant_value {
             ret.push(constant_value);
@@ -246,13 +253,15 @@ impl Operation for PadOperation {
         if let Some(axes) = self.axes {
             ret.push(axes);
         }
-        ret
+        Box::new(ret.into_iter())
     }
 
-    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.output]
+    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new(std::iter::once(self.output))
     }
+}
 
+impl Operation for PadOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         todo!()
     }
@@ -309,19 +318,20 @@ impl RandomNormalLikeOperation {
     }
 }
 
+impl Node<SymbolicGraphTensorId> for RandomNormalLikeOperation {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
+        "RandomNormalLike".to_string()
+    }
+    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new(std::iter::once(self.input))
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new(std::iter::once(self.output))
+    }
+}
+
 impl Operation for RandomNormalLikeOperation {
-    fn get_op_type_name(&self) -> String {
-        "Random Normal Like".to_string()
-    }
-
-    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.input]
-    }
-
-    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.output]
-    }
-
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         todo!()
     }
@@ -355,21 +365,22 @@ impl ExpandOperation {
     }
 }
 
-impl Operation for ExpandOperation {
-    fn get_op_type_name(&self) -> String {
+impl Node<SymbolicGraphTensorId> for ExpandOperation {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
         "Expand".to_string()
     }
-
-    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.input, self.shape]
+    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new(std::iter::once(self.input).chain(std::iter::once(self.shape)))
     }
-
-    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.output]
+    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new(std::iter::once(self.output))
     }
+}
 
+impl Operation for ExpandOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs());
 
         let x = Expand::push_new(&mut graph, input_map[&self.input], input_map[&self.shape]);
 
@@ -418,12 +429,12 @@ impl ClipOperation {
     }
 }
 
-impl Operation for ClipOperation {
-    fn get_op_type_name(&self) -> String {
+impl Node<SymbolicGraphTensorId> for ClipOperation {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
         "Clip".to_string()
     }
-
-    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
         let mut o = vec![self.input];
         if let Some(min) = self.min {
             o.push(min);
@@ -431,15 +442,15 @@ impl Operation for ClipOperation {
         if let Some(max) = self.max {
             o.push(max);
         }
-        o
+        Box::new(o.into_iter())
     }
-
-    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.output]
+    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new(std::iter::once(self.output))
     }
-
+}
+impl Operation for ClipOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs());
         let mut x = input_map[&self.input];
         if let Some(min) = self.min {
             let min = input_map[&min];
@@ -484,20 +495,26 @@ impl RangeOperation {
     }
 }
 
-impl Operation for RangeOperation {
-    fn get_op_type_name(&self) -> String {
+impl Node<SymbolicGraphTensorId> for RangeOperation {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
         "Range".to_string()
     }
-
-    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.start, self.end, self.delta]
+    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new(
+            std::iter::once(self.start)
+                .chain(std::iter::once(self.end))
+                .chain(std::iter::once(self.delta)),
+        )
     }
-    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.output]
+    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new(std::iter::once(self.output))
     }
+}
 
+impl Operation for RangeOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs());
 
         let out = Range::push_new(
             &mut graph,

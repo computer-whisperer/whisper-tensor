@@ -21,7 +21,7 @@ pub struct Constant {
 }
 
 impl Constant {
-    pub fn push_new<T: std::hash::Hash + Clone + Eq>(
+    pub fn push_new<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         a: NDArrayNumericTensor<DynRank>,
     ) -> MilliOpGraphTensorId {
@@ -34,7 +34,7 @@ impl Constant {
         out
     }
 
-    pub(crate) fn new_scalar<T, Io: std::hash::Hash + Clone + Eq>(
+    pub(crate) fn new_scalar<T, Io: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<Io>,
         v: T,
     ) -> MilliOpGraphTensorId
@@ -88,7 +88,7 @@ pub struct ConstantOfShape {
 }
 
 impl ConstantOfShape {
-    pub fn push_new<T: std::hash::Hash + Clone + Eq>(
+    pub fn push_new<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         value: NumericScalar,
         shape: MilliOpGraphTensorId,

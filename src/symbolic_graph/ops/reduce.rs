@@ -1,6 +1,6 @@
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
-use crate::milli_graph::MilliOpGraph;
-use crate::milli_graph::ops::*;
+use crate::graph::Node;
+use crate::milli_graph::{self, MilliOpGraph};
 use crate::onnx;
 use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{
@@ -41,24 +41,28 @@ impl CumSumOperation {
         })
     }
 }
-impl Operation for CumSumOperation {
-    fn get_op_type_name(&self) -> String {
+
+impl Node<SymbolicGraphTensorId> for CumSumOperation {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
         "CumSum".to_string()
     }
-
-    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.input, self.axis]
+    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new([self.input, self.axis].into_iter())
     }
-    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.output]
+    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new(std::iter::once(self.output))
     }
+}
 
+impl Operation for CumSumOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs());
         let a = input_map[&self.input];
         let b = input_map[&self.axis];
 
-        let out = CumSum::push_new(&mut graph, a, b, self.exclusive, self.reverse);
+        let out =
+            milli_graph::ops::CumSum::push_new(&mut graph, a, b, self.exclusive, self.reverse);
 
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
@@ -110,34 +114,35 @@ impl ReduceMeanOperation {
     }
 }
 
-impl Operation for ReduceMeanOperation {
-    fn get_op_type_name(&self) -> String {
-        "Reduce Mean".to_string()
+impl Node<SymbolicGraphTensorId> for ReduceMeanOperation {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
+        "ReduceMean".to_string()
     }
-
-    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
         if let Some(input_axes) = self.input_axes {
-            vec![self.input_data, input_axes]
+            Box::new([self.input_data, input_axes].into_iter())
         } else {
-            vec![self.input_data]
+            Box::new(std::iter::once(self.input_data))
         }
     }
-    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.output]
+    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new(std::iter::once(self.output))
     }
-
+}
+impl Operation for ReduceMeanOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs());
         let axes = if let Some(input_axes) = &self.input_axes {
             Some(input_map[input_axes])
         } else if let Some(axes) = &self.axes_attr {
             let tensor = NDArrayNumericTensor::from(axes.clone());
-            let tid = Constant::push_new(&mut graph, tensor.to_dyn());
+            let tid = milli_graph::ops::Constant::push_new(&mut graph, tensor.to_dyn());
             Some(tid)
         } else {
             None
         };
-        let out = ReduceMean::push_new(
+        let out = milli_graph::ops::ReduceMean::push_new(
             &mut graph,
             input_map[&self.input_data],
             axes,
@@ -194,35 +199,35 @@ impl ReduceSumOperation {
     }
 }
 
-impl Operation for ReduceSumOperation {
-    fn get_op_type_name(&self) -> String {
-        "Reduce Sum".to_string()
+impl Node<SymbolicGraphTensorId> for ReduceSumOperation {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
+        "ReduceSum".to_string()
     }
-
-    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
         if let Some(input_axes) = self.input_axes {
-            vec![self.input_data, input_axes]
+            Box::new([self.input_data, input_axes].into_iter())
         } else {
-            vec![self.input_data]
+            Box::new(std::iter::once(self.input_data))
         }
     }
-
-    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.output]
+    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new(std::iter::once(self.output))
     }
-
+}
+impl Operation for ReduceSumOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs());
         let axes = if let Some(input_axes) = &self.input_axes {
             Some(input_map[input_axes])
         } else if let Some(axes) = &self.axes_attr {
             let tensor = NDArrayNumericTensor::from(axes.clone());
-            let tid = Constant::push_new(&mut graph, tensor.to_dyn());
+            let tid = milli_graph::ops::Constant::push_new(&mut graph, tensor.to_dyn());
             Some(tid)
         } else {
             None
         };
-        let out = ReduceSum::push_new(
+        let out = milli_graph::ops::ReduceSum::push_new(
             &mut graph,
             input_map[&self.input_data],
             axes,
@@ -279,35 +284,35 @@ impl ReduceMaxOperation {
     }
 }
 
-impl Operation for ReduceMaxOperation {
-    fn get_op_type_name(&self) -> String {
-        "Reduce Max".to_string()
+impl Node<SymbolicGraphTensorId> for ReduceMaxOperation {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
+        "ReduceMax".to_string()
     }
-
-    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
         if let Some(input_axes) = self.input_axes {
-            vec![self.input_data, input_axes]
+            Box::new([self.input_data, input_axes].into_iter())
         } else {
-            vec![self.input_data]
+            Box::new(std::iter::once(self.input_data))
         }
     }
-
-    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.output]
+    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new(std::iter::once(self.output))
     }
-
+}
+impl Operation for ReduceMaxOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs());
         let axes = if let Some(input_axes) = &self.input_axes {
             Some(input_map[input_axes])
         } else if let Some(axes) = &self.axes_attr {
             let tensor = NDArrayNumericTensor::from(axes.clone());
-            let tid = Constant::push_new(&mut graph, tensor.to_dyn());
+            let tid = milli_graph::ops::Constant::push_new(&mut graph, tensor.to_dyn());
             Some(tid)
         } else {
             None
         };
-        let out = ReduceMax::push_new(
+        let out = milli_graph::ops::ReduceMax::push_new(
             &mut graph,
             input_map[&self.input_data],
             axes,
@@ -364,35 +369,36 @@ impl ReduceMinOperation {
     }
 }
 
-impl Operation for ReduceMinOperation {
-    fn get_op_type_name(&self) -> String {
-        "Reduce Min".to_string()
+impl Node<SymbolicGraphTensorId> for ReduceMinOperation {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
+        "ReduceMin".to_string()
     }
-
-    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
         if let Some(input_axes) = self.input_axes {
-            vec![self.input_data, input_axes]
+            Box::new([self.input_data, input_axes].into_iter())
         } else {
-            vec![self.input_data]
+            Box::new(std::iter::once(self.input_data))
         }
     }
-
-    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.output]
+    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new(std::iter::once(self.output))
     }
+}
 
+impl Operation for ReduceMinOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs());
         let axes = if let Some(input_axes) = &self.input_axes {
             Some(input_map[input_axes])
         } else if let Some(axes) = &self.axes_attr {
             let tensor = NDArrayNumericTensor::from(axes.clone());
-            let tid = Constant::push_new(&mut graph, tensor.to_dyn());
+            let tid = milli_graph::ops::Constant::push_new(&mut graph, tensor.to_dyn());
             Some(tid)
         } else {
             None
         };
-        let out = ReduceMin::push_new(
+        let out = milli_graph::ops::ReduceMin::push_new(
             &mut graph,
             input_map[&self.input_data],
             axes,
@@ -449,35 +455,36 @@ impl ReduceProdOperation {
     }
 }
 
-impl Operation for ReduceProdOperation {
-    fn get_op_type_name(&self) -> String {
-        "Reduce Prod".to_string()
+impl Node<SymbolicGraphTensorId> for ReduceProdOperation {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
+        "ReduceProd".to_string()
     }
-
-    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
         if let Some(input_axes) = self.input_axes {
-            vec![self.input_data, input_axes]
+            Box::new([self.input_data, input_axes].into_iter())
         } else {
-            vec![self.input_data]
+            Box::new(std::iter::once(self.input_data))
         }
     }
-
-    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.output]
+    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new(std::iter::once(self.output))
     }
+}
 
+impl Operation for ReduceProdOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs());
         let axes = if let Some(input_axes) = &self.input_axes {
             Some(input_map[input_axes])
         } else if let Some(axes) = &self.axes_attr {
             let tensor = NDArrayNumericTensor::from(axes.clone());
-            let tid = Constant::push_new(&mut graph, tensor.to_dyn());
+            let tid = milli_graph::ops::Constant::push_new(&mut graph, tensor.to_dyn());
             Some(tid)
         } else {
             None
         };
-        let out = ReduceProd::push_new(
+        let out = milli_graph::ops::ReduceProd::push_new(
             &mut graph,
             input_map[&self.input_data],
             axes,

@@ -45,20 +45,22 @@ impl ConstantOfShapeOperation {
     }
 }
 
+impl Node<SymbolicGraphTensorId> for ConstantOfShapeOperation {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
+        "ConstantOfShape".to_string()
+    }
+    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new(std::iter::once(self.input))
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new(std::iter::once(self.output))
+    }
+}
+
 impl Operation for ConstantOfShapeOperation {
-    fn get_op_type_name(&self) -> String {
-        "Constant of Shape".to_string()
-    }
-
-    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.input]
-    }
-    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.output]
-    }
-
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs());
         let node =
             ConstantOfShape::push_new(&mut graph, self.value.clone(), input_map[&self.input]);
         let out = match graph.inner(&()).get_node(&node) {
@@ -115,21 +117,22 @@ impl ConstantOperation {
     }
 }
 
-impl Operation for ConstantOperation {
-    fn get_op_type_name(&self) -> String {
+impl Node<SymbolicGraphTensorId> for ConstantOperation {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
         "Constant".to_string()
     }
-
-    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![]
+    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new(std::iter::empty())
     }
-
-    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.output]
+    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new(std::iter::once(self.output))
     }
+}
 
+impl Operation for ConstantOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        let (mut graph, _input_map) = MilliOpGraph::new(&self.get_inputs());
+        let (mut graph, _input_map) = MilliOpGraph::new(self.inputs());
 
         let out = Constant::push_new(&mut graph, self.value.clone());
 

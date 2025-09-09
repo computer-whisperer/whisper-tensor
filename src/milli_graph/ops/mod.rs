@@ -301,48 +301,13 @@ macro_rules! delegate {
 }
 
 impl MilliOp for AnyMilliOp {
-    fn eval(
-        &self,
+    delegate!(eval(
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
-        backend: &mut EvalBackend,
+        backend: &mut EvalBackend
     ) -> Result<
         Box<dyn Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>>,
         MilliOpGraphError,
-    > {
-        let collected: Vec<(MilliOpGraphTensorId, NumericTensor<DynRank>)> = match self {
-            AnyMilliOp::ArgMax(x) => x.eval(inputs, backend)?.collect(),
-            AnyMilliOp::ArgMin(x) => x.eval(inputs, backend)?.collect(),
-            AnyMilliOp::ReduceSum(x) => x.eval(inputs, backend)?.collect(),
-            AnyMilliOp::ReduceMin(x) => x.eval(inputs, backend)?.collect(),
-            AnyMilliOp::ReduceMax(x) => x.eval(inputs, backend)?.collect(),
-            AnyMilliOp::ReduceProd(x) => x.eval(inputs, backend)?.collect(),
-            AnyMilliOp::ReduceMean(x) => x.eval(inputs, backend)?.collect(),
-            AnyMilliOp::Transpose(x) => x.eval(inputs, backend)?.collect(),
-            AnyMilliOp::Reshape(x) => x.eval(inputs, backend)?.collect(),
-            AnyMilliOp::Squeeze(x) => x.eval(inputs, backend)?.collect(),
-            AnyMilliOp::Unsqueeze(x) => x.eval(inputs, backend)?.collect(),
-            AnyMilliOp::Cast(x) => x.eval(inputs, backend)?.collect(),
-            AnyMilliOp::CastLike(x) => x.eval(inputs, backend)?.collect(),
-            AnyMilliOp::Concat(x) => x.eval(inputs, backend)?.collect(),
-            AnyMilliOp::Slice(x) => x.eval(inputs, backend)?.collect(),
-            AnyMilliOp::Constant(x) => x.eval(inputs, backend)?.collect(),
-            AnyMilliOp::ConstantOfShape(x) => x.eval(inputs, backend)?.collect(),
-            AnyMilliOp::SimpleBinary(x) => x.eval(inputs, backend)?.collect(),
-            AnyMilliOp::MatMul(x) => x.eval(inputs, backend)?.collect(),
-            AnyMilliOp::Pow(x) => x.eval(inputs, backend)?.collect(),
-            AnyMilliOp::Where(x) => x.eval(inputs, backend)?.collect(),
-            AnyMilliOp::Expand(x) => x.eval(inputs, backend)?.collect(),
-            AnyMilliOp::Gather(x) => x.eval(inputs, backend)?.collect(),
-            AnyMilliOp::CumSum(x) => x.eval(inputs, backend)?.collect(),
-            AnyMilliOp::Split(x) => x.eval(inputs, backend)?.collect(),
-            AnyMilliOp::Shape(x) => x.eval(inputs, backend)?.collect(),
-            AnyMilliOp::Range(x) => x.eval(inputs, backend)?.collect(),
-            AnyMilliOp::SimpleUnary(x) => x.eval(inputs, backend)?.collect(),
-            AnyMilliOp::ClampMin(x) => x.eval(inputs, backend)?.collect(),
-            AnyMilliOp::NonZero(x) => x.eval(inputs, backend)?.collect(),
-        };
-        Ok(Box::new(collected.into_iter()))
-    }
+    > );
 }
 
 impl Node<MilliOpGraphTensorId> for AnyMilliOp {

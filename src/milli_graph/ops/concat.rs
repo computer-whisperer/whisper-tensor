@@ -14,7 +14,7 @@ pub struct Concat {
 }
 
 impl Concat {
-    pub fn push_new<T: std::hash::Hash + Clone + Eq>(
+    pub fn push_new<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         inputs: Vec<MilliOpGraphTensorId>,
         axis: i64,

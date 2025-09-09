@@ -15,7 +15,7 @@ pub struct Cast {
 }
 
 impl Cast {
-    pub fn push_new<T: std::hash::Hash + Clone + Eq>(
+    pub fn push_new<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         data: MilliOpGraphTensorId,
         dtype: DType,

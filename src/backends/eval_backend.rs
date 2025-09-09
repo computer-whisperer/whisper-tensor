@@ -2,6 +2,7 @@ use crate::backends::ModelLoadedTensorCache;
 #[cfg(feature = "vulkan")]
 use crate::backends::vulkan_backend::VulkanImmediateExecutor;
 use crate::dtype::{DType, DTypeError};
+use crate::graph::Node;
 use crate::numeric_tensor::NumericTensor;
 use crate::symbolic_graph::observer::SymbolicGraphObserver;
 use crate::symbolic_graph::ops::{EvalError, Operation};
@@ -154,7 +155,7 @@ pub fn run<T: SymbolicGraphObserver>(
     }
     let ops = model.get_operations();
     for op in ops.values() {
-        for id in op.op.get_inputs() {
+        for id in op.op.inputs() {
             let val = tensor_uses_left.entry(id).or_insert_with(|| 0);
             *val += 1;
         }
@@ -174,7 +175,7 @@ pub fn run<T: SymbolicGraphObserver>(
             let mut n_dropped_tensor = 0;
             let mut fast_reused_tensors = 0;
             let mut are_inputs_present = true;
-            let inputs = op.get_inputs();
+            let inputs = op.inputs().collect::<Vec<_>>();
             for input in &inputs {
                 if tensors_just_created.contains(input) {
                     fast_reused_tensors += 1;
@@ -204,7 +205,7 @@ pub fn run<T: SymbolicGraphObserver>(
 
         if let Some(op_id) = best_op_id {
             let GraphOperation { name, op } = ops.get(&op_id).unwrap();
-            let input_ids = op.get_inputs();
+            let input_ids = op.inputs();
             let mut input_values = HashMap::new();
             for tensor_id in input_ids {
                 if let Some(value) = active_tensors.get(&tensor_id) {

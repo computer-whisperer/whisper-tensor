@@ -1,3 +1,4 @@
+use crate::graph::Node;
 use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::ops::*;
 use crate::onnx;
@@ -41,20 +42,22 @@ impl GatherOperation {
     }
 }
 
-impl Operation for GatherOperation {
-    fn get_op_type_name(&self) -> String {
+impl Node<SymbolicGraphTensorId> for GatherOperation {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
         "Gather".to_string()
     }
-
-    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.input, self.indices]
+    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new(std::iter::once(self.input).chain(std::iter::once(self.indices)))
     }
-    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.output]
+    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new(std::iter::once(self.output))
     }
+}
 
+impl Operation for GatherOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs());
         let out = Gather::push_new(
             &mut graph,
             input_map[&self.input],

@@ -1,6 +1,6 @@
 use crate::dtype::DType;
-use crate::milli_graph::MilliOpGraph;
-use crate::milli_graph::ops::*;
+use crate::graph::Node;
+use crate::milli_graph::{self, MilliOpGraph};
 use crate::onnx;
 use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{ONNXDecodingError, SymbolicGraphTensorId};
@@ -34,21 +34,23 @@ impl CastLikeOperation {
     }
 }
 
+impl Node<SymbolicGraphTensorId> for CastLikeOperation {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
+        "CastLike".to_string()
+    }
+    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new([self.input, self.target_type].into_iter())
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new([self.output].into_iter())
+    }
+}
+
 impl Operation for CastLikeOperation {
-    fn get_op_type_name(&self) -> String {
-        "Cast Like".to_string()
-    }
-
-    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.input, self.target_type]
-    }
-    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.output]
-    }
-
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
-        let out = CastLike::push_new(
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs());
+        let out = milli_graph::ops::CastLike::push_new(
             &mut graph,
             input_map[&self.input],
             input_map[&self.target_type],
@@ -98,21 +100,23 @@ impl CastOperation {
     }
 }
 
-impl Operation for CastOperation {
-    fn get_op_type_name(&self) -> String {
+impl Node<SymbolicGraphTensorId> for CastOperation {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
         "Cast".to_string()
     }
-
-    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.input]
+    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new([self.input].into_iter())
     }
-    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.output]
+    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new([self.output].into_iter())
     }
+}
 
+impl Operation for CastOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
-        let out = Cast::push_new(&mut graph, input_map[&self.input], self.to);
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs());
+        let out = milli_graph::ops::Cast::push_new(&mut graph, input_map[&self.input], self.to);
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
         graph.set_output_map(output_map);

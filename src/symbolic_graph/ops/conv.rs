@@ -1,3 +1,4 @@
+use crate::graph::Node;
 use crate::milli_graph::MilliOpGraph;
 use crate::onnx;
 use crate::symbolic_graph::ops::Operation;
@@ -79,23 +80,26 @@ impl ConvOperation {
     }
 }
 
-impl Operation for ConvOperation {
-    fn get_op_type_name(&self) -> String {
+impl Node<SymbolicGraphTensorId> for ConvOperation {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
         "Conv".to_string()
     }
 
-    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
         if let Some(bias) = self.bias {
-            vec![self.input, self.weight, bias]
+            Box::new([self.input, self.weight, bias].into_iter())
         } else {
-            vec![self.input, self.weight]
+            Box::new([self.input, self.weight].into_iter())
         }
     }
 
-    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.output]
+    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new(std::iter::once(self.output))
     }
+}
 
+impl Operation for ConvOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         unimplemented!();
     }

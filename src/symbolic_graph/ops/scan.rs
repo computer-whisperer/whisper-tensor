@@ -1,4 +1,5 @@
 use crate::backends::eval_backend::EvalBackend;
+use crate::graph::Node;
 use crate::milli_graph::MilliOpGraph;
 use crate::numeric_tensor::NumericTensor;
 use crate::symbolic_graph::ops::{EvalError, Operation};
@@ -8,7 +9,7 @@ use crate::symbolic_graph::{
 };
 use crate::{DynRank, onnx};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ScanOperation {
@@ -77,33 +78,33 @@ impl ScanOperation {
     }
 }
 
-impl Operation for ScanOperation {
-    fn get_op_type_name(&self) -> String {
+impl Node<SymbolicGraphTensorId> for ScanOperation {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
         "Scan".to_string()
     }
-
-    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
-        let mut inputs_set = HashSet::new();
-        inputs_set.extend(self.state_inputs.iter().filter_map(|x| *x));
-        inputs_set.extend(self.scan_inputs.iter().filter_map(|x| *x));
-        inputs_set.extend(self.body.get_foreign_tensor_ids());
-        let mut inputs_vec: Vec<_> = inputs_set.into_iter().collect();
-        inputs_vec.sort(); // Deterministic ordering
-        inputs_vec
+    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        let mut v = vec![];
+        v.extend(self.state_inputs.iter().filter_map(|x| *x));
+        v.extend(self.scan_inputs.iter().filter_map(|x| *x));
+        v.extend(self.body.get_foreign_tensor_ids());
+        Box::new(v.into_iter())
     }
-
-    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
-        let mut outputs = Vec::new();
-        outputs.extend(self.state_outputs.iter().filter_map(|x| *x));
-        outputs.extend(self.scan_outputs.iter().filter_map(|x| *x));
-        outputs
+    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        let mut v = vec![];
+        v.extend(self.state_outputs.iter().filter_map(|x| *x));
+        v.extend(self.scan_outputs.iter().filter_map(|x| *x));
+        Box::new(v.into_iter())
     }
+}
 
+impl Operation for ScanOperation {
     fn eval(
         &self,
         backend: &mut EvalBackend,
         inputs: &HashMap<SymbolicGraphTensorId, NumericTensor<DynRank>>,
-    ) -> Result<HashMap<SymbolicGraphTensorId, NumericTensor<DynRank>>, EvalError> {
+    ) -> Result<Box<dyn Iterator<Item = (SymbolicGraphTensorId, NumericTensor<DynRank>)>>, EvalError>
+    {
         let state_inputs: Vec<_> = self
             .state_inputs
             .iter()
@@ -241,7 +242,7 @@ impl Operation for ScanOperation {
             }
         }
 
-        Ok(outputs)
+        Ok(Box::new(outputs.into_iter()))
     }
 
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {

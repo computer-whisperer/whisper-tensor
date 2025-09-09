@@ -1,12 +1,12 @@
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::dtype::DType;
-use crate::milli_graph::ops::*;
+use crate::graph::Node;
 use crate::milli_graph::{MilliOpGraph, ops_helpers};
-use crate::onnx;
 use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{
     ONNXDecodingError, SymbolicGraphTensorId, query_attribute_float, query_attribute_int,
 };
+use crate::{milli_graph, onnx};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -54,39 +54,41 @@ impl LpNormalizationOperation {
     }
 }
 
-impl Operation for LpNormalizationOperation {
-    fn get_op_type_name(&self) -> String {
+impl Node<SymbolicGraphTensorId> for LpNormalizationOperation {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
         "LpNormalization".to_string()
     }
-
-    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.input]
+    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new(std::iter::once(self.input))
     }
-    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.output]
+    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new(std::iter::once(self.output))
     }
-
+}
+impl Operation for LpNormalizationOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs());
         let input = input_map[&self.input];
 
         // abs(input)
-        let abs_tid = SimpleUnaryOp::abs(&mut graph, input);
+        let abs_tid = milli_graph::ops::SimpleUnaryOp::abs(&mut graph, input);
 
         let mut x_tid = match self.p {
             1 => abs_tid,
-            2 => SimpleBinary::mul(&mut graph, input, input),
+            2 => milli_graph::ops::SimpleBinary::mul(&mut graph, input, input),
             _ => panic!(),
         };
         let axis_tid = ops_helpers::scalar_const(&mut graph, self.axis);
-        x_tid = Cast::push_new(&mut graph, x_tid, DType::F32);
-        x_tid = ReduceSum::push_new(&mut graph, x_tid, Some(axis_tid), true, false);
+        x_tid = milli_graph::ops::Cast::push_new(&mut graph, x_tid, DType::F32);
+        x_tid =
+            milli_graph::ops::ReduceSum::push_new(&mut graph, x_tid, Some(axis_tid), true, false);
         if self.p == 2 {
-            x_tid = SimpleUnaryOp::sqrt(&mut graph, x_tid);
+            x_tid = milli_graph::ops::SimpleUnaryOp::sqrt(&mut graph, x_tid);
         }
-        let input_cast_tid = Cast::push_new(&mut graph, input, DType::F32);
-        let out_tid = SimpleBinary::div(&mut graph, input_cast_tid, x_tid);
-        let out = CastLike::push_new(&mut graph, out_tid, input);
+        let input_cast_tid = milli_graph::ops::Cast::push_new(&mut graph, input, DType::F32);
+        let out_tid = milli_graph::ops::SimpleBinary::div(&mut graph, input_cast_tid, x_tid);
+        let out = milli_graph::ops::CastLike::push_new(&mut graph, out_tid, input);
 
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
@@ -160,78 +162,100 @@ impl GroupNormalizationOperation {
     }
 }
 
-impl Operation for GroupNormalizationOperation {
-    fn get_op_type_name(&self) -> String {
+impl Node<SymbolicGraphTensorId> for GroupNormalizationOperation {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
         "GroupNormalization".to_string()
     }
-
-    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.input, self.scale, self.bias]
+    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new([self.input, self.scale, self.bias].into_iter())
     }
-    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.output]
+    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new(std::iter::once(self.output))
     }
+}
 
+impl Operation for GroupNormalizationOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs());
         let original_input = input_map[&self.input];
-        let input_cast = Cast::push_new(&mut graph, original_input, self.stash_type);
+        let input_cast =
+            milli_graph::ops::Cast::push_new(&mut graph, original_input, self.stash_type);
 
-        let input_shape = Shape::push_new(&mut graph, input_cast);
+        let input_shape = milli_graph::ops::Shape::push_new(&mut graph, input_cast);
         let num_channels = {
             let starts = ops_helpers::scalar_const(&mut graph, 1i64);
             let ends = ops_helpers::scalar_const(&mut graph, 2i64);
-            Slice::push_new(&mut graph, input_shape, starts, ends, None, None)
+            milli_graph::ops::Slice::push_new(&mut graph, input_shape, starts, ends, None, None)
         };
         let reshaped_input = {
             let new_shape_tensor =
                 NDArrayNumericTensor::from(vec![0i64, self.num_groups as i64, -1]);
-            let new_shape = Constant::push_new(&mut graph, new_shape_tensor.to_dyn());
-            Reshape::push_new(&mut graph, input_cast, new_shape, false)
+            let new_shape =
+                milli_graph::ops::Constant::push_new(&mut graph, new_shape_tensor.to_dyn());
+            milli_graph::ops::Reshape::push_new(&mut graph, input_cast, new_shape, false)
         };
 
         let mean_axis = ops_helpers::scalar_const(&mut graph, 2i64);
-        let mean = ReduceMean::push_new(&mut graph, reshaped_input, Some(mean_axis), true, false);
+        let mean = milli_graph::ops::ReduceMean::push_new(
+            &mut graph,
+            reshaped_input,
+            Some(mean_axis),
+            true,
+            false,
+        );
 
-        let input = SimpleBinary::sub(&mut graph, reshaped_input, mean);
+        let input = milli_graph::ops::SimpleBinary::sub(&mut graph, reshaped_input, mean);
 
         let variance = {
-            let x = SimpleBinary::mul(&mut graph, input, input);
-            ReduceMean::push_new(&mut graph, x, Some(mean_axis), true, false)
+            let x = milli_graph::ops::SimpleBinary::mul(&mut graph, input, input);
+            milli_graph::ops::ReduceMean::push_new(&mut graph, x, Some(mean_axis), true, false)
         };
 
         let input_normalized = {
-            let epsilon = Constant::new_scalar(&mut graph, self.epsilon);
-            let epsilon = CastLike::push_new(&mut graph, epsilon, variance);
-            let var_plus_eps = SimpleBinary::add(&mut graph, variance, epsilon);
-            let val = SimpleUnaryOp::sqrt(&mut graph, var_plus_eps);
-            SimpleBinary::div(&mut graph, input, val)
+            let epsilon = milli_graph::ops::Constant::new_scalar(&mut graph, self.epsilon);
+            let epsilon = milli_graph::ops::CastLike::push_new(&mut graph, epsilon, variance);
+            let var_plus_eps = milli_graph::ops::SimpleBinary::add(&mut graph, variance, epsilon);
+            let val = milli_graph::ops::SimpleUnaryOp::sqrt(&mut graph, var_plus_eps);
+            milli_graph::ops::SimpleBinary::div(&mut graph, input, val)
         };
 
-        let zero = Constant::new_scalar(&mut graph, 0i64);
-        let neg_one = Constant::new_scalar(&mut graph, -1i64);
-        let one = Constant::new_scalar(&mut graph, 1i64);
+        let zero = milli_graph::ops::Constant::new_scalar(&mut graph, 0i64);
+        let neg_one = milli_graph::ops::Constant::new_scalar(&mut graph, -1i64);
+        let one = milli_graph::ops::Constant::new_scalar(&mut graph, 1i64);
 
         let y = {
-            let new_shape = Concat::push_new(&mut graph, vec![zero, num_channels, neg_one], 0);
-            Reshape::push_new(&mut graph, input_normalized, new_shape, false)
-        };
-
-        let y = {
-            let scale_cast = Cast::push_new(&mut graph, input_map[&self.scale], self.stash_type);
-            let scale = Unsqueeze::push_new(&mut graph, scale_cast, one);
-            SimpleBinary::mul(&mut graph, y, scale)
+            let new_shape = milli_graph::ops::Concat::push_new(
+                &mut graph,
+                vec![zero, num_channels, neg_one],
+                0,
+            );
+            milli_graph::ops::Reshape::push_new(&mut graph, input_normalized, new_shape, false)
         };
 
         let y = {
-            let bias_cast = Cast::push_new(&mut graph, input_map[&self.bias], self.stash_type);
-            let bias = Unsqueeze::push_new(&mut graph, bias_cast, one);
-            SimpleBinary::add(&mut graph, y, bias)
+            let scale_cast = milli_graph::ops::Cast::push_new(
+                &mut graph,
+                input_map[&self.scale],
+                self.stash_type,
+            );
+            let scale = milli_graph::ops::Unsqueeze::push_new(&mut graph, scale_cast, one);
+            milli_graph::ops::SimpleBinary::mul(&mut graph, y, scale)
         };
 
-        let out = Reshape::push_new(&mut graph, y, input_shape, false);
+        let y = {
+            let bias_cast = milli_graph::ops::Cast::push_new(
+                &mut graph,
+                input_map[&self.bias],
+                self.stash_type,
+            );
+            let bias = milli_graph::ops::Unsqueeze::push_new(&mut graph, bias_cast, one);
+            milli_graph::ops::SimpleBinary::add(&mut graph, y, bias)
+        };
 
-        let out = CastLike::push_new(&mut graph, out, original_input);
+        let out = milli_graph::ops::Reshape::push_new(&mut graph, y, input_shape, false);
+
+        let out = milli_graph::ops::CastLike::push_new(&mut graph, out, original_input);
 
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
@@ -325,19 +349,19 @@ impl RMSNormalizationOperation {
     }
 }
 
-impl Operation for RMSNormalizationOperation {
-    fn get_op_type_name(&self) -> String {
-        "RMS Normalization".to_string()
+impl Node<SymbolicGraphTensorId> for RMSNormalizationOperation {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
+        "RMSNormalization".to_string()
     }
-
-    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
         let mut v = vec![self.input, self.scale];
         if let Some(bias) = self.bias {
             v.push(bias);
         }
-        v
+        Box::new(v.into_iter())
     }
-    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
         let mut res = vec![self.output];
         if let Some(mean_output) = self.mean_output {
             res.push(mean_output);
@@ -345,26 +369,29 @@ impl Operation for RMSNormalizationOperation {
         if let Some(inv_std_dev_output) = self.inv_std_dev_output {
             res.push(inv_std_dev_output);
         }
-        res
+        Box::new(res.into_iter())
     }
+}
 
+impl Operation for RMSNormalizationOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs());
         let input_data = input_map[&self.input];
         let input_scale = input_map[&self.scale];
 
-        let input_f32 = Cast::push_new(&mut graph, input_data, self.stash_type);
+        let input_f32 = milli_graph::ops::Cast::push_new(&mut graph, input_data, self.stash_type);
 
         let axis = ops_helpers::scalar_const(&mut graph, self.axis);
         let axis = ops_helpers::resolve_axes(&mut graph, axis, input_data);
 
         let rank_tid = ops_helpers::rank(&mut graph, input_data);
         let step_tid = ops_helpers::scalar_const(&mut graph, 1i64);
-        let normalized_axes = Range::push_new(&mut graph, axis, rank_tid, step_tid);
+        let normalized_axes =
+            milli_graph::ops::Range::push_new(&mut graph, axis, rank_tid, step_tid);
 
-        let input_squared = SimpleBinary::mul(&mut graph, input_f32, input_f32);
+        let input_squared = milli_graph::ops::SimpleBinary::mul(&mut graph, input_f32, input_f32);
 
-        let squared_mean = ReduceMean::push_new(
+        let squared_mean = milli_graph::ops::ReduceMean::push_new(
             &mut graph,
             input_squared,
             Some(normalized_axes),
@@ -372,25 +399,27 @@ impl Operation for RMSNormalizationOperation {
             false,
         );
 
-        let epsilon = Constant::new_scalar(&mut graph, self.epsilon);
-        let epsilon = CastLike::push_new(&mut graph, epsilon, squared_mean);
-        let mean_plus_eps = SimpleBinary::add(&mut graph, squared_mean, epsilon);
-        let rms = SimpleUnaryOp::sqrt(&mut graph, mean_plus_eps);
-        let rms_inv = SimpleUnaryOp::reciprocal(&mut graph, rms);
+        let epsilon = milli_graph::ops::Constant::new_scalar(&mut graph, self.epsilon);
+        let epsilon = milli_graph::ops::CastLike::push_new(&mut graph, epsilon, squared_mean);
+        let mean_plus_eps = milli_graph::ops::SimpleBinary::add(&mut graph, squared_mean, epsilon);
+        let rms = milli_graph::ops::SimpleUnaryOp::sqrt(&mut graph, mean_plus_eps);
+        let rms_inv = milli_graph::ops::SimpleUnaryOp::reciprocal(&mut graph, rms);
 
-        let normalized = SimpleBinary::mul(&mut graph, input_f32, rms_inv);
+        let normalized = milli_graph::ops::SimpleBinary::mul(&mut graph, input_f32, rms_inv);
 
-        let input_scale_cast = Cast::push_new(&mut graph, input_scale, self.stash_type);
-        let out = SimpleBinary::mul(&mut graph, normalized, input_scale_cast);
+        let input_scale_cast =
+            milli_graph::ops::Cast::push_new(&mut graph, input_scale, self.stash_type);
+        let out = milli_graph::ops::SimpleBinary::mul(&mut graph, normalized, input_scale_cast);
 
         let out = if let Some(bias) = self.bias {
-            let bias_cast = Cast::push_new(&mut graph, input_map[&bias], self.stash_type);
-            SimpleBinary::add(&mut graph, out, bias_cast)
+            let bias_cast =
+                milli_graph::ops::Cast::push_new(&mut graph, input_map[&bias], self.stash_type);
+            milli_graph::ops::SimpleBinary::add(&mut graph, out, bias_cast)
         } else {
             out
         };
 
-        let out = CastLike::push_new(&mut graph, out, input_data);
+        let out = milli_graph::ops::CastLike::push_new(&mut graph, out, input_data);
 
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
@@ -484,19 +513,19 @@ impl LayerNormalizationOperation {
     }
 }
 
-impl Operation for LayerNormalizationOperation {
-    fn get_op_type_name(&self) -> String {
-        "Layer Normalization".to_string()
+impl Node<SymbolicGraphTensorId> for LayerNormalizationOperation {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
+        "LayerNormalization".to_string()
     }
-
-    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
         let mut v = vec![self.input, self.scale];
         if let Some(bias) = self.bias {
             v.push(bias);
         }
-        v
+        Box::new(v.into_iter())
     }
-    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
         let mut res = vec![self.output];
         if let Some(mean_output) = self.mean_output {
             res.push(mean_output);
@@ -504,47 +533,63 @@ impl Operation for LayerNormalizationOperation {
         if let Some(inv_std_dev_output) = self.inv_std_dev_output {
             res.push(inv_std_dev_output);
         }
-        res
+        Box::new(res.into_iter())
     }
-
+}
+impl Operation for LayerNormalizationOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs());
         let input_data = input_map[&self.input];
         let input_scale = input_map[&self.scale];
 
-        let input_f32 = Cast::push_new(&mut graph, input_data, self.stash_type);
+        let input_f32 = milli_graph::ops::Cast::push_new(&mut graph, input_data, self.stash_type);
 
         let axis = ops_helpers::scalar_const(&mut graph, self.axis);
         let axis = ops_helpers::resolve_axes(&mut graph, axis, input_data);
 
         let rank_tid = ops_helpers::rank(&mut graph, input_data);
         let step_tid = ops_helpers::scalar_const(&mut graph, 1i64);
-        let normalized_axes = Range::push_new(&mut graph, axis, rank_tid, step_tid);
+        let normalized_axes =
+            milli_graph::ops::Range::push_new(&mut graph, axis, rank_tid, step_tid);
 
-        let mean = ReduceMean::push_new(&mut graph, input_f32, Some(normalized_axes), true, false);
+        let mean = milli_graph::ops::ReduceMean::push_new(
+            &mut graph,
+            input_f32,
+            Some(normalized_axes),
+            true,
+            false,
+        );
 
-        let d = SimpleBinary::sub(&mut graph, input_f32, mean);
-        let dd = SimpleBinary::mul(&mut graph, d, d);
-        let variance = ReduceMean::push_new(&mut graph, dd, Some(normalized_axes), true, false);
-        let epsilon = Constant::new_scalar(&mut graph, self.epsilon);
-        let epsilon = CastLike::push_new(&mut graph, epsilon, variance);
-        let var_plus_eps = SimpleBinary::add(&mut graph, variance, epsilon);
-        let stddev = SimpleUnaryOp::sqrt(&mut graph, var_plus_eps);
-        let inv_stddev = SimpleUnaryOp::reciprocal(&mut graph, stddev);
+        let d = milli_graph::ops::SimpleBinary::sub(&mut graph, input_f32, mean);
+        let dd = milli_graph::ops::SimpleBinary::mul(&mut graph, d, d);
+        let variance = milli_graph::ops::ReduceMean::push_new(
+            &mut graph,
+            dd,
+            Some(normalized_axes),
+            true,
+            false,
+        );
+        let epsilon = milli_graph::ops::Constant::new_scalar(&mut graph, self.epsilon);
+        let epsilon = milli_graph::ops::CastLike::push_new(&mut graph, epsilon, variance);
+        let var_plus_eps = milli_graph::ops::SimpleBinary::add(&mut graph, variance, epsilon);
+        let stddev = milli_graph::ops::SimpleUnaryOp::sqrt(&mut graph, var_plus_eps);
+        let inv_stddev = milli_graph::ops::SimpleUnaryOp::reciprocal(&mut graph, stddev);
 
-        let normalized = SimpleBinary::mul(&mut graph, d, inv_stddev);
+        let normalized = milli_graph::ops::SimpleBinary::mul(&mut graph, d, inv_stddev);
 
-        let input_scale_cast = Cast::push_new(&mut graph, input_scale, self.stash_type);
-        let out = SimpleBinary::mul(&mut graph, normalized, input_scale_cast);
+        let input_scale_cast =
+            milli_graph::ops::Cast::push_new(&mut graph, input_scale, self.stash_type);
+        let out = milli_graph::ops::SimpleBinary::mul(&mut graph, normalized, input_scale_cast);
 
         let out = if let Some(bias) = self.bias {
-            let bias_cast = Cast::push_new(&mut graph, input_map[&bias], self.stash_type);
-            SimpleBinary::add(&mut graph, out, bias_cast)
+            let bias_cast =
+                milli_graph::ops::Cast::push_new(&mut graph, input_map[&bias], self.stash_type);
+            milli_graph::ops::SimpleBinary::add(&mut graph, out, bias_cast)
         } else {
             out
         };
 
-        let out = CastLike::push_new(&mut graph, out, input_data);
+        let out = milli_graph::ops::CastLike::push_new(&mut graph, out, input_data);
 
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
@@ -604,19 +649,20 @@ impl InstanceNormalizationOperation {
     }
 }
 
+impl Node<SymbolicGraphTensorId> for InstanceNormalizationOperation {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
+        "InstanceNormalization".to_string()
+    }
+    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new([self.input, self.scale, self.bias].into_iter())
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new(std::iter::once(self.output))
+    }
+}
+
 impl Operation for InstanceNormalizationOperation {
-    fn get_op_type_name(&self) -> String {
-        "Instance Normalization".to_string()
-    }
-
-    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.input, self.scale, self.bias]
-    }
-
-    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.output]
-    }
-
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         unimplemented!();
     }

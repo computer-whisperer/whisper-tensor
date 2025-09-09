@@ -18,7 +18,7 @@ pub struct ReduceMax {
 }
 
 impl ReduceMax {
-    pub fn push_new<T: std::hash::Hash + Clone + Eq>(
+    pub fn push_new<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         data: MilliOpGraphTensorId,
         axes: Option<MilliOpGraphTensorId>,

@@ -19,7 +19,7 @@ pub struct Split {
 }
 
 impl Split {
-    pub fn push_new<T: std::hash::Hash + Clone + Eq>(
+    pub fn push_new<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         data: MilliOpGraphTensorId,
         split: Option<MilliOpTensorIDOrLiteral>,
@@ -126,7 +126,8 @@ mod tests {
     #[test]
     fn test_split_num_outputs_even_axis0() {
         // Build a tiny graph with one input and two split outputs, then run eval
-        let (mut graph, input_map) = MilliOpGraph::new(&[MilliOpGraphTensorId { inner: 0 }]);
+        let (mut graph, input_map) =
+            MilliOpGraph::new(std::iter::once(MilliOpGraphTensorId { inner: 0 }));
         let data_id = input_map[&MilliOpGraphTensorId { inner: 0 }];
         let out0 = Split::push_new(&mut graph, data_id, None, 0, Some(2), 0);
         let out1 = Split::push_new(&mut graph, data_id, None, 0, Some(2), 1);
@@ -141,7 +142,10 @@ mod tests {
 
         let mut backend = EvalBackend::NDArray;
         let mut obs = ();
-        let res = graph.eval(&inputs, &mut obs, &mut backend).unwrap();
+        let res = graph
+            .eval(&inputs, &mut obs, &mut backend)
+            .unwrap()
+            .collect::<HashMap<_, _>>();
         let out0 = res[&MilliOpGraphTensorId { inner: 1 }].clone();
         let out1 = res[&MilliOpGraphTensorId { inner: 2 }].clone();
 
@@ -158,7 +162,8 @@ mod tests {
 
     #[test]
     fn test_split_num_outputs_negative_axis() {
-        let (mut graph, input_map) = MilliOpGraph::new(&[MilliOpGraphTensorId { inner: 0 }]);
+        let (mut graph, input_map) =
+            MilliOpGraph::new(std::iter::once(MilliOpGraphTensorId { inner: 0 }));
         let data_id = input_map[&MilliOpGraphTensorId { inner: 0 }];
         let out = Split::push_new(&mut graph, data_id, None, -1, Some(2), 1);
         let mut output_map = HashMap::new();
@@ -176,7 +181,10 @@ mod tests {
 
         let mut backend = EvalBackend::NDArray;
         let mut obs = ();
-        let res = graph.eval(&inputs, &mut obs, &mut backend).unwrap();
+        let res = graph
+            .eval(&inputs, &mut obs, &mut backend)
+            .unwrap()
+            .collect::<HashMap<_, _>>();
         let out = res[&MilliOpGraphTensorId { inner: 1 }].clone();
         assert_eq!(out.shape(), vec![2u64, 2u64]);
         let v: Vec<f32> = out.flatten().unwrap().try_into().unwrap();
@@ -186,7 +194,8 @@ mod tests {
 
     #[test]
     fn test_split_num_outputs_uneven_distribution_axis0() {
-        let (mut graph, input_map) = MilliOpGraph::new(&[MilliOpGraphTensorId { inner: 0 }]);
+        let (mut graph, input_map) =
+            MilliOpGraph::new(std::iter::once(MilliOpGraphTensorId { inner: 0 }));
         let data_id = input_map[&MilliOpGraphTensorId { inner: 0 }];
         // dim=5, num_outputs=2 -> sizes [3,2]
         let out0 = Split::push_new(&mut graph, data_id, None, 0, Some(2), 0);
@@ -203,7 +212,10 @@ mod tests {
 
         let mut backend = EvalBackend::NDArray;
         let mut obs = ();
-        let res = graph.eval(&inputs, &mut obs, &mut backend).unwrap();
+        let res = graph
+            .eval(&inputs, &mut obs, &mut backend)
+            .unwrap()
+            .collect::<HashMap<_, _>>();
         let out0 = res[&MilliOpGraphTensorId { inner: 1 }].clone();
         let out1 = res[&MilliOpGraphTensorId { inner: 2 }].clone();
 

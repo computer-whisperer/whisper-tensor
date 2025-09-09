@@ -54,8 +54,8 @@ pub struct MilliOpGraph<ID: Hash + Clone + Eq> {
     next_node_id: usize,
 }
 
-impl<ID: Hash + Clone + Eq> MilliOpGraph<ID> {
-    pub fn new(inputs: &[ID]) -> (Self, HashMap<ID, MilliOpGraphTensorId>) {
+impl<ID: Hash + Clone + Eq + 'static> MilliOpGraph<ID> {
+    pub fn new(inputs: impl IntoIterator<Item = ID>) -> (Self, HashMap<ID, MilliOpGraphTensorId>) {
         let mut next_op_id = 0;
         let mut input_map = HashMap::new();
         let mut input_ordering = Vec::new();
@@ -105,9 +105,12 @@ impl<ID: Hash + Clone + Eq> MilliOpGraph<ID> {
         }
     }
 
-    pub fn set_output_map(&mut self, output_map: HashMap<MilliOpGraphTensorId, ID>) {
+    pub fn set_output_map(
+        &mut self,
+        output_map: impl IntoIterator<Item = (MilliOpGraphTensorId, ID)>,
+    ) {
         assert!(self.output_map.is_none());
-        self.output_map = Some(output_map)
+        self.output_map = Some(output_map.into_iter().collect());
     }
 
     pub fn set_output_map_ordered(
@@ -138,12 +141,13 @@ impl<ID: Hash + Clone + Eq> MilliOpGraph<ID> {
         new_node_id
     }
 
+    #[allow(clippy::type_complexity)]
     pub(crate) fn eval<T: MilliOpGraphObserver>(
         &self,
         inputs: &HashMap<ID, NumericTensor<DynRank>>,
         observer: &mut T,
         backend: &mut EvalBackend,
-    ) -> Result<HashMap<ID, NumericTensor<DynRank>>, MilliOpGraphError> {
+    ) -> Result<Box<dyn Iterator<Item = (ID, NumericTensor<DynRank>)>>, MilliOpGraphError> {
         assert!(self.output_map.is_some());
 
         let op_ids_to_eval: Vec<_> = {
@@ -183,7 +187,7 @@ impl<ID: Hash + Clone + Eq> MilliOpGraph<ID> {
             outputs.insert(b.clone(), intermediate_values[a].clone());
         }
 
-        Ok(outputs)
+        Ok(Box::new(outputs.into_iter()))
     }
 }
 
@@ -203,7 +207,7 @@ impl NodePath for MilliOpGraphNodePath {}
 
 impl LinkPath for MilliOpGraphTensorPath {}
 
-impl<IoLinkId: Hash + Clone + Eq + std::fmt::Debug> Graph for MilliOpGraph<IoLinkId> {
+impl<IoLinkId: Hash + Clone + Eq + std::fmt::Debug + 'static> Graph for MilliOpGraph<IoLinkId> {
     type GraphPath = ();
     type NodePath = MilliOpGraphNodePath;
     type LinkPath = MilliOpGraphTensorPath;
@@ -215,7 +219,9 @@ impl<IoLinkId: Hash + Clone + Eq + std::fmt::Debug> Graph for MilliOpGraph<IoLin
     }
 }
 
-impl<IoLinkId: Hash + Clone + Eq + std::fmt::Debug> InnerGraph for MilliOpGraph<IoLinkId> {
+impl<IoLinkId: Hash + Clone + Eq + std::fmt::Debug + 'static> InnerGraph
+    for MilliOpGraph<IoLinkId>
+{
     type NodeId = MilliOpGraphNodeId;
     type LinkId = MilliOpGraphTensorId;
     type Error = ();

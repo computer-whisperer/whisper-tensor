@@ -1,3 +1,4 @@
+use crate::graph::Node;
 use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::ops::Transpose;
 use crate::onnx;
@@ -33,20 +34,21 @@ impl TransposeOperation {
     }
 }
 
-impl Operation for TransposeOperation {
-    fn get_op_type_name(&self) -> String {
+impl Node<SymbolicGraphTensorId> for TransposeOperation {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
         "Transpose".to_string()
     }
-
-    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.input]
+    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new(std::iter::once(self.input))
     }
-    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.output]
+    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new(std::iter::once(self.output))
     }
-
+}
+impl Operation for TransposeOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs());
         let out = Transpose::push_new(&mut graph, input_map[&self.input], self.perm.clone());
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);

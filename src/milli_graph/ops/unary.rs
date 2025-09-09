@@ -38,7 +38,7 @@ pub struct SimpleUnaryOp {
 }
 
 impl SimpleUnaryOp {
-    fn new_internal<T: std::hash::Hash + Clone + Eq>(
+    fn new_internal<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         input: MilliOpGraphTensorId,
         op: WhichSimpleUnaryOp,
@@ -49,86 +49,86 @@ impl SimpleUnaryOp {
         output
     }
 
-    pub fn neg<T: std::hash::Hash + Clone + Eq>(
+    pub fn neg<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         input: MilliOpGraphTensorId,
     ) -> MilliOpGraphTensorId {
         Self::new_internal(graph, input, WhichSimpleUnaryOp::Neg)
     }
-    pub fn abs<T: std::hash::Hash + Clone + Eq>(
+    pub fn abs<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         input: MilliOpGraphTensorId,
     ) -> MilliOpGraphTensorId {
         Self::new_internal(graph, input, WhichSimpleUnaryOp::Abs)
     }
-    pub fn exp<T: std::hash::Hash + Clone + Eq>(
+    pub fn exp<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         input: MilliOpGraphTensorId,
     ) -> MilliOpGraphTensorId {
         Self::new_internal(graph, input, WhichSimpleUnaryOp::Exp)
     }
-    pub fn ln<T: std::hash::Hash + Clone + Eq>(
+    pub fn ln<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         input: MilliOpGraphTensorId,
     ) -> MilliOpGraphTensorId {
         Self::new_internal(graph, input, WhichSimpleUnaryOp::Ln)
     }
-    pub fn sqrt<T: std::hash::Hash + Clone + Eq>(
+    pub fn sqrt<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         input: MilliOpGraphTensorId,
     ) -> MilliOpGraphTensorId {
         Self::new_internal(graph, input, WhichSimpleUnaryOp::Sqrt)
     }
-    pub fn not<T: std::hash::Hash + Clone + Eq>(
+    pub fn not<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         input: MilliOpGraphTensorId,
     ) -> MilliOpGraphTensorId {
         Self::new_internal(graph, input, WhichSimpleUnaryOp::Not)
     }
-    pub fn sign<T: std::hash::Hash + Clone + Eq>(
+    pub fn sign<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         input: MilliOpGraphTensorId,
     ) -> MilliOpGraphTensorId {
         Self::new_internal(graph, input, WhichSimpleUnaryOp::Sign)
     }
-    pub fn bitwise_not<T: std::hash::Hash + Clone + Eq>(
+    pub fn bitwise_not<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         input: MilliOpGraphTensorId,
     ) -> MilliOpGraphTensorId {
         Self::new_internal(graph, input, WhichSimpleUnaryOp::BitwiseNot)
     }
-    pub fn reciprocal<T: std::hash::Hash + Clone + Eq>(
+    pub fn reciprocal<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         input: MilliOpGraphTensorId,
     ) -> MilliOpGraphTensorId {
         Self::new_internal(graph, input, WhichSimpleUnaryOp::Reciprocal)
     }
-    pub fn trig<T: std::hash::Hash + Clone + Eq>(
+    pub fn trig<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         input: MilliOpGraphTensorId,
         trig_op: TrigOp,
     ) -> MilliOpGraphTensorId {
         Self::new_internal(graph, input, WhichSimpleUnaryOp::Trig(trig_op))
     }
-    pub fn floor<T: std::hash::Hash + Clone + Eq>(
+    pub fn floor<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         input: MilliOpGraphTensorId,
     ) -> MilliOpGraphTensorId {
         Self::new_internal(graph, input, WhichSimpleUnaryOp::Floor)
     }
-    pub fn ceil<T: std::hash::Hash + Clone + Eq>(
+    pub fn ceil<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         input: MilliOpGraphTensorId,
     ) -> MilliOpGraphTensorId {
         Self::new_internal(graph, input, WhichSimpleUnaryOp::Ceil)
     }
-    pub fn round<T: std::hash::Hash + Clone + Eq>(
+    pub fn round<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         input: MilliOpGraphTensorId,
     ) -> MilliOpGraphTensorId {
         Self::new_internal(graph, input, WhichSimpleUnaryOp::Round)
     }
-    pub fn is_inf<T: std::hash::Hash + Clone + Eq>(
+    pub fn is_inf<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         input: MilliOpGraphTensorId,
         detect_positive: bool,
@@ -143,13 +143,13 @@ impl SimpleUnaryOp {
             },
         )
     }
-    pub fn is_nan<T: std::hash::Hash + Clone + Eq>(
+    pub fn is_nan<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         input: MilliOpGraphTensorId,
     ) -> MilliOpGraphTensorId {
         Self::new_internal(graph, input, WhichSimpleUnaryOp::IsNan)
     }
-    pub fn erf<T: std::hash::Hash + Clone + Eq>(
+    pub fn erf<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         input: MilliOpGraphTensorId,
     ) -> MilliOpGraphTensorId {
@@ -231,7 +231,7 @@ pub struct ClampMin {
 }
 
 impl ClampMin {
-    pub fn push_new<T: std::hash::Hash + Clone + Eq>(
+    pub fn push_new<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         a: MilliOpGraphTensorId,
         value: f32,

@@ -190,7 +190,7 @@ fn render_node_contents<'a>(
                             if let Some(name) = &op.name {
                                 ui.add(Label::new(name).selectable(false));
                             }
-                            ui.add(Label::new(op.op.get_op_type_name()).selectable(false));
+                            ui.add(Label::new(op.op.op_kind()).selectable(false));
                         }
                     }
                 }
@@ -868,11 +868,11 @@ impl GraphExplorerApp {
                             next_node_id += 1;
 
                             let mut inputs = vec![];
-                            for tensor_id in op.op.get_inputs() {
+                            for tensor_id in op.op.inputs() {
                                 inputs.push(tensor_link_ids[&tensor_id]);
                             }
                             let mut outputs = vec![];
-                            for tensor_id in op.op.get_outputs() {
+                            for tensor_id in op.op.outputs() {
                                 sourced_links.insert(tensor_link_ids[&tensor_id]);
                                 outputs.push(tensor_link_ids[&tensor_id]);
                             }

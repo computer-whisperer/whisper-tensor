@@ -1,3 +1,4 @@
+use crate::graph::Node;
 use crate::milli_graph::MilliOpGraph;
 use crate::onnx;
 use crate::symbolic_graph::ops::Operation;
@@ -143,12 +144,12 @@ impl ResizeOperation {
     }
 }
 
-impl Operation for ResizeOperation {
-    fn get_op_type_name(&self) -> String {
+impl Node<SymbolicGraphTensorId> for ResizeOperation {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
         "Resize".to_string()
     }
-
-    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
         let mut ret = vec![self.input];
         if let Some(roi) = &self.roi {
             ret.push(*roi);
@@ -159,13 +160,13 @@ impl Operation for ResizeOperation {
         if let Some(sizes) = &self.sizes {
             ret.push(*sizes)
         }
-        ret
+        Box::new(ret.into_iter())
     }
-
-    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.output]
+    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new(std::iter::once(self.output))
     }
-
+}
+impl Operation for ResizeOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         todo!()
     }

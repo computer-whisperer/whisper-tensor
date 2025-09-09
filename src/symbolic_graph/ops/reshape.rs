@@ -1,6 +1,6 @@
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
-use crate::milli_graph::MilliOpGraph;
-use crate::milli_graph::ops::*;
+use crate::graph::Node;
+use crate::milli_graph::{self, MilliOpGraph};
 use crate::onnx;
 use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{
@@ -43,35 +43,36 @@ impl SqueezeOperation {
     }
 }
 
-impl Operation for SqueezeOperation {
-    fn get_op_type_name(&self) -> String {
+impl Node<SymbolicGraphTensorId> for SqueezeOperation {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
         "Squeeze".to_string()
     }
-
-    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
         if let Some(axes) = self.axes {
-            vec![self.input, axes]
+            Box::new([self.input, axes].into_iter())
         } else {
-            vec![self.input]
+            Box::new(std::iter::once(self.input))
         }
     }
-
-    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.output]
+    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new(std::iter::once(self.output))
     }
-
+}
+impl Operation for SqueezeOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs());
         let axes_input = if let Some(axes) = self.axes {
             input_map[&axes]
         } else if let Some(axes) = &self.axes_attribute {
             let axes_tensor = NDArrayNumericTensor::from_vec(axes.clone());
-            Constant::push_new(&mut graph, axes_tensor.to_dyn())
+            milli_graph::ops::Constant::push_new(&mut graph, axes_tensor.to_dyn())
         } else {
             panic!();
         };
 
-        let out = Squeeze::push_new(&mut graph, input_map[&self.input], axes_input);
+        let out =
+            milli_graph::ops::Squeeze::push_new(&mut graph, input_map[&self.input], axes_input);
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
         graph.set_output_map(output_map);
@@ -113,35 +114,36 @@ impl UnsqueezeOperation {
     }
 }
 
-impl Operation for UnsqueezeOperation {
-    fn get_op_type_name(&self) -> String {
+impl Node<SymbolicGraphTensorId> for UnsqueezeOperation {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
         "Unsqueeze".to_string()
     }
-
-    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
         if let Some(axes) = self.axes {
-            vec![self.input, axes]
+            Box::new([self.input, axes].into_iter())
         } else {
-            vec![self.input]
+            Box::new(std::iter::once(self.input))
         }
     }
-
-    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.output]
+    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new(std::iter::once(self.output))
     }
-
+}
+impl Operation for UnsqueezeOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs());
         let axes_input = if let Some(axes) = self.axes {
             input_map[&axes]
         } else if let Some(axes) = &self.axes_attribute {
             let axes_tensor = NDArrayNumericTensor::from_vec(axes.clone());
-            Constant::push_new(&mut graph, axes_tensor.to_dyn())
+            milli_graph::ops::Constant::push_new(&mut graph, axes_tensor.to_dyn())
         } else {
             panic!();
         };
 
-        let out = Unsqueeze::push_new(&mut graph, input_map[&self.input], axes_input);
+        let out =
+            milli_graph::ops::Unsqueeze::push_new(&mut graph, input_map[&self.input], axes_input);
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
         graph.set_output_map(output_map);
@@ -176,21 +178,23 @@ impl ReshapeOperation {
     }
 }
 
-impl Operation for ReshapeOperation {
-    fn get_op_type_name(&self) -> String {
+impl Node<SymbolicGraphTensorId> for ReshapeOperation {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
         "Reshape".to_string()
     }
-
-    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.input, self.shape]
+    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new([self.input, self.shape].into_iter())
     }
-    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.output]
+    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new(std::iter::once(self.output))
     }
+}
 
+impl Operation for ReshapeOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
-        let out = Reshape::push_new(
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs());
+        let out = milli_graph::ops::Reshape::push_new(
             &mut graph,
             input_map[&self.input],
             input_map[&self.shape],
@@ -231,48 +235,56 @@ impl FlattenOperation {
     }
 }
 
-impl Operation for FlattenOperation {
-    fn get_op_type_name(&self) -> String {
+impl Node<SymbolicGraphTensorId> for FlattenOperation {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
         "Flatten".to_string()
     }
-
-    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.input]
+    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new(std::iter::once(self.input))
     }
-
-    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.output]
+    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new(std::iter::once(self.output))
     }
+}
 
+impl Operation for FlattenOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs());
         let input = input_map[&self.input];
 
         let shape_tensor = if self.axis == 0 {
             let output_shape = vec![1i64, -1i64];
             let shape_tensor = NDArrayNumericTensor::from(output_shape);
-            Constant::push_new(&mut graph, shape_tensor.to_dyn())
+            milli_graph::ops::Constant::push_new(&mut graph, shape_tensor.to_dyn())
         } else {
-            let input_shape = Shape::push_new(&mut graph, input);
-            let zero_const = Constant::push_new(
+            let input_shape = milli_graph::ops::Shape::push_new(&mut graph, input);
+            let zero_const = milli_graph::ops::Constant::push_new(
                 &mut graph,
                 NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
             );
-            let axis_const = Constant::push_new(
+            let axis_const = milli_graph::ops::Constant::push_new(
                 &mut graph,
                 NDArrayNumericTensor::from_vec_shape(vec![self.axis], &vec![1]).unwrap(),
             );
-            let first_dims =
-                Slice::push_new(&mut graph, input_shape, zero_const, axis_const, None, None);
-            let prod = ReduceProd::push_new(&mut graph, first_dims, None, true, false);
-            let neg_one_const = Constant::push_new(
+            let first_dims = milli_graph::ops::Slice::push_new(
+                &mut graph,
+                input_shape,
+                zero_const,
+                axis_const,
+                None,
+                None,
+            );
+            let prod =
+                milli_graph::ops::ReduceProd::push_new(&mut graph, first_dims, None, true, false);
+            let neg_one_const = milli_graph::ops::Constant::push_new(
                 &mut graph,
                 NDArrayNumericTensor::from_vec_shape(vec![-1i64], &vec![1]).unwrap(),
             );
-            Concat::push_new(&mut graph, vec![prod, neg_one_const], 0)
+            milli_graph::ops::Concat::push_new(&mut graph, vec![prod, neg_one_const], 0)
         };
 
-        let out = Reshape::push_new(&mut graph, input, shape_tensor, false);
+        let out = milli_graph::ops::Reshape::push_new(&mut graph, input, shape_tensor, false);
 
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);

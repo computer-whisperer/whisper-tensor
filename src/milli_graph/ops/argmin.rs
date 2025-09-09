@@ -17,7 +17,7 @@ pub struct ArgMin {
 }
 
 impl ArgMin {
-    pub fn push_new<T: std::hash::Hash + Clone + Eq>(
+    pub fn push_new<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         input: MilliOpGraphTensorId,
         axis: i64,

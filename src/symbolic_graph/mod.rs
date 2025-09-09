@@ -6,6 +6,7 @@ use crate::backends::ModelLoadedTensorCache;
 use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::{NDArrayNumericTensor, NDArrayNumericTensorError};
 use crate::dtype::DType;
+use crate::graph::{Graph, InnerGraph, Link, LinkPath, Node, NodePath};
 use crate::numeric_scalar::NumericScalar;
 use crate::numeric_tensor::NumericTensor;
 use crate::scalar_info::ScalarInfoTyped;
@@ -280,7 +281,7 @@ impl SymbolicGraphInner {
     pub fn get_foreign_tensor_ids(&self) -> HashSet<SymbolicGraphTensorId> {
         let mut results = HashSet::new();
         for op in self.operations.values() {
-            let inputs = op.op.get_inputs();
+            let inputs = op.op.inputs();
             for input in inputs {
                 if !self.tensors.contains_key(&input) {
                     results.insert(input);
@@ -551,17 +552,17 @@ impl SymbolicGraphInner {
 
             for op_id in &remaining_ops_to_complete {
                 let GraphOperation { name: _, op } = ops.get(op_id).unwrap();
-                let input_ids = op.get_inputs();
+                let input_ids = op.inputs();
                 let mut input_values = HashMap::new();
                 // Collect all inputs, abort if we can't do this one yet
                 let mut failed_to_fetch = false;
-                for tensor_id in &input_ids {
-                    if let Some(value) = active_tensors.get(tensor_id) {
+                for tensor_id in input_ids {
+                    if let Some(value) = active_tensors.get(&tensor_id) {
                         // Validate shape and dtype
-                        if let Some(tensor_info) = self.get_tensor_info(*tensor_id) {
+                        if let Some(tensor_info) = self.get_tensor_info(tensor_id) {
                             check_tensor_matches(value, tensor_info)?;
                         }
-                        input_values.insert(*tensor_id, value.clone());
+                        input_values.insert(tensor_id, value.clone());
                     } else {
                         // Can't do this one yet
                         failed_to_fetch = true;
@@ -1589,4 +1590,76 @@ pub enum SymbolicGraphTensorPath {
 #[derive(Clone, Debug, Serialize, Deserialize, Hash, PartialEq, Eq)]
 pub enum SymbolicGraphNodePath {
     Node(SymbolicGraphOperationId),
+}
+
+impl NodePath for SymbolicGraphNodePath {}
+
+impl LinkPath for SymbolicGraphTensorPath {}
+
+impl Graph for SymbolicGraph {
+    type GraphPath = ();
+    type NodePath = SymbolicGraphNodePath;
+    type LinkPath = SymbolicGraphTensorPath;
+    type Inner = SymbolicGraphInner;
+    type AnySubGraph = SymbolicGraphInner;
+
+    fn inner(&self, _: &Self::GraphPath) -> &Self::AnySubGraph {
+        &self.inner_graph
+    }
+}
+
+impl InnerGraph for SymbolicGraphInner {
+    type NodeId = SymbolicGraphOperationId;
+    type LinkId = SymbolicGraphTensorId;
+    type Error = ();
+    type AnyNode = GraphOperation;
+    type AnyLink = SymbolicGraphTensorId;
+    type InputLinkId = SymbolicGraphTensorId;
+    type OutputLinkId = SymbolicGraphTensorId;
+
+    fn nodes(&self) -> impl Iterator<Item = Self::NodeId> {
+        self.operations.keys().cloned()
+    }
+
+    fn links(&self) -> impl Iterator<Item = Self::LinkId> {
+        self.tensors.keys().cloned()
+    }
+
+    fn get_node(&self, id: &Self::NodeId) -> Option<&Self::AnyNode> {
+        self.operations.get(id)
+    }
+
+    fn get_link(&self, _id: &Self::LinkId) -> Option<&Self::AnyLink> {
+        None
+    }
+
+    fn input_links(&self) -> impl Iterator<Item = (Self::InputLinkId, Self::LinkId)> {
+        self.get_inputs().into_iter().map(|x| (x, x))
+    }
+
+    fn output_links(&self) -> impl Iterator<Item = (Self::OutputLinkId, Self::LinkId)> {
+        self.get_outputs().into_iter().map(|x| (x, x))
+    }
+}
+
+impl Link<SymbolicGraphTensorId> for SymbolicGraphTensorId {
+    fn link_id(&self) -> SymbolicGraphTensorId {
+        *self
+    }
+}
+
+impl Node<SymbolicGraphTensorId> for GraphOperation {
+    type OpKind = String;
+
+    fn op_kind(&self) -> Self::OpKind {
+        self.op.op_kind()
+    }
+
+    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        self.op.inputs()
+    }
+
+    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        self.op.outputs()
+    }
 }

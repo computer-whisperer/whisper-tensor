@@ -11,6 +11,7 @@ use rand::random_range;
 use std::collections::HashSet;
 use whisper_tensor::DynRank;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
+use whisper_tensor::graph::Node;
 use whisper_tensor::super_graph::nodes::SuperGraphAnyNode;
 use whisper_tensor::symbolic_graph::ops::{AnyOperation, Operation};
 use whisper_tensor::symbolic_graph::tensor_store::TensorStoreTensorId;
@@ -201,9 +202,8 @@ impl GraphExplorerApp {
                                 "ONNX Name: {:}",
                                 op_info.name.clone().unwrap_or("N/A".to_string())
                             ));
-                            resp = resp.union(
-                                ui.label(format!("Op Type: {:}", op_info.op.get_op_type_name())),
-                            );
+                            resp =
+                                resp.union(ui.label(format!("Op Type: {:}", op_info.op.op_kind())));
                             if let Some(super_graph_path) = &super_graph_path {
                                 let node_path = super_graph_path.push_symbolic_node(op_id);
                                 if let Some(x) = self.node_execution_durations.get(&node_path) {
@@ -254,19 +254,18 @@ impl GraphExplorerApp {
                             egui::Grid::new(egui::Id::new(("grid_inputs", name.clone())))
                                 .striped(true)
                                 .show(ui, |ui| {
-                                    for (i, tensor_id) in op_info.op.get_inputs().iter().enumerate()
-                                    {
+                                    for (i, tensor_id) in op_info.op.inputs().enumerate() {
                                         let resp = format_tensor_row(
                                             ui,
                                             i,
-                                            *tensor_id,
+                                            tensor_id,
                                             &model_graph,
                                             &mut new_inspect_windows,
                                         );
                                         if resp.hovered() {
                                             self.next_explorer_hovered = Some(
                                                 GraphExplorerSelectable::SymbolicGraphTensorId(
-                                                    *tensor_id,
+                                                    tensor_id,
                                                 ),
                                             );
                                             is_hovering_tensor = true;
@@ -274,7 +273,7 @@ impl GraphExplorerApp {
                                         if resp.clicked() {
                                             self.explorer_selection = Some(
                                                 GraphExplorerSelectable::SymbolicGraphTensorId(
-                                                    *tensor_id,
+                                                    tensor_id,
                                                 ),
                                             );
                                         }
@@ -284,20 +283,18 @@ impl GraphExplorerApp {
                             egui::Grid::new(egui::Id::new(("grid_outputs", name)))
                                 .striped(true)
                                 .show(ui, |ui| {
-                                    for (i, tensor_id) in
-                                        op_info.op.get_outputs().iter().enumerate()
-                                    {
+                                    for (i, tensor_id) in op_info.op.outputs().enumerate() {
                                         let resp = format_tensor_row(
                                             ui,
                                             i,
-                                            *tensor_id,
+                                            tensor_id,
                                             &model_graph,
                                             &mut new_inspect_windows,
                                         );
                                         if resp.hovered() {
                                             self.next_explorer_hovered = Some(
                                                 GraphExplorerSelectable::SymbolicGraphTensorId(
-                                                    *tensor_id,
+                                                    tensor_id,
                                                 ),
                                             );
                                             is_hovering_tensor = true;
@@ -305,7 +302,7 @@ impl GraphExplorerApp {
                                         if resp.clicked() {
                                             self.explorer_selection = Some(
                                                 GraphExplorerSelectable::SymbolicGraphTensorId(
-                                                    *tensor_id,
+                                                    tensor_id,
                                                 ),
                                             );
                                         }

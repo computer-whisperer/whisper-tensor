@@ -1,11 +1,11 @@
+use crate::graph::Node;
 use crate::milli_graph::MilliOpGraph;
-use crate::milli_graph::ops::*;
-use crate::onnx;
 use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{
     ONNXDecodingError, SymbolicGraphTensorId, query_attribute_bool, query_attribute_float,
     query_attribute_int,
 };
+use crate::{milli_graph, onnx};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -58,42 +58,54 @@ impl BinaryOperation {
     }
 }
 
-impl Operation for BinaryOperation {
-    fn get_op_type_name(&self) -> String {
+impl Node<SymbolicGraphTensorId> for BinaryOperation {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
         self.which.to_string()
     }
-
-    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.a, self.b]
+    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new([self.a, self.b].into_iter())
     }
-
-    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.output]
+    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new([self.output].into_iter())
     }
+}
 
+impl Operation for BinaryOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
+        let input_ids: Vec<_> = self.inputs().collect();
+        let (mut graph, input_map) = MilliOpGraph::new(input_ids);
         let a = input_map[&self.a];
         let b = input_map[&self.b];
         let out_tid = match self.which {
-            WhichBinaryOperation::Add => SimpleBinary::add(&mut graph, a, b),
-            WhichBinaryOperation::Sub => SimpleBinary::sub(&mut graph, a, b),
-            WhichBinaryOperation::Mul => SimpleBinary::mul(&mut graph, a, b),
-            WhichBinaryOperation::Div => SimpleBinary::div(&mut graph, a, b),
-            WhichBinaryOperation::MatMul => MatMul::push_new(&mut graph, a, b),
-            WhichBinaryOperation::And => SimpleBinary::and(&mut graph, a, b),
-            WhichBinaryOperation::Or => SimpleBinary::or(&mut graph, a, b),
-            WhichBinaryOperation::Xor => SimpleBinary::xor(&mut graph, a, b),
-            WhichBinaryOperation::BitwiseAnd => SimpleBinary::bitwise_and(&mut graph, a, b),
-            WhichBinaryOperation::BitwiseOr => SimpleBinary::bitwise_or(&mut graph, a, b),
-            WhichBinaryOperation::BitwiseXor => SimpleBinary::bitwise_xor(&mut graph, a, b),
-            WhichBinaryOperation::Equal => SimpleBinary::equal(&mut graph, a, b),
-            WhichBinaryOperation::Greater => SimpleBinary::greater(&mut graph, a, b),
-            WhichBinaryOperation::GreaterOrEqual => {
-                SimpleBinary::greater_or_equal(&mut graph, a, b)
+            WhichBinaryOperation::Add => milli_graph::ops::SimpleBinary::add(&mut graph, a, b),
+            WhichBinaryOperation::Sub => milli_graph::ops::SimpleBinary::sub(&mut graph, a, b),
+            WhichBinaryOperation::Mul => milli_graph::ops::SimpleBinary::mul(&mut graph, a, b),
+            WhichBinaryOperation::Div => milli_graph::ops::SimpleBinary::div(&mut graph, a, b),
+            WhichBinaryOperation::MatMul => milli_graph::ops::MatMul::push_new(&mut graph, a, b),
+            WhichBinaryOperation::And => milli_graph::ops::SimpleBinary::and(&mut graph, a, b),
+            WhichBinaryOperation::Or => milli_graph::ops::SimpleBinary::or(&mut graph, a, b),
+            WhichBinaryOperation::Xor => milli_graph::ops::SimpleBinary::xor(&mut graph, a, b),
+            WhichBinaryOperation::BitwiseAnd => {
+                milli_graph::ops::SimpleBinary::bitwise_and(&mut graph, a, b)
             }
-            WhichBinaryOperation::Less => SimpleBinary::less(&mut graph, a, b),
-            WhichBinaryOperation::LessOrEqual => SimpleBinary::less_or_equal(&mut graph, a, b),
+            WhichBinaryOperation::BitwiseOr => {
+                milli_graph::ops::SimpleBinary::bitwise_or(&mut graph, a, b)
+            }
+            WhichBinaryOperation::BitwiseXor => {
+                milli_graph::ops::SimpleBinary::bitwise_xor(&mut graph, a, b)
+            }
+            WhichBinaryOperation::Equal => milli_graph::ops::SimpleBinary::equal(&mut graph, a, b),
+            WhichBinaryOperation::Greater => {
+                milli_graph::ops::SimpleBinary::greater(&mut graph, a, b)
+            }
+            WhichBinaryOperation::GreaterOrEqual => {
+                milli_graph::ops::SimpleBinary::greater_or_equal(&mut graph, a, b)
+            }
+            WhichBinaryOperation::Less => milli_graph::ops::SimpleBinary::less(&mut graph, a, b),
+            WhichBinaryOperation::LessOrEqual => {
+                milli_graph::ops::SimpleBinary::less_or_equal(&mut graph, a, b)
+            }
         };
         let mut output_map = HashMap::new();
         output_map.insert(out_tid, self.output);
@@ -129,21 +141,24 @@ impl PowOperation {
     }
 }
 
-impl Operation for PowOperation {
-    fn get_op_type_name(&self) -> String {
+impl Node<SymbolicGraphTensorId> for PowOperation {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
         "Pow".to_string()
     }
-
-    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.input_x, self.input_y]
+    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new([self.input_x, self.input_y].into_iter())
     }
-    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.output]
+    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new([self.output].into_iter())
     }
+}
 
+impl Operation for PowOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
-        let out = Pow::push_new(
+        let input_ids: Vec<_> = self.inputs().collect();
+        let (mut graph, input_map) = MilliOpGraph::new(input_ids);
+        let out = milli_graph::ops::Pow::push_new(
             &mut graph,
             input_map[&self.input_x],
             input_map[&self.input_y],
@@ -202,31 +217,34 @@ impl GemmOperation {
     }
 }
 
-impl Operation for GemmOperation {
-    fn get_op_type_name(&self) -> String {
+impl Node<SymbolicGraphTensorId> for GemmOperation {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
         "Gemm".to_string()
     }
-
-    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
-        if let Some(input_c) = self.input_c {
-            vec![self.input_a, self.input_b, input_c]
+    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        let v = if let Some(c) = self.input_c {
+            vec![self.input_a, self.input_b, c]
         } else {
             vec![self.input_a, self.input_b]
-        }
+        };
+        Box::new(v.into_iter())
     }
-    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.output]
+    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new([self.output].into_iter())
     }
+}
 
+impl Operation for GemmOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs());
 
         let a = input_map[&self.input_a];
         let b = input_map[&self.input_b];
 
         let a = if let Some(trans_a) = self.trans_a {
             if trans_a {
-                Transpose::push_new(&mut graph, a, None)
+                milli_graph::ops::Transpose::push_new(&mut graph, a, None)
             } else {
                 a
             }
@@ -236,7 +254,7 @@ impl Operation for GemmOperation {
 
         let b = if let Some(trans_b) = self.trans_b {
             if trans_b {
-                Transpose::push_new(&mut graph, b, None)
+                milli_graph::ops::Transpose::push_new(&mut graph, b, None)
             } else {
                 b
             }
@@ -244,12 +262,12 @@ impl Operation for GemmOperation {
             b
         };
 
-        let x = MatMul::push_new(&mut graph, a, b);
+        let x = milli_graph::ops::MatMul::push_new(&mut graph, a, b);
 
         let x = if let Some(alpha) = self.alpha {
-            let alpha_tid = Constant::new_scalar(&mut graph, alpha);
-            let alpha_const = CastLike::push_new(&mut graph, alpha_tid, x);
-            SimpleBinary::mul(&mut graph, x, alpha_const)
+            let alpha_tid = milli_graph::ops::Constant::new_scalar(&mut graph, alpha);
+            let alpha_const = milli_graph::ops::CastLike::push_new(&mut graph, alpha_tid, x);
+            milli_graph::ops::SimpleBinary::mul(&mut graph, x, alpha_const)
         } else {
             x
         };
@@ -257,13 +275,13 @@ impl Operation for GemmOperation {
         let x = if let Some(c) = self.input_c {
             let c = input_map[&c];
             let c = if let Some(beta) = self.beta {
-                let beta_tid = Constant::new_scalar(&mut graph, beta);
-                let beta_const = CastLike::push_new(&mut graph, beta_tid, c);
-                SimpleBinary::mul(&mut graph, c, beta_const)
+                let beta_tid = milli_graph::ops::Constant::new_scalar(&mut graph, beta);
+                let beta_const = milli_graph::ops::CastLike::push_new(&mut graph, beta_tid, c);
+                milli_graph::ops::SimpleBinary::mul(&mut graph, c, beta_const)
             } else {
                 c
             };
-            SimpleBinary::add(&mut graph, x, c)
+            milli_graph::ops::SimpleBinary::add(&mut graph, x, c)
         } else {
             x
         };
@@ -312,23 +330,24 @@ impl ArgMaxOperation {
     }
 }
 
-impl Operation for ArgMaxOperation {
-    fn get_op_type_name(&self) -> String {
+impl Node<SymbolicGraphTensorId> for ArgMaxOperation {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
         "ArgMax".to_string()
     }
-
-    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.input]
+    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new([self.input].into_iter())
     }
-
-    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.output]
+    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new([self.output].into_iter())
     }
+}
 
+impl Operation for ArgMaxOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs());
 
-        let x = ArgMax::push_new(
+        let x = milli_graph::ops::ArgMax::push_new(
             &mut graph,
             input_map[&self.input],
             self.axis,
@@ -380,23 +399,24 @@ impl ArgMinOperation {
     }
 }
 
-impl Operation for ArgMinOperation {
-    fn get_op_type_name(&self) -> String {
+impl Node<SymbolicGraphTensorId> for ArgMinOperation {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
         "ArgMin".to_string()
     }
-
-    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.input]
+    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new([self.input].into_iter())
     }
-
-    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.output]
+    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new([self.output].into_iter())
     }
+}
 
+impl Operation for ArgMinOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs());
 
-        let x = ArgMin::push_new(
+        let x = milli_graph::ops::ArgMin::push_new(
             &mut graph,
             input_map[&self.input],
             self.axis,
@@ -440,25 +460,26 @@ impl MaxOperation {
     }
 }
 
-impl Operation for MaxOperation {
-    fn get_op_type_name(&self) -> String {
+impl Node<SymbolicGraphTensorId> for MaxOperation {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
         "Max".to_string()
     }
-
-    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
-        self.inputs.clone()
+    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new(self.inputs.clone().into_iter())
     }
-
-    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.output]
+    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new([self.output].into_iter())
     }
+}
 
+impl Operation for MaxOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs());
         let mut x = input_map[&self.inputs[0]];
         for input in &self.inputs[1..] {
             let y = input_map[input];
-            x = SimpleBinary::max(&mut graph, x, y)
+            x = milli_graph::ops::SimpleBinary::max(&mut graph, x, y)
         }
         let mut output_map = HashMap::new();
         output_map.insert(x, self.output);
@@ -496,25 +517,26 @@ impl MinOperation {
     }
 }
 
-impl Operation for MinOperation {
-    fn get_op_type_name(&self) -> String {
+impl Node<SymbolicGraphTensorId> for MinOperation {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
         "Min".to_string()
     }
-
-    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
-        self.inputs.clone()
+    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new(self.inputs.clone().into_iter())
     }
-
-    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.output]
+    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new([self.output].into_iter())
     }
+}
 
+impl Operation for MinOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs());
         let mut x = input_map[&self.inputs[0]];
         for input in &self.inputs[1..] {
             let y = input_map[input];
-            x = SimpleBinary::min(&mut graph, x, y)
+            x = milli_graph::ops::SimpleBinary::min(&mut graph, x, y)
         }
         let mut output_map = HashMap::new();
         output_map.insert(x, self.output);
@@ -555,25 +577,26 @@ impl ModuloOperation {
     }
 }
 
-impl Operation for ModuloOperation {
-    fn get_op_type_name(&self) -> String {
+impl Node<SymbolicGraphTensorId> for ModuloOperation {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
         "Modulo".to_string()
     }
-
-    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.a, self.b]
+    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new([self.a, self.b].into_iter())
     }
-
-    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
-        vec![self.output]
+    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new([self.output].into_iter())
     }
+}
 
+impl Operation for ModuloOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs());
         let a = input_map[&self.a];
         let b = input_map[&self.b];
 
-        let output = SimpleBinary::modulo(&mut graph, a, b, self.fmod);
+        let output = milli_graph::ops::SimpleBinary::modulo(&mut graph, a, b, self.fmod);
         let mut output_map = HashMap::new();
         output_map.insert(output, self.output);
         graph.set_output_map(output_map);

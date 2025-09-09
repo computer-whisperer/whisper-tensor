@@ -1,6 +1,6 @@
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
-use crate::milli_graph::MilliOpGraph;
-use crate::milli_graph::ops::*;
+use crate::graph::Node;
+use crate::milli_graph::{self, MilliOpGraph};
 use crate::onnx;
 use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{
@@ -51,39 +51,42 @@ impl SplitOperation {
     }
 }
 
-impl Operation for SplitOperation {
-    fn get_op_type_name(&self) -> String {
+impl Node<SymbolicGraphTensorId> for SplitOperation {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
         "Split".to_string()
     }
-
-    fn get_inputs(&self) -> Vec<SymbolicGraphTensorId> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        let mut inputs = vec![self.input];
         if let Some(split) = self.split {
-            vec![self.input, split]
-        } else {
-            vec![self.input]
+            inputs.push(split);
         }
+        Box::new(inputs.into_iter())
     }
-    fn get_outputs(&self) -> Vec<SymbolicGraphTensorId> {
-        self.outputs.clone()
+    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+        Box::new(self.outputs.clone().into_iter())
     }
-
+}
+impl Operation for SplitOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs());
 
         let mut output_map = HashMap::new();
 
         let split = if let Some(split) = self.split {
-            Some(MilliOpTensorIDOrLiteral::TensorID(input_map[&split]))
+            Some(milli_graph::ops::MilliOpTensorIDOrLiteral::TensorID(
+                input_map[&split],
+            ))
         } else {
             self.split_attribute.as_ref().map(|split| {
-                MilliOpTensorIDOrLiteral::Literal(
+                milli_graph::ops::MilliOpTensorIDOrLiteral::Literal(
                     NDArrayNumericTensor::from_vec(split.clone()).to_dyn(),
                 )
             })
         };
 
         for (output_id, output_tensor_id) in self.outputs.iter().enumerate() {
-            let out = Split::push_new(
+            let out = milli_graph::ops::Split::push_new(
                 &mut graph,
                 input_map[&self.input],
                 split.clone(),
