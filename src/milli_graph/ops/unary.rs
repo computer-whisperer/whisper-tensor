@@ -158,11 +158,33 @@ impl SimpleUnaryOp {
 }
 
 impl Node<MilliOpGraphTensorId> for SimpleUnaryOp {
-    fn inputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
-        vec![self.input].into_iter()
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
+        match self.op {
+            WhichSimpleUnaryOp::Neg => "Neg",
+            WhichSimpleUnaryOp::Abs => "Abs",
+            WhichSimpleUnaryOp::Exp => "Exp",
+            WhichSimpleUnaryOp::Ln => "Ln",
+            WhichSimpleUnaryOp::Sqrt => "Sqrt",
+            WhichSimpleUnaryOp::Not => "Not",
+            WhichSimpleUnaryOp::Sign => "Sign",
+            WhichSimpleUnaryOp::BitwiseNot => "Bitwise Not",
+            WhichSimpleUnaryOp::Reciprocal => "Reciprocal",
+            WhichSimpleUnaryOp::Trig(trig_op) => trig_op.get_name(),
+            WhichSimpleUnaryOp::Floor => "Floor",
+            WhichSimpleUnaryOp::Ceil => "Ceil",
+            WhichSimpleUnaryOp::Round => "Round",
+            WhichSimpleUnaryOp::IsNan => "IsNan",
+            WhichSimpleUnaryOp::IsInf { .. } => "IsInf",
+            WhichSimpleUnaryOp::Erf => "Erf",
+        }
+        .to_string()
     }
-    fn outputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
-        vec![self.output].into_iter()
+    fn inputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+        Box::new(vec![self.input].into_iter())
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+        Box::new(vec![self.output].into_iter())
     }
 }
 
@@ -172,7 +194,7 @@ impl MilliOp for SimpleUnaryOp {
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
     ) -> Result<
-        impl Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>,
+        Box<dyn Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>>,
         MilliOpGraphError,
     > {
         let input = &inputs[&self.input];
@@ -197,41 +219,19 @@ impl MilliOp for SimpleUnaryOp {
             WhichSimpleUnaryOp::IsNan => input.is_nan(backend)?,
             WhichSimpleUnaryOp::Erf => input.erf(backend)?,
         };
-        Ok([(self.output, out)].into_iter())
-    }
-
-    fn get_name(&self) -> String {
-        match self.op {
-            WhichSimpleUnaryOp::Neg => "Neg",
-            WhichSimpleUnaryOp::Abs => "Abs",
-            WhichSimpleUnaryOp::Exp => "Exp",
-            WhichSimpleUnaryOp::Ln => "Ln",
-            WhichSimpleUnaryOp::Sqrt => "Sqrt",
-            WhichSimpleUnaryOp::Not => "Not",
-            WhichSimpleUnaryOp::Sign => "Sign",
-            WhichSimpleUnaryOp::BitwiseNot => "Bitwise Not",
-            WhichSimpleUnaryOp::Reciprocal => "Reciprocal",
-            WhichSimpleUnaryOp::Trig(trig_op) => trig_op.get_name(),
-            WhichSimpleUnaryOp::Floor => "Floor",
-            WhichSimpleUnaryOp::Ceil => "Ceil",
-            WhichSimpleUnaryOp::Round => "Round",
-            WhichSimpleUnaryOp::IsNan => "IsNan",
-            WhichSimpleUnaryOp::IsInf { .. } => "IsInf",
-            WhichSimpleUnaryOp::Erf => "Erf",
-        }
-        .to_string()
+        Ok(Box::new([(self.output, out)].into_iter()))
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MilliOpClampMin {
+pub struct ClampMin {
     output: MilliOpGraphTensorId,
     input: MilliOpGraphTensorId,
     value: f32,
 }
 
-impl MilliOpClampMin {
-    pub fn new<T: std::hash::Hash + Clone + Eq>(
+impl ClampMin {
+    pub fn push_new<T: std::hash::Hash + Clone + Eq>(
         graph: &mut MilliOpGraph<T>,
         a: MilliOpGraphTensorId,
         value: f32,
@@ -247,29 +247,29 @@ impl MilliOpClampMin {
     }
 }
 
-impl Node<MilliOpGraphTensorId> for MilliOpClampMin {
-    fn inputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
-        vec![self.input].into_iter()
+impl Node<MilliOpGraphTensorId> for ClampMin {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
+        "Clamp Min".to_string()
     }
-    fn outputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
-        vec![self.output].into_iter()
+    fn inputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+        Box::new(vec![self.input].into_iter())
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+        Box::new(vec![self.output].into_iter())
     }
 }
 
-impl MilliOp for MilliOpClampMin {
+impl MilliOp for ClampMin {
     fn eval(
         &self,
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
     ) -> Result<
-        impl Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>,
+        Box<dyn Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>>,
         MilliOpGraphError,
     > {
         let out = inputs[&self.input].clamp_min(self.value, backend)?;
-        Ok([(self.output, out)].into_iter())
-    }
-
-    fn get_name(&self) -> String {
-        "Clamp Min".to_string()
+        Ok(Box::new([(self.output, out)].into_iter()))
     }
 }

@@ -216,7 +216,7 @@ fn render_node_contents<'a>(
             GraphLayoutNodeType::MilliOpGraphNode(node_id) => {
                 if let GraphSubject::MilliOpGraphB(milli_graph) = graph_subject {
                     if let Some(op) = milli_graph.get_node(node_id) {
-                        ui.add(Label::new(op.get_name()).selectable(false));
+                        ui.add(Label::new(op.op_kind()).selectable(false));
                     }
                 }
             }

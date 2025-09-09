@@ -14,7 +14,7 @@ pub struct CastLike {
 }
 
 impl CastLike {
-    pub fn new<T: std::hash::Hash + Clone + Eq>(
+    pub fn push_new<T: std::hash::Hash + Clone + Eq>(
         graph: &mut MilliOpGraph<T>,
         data: MilliOpGraphTensorId,
         target_type: MilliOpGraphTensorId,
@@ -31,11 +31,15 @@ impl CastLike {
 }
 
 impl crate::graph::Node<MilliOpGraphTensorId> for CastLike {
-    fn inputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
-        vec![self.data, self.target_type].into_iter()
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
+        "CastLike".to_string()
     }
-    fn outputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
-        vec![self.output].into_iter()
+    fn inputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+        Box::new(vec![self.data, self.target_type].into_iter())
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+        Box::new(vec![self.output].into_iter())
     }
 }
 
@@ -45,14 +49,10 @@ impl MilliOp for CastLike {
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
     ) -> Result<
-        impl Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>,
+        Box<dyn Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>>,
         MilliOpGraphError,
     > {
         let out = inputs[&self.data].cast(inputs[&self.target_type].dtype(), backend)?;
-        Ok([(self.output, out)].into_iter())
-    }
-
-    fn get_name(&self) -> String {
-        "CastLike".to_string()
+        Ok(Box::new([(self.output, out)].into_iter()))
     }
 }

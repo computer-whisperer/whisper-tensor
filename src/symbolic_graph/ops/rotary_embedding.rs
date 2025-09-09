@@ -1,5 +1,4 @@
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
-use crate::graph::{Graph, InnerGraph, Node};
 use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::ops::*;
 use crate::onnx;
@@ -81,15 +80,15 @@ impl Operation for RotaryEmbeddingOperation {
         // Prepare input to shape [B, S, H, D]
         let prepared = if self.num_heads.is_some() {
             // 3D path: [B, S, hidden] -> [B, S, num_heads, head_size]
-            let new_shape = Constant::new(
+            let new_shape = Constant::push_new(
                 &mut graph,
                 NDArrayNumericTensor::from(vec![0i64, 0i64, self.num_heads.unwrap(), -1i64])
                     .to_dyn(),
             );
-            Reshape::new(&mut graph, data, new_shape, false)
+            Reshape::push_new(&mut graph, data, new_shape, false)
         } else {
             // 4D path: [B, H, S, D] -> [B, S, H, D]
-            Transpose::new(&mut graph, data, Some(vec![0, 2, 1, 3]))
+            Transpose::push_new(&mut graph, data, Some(vec![0, 2, 1, 3]))
         };
 
         // Determine rotary dimension handling
@@ -97,20 +96,22 @@ impl Operation for RotaryEmbeddingOperation {
         let use_partial = self.rotary_embedding_dim > 0;
 
         // Build 1D vector constants for slice parameters
-        let starts0v = Constant::new(&mut graph, NDArrayNumericTensor::from(vec![0i64]).to_dyn());
-        let axeslastv = Constant::new(&mut graph, NDArrayNumericTensor::from(vec![-1i64]).to_dyn());
+        let starts0v =
+            Constant::push_new(&mut graph, NDArrayNumericTensor::from(vec![0i64]).to_dyn());
+        let axeslastv =
+            Constant::push_new(&mut graph, NDArrayNumericTensor::from(vec![-1i64]).to_dyn());
         let endsrotv = if use_partial {
-            Constant::new(
+            Constant::push_new(
                 &mut graph,
                 NDArrayNumericTensor::from(vec![self.rotary_embedding_dim]).to_dyn(),
             )
         } else {
-            Constant::new(
+            Constant::push_new(
                 &mut graph,
                 NDArrayNumericTensor::from(vec![i64::MAX]).to_dyn(),
             )
         };
-        let x_rotate = Slice::new(
+        let x_rotate = Slice::push_new(
             &mut graph,
             prepared,
             starts0v,
@@ -121,21 +122,21 @@ impl Operation for RotaryEmbeddingOperation {
 
         // x_not_rotate: from rotary_dim to end (empty if using full)
         let startsrotv = if use_partial {
-            Constant::new(
+            Constant::push_new(
                 &mut graph,
                 NDArrayNumericTensor::from(vec![self.rotary_embedding_dim]).to_dyn(),
             )
         } else {
-            Constant::new(
+            Constant::push_new(
                 &mut graph,
                 NDArrayNumericTensor::from(vec![i64::MAX]).to_dyn(),
             )
         };
-        let endsbigv = Constant::new(
+        let endsbigv = Constant::push_new(
             &mut graph,
             NDArrayNumericTensor::from(vec![i64::MAX]).to_dyn(),
         );
-        let x_not_rotate = Slice::new(
+        let x_not_rotate = Slice::push_new(
             &mut graph,
             prepared,
             startsrotv,
@@ -146,12 +147,12 @@ impl Operation for RotaryEmbeddingOperation {
 
         // Prepare cos/sin caches
         let mut cos = if let Some(pid) = pos_ids {
-            Gather::new(&mut graph, cos_cache, pid, 0)
+            Gather::push_new(&mut graph, cos_cache, pid, 0)
         } else {
             cos_cache
         };
         let mut sin = if let Some(pid) = pos_ids {
-            Gather::new(&mut graph, sin_cache, pid, 0)
+            Gather::push_new(&mut graph, sin_cache, pid, 0)
         } else {
             sin_cache
         };
@@ -162,32 +163,34 @@ impl Operation for RotaryEmbeddingOperation {
             // Slice cos/sin to rotary_dim/2 on last axis
             let half = self.rotary_embedding_dim / 2;
             let endshalfv =
-                Constant::new(&mut graph, NDArrayNumericTensor::from(vec![half]).to_dyn());
-            let cos_s = Slice::new(&mut graph, cos, starts0v, endshalfv, None, Some(axeslastv));
-            let sin_s = Slice::new(&mut graph, sin, starts0v, endshalfv, None, Some(axeslastv));
+                Constant::push_new(&mut graph, NDArrayNumericTensor::from(vec![half]).to_dyn());
+            let cos_s =
+                Slice::push_new(&mut graph, cos, starts0v, endshalfv, None, Some(axeslastv));
+            let sin_s =
+                Slice::push_new(&mut graph, sin, starts0v, endshalfv, None, Some(axeslastv));
             cos = cos_s;
             sin = sin_s;
         }
 
         // Unsqueeze cos/sin at axis=2 to broadcast: [B, S, 1, D/2]
-        let axis2 = Constant::new(&mut graph, NDArrayNumericTensor::from(vec![2i64]).to_dyn());
-        let cos = Unsqueeze::new(&mut graph, cos, axis2);
-        let sin = Unsqueeze::new(&mut graph, sin, axis2);
+        let axis2 = Constant::push_new(&mut graph, NDArrayNumericTensor::from(vec![2i64]).to_dyn());
+        let cos = Unsqueeze::push_new(&mut graph, cos, axis2);
+        let sin = Unsqueeze::push_new(&mut graph, sin, axis2);
 
         // Split x_rotate into x1 and x2 depending on interleaving
         let (x1, x2) = if self.interleaved {
             // Reshape [..., D] -> [..., -1, 2]
-            let new_shape = Constant::new(
+            let new_shape = Constant::push_new(
                 &mut graph,
                 NDArrayNumericTensor::from(vec![0i64, 0i64, 0i64, -1i64, 2i64]).to_dyn(),
             );
-            let xr5 = Reshape::new(&mut graph, x_rotate, new_shape, false);
+            let xr5 = Reshape::push_new(&mut graph, x_rotate, new_shape, false);
             // Split last axis [1,1]
-            let split_sizes = Constant::new(
+            let split_sizes = Constant::push_new(
                 &mut graph,
                 NDArrayNumericTensor::from(vec![1i64, 1i64]).to_dyn(),
             );
-            let x1u = Split::new(
+            let x1u = Split::push_new(
                 &mut graph,
                 xr5,
                 Some(MilliOpTensorIDOrLiteral::TensorID(split_sizes)),
@@ -195,7 +198,7 @@ impl Operation for RotaryEmbeddingOperation {
                 None,
                 0,
             );
-            let x2u = Split::new(
+            let x2u = Split::push_new(
                 &mut graph,
                 xr5,
                 Some(MilliOpTensorIDOrLiteral::TensorID(split_sizes)),
@@ -204,19 +207,19 @@ impl Operation for RotaryEmbeddingOperation {
                 1,
             );
             let ax_last =
-                Constant::new(&mut graph, NDArrayNumericTensor::from(vec![-1i64]).to_dyn());
-            let x1 = Squeeze::new(&mut graph, x1u, ax_last);
-            let x2 = Squeeze::new(&mut graph, x2u, ax_last);
+                Constant::push_new(&mut graph, NDArrayNumericTensor::from(vec![-1i64]).to_dyn());
+            let x1 = Squeeze::push_new(&mut graph, x1u, ax_last);
+            let x2 = Squeeze::push_new(&mut graph, x2u, ax_last);
             (x1, x2)
         } else {
             // Split last axis [D/2, D/2]
             if use_partial {
                 let half = self.rotary_embedding_dim / 2;
-                let split_sizes = Constant::new(
+                let split_sizes = Constant::push_new(
                     &mut graph,
                     NDArrayNumericTensor::from(vec![half, half]).to_dyn(),
                 );
-                let x1 = Split::new(
+                let x1 = Split::push_new(
                     &mut graph,
                     x_rotate,
                     Some(MilliOpTensorIDOrLiteral::TensorID(split_sizes)),
@@ -224,7 +227,7 @@ impl Operation for RotaryEmbeddingOperation {
                     None,
                     0,
                 );
-                let x2 = Split::new(
+                let x2 = Split::push_new(
                     &mut graph,
                     x_rotate,
                     Some(MilliOpTensorIDOrLiteral::TensorID(split_sizes)),
@@ -236,16 +239,16 @@ impl Operation for RotaryEmbeddingOperation {
             } else {
                 // For full rotation and non-interleaved: split into contiguous halves.
                 // Reshape [..., D] -> [..., 2, D/2], then split axis -2 and squeeze it.
-                let new_shape = Constant::new(
+                let new_shape = Constant::push_new(
                     &mut graph,
                     NDArrayNumericTensor::from(vec![0i64, 0i64, 0i64, 2i64, -1i64]).to_dyn(),
                 );
-                let xr5 = Reshape::new(&mut graph, x_rotate, new_shape, false);
-                let split_sizes = Constant::new(
+                let xr5 = Reshape::push_new(&mut graph, x_rotate, new_shape, false);
+                let split_sizes = Constant::push_new(
                     &mut graph,
                     NDArrayNumericTensor::from(vec![1i64, 1i64]).to_dyn(),
                 );
-                let x1u = Split::new(
+                let x1u = Split::push_new(
                     &mut graph,
                     xr5,
                     Some(MilliOpTensorIDOrLiteral::TensorID(split_sizes)),
@@ -253,7 +256,7 @@ impl Operation for RotaryEmbeddingOperation {
                     None,
                     0,
                 );
-                let x2u = Split::new(
+                let x2u = Split::push_new(
                     &mut graph,
                     xr5,
                     Some(MilliOpTensorIDOrLiteral::TensorID(split_sizes)),
@@ -261,10 +264,12 @@ impl Operation for RotaryEmbeddingOperation {
                     None,
                     1,
                 );
-                let ax_minus2 =
-                    Constant::new(&mut graph, NDArrayNumericTensor::from(vec![-2i64]).to_dyn());
-                let x1 = Squeeze::new(&mut graph, x1u, ax_minus2);
-                let x2 = Squeeze::new(&mut graph, x2u, ax_minus2);
+                let ax_minus2 = Constant::push_new(
+                    &mut graph,
+                    NDArrayNumericTensor::from(vec![-2i64]).to_dyn(),
+                );
+                let x1 = Squeeze::push_new(&mut graph, x1u, ax_minus2);
+                let x2 = Squeeze::push_new(&mut graph, x2u, ax_minus2);
                 (x1, x2)
             }
         };
@@ -280,28 +285,28 @@ impl Operation for RotaryEmbeddingOperation {
         // Reassemble rotated part
         let rotated = if self.interleaved {
             let ax_last =
-                Constant::new(&mut graph, NDArrayNumericTensor::from(vec![-1i64]).to_dyn());
-            let real_u = Unsqueeze::new(&mut graph, real, ax_last);
-            let imag_u = Unsqueeze::new(&mut graph, imag, ax_last);
-            let stacked = Concat::new(&mut graph, vec![real_u, imag_u], -1);
-            let new_shape = Constant::new(
+                Constant::push_new(&mut graph, NDArrayNumericTensor::from(vec![-1i64]).to_dyn());
+            let real_u = Unsqueeze::push_new(&mut graph, real, ax_last);
+            let imag_u = Unsqueeze::push_new(&mut graph, imag, ax_last);
+            let stacked = Concat::push_new(&mut graph, vec![real_u, imag_u], -1);
+            let new_shape = Constant::push_new(
                 &mut graph,
                 NDArrayNumericTensor::from(vec![0i64, 0i64, 0i64, -1i64]).to_dyn(),
             );
-            Reshape::new(&mut graph, stacked, new_shape, false)
+            Reshape::push_new(&mut graph, stacked, new_shape, false)
         } else {
-            Concat::new(&mut graph, vec![real, imag], -1)
+            Concat::push_new(&mut graph, vec![real, imag], -1)
         };
 
         // Combine with non-rotated tail
-        let combined = Concat::new(&mut graph, vec![rotated, x_not_rotate], -1);
+        let combined = Concat::push_new(&mut graph, vec![rotated, x_not_rotate], -1);
 
         // Return to original layout
         let out = if self.num_heads.is_some() {
-            let data_shape = Shape::new(&mut graph, data);
-            Reshape::new(&mut graph, combined, data_shape, false)
+            let data_shape = Shape::push_new(&mut graph, data);
+            Reshape::push_new(&mut graph, combined, data_shape, false)
         } else {
-            Transpose::new(&mut graph, combined, Some(vec![0, 2, 1, 3]))
+            Transpose::push_new(&mut graph, combined, Some(vec![0, 2, 1, 3]))
         };
 
         let mut output_map = HashMap::new();

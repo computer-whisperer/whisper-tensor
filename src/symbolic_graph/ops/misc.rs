@@ -56,7 +56,7 @@ impl Operation for WhereOperation {
 
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
-        let out = Where::new(
+        let out = Where::push_new(
             &mut graph,
             input_map[&self.condition],
             input_map[&self.x],
@@ -371,7 +371,7 @@ impl Operation for ExpandOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
 
-        let x = Expand::new(&mut graph, input_map[&self.input], input_map[&self.shape]);
+        let x = Expand::push_new(&mut graph, input_map[&self.input], input_map[&self.shape]);
 
         let mut output_map = HashMap::new();
         output_map.insert(x, self.output);
@@ -499,7 +499,7 @@ impl Operation for RangeOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
 
-        let out = Range::new(
+        let out = Range::push_new(
             &mut graph,
             input_map[&self.start],
             input_map[&self.end],

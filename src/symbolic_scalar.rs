@@ -48,6 +48,7 @@ where
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn try_eq(&self, other: &Self) -> Option<bool> {
         if self.symbol_idx == other.symbol_idx {
             Some(self.offset == other.offset)
@@ -56,6 +57,7 @@ where
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn add_offset(&self, offset: i64) -> Self {
         Self {
             offset: self.offset + offset,

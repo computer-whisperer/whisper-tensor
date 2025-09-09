@@ -17,7 +17,7 @@ pub struct ArgMin {
 }
 
 impl ArgMin {
-    pub fn new<T: std::hash::Hash + Clone + Eq>(
+    pub fn push_new<T: std::hash::Hash + Clone + Eq>(
         graph: &mut MilliOpGraph<T>,
         input: MilliOpGraphTensorId,
         axis: i64,
@@ -43,7 +43,7 @@ impl MilliOp for ArgMin {
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
     ) -> Result<
-        impl Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>,
+        Box<dyn Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>>,
         MilliOpGraphError,
     > {
         let input = inputs[&self.input].clone();
@@ -53,19 +53,19 @@ impl MilliOp for ArgMin {
             self.axis
         } as usize;
         let min = input.argmin(axis, self.keepdims, self.select_last_index, backend)?;
-        Ok([(self.output, min)].into_iter())
-    }
-
-    fn get_name(&self) -> String {
-        "ArgMin".to_string()
+        Ok(Box::new([(self.output, min)].into_iter()))
     }
 }
 
 impl Node<MilliOpGraphTensorId> for ArgMin {
-    fn inputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
-        vec![self.input].into_iter()
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
+        "ArgMin".to_string()
     }
-    fn outputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
-        vec![self.output].into_iter()
+    fn inputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+        Box::new(vec![self.input].into_iter())
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+        Box::new(vec![self.output].into_iter())
     }
 }

@@ -19,7 +19,7 @@ pub struct Split {
 }
 
 impl Split {
-    pub fn new<T: std::hash::Hash + Clone + Eq>(
+    pub fn push_new<T: std::hash::Hash + Clone + Eq>(
         graph: &mut MilliOpGraph<T>,
         data: MilliOpGraphTensorId,
         split: Option<MilliOpTensorIDOrLiteral>,
@@ -42,11 +42,15 @@ impl Split {
 }
 
 impl Node<MilliOpGraphTensorId> for Split {
-    fn inputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
-        vec![self.data].into_iter()
+    type OpKind = String;
+    fn op_kind(&self) -> String {
+        "Split".to_string()
     }
-    fn outputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
-        vec![self.output].into_iter()
+    fn inputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+        Box::new([self.data].into_iter())
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+        Box::new([self.output].into_iter())
     }
 }
 
@@ -56,7 +60,7 @@ impl MilliOp for Split {
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
     ) -> Result<
-        impl Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>,
+        Box<dyn Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>>,
         MilliOpGraphError,
     > {
         // Determine the split sizes
@@ -110,11 +114,7 @@ impl MilliOp for Split {
 
         let outs = inputs[&self.data].split(&split, self.axis, backend)?;
         let out = outs[self.output_id].clone();
-        Ok([(self.output, out)].into_iter())
-    }
-
-    fn get_name(&self) -> String {
-        "Split".to_string()
+        Ok(Box::new([(self.output, out)].into_iter()))
     }
 }
 
@@ -128,8 +128,8 @@ mod tests {
         // Build a tiny graph with one input and two split outputs, then run eval
         let (mut graph, input_map) = MilliOpGraph::new(&[MilliOpGraphTensorId { inner: 0 }]);
         let data_id = input_map[&MilliOpGraphTensorId { inner: 0 }];
-        let out0 = Split::new(&mut graph, data_id, None, 0, Some(2), 0);
-        let out1 = Split::new(&mut graph, data_id, None, 0, Some(2), 1);
+        let out0 = Split::push_new(&mut graph, data_id, None, 0, Some(2), 0);
+        let out1 = Split::push_new(&mut graph, data_id, None, 0, Some(2), 1);
         let mut output_map = HashMap::new();
         output_map.insert(out0, MilliOpGraphTensorId { inner: 1 });
         output_map.insert(out1, MilliOpGraphTensorId { inner: 2 });
@@ -160,7 +160,7 @@ mod tests {
     fn test_split_num_outputs_negative_axis() {
         let (mut graph, input_map) = MilliOpGraph::new(&[MilliOpGraphTensorId { inner: 0 }]);
         let data_id = input_map[&MilliOpGraphTensorId { inner: 0 }];
-        let out = Split::new(&mut graph, data_id, None, -1, Some(2), 1);
+        let out = Split::push_new(&mut graph, data_id, None, -1, Some(2), 1);
         let mut output_map = HashMap::new();
         output_map.insert(out, MilliOpGraphTensorId { inner: 1 });
         graph.set_output_map(output_map);
@@ -189,8 +189,8 @@ mod tests {
         let (mut graph, input_map) = MilliOpGraph::new(&[MilliOpGraphTensorId { inner: 0 }]);
         let data_id = input_map[&MilliOpGraphTensorId { inner: 0 }];
         // dim=5, num_outputs=2 -> sizes [3,2]
-        let out0 = Split::new(&mut graph, data_id, None, 0, Some(2), 0);
-        let out1 = Split::new(&mut graph, data_id, None, 0, Some(2), 1);
+        let out0 = Split::push_new(&mut graph, data_id, None, 0, Some(2), 0);
+        let out1 = Split::push_new(&mut graph, data_id, None, 0, Some(2), 1);
         let mut output_map = HashMap::new();
         output_map.insert(out0, MilliOpGraphTensorId { inner: 1 });
         output_map.insert(out1, MilliOpGraphTensorId { inner: 2 });

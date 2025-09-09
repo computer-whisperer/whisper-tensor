@@ -16,7 +16,7 @@ pub struct Where {
 }
 
 impl Where {
-    pub fn new<T: std::hash::Hash + Clone + Eq>(
+    pub fn push_new<T: std::hash::Hash + Clone + Eq>(
         graph: &mut MilliOpGraph<T>,
         condition: MilliOpGraphTensorId,
         x: MilliOpGraphTensorId,
@@ -35,11 +35,15 @@ impl Where {
 }
 
 impl Node<MilliOpGraphTensorId> for Where {
-    fn inputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
-        vec![self.condition, self.x, self.y].into_iter()
+    type OpKind = String;
+    fn op_kind(&self) -> String {
+        "Where".to_string()
     }
-    fn outputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
-        vec![self.output].into_iter()
+    fn inputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+        Box::new([self.condition, self.x, self.y].into_iter())
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+        Box::new([self.output].into_iter())
     }
 }
 
@@ -49,14 +53,10 @@ impl MilliOp for Where {
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
     ) -> Result<
-        impl Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>,
+        Box<dyn Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>>,
         MilliOpGraphError,
     > {
         let out = inputs[&self.condition].where_op(&inputs[&self.x], &inputs[&self.y], backend)?;
-        Ok([(self.output, out)].into_iter())
-    }
-
-    fn get_name(&self) -> String {
-        "Where".to_string()
+        Ok(Box::new([(self.output, out)].into_iter()))
     }
 }

@@ -35,6 +35,7 @@ where
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn try_eq(&self, other: &Self) -> Option<bool> {
         if let (Self::Numeric(a), Self::Numeric(b)) = (self, other) {
             Some(a == b)
@@ -45,6 +46,7 @@ where
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn add_offset(&self, offset: i64) -> Self
     where
         T: 'static + std::ops::Add<Output = T>,

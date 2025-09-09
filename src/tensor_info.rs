@@ -560,6 +560,7 @@ impl<T, R: Rank> TensorInfoTypedRanked<T, R>
 where
     T: TensorInfoType,
 {
+    #[allow(dead_code)]
     pub(crate) fn shape(&self) -> R::UnknownDims {
         match self {
             TensorInfoTypedRanked::Shaped(shaped) => R::known_to_unknown_dims(&shaped.shape()),
@@ -575,6 +576,7 @@ where
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn get(
         &self,
         index: &R::KnownDims,
@@ -767,6 +769,7 @@ pub enum TensorInfoRanked<R: Rank> {
 }
 
 impl<R: Rank> TensorInfoRanked<R> {
+    #[allow(dead_code)]
     pub(crate) fn new(
         first_element: ScalarInfo,
         shape: R::UnknownDims,
@@ -825,6 +828,7 @@ impl<R: Rank> TensorInfoRanked<R> {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn try_to_type<T: TensorInfoType>(
         &self,
     ) -> Result<TensorInfoTypedRanked<T, R>, TensorInfoError> {
@@ -862,6 +866,7 @@ impl<R: Rank> TensorInfoRanked<R> {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn reshape(
         &self,
         new_shape: R::UnknownDims,
@@ -897,6 +902,7 @@ pub enum TensorInfo {
 }
 
 impl TensorInfo {
+    #[allow(dead_code)]
     pub(crate) fn new_from_first_element_and_rank(
         first_element: ScalarInfo,
         rank: ScalarInfoTyped<u32>,
@@ -916,6 +922,7 @@ impl TensorInfo {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn new_from_first_element_and_shape(
         first_element: ScalarInfo,
         shape: TensorInfoTypedRanked<u64, P1>,
@@ -949,6 +956,8 @@ impl TensorInfo {
             Self::Minimal(x) => x.dtype(),
         }
     }
+
+    #[allow(dead_code)]
     pub(crate) fn shape(
         &self,
         symbolic_resolver: &mut SymbolicResolver,
@@ -967,6 +976,8 @@ impl TensorInfo {
             Self::Minimal(x) => TensorInfoTypedRanked::Ranked(x.shape(symbolic_resolver)),
         }
     }
+
+    #[allow(dead_code)]
     pub(crate) fn rank(&self) -> ScalarInfoTyped<u32> {
         match self {
             Self::Ranked(x) => ScalarInfoTyped::Numeric(x.rank() as u32),
@@ -998,6 +1009,7 @@ impl TensorInfo {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn as_ranked(&self) -> Option<&TensorInfoRanked<DynRank>> {
         match self {
             TensorInfo::Ranked(tensor) => Some(tensor),
@@ -1005,6 +1017,7 @@ impl TensorInfo {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn as_shaped(&self) -> Option<&TensorInfoShaped<DynRank>> {
         match self {
             TensorInfo::Ranked(tensor) => tensor.as_shaped(),
@@ -1019,6 +1032,7 @@ impl TensorInfo {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn try_to_rank<R: KnownRank>(
         &self,
         symbolic_resolver: &mut SymbolicResolver,

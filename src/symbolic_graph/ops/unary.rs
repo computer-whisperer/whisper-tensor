@@ -1,5 +1,4 @@
 use crate::dtype::DType;
-use crate::graph::{Graph, InnerGraph, Node};
 use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::ops::*;
 use crate::symbolic_graph::ops::Operation;
@@ -79,30 +78,30 @@ impl Operation for UnaryOperation {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let a = input_map[&self.input];
         if let WhichUnaryOperation::NonZero = &self.which {
-            let out_tid = NonZero::new(&mut graph, a);
+            let out_tid = NonZero::push_new(&mut graph, a);
             let mut output_map = HashMap::new();
             output_map.insert(out_tid, self.output);
             graph.set_output_map(output_map);
             return graph;
         }
         let out_tid = match &self.which {
-            WhichUnaryOperation::Relu => MilliOpClampMin::new(&mut graph, a, 0.0),
+            WhichUnaryOperation::Relu => ClampMin::push_new(&mut graph, a, 0.0),
             WhichUnaryOperation::Sigmoid => {
-                let xn = Cast::new(&mut graph, a, DType::F32);
+                let xn = Cast::push_new(&mut graph, a, DType::F32);
                 let xn = SimpleUnaryOp::neg(&mut graph, xn);
                 let xn = SimpleUnaryOp::exp(&mut graph, xn);
                 let c_tid = Constant::new_scalar(&mut graph, 1.0f32);
-                let c = CastLike::new(&mut graph, c_tid, xn);
+                let c = CastLike::push_new(&mut graph, c_tid, xn);
                 let o = SimpleBinary::add(&mut graph, xn, c);
                 let o = SimpleUnaryOp::reciprocal(&mut graph, o);
-                CastLike::new(&mut graph, o, a)
+                CastLike::push_new(&mut graph, o, a)
             }
             WhichUnaryOperation::Exp => SimpleUnaryOp::exp(&mut graph, a),
             WhichUnaryOperation::Log => SimpleUnaryOp::ln(&mut graph, a),
             WhichUnaryOperation::Softplus => {
                 let x = SimpleUnaryOp::exp(&mut graph, a);
                 let c_tid = Constant::new_scalar(&mut graph, 1.0f32);
-                let c = CastLike::new(&mut graph, c_tid, x);
+                let c = CastLike::push_new(&mut graph, c_tid, x);
                 let x = SimpleBinary::add(&mut graph, x, c);
                 SimpleUnaryOp::ln(&mut graph, x)
             }
@@ -173,7 +172,7 @@ impl Operation for SoftmaxOperation {
 
         let e = SimpleUnaryOp::exp(&mut graph, input_map[&self.input]);
         let axis_tid = Constant::new_scalar(&mut graph, self.axis.unwrap_or(-1));
-        let sum = ReduceSum::new(&mut graph, e, Some(axis_tid), true, false);
+        let sum = ReduceSum::push_new(&mut graph, e, Some(axis_tid), true, false);
         let out_tid = SimpleBinary::div(&mut graph, e, sum);
         let mut output_map = HashMap::new();
         output_map.insert(out_tid, self.output);
@@ -227,7 +226,7 @@ impl Operation for LogSoftmaxOperation {
 
         let e_tid = SimpleUnaryOp::exp(&mut graph, input_map[&self.input]);
         let axis_tid = Constant::new_scalar(&mut graph, self.axis.unwrap_or(-1));
-        let sum_tid = ReduceSum::new(&mut graph, e_tid, Some(axis_tid), true, false);
+        let sum_tid = ReduceSum::push_new(&mut graph, e_tid, Some(axis_tid), true, false);
         let softmax_tid = SimpleBinary::div(&mut graph, e_tid, sum_tid);
         let out_tid = SimpleUnaryOp::ln(&mut graph, softmax_tid);
         let mut output_map = HashMap::new();

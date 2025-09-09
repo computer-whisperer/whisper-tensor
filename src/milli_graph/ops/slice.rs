@@ -19,7 +19,7 @@ pub struct Slice {
 }
 
 impl Slice {
-    pub fn new<T: std::hash::Hash + Clone + Eq>(
+    pub fn push_new<T: std::hash::Hash + Clone + Eq>(
         graph: &mut MilliOpGraph<T>,
         data: MilliOpGraphTensorId,
         starts: MilliOpGraphTensorId,
@@ -42,7 +42,11 @@ impl Slice {
 }
 
 impl crate::graph::Node<MilliOpGraphTensorId> for Slice {
-    fn inputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
+        "Slice".to_string()
+    }
+    fn inputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
         let mut res = vec![self.data, self.starts, self.ends];
         if let Some(steps) = &self.steps {
             res.push(*steps);
@@ -50,10 +54,10 @@ impl crate::graph::Node<MilliOpGraphTensorId> for Slice {
         if let Some(axes) = &self.axes {
             res.push(*axes);
         }
-        res.into_iter()
+        Box::new(res.into_iter())
     }
-    fn outputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
-        vec![self.output].into_iter()
+    fn outputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+        Box::new([self.output].into_iter())
     }
 }
 
@@ -63,7 +67,7 @@ impl MilliOp for Slice {
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
     ) -> Result<
-        impl Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>,
+        Box<dyn Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>>,
         MilliOpGraphError,
     > {
         let data_input = &inputs[&self.data];
@@ -128,10 +132,6 @@ impl MilliOp for Slice {
             output_slice[axis] = start..end;
         }
         let output = data_input.slice(&output_slice, backend)?;
-        Ok([(self.output, output)].into_iter())
-    }
-
-    fn get_name(&self) -> String {
-        "Slice".to_string()
+        Ok(Box::new([(self.output, output)].into_iter()))
     }
 }

@@ -47,7 +47,7 @@ impl Operation for TransposeOperation {
 
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
-        let out = Transpose::new(&mut graph, input_map[&self.input], self.perm.clone());
+        let out = Transpose::push_new(&mut graph, input_map[&self.input], self.perm.clone());
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
         graph.set_output_map(output_map);

@@ -58,7 +58,7 @@ impl Operation for ConcatOperation {
         for input in &self.inputs {
             milli_inputs.push(input_map[input]);
         }
-        let out = Concat::new(&mut graph, milli_inputs, self.axis);
+        let out = Concat::push_new(&mut graph, milli_inputs, self.axis);
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
         graph.set_output_map(output_map);

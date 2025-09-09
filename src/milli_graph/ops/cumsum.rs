@@ -18,7 +18,7 @@ pub struct CumSum {
 }
 
 impl CumSum {
-    pub fn new<T: std::hash::Hash + Clone + Eq>(
+    pub fn push_new<T: std::hash::Hash + Clone + Eq>(
         graph: &mut MilliOpGraph<T>,
         input: MilliOpGraphTensorId,
         axis: MilliOpGraphTensorId,
@@ -41,11 +41,15 @@ impl CumSum {
 use crate::graph::Node;
 
 impl Node<MilliOpGraphTensorId> for CumSum {
-    fn inputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
-        vec![self.input, self.axis].into_iter()
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
+        "CumSum".to_string()
     }
-    fn outputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
-        vec![self.output].into_iter()
+    fn inputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+        Box::new(vec![self.input, self.axis].into_iter())
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+        Box::new(vec![self.output].into_iter())
     }
 }
 
@@ -55,16 +59,12 @@ impl MilliOp for CumSum {
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
     ) -> Result<
-        impl Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>,
+        Box<dyn Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>>,
         MilliOpGraphError,
     > {
         let data = &inputs[&self.input];
         let axis = i64::cast_from_numeric_scalar(&inputs[&self.axis].first_element());
         let out = data.cumsum(Some(axis as isize), self.exclusive, self.reverse, backend)?;
-        Ok([(self.output, out)].into_iter())
-    }
-
-    fn get_name(&self) -> String {
-        "CumSum".to_string()
+        Ok(Box::new([(self.output, out)].into_iter()))
     }
 }

@@ -16,7 +16,7 @@ pub struct Range {
 }
 
 impl Range {
-    pub fn new<T: std::hash::Hash + Clone + Eq>(
+    pub fn push_new<T: std::hash::Hash + Clone + Eq>(
         graph: &mut MilliOpGraph<T>,
         start: MilliOpGraphTensorId,
         end: MilliOpGraphTensorId,
@@ -35,11 +35,15 @@ impl Range {
 }
 
 impl crate::graph::Node<MilliOpGraphTensorId> for Range {
-    fn inputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
-        vec![self.start, self.end, self.delta].into_iter()
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
+        "Range".to_string()
     }
-    fn outputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
-        vec![self.output].into_iter()
+    fn inputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+        Box::new(vec![self.start, self.end, self.delta].into_iter())
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+        Box::new(vec![self.output].into_iter())
     }
 }
 
@@ -49,7 +53,7 @@ impl MilliOp for Range {
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
     ) -> Result<
-        impl Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>,
+        Box<dyn Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>>,
         MilliOpGraphError,
     > {
         let out: NumericTensor<DynRank> = NumericTensor::<P1>::range(
@@ -59,10 +63,6 @@ impl MilliOp for Range {
             backend,
         )?
         .to_dyn_rank();
-        Ok([(self.output, out)].into_iter())
-    }
-
-    fn get_name(&self) -> String {
-        "Range".to_string()
+        Ok(Box::new([(self.output, out)].into_iter()))
     }
 }

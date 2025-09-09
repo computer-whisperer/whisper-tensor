@@ -15,7 +15,7 @@ pub struct Cast {
 }
 
 impl Cast {
-    pub fn new<T: std::hash::Hash + Clone + Eq>(
+    pub fn push_new<T: std::hash::Hash + Clone + Eq>(
         graph: &mut MilliOpGraph<T>,
         data: MilliOpGraphTensorId,
         dtype: DType,
@@ -32,11 +32,15 @@ impl Cast {
 }
 
 impl crate::graph::Node<MilliOpGraphTensorId> for Cast {
-    fn inputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
-        vec![self.data].into_iter()
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
+        "Cast".to_string()
     }
-    fn outputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
-        vec![self.output].into_iter()
+    fn inputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+        Box::new(vec![self.data].into_iter())
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+        Box::new(vec![self.output].into_iter())
     }
 }
 
@@ -46,14 +50,10 @@ impl MilliOp for Cast {
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
     ) -> Result<
-        impl Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>,
+        Box<dyn Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>>,
         MilliOpGraphError,
     > {
         let out = inputs[&self.data].cast(self.dtype, backend)?;
-        Ok([(self.output, out)].into_iter())
-    }
-
-    fn get_name(&self) -> String {
-        "Cast".to_string()
+        Ok(Box::new([(self.output, out)].into_iter()))
     }
 }

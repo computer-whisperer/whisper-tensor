@@ -18,7 +18,7 @@ pub struct NonZero {
 }
 
 impl NonZero {
-    pub fn new<T: std::hash::Hash + Clone + Eq>(
+    pub fn push_new<T: std::hash::Hash + Clone + Eq>(
         graph: &mut MilliOpGraph<T>,
         input: MilliOpGraphTensorId,
     ) -> MilliOpGraphTensorId {
@@ -30,11 +30,15 @@ impl NonZero {
 }
 
 impl Node<MilliOpGraphTensorId> for NonZero {
-    fn inputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
-        vec![self.input].into_iter()
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
+        "NonZero".to_string()
     }
-    fn outputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
-        vec![self.output].into_iter()
+    fn inputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+        Box::new(vec![self.input].into_iter())
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+        Box::new(vec![self.output].into_iter())
     }
 }
 
@@ -44,14 +48,15 @@ impl MilliOp for NonZero {
         known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>,
         symbolic_resolver: &mut SymbolicResolver,
         backend: &mut EvalBackend,
-    ) -> Result<impl Iterator<Item = (MilliOpGraphTensorId, TensorInfo)>, MilliOpGraphError> {
+    ) -> Result<Box<dyn Iterator<Item = (MilliOpGraphTensorId, TensorInfo)>>, MilliOpGraphError>
+    {
         if let Some(input) = known_inputs.get(&self.input).and_then(|ti| ti.as_numeric()) {
             let inputs = HashMap::from([(self.input, input.clone())]);
             let out = self
                 .eval(&inputs, backend)?
                 .map(|(tid, t)| (tid, TensorInfo::from(t)))
                 .collect::<Vec<_>>();
-            return Ok(out.into_iter());
+            return Ok(Box::new(out.into_iter()));
         }
         // Fallback minimal info if unknown: dtype I64 vector of unknown size
         let minimal = TensorInfo::Minimal(MinimalTensor::new(
@@ -59,7 +64,7 @@ impl MilliOp for NonZero {
             SymbolicScalarTyped::new(symbolic_resolver),
         ));
         let v: Vec<(MilliOpGraphTensorId, TensorInfo)> = vec![(self.output, minimal)];
-        Ok(v.into_iter())
+        Ok(Box::new(v.into_iter()))
     }
 
     fn eval(
@@ -67,14 +72,10 @@ impl MilliOp for NonZero {
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
     ) -> Result<
-        impl Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>,
+        Box<dyn Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>>,
         MilliOpGraphError,
     > {
         let out = inputs[&self.input].nonzero(backend)?;
-        Ok([(self.output, out)].into_iter())
-    }
-
-    fn get_name(&self) -> String {
-        "NonZero".to_string()
+        Ok(Box::new([(self.output, out)].into_iter()))
     }
 }

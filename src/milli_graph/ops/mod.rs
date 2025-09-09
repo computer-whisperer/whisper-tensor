@@ -71,13 +71,18 @@ pub enum MilliOpTensorIDOrLiteral {
     Literal(NDArrayNumericTensor<DynRank>),
 }
 
+pub type EvalResult = Result<
+    Box<dyn Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>>,
+    MilliOpGraphError,
+>;
 pub trait MilliOp: Node<MilliOpGraphTensorId> {
     fn infer(
         &self,
         known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>,
         _symbolic_resolver: &mut SymbolicResolver,
         backend: &mut EvalBackend,
-    ) -> Result<impl Iterator<Item = (MilliOpGraphTensorId, TensorInfo)>, MilliOpGraphError> {
+    ) -> Result<Box<dyn Iterator<Item = (MilliOpGraphTensorId, TensorInfo)>>, MilliOpGraphError>
+    {
         let mut resolved_inputs = HashMap::new();
         for input in self.inputs() {
             if let Some(tensor_info) = known_inputs.get(&input) {
@@ -95,21 +100,17 @@ pub trait MilliOp: Node<MilliOpGraphTensorId> {
             .eval(&resolved_inputs, backend)?
             .map(|(a, b)| (a, TensorInfo::from(b)))
             .collect();
-        Ok(collected.into_iter())
+        Ok(Box::new(collected.into_iter()))
     }
     //fn infer(&self, known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>, _symbolic_resolver: &mut SymbolicResolver, backend: &mut EvalBackend) -> Result<TensorInfo, MilliOpGraphError>;
     fn eval(
         &self,
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
         _backend: &mut EvalBackend,
-    ) -> Result<
-        impl Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>,
-        MilliOpGraphError,
-    >;
-
-    fn get_name(&self) -> String;
+    ) -> EvalResult;
 }
 
+#[allow(dead_code)]
 fn infer_multidirectional_broadcasting_rank(
     shapes: &[TensorInfoTypedRanked<u64, P1>],
     symbolic_resolver: &mut SymbolicResolver,
@@ -139,6 +140,7 @@ fn infer_multidirectional_broadcasting_rank(
     }
 }
 
+#[allow(dead_code)]
 fn infer_multidirectional_broadcasting_shape(
     shapes: &[Vec<ScalarInfoTyped<u64>>],
     symbolic_resolver: &mut SymbolicResolver,
@@ -230,10 +232,10 @@ pub enum AnyMilliOp {
     Constant(Constant),
     ConstantOfShape(ConstantOfShape),
     SimpleBinary(SimpleBinary),
-    MatMul(MilliOpMatMul),
-    Pow(MilliOpPow),
+    MatMul(MatMul),
+    Pow(Pow),
     SimpleUnary(SimpleUnaryOp),
-    ClampMin(MilliOpClampMin),
+    ClampMin(ClampMin),
     NonZero(NonZero),
     CumSum(CumSum),
     Shape(Shape),
@@ -276,7 +278,6 @@ macro_rules! delegate {
                 AnyMilliOp::Reshape(x) => x.$name($($arg),*),
                 AnyMilliOp::Slice(x) => x.$name($($arg),*),
                 AnyMilliOp::ReduceSum(x) => x.$name($($arg),*),
-                AnyMilliOp::ReduceSum(x) => x.$name($($arg),*),
                 AnyMilliOp::ReduceMin(x) => x.$name($($arg),*),
                 AnyMilliOp::ReduceMax(x) => x.$name($($arg),*),
                 AnyMilliOp::ReduceProd(x) => x.$name($($arg),*),
@@ -305,7 +306,7 @@ impl MilliOp for AnyMilliOp {
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
     ) -> Result<
-        impl Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>,
+        Box<dyn Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>>,
         MilliOpGraphError,
     > {
         let collected: Vec<(MilliOpGraphTensorId, NumericTensor<DynRank>)> = match self {
@@ -340,115 +341,13 @@ impl MilliOp for AnyMilliOp {
             AnyMilliOp::ClampMin(x) => x.eval(inputs, backend)?.collect(),
             AnyMilliOp::NonZero(x) => x.eval(inputs, backend)?.collect(),
         };
-        Ok(collected.into_iter())
-    }
-
-    fn get_name(&self) -> String {
-        match self {
-            AnyMilliOp::ArgMax(x) => x.get_name(),
-            AnyMilliOp::ArgMin(x) => x.get_name(),
-            AnyMilliOp::ReduceSum(x) => x.get_name(),
-            AnyMilliOp::Constant(x) => x.get_name(),
-            AnyMilliOp::ConstantOfShape(x) => x.get_name(),
-            AnyMilliOp::SimpleBinary(_) => "SimpleBinary".to_string(),
-            AnyMilliOp::MatMul(_) => "MatMul".to_string(),
-            AnyMilliOp::Pow(_) => "Pow".to_string(),
-            AnyMilliOp::SimpleUnary(_) => "SimpleUnary".to_string(),
-            AnyMilliOp::ClampMin(_) => "ClampMin".to_string(),
-            AnyMilliOp::NonZero(_) => "NonZero".to_string(),
-            AnyMilliOp::CumSum(_) => "CumSum".to_string(),
-            AnyMilliOp::Shape(x) => x.get_name(),
-            AnyMilliOp::Reshape(x) => x.get_name(),
-            AnyMilliOp::Slice(x) => x.get_name(),
-            AnyMilliOp::ReduceMin(x) => x.get_name(),
-            AnyMilliOp::ReduceMax(x) => x.get_name(),
-            AnyMilliOp::ReduceProd(x) => x.get_name(),
-            AnyMilliOp::ReduceMean(x) => x.get_name(),
-            AnyMilliOp::Cast(x) => x.get_name(),
-            AnyMilliOp::CastLike(x) => x.get_name(),
-            AnyMilliOp::Transpose(x) => x.get_name(),
-            AnyMilliOp::Squeeze(x) => x.get_name(),
-            AnyMilliOp::Unsqueeze(x) => x.get_name(),
-            AnyMilliOp::Gather(_) => "Gather".to_string(),
-            AnyMilliOp::Concat(x) => x.get_name(),
-            AnyMilliOp::Split(_) => "Split".to_string(),
-            AnyMilliOp::Where(_) => "Where".to_string(),
-            AnyMilliOp::Range(x) => x.get_name(),
-            AnyMilliOp::Expand(x) => x.get_name(),
-        }
+        Ok(Box::new(collected.into_iter()))
     }
 }
 
 impl Node<MilliOpGraphTensorId> for AnyMilliOp {
-    fn inputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
-        let it: Box<dyn Iterator<Item = MilliOpGraphTensorId>> = match self {
-            AnyMilliOp::ArgMax(x) => Box::new(x.inputs()),
-            AnyMilliOp::ArgMin(x) => Box::new(x.inputs()),
-            AnyMilliOp::ReduceSum(x) => Box::new(x.inputs()),
-            AnyMilliOp::Shape(x) => Box::new(x.inputs()),
-            AnyMilliOp::ReduceMin(x) => Box::new(x.inputs()),
-            AnyMilliOp::ReduceMax(x) => Box::new(x.inputs()),
-            AnyMilliOp::ReduceProd(x) => Box::new(x.inputs()),
-            AnyMilliOp::ReduceMean(x) => Box::new(x.inputs()),
-            AnyMilliOp::Transpose(x) => Box::new(x.inputs()),
-            AnyMilliOp::Reshape(x) => Box::new(x.inputs()),
-            AnyMilliOp::Squeeze(x) => Box::new(x.inputs()),
-            AnyMilliOp::Unsqueeze(x) => Box::new(x.inputs()),
-            AnyMilliOp::Cast(x) => Box::new(x.inputs()),
-            AnyMilliOp::CastLike(x) => Box::new(x.inputs()),
-            AnyMilliOp::Concat(x) => Box::new(x.inputs()),
-            AnyMilliOp::Slice(x) => Box::new(x.inputs()),
-            AnyMilliOp::Constant(x) => Box::new(x.inputs()),
-            AnyMilliOp::ConstantOfShape(x) => Box::new(x.inputs()),
-            AnyMilliOp::SimpleBinary(x) => Box::new(x.inputs()),
-            AnyMilliOp::MatMul(x) => Box::new(x.inputs()),
-            AnyMilliOp::Pow(x) => Box::new(x.inputs()),
-            AnyMilliOp::Where(x) => Box::new(x.inputs()),
-            AnyMilliOp::Range(x) => Box::new(x.inputs()),
-            AnyMilliOp::Expand(x) => Box::new(x.inputs()),
-            AnyMilliOp::Gather(x) => Box::new(x.inputs()),
-            AnyMilliOp::CumSum(x) => Box::new(x.inputs()),
-            AnyMilliOp::Split(x) => Box::new(x.inputs()),
-            AnyMilliOp::SimpleUnary(x) => Box::new(x.inputs()),
-            AnyMilliOp::ClampMin(x) => Box::new(x.inputs()),
-            AnyMilliOp::NonZero(x) => Box::new(x.inputs()),
-        };
-        it
-    }
-
-    fn outputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
-        let it: Box<dyn Iterator<Item = MilliOpGraphTensorId>> = match self {
-            AnyMilliOp::ArgMax(x) => Box::new(x.outputs()),
-            AnyMilliOp::ArgMin(x) => Box::new(x.outputs()),
-            AnyMilliOp::ReduceSum(x) => Box::new(x.outputs()),
-            AnyMilliOp::Shape(x) => Box::new(x.outputs()),
-            AnyMilliOp::ReduceMin(x) => Box::new(x.outputs()),
-            AnyMilliOp::ReduceMax(x) => Box::new(x.outputs()),
-            AnyMilliOp::ReduceProd(x) => Box::new(x.outputs()),
-            AnyMilliOp::ReduceMean(x) => Box::new(x.outputs()),
-            AnyMilliOp::Transpose(x) => Box::new(x.outputs()),
-            AnyMilliOp::Reshape(x) => Box::new(x.outputs()),
-            AnyMilliOp::Squeeze(x) => Box::new(x.outputs()),
-            AnyMilliOp::Unsqueeze(x) => Box::new(x.outputs()),
-            AnyMilliOp::Cast(x) => Box::new(x.outputs()),
-            AnyMilliOp::CastLike(x) => Box::new(x.outputs()),
-            AnyMilliOp::Concat(x) => Box::new(x.outputs()),
-            AnyMilliOp::Slice(x) => Box::new(x.outputs()),
-            AnyMilliOp::Constant(x) => Box::new(x.outputs()),
-            AnyMilliOp::ConstantOfShape(x) => Box::new(x.outputs()),
-            AnyMilliOp::SimpleBinary(x) => Box::new(x.outputs()),
-            AnyMilliOp::MatMul(x) => Box::new(x.outputs()),
-            AnyMilliOp::Pow(x) => Box::new(x.outputs()),
-            AnyMilliOp::Where(x) => Box::new(x.outputs()),
-            AnyMilliOp::Range(x) => Box::new(x.outputs()),
-            AnyMilliOp::Expand(x) => Box::new(x.outputs()),
-            AnyMilliOp::Gather(x) => Box::new(x.outputs()),
-            AnyMilliOp::CumSum(x) => Box::new(x.outputs()),
-            AnyMilliOp::Split(x) => Box::new(x.outputs()),
-            AnyMilliOp::SimpleUnary(x) => Box::new(x.outputs()),
-            AnyMilliOp::ClampMin(x) => Box::new(x.outputs()),
-            AnyMilliOp::NonZero(x) => Box::new(x.outputs()),
-        };
-        it
-    }
+    type OpKind = String;
+    delegate!(op_kind() -> String);
+    delegate!(inputs() ->  Box<dyn Iterator<Item = MilliOpGraphTensorId>>);
+    delegate!(outputs() -> Box<dyn Iterator<Item = MilliOpGraphTensorId>>);
 }

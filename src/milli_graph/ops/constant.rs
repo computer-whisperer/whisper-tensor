@@ -21,7 +21,7 @@ pub struct Constant {
 }
 
 impl Constant {
-    pub fn new<T: std::hash::Hash + Clone + Eq>(
+    pub fn push_new<T: std::hash::Hash + Clone + Eq>(
         graph: &mut MilliOpGraph<T>,
         a: NDArrayNumericTensor<DynRank>,
     ) -> MilliOpGraphTensorId {
@@ -53,11 +53,15 @@ impl Constant {
 }
 
 impl Node<MilliOpGraphTensorId> for Constant {
-    fn inputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
-        std::iter::empty()
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
+        "Constant".to_string()
     }
-    fn outputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
-        vec![self.output].into_iter()
+    fn inputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+        Box::new(std::iter::empty())
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+        Box::new(vec![self.output].into_iter())
     }
 }
 
@@ -67,14 +71,12 @@ impl MilliOp for Constant {
         _inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
         _backend: &mut EvalBackend,
     ) -> Result<
-        impl Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>,
+        Box<dyn Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>>,
         MilliOpGraphError,
     > {
-        Ok([(self.output, self.data.clone().into())].into_iter())
-    }
-
-    fn get_name(&self) -> String {
-        "Constant".to_string()
+        Ok(Box::new(
+            [(self.output, self.data.clone().into())].into_iter(),
+        ))
     }
 }
 
@@ -86,7 +88,7 @@ pub struct ConstantOfShape {
 }
 
 impl ConstantOfShape {
-    pub fn new<T: std::hash::Hash + Clone + Eq>(
+    pub fn push_new<T: std::hash::Hash + Clone + Eq>(
         graph: &mut MilliOpGraph<T>,
         value: NumericScalar,
         shape: MilliOpGraphTensorId,
@@ -101,11 +103,15 @@ impl ConstantOfShape {
 }
 
 impl Node<MilliOpGraphTensorId> for ConstantOfShape {
-    fn inputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
-        vec![self.shape].into_iter()
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
+        "ConstantOfShape".to_string()
     }
-    fn outputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
-        vec![self.output].into_iter()
+    fn inputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+        Box::new(vec![self.shape].into_iter())
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+        Box::new(vec![self.output].into_iter())
     }
 }
 
@@ -115,17 +121,13 @@ impl MilliOp for ConstantOfShape {
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
         _backend: &mut EvalBackend,
     ) -> Result<
-        impl Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>,
+        Box<dyn Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>>,
         MilliOpGraphError,
     > {
         let shape: Vec<i64> = inputs[&self.shape].try_to_rank::<P1>()?.try_into()?;
         let shape_usize = shape.iter().map(|x| *x as u64).collect::<Vec<_>>();
         let out: NumericTensor<DynRank> =
             NDArrayNumericTensor::<DynRank>::fill(self.value.clone(), &shape_usize)?.into();
-        Ok([(self.output, out)].into_iter())
-    }
-
-    fn get_name(&self) -> String {
-        "Constant of Shape".to_string()
+        Ok(Box::new([(self.output, out)].into_iter()))
     }
 }

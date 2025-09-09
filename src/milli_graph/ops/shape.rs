@@ -16,7 +16,7 @@ pub struct Shape {
 }
 
 impl Shape {
-    pub fn new<T: std::hash::Hash + Clone + Eq>(
+    pub fn push_new<T: std::hash::Hash + Clone + Eq>(
         graph: &mut MilliOpGraph<T>,
         input: MilliOpGraphTensorId,
     ) -> MilliOpGraphTensorId {
@@ -33,7 +33,7 @@ impl MilliOp for Shape {
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
         _backend: &mut EvalBackend,
     ) -> Result<
-        impl Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>,
+        Box<dyn Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>>,
         MilliOpGraphError,
     > {
         let output_shape = inputs[&self.input]
@@ -44,19 +44,19 @@ impl MilliOp for Shape {
         let out: NumericTensor<DynRank> = NDArrayNumericTensor::<P1>::from(output_shape)
             .to_dyn()
             .into();
-        Ok([(self.output, out)].into_iter())
-    }
-
-    fn get_name(&self) -> String {
-        "Shape".to_string()
+        Ok(Box::new([(self.output, out)].into_iter()))
     }
 }
 
 impl Node<MilliOpGraphTensorId> for Shape {
-    fn inputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
-        vec![self.input].into_iter()
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
+        "Shape".to_string()
     }
-    fn outputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
-        vec![self.output].into_iter()
+    fn inputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+        Box::new(vec![self.input].into_iter())
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+        Box::new(vec![self.output].into_iter())
     }
 }

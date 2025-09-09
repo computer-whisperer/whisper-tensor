@@ -233,6 +233,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn from_bytes(
         bytes: &[u8],
         dtype: DType,

@@ -42,7 +42,7 @@ use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::ops::AnyMilliOp;
 
 impl SimpleBinary {
-    fn new<T: std::hash::Hash + Clone + Eq>(
+    fn push_new<T: std::hash::Hash + Clone + Eq>(
         graph: &mut MilliOpGraph<T>,
         a: MilliOpGraphTensorId,
         b: MilliOpGraphTensorId,
@@ -63,7 +63,7 @@ impl SimpleBinary {
         a: MilliOpGraphTensorId,
         b: MilliOpGraphTensorId,
     ) -> MilliOpGraphTensorId {
-        Self::new(graph, a, b, WhichSimpleBinaryOp::Add)
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Add)
     }
 
     pub fn sub<T: std::hash::Hash + Clone + Eq>(
@@ -71,7 +71,7 @@ impl SimpleBinary {
         a: MilliOpGraphTensorId,
         b: MilliOpGraphTensorId,
     ) -> MilliOpGraphTensorId {
-        Self::new(graph, a, b, WhichSimpleBinaryOp::Sub)
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Sub)
     }
 
     pub fn mul<T: std::hash::Hash + Clone + Eq>(
@@ -79,7 +79,7 @@ impl SimpleBinary {
         a: MilliOpGraphTensorId,
         b: MilliOpGraphTensorId,
     ) -> MilliOpGraphTensorId {
-        Self::new(graph, a, b, WhichSimpleBinaryOp::Mul)
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Mul)
     }
 
     pub fn div<T: std::hash::Hash + Clone + Eq>(
@@ -87,7 +87,7 @@ impl SimpleBinary {
         a: MilliOpGraphTensorId,
         b: MilliOpGraphTensorId,
     ) -> MilliOpGraphTensorId {
-        Self::new(graph, a, b, WhichSimpleBinaryOp::Div)
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Div)
     }
 
     pub fn modulo<T: std::hash::Hash + Clone + Eq>(
@@ -96,14 +96,14 @@ impl SimpleBinary {
         b: MilliOpGraphTensorId,
         fmod: Option<bool>,
     ) -> MilliOpGraphTensorId {
-        Self::new(graph, a, b, WhichSimpleBinaryOp::Modulo(fmod))
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Modulo(fmod))
     }
     pub fn and<T: std::hash::Hash + Clone + Eq>(
         graph: &mut MilliOpGraph<T>,
         a: MilliOpGraphTensorId,
         b: MilliOpGraphTensorId,
     ) -> MilliOpGraphTensorId {
-        Self::new(graph, a, b, WhichSimpleBinaryOp::And)
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::And)
     }
 
     pub fn or<T: std::hash::Hash + Clone + Eq>(
@@ -111,7 +111,7 @@ impl SimpleBinary {
         a: MilliOpGraphTensorId,
         b: MilliOpGraphTensorId,
     ) -> MilliOpGraphTensorId {
-        Self::new(graph, a, b, WhichSimpleBinaryOp::Or)
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Or)
     }
 
     pub fn xor<T: std::hash::Hash + Clone + Eq>(
@@ -119,7 +119,7 @@ impl SimpleBinary {
         a: MilliOpGraphTensorId,
         b: MilliOpGraphTensorId,
     ) -> MilliOpGraphTensorId {
-        Self::new(graph, a, b, WhichSimpleBinaryOp::Xor)
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Xor)
     }
 
     pub fn bitwise_and<T: std::hash::Hash + Clone + Eq>(
@@ -127,7 +127,7 @@ impl SimpleBinary {
         a: MilliOpGraphTensorId,
         b: MilliOpGraphTensorId,
     ) -> MilliOpGraphTensorId {
-        Self::new(graph, a, b, WhichSimpleBinaryOp::BitwiseAnd)
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::BitwiseAnd)
     }
 
     pub fn bitwise_or<T: std::hash::Hash + Clone + Eq>(
@@ -135,7 +135,7 @@ impl SimpleBinary {
         a: MilliOpGraphTensorId,
         b: MilliOpGraphTensorId,
     ) -> MilliOpGraphTensorId {
-        Self::new(graph, a, b, WhichSimpleBinaryOp::BitwiseOr)
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::BitwiseOr)
     }
 
     pub fn bitwise_xor<T: std::hash::Hash + Clone + Eq>(
@@ -143,7 +143,7 @@ impl SimpleBinary {
         a: MilliOpGraphTensorId,
         b: MilliOpGraphTensorId,
     ) -> MilliOpGraphTensorId {
-        Self::new(graph, a, b, WhichSimpleBinaryOp::BitwiseXor)
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::BitwiseXor)
     }
 
     pub fn equal<T: std::hash::Hash + Clone + Eq>(
@@ -151,7 +151,7 @@ impl SimpleBinary {
         a: MilliOpGraphTensorId,
         b: MilliOpGraphTensorId,
     ) -> MilliOpGraphTensorId {
-        Self::new(graph, a, b, WhichSimpleBinaryOp::Equal)
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Equal)
     }
 
     pub fn greater<T: std::hash::Hash + Clone + Eq>(
@@ -159,7 +159,7 @@ impl SimpleBinary {
         a: MilliOpGraphTensorId,
         b: MilliOpGraphTensorId,
     ) -> MilliOpGraphTensorId {
-        Self::new(graph, a, b, WhichSimpleBinaryOp::Greater)
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Greater)
     }
 
     pub fn greater_or_equal<T: std::hash::Hash + Clone + Eq>(
@@ -167,7 +167,7 @@ impl SimpleBinary {
         a: MilliOpGraphTensorId,
         b: MilliOpGraphTensorId,
     ) -> MilliOpGraphTensorId {
-        Self::new(graph, a, b, WhichSimpleBinaryOp::GreaterOrEqual)
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::GreaterOrEqual)
     }
 
     pub fn less<T: std::hash::Hash + Clone + Eq>(
@@ -175,7 +175,7 @@ impl SimpleBinary {
         a: MilliOpGraphTensorId,
         b: MilliOpGraphTensorId,
     ) -> MilliOpGraphTensorId {
-        Self::new(graph, a, b, WhichSimpleBinaryOp::Less)
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Less)
     }
 
     pub fn less_or_equal<T: std::hash::Hash + Clone + Eq>(
@@ -183,7 +183,7 @@ impl SimpleBinary {
         a: MilliOpGraphTensorId,
         b: MilliOpGraphTensorId,
     ) -> MilliOpGraphTensorId {
-        Self::new(graph, a, b, WhichSimpleBinaryOp::LessOrEqual)
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::LessOrEqual)
     }
 
     pub fn max<T: std::hash::Hash + Clone + Eq>(
@@ -191,7 +191,7 @@ impl SimpleBinary {
         a: MilliOpGraphTensorId,
         b: MilliOpGraphTensorId,
     ) -> MilliOpGraphTensorId {
-        Self::new(graph, a, b, WhichSimpleBinaryOp::Max)
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Max)
     }
 
     pub fn min<T: std::hash::Hash + Clone + Eq>(
@@ -199,7 +199,7 @@ impl SimpleBinary {
         a: MilliOpGraphTensorId,
         b: MilliOpGraphTensorId,
     ) -> MilliOpGraphTensorId {
-        Self::new(graph, a, b, WhichSimpleBinaryOp::Min)
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Min)
     }
 }
 
@@ -209,7 +209,7 @@ impl MilliOp for SimpleBinary {
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
     ) -> Result<
-        impl Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>,
+        Box<dyn Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>>,
         MilliOpGraphError,
     > {
         let a = &inputs[&self.a];
@@ -255,10 +255,87 @@ impl MilliOp for SimpleBinary {
             WhichSimpleBinaryOp::Max => NumericTensor::<DynRank>::max(a, b, backend)?,
             WhichSimpleBinaryOp::Min => NumericTensor::<DynRank>::min(a, b, backend)?,
         };
-        Ok([(self.output, out)].into_iter())
+        Ok(Box::new([(self.output, out)].into_iter()))
     }
+}
 
-    fn get_name(&self) -> String {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Pow {
+    output: MilliOpGraphTensorId,
+    a: MilliOpGraphTensorId,
+    b: MilliOpGraphTensorId,
+}
+
+impl Pow {
+    pub fn push_new<T: std::hash::Hash + Clone + Eq>(
+        graph: &mut MilliOpGraph<T>,
+        a: MilliOpGraphTensorId,
+        b: MilliOpGraphTensorId,
+    ) -> MilliOpGraphTensorId {
+        let output = graph.get_new_tensor_id();
+        let node = Self { output, a, b };
+        graph.push_op(AnyMilliOp::Pow(node));
+        output
+    }
+}
+
+impl MilliOp for Pow {
+    fn eval(
+        &self,
+        inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
+        backend: &mut EvalBackend,
+    ) -> Result<
+        Box<dyn Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>>,
+        MilliOpGraphError,
+    > {
+        let out = NumericTensor::<DynRank>::pow(&inputs[&self.a], &inputs[&self.b], backend)?;
+        Ok(Box::new([(self.output, out)].into_iter()))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MatMul {
+    output: MilliOpGraphTensorId,
+    a: MilliOpGraphTensorId,
+    b: MilliOpGraphTensorId,
+}
+
+impl MatMul {
+    pub fn push_new<T: std::hash::Hash + Clone + Eq>(
+        graph: &mut MilliOpGraph<T>,
+        a: MilliOpGraphTensorId,
+        b: MilliOpGraphTensorId,
+    ) -> MilliOpGraphTensorId {
+        let output = graph.get_new_tensor_id();
+        let node = Self { output, a, b };
+        graph.push_op(AnyMilliOp::MatMul(node));
+        output
+    }
+}
+
+impl MilliOp for MatMul {
+    fn eval(
+        &self,
+        inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
+        backend: &mut EvalBackend,
+    ) -> Result<
+        Box<dyn Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>>,
+        MilliOpGraphError,
+    > {
+        let a_input = &inputs[&self.a];
+        let b_input = &inputs[&self.b];
+        let accumulate_dtype = match a_input.dtype() {
+            DType::BF16 | DType::F16 => Some(DType::F32),
+            _ => None,
+        };
+        let out = NumericTensor::<DynRank>::matmul(a_input, b_input, accumulate_dtype, backend)?;
+        Ok(Box::new([(self.output, out)].into_iter()))
+    }
+}
+
+impl Node<MilliOpGraphTensorId> for SimpleBinary {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
         match self.which_op {
             WhichSimpleBinaryOp::Add => "Add",
             WhichSimpleBinaryOp::Sub => "Sub",
@@ -281,113 +358,36 @@ impl MilliOp for SimpleBinary {
         }
         .to_string()
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MilliOpPow {
-    output: MilliOpGraphTensorId,
-    a: MilliOpGraphTensorId,
-    b: MilliOpGraphTensorId,
-}
-
-impl MilliOpPow {
-    pub fn new<T: std::hash::Hash + Clone + Eq>(
-        graph: &mut MilliOpGraph<T>,
-        a: MilliOpGraphTensorId,
-        b: MilliOpGraphTensorId,
-    ) -> MilliOpGraphTensorId {
-        let output = graph.get_new_tensor_id();
-        let node = Self { output, a, b };
-        graph.push_op(AnyMilliOp::Pow(node));
-        output
+    fn inputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+        Box::new(vec![self.a, self.b].into_iter())
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+        Box::new(vec![self.output].into_iter())
     }
 }
 
-impl MilliOp for MilliOpPow {
-    fn eval(
-        &self,
-        inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
-        backend: &mut EvalBackend,
-    ) -> Result<
-        impl Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>,
-        MilliOpGraphError,
-    > {
-        let out = NumericTensor::<DynRank>::pow(&inputs[&self.a], &inputs[&self.b], backend)?;
-        Ok([(self.output, out)].into_iter())
-    }
-
-    fn get_name(&self) -> String {
+impl Node<MilliOpGraphTensorId> for Pow {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
         "Pow".to_string()
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MilliOpMatMul {
-    output: MilliOpGraphTensorId,
-    a: MilliOpGraphTensorId,
-    b: MilliOpGraphTensorId,
-}
-
-impl MilliOpMatMul {
-    pub fn new<T: std::hash::Hash + Clone + Eq>(
-        graph: &mut MilliOpGraph<T>,
-        a: MilliOpGraphTensorId,
-        b: MilliOpGraphTensorId,
-    ) -> MilliOpGraphTensorId {
-        let output = graph.get_new_tensor_id();
-        let node = Self { output, a, b };
-        graph.push_op(AnyMilliOp::MatMul(node));
-        output
+    fn inputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+        Box::new(vec![self.a, self.b].into_iter())
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+        Box::new(vec![self.output].into_iter())
     }
 }
 
-impl MilliOp for MilliOpMatMul {
-    fn eval(
-        &self,
-        inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
-        backend: &mut EvalBackend,
-    ) -> Result<
-        impl Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>,
-        MilliOpGraphError,
-    > {
-        let a_input = &inputs[&self.a];
-        let b_input = &inputs[&self.b];
-        let accumulate_dtype = match a_input.dtype() {
-            DType::BF16 | DType::F16 => Some(DType::F32),
-            _ => None,
-        };
-        let out = NumericTensor::<DynRank>::matmul(a_input, b_input, accumulate_dtype, backend)?;
-        Ok([(self.output, out)].into_iter())
-    }
-
-    fn get_name(&self) -> String {
+impl Node<MilliOpGraphTensorId> for MatMul {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
         "MatMul".to_string()
     }
-}
-
-impl Node<MilliOpGraphTensorId> for SimpleBinary {
-    fn inputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
-        vec![self.a, self.b].into_iter()
+    fn inputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+        Box::new(vec![self.a, self.b].into_iter())
     }
-    fn outputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
-        vec![self.output].into_iter()
-    }
-}
-
-impl Node<MilliOpGraphTensorId> for MilliOpPow {
-    fn inputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
-        vec![self.a, self.b].into_iter()
-    }
-    fn outputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
-        vec![self.output].into_iter()
-    }
-}
-
-impl Node<MilliOpGraphTensorId> for MilliOpMatMul {
-    fn inputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
-        vec![self.a, self.b].into_iter()
-    }
-    fn outputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
-        vec![self.output].into_iter()
+    fn outputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+        Box::new(vec![self.output].into_iter())
     }
 }

@@ -1,4 +1,3 @@
-use crate::graph::{Graph, InnerGraph, Node};
 use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::ops::*;
 use crate::onnx;
@@ -81,7 +80,7 @@ impl Operation for BinaryOperation {
             WhichBinaryOperation::Sub => SimpleBinary::sub(&mut graph, a, b),
             WhichBinaryOperation::Mul => SimpleBinary::mul(&mut graph, a, b),
             WhichBinaryOperation::Div => SimpleBinary::div(&mut graph, a, b),
-            WhichBinaryOperation::MatMul => MilliOpMatMul::new(&mut graph, a, b),
+            WhichBinaryOperation::MatMul => MatMul::push_new(&mut graph, a, b),
             WhichBinaryOperation::And => SimpleBinary::and(&mut graph, a, b),
             WhichBinaryOperation::Or => SimpleBinary::or(&mut graph, a, b),
             WhichBinaryOperation::Xor => SimpleBinary::xor(&mut graph, a, b),
@@ -144,7 +143,7 @@ impl Operation for PowOperation {
 
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
-        let out = MilliOpPow::new(
+        let out = Pow::push_new(
             &mut graph,
             input_map[&self.input_x],
             input_map[&self.input_y],
@@ -227,7 +226,7 @@ impl Operation for GemmOperation {
 
         let a = if let Some(trans_a) = self.trans_a {
             if trans_a {
-                Transpose::new(&mut graph, a, None)
+                Transpose::push_new(&mut graph, a, None)
             } else {
                 a
             }
@@ -237,7 +236,7 @@ impl Operation for GemmOperation {
 
         let b = if let Some(trans_b) = self.trans_b {
             if trans_b {
-                Transpose::new(&mut graph, b, None)
+                Transpose::push_new(&mut graph, b, None)
             } else {
                 b
             }
@@ -245,11 +244,11 @@ impl Operation for GemmOperation {
             b
         };
 
-        let x = MilliOpMatMul::new(&mut graph, a, b);
+        let x = MatMul::push_new(&mut graph, a, b);
 
         let x = if let Some(alpha) = self.alpha {
             let alpha_tid = Constant::new_scalar(&mut graph, alpha);
-            let alpha_const = CastLike::new(&mut graph, alpha_tid, x);
+            let alpha_const = CastLike::push_new(&mut graph, alpha_tid, x);
             SimpleBinary::mul(&mut graph, x, alpha_const)
         } else {
             x
@@ -259,7 +258,7 @@ impl Operation for GemmOperation {
             let c = input_map[&c];
             let c = if let Some(beta) = self.beta {
                 let beta_tid = Constant::new_scalar(&mut graph, beta);
-                let beta_const = CastLike::new(&mut graph, beta_tid, c);
+                let beta_const = CastLike::push_new(&mut graph, beta_tid, c);
                 SimpleBinary::mul(&mut graph, c, beta_const)
             } else {
                 c
@@ -329,7 +328,7 @@ impl Operation for ArgMaxOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
 
-        let x = ArgMax::new(
+        let x = ArgMax::push_new(
             &mut graph,
             input_map[&self.input],
             self.axis,
@@ -397,7 +396,7 @@ impl Operation for ArgMinOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
 
-        let x = ArgMin::new(
+        let x = ArgMin::push_new(
             &mut graph,
             input_map[&self.input],
             self.axis,

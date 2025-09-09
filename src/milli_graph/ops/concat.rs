@@ -14,7 +14,7 @@ pub struct Concat {
 }
 
 impl Concat {
-    pub fn new<T: std::hash::Hash + Clone + Eq>(
+    pub fn push_new<T: std::hash::Hash + Clone + Eq>(
         graph: &mut MilliOpGraph<T>,
         inputs: Vec<MilliOpGraphTensorId>,
         axis: i64,
@@ -31,11 +31,15 @@ impl Concat {
 }
 
 impl crate::graph::Node<MilliOpGraphTensorId> for Concat {
-    fn inputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
-        self.inputs.clone().into_iter()
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
+        "Concat".to_string()
     }
-    fn outputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
-        vec![self.output].into_iter()
+    fn inputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+        Box::new(self.inputs.clone().into_iter())
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+        Box::new(vec![self.output].into_iter())
     }
 }
 
@@ -45,7 +49,7 @@ impl MilliOp for Concat {
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
     ) -> Result<
-        impl Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>,
+        Box<dyn Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>>,
         MilliOpGraphError,
     > {
         let mut resolved_inputs = vec![];
@@ -58,10 +62,6 @@ impl MilliOp for Concat {
             self.axis
         } as usize;
         let out = NumericTensor::<DynRank>::concat(resolved_inputs.as_slice(), axis, backend)?;
-        Ok([(self.output, out)].into_iter())
-    }
-
-    fn get_name(&self) -> String {
-        "Concat".to_string()
+        Ok(Box::new([(self.output, out)].into_iter()))
     }
 }

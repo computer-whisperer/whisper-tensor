@@ -68,14 +68,14 @@ fn main() {
         // Slice to last token
 
         let logits_in = {
-            let input_shape = Shape::new(&mut milli_graph, logits_input);
-            let const_a = Constant::new(
+            let input_shape = Shape::push_new(&mut milli_graph, logits_input);
+            let const_a = Constant::push_new(
                 &mut milli_graph,
                 NDArrayNumericTensor::from_vec(vec![0i64, 0, 1, 0]).to_dyn(),
             );
             let value = SimpleBinary::mul(&mut milli_graph, input_shape, const_a);
             let value = SimpleBinary::sub(&mut milli_graph, value, const_a);
-            Slice::new(
+            Slice::push_new(
                 &mut milli_graph,
                 logits_input,
                 value,
@@ -86,17 +86,17 @@ fn main() {
         };
 
         // Cull unnecessary dims
-        let const_0 = Constant::new(
+        let const_0 = Constant::push_new(
             &mut milli_graph,
             NDArrayNumericTensor::from_vec(vec![0i64]).to_dyn(),
         );
-        let logits_in = Squeeze::new(&mut milli_graph, logits_in, const_0);
-        let logits_in = Squeeze::new(&mut milli_graph, logits_in, const_0);
-        let logits_in = Squeeze::new(&mut milli_graph, logits_in, const_0);
+        let logits_in = Squeeze::push_new(&mut milli_graph, logits_in, const_0);
+        let logits_in = Squeeze::push_new(&mut milli_graph, logits_in, const_0);
+        let logits_in = Squeeze::push_new(&mut milli_graph, logits_in, const_0);
 
-        let output = ArgMax::new(&mut milli_graph, logits_in, 0, false, false);
-        let output = Cast::new(&mut milli_graph, output, DType::U32);
-        let output = Unsqueeze::new(&mut milli_graph, output, const_0);
+        let output = ArgMax::push_new(&mut milli_graph, logits_in, 0, false, false);
+        let output = Cast::push_new(&mut milli_graph, output, DType::U32);
+        let output = Unsqueeze::push_new(&mut milli_graph, output, const_0);
         let mut output_map = HashMap::new();
 
         let output_tensor = SuperGraphLinkTensor::new(builder.get_next_link_id());

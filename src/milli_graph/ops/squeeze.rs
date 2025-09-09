@@ -18,7 +18,7 @@ pub struct Squeeze {
 }
 
 impl Squeeze {
-    pub fn new<T: std::hash::Hash + Clone + Eq>(
+    pub fn push_new<T: std::hash::Hash + Clone + Eq>(
         graph: &mut MilliOpGraph<T>,
         data: MilliOpGraphTensorId,
         axes: MilliOpGraphTensorId,
@@ -31,11 +31,15 @@ impl Squeeze {
 }
 
 impl Node<MilliOpGraphTensorId> for Squeeze {
-    fn inputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
-        vec![self.data, self.axes].into_iter()
+    type OpKind = String;
+    fn op_kind(&self) -> String {
+        "Squeeze".to_string()
     }
-    fn outputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
-        vec![self.output].into_iter()
+    fn inputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+        Box::new([self.data, self.axes].into_iter())
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+        Box::new([self.output].into_iter())
     }
 }
 
@@ -45,7 +49,7 @@ impl MilliOp for Squeeze {
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
     ) -> Result<
-        impl Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>,
+        Box<dyn Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>>,
         MilliOpGraphError,
     > {
         let axes_ndarray = NDArrayNumericTensor::<DynRank>::try_from(
@@ -61,7 +65,7 @@ impl MilliOp for Squeeze {
                 (input_shape.len() as i64 + axis) as usize
             };
             let output = inputs[&self.data].squeeze(axis)?;
-            Ok([(self.output, output)].into_iter())
+            Ok(Box::new([(self.output, output)].into_iter()))
         } else {
             // Multiple axes (use reshape)
             let input_shape = inputs[&self.data].shape();
@@ -86,11 +90,7 @@ impl MilliOp for Squeeze {
                 }
             }
             let output = inputs[&self.data].reshape(output_shape, backend)?;
-            Ok([(self.output, output)].into_iter())
+            Ok(Box::new([(self.output, output)].into_iter()))
         }
-    }
-
-    fn get_name(&self) -> String {
-        "Squeeze".to_string()
     }
 }

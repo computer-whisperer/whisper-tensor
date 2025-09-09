@@ -15,7 +15,7 @@ pub struct Expand {
 }
 
 impl Expand {
-    pub fn new<T: std::hash::Hash + Clone + Eq>(
+    pub fn push_new<T: std::hash::Hash + Clone + Eq>(
         graph: &mut MilliOpGraph<T>,
         input: MilliOpGraphTensorId,
         shape: MilliOpGraphTensorId,
@@ -32,11 +32,15 @@ impl Expand {
 }
 
 impl crate::graph::Node<MilliOpGraphTensorId> for Expand {
-    fn inputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
-        vec![self.input, self.shape].into_iter()
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
+        "Expand".to_string()
     }
-    fn outputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
-        vec![self.output].into_iter()
+    fn inputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+        Box::new(vec![self.input, self.shape].into_iter())
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+        Box::new(vec![self.output].into_iter())
     }
 }
 
@@ -46,7 +50,7 @@ impl MilliOp for Expand {
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
         _backend: &mut EvalBackend,
     ) -> Result<
-        impl Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>,
+        Box<dyn Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>>,
         MilliOpGraphError,
     > {
         let shape: Vec<i64> = inputs[&self.shape].try_to_rank::<P1>()?.try_into()?;
@@ -61,10 +65,6 @@ impl MilliOp for Expand {
             .map(|(a, b)| std::cmp::max(*a, *b))
             .collect::<Vec<u64>>();
         let out = x.expand(&shape_u)?;
-        Ok([(self.output, out)].into_iter())
-    }
-
-    fn get_name(&self) -> String {
-        "Expand".to_string()
+        Ok(Box::new([(self.output, out)].into_iter()))
     }
 }

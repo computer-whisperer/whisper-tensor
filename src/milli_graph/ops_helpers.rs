@@ -7,8 +7,8 @@ pub(crate) fn rank(
     graph: &mut MilliOpGraph<SymbolicGraphTensorId>,
     tensor: MilliOpGraphTensorId,
 ) -> MilliOpGraphTensorId {
-    let shape_tid = Shape::new(graph, tensor);
-    Shape::new(graph, shape_tid)
+    let shape_tid = Shape::push_new(graph, tensor);
+    Shape::push_new(graph, shape_tid)
 }
 
 pub(crate) fn scalar_const<T>(
@@ -26,8 +26,8 @@ pub(crate) fn resolve_axes(
     axes: MilliOpGraphTensorId,
     tensor: MilliOpGraphTensorId,
 ) -> MilliOpGraphTensorId {
-    let shape_tid = Shape::new(graph, tensor);
-    let rank_tid = Shape::new(graph, shape_tid);
+    let shape_tid = Shape::push_new(graph, tensor);
+    let rank_tid = Shape::push_new(graph, shape_tid);
     let axes2_tid = SimpleBinary::add(graph, axes, rank_tid);
     SimpleBinary::modulo(graph, axes2_tid, rank_tid, None)
 }

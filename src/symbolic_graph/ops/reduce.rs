@@ -1,5 +1,4 @@
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
-use crate::graph::{Graph, InnerGraph, Node};
 use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::ops::*;
 use crate::onnx;
@@ -59,7 +58,7 @@ impl Operation for CumSumOperation {
         let a = input_map[&self.input];
         let b = input_map[&self.axis];
 
-        let out = CumSum::new(&mut graph, a, b, self.exclusive, self.reverse);
+        let out = CumSum::push_new(&mut graph, a, b, self.exclusive, self.reverse);
 
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
@@ -133,12 +132,12 @@ impl Operation for ReduceMeanOperation {
             Some(input_map[input_axes])
         } else if let Some(axes) = &self.axes_attr {
             let tensor = NDArrayNumericTensor::from(axes.clone());
-            let tid = Constant::new(&mut graph, tensor.to_dyn());
+            let tid = Constant::push_new(&mut graph, tensor.to_dyn());
             Some(tid)
         } else {
             None
         };
-        let out = ReduceMean::new(
+        let out = ReduceMean::push_new(
             &mut graph,
             input_map[&self.input_data],
             axes,
@@ -218,12 +217,12 @@ impl Operation for ReduceSumOperation {
             Some(input_map[input_axes])
         } else if let Some(axes) = &self.axes_attr {
             let tensor = NDArrayNumericTensor::from(axes.clone());
-            let tid = Constant::new(&mut graph, tensor.to_dyn());
+            let tid = Constant::push_new(&mut graph, tensor.to_dyn());
             Some(tid)
         } else {
             None
         };
-        let out = ReduceSum::new(
+        let out = ReduceSum::push_new(
             &mut graph,
             input_map[&self.input_data],
             axes,
@@ -303,12 +302,12 @@ impl Operation for ReduceMaxOperation {
             Some(input_map[input_axes])
         } else if let Some(axes) = &self.axes_attr {
             let tensor = NDArrayNumericTensor::from(axes.clone());
-            let tid = Constant::new(&mut graph, tensor.to_dyn());
+            let tid = Constant::push_new(&mut graph, tensor.to_dyn());
             Some(tid)
         } else {
             None
         };
-        let out = ReduceMax::new(
+        let out = ReduceMax::push_new(
             &mut graph,
             input_map[&self.input_data],
             axes,
@@ -388,12 +387,12 @@ impl Operation for ReduceMinOperation {
             Some(input_map[input_axes])
         } else if let Some(axes) = &self.axes_attr {
             let tensor = NDArrayNumericTensor::from(axes.clone());
-            let tid = Constant::new(&mut graph, tensor.to_dyn());
+            let tid = Constant::push_new(&mut graph, tensor.to_dyn());
             Some(tid)
         } else {
             None
         };
-        let out = ReduceMin::new(
+        let out = ReduceMin::push_new(
             &mut graph,
             input_map[&self.input_data],
             axes,
@@ -473,12 +472,12 @@ impl Operation for ReduceProdOperation {
             Some(input_map[input_axes])
         } else if let Some(axes) = &self.axes_attr {
             let tensor = NDArrayNumericTensor::from(axes.clone());
-            let tid = Constant::new(&mut graph, tensor.to_dyn());
+            let tid = Constant::push_new(&mut graph, tensor.to_dyn());
             Some(tid)
         } else {
             None
         };
-        let out = ReduceProd::new(
+        let out = ReduceProd::push_new(
             &mut graph,
             input_map[&self.input_data],
             axes,

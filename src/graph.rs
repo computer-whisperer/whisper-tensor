@@ -24,10 +24,14 @@ pub trait Link<LinkIdT: Clone + Eq + Hash + Debug> {
 
 /// Node within a graph. Carries op kind and its interface to links.
 pub trait Node<LinkIdT: Clone + Eq + Hash + Debug> {
+    type OpKind: AsRef<str> + Clone + Debug;
+
+    /// Op name or other identifier.
+    fn op_kind(&self) -> Self::OpKind;
     /// Incoming link handles in input index order.
-    fn inputs(&self) -> impl Iterator<Item = LinkIdT>;
+    fn inputs(&self) -> Box<dyn Iterator<Item = LinkIdT>>;
     /// Outgoing link handles grouped by output index order.
-    fn outputs(&self) -> impl Iterator<Item = LinkIdT>;
+    fn outputs(&self) -> Box<dyn Iterator<Item = LinkIdT>>;
 }
 
 /// The inner structure of a graph: nodes and links, plus IO interface.

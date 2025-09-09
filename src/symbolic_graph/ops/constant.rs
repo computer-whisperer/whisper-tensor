@@ -59,7 +59,7 @@ impl Operation for ConstantOfShapeOperation {
 
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
-        let node = ConstantOfShape::new(&mut graph, self.value.clone(), input_map[&self.input]);
+        let node = ConstantOfShape::push_new(&mut graph, self.value.clone(), input_map[&self.input]);
         let out = match graph.inner(&()).get_node(&node) {
             Some(AnyMilliOp::ConstantOfShape(op)) => op.outputs().next().unwrap(),
             _ => unreachable!(),
@@ -130,7 +130,7 @@ impl Operation for ConstantOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, _input_map) = MilliOpGraph::new(&self.get_inputs());
 
-        let out = Constant::new(&mut graph, self.value.clone());
+        let out = Constant::push_new(&mut graph, self.value.clone());
 
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
