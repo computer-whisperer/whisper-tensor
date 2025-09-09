@@ -1,4 +1,3 @@
-
 //! Backbone traits to enforce a common graph paradigm across implementations.
 //!
 //! Goals:
@@ -25,7 +24,6 @@ pub trait Link<LinkIdT: Clone + Eq + Hash + Debug> {
 
 /// Node within a graph. Carries op kind and its interface to links.
 pub trait Node<LinkIdT: Clone + Eq + Hash + Debug> {
-
     /// Incoming link handles in input index order.
     fn inputs(&self) -> impl Iterator<Item = LinkIdT>;
     /// Outgoing link handles grouped by output index order.

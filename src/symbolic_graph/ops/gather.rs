@@ -55,11 +55,12 @@ impl Operation for GatherOperation {
 
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
-        let out = graph.push_op(AnyMilliOp::Gather(Gather::new(
+        let out = Gather::new(
+            &mut graph,
             input_map[&self.input],
             input_map[&self.indices],
             self.axis,
-        )));
+        );
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
         graph.set_output_map(output_map);

@@ -21,15 +21,23 @@ impl Expand {
         shape: MilliOpGraphTensorId,
     ) -> MilliOpGraphTensorId {
         let output = graph.get_new_tensor_id();
-        let node = Self { output, input, shape };
+        let node = Self {
+            output,
+            input,
+            shape,
+        };
         graph.push_op(AnyMilliOp::Expand(node));
         output
     }
 }
 
 impl crate::graph::Node<MilliOpGraphTensorId> for Expand {
-    fn inputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> { vec![self.input, self.shape].into_iter() }
-    fn outputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> { vec![self.output].into_iter() }
+    fn inputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
+        vec![self.input, self.shape].into_iter()
+    }
+    fn outputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
+        vec![self.output].into_iter()
+    }
 }
 
 impl MilliOp for Expand {
@@ -37,7 +45,10 @@ impl MilliOp for Expand {
         &self,
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
         _backend: &mut EvalBackend,
-    ) -> Result<impl Iterator<Item=(MilliOpGraphTensorId, NumericTensor<DynRank>)>, MilliOpGraphError> {
+    ) -> Result<
+        impl Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>,
+        MilliOpGraphError,
+    > {
         let shape: Vec<i64> = inputs[&self.shape].try_to_rank::<P1>()?.try_into()?;
         let shape_u = shape.iter().map(|x| *x as u64).collect::<Vec<u64>>();
         let mut x = inputs[&self.input].clone();

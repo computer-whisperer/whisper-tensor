@@ -54,6 +54,7 @@ pub use where_op::*;
 
 use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
+use crate::graph::Node;
 use crate::milli_graph::{MilliOpGraphError, MilliOpGraphTensorId};
 use crate::numeric_tensor::NumericTensor;
 use crate::scalar_info::ScalarInfoTyped;
@@ -63,7 +64,6 @@ use crate::tensor_rank::DynRank;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use typenum::P1;
-use crate::graph::Node;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MilliOpTensorIDOrLiteral {
@@ -77,7 +77,7 @@ pub trait MilliOp: Node<MilliOpGraphTensorId> {
         known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>,
         _symbolic_resolver: &mut SymbolicResolver,
         backend: &mut EvalBackend,
-    ) -> Result<impl Iterator<Item=(MilliOpGraphTensorId, TensorInfo)>, MilliOpGraphError> {
+    ) -> Result<impl Iterator<Item = (MilliOpGraphTensorId, TensorInfo)>, MilliOpGraphError> {
         let mut resolved_inputs = HashMap::new();
         for input in self.inputs() {
             if let Some(tensor_info) = known_inputs.get(&input) {
@@ -102,7 +102,10 @@ pub trait MilliOp: Node<MilliOpGraphTensorId> {
         &self,
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
         _backend: &mut EvalBackend,
-    ) -> Result<impl Iterator<Item=(MilliOpGraphTensorId, NumericTensor<DynRank>)>, MilliOpGraphError>;
+    ) -> Result<
+        impl Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>,
+        MilliOpGraphError,
+    >;
 
     fn get_name(&self) -> String;
 }
@@ -296,13 +299,15 @@ macro_rules! delegate {
     }
 }
 
-
 impl MilliOp for AnyMilliOp {
     fn eval(
         &self,
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
-    ) -> Result<impl Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>, MilliOpGraphError> {
+    ) -> Result<
+        impl Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>,
+        MilliOpGraphError,
+    > {
         let collected: Vec<(MilliOpGraphTensorId, NumericTensor<DynRank>)> = match self {
             AnyMilliOp::ArgMax(x) => x.eval(inputs, backend)?.collect(),
             AnyMilliOp::ArgMin(x) => x.eval(inputs, backend)?.collect(),

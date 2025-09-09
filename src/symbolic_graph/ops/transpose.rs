@@ -1,5 +1,5 @@
 use crate::milli_graph::MilliOpGraph;
-use crate::milli_graph::ops::{AnyMilliOp, Transpose};
+use crate::milli_graph::ops::Transpose;
 use crate::onnx;
 use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{ONNXDecodingError, SymbolicGraphTensorId, query_attribute_ints};
@@ -47,10 +47,7 @@ impl Operation for TransposeOperation {
 
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
-        let out = graph.push_op(AnyMilliOp::Transpose(Transpose::new(
-            input_map[&self.input],
-            self.perm.clone(),
-        )));
+        let out = Transpose::new(&mut graph, input_map[&self.input], self.perm.clone());
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
         graph.set_output_map(output_map);

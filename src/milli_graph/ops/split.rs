@@ -1,12 +1,12 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
+use crate::graph::Node;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp, MilliOpTensorIDOrLiteral};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError, MilliOpGraphTensorId};
 use crate::numeric_tensor::NumericTensor;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use typenum::P1;
-use crate::graph::Node;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Split {
@@ -42,8 +42,12 @@ impl Split {
 }
 
 impl Node<MilliOpGraphTensorId> for Split {
-    fn inputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> { vec![self.data].into_iter() }
-    fn outputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> { vec![self.output].into_iter() }
+    fn inputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
+        vec![self.data].into_iter()
+    }
+    fn outputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
+        vec![self.output].into_iter()
+    }
 }
 
 impl MilliOp for Split {
@@ -51,7 +55,10 @@ impl MilliOp for Split {
         &self,
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
-    ) -> Result<impl Iterator<Item=(MilliOpGraphTensorId, NumericTensor<DynRank>)>, MilliOpGraphError> {
+    ) -> Result<
+        impl Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>,
+        MilliOpGraphError,
+    > {
         // Determine the split sizes
         let split: Vec<i64> = if let Some(split) = &self.split {
             match split {

@@ -1,12 +1,12 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
+use crate::graph::Node;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError, MilliOpGraphTensorId};
 use crate::numeric_tensor::NumericTensor;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use typenum::P1;
-use crate::graph::Node;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReduceMin {
@@ -43,7 +43,10 @@ impl MilliOp for ReduceMin {
         &self,
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
-    ) -> Result<impl Iterator<Item=(MilliOpGraphTensorId, NumericTensor<DynRank>)>, MilliOpGraphError> {
+    ) -> Result<
+        impl Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>,
+        MilliOpGraphError,
+    > {
         let data = &inputs[&self.data];
         let axes = if let Some(axes) = self.axes {
             Vec::<i64>::try_from(inputs[&axes].try_to_rank::<P1>()?)?
@@ -80,8 +83,13 @@ impl MilliOp for ReduceMin {
 }
 
 impl Node<MilliOpGraphTensorId> for ReduceMin {
-    fn inputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> {
-        match self.axes { Some(ax) => vec![self.data, ax].into_iter(), None => vec![self.data].into_iter() }
+    fn inputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
+        match self.axes {
+            Some(ax) => vec![self.data, ax].into_iter(),
+            None => vec![self.data].into_iter(),
+        }
     }
-    fn outputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> { vec![self.output].into_iter() }
+    fn outputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
+        vec![self.output].into_iter()
+    }
 }

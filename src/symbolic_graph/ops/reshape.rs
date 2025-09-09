@@ -66,17 +66,12 @@ impl Operation for SqueezeOperation {
             input_map[&axes]
         } else if let Some(axes) = &self.axes_attribute {
             let axes_tensor = NDArrayNumericTensor::from_vec(axes.clone());
-            graph.push_op(AnyMilliOp::Constant(Constant::new(
-                axes_tensor.to_dyn(),
-            )))
+            Constant::new(&mut graph, axes_tensor.to_dyn())
         } else {
             panic!();
         };
 
-        let out = graph.push_op(AnyMilliOp::Squeeze(Squeeze::new(
-            input_map[&self.input],
-            axes_input,
-        )));
+        let out = Squeeze::new(&mut graph, input_map[&self.input], axes_input);
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
         graph.set_output_map(output_map);
@@ -141,17 +136,12 @@ impl Operation for UnsqueezeOperation {
             input_map[&axes]
         } else if let Some(axes) = &self.axes_attribute {
             let axes_tensor = NDArrayNumericTensor::from_vec(axes.clone());
-            graph.push_op(AnyMilliOp::Constant(Constant::new(
-                axes_tensor.to_dyn(),
-            )))
+            Constant::new(&mut graph, axes_tensor.to_dyn())
         } else {
             panic!();
         };
 
-        let out = graph.push_op(AnyMilliOp::Unsqueeze(Unsqueeze::new(
-            input_map[&self.input],
-            axes_input,
-        )));
+        let out = Unsqueeze::new(&mut graph, input_map[&self.input], axes_input);
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
         graph.set_output_map(output_map);
@@ -200,11 +190,12 @@ impl Operation for ReshapeOperation {
 
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
-        let out = graph.push_op(AnyMilliOp::Reshape(Reshape::new(
+        let out = Reshape::new(
+            &mut graph,
             input_map[&self.input],
             input_map[&self.shape],
             false,
-        )));
+        );
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
         graph.set_output_map(output_map);
@@ -260,41 +251,28 @@ impl Operation for FlattenOperation {
         let shape_tensor = if self.axis == 0 {
             let output_shape = vec![1i64, -1i64];
             let shape_tensor = NDArrayNumericTensor::from(output_shape);
-            graph.push_op(AnyMilliOp::Constant(Constant::new(
-                shape_tensor.to_dyn(),
-            )))
+            Constant::new(&mut graph, shape_tensor.to_dyn())
         } else {
-            let input_shape = graph.push_op(AnyMilliOp::Shape(Shape::new(input)));
-            let zero_const = graph.push_op(AnyMilliOp::Constant(Constant::new(
+            let input_shape = Shape::new(&mut graph, input);
+            let zero_const = Constant::new(
+                &mut graph,
                 NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
-            )));
-            let axis_const = graph.push_op(AnyMilliOp::Constant(Constant::new(
+            );
+            let axis_const = Constant::new(
+                &mut graph,
                 NDArrayNumericTensor::from_vec_shape(vec![self.axis], &vec![1]).unwrap(),
-            )));
-            let first_dims = graph.push_op(AnyMilliOp::Slice(Slice::new(
-                input_shape,
-                zero_const,
-                axis_const,
-                None,
-                None,
-            )));
-            let prod = graph.push_op(AnyMilliOp::ReduceProd(ReduceProd::new(
-                first_dims, None, true, false,
-            )));
-            let neg_one_const = graph.push_op(AnyMilliOp::Constant(Constant::new(
+            );
+            let first_dims =
+                Slice::new(&mut graph, input_shape, zero_const, axis_const, None, None);
+            let prod = ReduceProd::new(&mut graph, first_dims, None, true, false);
+            let neg_one_const = Constant::new(
+                &mut graph,
                 NDArrayNumericTensor::from_vec_shape(vec![-1i64], &vec![1]).unwrap(),
-            )));
-            graph.push_op(AnyMilliOp::Concat(Concat::new(
-                vec![prod, neg_one_const],
-                0,
-            )))
+            );
+            Concat::new(&mut graph, vec![prod, neg_one_const], 0)
         };
 
-        let out = graph.push_op(AnyMilliOp::Reshape(Reshape::new(
-            input,
-            shape_tensor,
-            false,
-        )));
+        let out = Reshape::new(&mut graph, input, shape_tensor, false);
 
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);

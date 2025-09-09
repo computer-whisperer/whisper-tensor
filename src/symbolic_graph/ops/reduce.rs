@@ -1,4 +1,5 @@
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
+use crate::graph::{Graph, InnerGraph, Node};
 use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::ops::*;
 use crate::onnx;
@@ -6,7 +7,6 @@ use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{
     ONNXDecodingError, SymbolicGraphTensorId, query_attribute_int, query_attribute_ints,
 };
-use crate::graph::{Graph, InnerGraph, Node};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -59,13 +59,7 @@ impl Operation for CumSumOperation {
         let a = input_map[&self.input];
         let b = input_map[&self.axis];
 
-        let out = CumSum::new(
-            &mut graph,
-            a,
-            b,
-            self.exclusive,
-            self.reverse,
-        );
+        let out = CumSum::new(&mut graph, a, b, self.exclusive, self.reverse);
 
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
@@ -139,11 +133,7 @@ impl Operation for ReduceMeanOperation {
             Some(input_map[input_axes])
         } else if let Some(axes) = &self.axes_attr {
             let tensor = NDArrayNumericTensor::from(axes.clone());
-            let node = Constant::new(&mut graph, tensor.to_dyn());
-            let tid = match graph.inner(&()).get_node(&node) {
-                Some(AnyMilliOp::Constant(op)) => op.outputs().next().unwrap(),
-                _ => unreachable!(),
-            };
+            let tid = Constant::new(&mut graph, tensor.to_dyn());
             Some(tid)
         } else {
             None
@@ -228,11 +218,7 @@ impl Operation for ReduceSumOperation {
             Some(input_map[input_axes])
         } else if let Some(axes) = &self.axes_attr {
             let tensor = NDArrayNumericTensor::from(axes.clone());
-            let node = Constant::new(&mut graph, tensor.to_dyn());
-            let tid = match graph.inner(&()).get_node(&node) {
-                Some(AnyMilliOp::Constant(op)) => op.outputs().next().unwrap(),
-                _ => unreachable!(),
-            };
+            let tid = Constant::new(&mut graph, tensor.to_dyn());
             Some(tid)
         } else {
             None
@@ -317,11 +303,7 @@ impl Operation for ReduceMaxOperation {
             Some(input_map[input_axes])
         } else if let Some(axes) = &self.axes_attr {
             let tensor = NDArrayNumericTensor::from(axes.clone());
-            let node = Constant::new(&mut graph, tensor.to_dyn());
-            let tid = match graph.inner(&()).get_node(&node) {
-                Some(AnyMilliOp::Constant(op)) => op.outputs().next().unwrap(),
-                _ => unreachable!(),
-            };
+            let tid = Constant::new(&mut graph, tensor.to_dyn());
             Some(tid)
         } else {
             None
@@ -406,11 +388,7 @@ impl Operation for ReduceMinOperation {
             Some(input_map[input_axes])
         } else if let Some(axes) = &self.axes_attr {
             let tensor = NDArrayNumericTensor::from(axes.clone());
-            let node = Constant::new(&mut graph, tensor.to_dyn());
-            let tid = match graph.inner(&()).get_node(&node) {
-                Some(AnyMilliOp::Constant(op)) => op.outputs().next().unwrap(),
-                _ => unreachable!(),
-            };
+            let tid = Constant::new(&mut graph, tensor.to_dyn());
             Some(tid)
         } else {
             None
@@ -495,11 +473,7 @@ impl Operation for ReduceProdOperation {
             Some(input_map[input_axes])
         } else if let Some(axes) = &self.axes_attr {
             let tensor = NDArrayNumericTensor::from(axes.clone());
-            let node = Constant::new(&mut graph, tensor.to_dyn());
-            let tid = match graph.inner(&()).get_node(&node) {
-                Some(AnyMilliOp::Constant(op)) => op.outputs().next().unwrap(),
-                _ => unreachable!(),
-            };
+            let tid = Constant::new(&mut graph, tensor.to_dyn());
             Some(tid)
         } else {
             None

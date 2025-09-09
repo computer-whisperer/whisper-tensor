@@ -1,7 +1,6 @@
 use super::ops::*;
 use crate::backends::ndarray_backend::conversions::NDArrayNumericTensorType;
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphTensorId};
-use crate::graph::{Graph, InnerGraph, Node};
 use crate::symbolic_graph::SymbolicGraphTensorId;
 
 pub(crate) fn rank(
@@ -19,11 +18,7 @@ pub(crate) fn scalar_const<T>(
 where
     T: NDArrayNumericTensorType,
 {
-    let node = Constant::new_scalar(graph, value);
-    match graph.inner(&()).get_node(&node) {
-        Some(AnyMilliOp::Constant(op)) => op.outputs().next().unwrap(),
-        _ => unreachable!(),
-    }
+    Constant::new_scalar(graph, value)
 }
 
 pub(crate) fn resolve_axes(

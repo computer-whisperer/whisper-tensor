@@ -42,13 +42,19 @@ impl Slice {
 }
 
 impl crate::graph::Node<MilliOpGraphTensorId> for Slice {
-    fn inputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> {
+    fn inputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
         let mut res = vec![self.data, self.starts, self.ends];
-        if let Some(steps) = &self.steps { res.push(*steps); }
-        if let Some(axes) = &self.axes { res.push(*axes); }
+        if let Some(steps) = &self.steps {
+            res.push(*steps);
+        }
+        if let Some(axes) = &self.axes {
+            res.push(*axes);
+        }
         res.into_iter()
     }
-    fn outputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> { vec![self.output].into_iter() }
+    fn outputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
+        vec![self.output].into_iter()
+    }
 }
 
 impl MilliOp for Slice {
@@ -56,7 +62,10 @@ impl MilliOp for Slice {
         &self,
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
-    ) -> Result<impl Iterator<Item=(MilliOpGraphTensorId, NumericTensor<DynRank>)>, MilliOpGraphError> {
+    ) -> Result<
+        impl Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>,
+        MilliOpGraphError,
+    > {
         let data_input = &inputs[&self.data];
         let input_shape = data_input.shape();
         let input_rank = data_input.rank();

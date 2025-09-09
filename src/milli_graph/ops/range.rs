@@ -23,15 +23,24 @@ impl Range {
         delta: MilliOpGraphTensorId,
     ) -> MilliOpGraphTensorId {
         let output = graph.get_new_tensor_id();
-        let node = Self { output, start, end, delta };
+        let node = Self {
+            output,
+            start,
+            end,
+            delta,
+        };
         graph.push_op(AnyMilliOp::Range(node));
         output
     }
 }
 
 impl crate::graph::Node<MilliOpGraphTensorId> for Range {
-    fn inputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> { vec![self.start, self.end, self.delta].into_iter() }
-    fn outputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> { vec![self.output].into_iter() }
+    fn inputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
+        vec![self.start, self.end, self.delta].into_iter()
+    }
+    fn outputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
+        vec![self.output].into_iter()
+    }
 }
 
 impl MilliOp for Range {
@@ -39,13 +48,17 @@ impl MilliOp for Range {
         &self,
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
-    ) -> Result<impl Iterator<Item=(MilliOpGraphTensorId, NumericTensor<DynRank>)>, MilliOpGraphError> {
+    ) -> Result<
+        impl Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>,
+        MilliOpGraphError,
+    > {
         let out: NumericTensor<DynRank> = NumericTensor::<P1>::range(
             inputs[&self.start].first_element(),
             inputs[&self.end].first_element(),
             inputs[&self.delta].first_element(),
             backend,
-        )?.to_dyn_rank();
+        )?
+        .to_dyn_rank();
         Ok([(self.output, out)].into_iter())
     }
 

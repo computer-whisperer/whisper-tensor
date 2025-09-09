@@ -14,17 +14,29 @@ pub struct Concat {
 }
 
 impl Concat {
-    pub fn new<T: std::hash::Hash + Clone + Eq>(graph: &mut MilliOpGraph<T>, inputs: Vec<MilliOpGraphTensorId>, axis: i64) -> MilliOpGraphTensorId {
+    pub fn new<T: std::hash::Hash + Clone + Eq>(
+        graph: &mut MilliOpGraph<T>,
+        inputs: Vec<MilliOpGraphTensorId>,
+        axis: i64,
+    ) -> MilliOpGraphTensorId {
         let output = graph.get_new_tensor_id();
-        let node = Self { output, inputs, axis };
+        let node = Self {
+            output,
+            inputs,
+            axis,
+        };
         graph.push_op(AnyMilliOp::Concat(node));
         output
     }
 }
 
 impl crate::graph::Node<MilliOpGraphTensorId> for Concat {
-    fn inputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> { self.inputs.clone().into_iter() }
-    fn outputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> { vec![self.output].into_iter() }
+    fn inputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
+        self.inputs.clone().into_iter()
+    }
+    fn outputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
+        vec![self.output].into_iter()
+    }
 }
 
 impl MilliOp for Concat {
@@ -32,7 +44,10 @@ impl MilliOp for Concat {
         &self,
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
-    ) -> Result<impl Iterator<Item=(MilliOpGraphTensorId, NumericTensor<DynRank>)>, MilliOpGraphError> {
+    ) -> Result<
+        impl Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>,
+        MilliOpGraphError,
+    > {
         let mut resolved_inputs = vec![];
         for input in &self.inputs {
             resolved_inputs.push(&inputs[input]);
@@ -42,11 +57,7 @@ impl MilliOp for Concat {
         } else {
             self.axis
         } as usize;
-        let out = NumericTensor::<DynRank>::concat(
-            resolved_inputs.as_slice(),
-            axis,
-            backend,
-        )?;
+        let out = NumericTensor::<DynRank>::concat(resolved_inputs.as_slice(), axis, backend)?;
         Ok([(self.output, out)].into_iter())
     }
 

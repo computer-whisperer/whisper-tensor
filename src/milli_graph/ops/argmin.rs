@@ -1,11 +1,11 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
+use crate::graph::Node;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError, MilliOpGraphTensorId};
 use crate::numeric_tensor::NumericTensor;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use crate::graph::Node;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArgMin {
@@ -17,8 +17,8 @@ pub struct ArgMin {
 }
 
 impl ArgMin {
-    pub fn new(
-        graph: &mut MilliOpGraph<MilliOpGraphTensorId>,
+    pub fn new<T: std::hash::Hash + Clone + Eq>(
+        graph: &mut MilliOpGraph<T>,
         input: MilliOpGraphTensorId,
         axis: i64,
         keepdims: bool,
@@ -42,7 +42,10 @@ impl MilliOp for ArgMin {
         &self,
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
-    ) -> Result<impl Iterator<Item=(MilliOpGraphTensorId, NumericTensor<DynRank>)>, MilliOpGraphError>{
+    ) -> Result<
+        impl Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>,
+        MilliOpGraphError,
+    > {
         let input = inputs[&self.input].clone();
         let axis = if self.axis < 0 {
             input.shape().len() as i64 + self.axis
@@ -58,12 +61,11 @@ impl MilliOp for ArgMin {
     }
 }
 
-
 impl Node<MilliOpGraphTensorId> for ArgMin {
-    fn inputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> {
+    fn inputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
         vec![self.input].into_iter()
     }
-    fn outputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId>{
+    fn outputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
         vec![self.output].into_iter()
     }
 }

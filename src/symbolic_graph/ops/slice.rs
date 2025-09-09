@@ -70,13 +70,14 @@ impl Operation for SliceOperation {
 
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
-        let out = graph.push_op(AnyMilliOp::Slice(Slice::new(
+        let out = Slice::new(
+            &mut graph,
             input_map[&self.data],
             input_map[&self.starts],
             input_map[&self.ends],
             self.steps.map(|x| input_map[&x]),
             self.axes.map(|x| input_map[&x]),
-        )));
+        );
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
         graph.set_output_map(output_map);

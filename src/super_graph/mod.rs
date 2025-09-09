@@ -5,7 +5,10 @@ pub mod nodes;
 pub mod observer;
 
 use crate::backends::eval_backend::EvalBackend;
-use crate::milli_graph::{MilliOpGraphError, MilliOpGraphNodeId, MilliOpGraphNodePath, MilliOpGraphTensorId, MilliOpGraphTensorPath};
+use crate::milli_graph::{
+    MilliOpGraphError, MilliOpGraphNodeId, MilliOpGraphNodePath, MilliOpGraphTensorId,
+    MilliOpGraphTensorPath,
+};
 use crate::model::ModelError;
 use crate::numeric_tensor::NumericTensorError;
 use crate::numeric_tensor_typed::TypedNumericTensorError;

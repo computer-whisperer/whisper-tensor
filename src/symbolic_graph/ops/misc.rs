@@ -56,11 +56,12 @@ impl Operation for WhereOperation {
 
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
-        let out = graph.push_op(AnyMilliOp::Where(Where::new(
+        let out = Where::new(
+            &mut graph,
             input_map[&self.condition],
             input_map[&self.x],
             input_map[&self.y],
-        )));
+        );
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
         graph.set_output_map(output_map);
@@ -370,10 +371,7 @@ impl Operation for ExpandOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
 
-        let x = graph.push_op(AnyMilliOp::Expand(Expand::new(
-            input_map[&self.input],
-            input_map[&self.shape],
-        )));
+        let x = Expand::new(&mut graph, input_map[&self.input], input_map[&self.shape]);
 
         let mut output_map = HashMap::new();
         output_map.insert(x, self.output);
@@ -442,19 +440,15 @@ impl Operation for ClipOperation {
 
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
-        let x = input_map[&self.input];
-        let x = if let Some(min) = self.min {
+        let mut x = input_map[&self.input];
+        if let Some(min) = self.min {
             let min = input_map[&min];
-            graph.push_op(AnyMilliOp::SimpleBinary(SimpleBinary::max(x, min)))
-        } else {
-            x
-        };
-        let x = if let Some(max) = self.max {
+            x = SimpleBinary::max(&mut graph, x, min);
+        }
+        if let Some(max) = self.max {
             let max = input_map[&max];
-            graph.push_op(AnyMilliOp::SimpleBinary(SimpleBinary::min(x, max)))
-        } else {
-            x
-        };
+            x = SimpleBinary::min(&mut graph, x, max);
+        }
         let mut output_map = HashMap::new();
         output_map.insert(x, self.output);
         graph.set_output_map(output_map);
@@ -505,11 +499,12 @@ impl Operation for RangeOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
 
-        let out = graph.push_op(AnyMilliOp::Range(Range::new(
+        let out = Range::new(
+            &mut graph,
             input_map[&self.start],
             input_map[&self.end],
             input_map[&self.delta],
-        )));
+        );
 
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);

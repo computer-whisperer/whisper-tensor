@@ -1,13 +1,13 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
+use crate::graph::Node;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError, MilliOpGraphTensorId};
 use crate::numeric_tensor::NumericTensor;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use typenum::P1;
-use crate::graph::Node;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Shape {
@@ -16,7 +16,10 @@ pub struct Shape {
 }
 
 impl Shape {
-    pub fn new<T: std::hash::Hash + Clone + Eq>(graph: &mut MilliOpGraph<T>, input: MilliOpGraphTensorId) -> MilliOpGraphTensorId {
+    pub fn new<T: std::hash::Hash + Clone + Eq>(
+        graph: &mut MilliOpGraph<T>,
+        input: MilliOpGraphTensorId,
+    ) -> MilliOpGraphTensorId {
         let output = graph.get_new_tensor_id();
         let node = Self { output, input };
         graph.push_op(AnyMilliOp::Shape(node));
@@ -29,7 +32,10 @@ impl MilliOp for Shape {
         &self,
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
         _backend: &mut EvalBackend,
-    ) -> Result<impl Iterator<Item=(MilliOpGraphTensorId, NumericTensor<DynRank>)>, MilliOpGraphError> {
+    ) -> Result<
+        impl Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>,
+        MilliOpGraphError,
+    > {
         let output_shape = inputs[&self.input]
             .shape()
             .into_iter()
@@ -47,6 +53,10 @@ impl MilliOp for Shape {
 }
 
 impl Node<MilliOpGraphTensorId> for Shape {
-    fn inputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> { vec![self.input].into_iter() }
-    fn outputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> { vec![self.output].into_iter() }
+    fn inputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
+        vec![self.input].into_iter()
+    }
+    fn outputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
+        vec![self.output].into_iter()
+    }
 }

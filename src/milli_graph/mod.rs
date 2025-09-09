@@ -1,6 +1,7 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::dtype::DTypeError;
+use crate::graph::{Graph, GraphPath, InnerGraph, LinkPath, Node, NodePath};
 use crate::milli_graph::observer::MilliOpGraphObserver;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::numeric_tensor::NumericTensor;
@@ -9,7 +10,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::time::Instant;
-use crate::graph::{Graph, GraphPath, InnerGraph, LinkPath, Node, NodePath};
 
 pub mod observer;
 pub mod ops;
@@ -84,7 +84,9 @@ impl<ID: Hash + Clone + Eq> MilliOpGraph<ID> {
 
     pub fn get_all_tensors(&self) -> HashSet<MilliOpGraphTensorId> {
         let mut result = HashSet::new();
-        for v in self.input_map.values() { result.insert(*v); }
+        for v in self.input_map.values() {
+            result.insert(*v);
+        }
         for op in self.ops.values() {
             for tid in op.outputs() {
                 result.insert(tid);
@@ -167,7 +169,11 @@ impl<ID: Hash + Clone + Eq> MilliOpGraph<ID> {
                 backend,
             );
             for (tensor_id, value) in out_vec {
-                observer.on_tensor_assigned(&MilliOpGraphTensorPath::Tensor(tensor_id), &value, backend);
+                observer.on_tensor_assigned(
+                    &MilliOpGraphTensorPath::Tensor(tensor_id),
+                    &value,
+                    backend,
+                );
                 intermediate_values.insert(tensor_id, value);
             }
         }
@@ -191,15 +197,11 @@ pub enum MilliOpGraphNodePath {
     Op(MilliOpGraphNodeId),
 }
 
-impl GraphPath for () {
-}
+impl GraphPath for () {}
 
-impl NodePath for MilliOpGraphNodePath {
-}
+impl NodePath for MilliOpGraphNodePath {}
 
-impl LinkPath for MilliOpGraphTensorPath {
-}
-
+impl LinkPath for MilliOpGraphTensorPath {}
 
 impl<IoLinkId: Hash + Clone + Eq + std::fmt::Debug> Graph for MilliOpGraph<IoLinkId> {
     type GraphPath = ();
@@ -222,11 +224,11 @@ impl<IoLinkId: Hash + Clone + Eq + std::fmt::Debug> InnerGraph for MilliOpGraph<
     type InputLinkId = IoLinkId;
     type OutputLinkId = IoLinkId;
 
-    fn nodes(&self) -> impl Iterator<Item=Self::NodeId> {
+    fn nodes(&self) -> impl Iterator<Item = Self::NodeId> {
         self.ops.keys().cloned()
     }
 
-    fn links(&self) -> impl Iterator<Item=Self::LinkId> {
+    fn links(&self) -> impl Iterator<Item = Self::LinkId> {
         self.get_all_tensors().into_iter()
     }
 
@@ -238,21 +240,29 @@ impl<IoLinkId: Hash + Clone + Eq + std::fmt::Debug> InnerGraph for MilliOpGraph<
         None
     }
 
-    fn input_links(&self) -> impl Iterator<Item=(Self::InputLinkId, Self::LinkId)> {
-        self.input_ordering.iter().cloned().map(|x| (x.clone(), self.input_map[&x]))
+    fn input_links(&self) -> impl Iterator<Item = (Self::InputLinkId, Self::LinkId)> {
+        self.input_ordering
+            .iter()
+            .cloned()
+            .map(|x| (x.clone(), self.input_map[&x]))
     }
 
-    fn output_links(&self) -> impl Iterator<Item=(Self::OutputLinkId, Self::LinkId)> {
+    fn output_links(&self) -> impl Iterator<Item = (Self::OutputLinkId, Self::LinkId)> {
         let ordering = self.output_ordering.as_ref().unwrap();
         let map = self.output_map.as_ref().unwrap();
         ordering.iter().cloned().map(move |x| {
-            let tid = map.iter().find(|(_, id)| **id == x).map(|(tid, _)| *tid).expect("output id not found in map");
+            let tid = map
+                .iter()
+                .find(|(_, id)| **id == x)
+                .map(|(tid, _)| *tid)
+                .expect("output id not found in map");
             (x, tid)
         })
     }
 }
 
-
 impl crate::graph::Link<MilliOpGraphTensorId> for MilliOpGraphTensorId {
-    fn link_id(&self) -> MilliOpGraphTensorId { *self }
+    fn link_id(&self) -> MilliOpGraphTensorId {
+        *self
+    }
 }

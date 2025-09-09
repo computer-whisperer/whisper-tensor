@@ -1,13 +1,13 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::dtype::DType;
+use crate::graph::Node;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError, MilliOpGraphTensorId};
 use crate::numeric_tensor::NumericTensor;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use typenum::P1;
-use crate::graph::Node;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Reshape {
@@ -18,7 +18,12 @@ pub struct Reshape {
 }
 
 impl Reshape {
-    pub fn new<T: std::hash::Hash + Clone + Eq>(graph: &mut MilliOpGraph<T>, data: MilliOpGraphTensorId, shape: MilliOpGraphTensorId, allowzero: bool) -> MilliOpGraphTensorId {
+    pub fn new<T: std::hash::Hash + Clone + Eq>(
+        graph: &mut MilliOpGraph<T>,
+        data: MilliOpGraphTensorId,
+        shape: MilliOpGraphTensorId,
+        allowzero: bool,
+    ) -> MilliOpGraphTensorId {
         let output = graph.get_new_tensor_id();
         let node = Self {
             output,
@@ -81,8 +86,12 @@ impl Reshape {
 }
 
 impl Node<MilliOpGraphTensorId> for Reshape {
-    fn inputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> { vec![self.data, self.shape].into_iter() }
-    fn outputs(&self) -> impl Iterator<Item=MilliOpGraphTensorId> { vec![self.output].into_iter() }
+    fn inputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
+        vec![self.data, self.shape].into_iter()
+    }
+    fn outputs(&self) -> impl Iterator<Item = MilliOpGraphTensorId> {
+        vec![self.output].into_iter()
+    }
 }
 
 impl MilliOp for Reshape {
@@ -90,7 +99,10 @@ impl MilliOp for Reshape {
         &self,
         inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
-    ) -> Result<impl Iterator<Item=(MilliOpGraphTensorId, NumericTensor<DynRank>)>, MilliOpGraphError> {
+    ) -> Result<
+        impl Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>,
+        MilliOpGraphError,
+    > {
         let data_input = &inputs[&self.data];
         let shape_input = &inputs[&self.shape];
         let shape_input_value: Vec<i64> = shape_input

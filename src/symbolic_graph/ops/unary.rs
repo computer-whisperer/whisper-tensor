@@ -1,4 +1,5 @@
 use crate::dtype::DType;
+use crate::graph::{Graph, InnerGraph, Node};
 use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::ops::*;
 use crate::symbolic_graph::ops::Operation;
@@ -6,7 +7,6 @@ use crate::symbolic_graph::{ONNXDecodingError, SymbolicGraphTensorId, query_attr
 use crate::{TrigOp, onnx};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use crate::graph::{Graph, Node, InnerGraph};
 
 #[derive(Clone, Debug, PartialEq, strum_macros::Display, Serialize, Deserialize)]
 pub enum WhichUnaryOperation {
@@ -91,8 +91,7 @@ impl Operation for UnaryOperation {
                 let xn = Cast::new(&mut graph, a, DType::F32);
                 let xn = SimpleUnaryOp::neg(&mut graph, xn);
                 let xn = SimpleUnaryOp::exp(&mut graph, xn);
-                let c_node = Constant::new_scalar(&mut graph, 1.0f32);
-                let c_tid = match graph.inner(&()).get_node(&c_node) { Some(AnyMilliOp::Constant(op)) => op.outputs().next().unwrap(), _ => unreachable!(), };
+                let c_tid = Constant::new_scalar(&mut graph, 1.0f32);
                 let c = CastLike::new(&mut graph, c_tid, xn);
                 let o = SimpleBinary::add(&mut graph, xn, c);
                 let o = SimpleUnaryOp::reciprocal(&mut graph, o);
@@ -102,8 +101,7 @@ impl Operation for UnaryOperation {
             WhichUnaryOperation::Log => SimpleUnaryOp::ln(&mut graph, a),
             WhichUnaryOperation::Softplus => {
                 let x = SimpleUnaryOp::exp(&mut graph, a);
-                let c_node = Constant::new_scalar(&mut graph, 1.0f32);
-                let c_tid = match graph.inner(&()).get_node(&c_node) { Some(AnyMilliOp::Constant(op)) => op.outputs().next().unwrap(), _ => unreachable!(), };
+                let c_tid = Constant::new_scalar(&mut graph, 1.0f32);
                 let c = CastLike::new(&mut graph, c_tid, x);
                 let x = SimpleBinary::add(&mut graph, x, c);
                 SimpleUnaryOp::ln(&mut graph, x)
@@ -174,8 +172,7 @@ impl Operation for SoftmaxOperation {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
 
         let e = SimpleUnaryOp::exp(&mut graph, input_map[&self.input]);
-        let axis_node = Constant::new_scalar(&mut graph, self.axis.unwrap_or(-1));
-        let axis_tid = match graph.inner(&()).get_node(&axis_node) { Some(AnyMilliOp::Constant(op)) => op.outputs().next().unwrap(), _ => unreachable!(), };
+        let axis_tid = Constant::new_scalar(&mut graph, self.axis.unwrap_or(-1));
         let sum = ReduceSum::new(&mut graph, e, Some(axis_tid), true, false);
         let out_tid = SimpleBinary::div(&mut graph, e, sum);
         let mut output_map = HashMap::new();
@@ -229,8 +226,7 @@ impl Operation for LogSoftmaxOperation {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
 
         let e_tid = SimpleUnaryOp::exp(&mut graph, input_map[&self.input]);
-        let axis_node = Constant::new_scalar(&mut graph, self.axis.unwrap_or(-1));
-        let axis_tid = match graph.inner(&()).get_node(&axis_node) { Some(AnyMilliOp::Constant(op)) => op.outputs().next().unwrap(), _ => unreachable!(), };
+        let axis_tid = Constant::new_scalar(&mut graph, self.axis.unwrap_or(-1));
         let sum_tid = ReduceSum::new(&mut graph, e_tid, Some(axis_tid), true, false);
         let softmax_tid = SimpleBinary::div(&mut graph, e_tid, sum_tid);
         let out_tid = SimpleUnaryOp::ln(&mut graph, softmax_tid);
@@ -290,7 +286,12 @@ impl Operation for IsInfOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
         let input = input_map[&self.input];
-        let out_tid = SimpleUnaryOp::is_inf(&mut graph, input, self.detect_positive.unwrap_or(true), self.detect_negative.unwrap_or(true));
+        let out_tid = SimpleUnaryOp::is_inf(
+            &mut graph,
+            input,
+            self.detect_positive.unwrap_or(true),
+            self.detect_negative.unwrap_or(true),
+        );
         let mut output_map = HashMap::new();
         output_map.insert(out_tid, self.output);
         graph.set_output_map(output_map);

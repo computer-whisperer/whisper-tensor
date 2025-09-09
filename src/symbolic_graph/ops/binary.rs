@@ -1,3 +1,4 @@
+use crate::graph::{Graph, InnerGraph, Node};
 use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::ops::*;
 use crate::onnx;
@@ -89,7 +90,9 @@ impl Operation for BinaryOperation {
             WhichBinaryOperation::BitwiseXor => SimpleBinary::bitwise_xor(&mut graph, a, b),
             WhichBinaryOperation::Equal => SimpleBinary::equal(&mut graph, a, b),
             WhichBinaryOperation::Greater => SimpleBinary::greater(&mut graph, a, b),
-            WhichBinaryOperation::GreaterOrEqual => SimpleBinary::greater_or_equal(&mut graph, a, b),
+            WhichBinaryOperation::GreaterOrEqual => {
+                SimpleBinary::greater_or_equal(&mut graph, a, b)
+            }
             WhichBinaryOperation::Less => SimpleBinary::less(&mut graph, a, b),
             WhichBinaryOperation::LessOrEqual => SimpleBinary::less_or_equal(&mut graph, a, b),
         };
@@ -141,10 +144,11 @@ impl Operation for PowOperation {
 
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
-        let out = graph.push_op(AnyMilliOp::Pow(MilliOpPow::new(
+        let out = MilliOpPow::new(
+            &mut graph,
             input_map[&self.input_x],
             input_map[&self.input_y],
-        )));
+        );
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
         graph.set_output_map(output_map);
@@ -223,7 +227,7 @@ impl Operation for GemmOperation {
 
         let a = if let Some(trans_a) = self.trans_a {
             if trans_a {
-                graph.push_op(AnyMilliOp::Transpose(Transpose::new(a, None)))
+                Transpose::new(&mut graph, a, None)
             } else {
                 a
             }
@@ -233,7 +237,7 @@ impl Operation for GemmOperation {
 
         let b = if let Some(trans_b) = self.trans_b {
             if trans_b {
-                graph.push_op(AnyMilliOp::Transpose(Transpose::new(b, None)))
+                Transpose::new(&mut graph, b, None)
             } else {
                 b
             }
@@ -241,17 +245,12 @@ impl Operation for GemmOperation {
             b
         };
 
-        let x = graph.push_op(AnyMilliOp::MatMul(MilliOpMatMul::new(a, b)));
+        let x = MilliOpMatMul::new(&mut graph, a, b);
 
         let x = if let Some(alpha) = self.alpha {
-            let alpha_const =
-                graph.push_op(AnyMilliOp::Constant(Constant::new_scalar(alpha)));
-            let alpha_const =
-                graph.push_op(AnyMilliOp::CastLike(CastLike::new(alpha_const, x)));
-            graph.push_op(AnyMilliOp::SimpleBinary(SimpleBinary::mul(
-                x,
-                alpha_const,
-            )))
+            let alpha_tid = Constant::new_scalar(&mut graph, alpha);
+            let alpha_const = CastLike::new(&mut graph, alpha_tid, x);
+            SimpleBinary::mul(&mut graph, x, alpha_const)
         } else {
             x
         };
@@ -259,17 +258,13 @@ impl Operation for GemmOperation {
         let x = if let Some(c) = self.input_c {
             let c = input_map[&c];
             let c = if let Some(beta) = self.beta {
-                let beta_const =
-                    graph.push_op(AnyMilliOp::Constant(Constant::new_scalar(beta)));
-                let beta_const =
-                    graph.push_op(AnyMilliOp::CastLike(CastLike::new(beta_const, c)));
-                graph.push_op(AnyMilliOp::SimpleBinary(SimpleBinary::mul(
-                    c, beta_const,
-                )))
+                let beta_tid = Constant::new_scalar(&mut graph, beta);
+                let beta_const = CastLike::new(&mut graph, beta_tid, c);
+                SimpleBinary::mul(&mut graph, c, beta_const)
             } else {
                 c
             };
-            graph.push_op(AnyMilliOp::SimpleBinary(SimpleBinary::add(x, c)))
+            SimpleBinary::add(&mut graph, x, c)
         } else {
             x
         };
@@ -334,12 +329,13 @@ impl Operation for ArgMaxOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
 
-        let x = graph.push_op(AnyMilliOp::ArgMax(ArgMax::new(
+        let x = ArgMax::new(
+            &mut graph,
             input_map[&self.input],
             self.axis,
             self.keepdims,
             self.select_last_index,
-        )));
+        );
 
         let mut output_map = HashMap::new();
         output_map.insert(x, self.output);
@@ -401,12 +397,13 @@ impl Operation for ArgMinOperation {
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
 
-        let x = graph.push_op(AnyMilliOp::ArgMin(ArgMin::new(
+        let x = ArgMin::new(
+            &mut graph,
             input_map[&self.input],
             self.axis,
             self.keepdims,
             self.select_last_index,
-        )));
+        );
 
         let mut output_map = HashMap::new();
         output_map.insert(x, self.output);
@@ -462,7 +459,7 @@ impl Operation for MaxOperation {
         let mut x = input_map[&self.inputs[0]];
         for input in &self.inputs[1..] {
             let y = input_map[input];
-            x = graph.push_op(AnyMilliOp::SimpleBinary(SimpleBinary::max(x, y)))
+            x = SimpleBinary::max(&mut graph, x, y)
         }
         let mut output_map = HashMap::new();
         output_map.insert(x, self.output);
@@ -518,7 +515,7 @@ impl Operation for MinOperation {
         let mut x = input_map[&self.inputs[0]];
         for input in &self.inputs[1..] {
             let y = input_map[input];
-            x = graph.push_op(AnyMilliOp::SimpleBinary(SimpleBinary::min(x, y)))
+            x = SimpleBinary::min(&mut graph, x, y)
         }
         let mut output_map = HashMap::new();
         output_map.insert(x, self.output);
@@ -577,9 +574,7 @@ impl Operation for ModuloOperation {
         let a = input_map[&self.a];
         let b = input_map[&self.b];
 
-        let output = graph.push_op(AnyMilliOp::SimpleBinary(SimpleBinary::modulo(
-            a, b, self.fmod,
-        )));
+        let output = SimpleBinary::modulo(&mut graph, a, b, self.fmod);
         let mut output_map = HashMap::new();
         output_map.insert(output, self.output);
         graph.set_output_map(output_map);

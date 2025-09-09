@@ -48,10 +48,11 @@ impl Operation for CastLikeOperation {
 
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
-        let out = graph.push_op(AnyMilliOp::CastLike(CastLike::new(
+        let out = CastLike::new(
+            &mut graph,
             input_map[&self.input],
             input_map[&self.target_type],
-        )));
+        );
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
         graph.set_output_map(output_map);
@@ -111,10 +112,7 @@ impl Operation for CastOperation {
 
     fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
-        let out = graph.push_op(AnyMilliOp::Cast(Cast::new(
-            input_map[&self.input],
-            self.to,
-        )));
+        let out = Cast::new(&mut graph, input_map[&self.input], self.to);
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
         graph.set_output_map(output_map);

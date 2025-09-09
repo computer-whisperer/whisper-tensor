@@ -2,7 +2,6 @@ use crate::milli_graph::ops::*;
 use crate::milli_graph::{MilliOpGraph, ops_helpers};
 use crate::onnx;
 use crate::symbolic_graph::ops::Operation;
-use crate::graph::{Graph, Node, InnerGraph};
 use crate::symbolic_graph::{ONNXDecodingError, SymbolicGraphTensorId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -71,9 +70,7 @@ impl Operation for ShapeOperation {
             } else {
                 Shape::new(&mut graph, out)
             };
-            Slice::new(
-                &mut graph, out, start, end, None, None,
-            )
+            Slice::new(&mut graph, out, start, end, None, None)
         } else {
             out
         };
@@ -124,13 +121,7 @@ impl Operation for SizeOperation {
         let (mut graph, input_map) = MilliOpGraph::new(&self.get_inputs());
 
         let shape_tid = Shape::new(&mut graph, input_map[&self.input]);
-        let size_node = ReduceProd::new(
-            &mut graph, shape_tid, None, false, false,
-        );
-        let size_tid = match graph.inner(&()).get_node(&size_node) {
-            Some(AnyMilliOp::ReduceProd(op)) => op.outputs().next().unwrap(),
-            _ => unreachable!(),
-        };
+        let size_tid = ReduceProd::new(&mut graph, shape_tid, None, false, false);
 
         let mut output_map = HashMap::new();
         output_map.insert(size_tid, self.output);
