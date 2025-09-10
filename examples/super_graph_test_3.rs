@@ -6,18 +6,22 @@ use whisper_tensor::backends::eval_backend::EvalBackend;
 use whisper_tensor::backends::vulkan_backend::{VulkanContext, VulkanImmediateExecutor};
 use whisper_tensor::model::Model;
 use whisper_tensor::super_graph::cache::SuperGraphCache;
-use whisper_tensor_import::identify_and_load;
 use whisper_tensor_import::onnx_graph::WeightStorageStrategy;
+use whisper_tensor_import::{ModelTypeHint, identify_and_load};
 
 fn main() {
     tracing_subscriber::fmt::init();
-    //let input_path =
-    //    Path::new("/mnt/secondary/rwkv-7-world/RWKV-x070-World-0.4B-v2.9-20250107-ctx4096.pth");
-    let input_path = Path::new("/mnt/secondary/neural_networks/llms/Llama-3.1-8B-Instruct");
+    let input_path =
+        Path::new("/mnt/secondary/rwkv-7-world/RWKV-x070-World-0.4B-v2.9-20250107-ctx4096.pth");
+    //let input_path = Path::new("/mnt/secondary/neural_networks/llms/Llama-3.1-8B-Instruct");
     //let onnx_out = Path::new("out.onnx");
-    let _bin_out = Path::new("out.bin");
-    let onnx_data =
-        identify_and_load(input_path, WeightStorageStrategy::EmbeddedData, None).unwrap();
+    //let _bin_out = Path::new("out.bin");
+    let onnx_data = identify_and_load(
+        input_path,
+        WeightStorageStrategy::OriginReference,
+        Some(ModelTypeHint::RWKV7),
+    )
+    .unwrap();
 
     let vulkan_context = VulkanContext::new().unwrap();
     let mut vulkan_runtime = VulkanImmediateExecutor::new(vulkan_context).unwrap();

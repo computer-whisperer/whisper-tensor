@@ -221,9 +221,9 @@ impl Node<SymbolicGraphTensorId> for AnyOperation {
 
     delegate!(op_kind() -> Self::OpKind);
 
-    delegate!(inputs() -> Box<dyn Iterator<Item=SymbolicGraphTensorId>>);
+    delegate!(inputs() -> Box<dyn Iterator<Item=SymbolicGraphTensorId> + '_>);
 
-    delegate!(outputs() -> Box<dyn Iterator<Item=SymbolicGraphTensorId>>);
+    delegate!(outputs() -> Box<dyn Iterator<Item=SymbolicGraphTensorId> + '_>);
 }
 
 impl Operation for AnyOperation {

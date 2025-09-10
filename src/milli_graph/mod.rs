@@ -234,7 +234,7 @@ impl<IoLinkId: Hash + Clone + Eq + std::fmt::Debug + 'static> InnerGraph
         self.ops.keys().cloned()
     }
 
-    fn links(&self) -> impl Iterator<Item = Self::LinkId> {
+    fn inner_links(&self) -> impl Iterator<Item = Self::LinkId> {
         self.get_all_tensors().into_iter()
     }
 
@@ -249,21 +249,31 @@ impl<IoLinkId: Hash + Clone + Eq + std::fmt::Debug + 'static> InnerGraph
     fn input_links(&self) -> impl Iterator<Item = (Self::InputLinkId, Self::LinkId)> {
         self.input_ordering
             .iter()
-            .cloned()
-            .map(|x| (x.clone(), self.input_map[&x]))
+            .map(|x| (x.clone(), self.input_map[x]))
     }
 
     fn output_links(&self) -> impl Iterator<Item = (Self::OutputLinkId, Self::LinkId)> {
-        let ordering = self.output_ordering.as_ref().unwrap();
-        let map = self.output_map.as_ref().unwrap();
-        ordering.iter().cloned().map(move |x| {
-            let tid = map
-                .iter()
-                .find(|(_, id)| **id == x)
-                .map(|(tid, _)| *tid)
-                .expect("output id not found in map");
-            (x, tid)
-        })
+        let mut output = vec![];
+        if let Some(ordering) = &self.output_ordering {
+            let map = self.output_map.as_ref().unwrap();
+            output.extend(ordering.iter().cloned().map(move |x| {
+                let tid = map
+                    .iter()
+                    .find(|(_, id)| **id == x)
+                    .map(|(tid, _)| *tid)
+                    .expect("output id not found in map");
+                (x, tid)
+            }))
+        } else {
+            output.extend(
+                self.output_map
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .map(|(tid, id)| (id.clone(), *tid)),
+            )
+        }
+        output.into_iter()
     }
 }
 

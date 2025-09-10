@@ -1621,7 +1621,7 @@ impl InnerGraph for SymbolicGraphInner {
         self.operations.keys().cloned()
     }
 
-    fn links(&self) -> impl Iterator<Item = Self::LinkId> {
+    fn inner_links(&self) -> impl Iterator<Item = Self::LinkId> {
         self.tensors.keys().cloned()
     }
 
@@ -1655,11 +1655,11 @@ impl Node<SymbolicGraphTensorId> for GraphOperation {
         self.op.op_kind()
     }
 
-    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId> + '_> {
         self.op.inputs()
     }
 
-    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId> + '_> {
         self.op.outputs()
     }
 }

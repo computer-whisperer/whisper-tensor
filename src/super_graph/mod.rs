@@ -5,6 +5,7 @@ pub mod nodes;
 pub mod observer;
 
 use crate::backends::eval_backend::EvalBackend;
+use crate::graph::{Graph, GraphPath, InnerGraph, Link, LinkPath, Node, NodePath};
 use crate::milli_graph::{
     MilliOpGraphError, MilliOpGraphNodeId, MilliOpGraphNodePath, MilliOpGraphTensorId,
     MilliOpGraphTensorPath,
@@ -99,34 +100,34 @@ impl SuperGraphInner {
                 for op_id in &remaining_ops {
                     let op = self.nodes.get(op_id).unwrap();
                     let mut all_inputs_ready = true;
-                    for input in &op.get_inputs() {
+                    for input in op.inputs() {
                         match input {
                             SuperGraphAnyLink::Tensor(x) => {
-                                if !data.tensors.contains_key(x) {
+                                if !data.tensors.contains_key(&x) {
                                     all_inputs_ready = false;
                                     break;
                                 }
                             }
                             SuperGraphAnyLink::String(x) => {
-                                if !data.strings.contains_key(x) {
+                                if !data.strings.contains_key(&x) {
                                     all_inputs_ready = false;
                                     break;
                                 }
                             }
                             SuperGraphAnyLink::Model(x) => {
-                                if !data.models.contains_key(x) {
+                                if !data.models.contains_key(&x) {
                                     all_inputs_ready = false;
                                     break;
                                 }
                             }
                             SuperGraphAnyLink::Tokenizer(x) => {
-                                if !data.tokenizers.contains_key(x) {
+                                if !data.tokenizers.contains_key(&x) {
                                     all_inputs_ready = false;
                                     break;
                                 }
                             }
                             SuperGraphAnyLink::Hash(x) => {
-                                if !data.hashes.contains_key(x) {
+                                if !data.hashes.contains_key(&x) {
                                     all_inputs_ready = false;
                                     break;
                                 }
@@ -176,8 +177,8 @@ impl SuperGraphInner {
         links.extend(self.input_links.iter().cloned());
         links.extend(self.output_links.iter().cloned());
         for node in self.nodes.values() {
-            links.extend(node.get_inputs());
-            links.extend(node.get_outputs());
+            links.extend(node.inputs());
+            links.extend(node.outputs());
         }
         links
     }
@@ -238,12 +239,12 @@ impl SuperGraphBuilder {
         sourced_links.extend(input_links.iter().cloned());
 
         for node in self.nodes.values() {
-            for link in node.get_outputs() {
+            for link in node.outputs() {
                 if !sourced_links.insert(link) {
                     panic!("Link {link:?} is sourced multiple times");
                 }
             }
-            sinked_links.extend(node.get_inputs().iter().cloned());
+            sinked_links.extend(node.inputs());
         }
 
         for link in sinked_links {
@@ -432,5 +433,68 @@ impl SuperGraphGraphPath {
         } else {
             panic!();
         }
+    }
+}
+
+impl GraphPath for SuperGraphGraphPath {}
+
+impl NodePath for SuperGraphNodePath {}
+
+impl LinkPath for SuperGraphTensorPath {}
+
+impl Graph for SuperGraph {
+    type GraphPath = SuperGraphGraphPath;
+    type NodePath = SuperGraphNodePath;
+    type LinkPath = SuperGraphTensorPath;
+    type Inner = SuperGraphInner;
+    type AnySubGraph = SuperGraphInner;
+
+    fn inner(&self, _path: &Self::GraphPath) -> &Self::AnySubGraph {
+        &self.inner
+    }
+}
+
+impl Link<SuperGraphAnyLink> for SuperGraphAnyLink {
+    fn link_id(&self) -> SuperGraphAnyLink {
+        *self
+    }
+}
+
+impl InnerGraph for SuperGraphInner {
+    type NodeId = SuperGraphNodeId;
+    type LinkId = SuperGraphAnyLink;
+    type Error = ();
+    type AnyNode = SuperGraphAnyNode;
+    type AnyLink = SuperGraphAnyLink;
+    type InputLinkId = SuperGraphAnyLink;
+    type OutputLinkId = SuperGraphAnyLink;
+
+    fn nodes(&self) -> impl Iterator<Item = Self::NodeId> {
+        self.nodes.keys().cloned()
+    }
+
+    fn inner_links(&self) -> impl Iterator<Item = Self::LinkId> {
+        let mut links = HashSet::new();
+        for node in self.nodes.values() {
+            links.extend(node.inputs());
+            links.extend(node.outputs());
+        }
+        links.into_iter()
+    }
+
+    fn get_node(&self, id: &Self::NodeId) -> Option<&Self::AnyNode> {
+        self.nodes.get(id)
+    }
+
+    fn get_link(&self, _id: &Self::LinkId) -> Option<&Self::AnyLink> {
+        unimplemented!()
+    }
+
+    fn input_links(&self) -> impl Iterator<Item = (Self::InputLinkId, Self::LinkId)> {
+        self.input_links.iter().map(|x| (*x, *x))
+    }
+
+    fn output_links(&self) -> impl Iterator<Item = (Self::OutputLinkId, Self::LinkId)> {
+        self.output_links.iter().map(|x| (*x, *x))
     }
 }

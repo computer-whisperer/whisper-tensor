@@ -1,6 +1,7 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
+use crate::graph::{InnerGraph, Node};
 use crate::milli_graph::observer::MilliOpGraphObserver;
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphNodePath, MilliOpGraphTensorPath};
 use crate::numeric_tensor::NumericTensor;
@@ -26,8 +27,6 @@ use typenum::P1;
 use whisper_tensor_import::onnx_graph::TokenizerInfo;
 
 pub trait SuperGraphNode {
-    fn get_inputs(&self) -> Vec<SuperGraphAnyLink>;
-    fn get_outputs(&self) -> Vec<SuperGraphAnyLink>;
     fn to_any(self) -> SuperGraphAnyNode;
     fn eval<'a, 'b, 'c, 'd, T: SuperGraphObserver>(
         &'a self,
@@ -66,6 +65,27 @@ impl SuperGraphNodeModelExecution {
             tensor_inputs,
             tensor_outputs,
         }
+    }
+}
+
+impl Node<SuperGraphAnyLink> for SuperGraphNodeModelExecution {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
+        "Model Execution".to_string()
+    }
+
+    fn inputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        let ret = self.tensor_inputs.clone().into_iter().map(|x| x.0.to_any());
+        Box::new(ret.chain(std::iter::once(self.model.to_any())))
+    }
+
+    fn outputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new(
+            self.tensor_outputs
+                .clone()
+                .into_iter()
+                .map(|x| x.1.to_any()),
+        )
     }
 }
 
@@ -114,14 +134,6 @@ impl<'a, T: SuperGraphObserver> SymbolicGraphObserver for SymbolicGraphObserverW
 }
 
 impl SuperGraphNode for SuperGraphNodeModelExecution {
-    fn get_inputs(&self) -> Vec<SuperGraphAnyLink> {
-        let mut ret: Vec<_> = self.tensor_inputs.iter().map(|x| x.0.to_any()).collect();
-        ret.push(self.model.to_any());
-        ret
-    }
-    fn get_outputs(&self) -> Vec<SuperGraphAnyLink> {
-        self.tensor_outputs.iter().map(|x| x.1.to_any()).collect()
-    }
     fn to_any(self) -> SuperGraphAnyNode {
         SuperGraphAnyNode::ModelExecution(self)
     }
@@ -193,13 +205,19 @@ impl SuperGraphNodeTokenizerLoad {
     }
 }
 
+impl Node<SuperGraphAnyLink> for SuperGraphNodeTokenizerLoad {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
+        "Tokenizer Load".to_string()
+    }
+    fn inputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new(std::iter::empty())
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new(std::iter::once(self.output.to_any()))
+    }
+}
 impl SuperGraphNode for SuperGraphNodeTokenizerLoad {
-    fn get_inputs(&self) -> Vec<SuperGraphAnyLink> {
-        vec![]
-    }
-    fn get_outputs(&self) -> Vec<SuperGraphAnyLink> {
-        vec![self.output.to_any()]
-    }
     fn to_any(self) -> SuperGraphAnyNode {
         SuperGraphAnyNode::TokenizerLoad(self)
     }
@@ -274,15 +292,22 @@ impl SuperGraphNodeTokenizerEncode {
     }
 }
 
+impl Node<SuperGraphAnyLink> for SuperGraphNodeTokenizerEncode {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
+        "Tokenizer Encode".to_string()
+    }
+    fn inputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new(
+            std::iter::once(self.tokenizer.to_any())
+                .chain(std::iter::once(self.text_input.to_any())),
+        )
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new(std::iter::once(self.tensor_output.to_any()))
+    }
+}
 impl SuperGraphNode for SuperGraphNodeTokenizerEncode {
-    fn get_inputs(&self) -> Vec<SuperGraphAnyLink> {
-        vec![self.tokenizer.to_any(), self.text_input.to_any()]
-    }
-
-    fn get_outputs(&self) -> Vec<SuperGraphAnyLink> {
-        vec![self.tensor_output.to_any()]
-    }
-
     fn to_any(self) -> SuperGraphAnyNode {
         SuperGraphAnyNode::TokenizerEncode(self)
     }
@@ -344,13 +369,23 @@ impl SuperGraphNodeTokenizerDecode {
     }
 }
 
+impl Node<SuperGraphAnyLink> for SuperGraphNodeTokenizerDecode {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
+        "Tokenizer Decode".to_string()
+    }
+    fn inputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new(
+            std::iter::once(self.tokenizer.to_any())
+                .chain(std::iter::once(self.tensor_input.to_any())),
+        )
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new(std::iter::once(self.text_output.to_any()))
+    }
+}
+
 impl SuperGraphNode for SuperGraphNodeTokenizerDecode {
-    fn get_inputs(&self) -> Vec<SuperGraphAnyLink> {
-        vec![self.tensor_input.to_any()]
-    }
-    fn get_outputs(&self) -> Vec<SuperGraphAnyLink> {
-        vec![self.text_output.to_any()]
-    }
     fn to_any(self) -> SuperGraphAnyNode {
         SuperGraphAnyNode::TokenizerDecode(self)
     }
@@ -425,17 +460,20 @@ impl<'a, T: SuperGraphObserver> MilliOpGraphObserver for MilliOpGraphObserverWra
     }
 }
 
+impl Node<SuperGraphAnyLink> for SuperGraphNodeMilliOpGraph {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
+        "MilliOpGraph".to_string()
+    }
+    fn inputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new(self.graph.input_links().map(|(a, _b)| a.to_any()))
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new(self.graph.output_links().map(|(a, _b)| a.to_any()))
+    }
+}
+
 impl SuperGraphNode for SuperGraphNodeMilliOpGraph {
-    fn get_inputs(&self) -> Vec<SuperGraphAnyLink> {
-        self.graph.get_inputs().iter().map(|x| x.to_any()).collect()
-    }
-    fn get_outputs(&self) -> Vec<SuperGraphAnyLink> {
-        self.graph
-            .get_outputs()
-            .iter()
-            .map(|x| x.to_any())
-            .collect()
-    }
     fn to_any(self) -> SuperGraphAnyNode {
         SuperGraphAnyNode::MilliOpGraph(self)
     }
@@ -494,8 +532,12 @@ impl SuperGraphNodeScan {
     }
 }
 
-impl SuperGraphNode for SuperGraphNodeScan {
-    fn get_inputs(&self) -> Vec<SuperGraphAnyLink> {
+impl Node<SuperGraphAnyLink> for SuperGraphNodeScan {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
+        "Scan".to_string()
+    }
+    fn inputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
         let mut inputs = Vec::new();
         inputs.push(self.iteration_count.to_any());
         for link in &self.simple_inputs {
@@ -507,10 +549,9 @@ impl SuperGraphNode for SuperGraphNodeScan {
         for (input, _, _) in &self.scan_inputs {
             inputs.push(input.to_any());
         }
-        inputs
+        Box::new(inputs.into_iter())
     }
-
-    fn get_outputs(&self) -> Vec<SuperGraphAnyLink> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
         let mut outputs = Vec::new();
         for link in &self.simple_outputs {
             outputs.push(link.second());
@@ -518,9 +559,10 @@ impl SuperGraphNode for SuperGraphNodeScan {
         for (_, output, _) in &self.scan_outputs {
             outputs.push(output.to_any());
         }
-        outputs
+        Box::new(outputs.into_iter())
     }
-
+}
+impl SuperGraphNode for SuperGraphNodeScan {
     fn to_any(self) -> SuperGraphAnyNode {
         SuperGraphAnyNode::Scan(self)
     }
@@ -864,21 +906,27 @@ impl SuperGraphNodeRNNCacheRead {
     }
 }
 
+impl Node<SuperGraphAnyLink> for SuperGraphNodeRNNCacheRead {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
+        "RNNCacheRead".to_string()
+    }
+    fn inputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new(
+            [self.key_input.to_any(), self.tokens_input.to_any()]
+                .into_iter()
+                .chain(self.default_state_inputs.iter().map(|x| x.1.to_any())),
+        )
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new(
+            std::iter::once(self.tokens_output.to_any())
+                .chain(self.state_outputs.iter().map(|x| x.1.to_any())),
+        )
+    }
+}
+
 impl SuperGraphNode for SuperGraphNodeRNNCacheRead {
-    fn get_inputs(&self) -> Vec<SuperGraphAnyLink> {
-        vec![self.key_input.to_any(), self.tokens_input.to_any()]
-            .into_iter()
-            .chain(self.default_state_inputs.iter().map(|x| x.1.to_any()))
-            .collect()
-    }
-
-    fn get_outputs(&self) -> Vec<SuperGraphAnyLink> {
-        vec![self.tokens_output.to_any()]
-            .into_iter()
-            .chain(self.state_outputs.iter().map(|x| x.1.to_any()))
-            .collect()
-    }
-
     fn to_any(self) -> SuperGraphAnyNode {
         SuperGraphAnyNode::RNNCacheRead(self)
     }
@@ -972,18 +1020,23 @@ impl SuperGraphNodeRNNCacheWrite {
     }
 }
 
+impl Node<SuperGraphAnyLink> for SuperGraphNodeRNNCacheWrite {
+    type OpKind = String;
+    fn op_kind(&self) -> Self::OpKind {
+        "RNNCacheWrite".to_string()
+    }
+    fn inputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new(
+            [self.key_input.to_any(), self.tokens_input.to_any()]
+                .into_iter()
+                .chain(self.state_inputs.iter().map(|x| x.1.to_any())),
+        )
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new(std::iter::empty())
+    }
+}
 impl SuperGraphNode for SuperGraphNodeRNNCacheWrite {
-    fn get_inputs(&self) -> Vec<SuperGraphAnyLink> {
-        vec![self.key_input.to_any(), self.tokens_input.to_any()]
-            .into_iter()
-            .chain(self.state_inputs.iter().map(|x| x.1.to_any()))
-            .collect()
-    }
-
-    fn get_outputs(&self) -> Vec<SuperGraphAnyLink> {
-        vec![]
-    }
-
     fn to_any(self) -> SuperGraphAnyNode {
         SuperGraphAnyNode::RNNCacheWrite(self)
     }
@@ -1038,33 +1091,24 @@ pub enum SuperGraphAnyNode {
     RNNCacheRead(SuperGraphNodeRNNCacheRead),
 }
 
+macro_rules! delegate {
+    ($name:ident($($arg:ident: $ty:ty),*) -> $ret:ty) => {
+        fn $name(&self, $($arg: $ty),*) -> $ret {
+            match self {
+                SuperGraphAnyNode::ModelExecution(x) => x.$name($($arg),*),
+                SuperGraphAnyNode::TokenizerEncode(x) => x.$name($($arg),*),
+                SuperGraphAnyNode::TokenizerDecode(x) => x.$name($($arg),*),
+                SuperGraphAnyNode::TokenizerLoad(x) => x.$name($($arg),*),
+                SuperGraphAnyNode::MilliOpGraph(x) => x.$name($($arg),*),
+                SuperGraphAnyNode::Scan(x) => x.$name($($arg),*),
+                SuperGraphAnyNode::RNNCacheRead(x) => x.$name($($arg),*),
+                SuperGraphAnyNode::RNNCacheWrite(x) => x.$name($($arg),*),
+            }
+        }
+    }
+}
+
 impl SuperGraphAnyNode {
-    pub fn get_outputs(&self) -> Vec<SuperGraphAnyLink> {
-        match self {
-            SuperGraphAnyNode::ModelExecution(node) => node.get_outputs(),
-            SuperGraphAnyNode::TokenizerEncode(node) => node.get_outputs(),
-            SuperGraphAnyNode::TokenizerDecode(node) => node.get_outputs(),
-            SuperGraphAnyNode::TokenizerLoad(node) => node.get_outputs(),
-            SuperGraphAnyNode::MilliOpGraph(node) => node.get_outputs(),
-            SuperGraphAnyNode::Scan(node) => node.get_outputs(),
-            SuperGraphAnyNode::RNNCacheWrite(node) => node.get_outputs(),
-            SuperGraphAnyNode::RNNCacheRead(node) => node.get_outputs(),
-        }
-    }
-
-    pub fn get_inputs(&self) -> Vec<SuperGraphAnyLink> {
-        match self {
-            SuperGraphAnyNode::ModelExecution(node) => node.get_inputs(),
-            SuperGraphAnyNode::TokenizerEncode(node) => node.get_inputs(),
-            SuperGraphAnyNode::TokenizerDecode(node) => node.get_inputs(),
-            SuperGraphAnyNode::TokenizerLoad(node) => node.get_inputs(),
-            SuperGraphAnyNode::MilliOpGraph(node) => node.get_inputs(),
-            SuperGraphAnyNode::Scan(node) => node.get_inputs(),
-            SuperGraphAnyNode::RNNCacheWrite(node) => node.get_inputs(),
-            SuperGraphAnyNode::RNNCacheRead(node) => node.get_inputs(),
-        }
-    }
-
     pub(crate) fn eval<'a, 'b, 'c, 'd, T: SuperGraphObserver>(
         &'a self,
         node_path: &[SuperGraphNodeId],
@@ -1083,24 +1127,17 @@ impl SuperGraphAnyNode {
         }
     }
 
-    pub fn get_name(&self) -> String {
-        match self {
-            SuperGraphAnyNode::ModelExecution(_node) => "Model Execution",
-            SuperGraphAnyNode::TokenizerEncode(_node) => "Tokenizer Encode",
-            SuperGraphAnyNode::TokenizerDecode(_node) => "Tokenizer Decode",
-            SuperGraphAnyNode::TokenizerLoad(_node) => "Tokenizer Load",
-            SuperGraphAnyNode::MilliOpGraph(_node) => "Milli Op Graph",
-            SuperGraphAnyNode::Scan(_node) => "Scan",
-            SuperGraphAnyNode::RNNCacheRead(_node) => "RNN Cache Read",
-            SuperGraphAnyNode::RNNCacheWrite(_node) => "RNN Cache Write",
-        }
-        .to_string()
-    }
-
     pub fn get_sub_graph(&self) -> Option<&SuperGraphInner> {
         match self {
             SuperGraphAnyNode::Scan(x) => Some(&x.inner_graph),
             _ => None,
         }
     }
+}
+
+impl Node<SuperGraphAnyLink> for SuperGraphAnyNode {
+    type OpKind = String;
+    delegate!(op_kind() -> Self::OpKind);
+    delegate!(inputs() -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_>);
+    delegate!(outputs() -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_>);
 }

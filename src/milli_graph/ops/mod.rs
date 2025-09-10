@@ -313,6 +313,6 @@ impl MilliOp for AnyMilliOp {
 impl Node<MilliOpGraphTensorId> for AnyMilliOp {
     type OpKind = String;
     delegate!(op_kind() -> String);
-    delegate!(inputs() ->  Box<dyn Iterator<Item = MilliOpGraphTensorId>>);
-    delegate!(outputs() -> Box<dyn Iterator<Item = MilliOpGraphTensorId>>);
+    delegate!(inputs() ->  Box<dyn Iterator<Item = MilliOpGraphTensorId> + '_>);
+    delegate!(outputs() -> Box<dyn Iterator<Item = MilliOpGraphTensorId> + '_>);
 }

@@ -29,9 +29,9 @@ pub trait Node<LinkIdT: Clone + Eq + Hash + Debug> {
     /// Op name or other identifier.
     fn op_kind(&self) -> Self::OpKind;
     /// Incoming link handles in input index order.
-    fn inputs(&self) -> Box<dyn Iterator<Item = LinkIdT>>;
+    fn inputs(&self) -> Box<dyn Iterator<Item = LinkIdT> + '_>;
     /// Outgoing link handles grouped by output index order.
-    fn outputs(&self) -> Box<dyn Iterator<Item = LinkIdT>>;
+    fn outputs(&self) -> Box<dyn Iterator<Item = LinkIdT> + '_>;
 }
 
 /// The inner structure of a graph: nodes and links, plus IO interface.
@@ -46,7 +46,7 @@ pub trait InnerGraph {
 
     /// Deterministic iteration over nodes and links.
     fn nodes(&self) -> impl Iterator<Item = Self::NodeId>;
-    fn links(&self) -> impl Iterator<Item = Self::LinkId>;
+    fn inner_links(&self) -> impl Iterator<Item = Self::LinkId>;
 
     /// Resolve handles.
     fn get_node(&self, id: &Self::NodeId) -> Option<&Self::AnyNode>;

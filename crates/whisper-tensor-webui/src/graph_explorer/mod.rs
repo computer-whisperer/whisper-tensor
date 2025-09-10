@@ -1007,11 +1007,11 @@ impl GraphExplorerApp {
                             next_node_id += 1;
 
                             let mut inputs = vec![];
-                            for tensor_id in node.get_inputs() {
+                            for tensor_id in node.inputs() {
                                 inputs.push(link_ids[&tensor_id]);
                             }
                             let mut outputs = vec![];
-                            for tensor_id in node.get_outputs() {
+                            for tensor_id in node.outputs() {
                                 sourced_links.insert(link_ids[&tensor_id]);
                                 outputs.push(link_ids[&tensor_id]);
                             }
