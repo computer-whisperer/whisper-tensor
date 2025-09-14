@@ -131,7 +131,7 @@ fn main() {
                 caches: None,
                 super_graph_tensor_cache: &mut SuperGraphTensorCache::new(),
                 use_compiled_models: false,
-                compiled_models: None
+                compiled_models: None,
             },
         )
         .unwrap();
