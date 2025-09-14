@@ -27,6 +27,7 @@ struct ModelData {
     model: Arc<Model>,
     model_id: LoadedModelId,
     model_name: String,
+    compiled_program: Option<Arc<CompiledProgram>>,
 }
 
 pub(crate) struct ModelServer {
@@ -57,6 +58,7 @@ impl ModelServer {
                 model_id: model.model_id,
                 model_name: model.model_name.clone(),
                 num_ops: model.model.get_symbolic_graph().get_operations().len() as u64,
+                model_compiled: model.compiled_program.is_some(),
             });
 
             for interface in get_automatic_interfaces_from_model(&model.model) {
@@ -101,6 +103,7 @@ impl ModelServer {
             model: Arc::new(runtime_model),
             model_id: LoadedModelId(model_id),
             model_name,
+            compiled_program: None,
         });
 
         drop(guard);
@@ -122,6 +125,32 @@ impl ModelServer {
             .iter()
             .find(|model| model.model_id == model_id)
             .map(|model| model.model.clone())
+    }
+
+    pub(crate) async fn get_compiled_model(
+        &self,
+        model_id: LoadedModelId,
+    ) -> Option<Arc<CompiledProgram>> {
+        let guard = self.models.read().await;
+        guard
+            .iter()
+            .find(|model| model.model_id == model_id)
+            .map(|model| model.compiled_program.clone())
+            .flatten()
+    }
+
+    pub(crate) async fn set_compiled_model(
+        &self,
+        model_id: LoadedModelId,
+        compiled_program: Arc<CompiledProgram>,
+    ) {
+        let mut guard = self.models.write().await;
+        guard
+            .iter_mut()
+            .find(|model| model.model_id == model_id)
+            .map(|model| model.compiled_program = Some(compiled_program));
+        drop(guard);
+        self.generate_new_model_report().await;
     }
 
     pub(crate) async fn with_model<T>(
@@ -178,6 +207,7 @@ use crossbeam::queue::ArrayQueue;
 use hf_hub::api::tokio::ApiBuilder;
 use hf_hub::{Repo, RepoType};
 use tokenizers::FromPretrainedParameters;
+use whisper_tensor::compiler::CompiledProgram;
 use whisper_tensor::interfaces::get_automatic_interfaces_from_model;
 use whisper_tensor::model::Model;
 use whisper_tensor::numeric_tensor::NumericTensor;
@@ -395,6 +425,10 @@ async fn handle_socket(
                                         }
                                         WebsocketClientServerMessage::SuperGraphRequest(request) => {
                                             let job = SchedulerJob::SuperGraphRequest((request, finished_supergraph_job_tx.clone(), Some(SchedulerReporter::new(report_queue.clone(), report_notify.clone()))));
+                                            scheduler_sender.send(job).await.unwrap();
+                                        }
+                                        WebsocketClientServerMessage::CompileModel(model_id) => {
+                                            let job = SchedulerJob::CompileModelRequest{model_id};
                                             scheduler_sender.send(job).await.unwrap();
                                         }
                                         /*

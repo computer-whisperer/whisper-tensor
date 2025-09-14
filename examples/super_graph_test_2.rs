@@ -32,6 +32,7 @@ fn main() {
             .unwrap()
             .run_string_in_string_out(
                 &model,
+                None,
                 context.clone(),
                 &mut tokenizer_cache,
                 None,

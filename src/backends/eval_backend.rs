@@ -123,7 +123,7 @@ pub fn run<T: SymbolicGraphObserver>(
     loaded_tensor_cache: Option<&mut ModelLoadedTensorCache>,
     eval_backend: &mut EvalBackend,
     observer: &mut T,
-    inputs: HashMap<String, NumericTensor<DynRank>>,
+    inputs: impl IntoIterator<Item = (String, NumericTensor<DynRank>)>,
 ) -> Result<HashMap<String, NumericTensor<DynRank>>, EvalRuntimeError> {
     let initialized_tensors = if let Some(tensor_cache) = loaded_tensor_cache {
         model.get_initialized_tensors_cached(tensor_store, tensor_cache, eval_backend)

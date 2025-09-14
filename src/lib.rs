@@ -1,6 +1,7 @@
 use num_traits::Float;
 use serde::{Deserialize, Serialize};
 pub mod backends;
+pub mod compiler;
 pub mod dtype;
 pub mod graph;
 pub mod interfaces;

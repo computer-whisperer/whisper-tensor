@@ -130,6 +130,8 @@ fn main() {
                 eval_backend: &mut EvalBackend::NDArray,
                 caches: None,
                 super_graph_tensor_cache: &mut SuperGraphTensorCache::new(),
+                use_compiled_models: false,
+                compiled_models: None
             },
         )
         .unwrap();

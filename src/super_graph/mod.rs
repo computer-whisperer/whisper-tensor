@@ -5,12 +5,13 @@ pub mod nodes;
 pub mod observer;
 
 use crate::backends::eval_backend::EvalBackend;
+use crate::compiler::{CompiledProgram, CompilerError};
 use crate::graph::{Graph, GraphPath, InnerGraph, Link, LinkPath, Node, NodePath};
 use crate::milli_graph::{
     MilliOpGraphError, MilliOpGraphNodeId, MilliOpGraphNodePath, MilliOpGraphTensorId,
     MilliOpGraphTensorPath,
 };
-use crate::model::ModelError;
+use crate::model::{Model, ModelError};
 use crate::numeric_tensor::NumericTensorError;
 use crate::numeric_tensor_typed::TypedNumericTensorError;
 use crate::super_graph::cache::{SuperGraphCache, SuperGraphTensorCache};
@@ -44,6 +45,10 @@ pub enum SuperGraphError {
     NumericTensorError(#[from] NumericTensorError),
     #[error(transparent)]
     TypedNumericTensorError(#[from] TypedNumericTensorError),
+    #[error("Model not in compiled cache")]
+    ModelNotCompiledError,
+    #[error(transparent)]
+    CompilerError(#[from] CompilerError),
     #[error("Missing link")]
     MissingLinkError(),
 }
@@ -55,6 +60,8 @@ pub struct SuperGraphContext<'short, 'model, 'c, 'd, T: SuperGraphObserver> {
     pub eval_backend: &'c mut EvalBackend<'d>,
     pub caches: Option<&'short mut SuperGraphCache>,
     pub super_graph_tensor_cache: &'short mut SuperGraphTensorCache<'model>,
+    pub use_compiled_models: bool,
+    pub compiled_models: Option<Vec<(&'model Model, &'short CompiledProgram)>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

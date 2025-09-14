@@ -10,7 +10,7 @@ pub enum TokenizerError {
     Utf8Error(#[from] Utf8Error),
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
 pub enum AnyTokenizer {
     #[cfg(feature = "tokenizers")]

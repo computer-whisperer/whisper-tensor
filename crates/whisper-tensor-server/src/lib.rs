@@ -37,6 +37,7 @@ pub enum SuperGraphRequestBackendMode {
     #[default]
     NDArray,
     Vulkan,
+    Compiler,
 }
 
 impl Display for SuperGraphRequestBackendMode {
@@ -44,6 +45,7 @@ impl Display for SuperGraphRequestBackendMode {
         match self {
             SuperGraphRequestBackendMode::NDArray => write!(f, "NDArray"),
             SuperGraphRequestBackendMode::Vulkan => write!(f, "Vulkan"),
+            SuperGraphRequestBackendMode::Compiler => write!(f, "Compiler"),
         }
     }
 }
@@ -89,6 +91,7 @@ pub enum WebsocketClientServerMessage {
     GetStoredTensor(LoadedModelId, TensorStoreTensorId),
     GetHFTokenizer(String),
     SuperGraphRequest(SuperGraphRequest),
+    CompileModel(LoadedModelId),
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -96,6 +99,7 @@ pub struct CurrentModelsReportEntry {
     pub model_id: LoadedModelId,
     pub model_name: String,
     pub num_ops: u64,
+    pub model_compiled: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

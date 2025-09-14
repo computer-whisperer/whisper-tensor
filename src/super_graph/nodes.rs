@@ -1,6 +1,7 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
+use crate::compiler::CompiledProgramObserver;
 use crate::graph::{InnerGraph, Node};
 use crate::milli_graph::observer::MilliOpGraphObserver;
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphNodePath, MilliOpGraphTensorPath};
@@ -133,6 +134,36 @@ impl<'a, T: SuperGraphObserver> SymbolicGraphObserver for SymbolicGraphObserverW
     }
 }
 
+impl<'a, T: SuperGraphObserver> CompiledProgramObserver for SymbolicGraphObserverWrapper<'a, T> {
+    fn on_op_executed(
+        &mut self,
+        node_path: &SymbolicGraphNodePath,
+        start_instant: Instant,
+        end_instant: Instant,
+        backend: &mut EvalBackend,
+    ) {
+        self.inner.on_node_executed(
+            &SuperGraphNodePath::SymbolicGraphNode(self.node_path.clone(), node_path.clone()),
+            start_instant,
+            end_instant,
+            backend,
+        )
+    }
+
+    fn on_tensor_assigned(
+        &mut self,
+        tensor_path: &SymbolicGraphTensorPath,
+        tensor: &NumericTensor<DynRank>,
+        backend: &mut EvalBackend,
+    ) {
+        self.inner.on_tensor_assigned(
+            &SuperGraphTensorPath::SymbolicGraphTensor(self.node_path.clone(), tensor_path.clone()),
+            tensor,
+            backend,
+        )
+    }
+}
+
 impl SuperGraphNode for SuperGraphNodeModelExecution {
     fn to_any(self) -> SuperGraphAnyNode {
         SuperGraphAnyNode::ModelExecution(self)
@@ -152,8 +183,6 @@ impl SuperGraphNode for SuperGraphNodeModelExecution {
             }
             inputs
         };
-
-        let mut observer = SymbolicGraphObserverWrapper::new(context.observer, node_path);
         let tensor_cache = {
             let mut res = None;
             for (a, b) in &mut context.super_graph_tensor_cache.caches {
@@ -163,15 +192,31 @@ impl SuperGraphNode for SuperGraphNodeModelExecution {
             }
             res
         };
-        let outputs = if let Some(x) = tensor_cache {
-            model.eval(inputs, &mut observer, Some(x), context.eval_backend)?
+
+        let mut observer = SymbolicGraphObserverWrapper::new(context.observer, node_path);
+        if context.use_compiled_models
+            && let Some(compiled_models) = &context.compiled_models
+        {
+            let compiled_model = &compiled_models
+                .iter()
+                .find(|(x, _y)| core::ptr::addr_eq(*x, *model))
+                .ok_or(SuperGraphError::ModelNotCompiledError)?
+                .1;
+            let outputs =
+                compiled_model.run(context.eval_backend, tensor_cache, inputs, &mut observer)?;
+            let outputs = outputs.collect::<HashMap<_, _>>();
+            for (name, link) in &self.tensor_outputs {
+                data.tensors
+                    .insert(*link, outputs.get(name).unwrap().clone());
+            }
         } else {
-            model.eval(inputs, &mut observer, None, context.eval_backend)?
+            let outputs = model.eval(inputs, &mut observer, tensor_cache, context.eval_backend)?;
+            for (name, link) in &self.tensor_outputs {
+                data.tensors
+                    .insert(*link, outputs.get(name).unwrap().clone());
+            }
         };
-        for (name, link) in &self.tensor_outputs {
-            data.tensors
-                .insert(*link, outputs.get(name).unwrap().clone());
-        }
+
         Ok(())
     }
 }

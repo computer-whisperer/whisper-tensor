@@ -425,9 +425,17 @@ impl eframe::App for WebUIApp {
                                     ui.label(model.model_id.to_string());
                                     ui.label(model.model_name.clone());
                                     ui.label(format!("Operations: {:?}", model.num_ops));
+                                    ui.label(format!("Compiled: {:}", model.model_compiled));
                                     if ui.button("Unload").clicked() {
                                         self.server_request_manager
                                             .send(WebsocketClientServerMessage::UnloadModel(
+                                                model.model_id,
+                                            ))
+                                            .unwrap();
+                                    }
+                                    if ui.button("Compile").clicked() {
+                                        self.server_request_manager
+                                            .send(WebsocketClientServerMessage::CompileModel(
                                                 model.model_id,
                                             ))
                                             .unwrap();

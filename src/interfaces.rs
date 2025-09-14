@@ -1,6 +1,7 @@
 use crate::backends::ModelLoadedTensorCache;
 use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
+use crate::compiler::CompiledProgram;
 use crate::dtype::DType;
 use crate::interfaces::Error::GeneralError;
 use crate::milli_graph::MilliOpGraph;
@@ -522,9 +523,11 @@ impl TextInferenceTokensInLogitOutInterface {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn run_string_in_string_out(
         &self,
         model: &Model,
+        compiled_model: Option<&CompiledProgram>,
         text_in: String,
         tokenizer_cache: &mut HashMap<TokenizerInfo, Arc<AnyTokenizer>>,
         tensor_cache: Option<&mut ModelLoadedTensorCache>,
@@ -560,11 +563,20 @@ impl TextInferenceTokensInLogitOutInterface {
                     .caches
                     .push((model, (*tensor_cache).clone()))
             }
+            let compiled_models = {
+                let mut compiled_models = Vec::new();
+                if let Some(compiled_model) = compiled_model {
+                    compiled_models.push((model, compiled_model));
+                }
+                compiled_models
+            };
             let mut context = SuperGraphContext {
                 observer: &mut observer,
                 eval_backend: backend,
                 super_graph_tensor_cache: &mut super_graph_tensor_cache,
                 caches: super_graph_caches,
+                use_compiled_models: compiled_model.is_some(),
+                compiled_models: Some(compiled_models),
             };
             let res = self.super_graph.run(super_graph_data, &mut context)?;
             if let Some(tensor_cache) = tensor_cache {

@@ -165,7 +165,7 @@ fn render_node_contents<'a>(
             GraphLayoutNodeType::SuperGraphNode(node_id) => {
                 if let GraphSubject::SuperGraphInner(super_graph) = graph_subject {
                     let node = &super_graph.nodes[&node_id];
-                    ui.add(Label::new(node.get_name()).selectable(false));
+                    ui.add(Label::new(node.op_kind()).selectable(false));
                 }
             }
             GraphLayoutNodeType::SuperGraphLink(link) => {
@@ -1681,6 +1681,10 @@ impl GraphExplorerApp {
                                                                     SuperGraphRequestBackendMode::Vulkan,
                                                                     SuperGraphRequestBackendMode::Vulkan.to_string());
                                                             }
+                                                            ui.selectable_value(
+                                                                &mut text_inference_data.selected_mode,
+                                                                SuperGraphRequestBackendMode::Compiler,
+                                                                SuperGraphRequestBackendMode::Compiler.to_string());
                                                     });
                                                     if ui.button("Run").clicked() {
                                                         let tokens =

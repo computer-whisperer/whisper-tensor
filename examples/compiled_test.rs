@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
+use std::sync::Arc;
 use whisper_tensor::backends::ModelLoadedTensorCache;
 use whisper_tensor::backends::eval_backend::EvalBackend;
-use whisper_tensor::backends::vulkan_backend::{VulkanContext, VulkanImmediateExecutor};
+use whisper_tensor::compiler;
 use whisper_tensor::model::Model;
 use whisper_tensor::super_graph::cache::SuperGraphCache;
 use whisper_tensor_import::onnx_graph::WeightStorageStrategy;
@@ -23,11 +24,12 @@ fn main() {
     )
     .unwrap();
 
-    let vulkan_context = VulkanContext::new().unwrap();
-    let mut vulkan_runtime = VulkanImmediateExecutor::new(vulkan_context).unwrap();
-    let mut eval_backend = EvalBackend::Vulkan(&mut vulkan_runtime);
+    let mut eval_backend = EvalBackend::NDArray;
 
-    let model = Model::new_from_onnx(&onnx_data).unwrap();
+    let model = Arc::new(Model::new_from_onnx(&onnx_data).unwrap());
+    let compiled_model = compiler::build_program(compiler::CompilationSubject::Model {
+        model: model.clone(),
+    });
 
     let mut super_graph_caches = SuperGraphCache::new();
     let prompt = "The first 10 numbers in the fibonacci sequence are:".to_string();
@@ -43,7 +45,7 @@ fn main() {
             .unwrap()
             .run_string_in_string_out(
                 &model,
-                None,
+                Some(&compiled_model),
                 context.clone(),
                 &mut tokenizer_cache,
                 Some(&mut model_cache),

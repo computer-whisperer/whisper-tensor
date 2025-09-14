@@ -2,19 +2,21 @@ use crate::ModelServer;
 use crossbeam::queue::ArrayQueue;
 use log::error;
 use std::collections::{HashMap, HashSet};
+use std::hash::Hash;
 use std::ptr;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::sync::{Notify, mpsc};
-use whisper_tensor::DynRank;
 use whisper_tensor::backends::ModelLoadedTensorCache;
 use whisper_tensor::backends::eval_backend::EvalBackend;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
+use whisper_tensor::compiler::{CompilationSubject, CompiledProgram};
 use whisper_tensor::numeric_tensor::NumericTensor;
 use whisper_tensor::super_graph::cache::{SuperGraphCache, SuperGraphTensorCache};
 use whisper_tensor::super_graph::data::SuperGraphData;
 use whisper_tensor::super_graph::observer::SuperGraphObserver;
 use whisper_tensor::super_graph::{SuperGraphContext, SuperGraphNodePath, SuperGraphTensorPath};
+use whisper_tensor::{DynRank, compiler};
 use whisper_tensor_server::{
     AbbreviatedTensorReportSettings, AbbreviatedTensorValue, LoadedModelId, SuperGraphRequest,
     SuperGraphRequestBackendMode, SuperGraphResponse, SuperGraphResponseData,
@@ -94,6 +96,9 @@ pub enum SchedulerJob {
             Option<SchedulerReporter>,
         ),
     ),
+    CompileModelRequest {
+        model_id: LoadedModelId,
+    },
 }
 
 struct LocalSuperGraphObserver {
@@ -213,16 +218,29 @@ pub async fn scheduler(mut input: mpsc::Receiver<SchedulerJob>, model_server: Ar
             let vulkan_tensor_load_caches = vulkan_tensor_load_caches.clone();
             let ndarray_tensor_load_caches = Arc::new(Mutex::new(HashMap::new()));
             match x {
+                SchedulerJob::CompileModelRequest { model_id } => {
+                    let model = model_server.get_model(model_id).await;
+                    if let Some(model) = model {
+                        let subject = CompilationSubject::Model { model };
+                        let program = compiler::build_program(subject);
+                        model_server
+                            .set_compiled_model(model_id, Arc::new(program))
+                            .await;
+                    }
+                }
                 SchedulerJob::SuperGraphRequest((req, resp_sender, reporter)) => {
                     // Collect links to needed models
                     let mut model_id_map = HashMap::new();
+                    let mut compiled_models = HashMap::new();
                     let models = {
                         let mut models = HashMap::new();
                         for (link, &model_id) in &req.model_inputs {
                             let model = model_server.get_model(model_id).await;
+                            let compiled_model = model_server.get_compiled_model(model_id).await;
                             if let Some(model) = model {
                                 models.insert(*link, model.clone());
                                 model_id_map.insert(model_id, model);
+                                compiled_models.insert(model_id, compiled_model);
                             }
                         }
                         models
@@ -234,6 +252,7 @@ pub async fn scheduler(mut input: mpsc::Receiver<SchedulerJob>, model_server: Ar
                         let mut vulkan_runtime = vulkan_runtime.lock().unwrap();
                         #[cfg(feature = "vulkan")]
                         let mut vulkan_backend = EvalBackend::Vulkan(&mut vulkan_runtime);
+                        let mut use_compiler = false;
                         let backend: Result<&mut EvalBackend, String> = match req.backend_mode {
                             SuperGraphRequestBackendMode::NDArray => Ok(&mut ndarray_backend),
                             SuperGraphRequestBackendMode::Vulkan => {
@@ -242,6 +261,10 @@ pub async fn scheduler(mut input: mpsc::Receiver<SchedulerJob>, model_server: Ar
                                 #[cfg(not(feature = "vulkan"))]
                                 let res = Err("Vulkan feature not enabled!".to_string());
                                 res
+                            }
+                            SuperGraphRequestBackendMode::Compiler => {
+                                use_compiler = true;
+                                Ok(&mut ndarray_backend)
                             }
                         };
 
@@ -322,10 +345,24 @@ pub async fn scheduler(mut input: mpsc::Receiver<SchedulerJob>, model_server: Ar
                                     let cache = req.use_cache.map(|x| {
                                         caches.entry(x).or_insert_with(SuperGraphCache::new)
                                     });
+                                    let compiled_models = {
+                                        let mut ret = vec![];
+                                        for (a, b) in &compiled_models {
+                                            if let Some(x) = b {
+                                                ret.push((
+                                                    model_id_map.get(a).unwrap().as_ref(),
+                                                    x.as_ref(),
+                                                ));
+                                            }
+                                        }
+                                        ret
+                                    };
                                     let mut context = SuperGraphContext {
                                         observer: &mut observer,
                                         eval_backend: backend,
                                         caches: cache,
+                                        use_compiled_models: use_compiler,
+                                        compiled_models: Some(compiled_models),
                                         super_graph_tensor_cache: &mut super_graph_tensor_cache,
                                     };
                                     let ret = req
