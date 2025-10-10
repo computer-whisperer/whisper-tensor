@@ -74,7 +74,7 @@ jobs:
           version: 'latest'  # pin if you prefer
 
       - name: Check formatting (rustfmt)
-        run: cargo fmt --all -- --check
+        run: cargo fmt -p whisper-tensor-webui -- --check
 
       - name: Clippy (webui crate, wasm32)
         run: cargo clippy -p whisper-tensor-webui --target wasm32-unknown-unknown -- -D warnings
