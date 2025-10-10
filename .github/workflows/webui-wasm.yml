@@ -77,7 +77,7 @@ jobs:
         run: cargo fmt -p whisper-tensor-webui -- --check
 
       - name: Clippy (webui crate, wasm32)
-        run: cargo clippy -p whisper-tensor-webui --target wasm32-unknown-unknown -- -D warnings
+        run: cargo clippy -p whisper-tensor-webui --no-deps --target wasm32-unknown-unknown -- -D warnings
 
       - name: Build webui crate (wasm)
         working-directory: crates/whisper-tensor-webui
