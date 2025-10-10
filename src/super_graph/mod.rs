@@ -16,14 +16,16 @@ use crate::numeric_tensor::NumericTensorError;
 use crate::numeric_tensor_typed::TypedNumericTensorError;
 use crate::super_graph::cache::{SuperGraphCache, SuperGraphTensorCache};
 use crate::super_graph::data::SuperGraphData;
+use crate::super_graph::links::SuperGraphLinkTensorMap;
 pub use crate::super_graph::links::{
-    SuperGraphAnyLink, SuperGraphLinkHash, SuperGraphLinkId, SuperGraphLinkModel,
-    SuperGraphLinkString, SuperGraphLinkTensor, SuperGraphLinkTokenizer,
+    SuperGraphAnyLink, SuperGraphLinkHash, SuperGraphLinkId, SuperGraphLinkString,
+    SuperGraphLinkTensor, SuperGraphLinkTokenizer,
 };
 use crate::super_graph::nodes::SuperGraphAnyNode;
 use crate::super_graph::observer::SuperGraphObserver;
 use crate::symbolic_graph::{
-    SymbolicGraphNodePath, SymbolicGraphOperationId, SymbolicGraphTensorId, SymbolicGraphTensorPath,
+    SymbolicGraph, SymbolicGraphNodePath, SymbolicGraphOperationId, SymbolicGraphTensorId,
+    SymbolicGraphTensorPath,
 };
 use crate::tokenizer::TokenizerError;
 use serde::{Deserialize, Serialize};
@@ -61,6 +63,7 @@ pub struct SuperGraphContext<'short, 'model, 'c, 'd, T: SuperGraphObserver> {
     pub caches: Option<&'short mut SuperGraphCache>,
     pub super_graph_tensor_cache: &'short mut SuperGraphTensorCache<'model>,
     pub use_compiled_models: bool,
+    pub symbolic_graphs: Vec<&'model SymbolicGraph>,
     pub compiled_models: Option<Vec<(&'model Model, &'short CompiledProgram)>>,
 }
 
@@ -121,8 +124,8 @@ impl SuperGraphInner {
                                     break;
                                 }
                             }
-                            SuperGraphAnyLink::Model(x) => {
-                                if !data.models.contains_key(&x) {
+                            SuperGraphAnyLink::TensorMap(x) => {
+                                if !data.tensor_maps.contains_key(&x) {
                                     all_inputs_ready = false;
                                     break;
                                 }
@@ -271,8 +274,8 @@ impl SuperGraphBuilder {
         SuperGraphLinkTensor::new(self.get_next_link_id())
     }
 
-    pub fn new_model_link(&mut self) -> SuperGraphLinkModel {
-        SuperGraphLinkModel::new(self.get_next_link_id())
+    pub fn new_model_link(&mut self) -> SuperGraphLinkTensorMap {
+        SuperGraphLinkTensorMap::new(self.get_next_link_id())
     }
 
     pub fn new_tokenizer_link(&mut self) -> SuperGraphLinkTokenizer {

@@ -47,18 +47,18 @@ impl SuperGraphLink for SuperGraphLinkTensor {
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
-pub struct SuperGraphLinkModel(SuperGraphLinkId);
-impl SuperGraphLinkModel {
+pub struct SuperGraphLinkTensorMap(SuperGraphLinkId);
+impl SuperGraphLinkTensorMap {
     pub fn new(id: SuperGraphLinkId) -> Self {
         Self(id)
     }
 }
-impl SuperGraphLink for SuperGraphLinkModel {
+impl SuperGraphLink for SuperGraphLinkTensorMap {
     fn id(&self) -> SuperGraphLinkId {
         self.0
     }
     fn to_any(&self) -> SuperGraphAnyLink {
-        SuperGraphAnyLink::Model(*self)
+        SuperGraphAnyLink::TensorMap(*self)
     }
 }
 
@@ -98,7 +98,7 @@ impl SuperGraphLink for SuperGraphLinkHash {
 pub enum SuperGraphAnyLink {
     Tensor(SuperGraphLinkTensor),
     String(SuperGraphLinkString),
-    Model(SuperGraphLinkModel),
+    TensorMap(SuperGraphLinkTensorMap),
     Tokenizer(SuperGraphLinkTokenizer),
     Hash(SuperGraphLinkHash),
 }
@@ -109,7 +109,7 @@ impl SuperGraphAnyLink {
         match self {
             SuperGraphAnyLink::Tensor(link) => link.id(),
             SuperGraphAnyLink::String(link) => link.id(),
-            SuperGraphAnyLink::Model(link) => link.id(),
+            SuperGraphAnyLink::TensorMap(link) => link.id(),
             SuperGraphAnyLink::Tokenizer(link) => link.id(),
             SuperGraphAnyLink::Hash(link) => link.id(),
         }
@@ -120,7 +120,7 @@ impl SuperGraphAnyLink {
 pub enum SuperGraphLinkDouble {
     Tensor(SuperGraphLinkTensor, SuperGraphLinkTensor),
     String(SuperGraphLinkString, SuperGraphLinkString),
-    Model(SuperGraphLinkModel, SuperGraphLinkModel),
+    TensorMap(SuperGraphLinkTensorMap, SuperGraphLinkTensorMap),
     Tokenizer(SuperGraphLinkTokenizer, SuperGraphLinkTokenizer),
     Hash(SuperGraphLinkHash, SuperGraphLinkHash),
 }
@@ -130,7 +130,7 @@ impl SuperGraphLinkDouble {
         match self {
             SuperGraphLinkDouble::Tensor(t1, _) => SuperGraphAnyLink::Tensor(*t1),
             SuperGraphLinkDouble::String(s1, _) => SuperGraphAnyLink::String(*s1),
-            SuperGraphLinkDouble::Model(m1, _) => SuperGraphAnyLink::Model(*m1),
+            SuperGraphLinkDouble::TensorMap(m1, _) => SuperGraphAnyLink::TensorMap(*m1),
             SuperGraphLinkDouble::Tokenizer(t1, _) => SuperGraphAnyLink::Tokenizer(*t1),
             SuperGraphLinkDouble::Hash(h1, _) => SuperGraphAnyLink::Hash(*h1),
         }
@@ -139,7 +139,7 @@ impl SuperGraphLinkDouble {
         match self {
             SuperGraphLinkDouble::Tensor(_, t2) => SuperGraphAnyLink::Tensor(*t2),
             SuperGraphLinkDouble::String(_, s2) => SuperGraphAnyLink::String(*s2),
-            SuperGraphLinkDouble::Model(_, m2) => SuperGraphAnyLink::Model(*m2),
+            SuperGraphLinkDouble::TensorMap(_, m2) => SuperGraphAnyLink::TensorMap(*m2),
             SuperGraphLinkDouble::Tokenizer(_, t2) => SuperGraphAnyLink::Tokenizer(*t2),
             SuperGraphLinkDouble::Hash(_, h2) => SuperGraphAnyLink::Hash(*h2),
         }
@@ -158,10 +158,10 @@ pub enum SuperGraphLinkTriple {
         SuperGraphLinkString,
         SuperGraphLinkString,
     ),
-    Model(
-        SuperGraphLinkModel,
-        SuperGraphLinkModel,
-        SuperGraphLinkModel,
+    TensorMap(
+        SuperGraphLinkTensorMap,
+        SuperGraphLinkTensorMap,
+        SuperGraphLinkTensorMap,
     ),
     Tokenizer(
         SuperGraphLinkTokenizer,
@@ -176,7 +176,7 @@ impl SuperGraphLinkTriple {
         match self {
             SuperGraphLinkTriple::Tensor(t1, _, _) => SuperGraphAnyLink::Tensor(*t1),
             SuperGraphLinkTriple::String(s1, _, _) => SuperGraphAnyLink::String(*s1),
-            SuperGraphLinkTriple::Model(m1, _, _) => SuperGraphAnyLink::Model(*m1),
+            SuperGraphLinkTriple::TensorMap(m1, _, _) => SuperGraphAnyLink::TensorMap(*m1),
             SuperGraphLinkTriple::Tokenizer(t1, _, _) => SuperGraphAnyLink::Tokenizer(*t1),
             SuperGraphLinkTriple::Hash(h1, _, _) => SuperGraphAnyLink::Hash(*h1),
         }
@@ -185,7 +185,7 @@ impl SuperGraphLinkTriple {
         match self {
             SuperGraphLinkTriple::Tensor(_, t2, _) => SuperGraphAnyLink::Tensor(*t2),
             SuperGraphLinkTriple::String(_, s2, _) => SuperGraphAnyLink::String(*s2),
-            SuperGraphLinkTriple::Model(_, m2, _) => SuperGraphAnyLink::Model(*m2),
+            SuperGraphLinkTriple::TensorMap(_, m2, _) => SuperGraphAnyLink::TensorMap(*m2),
             SuperGraphLinkTriple::Tokenizer(_, t2, _) => SuperGraphAnyLink::Tokenizer(*t2),
             SuperGraphLinkTriple::Hash(_, h2, _) => SuperGraphAnyLink::Hash(*h2),
         }
@@ -194,7 +194,7 @@ impl SuperGraphLinkTriple {
         match self {
             SuperGraphLinkTriple::Tensor(_, _, t3) => SuperGraphAnyLink::Tensor(*t3),
             SuperGraphLinkTriple::String(_, _, s3) => SuperGraphAnyLink::String(*s3),
-            SuperGraphLinkTriple::Model(_, _, m3) => SuperGraphAnyLink::Model(*m3),
+            SuperGraphLinkTriple::TensorMap(_, _, m3) => SuperGraphAnyLink::TensorMap(*m3),
             SuperGraphLinkTriple::Tokenizer(_, _, t3) => SuperGraphAnyLink::Tokenizer(*t3),
             SuperGraphLinkTriple::Hash(_, _, h3) => SuperGraphAnyLink::Hash(*h3),
         }

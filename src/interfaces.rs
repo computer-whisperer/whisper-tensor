@@ -11,8 +11,8 @@ use crate::numeric_tensor::NumericTensor;
 use crate::super_graph::cache::{SuperGraphCache, SuperGraphTensorCache};
 use crate::super_graph::data::SuperGraphData;
 use crate::super_graph::links::{
-    SuperGraphLink, SuperGraphLinkDouble, SuperGraphLinkHash, SuperGraphLinkModel,
-    SuperGraphLinkTensor, SuperGraphLinkTriple,
+    SuperGraphLink, SuperGraphLinkDouble, SuperGraphLinkHash, SuperGraphLinkTensor,
+    SuperGraphLinkTensorMap, SuperGraphLinkTriple,
 };
 use crate::super_graph::nodes::{
     SuperGraphNode, SuperGraphNodeMilliOpGraph, SuperGraphNodeModelExecution,
@@ -63,7 +63,7 @@ impl AnyInterface {
 pub struct TextInferenceTokensInLogitOutInterface {
     pub cache_key_input_link: SuperGraphLinkHash,
     pub token_context_input_link: SuperGraphLinkTensor,
-    pub model_input_link: SuperGraphLinkModel,
+    pub model_input_link: SuperGraphLinkTensorMap,
     pub logit_output_link: SuperGraphLinkTensor,
     pub super_graph: SuperGraph,
     pub tokenizer: TokenizerInfo,
@@ -308,6 +308,7 @@ impl TextInferenceTokensInLogitOutInterface {
                 sub_builder.add_node(
                     SuperGraphNodeModelExecution::new(
                         sub_model_input_link,
+                        0,
                         tensor_inputs,
                         tensor_outputs,
                     )
@@ -395,7 +396,7 @@ impl TextInferenceTokensInLogitOutInterface {
                 let scan_node = SuperGraphNodeScan::new(
                     sub_graph_inner,
                     loop_count_link,
-                    vec![SuperGraphLinkDouble::Model(
+                    vec![SuperGraphLinkDouble::TensorMap(
                         model_input_link,
                         sub_model_input_link,
                     )],
@@ -464,8 +465,13 @@ impl TextInferenceTokensInLogitOutInterface {
             let tensor_outputs = vec![(logit_output_name.clone(), raw_logit_output_link)];
 
             super_graph_builder.add_node(
-                SuperGraphNodeModelExecution::new(model_input_link, tensor_inputs, tensor_outputs)
-                    .to_any(),
+                SuperGraphNodeModelExecution::new(
+                    model_input_link,
+                    0,
+                    tensor_inputs,
+                    tensor_outputs,
+                )
+                .to_any(),
             );
 
             // Output processing
@@ -548,7 +554,9 @@ impl TextInferenceTokensInLogitOutInterface {
 
         let super_graph_data = {
             let mut super_graph_data = SuperGraphData::new();
-            super_graph_data.models.insert(self.model_input_link, model);
+            super_graph_data
+                .tensor_maps
+                .insert(self.model_input_link, model);
             super_graph_data
                 .tensors
                 .insert(self.token_context_input_link, tokens_tensor);
@@ -575,6 +583,7 @@ impl TextInferenceTokensInLogitOutInterface {
                 eval_backend: backend,
                 super_graph_tensor_cache: &mut super_graph_tensor_cache,
                 caches: super_graph_caches,
+                symbolic_graphs: vec![model.get_symbolic_graph()],
                 use_compiled_models: compiled_model.is_some(),
                 compiled_models: Some(compiled_models),
             };

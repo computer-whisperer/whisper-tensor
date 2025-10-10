@@ -8,7 +8,7 @@ use crate::milli_graph::{MilliOpGraph, MilliOpGraphNodePath, MilliOpGraphTensorP
 use crate::numeric_tensor::NumericTensor;
 use crate::super_graph::links::{
     SuperGraphAnyLink, SuperGraphLink, SuperGraphLinkDouble, SuperGraphLinkHash,
-    SuperGraphLinkModel, SuperGraphLinkString, SuperGraphLinkTensor, SuperGraphLinkTokenizer,
+    SuperGraphLinkString, SuperGraphLinkTensor, SuperGraphLinkTensorMap, SuperGraphLinkTokenizer,
     SuperGraphLinkTriple,
 };
 use crate::super_graph::observer::SuperGraphObserver;
@@ -50,19 +50,22 @@ pub struct ModelReference {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SuperGraphNodeModelExecution {
-    model: SuperGraphLinkModel,
+    tensor_map: SuperGraphLinkTensorMap,
+    pub symbolic_graph_id: usize, // Which graph (passed to
     tensor_inputs: Vec<(SuperGraphLinkTensor, String)>,
     tensor_outputs: Vec<(String, SuperGraphLinkTensor)>,
 }
 
 impl SuperGraphNodeModelExecution {
     pub fn new(
-        model: SuperGraphLinkModel,
+        tensor_map: SuperGraphLinkTensorMap,
+        symbolic_graph_id: usize,
         tensor_inputs: Vec<(SuperGraphLinkTensor, String)>,
         tensor_outputs: Vec<(String, SuperGraphLinkTensor)>,
     ) -> Self {
         Self {
-            model,
+            tensor_map,
+            symbolic_graph_id,
             tensor_inputs,
             tensor_outputs,
         }
@@ -77,7 +80,7 @@ impl Node<SuperGraphAnyLink> for SuperGraphNodeModelExecution {
 
     fn inputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
         let ret = self.tensor_inputs.clone().into_iter().map(|x| x.0.to_any());
-        Box::new(ret.chain(std::iter::once(self.model.to_any())))
+        Box::new(ret.chain(std::iter::once(self.tensor_map.to_any())))
     }
 
     fn outputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
@@ -174,7 +177,7 @@ impl SuperGraphNode for SuperGraphNodeModelExecution {
         data: &mut SuperGraphData,
         context: &mut SuperGraphContext<T>,
     ) -> Result<(), SuperGraphError> {
-        let model = data.models.get(&self.model).unwrap();
+        let model = data.tensor_maps.get(&self.tensor_map).unwrap();
 
         let inputs = {
             let mut inputs = HashMap::new();
@@ -646,11 +649,11 @@ impl SuperGraphNode for SuperGraphNodeScan {
                                 .clone(),
                         );
                     }
-                    SuperGraphLinkDouble::Model(input, output) => {
-                        simple_inputs.models.insert(
+                    SuperGraphLinkDouble::TensorMap(input, output) => {
+                        simple_inputs.tensor_maps.insert(
                             *output,
                             *data
-                                .models
+                                .tensor_maps
                                 .get(input)
                                 .ok_or(SuperGraphError::MissingLinkError())?,
                         );
@@ -700,11 +703,11 @@ impl SuperGraphNode for SuperGraphNodeScan {
                                 .clone(),
                         );
                     }
-                    SuperGraphLinkTriple::Model(initial, inner_input, _inner_output) => {
-                        state_values.models.insert(
+                    SuperGraphLinkTriple::TensorMap(initial, inner_input, _inner_output) => {
+                        state_values.tensor_maps.insert(
                             *inner_input,
                             *data
-                                .models
+                                .tensor_maps
                                 .get(initial)
                                 .ok_or(SuperGraphError::MissingLinkError())?,
                         );
@@ -812,11 +815,11 @@ impl SuperGraphNode for SuperGraphNodeScan {
                                     .clone(),
                             );
                         }
-                        SuperGraphLinkTriple::Model(_initial, inner_input, inner_output) => {
-                            state_values.models.insert(
+                        SuperGraphLinkTriple::TensorMap(_initial, inner_input, inner_output) => {
+                            state_values.tensor_maps.insert(
                                 *inner_input,
                                 *iter_outputs
-                                    .models
+                                    .tensor_maps
                                     .get(inner_output)
                                     .ok_or(SuperGraphError::MissingLinkError())?,
                             );
@@ -878,13 +881,13 @@ impl SuperGraphNode for SuperGraphNodeScan {
                             .clone(),
                     );
                 }
-                SuperGraphLinkDouble::Model(input, output) => {
-                    output_data.models.insert(
+                SuperGraphLinkDouble::TensorMap(input, output) => {
+                    output_data.tensor_maps.insert(
                         *output,
                         *prev_iter_outputs
                             .as_ref()
                             .unwrap()
-                            .models
+                            .tensor_maps
                             .get(input)
                             .ok_or(SuperGraphError::MissingLinkError())?,
                     );

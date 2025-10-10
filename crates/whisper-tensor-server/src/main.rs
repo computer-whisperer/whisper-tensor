@@ -135,8 +135,7 @@ impl ModelServer {
         guard
             .iter()
             .find(|model| model.model_id == model_id)
-            .map(|model| model.compiled_program.clone())
-            .flatten()
+            .and_then(|model| model.compiled_program.clone())
     }
 
     pub(crate) async fn set_compiled_model(
@@ -145,10 +144,9 @@ impl ModelServer {
         compiled_program: Arc<CompiledProgram>,
     ) {
         let mut guard = self.models.write().await;
-        guard
-            .iter_mut()
-            .find(|model| model.model_id == model_id)
-            .map(|model| model.compiled_program = Some(compiled_program));
+        if let Some(model) = guard.iter_mut().find(|model| model.model_id == model_id) {
+            model.compiled_program = Some(compiled_program);
+        }
         drop(guard);
         self.generate_new_model_report().await;
     }

@@ -8,9 +8,6 @@ use crate::onnx::{ModelProto, StringStringEntryProto};
 use prost::{DecodeError, Message};
 use whisper_tensor_import::onnx_graph::{InputMetadata, ModelMetadata, OutputMetadata};
 
-#[cfg(feature = "onnx-reference")]
-use crate::backends::onnx_reference_backend::{self, ONNXReferenceTensor};
-
 use crate::symbolic_graph::tensor_store::TensorStore;
 use crate::symbolic_graph::{ONNXDecodingError, SymbolicGraph, SymbolicGraphMutator, TensorType};
 
@@ -31,9 +28,6 @@ pub enum ModelError {
     EvalRuntimeError(#[from] EvalRuntimeError),
     #[error(transparent)]
     SerdeJSONError(#[from] serde_json::Error),
-    #[cfg(feature = "onnx-reference")]
-    #[error(transparent)]
-    ONNXReference(#[from] onnx_reference_backend::ONNXReferenceError),
     #[cfg(feature = "candle")]
     #[error(transparent)]
     Candle(#[from] candle_core::Error),
@@ -67,11 +61,6 @@ pub struct Model {
     pub model_outputs: HashMap<String, Option<OutputMetadata>>,
     pub text_inference_tokens_in_logits_out_interface:
         Option<TextInferenceTokensInLogitOutInterface>,
-    // Runtimes
-    #[cfg(feature = "onnx-reference")]
-    onnx_reference_backend: Option<onnx_reference_backend::ONNXReferenceBackend>,
-    #[cfg(feature = "candle")]
-    candle_proto: Option<candle_onnx::onnx::ModelProto>,
 }
 
 impl Model {
@@ -143,10 +132,6 @@ impl Model {
             model_inputs,
             model_outputs,
             text_inference_tokens_in_logits_out_interface,
-            #[cfg(feature = "onnx-reference")]
-            onnx_reference_backend: None,
-            #[cfg(feature = "candle")]
-            candle_proto: None,
         })
     }
 
@@ -172,16 +157,6 @@ impl Model {
         Ok(())
     }
 
-    #[cfg(feature = "candle")]
-    pub fn setup_candle_backend(&mut self) -> Result<(), anyhow::Error> {
-        // Emit to some temp file because bs
-        let temp_file = tempfile::NamedTempFile::new().map_err(|e| anyhow::anyhow!(e))?;
-        std::fs::write(temp_file.path(), &self.onnx_data).map_err(|e| anyhow::anyhow!(e))?;
-        self.candle_proto =
-            Some(candle_onnx::read_file(temp_file.path()).map_err(|e| anyhow::anyhow!(e))?);
-        Ok(())
-    }
-
     pub fn run(
         &self,
         inputs: HashMap<String, NumericTensor<DynRank>>,
@@ -189,41 +164,6 @@ impl Model {
         selected_runtime: &mut ModelExecutionRuntime,
     ) -> Result<HashMap<String, NumericTensor<DynRank>>, ModelError> {
         Ok(match selected_runtime {
-            #[cfg(feature = "onnx-reference")]
-            ModelExecutionRuntime::ONNXReference => {
-                if self.onnx_reference_backend.is_none() {
-                    Err(ModelError::UnconfiguredBackend)?;
-                }
-                let session = self.onnx_reference_backend.as_ref().unwrap();
-                let mut converted_inputs = HashMap::new();
-                for (name, tensor) in inputs {
-                    converted_inputs.insert(name, ONNXReferenceTensor::try_from(tensor)?);
-                }
-                let res = session.run(converted_inputs)?;
-                let mut output_tensors = HashMap::new();
-                for (name, tensor) in res {
-                    output_tensors.insert(name, NumericTensor::from(tensor));
-                }
-                output_tensors
-            }
-            #[cfg(feature = "candle")]
-            ModelExecutionRuntime::Candle => {
-                if self.candle_proto.is_none() {
-                    Err(ModelError::UnconfiguredBackend)?;
-                }
-                let candle_proto = self.candle_proto.as_ref().unwrap();
-                let mut converted_inputs = HashMap::new();
-                for (key, tensor) in inputs {
-                    converted_inputs
-                        .insert(key.to_string(), candle_core::Tensor::try_from(tensor)?);
-                }
-                let res = candle_onnx::simple_eval(candle_proto, converted_inputs)?;
-                let mut output_tensors = HashMap::new();
-                for (key, tensor) in res {
-                    output_tensors.insert(key, NumericTensor::from(tensor));
-                }
-                output_tensors
-            }
             ModelExecutionRuntime::Eval(eval_backend) => eval_backend::run(
                 &self.graph,
                 &self.tensor_store,

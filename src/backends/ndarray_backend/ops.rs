@@ -1194,7 +1194,7 @@ where
     }
     let n = x.shape()[0];
     let c = x.shape()[1];
-    if c % num_groups != 0 {
+    if !c.is_multiple_of(num_groups) {
         return Err(NDArrayOperationError::IncompatibleShape);
     }
     if scale.len() != c || bias.len() != c {

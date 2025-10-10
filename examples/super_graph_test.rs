@@ -11,7 +11,7 @@ use whisper_tensor::model::Model;
 use whisper_tensor::super_graph::cache::SuperGraphTensorCache;
 use whisper_tensor::super_graph::data::SuperGraphData;
 use whisper_tensor::super_graph::links::{
-    SuperGraphLink, SuperGraphLinkModel, SuperGraphLinkString, SuperGraphLinkTensor,
+    SuperGraphLink, SuperGraphLinkString, SuperGraphLinkTensor, SuperGraphLinkTensorMap,
 };
 use whisper_tensor::super_graph::nodes::{
     SuperGraphNodeMilliOpGraph, SuperGraphNodeModelExecution, SuperGraphNodeTokenizerDecode,
@@ -36,7 +36,7 @@ fn main() {
 
     let mut builder = SuperGraphBuilder::new();
 
-    let model_link = SuperGraphLinkModel::new(builder.get_next_link_id());
+    let model_link = SuperGraphLinkTensorMap::new(builder.get_next_link_id());
     let text_input_link = SuperGraphLinkString::new(builder.get_next_link_id());
 
     let tokenizer_link = SuperGraphNodeTokenizerLoad::new_and_add(
@@ -55,7 +55,7 @@ fn main() {
             let outputs = vec![("output1".to_string(), tensor)];
             (outputs, tensor)
         };
-        let node = SuperGraphNodeModelExecution::new(model_link, inputs, outputs);
+        let node = SuperGraphNodeModelExecution::new(model_link, 0, inputs, outputs);
         builder.add_node(node.into());
         logit_output
     };
@@ -117,7 +117,7 @@ fn main() {
     let super_graph = builder.build(inputs.as_slice(), outputs.as_slice());
 
     let mut super_graph_data = SuperGraphData::new();
-    super_graph_data.models.insert(model_link, &model);
+    super_graph_data.tensor_maps.insert(model_link, &model);
     super_graph_data.strings.insert(
         text_input_link,
         "The fibonacci sequence is: 1, 1, 2, 3, 5, 8, 13,".to_string(),
@@ -130,6 +130,7 @@ fn main() {
                 eval_backend: &mut EvalBackend::NDArray,
                 caches: None,
                 super_graph_tensor_cache: &mut SuperGraphTensorCache::new(),
+                symbolic_graphs: vec![model.get_symbolic_graph()],
                 use_compiled_models: false,
                 compiled_models: None,
             },

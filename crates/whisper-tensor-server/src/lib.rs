@@ -8,7 +8,7 @@ use whisper_tensor::dtype::DType;
 use whisper_tensor::interfaces::AnyInterface;
 use whisper_tensor::numeric_tensor::NumericTensor;
 use whisper_tensor::super_graph::links::{
-    SuperGraphLinkHash, SuperGraphLinkModel, SuperGraphLinkString, SuperGraphLinkTensor,
+    SuperGraphLinkHash, SuperGraphLinkString, SuperGraphLinkTensor, SuperGraphLinkTensorMap,
 };
 use whisper_tensor::super_graph::{
     SuperGraph, SuperGraphHash, SuperGraphNodePath, SuperGraphTensorPath,
@@ -59,7 +59,8 @@ pub struct SuperGraphRequest {
     pub string_inputs: HashMap<SuperGraphLinkString, String>,
     pub hash_inputs: HashMap<SuperGraphLinkHash, SuperGraphHash>,
     pub tensor_inputs: HashMap<SuperGraphLinkTensor, NDArrayNumericTensor<DynRank>>,
-    pub model_inputs: HashMap<SuperGraphLinkModel, LoadedModelId>,
+    pub model_inputs: HashMap<SuperGraphLinkTensorMap, LoadedModelId>,
+    pub symbolic_graph_ids: Vec<LoadedModelId>,
     pub subscribed_tensors: Vec<SuperGraphTensorPath>,
     pub do_node_execution_reports: bool,
     pub abbreviated_tensor_report_settings: Option<AbbreviatedTensorReportSettings>,

@@ -172,7 +172,7 @@ fn render_node_contents<'a>(
                 let text = match link {
                     SuperGraphAnyLink::Tensor(_) => "Tensor",
                     SuperGraphAnyLink::String(_) => "String",
-                    SuperGraphAnyLink::Model(_) => "Model",
+                    SuperGraphAnyLink::TensorMap(_) => "TensorMap",
                     SuperGraphAnyLink::Tokenizer(_) => "Tokenizer",
                     SuperGraphAnyLink::Hash(_) => "Hash",
                 };
@@ -1720,6 +1720,7 @@ impl GraphExplorerApp {
                                                                             .clone(),
                                                                         tokens_tensor,
                                                                     )]),
+                                                                    symbolic_graph_ids: interface.model_ids.clone(),
                                                                     model_inputs: HashMap::from([(
                                                                         llm_interface
                                                                             .model_input_link
@@ -1798,7 +1799,7 @@ impl GraphExplorerApp {
     ) -> Option<LoadedModelId> {
         let (_graph_subject, model_scope) = {
             let mut graph_subject = None;
-            let mut implied_model = None;
+            let mut implied_symbolic_graph_model_ids = None;
             let mut model_scope = None;
             for a in &self.graph_subject_path {
                 match a {
@@ -1812,7 +1813,7 @@ impl GraphExplorerApp {
                     }
                     GraphExplorerLayerSelection::Interface(interface_id) => {
                         if let Some(x) = loaded_models.current_interfaces.get(interface_id) {
-                            implied_model = x.model_ids.first();
+                            implied_symbolic_graph_model_ids = Some(x.model_ids.clone());
                             graph_subject = Some(GraphSubject::SuperGraphInner(
                                 &x.interface.get_super_graph().inner,
                             ));
@@ -1839,8 +1840,11 @@ impl GraphExplorerApp {
                             && let Some(node) = graph.nodes.get(node_id)
                         {
                             match node {
-                                SuperGraphAnyNode::ModelExecution(_) => {
-                                    if let Some(model_id) = implied_model
+                                SuperGraphAnyNode::ModelExecution(node) => {
+                                    if let Some(model_ids) =
+                                        implied_symbolic_graph_model_ids.as_ref()
+                                        && let Some(model_id) =
+                                            model_ids.get(node.symbolic_graph_id)
                                         && let Some(model_graph) = self.loaded_models.get(model_id)
                                     {
                                         model_scope = Some(*model_id);

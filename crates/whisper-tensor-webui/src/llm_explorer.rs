@@ -372,6 +372,7 @@ impl LLMExplorerApp {
                             string_inputs: HashMap::new(),
                             use_cache: None,
                             backend_mode: SuperGraphRequestBackendMode::NDArray,
+                            symbolic_graph_ids: interface.model_ids.clone(),
                             tensor_inputs: HashMap::from([(
                                 llm_interface.token_context_input_link.clone(),
                                 tokens_tensor,

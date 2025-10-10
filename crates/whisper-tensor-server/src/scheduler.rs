@@ -2,7 +2,6 @@ use crate::ModelServer;
 use crossbeam::queue::ArrayQueue;
 use log::error;
 use std::collections::{HashMap, HashSet};
-use std::hash::Hash;
 use std::ptr;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -10,7 +9,7 @@ use tokio::sync::{Notify, mpsc};
 use whisper_tensor::backends::ModelLoadedTensorCache;
 use whisper_tensor::backends::eval_backend::EvalBackend;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
-use whisper_tensor::compiler::{CompilationSubject, CompiledProgram};
+use whisper_tensor::compiler::CompilationSubject;
 use whisper_tensor::numeric_tensor::NumericTensor;
 use whisper_tensor::super_graph::cache::{SuperGraphCache, SuperGraphTensorCache};
 use whisper_tensor::super_graph::data::SuperGraphData;
@@ -88,6 +87,7 @@ impl SchedulerReporter {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 pub enum SchedulerJob {
     SuperGraphRequest(
         (
@@ -232,8 +232,9 @@ pub async fn scheduler(mut input: mpsc::Receiver<SchedulerJob>, model_server: Ar
                     // Collect links to needed models
                     let mut model_id_map = HashMap::new();
                     let mut compiled_models = HashMap::new();
-                    let models = {
+                    let (models, symbolic_graph_models) = {
                         let mut models = HashMap::new();
+                        let mut symbolic_graph_models = Vec::new();
                         for (link, &model_id) in &req.model_inputs {
                             let model = model_server.get_model(model_id).await;
                             let compiled_model = model_server.get_compiled_model(model_id).await;
@@ -243,7 +244,11 @@ pub async fn scheduler(mut input: mpsc::Receiver<SchedulerJob>, model_server: Ar
                                 compiled_models.insert(model_id, compiled_model);
                             }
                         }
-                        models
+                        for model_id in req.symbolic_graph_ids {
+                            symbolic_graph_models
+                                .push(model_server.get_model(model_id).await.unwrap());
+                        }
+                        (models, symbolic_graph_models)
                     };
                     // Dispatch tight loop
                     let result = tokio::task::spawn_blocking(move || {
@@ -280,7 +285,7 @@ pub async fn scheduler(mut input: mpsc::Receiver<SchedulerJob>, model_server: Ar
                                 // Populate data with refs
                                 for link in req.model_inputs.keys() {
                                     if let Some(model) = models.get(link) {
-                                        super_graph_data.models.insert(*link, model);
+                                        super_graph_data.tensor_maps.insert(*link, model);
                                     }
                                 }
                                 for (link, data) in req.string_inputs {
@@ -357,11 +362,16 @@ pub async fn scheduler(mut input: mpsc::Receiver<SchedulerJob>, model_server: Ar
                                         }
                                         ret
                                     };
+                                    let symbolic_graph_refs = symbolic_graph_models
+                                        .iter()
+                                        .map(|x| x.get_symbolic_graph())
+                                        .collect();
                                     let mut context = SuperGraphContext {
                                         observer: &mut observer,
                                         eval_backend: backend,
                                         caches: cache,
                                         use_compiled_models: use_compiler,
+                                        symbolic_graphs: symbolic_graph_refs,
                                         compiled_models: Some(compiled_models),
                                         super_graph_tensor_cache: &mut super_graph_tensor_cache,
                                     };
