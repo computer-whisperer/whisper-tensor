@@ -556,7 +556,7 @@ impl TextInferenceTokensInLogitOutInterface {
             let mut super_graph_data = SuperGraphData::new();
             super_graph_data
                 .tensor_maps
-                .insert(self.model_input_link, model);
+                .insert(self.model_input_link, model.get_tensor_store());
             super_graph_data
                 .tensors
                 .insert(self.token_context_input_link, tokens_tensor);
@@ -569,7 +569,7 @@ impl TextInferenceTokensInLogitOutInterface {
             if let Some(tensor_cache) = &tensor_cache {
                 super_graph_tensor_cache
                     .caches
-                    .push((model, (*tensor_cache).clone()))
+                    .push((model.get_tensor_store(), (*tensor_cache).clone()))
             }
             let compiled_models = {
                 let mut compiled_models = Vec::new();

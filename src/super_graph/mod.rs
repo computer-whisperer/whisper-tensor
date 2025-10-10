@@ -4,7 +4,7 @@ pub mod links;
 pub mod nodes;
 pub mod observer;
 
-use crate::backends::eval_backend::EvalBackend;
+use crate::backends::eval_backend::{EvalBackend, EvalRuntimeError};
 use crate::compiler::{CompiledProgram, CompilerError};
 use crate::graph::{Graph, GraphPath, InnerGraph, Link, LinkPath, Node, NodePath};
 use crate::milli_graph::{
@@ -53,6 +53,8 @@ pub enum SuperGraphError {
     CompilerError(#[from] CompilerError),
     #[error("Missing link")]
     MissingLinkError(),
+    #[error(transparent)]
+    EvalRuntimeError(#[from] EvalRuntimeError),
 }
 
 pub type SuperGraphHash = u64;

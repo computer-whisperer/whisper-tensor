@@ -1,15 +1,15 @@
 use crate::DynRank;
 use crate::backends::eval_backend;
 use crate::backends::eval_backend::EvalBackend;
-use crate::model::Model;
 use crate::numeric_tensor::NumericTensor;
 use crate::symbolic_graph::observer::SymbolicGraphObserver;
-use crate::symbolic_graph::{SymbolicGraphNodePath, SymbolicGraphTensorPath};
+use crate::symbolic_graph::tensor_store::TensorStore;
+use crate::symbolic_graph::{SymbolicGraph, SymbolicGraphNodePath, SymbolicGraphTensorPath};
 use std::sync::Arc;
 use std::time::Instant;
 
 pub enum CompilationSubject {
-    Model { model: Arc<Model> },
+    SymbolicGraph { symbolic_graph: Arc<SymbolicGraph> },
 }
 
 pub trait CompiledProgramObserver {
@@ -35,7 +35,7 @@ pub enum CompilerError {
 }
 
 pub struct CompiledProgram {
-    pub interim_graph: Arc<Model>,
+    pub interim_graph: Arc<SymbolicGraph>,
 }
 
 struct SymbolicGraphObserverWrapper<'a, T: CompiledProgramObserver> {
@@ -69,14 +69,15 @@ impl CompiledProgram {
     pub fn run<T: CompiledProgramObserver>(
         &self,
         eval_backend: &mut EvalBackend,
+        tensor_store: &TensorStore,
         tensor_cache: Option<&mut crate::backends::ModelLoadedTensorCache>,
         inputs: impl IntoIterator<Item = (String, NumericTensor<DynRank>)>,
         observer: &mut T,
     ) -> Result<impl Iterator<Item = (String, NumericTensor<DynRank>)>, CompilerError> {
         let mut observer = SymbolicGraphObserverWrapper { observer };
         let res = eval_backend::run(
-            self.interim_graph.get_symbolic_graph(),
-            self.interim_graph.get_tensor_store(),
+            &self.interim_graph,
+            tensor_store,
             tensor_cache,
             eval_backend,
             &mut observer,
@@ -89,8 +90,8 @@ impl CompiledProgram {
 
 pub fn build_program(subject: CompilationSubject) -> CompiledProgram {
     match subject {
-        CompilationSubject::Model { model } => CompiledProgram {
-            interim_graph: model,
+        CompilationSubject::SymbolicGraph { symbolic_graph } => CompiledProgram {
+            interim_graph: symbolic_graph,
         },
     }
 }

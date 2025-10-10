@@ -221,7 +221,8 @@ pub async fn scheduler(mut input: mpsc::Receiver<SchedulerJob>, model_server: Ar
                 SchedulerJob::CompileModelRequest { model_id } => {
                     let model = model_server.get_model(model_id).await;
                     if let Some(model) = model {
-                        let subject = CompilationSubject::Model { model };
+                        let symbolic_graph = Arc::new(model.get_symbolic_graph().clone());
+                        let subject = CompilationSubject::SymbolicGraph { symbolic_graph };
                         let program = compiler::build_program(subject);
                         model_server
                             .set_compiled_model(model_id, Arc::new(program))
@@ -285,7 +286,9 @@ pub async fn scheduler(mut input: mpsc::Receiver<SchedulerJob>, model_server: Ar
                                 // Populate data with refs
                                 for link in req.model_inputs.keys() {
                                     if let Some(model) = models.get(link) {
-                                        super_graph_data.tensor_maps.insert(*link, model);
+                                        super_graph_data
+                                            .tensor_maps
+                                            .insert(*link, model.get_tensor_store());
                                     }
                                 }
                                 for (link, data) in req.string_inputs {
@@ -317,10 +320,10 @@ pub async fn scheduler(mut input: mpsc::Receiver<SchedulerJob>, model_server: Ar
                                                     if let Some(x) =
                                                         ndarray_tensor_load_caches.remove(a)
                                                     {
-                                                        res.caches.push((b.as_ref(), x));
+                                                        res.caches.push((b.get_tensor_store(), x));
                                                     } else {
                                                         res.caches.push((
-                                                            b.as_ref(),
+                                                            b.get_tensor_store(),
                                                             ModelLoadedTensorCache::default(),
                                                         ));
                                                     }
@@ -332,10 +335,10 @@ pub async fn scheduler(mut input: mpsc::Receiver<SchedulerJob>, model_server: Ar
                                                     if let Some(x) =
                                                         vulkan_tensor_load_caches.remove(a)
                                                     {
-                                                        res.caches.push((b.as_ref(), x));
+                                                        res.caches.push((b.get_tensor_store(), x));
                                                     } else {
                                                         res.caches.push((
-                                                            b.as_ref(),
+                                                            b.get_tensor_store(),
                                                             ModelLoadedTensorCache::default(),
                                                         ));
                                                     }

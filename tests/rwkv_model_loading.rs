@@ -102,7 +102,7 @@ fn rwkv01b_single_step_runs_shape_sanity() {
     .expect("import rwkv7 to onnx");
     let model = Model::new_from_onnx(&onnx_bytes).expect("model loads");
 
-    let mut eval = EvalBackend::NDArray;
+    //let mut eval = EvalBackend::NDArray;
     let mut observer = ();
 
     // Prepare zeroed inputs by introspecting model input tensor info

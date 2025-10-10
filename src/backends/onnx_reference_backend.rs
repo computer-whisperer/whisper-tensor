@@ -15,7 +15,7 @@ pub struct ONNXReferenceTensor {
 
 impl Clone for ONNXReferenceTensor {
     fn clone(&self) -> Self {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let value = self.value.bind(py).clone();
             ONNXReferenceTensor {
                 value: value.unbind(),
@@ -34,14 +34,14 @@ impl ONNXReferenceTensor {
     }
 
     pub fn shape(&self) -> Vec<usize> {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let value = self.value.bind(py);
             value.getattr("shape").unwrap().extract().unwrap()
         })
     }
 
     pub fn to_ndarray<R: Rank>(&self) -> Result<NDArrayNumericTensor<R>, NumericTensorError> {
-        let out = Python::with_gil(|py| {
+        let out = Python::attach(|py| {
             let value = self.value.bind(py);
             let v_flat = value.call_method0("flatten")?;
             let v_flat = v_flat.call_method0("tolist")?;
@@ -74,7 +74,7 @@ impl TryFrom<ONNXReferenceTensor> for NDArrayNumericTensor<DynRank> {
 impl TryFrom<&NDArrayNumericTensor<DynRank>> for ONNXReferenceTensor {
     type Error = ONNXReferenceError;
     fn try_from(input: &NDArrayNumericTensor<DynRank>) -> Result<Self, Self::Error> {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let np = py.import("numpy")?;
             let np_array = match &input {
                 NDArrayNumericTensor::F32(x) => {
@@ -154,7 +154,7 @@ pub enum ONNXReferenceError {
 
 impl ONNXReferenceBackend {
     pub fn new(onnx_bytes: &[u8]) -> Result<Self, ONNXReferenceError> {
-        let evaluator = Python::with_gil(|py| {
+        let evaluator = Python::attach(|py| {
             //let locals = [("os", py.import("os")?), ("sys", py.import("sys")?)].into_py_dict(py)?;
             //py.eval(c_str!("sys.path.append(\"libs/onnx\")"), None, Some(&locals))?;
             let onnx = py.import("onnx")?;
@@ -177,7 +177,7 @@ impl ONNXReferenceBackend {
         &self,
         inputs: HashMap<String, ONNXReferenceTensor>,
     ) -> Result<HashMap<String, ONNXReferenceTensor>, ONNXReferenceError> {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let evaluator = self.evaluator.bind(py);
             let py_inputs = PyDict::new(py);
             for (key, value) in inputs {
@@ -204,7 +204,7 @@ impl ONNXReferenceBackend {
     pub fn get_input_tensor_info(
         &self,
     ) -> Result<HashMap<String, (DType, Vec<Option<u64>>)>, ONNXReferenceError> {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let mut output = HashMap::new();
             let evaluator = self.evaluator.bind(py);
             let input_names: Vec<String> = evaluator.getattr("input_names")?.extract()?;

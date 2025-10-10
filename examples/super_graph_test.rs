@@ -117,7 +117,9 @@ fn main() {
     let super_graph = builder.build(inputs.as_slice(), outputs.as_slice());
 
     let mut super_graph_data = SuperGraphData::new();
-    super_graph_data.tensor_maps.insert(model_link, &model);
+    super_graph_data
+        .tensor_maps
+        .insert(model_link, model.get_tensor_store());
     super_graph_data.strings.insert(
         text_input_link,
         "The fibonacci sequence is: 1, 1, 2, 3, 5, 8, 13,".to_string(),

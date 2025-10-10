@@ -1,4 +1,5 @@
 use crate::DynRank;
+use crate::backends::eval_backend;
 use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::compiler::CompiledProgramObserver;
@@ -177,7 +178,7 @@ impl SuperGraphNode for SuperGraphNodeModelExecution {
         data: &mut SuperGraphData,
         context: &mut SuperGraphContext<T>,
     ) -> Result<(), SuperGraphError> {
-        let model = data.tensor_maps.get(&self.tensor_map).unwrap();
+        let tensor_store = data.tensor_maps.get(&self.tensor_map).unwrap();
 
         let inputs = {
             let mut inputs = HashMap::new();
@@ -189,12 +190,14 @@ impl SuperGraphNode for SuperGraphNodeModelExecution {
         let tensor_cache = {
             let mut res = None;
             for (a, b) in &mut context.super_graph_tensor_cache.caches {
-                if ptr::eq(*a, *model) {
+                if ptr::eq(*a, *tensor_store) {
                     res = Some(b)
                 }
             }
             res
         };
+
+        let symbolic_graph = context.symbolic_graphs[self.symbolic_graph_id];
 
         let mut observer = SymbolicGraphObserverWrapper::new(context.observer, node_path);
         if context.use_compiled_models
@@ -202,18 +205,30 @@ impl SuperGraphNode for SuperGraphNodeModelExecution {
         {
             let compiled_model = &compiled_models
                 .iter()
-                .find(|(x, _y)| core::ptr::addr_eq(*x, *model))
+                .find(|(x, _y)| core::ptr::addr_eq(*x, symbolic_graph))
                 .ok_or(SuperGraphError::ModelNotCompiledError)?
                 .1;
-            let outputs =
-                compiled_model.run(context.eval_backend, tensor_cache, inputs, &mut observer)?;
+            let outputs = compiled_model.run(
+                context.eval_backend,
+                tensor_store,
+                tensor_cache,
+                inputs,
+                &mut observer,
+            )?;
             let outputs = outputs.collect::<HashMap<_, _>>();
             for (name, link) in &self.tensor_outputs {
                 data.tensors
                     .insert(*link, outputs.get(name).unwrap().clone());
             }
         } else {
-            let outputs = model.eval(inputs, &mut observer, tensor_cache, context.eval_backend)?;
+            let outputs = eval_backend::run(
+                symbolic_graph,
+                tensor_store,
+                tensor_cache,
+                context.eval_backend,
+                &mut observer,
+                inputs,
+            )?;
             for (name, link) in &self.tensor_outputs {
                 data.tensors
                     .insert(*link, outputs.get(name).unwrap().clone());

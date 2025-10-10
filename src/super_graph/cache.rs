@@ -1,7 +1,7 @@
 use crate::DynRank;
 use crate::backends::ModelLoadedTensorCache;
-use crate::model::Model;
 use crate::numeric_tensor::NumericTensor;
+use crate::symbolic_graph::tensor_store::TensorStore;
 use std::collections::HashMap;
 
 type RNNCache = HashMap<Vec<u32>, HashMap<String, NumericTensor<DynRank>>>;
@@ -21,7 +21,7 @@ impl SuperGraphCache {
 
 #[derive(Default)]
 pub struct SuperGraphTensorCache<'model> {
-    pub caches: Vec<(&'model Model, ModelLoadedTensorCache)>,
+    pub caches: Vec<(&'model TensorStore, ModelLoadedTensorCache)>,
 }
 
 impl<'model> SuperGraphTensorCache<'model> {

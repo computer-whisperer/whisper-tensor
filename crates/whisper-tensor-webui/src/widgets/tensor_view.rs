@@ -14,7 +14,7 @@ pub fn tensor_view_old(ui: &mut Ui, value: &NDArrayNumericTensor<DynRank>) -> Re
                 ui.label(format!("{:}, {:?}", value.dtype(), value.shape()));
                 if ui.button("Copy Full").clicked() {
                     let text = format!("{:#}", value);
-                    ui.output_mut(|o| o.copied_text = text);
+                    ui.ctx().copy_text(text);
                 }
             });
             ui.label(value.to_string());
@@ -225,7 +225,7 @@ pub fn tensor_view(
                 ui.horizontal(|ui| {
                     ui.label(format!("{}  {:?}", tensor.dtype(), shape));
                     if ui.button("Copy Full").clicked() {
-                        ui.output_mut(|o| o.copied_text = format!("{:#}", tensor));
+                        ui.ctx().copy_text(format!("{:#}", tensor));
                     }
                 });
                 // All zeros index
@@ -250,11 +250,11 @@ pub fn tensor_view(
                 ui.label(format!("{}  {:?}", tensor.dtype(), shape));
                 if ui.button("Copy Full").clicked() {
                     let text = format!("{:#}", tensor);
-                    ui.output_mut(|o| o.copied_text = text);
+                    ui.ctx().copy_text(text);
                 }
                 if ui.button("Copy Visible Slice").clicked() {
                     let txt = slice_to_string(tensor, state);
-                    ui.output_mut(|o| o.copied_text = txt);
+                    ui.ctx().copy_text(txt);
                 }
                 ui.separator();
 
