@@ -1,46 +1,23 @@
 use crate::graph_explorer::inspect_windows::InspectWindow;
-use crate::graph_explorer::{GraphExplorerApp, GraphExplorerLayerSelection, GraphExplorerState};
+use crate::graph_explorer::{GraphExplorerApp, GraphExplorerState};
 use crate::llm_explorer::{LLMExplorerApp, LLMExplorerState};
 use crate::websockets;
 use crate::websockets::ServerRequestManager;
-use crate::widgets::toggle::toggle_ui;
-use egui::epaint::{CubicBezierShape, QuadraticBezierShape, RectShape};
-use egui::{
-    Color32, CursorIcon, Event, EventFilter, Label, Layout, Margin, Rect, Response, RichText,
-    Sense, Shape, Stroke, StrokeKind, UiBuilder, Vec2, Widget, WidgetText, vec2,
-};
-use futures::SinkExt;
-use log::{debug, info};
-use rand::{random, random_range};
+use egui::Margin;
 use rwkv_tokenizer::WorldTokenizer;
 use serde::{Deserialize, Serialize};
-use std::cmp::{Ordering, max};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 use strum::IntoEnumIterator;
 use tokio::sync::mpsc;
-use tokio::sync::mpsc::error::TryRecvError;
-use wasm_bindgen::prelude::*;
-use wasm_bindgen::{JsCast, JsValue};
-use wasm_bindgen_futures::js_sys;
-use wasm_bindgen_futures::js_sys::ArrayBuffer;
-use web_sys::WebSocket;
-use whisper_tensor::DynRank;
-use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::interfaces::AnyInterface;
-use whisper_tensor::scalar_info::ScalarInfoTyped;
-use whisper_tensor::symbolic_graph::ops::{AnyOperation, Operation};
-use whisper_tensor::symbolic_graph::tensor_store::TensorStoreTensorId;
-use whisper_tensor::symbolic_graph::{
-    StoredOrNotTensor, SymbolicGraph, SymbolicGraphOperationId, SymbolicGraphTensorId, TensorType,
-};
-use whisper_tensor::tokenizer::{AnyTokenizer, Tokenizer, TokenizerError};
+use whisper_tensor::symbolic_graph::SymbolicGraph;
+use whisper_tensor::tokenizer::AnyTokenizer;
 use whisper_tensor_import::ModelTypeHint;
 use whisper_tensor_import::onnx_graph::TokenizerInfo;
 use whisper_tensor_server::{
-    CurrentInterfacesReportEntry, CurrentModelsAndInterfacesReport, CurrentModelsReportEntry,
-    LoadedModelId, ServerConfigReport, WebsocketClientServerMessage, WebsocketServerClientMessage,
+    CurrentInterfacesReportEntry, CurrentModelsReportEntry, LoadedModelId, ServerConfigReport,
+    WebsocketClientServerMessage, WebsocketServerClientMessage,
 };
 
 #[derive(Clone, Debug)]
@@ -201,6 +178,7 @@ impl eframe::App for WebUIApp {
                             // Prompt tokenizer loading
                             let mut needed_tokenizers = Vec::new();
                             for interface in self.loaded_models.current_interfaces.values() {
+                                #[allow(irrefutable_let_patterns)]
                                 if let AnyInterface::TextInferenceTokensInLogitOutInterface(
                                     interface,
                                 ) = &interface.interface
@@ -241,15 +219,13 @@ impl eframe::App for WebUIApp {
                             let (id, graph_bin) = res.unwrap();
                             if let Some(requesting_id) =
                                 self.loaded_models.currently_requesting_model
+                                && requesting_id == id
                             {
-                                if requesting_id == id {
-                                    self.loaded_models.currently_requesting_model = None;
-                                    let graph = ciborium::from_reader::<SymbolicGraph, _>(
-                                        graph_bin.as_slice(),
-                                    )
-                                    .unwrap();
-                                    self.graph_explorer_app.loaded_models.insert(id, graph);
-                                }
+                                self.loaded_models.currently_requesting_model = None;
+                                let graph =
+                                    ciborium::from_reader::<SymbolicGraph, _>(graph_bin.as_slice())
+                                        .unwrap();
+                                self.graph_explorer_app.loaded_models.insert(id, graph);
                             }
                         }
                         WebsocketServerClientMessage::TensorStoreReturn(
@@ -259,22 +235,16 @@ impl eframe::App for WebUIApp {
                         ) => {
                             if let Some(selected_model_id) =
                                 self.graph_explorer_app.get_model_scope(&self.loaded_models)
+                                && selected_model_id == model_id
                             {
-                                if selected_model_id == model_id {
-                                    for window in &mut self.graph_explorer_app.inspect_windows {
-                                        if let InspectWindow::SymbolicGraphTensor(
-                                            inspect_window_tensor,
-                                        ) = window
-                                        {
-                                            if let Some(x) =
-                                                inspect_window_tensor.stored_value_requested
-                                            {
-                                                if x == stored_tensor_id {
-                                                    inspect_window_tensor.stored_value =
-                                                        Some(res.clone());
-                                                }
-                                            }
-                                        }
+                                for window in &mut self.graph_explorer_app.inspect_windows {
+                                    if let InspectWindow::SymbolicGraphTensor(inspect_window_tensor) =
+                                        window
+                                        && let Some(x) =
+                                            inspect_window_tensor.stored_value_requested
+                                        && x == stored_tensor_id
+                                    {
+                                        inspect_window_tensor.stored_value = Some(res.clone());
                                     }
                                 }
                             }
@@ -307,6 +277,7 @@ impl eframe::App for WebUIApp {
                     }
                 }
                 Err(_) => {
+                    log::debug!("Websocket error!");
                     break;
                 }
             }
@@ -314,7 +285,7 @@ impl eframe::App for WebUIApp {
 
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             // The top panel is often a good place for a menu bar:
-            egui::menu::bar(ui, |ui| {
+            egui::MenuBar::new().ui(ui, |ui| {
                 egui::widgets::global_theme_preference_switch(ui);
                 ui.heading("Whisper Tensor");
                 ui.selectable_value(

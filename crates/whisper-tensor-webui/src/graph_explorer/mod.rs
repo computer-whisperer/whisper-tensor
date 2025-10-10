@@ -10,7 +10,7 @@ use crate::widgets::tokenized_rich_text::TokenizedRichText;
 use egui::epaint::CubicBezierShape;
 use egui::{
     Color32, ColorImage, Context, Label, Margin, Mesh, Pos2, Rect, Response, Sense, Shape, Stroke,
-    StrokeKind, TextureHandle, Ui, UiBuilder, Vec2, Widget, vec2,
+    StrokeKind, TextureHandle, Ui, UiBuilder, Vec2, vec2,
 };
 use graph_layout::{
     GraphLayout, GraphLayoutError, GraphLayoutIOOffsets, GraphLayoutLinkData, GraphLayoutLinkId,
@@ -26,7 +26,6 @@ use whisper_tensor::DynRank;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::graph::{InnerGraph, Node};
 use whisper_tensor::interfaces::AnyInterface;
-use whisper_tensor::milli_graph::ops::MilliOp;
 use whisper_tensor::milli_graph::{MilliOpGraph, MilliOpGraphNodeId, MilliOpGraphTensorId};
 use whisper_tensor::scalar_info::ScalarInfoTyped;
 use whisper_tensor::super_graph::nodes::SuperGraphAnyNode;
@@ -41,7 +40,6 @@ use whisper_tensor::symbolic_graph::{
 };
 use whisper_tensor::tokenizer::Tokenizer;
 use whisper_tensor_import::onnx_graph::TokenizerInfo;
-use whisper_tensor_import::onnx_graph::tensor::Tensor;
 use whisper_tensor_server::{
     AbbreviatedTensorReportSettings, AbbreviatedTensorValue, LoadedModelId, ServerConfigReport,
     SuperGraphRequest, SuperGraphRequestBackendMode, WebsocketClientServerMessage,
@@ -76,6 +74,7 @@ pub(crate) enum GraphSubject<'a> {
     MilliOpGraphB(&'a MilliOpGraph<SuperGraphLinkTensor>),
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum GraphExplorerLayerSelection {
     Model(LoadedModelId),
@@ -95,7 +94,7 @@ pub(crate) enum GraphExplorerSelectable {
 }
 
 #[derive(Clone, Debug, Default)]
-struct TextInferenceData {
+pub(crate) struct TextInferenceData {
     tokens: Vec<u32>,
     logits: HashMap<Vec<u32>, Vec<(u32, f32)>>,
     pending_request: Option<(u64, SuperGraphLinkTensor, Vec<u32>)>,
@@ -126,6 +125,7 @@ pub(crate) struct GraphExplorerApp {
     error_popup: Option<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_node_contents<'a>(
     ui: &mut egui::Ui,
     node_type: &GraphLayoutNodeType,
@@ -164,7 +164,7 @@ fn render_node_contents<'a>(
         match &node_type {
             GraphLayoutNodeType::SuperGraphNode(node_id) => {
                 if let GraphSubject::SuperGraphInner(super_graph) = graph_subject {
-                    let node = &super_graph.nodes[&node_id];
+                    let node = &super_graph.nodes[node_id];
                     ui.add(Label::new(node.op_kind()).selectable(false));
                 }
             }
@@ -180,7 +180,7 @@ fn render_node_contents<'a>(
             }
             GraphLayoutNodeType::SymbolicGraphOperation(op_id) => {
                 if let GraphSubject::SymbolicGraphInner(symbolic_graph) = graph_subject {
-                    let op = &symbolic_graph.get_operations()[&op_id];
+                    let op = &symbolic_graph.get_operations()[op_id];
                     match &op.op {
                         AnyOperation::Constant(x) => {
                             let text = format!("{} {}", x.value.dtype(), x.value);
@@ -214,10 +214,10 @@ fn render_node_contents<'a>(
                 }
             }
             GraphLayoutNodeType::MilliOpGraphNode(node_id) => {
-                if let GraphSubject::MilliOpGraphB(milli_graph) = graph_subject {
-                    if let Some(op) = milli_graph.get_node(node_id) {
-                        ui.add(Label::new(op.op_kind()).selectable(false));
-                    }
+                if let GraphSubject::MilliOpGraphB(milli_graph) = graph_subject
+                    && let Some(op) = milli_graph.get_node(node_id)
+                {
+                    ui.add(Label::new(op.op_kind()).selectable(false));
                 }
             }
             GraphLayoutNodeType::MilliOpGraphInput(_) => {
@@ -229,7 +229,7 @@ fn render_node_contents<'a>(
             GraphLayoutNodeType::ConnectionByNameSrc(name) => match &name.link_type {
                 GraphLayoutLinkType::SymbolicGraphTensor(tensor_id) => {
                     if let GraphSubject::SymbolicGraphInner(symbolic_graph) = graph_subject {
-                        let value = symbolic_graph.get_tensor_info(tensor_id.clone()).unwrap();
+                        let value = symbolic_graph.get_tensor_info(*tensor_id).unwrap();
                         let name = value
                             .onnx_name
                             .clone()
@@ -247,7 +247,7 @@ fn render_node_contents<'a>(
             GraphLayoutNodeType::ConnectionByNameDest(name) => match &name.link_type {
                 GraphLayoutLinkType::SymbolicGraphTensor(tensor_id) => {
                     if let GraphSubject::SymbolicGraphInner(symbolic_graph) = graph_subject {
-                        let value = symbolic_graph.get_tensor_info(tensor_id.clone()).unwrap();
+                        let value = symbolic_graph.get_tensor_info(*tensor_id).unwrap();
                         let name = value
                             .onnx_name
                             .clone()
@@ -262,9 +262,6 @@ fn render_node_contents<'a>(
                     ui.add(Label::new(format!("> {:?}", link)).selectable(false));
                 }
             },
-            _ => {
-                // TODO
-            }
         }
     }
 
@@ -331,7 +328,7 @@ fn render_node_contents<'a>(
     (response, GraphLayoutIOOffsets { inputs, outputs })
 }
 
-fn format_shape(val: &Vec<ScalarInfoTyped<u64>>) -> String {
+fn format_shape(val: &[ScalarInfoTyped<u64>]) -> String {
     let joined = val
         .iter()
         .map(|x| match x {
@@ -375,7 +372,7 @@ impl GraphExplorerApp {
         ctx: &Context,
         path: &SuperGraphTensorPath,
     ) -> Option<TextureHandle> {
-        if let Some(swatch) = rendered_tensor_swatches.get(&path) {
+        if let Some(swatch) = rendered_tensor_swatches.get(path) {
             Some(swatch.clone())
         } else if let Some(x) = abbreviated_tensor_reports.get(path) {
             if let Some(raw_texture) =
@@ -418,7 +415,7 @@ impl GraphExplorerApp {
             });
         }
 
-        self.explorer_hovered = self.next_explorer_hovered.clone();
+        self.explorer_hovered = self.next_explorer_hovered;
         self.next_explorer_hovered = None;
 
         ui.horizontal(|ui| {
@@ -444,8 +441,8 @@ impl GraphExplorerApp {
                 .selected_text(
                     model_selector_options
                         .iter()
-                        .find(|(a, b)| value.as_ref().map(|x| x == a).unwrap_or(false))
-                        .map(|(a, b)| b.clone())
+                        .find(|(a, _b)| value.as_ref().map(|x| x == a).unwrap_or(false))
+                        .map(|(_a, b)| b.clone())
                         .unwrap_or("Select a model or interface".to_string()),
                 )
                 .show_ui(ui, |ui| {
@@ -488,12 +485,13 @@ impl GraphExplorerApp {
         }
 
         let (graph_subjects, selected_interface, selected_interface_id, is_loading) = {
-            let mut graph_subjects: Vec<(
-                GraphSubject,
+            type SubjectData<'a> = (
+                GraphSubject<'a>,
                 Vec<GraphExplorerLayerSelection>,
                 Option<SuperGraphGraphPath>,
                 Option<GraphExplorerLayerSelection>,
-            )> = vec![];
+            );
+            let mut graph_subjects: Vec<SubjectData> = vec![];
             let mut compiled_path = vec![];
             let mut current_graph_path = None;
             let mut selected_interface = None;
@@ -546,12 +544,11 @@ impl GraphExplorerApp {
                             graph_subject
                                 .get_operations()
                                 .get(operation_id)
-                                .map(|x| {
+                                .and_then(|x| {
                                     x.op.get_sub_graphs()
                                         .get(*i)
-                                        .map(|x| GraphSubject::SymbolicGraphInner(*x))
+                                        .map(|x| GraphSubject::SymbolicGraphInner(x))
                                 })
-                                .flatten()
                         } else {
                             None
                         }
@@ -687,16 +684,14 @@ impl GraphExplorerApp {
                                     self.next_graph_subject_path = Some(graph_subject_path.clone());
                                 }
                             }
-                            for (_node_id, node) in graph_layout.get_nodes() {
+                            for node in graph_layout.get_nodes().values() {
                                 let pos = (node.position - node_bounding_rect.min) * transform;
 
                                 let this_selectable = node.node_type.get_graph_selectable();
 
-                                let is_selected = self.explorer_selection
-                                    == Some(this_selectable.clone())
+                                let is_selected = self.explorer_selection == Some(this_selectable)
                                     && selected_entry.is_none();
-                                let is_hovered = self.explorer_hovered
-                                    == Some(this_selectable.clone())
+                                let is_hovered = self.explorer_hovered == Some(this_selectable)
                                     && selected_entry.is_none();
 
                                 let node_path = if let Some(graph_path) = super_graph_path {
@@ -842,14 +837,11 @@ impl GraphExplorerApp {
             if !self.graph_layouts.contains_key(&self.graph_subject_path) {
                 match graph_subject {
                     GraphSubject::SymbolicGraphInner(graph) => {
-                        let mut next_link_id = 0;
-
                         // Map tensors to link IDs
                         let mut tensor_link_ids = HashMap::new();
                         let mut link_data = HashMap::new();
-                        for (tensor_id, _) in graph.get_tensors() {
-                            let new_link_id = GraphLayoutLinkId(next_link_id);
-                            next_link_id += 1;
+                        for (i, tensor_id) in graph.get_tensors().keys().enumerate() {
+                            let new_link_id = GraphLayoutLinkId(i);
                             tensor_link_ids.insert(*tensor_id, new_link_id);
                             link_data.insert(
                                 new_link_id,
@@ -893,7 +885,7 @@ impl GraphExplorerApp {
                                     let node_id = GraphLayoutNodeId(next_node_id);
                                     io_tensor_node_ids.insert(*tensor_id, node_id);
                                     next_node_id += 1;
-                                    sourced_links.insert(tensor_link_ids[&tensor_id]);
+                                    sourced_links.insert(tensor_link_ids[tensor_id]);
                                     node_init_data.insert(
                                         node_id,
                                         GraphLayoutNodeInitData {
@@ -926,7 +918,7 @@ impl GraphExplorerApp {
                                         let node_id = GraphLayoutNodeId(next_node_id);
                                         io_tensor_node_ids.insert(*tensor_id, node_id);
                                         next_node_id += 1;
-                                        sourced_links.insert(tensor_link_ids[&tensor_id]);
+                                        sourced_links.insert(tensor_link_ids[tensor_id]);
                                         node_init_data.insert(
                                             node_id,
                                             GraphLayoutNodeInitData {
@@ -944,7 +936,7 @@ impl GraphExplorerApp {
                                     let node_id = GraphLayoutNodeId(next_node_id);
                                     io_tensor_node_ids.insert(*tensor_id, node_id);
                                     next_node_id += 1;
-                                    sourced_links.insert(tensor_link_ids[&tensor_id]);
+                                    sourced_links.insert(tensor_link_ids[tensor_id]);
                                     node_init_data.insert(
                                         node_id,
                                         GraphLayoutNodeInitData {
@@ -968,7 +960,7 @@ impl GraphExplorerApp {
                                     &node_init_data.node_type,
                                     node_init_data.inputs.len(),
                                     node_init_data.outputs.len(),
-                                    &graph_subject,
+                                    graph_subject,
                                     false,
                                     false,
                                     None,
@@ -982,12 +974,12 @@ impl GraphExplorerApp {
                     GraphSubject::SuperGraphInner(super_graph_inner) => {
                         // Map links
                         let mut link_ids = HashMap::new();
-                        let mut next_link_id = 0;
                         let mut link_data = HashMap::new();
-                        for super_graph_link in super_graph_inner.get_all_links() {
-                            let new_link_id = GraphLayoutLinkId(next_link_id);
-                            next_link_id += 1;
-                            link_ids.insert(super_graph_link.clone(), new_link_id);
+                        for (i, super_graph_link) in
+                            super_graph_inner.get_all_links().into_iter().enumerate()
+                        {
+                            let new_link_id = GraphLayoutLinkId(i);
+                            link_ids.insert(super_graph_link, new_link_id);
                             link_data.insert(
                                 new_link_id,
                                 GraphLayoutLinkData {
@@ -1018,7 +1010,7 @@ impl GraphExplorerApp {
                             node_init_data.insert(
                                 new_node_id,
                                 GraphLayoutNodeInitData {
-                                    node_type: GraphLayoutNodeType::SuperGraphNode(node_id.clone()),
+                                    node_type: GraphLayoutNodeType::SuperGraphNode(*node_id),
                                     inputs,
                                     outputs,
                                 },
@@ -1030,16 +1022,14 @@ impl GraphExplorerApp {
                             let new_node_id = GraphLayoutNodeId(next_node_id);
                             next_node_id += 1;
 
-                            let mut inputs = vec![];
-                            let mut outputs = vec![link_ids[input_link]];
+                            let inputs = vec![];
+                            let outputs = vec![link_ids[input_link]];
                             sourced_links.insert(link_ids[input_link]);
 
                             node_init_data.insert(
                                 new_node_id,
                                 GraphLayoutNodeInitData {
-                                    node_type: GraphLayoutNodeType::SuperGraphLink(
-                                        input_link.clone(),
-                                    ),
+                                    node_type: GraphLayoutNodeType::SuperGraphLink(*input_link),
                                     inputs,
                                     outputs,
                                 },
@@ -1049,14 +1039,12 @@ impl GraphExplorerApp {
                             let new_node_id = GraphLayoutNodeId(next_node_id);
                             next_node_id += 1;
 
-                            let mut inputs = vec![link_ids[output_link]];
-                            let mut outputs = vec![];
+                            let inputs = vec![link_ids[output_link]];
+                            let outputs = vec![];
                             node_init_data.insert(
                                 new_node_id,
                                 GraphLayoutNodeInitData {
-                                    node_type: GraphLayoutNodeType::SuperGraphLink(
-                                        output_link.clone(),
-                                    ),
+                                    node_type: GraphLayoutNodeType::SuperGraphLink(*output_link),
                                     inputs,
                                     outputs,
                                 },
@@ -1073,7 +1061,7 @@ impl GraphExplorerApp {
                                     &node_init_data.node_type,
                                     node_init_data.inputs.len(),
                                     node_init_data.outputs.len(),
-                                    &graph_subject,
+                                    graph_subject,
                                     false,
                                     false,
                                     None,
@@ -1087,12 +1075,12 @@ impl GraphExplorerApp {
                     GraphSubject::MilliOpGraphB(milli_op_graph) => {
                         // Map links
                         let mut link_ids = HashMap::new();
-                        let mut next_link_id = 0;
                         let mut link_data = HashMap::new();
-                        for tensor_id in milli_op_graph.get_all_tensors() {
-                            let new_link_id = GraphLayoutLinkId(next_link_id);
-                            next_link_id += 1;
-                            link_ids.insert(tensor_id.clone(), new_link_id);
+                        for (i, tensor_id) in
+                            milli_op_graph.get_all_tensors().into_iter().enumerate()
+                        {
+                            let new_link_id = GraphLayoutLinkId(i);
+                            link_ids.insert(tensor_id, new_link_id);
                             link_data.insert(
                                 new_link_id,
                                 GraphLayoutLinkData {
@@ -1134,16 +1122,14 @@ impl GraphExplorerApp {
                             let new_node_id = GraphLayoutNodeId(next_node_id);
                             next_node_id += 1;
 
-                            let mut inputs = vec![];
-                            let mut outputs = vec![link_ids[input_link]];
+                            let inputs = vec![];
+                            let outputs = vec![link_ids[input_link]];
                             sourced_links.insert(link_ids[input_link]);
 
                             node_init_data.insert(
                                 new_node_id,
                                 GraphLayoutNodeInitData {
-                                    node_type: GraphLayoutNodeType::MilliOpGraphInput(
-                                        input_link.clone(),
-                                    ),
+                                    node_type: GraphLayoutNodeType::MilliOpGraphInput(*input_link),
                                     inputs,
                                     outputs,
                                 },
@@ -1153,13 +1139,13 @@ impl GraphExplorerApp {
                             let new_node_id = GraphLayoutNodeId(next_node_id);
                             next_node_id += 1;
 
-                            let mut inputs = vec![link_ids[output_link]];
-                            let mut outputs = vec![];
+                            let inputs = vec![link_ids[output_link]];
+                            let outputs = vec![];
                             node_init_data.insert(
                                 new_node_id,
                                 GraphLayoutNodeInitData {
                                     node_type: GraphLayoutNodeType::MilliOpGraphOutput(
-                                        output_link.clone(),
+                                        *output_link,
                                     ),
                                     inputs,
                                     outputs,
@@ -1177,7 +1163,7 @@ impl GraphExplorerApp {
                                     &node_init_data.node_type,
                                     node_init_data.inputs.len(),
                                     node_init_data.outputs.len(),
-                                    &graph_subject,
+                                    graph_subject,
                                     false,
                                     false,
                                     None,
@@ -1194,10 +1180,8 @@ impl GraphExplorerApp {
             match self.graph_layouts.get_mut(&self.graph_subject_path) {
                 Some(Ok(graph_layout)) => {
                     // Update positions
-                    if state.explorer_physics {
-                        if graph_layout.update_layout(5000) {
-                            ui.ctx().request_repaint_after(Duration::from_millis(20));
-                        }
+                    if state.explorer_physics && graph_layout.update_layout(5000) {
+                        ui.ctx().request_repaint_after(Duration::from_millis(20));
                     }
                     let mut frame_shape = ui.available_size_before_wrap();
                     if do_interface_panel {
@@ -1211,7 +1195,7 @@ impl GraphExplorerApp {
                         frame.show(ui, |ui| {
 
                             let mut scene_rect =  if let Some(x) =  self.model_view_scene_rects.get(&self.graph_subject_path) {
-                                x.clone()
+                                *x
                             } else {
                                 // No bound of graph should exceed this (unless necessary for aspect ratio)
                                 let max_frame = graph_layout.get_bounding_rect().expand(30.0);
@@ -1224,7 +1208,7 @@ impl GraphExplorerApp {
 
                                 let center_y = max_frame.center().y;
                                 let center_pos = egui::pos2(min_x + (max_x - min_x) / 2.0, center_y);
-                                let scale = (frame_shape.x / (max_x - min_x)).max(0.0).min(0.8);
+                                let scale = (frame_shape.x / (max_x - min_x)).clamp(0.0, 0.8);
 
                                 Rect::from_center_size(
                                     center_pos,
@@ -1239,7 +1223,7 @@ impl GraphExplorerApp {
                                     .find_nodes_within(&cull_rect.center(), cull_rect.size().length() / 2.0)
                                     .clone();
                                 let mut nodes_to_render = HashSet::<GraphLayoutNodeId>::from_iter(
-                                    nodes_to_render_vec.iter().map(|x| *x),
+                                    nodes_to_render_vec.iter().copied(),
                                 );
 
                                 let mut edges_to_render = vec![];
@@ -1309,19 +1293,15 @@ impl GraphExplorerApp {
                                         self.nodes_in_view.insert(node_path.clone());
                                     }
                                     let duration_since_eval = if let Some(node_path) = &node_path {
-                                        if let Some(x) = self.node_execution_timestamps.get(node_path) {
-                                            Some(current_time - *x)
-                                        } else {
-                                            None
-                                        }
+                                        self.node_execution_timestamps.get(node_path).map(|x| current_time - *x)
                                     } else {
                                         None
                                     };
                                     let pos = current_node_data[&node_id].position;
                                     let cell_shape = current_node_data[&node_id].shape;
                                     let op_rect = Rect::from_min_max(
-                                        pos.clone() - cell_shape / 2.0,
-                                        pos.clone() + cell_shape,
+                                        pos - cell_shape / 2.0,
+                                        pos + cell_shape,
                                     );
                                     let ui_builder = UiBuilder::new().max_rect(op_rect);
                                     let mut ui_child = ui.new_child(ui_builder);
@@ -1344,7 +1324,7 @@ impl GraphExplorerApp {
                                         &current_node_data[&node_id].node_type,
                                         current_node_data[&node_id].inputs.len(),
                                         current_node_data[&node_id].outputs.len(),
-                                        &graph_subject,
+                                        graph_subject,
                                         is_selected,
                                         is_hovered,
                                         duration_since_eval,
@@ -1353,10 +1333,10 @@ impl GraphExplorerApp {
                                     node_bounding_boxes.insert(node_id, ui_child.min_rect());
 
                                     if resp.hovered() {
-                                        self.next_explorer_hovered = Some(this_selectable.clone());
+                                        self.next_explorer_hovered = Some(this_selectable);
                                     }
                                     if resp.clicked() {
-                                        self.explorer_selection = Some(this_selectable.clone());
+                                        self.explorer_selection = Some(this_selectable);
                                     }
                                     if resp.dragged() {
                                         node_position_updates.insert(node_id, current_node_data.get(&node_id).unwrap().position + resp.drag_delta());
@@ -1380,29 +1360,28 @@ impl GraphExplorerApp {
                                                 }
                                             }
                                             GraphLayoutNodeType::SuperGraphNode(node_id) => {
-                                                if let GraphSubject::SuperGraphInner(x) = &graph_subject {
-                                                    if let Some(node) = x.nodes.get(node_id) {
+                                                if let GraphSubject::SuperGraphInner(x) = &graph_subject
+                                                    && let Some(node) = x.nodes.get(node_id) {
                                                         match node {
                                                             SuperGraphAnyNode::MilliOpGraph(_) => {
                                                                 let mut path = self.graph_subject_path.clone();
-                                                                path.push(GraphExplorerLayerSelection::SuperGraphNodeId(node_id.clone()));
+                                                                path.push(GraphExplorerLayerSelection::SuperGraphNodeId(*node_id));
                                                                 self.next_graph_subject_path = Some(path);
                                                             }
                                                             SuperGraphAnyNode::ModelExecution(_) => {
                                                                 let mut path = self.graph_subject_path.clone();
-                                                                path.push(GraphExplorerLayerSelection::SuperGraphNodeId(node_id.clone()));
+                                                                path.push(GraphExplorerLayerSelection::SuperGraphNodeId(*node_id));
                                                                 self.next_graph_subject_path = Some(path);
                                                             }
                                                             _ => {
-                                                                if let Some(_) = node.get_sub_graph() {
+                                                                if node.get_sub_graph().is_some() {
                                                                     let mut path = self.graph_subject_path.clone();
-                                                                    path.push(GraphExplorerLayerSelection::SuperGraphNodeId(node_id.clone()));
+                                                                    path.push(GraphExplorerLayerSelection::SuperGraphNodeId(*node_id));
                                                                     self.next_graph_subject_path = Some(path);
                                                                 }
                                                             }
                                                         }
 
-                                                    }
                                                 }
                                                 // TODO: Inspect this
                                             }
@@ -1455,7 +1434,7 @@ impl GraphExplorerApp {
                                     let (is_selected, is_hovered) =
                                         if let Some(link_data) = link_data.get(&link_id) {
                                             let this_selectable = link_data.link_type.get_graph_selectable();
-                                            let is_selected = self.explorer_selection == Some(this_selectable.clone());
+                                            let is_selected = self.explorer_selection == Some(this_selectable);
                                             let is_hovered = self.explorer_hovered == Some(this_selectable);
                                             (is_selected, is_hovered)
                                         } else {
@@ -1554,16 +1533,16 @@ impl GraphExplorerApp {
                             {
                                 match tokenizer {
                                     Ok(tokenizer) => {
-                                        let mut text_inference_data = {
+                                        let text_inference_data = {
                                             if let Some(text_inference_data) =
                                                 self.text_inference_data.get_mut(&interface_id)
                                             {
                                                 text_inference_data
                                             } else {
-                                                let mut inference_data =
-                                                    TextInferenceData::default();
-                                                inference_data.tokens =
-                                                    tokenizer.encode("Hello World!");
+                                                let inference_data = TextInferenceData {
+                                                    tokens: tokenizer.encode("Hello World!"),
+                                                    .. Default::default()
+                                                };
                                                 self.text_inference_data
                                                     .insert(interface_id, inference_data);
                                                 self.text_inference_data
@@ -1591,7 +1570,7 @@ impl GraphExplorerApp {
                                                     }
                                                 }
                                             }
-                                            if let Some(mut response) =
+                                            if let Some(response) =
                                                 server_request_manager.get_response(*request_id)
                                             {
                                                 let (_, link, tokens) = text_inference_data
@@ -1601,7 +1580,7 @@ impl GraphExplorerApp {
                                                 text_inference_data.pending_request = None;
                                                 match response.result {
                                                     Ok(mut data) => {
-                                                        let mut response_tokens =
+                                                        let response_tokens =
                                                             data.tensor_outputs.remove(&link).unwrap();
                                                         let shape = response_tokens.shape();
                                                         let logits_per_token = shape[1];
@@ -1694,7 +1673,7 @@ impl GraphExplorerApp {
                                                                 tokens.clone(),
                                                             )
                                                                 .to_dyn();
-                                                        let mut swatch_settings = if state.do_explorer_swatches_in_view || state.do_all_explorer_swatches {
+                                                        let swatch_settings = if state.do_explorer_swatches_in_view || state.do_all_explorer_swatches {
                                                             Some(AbbreviatedTensorReportSettings{
                                                                 downsampled_size: (state.swatch_dimension*state.swatch_dimension) as u64,
                                                                 subscribed_tensors: self.tensors_in_view.iter().cloned().collect(),
@@ -1716,25 +1695,21 @@ impl GraphExplorerApp {
                                                                     subscribed_tensors: self.inspect_window_tensor_subscriptions.iter().cloned().collect(),
                                                                     tensor_inputs: HashMap::from([(
                                                                         llm_interface
-                                                                            .token_context_input_link
-                                                                            .clone(),
+                                                                            .token_context_input_link,
                                                                         tokens_tensor,
                                                                     )]),
                                                                     symbolic_graph_ids: interface.model_ids.clone(),
                                                                     model_inputs: HashMap::from([(
                                                                         llm_interface
-                                                                            .model_input_link
-                                                                            .clone(),
-                                                                        interface
+                                                                            .model_input_link,
+                                                                        *interface
                                                                             .model_ids
                                                                             .first()
-                                                                            .unwrap()
-                                                                            .clone(),
+                                                                            .unwrap(),
                                                                     )]),
                                                                     hash_inputs: HashMap::from([(
                                                                         llm_interface
-                                                                            .cache_key_input_link
-                                                                            .clone(),
+                                                                            .cache_key_input_link,
                                                                         12u64,
                                                                     )]),
                                                                     use_cache: if text_inference_data.use_cache {Some(100 + interface_id as u64)} else {None},
@@ -1745,8 +1720,7 @@ impl GraphExplorerApp {
                                                             Some((
                                                                 token,
                                                                 llm_interface
-                                                                    .logit_output_link
-                                                                    .clone(),
+                                                                    .logit_output_link,
                                                                 tokens,
                                                             ));
                                                     }
@@ -1757,7 +1731,7 @@ impl GraphExplorerApp {
                                             let mut logits = vec![];
                                             let mut context = vec![];
                                             for token in &text_inference_data.tokens {
-                                                context.push(token.clone());
+                                                context.push(*token);
                                                 if let Some(x) =
                                                     text_inference_data.logits.get(&context)
                                                 {
@@ -1784,9 +1758,7 @@ impl GraphExplorerApp {
                             }
                         });
                     }
-                    _ => {
-                        ui.label("Unsupported Interface");
-                    }
+
                 }
                 ui.allocate_exact_size(ui.available_size_before_wrap(), Sense::click());
             });

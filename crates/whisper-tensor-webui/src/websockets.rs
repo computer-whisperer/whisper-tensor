@@ -1,8 +1,7 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::SendError;
-use tokio::sync::{Notify, mpsc};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::Closure;
 use web_sys::{WebSocket, js_sys};
@@ -31,24 +30,25 @@ impl ServerRequestManager {
     }
 
     pub fn new_response(&mut self, resp: SuperGraphResponse) {
-        if let Some(attention_token) = resp.attention_token.clone() {
-            if self.active_requests.contains(&attention_token) {
-                self.incoming_responses.insert(attention_token, resp);
-            }
+        if let Some(attention_token) = resp.attention_token
+            && self.active_requests.contains(&attention_token)
+        {
+            self.incoming_responses.insert(attention_token, resp);
         }
     }
 
     pub fn new_execution_report(&mut self, report: SuperGraphExecutionReport) {
-        if let Some(attention_token) = report.attention.clone() {
-            if self.active_requests.contains(&attention_token) {
-                self.incoming_reports
-                    .entry(attention_token)
-                    .or_default()
-                    .push(report);
-            }
+        if let Some(attention_token) = report.attention
+            && self.active_requests.contains(&attention_token)
+        {
+            self.incoming_reports
+                .entry(attention_token)
+                .or_default()
+                .push(report);
         }
     }
 
+    #[allow(dead_code)]
     pub fn cancel_request(&mut self, attention_token: u64) {
         self.incoming_reports.remove(&attention_token);
         self.incoming_responses.remove(&attention_token);
@@ -82,6 +82,7 @@ impl ServerRequestManager {
         self.incoming_reports.remove(&attention_token)
     }
 
+    #[allow(clippy::result_large_err)]
     pub fn send(
         &mut self,
         message: WebsocketClientServerMessage,

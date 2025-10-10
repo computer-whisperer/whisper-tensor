@@ -24,6 +24,7 @@ pub(crate) fn build_tensor_swatch(
     }
 }
 
+#[allow(dead_code)]
 #[derive(Copy, Clone, Debug)]
 pub enum Colormap {
     Diverging,
@@ -34,6 +35,7 @@ pub enum Colormap {
 
 // -------- public entry points --------
 
+#[allow(dead_code)]
 /// Map raw f32 values -> Color32 using provided scaling parameters.
 pub fn colors_from_values(vals: &[f32], params: ScaleParams, cmap: Colormap) -> Vec<Color32> {
     let denom = (params.vmax - params.vmin).max(1e-12);
@@ -103,9 +105,9 @@ fn cmap_diverging_blue_white_red(t: f32) -> Color32 {
 /// Lightweight “magma-ish” sequential map for 0..1
 fn cmap_magma_like(t: f32) -> Color32 {
     let u = clamp01(t);
-    let r = (255.0 * u.powf(0.5)) as f32;
-    let g = (255.0 * u.powf(1.2) * 0.6) as f32;
-    let b = (255.0 * u.powf(2.0) * 0.2) as f32;
+    let r = 255.0 * u.powf(0.5);
+    let g = 255.0 * u.powf(1.2) * 0.6;
+    let b = 255.0 * u.powf(2.0) * 0.2;
     Color32::from_rgb(sat_u8(r), sat_u8(g), sat_u8(b))
 }
 
@@ -148,13 +150,7 @@ fn cmap_aurora_muted(t: f32) -> Color32 {
 
 #[inline]
 fn clamp01(x: f32) -> f32 {
-    if x < 0.0 {
-        0.0
-    } else if x > 1.0 {
-        1.0
-    } else {
-        x
-    }
+    x.clamp(0.0, 1.0)
 }
 
 #[inline]
@@ -171,11 +167,7 @@ fn to_byte(t01: f32) -> u8 {
         let fi = f as i32;
         if fi & 1 == 0 { fi } else { fi + 1 }
     };
-    if n < 0 {
-        n = 0
-    } else if n > 255 {
-        n = 255
-    }
+    n = n.clamp(0, 255);
     n as u8
 }
 

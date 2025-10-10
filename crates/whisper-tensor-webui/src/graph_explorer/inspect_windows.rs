@@ -1,5 +1,4 @@
 use crate::app::LoadedModels;
-use crate::graph_explorer::graph_layout::GraphLayout;
 use crate::graph_explorer::{
     GraphExplorerApp, GraphExplorerLayerSelection, GraphExplorerSelectable, GraphExplorerState,
     GraphSubject, format_shape,
@@ -7,7 +6,6 @@ use crate::graph_explorer::{
 use crate::websockets::ServerRequestManager;
 use crate::widgets::tensor_view::{TensorViewState, tensor_view};
 use egui::{Response, RichText};
-use rand::random_range;
 use std::collections::HashSet;
 use whisper_tensor::DynRank;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
@@ -259,7 +257,7 @@ impl GraphExplorerApp {
                                             ui,
                                             i,
                                             tensor_id,
-                                            &model_graph,
+                                            model_graph,
                                             &mut new_inspect_windows,
                                         );
                                         if resp.hovered() {
@@ -288,7 +286,7 @@ impl GraphExplorerApp {
                                             ui,
                                             i,
                                             tensor_id,
-                                            &model_graph,
+                                            model_graph,
                                             &mut new_inspect_windows,
                                         );
                                         if resp.hovered() {
@@ -308,6 +306,7 @@ impl GraphExplorerApp {
                                         }
                                     }
                                 });
+                            #[allow(clippy::single_match)]
                             match &op_info.op {
                                 AnyOperation::Constant(x) => {
                                     resp = resp.union(tensor_view(
@@ -324,11 +323,12 @@ impl GraphExplorerApp {
                                     Some(GraphExplorerSelectable::SymbolicGraphOperationId(op_id));
                             }
                         });
-                        if let Some(resp) = resp {
-                            if resp.response.contains_pointer() && !is_hovering_tensor {
-                                self.next_explorer_hovered =
-                                    Some(GraphExplorerSelectable::SymbolicGraphOperationId(op_id))
-                            }
+                        if let Some(resp) = resp
+                            && resp.response.contains_pointer()
+                            && !is_hovering_tensor
+                        {
+                            self.next_explorer_hovered =
+                                Some(GraphExplorerSelectable::SymbolicGraphOperationId(op_id))
                         }
                     }
                     (
@@ -383,16 +383,13 @@ impl GraphExplorerApp {
                                                 resp = resp.union(ui.label("Initial Value:"));
                                                 resp = resp.union(tensor_view(
                                                     ui,
-                                                    &x,
+                                                    x,
                                                     &mut inspect_window_tensor.value_view_state,
                                                 ));
                                             }
                                         };
-                                    } else {
-                                        if let Some(x) = &super_graph_path {
-                                            subscribed_tensor =
-                                                Some(x.push_symbolic_tensor(tensor_id));
-                                        }
+                                    } else if let Some(x) = &super_graph_path {
+                                        subscribed_tensor = Some(x.push_symbolic_tensor(tensor_id));
                                     }
                                 }
                                 TensorType::Output => {
@@ -417,7 +414,7 @@ impl GraphExplorerApp {
                                             resp = resp.union(ui.label("Value:"));
                                             resp = resp.union(tensor_view(
                                                 ui,
-                                                &x,
+                                                x,
                                                 &mut inspect_window_tensor.value_view_state,
                                             ));
                                         }
@@ -440,7 +437,7 @@ impl GraphExplorerApp {
                                             resp = resp.union(ui.label("Value:"));
                                             resp = resp.union(tensor_view(
                                                 ui,
-                                                &x,
+                                                x,
                                                 &mut inspect_window_tensor.value_view_state,
                                             ));
                                         }
@@ -466,7 +463,7 @@ impl GraphExplorerApp {
                                     resp = resp.union(ui.label("Last value:"));
                                     resp = resp.union(tensor_view(
                                         ui,
-                                        &x,
+                                        x,
                                         &mut inspect_window_tensor.subscribed_view_state,
                                     ));
                                 } else {
@@ -479,11 +476,11 @@ impl GraphExplorerApp {
                                     Some(GraphExplorerSelectable::SymbolicGraphTensorId(tensor_id));
                             }
                         });
-                        if let Some(resp) = resp {
-                            if resp.response.contains_pointer() {
-                                self.next_explorer_hovered =
-                                    Some(GraphExplorerSelectable::SymbolicGraphTensorId(tensor_id))
-                            }
+                        if let Some(resp) = resp
+                            && resp.response.contains_pointer()
+                        {
+                            self.next_explorer_hovered =
+                                Some(GraphExplorerSelectable::SymbolicGraphTensorId(tensor_id))
                         }
                     }
                     _ => {}

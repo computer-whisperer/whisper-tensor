@@ -4,24 +4,6 @@ use whisper_tensor::DynRank;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::numeric_scalar::NumericScalarType;
 
-pub fn tensor_view_old(ui: &mut Ui, value: &NDArrayNumericTensor<DynRank>) -> Response {
-    let frame = egui::Frame::default()
-        .inner_margin(2.0)
-        .stroke(ui.visuals().window_stroke);
-    frame
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(format!("{:}, {:?}", value.dtype(), value.shape()));
-                if ui.button("Copy Full").clicked() {
-                    let text = format!("{:#}", value);
-                    ui.ctx().copy_text(text);
-                }
-            });
-            ui.label(value.to_string());
-        })
-        .response
-}
-
 /// State you should persist in your egui app.
 #[derive(Clone, Debug)]
 pub struct TensorViewState {
@@ -50,11 +32,12 @@ pub struct TensorViewState {
 }
 
 impl TensorViewState {
+    #[allow(dead_code)]
     pub fn new(shape: &[u64]) -> Self {
         let ndim = shape.len().max(1);
-        let row_axis = if ndim >= 2 { ndim - 2 } else { 0 };
+        let row_axis = ndim.saturating_sub(2);
         let col_axis = if ndim >= 2 { ndim - 1 } else { 0 };
-        let mut fixed_idx = vec![0; ndim];
+        let fixed_idx = vec![0; ndim];
         Self {
             row_axis,
             col_axis,
@@ -263,7 +246,7 @@ pub fn tensor_view(
                 ui.checkbox(&mut state.scientific, "sci");
                 ui.add(
                     egui::DragValue::new(&mut state.precision)
-                        .clamp_range(0..=12)
+                        .range(0..=12)
                         .speed(0.1)
                         .prefix("prec "),
                 );
@@ -283,12 +266,12 @@ pub fn tensor_view(
 
                 ui.separator();
                 // Fixed axes controls
-                for ax in 0..ndim {
+                for (ax, item) in shape.iter().enumerate() {
                     if ax != state.row_axis && ax != state.col_axis {
-                        let max = shape[ax].saturating_sub(1);
+                        let max = item.saturating_sub(1);
                         ui.add(
                             egui::DragValue::new(&mut state.fixed_idx[ax])
-                                .clamp_range(0..=max as i64)
+                                .range(0..=max as i64)
                                 .prefix(format!("axis{ax}=")),
                         );
                     }
@@ -319,12 +302,12 @@ pub fn tensor_view(
                 }
                 ui.add(
                     egui::DragValue::new(&mut state.row_offset)
-                        .clamp_range(0..=rmax as i64)
+                        .range(0..=rmax as i64)
                         .prefix("row@"),
                 );
                 ui.add(
                     egui::DragValue::new(&mut state.rows_per_page)
-                        .clamp_range(1..=shape[state.row_axis] as i64)
+                        .range(1..=shape[state.row_axis] as i64)
                         .prefix("rows/page "),
                 );
 
@@ -338,12 +321,12 @@ pub fn tensor_view(
                 }
                 ui.add(
                     egui::DragValue::new(&mut state.col_offset)
-                        .clamp_range(0..=cmax as i64)
+                        .range(0..=cmax as i64)
                         .prefix("col@"),
                 );
                 ui.add(
                     egui::DragValue::new(&mut state.cols_per_page)
-                        .clamp_range(1..=shape[state.col_axis] as i64)
+                        .range(1..=shape[state.col_axis] as i64)
                         .prefix("cols/page "),
                 );
 
@@ -423,7 +406,7 @@ pub fn tensor_view(
                         });
                     }
                 })
-                .body(|mut body| {
+                .body(|body| {
                     body.rows(state.row_height, rows_vis as usize, |mut row| {
                         let row_idx = row.index();
                         let r = state.row_offset + row_idx as u64;
@@ -443,9 +426,9 @@ pub fn tensor_view(
                                 idx[state.row_axis] = r;
                                 idx[state.col_axis] = c;
                                 // Other axes come from state.fixed_idx (already clamped)
-                                for ax in 0..ndim {
+                                for (ax, item) in idx.iter_mut().enumerate() {
                                     if ax != state.row_axis && ax != state.col_axis {
-                                        idx[ax] = state.fixed_idx[ax];
+                                        *item = state.fixed_idx[ax];
                                     }
                                 }
                             }
@@ -480,7 +463,7 @@ pub fn tensor_view(
 }
 
 fn axis_combo(ui: &mut Ui, id: Id, axis: &mut usize, ndim: usize) {
-    egui::ComboBox::from_id_source(id)
+    egui::ComboBox::from_id_salt(id)
         .selected_text(format!("{axis}"))
         .show_ui(ui, |ui| {
             for a in 0..ndim {

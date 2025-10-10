@@ -291,6 +291,7 @@ impl SuperGraphNode for SuperGraphNodeTokenizerLoad {
         _context: &mut SuperGraphContext<T>,
     ) -> Result<(), SuperGraphError> {
         let tokenizer = match &self.info {
+            #[allow(unused_variables)]
             TokenizerInfo::HFTokenizer(name) => {
                 #[cfg(all(feature = "tokenizers", feature = "http"))]
                 {

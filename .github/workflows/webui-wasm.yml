@@ -41,6 +41,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+          components: rustfmt, clippy
 
       # protoc for prost-build (runs in build.rs)
       - name: Install protoc
@@ -71,6 +72,12 @@ jobs:
         uses: jetli/wasm-pack-action@v0.3.0
         with:
           version: 'latest'  # pin if you prefer
+
+      - name: Check formatting (rustfmt)
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (webui crate, wasm32)
+        run: cargo clippy -p whisper-tensor-webui --target wasm32-unknown-unknown -- -D warnings
 
       - name: Build webui crate (wasm)
         working-directory: crates/whisper-tensor-webui

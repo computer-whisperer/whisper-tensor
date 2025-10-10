@@ -1,6 +1,6 @@
 use egui::{Color32, CursorIcon, Event, EventFilter, Label, RichText, Sense, Ui, Vec2, Widget};
 use log::info;
-use whisper_tensor::tokenizer::{Tokenizer, TokenizerError};
+use whisper_tensor::tokenizer::Tokenizer;
 
 fn escape_token_text(input: &str) -> String {
     use std::fmt::Write;
@@ -103,30 +103,28 @@ impl TokenizedRichText {
                             spacing_mut.item_spacing.x = 5.0;
                             spacing_mut.item_spacing.y = 3.0;
                         }
-                        if is_good {
-                            if let Some(logits) = logits {
-                                if idx - 1 < logits.len() {
-                                    let logits = logits[idx - 1];
-                                    for j in 0..self.logits_to_render {
-                                        if j >= logits.len() {
-                                            break;
-                                        }
-                                        let (token_id, value) = &logits[j];
-                                        let token_str = tokenizer
-                                            .decode(&[*token_id])
-                                            .unwrap_or("?".to_string());
-                                        let token_str = escape_token_text(&token_str);
-                                        //ui.label(format!("{token_id}, {value}, {token_str}"));
-                                        let text = RichText::new(token_str)
-                                            .background_color(Color32::from_rgb(20, 20, 20))
-                                            .size(11.0);
-                                        ui.label(text);
-                                        //let text = RichText::new(token_id.to_string()).size(8.0);
-                                        //ui.label(text);
-                                        let text = RichText::new(format!("{value:.02}")).size(8.0);
-                                        ui.label(text);
-                                    }
+                        if is_good
+                            && let Some(logits) = logits
+                            && idx - 1 < logits.len()
+                        {
+                            let logits = logits[idx - 1];
+                            for j in 0..self.logits_to_render {
+                                if j >= logits.len() {
+                                    break;
                                 }
+                                let (token_id, value) = &logits[j];
+                                let token_str =
+                                    tokenizer.decode(&[*token_id]).unwrap_or("?".to_string());
+                                let token_str = escape_token_text(&token_str);
+                                //ui.label(format!("{token_id}, {value}, {token_str}"));
+                                let text = RichText::new(token_str)
+                                    .background_color(Color32::from_rgb(20, 20, 20))
+                                    .size(11.0);
+                                ui.label(text);
+                                //let text = RichText::new(token_id.to_string()).size(8.0);
+                                //ui.label(text);
+                                let text = RichText::new(format!("{value:.02}")).size(8.0);
+                                ui.label(text);
                             }
                         }
                         is_good = next_is_good;
@@ -138,7 +136,7 @@ impl TokenizedRichText {
                 ui.allocate_exact_size(ui.available_size_before_wrap(), Sense::click());
             });
 
-            let mut response = ui.interact(ui.min_rect(), id, Sense::click());
+            let response = ui.interact(ui.min_rect(), id, Sense::click());
 
             if response.hovered() {
                 ui.ctx().set_cursor_icon(CursorIcon::Text);
@@ -168,12 +166,12 @@ impl TokenizedRichText {
                             pressed: true,
                             ..
                         } => {
-                            if let Ok(mut text) = tokenizer.decode(tokens) {
-                                if !text.is_empty() {
-                                    text.remove(text.len() - 1);
-                                    let new_tokens = tokenizer.encode(&text);
-                                    *tokens = new_tokens;
-                                }
+                            if let Ok(mut text) = tokenizer.decode(tokens)
+                                && !text.is_empty()
+                            {
+                                text.remove(text.len() - 1);
+                                let new_tokens = tokenizer.encode(&text);
+                                *tokens = new_tokens;
                             }
                         }
                         Event::PointerMoved(_) | Event::PointerGone | Event::Key { .. } => {

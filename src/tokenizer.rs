@@ -22,6 +22,7 @@ pub enum AnyTokenizer {
 impl AnyTokenizer {
     pub fn from_tokenizer_info(info: &TokenizerInfo) -> AnyTokenizer {
         match &info {
+            #[allow(unused_variables)]
             TokenizerInfo::HFTokenizer(name) => {
                 #[cfg(all(feature = "tokenizers", feature = "http"))]
                 {

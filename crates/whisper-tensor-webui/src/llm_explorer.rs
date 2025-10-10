@@ -5,17 +5,12 @@ use log::info;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use tokio::sync::mpsc;
-use web_sys::js_sys::Atomics::load;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::interfaces::AnyInterface;
 use whisper_tensor::super_graph::links::SuperGraphLinkTensor;
 use whisper_tensor::tokenizer::Tokenizer;
 use whisper_tensor_import::onnx_graph::TokenizerInfo;
-use whisper_tensor_server::{
-    LoadedModelId, SuperGraphRequest, SuperGraphRequestBackendMode, SuperGraphResponseData,
-    WebsocketClientServerMessage,
-};
+use whisper_tensor_server::{SuperGraphRequest, SuperGraphRequestBackendMode};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct LLMExplorerState {
@@ -53,12 +48,12 @@ fn escape_token_text(input: &str) -> String {
 
     out
 }
-
+type LogitData = (Vec<u32>, Result<Vec<Vec<(u32, f32)>>, String>);
 pub(crate) struct LLMExplorerApp {
     llm_explorer_selected_interface_id: Option<InterfaceId>,
     llm_explorer_cached_token_list: Option<Vec<u32>>,
     pending_request: Option<(u64, SuperGraphLinkTensor, Vec<u32>)>,
-    pub(crate) latest_logits: Option<(Vec<u32>, Result<Vec<Vec<(u32, f32)>>, String>)>,
+    pub(crate) latest_logits: Option<LogitData>,
 }
 
 impl LLMExplorerApp {
@@ -80,43 +75,42 @@ impl LLMExplorerApp {
         ui: &mut egui::Ui,
     ) {
         // Handle pending requests
-        if let Some((request_id, link, tokens)) = self.pending_request.clone() {
-            if let Some(mut response) = server_request_manager.get_response(request_id) {
-                self.pending_request = None;
-                match response.result {
-                    Ok(mut data) => {
-                        let mut response_tokens = data.tensor_outputs.remove(&link).unwrap();
-                        let shape = response_tokens.shape();
-                        let logits_per_token = shape[1];
-                        let returned_tokens = shape[0];
-                        let mut outputs = Vec::new();
-                        for i in 0..returned_tokens as usize {
-                            let sliced_output_tensor = response_tokens
-                                .slice(&[i..i + 1, 0..logits_per_token as usize])
-                                .unwrap();
-                            let output = sliced_output_tensor.flatten();
-                            let output_vec: Vec<f32> = output.try_into().unwrap();
-                            let mut idx_and_val = output_vec
-                                .iter()
-                                .enumerate()
-                                .map(|(a, b)| (a as u32, *b))
-                                .collect::<Vec<_>>();
-                            idx_and_val.sort_by(|(_, a), (_, b)| {
-                                if a < b {
-                                    Ordering::Greater
-                                } else {
-                                    Ordering::Less
-                                }
-                            });
-                            let clipped_logits =
-                                idx_and_val[0..idx_and_val.len().min(100)].to_vec();
-                            outputs.push(clipped_logits)
-                        }
-                        self.latest_logits = Some((tokens, Ok(outputs)));
+        if let Some((request_id, link, tokens)) = self.pending_request.clone()
+            && let Some(response) = server_request_manager.get_response(request_id)
+        {
+            self.pending_request = None;
+            match response.result {
+                Ok(mut data) => {
+                    let response_tokens = data.tensor_outputs.remove(&link).unwrap();
+                    let shape = response_tokens.shape();
+                    let logits_per_token = shape[1];
+                    let returned_tokens = shape[0];
+                    let mut outputs = Vec::new();
+                    for i in 0..returned_tokens as usize {
+                        let sliced_output_tensor = response_tokens
+                            .slice(&[i..i + 1, 0..logits_per_token as usize])
+                            .unwrap();
+                        let output = sliced_output_tensor.flatten();
+                        let output_vec: Vec<f32> = output.try_into().unwrap();
+                        let mut idx_and_val = output_vec
+                            .iter()
+                            .enumerate()
+                            .map(|(a, b)| (a as u32, *b))
+                            .collect::<Vec<_>>();
+                        idx_and_val.sort_by(|(_, a), (_, b)| {
+                            if a < b {
+                                Ordering::Greater
+                            } else {
+                                Ordering::Less
+                            }
+                        });
+                        let clipped_logits = idx_and_val[0..idx_and_val.len().min(100)].to_vec();
+                        outputs.push(clipped_logits)
                     }
-                    Err(err) => {
-                        println!("Error: {err}");
-                    }
+                    self.latest_logits = Some((tokens, Ok(outputs)));
+                }
+                Err(err) => {
+                    println!("Error: {err}");
                 }
             }
         }
@@ -124,9 +118,8 @@ impl LLMExplorerApp {
         // Find llm interfaces
         let mut llm_interfaces = HashMap::new();
         for (&interface_id, interface) in &loaded_models.current_interfaces {
-            if let AnyInterface::TextInferenceTokensInLogitOutInterface(_x) = &interface.interface {
-                llm_interfaces.insert(interface.interface_name.clone(), interface_id);
-            }
+            let AnyInterface::TextInferenceTokensInLogitOutInterface(_x) = &interface.interface;
+            llm_interfaces.insert(interface.interface_name.clone(), interface_id);
         }
 
         ui.horizontal(|ui| {
@@ -254,10 +247,10 @@ impl LLMExplorerApp {
                                         Label::new(text).ui(ui);
 
                                         // Validate logits
-                                        if let Some((b, _c)) = &self.latest_logits {
-                                            if idx < b.len() {
-                                                next_is_good &= b[idx] == *chosen_token
-                                            }
+                                        if let Some((b, _c)) = &self.latest_logits
+                                            && idx < b.len()
+                                        {
+                                            next_is_good &= b[idx] == *chosen_token
                                         }
                                     } else {
                                         next_is_good = false;
@@ -267,37 +260,31 @@ impl LLMExplorerApp {
                                         spacing_mut.item_spacing.x = 5.0;
                                         spacing_mut.item_spacing.y = 3.0;
                                     }
-                                    if is_good {
-                                        if let Some((b, c)) = &self.latest_logits {
-                                            if idx - 1 < b.len() {
-                                                if let Ok(c) = c {
-                                                    let logits = &c[idx - 1];
-                                                    for j in 0..5 {
-                                                        if j >= logits.len() {
-                                                            break;
-                                                        }
-                                                        let (token_id, value) = &logits[j];
-                                                        let token_str = tokenizer
-                                                            .decode(&[*token_id])
-                                                            .unwrap_or("?".to_string());
-                                                        let token_str =
-                                                            escape_token_text(&token_str);
-                                                        //ui.label(format!("{token_id}, {value}, {token_str}"));
-                                                        let text = RichText::new(token_str)
-                                                            .background_color(Color32::from_rgb(
-                                                                20, 20, 20,
-                                                            ))
-                                                            .size(15.0);
-                                                        ui.label(text);
-                                                        //let text = RichText::new(token_id.to_string()).size(8.0);
-                                                        //ui.label(text);
-                                                        let text =
-                                                            RichText::new(format!("{value:.02}"))
-                                                                .size(8.0);
-                                                        ui.label(text);
-                                                    }
-                                                }
+                                    if is_good
+                                        && let Some((b, c)) = &self.latest_logits
+                                        && idx - 1 < b.len()
+                                        && let Ok(c) = c
+                                    {
+                                        let logits = &c[idx - 1];
+                                        for j in 0..5 {
+                                            if j >= logits.len() {
+                                                break;
                                             }
+                                            let (token_id, value) = &logits[j];
+                                            let token_str = tokenizer
+                                                .decode(&[*token_id])
+                                                .unwrap_or("?".to_string());
+                                            let token_str = escape_token_text(&token_str);
+                                            //ui.label(format!("{token_id}, {value}, {token_str}"));
+                                            let text = RichText::new(token_str)
+                                                .background_color(Color32::from_rgb(20, 20, 20))
+                                                .size(15.0);
+                                            ui.label(text);
+                                            //let text = RichText::new(token_id.to_string()).size(8.0);
+                                            //ui.label(text);
+                                            let text =
+                                                RichText::new(format!("{value:.02}")).size(8.0);
+                                            ui.label(text);
                                         }
                                     }
                                     is_good = next_is_good;
@@ -308,7 +295,7 @@ impl LLMExplorerApp {
                         });
                     }
 
-                    let mut response = ui.interact(ui.min_rect(), id, Sense::click());
+                    let response = ui.interact(ui.min_rect(), id, Sense::click());
 
                     if response.hovered() {
                         ui.ctx().set_cursor_icon(CursorIcon::Text);
@@ -374,20 +361,19 @@ impl LLMExplorerApp {
                             backend_mode: SuperGraphRequestBackendMode::NDArray,
                             symbolic_graph_ids: interface.model_ids.clone(),
                             tensor_inputs: HashMap::from([(
-                                llm_interface.token_context_input_link.clone(),
+                                llm_interface.token_context_input_link,
                                 tokens_tensor,
                             )]),
                             model_inputs: HashMap::from([(
-                                llm_interface.model_input_link.clone(),
-                                interface.model_ids.first().unwrap().clone(),
+                                llm_interface.model_input_link,
+                                *interface.model_ids.first().unwrap(),
                             )]),
                             hash_inputs: HashMap::from([(
-                                llm_interface.cache_key_input_link.clone(),
+                                llm_interface.cache_key_input_link,
                                 0u64,
                             )]),
                         });
-                    self.pending_request =
-                        Some((token, llm_interface.logit_output_link.clone(), tokens));
+                    self.pending_request = Some((token, llm_interface.logit_output_link, tokens));
                     self.latest_logits = None;
                 }
             }
