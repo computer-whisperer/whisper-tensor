@@ -1,6 +1,6 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
-use crate::graph::Node;
+use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError, MilliOpGraphTensorId};
 use crate::numeric_tensor::NumericTensor;
@@ -9,6 +9,7 @@ use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Where {
+    global_id: GlobalId,
     output: MilliOpGraphTensorId,
     condition: MilliOpGraphTensorId,
     x: MilliOpGraphTensorId,
@@ -21,9 +22,11 @@ impl Where {
         condition: MilliOpGraphTensorId,
         x: MilliOpGraphTensorId,
         y: MilliOpGraphTensorId,
+        rng: &mut impl rand::Rng,
     ) -> MilliOpGraphTensorId {
-        let output = graph.get_new_tensor_id();
+        let output = graph.get_new_tensor_id(rng);
         let node = Self {
+            global_id: GlobalId::new(rng),
             output,
             condition,
             x,
@@ -36,6 +39,9 @@ impl Where {
 
 impl Node<MilliOpGraphTensorId> for Where {
     type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
     fn op_kind(&self) -> String {
         "Where".to_string()
     }

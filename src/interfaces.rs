@@ -24,6 +24,7 @@ use crate::tokenizer::{AnyTokenizer, Tokenizer};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+use rand::Rng;
 use whisper_tensor_import::onnx_graph::{
     InputMetadata, ModelInputType, ModelMetadata, ModelOutputType, OutputMetadata, TokenizerInfo,
 };
@@ -79,6 +80,7 @@ impl TextInferenceTokensInLogitOutInterface {
         model_inputs: &HashMap<String, Option<InputMetadata>>,
         model_outputs: &HashMap<String, Option<OutputMetadata>>,
         symbolic_graph: &SymbolicGraph,
+        rng: &mut impl Rng
     ) -> Result<Self, Error> {
         let tokenizer = model_metadata
             .tokenizer_infos
@@ -133,28 +135,28 @@ impl TextInferenceTokensInLogitOutInterface {
 
         // Build super graph
         let mut super_graph_builder = SuperGraphBuilder::new();
-        let token_context_input_link = super_graph_builder.new_tensor_link();
+        let token_context_input_link = super_graph_builder.new_tensor_link(rng);
 
-        let model_input_link = super_graph_builder.new_model_link();
-        let raw_logit_output_link = super_graph_builder.new_tensor_link();
+        let model_input_link = super_graph_builder.new_model_link(rng);
+        let raw_logit_output_link = super_graph_builder.new_tensor_link(rng);
 
-        let cache_key = super_graph_builder.new_hash_link();
+        let cache_key = super_graph_builder.new_hash_link(rng);
 
         let processed_logit_output_link = if Some(1) == model_metadata.max_token_batch {
             // RNN compatibility mode
 
             let state_init_links = state_chain_ids
                 .iter()
-                .map(|id| (*id, super_graph_builder.new_tensor_link()))
+                .map(|id| (*id, super_graph_builder.new_tensor_link(rng)))
                 .collect::<Vec<(_, _)>>();
 
             // Cache
             let (post_cache_tokens_input, post_cache_state_init_links) = {
                 let post_cache_state_init_links = state_chain_ids
                     .iter()
-                    .map(|id| (*id, super_graph_builder.new_tensor_link()))
+                    .map(|id| (*id, super_graph_builder.new_tensor_link(rng)))
                     .collect::<Vec<(_, _)>>();
-                let post_cache_tokens = super_graph_builder.new_tensor_link();
+                let post_cache_tokens = super_graph_builder.new_tensor_link(rng);
                 let node = SuperGraphNodeRNNCacheRead::new(
                     cache_key,
                     token_context_input_link,
@@ -167,6 +169,7 @@ impl TextInferenceTokensInLogitOutInterface {
                         .iter()
                         .map(|(id, link)| (id.to_string(), *link))
                         .collect::<Vec<(_, _)>>(),
+                    rng
                 );
                 super_graph_builder.add_node(node.to_any());
                 (post_cache_tokens, post_cache_state_init_links)
@@ -174,16 +177,16 @@ impl TextInferenceTokensInLogitOutInterface {
 
             let loop_count_link = {
                 let loop_count_link =
-                    SuperGraphLinkTensor::new(super_graph_builder.get_next_link_id());
+                    SuperGraphLinkTensor::new(super_graph_builder.get_next_link_id(), rng);
 
                 let (mut milli_graph, input_map) =
-                    MilliOpGraph::new(std::iter::once(post_cache_tokens_input));
+                    MilliOpGraph::new(std::iter::once(post_cache_tokens_input), rng);
                 let milli_op_graph_input = *input_map.get(&post_cache_tokens_input).unwrap();
 
-                let shape_out = Shape::push_new(&mut milli_graph, milli_op_graph_input);
+                let shape_out = Shape::push_new(&mut milli_graph, milli_op_graph_input, rng);
                 milli_graph.set_output_map(std::iter::once((shape_out, loop_count_link)));
 
-                let node = SuperGraphNodeMilliOpGraph::new(milli_graph);
+                let node = SuperGraphNodeMilliOpGraph::new(milli_graph, rng);
                 super_graph_builder.add_node(node.into());
                 loop_count_link
             };
@@ -192,7 +195,7 @@ impl TextInferenceTokensInLogitOutInterface {
             let (processed_logit_output_link, final_state_outputs) = {
                 // State initialization
                 {
-                    let (mut milli_graph, _) = MilliOpGraph::new(std::iter::empty());
+                    let (mut milli_graph, _) = MilliOpGraph::new(std::iter::empty(), rng);
                     let mut output_map = HashMap::new();
                     let mut output_order = vec![];
                     for (id, link) in state_init_links.iter() {
@@ -219,32 +222,32 @@ impl TextInferenceTokensInLogitOutInterface {
                         .unwrap()
                         .cast(input_tensor_dtype)
                         .unwrap();
-                        let input_tensor_tid = Constant::push_new(&mut milli_graph, input_tensor);
+                        let input_tensor_tid = Constant::push_new(&mut milli_graph, input_tensor, rng);
                         output_map.insert(input_tensor_tid, *link);
                         output_order.push(*link);
                     }
                     milli_graph.set_output_map_ordered(output_map, output_order);
 
-                    let node = SuperGraphNodeMilliOpGraph::new(milli_graph);
+                    let node = SuperGraphNodeMilliOpGraph::new(milli_graph, rng);
                     super_graph_builder.add_node(node.into());
                 }
 
                 let mut sub_builder = SuperGraphBuilder::new();
 
-                let sub_model_input_link = sub_builder.new_model_link();
-                let sub_token_input = sub_builder.new_tensor_link();
+                let sub_model_input_link = sub_builder.new_model_link(rng);
+                let sub_token_input = sub_builder.new_tensor_link(rng);
 
                 let state_input_links = state_chain_ids
                     .iter()
-                    .map(|id| (*id, sub_builder.new_tensor_link()))
+                    .map(|id| (*id, sub_builder.new_tensor_link(rng)))
                     .collect::<HashMap<_, _>>();
                 let state_output_links = state_chain_ids
                     .iter()
-                    .map(|id| (*id, sub_builder.new_tensor_link()))
+                    .map(|id| (*id, sub_builder.new_tensor_link(rng)))
                     .collect::<HashMap<_, _>>();
                 let final_state_output_links = state_chain_ids
                     .iter()
-                    .map(|id| (*id, super_graph_builder.new_tensor_link()))
+                    .map(|id| (*id, super_graph_builder.new_tensor_link(rng)))
                     .collect::<Vec<(_, _)>>();
 
                 // Input processing
@@ -260,22 +263,23 @@ impl TextInferenceTokensInLogitOutInterface {
                     let input_tensor_dtype = input_tensor_info.dtype.unwrap();
 
                     let (mut milli_graph, input_map) =
-                        MilliOpGraph::new(std::iter::once(sub_token_input));
+                        MilliOpGraph::new(std::iter::once(sub_token_input), rng);
                     let milli_op_graph_input = *input_map.get(&sub_token_input).unwrap();
                     let mut x =
-                        Cast::push_new(&mut milli_graph, milli_op_graph_input, input_tensor_dtype);
+                        Cast::push_new(&mut milli_graph, milli_op_graph_input, input_tensor_dtype, rng);
                     let zero_tid = Constant::push_new(
                         &mut milli_graph,
                         NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
+                        rng
                     );
                     for _ in 0..input_tensor_rank {
-                        x = Unsqueeze::push_new(&mut milli_graph, x, zero_tid);
+                        x = Unsqueeze::push_new(&mut milli_graph, x, zero_tid, rng);
                     }
 
-                    let processed_input_link = sub_builder.new_tensor_link();
+                    let processed_input_link = sub_builder.new_tensor_link(rng);
                     milli_graph.set_output_map(std::iter::once((x, processed_input_link)));
 
-                    let node = SuperGraphNodeMilliOpGraph::new(milli_graph);
+                    let node = SuperGraphNodeMilliOpGraph::new(milli_graph, rng);
                     sub_builder.add_node(node.into());
                     processed_input_link
                 };
@@ -292,7 +296,7 @@ impl TextInferenceTokensInLogitOutInterface {
                     tensor_inputs
                 };
 
-                let sub_logit_output = sub_builder.new_tensor_link();
+                let sub_logit_output = sub_builder.new_tensor_link(rng);
                 let tensor_outputs = {
                     let mut tensor_outputs = Vec::new();
                     tensor_outputs.push((logit_output_name.clone(), sub_logit_output));
@@ -307,6 +311,7 @@ impl TextInferenceTokensInLogitOutInterface {
 
                 sub_builder.add_node(
                     SuperGraphNodeModelExecution::new(
+                        rng,
                         sub_model_input_link,
                         0,
                         tensor_inputs,
@@ -326,22 +331,23 @@ impl TextInferenceTokensInLogitOutInterface {
                     let output_tensor_rank = output_tensor_info.shape.clone().unwrap().len();
 
                     let (mut milli_graph, input_map) =
-                        MilliOpGraph::new(std::iter::once(sub_logit_output));
+                        MilliOpGraph::new(std::iter::once(sub_logit_output), rng);
                     let milli_op_graph_input = *input_map.get(&sub_logit_output).unwrap();
                     let mut x = milli_op_graph_input;
                     let zero_tid = Constant::push_new(
                         &mut milli_graph,
                         NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
+                        rng
                     );
                     for _ in 0..(output_tensor_rank - 1) {
-                        x = Squeeze::push_new(&mut milli_graph, x, zero_tid);
+                        x = Squeeze::push_new(&mut milli_graph, x, zero_tid, rng);
                     }
-                    x = Cast::push_new(&mut milli_graph, x, DType::F32);
+                    x = Cast::push_new(&mut milli_graph, x, DType::F32, rng);
 
-                    let processed_logit_output_link = sub_builder.new_tensor_link();
+                    let processed_logit_output_link = sub_builder.new_tensor_link(rng);
                     milli_graph.set_output_map(std::iter::once((x, processed_logit_output_link)));
 
-                    let node = SuperGraphNodeMilliOpGraph::new(milli_graph);
+                    let node = SuperGraphNodeMilliOpGraph::new(milli_graph, rng);
                     sub_builder.add_node(node.into());
                     processed_logit_output_link
                 };
@@ -362,7 +368,7 @@ impl TextInferenceTokensInLogitOutInterface {
                     state_links
                 };
 
-                let outer_logit_output_link = super_graph_builder.new_tensor_link();
+                let outer_logit_output_link = super_graph_builder.new_tensor_link(rng);
 
                 let input_links = {
                     let mut input_links =
@@ -404,6 +410,7 @@ impl TextInferenceTokensInLogitOutInterface {
                     vec![(post_cache_tokens_input, sub_token_input, 0)],
                     vec![(processed_logit_output_link, outer_logit_output_link, 0)],
                     final_state_outputs,
+                    rng
                 );
                 super_graph_builder.add_node(scan_node.into());
 
@@ -419,6 +426,7 @@ impl TextInferenceTokensInLogitOutInterface {
                         .iter()
                         .map(|(id, link)| (id.to_string(), *link))
                         .collect::<Vec<(_, _)>>(),
+                    rng
                 );
                 super_graph_builder.add_node(node.into());
             }
@@ -437,25 +445,26 @@ impl TextInferenceTokensInLogitOutInterface {
                 let input_tensor_dtype = input_tensor_info.dtype.unwrap();
 
                 let (mut milli_graph, input_map) =
-                    MilliOpGraph::new(std::iter::once(token_context_input_link));
+                    MilliOpGraph::new(std::iter::once(token_context_input_link), rng);
                 let milli_op_graph_input = *input_map.get(&token_context_input_link).unwrap();
                 let mut x =
-                    Cast::push_new(&mut milli_graph, milli_op_graph_input, input_tensor_dtype);
+                    Cast::push_new(&mut milli_graph, milli_op_graph_input, input_tensor_dtype, rng);
                 let zero_tid = Constant::push_new(
                     &mut milli_graph,
                     NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
+                    rng,
                 );
                 for _ in 0..(input_tensor_rank - 1) {
-                    x = Unsqueeze::push_new(&mut milli_graph, x, zero_tid);
+                    x = Unsqueeze::push_new(&mut milli_graph, x, zero_tid, rng);
                 }
 
                 let processed_input_link =
-                    SuperGraphLinkTensor::new(super_graph_builder.get_next_link_id());
+                    SuperGraphLinkTensor::new(super_graph_builder.get_next_link_id(), rng);
                 let mut output_map = HashMap::new();
                 output_map.insert(x, processed_input_link);
                 milli_graph.set_output_map(output_map);
 
-                let node = SuperGraphNodeMilliOpGraph::new(milli_graph);
+                let node = SuperGraphNodeMilliOpGraph::new(milli_graph, rng);
                 super_graph_builder.add_node(node.into());
                 processed_input_link
             };
@@ -466,6 +475,7 @@ impl TextInferenceTokensInLogitOutInterface {
 
             super_graph_builder.add_node(
                 SuperGraphNodeModelExecution::new(
+                    rng,
                     model_input_link,
                     0,
                     tensor_inputs,
@@ -485,24 +495,25 @@ impl TextInferenceTokensInLogitOutInterface {
                 let output_tensor_rank = output_tensor_info.shape.clone().unwrap().len();
 
                 let (mut milli_graph, input_map) =
-                    MilliOpGraph::new(std::iter::once(raw_logit_output_link));
+                    MilliOpGraph::new(std::iter::once(raw_logit_output_link), rng);
                 let milli_op_graph_input = *input_map.get(&raw_logit_output_link).unwrap();
                 let mut x = milli_op_graph_input;
                 let zero_tid = Constant::push_new(
                     &mut milli_graph,
                     NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
+                    rng,
                 );
                 for _ in 0..(output_tensor_rank - 2) {
-                    x = Squeeze::push_new(&mut milli_graph, x, zero_tid);
+                    x = Squeeze::push_new(&mut milli_graph, x, zero_tid, rng);
                 }
-                x = Cast::push_new(&mut milli_graph, x, DType::F32);
+                x = Cast::push_new(&mut milli_graph, x, DType::F32, rng);
 
-                let processed_logit_output_link = super_graph_builder.new_tensor_link();
+                let processed_logit_output_link = super_graph_builder.new_tensor_link(rng);
                 let mut output_map = HashMap::new();
                 output_map.insert(x, processed_logit_output_link);
                 milli_graph.set_output_map(output_map);
 
-                let node = SuperGraphNodeMilliOpGraph::new(milli_graph);
+                let node = SuperGraphNodeMilliOpGraph::new(milli_graph, rng);
                 super_graph_builder.add_node(node.into());
                 processed_logit_output_link
             }

@@ -1,5 +1,5 @@
 use crate::backends::eval_backend::EvalBackend;
-use crate::graph::Node;
+use crate::graph::{GlobalId, Node};
 use crate::milli_graph::MilliOpGraph;
 use crate::numeric_tensor::NumericTensor;
 use crate::symbolic_graph::ops::{EvalError, Operation};
@@ -10,9 +10,11 @@ use crate::symbolic_graph::{
 use crate::{DynRank, onnx};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use rand::Rng;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ScanOperation {
+    global_id: GlobalId,
     scan_inputs: Vec<Option<SymbolicGraphTensorId>>,
     state_inputs: Vec<Option<SymbolicGraphTensorId>>,
     scan_outputs: Vec<Option<SymbolicGraphTensorId>>,
@@ -31,12 +33,13 @@ impl ScanOperation {
         attributes: &[onnx::AttributeProto],
         symbolic_graph_mutator: &mut SymbolicGraphMutator,
         core_opset_version: usize,
+        rng: &mut impl Rng
     ) -> Result<Self, ONNXDecodingError> {
         let body = query_attribute_graph(attributes, "body")
             .ok_or(ONNXDecodingError::MissingField("body"))?;
         let body = {
             let mut inner_graph = SymbolicGraphInner::new();
-            inner_graph.populate(symbolic_graph_mutator, body, core_opset_version)?;
+            inner_graph.populate(symbolic_graph_mutator, body, core_opset_version, rng)?;
             inner_graph
         };
 
@@ -65,6 +68,7 @@ impl ScanOperation {
         let scan_outputs = outputs[num_state_tensors..].to_vec();
 
         Ok(Self {
+            global_id: GlobalId::new(rng),
             state_inputs,
             scan_inputs,
             state_outputs,
@@ -80,6 +84,9 @@ impl ScanOperation {
 
 impl Node<SymbolicGraphTensorId> for ScanOperation {
     type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
     fn op_kind(&self) -> Self::OpKind {
         "Scan".to_string()
     }
@@ -245,7 +252,7 @@ impl Operation for ScanOperation {
         Ok(Box::new(outputs.into_iter()))
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
+    fn get_milli_op_graph(&self, _rng: &mut impl Rng) -> MilliOpGraph<SymbolicGraphTensorId> {
         todo!()
     }
 }

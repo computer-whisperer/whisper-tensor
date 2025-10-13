@@ -1,6 +1,6 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
-use crate::graph::Node;
+use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError, MilliOpGraphTensorId};
 use crate::numeric_tensor::NumericTensor;
@@ -9,6 +9,7 @@ use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArgMin {
+    global_id: GlobalId,
     output: MilliOpGraphTensorId,
     input: MilliOpGraphTensorId,
     axis: i64,
@@ -23,9 +24,11 @@ impl ArgMin {
         axis: i64,
         keepdims: bool,
         select_last_index: bool,
+        rng: &mut impl rand::Rng
     ) -> MilliOpGraphTensorId {
-        let output = graph.get_new_tensor_id();
+        let output = graph.get_new_tensor_id(rng);
         let node = Self {
+            global_id: GlobalId::new(rng),
             output,
             input,
             axis,
@@ -59,6 +62,9 @@ impl MilliOp for ArgMin {
 
 impl Node<MilliOpGraphTensorId> for ArgMin {
     type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
     fn op_kind(&self) -> Self::OpKind {
         "ArgMin".to_string()
     }

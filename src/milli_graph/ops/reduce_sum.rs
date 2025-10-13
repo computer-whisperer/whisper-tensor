@@ -1,7 +1,7 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::dtype::DType;
-use crate::graph::Node;
+use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError, MilliOpGraphTensorId};
 use crate::numeric_tensor::NumericTensor;
@@ -11,6 +11,7 @@ use typenum::P1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReduceSum {
+    global_id: GlobalId,
     output: MilliOpGraphTensorId,
     data: MilliOpGraphTensorId,
     axes: Option<MilliOpGraphTensorId>,
@@ -25,9 +26,11 @@ impl ReduceSum {
         axes: Option<MilliOpGraphTensorId>,
         keepdims: bool,
         noop_with_empty_axes: bool,
+        rng: &mut impl rand::Rng,
     ) -> MilliOpGraphTensorId {
-        let output = graph.get_new_tensor_id();
+        let output = graph.get_new_tensor_id(rng);
         let node = Self {
+            global_id: GlobalId::new(rng),
             output,
             data,
             axes,
@@ -92,6 +95,9 @@ impl MilliOp for ReduceSum {
 
 impl Node<MilliOpGraphTensorId> for ReduceSum {
     type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
     fn op_kind(&self) -> Self::OpKind {
         "ReduceSum".to_string()
     }

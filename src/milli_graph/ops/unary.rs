@@ -1,5 +1,5 @@
 use crate::backends::eval_backend::EvalBackend;
-use crate::graph::Node;
+use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError, MilliOpGraphTensorId};
 use crate::numeric_tensor::NumericTensor;
@@ -32,6 +32,7 @@ pub(crate) enum WhichSimpleUnaryOp {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SimpleUnaryOp {
+    global_id: GlobalId,
     output: MilliOpGraphTensorId,
     input: MilliOpGraphTensorId,
     op: WhichSimpleUnaryOp,
@@ -42,9 +43,10 @@ impl SimpleUnaryOp {
         graph: &mut MilliOpGraph<T>,
         input: MilliOpGraphTensorId,
         op: WhichSimpleUnaryOp,
+        rng: &mut impl rand::Rng,
     ) -> MilliOpGraphTensorId {
-        let output = graph.get_new_tensor_id();
-        let node = Self { output, input, op };
+        let output = graph.get_new_tensor_id(rng);
+        let node = Self { output, input, op, global_id: GlobalId::new(rng)};
         graph.push_op(AnyMilliOp::SimpleUnary(node));
         output
     }
@@ -52,87 +54,101 @@ impl SimpleUnaryOp {
     pub fn neg<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         input: MilliOpGraphTensorId,
+        rng: &mut impl rand::Rng,
     ) -> MilliOpGraphTensorId {
-        Self::new_internal(graph, input, WhichSimpleUnaryOp::Neg)
+        Self::new_internal(graph, input, WhichSimpleUnaryOp::Neg, rng)
     }
     pub fn abs<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         input: MilliOpGraphTensorId,
+        rng: &mut impl rand::Rng,
     ) -> MilliOpGraphTensorId {
-        Self::new_internal(graph, input, WhichSimpleUnaryOp::Abs)
+        Self::new_internal(graph, input, WhichSimpleUnaryOp::Abs, rng)
     }
     pub fn exp<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         input: MilliOpGraphTensorId,
+        rng: &mut impl rand::Rng,
     ) -> MilliOpGraphTensorId {
-        Self::new_internal(graph, input, WhichSimpleUnaryOp::Exp)
+        Self::new_internal(graph, input, WhichSimpleUnaryOp::Exp, rng)
     }
     pub fn ln<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         input: MilliOpGraphTensorId,
+        rng: &mut impl rand::Rng,
     ) -> MilliOpGraphTensorId {
-        Self::new_internal(graph, input, WhichSimpleUnaryOp::Ln)
+        Self::new_internal(graph, input, WhichSimpleUnaryOp::Ln, rng)
     }
     pub fn sqrt<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         input: MilliOpGraphTensorId,
+        rng: &mut impl rand::Rng,
     ) -> MilliOpGraphTensorId {
-        Self::new_internal(graph, input, WhichSimpleUnaryOp::Sqrt)
+        Self::new_internal(graph, input, WhichSimpleUnaryOp::Sqrt, rng)
     }
     pub fn not<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         input: MilliOpGraphTensorId,
+        rng: &mut impl rand::Rng,
     ) -> MilliOpGraphTensorId {
-        Self::new_internal(graph, input, WhichSimpleUnaryOp::Not)
+        Self::new_internal(graph, input, WhichSimpleUnaryOp::Not, rng)
     }
     pub fn sign<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         input: MilliOpGraphTensorId,
+        rng: &mut impl rand::Rng,
     ) -> MilliOpGraphTensorId {
-        Self::new_internal(graph, input, WhichSimpleUnaryOp::Sign)
+        Self::new_internal(graph, input, WhichSimpleUnaryOp::Sign, rng)
     }
     pub fn bitwise_not<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         input: MilliOpGraphTensorId,
+        rng: &mut impl rand::Rng,
     ) -> MilliOpGraphTensorId {
-        Self::new_internal(graph, input, WhichSimpleUnaryOp::BitwiseNot)
+        Self::new_internal(graph, input, WhichSimpleUnaryOp::BitwiseNot, rng)
     }
     pub fn reciprocal<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         input: MilliOpGraphTensorId,
+        rng: &mut impl rand::Rng,
     ) -> MilliOpGraphTensorId {
-        Self::new_internal(graph, input, WhichSimpleUnaryOp::Reciprocal)
+        Self::new_internal(graph, input, WhichSimpleUnaryOp::Reciprocal, rng)
     }
     pub fn trig<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         input: MilliOpGraphTensorId,
         trig_op: TrigOp,
+        rng: &mut impl rand::Rng,
     ) -> MilliOpGraphTensorId {
-        Self::new_internal(graph, input, WhichSimpleUnaryOp::Trig(trig_op))
+        Self::new_internal(graph, input, WhichSimpleUnaryOp::Trig(trig_op), rng)
     }
     pub fn floor<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         input: MilliOpGraphTensorId,
+        rng: &mut impl rand::Rng,
     ) -> MilliOpGraphTensorId {
-        Self::new_internal(graph, input, WhichSimpleUnaryOp::Floor)
+        Self::new_internal(graph, input, WhichSimpleUnaryOp::Floor, rng)
     }
     pub fn ceil<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         input: MilliOpGraphTensorId,
+        rng: &mut impl rand::Rng,
     ) -> MilliOpGraphTensorId {
-        Self::new_internal(graph, input, WhichSimpleUnaryOp::Ceil)
+        Self::new_internal(graph, input, WhichSimpleUnaryOp::Ceil, rng)
     }
     pub fn round<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         input: MilliOpGraphTensorId,
+        rng: &mut impl rand::Rng,
     ) -> MilliOpGraphTensorId {
-        Self::new_internal(graph, input, WhichSimpleUnaryOp::Round)
+        Self::new_internal(graph, input, WhichSimpleUnaryOp::Round, rng)
     }
     pub fn is_inf<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         input: MilliOpGraphTensorId,
         detect_positive: bool,
         detect_negative: bool,
+        rng: &mut impl rand::Rng,
     ) -> MilliOpGraphTensorId {
         Self::new_internal(
             graph,
@@ -141,19 +157,22 @@ impl SimpleUnaryOp {
                 detect_positive,
                 detect_negative,
             },
+            rng
         )
     }
     pub fn is_nan<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         input: MilliOpGraphTensorId,
+        rng: &mut impl rand::Rng,
     ) -> MilliOpGraphTensorId {
-        Self::new_internal(graph, input, WhichSimpleUnaryOp::IsNan)
+        Self::new_internal(graph, input, WhichSimpleUnaryOp::IsNan, rng)
     }
     pub fn erf<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         input: MilliOpGraphTensorId,
+        rng: &mut impl rand::Rng,
     ) -> MilliOpGraphTensorId {
-        Self::new_internal(graph, input, WhichSimpleUnaryOp::Erf)
+        Self::new_internal(graph, input, WhichSimpleUnaryOp::Erf, rng)
     }
 }
 
@@ -185,6 +204,9 @@ impl Node<MilliOpGraphTensorId> for SimpleUnaryOp {
     }
     fn outputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
         Box::new(vec![self.output].into_iter())
+    }
+    fn global_id(&self) -> GlobalId {
+        self.global_id
     }
 }
 
@@ -225,6 +247,7 @@ impl MilliOp for SimpleUnaryOp {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClampMin {
+    global_id: GlobalId,
     output: MilliOpGraphTensorId,
     input: MilliOpGraphTensorId,
     value: f32,
@@ -235,9 +258,11 @@ impl ClampMin {
         graph: &mut MilliOpGraph<T>,
         a: MilliOpGraphTensorId,
         value: f32,
+        rng: &mut impl rand::Rng,
     ) -> MilliOpGraphTensorId {
-        let output = graph.get_new_tensor_id();
+        let output = graph.get_new_tensor_id(rng);
         let node = Self {
+            global_id: GlobalId::new(rng),
             output,
             input: a,
             value,
@@ -249,6 +274,9 @@ impl ClampMin {
 
 impl Node<MilliOpGraphTensorId> for ClampMin {
     type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
     fn op_kind(&self) -> Self::OpKind {
         "Clamp Min".to_string()
     }

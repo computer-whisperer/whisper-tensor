@@ -6,26 +6,21 @@
 //! - Enable shared tooling and passes across all graphs.
 use std::fmt::Debug;
 use std::hash::Hash;
-
-/// Path addressing the graph itself (root and nested subgraphs).
-pub trait GraphPath: Clone + Debug + Eq + Hash {}
-
-/// Path addressing a node instance within a graph (may be nested via GraphPath semantics).
-pub trait NodePath: Clone + Debug + Eq + Hash {}
-
-/// Path addressing a link (edge) within a graph (may be nested via GraphPath semantics).
-pub trait LinkPath: Clone + Debug + Eq + Hash {}
+use rand::Rng;
+use serde::{Deserialize, Serialize};
 
 /// A directed connection between a producer node output and a consumer node input.
-pub trait Link<LinkIdT: Clone + Eq + Hash + Debug> {
-    /// The tensor that flows along this link (stable id at graph scope).
-    fn link_id(&self) -> LinkIdT;
+pub trait Link {
+    /// Unique identifier.
+    fn global_id(&self) -> GlobalId;
 }
 
 /// Node within a graph. Carries op kind and its interface to links.
 pub trait Node<LinkIdT: Clone + Eq + Hash + Debug> {
     type OpKind: AsRef<str> + Clone + Debug;
 
+    /// Unique identifier.
+    fn global_id(&self) -> GlobalId;
     /// Op name or other identifier.
     fn op_kind(&self) -> Self::OpKind;
     /// Incoming link handles in input index order.
@@ -34,13 +29,22 @@ pub trait Node<LinkIdT: Clone + Eq + Hash + Debug> {
     fn outputs(&self) -> Box<dyn Iterator<Item = LinkIdT> + '_>;
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, Hash, PartialEq, Eq, Copy, Ord, PartialOrd)]
+pub struct GlobalId(pub(crate) u64);
+
+impl GlobalId {
+    pub fn new(rng: &mut impl Rng) -> Self {
+        GlobalId(rng.next_u64())
+    }
+}
+
 /// The inner structure of a graph: nodes and links, plus IO interface.
 pub trait InnerGraph {
     type NodeId: Clone + Eq + Hash + Debug;
     type LinkId: Clone + Eq + Hash + Debug;
     type Error: Debug;
     type AnyNode: Node<Self::LinkId>;
-    type AnyLink: Link<Self::LinkId>;
+    type AnyLink: Link;
     type InputLinkId: Clone + Eq + Hash + Debug;
     type OutputLinkId: Clone + Eq + Hash + Debug;
 
@@ -51,6 +55,8 @@ pub trait InnerGraph {
     /// Resolve handles.
     fn get_node(&self, id: &Self::NodeId) -> Option<&Self::AnyNode>;
     fn get_link(&self, id: &Self::LinkId) -> Option<&Self::AnyLink>;
+    fn get_node_by_global_id(&self, global_id: &GlobalId) -> Option<&Self::AnyNode>;
+    fn get_link_by_global_id(&self, global_id: &GlobalId) -> Option<&Self::AnyLink>;
 
     /// External interface tensors.
     fn input_links(&self) -> impl Iterator<Item = (Self::InputLinkId, Self::LinkId)>;
@@ -62,35 +68,33 @@ pub trait InnerGraph {
     }
 }
 
+
 /// Root graph abstraction that can host an InnerGraph and provide naming/paths.
 pub trait Graph {
-    type GraphPath: GraphPath;
-    type NodePath: NodePath;
-    type LinkPath: LinkPath;
     type Inner: InnerGraph;
     type AnySubGraph;
 
     /// Access inner graph by path (root or nested).
-    fn inner(&self, path: &Self::GraphPath) -> &Self::AnySubGraph;
+    fn inner(&self) -> &Self::AnySubGraph;
 }
 
 /// Observer API for instrumentation across graph execution and transformations.
 pub trait Observer<G: Graph> {
     fn on_node_scheduled(
         &mut self,
-        _path: &G::GraphPath,
+        _path: &[GlobalId],
         _node: &<G::Inner as InnerGraph>::AnyNode,
     ) {
     }
     fn on_node_executed(
         &mut self,
-        _path: &G::GraphPath,
+        _path: &[GlobalId],
         _node: &<G::Inner as InnerGraph>::AnyNode,
     ) {
     }
     fn on_tensor_assigned(
         &mut self,
-        _path: &G::GraphPath,
+        _path: &[GlobalId],
         _tensor: &<G::Inner as InnerGraph>::AnyLink,
     ) {
     }

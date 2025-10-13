@@ -1,4 +1,5 @@
-use crate::graph::Node;
+use rand::Rng;
+use crate::graph::{GlobalId, Node};
 use crate::milli_graph::MilliOpGraph;
 use crate::onnx;
 use crate::symbolic_graph::ops::Operation;
@@ -41,6 +42,7 @@ pub(crate) enum ResizeNearestMode {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ResizeOperation {
+    global_id: GlobalId,
     input: SymbolicGraphTensorId,
     roi: Option<SymbolicGraphTensorId>,
     scales: Option<SymbolicGraphTensorId>,
@@ -62,6 +64,7 @@ impl ResizeOperation {
         inputs: &[Option<SymbolicGraphTensorId>],
         outputs: &[Option<SymbolicGraphTensorId>],
         attributes: &[onnx::AttributeProto],
+        rng: &mut impl Rng,
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.is_empty() || inputs.len() > 4 {
             return Err(ONNXDecodingError::InvalidOperatorInputs("Resize"));
@@ -114,6 +117,7 @@ impl ResizeOperation {
         };
 
         Ok(Self {
+            global_id: GlobalId::new(rng),
             input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Resize"))?,
             roi: if inputs.len() > 1 {
                 Some(inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs("Resize"))?)
@@ -146,6 +150,9 @@ impl ResizeOperation {
 
 impl Node<SymbolicGraphTensorId> for ResizeOperation {
     type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
     fn op_kind(&self) -> Self::OpKind {
         "Resize".to_string()
     }
@@ -167,7 +174,7 @@ impl Node<SymbolicGraphTensorId> for ResizeOperation {
     }
 }
 impl Operation for ResizeOperation {
-    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
+    fn get_milli_op_graph(&self, _rng: &mut impl Rng) -> MilliOpGraph<SymbolicGraphTensorId> {
         todo!()
     }
 }

@@ -1,6 +1,6 @@
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::dtype::DType;
-use crate::graph::Node;
+use crate::graph::{GlobalId, Node};
 use crate::milli_graph::{MilliOpGraph, ops_helpers};
 use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{
@@ -9,9 +9,11 @@ use crate::symbolic_graph::{
 use crate::{milli_graph, onnx};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use rand::Rng;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LpNormalizationOperation {
+    global_id: GlobalId,
     input: SymbolicGraphTensorId,
     output: SymbolicGraphTensorId,
     axis: i64,
@@ -23,6 +25,7 @@ impl LpNormalizationOperation {
         inputs: &[Option<SymbolicGraphTensorId>],
         outputs: &[Option<SymbolicGraphTensorId>],
         attributes: &[onnx::AttributeProto],
+        rng: &mut impl Rng,
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 1 {
             return Err(ONNXDecodingError::InvalidOperatorInputs("LpNormalization"));
@@ -45,6 +48,7 @@ impl LpNormalizationOperation {
         }
 
         Ok(Self {
+            global_id: GlobalId::new(rng),
             input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("LpNormalization"))?,
             output: outputs[0]
                 .ok_or(ONNXDecodingError::InvalidOperatorOutputs("LpNormalization"))?,
@@ -56,6 +60,9 @@ impl LpNormalizationOperation {
 
 impl Node<SymbolicGraphTensorId> for LpNormalizationOperation {
     type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
     fn op_kind(&self) -> Self::OpKind {
         "LpNormalization".to_string()
     }
@@ -67,28 +74,28 @@ impl Node<SymbolicGraphTensorId> for LpNormalizationOperation {
     }
 }
 impl Operation for LpNormalizationOperation {
-    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        let (mut graph, input_map) = MilliOpGraph::new(self.inputs());
+    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph<SymbolicGraphTensorId> {
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let input = input_map[&self.input];
 
         // abs(input)
-        let abs_tid = milli_graph::ops::SimpleUnaryOp::abs(&mut graph, input);
+        let abs_tid = milli_graph::ops::SimpleUnaryOp::abs(&mut graph, input, rng);
 
         let mut x_tid = match self.p {
             1 => abs_tid,
-            2 => milli_graph::ops::SimpleBinary::mul(&mut graph, input, input),
+            2 => milli_graph::ops::SimpleBinary::mul(&mut graph, input, input, rng),
             _ => panic!(),
         };
-        let axis_tid = ops_helpers::scalar_const(&mut graph, self.axis);
-        x_tid = milli_graph::ops::Cast::push_new(&mut graph, x_tid, DType::F32);
+        let axis_tid = ops_helpers::scalar_const(&mut graph, self.axis, rng);
+        x_tid = milli_graph::ops::Cast::push_new(&mut graph, x_tid, DType::F32, rng);
         x_tid =
-            milli_graph::ops::ReduceSum::push_new(&mut graph, x_tid, Some(axis_tid), true, false);
+            milli_graph::ops::ReduceSum::push_new(&mut graph, x_tid, Some(axis_tid), true, false, rng);
         if self.p == 2 {
-            x_tid = milli_graph::ops::SimpleUnaryOp::sqrt(&mut graph, x_tid);
+            x_tid = milli_graph::ops::SimpleUnaryOp::sqrt(&mut graph, x_tid, rng);
         }
-        let input_cast_tid = milli_graph::ops::Cast::push_new(&mut graph, input, DType::F32);
-        let out_tid = milli_graph::ops::SimpleBinary::div(&mut graph, input_cast_tid, x_tid);
-        let out = milli_graph::ops::CastLike::push_new(&mut graph, out_tid, input);
+        let input_cast_tid = milli_graph::ops::Cast::push_new(&mut graph, input, DType::F32, rng);
+        let out_tid = milli_graph::ops::SimpleBinary::div(&mut graph, input_cast_tid, x_tid, rng);
+        let out = milli_graph::ops::CastLike::push_new(&mut graph, out_tid, input, rng);
 
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
@@ -99,6 +106,7 @@ impl Operation for LpNormalizationOperation {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GroupNormalizationOperation {
+    global_id: GlobalId,
     input: SymbolicGraphTensorId,
     scale: SymbolicGraphTensorId,
     bias: SymbolicGraphTensorId,
@@ -113,6 +121,7 @@ impl GroupNormalizationOperation {
         inputs: &[Option<SymbolicGraphTensorId>],
         outputs: &[Option<SymbolicGraphTensorId>],
         attributes: &[onnx::AttributeProto],
+        rng: &mut impl Rng,
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 3 {
             return Err(ONNXDecodingError::InvalidOperatorInputs(
@@ -143,6 +152,7 @@ impl GroupNormalizationOperation {
             "num_groups".to_string(),
         ))? as usize;
         Ok(Self {
+            global_id: GlobalId::new(rng),
             input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs(
                 "GroupNormalization",
             ))?,
@@ -164,6 +174,9 @@ impl GroupNormalizationOperation {
 
 impl Node<SymbolicGraphTensorId> for GroupNormalizationOperation {
     type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
     fn op_kind(&self) -> Self::OpKind {
         "GroupNormalization".to_string()
     }
@@ -176,61 +189,63 @@ impl Node<SymbolicGraphTensorId> for GroupNormalizationOperation {
 }
 
 impl Operation for GroupNormalizationOperation {
-    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        let (mut graph, input_map) = MilliOpGraph::new(self.inputs());
+    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph<SymbolicGraphTensorId> {
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let original_input = input_map[&self.input];
         let input_cast =
-            milli_graph::ops::Cast::push_new(&mut graph, original_input, self.stash_type);
+            milli_graph::ops::Cast::push_new(&mut graph, original_input, self.stash_type, rng);
 
-        let input_shape = milli_graph::ops::Shape::push_new(&mut graph, input_cast);
+        let input_shape = milli_graph::ops::Shape::push_new(&mut graph, input_cast, rng);
         let num_channels = {
-            let starts = ops_helpers::scalar_const(&mut graph, 1i64);
-            let ends = ops_helpers::scalar_const(&mut graph, 2i64);
-            milli_graph::ops::Slice::push_new(&mut graph, input_shape, starts, ends, None, None)
+            let starts = ops_helpers::scalar_const(&mut graph, 1i64, rng);
+            let ends = ops_helpers::scalar_const(&mut graph, 2i64, rng);
+            milli_graph::ops::Slice::push_new(&mut graph, input_shape, starts, ends, None, None, rng)
         };
         let reshaped_input = {
             let new_shape_tensor =
                 NDArrayNumericTensor::from(vec![0i64, self.num_groups as i64, -1]);
             let new_shape =
-                milli_graph::ops::Constant::push_new(&mut graph, new_shape_tensor.to_dyn());
-            milli_graph::ops::Reshape::push_new(&mut graph, input_cast, new_shape, false)
+                milli_graph::ops::Constant::push_new(&mut graph, new_shape_tensor.to_dyn(), rng);
+            milli_graph::ops::Reshape::push_new(&mut graph, input_cast, new_shape, false, rng)
         };
 
-        let mean_axis = ops_helpers::scalar_const(&mut graph, 2i64);
+        let mean_axis = ops_helpers::scalar_const(&mut graph, 2i64, rng);
         let mean = milli_graph::ops::ReduceMean::push_new(
             &mut graph,
             reshaped_input,
             Some(mean_axis),
             true,
             false,
+            rng
         );
 
-        let input = milli_graph::ops::SimpleBinary::sub(&mut graph, reshaped_input, mean);
+        let input = milli_graph::ops::SimpleBinary::sub(&mut graph, reshaped_input, mean, rng);
 
         let variance = {
-            let x = milli_graph::ops::SimpleBinary::mul(&mut graph, input, input);
-            milli_graph::ops::ReduceMean::push_new(&mut graph, x, Some(mean_axis), true, false)
+            let x = milli_graph::ops::SimpleBinary::mul(&mut graph, input, input, rng);
+            milli_graph::ops::ReduceMean::push_new(&mut graph, x, Some(mean_axis), true, false, rng)
         };
 
         let input_normalized = {
-            let epsilon = milli_graph::ops::Constant::new_scalar(&mut graph, self.epsilon);
-            let epsilon = milli_graph::ops::CastLike::push_new(&mut graph, epsilon, variance);
-            let var_plus_eps = milli_graph::ops::SimpleBinary::add(&mut graph, variance, epsilon);
-            let val = milli_graph::ops::SimpleUnaryOp::sqrt(&mut graph, var_plus_eps);
-            milli_graph::ops::SimpleBinary::div(&mut graph, input, val)
+            let epsilon = milli_graph::ops::Constant::new_scalar(&mut graph, self.epsilon, rng);
+            let epsilon = milli_graph::ops::CastLike::push_new(&mut graph, epsilon, variance, rng);
+            let var_plus_eps = milli_graph::ops::SimpleBinary::add(&mut graph, variance, epsilon, rng);
+            let val = milli_graph::ops::SimpleUnaryOp::sqrt(&mut graph, var_plus_eps, rng);
+            milli_graph::ops::SimpleBinary::div(&mut graph, input, val, rng)
         };
 
-        let zero = milli_graph::ops::Constant::new_scalar(&mut graph, 0i64);
-        let neg_one = milli_graph::ops::Constant::new_scalar(&mut graph, -1i64);
-        let one = milli_graph::ops::Constant::new_scalar(&mut graph, 1i64);
+        let zero = milli_graph::ops::Constant::new_scalar(&mut graph, 0i64, rng);
+        let neg_one = milli_graph::ops::Constant::new_scalar(&mut graph, -1i64, rng);
+        let one = milli_graph::ops::Constant::new_scalar(&mut graph, 1i64, rng);
 
         let y = {
             let new_shape = milli_graph::ops::Concat::push_new(
                 &mut graph,
                 vec![zero, num_channels, neg_one],
                 0,
+                rng
             );
-            milli_graph::ops::Reshape::push_new(&mut graph, input_normalized, new_shape, false)
+            milli_graph::ops::Reshape::push_new(&mut graph, input_normalized, new_shape, false, rng)
         };
 
         let y = {
@@ -238,9 +253,10 @@ impl Operation for GroupNormalizationOperation {
                 &mut graph,
                 input_map[&self.scale],
                 self.stash_type,
+                rng,
             );
-            let scale = milli_graph::ops::Unsqueeze::push_new(&mut graph, scale_cast, one);
-            milli_graph::ops::SimpleBinary::mul(&mut graph, y, scale)
+            let scale = milli_graph::ops::Unsqueeze::push_new(&mut graph, scale_cast, one, rng);
+            milli_graph::ops::SimpleBinary::mul(&mut graph, y, scale, rng)
         };
 
         let y = {
@@ -248,14 +264,15 @@ impl Operation for GroupNormalizationOperation {
                 &mut graph,
                 input_map[&self.bias],
                 self.stash_type,
+                rng
             );
-            let bias = milli_graph::ops::Unsqueeze::push_new(&mut graph, bias_cast, one);
-            milli_graph::ops::SimpleBinary::add(&mut graph, y, bias)
+            let bias = milli_graph::ops::Unsqueeze::push_new(&mut graph, bias_cast, one, rng);
+            milli_graph::ops::SimpleBinary::add(&mut graph, y, bias, rng)
         };
 
-        let out = milli_graph::ops::Reshape::push_new(&mut graph, y, input_shape, false);
+        let out = milli_graph::ops::Reshape::push_new(&mut graph, y, input_shape, false, rng);
 
-        let out = milli_graph::ops::CastLike::push_new(&mut graph, out, original_input);
+        let out = milli_graph::ops::CastLike::push_new(&mut graph, out, original_input, rng);
 
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
@@ -266,6 +283,7 @@ impl Operation for GroupNormalizationOperation {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RMSNormalizationOperation {
+    global_id: GlobalId,
     input: SymbolicGraphTensorId,
     scale: SymbolicGraphTensorId,
     bias: Option<SymbolicGraphTensorId>,
@@ -282,6 +300,7 @@ impl RMSNormalizationOperation {
         inputs: &[Option<SymbolicGraphTensorId>],
         outputs: &[Option<SymbolicGraphTensorId>],
         attributes: &[onnx::AttributeProto],
+        rng: &mut impl Rng,
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() < 2 || inputs.len() > 3 {
             return Err(ONNXDecodingError::InvalidOperatorInputs(
@@ -312,6 +331,7 @@ impl RMSNormalizationOperation {
             DType::BF16
         };
         Ok(Self {
+            global_id: GlobalId::new(rng),
             input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs(
                 "LayerNormalization",
             ))?,
@@ -351,6 +371,9 @@ impl RMSNormalizationOperation {
 
 impl Node<SymbolicGraphTensorId> for RMSNormalizationOperation {
     type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
     fn op_kind(&self) -> Self::OpKind {
         "RMSNormalization".to_string()
     }
@@ -374,22 +397,22 @@ impl Node<SymbolicGraphTensorId> for RMSNormalizationOperation {
 }
 
 impl Operation for RMSNormalizationOperation {
-    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        let (mut graph, input_map) = MilliOpGraph::new(self.inputs());
+    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph<SymbolicGraphTensorId> {
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let input_data = input_map[&self.input];
         let input_scale = input_map[&self.scale];
 
-        let input_f32 = milli_graph::ops::Cast::push_new(&mut graph, input_data, self.stash_type);
+        let input_f32 = milli_graph::ops::Cast::push_new(&mut graph, input_data, self.stash_type, rng);
 
-        let axis = ops_helpers::scalar_const(&mut graph, self.axis);
-        let axis = ops_helpers::resolve_axes(&mut graph, axis, input_data);
+        let axis = ops_helpers::scalar_const(&mut graph, self.axis, rng);
+        let axis = ops_helpers::resolve_axes(&mut graph, axis, input_data, rng);
 
-        let rank_tid = ops_helpers::rank(&mut graph, input_data);
-        let step_tid = ops_helpers::scalar_const(&mut graph, 1i64);
+        let rank_tid = ops_helpers::rank(&mut graph, input_data, rng);
+        let step_tid = ops_helpers::scalar_const(&mut graph, 1i64, rng);
         let normalized_axes =
-            milli_graph::ops::Range::push_new(&mut graph, axis, rank_tid, step_tid);
+            milli_graph::ops::Range::push_new(&mut graph, axis, rank_tid, step_tid, rng);
 
-        let input_squared = milli_graph::ops::SimpleBinary::mul(&mut graph, input_f32, input_f32);
+        let input_squared = milli_graph::ops::SimpleBinary::mul(&mut graph, input_f32, input_f32, rng);
 
         let squared_mean = milli_graph::ops::ReduceMean::push_new(
             &mut graph,
@@ -397,29 +420,30 @@ impl Operation for RMSNormalizationOperation {
             Some(normalized_axes),
             true,
             false,
+            rng
         );
 
-        let epsilon = milli_graph::ops::Constant::new_scalar(&mut graph, self.epsilon);
-        let epsilon = milli_graph::ops::CastLike::push_new(&mut graph, epsilon, squared_mean);
-        let mean_plus_eps = milli_graph::ops::SimpleBinary::add(&mut graph, squared_mean, epsilon);
-        let rms = milli_graph::ops::SimpleUnaryOp::sqrt(&mut graph, mean_plus_eps);
-        let rms_inv = milli_graph::ops::SimpleUnaryOp::reciprocal(&mut graph, rms);
+        let epsilon = milli_graph::ops::Constant::new_scalar(&mut graph, self.epsilon, rng);
+        let epsilon = milli_graph::ops::CastLike::push_new(&mut graph, epsilon, squared_mean, rng);
+        let mean_plus_eps = milli_graph::ops::SimpleBinary::add(&mut graph, squared_mean, epsilon, rng);
+        let rms = milli_graph::ops::SimpleUnaryOp::sqrt(&mut graph, mean_plus_eps, rng);
+        let rms_inv = milli_graph::ops::SimpleUnaryOp::reciprocal(&mut graph, rms, rng);
 
-        let normalized = milli_graph::ops::SimpleBinary::mul(&mut graph, input_f32, rms_inv);
+        let normalized = milli_graph::ops::SimpleBinary::mul(&mut graph, input_f32, rms_inv, rng);
 
         let input_scale_cast =
-            milli_graph::ops::Cast::push_new(&mut graph, input_scale, self.stash_type);
-        let out = milli_graph::ops::SimpleBinary::mul(&mut graph, normalized, input_scale_cast);
+            milli_graph::ops::Cast::push_new(&mut graph, input_scale, self.stash_type, rng);
+        let out = milli_graph::ops::SimpleBinary::mul(&mut graph, normalized, input_scale_cast, rng);
 
         let out = if let Some(bias) = self.bias {
             let bias_cast =
-                milli_graph::ops::Cast::push_new(&mut graph, input_map[&bias], self.stash_type);
-            milli_graph::ops::SimpleBinary::add(&mut graph, out, bias_cast)
+                milli_graph::ops::Cast::push_new(&mut graph, input_map[&bias], self.stash_type, rng);
+            milli_graph::ops::SimpleBinary::add(&mut graph, out, bias_cast, rng)
         } else {
             out
         };
 
-        let out = milli_graph::ops::CastLike::push_new(&mut graph, out, input_data);
+        let out = milli_graph::ops::CastLike::push_new(&mut graph, out, input_data, rng);
 
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
@@ -430,6 +454,7 @@ impl Operation for RMSNormalizationOperation {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LayerNormalizationOperation {
+    global_id: GlobalId,
     input: SymbolicGraphTensorId,
     scale: SymbolicGraphTensorId,
     bias: Option<SymbolicGraphTensorId>,
@@ -446,6 +471,7 @@ impl LayerNormalizationOperation {
         inputs: &[Option<SymbolicGraphTensorId>],
         outputs: &[Option<SymbolicGraphTensorId>],
         attributes: &[onnx::AttributeProto],
+        rng: &mut impl Rng,
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() < 2 || inputs.len() > 3 {
             return Err(ONNXDecodingError::InvalidOperatorInputs(
@@ -476,6 +502,7 @@ impl LayerNormalizationOperation {
             DType::BF16
         };
         Ok(Self {
+            global_id: GlobalId::new(rng),
             input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs(
                 "LayerNormalization",
             ))?,
@@ -515,6 +542,9 @@ impl LayerNormalizationOperation {
 
 impl Node<SymbolicGraphTensorId> for LayerNormalizationOperation {
     type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
     fn op_kind(&self) -> Self::OpKind {
         "LayerNormalization".to_string()
     }
@@ -537,20 +567,20 @@ impl Node<SymbolicGraphTensorId> for LayerNormalizationOperation {
     }
 }
 impl Operation for LayerNormalizationOperation {
-    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        let (mut graph, input_map) = MilliOpGraph::new(self.inputs());
+fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph<SymbolicGraphTensorId> {
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let input_data = input_map[&self.input];
         let input_scale = input_map[&self.scale];
 
-        let input_f32 = milli_graph::ops::Cast::push_new(&mut graph, input_data, self.stash_type);
+        let input_f32 = milli_graph::ops::Cast::push_new(&mut graph, input_data, self.stash_type, rng);
 
-        let axis = ops_helpers::scalar_const(&mut graph, self.axis);
-        let axis = ops_helpers::resolve_axes(&mut graph, axis, input_data);
+        let axis = ops_helpers::scalar_const(&mut graph, self.axis, rng);
+        let axis = ops_helpers::resolve_axes(&mut graph, axis, input_data, rng);
 
-        let rank_tid = ops_helpers::rank(&mut graph, input_data);
-        let step_tid = ops_helpers::scalar_const(&mut graph, 1i64);
+        let rank_tid = ops_helpers::rank(&mut graph, input_data, rng);
+        let step_tid = ops_helpers::scalar_const(&mut graph, 1i64, rng);
         let normalized_axes =
-            milli_graph::ops::Range::push_new(&mut graph, axis, rank_tid, step_tid);
+            milli_graph::ops::Range::push_new(&mut graph, axis, rank_tid, step_tid, rng);
 
         let mean = milli_graph::ops::ReduceMean::push_new(
             &mut graph,
@@ -558,38 +588,40 @@ impl Operation for LayerNormalizationOperation {
             Some(normalized_axes),
             true,
             false,
+            rng
         );
 
-        let d = milli_graph::ops::SimpleBinary::sub(&mut graph, input_f32, mean);
-        let dd = milli_graph::ops::SimpleBinary::mul(&mut graph, d, d);
+        let d = milli_graph::ops::SimpleBinary::sub(&mut graph, input_f32, mean, rng);
+        let dd = milli_graph::ops::SimpleBinary::mul(&mut graph, d, d, rng);
         let variance = milli_graph::ops::ReduceMean::push_new(
             &mut graph,
             dd,
             Some(normalized_axes),
             true,
             false,
+            rng
         );
-        let epsilon = milli_graph::ops::Constant::new_scalar(&mut graph, self.epsilon);
-        let epsilon = milli_graph::ops::CastLike::push_new(&mut graph, epsilon, variance);
-        let var_plus_eps = milli_graph::ops::SimpleBinary::add(&mut graph, variance, epsilon);
-        let stddev = milli_graph::ops::SimpleUnaryOp::sqrt(&mut graph, var_plus_eps);
-        let inv_stddev = milli_graph::ops::SimpleUnaryOp::reciprocal(&mut graph, stddev);
+        let epsilon = milli_graph::ops::Constant::new_scalar(&mut graph, self.epsilon, rng);
+        let epsilon = milli_graph::ops::CastLike::push_new(&mut graph, epsilon, variance, rng);
+        let var_plus_eps = milli_graph::ops::SimpleBinary::add(&mut graph, variance, epsilon, rng);
+        let stddev = milli_graph::ops::SimpleUnaryOp::sqrt(&mut graph, var_plus_eps, rng);
+        let inv_stddev = milli_graph::ops::SimpleUnaryOp::reciprocal(&mut graph, stddev, rng);
 
-        let normalized = milli_graph::ops::SimpleBinary::mul(&mut graph, d, inv_stddev);
+        let normalized = milli_graph::ops::SimpleBinary::mul(&mut graph, d, inv_stddev, rng);
 
         let input_scale_cast =
-            milli_graph::ops::Cast::push_new(&mut graph, input_scale, self.stash_type);
-        let out = milli_graph::ops::SimpleBinary::mul(&mut graph, normalized, input_scale_cast);
+            milli_graph::ops::Cast::push_new(&mut graph, input_scale, self.stash_type, rng);
+        let out = milli_graph::ops::SimpleBinary::mul(&mut graph, normalized, input_scale_cast, rng);
 
         let out = if let Some(bias) = self.bias {
             let bias_cast =
-                milli_graph::ops::Cast::push_new(&mut graph, input_map[&bias], self.stash_type);
-            milli_graph::ops::SimpleBinary::add(&mut graph, out, bias_cast)
+                milli_graph::ops::Cast::push_new(&mut graph, input_map[&bias], self.stash_type, rng);
+            milli_graph::ops::SimpleBinary::add(&mut graph, out, bias_cast, rng)
         } else {
             out
         };
 
-        let out = milli_graph::ops::CastLike::push_new(&mut graph, out, input_data);
+        let out = milli_graph::ops::CastLike::push_new(&mut graph, out, input_data, rng);
 
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
@@ -606,6 +638,7 @@ impl Operation for LayerNormalizationOperation {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct InstanceNormalizationOperation {
+    global_id: GlobalId,
     input: SymbolicGraphTensorId,
     scale: SymbolicGraphTensorId,
     bias: SymbolicGraphTensorId,
@@ -618,6 +651,7 @@ impl InstanceNormalizationOperation {
         inputs: &[Option<SymbolicGraphTensorId>],
         outputs: &[Option<SymbolicGraphTensorId>],
         attributes: &[onnx::AttributeProto],
+        rng: &mut impl Rng,
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 3 {
             return Err(ONNXDecodingError::InvalidOperatorInputs(
@@ -632,6 +666,7 @@ impl InstanceNormalizationOperation {
         let epsilon = query_attribute_float(attributes, "epsilon");
 
         Ok(Self {
+            global_id: GlobalId::new(rng),
             input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs(
                 "InstanceNormalization",
             ))?,
@@ -651,6 +686,9 @@ impl InstanceNormalizationOperation {
 
 impl Node<SymbolicGraphTensorId> for InstanceNormalizationOperation {
     type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
     fn op_kind(&self) -> Self::OpKind {
         "InstanceNormalization".to_string()
     }
@@ -663,7 +701,7 @@ impl Node<SymbolicGraphTensorId> for InstanceNormalizationOperation {
 }
 
 impl Operation for InstanceNormalizationOperation {
-    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
+    fn get_milli_op_graph(&self, _rng: &mut impl Rng) -> MilliOpGraph<SymbolicGraphTensorId> {
         unimplemented!();
     }
 }

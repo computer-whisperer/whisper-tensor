@@ -2,7 +2,7 @@ use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::backends::ndarray_backend::conversions::NDArrayNumericTensorType;
-use crate::graph::Node;
+use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{
     MilliOpGraph, MilliOpGraphError, MilliOpGraphNodeId, MilliOpGraphTensorId,
@@ -12,10 +12,12 @@ use crate::numeric_tensor::NumericTensor;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use rand::Rng;
 use typenum::P1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Constant {
+    global_id: GlobalId,
     output: MilliOpGraphTensorId,
     data: NDArrayNumericTensor<DynRank>,
 }
@@ -24,9 +26,11 @@ impl Constant {
     pub fn push_new<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         a: NDArrayNumericTensor<DynRank>,
+        rng: &mut impl Rng,
     ) -> MilliOpGraphTensorId {
         let node = Self {
-            output: graph.get_new_tensor_id(),
+            global_id: GlobalId::new(rng),
+            output: graph.get_new_tensor_id(rng),
             data: a,
         };
         let out = node.output;
@@ -37,13 +41,15 @@ impl Constant {
     pub(crate) fn new_scalar<T, Io: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<Io>,
         v: T,
+        rng: &mut impl Rng,
     ) -> MilliOpGraphTensorId
     where
         T: NDArrayNumericTensorType,
     {
         let data = NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![v], &vec![1]).unwrap();
         let node = Self {
-            output: graph.get_new_tensor_id(),
+            global_id: GlobalId::new(rng),
+            output: graph.get_new_tensor_id(rng),
             data,
         };
         let out = node.output;
@@ -54,6 +60,9 @@ impl Constant {
 
 impl Node<MilliOpGraphTensorId> for Constant {
     type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
     fn op_kind(&self) -> Self::OpKind {
         "Constant".to_string()
     }
@@ -82,6 +91,7 @@ impl MilliOp for Constant {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConstantOfShape {
+    global_id: GlobalId,
     output: MilliOpGraphTensorId,
     value: NumericScalar,
     shape: MilliOpGraphTensorId,
@@ -92,9 +102,11 @@ impl ConstantOfShape {
         graph: &mut MilliOpGraph<T>,
         value: NumericScalar,
         shape: MilliOpGraphTensorId,
+        rng: &mut impl Rng,
     ) -> MilliOpGraphNodeId {
         let node = Self {
-            output: graph.get_new_tensor_id(),
+            global_id: GlobalId::new(rng),
+            output: graph.get_new_tensor_id(rng),
             value,
             shape,
         };
@@ -104,6 +116,9 @@ impl ConstantOfShape {
 
 impl Node<MilliOpGraphTensorId> for ConstantOfShape {
     type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
     fn op_kind(&self) -> Self::OpKind {
         "ConstantOfShape".to_string()
     }

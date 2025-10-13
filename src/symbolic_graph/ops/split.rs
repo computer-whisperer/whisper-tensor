@@ -1,5 +1,5 @@
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
-use crate::graph::Node;
+use crate::graph::{GlobalId, Node};
 use crate::milli_graph::{self, MilliOpGraph};
 use crate::onnx;
 use crate::symbolic_graph::ops::Operation;
@@ -8,9 +8,11 @@ use crate::symbolic_graph::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use rand::Rng;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SplitOperation {
+    global_id: GlobalId,
     axis: Option<i64>,
     num_outputs: Option<i64>,
     input: SymbolicGraphTensorId,
@@ -24,6 +26,7 @@ impl SplitOperation {
         inputs: &[Option<SymbolicGraphTensorId>],
         outputs: &[Option<SymbolicGraphTensorId>],
         attributes: &[onnx::AttributeProto],
+        rng: &mut impl Rng
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.is_empty() || inputs.len() > 2 {
             return Err(ONNXDecodingError::InvalidOperatorInputs("Split"));
@@ -34,6 +37,7 @@ impl SplitOperation {
         let split_attribute = query_attribute_ints(attributes, "split");
 
         Ok(Self {
+            global_id: GlobalId::new(rng),
             input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Split"))?,
             split: if inputs.len() > 1 {
                 Some(inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs("Split"))?)
@@ -53,6 +57,9 @@ impl SplitOperation {
 
 impl Node<SymbolicGraphTensorId> for SplitOperation {
     type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
     fn op_kind(&self) -> Self::OpKind {
         "Split".to_string()
     }
@@ -68,8 +75,8 @@ impl Node<SymbolicGraphTensorId> for SplitOperation {
     }
 }
 impl Operation for SplitOperation {
-    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        let (mut graph, input_map) = MilliOpGraph::new(self.inputs());
+    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph<SymbolicGraphTensorId> {
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
 
         let mut output_map = HashMap::new();
 
@@ -93,6 +100,7 @@ impl Operation for SplitOperation {
                 self.axis.unwrap_or_default(),
                 self.num_outputs.map(|x| x as usize),
                 output_id,
+                rng
             );
 
             output_map.insert(out, *output_tensor_id);

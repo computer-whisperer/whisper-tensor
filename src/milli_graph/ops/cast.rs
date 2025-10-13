@@ -6,9 +6,12 @@ use crate::milli_graph::{MilliOpGraph, MilliOpGraphError, MilliOpGraphTensorId};
 use crate::numeric_tensor::NumericTensor;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use rand::Rng;
+use crate::graph::GlobalId;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Cast {
+    global_id: GlobalId,
     output: MilliOpGraphTensorId,
     data: MilliOpGraphTensorId,
     dtype: DType,
@@ -19,9 +22,11 @@ impl Cast {
         graph: &mut MilliOpGraph<T>,
         data: MilliOpGraphTensorId,
         dtype: DType,
+        rng: &mut impl Rng,
     ) -> MilliOpGraphTensorId {
-        let output = graph.get_new_tensor_id();
+        let output = graph.get_new_tensor_id(rng);
         let node = Self {
+            global_id: GlobalId::new(rng),
             output,
             data,
             dtype,
@@ -33,6 +38,9 @@ impl Cast {
 
 impl crate::graph::Node<MilliOpGraphTensorId> for Cast {
     type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
     fn op_kind(&self) -> Self::OpKind {
         "Cast".to_string()
     }

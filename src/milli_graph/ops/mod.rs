@@ -54,7 +54,7 @@ pub use where_op::*;
 
 use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
-use crate::graph::Node;
+use crate::graph::{GlobalId, Node};
 use crate::milli_graph::{MilliOpGraphError, MilliOpGraphTensorId};
 use crate::numeric_tensor::NumericTensor;
 use crate::scalar_info::ScalarInfoTyped;
@@ -315,4 +315,5 @@ impl Node<MilliOpGraphTensorId> for AnyMilliOp {
     delegate!(op_kind() -> String);
     delegate!(inputs() ->  Box<dyn Iterator<Item = MilliOpGraphTensorId> + '_>);
     delegate!(outputs() -> Box<dyn Iterator<Item = MilliOpGraphTensorId> + '_>);
+    delegate!(global_id() -> GlobalId);
 }

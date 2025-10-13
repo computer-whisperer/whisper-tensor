@@ -1,13 +1,15 @@
-use crate::graph::Node;
+use crate::graph::{GlobalId, Node};
 use crate::milli_graph::{self, MilliOpGraph};
 use crate::onnx;
 use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{ONNXDecodingError, SymbolicGraphTensorId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use rand::Rng;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SliceOperation {
+    global_id: GlobalId,
     data: SymbolicGraphTensorId,
     starts: SymbolicGraphTensorId,
     ends: SymbolicGraphTensorId,
@@ -21,6 +23,7 @@ impl SliceOperation {
         inputs: &[Option<SymbolicGraphTensorId>],
         outputs: &[Option<SymbolicGraphTensorId>],
         _attributes: &[onnx::AttributeProto],
+        rng: &mut impl Rng,
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() < 3 || inputs.len() > 5 {
             return Err(ONNXDecodingError::InvalidOperatorInputs("Slice"));
@@ -30,6 +33,7 @@ impl SliceOperation {
         }
 
         Ok(Self {
+            global_id: GlobalId::new(rng),
             data: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Slice"))?,
             starts: inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs("Slice"))?,
             ends: inputs[2].ok_or(ONNXDecodingError::InvalidOperatorInputs("Slice"))?,
@@ -50,6 +54,9 @@ impl SliceOperation {
 
 impl Node<SymbolicGraphTensorId> for SliceOperation {
     type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
     fn op_kind(&self) -> Self::OpKind {
         "Slice".to_string()
     }
@@ -68,8 +75,8 @@ impl Node<SymbolicGraphTensorId> for SliceOperation {
     }
 }
 impl Operation for SliceOperation {
-    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        let (mut graph, input_map) = MilliOpGraph::new(self.inputs());
+    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph<SymbolicGraphTensorId> {
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let out = milli_graph::ops::Slice::push_new(
             &mut graph,
             input_map[&self.data],
@@ -77,6 +84,7 @@ impl Operation for SliceOperation {
             input_map[&self.ends],
             self.steps.map(|x| input_map[&x]),
             self.axes.map(|x| input_map[&x]),
+            rng
         );
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);

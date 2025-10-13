@@ -1,6 +1,6 @@
 use crate::app::LoadedModels;
 use crate::graph_explorer::{
-    GraphExplorerApp, GraphExplorerLayerSelection, GraphExplorerSelectable, GraphExplorerState,
+    GraphExplorerApp, GraphExplorerLayerSelection, GraphExplorerSelectable, GraphExplorerSettings,
     GraphSubject, format_shape,
 };
 use crate::websockets::ServerRequestManager;
@@ -89,7 +89,7 @@ impl InspectWindow {
 impl GraphExplorerApp {
     pub(crate) fn update_inspect_windows(
         &mut self,
-        _state: &mut GraphExplorerState,
+        _state: &mut GraphExplorerSettings,
         ctx: &egui::Context,
         loaded_models: &mut LoadedModels,
         server_request_manager: &mut ServerRequestManager,

@@ -1,20 +1,20 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::numeric_tensor::NumericTensor;
-use crate::super_graph::{SuperGraphNodePath, SuperGraphTensorPath};
 use std::time::Instant;
+use crate::graph::GlobalId;
 
 pub trait SuperGraphObserver {
     fn on_node_executed(
         &mut self,
-        path: &SuperGraphNodePath,
+        path: &[GlobalId],
         start_instant: Instant,
         end_instant: Instant,
         backend: &mut EvalBackend,
     );
     fn on_tensor_assigned(
         &mut self,
-        path: &SuperGraphTensorPath,
+        path: &[GlobalId],
         tensor: &NumericTensor<DynRank>,
         backend: &mut EvalBackend,
     );
@@ -23,7 +23,7 @@ pub trait SuperGraphObserver {
 impl SuperGraphObserver for () {
     fn on_node_executed(
         &mut self,
-        _path: &SuperGraphNodePath,
+        _path: &[GlobalId],
         _start_instant: Instant,
         _end_instant: Instant,
         _backend: &mut EvalBackend,
@@ -31,7 +31,7 @@ impl SuperGraphObserver for () {
     }
     fn on_tensor_assigned(
         &mut self,
-        _path: &SuperGraphTensorPath,
+        _path: &[GlobalId],
         _tensor: &NumericTensor<DynRank>,
         _backend: &mut EvalBackend,
     ) {

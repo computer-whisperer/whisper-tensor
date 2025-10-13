@@ -7,9 +7,12 @@ use crate::numeric_scalar::NumericScalarType;
 use crate::numeric_tensor::NumericTensor;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use rand::Rng;
+use crate::graph::{GlobalId, Node};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CumSum {
+    global_id: GlobalId,
     output: MilliOpGraphTensorId,
     input: MilliOpGraphTensorId,
     axis: MilliOpGraphTensorId,
@@ -24,9 +27,11 @@ impl CumSum {
         axis: MilliOpGraphTensorId,
         exclusive: bool,
         reverse: bool,
+        rng: &mut impl Rng,
     ) -> MilliOpGraphTensorId {
-        let output = graph.get_new_tensor_id();
+        let output = graph.get_new_tensor_id(rng);
         let node = Self {
+            global_id: GlobalId::new(rng),
             output,
             input,
             axis,
@@ -38,10 +43,11 @@ impl CumSum {
     }
 }
 
-use crate::graph::Node;
-
 impl Node<MilliOpGraphTensorId> for CumSum {
     type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
     fn op_kind(&self) -> Self::OpKind {
         "CumSum".to_string()
     }

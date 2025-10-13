@@ -1,9 +1,8 @@
-use crate::graph_explorer::GraphExplorerSelectable;
 use egui::{Pos2, Rect, UiBuilder, Vec2, vec2};
 use rand::{random, random_range};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
-use whisper_tensor::milli_graph::{MilliOpGraphNodeId, MilliOpGraphTensorId};
+use whisper_tensor::graph::GlobalId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct GraphLayoutNodeId(pub(crate) usize);
@@ -19,55 +18,29 @@ pub(crate) struct GraphLayoutIOOffsets {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum GraphLayoutNodeType {
-    SymbolicGraphOperation(whisper_tensor::symbolic_graph::SymbolicGraphOperationId),
-    SymbolicGraphTensor(whisper_tensor::symbolic_graph::SymbolicGraphTensorId),
-    SuperGraphLink(whisper_tensor::super_graph::SuperGraphAnyLink),
-    SuperGraphNode(whisper_tensor::super_graph::SuperGraphNodeId),
-    MilliOpGraphNode(MilliOpGraphNodeId),
-    MilliOpGraphInput(MilliOpGraphTensorId),
-    MilliOpGraphOutput(MilliOpGraphTensorId),
+    SymbolicGraphOperation(GlobalId),
+    SymbolicGraphTensor(GlobalId),
+    SuperGraphLink(GlobalId),
+    SuperGraphNode(GlobalId),
+    MilliOpGraphNode(GlobalId),
+    MilliOpGraphInput(GlobalId),
+    MilliOpGraphOutput(GlobalId),
     ConnectionByNameSrc(GraphLayoutLinkData),
     ConnectionByNameDest(GraphLayoutLinkData),
 }
 
 impl GraphLayoutNodeType {
-    pub(crate) fn get_graph_selectable(&self) -> GraphExplorerSelectable {
+    pub(crate) fn global_id(&self) -> GlobalId {
         match self {
-            GraphLayoutNodeType::SymbolicGraphOperation(op_id) => {
-                GraphExplorerSelectable::SymbolicGraphOperationId(*op_id)
-            }
-            GraphLayoutNodeType::SymbolicGraphTensor(tensor_id) => {
-                GraphExplorerSelectable::SymbolicGraphTensorId(*tensor_id)
-            }
-            GraphLayoutNodeType::SuperGraphNode(node_id) => {
-                GraphExplorerSelectable::SuperGraphNodeId(*node_id)
-            }
-            GraphLayoutNodeType::SuperGraphLink(link) => {
-                GraphExplorerSelectable::SuperGraphLink(*link)
-            }
-            GraphLayoutNodeType::MilliOpGraphInput(tensor) => {
-                GraphExplorerSelectable::MilliOpGraphTensor(*tensor)
-            }
-            GraphLayoutNodeType::MilliOpGraphOutput(tensor) => {
-                GraphExplorerSelectable::MilliOpGraphTensor(*tensor)
-            }
-            GraphLayoutNodeType::MilliOpGraphNode(node_id) => {
-                GraphExplorerSelectable::MilliOpGraphNode(*node_id)
-            }
-            GraphLayoutNodeType::ConnectionByNameSrc(tensor_data)
-            | GraphLayoutNodeType::ConnectionByNameDest(tensor_data) => {
-                match &tensor_data.link_type {
-                    GraphLayoutLinkType::SymbolicGraphTensor(tensor_id) => {
-                        GraphExplorerSelectable::SymbolicGraphTensorId(*tensor_id)
-                    }
-                    GraphLayoutLinkType::SuperGraphLink(link) => {
-                        GraphExplorerSelectable::SuperGraphLink(*link)
-                    }
-                    GraphLayoutLinkType::MilliOpGraphTensor(tensor) => {
-                        GraphExplorerSelectable::MilliOpGraphTensor(*tensor)
-                    }
-                }
-            }
+            GraphLayoutNodeType::SymbolicGraphOperation(id) => *id,
+            GraphLayoutNodeType::SymbolicGraphTensor(id) => *id,
+            GraphLayoutNodeType::SuperGraphLink(id) => *id,
+            GraphLayoutNodeType::SuperGraphNode(id) => *id,
+            GraphLayoutNodeType::MilliOpGraphNode(id) => *id,
+            GraphLayoutNodeType::MilliOpGraphInput(id) => *id,
+            GraphLayoutNodeType::MilliOpGraphOutput(id) => *id,
+            GraphLayoutNodeType::ConnectionByNameSrc(data) => data.global_id(),
+            GraphLayoutNodeType::ConnectionByNameDest(data) => data.global_id(),
         }
     }
 }
@@ -92,28 +65,24 @@ pub(crate) struct GraphLayoutNodeInitData {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum GraphLayoutLinkType {
-    SymbolicGraphTensor(whisper_tensor::symbolic_graph::SymbolicGraphTensorId),
-    SuperGraphLink(whisper_tensor::super_graph::SuperGraphAnyLink),
-    MilliOpGraphTensor(MilliOpGraphTensorId),
-}
-
-impl GraphLayoutLinkType {
-    pub(crate) fn get_graph_selectable(&self) -> GraphExplorerSelectable {
-        match self {
-            GraphLayoutLinkType::SymbolicGraphTensor(x) => {
-                GraphExplorerSelectable::SymbolicGraphTensorId(*x)
-            }
-            GraphLayoutLinkType::SuperGraphLink(x) => GraphExplorerSelectable::SuperGraphLink(*x),
-            GraphLayoutLinkType::MilliOpGraphTensor(x) => {
-                GraphExplorerSelectable::MilliOpGraphTensor(*x)
-            }
-        }
-    }
+    SymbolicGraphTensor(GlobalId),
+    SuperGraphLink(GlobalId),
+    MilliOpGraphTensor(GlobalId),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct GraphLayoutLinkData {
     pub(crate) link_type: GraphLayoutLinkType,
+}
+
+impl GraphLayoutLinkData {
+    pub(crate) fn global_id(&self) -> GlobalId {
+        match &self.link_type {
+            GraphLayoutLinkType::SymbolicGraphTensor(id) => *id,
+            GraphLayoutLinkType::SuperGraphLink(id) => *id,
+            GraphLayoutLinkType::MilliOpGraphTensor(id) => *id,
+        }
+    }
 }
 
 type Edge = (

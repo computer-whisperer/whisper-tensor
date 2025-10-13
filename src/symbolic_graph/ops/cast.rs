@@ -1,5 +1,5 @@
 use crate::dtype::DType;
-use crate::graph::Node;
+use crate::graph::{GlobalId, Node};
 use crate::milli_graph::{self, MilliOpGraph};
 use crate::onnx;
 use crate::symbolic_graph::ops::Operation;
@@ -9,6 +9,7 @@ use std::collections::HashMap;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CastLikeOperation {
+    global_id: GlobalId,
     input: SymbolicGraphTensorId,
     target_type: SymbolicGraphTensorId,
     output: SymbolicGraphTensorId,
@@ -19,6 +20,7 @@ impl CastLikeOperation {
         inputs: &[Option<SymbolicGraphTensorId>],
         outputs: &[Option<SymbolicGraphTensorId>],
         _attributes: &[onnx::AttributeProto],
+        rng: &mut impl rand::Rng,
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 2 {
             return Err(ONNXDecodingError::InvalidOperatorInputs("CastLike"));
@@ -27,6 +29,7 @@ impl CastLikeOperation {
             return Err(ONNXDecodingError::InvalidOperatorOutputs("CastLike"));
         }
         Ok(Self {
+            global_id: GlobalId::new(rng),
             input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("CastLike"))?,
             target_type: inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs("CastLike"))?,
             output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("CastLike"))?,
@@ -36,6 +39,9 @@ impl CastLikeOperation {
 
 impl Node<SymbolicGraphTensorId> for CastLikeOperation {
     type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
     fn op_kind(&self) -> Self::OpKind {
         "CastLike".to_string()
     }
@@ -48,12 +54,13 @@ impl Node<SymbolicGraphTensorId> for CastLikeOperation {
 }
 
 impl Operation for CastLikeOperation {
-    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        let (mut graph, input_map) = MilliOpGraph::new(self.inputs());
+    fn get_milli_op_graph(&self, rng: &mut impl rand::Rng) -> MilliOpGraph<SymbolicGraphTensorId> {
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let out = milli_graph::ops::CastLike::push_new(
             &mut graph,
             input_map[&self.input],
             input_map[&self.target_type],
+            rng,
         );
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
@@ -64,6 +71,7 @@ impl Operation for CastLikeOperation {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CastOperation {
+    global_id: GlobalId,
     input: SymbolicGraphTensorId,
     output: SymbolicGraphTensorId,
     to: DType,
@@ -74,6 +82,7 @@ impl CastOperation {
         inputs: &[Option<SymbolicGraphTensorId>],
         outputs: &[Option<SymbolicGraphTensorId>],
         attributes: &[onnx::AttributeProto],
+        rng: &mut impl rand::Rng,
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 1 {
             return Err(ONNXDecodingError::InvalidOperatorInputs("Cast"));
@@ -93,6 +102,7 @@ impl CastOperation {
             .map_err(|x| ONNXDecodingError::ProtobufDecodeError(x.into()))?;
         let to = DType::try_from(to_datatype)?;
         Ok(Self {
+            global_id: GlobalId::new(rng),
             input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Cast"))?,
             output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Cast"))?,
             to,
@@ -102,6 +112,9 @@ impl CastOperation {
 
 impl Node<SymbolicGraphTensorId> for CastOperation {
     type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
     fn op_kind(&self) -> Self::OpKind {
         "Cast".to_string()
     }
@@ -114,9 +127,9 @@ impl Node<SymbolicGraphTensorId> for CastOperation {
 }
 
 impl Operation for CastOperation {
-    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        let (mut graph, input_map) = MilliOpGraph::new(self.inputs());
-        let out = milli_graph::ops::Cast::push_new(&mut graph, input_map[&self.input], self.to);
+    fn get_milli_op_graph(&self, rng: &mut impl rand::Rng) -> MilliOpGraph<SymbolicGraphTensorId> {
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
+        let out = milli_graph::ops::Cast::push_new(&mut graph, input_map[&self.input], self.to, rng);
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
         graph.set_output_map(output_map);

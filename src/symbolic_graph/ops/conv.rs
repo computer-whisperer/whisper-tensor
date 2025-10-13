@@ -1,4 +1,5 @@
-use crate::graph::Node;
+use rand::Rng;
+use crate::graph::{GlobalId, Node};
 use crate::milli_graph::MilliOpGraph;
 use crate::onnx;
 use crate::symbolic_graph::ops::Operation;
@@ -18,6 +19,7 @@ pub(crate) enum ConvOperationAutoPad {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ConvOperation {
+    global_id: GlobalId,
     input: SymbolicGraphTensorId,
     output: SymbolicGraphTensorId,
     weight: SymbolicGraphTensorId,
@@ -35,6 +37,7 @@ impl ConvOperation {
         inputs: &[Option<SymbolicGraphTensorId>],
         outputs: &[Option<SymbolicGraphTensorId>],
         attributes: &[onnx::AttributeProto],
+        rng: &mut impl Rng,
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() < 2 || inputs.len() > 3 {
             return Err(ONNXDecodingError::InvalidOperatorInputs("Conv"));
@@ -62,6 +65,7 @@ impl ConvOperation {
         let strides = query_attribute_ints(attributes, "strides").unwrap_or_default();
 
         Ok(Self {
+            global_id: GlobalId::new(rng),
             input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Conv"))?,
             weight: inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs("Conv"))?,
             bias: if inputs.len() > 2 {
@@ -82,6 +86,9 @@ impl ConvOperation {
 
 impl Node<SymbolicGraphTensorId> for ConvOperation {
     type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
     fn op_kind(&self) -> Self::OpKind {
         "Conv".to_string()
     }
@@ -100,7 +107,7 @@ impl Node<SymbolicGraphTensorId> for ConvOperation {
 }
 
 impl Operation for ConvOperation {
-    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
+    fn get_milli_op_graph(&self, _rng: &mut impl Rng) -> MilliOpGraph<SymbolicGraphTensorId> {
         unimplemented!();
     }
 }

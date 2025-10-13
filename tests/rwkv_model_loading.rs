@@ -62,7 +62,8 @@ fn rwkv01b_model_loads() {
             Some(whisper_tensor_import::ModelTypeHint::RWKV7),
         )
         .expect("import rwkv7 to onnx");
-        let model = Model::new_from_onnx(&onnx_bytes).expect("model loads");
+        let mut rng = rand::rng();
+        let model = Model::new_from_onnx(&onnx_bytes, &mut rng).expect("model loads");
 
         // Ensure we can construct Eval backend and load constant tensors (which should trigger
         // lazy external loading for any external_data entries)
@@ -100,7 +101,8 @@ fn rwkv01b_single_step_runs_shape_sanity() {
         Some(whisper_tensor_import::ModelTypeHint::RWKV7),
     )
     .expect("import rwkv7 to onnx");
-    let model = Model::new_from_onnx(&onnx_bytes).expect("model loads");
+    let mut rng = rand::rng();
+    let model = Model::new_from_onnx(&onnx_bytes, &mut rng).expect("model loads");
 
     //let mut eval = EvalBackend::NDArray;
     let mut observer = ();
@@ -174,7 +176,8 @@ fn rwkv01b_model_loads_with_binfile() {
     let old_cwd = std::env::current_dir().expect("get cwd");
     std::env::set_current_dir(tempdir.path()).expect("set cwd to tempdir");
 
-    let model = Model::new_from_onnx(&onnx_bytes).expect("model loads from onnx bytes");
+    let mut rng = rand::rng();
+    let model = Model::new_from_onnx(&onnx_bytes, &mut rng).expect("model loads from onnx bytes");
 
     // Trigger lazy tensor loading via the eval path
     let mut eval = EvalBackend::NDArray;
@@ -206,7 +209,8 @@ fn rwkv01b_model_loads_with_origin_reference() {
     .expect("import rwkv7 to onnx (OriginReference)");
 
     // No cwd or symlink manipulation needed: location is absolute inside ONNX now
-    let model = Model::new_from_onnx(&onnx_bytes).expect("model loads from onnx bytes");
+    let mut rng = rand::rng();
+    let model = Model::new_from_onnx(&onnx_bytes, &mut rng).expect("model loads from onnx bytes");
 
     // Trigger lazy tensor loading via the eval path (fetch tensors from the .pth via candle)
     let mut eval = EvalBackend::NDArray;

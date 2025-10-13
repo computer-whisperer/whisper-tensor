@@ -1,5 +1,5 @@
 use crate::graph_explorer::inspect_windows::InspectWindow;
-use crate::graph_explorer::{GraphExplorerApp, GraphExplorerState};
+use crate::graph_explorer::{GraphExplorerApp, GraphExplorerSettings, GraphRootSubjectSelection};
 use crate::llm_explorer::{LLMExplorerApp, LLMExplorerState};
 use crate::websockets;
 use crate::websockets::ServerRequestManager;
@@ -19,6 +19,7 @@ use whisper_tensor_server::{
     CurrentInterfacesReportEntry, CurrentModelsReportEntry, LoadedModelId, ServerConfigReport,
     WebsocketClientServerMessage, WebsocketServerClientMessage,
 };
+use crate::widgets::toggle::toggle_ui;
 
 #[derive(Clone, Debug)]
 pub(crate) enum ModelLoadState {
@@ -39,7 +40,7 @@ struct AppState {
     model_to_load_path_text: String,
     model_type_hint_selected: Option<ModelTypeHint>,
 
-    graph_explorer_state: GraphExplorerState,
+    graph_explorer_settings: GraphExplorerSettings,
     llm_explorer_state: LLMExplorerState,
 }
 
@@ -49,7 +50,7 @@ impl Default for AppState {
             selected_tab: SelectedTab::Models,
             model_to_load_path_text: String::new(),
             model_type_hint_selected: None,
-            graph_explorer_state: GraphExplorerState::default(),
+            graph_explorer_settings: GraphExplorerSettings::default(),
             llm_explorer_state: LLMExplorerState::default(),
         }
     }
@@ -82,7 +83,7 @@ pub struct WebUIApp {
     next_interface_id: InterfaceId,
     loaded_models: LoadedModels,
     app_state: AppState,
-    graph_explorer_app: GraphExplorerApp,
+    graph_explorer_app: Option<GraphExplorerApp>,
     llm_explorer_app: LLMExplorerApp,
     loaded_tokenizers: LoadedTokenizers,
     server_config_report: Option<ServerConfigReport>,
@@ -121,7 +122,7 @@ impl WebUIApp {
             next_interface_id: 0,
             websocket_server_client_receiver: server_client_receiver,
             app_state,
-            graph_explorer_app: GraphExplorerApp::new(),
+            graph_explorer_app: None,
             loaded_tokenizers: LoadedTokenizers::new(),
             llm_explorer_app: LLMExplorerApp::new(),
             server_config_report: None,
@@ -417,15 +418,71 @@ impl eframe::App for WebUIApp {
                     });
                 }
                 SelectedTab::GraphExplorer => {
-                    if let Some(server_config_report) = &self.server_config_report {
-                        self.graph_explorer_app.update(
-                            &mut self.app_state.graph_explorer_state,
-                            &mut self.loaded_models,
-                            &mut self.loaded_tokenizers,
-                            &mut self.server_request_manager,
-                            server_config_report,
-                            ui,
-                        )
+                    ui.horizontal(|ui| {
+                        let model_selector_options = {
+                            let mut options = vec![];
+                            for (interface_id, interface) in &self.loaded_models.current_interfaces {
+                                options.push((
+                                    GraphRootSubjectSelection::Interface(*interface_id),
+                                    format!("({}) {}", interface_id, interface.interface_name.clone()),
+                                ));
+                            }
+                            for model in &self.loaded_models.current_models {
+                                options.push((
+                                    GraphRootSubjectSelection::Model(model.model_id),
+                                    format!("({}) {}", model.model_id, model.model_name.clone()),
+                                ));
+                            }
+                            options
+                        };
+                        let mut value = self.graph_explorer_app.and_then(|x| x.root_selection);
+                        let initial_value = value.clone();
+                        egui::ComboBox::from_id_salt(123661)
+                            .selected_text(
+                                model_selector_options
+                                    .iter()
+                                    .find(|(a, _b)| value.as_ref().map(|x| x == a).unwrap_or(false))
+                                    .map(|(_a, b)| b.clone())
+                                    .unwrap_or("Select a model or interface".to_string()),
+                            )
+                            .show_ui(ui, |ui| {
+                                for (a, b) in model_selector_options {
+                                    ui.selectable_value(&mut value, Some(a), b.to_string());
+                                }
+                            });
+                        if value != initial_value {
+                            self.next_graph_subject_path = value.map(|x| vec![x]);
+                        }
+                        if ui.button("Load New Model").clicked() {
+                            self.loaded_models.model_load_state = Some(ModelLoadState::DialogOpen(None));
+                        };
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            toggle_ui(ui, &mut self.app_state.graph_explorer_settings.explorer_minimap);
+                            ui.label("Minimap:");
+                            toggle_ui(ui, &mut self.app_state.graph_explorer_settings.explorer_physics);
+                            ui.label("Physics:");
+                            toggle_ui(ui, &mut self.app_state.graph_explorer_settings.explorer_node_wave);
+                            ui.label("Activity:");
+                            toggle_ui(ui, &mut self.app_state.graph_explorer_settings.do_all_explorer_swatches);
+                            ui.label("All Swatches:");
+                            toggle_ui(ui, &mut self.app_state.graph_explorer_settings.do_explorer_swatches_in_view);
+                            ui.label("Swatches In-frame:");
+                        })
+                    });
+                    if let Some(app) = &mut self.graph_explorer_app {
+                        if let Some(server_config_report) = &self.server_config_report {
+                            ui.horizontal(|ui| {
+                                app.render_minimap(ui)
+                            });
+                            app.update(
+                                &mut self.app_state.graph_explorer_settings,
+                                &mut self.loaded_models,
+                                &mut self.loaded_tokenizers,
+                                &mut self.server_request_manager,
+                                server_config_report,
+                                ui,
+                            );
+                        }
                     }
                 }
                 SelectedTab::LLMExplorer => {
@@ -438,21 +495,18 @@ impl eframe::App for WebUIApp {
                     );
                 }
             }
-
-            /*
-            if ui.button("Ping").clicked() {
-                self.websocket_client_server_message.send(WebsocketClientServerMessage::Ping);
-
-            };*/
         });
 
         if let SelectedTab::GraphExplorer = self.app_state.selected_tab {
-            self.graph_explorer_app.update_inspect_windows(
-                &mut self.app_state.graph_explorer_state,
-                ctx,
-                &mut self.loaded_models,
-                &mut self.server_request_manager,
-            )
+            if let Some(app) = &mut self.graph_explorer_app {
+                app.update_inspect_windows(
+                    &mut self.app_state.graph_explorer_state,
+                    ctx,
+                    &mut self.loaded_models,
+                    &mut self.server_request_manager,
+                )
+
+            }
         }
     }
 

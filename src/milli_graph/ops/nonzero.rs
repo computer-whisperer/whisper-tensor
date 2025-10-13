@@ -1,7 +1,7 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::dtype::DType;
-use crate::graph::Node;
+use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError, MilliOpGraphTensorId};
 use crate::numeric_tensor::NumericTensor;
@@ -13,6 +13,7 @@ use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NonZero {
+    global_id: GlobalId,
     output: MilliOpGraphTensorId,
     input: MilliOpGraphTensorId,
 }
@@ -21,9 +22,10 @@ impl NonZero {
     pub fn push_new<T: std::hash::Hash + Clone + Eq + 'static>(
         graph: &mut MilliOpGraph<T>,
         input: MilliOpGraphTensorId,
+        rng: &mut impl rand::Rng,
     ) -> MilliOpGraphTensorId {
-        let output = graph.get_new_tensor_id();
-        let node = Self { output, input };
+        let output = graph.get_new_tensor_id(rng);
+        let node = Self { output, input, global_id: GlobalId::new(rng) };
         graph.push_op(AnyMilliOp::NonZero(node));
         output
     }
@@ -31,6 +33,9 @@ impl NonZero {
 
 impl Node<MilliOpGraphTensorId> for NonZero {
     type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
     fn op_kind(&self) -> Self::OpKind {
         "NonZero".to_string()
     }

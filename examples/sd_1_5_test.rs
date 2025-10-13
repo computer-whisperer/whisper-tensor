@@ -21,5 +21,6 @@ fn main() {
         .unwrap()
         .write_all(&onnx_data)
         .unwrap();
-    let _runtime = Model::new_from_onnx(&onnx_data).unwrap();
+    let mut rng = rand::rng();
+    let _runtime = Model::new_from_onnx(&onnx_data, &mut rng).unwrap();
 }

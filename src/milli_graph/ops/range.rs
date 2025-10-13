@@ -5,10 +5,13 @@ use crate::milli_graph::{MilliOpGraph, MilliOpGraphError, MilliOpGraphTensorId};
 use crate::numeric_tensor::NumericTensor;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use rand::Rng;
 use typenum::P1;
+use crate::graph::GlobalId;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Range {
+    global_id: GlobalId,
     output: MilliOpGraphTensorId,
     start: MilliOpGraphTensorId,
     end: MilliOpGraphTensorId,
@@ -21,9 +24,11 @@ impl Range {
         start: MilliOpGraphTensorId,
         end: MilliOpGraphTensorId,
         delta: MilliOpGraphTensorId,
+        rng: &mut impl Rng,
     ) -> MilliOpGraphTensorId {
-        let output = graph.get_new_tensor_id();
+        let output = graph.get_new_tensor_id(rng);
         let node = Self {
+            global_id: GlobalId::new(rng),
             output,
             start,
             end,
@@ -36,6 +41,9 @@ impl Range {
 
 impl crate::graph::Node<MilliOpGraphTensorId> for Range {
     type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
     fn op_kind(&self) -> Self::OpKind {
         "Range".to_string()
     }

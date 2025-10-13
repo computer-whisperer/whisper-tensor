@@ -2,14 +2,14 @@ use crate::backends::ModelLoadedTensorCache;
 #[cfg(feature = "vulkan")]
 use crate::backends::vulkan_backend::VulkanImmediateExecutor;
 use crate::dtype::{DType, DTypeError};
-use crate::graph::Node;
+use crate::graph::{Link, Node};
 use crate::numeric_tensor::NumericTensor;
 use crate::symbolic_graph::observer::SymbolicGraphObserver;
 use crate::symbolic_graph::ops::{EvalError, Operation};
 use crate::symbolic_graph::tensor_store::TensorStore;
 use crate::symbolic_graph::{
-    GraphOperation, SymbolicGraph, SymbolicGraphNodePath, SymbolicGraphOperationId,
-    SymbolicGraphTensorId, SymbolicGraphTensorPath, check_tensor_matches,
+    GraphOperation, SymbolicGraph, SymbolicGraphOperationId,
+    SymbolicGraphTensorId, check_tensor_matches,
 };
 use crate::tensor_rank::{DynRank, Rank};
 use std::collections::{HashMap, HashSet};
@@ -140,8 +140,9 @@ pub fn run<T: SymbolicGraphObserver>(
     let tensors_by_name = model.get_tensors_by_name();
     for (name, tensor) in inputs {
         if let Some(tensor_id) = tensors_by_name.get(&name) {
+            let onnx_tensor = model.get_tensor_info(*tensor_id).unwrap();
             observer.on_tensor_assigned(
-                &SymbolicGraphTensorPath::Tensor(*tensor_id),
+                &[onnx_tensor.global_id()],
                 &tensor,
                 eval_backend,
             );
@@ -234,7 +235,7 @@ pub fn run<T: SymbolicGraphObserver>(
                 .map_err(|x| EvalRuntimeError::EvalError(name.clone(), x))?;
             let end_instant = Instant::now();
             observer.on_op_executed(
-                &SymbolicGraphNodePath::Node(op_id),
+                &[op.global_id()],
                 start_instant,
                 end_instant,
                 eval_backend,
@@ -249,7 +250,7 @@ pub fn run<T: SymbolicGraphObserver>(
                     .map_err(|x| EvalRuntimeError::EvalError(name.clone(), x))?;
 
                 observer.on_tensor_assigned(
-                    &SymbolicGraphTensorPath::Tensor(tensor_id),
+                    &[tensor_info.global_id()],
                     &value,
                     eval_backend,
                 );

@@ -32,49 +32,52 @@ fn main() {
     )
     .unwrap();
 
-    let model = Model::new_from_onnx(&onnx_data).unwrap();
+    let mut rng = rand::rng();
+    let model = Model::new_from_onnx(&onnx_data, &mut rng).unwrap();
 
     let mut builder = SuperGraphBuilder::new();
 
-    let model_link = SuperGraphLinkTensorMap::new(builder.get_next_link_id());
-    let text_input_link = SuperGraphLinkString::new(builder.get_next_link_id());
+    let model_link = SuperGraphLinkTensorMap::new(builder.get_next_link_id(), &mut rng);
+    let text_input_link = SuperGraphLinkString::new(builder.get_next_link_id(), &mut rng);
 
     let tokenizer_link = SuperGraphNodeTokenizerLoad::new_and_add(
         &mut builder,
         TokenizerInfo::HFTokenizer("gpt2".to_string()),
+        &mut rng,
     );
 
     let tokens =
-        SuperGraphNodeTokenizerEncode::new_and_add(&mut builder, tokenizer_link, text_input_link);
+        SuperGraphNodeTokenizerEncode::new_and_add(&mut builder, tokenizer_link, text_input_link, &mut rng);
 
     // Model invocation
     let logit_output = {
         let inputs = vec![(tokens, "input1".to_string())];
         let (outputs, logit_output) = {
-            let tensor = SuperGraphLinkTensor::new(builder.get_next_link_id());
+            let tensor = SuperGraphLinkTensor::new(builder.get_next_link_id(), &mut rng);
             let outputs = vec![("output1".to_string(), tensor)];
             (outputs, tensor)
         };
-        let node = SuperGraphNodeModelExecution::new(model_link, 0, inputs, outputs);
+        let node = SuperGraphNodeModelExecution::new(&mut rng, model_link, 0, inputs, outputs);
         builder.add_node(node.into());
         logit_output
     };
 
     // Sampler
     let chosen_token = {
-        let (mut milli_graph, inputs_map) = MilliOpGraph::new([logit_output]);
+        let (mut milli_graph, inputs_map) = MilliOpGraph::new([logit_output], &mut rng);
         let logits_input = inputs_map[&logit_output];
 
         // Slice to last token
 
         let logits_in = {
-            let input_shape = Shape::push_new(&mut milli_graph, logits_input);
+            let input_shape = Shape::push_new(&mut milli_graph, logits_input, &mut rng);
             let const_a = Constant::push_new(
                 &mut milli_graph,
                 NDArrayNumericTensor::from_vec(vec![0i64, 0, 1, 0]).to_dyn(),
+                &mut rng,
             );
-            let value = SimpleBinary::mul(&mut milli_graph, input_shape, const_a);
-            let value = SimpleBinary::sub(&mut milli_graph, value, const_a);
+            let value = SimpleBinary::mul(&mut milli_graph, input_shape, const_a, &mut rng);
+            let value = SimpleBinary::sub(&mut milli_graph, value, const_a, &mut rng);
             Slice::push_new(
                 &mut milli_graph,
                 logits_input,
@@ -82,6 +85,7 @@ fn main() {
                 input_shape,
                 None,
                 None,
+                &mut rng,
             )
         };
 
@@ -89,27 +93,28 @@ fn main() {
         let const_0 = Constant::push_new(
             &mut milli_graph,
             NDArrayNumericTensor::from_vec(vec![0i64]).to_dyn(),
+            &mut rng,
         );
-        let logits_in = Squeeze::push_new(&mut milli_graph, logits_in, const_0);
-        let logits_in = Squeeze::push_new(&mut milli_graph, logits_in, const_0);
-        let logits_in = Squeeze::push_new(&mut milli_graph, logits_in, const_0);
+        let logits_in = Squeeze::push_new(&mut milli_graph, logits_in, const_0, &mut rng);
+        let logits_in = Squeeze::push_new(&mut milli_graph, logits_in, const_0, &mut rng);
+        let logits_in = Squeeze::push_new(&mut milli_graph, logits_in, const_0, &mut rng);
 
-        let output = ArgMax::push_new(&mut milli_graph, logits_in, 0, false, false);
-        let output = Cast::push_new(&mut milli_graph, output, DType::U32);
-        let output = Unsqueeze::push_new(&mut milli_graph, output, const_0);
+        let output = ArgMax::push_new(&mut milli_graph, logits_in, 0, false, false, &mut rng);
+        let output = Cast::push_new(&mut milli_graph, output, DType::U32, &mut rng);
+        let output = Unsqueeze::push_new(&mut milli_graph, output, const_0, &mut rng);
         let mut output_map = HashMap::new();
 
-        let output_tensor = SuperGraphLinkTensor::new(builder.get_next_link_id());
+        let output_tensor = SuperGraphLinkTensor::new(builder.get_next_link_id(), &mut rng);
         output_map.insert(output, output_tensor);
         milli_graph.set_output_map(output_map);
 
-        let node = SuperGraphNodeMilliOpGraph::new(milli_graph);
+        let node = SuperGraphNodeMilliOpGraph::new(milli_graph, &mut rng);
         builder.add_node(node.into());
         output_tensor
     };
 
     let text_output =
-        SuperGraphNodeTokenizerDecode::new_and_add(&mut builder, tokenizer_link, chosen_token);
+        SuperGraphNodeTokenizerDecode::new_and_add(&mut builder, tokenizer_link, chosen_token, &mut rng);
 
     let inputs = vec![model_link.to_any(), text_input_link.to_any()];
     let outputs = vec![text_output.to_any()];

@@ -5,10 +5,13 @@ use crate::milli_graph::{MilliOpGraph, MilliOpGraphError, MilliOpGraphTensorId};
 use crate::numeric_tensor::NumericTensor;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use rand::Rng;
 use typenum::P1;
+use crate::graph::GlobalId;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Expand {
+    global_id: GlobalId,
     output: MilliOpGraphTensorId,
     input: MilliOpGraphTensorId,
     shape: MilliOpGraphTensorId,
@@ -19,9 +22,11 @@ impl Expand {
         graph: &mut MilliOpGraph<T>,
         input: MilliOpGraphTensorId,
         shape: MilliOpGraphTensorId,
+        rng: &mut impl Rng,
     ) -> MilliOpGraphTensorId {
-        let output = graph.get_new_tensor_id();
+        let output = graph.get_new_tensor_id(rng);
         let node = Self {
+            global_id: GlobalId::new(rng),
             output,
             input,
             shape,
@@ -33,6 +38,9 @@ impl Expand {
 
 impl crate::graph::Node<MilliOpGraphTensorId> for Expand {
     type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
     fn op_kind(&self) -> Self::OpKind {
         "Expand".to_string()
     }

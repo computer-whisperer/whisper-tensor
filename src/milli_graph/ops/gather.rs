@@ -1,14 +1,16 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
-use crate::graph::Node;
+use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError, MilliOpGraphTensorId};
 use crate::numeric_tensor::NumericTensor;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use rand::Rng;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Gather {
+    global_id: GlobalId,
     output: MilliOpGraphTensorId,
     data: MilliOpGraphTensorId,
     indices: MilliOpGraphTensorId,
@@ -21,9 +23,11 @@ impl Gather {
         data: MilliOpGraphTensorId,
         indices: MilliOpGraphTensorId,
         axis: i64,
+        rng: &mut impl Rng,
     ) -> MilliOpGraphTensorId {
-        let output = graph.get_new_tensor_id();
+        let output = graph.get_new_tensor_id(rng);
         let node = Self {
+            global_id: GlobalId::new(rng),
             output,
             data,
             indices,
@@ -36,6 +40,9 @@ impl Gather {
 
 impl Node<MilliOpGraphTensorId> for Gather {
     type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
     fn op_kind(&self) -> Self::OpKind {
         "Gather".to_string()
     }

@@ -1,7 +1,7 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::dtype::DTypeError;
-use crate::graph::{Graph, GraphPath, InnerGraph, LinkPath, Node, NodePath};
+use crate::graph::{GlobalId, Graph, InnerGraph, Link, Node};
 use crate::milli_graph::observer::MilliOpGraphObserver;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::numeric_tensor::NumericTensor;
@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::time::Instant;
+use rand::Rng;
 
 pub mod observer;
 pub mod ops;
@@ -43,29 +44,47 @@ pub struct MilliOpGraphNodeId {
     inner: usize,
 }
 
+#[derive(Debug, Clone, Copy, Hash, Ord, PartialOrd, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MilliOpGraphTensor {
+    global_id: GlobalId,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MilliOpGraph<ID: Hash + Clone + Eq> {
     pub input_map: HashMap<ID, MilliOpGraphTensorId>,
     pub input_ordering: Vec<ID>,
     pub output_map: Option<HashMap<MilliOpGraphTensorId, ID>>,
     pub output_ordering: Option<Vec<ID>>,
+    ops_by_global_id: HashMap<GlobalId, MilliOpGraphNodeId>,
+    tensors_by_global_id: HashMap<GlobalId, MilliOpGraphTensorId>,
     ops: HashMap<MilliOpGraphNodeId, AnyMilliOp>,
+    tensors: HashMap<MilliOpGraphTensorId, MilliOpGraphTensor>,
     next_tensor_id: usize,
     next_node_id: usize,
 }
 
 impl<ID: Hash + Clone + Eq + 'static> MilliOpGraph<ID> {
-    pub fn new(inputs: impl IntoIterator<Item = ID>) -> (Self, HashMap<ID, MilliOpGraphTensorId>) {
+    pub fn new(inputs: impl IntoIterator<Item = ID>, rng: &mut impl Rng) -> (Self, HashMap<ID, MilliOpGraphTensorId>) {
         let mut next_op_id = 0;
         let mut input_map = HashMap::new();
         let mut input_ordering = Vec::new();
+        let mut tensors = HashMap::new();
+        let mut tensors_by_global_id = HashMap::new();
+        let ops_by_global_id = HashMap::new();
         for input in inputs {
             input_ordering.push(input.clone());
-            input_map.insert(input.clone(), MilliOpGraphTensorId { inner: next_op_id });
+            let tensor_id = MilliOpGraphTensorId { inner: next_op_id };
+            let global_id = GlobalId::new(rng);
+            input_map.insert(input.clone(), tensor_id);
+            tensors.insert(tensor_id, MilliOpGraphTensor { global_id });
+            tensors_by_global_id.insert(global_id, tensor_id);
             next_op_id += 1;
         }
         (
             Self {
+                tensors_by_global_id,
+                ops_by_global_id,
+                tensors,
                 input_ordering,
                 output_ordering: None,
                 input_map: input_map.clone(),
@@ -124,11 +143,14 @@ impl<ID: Hash + Clone + Eq + 'static> MilliOpGraph<ID> {
         self.output_ordering = Some(output_ordering);
     }
 
-    pub fn get_new_tensor_id(&mut self) -> MilliOpGraphTensorId {
+    pub fn get_new_tensor_id(&mut self, rng: &mut impl Rng) -> MilliOpGraphTensorId {
         let new_id = MilliOpGraphTensorId {
             inner: self.next_tensor_id,
         };
         self.next_tensor_id += 1;
+        let global_id = GlobalId::new(rng);
+        self.tensors.insert(new_id, MilliOpGraphTensor { global_id });
+        self.tensors_by_global_id.insert(global_id, new_id);
         new_id
     }
 
@@ -137,6 +159,7 @@ impl<ID: Hash + Clone + Eq + 'static> MilliOpGraph<ID> {
             inner: self.next_node_id,
         };
         self.next_node_id += 1;
+        self.ops_by_global_id.insert(op.global_id(), new_node_id);
         self.ops.insert(new_node_id, op);
         new_node_id
     }
@@ -167,14 +190,14 @@ impl<ID: Hash + Clone + Eq + 'static> MilliOpGraph<ID> {
             let out_vec: Vec<_> = op.eval(&intermediate_values, backend)?.collect();
             let end_instant = Instant::now();
             observer.on_node_executed(
-                &MilliOpGraphNodePath::Op(*op_id),
+                &[op.global_id()],
                 start_instant,
                 end_instant,
                 backend,
             );
             for (tensor_id, value) in out_vec {
                 observer.on_tensor_assigned(
-                    &MilliOpGraphTensorPath::Tensor(tensor_id),
+                    &[self.tensors[&tensor_id].global_id()],
                     &value,
                     backend,
                 );
@@ -201,20 +224,12 @@ pub enum MilliOpGraphNodePath {
     Op(MilliOpGraphNodeId),
 }
 
-impl GraphPath for () {}
-
-impl NodePath for MilliOpGraphNodePath {}
-
-impl LinkPath for MilliOpGraphTensorPath {}
 
 impl<IoLinkId: Hash + Clone + Eq + std::fmt::Debug + 'static> Graph for MilliOpGraph<IoLinkId> {
-    type GraphPath = ();
-    type NodePath = MilliOpGraphNodePath;
-    type LinkPath = MilliOpGraphTensorPath;
     type Inner = Self;
     type AnySubGraph = Self;
 
-    fn inner(&self, _: &Self::GraphPath) -> &Self::AnySubGraph {
+    fn inner(&self) -> &Self::AnySubGraph {
         self
     }
 }
@@ -226,7 +241,7 @@ impl<IoLinkId: Hash + Clone + Eq + std::fmt::Debug + 'static> InnerGraph
     type LinkId = MilliOpGraphTensorId;
     type Error = ();
     type AnyNode = AnyMilliOp;
-    type AnyLink = MilliOpGraphTensorId;
+    type AnyLink = MilliOpGraphTensor;
     type InputLinkId = IoLinkId;
     type OutputLinkId = IoLinkId;
 
@@ -242,8 +257,16 @@ impl<IoLinkId: Hash + Clone + Eq + std::fmt::Debug + 'static> InnerGraph
         self.ops.get(id)
     }
 
-    fn get_link(&self, _id: &Self::LinkId) -> Option<&Self::AnyLink> {
-        None
+    fn get_link(&self, id: &Self::LinkId) -> Option<&Self::AnyLink> {
+        self.tensors.get(id)
+    }
+
+    fn get_link_by_global_id(&self, global_id: &GlobalId) -> Option<&Self::AnyLink> {
+        self.tensors_by_global_id.get(global_id).and_then(|x| self.tensors.get(x))
+    }
+
+    fn get_node_by_global_id(&self, global_id: &GlobalId) -> Option<&Self::AnyNode> {
+        self.ops_by_global_id.get(global_id).and_then(|x| self.ops.get(x))
     }
 
     fn input_links(&self) -> impl Iterator<Item = (Self::InputLinkId, Self::LinkId)> {
@@ -277,8 +300,9 @@ impl<IoLinkId: Hash + Clone + Eq + std::fmt::Debug + 'static> InnerGraph
     }
 }
 
-impl crate::graph::Link<MilliOpGraphTensorId> for MilliOpGraphTensorId {
-    fn link_id(&self) -> MilliOpGraphTensorId {
-        *self
+
+impl crate::graph::Link for MilliOpGraphTensor {
+    fn global_id(&self) -> GlobalId {
+        self.global_id
     }
 }

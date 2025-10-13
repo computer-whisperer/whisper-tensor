@@ -1,5 +1,5 @@
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
-use crate::graph::Node;
+use crate::graph::{GlobalId, Node};
 use crate::milli_graph::{self, MilliOpGraph};
 use crate::onnx;
 use crate::symbolic_graph::ops::Operation;
@@ -8,9 +8,11 @@ use crate::symbolic_graph::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use rand::Rng;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CumSumOperation {
+    global_id: GlobalId,
     input: SymbolicGraphTensorId,
     output: SymbolicGraphTensorId,
     axis: SymbolicGraphTensorId,
@@ -23,6 +25,7 @@ impl CumSumOperation {
         inputs: &[Option<SymbolicGraphTensorId>],
         outputs: &[Option<SymbolicGraphTensorId>],
         attributes: &[onnx::AttributeProto],
+        rng: &mut impl Rng,
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 2 {
             return Err(ONNXDecodingError::InvalidOperatorInputs("CumSum"));
@@ -33,6 +36,7 @@ impl CumSumOperation {
         let exclusive = query_attribute_int(attributes, "exclusive").unwrap_or_default() != 0;
         let reverse = query_attribute_int(attributes, "reverse").unwrap_or_default() != 0;
         Ok(Self {
+            global_id: GlobalId::new(rng),
             input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Unary"))?,
             axis: inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs("Unary"))?,
             output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Unary"))?,
@@ -44,6 +48,9 @@ impl CumSumOperation {
 
 impl Node<SymbolicGraphTensorId> for CumSumOperation {
     type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
     fn op_kind(&self) -> Self::OpKind {
         "CumSum".to_string()
     }
@@ -56,13 +63,13 @@ impl Node<SymbolicGraphTensorId> for CumSumOperation {
 }
 
 impl Operation for CumSumOperation {
-    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        let (mut graph, input_map) = MilliOpGraph::new(self.inputs());
+    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph<SymbolicGraphTensorId> {
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let a = input_map[&self.input];
         let b = input_map[&self.axis];
 
         let out =
-            milli_graph::ops::CumSum::push_new(&mut graph, a, b, self.exclusive, self.reverse);
+            milli_graph::ops::CumSum::push_new(&mut graph, a, b, self.exclusive, self.reverse, rng);
 
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
@@ -73,6 +80,7 @@ impl Operation for CumSumOperation {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ReduceMeanOperation {
+    global_id: GlobalId,
     keepdims: Option<bool>,
     noop_with_empty_axes: Option<bool>,
     input_data: SymbolicGraphTensorId,
@@ -86,6 +94,7 @@ impl ReduceMeanOperation {
         inputs: &[Option<SymbolicGraphTensorId>],
         outputs: &[Option<SymbolicGraphTensorId>],
         attributes: &[onnx::AttributeProto],
+        rng: &mut impl Rng,
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.is_empty() || inputs.len() > 2 {
             return Err(ONNXDecodingError::InvalidOperatorInputs("ReduceMean"));
@@ -100,6 +109,7 @@ impl ReduceMeanOperation {
             query_attribute_int(attributes, "noop_with_empty_axes").map(|x| x != 0);
 
         Ok(Self {
+            global_id: GlobalId::new(rng),
             keepdims,
             noop_with_empty_axes,
             input_data: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("ReduceMean"))?,
@@ -116,6 +126,9 @@ impl ReduceMeanOperation {
 
 impl Node<SymbolicGraphTensorId> for ReduceMeanOperation {
     type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
     fn op_kind(&self) -> Self::OpKind {
         "ReduceMean".to_string()
     }
@@ -131,13 +144,13 @@ impl Node<SymbolicGraphTensorId> for ReduceMeanOperation {
     }
 }
 impl Operation for ReduceMeanOperation {
-    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        let (mut graph, input_map) = MilliOpGraph::new(self.inputs());
+fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph<SymbolicGraphTensorId> {
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let axes = if let Some(input_axes) = &self.input_axes {
             Some(input_map[input_axes])
         } else if let Some(axes) = &self.axes_attr {
             let tensor = NDArrayNumericTensor::from(axes.clone());
-            let tid = milli_graph::ops::Constant::push_new(&mut graph, tensor.to_dyn());
+            let tid = milli_graph::ops::Constant::push_new(&mut graph, tensor.to_dyn(), rng);
             Some(tid)
         } else {
             None
@@ -148,6 +161,7 @@ impl Operation for ReduceMeanOperation {
             axes,
             self.keepdims.unwrap_or(true),
             self.noop_with_empty_axes.unwrap_or(false),
+            rng
         );
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
@@ -158,6 +172,7 @@ impl Operation for ReduceMeanOperation {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ReduceSumOperation {
+    global_id: GlobalId,
     keepdims: Option<bool>,
     noop_with_empty_axes: Option<bool>,
     input_data: SymbolicGraphTensorId,
@@ -171,6 +186,7 @@ impl ReduceSumOperation {
         inputs: &[Option<SymbolicGraphTensorId>],
         outputs: &[Option<SymbolicGraphTensorId>],
         attributes: &[onnx::AttributeProto],
+        rng: &mut impl Rng,
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.is_empty() || inputs.len() > 2 {
             return Err(ONNXDecodingError::InvalidOperatorInputs("ReduceSum"));
@@ -185,6 +201,7 @@ impl ReduceSumOperation {
             query_attribute_int(attributes, "noop_with_empty_axes").map(|x| x != 0);
 
         Ok(Self {
+            global_id: GlobalId::new(rng),
             keepdims,
             noop_with_empty_axes,
             input_data: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("ReduceSum"))?,
@@ -201,6 +218,9 @@ impl ReduceSumOperation {
 
 impl Node<SymbolicGraphTensorId> for ReduceSumOperation {
     type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
     fn op_kind(&self) -> Self::OpKind {
         "ReduceSum".to_string()
     }
@@ -216,13 +236,13 @@ impl Node<SymbolicGraphTensorId> for ReduceSumOperation {
     }
 }
 impl Operation for ReduceSumOperation {
-    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        let (mut graph, input_map) = MilliOpGraph::new(self.inputs());
+    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph<SymbolicGraphTensorId> {
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let axes = if let Some(input_axes) = &self.input_axes {
             Some(input_map[input_axes])
         } else if let Some(axes) = &self.axes_attr {
             let tensor = NDArrayNumericTensor::from(axes.clone());
-            let tid = milli_graph::ops::Constant::push_new(&mut graph, tensor.to_dyn());
+            let tid = milli_graph::ops::Constant::push_new(&mut graph, tensor.to_dyn(), rng);
             Some(tid)
         } else {
             None
@@ -233,6 +253,7 @@ impl Operation for ReduceSumOperation {
             axes,
             self.keepdims.unwrap_or(true),
             self.noop_with_empty_axes.unwrap_or(false),
+            rng
         );
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
@@ -243,6 +264,7 @@ impl Operation for ReduceSumOperation {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ReduceMaxOperation {
+    global_id: GlobalId,
     keepdims: Option<bool>,
     noop_with_empty_axes: Option<bool>,
     input_data: SymbolicGraphTensorId,
@@ -256,6 +278,7 @@ impl ReduceMaxOperation {
         inputs: &[Option<SymbolicGraphTensorId>],
         outputs: &[Option<SymbolicGraphTensorId>],
         attributes: &[onnx::AttributeProto],
+        rng: &mut impl Rng,
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.is_empty() || inputs.len() > 2 {
             return Err(ONNXDecodingError::InvalidOperatorInputs("ReduceMax"));
@@ -270,6 +293,7 @@ impl ReduceMaxOperation {
             query_attribute_int(attributes, "noop_with_empty_axes").map(|x| x != 0);
 
         Ok(Self {
+            global_id: GlobalId::new(rng),
             keepdims,
             noop_with_empty_axes,
             input_data: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("ReduceMax"))?,
@@ -286,6 +310,9 @@ impl ReduceMaxOperation {
 
 impl Node<SymbolicGraphTensorId> for ReduceMaxOperation {
     type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
     fn op_kind(&self) -> Self::OpKind {
         "ReduceMax".to_string()
     }
@@ -301,13 +328,13 @@ impl Node<SymbolicGraphTensorId> for ReduceMaxOperation {
     }
 }
 impl Operation for ReduceMaxOperation {
-    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        let (mut graph, input_map) = MilliOpGraph::new(self.inputs());
+    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph<SymbolicGraphTensorId> {
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let axes = if let Some(input_axes) = &self.input_axes {
             Some(input_map[input_axes])
         } else if let Some(axes) = &self.axes_attr {
             let tensor = NDArrayNumericTensor::from(axes.clone());
-            let tid = milli_graph::ops::Constant::push_new(&mut graph, tensor.to_dyn());
+            let tid = milli_graph::ops::Constant::push_new(&mut graph, tensor.to_dyn(), rng);
             Some(tid)
         } else {
             None
@@ -318,6 +345,7 @@ impl Operation for ReduceMaxOperation {
             axes,
             self.keepdims.unwrap_or(true),
             self.noop_with_empty_axes.unwrap_or(false),
+            rng
         );
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
@@ -328,6 +356,7 @@ impl Operation for ReduceMaxOperation {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ReduceMinOperation {
+    global_id: GlobalId,
     keepdims: Option<bool>,
     noop_with_empty_axes: Option<bool>,
     input_data: SymbolicGraphTensorId,
@@ -341,6 +370,7 @@ impl ReduceMinOperation {
         inputs: &[Option<SymbolicGraphTensorId>],
         outputs: &[Option<SymbolicGraphTensorId>],
         attributes: &[onnx::AttributeProto],
+        rng: &mut impl Rng,
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.is_empty() || inputs.len() > 2 {
             return Err(ONNXDecodingError::InvalidOperatorInputs("ReduceMin"));
@@ -355,6 +385,7 @@ impl ReduceMinOperation {
             query_attribute_int(attributes, "noop_with_empty_axes").map(|x| x != 0);
 
         Ok(Self {
+            global_id: GlobalId::new(rng),
             keepdims,
             noop_with_empty_axes,
             input_data: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("ReduceMin"))?,
@@ -371,6 +402,9 @@ impl ReduceMinOperation {
 
 impl Node<SymbolicGraphTensorId> for ReduceMinOperation {
     type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
     fn op_kind(&self) -> Self::OpKind {
         "ReduceMin".to_string()
     }
@@ -387,13 +421,13 @@ impl Node<SymbolicGraphTensorId> for ReduceMinOperation {
 }
 
 impl Operation for ReduceMinOperation {
-    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        let (mut graph, input_map) = MilliOpGraph::new(self.inputs());
+    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph<SymbolicGraphTensorId> {
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let axes = if let Some(input_axes) = &self.input_axes {
             Some(input_map[input_axes])
         } else if let Some(axes) = &self.axes_attr {
             let tensor = NDArrayNumericTensor::from(axes.clone());
-            let tid = milli_graph::ops::Constant::push_new(&mut graph, tensor.to_dyn());
+            let tid = milli_graph::ops::Constant::push_new(&mut graph, tensor.to_dyn(), rng);
             Some(tid)
         } else {
             None
@@ -404,6 +438,7 @@ impl Operation for ReduceMinOperation {
             axes,
             self.keepdims.unwrap_or(true),
             self.noop_with_empty_axes.unwrap_or(false),
+            rng
         );
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
@@ -414,6 +449,7 @@ impl Operation for ReduceMinOperation {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ReduceProdOperation {
+    global_id: GlobalId,
     keepdims: Option<bool>,
     noop_with_empty_axes: Option<bool>,
     input_data: SymbolicGraphTensorId,
@@ -427,6 +463,7 @@ impl ReduceProdOperation {
         inputs: &[Option<SymbolicGraphTensorId>],
         outputs: &[Option<SymbolicGraphTensorId>],
         attributes: &[onnx::AttributeProto],
+        rng: &mut impl Rng,
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.is_empty() || inputs.len() > 2 {
             return Err(ONNXDecodingError::InvalidOperatorInputs("ReduceProd"));
@@ -441,6 +478,7 @@ impl ReduceProdOperation {
             query_attribute_int(attributes, "noop_with_empty_axes").map(|x| x != 0);
 
         Ok(Self {
+            global_id: GlobalId::new(rng),
             keepdims,
             noop_with_empty_axes,
             input_data: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("ReduceProd"))?,
@@ -457,6 +495,9 @@ impl ReduceProdOperation {
 
 impl Node<SymbolicGraphTensorId> for ReduceProdOperation {
     type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
     fn op_kind(&self) -> Self::OpKind {
         "ReduceProd".to_string()
     }
@@ -473,13 +514,13 @@ impl Node<SymbolicGraphTensorId> for ReduceProdOperation {
 }
 
 impl Operation for ReduceProdOperation {
-    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        let (mut graph, input_map) = MilliOpGraph::new(self.inputs());
+fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph<SymbolicGraphTensorId> {
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let axes = if let Some(input_axes) = &self.input_axes {
             Some(input_map[input_axes])
         } else if let Some(axes) = &self.axes_attr {
             let tensor = NDArrayNumericTensor::from(axes.clone());
-            let tid = milli_graph::ops::Constant::push_new(&mut graph, tensor.to_dyn());
+            let tid = milli_graph::ops::Constant::push_new(&mut graph, tensor.to_dyn(), rng);
             Some(tid)
         } else {
             None
@@ -490,6 +531,7 @@ impl Operation for ReduceProdOperation {
             axes,
             self.keepdims.unwrap_or(true),
             self.noop_with_empty_axes.unwrap_or(false),
+            rng
         );
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);

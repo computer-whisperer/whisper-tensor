@@ -6,7 +6,7 @@ use crate::backends::ModelLoadedTensorCache;
 use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::{NDArrayNumericTensor, NDArrayNumericTensorError};
 use crate::dtype::DType;
-use crate::graph::{Graph, InnerGraph, Link, LinkPath, Node, NodePath};
+use crate::graph::{GlobalId, Graph, InnerGraph, Link, Node};
 use crate::numeric_scalar::NumericScalar;
 use crate::numeric_tensor::NumericTensor;
 use crate::scalar_info::ScalarInfoTyped;
@@ -18,6 +18,7 @@ use crate::{TrigOp, onnx};
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use rand::Rng;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ONNXDecodingError {
@@ -171,6 +172,7 @@ pub enum TensorType {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ONNXTensorInfo {
+    global_id: GlobalId,
     pub onnx_name: Option<String>,
     pub dtype: Option<DType>,
     pub shape: Option<Vec<ScalarInfoTyped<u64>>>,
@@ -228,6 +230,8 @@ pub struct SymbolicGraphInner {
     ordered_outputs: Vec<SymbolicGraphTensorId>,
     ordered_inputs: Vec<SymbolicGraphTensorId>,
     operations: HashMap<SymbolicGraphOperationId, GraphOperation>,
+    tensors_by_global_id: HashMap<GlobalId, SymbolicGraphTensorId>,
+    nodes_by_global_id: HashMap<GlobalId, SymbolicGraphOperationId>,
 }
 
 impl SymbolicGraphInner {
@@ -237,6 +241,8 @@ impl SymbolicGraphInner {
             ordered_outputs: Vec::new(),
             ordered_inputs: Vec::new(),
             operations: HashMap::new(),
+            tensors_by_global_id: HashMap::new(),
+            nodes_by_global_id: HashMap::new(),
         }
     }
 
@@ -359,19 +365,20 @@ impl SymbolicGraphInner {
         graph_mutator: &mut SymbolicGraphMutator,
         onnx_graph: &onnx::GraphProto,
         core_opset_version: usize,
+        rng: &mut impl Rng,
     ) -> Result<(), ONNXDecodingError> {
         for t in onnx_graph.input.iter() {
             let tensor_id =
-                graph_mutator.new_tensor_from_tensor_info(self, t, TensorType::Input(None))?;
+                graph_mutator.new_tensor_from_tensor_info(self, t, TensorType::Input(None), rng)?;
             self.ordered_inputs.push(tensor_id);
         }
         for t in onnx_graph.output.iter() {
             let tensor_id =
-                graph_mutator.new_tensor_from_tensor_info(self, t, TensorType::Output)?;
+                graph_mutator.new_tensor_from_tensor_info(self, t, TensorType::Output, rng)?;
             self.ordered_outputs.push(tensor_id);
         }
         for t in onnx_graph.value_info.iter() {
-            graph_mutator.new_tensor_from_tensor_info(self, t, TensorType::Intermediate)?;
+            graph_mutator.new_tensor_from_tensor_info(self, t, TensorType::Intermediate, rng)?;
         }
 
         for t in &onnx_graph.initializer {
@@ -519,17 +526,17 @@ impl SymbolicGraphInner {
             } else {
                 match tensor {
                     StoredOrNotTensor::Stored(x) => {
-                        graph_mutator.new_stored_tensor(self, x, Some(t.name.clone()));
+                        graph_mutator.new_stored_tensor(self, x, Some(t.name.clone()), rng);
                     }
                     StoredOrNotTensor::NotStored(x) => {
-                        graph_mutator.new_constant_tensor(self, x, Some(t.name.clone()));
+                        graph_mutator.new_constant_tensor(self, x, Some(t.name.clone()), rng);
                     }
                 }
             }
         }
 
         for node in &onnx_graph.node {
-            graph_mutator.new_node_from_onnx_node(self, core_opset_version, node)?;
+            graph_mutator.new_node_from_onnx_node(self, core_opset_version, node, rng)?;
         }
 
         Ok(())
@@ -833,10 +840,10 @@ impl SymbolicGraphMutator {
         }
     }
 
-    pub fn from_onnx_bytes(onnx_bytes: &[u8]) -> Result<Self, ONNXDecodingError> {
+    pub fn from_onnx_bytes(onnx_bytes: &[u8], rng: &mut impl Rng) -> Result<Self, ONNXDecodingError> {
         let model = onnx::ModelProto::decode(onnx_bytes)
             .map_err(|x| ONNXDecodingError::ProtobufDecodeError(anyhow::Error::from(x)))?;
-        Self::from_onnx_model_proto(model)
+        Self::from_onnx_model_proto(model, rng)
     }
 
     pub(crate) fn new_unknown_tensor(
@@ -844,6 +851,7 @@ impl SymbolicGraphMutator {
         inner_graph: &mut SymbolicGraphInner,
         name: &str,
         tensor_type: TensorType,
+        rng: &mut impl Rng,
     ) -> SymbolicGraphTensorId {
         let tensor_id = self.next_tensor_id;
         self.next_tensor_id += 1;
@@ -852,7 +860,9 @@ impl SymbolicGraphMutator {
             tensor_type,
             dtype: None,
             shape: None,
+            global_id: GlobalId::new(rng)
         };
+        inner_graph.tensors_by_global_id.insert(tensor.global_id(), tensor_id);
         inner_graph.tensors.insert(tensor_id, tensor);
         self.tensors_by_name.insert(name.to_string(), tensor_id);
         tensor_id
@@ -863,6 +873,7 @@ impl SymbolicGraphMutator {
         inner_graph: &mut SymbolicGraphInner,
         tensor_info: &onnx::ValueInfoProto,
         tensor_type: TensorType,
+        rng: &mut impl Rng,
     ) -> Result<SymbolicGraphTensorId, ONNXDecodingError> {
         let tensor_id = self.next_tensor_id;
         self.next_tensor_id += 1;
@@ -924,7 +935,9 @@ impl SymbolicGraphMutator {
 
         let name = tensor_info.name.clone();
 
+        let global_id = GlobalId::new(rng);
         self.tensors_by_name.insert(name.clone(), tensor_id);
+        inner_graph.tensors_by_global_id.insert(global_id, tensor_id);
         inner_graph.tensors.insert(
             tensor_id,
             ONNXTensorInfo {
@@ -932,6 +945,7 @@ impl SymbolicGraphMutator {
                 dtype: Some(dtype),
                 shape: Some(dimensions),
                 tensor_type,
+                global_id
             },
         );
         Ok(tensor_id)
@@ -942,6 +956,7 @@ impl SymbolicGraphMutator {
         inner_graph: &mut SymbolicGraphInner,
         value: NDArrayNumericTensor<DynRank>,
         name: Option<String>,
+        rng: &mut impl Rng,
     ) -> SymbolicGraphTensorId {
         let tensor_id = self.next_tensor_id;
         self.next_tensor_id += 1;
@@ -951,6 +966,8 @@ impl SymbolicGraphMutator {
             shape.push(ScalarInfoTyped::Numeric(s))
         }
 
+        let global_id = GlobalId::new(rng);
+        inner_graph.tensors_by_global_id.insert(global_id, tensor_id);
         inner_graph.tensors.insert(
             tensor_id,
             ONNXTensorInfo {
@@ -958,6 +975,7 @@ impl SymbolicGraphMutator {
                 dtype: Some(value.dtype()),
                 shape: Some(shape),
                 tensor_type: TensorType::Constant(StoredOrNotTensor::NotStored(value)),
+                global_id
             },
         );
         if let Some(name) = name {
@@ -972,6 +990,7 @@ impl SymbolicGraphMutator {
         inner_graph: &mut SymbolicGraphInner,
         id: TensorStoreTensorId,
         name: Option<String>,
+        rng: &mut impl Rng,
     ) -> SymbolicGraphTensorId {
         let tensor_id = self.next_tensor_id;
         self.next_tensor_id += 1;
@@ -983,6 +1002,8 @@ impl SymbolicGraphMutator {
             shape.push(ScalarInfoTyped::Numeric(s))
         }
 
+        let global_id = GlobalId::new(rng);
+        inner_graph.tensors_by_global_id.insert(global_id, tensor_id);
         inner_graph.tensors.insert(
             tensor_id,
             ONNXTensorInfo {
@@ -990,6 +1011,7 @@ impl SymbolicGraphMutator {
                 dtype: Some(tensor_ref.dtype()),
                 shape: Some(shape),
                 tensor_type: TensorType::Constant(StoredOrNotTensor::Stored(id)),
+                global_id
             },
         );
         if let Some(name) = name {
@@ -1004,6 +1026,7 @@ impl SymbolicGraphMutator {
         inner_graph: &mut SymbolicGraphInner,
         core_opset_version: usize,
         onnx_node: &onnx::NodeProto,
+        rng: &mut impl Rng,
     ) -> Result<(), ONNXDecodingError> {
         let mut input_tensors = vec![];
         for input in &onnx_node.input {
@@ -1012,7 +1035,7 @@ impl SymbolicGraphMutator {
             } else if let Some(tensor_id) = self.tensors_by_name.get(input) {
                 Some(*tensor_id)
             } else {
-                Some(self.new_unknown_tensor(inner_graph, input, TensorType::Intermediate))
+                Some(self.new_unknown_tensor(inner_graph, input, TensorType::Intermediate, rng))
             });
         }
 
@@ -1023,7 +1046,7 @@ impl SymbolicGraphMutator {
             } else if let Some(tensor_id) = self.tensors_by_name.get(output) {
                 Some(*tensor_id)
             } else {
-                Some(self.new_unknown_tensor(inner_graph, output, TensorType::Intermediate))
+                Some(self.new_unknown_tensor(inner_graph, output, TensorType::Intermediate, rng))
             });
         }
 
@@ -1038,266 +1061,319 @@ impl SymbolicGraphMutator {
                 &input_tensors,
                 &output_tensors,
                 &onnx_node.attribute,
+                rng,
             )?)),
             "Min" => Some(AnyOperation::Min(ops::MinOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 &onnx_node.attribute,
+                rng,
             )?)),
             "Add" => Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 ops::WhichBinaryOperation::Add,
+                rng,
             )?)),
             "Mod" => Some(AnyOperation::Modulo(ops::ModuloOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 &onnx_node.attribute,
+                rng,
             )?)),
             "Sub" => Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 ops::WhichBinaryOperation::Sub,
+                rng,
             )?)),
             "Mul" => Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 ops::WhichBinaryOperation::Mul,
+                rng,
             )?)),
             "Div" => Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 ops::WhichBinaryOperation::Div,
+                rng,
             )?)),
             "MatMul" => Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 ops::WhichBinaryOperation::MatMul,
+                rng,
             )?)),
             "Equal" => Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 ops::WhichBinaryOperation::Equal,
+                rng,
             )?)),
             "Greater" => Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 ops::WhichBinaryOperation::Greater,
+                rng,
             )?)),
             "GreaterOrEqual" => Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 ops::WhichBinaryOperation::GreaterOrEqual,
+                rng,
             )?)),
             "Less" => Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 ops::WhichBinaryOperation::Less,
+                rng,
             )?)),
             "LessOrEqual" => Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 ops::WhichBinaryOperation::LessOrEqual,
+                rng,
             )?)),
             "And" => Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 ops::WhichBinaryOperation::And,
+                rng,
             )?)),
             "Or" => Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 ops::WhichBinaryOperation::Or,
+                rng,
             )?)),
             "Xor" => Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 ops::WhichBinaryOperation::Xor,
+                rng,
             )?)),
             "BitwiseAnd" => Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 ops::WhichBinaryOperation::BitwiseAnd,
+                rng,
             )?)),
             "BitwiseOr" => Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 ops::WhichBinaryOperation::BitwiseOr,
+                rng,
             )?)),
             "BitwiseXor" => Some(AnyOperation::Binary(ops::BinaryOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 ops::WhichBinaryOperation::BitwiseXor,
+                rng,
             )?)),
             "Relu" => Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 ops::WhichUnaryOperation::Relu,
+                rng,
             )?)),
             "Sigmoid" => Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 ops::WhichUnaryOperation::Sigmoid,
+                rng,
             )?)),
             "Asin" => Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 ops::WhichUnaryOperation::Trig(TrigOp::Asin),
+                rng,
             )?)),
             "Asinh" => Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 ops::WhichUnaryOperation::Trig(TrigOp::Asinh),
+                rng,
             )?)),
             "Acos" => Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 ops::WhichUnaryOperation::Trig(TrigOp::Acos),
+                rng,
             )?)),
             "Acosh" => Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 ops::WhichUnaryOperation::Trig(TrigOp::Acosh),
+                rng,
             )?)),
             "Atan" => Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 ops::WhichUnaryOperation::Trig(TrigOp::Atan),
+                rng,
             )?)),
             "Atanh" => Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 ops::WhichUnaryOperation::Trig(TrigOp::Atanh),
+                rng,
             )?)),
             "Sin" => Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 ops::WhichUnaryOperation::Trig(TrigOp::Sin),
+                rng,
             )?)),
             "Sinh" => Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 ops::WhichUnaryOperation::Trig(TrigOp::Sinh),
+                rng,
             )?)),
             "Cos" => Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 ops::WhichUnaryOperation::Trig(TrigOp::Cos),
+                rng,
             )?)),
             "Cosh" => Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 ops::WhichUnaryOperation::Trig(TrigOp::Cosh),
+                rng,
             )?)),
             "Tan" => Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 ops::WhichUnaryOperation::Trig(TrigOp::Tan),
+                rng,
             )?)),
             "Tanh" => Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 ops::WhichUnaryOperation::Trig(TrigOp::Tanh),
+                rng,
             )?)),
             "Exp" => Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 ops::WhichUnaryOperation::Exp,
+                rng,
             )?)),
             "Log" => Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 ops::WhichUnaryOperation::Log,
+                rng,
             )?)),
             "Sqrt" => Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 ops::WhichUnaryOperation::Sqrt,
+                rng,
             )?)),
             "BitwiseNot" => Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 ops::WhichUnaryOperation::BitwiseNot,
+                rng,
             )?)),
             "Not" => Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 ops::WhichUnaryOperation::Not,
+                rng,
             )?)),
             "Softplus" => Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 ops::WhichUnaryOperation::Softplus,
+                rng,
             )?)),
             "Neg" => Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 ops::WhichUnaryOperation::Neg,
+                rng,
             )?)),
             "Abs" => Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 ops::WhichUnaryOperation::Abs,
+                rng,
             )?)),
             "Sign" => Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 ops::WhichUnaryOperation::Sign,
+                rng,
             )?)),
             "IsNaN" => Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 ops::WhichUnaryOperation::IsNan,
+                rng,
             )?)),
             "Erf" => Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 ops::WhichUnaryOperation::Erf,
+                rng,
             )?)),
             "IsInf" => Some(AnyOperation::IsInf(ops::IsInfOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 &onnx_node.attribute,
+                rng,
             )?)),
             "Floor" => Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 ops::WhichUnaryOperation::Floor,
+                rng,
             )?)),
             "Ceil" => Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 ops::WhichUnaryOperation::Ceil,
+                rng,
             )?)),
             "Round" => Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 ops::WhichUnaryOperation::Round,
+                rng,
             )?)),
             "Clip" => Some(AnyOperation::Clip(ops::ClipOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 &onnx_node.attribute,
+                rng,
             )?)),
             "Reciprocal" => Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 ops::WhichUnaryOperation::Reciprocal,
+                rng,
             )?)),
             "Size" => Some(AnyOperation::Size(ops::SizeOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
+                rng,
             )?)),
             "NonZero" => Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 ops::WhichUnaryOperation::NonZero,
+                rng,
             )?)),
             "LpNormalization" => Some(AnyOperation::LpNormalization(
                 ops::LpNormalizationOperation::from_onnx(
                     &input_tensors,
                     &output_tensors,
                     &onnx_node.attribute,
+                    rng,
                 )?,
             )),
             "GroupNormalization" => Some(AnyOperation::GroupNormalization(
@@ -1305,6 +1381,7 @@ impl SymbolicGraphMutator {
                     &input_tensors,
                     &output_tensors,
                     &onnx_node.attribute,
+                    rng,
                 )?,
             )),
             "RMSNormalization" => Some(AnyOperation::RMSNormalization(
@@ -1312,6 +1389,7 @@ impl SymbolicGraphMutator {
                     &input_tensors,
                     &output_tensors,
                     &onnx_node.attribute,
+                    rng,
                 )?,
             )),
             "LayerNormalization" => Some(AnyOperation::LayerNormalization(
@@ -1319,199 +1397,236 @@ impl SymbolicGraphMutator {
                     &input_tensors,
                     &output_tensors,
                     &onnx_node.attribute,
+                    rng,
                 )?,
             )),
             "CumSum" => Some(AnyOperation::CumSum(ops::CumSumOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 &onnx_node.attribute,
+                rng,
             )?)),
             "Gather" => Some(AnyOperation::Gather(ops::GatherOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 &onnx_node.attribute,
+                rng,
             )?)),
             "Cast" => Some(AnyOperation::Cast(ops::CastOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 &onnx_node.attribute,
+                rng,
             )?)),
             "CastLike" => Some(AnyOperation::CastLike(ops::CastLikeOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 &onnx_node.attribute,
+                rng,
             )?)),
             "Pow" => Some(AnyOperation::Pow(ops::PowOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 &onnx_node.attribute,
+                rng,
             )?)),
             "ReduceMean" => Some(AnyOperation::ReduceMean(
                 ops::ReduceMeanOperation::from_onnx(
                     &input_tensors,
                     &output_tensors,
                     &onnx_node.attribute,
+                    rng,
                 )?,
             )),
             "ReduceSum" => Some(AnyOperation::ReduceSum(ops::ReduceSumOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 &onnx_node.attribute,
+                rng,
             )?)),
             "ReduceProd" => Some(AnyOperation::ReduceProd(
                 ops::ReduceProdOperation::from_onnx(
                     &input_tensors,
                     &output_tensors,
                     &onnx_node.attribute,
+                    rng,
                 )?,
             )),
             "ReduceMin" => Some(AnyOperation::ReduceMin(ops::ReduceMinOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 &onnx_node.attribute,
+                rng,
             )?)),
             "ReduceMax" => Some(AnyOperation::ReduceMax(ops::ReduceMaxOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 &onnx_node.attribute,
+                rng,
             )?)),
             "Flatten" => Some(AnyOperation::Flatten(ops::FlattenOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 &onnx_node.attribute,
+                rng,
             )?)),
             "Expand" => Some(AnyOperation::Expand(ops::ExpandOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 &onnx_node.attribute,
+                rng,
             )?)),
             "Squeeze" => Some(AnyOperation::Squeeze(ops::SqueezeOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 &onnx_node.attribute,
+                rng,
             )?)),
             "Unsqueeze" => Some(AnyOperation::Unsqueeze(ops::UnsqueezeOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 &onnx_node.attribute,
+                rng,
             )?)),
             "Transpose" => Some(AnyOperation::Transpose(ops::TransposeOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 &onnx_node.attribute,
+                rng,
             )?)),
             "Reshape" => Some(AnyOperation::Reshape(ops::ReshapeOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 &onnx_node.attribute,
+                rng,
             )?)),
             "Shape" => Some(AnyOperation::Shape(ops::ShapeOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 &onnx_node.attribute,
+                rng,
             )?)),
             "Range" => Some(AnyOperation::Range(ops::RangeOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
+                rng,
             )?)),
             "Concat" => Some(AnyOperation::Concat(ops::ConcatOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 &onnx_node.attribute,
+                rng,
             )?)),
             "ConstantOfShape" => Some(AnyOperation::ConstantOfShape(
                 ops::ConstantOfShapeOperation::from_onnx(
                     &input_tensors,
                     &output_tensors,
                     &onnx_node.attribute,
+                    rng
                 )?,
             )),
             "Gemm" => Some(AnyOperation::Gemm(ops::GemmOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 &onnx_node.attribute,
+                rng,
             )?)),
             "Slice" => Some(AnyOperation::Slice(ops::SliceOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 &onnx_node.attribute,
+                rng,
             )?)),
             "Where" => Some(AnyOperation::Where(ops::WhereOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 &onnx_node.attribute,
+                rng,
             )?)),
             "Softmax" => Some(AnyOperation::Softmax(ops::SoftmaxOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 &onnx_node.attribute,
+                rng,
             )?)),
             "LogSoftmax" => Some(AnyOperation::LogSoftmax(
                 ops::LogSoftmaxOperation::from_onnx(
                     &input_tensors,
                     &output_tensors,
                     &onnx_node.attribute,
+                    rng,
                 )?,
             )),
             "Split" => Some(AnyOperation::Split(ops::SplitOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 &onnx_node.attribute,
+                rng,
             )?)),
             "Constant" => Some(AnyOperation::Constant(ops::ConstantOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 &onnx_node.attribute,
+                rng
             )?)),
             "Identity" => Some(AnyOperation::Identity(ops::IdentityOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 &onnx_node.attribute,
+                rng,
             )?)),
             "Conv" => Some(AnyOperation::Conv(ops::ConvOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 &onnx_node.attribute,
+                rng,
             )?)),
             "InstanceNormalization" => Some(AnyOperation::InstanceNormalization(
                 ops::InstanceNormalizationOperation::from_onnx(
                     &input_tensors,
                     &output_tensors,
                     &onnx_node.attribute,
+                    rng,
                 )?,
             )),
             "Resize" => Some(AnyOperation::Resize(ops::ResizeOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 &onnx_node.attribute,
+                rng,
             )?)),
             "Pad" => Some(AnyOperation::Pad(ops::PadOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 &onnx_node.attribute,
+                rng,
             )?)),
             "RandomNormalLike" => Some(AnyOperation::RandomNormalLike(
                 ops::RandomNormalLikeOperation::from_onnx(
                     &input_tensors,
                     &output_tensors,
                     &onnx_node.attribute,
+                    rng,
                 )?,
             )),
             "ArgMax" => Some(AnyOperation::ArgMax(ops::ArgMaxOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 &onnx_node.attribute,
+                rng,
             )?)),
             "ArgMin" => Some(AnyOperation::ArgMin(ops::ArgMinOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
                 &onnx_node.attribute,
+                rng,
             )?)),
             "RotaryEmbedding" => Some(AnyOperation::RotaryEmbedding(
                 ops::RotaryEmbeddingOperation::from_onnx(
                     &input_tensors,
                     &output_tensors,
                     &onnx_node.attribute,
+                    rng,
                 )?,
             )),
             "If" => Some(AnyOperation::If(ops::IfOperation::from_onnx(
@@ -1520,6 +1635,7 @@ impl SymbolicGraphMutator {
                 &onnx_node.attribute,
                 self,
                 core_opset_version,
+                rng,
             )?)),
             "Scan" => Some(AnyOperation::Scan(ops::ScanOperation::from_onnx(
                 &input_tensors,
@@ -1527,22 +1643,24 @@ impl SymbolicGraphMutator {
                 &onnx_node.attribute,
                 self,
                 core_opset_version,
+                rng,
             )?)),
             x => Err(ONNXDecodingError::UnsupportedONNXType(x.to_string()))?,
         };
 
         if let Some(op) = new_op {
-            let op = GraphOperation { name, op };
+            let op = GraphOperation { name, op};
 
             let operation_id = self.next_operation_id;
             self.next_operation_id += 1;
+            inner_graph.nodes_by_global_id.insert(op.global_id(), operation_id);
             inner_graph.operations.insert(operation_id, op);
         }
 
         Ok(())
     }
 
-    pub fn from_onnx_model_proto(model_proto: onnx::ModelProto) -> Result<Self, ONNXDecodingError> {
+    pub fn from_onnx_model_proto(model_proto: onnx::ModelProto, rng: &mut impl Rng) -> Result<Self, ONNXDecodingError> {
         let mut core_opset_version = 0;
         for opset_proto in model_proto.opset_import {
             if opset_proto.domain.is_empty() {
@@ -1559,7 +1677,7 @@ impl SymbolicGraphMutator {
             unknown_dimensions,
         } = graph_mutator.graph.take().unwrap();
 
-        inner_graph.populate(&mut graph_mutator, &onnx_graph, core_opset_version)?;
+        inner_graph.populate(&mut graph_mutator, &onnx_graph, core_opset_version, rng)?;
 
         graph_mutator.graph = Some(SymbolicGraph {
             inner_graph,
@@ -1592,18 +1710,12 @@ pub enum SymbolicGraphNodePath {
     Node(SymbolicGraphOperationId),
 }
 
-impl NodePath for SymbolicGraphNodePath {}
-
-impl LinkPath for SymbolicGraphTensorPath {}
 
 impl Graph for SymbolicGraph {
-    type GraphPath = ();
-    type NodePath = SymbolicGraphNodePath;
-    type LinkPath = SymbolicGraphTensorPath;
     type Inner = SymbolicGraphInner;
     type AnySubGraph = SymbolicGraphInner;
 
-    fn inner(&self, _: &Self::GraphPath) -> &Self::AnySubGraph {
+    fn inner(&self) -> &Self::AnySubGraph {
         &self.inner_graph
     }
 }
@@ -1613,7 +1725,7 @@ impl InnerGraph for SymbolicGraphInner {
     type LinkId = SymbolicGraphTensorId;
     type Error = ();
     type AnyNode = GraphOperation;
-    type AnyLink = SymbolicGraphTensorId;
+    type AnyLink = ONNXTensorInfo;
     type InputLinkId = SymbolicGraphTensorId;
     type OutputLinkId = SymbolicGraphTensorId;
 
@@ -1629,8 +1741,16 @@ impl InnerGraph for SymbolicGraphInner {
         self.operations.get(id)
     }
 
-    fn get_link(&self, _id: &Self::LinkId) -> Option<&Self::AnyLink> {
-        None
+    fn get_link(&self, id: &Self::LinkId) -> Option<&Self::AnyLink> {
+        self.tensors.get(id)
+    }
+
+    fn get_link_by_global_id(&self, global_id: &GlobalId) -> Option<&Self::AnyLink> {
+        self.tensors_by_global_id.get(global_id).and_then(|id| self.get_link(id))
+    }
+
+    fn get_node_by_global_id(&self, global_id: &GlobalId) -> Option<&Self::AnyNode> {
+        self.nodes_by_global_id.get(global_id).and_then(|id| self.get_node(id))
     }
 
     fn input_links(&self) -> impl Iterator<Item = (Self::InputLinkId, Self::LinkId)> {
@@ -1642,9 +1762,9 @@ impl InnerGraph for SymbolicGraphInner {
     }
 }
 
-impl Link<SymbolicGraphTensorId> for SymbolicGraphTensorId {
-    fn link_id(&self) -> SymbolicGraphTensorId {
-        *self
+impl Link for ONNXTensorInfo {
+    fn global_id(&self) -> GlobalId {
+        self.global_id
     }
 }
 
@@ -1661,5 +1781,9 @@ impl Node<SymbolicGraphTensorId> for GraphOperation {
 
     fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId> + '_> {
         self.op.outputs()
+    }
+
+    fn global_id(&self) -> GlobalId {
+        self.op.global_id()
     }
 }

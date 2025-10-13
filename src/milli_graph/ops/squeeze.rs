@@ -2,7 +2,7 @@ use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::dtype::DType;
-use crate::graph::Node;
+use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError, MilliOpGraphTensorId};
 use crate::numeric_tensor::NumericTensor;
@@ -12,6 +12,7 @@ use typenum::P1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Squeeze {
+    global_id: GlobalId,
     output: MilliOpGraphTensorId,
     data: MilliOpGraphTensorId,
     axes: MilliOpGraphTensorId,
@@ -22,9 +23,10 @@ impl Squeeze {
         graph: &mut MilliOpGraph<T>,
         data: MilliOpGraphTensorId,
         axes: MilliOpGraphTensorId,
+        rng: &mut impl rand::Rng,
     ) -> MilliOpGraphTensorId {
-        let output = graph.get_new_tensor_id();
-        let node = Self { output, data, axes };
+        let output = graph.get_new_tensor_id(rng);
+        let node = Self { output, data, axes, global_id: GlobalId::new(rng) };
         graph.push_op(AnyMilliOp::Squeeze(node));
         output
     }
@@ -32,6 +34,9 @@ impl Squeeze {
 
 impl Node<MilliOpGraphTensorId> for Squeeze {
     type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
     fn op_kind(&self) -> String {
         "Squeeze".to_string()
     }

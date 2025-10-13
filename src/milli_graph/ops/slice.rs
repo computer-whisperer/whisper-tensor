@@ -7,9 +7,11 @@ use crate::numeric_tensor::NumericTensor;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use typenum::P1;
+use crate::graph::GlobalId;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Slice {
+    global_id: crate::graph::GlobalId,
     output: MilliOpGraphTensorId,
     data: MilliOpGraphTensorId,
     starts: MilliOpGraphTensorId,
@@ -26,8 +28,9 @@ impl Slice {
         ends: MilliOpGraphTensorId,
         steps: Option<MilliOpGraphTensorId>,
         axes: Option<MilliOpGraphTensorId>,
+        rng: &mut impl rand::Rng,
     ) -> MilliOpGraphTensorId {
-        let output = graph.get_new_tensor_id();
+        let output = graph.get_new_tensor_id(rng);
         let node = Self {
             output,
             data,
@@ -35,6 +38,7 @@ impl Slice {
             ends,
             steps,
             axes,
+            global_id: GlobalId::new(rng),
         };
         graph.push_op(AnyMilliOp::Slice(node));
         output
@@ -43,6 +47,9 @@ impl Slice {
 
 impl crate::graph::Node<MilliOpGraphTensorId> for Slice {
     type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
     fn op_kind(&self) -> Self::OpKind {
         "Slice".to_string()
     }

@@ -54,13 +54,15 @@ pub use unary::{
 use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::NDArrayNumericTensorError;
 use crate::dtype::{DType, DTypeError};
-use crate::graph::Node;
+use crate::graph::{GlobalId, Node};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::numeric_tensor::{NumericTensor, NumericTensorError};
 use crate::symbolic_graph::{SymbolicGraphInner, SymbolicGraphTensorId};
 use crate::tensor_rank::DynRank;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use rand::Rng;
+use wyrand::WyRand;
 
 #[derive(Debug, thiserror::Error)]
 pub enum EvalError {
@@ -94,10 +96,11 @@ pub trait Operation: Node<SymbolicGraphTensorId> {
         backend: &mut EvalBackend,
         inputs: &HashMap<SymbolicGraphTensorId, NumericTensor<DynRank>>,
     ) -> OperationEvalRet {
-        let milli_graph = self.get_milli_op_graph();
+        let mut rng = WyRand::new(Default::default());
+        let milli_graph = self.get_milli_op_graph(&mut rng);
         Ok(milli_graph.eval(inputs, &mut (), backend)?)
     }
-    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId>;
+    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph<SymbolicGraphTensorId>;
     fn get_sub_graphs(&self) -> Vec<&SymbolicGraphInner> {
         vec![]
     }
@@ -224,6 +227,8 @@ impl Node<SymbolicGraphTensorId> for AnyOperation {
     delegate!(inputs() -> Box<dyn Iterator<Item=SymbolicGraphTensorId> + '_>);
 
     delegate!(outputs() -> Box<dyn Iterator<Item=SymbolicGraphTensorId> + '_>);
+
+    delegate!(global_id() -> GlobalId);
 }
 
 impl Operation for AnyOperation {
@@ -232,5 +237,5 @@ impl Operation for AnyOperation {
         inputs: &HashMap<SymbolicGraphTensorId, NumericTensor<DynRank>>
     ) -> Result<Box<dyn Iterator<Item=(SymbolicGraphTensorId, NumericTensor<DynRank>)>>, EvalError>);
 
-    delegate!(get_milli_op_graph() -> MilliOpGraph<SymbolicGraphTensorId>);
+    delegate!(get_milli_op_graph(rng: &mut impl Rng) -> MilliOpGraph<SymbolicGraphTensorId>);
 }

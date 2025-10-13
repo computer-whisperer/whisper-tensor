@@ -1,14 +1,16 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
-use crate::graph::Node;
+use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError, MilliOpGraphTensorId};
 use crate::numeric_tensor::NumericTensor;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use rand::Rng;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArgMax {
+    global_id: GlobalId,
     output: MilliOpGraphTensorId,
     input: MilliOpGraphTensorId,
     axis: i64,
@@ -23,9 +25,11 @@ impl ArgMax {
         axis: i64,
         keepdims: bool,
         select_last_index: bool,
+        rng: &mut impl Rng
     ) -> MilliOpGraphTensorId {
-        let output = graph.get_new_tensor_id();
+        let output = graph.get_new_tensor_id(rng);
         let node = Self {
+            global_id: GlobalId::new(rng),
             output,
             input,
             axis,
@@ -67,5 +71,8 @@ impl Node<MilliOpGraphTensorId> for ArgMax {
     }
     fn outputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
         Box::new(vec![self.output].into_iter())
+    }
+    fn global_id(&self) -> GlobalId {
+        self.global_id
     }
 }

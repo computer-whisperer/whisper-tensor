@@ -1,6 +1,6 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
-use crate::graph::Node;
+use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError, MilliOpGraphTensorId};
 use crate::numeric_tensor::NumericTensor;
@@ -9,6 +9,7 @@ use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Transpose {
+    global_id: GlobalId,
     output: MilliOpGraphTensorId,
     data: MilliOpGraphTensorId,
     perm: Option<Vec<i64>>,
@@ -19,9 +20,10 @@ impl Transpose {
         graph: &mut MilliOpGraph<T>,
         data: MilliOpGraphTensorId,
         perm: Option<Vec<i64>>,
+        rng: &mut impl rand::Rng,
     ) -> MilliOpGraphTensorId {
-        let output = graph.get_new_tensor_id();
-        let node = Self { output, data, perm };
+        let output = graph.get_new_tensor_id(rng);
+        let node = Self { output, data, perm, global_id: GlobalId::new(rng) };
         graph.push_op(AnyMilliOp::Transpose(node));
         output
     }
@@ -29,6 +31,9 @@ impl Transpose {
 
 impl Node<MilliOpGraphTensorId> for Transpose {
     type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
     fn op_kind(&self) -> Self::OpKind {
         "Transpose".to_string()
     }

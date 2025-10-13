@@ -86,7 +86,10 @@ impl ModelServer {
         };
         let onnx_data = identify_and_load(model_path, storage, model_hint)?;
 
-        let runtime_model = Model::new_from_onnx(&onnx_data)?;
+        let runtime_model = {
+            let mut rng = rand::rng();
+            Model::new_from_onnx(&onnx_data, &mut rng)?
+        };
         let model_name = model_path
             .file_stem()
             .unwrap_or_default()

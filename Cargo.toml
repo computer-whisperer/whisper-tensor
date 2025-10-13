@@ -25,20 +25,21 @@ pyo3 = {optional=true, version = "0.26.0", features = ["auto-initialize"]}
 tokenizers = {optional=true, version="0.22.1", default-features = false, features = ["unstable_wasm"]}
 rspirv = "0.12.0"
 tch = {optional=true, version="0.20.0"}
+wyrand = "0.3.2"
+rand = "0.9.2"
 
 ndarray = { version = "0.16.1", features = ["serde", "rayon", "matrixmultiply-threading"] }
 rwkv-tokenizer = {workspace=true, optional=true, features = ["serde"] }
 env_logger = "0.11.8"
 log = "0.4.27"
 serde_json = "1.0.140"
-rand = { version = "0.9.2", optional = true }
 typenum = { version="1.18.0", features=["const-generics"] }
 strum = "0.27"
 strum_macros = "0.27"
 paste = "1.0.15"
 
 [features]
-default = ["tokenizers", "rwkv-tokenizer", "dep:rand", "http"]
+default = ["tokenizers", "rwkv-tokenizer", "http"]
 onnx-reference = ["pyo3"]
 candle = ["candle-onnx", "candle-core"]
 tokenizers = ["dep:tokenizers"]
@@ -49,9 +50,6 @@ tch = ["dep:tch"]
 
 [build-dependencies]
 prost-build = "0.13.3"
-
-[dev-dependencies]
-rand = "0.9.2"
 
 [workspace]
 members = [ "crates/whisper-tensor-import", "crates/whisper-tensor-webui", "crates/whisper-tensor-server"]

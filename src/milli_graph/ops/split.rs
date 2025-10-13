@@ -1,6 +1,6 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
-use crate::graph::Node;
+use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp, MilliOpTensorIDOrLiteral};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError, MilliOpGraphTensorId};
 use crate::numeric_tensor::NumericTensor;
@@ -10,6 +10,7 @@ use typenum::P1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Split {
+    global_id: GlobalId,
     output: MilliOpGraphTensorId,
     data: MilliOpGraphTensorId,
     split: Option<MilliOpTensorIDOrLiteral>,
@@ -26,9 +27,11 @@ impl Split {
         axis: i64,
         num_outputs: Option<usize>,
         output_id: usize,
+        rng: &mut impl rand::Rng,
     ) -> MilliOpGraphTensorId {
-        let output = graph.get_new_tensor_id();
+        let output = graph.get_new_tensor_id(rng);
         let node = Self {
+            global_id: GlobalId::new(rng),
             output,
             data,
             split,
@@ -43,6 +46,9 @@ impl Split {
 
 impl Node<MilliOpGraphTensorId> for Split {
     type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
     fn op_kind(&self) -> String {
         "Split".to_string()
     }
@@ -125,12 +131,13 @@ mod tests {
 
     #[test]
     fn test_split_num_outputs_even_axis0() {
+        let rng = &mut rand::rng();
         // Build a tiny graph with one input and two split outputs, then run eval
         let (mut graph, input_map) =
-            MilliOpGraph::new(std::iter::once(MilliOpGraphTensorId { inner: 0 }));
+            MilliOpGraph::new(std::iter::once(MilliOpGraphTensorId { inner: 0 }), rng);
         let data_id = input_map[&MilliOpGraphTensorId { inner: 0 }];
-        let out0 = Split::push_new(&mut graph, data_id, None, 0, Some(2), 0);
-        let out1 = Split::push_new(&mut graph, data_id, None, 0, Some(2), 1);
+        let out0 = Split::push_new(&mut graph, data_id, None, 0, Some(2), 0, rng);
+        let out1 = Split::push_new(&mut graph, data_id, None, 0, Some(2), 1, rng);
         let mut output_map = HashMap::new();
         output_map.insert(out0, MilliOpGraphTensorId { inner: 1 });
         output_map.insert(out1, MilliOpGraphTensorId { inner: 2 });
@@ -162,10 +169,11 @@ mod tests {
 
     #[test]
     fn test_split_num_outputs_negative_axis() {
+        let rng = &mut rand::rng();
         let (mut graph, input_map) =
-            MilliOpGraph::new(std::iter::once(MilliOpGraphTensorId { inner: 0 }));
+            MilliOpGraph::new(std::iter::once(MilliOpGraphTensorId { inner: 0 }), rng);
         let data_id = input_map[&MilliOpGraphTensorId { inner: 0 }];
-        let out = Split::push_new(&mut graph, data_id, None, -1, Some(2), 1);
+        let out = Split::push_new(&mut graph, data_id, None, -1, Some(2), 1, rng);
         let mut output_map = HashMap::new();
         output_map.insert(out, MilliOpGraphTensorId { inner: 1 });
         graph.set_output_map(output_map);
@@ -194,12 +202,13 @@ mod tests {
 
     #[test]
     fn test_split_num_outputs_uneven_distribution_axis0() {
+        let rng = &mut rand::rng();
         let (mut graph, input_map) =
-            MilliOpGraph::new(std::iter::once(MilliOpGraphTensorId { inner: 0 }));
+            MilliOpGraph::new(std::iter::once(MilliOpGraphTensorId { inner: 0 }), rng);
         let data_id = input_map[&MilliOpGraphTensorId { inner: 0 }];
         // dim=5, num_outputs=2 -> sizes [3,2]
-        let out0 = Split::push_new(&mut graph, data_id, None, 0, Some(2), 0);
-        let out1 = Split::push_new(&mut graph, data_id, None, 0, Some(2), 1);
+        let out0 = Split::push_new(&mut graph, data_id, None, 0, Some(2), 0, rng);
+        let out1 = Split::push_new(&mut graph, data_id, None, 0, Some(2), 1, rng);
         let mut output_map = HashMap::new();
         output_map.insert(out0, MilliOpGraphTensorId { inner: 1 });
         output_map.insert(out1, MilliOpGraphTensorId { inner: 2 });
