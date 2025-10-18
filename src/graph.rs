@@ -72,10 +72,27 @@ pub trait InnerGraph {
 /// Root graph abstraction that can host an InnerGraph and provide naming/paths.
 pub trait Graph {
     type Inner: InnerGraph;
-    type AnySubGraph;
 
     /// Access inner graph by path (root or nested).
-    fn inner(&self) -> &Self::AnySubGraph;
+    fn inner(&self) -> &Self::Inner;
+}
+
+pub trait InnerGraphDyn {
+
+}
+
+impl<G: InnerGraph> InnerGraphDyn for G {
+
+}
+
+pub trait GraphDyn {
+    fn inner(&self) -> Box<dyn InnerGraphDyn>;
+}
+
+impl<G: Graph> GraphDyn for G {
+    fn inner(&self) -> Box<dyn InnerGraphDyn> {
+        Box::new(self.inner())
+    }
 }
 
 /// Observer API for instrumentation across graph execution and transformations.

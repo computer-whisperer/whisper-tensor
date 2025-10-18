@@ -24,7 +24,7 @@ use tensor_swatch::build_tensor_swatch;
 use web_time::{Duration, Instant};
 use whisper_tensor::DynRank;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
-use whisper_tensor::graph::{GlobalId, InnerGraph, Node};
+use whisper_tensor::graph::{GlobalId, Graph, InnerGraph, Node};
 use whisper_tensor::interfaces::AnyInterface;
 use whisper_tensor::milli_graph::MilliOpGraph;
 use whisper_tensor::scalar_info::ScalarInfoTyped;
@@ -73,6 +73,7 @@ pub(crate) enum GraphSubject<'a> {
     MilliOpGraphB(&'a MilliOpGraph<SuperGraphLinkTensor>),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum GraphRootSubjectSelection {
     Model(LoadedModelId),
     Interface(InterfaceId)
@@ -107,7 +108,6 @@ pub(crate) struct GraphExplorerApp {
         HashMap<Vec<GlobalId>, NDArrayNumericTensor<DynRank>>,
     pub inspect_windows: Vec<InspectWindow>,
     graph_layouts: HashMap<Vec<GlobalId>, Result<GraphLayout, GraphLayoutError>>,
-    pub loaded_models: HashMap<LoadedModelId, SymbolicGraph>,
     model_view_scene_rects: HashMap<Vec<GlobalId>, Rect>,
     pub(crate) graph_subject_path: Vec<GlobalId>,
     pub(crate) next_graph_subject_path: Option<Vec<GlobalId>>,
@@ -337,8 +337,9 @@ fn format_shape(val: &[ScalarInfoTyped<u64>]) -> String {
 }
 
 impl GraphExplorerApp {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(subject: GraphRootSubjectSelection) -> Self {
         Self {
+            root_selection: subject,
             explorer_selection: None,
             explorer_hovered: None,
             next_explorer_hovered: None,
@@ -346,7 +347,6 @@ impl GraphExplorerApp {
             inspect_window_tensor_subscriptions: HashSet::new(),
             inspect_windows: Vec::new(),
             graph_layouts: HashMap::new(),
-            loaded_models: HashMap::new(),
             model_view_scene_rects: HashMap::new(),
             graph_subject_path: Vec::new(),
             next_graph_subject_path: None,
@@ -387,6 +387,10 @@ impl GraphExplorerApp {
         } else {
             None
         }
+    }
+
+    pub(crate) fn get_graph_subjects(path: &[GlobalId], root: GraphRootSubjectSelection, loaded_models: &LoadedModels) -> Vec<Box<dyn Graph>> {
+
     }
 
     pub(crate) fn render_minimap(&mut self, ui: &mut egui::Ui) {
