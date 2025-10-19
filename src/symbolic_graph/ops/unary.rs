@@ -2,7 +2,7 @@ use crate::dtype::DType;
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::MilliOpGraph;
 use crate::symbolic_graph::ops::Operation;
-use crate::symbolic_graph::{ONNXDecodingError, SymbolicGraphTensorId, query_attribute_int};
+use crate::symbolic_graph::{ONNXDecodingError, query_attribute_int};
 use crate::{TrigOp, milli_graph, onnx};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -34,15 +34,15 @@ pub enum WhichUnaryOperation {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct UnaryOperation {
     global_id: GlobalId,
-    input: SymbolicGraphTensorId,
-    output: SymbolicGraphTensorId,
+    input: GlobalId,
+    output: GlobalId,
     which: WhichUnaryOperation,
 }
 
 impl UnaryOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<SymbolicGraphTensorId>],
-        outputs: &[Option<SymbolicGraphTensorId>],
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
         which: WhichUnaryOperation,
         rng: &mut impl Rng
     ) -> Result<Self, ONNXDecodingError> {
@@ -62,7 +62,7 @@ impl UnaryOperation {
     }
 }
 
-impl Node<SymbolicGraphTensorId> for UnaryOperation {
+impl Node for UnaryOperation {
     type OpKind = String;
     fn global_id(&self) -> GlobalId {
         self.global_id
@@ -73,15 +73,15 @@ impl Node<SymbolicGraphTensorId> for UnaryOperation {
             _ => self.which.to_string(),
         }
     }
-    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(std::iter::once(self.input))
     }
-    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(std::iter::once(self.output))
     }
 }
 impl Operation for UnaryOperation {
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph<SymbolicGraphTensorId> {
+    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let a = input_map[&self.input];
         if let WhichUnaryOperation::NonZero = &self.which {
@@ -144,14 +144,14 @@ impl Operation for UnaryOperation {
 pub struct SoftmaxOperation {
     global_id: GlobalId,
     axis: Option<i64>,
-    input: SymbolicGraphTensorId,
-    output: SymbolicGraphTensorId,
+    input: GlobalId,
+    output: GlobalId,
 }
 
 impl SoftmaxOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<SymbolicGraphTensorId>],
-        outputs: &[Option<SymbolicGraphTensorId>],
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
         attributes: &[onnx::AttributeProto],
         rng: &mut impl Rng
     ) -> Result<Self, ONNXDecodingError> {
@@ -171,7 +171,7 @@ impl SoftmaxOperation {
     }
 }
 
-impl Node<SymbolicGraphTensorId> for SoftmaxOperation {
+impl Node for SoftmaxOperation {
     type OpKind = String;
     fn global_id(&self) -> GlobalId {
         self.global_id
@@ -179,15 +179,15 @@ impl Node<SymbolicGraphTensorId> for SoftmaxOperation {
     fn op_kind(&self) -> Self::OpKind {
         "Softmax".to_string()
     }
-    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(std::iter::once(self.input))
     }
-    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(std::iter::once(self.output))
     }
 }
 impl Operation for SoftmaxOperation {
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph<SymbolicGraphTensorId> {
+    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
 
         let e = milli_graph::ops::SimpleUnaryOp::exp(&mut graph, input_map[&self.input], rng);
@@ -205,14 +205,14 @@ impl Operation for SoftmaxOperation {
 pub struct LogSoftmaxOperation {
     global_id: GlobalId,
     axis: Option<i64>,
-    input: SymbolicGraphTensorId,
-    output: SymbolicGraphTensorId,
+    input: GlobalId,
+    output: GlobalId,
 }
 
 impl LogSoftmaxOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<SymbolicGraphTensorId>],
-        outputs: &[Option<SymbolicGraphTensorId>],
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
         attributes: &[onnx::AttributeProto],
         rng: &mut impl Rng
     ) -> Result<Self, ONNXDecodingError> {
@@ -232,7 +232,7 @@ impl LogSoftmaxOperation {
     }
 }
 
-impl Node<SymbolicGraphTensorId> for LogSoftmaxOperation {
+impl Node for LogSoftmaxOperation {
     type OpKind = String;
     fn global_id(&self) -> GlobalId {
         self.global_id
@@ -240,16 +240,16 @@ impl Node<SymbolicGraphTensorId> for LogSoftmaxOperation {
     fn op_kind(&self) -> Self::OpKind {
         "LogSoftmax".to_string()
     }
-    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(std::iter::once(self.input))
     }
-    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(std::iter::once(self.output))
     }
 }
 
 impl Operation for LogSoftmaxOperation {
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph<SymbolicGraphTensorId> {
+    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
 
         let e_tid = milli_graph::ops::SimpleUnaryOp::exp(&mut graph, input_map[&self.input], rng);
@@ -268,16 +268,16 @@ impl Operation for LogSoftmaxOperation {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct IsInfOperation {
     global_id: GlobalId,
-    input: SymbolicGraphTensorId,
-    output: SymbolicGraphTensorId,
+    input: GlobalId,
+    output: GlobalId,
     detect_negative: Option<bool>,
     detect_positive: Option<bool>,
 }
 
 impl IsInfOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<SymbolicGraphTensorId>],
-        outputs: &[Option<SymbolicGraphTensorId>],
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
         attributes: &[onnx::AttributeProto],
         rng: &mut impl Rng
     ) -> Result<Self, ONNXDecodingError> {
@@ -301,7 +301,7 @@ impl IsInfOperation {
     }
 }
 
-impl Node<SymbolicGraphTensorId> for IsInfOperation {
+impl Node for IsInfOperation {
     type OpKind = String;
     fn global_id(&self) -> GlobalId {
         self.global_id
@@ -309,15 +309,15 @@ impl Node<SymbolicGraphTensorId> for IsInfOperation {
     fn op_kind(&self) -> Self::OpKind {
         "Is Inf".to_string()
     }
-    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(std::iter::once(self.input))
     }
-    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(std::iter::once(self.output))
     }
 }
 impl Operation for IsInfOperation {
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph<SymbolicGraphTensorId> {
+    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let input = input_map[&self.input];
         let out_tid = milli_graph::ops::SimpleUnaryOp::is_inf(
@@ -337,14 +337,14 @@ impl Operation for IsInfOperation {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct IdentityOperation {
     global_id: GlobalId,
-    input: SymbolicGraphTensorId,
-    output: SymbolicGraphTensorId,
+    input: GlobalId,
+    output: GlobalId,
 }
 
 impl IdentityOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<SymbolicGraphTensorId>],
-        outputs: &[Option<SymbolicGraphTensorId>],
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
         _attributes: &[onnx::AttributeProto],
         rng: &mut impl Rng
     ) -> Result<Self, ONNXDecodingError> {
@@ -363,7 +363,7 @@ impl IdentityOperation {
     }
 }
 
-impl Node<SymbolicGraphTensorId> for IdentityOperation {
+impl Node for IdentityOperation {
     type OpKind = String;
     fn global_id(&self) -> GlobalId {
         self.global_id
@@ -371,15 +371,15 @@ impl Node<SymbolicGraphTensorId> for IdentityOperation {
     fn op_kind(&self) -> Self::OpKind {
         "Identity".to_string()
     }
-    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(std::iter::once(self.input))
     }
-    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(std::iter::once(self.output))
     }
 }
 impl Operation for IdentityOperation {
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph<SymbolicGraphTensorId> {
+    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let input = input_map[&self.input];
         let mut output_map = HashMap::new();

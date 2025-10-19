@@ -2,7 +2,7 @@ use crate::graph::{GlobalId, Node};
 use crate::milli_graph::{self, MilliOpGraph};
 use crate::onnx;
 use crate::symbolic_graph::ops::Operation;
-use crate::symbolic_graph::{ONNXDecodingError, SymbolicGraphTensorId};
+use crate::symbolic_graph::ONNXDecodingError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use rand::Rng;
@@ -10,18 +10,18 @@ use rand::Rng;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SliceOperation {
     global_id: GlobalId,
-    data: SymbolicGraphTensorId,
-    starts: SymbolicGraphTensorId,
-    ends: SymbolicGraphTensorId,
-    axes: Option<SymbolicGraphTensorId>,
-    steps: Option<SymbolicGraphTensorId>,
-    output: SymbolicGraphTensorId,
+    data: GlobalId,
+    starts: GlobalId,
+    ends: GlobalId,
+    axes: Option<GlobalId>,
+    steps: Option<GlobalId>,
+    output: GlobalId,
 }
 
 impl SliceOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<SymbolicGraphTensorId>],
-        outputs: &[Option<SymbolicGraphTensorId>],
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
         _attributes: &[onnx::AttributeProto],
         rng: &mut impl Rng,
     ) -> Result<Self, ONNXDecodingError> {
@@ -52,7 +52,7 @@ impl SliceOperation {
     }
 }
 
-impl Node<SymbolicGraphTensorId> for SliceOperation {
+impl Node for SliceOperation {
     type OpKind = String;
     fn global_id(&self) -> GlobalId {
         self.global_id
@@ -60,7 +60,7 @@ impl Node<SymbolicGraphTensorId> for SliceOperation {
     fn op_kind(&self) -> Self::OpKind {
         "Slice".to_string()
     }
-    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         let mut v = vec![self.data, self.starts, self.ends];
         if let Some(axes) = &self.axes {
             v.push(*axes);
@@ -70,12 +70,12 @@ impl Node<SymbolicGraphTensorId> for SliceOperation {
         }
         Box::new(v.into_iter())
     }
-    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(std::iter::once(self.output))
     }
 }
 impl Operation for SliceOperation {
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph<SymbolicGraphTensorId> {
+    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let out = milli_graph::ops::Slice::push_new(
             &mut graph,

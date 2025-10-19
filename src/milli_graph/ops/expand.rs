@@ -1,7 +1,7 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
-use crate::milli_graph::{MilliOpGraph, MilliOpGraphError, MilliOpGraphTensorId};
+use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::numeric_tensor::NumericTensor;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -12,18 +12,18 @@ use crate::graph::GlobalId;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Expand {
     global_id: GlobalId,
-    output: MilliOpGraphTensorId,
-    input: MilliOpGraphTensorId,
-    shape: MilliOpGraphTensorId,
+    output: GlobalId,
+    input: GlobalId,
+    shape: GlobalId,
 }
 
 impl Expand {
-    pub fn push_new<T: std::hash::Hash + Clone + Eq + 'static>(
-        graph: &mut MilliOpGraph<T>,
-        input: MilliOpGraphTensorId,
-        shape: MilliOpGraphTensorId,
+    pub fn push_new(
+        graph: &mut MilliOpGraph,
+        input: GlobalId,
+        shape: GlobalId,
         rng: &mut impl Rng,
-    ) -> MilliOpGraphTensorId {
+    ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
         let node = Self {
             global_id: GlobalId::new(rng),
@@ -36,7 +36,7 @@ impl Expand {
     }
 }
 
-impl crate::graph::Node<MilliOpGraphTensorId> for Expand {
+impl crate::graph::Node for Expand {
     type OpKind = String;
     fn global_id(&self) -> GlobalId {
         self.global_id
@@ -44,10 +44,10 @@ impl crate::graph::Node<MilliOpGraphTensorId> for Expand {
     fn op_kind(&self) -> Self::OpKind {
         "Expand".to_string()
     }
-    fn inputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(vec![self.input, self.shape].into_iter())
     }
-    fn outputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(vec![self.output].into_iter())
     }
 }
@@ -55,10 +55,10 @@ impl crate::graph::Node<MilliOpGraphTensorId> for Expand {
 impl MilliOp for Expand {
     fn eval(
         &self,
-        inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
+        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
         _backend: &mut EvalBackend,
     ) -> Result<
-        Box<dyn Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>>,
+        Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>,
         MilliOpGraphError,
     > {
         let shape: Vec<i64> = inputs[&self.shape].try_to_rank::<P1>()?.try_into()?;

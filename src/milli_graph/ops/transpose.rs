@@ -2,7 +2,7 @@ use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
-use crate::milli_graph::{MilliOpGraph, MilliOpGraphError, MilliOpGraphTensorId};
+use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::numeric_tensor::NumericTensor;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -10,18 +10,18 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Transpose {
     global_id: GlobalId,
-    output: MilliOpGraphTensorId,
-    data: MilliOpGraphTensorId,
+    output: GlobalId,
+    data: GlobalId,
     perm: Option<Vec<i64>>,
 }
 
 impl Transpose {
-    pub fn push_new<T: std::hash::Hash + Clone + Eq + 'static>(
-        graph: &mut MilliOpGraph<T>,
-        data: MilliOpGraphTensorId,
+    pub fn push_new(
+        graph: &mut MilliOpGraph,
+        data: GlobalId,
         perm: Option<Vec<i64>>,
         rng: &mut impl rand::Rng,
-    ) -> MilliOpGraphTensorId {
+    ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
         let node = Self { output, data, perm, global_id: GlobalId::new(rng) };
         graph.push_op(AnyMilliOp::Transpose(node));
@@ -29,7 +29,7 @@ impl Transpose {
     }
 }
 
-impl Node<MilliOpGraphTensorId> for Transpose {
+impl Node for Transpose {
     type OpKind = String;
     fn global_id(&self) -> GlobalId {
         self.global_id
@@ -37,10 +37,10 @@ impl Node<MilliOpGraphTensorId> for Transpose {
     fn op_kind(&self) -> Self::OpKind {
         "Transpose".to_string()
     }
-    fn inputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(vec![self.data].into_iter())
     }
-    fn outputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(vec![self.output].into_iter())
     }
 }
@@ -48,10 +48,10 @@ impl Node<MilliOpGraphTensorId> for Transpose {
 impl MilliOp for Transpose {
     fn eval(
         &self,
-        inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
+        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
     ) -> Result<
-        Box<dyn Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>>,
+        Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>,
         MilliOpGraphError,
     > {
         let out = inputs[&self.data].transpose(self.perm.clone(), backend)?;

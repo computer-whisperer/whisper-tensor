@@ -2,7 +2,7 @@ use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::dtype::DType;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
-use crate::milli_graph::{MilliOpGraph, MilliOpGraphError, MilliOpGraphTensorId};
+use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::numeric_tensor::NumericTensor;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -12,24 +12,24 @@ use crate::graph::GlobalId;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Slice {
     global_id: crate::graph::GlobalId,
-    output: MilliOpGraphTensorId,
-    data: MilliOpGraphTensorId,
-    starts: MilliOpGraphTensorId,
-    ends: MilliOpGraphTensorId,
-    steps: Option<MilliOpGraphTensorId>,
-    axes: Option<MilliOpGraphTensorId>,
+    output: GlobalId,
+    data: GlobalId,
+    starts: GlobalId,
+    ends: GlobalId,
+    steps: Option<GlobalId>,
+    axes: Option<GlobalId>,
 }
 
 impl Slice {
-    pub fn push_new<T: std::hash::Hash + Clone + Eq + 'static>(
-        graph: &mut MilliOpGraph<T>,
-        data: MilliOpGraphTensorId,
-        starts: MilliOpGraphTensorId,
-        ends: MilliOpGraphTensorId,
-        steps: Option<MilliOpGraphTensorId>,
-        axes: Option<MilliOpGraphTensorId>,
+    pub fn push_new(
+        graph: &mut MilliOpGraph,
+        data: GlobalId,
+        starts: GlobalId,
+        ends: GlobalId,
+        steps: Option<GlobalId>,
+        axes: Option<GlobalId>,
         rng: &mut impl rand::Rng,
-    ) -> MilliOpGraphTensorId {
+    ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
         let node = Self {
             output,
@@ -45,7 +45,7 @@ impl Slice {
     }
 }
 
-impl crate::graph::Node<MilliOpGraphTensorId> for Slice {
+impl crate::graph::Node for Slice {
     type OpKind = String;
     fn global_id(&self) -> GlobalId {
         self.global_id
@@ -53,7 +53,7 @@ impl crate::graph::Node<MilliOpGraphTensorId> for Slice {
     fn op_kind(&self) -> Self::OpKind {
         "Slice".to_string()
     }
-    fn inputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         let mut res = vec![self.data, self.starts, self.ends];
         if let Some(steps) = &self.steps {
             res.push(*steps);
@@ -63,7 +63,7 @@ impl crate::graph::Node<MilliOpGraphTensorId> for Slice {
         }
         Box::new(res.into_iter())
     }
-    fn outputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new([self.output].into_iter())
     }
 }
@@ -71,10 +71,10 @@ impl crate::graph::Node<MilliOpGraphTensorId> for Slice {
 impl MilliOp for Slice {
     fn eval(
         &self,
-        inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
+        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
     ) -> Result<
-        Box<dyn Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>>,
+        Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>,
         MilliOpGraphError,
     > {
         let data_input = &inputs[&self.data];

@@ -13,10 +13,7 @@ use whisper_tensor::super_graph::data::SuperGraphData;
 use whisper_tensor::super_graph::links::{
     SuperGraphLink, SuperGraphLinkString, SuperGraphLinkTensor, SuperGraphLinkTensorMap,
 };
-use whisper_tensor::super_graph::nodes::{
-    SuperGraphNodeMilliOpGraph, SuperGraphNodeModelExecution, SuperGraphNodeTokenizerDecode,
-    SuperGraphNodeTokenizerEncode, SuperGraphNodeTokenizerLoad,
-};
+use whisper_tensor::super_graph::nodes::{SuperGraphNode, SuperGraphNodeMilliOpGraph, SuperGraphNodeModelExecution, SuperGraphNodeTokenizerDecode, SuperGraphNodeTokenizerEncode, SuperGraphNodeTokenizerLoad};
 use whisper_tensor::super_graph::{SuperGraphBuilder, SuperGraphContext};
 use whisper_tensor_import::onnx_graph::{TokenizerInfo, WeightStorageStrategy};
 use whisper_tensor_import::{ModelTypeHint, identify_and_load};
@@ -37,8 +34,8 @@ fn main() {
 
     let mut builder = SuperGraphBuilder::new();
 
-    let model_link = SuperGraphLinkTensorMap::new(builder.get_next_link_id(), &mut rng);
-    let text_input_link = SuperGraphLinkString::new(builder.get_next_link_id(), &mut rng);
+    let model_link = SuperGraphLinkTensorMap::new(&mut rng);
+    let text_input_link = SuperGraphLinkString::new(&mut rng);
 
     let tokenizer_link = SuperGraphNodeTokenizerLoad::new_and_add(
         &mut builder,
@@ -53,19 +50,19 @@ fn main() {
     let logit_output = {
         let inputs = vec![(tokens, "input1".to_string())];
         let (outputs, logit_output) = {
-            let tensor = SuperGraphLinkTensor::new(builder.get_next_link_id(), &mut rng);
+            let tensor = SuperGraphLinkTensor::new(&mut rng);
             let outputs = vec![("output1".to_string(), tensor)];
             (outputs, tensor)
         };
         let node = SuperGraphNodeModelExecution::new(&mut rng, model_link, 0, inputs, outputs);
-        builder.add_node(node.into());
+        builder.add_node(node.to_any());
         logit_output
     };
 
     // Sampler
     let chosen_token = {
-        let (mut milli_graph, inputs_map) = MilliOpGraph::new([logit_output], &mut rng);
-        let logits_input = inputs_map[&logit_output];
+        let (mut milli_graph, inputs_map) = MilliOpGraph::new([logit_output.global_id()], &mut rng);
+        let logits_input = inputs_map[&logit_output.global_id()];
 
         // Slice to last token
 
@@ -104,12 +101,12 @@ fn main() {
         let output = Unsqueeze::push_new(&mut milli_graph, output, const_0, &mut rng);
         let mut output_map = HashMap::new();
 
-        let output_tensor = SuperGraphLinkTensor::new(builder.get_next_link_id(), &mut rng);
-        output_map.insert(output, output_tensor);
+        let output_tensor = SuperGraphLinkTensor::new(&mut rng);
+        output_map.insert(output, output_tensor.global_id());
         milli_graph.set_output_map(output_map);
 
         let node = SuperGraphNodeMilliOpGraph::new(milli_graph, &mut rng);
-        builder.add_node(node.into());
+        builder.add_node(node.to_any());
         output_tensor
     };
 

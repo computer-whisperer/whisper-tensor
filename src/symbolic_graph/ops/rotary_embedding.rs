@@ -2,7 +2,7 @@ use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::MilliOpGraph;
 use crate::symbolic_graph::ops::Operation;
-use crate::symbolic_graph::{ONNXDecodingError, SymbolicGraphTensorId, query_attribute_int};
+use crate::symbolic_graph::{ONNXDecodingError, query_attribute_int};
 use crate::{milli_graph, onnx};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -11,11 +11,11 @@ use rand::Rng;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RotaryEmbeddingOperation {
     global_id: GlobalId,
-    data_input: SymbolicGraphTensorId,
-    cos_cache: SymbolicGraphTensorId,
-    sin_cache: SymbolicGraphTensorId,
-    position_ids: Option<SymbolicGraphTensorId>,
-    data_output: SymbolicGraphTensorId,
+    data_input: GlobalId,
+    cos_cache: GlobalId,
+    sin_cache: GlobalId,
+    position_ids: Option<GlobalId>,
+    data_output: GlobalId,
     interleaved: bool,
     num_heads: Option<i64>,
     rotary_embedding_dim: i64,
@@ -23,8 +23,8 @@ pub struct RotaryEmbeddingOperation {
 
 impl RotaryEmbeddingOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<SymbolicGraphTensorId>],
-        outputs: &[Option<SymbolicGraphTensorId>],
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
         attributes: &[onnx::AttributeProto],
         rng: &mut impl Rng,
     ) -> Result<Self, ONNXDecodingError> {
@@ -56,7 +56,7 @@ impl RotaryEmbeddingOperation {
     }
 }
 
-impl Node<SymbolicGraphTensorId> for RotaryEmbeddingOperation {
+impl Node for RotaryEmbeddingOperation {
     type OpKind = String;
     fn global_id(&self) -> GlobalId {
         self.global_id
@@ -64,19 +64,19 @@ impl Node<SymbolicGraphTensorId> for RotaryEmbeddingOperation {
     fn op_kind(&self) -> Self::OpKind {
         "RotaryEmbedding".to_string()
     }
-    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         let mut v = vec![self.data_input, self.cos_cache, self.sin_cache];
         if let Some(x) = self.position_ids {
             v.push(x);
         }
         Box::new(v.into_iter())
     }
-    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(std::iter::once(self.data_output))
     }
 }
 impl Operation for RotaryEmbeddingOperation {
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph<SymbolicGraphTensorId> {
+    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
 
         let data = input_map[&self.data_input];

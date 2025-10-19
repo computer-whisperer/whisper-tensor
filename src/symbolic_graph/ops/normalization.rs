@@ -4,7 +4,7 @@ use crate::graph::{GlobalId, Node};
 use crate::milli_graph::{MilliOpGraph, ops_helpers};
 use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{
-    ONNXDecodingError, SymbolicGraphTensorId, query_attribute_float, query_attribute_int,
+    ONNXDecodingError, query_attribute_float, query_attribute_int,
 };
 use crate::{milli_graph, onnx};
 use serde::{Deserialize, Serialize};
@@ -14,16 +14,16 @@ use rand::Rng;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LpNormalizationOperation {
     global_id: GlobalId,
-    input: SymbolicGraphTensorId,
-    output: SymbolicGraphTensorId,
+    input: GlobalId,
+    output: GlobalId,
     axis: i64,
     p: i64,
 }
 
 impl LpNormalizationOperation {
     pub fn from_onnx(
-        inputs: &[Option<SymbolicGraphTensorId>],
-        outputs: &[Option<SymbolicGraphTensorId>],
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
         attributes: &[onnx::AttributeProto],
         rng: &mut impl Rng,
     ) -> Result<Self, ONNXDecodingError> {
@@ -58,7 +58,7 @@ impl LpNormalizationOperation {
     }
 }
 
-impl Node<SymbolicGraphTensorId> for LpNormalizationOperation {
+impl Node for LpNormalizationOperation {
     type OpKind = String;
     fn global_id(&self) -> GlobalId {
         self.global_id
@@ -66,15 +66,15 @@ impl Node<SymbolicGraphTensorId> for LpNormalizationOperation {
     fn op_kind(&self) -> Self::OpKind {
         "LpNormalization".to_string()
     }
-    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(std::iter::once(self.input))
     }
-    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(std::iter::once(self.output))
     }
 }
 impl Operation for LpNormalizationOperation {
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph<SymbolicGraphTensorId> {
+    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let input = input_map[&self.input];
 
@@ -107,10 +107,10 @@ impl Operation for LpNormalizationOperation {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GroupNormalizationOperation {
     global_id: GlobalId,
-    input: SymbolicGraphTensorId,
-    scale: SymbolicGraphTensorId,
-    bias: SymbolicGraphTensorId,
-    output: SymbolicGraphTensorId,
+    input: GlobalId,
+    scale: GlobalId,
+    bias: GlobalId,
+    output: GlobalId,
     epsilon: f32,
     num_groups: usize,
     stash_type: DType,
@@ -118,8 +118,8 @@ pub struct GroupNormalizationOperation {
 
 impl GroupNormalizationOperation {
     pub fn from_onnx(
-        inputs: &[Option<SymbolicGraphTensorId>],
-        outputs: &[Option<SymbolicGraphTensorId>],
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
         attributes: &[onnx::AttributeProto],
         rng: &mut impl Rng,
     ) -> Result<Self, ONNXDecodingError> {
@@ -172,7 +172,7 @@ impl GroupNormalizationOperation {
     }
 }
 
-impl Node<SymbolicGraphTensorId> for GroupNormalizationOperation {
+impl Node for GroupNormalizationOperation {
     type OpKind = String;
     fn global_id(&self) -> GlobalId {
         self.global_id
@@ -180,16 +180,16 @@ impl Node<SymbolicGraphTensorId> for GroupNormalizationOperation {
     fn op_kind(&self) -> Self::OpKind {
         "GroupNormalization".to_string()
     }
-    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new([self.input, self.scale, self.bias].into_iter())
     }
-    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(std::iter::once(self.output))
     }
 }
 
 impl Operation for GroupNormalizationOperation {
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph<SymbolicGraphTensorId> {
+    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let original_input = input_map[&self.input];
         let input_cast =
@@ -284,12 +284,12 @@ impl Operation for GroupNormalizationOperation {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RMSNormalizationOperation {
     global_id: GlobalId,
-    input: SymbolicGraphTensorId,
-    scale: SymbolicGraphTensorId,
-    bias: Option<SymbolicGraphTensorId>,
-    output: SymbolicGraphTensorId,
-    mean_output: Option<SymbolicGraphTensorId>,
-    inv_std_dev_output: Option<SymbolicGraphTensorId>,
+    input: GlobalId,
+    scale: GlobalId,
+    bias: Option<GlobalId>,
+    output: GlobalId,
+    mean_output: Option<GlobalId>,
+    inv_std_dev_output: Option<GlobalId>,
     axis: i64,
     epsilon: f32,
     stash_type: DType,
@@ -297,8 +297,8 @@ pub struct RMSNormalizationOperation {
 
 impl RMSNormalizationOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<SymbolicGraphTensorId>],
-        outputs: &[Option<SymbolicGraphTensorId>],
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
         attributes: &[onnx::AttributeProto],
         rng: &mut impl Rng,
     ) -> Result<Self, ONNXDecodingError> {
@@ -369,7 +369,7 @@ impl RMSNormalizationOperation {
     }
 }
 
-impl Node<SymbolicGraphTensorId> for RMSNormalizationOperation {
+impl Node for RMSNormalizationOperation {
     type OpKind = String;
     fn global_id(&self) -> GlobalId {
         self.global_id
@@ -377,14 +377,14 @@ impl Node<SymbolicGraphTensorId> for RMSNormalizationOperation {
     fn op_kind(&self) -> Self::OpKind {
         "RMSNormalization".to_string()
     }
-    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         let mut v = vec![self.input, self.scale];
         if let Some(bias) = self.bias {
             v.push(bias);
         }
         Box::new(v.into_iter())
     }
-    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         let mut res = vec![self.output];
         if let Some(mean_output) = self.mean_output {
             res.push(mean_output);
@@ -397,7 +397,7 @@ impl Node<SymbolicGraphTensorId> for RMSNormalizationOperation {
 }
 
 impl Operation for RMSNormalizationOperation {
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph<SymbolicGraphTensorId> {
+    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let input_data = input_map[&self.input];
         let input_scale = input_map[&self.scale];
@@ -455,12 +455,12 @@ impl Operation for RMSNormalizationOperation {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LayerNormalizationOperation {
     global_id: GlobalId,
-    input: SymbolicGraphTensorId,
-    scale: SymbolicGraphTensorId,
-    bias: Option<SymbolicGraphTensorId>,
-    output: SymbolicGraphTensorId,
-    mean_output: Option<SymbolicGraphTensorId>,
-    inv_std_dev_output: Option<SymbolicGraphTensorId>,
+    input: GlobalId,
+    scale: GlobalId,
+    bias: Option<GlobalId>,
+    output: GlobalId,
+    mean_output: Option<GlobalId>,
+    inv_std_dev_output: Option<GlobalId>,
     axis: i64,
     epsilon: f32,
     stash_type: DType,
@@ -468,8 +468,8 @@ pub struct LayerNormalizationOperation {
 
 impl LayerNormalizationOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<SymbolicGraphTensorId>],
-        outputs: &[Option<SymbolicGraphTensorId>],
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
         attributes: &[onnx::AttributeProto],
         rng: &mut impl Rng,
     ) -> Result<Self, ONNXDecodingError> {
@@ -540,7 +540,7 @@ impl LayerNormalizationOperation {
     }
 }
 
-impl Node<SymbolicGraphTensorId> for LayerNormalizationOperation {
+impl Node for LayerNormalizationOperation {
     type OpKind = String;
     fn global_id(&self) -> GlobalId {
         self.global_id
@@ -548,14 +548,14 @@ impl Node<SymbolicGraphTensorId> for LayerNormalizationOperation {
     fn op_kind(&self) -> Self::OpKind {
         "LayerNormalization".to_string()
     }
-    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         let mut v = vec![self.input, self.scale];
         if let Some(bias) = self.bias {
             v.push(bias);
         }
         Box::new(v.into_iter())
     }
-    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         let mut res = vec![self.output];
         if let Some(mean_output) = self.mean_output {
             res.push(mean_output);
@@ -567,7 +567,7 @@ impl Node<SymbolicGraphTensorId> for LayerNormalizationOperation {
     }
 }
 impl Operation for LayerNormalizationOperation {
-fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph<SymbolicGraphTensorId> {
+fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let input_data = input_map[&self.input];
         let input_scale = input_map[&self.scale];
@@ -639,17 +639,17 @@ fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph<SymbolicGraphTe
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct InstanceNormalizationOperation {
     global_id: GlobalId,
-    input: SymbolicGraphTensorId,
-    scale: SymbolicGraphTensorId,
-    bias: SymbolicGraphTensorId,
-    output: SymbolicGraphTensorId,
+    input: GlobalId,
+    scale: GlobalId,
+    bias: GlobalId,
+    output: GlobalId,
     epsilon: Option<f32>,
 }
 
 impl InstanceNormalizationOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<SymbolicGraphTensorId>],
-        outputs: &[Option<SymbolicGraphTensorId>],
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
         attributes: &[onnx::AttributeProto],
         rng: &mut impl Rng,
     ) -> Result<Self, ONNXDecodingError> {
@@ -684,7 +684,7 @@ impl InstanceNormalizationOperation {
     }
 }
 
-impl Node<SymbolicGraphTensorId> for InstanceNormalizationOperation {
+impl Node for InstanceNormalizationOperation {
     type OpKind = String;
     fn global_id(&self) -> GlobalId {
         self.global_id
@@ -692,16 +692,16 @@ impl Node<SymbolicGraphTensorId> for InstanceNormalizationOperation {
     fn op_kind(&self) -> Self::OpKind {
         "InstanceNormalization".to_string()
     }
-    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new([self.input, self.scale, self.bias].into_iter())
     }
-    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(std::iter::once(self.output))
     }
 }
 
 impl Operation for InstanceNormalizationOperation {
-    fn get_milli_op_graph(&self, _rng: &mut impl Rng) -> MilliOpGraph<SymbolicGraphTensorId> {
+    fn get_milli_op_graph(&self, _rng: &mut impl Rng) -> MilliOpGraph {
         unimplemented!();
     }
 }

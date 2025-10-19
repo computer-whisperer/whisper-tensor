@@ -3,22 +3,22 @@ use crate::graph::{GlobalId, Node};
 use crate::milli_graph::{self, MilliOpGraph};
 use crate::onnx;
 use crate::symbolic_graph::ops::Operation;
-use crate::symbolic_graph::{ONNXDecodingError, SymbolicGraphTensorId};
+use crate::symbolic_graph::ONNXDecodingError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CastLikeOperation {
     global_id: GlobalId,
-    input: SymbolicGraphTensorId,
-    target_type: SymbolicGraphTensorId,
-    output: SymbolicGraphTensorId,
+    input: GlobalId,
+    target_type: GlobalId,
+    output: GlobalId,
 }
 
 impl CastLikeOperation {
     pub fn from_onnx(
-        inputs: &[Option<SymbolicGraphTensorId>],
-        outputs: &[Option<SymbolicGraphTensorId>],
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
         _attributes: &[onnx::AttributeProto],
         rng: &mut impl rand::Rng,
     ) -> Result<Self, ONNXDecodingError> {
@@ -37,7 +37,7 @@ impl CastLikeOperation {
     }
 }
 
-impl Node<SymbolicGraphTensorId> for CastLikeOperation {
+impl Node for CastLikeOperation {
     type OpKind = String;
     fn global_id(&self) -> GlobalId {
         self.global_id
@@ -45,16 +45,16 @@ impl Node<SymbolicGraphTensorId> for CastLikeOperation {
     fn op_kind(&self) -> Self::OpKind {
         "CastLike".to_string()
     }
-    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new([self.input, self.target_type].into_iter())
     }
-    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new([self.output].into_iter())
     }
 }
 
 impl Operation for CastLikeOperation {
-    fn get_milli_op_graph(&self, rng: &mut impl rand::Rng) -> MilliOpGraph<SymbolicGraphTensorId> {
+    fn get_milli_op_graph(&self, rng: &mut impl rand::Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let out = milli_graph::ops::CastLike::push_new(
             &mut graph,
@@ -72,15 +72,15 @@ impl Operation for CastLikeOperation {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CastOperation {
     global_id: GlobalId,
-    input: SymbolicGraphTensorId,
-    output: SymbolicGraphTensorId,
+    input: GlobalId,
+    output: GlobalId,
     to: DType,
 }
 
 impl CastOperation {
     pub fn from_onnx(
-        inputs: &[Option<SymbolicGraphTensorId>],
-        outputs: &[Option<SymbolicGraphTensorId>],
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
         attributes: &[onnx::AttributeProto],
         rng: &mut impl rand::Rng,
     ) -> Result<Self, ONNXDecodingError> {
@@ -110,7 +110,7 @@ impl CastOperation {
     }
 }
 
-impl Node<SymbolicGraphTensorId> for CastOperation {
+impl Node for CastOperation {
     type OpKind = String;
     fn global_id(&self) -> GlobalId {
         self.global_id
@@ -118,16 +118,16 @@ impl Node<SymbolicGraphTensorId> for CastOperation {
     fn op_kind(&self) -> Self::OpKind {
         "Cast".to_string()
     }
-    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new([self.input].into_iter())
     }
-    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new([self.output].into_iter())
     }
 }
 
 impl Operation for CastOperation {
-    fn get_milli_op_graph(&self, rng: &mut impl rand::Rng) -> MilliOpGraph<SymbolicGraphTensorId> {
+    fn get_milli_op_graph(&self, rng: &mut impl rand::Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let out = milli_graph::ops::Cast::push_new(&mut graph, input_map[&self.input], self.to, rng);
         let mut output_map = HashMap::new();

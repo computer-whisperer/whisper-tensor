@@ -4,7 +4,7 @@ use crate::milli_graph::{self, MilliOpGraph};
 use crate::onnx;
 use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{
-    ONNXDecodingError, SymbolicGraphTensorId, query_attribute_int, query_attribute_ints,
+    ONNXDecodingError, query_attribute_int, query_attribute_ints,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -15,16 +15,16 @@ pub struct SplitOperation {
     global_id: GlobalId,
     axis: Option<i64>,
     num_outputs: Option<i64>,
-    input: SymbolicGraphTensorId,
-    split: Option<SymbolicGraphTensorId>,
+    input: GlobalId,
+    split: Option<GlobalId>,
     split_attribute: Option<Vec<i64>>,
-    outputs: Vec<SymbolicGraphTensorId>,
+    outputs: Vec<GlobalId>,
 }
 
 impl SplitOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<SymbolicGraphTensorId>],
-        outputs: &[Option<SymbolicGraphTensorId>],
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
         attributes: &[onnx::AttributeProto],
         rng: &mut impl Rng
     ) -> Result<Self, ONNXDecodingError> {
@@ -55,7 +55,7 @@ impl SplitOperation {
     }
 }
 
-impl Node<SymbolicGraphTensorId> for SplitOperation {
+impl Node for SplitOperation {
     type OpKind = String;
     fn global_id(&self) -> GlobalId {
         self.global_id
@@ -63,19 +63,19 @@ impl Node<SymbolicGraphTensorId> for SplitOperation {
     fn op_kind(&self) -> Self::OpKind {
         "Split".to_string()
     }
-    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         let mut inputs = vec![self.input];
         if let Some(split) = self.split {
             inputs.push(split);
         }
         Box::new(inputs.into_iter())
     }
-    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(self.outputs.clone().into_iter())
     }
 }
 impl Operation for SplitOperation {
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph<SymbolicGraphTensorId> {
+    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
 
         let mut output_map = HashMap::new();

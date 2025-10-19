@@ -1,7 +1,7 @@
 use crate::DynRank;
 use crate::numeric_tensor::NumericTensor;
-use crate::symbolic_graph::SymbolicGraphTensorId;
 use std::collections::HashMap;
+use crate::graph::GlobalId;
 
 #[cfg(feature = "candle")]
 pub mod candle_backend;
@@ -17,7 +17,7 @@ pub mod ndarray_backend;
 
 #[derive(Default, Clone)]
 pub struct ModelLoadedTensorCache {
-    pub tensors: HashMap<SymbolicGraphTensorId, NumericTensor<DynRank>>,
+    pub tensors: HashMap<GlobalId, NumericTensor<DynRank>>,
 }
 
 impl ModelLoadedTensorCache {

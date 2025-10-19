@@ -1,7 +1,7 @@
 use crate::backends::eval_backend::EvalBackend;
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
-use crate::milli_graph::{MilliOpGraph, MilliOpGraphError, MilliOpGraphTensorId};
+use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::numeric_tensor::NumericTensor;
 use crate::{DynRank, TrigOp};
 use serde::{Deserialize, Serialize};
@@ -33,123 +33,123 @@ pub(crate) enum WhichSimpleUnaryOp {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SimpleUnaryOp {
     global_id: GlobalId,
-    output: MilliOpGraphTensorId,
-    input: MilliOpGraphTensorId,
+    output: GlobalId,
+    input: GlobalId,
     op: WhichSimpleUnaryOp,
 }
 
 impl SimpleUnaryOp {
-    fn new_internal<T: std::hash::Hash + Clone + Eq + 'static>(
-        graph: &mut MilliOpGraph<T>,
-        input: MilliOpGraphTensorId,
+    fn new_internal(
+        graph: &mut MilliOpGraph,
+        input: GlobalId,
         op: WhichSimpleUnaryOp,
         rng: &mut impl rand::Rng,
-    ) -> MilliOpGraphTensorId {
+    ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
         let node = Self { output, input, op, global_id: GlobalId::new(rng)};
         graph.push_op(AnyMilliOp::SimpleUnary(node));
         output
     }
 
-    pub fn neg<T: std::hash::Hash + Clone + Eq + 'static>(
-        graph: &mut MilliOpGraph<T>,
-        input: MilliOpGraphTensorId,
+    pub fn neg(
+        graph: &mut MilliOpGraph,
+        input: GlobalId,
         rng: &mut impl rand::Rng,
-    ) -> MilliOpGraphTensorId {
+    ) -> GlobalId {
         Self::new_internal(graph, input, WhichSimpleUnaryOp::Neg, rng)
     }
-    pub fn abs<T: std::hash::Hash + Clone + Eq + 'static>(
-        graph: &mut MilliOpGraph<T>,
-        input: MilliOpGraphTensorId,
+    pub fn abs(
+        graph: &mut MilliOpGraph,
+        input: GlobalId,
         rng: &mut impl rand::Rng,
-    ) -> MilliOpGraphTensorId {
+    ) -> GlobalId {
         Self::new_internal(graph, input, WhichSimpleUnaryOp::Abs, rng)
     }
-    pub fn exp<T: std::hash::Hash + Clone + Eq + 'static>(
-        graph: &mut MilliOpGraph<T>,
-        input: MilliOpGraphTensorId,
+    pub fn exp(
+        graph: &mut MilliOpGraph,
+        input: GlobalId,
         rng: &mut impl rand::Rng,
-    ) -> MilliOpGraphTensorId {
+    ) -> GlobalId {
         Self::new_internal(graph, input, WhichSimpleUnaryOp::Exp, rng)
     }
-    pub fn ln<T: std::hash::Hash + Clone + Eq + 'static>(
-        graph: &mut MilliOpGraph<T>,
-        input: MilliOpGraphTensorId,
+    pub fn ln(
+        graph: &mut MilliOpGraph,
+        input: GlobalId,
         rng: &mut impl rand::Rng,
-    ) -> MilliOpGraphTensorId {
+    ) -> GlobalId {
         Self::new_internal(graph, input, WhichSimpleUnaryOp::Ln, rng)
     }
-    pub fn sqrt<T: std::hash::Hash + Clone + Eq + 'static>(
-        graph: &mut MilliOpGraph<T>,
-        input: MilliOpGraphTensorId,
+    pub fn sqrt(
+        graph: &mut MilliOpGraph,
+        input: GlobalId,
         rng: &mut impl rand::Rng,
-    ) -> MilliOpGraphTensorId {
+    ) -> GlobalId {
         Self::new_internal(graph, input, WhichSimpleUnaryOp::Sqrt, rng)
     }
-    pub fn not<T: std::hash::Hash + Clone + Eq + 'static>(
-        graph: &mut MilliOpGraph<T>,
-        input: MilliOpGraphTensorId,
+    pub fn not(
+        graph: &mut MilliOpGraph,
+        input: GlobalId,
         rng: &mut impl rand::Rng,
-    ) -> MilliOpGraphTensorId {
+    ) -> GlobalId {
         Self::new_internal(graph, input, WhichSimpleUnaryOp::Not, rng)
     }
-    pub fn sign<T: std::hash::Hash + Clone + Eq + 'static>(
-        graph: &mut MilliOpGraph<T>,
-        input: MilliOpGraphTensorId,
+    pub fn sign(
+        graph: &mut MilliOpGraph,
+        input: GlobalId,
         rng: &mut impl rand::Rng,
-    ) -> MilliOpGraphTensorId {
+    ) -> GlobalId {
         Self::new_internal(graph, input, WhichSimpleUnaryOp::Sign, rng)
     }
-    pub fn bitwise_not<T: std::hash::Hash + Clone + Eq + 'static>(
-        graph: &mut MilliOpGraph<T>,
-        input: MilliOpGraphTensorId,
+    pub fn bitwise_not(
+        graph: &mut MilliOpGraph,
+        input: GlobalId,
         rng: &mut impl rand::Rng,
-    ) -> MilliOpGraphTensorId {
+    ) -> GlobalId {
         Self::new_internal(graph, input, WhichSimpleUnaryOp::BitwiseNot, rng)
     }
-    pub fn reciprocal<T: std::hash::Hash + Clone + Eq + 'static>(
-        graph: &mut MilliOpGraph<T>,
-        input: MilliOpGraphTensorId,
+    pub fn reciprocal(
+        graph: &mut MilliOpGraph,
+        input: GlobalId,
         rng: &mut impl rand::Rng,
-    ) -> MilliOpGraphTensorId {
+    ) -> GlobalId {
         Self::new_internal(graph, input, WhichSimpleUnaryOp::Reciprocal, rng)
     }
-    pub fn trig<T: std::hash::Hash + Clone + Eq + 'static>(
-        graph: &mut MilliOpGraph<T>,
-        input: MilliOpGraphTensorId,
+    pub fn trig(
+        graph: &mut MilliOpGraph,
+        input: GlobalId,
         trig_op: TrigOp,
         rng: &mut impl rand::Rng,
-    ) -> MilliOpGraphTensorId {
+    ) -> GlobalId {
         Self::new_internal(graph, input, WhichSimpleUnaryOp::Trig(trig_op), rng)
     }
-    pub fn floor<T: std::hash::Hash + Clone + Eq + 'static>(
-        graph: &mut MilliOpGraph<T>,
-        input: MilliOpGraphTensorId,
+    pub fn floor(
+        graph: &mut MilliOpGraph,
+        input: GlobalId,
         rng: &mut impl rand::Rng,
-    ) -> MilliOpGraphTensorId {
+    ) -> GlobalId {
         Self::new_internal(graph, input, WhichSimpleUnaryOp::Floor, rng)
     }
-    pub fn ceil<T: std::hash::Hash + Clone + Eq + 'static>(
-        graph: &mut MilliOpGraph<T>,
-        input: MilliOpGraphTensorId,
+    pub fn ceil(
+        graph: &mut MilliOpGraph,
+        input: GlobalId,
         rng: &mut impl rand::Rng,
-    ) -> MilliOpGraphTensorId {
+    ) -> GlobalId {
         Self::new_internal(graph, input, WhichSimpleUnaryOp::Ceil, rng)
     }
-    pub fn round<T: std::hash::Hash + Clone + Eq + 'static>(
-        graph: &mut MilliOpGraph<T>,
-        input: MilliOpGraphTensorId,
+    pub fn round(
+        graph: &mut MilliOpGraph,
+        input: GlobalId,
         rng: &mut impl rand::Rng,
-    ) -> MilliOpGraphTensorId {
+    ) -> GlobalId {
         Self::new_internal(graph, input, WhichSimpleUnaryOp::Round, rng)
     }
-    pub fn is_inf<T: std::hash::Hash + Clone + Eq + 'static>(
-        graph: &mut MilliOpGraph<T>,
-        input: MilliOpGraphTensorId,
+    pub fn is_inf(
+        graph: &mut MilliOpGraph,
+        input: GlobalId,
         detect_positive: bool,
         detect_negative: bool,
         rng: &mut impl rand::Rng,
-    ) -> MilliOpGraphTensorId {
+    ) -> GlobalId {
         Self::new_internal(
             graph,
             input,
@@ -160,23 +160,23 @@ impl SimpleUnaryOp {
             rng
         )
     }
-    pub fn is_nan<T: std::hash::Hash + Clone + Eq + 'static>(
-        graph: &mut MilliOpGraph<T>,
-        input: MilliOpGraphTensorId,
+    pub fn is_nan(
+        graph: &mut MilliOpGraph,
+        input: GlobalId,
         rng: &mut impl rand::Rng,
-    ) -> MilliOpGraphTensorId {
+    ) -> GlobalId {
         Self::new_internal(graph, input, WhichSimpleUnaryOp::IsNan, rng)
     }
-    pub fn erf<T: std::hash::Hash + Clone + Eq + 'static>(
-        graph: &mut MilliOpGraph<T>,
-        input: MilliOpGraphTensorId,
+    pub fn erf(
+        graph: &mut MilliOpGraph,
+        input: GlobalId,
         rng: &mut impl rand::Rng,
-    ) -> MilliOpGraphTensorId {
+    ) -> GlobalId {
         Self::new_internal(graph, input, WhichSimpleUnaryOp::Erf, rng)
     }
 }
 
-impl Node<MilliOpGraphTensorId> for SimpleUnaryOp {
+impl Node for SimpleUnaryOp {
     type OpKind = String;
     fn op_kind(&self) -> Self::OpKind {
         match self.op {
@@ -199,10 +199,10 @@ impl Node<MilliOpGraphTensorId> for SimpleUnaryOp {
         }
         .to_string()
     }
-    fn inputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(vec![self.input].into_iter())
     }
-    fn outputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(vec![self.output].into_iter())
     }
     fn global_id(&self) -> GlobalId {
@@ -213,10 +213,10 @@ impl Node<MilliOpGraphTensorId> for SimpleUnaryOp {
 impl MilliOp for SimpleUnaryOp {
     fn eval(
         &self,
-        inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
+        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
     ) -> Result<
-        Box<dyn Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>>,
+        Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>,
         MilliOpGraphError,
     > {
         let input = &inputs[&self.input];
@@ -248,18 +248,18 @@ impl MilliOp for SimpleUnaryOp {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClampMin {
     global_id: GlobalId,
-    output: MilliOpGraphTensorId,
-    input: MilliOpGraphTensorId,
+    output: GlobalId,
+    input: GlobalId,
     value: f32,
 }
 
 impl ClampMin {
-    pub fn push_new<T: std::hash::Hash + Clone + Eq + 'static>(
-        graph: &mut MilliOpGraph<T>,
-        a: MilliOpGraphTensorId,
+    pub fn push_new(
+        graph: &mut MilliOpGraph,
+        a: GlobalId,
         value: f32,
         rng: &mut impl rand::Rng,
-    ) -> MilliOpGraphTensorId {
+    ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
         let node = Self {
             global_id: GlobalId::new(rng),
@@ -272,7 +272,7 @@ impl ClampMin {
     }
 }
 
-impl Node<MilliOpGraphTensorId> for ClampMin {
+impl Node for ClampMin {
     type OpKind = String;
     fn global_id(&self) -> GlobalId {
         self.global_id
@@ -280,10 +280,10 @@ impl Node<MilliOpGraphTensorId> for ClampMin {
     fn op_kind(&self) -> Self::OpKind {
         "Clamp Min".to_string()
     }
-    fn inputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(vec![self.input].into_iter())
     }
-    fn outputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(vec![self.output].into_iter())
     }
 }
@@ -291,10 +291,10 @@ impl Node<MilliOpGraphTensorId> for ClampMin {
 impl MilliOp for ClampMin {
     fn eval(
         &self,
-        inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
+        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
     ) -> Result<
-        Box<dyn Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>>,
+        Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>,
         MilliOpGraphError,
     > {
         let out = inputs[&self.input].clamp_min(self.value, backend)?;

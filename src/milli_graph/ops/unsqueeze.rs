@@ -4,7 +4,7 @@ use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::dtype::DType;
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
-use crate::milli_graph::{MilliOpGraph, MilliOpGraphError, MilliOpGraphTensorId};
+use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::numeric_tensor::NumericTensor;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -13,18 +13,18 @@ use typenum::P1;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Unsqueeze {
     global_id: GlobalId,
-    output: MilliOpGraphTensorId,
-    data: MilliOpGraphTensorId,
-    axes: MilliOpGraphTensorId,
+    output: GlobalId,
+    data: GlobalId,
+    axes: GlobalId,
 }
 
 impl Unsqueeze {
-    pub fn push_new<T: std::hash::Hash + Clone + Eq + 'static>(
-        graph: &mut MilliOpGraph<T>,
-        data: MilliOpGraphTensorId,
-        axes: MilliOpGraphTensorId,
+    pub fn push_new(
+        graph: &mut MilliOpGraph,
+        data: GlobalId,
+        axes: GlobalId,
         rng: &mut impl rand::Rng,
-    ) -> MilliOpGraphTensorId {
+    ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
         let node = Self { output, data, axes, global_id: GlobalId::new(rng) };
         graph.push_op(AnyMilliOp::Unsqueeze(node));
@@ -32,7 +32,7 @@ impl Unsqueeze {
     }
 }
 
-impl Node<MilliOpGraphTensorId> for Unsqueeze {
+impl Node for Unsqueeze {
     type OpKind = String;
     fn global_id(&self) -> GlobalId {
         self.global_id
@@ -40,10 +40,10 @@ impl Node<MilliOpGraphTensorId> for Unsqueeze {
     fn op_kind(&self) -> String {
         "Unsqueeze".to_string()
     }
-    fn inputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(vec![self.data, self.axes].into_iter())
     }
-    fn outputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(vec![self.output].into_iter())
     }
 }
@@ -51,10 +51,10 @@ impl Node<MilliOpGraphTensorId> for Unsqueeze {
 impl MilliOp for Unsqueeze {
     fn eval(
         &self,
-        inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
+        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
     ) -> Result<
-        Box<dyn Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>>,
+        Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>,
         MilliOpGraphError,
     > {
         let axes_ndarray = NDArrayNumericTensor::<DynRank>::try_from(

@@ -5,7 +5,7 @@ use crate::backends::ndarray_backend::conversions::NDArrayNumericTensorType;
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{
-    MilliOpGraph, MilliOpGraphError, MilliOpGraphNodeId, MilliOpGraphTensorId,
+    MilliOpGraph, MilliOpGraphError,
 };
 use crate::numeric_scalar::NumericScalar;
 use crate::numeric_tensor::NumericTensor;
@@ -18,16 +18,16 @@ use typenum::P1;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Constant {
     global_id: GlobalId,
-    output: MilliOpGraphTensorId,
+    output: GlobalId,
     data: NDArrayNumericTensor<DynRank>,
 }
 
 impl Constant {
-    pub fn push_new<T: std::hash::Hash + Clone + Eq + 'static>(
-        graph: &mut MilliOpGraph<T>,
+    pub fn push_new(
+        graph: &mut MilliOpGraph,
         a: NDArrayNumericTensor<DynRank>,
         rng: &mut impl Rng,
-    ) -> MilliOpGraphTensorId {
+    ) -> GlobalId {
         let node = Self {
             global_id: GlobalId::new(rng),
             output: graph.get_new_tensor_id(rng),
@@ -38,11 +38,11 @@ impl Constant {
         out
     }
 
-    pub(crate) fn new_scalar<T, Io: std::hash::Hash + Clone + Eq + 'static>(
-        graph: &mut MilliOpGraph<Io>,
+    pub(crate) fn new_scalar<T>(
+        graph: &mut MilliOpGraph,
         v: T,
         rng: &mut impl Rng,
-    ) -> MilliOpGraphTensorId
+    ) -> GlobalId
     where
         T: NDArrayNumericTensorType,
     {
@@ -58,7 +58,7 @@ impl Constant {
     }
 }
 
-impl Node<MilliOpGraphTensorId> for Constant {
+impl Node for Constant {
     type OpKind = String;
     fn global_id(&self) -> GlobalId {
         self.global_id
@@ -66,10 +66,10 @@ impl Node<MilliOpGraphTensorId> for Constant {
     fn op_kind(&self) -> Self::OpKind {
         "Constant".to_string()
     }
-    fn inputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(std::iter::empty())
     }
-    fn outputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(vec![self.output].into_iter())
     }
 }
@@ -77,10 +77,10 @@ impl Node<MilliOpGraphTensorId> for Constant {
 impl MilliOp for Constant {
     fn eval(
         &self,
-        _inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
+        _inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
         _backend: &mut EvalBackend,
     ) -> Result<
-        Box<dyn Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>>,
+        Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>,
         MilliOpGraphError,
     > {
         Ok(Box::new(
@@ -92,18 +92,18 @@ impl MilliOp for Constant {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConstantOfShape {
     global_id: GlobalId,
-    output: MilliOpGraphTensorId,
+    output: GlobalId,
     value: NumericScalar,
-    shape: MilliOpGraphTensorId,
+    shape: GlobalId,
 }
 
 impl ConstantOfShape {
-    pub fn push_new<T: std::hash::Hash + Clone + Eq + 'static>(
-        graph: &mut MilliOpGraph<T>,
+    pub fn push_new(
+        graph: &mut MilliOpGraph,
         value: NumericScalar,
-        shape: MilliOpGraphTensorId,
+        shape: GlobalId,
         rng: &mut impl Rng,
-    ) -> MilliOpGraphNodeId {
+    ) -> GlobalId {
         let node = Self {
             global_id: GlobalId::new(rng),
             output: graph.get_new_tensor_id(rng),
@@ -114,7 +114,7 @@ impl ConstantOfShape {
     }
 }
 
-impl Node<MilliOpGraphTensorId> for ConstantOfShape {
+impl Node for ConstantOfShape {
     type OpKind = String;
     fn global_id(&self) -> GlobalId {
         self.global_id
@@ -122,10 +122,10 @@ impl Node<MilliOpGraphTensorId> for ConstantOfShape {
     fn op_kind(&self) -> Self::OpKind {
         "ConstantOfShape".to_string()
     }
-    fn inputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(vec![self.shape].into_iter())
     }
-    fn outputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(vec![self.output].into_iter())
     }
 }
@@ -133,10 +133,10 @@ impl Node<MilliOpGraphTensorId> for ConstantOfShape {
 impl MilliOp for ConstantOfShape {
     fn eval(
         &self,
-        inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
+        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
         _backend: &mut EvalBackend,
     ) -> Result<
-        Box<dyn Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>>,
+        Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>,
         MilliOpGraphError,
     > {
         let shape: Vec<i64> = inputs[&self.shape].try_to_rank::<P1>()?.try_into()?;

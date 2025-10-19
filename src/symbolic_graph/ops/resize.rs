@@ -4,7 +4,7 @@ use crate::milli_graph::MilliOpGraph;
 use crate::onnx;
 use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{
-    ONNXDecodingError, SymbolicGraphTensorId, query_attribute_bool, query_attribute_float,
+    ONNXDecodingError, query_attribute_bool, query_attribute_float,
     query_attribute_ints, query_attribute_string,
 };
 use serde::{Deserialize, Serialize};
@@ -43,11 +43,11 @@ pub(crate) enum ResizeNearestMode {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ResizeOperation {
     global_id: GlobalId,
-    input: SymbolicGraphTensorId,
-    roi: Option<SymbolicGraphTensorId>,
-    scales: Option<SymbolicGraphTensorId>,
-    sizes: Option<SymbolicGraphTensorId>,
-    output: SymbolicGraphTensorId,
+    input: GlobalId,
+    roi: Option<GlobalId>,
+    scales: Option<GlobalId>,
+    sizes: Option<GlobalId>,
+    output: GlobalId,
     antialias: bool,
     axes: Vec<i64>,
     coordinate_transformation_mode: ResizeCoordinateTransformationMode,
@@ -61,8 +61,8 @@ pub struct ResizeOperation {
 
 impl ResizeOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<SymbolicGraphTensorId>],
-        outputs: &[Option<SymbolicGraphTensorId>],
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
         attributes: &[onnx::AttributeProto],
         rng: &mut impl Rng,
     ) -> Result<Self, ONNXDecodingError> {
@@ -148,7 +148,7 @@ impl ResizeOperation {
     }
 }
 
-impl Node<SymbolicGraphTensorId> for ResizeOperation {
+impl Node for ResizeOperation {
     type OpKind = String;
     fn global_id(&self) -> GlobalId {
         self.global_id
@@ -156,7 +156,7 @@ impl Node<SymbolicGraphTensorId> for ResizeOperation {
     fn op_kind(&self) -> Self::OpKind {
         "Resize".to_string()
     }
-    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         let mut ret = vec![self.input];
         if let Some(roi) = &self.roi {
             ret.push(*roi);
@@ -169,12 +169,12 @@ impl Node<SymbolicGraphTensorId> for ResizeOperation {
         }
         Box::new(ret.into_iter())
     }
-    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(std::iter::once(self.output))
     }
 }
 impl Operation for ResizeOperation {
-    fn get_milli_op_graph(&self, _rng: &mut impl Rng) -> MilliOpGraph<SymbolicGraphTensorId> {
+    fn get_milli_op_graph(&self, _rng: &mut impl Rng) -> MilliOpGraph {
         todo!()
     }
 }

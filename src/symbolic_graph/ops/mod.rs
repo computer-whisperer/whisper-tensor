@@ -57,7 +57,7 @@ use crate::dtype::{DType, DTypeError};
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::numeric_tensor::{NumericTensor, NumericTensorError};
-use crate::symbolic_graph::{SymbolicGraphInner, SymbolicGraphTensorId};
+use crate::symbolic_graph::SymbolicGraphInner;
 use crate::tensor_rank::DynRank;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -89,18 +89,18 @@ pub enum EvalError {
 }
 
 type OperationEvalRet =
-    Result<Box<dyn Iterator<Item = (SymbolicGraphTensorId, NumericTensor<DynRank>)>>, EvalError>;
-pub trait Operation: Node<SymbolicGraphTensorId> {
+    Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, EvalError>;
+pub trait Operation: Node {
     fn eval(
         &self,
         backend: &mut EvalBackend,
-        inputs: &HashMap<SymbolicGraphTensorId, NumericTensor<DynRank>>,
+        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
     ) -> OperationEvalRet {
         let mut rng = WyRand::new(Default::default());
         let milli_graph = self.get_milli_op_graph(&mut rng);
         Ok(milli_graph.eval(inputs, &mut (), backend)?)
     }
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph<SymbolicGraphTensorId>;
+    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph;
     fn get_sub_graphs(&self) -> Vec<&SymbolicGraphInner> {
         vec![]
     }
@@ -219,14 +219,14 @@ macro_rules! delegate {
     }
 }
 
-impl Node<SymbolicGraphTensorId> for AnyOperation {
+impl Node for AnyOperation {
     type OpKind = String;
 
     delegate!(op_kind() -> Self::OpKind);
 
-    delegate!(inputs() -> Box<dyn Iterator<Item=SymbolicGraphTensorId> + '_>);
+    delegate!(inputs() -> Box<dyn Iterator<Item=GlobalId> + '_>);
 
-    delegate!(outputs() -> Box<dyn Iterator<Item=SymbolicGraphTensorId> + '_>);
+    delegate!(outputs() -> Box<dyn Iterator<Item=GlobalId> + '_>);
 
     delegate!(global_id() -> GlobalId);
 }
@@ -234,8 +234,8 @@ impl Node<SymbolicGraphTensorId> for AnyOperation {
 impl Operation for AnyOperation {
     delegate!(eval(
         backend: &mut EvalBackend,
-        inputs: &HashMap<SymbolicGraphTensorId, NumericTensor<DynRank>>
-    ) -> Result<Box<dyn Iterator<Item=(SymbolicGraphTensorId, NumericTensor<DynRank>)>>, EvalError>);
+        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>
+    ) -> Result<Box<dyn Iterator<Item=(GlobalId, NumericTensor<DynRank>)>>, EvalError>);
 
-    delegate!(get_milli_op_graph(rng: &mut impl Rng) -> MilliOpGraph<SymbolicGraphTensorId>);
+    delegate!(get_milli_op_graph(rng: &mut impl Rng) -> MilliOpGraph);
 }

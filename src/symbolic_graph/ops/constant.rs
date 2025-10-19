@@ -5,7 +5,7 @@ use crate::milli_graph::ops::*;
 use crate::numeric_scalar::NumericScalar;
 use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{
-    ONNXDecodingError, SymbolicGraphTensorId, query_attribute_float, query_attribute_floats,
+    ONNXDecodingError, query_attribute_float, query_attribute_floats,
     query_attribute_int, query_attribute_ints, query_attribute_tensor,
 };
 use crate::{DynRank, onnx};
@@ -17,14 +17,14 @@ use rand::Rng;
 pub struct ConstantOfShapeOperation {
     global_id: GlobalId,
     value: NumericScalar,
-    input: SymbolicGraphTensorId,
-    output: SymbolicGraphTensorId,
+    input: GlobalId,
+    output: GlobalId,
 }
 
 impl ConstantOfShapeOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<SymbolicGraphTensorId>],
-        outputs: &[Option<SymbolicGraphTensorId>],
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
         attributes: &[onnx::AttributeProto],
         rng: &mut impl Rng,
     ) -> Result<Self, ONNXDecodingError> {
@@ -49,7 +49,7 @@ impl ConstantOfShapeOperation {
     }
 }
 
-impl Node<SymbolicGraphTensorId> for ConstantOfShapeOperation {
+impl Node for ConstantOfShapeOperation {
     type OpKind = String;
     fn global_id(&self) -> GlobalId {
         self.global_id
@@ -57,20 +57,20 @@ impl Node<SymbolicGraphTensorId> for ConstantOfShapeOperation {
     fn op_kind(&self) -> Self::OpKind {
         "ConstantOfShape".to_string()
     }
-    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(std::iter::once(self.input))
     }
-    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(std::iter::once(self.output))
     }
 }
 
 impl Operation for ConstantOfShapeOperation {
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph<SymbolicGraphTensorId> {
+    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let node =
             ConstantOfShape::push_new(&mut graph, self.value.clone(), input_map[&self.input], rng);
-        let out = match graph.inner().get_node(&node) {
+        let out = match graph.inner().get_node_by_id(&node) {
             Some(AnyMilliOp::ConstantOfShape(op)) => op.outputs().next().unwrap(),
             _ => unreachable!(),
         };
@@ -85,13 +85,13 @@ impl Operation for ConstantOfShapeOperation {
 pub struct ConstantOperation {
     global_id: GlobalId,
     pub value: NDArrayNumericTensor<DynRank>,
-    output: SymbolicGraphTensorId,
+    output: GlobalId,
 }
 
 impl ConstantOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<SymbolicGraphTensorId>],
-        outputs: &[Option<SymbolicGraphTensorId>],
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
         attributes: &[onnx::AttributeProto],
         rng: &mut impl Rng,
     ) -> Result<Self, ONNXDecodingError> {
@@ -127,7 +127,7 @@ impl ConstantOperation {
     }
 }
 
-impl Node<SymbolicGraphTensorId> for ConstantOperation {
+impl Node for ConstantOperation {
     type OpKind = String;
     fn global_id(&self) -> GlobalId {
         self.global_id
@@ -135,16 +135,16 @@ impl Node<SymbolicGraphTensorId> for ConstantOperation {
     fn op_kind(&self) -> Self::OpKind {
         "Constant".to_string()
     }
-    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(std::iter::empty())
     }
-    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(std::iter::once(self.output))
     }
 }
 
 impl Operation for ConstantOperation {
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph<SymbolicGraphTensorId> {
+    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, _input_map) = MilliOpGraph::new(self.inputs(), rng);
 
         let out = Constant::push_new(&mut graph, self.value.clone(), rng);

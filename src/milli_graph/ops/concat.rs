@@ -1,7 +1,7 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
-use crate::milli_graph::{MilliOpGraph, MilliOpGraphError, MilliOpGraphTensorId};
+use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::numeric_tensor::NumericTensor;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -11,18 +11,18 @@ use crate::graph::GlobalId;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Concat {
     global_id: GlobalId,
-    output: MilliOpGraphTensorId,
-    inputs: Vec<MilliOpGraphTensorId>,
+    output: GlobalId,
+    inputs: Vec<GlobalId>,
     axis: i64,
 }
 
 impl Concat {
-    pub fn push_new<T: std::hash::Hash + Clone + Eq + 'static>(
-        graph: &mut MilliOpGraph<T>,
-        inputs: Vec<MilliOpGraphTensorId>,
+    pub fn push_new(
+        graph: &mut MilliOpGraph,
+        inputs: Vec<GlobalId>,
         axis: i64,
         rng: &mut impl Rng,
-    ) -> MilliOpGraphTensorId {
+    ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
         let node = Self {
             global_id: GlobalId::new(rng),
@@ -35,7 +35,7 @@ impl Concat {
     }
 }
 
-impl crate::graph::Node<MilliOpGraphTensorId> for Concat {
+impl crate::graph::Node for Concat {
     type OpKind = String;
     fn global_id(&self) -> GlobalId {
         self.global_id
@@ -43,10 +43,10 @@ impl crate::graph::Node<MilliOpGraphTensorId> for Concat {
     fn op_kind(&self) -> Self::OpKind {
         "Concat".to_string()
     }
-    fn inputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(self.inputs.clone().into_iter())
     }
-    fn outputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(vec![self.output].into_iter())
     }
 }
@@ -54,10 +54,10 @@ impl crate::graph::Node<MilliOpGraphTensorId> for Concat {
 impl MilliOp for Concat {
     fn eval(
         &self,
-        inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
+        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
     ) -> Result<
-        Box<dyn Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>>,
+        Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>,
         MilliOpGraphError,
     > {
         let mut resolved_inputs = vec![];

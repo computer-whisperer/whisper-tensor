@@ -4,7 +4,7 @@ use crate::milli_graph::MilliOpGraph;
 use crate::numeric_tensor::NumericTensor;
 use crate::symbolic_graph::ops::{EvalError, Operation};
 use crate::symbolic_graph::{
-    ONNXDecodingError, SymbolicGraphInner, SymbolicGraphMutator, SymbolicGraphTensorId,
+    ONNXDecodingError, SymbolicGraphInner, SymbolicGraphMutator,
     query_attribute_graph, query_attribute_int, query_attribute_ints,
 };
 use crate::{DynRank, onnx};
@@ -15,10 +15,10 @@ use rand::Rng;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ScanOperation {
     global_id: GlobalId,
-    scan_inputs: Vec<Option<SymbolicGraphTensorId>>,
-    state_inputs: Vec<Option<SymbolicGraphTensorId>>,
-    scan_outputs: Vec<Option<SymbolicGraphTensorId>>,
-    state_outputs: Vec<Option<SymbolicGraphTensorId>>,
+    scan_inputs: Vec<Option<GlobalId>>,
+    state_inputs: Vec<Option<GlobalId>>,
+    scan_outputs: Vec<Option<GlobalId>>,
+    state_outputs: Vec<Option<GlobalId>>,
     scan_input_axes: Option<Vec<i64>>,
     scan_input_directions: Option<Vec<i64>>,
     scan_output_axes: Option<Vec<i64>>,
@@ -28,8 +28,8 @@ pub struct ScanOperation {
 
 impl ScanOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<SymbolicGraphTensorId>],
-        outputs: &[Option<SymbolicGraphTensorId>],
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
         attributes: &[onnx::AttributeProto],
         symbolic_graph_mutator: &mut SymbolicGraphMutator,
         core_opset_version: usize,
@@ -82,7 +82,7 @@ impl ScanOperation {
     }
 }
 
-impl Node<SymbolicGraphTensorId> for ScanOperation {
+impl Node for ScanOperation {
     type OpKind = String;
     fn global_id(&self) -> GlobalId {
         self.global_id
@@ -90,14 +90,14 @@ impl Node<SymbolicGraphTensorId> for ScanOperation {
     fn op_kind(&self) -> Self::OpKind {
         "Scan".to_string()
     }
-    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         let mut v = vec![];
         v.extend(self.state_inputs.iter().filter_map(|x| *x));
         v.extend(self.scan_inputs.iter().filter_map(|x| *x));
         v.extend(self.body.get_foreign_tensor_ids());
         Box::new(v.into_iter())
     }
-    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         let mut v = vec![];
         v.extend(self.state_outputs.iter().filter_map(|x| *x));
         v.extend(self.scan_outputs.iter().filter_map(|x| *x));
@@ -109,8 +109,8 @@ impl Operation for ScanOperation {
     fn eval(
         &self,
         backend: &mut EvalBackend,
-        inputs: &HashMap<SymbolicGraphTensorId, NumericTensor<DynRank>>,
-    ) -> Result<Box<dyn Iterator<Item = (SymbolicGraphTensorId, NumericTensor<DynRank>)>>, EvalError>
+        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
+    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, EvalError>
     {
         let state_inputs: Vec<_> = self
             .state_inputs
@@ -252,7 +252,7 @@ impl Operation for ScanOperation {
         Ok(Box::new(outputs.into_iter()))
     }
 
-    fn get_milli_op_graph(&self, _rng: &mut impl Rng) -> MilliOpGraph<SymbolicGraphTensorId> {
+    fn get_milli_op_graph(&self, _rng: &mut impl Rng) -> MilliOpGraph {
         todo!()
     }
 }

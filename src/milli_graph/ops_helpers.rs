@@ -1,23 +1,22 @@
 use rand::Rng;
 use super::ops::*;
 use crate::backends::ndarray_backend::conversions::NDArrayNumericTensorType;
-use crate::milli_graph::{MilliOpGraph, MilliOpGraphTensorId};
-use crate::symbolic_graph::SymbolicGraphTensorId;
+use crate::milli_graph::{MilliOpGraph, GlobalId};
 
 pub(crate) fn rank(
-    graph: &mut MilliOpGraph<SymbolicGraphTensorId>,
-    tensor: MilliOpGraphTensorId,
+    graph: &mut MilliOpGraph,
+    tensor: GlobalId,
     rng: &mut impl Rng
-) -> MilliOpGraphTensorId {
+) -> GlobalId {
     let shape_tid = Shape::push_new(graph, tensor, rng);
     Shape::push_new(graph, shape_tid, rng)
 }
 
 pub(crate) fn scalar_const<T>(
-    graph: &mut MilliOpGraph<SymbolicGraphTensorId>,
+    graph: &mut MilliOpGraph,
     value: T,
     rng: &mut impl Rng
-) -> MilliOpGraphTensorId
+) -> GlobalId
 where
     T: NDArrayNumericTensorType,
 {
@@ -25,11 +24,11 @@ where
 }
 
 pub(crate) fn resolve_axes(
-    graph: &mut MilliOpGraph<SymbolicGraphTensorId>,
-    axes: MilliOpGraphTensorId,
-    tensor: MilliOpGraphTensorId,
+    graph: &mut MilliOpGraph,
+    axes: GlobalId,
+    tensor: GlobalId,
     rng: &mut impl Rng
-) -> MilliOpGraphTensorId {
+) -> GlobalId {
     let shape_tid = Shape::push_new(graph, tensor, rng);
     let rank_tid = Shape::push_new(graph, shape_tid, rng);
     let axes2_tid = SimpleBinary::add(graph, axes, rank_tid, rng);

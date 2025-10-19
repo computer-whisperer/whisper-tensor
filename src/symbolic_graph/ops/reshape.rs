@@ -4,7 +4,7 @@ use crate::milli_graph::{self, MilliOpGraph};
 use crate::onnx;
 use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{
-    ONNXDecodingError, SymbolicGraphTensorId, query_attribute_int, query_attribute_ints,
+    ONNXDecodingError, query_attribute_int, query_attribute_ints,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -13,16 +13,16 @@ use rand::Rng;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SqueezeOperation {
     global_id: GlobalId,
-    input: SymbolicGraphTensorId,
-    axes: Option<SymbolicGraphTensorId>,
+    input: GlobalId,
+    axes: Option<GlobalId>,
     axes_attribute: Option<Vec<i64>>,
-    output: SymbolicGraphTensorId,
+    output: GlobalId,
 }
 
 impl SqueezeOperation {
     pub fn from_onnx(
-        inputs: &[Option<SymbolicGraphTensorId>],
-        outputs: &[Option<SymbolicGraphTensorId>],
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
         attributes: &[onnx::AttributeProto],
         rng: &mut impl rand::Rng,
     ) -> Result<Self, ONNXDecodingError> {
@@ -47,7 +47,7 @@ impl SqueezeOperation {
     }
 }
 
-impl Node<SymbolicGraphTensorId> for SqueezeOperation {
+impl Node for SqueezeOperation {
     type OpKind = String;
     fn global_id(&self) -> GlobalId {
         self.global_id
@@ -55,19 +55,19 @@ impl Node<SymbolicGraphTensorId> for SqueezeOperation {
     fn op_kind(&self) -> Self::OpKind {
         "Squeeze".to_string()
     }
-    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         if let Some(axes) = self.axes {
             Box::new([self.input, axes].into_iter())
         } else {
             Box::new(std::iter::once(self.input))
         }
     }
-    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(std::iter::once(self.output))
     }
 }
 impl Operation for SqueezeOperation {
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph<SymbolicGraphTensorId> {
+    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let axes_input = if let Some(axes) = self.axes {
             input_map[&axes]
@@ -90,16 +90,16 @@ impl Operation for SqueezeOperation {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct UnsqueezeOperation {
     global_id: GlobalId,
-    input: SymbolicGraphTensorId,
-    axes: Option<SymbolicGraphTensorId>,
+    input: GlobalId,
+    axes: Option<GlobalId>,
     axes_attribute: Option<Vec<i64>>,
-    output: SymbolicGraphTensorId,
+    output: GlobalId,
 }
 
 impl UnsqueezeOperation {
     pub fn from_onnx(
-        inputs: &[Option<SymbolicGraphTensorId>],
-        outputs: &[Option<SymbolicGraphTensorId>],
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
         attributes: &[onnx::AttributeProto],
         rng: &mut impl Rng,
     ) -> Result<Self, ONNXDecodingError> {
@@ -124,7 +124,7 @@ impl UnsqueezeOperation {
     }
 }
 
-impl Node<SymbolicGraphTensorId> for UnsqueezeOperation {
+impl Node for UnsqueezeOperation {
     type OpKind = String;
     fn global_id(&self) -> GlobalId {
         self.global_id
@@ -132,19 +132,19 @@ impl Node<SymbolicGraphTensorId> for UnsqueezeOperation {
     fn op_kind(&self) -> Self::OpKind {
         "Unsqueeze".to_string()
     }
-    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         if let Some(axes) = self.axes {
             Box::new([self.input, axes].into_iter())
         } else {
             Box::new(std::iter::once(self.input))
         }
     }
-    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(std::iter::once(self.output))
     }
 }
 impl Operation for UnsqueezeOperation {
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph<SymbolicGraphTensorId> {
+    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let axes_input = if let Some(axes) = self.axes {
             input_map[&axes]
@@ -167,15 +167,15 @@ impl Operation for UnsqueezeOperation {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ReshapeOperation {
     global_id: GlobalId,
-    input: SymbolicGraphTensorId,
-    shape: SymbolicGraphTensorId,
-    output: SymbolicGraphTensorId,
+    input: GlobalId,
+    shape: GlobalId,
+    output: GlobalId,
 }
 
 impl ReshapeOperation {
     pub fn from_onnx(
-        inputs: &[Option<SymbolicGraphTensorId>],
-        outputs: &[Option<SymbolicGraphTensorId>],
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
         _attributes: &[onnx::AttributeProto],
         rng: &mut impl Rng,
     ) -> Result<Self, ONNXDecodingError> {
@@ -194,7 +194,7 @@ impl ReshapeOperation {
     }
 }
 
-impl Node<SymbolicGraphTensorId> for ReshapeOperation {
+impl Node for ReshapeOperation {
     type OpKind = String;
     fn global_id(&self) -> GlobalId {
         self.global_id
@@ -202,16 +202,16 @@ impl Node<SymbolicGraphTensorId> for ReshapeOperation {
     fn op_kind(&self) -> Self::OpKind {
         "Reshape".to_string()
     }
-    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new([self.input, self.shape].into_iter())
     }
-    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(std::iter::once(self.output))
     }
 }
 
 impl Operation for ReshapeOperation {
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph<SymbolicGraphTensorId> {
+    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let out = milli_graph::ops::Reshape::push_new(
             &mut graph,
@@ -230,15 +230,15 @@ impl Operation for ReshapeOperation {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FlattenOperation {
     global_id: GlobalId,
-    input: SymbolicGraphTensorId,
-    output: SymbolicGraphTensorId,
+    input: GlobalId,
+    output: GlobalId,
     axis: i64,
 }
 
 impl FlattenOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<SymbolicGraphTensorId>],
-        outputs: &[Option<SymbolicGraphTensorId>],
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
         attributes: &[onnx::AttributeProto],
         rng: &mut impl Rng,
     ) -> Result<Self, ONNXDecodingError> {
@@ -258,7 +258,7 @@ impl FlattenOperation {
     }
 }
 
-impl Node<SymbolicGraphTensorId> for FlattenOperation {
+impl Node for FlattenOperation {
     type OpKind = String;
     fn global_id(&self) -> GlobalId {
         self.global_id
@@ -266,16 +266,16 @@ impl Node<SymbolicGraphTensorId> for FlattenOperation {
     fn op_kind(&self) -> Self::OpKind {
         "Flatten".to_string()
     }
-    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(std::iter::once(self.input))
     }
-    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(std::iter::once(self.output))
     }
 }
 
 impl Operation for FlattenOperation {
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph<SymbolicGraphTensorId> {
+    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let input = input_map[&self.input];
 

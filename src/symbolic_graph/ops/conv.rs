@@ -4,7 +4,7 @@ use crate::milli_graph::MilliOpGraph;
 use crate::onnx;
 use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{
-    ONNXDecodingError, SymbolicGraphTensorId, query_attribute_int, query_attribute_ints,
+    ONNXDecodingError, query_attribute_int, query_attribute_ints,
     query_attribute_string,
 };
 use serde::{Deserialize, Serialize};
@@ -20,10 +20,10 @@ pub(crate) enum ConvOperationAutoPad {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ConvOperation {
     global_id: GlobalId,
-    input: SymbolicGraphTensorId,
-    output: SymbolicGraphTensorId,
-    weight: SymbolicGraphTensorId,
-    bias: Option<SymbolicGraphTensorId>,
+    input: GlobalId,
+    output: GlobalId,
+    weight: GlobalId,
+    bias: Option<GlobalId>,
     auto_pad: ConvOperationAutoPad,
     dilations: Vec<i64>,
     group: i64,
@@ -34,8 +34,8 @@ pub struct ConvOperation {
 
 impl ConvOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<SymbolicGraphTensorId>],
-        outputs: &[Option<SymbolicGraphTensorId>],
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
         attributes: &[onnx::AttributeProto],
         rng: &mut impl Rng,
     ) -> Result<Self, ONNXDecodingError> {
@@ -84,7 +84,7 @@ impl ConvOperation {
     }
 }
 
-impl Node<SymbolicGraphTensorId> for ConvOperation {
+impl Node for ConvOperation {
     type OpKind = String;
     fn global_id(&self) -> GlobalId {
         self.global_id
@@ -93,7 +93,7 @@ impl Node<SymbolicGraphTensorId> for ConvOperation {
         "Conv".to_string()
     }
 
-    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         if let Some(bias) = self.bias {
             Box::new([self.input, self.weight, bias].into_iter())
         } else {
@@ -101,13 +101,13 @@ impl Node<SymbolicGraphTensorId> for ConvOperation {
         }
     }
 
-    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(std::iter::once(self.output))
     }
 }
 
 impl Operation for ConvOperation {
-    fn get_milli_op_graph(&self, _rng: &mut impl Rng) -> MilliOpGraph<SymbolicGraphTensorId> {
+    fn get_milli_op_graph(&self, _rng: &mut impl Rng) -> MilliOpGraph {
         unimplemented!();
     }
 }

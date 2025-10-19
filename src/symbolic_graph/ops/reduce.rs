@@ -4,7 +4,7 @@ use crate::milli_graph::{self, MilliOpGraph};
 use crate::onnx;
 use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{
-    ONNXDecodingError, SymbolicGraphTensorId, query_attribute_int, query_attribute_ints,
+    ONNXDecodingError, query_attribute_int, query_attribute_ints,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -13,17 +13,17 @@ use rand::Rng;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CumSumOperation {
     global_id: GlobalId,
-    input: SymbolicGraphTensorId,
-    output: SymbolicGraphTensorId,
-    axis: SymbolicGraphTensorId,
+    input: GlobalId,
+    output: GlobalId,
+    axis: GlobalId,
     exclusive: bool,
     reverse: bool,
 }
 
 impl CumSumOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<SymbolicGraphTensorId>],
-        outputs: &[Option<SymbolicGraphTensorId>],
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
         attributes: &[onnx::AttributeProto],
         rng: &mut impl Rng,
     ) -> Result<Self, ONNXDecodingError> {
@@ -46,7 +46,7 @@ impl CumSumOperation {
     }
 }
 
-impl Node<SymbolicGraphTensorId> for CumSumOperation {
+impl Node for CumSumOperation {
     type OpKind = String;
     fn global_id(&self) -> GlobalId {
         self.global_id
@@ -54,16 +54,16 @@ impl Node<SymbolicGraphTensorId> for CumSumOperation {
     fn op_kind(&self) -> Self::OpKind {
         "CumSum".to_string()
     }
-    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new([self.input, self.axis].into_iter())
     }
-    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(std::iter::once(self.output))
     }
 }
 
 impl Operation for CumSumOperation {
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph<SymbolicGraphTensorId> {
+    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let a = input_map[&self.input];
         let b = input_map[&self.axis];
@@ -83,16 +83,16 @@ pub struct ReduceMeanOperation {
     global_id: GlobalId,
     keepdims: Option<bool>,
     noop_with_empty_axes: Option<bool>,
-    input_data: SymbolicGraphTensorId,
-    input_axes: Option<SymbolicGraphTensorId>,
+    input_data: GlobalId,
+    input_axes: Option<GlobalId>,
     axes_attr: Option<Vec<i64>>,
-    output: SymbolicGraphTensorId,
+    output: GlobalId,
 }
 
 impl ReduceMeanOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<SymbolicGraphTensorId>],
-        outputs: &[Option<SymbolicGraphTensorId>],
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
         attributes: &[onnx::AttributeProto],
         rng: &mut impl Rng,
     ) -> Result<Self, ONNXDecodingError> {
@@ -124,7 +124,7 @@ impl ReduceMeanOperation {
     }
 }
 
-impl Node<SymbolicGraphTensorId> for ReduceMeanOperation {
+impl Node for ReduceMeanOperation {
     type OpKind = String;
     fn global_id(&self) -> GlobalId {
         self.global_id
@@ -132,19 +132,19 @@ impl Node<SymbolicGraphTensorId> for ReduceMeanOperation {
     fn op_kind(&self) -> Self::OpKind {
         "ReduceMean".to_string()
     }
-    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         if let Some(input_axes) = self.input_axes {
             Box::new([self.input_data, input_axes].into_iter())
         } else {
             Box::new(std::iter::once(self.input_data))
         }
     }
-    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(std::iter::once(self.output))
     }
 }
 impl Operation for ReduceMeanOperation {
-fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph<SymbolicGraphTensorId> {
+fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let axes = if let Some(input_axes) = &self.input_axes {
             Some(input_map[input_axes])
@@ -175,16 +175,16 @@ pub struct ReduceSumOperation {
     global_id: GlobalId,
     keepdims: Option<bool>,
     noop_with_empty_axes: Option<bool>,
-    input_data: SymbolicGraphTensorId,
-    input_axes: Option<SymbolicGraphTensorId>,
+    input_data: GlobalId,
+    input_axes: Option<GlobalId>,
     axes_attr: Option<Vec<i64>>,
-    output: SymbolicGraphTensorId,
+    output: GlobalId,
 }
 
 impl ReduceSumOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<SymbolicGraphTensorId>],
-        outputs: &[Option<SymbolicGraphTensorId>],
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
         attributes: &[onnx::AttributeProto],
         rng: &mut impl Rng,
     ) -> Result<Self, ONNXDecodingError> {
@@ -216,7 +216,7 @@ impl ReduceSumOperation {
     }
 }
 
-impl Node<SymbolicGraphTensorId> for ReduceSumOperation {
+impl Node for ReduceSumOperation {
     type OpKind = String;
     fn global_id(&self) -> GlobalId {
         self.global_id
@@ -224,19 +224,19 @@ impl Node<SymbolicGraphTensorId> for ReduceSumOperation {
     fn op_kind(&self) -> Self::OpKind {
         "ReduceSum".to_string()
     }
-    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         if let Some(input_axes) = self.input_axes {
             Box::new([self.input_data, input_axes].into_iter())
         } else {
             Box::new(std::iter::once(self.input_data))
         }
     }
-    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(std::iter::once(self.output))
     }
 }
 impl Operation for ReduceSumOperation {
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph<SymbolicGraphTensorId> {
+    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let axes = if let Some(input_axes) = &self.input_axes {
             Some(input_map[input_axes])
@@ -267,16 +267,16 @@ pub struct ReduceMaxOperation {
     global_id: GlobalId,
     keepdims: Option<bool>,
     noop_with_empty_axes: Option<bool>,
-    input_data: SymbolicGraphTensorId,
-    input_axes: Option<SymbolicGraphTensorId>,
+    input_data: GlobalId,
+    input_axes: Option<GlobalId>,
     axes_attr: Option<Vec<i64>>,
-    output: SymbolicGraphTensorId,
+    output: GlobalId,
 }
 
 impl ReduceMaxOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<SymbolicGraphTensorId>],
-        outputs: &[Option<SymbolicGraphTensorId>],
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
         attributes: &[onnx::AttributeProto],
         rng: &mut impl Rng,
     ) -> Result<Self, ONNXDecodingError> {
@@ -308,7 +308,7 @@ impl ReduceMaxOperation {
     }
 }
 
-impl Node<SymbolicGraphTensorId> for ReduceMaxOperation {
+impl Node for ReduceMaxOperation {
     type OpKind = String;
     fn global_id(&self) -> GlobalId {
         self.global_id
@@ -316,19 +316,19 @@ impl Node<SymbolicGraphTensorId> for ReduceMaxOperation {
     fn op_kind(&self) -> Self::OpKind {
         "ReduceMax".to_string()
     }
-    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         if let Some(input_axes) = self.input_axes {
             Box::new([self.input_data, input_axes].into_iter())
         } else {
             Box::new(std::iter::once(self.input_data))
         }
     }
-    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(std::iter::once(self.output))
     }
 }
 impl Operation for ReduceMaxOperation {
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph<SymbolicGraphTensorId> {
+    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let axes = if let Some(input_axes) = &self.input_axes {
             Some(input_map[input_axes])
@@ -359,16 +359,16 @@ pub struct ReduceMinOperation {
     global_id: GlobalId,
     keepdims: Option<bool>,
     noop_with_empty_axes: Option<bool>,
-    input_data: SymbolicGraphTensorId,
-    input_axes: Option<SymbolicGraphTensorId>,
+    input_data: GlobalId,
+    input_axes: Option<GlobalId>,
     axes_attr: Option<Vec<i64>>,
-    output: SymbolicGraphTensorId,
+    output: GlobalId,
 }
 
 impl ReduceMinOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<SymbolicGraphTensorId>],
-        outputs: &[Option<SymbolicGraphTensorId>],
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
         attributes: &[onnx::AttributeProto],
         rng: &mut impl Rng,
     ) -> Result<Self, ONNXDecodingError> {
@@ -400,7 +400,7 @@ impl ReduceMinOperation {
     }
 }
 
-impl Node<SymbolicGraphTensorId> for ReduceMinOperation {
+impl Node for ReduceMinOperation {
     type OpKind = String;
     fn global_id(&self) -> GlobalId {
         self.global_id
@@ -408,20 +408,20 @@ impl Node<SymbolicGraphTensorId> for ReduceMinOperation {
     fn op_kind(&self) -> Self::OpKind {
         "ReduceMin".to_string()
     }
-    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         if let Some(input_axes) = self.input_axes {
             Box::new([self.input_data, input_axes].into_iter())
         } else {
             Box::new(std::iter::once(self.input_data))
         }
     }
-    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(std::iter::once(self.output))
     }
 }
 
 impl Operation for ReduceMinOperation {
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph<SymbolicGraphTensorId> {
+    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let axes = if let Some(input_axes) = &self.input_axes {
             Some(input_map[input_axes])
@@ -452,16 +452,16 @@ pub struct ReduceProdOperation {
     global_id: GlobalId,
     keepdims: Option<bool>,
     noop_with_empty_axes: Option<bool>,
-    input_data: SymbolicGraphTensorId,
-    input_axes: Option<SymbolicGraphTensorId>,
+    input_data: GlobalId,
+    input_axes: Option<GlobalId>,
     axes_attr: Option<Vec<i64>>,
-    output: SymbolicGraphTensorId,
+    output: GlobalId,
 }
 
 impl ReduceProdOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<SymbolicGraphTensorId>],
-        outputs: &[Option<SymbolicGraphTensorId>],
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
         attributes: &[onnx::AttributeProto],
         rng: &mut impl Rng,
     ) -> Result<Self, ONNXDecodingError> {
@@ -493,7 +493,7 @@ impl ReduceProdOperation {
     }
 }
 
-impl Node<SymbolicGraphTensorId> for ReduceProdOperation {
+impl Node for ReduceProdOperation {
     type OpKind = String;
     fn global_id(&self) -> GlobalId {
         self.global_id
@@ -501,20 +501,20 @@ impl Node<SymbolicGraphTensorId> for ReduceProdOperation {
     fn op_kind(&self) -> Self::OpKind {
         "ReduceProd".to_string()
     }
-    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         if let Some(input_axes) = self.input_axes {
             Box::new([self.input_data, input_axes].into_iter())
         } else {
             Box::new(std::iter::once(self.input_data))
         }
     }
-    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(std::iter::once(self.output))
     }
 }
 
 impl Operation for ReduceProdOperation {
-fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph<SymbolicGraphTensorId> {
+fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let axes = if let Some(input_axes) = &self.input_axes {
             Some(input_map[input_axes])

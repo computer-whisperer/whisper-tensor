@@ -1,7 +1,7 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
-use crate::milli_graph::{MilliOpGraph, MilliOpGraphError, MilliOpGraphTensorId};
+use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::numeric_tensor::NumericTensor;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -11,18 +11,18 @@ use crate::graph::GlobalId;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CastLike {
     global_id: GlobalId,
-    output: MilliOpGraphTensorId,
-    data: MilliOpGraphTensorId,
-    target_type: MilliOpGraphTensorId,
+    output: GlobalId,
+    data: GlobalId,
+    target_type: GlobalId,
 }
 
 impl CastLike {
-    pub fn push_new<T: std::hash::Hash + Clone + Eq + 'static>(
-        graph: &mut MilliOpGraph<T>,
-        data: MilliOpGraphTensorId,
-        target_type: MilliOpGraphTensorId,
+    pub fn push_new(
+        graph: &mut MilliOpGraph,
+        data: GlobalId,
+        target_type: GlobalId,
         rng: &mut impl Rng,
-    ) -> MilliOpGraphTensorId {
+    ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
         let node = Self {
             global_id: GlobalId::new(rng),
@@ -35,7 +35,7 @@ impl CastLike {
     }
 }
 
-impl crate::graph::Node<MilliOpGraphTensorId> for CastLike {
+impl crate::graph::Node for CastLike {
     type OpKind = String;
     fn global_id(&self) -> GlobalId {
         self.global_id
@@ -43,10 +43,10 @@ impl crate::graph::Node<MilliOpGraphTensorId> for CastLike {
     fn op_kind(&self) -> Self::OpKind {
         "CastLike".to_string()
     }
-    fn inputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(vec![self.data, self.target_type].into_iter())
     }
-    fn outputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(vec![self.output].into_iter())
     }
 }
@@ -54,10 +54,10 @@ impl crate::graph::Node<MilliOpGraphTensorId> for CastLike {
 impl MilliOp for CastLike {
     fn eval(
         &self,
-        inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
+        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
     ) -> Result<
-        Box<dyn Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>>,
+        Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>,
         MilliOpGraphError,
     > {
         let out = inputs[&self.data].cast(inputs[&self.target_type].dtype(), backend)?;
