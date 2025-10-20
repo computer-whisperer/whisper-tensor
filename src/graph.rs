@@ -27,6 +27,7 @@ pub trait Link {
 /// Node within a graph. Carries op kind and its interface to links.
 pub trait Node {
     type OpKind: AsRef<str> + Clone + Debug;
+    type AnyInnerGraph: InnerGraph;
 
     /// Unique identifier.
     fn global_id(&self) -> GlobalId;
@@ -36,6 +37,8 @@ pub trait Node {
     fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId> + '_>;
     /// Outgoing link handles grouped by output index order.
     fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId> + '_>;
+    fn inner_graph_ids(&self) -> Box<dyn Iterator<Item = GlobalId> + '_>;
+    fn get_inner_graph_by_id(&self, id: &GlobalId) -> Option<&dyn InnerGraphDyn>;
 }
 
 pub trait NodeDyn {
@@ -72,6 +75,9 @@ pub trait InnerGraph {
     type AnyNode: Node;
     type AnyLink: Link;
 
+    /// Unique identifier for the graph layer.
+    fn global_id(&self) -> GlobalId;
+
     /// Deterministic iteration over nodes and links.
     fn node_ids(&self) -> impl Iterator<Item = GlobalId>;
     fn inner_link_ids(&self) -> impl Iterator<Item = GlobalId>;
@@ -92,16 +98,30 @@ pub trait InnerGraph {
 
 
 pub trait InnerGraphDyn {
+    fn global_id(&self) -> GlobalId;
+
     fn input_link_ids(&self) -> Box<dyn Iterator<Item = (GlobalId, GlobalId)> + '_>;
     fn output_link_ids(&self) -> Box<dyn Iterator<Item = (GlobalId, GlobalId)> + '_>;
+
+    fn get_node_by_id(&self, id: &GlobalId) -> Option<&dyn InnerGraphDyn>;
+    fn get_link_by_id(&self, id: &GlobalId) -> Option<&dyn InnerGraphDyn>;
 }
 
 impl<G: InnerGraph> InnerGraphDyn for G {
+    fn global_id(&self) -> GlobalId {
+        self.global_id()
+    }
     fn input_link_ids(&self) -> Box<dyn Iterator<Item = (GlobalId, GlobalId)> + '_> {
         Box::new(<G as InnerGraph>::input_link_ids(self))
     }
     fn output_link_ids(&self) -> Box<dyn Iterator<Item = (GlobalId, GlobalId)> + '_> {
         Box::new(<G as InnerGraph>::output_link_ids(self))
+    }
+    fn get_node_by_id(&self, id: &GlobalId) -> Option<&dyn InnerGraphDyn> {
+        self.get_node_by_id(id).map(|x| x as &dyn InnerGraphDyn)
+    }
+    fn get_link_by_id(&self, id: &GlobalId) -> Option<&dyn InnerGraphDyn> {
+        self.get_link_by_id(id).map(|x| x as &dyn InnerGraphDyn)
     }
 }
 
