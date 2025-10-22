@@ -5,10 +5,7 @@ use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::ops::*;
 use crate::numeric_tensor::NumericTensor;
 use crate::symbolic_graph::ops::{EvalError, Operation};
-use crate::symbolic_graph::{
-    ONNXDecodingError, SymbolicGraphInner, SymbolicGraphMutator,
-    query_attribute_float, query_attribute_graph, query_attribute_string,
-};
+use crate::symbolic_graph::{ONNXDecodingError, SymbolicGraphMutator, query_attribute_float, query_attribute_graph, query_attribute_string, SymbolicGraph};
 use crate::{DynRank, onnx};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -85,8 +82,8 @@ pub struct IfOperation {
     global_id: GlobalId,
     outputs: Vec<GlobalId>,
     condition: GlobalId,
-    then_branch: SymbolicGraphInner,
-    else_branch: SymbolicGraphInner,
+    then_branch: SymbolicGraph,
+    else_branch: SymbolicGraph,
 }
 
 impl IfOperation {
@@ -108,7 +105,7 @@ impl IfOperation {
         let then_branch_graph = query_attribute_graph(attributes, "then_branch")
             .ok_or(ONNXDecodingError::MissingField("then_branch"))?;
         let then_branch_graph = {
-            let mut inner_graph = SymbolicGraphInner::new();
+            let mut inner_graph = SymbolicGraph::new(rng);
             inner_graph.populate(
                 symbolic_graph_mutator,
                 then_branch_graph,
@@ -120,7 +117,7 @@ impl IfOperation {
         let else_branch_graph = query_attribute_graph(attributes, "else_branch")
             .ok_or(ONNXDecodingError::MissingField("else_branch"))?;
         let else_branch_graph = {
-            let mut inner_graph = SymbolicGraphInner::new();
+            let mut inner_graph = SymbolicGraph::new(rng);
             inner_graph.populate(
                 symbolic_graph_mutator,
                 else_branch_graph,

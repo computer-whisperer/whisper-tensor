@@ -18,29 +18,23 @@ pub(crate) struct GraphLayoutIOOffsets {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum GraphLayoutNodeType {
-    SymbolicGraphOperation(GlobalId),
-    SymbolicGraphTensor(GlobalId),
-    SuperGraphLink(GlobalId),
-    SuperGraphNode(GlobalId),
-    MilliOpGraphNode(GlobalId),
-    MilliOpGraphInput(GlobalId),
-    MilliOpGraphOutput(GlobalId),
-    ConnectionByNameSrc(GraphLayoutLinkData),
-    ConnectionByNameDest(GraphLayoutLinkData),
+    InputLinkNode(GlobalId),
+    ConstantLinkNode(GlobalId),
+    OutputLinkNode(GlobalId),
+    GraphNode(GlobalId),
+    ConnectionByNameSrc(GlobalId),
+    ConnectionByNameDest(GlobalId),
 }
 
 impl GraphLayoutNodeType {
     pub(crate) fn global_id(&self) -> GlobalId {
         match self {
-            GraphLayoutNodeType::SymbolicGraphOperation(id) => *id,
-            GraphLayoutNodeType::SymbolicGraphTensor(id) => *id,
-            GraphLayoutNodeType::SuperGraphLink(id) => *id,
-            GraphLayoutNodeType::SuperGraphNode(id) => *id,
-            GraphLayoutNodeType::MilliOpGraphNode(id) => *id,
-            GraphLayoutNodeType::MilliOpGraphInput(id) => *id,
-            GraphLayoutNodeType::MilliOpGraphOutput(id) => *id,
-            GraphLayoutNodeType::ConnectionByNameSrc(data) => data.global_id(),
-            GraphLayoutNodeType::ConnectionByNameDest(data) => data.global_id(),
+            GraphLayoutNodeType::InputLinkNode(global_id) => *global_id,
+            GraphLayoutNodeType::ConstantLinkNode(global_id) => *global_id,
+            GraphLayoutNodeType::OutputLinkNode(global_id) => *global_id,
+            GraphLayoutNodeType::GraphNode(global_id) => *global_id,
+            GraphLayoutNodeType::ConnectionByNameSrc(global_id) => *global_id,
+            GraphLayoutNodeType::ConnectionByNameDest(global_id) => *global_id,
         }
     }
 }
@@ -63,26 +57,10 @@ pub(crate) struct GraphLayoutNodeInitData {
     pub outputs: Vec<GraphLayoutLinkId>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) enum GraphLayoutLinkType {
-    SymbolicGraphTensor(GlobalId),
-    SuperGraphLink(GlobalId),
-    MilliOpGraphTensor(GlobalId),
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct GraphLayoutLinkData {
-    pub(crate) link_type: GraphLayoutLinkType,
-}
-
-impl GraphLayoutLinkData {
-    pub(crate) fn global_id(&self) -> GlobalId {
-        match &self.link_type {
-            GraphLayoutLinkType::SymbolicGraphTensor(id) => *id,
-            GraphLayoutLinkType::SuperGraphLink(id) => *id,
-            GraphLayoutLinkType::MilliOpGraphTensor(id) => *id,
-        }
-    }
+    pub(crate) global_id: GlobalId,
 }
 
 type Edge = (
@@ -260,7 +238,7 @@ impl GraphLayout {
                         links_with_source_node.insert(*link_id);
                         let new_node = GraphLayoutNodeInitData {
                             node_type: GraphLayoutNodeType::ConnectionByNameSrc(
-                                link_data[link_id].clone(),
+                                link_data[link_id].global_id,
                             ),
                             inputs: vec![*link_id],
                             outputs: vec![],
@@ -278,7 +256,7 @@ impl GraphLayout {
                     next_link_id += 1;
                     let new_node = GraphLayoutNodeInitData {
                         node_type: GraphLayoutNodeType::ConnectionByNameDest(
-                            link_data[link_id].clone(),
+                            link_data[link_id].global_id,
                         ),
                         inputs: vec![],
                         outputs: vec![new_link_id],

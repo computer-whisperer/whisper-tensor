@@ -3,10 +3,7 @@ use crate::graph::{GlobalId, Node};
 use crate::milli_graph::MilliOpGraph;
 use crate::numeric_tensor::NumericTensor;
 use crate::symbolic_graph::ops::{EvalError, Operation};
-use crate::symbolic_graph::{
-    ONNXDecodingError, SymbolicGraphInner, SymbolicGraphMutator,
-    query_attribute_graph, query_attribute_int, query_attribute_ints,
-};
+use crate::symbolic_graph::{ONNXDecodingError, SymbolicGraphMutator, query_attribute_graph, query_attribute_int, query_attribute_ints, SymbolicGraph};
 use crate::{DynRank, onnx};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -23,7 +20,7 @@ pub struct ScanOperation {
     scan_input_directions: Option<Vec<i64>>,
     scan_output_axes: Option<Vec<i64>>,
     scan_output_directions: Option<Vec<i64>>,
-    body: SymbolicGraphInner,
+    body: SymbolicGraph,
 }
 
 impl ScanOperation {
@@ -38,7 +35,7 @@ impl ScanOperation {
         let body = query_attribute_graph(attributes, "body")
             .ok_or(ONNXDecodingError::MissingField("body"))?;
         let body = {
-            let mut inner_graph = SymbolicGraphInner::new();
+            let mut inner_graph = SymbolicGraph::new(rng);
             inner_graph.populate(symbolic_graph_mutator, body, core_opset_version, rng)?;
             inner_graph
         };

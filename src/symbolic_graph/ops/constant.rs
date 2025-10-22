@@ -1,5 +1,5 @@
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
-use crate::graph::{GlobalId, Graph, InnerGraph, Node};
+use crate::graph::{GlobalId, Graph, Node};
 use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::ops::*;
 use crate::numeric_scalar::NumericScalar;
@@ -70,7 +70,7 @@ impl Operation for ConstantOfShapeOperation {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let node =
             ConstantOfShape::push_new(&mut graph, self.value.clone(), input_map[&self.input], rng);
-        let out = match graph.inner().get_node_by_id(&node) {
+        let out = match graph.get_node_by_id(&node) {
             Some(AnyMilliOp::ConstantOfShape(op)) => op.outputs().next().unwrap(),
             _ => unreachable!(),
         };

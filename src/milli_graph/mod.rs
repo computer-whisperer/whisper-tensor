@@ -1,7 +1,7 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::dtype::DTypeError;
-use crate::graph::{GlobalId, Graph, InnerGraph, Link, Node};
+use crate::graph::{GlobalId, Graph, Link, Node};
 use crate::milli_graph::observer::MilliOpGraphObserver;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::numeric_tensor::NumericTensor;
@@ -41,6 +41,7 @@ pub struct MilliOpGraphTensor {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MilliOpGraph {
+    global_id: GlobalId,
     pub input_map: HashMap<GlobalId, GlobalId>,
     pub input_ordering: Vec<GlobalId>,
     pub output_map: Option<HashMap<GlobalId, GlobalId>>,
@@ -63,6 +64,7 @@ impl MilliOpGraph {
         }
         (
             Self {
+                global_id: GlobalId::new(rng),
                 tensors,
                 input_ordering,
                 output_ordering: None,
@@ -178,20 +180,15 @@ impl MilliOpGraph {
     }
 }
 
-
-impl Graph for MilliOpGraph {
-    type Inner = Self;
-
-    fn inner(&self) -> &Self::Inner {
-        self
-    }
-}
-
-impl InnerGraph for MilliOpGraph
+impl Graph for MilliOpGraph
 {
     type Error = ();
     type AnyNode = AnyMilliOp;
     type AnyLink = MilliOpGraphTensor;
+
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
 
     fn node_ids(&self) -> impl Iterator<Item = GlobalId> {
         self.ops.keys().cloned()
@@ -209,11 +206,14 @@ impl InnerGraph for MilliOpGraph
         self.tensors.get(id)
     }
 
-
     fn input_link_ids(&self) -> impl Iterator<Item = (GlobalId, GlobalId)> {
         self.input_ordering
             .iter()
             .map(|x| (x.clone(), self.input_map[x]))
+    }
+
+    fn constant_link_ids(&self) -> impl Iterator<Item = GlobalId> {
+        core::iter::empty()
     }
 
     fn output_link_ids(&self) -> impl Iterator<Item = (GlobalId, GlobalId)> {

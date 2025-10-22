@@ -6,7 +6,7 @@ pub mod observer;
 
 use crate::backends::eval_backend::{EvalBackend, EvalRuntimeError};
 use crate::compiler::{CompiledProgram, CompilerError};
-use crate::graph::{GlobalId, Graph, InnerGraph, Link};
+use crate::graph::{GlobalId, Graph, Link};
 use crate::milli_graph::{
     MilliOpGraphError,
 };
@@ -29,7 +29,7 @@ use crate::tokenizer::TokenizerError;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
-use rand::RngCore;
+use rand::{Rng, RngCore};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SuperGraphError {
@@ -67,7 +67,11 @@ pub struct SuperGraphContext<'short, 'model, 'c, 'd, T: SuperGraphObserver> {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SuperGraph {
-    pub inner: SuperGraphInner,
+    global_id: GlobalId,
+    pub input_links: HashSet<SuperGraphAnyLink>,
+    pub output_links: HashSet<SuperGraphAnyLink>,
+    pub nodes: HashMap<GlobalId, SuperGraphAnyNode>,
+    pub links_by_global_id: HashMap<GlobalId, SuperGraphAnyLink>,
 }
 
 impl SuperGraph {
@@ -76,23 +80,9 @@ impl SuperGraph {
         data: SuperGraphData<'model>,
         context: &mut SuperGraphContext<'short, 'model, 'c, 'd, T>,
     ) -> Result<SuperGraphData<'model>, SuperGraphError> {
-        self.inner.eval(&[], data, context)
+        self.eval(&[], data, context)
     }
 
-    pub fn get_all_links(&self) -> HashSet<SuperGraphAnyLink> {
-        self.inner.get_all_links()
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct SuperGraphInner {
-    pub input_links: HashSet<SuperGraphAnyLink>,
-    pub output_links: HashSet<SuperGraphAnyLink>,
-    pub nodes: HashMap<GlobalId, SuperGraphAnyNode>,
-    pub links_by_global_id: HashMap<GlobalId, SuperGraphAnyLink>,
-}
-
-impl SuperGraphInner {
     pub fn eval<'a, 'b, 'c, 'd, T: SuperGraphObserver>(
         &'a self,
         node_path: &[GlobalId],
@@ -212,19 +202,10 @@ impl SuperGraphBuilder {
 
     pub fn build(
         self,
+        rng: &mut impl Rng,
         input_links: &[SuperGraphAnyLink],
         output_links: &[SuperGraphAnyLink],
     ) -> SuperGraph {
-        SuperGraph {
-            inner: Self::build_inner(self, input_links, output_links),
-        }
-    }
-
-    pub fn build_inner(
-        self,
-        input_links: &[SuperGraphAnyLink],
-        output_links: &[SuperGraphAnyLink],
-    ) -> SuperGraphInner {
         // Validate that all input and output links are present in the graph
         let mut sourced_links = HashSet::new();
         let mut sinked_links = HashSet::new();
@@ -248,7 +229,8 @@ impl SuperGraphBuilder {
 
         let links_by_global_id = sourced_links.iter().map(|link| (link.global_id(), *link)).collect::<HashMap<_, _>>();
 
-        SuperGraphInner {
+        SuperGraph {
+            global_id: GlobalId::new(rng),
             nodes: self.nodes,
             input_links: HashSet::from_iter(input_links.iter().cloned()),
             output_links: HashSet::from_iter(output_links.iter().cloned()),
@@ -283,24 +265,20 @@ impl Default for SuperGraphBuilder {
     }
 }
 
-impl Graph for SuperGraph {
-    type Inner = SuperGraphInner;
-
-    fn inner(&self) -> &Self::Inner {
-        &self.inner
-    }
-}
-
 impl Link for SuperGraphAnyLink {
     fn global_id(&self) -> GlobalId {
         self.global_id()
     }
 }
 
-impl InnerGraph for SuperGraphInner {
+impl Graph for SuperGraph {
     type Error = ();
     type AnyNode = SuperGraphAnyNode;
     type AnyLink = SuperGraphAnyLink;
+
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
 
     fn node_ids(&self) -> impl Iterator<Item = GlobalId> {
         self.nodes.keys().cloned()
@@ -329,5 +307,9 @@ impl InnerGraph for SuperGraphInner {
 
     fn output_link_ids(&self) -> impl Iterator<Item = (GlobalId, GlobalId)> {
         self.output_links.iter().map(|x| (x.global_id(), x.global_id()))
+    }
+
+    fn constant_link_ids(&self) -> impl Iterator<Item=GlobalId> {
+        core::iter::empty()
     }
 }

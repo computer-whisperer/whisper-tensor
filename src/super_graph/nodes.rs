@@ -3,7 +3,7 @@ use crate::backends::eval_backend;
 use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::compiler::CompiledProgramObserver;
-use crate::graph::{GlobalId, InnerGraph, Node};
+use crate::graph::{GlobalId, Graph, Node};
 use crate::milli_graph::observer::MilliOpGraphObserver;
 use crate::milli_graph::{MilliOpGraph};
 use crate::numeric_tensor::NumericTensor;
@@ -13,9 +13,7 @@ use crate::super_graph::links::{
     SuperGraphLinkTriple,
 };
 use crate::super_graph::observer::SuperGraphObserver;
-use crate::super_graph::{
-    SuperGraphBuilder, SuperGraphContext, SuperGraphData, SuperGraphError, SuperGraphInner,
-};
+use crate::super_graph::{SuperGraph, SuperGraphBuilder, SuperGraphContext, SuperGraphData, SuperGraphError};
 use crate::symbolic_graph::observer::SymbolicGraphObserver;
 use crate::tokenizer::{AnyTokenizer, Tokenizer};
 use rwkv_tokenizer::WorldTokenizer;
@@ -609,7 +607,7 @@ impl SuperGraphNode for SuperGraphNodeMilliOpGraph {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SuperGraphNodeScan {
     global_id: GlobalId,
-    inner_graph: SuperGraphInner,
+    inner_graph: SuperGraph,
     iteration_count: SuperGraphLinkTensor,
     simple_inputs: Vec<SuperGraphLinkDouble>,
     state_links: Vec<SuperGraphLinkTriple>,
@@ -620,7 +618,7 @@ pub struct SuperGraphNodeScan {
 
 impl SuperGraphNodeScan {
     pub fn new(
-        inner_graph: SuperGraphInner,
+        inner_graph: SuperGraph,
         iteration_count: SuperGraphLinkTensor,
         simple_inputs: Vec<SuperGraphLinkDouble>,
         state_links: Vec<SuperGraphLinkTriple>,
@@ -1227,7 +1225,7 @@ macro_rules! delegate {
 }
 
 impl SuperGraphAnyNode {
-    pub fn get_sub_graph(&self) -> Option<&SuperGraphInner> {
+    pub fn get_sub_graph(&self) -> Option<&SuperGraph> {
         match self {
             SuperGraphAnyNode::Scan(x) => Some(&x.inner_graph),
             _ => None,

@@ -116,7 +116,7 @@ fn main() {
     let inputs = vec![model_link.to_any(), text_input_link.to_any()];
     let outputs = vec![text_output.to_any()];
 
-    let super_graph = builder.build(inputs.as_slice(), outputs.as_slice());
+    let super_graph = builder.build(&mut rng, inputs.as_slice(), outputs.as_slice());
 
     let mut super_graph_data = SuperGraphData::new();
     super_graph_data

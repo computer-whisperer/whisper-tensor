@@ -57,12 +57,12 @@ use crate::dtype::{DType, DTypeError};
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::numeric_tensor::{NumericTensor, NumericTensorError};
-use crate::symbolic_graph::SymbolicGraphInner;
 use crate::tensor_rank::DynRank;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use rand::Rng;
 use wyrand::WyRand;
+use crate::symbolic_graph::SymbolicGraph;
 
 #[derive(Debug, thiserror::Error)]
 pub enum EvalError {
@@ -101,7 +101,7 @@ pub trait Operation: Node {
         Ok(milli_graph.eval(inputs, &mut (), backend)?)
     }
     fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph;
-    fn get_sub_graphs(&self) -> Vec<&SymbolicGraphInner> {
+    fn get_sub_graphs(&self) -> Vec<&SymbolicGraph> {
         vec![]
     }
 }

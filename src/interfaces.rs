@@ -386,7 +386,7 @@ impl TextInferenceTokensInLogitOutInterface {
                     output_links
                 };
 
-                let sub_graph_inner = sub_builder.build_inner(&input_links, &output_links);
+                let sub_graph_inner = sub_builder.build(rng, &input_links, &output_links);
 
                 let final_state_outputs = {
                     let mut final_state_outputs = vec![];
@@ -526,6 +526,7 @@ impl TextInferenceTokensInLogitOutInterface {
         ];
         let super_graph_outputs = vec![processed_logit_output_link.to_any()];
         let super_graph = super_graph_builder.build(
+            rng,
             super_graph_inputs.as_slice(),
             super_graph_outputs.as_slice(),
         );

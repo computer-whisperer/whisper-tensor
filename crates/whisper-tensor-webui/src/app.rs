@@ -1,4 +1,3 @@
-use crate::graph_explorer::inspect_windows::InspectWindow;
 use crate::graph_explorer::{GraphExplorerApp, GraphExplorerSettings, GraphRootSubjectSelection};
 use crate::llm_explorer::{LLMExplorerApp, LLMExplorerState};
 use crate::websockets;
@@ -283,8 +282,12 @@ impl eframe::App for WebUIApp {
                         }
                     }
                 }
-                Err(_) => {
-                    log::debug!("Websocket error!");
+                Err(mpsc::error::TryRecvError::Empty) => {
+                    // No issue
+                    break;
+                }
+                Err(err) => {
+                    log::debug!("Websocket error: {err}!");
                     break;
                 }
             }
@@ -473,9 +476,11 @@ impl eframe::App for WebUIApp {
                     if let Some(selected_tab) = self.selected_graph_explorer_tab {
                         let mut graph_explorer = self.graph_explorer_app.entry(selected_tab).or_insert_with(|| GraphExplorerApp::new(selected_tab));
                         if let Some(server_config_report) = &self.server_config_report {
-                            ui.horizontal(|ui| {
-                                graph_explorer.render_minimap(ui)
-                            });
+                            if self.app_state.graph_explorer_settings {
+                                ui.horizontal(|ui| {
+                                    graph_explorer.render_minimap(ui)
+                                });
+                            }
                             graph_explorer.update(
                                 &mut self.app_state.graph_explorer_settings,
                                 &mut self.loaded_models,
