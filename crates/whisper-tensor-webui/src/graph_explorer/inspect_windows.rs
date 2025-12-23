@@ -1,6 +1,6 @@
 use crate::app::LoadedModels;
 use crate::graph_explorer::{
-    GraphExplorerApp, GraphExplorerSelectable, GraphExplorerSettings,
+    GraphExplorerApp, GraphExplorerSettings,
     format_shape,
 };
 use crate::websockets::ServerRequestManager;

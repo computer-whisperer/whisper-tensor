@@ -3,7 +3,7 @@ pub mod inspect_windows;
 mod tensor_swatch;
 
 use crate::app::{InterfaceId, LoadedModels, LoadedTokenizers};
-use crate::graph_explorer::inspect_windows::AnyInspectWindow;
+use crate::graph_explorer::inspect_windows::{AnyInspectWindow, InspectWindowGraphLink, InspectWindowGraphNode};
 use crate::websockets::ServerRequestManager;
 use crate::widgets::toggle::toggle_ui;
 use crate::widgets::tokenized_rich_text::TokenizedRichText;
@@ -62,16 +62,6 @@ impl Default for GraphExplorerSettings {
 pub(crate) enum GraphRootSubjectSelection {
     Model(LoadedModelId),
     Interface(InterfaceId),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum GraphExplorerSelectable {
-    SymbolicGraphOperationId(GlobalId),
-    SymbolicGraphTensorId(GlobalId),
-    SuperGraphNodeId(GlobalId),
-    SuperGraphLink(GlobalId),
-    MilliOpGraphTensor(GlobalId),
-    MilliOpGraphNode(GlobalId),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -144,22 +134,60 @@ fn render_node_contents<'a>(
             GraphLayoutNodeType::GraphNode(node_id) => {
                 if let Some(node) = &graph_subject.get_node_by_id(node_id) {
                     ui.add(Label::new(node.op_kind()).selectable(false));
+                    if let Some(label) = node.label() {
+                        ui.add(Label::new(label).selectable(false));
+                    }
                 }
             }
-            GraphLayoutNodeType::InputLinkNode(_link_id) => {
-                ui.add(Label::new("Input").selectable(false));
+            GraphLayoutNodeType::InputLinkNode(link_id) => {
+                let text = if let Some(link) = graph_subject.get_link_by_id(link_id) &&
+                    let Some(label) = link.label() {
+                    format!("Input: {}", label)
+                }
+                else {
+                    "Input".to_string()
+                };
+                ui.add(Label::new(text).selectable(false));
             }
-            GraphLayoutNodeType::OutputLinkNode(_link_id) => {
-                ui.add(Label::new("Output").selectable(false));
+            GraphLayoutNodeType::OutputLinkNode(link_id) => {
+                let text = if let Some(link) = graph_subject.get_link_by_id(link_id) &&
+                    let Some(label) = link.label() {
+                    format!("Output: {}", label)
+                }
+                else {
+                    "Output".to_string()
+                };
+                ui.add(Label::new(text).selectable(false));
             }
-            GraphLayoutNodeType::ConstantLinkNode(_link_id) => {
-                ui.add(Label::new("Constant").selectable(false));
+            GraphLayoutNodeType::ConstantLinkNode(link_id) => {
+                let text = if let Some(link) = graph_subject.get_link_by_id(link_id) &&
+                    let Some(label) = link.label() {
+                    format!("Constant: {}", label)
+                }
+                else {
+                    "Constant".to_string()
+                };
+                ui.add(Label::new(text).selectable(false));
             }
-            GraphLayoutNodeType::ConnectionByNameSrc(link) => {
-                ui.add(Label::new(format!("{:?} >", link)).selectable(false));
+            GraphLayoutNodeType::ConnectionByNameSrc(link_id) => {
+                let text = if let Some(link) = graph_subject.get_link_by_id(link_id) &&
+                    let Some(label) = link.label() {
+                    format!("{} >", label)
+                }
+                else {
+                    format!("{} >", link_id)
+                };
+                ui.add(Label::new(text).selectable(false));
             }
-            GraphLayoutNodeType::ConnectionByNameDest(link) => {
-                ui.add(Label::new(format!("> {:?}", link)).selectable(false));
+            GraphLayoutNodeType::ConnectionByNameDest(link_id) => {
+                let text = if let Some(link) = graph_subject.get_link_by_id(link_id) &&
+                    let Some(label) = link.label() {
+                    format!("> {}", label)
+                }
+                else {
+                    format!("> {}", link_id)
+                };
+                ui.add(Label::new(text).selectable(false));
             }
         }
     }
@@ -862,8 +890,12 @@ impl GraphExplorerApp {
                                     }
                                     if resp.double_clicked() {
                                         match &current_node_data[&node_id].node_type {
-                                            // TODO: Open inspect window
                                             GraphLayoutNodeType::GraphNode(global_id) => {
+                                                let node_path = working_path
+                                                                .iter()
+                                                                .cloned()
+                                                                .chain(core::iter::once(*global_id))
+                                                                .collect::<Vec<_>>();
                                                 match get_inner_graph(
                                                     working_graph,
                                                     *global_id,
@@ -873,16 +905,32 @@ impl GraphExplorerApp {
                                                     LoadableGraphState::Unloaded(_) |
                                                     LoadableGraphState::Loaded(_) => {
                                                         self.next_graph_subject_path = Some(
-                                                            working_path
-                                                                .iter()
-                                                                .cloned()
-                                                                .chain(core::iter::once(*global_id))
-                                                                .collect::<Vec<_>>(),
+                                                            node_path,
                                                         );
                                                     }
                                                     LoadableGraphState::None => {
                                                         // No sub graph
+                                                        if !AnyInspectWindow::check_if_already_exists(
+                                                            &self.inspect_windows, &node_path) {
+                                                            self.inspect_windows.push(
+                                                                InspectWindowGraphNode::new(node_path.clone()).to_any()
+                                                            )
+                                                        }
                                                     }
+                                                }
+                                            }
+                                            GraphLayoutNodeType::InputLinkNode(link_id) |
+                                            GraphLayoutNodeType::OutputLinkNode(link_id) => {
+                                                let link_path = working_path
+                                                    .iter()
+                                                    .cloned()
+                                                    .chain(core::iter::once(*link_id))
+                                                    .collect::<Vec<_>>();
+                                                if !AnyInspectWindow::check_if_already_exists(
+                                                    &self.inspect_windows, &link_path) {
+                                                    self.inspect_windows.push(
+                                                        InspectWindowGraphLink::new(link_path.clone()).to_any()
+                                                    )
                                                 }
                                             }
                                             _ => {}

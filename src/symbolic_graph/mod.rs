@@ -1641,6 +1641,9 @@ impl Link for ONNXTensorInfo {
     fn global_id(&self) -> GlobalId {
         self.global_id
     }
+    fn label(&self) -> Option<String> {
+        self.onnx_name.clone()
+    }
 }
 
 impl Node for GraphOperation {
@@ -1660,5 +1663,9 @@ impl Node for GraphOperation {
 
     fn global_id(&self) -> GlobalId {
         self.op.global_id()
+    }
+
+    fn label(&self) -> Option<String> {
+        self.name.clone()
     }
 }

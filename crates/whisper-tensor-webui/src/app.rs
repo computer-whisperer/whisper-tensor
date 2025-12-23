@@ -476,7 +476,7 @@ impl eframe::App for WebUIApp {
                     if let Some(selected_tab) = self.selected_graph_explorer_tab {
                         let mut graph_explorer = self.graph_explorer_app.entry(selected_tab).or_insert_with(|| GraphExplorerApp::new(selected_tab));
                         if let Some(server_config_report) = &self.server_config_report {
-                            if self.app_state.graph_explorer_settings {
+                            if self.app_state.graph_explorer_settings.explorer_minimap {
                                 ui.horizontal(|ui| {
                                     graph_explorer.render_minimap(ui)
                                 });

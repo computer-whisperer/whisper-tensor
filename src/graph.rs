@@ -30,6 +30,9 @@ impl Display for GlobalId {
 pub trait Link {
     /// Unique identifier.
     fn global_id(&self) -> GlobalId;
+    fn label(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Node within a graph. Carries op kind and its interface to links.
@@ -44,24 +47,37 @@ pub trait Node {
     fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId> + '_>;
     /// Outgoing link handles grouped by output index order.
     fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId> + '_>;
+    /// Optional label for debugging.
+    fn label(&self) -> Option<String> {
+        None
+    }
 }
 
 pub trait NodeDyn {
+    /// Unique identifier.
     fn global_id(&self) -> GlobalId;
+    /// Op name or other identifier.
     fn op_kind(&self) -> String;
+    /// Incoming link handles in input index order.
     fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId> + '_>;
+    /// Outgoing link handles grouped by output index order.
     fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId> + '_>;
+    /// Optional label for debugging.
+    fn label(&self) -> Option<String>;
 }
 
 impl<N: Node> NodeDyn for N
 {
-
     fn global_id(&self) -> GlobalId {
         self.global_id()
     }
 
     fn op_kind(&self) -> String {
         self.op_kind().as_ref().to_string()
+    }
+
+    fn label(&self) -> Option<String> {
+        self.label()
     }
 
     fn inputs(&self) -> Box<dyn Iterator<Item=GlobalId> + '_> {
@@ -115,6 +131,7 @@ pub trait GraphDyn {
     /// Constant values in the graph.
     fn constant_link_ids(&self) -> Box<dyn Iterator<Item = GlobalId> + '_>;
     fn get_node_by_id(&self, id: &GlobalId) -> Option<&dyn NodeDyn>;
+    fn get_link_by_id(&self, id: &GlobalId) -> Option<&dyn Link>;
     fn as_any(&self) -> &dyn Any;
 }
 
@@ -139,6 +156,9 @@ impl<G: Graph + 'static> GraphDyn for G {
     }
     fn get_node_by_id(&self, id: &GlobalId) -> Option<&dyn NodeDyn> {
         self.get_node_by_id(id).map(|x| x as &dyn NodeDyn)
+    }
+    fn get_link_by_id(&self, id: &GlobalId) -> Option<&dyn Link> {
+        self.get_link_by_id(id).map(|x| x as &dyn Link)
     }
     fn as_any<'a>(&'a self) -> &'a dyn Any {
         self as &'a dyn Any

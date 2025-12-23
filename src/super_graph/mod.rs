@@ -297,8 +297,8 @@ impl Graph for SuperGraph {
         self.nodes.get(id)
     }
 
-    fn get_link_by_id(&self, _id: &GlobalId) -> Option<&Self::AnyLink> {
-        unimplemented!()
+    fn get_link_by_id(&self, id: &GlobalId) -> Option<&Self::AnyLink> {
+        self.links_by_global_id.get(id)
     }
 
     fn input_link_ids(&self) -> impl Iterator<Item = (GlobalId, GlobalId)> {
