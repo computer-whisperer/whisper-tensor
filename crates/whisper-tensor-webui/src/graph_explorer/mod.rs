@@ -929,7 +929,10 @@ impl GraphExplorerApp {
                                                 }
                                             }
                                             GraphLayoutNodeType::InputLinkNode(link_id) |
-                                            GraphLayoutNodeType::OutputLinkNode(link_id) => {
+                                            GraphLayoutNodeType::OutputLinkNode(link_id) |
+                                            GraphLayoutNodeType::ConstantLinkNode(link_id) |
+                                            GraphLayoutNodeType::ConnectionByNameSrc(link_id) |
+                                            GraphLayoutNodeType::ConnectionByNameDest(link_id) => {
                                                 let link_path = working_path
                                                     .iter()
                                                     .cloned()
@@ -942,7 +945,6 @@ impl GraphExplorerApp {
                                                     )
                                                 }
                                             }
-                                            _ => {}
                                         }
                                     }
                                 }
