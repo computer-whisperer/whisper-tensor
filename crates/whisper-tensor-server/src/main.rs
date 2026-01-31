@@ -1,6 +1,8 @@
 use axum::{
     Router,
     extract::ws::{WebSocket, WebSocketUpgrade},
+    http::StatusCode,
+    response::Html,
     response::IntoResponse,
     routing::get,
 };
@@ -221,10 +223,24 @@ use whisper_tensor_server::{
     WebsocketServerClientMessage,
 };
 
+const WEBUI_PKG_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../whisper-tensor-webui/pkg");
+const WEBUI_ASSETS_DIR: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../whisper-tensor-webui/assets"
+);
+const NOT_FOUND_HTML: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../whisper-tensor-webui/assets/404.html"
+));
+
 async fn send_message(socket: &mut WebSocket, message: WebsocketServerClientMessage) {
     let mut data = Vec::<u8>::new();
     ciborium::into_writer(&message, &mut data).unwrap();
     socket.send(Message::Binary(data.into())).await.unwrap();
+}
+
+async fn not_found() -> impl IntoResponse {
+    (StatusCode::NOT_FOUND, Html(NOT_FOUND_HTML))
 }
 
 pub async fn hf_from_pretrained<S: AsRef<str>>(
@@ -492,6 +508,10 @@ async fn main() {
 
     tokio::spawn(async move {
         let model_server = model_server.clone();
+        let not_found_file = ServeFile::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../whisper-tensor-webui/assets/404.html"
+        ));
         let app = Router::new()
             .route("/health", get(|| async { "ok" }))
             .route(
@@ -505,19 +525,29 @@ async fn main() {
                     )
                 }),
             ) // Add WebSocket endpoint
-            .nest_service("/pkg", ServeDir::new("./crates/whisper-tensor-webui/pkg/"))
+            .nest_service(
+                "/pkg",
+                ServeDir::new(WEBUI_PKG_DIR).not_found_service(not_found_file.clone()),
+            )
             .nest_service(
                 "/assets",
-                ServeDir::new("./crates/whisper-tensor-webui/assets/"),
+                ServeDir::new(WEBUI_ASSETS_DIR).not_found_service(not_found_file.clone()),
             )
             .route_service(
                 "/index.html",
-                ServeFile::new("./crates/whisper-tensor-webui/assets/index.html"),
+                ServeFile::new(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../whisper-tensor-webui/assets/index.html"
+                )),
             )
             .route_service(
                 "/",
-                ServeFile::new("./crates/whisper-tensor-webui/assets/index.html"),
+                ServeFile::new(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../whisper-tensor-webui/assets/index.html"
+                )),
             )
+            .fallback(not_found)
             .layer(TraceLayer::new_for_http());
 
         let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();

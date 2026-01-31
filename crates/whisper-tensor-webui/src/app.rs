@@ -2,6 +2,7 @@ use crate::graph_explorer::{GraphExplorerApp, GraphExplorerSettings, GraphRootSu
 use crate::llm_explorer::{LLMExplorerApp, LLMExplorerState};
 use crate::websockets;
 use crate::websockets::ServerRequestManager;
+use crate::widgets::toggle::toggle_ui;
 use egui::Margin;
 use rwkv_tokenizer::WorldTokenizer;
 use serde::{Deserialize, Serialize};
@@ -18,7 +19,6 @@ use whisper_tensor_server::{
     CurrentInterfacesReportEntry, CurrentModelsReportEntry, LoadedModelId, ServerConfigReport,
     WebsocketClientServerMessage, WebsocketServerClientMessage,
 };
-use crate::widgets::toggle::toggle_ui;
 
 #[derive(Clone, Debug)]
 pub(crate) enum ModelLoadState {
@@ -233,27 +233,21 @@ impl eframe::App for WebUIApp {
                             }
                         }
                         WebsocketServerClientMessage::TensorStoreReturn(
-                            model_id,
+                            _model_id,
                             stored_tensor_id,
                             res,
                         ) => {
-                            /*
-                            if let Some(selected_model_id) =
-                                self.graph_explorer_app.get_model_scope(&self.loaded_models)
-                                && selected_model_id == model_id
-                            {
-                                for window in &mut self.graph_explorer_app.inspect_windows {
-                                    if let InspectWindow::SymbolicGraphTensor(inspect_window_tensor) =
-                                        window
-                                        && let Some(x) =
-                                            inspect_window_tensor.stored_value_requested
-                                        && x == stored_tensor_id
-                                    {
-                                        inspect_window_tensor.stored_value = Some(res.clone());
+                            // Route to all graph explorers that may have requested this tensor
+                            for explorer in self.graph_explorer_app.values_mut() {
+                                for window in &mut explorer.inspect_windows {
+                                    if let crate::graph_explorer::inspect_windows::AnyInspectWindow::GraphLink(link_window) = window {
+                                        if link_window.stored_value_requested == Some(stored_tensor_id) {
+                                            link_window.stored_value = Some(res.clone());
+                                            link_window.stored_value_requested = None;
+                                        }
                                     }
                                 }
                             }
-                            */
                         }
                         WebsocketServerClientMessage::HFTokenizerReturn(hf_name, bytes_res) => {
                             let tokenizer = match bytes_res {
@@ -430,10 +424,15 @@ impl eframe::App for WebUIApp {
                     ui.horizontal(|ui| {
                         let model_selector_options = {
                             let mut options = vec![];
-                            for (interface_id, interface) in &self.loaded_models.current_interfaces {
+                            for (interface_id, interface) in &self.loaded_models.current_interfaces
+                            {
                                 options.push((
                                     GraphRootSubjectSelection::Interface(*interface_id),
-                                    format!("({}) {}", interface_id, interface.interface_name.clone()),
+                                    format!(
+                                        "({}) {}",
+                                        interface_id,
+                                        interface.interface_name.clone()
+                                    ),
                                 ));
                             }
                             for model in &self.loaded_models.current_models {
@@ -448,38 +447,70 @@ impl eframe::App for WebUIApp {
                             .selected_text(
                                 model_selector_options
                                     .iter()
-                                    .find(|(a, _b)| self.selected_graph_explorer_tab.as_ref().map(|x| x == a).unwrap_or(false))
+                                    .find(|(a, _b)| {
+                                        self.selected_graph_explorer_tab
+                                            .as_ref()
+                                            .map(|x| x == a)
+                                            .unwrap_or(false)
+                                    })
                                     .map(|(_a, b)| b.clone())
                                     .unwrap_or("Select a model or interface".to_string()),
                             )
                             .show_ui(ui, |ui| {
                                 for (a, b) in model_selector_options {
-                                    ui.selectable_value(&mut self.selected_graph_explorer_tab, Some(a), b.to_string());
+                                    ui.selectable_value(
+                                        &mut self.selected_graph_explorer_tab,
+                                        Some(a),
+                                        b.to_string(),
+                                    );
                                 }
                             });
                         if ui.button("Load New Model").clicked() {
-                            self.loaded_models.model_load_state = Some(ModelLoadState::DialogOpen(None));
+                            self.loaded_models.model_load_state =
+                                Some(ModelLoadState::DialogOpen(None));
                         };
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            toggle_ui(ui, &mut self.app_state.graph_explorer_settings.explorer_minimap);
+                            toggle_ui(
+                                ui,
+                                &mut self.app_state.graph_explorer_settings.explorer_minimap,
+                            );
                             ui.label("Minimap:");
-                            toggle_ui(ui, &mut self.app_state.graph_explorer_settings.explorer_physics);
+                            toggle_ui(
+                                ui,
+                                &mut self.app_state.graph_explorer_settings.explorer_physics,
+                            );
                             ui.label("Physics:");
-                            toggle_ui(ui, &mut self.app_state.graph_explorer_settings.explorer_node_wave);
+                            toggle_ui(
+                                ui,
+                                &mut self.app_state.graph_explorer_settings.explorer_node_wave,
+                            );
                             ui.label("Activity:");
-                            toggle_ui(ui, &mut self.app_state.graph_explorer_settings.do_all_explorer_swatches);
+                            toggle_ui(
+                                ui,
+                                &mut self
+                                    .app_state
+                                    .graph_explorer_settings
+                                    .do_all_explorer_swatches,
+                            );
                             ui.label("All Swatches:");
-                            toggle_ui(ui, &mut self.app_state.graph_explorer_settings.do_explorer_swatches_in_view);
+                            toggle_ui(
+                                ui,
+                                &mut self
+                                    .app_state
+                                    .graph_explorer_settings
+                                    .do_explorer_swatches_in_view,
+                            );
                             ui.label("Swatches In-frame:");
                         })
                     });
                     if let Some(selected_tab) = self.selected_graph_explorer_tab {
-                        let mut graph_explorer = self.graph_explorer_app.entry(selected_tab).or_insert_with(|| GraphExplorerApp::new(selected_tab));
+                        let graph_explorer = self
+                            .graph_explorer_app
+                            .entry(selected_tab)
+                            .or_insert_with(|| GraphExplorerApp::new(selected_tab));
                         if let Some(server_config_report) = &self.server_config_report {
                             if self.app_state.graph_explorer_settings.explorer_minimap {
-                                ui.horizontal(|ui| {
-                                    graph_explorer.render_minimap(ui)
-                                });
+                                ui.horizontal(|ui| graph_explorer.render_minimap(ui));
                             }
                             graph_explorer.update(
                                 &mut self.app_state.graph_explorer_settings,
@@ -506,7 +537,8 @@ impl eframe::App for WebUIApp {
 
         if let SelectedTab::GraphExplorer = self.app_state.selected_tab {
             if let Some(selected_tab) = self.selected_graph_explorer_tab
-            && let Some(app) = self.graph_explorer_app.get_mut(&selected_tab) {
+                && let Some(app) = self.graph_explorer_app.get_mut(&selected_tab)
+            {
                 app.update_inspect_windows(
                     &mut self.app_state.graph_explorer_settings,
                     ctx,

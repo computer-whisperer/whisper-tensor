@@ -3,7 +3,9 @@ pub mod inspect_windows;
 mod tensor_swatch;
 
 use crate::app::{InterfaceId, LoadedModels, LoadedTokenizers};
-use crate::graph_explorer::inspect_windows::{AnyInspectWindow, InspectWindowGraphLink, InspectWindowGraphNode};
+use crate::graph_explorer::inspect_windows::{
+    AnyInspectWindow, InspectWindowGraphLink, InspectWindowGraphNode,
+};
 use crate::websockets::ServerRequestManager;
 use crate::widgets::toggle::toggle_ui;
 use crate::widgets::tokenized_rich_text::TokenizedRichText;
@@ -25,15 +27,17 @@ use tensor_swatch::build_tensor_swatch;
 use web_time::{Duration, Instant};
 use whisper_tensor::DynRank;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
-use whisper_tensor::graph::{GlobalId, Graph, GraphDyn, Node};
+use whisper_tensor::graph::{GlobalId, Graph, GraphDyn};
 use whisper_tensor::interfaces::AnyInterface;
 use whisper_tensor::scalar_info::ScalarInfoTyped;
 use whisper_tensor::super_graph::nodes::SuperGraphAnyNode;
 use whisper_tensor::super_graph::{SuperGraph, SuperGraphLinkTensor};
-use whisper_tensor::symbolic_graph::ops::Operation;
 use whisper_tensor::tokenizer::Tokenizer;
 use whisper_tensor_import::onnx_graph::TokenizerInfo;
-use whisper_tensor_server::{AbbreviatedTensorReportSettings, AbbreviatedTensorValue, LoadedModelId, ServerConfigReport, SuperGraphRequest, SuperGraphRequestBackendMode, WebsocketClientServerMessage};
+use whisper_tensor_server::{
+    AbbreviatedTensorReportSettings, AbbreviatedTensorValue, LoadedModelId, ServerConfigReport,
+    SuperGraphRequest, SuperGraphRequestBackendMode, WebsocketClientServerMessage,
+};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct GraphExplorerSettings {
@@ -140,51 +144,51 @@ fn render_node_contents<'a>(
                 }
             }
             GraphLayoutNodeType::InputLinkNode(link_id) => {
-                let text = if let Some(link) = graph_subject.get_link_by_id(link_id) &&
-                    let Some(label) = link.label() {
+                let text = if let Some(link) = graph_subject.get_link_by_id(link_id)
+                    && let Some(label) = link.label()
+                {
                     format!("Input: {}", label)
-                }
-                else {
+                } else {
                     "Input".to_string()
                 };
                 ui.add(Label::new(text).selectable(false));
             }
             GraphLayoutNodeType::OutputLinkNode(link_id) => {
-                let text = if let Some(link) = graph_subject.get_link_by_id(link_id) &&
-                    let Some(label) = link.label() {
+                let text = if let Some(link) = graph_subject.get_link_by_id(link_id)
+                    && let Some(label) = link.label()
+                {
                     format!("Output: {}", label)
-                }
-                else {
+                } else {
                     "Output".to_string()
                 };
                 ui.add(Label::new(text).selectable(false));
             }
             GraphLayoutNodeType::ConstantLinkNode(link_id) => {
-                let text = if let Some(link) = graph_subject.get_link_by_id(link_id) &&
-                    let Some(label) = link.label() {
+                let text = if let Some(link) = graph_subject.get_link_by_id(link_id)
+                    && let Some(label) = link.label()
+                {
                     format!("Constant: {}", label)
-                }
-                else {
+                } else {
                     "Constant".to_string()
                 };
                 ui.add(Label::new(text).selectable(false));
             }
             GraphLayoutNodeType::ConnectionByNameSrc(link_id) => {
-                let text = if let Some(link) = graph_subject.get_link_by_id(link_id) &&
-                    let Some(label) = link.label() {
+                let text = if let Some(link) = graph_subject.get_link_by_id(link_id)
+                    && let Some(label) = link.label()
+                {
                     format!("{} >", label)
-                }
-                else {
+                } else {
                     format!("{} >", link_id)
                 };
                 ui.add(Label::new(text).selectable(false));
             }
             GraphLayoutNodeType::ConnectionByNameDest(link_id) => {
-                let text = if let Some(link) = graph_subject.get_link_by_id(link_id) &&
-                    let Some(label) = link.label() {
+                let text = if let Some(link) = graph_subject.get_link_by_id(link_id)
+                    && let Some(label) = link.label()
+                {
                     format!("> {}", label)
-                }
-                else {
+                } else {
                     format!("> {}", link_id)
                 };
                 ui.add(Label::new(text).selectable(false));
@@ -267,13 +271,13 @@ fn format_shape(val: &[ScalarInfoTyped<u64>]) -> String {
     format!("({joined:})")
 }
 
-enum LoadableGraphState<'a> {
+pub(crate) enum LoadableGraphState<'a> {
     None,
     Unloaded(LoadedModelId),
     Loaded(&'a dyn GraphDyn),
 }
 
-fn get_inner_graph<'a>(
+pub(crate) fn get_inner_graph<'a>(
     graph: &'a dyn GraphDyn,
     node_id: GlobalId,
     root_selection: GraphRootSubjectSelection,
@@ -555,7 +559,7 @@ impl GraphExplorerApp {
                         models_to_load.insert(model_id);
                     }
                     res
-                },
+                }
                 GraphRootSubjectSelection::Interface(interface_id) => loaded_models
                     .current_interfaces
                     .get(&interface_id)
@@ -566,7 +570,12 @@ impl GraphExplorerApp {
                 let mut current_graph = graph;
                 let mut current_path = vec![];
                 for node_id in &self.graph_subject_path {
-                    match get_inner_graph(current_graph, *node_id, self.root_selection, loaded_models) {
+                    match get_inner_graph(
+                        current_graph,
+                        *node_id,
+                        self.root_selection,
+                        loaded_models,
+                    ) {
                         LoadableGraphState::Loaded(next_graph) => {
                             current_graph = next_graph;
                             current_path.push(*node_id);
@@ -1294,7 +1303,9 @@ impl GraphExplorerApp {
         // Prompt model loading
 
         for model_id in models_to_load {
-            if  loaded_models.loaded_models.get(&model_id).is_none() && loaded_models.currently_requesting_model.is_none() {
+            if loaded_models.loaded_models.get(&model_id).is_none()
+                && loaded_models.currently_requesting_model.is_none()
+            {
                 log::info!("Loading model: {}", model_id);
                 server_request_manager
                     .send(WebsocketClientServerMessage::GetModelGraph(model_id))
