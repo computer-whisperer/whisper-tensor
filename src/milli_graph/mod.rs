@@ -247,3 +247,7 @@ impl crate::graph::Link for MilliOpGraphTensor {
         self.global_id
     }
 }
+
+impl crate::graph::LinkMetadata for MilliOpGraphTensor {
+    // MilliOpGraph tensors don't have rich metadata like dtype/shape at this level
+}

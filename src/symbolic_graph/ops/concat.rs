@@ -1,4 +1,4 @@
-use crate::graph::{GlobalId, Node};
+use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::ops::*;
 use crate::onnx;
@@ -62,6 +62,13 @@ impl Node for ConcatOperation {
 }
 
 impl Operation for ConcatOperation {
+    fn parameters(&self) -> Vec<Property> {
+        vec![
+            Property::new("axis", PropertyValue::Int(self.axis)),
+            Property::new("num_inputs", PropertyValue::Int(self.inputs.len() as i64)),
+        ]
+    }
+
     fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let mut milli_inputs = vec![];

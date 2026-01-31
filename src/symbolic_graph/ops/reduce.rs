@@ -1,5 +1,5 @@
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
-use crate::graph::{GlobalId, Node};
+use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::{self, MilliOpGraph};
 use crate::onnx;
 use crate::symbolic_graph::ops::Operation;
@@ -75,6 +75,13 @@ impl Operation for CumSumOperation {
         output_map.insert(out, self.output);
         graph.set_output_map(output_map);
         graph
+    }
+
+    fn parameters(&self) -> Vec<Property> {
+        vec![
+            Property::new("exclusive", PropertyValue::Bool(self.exclusive)),
+            Property::new("reverse", PropertyValue::Bool(self.reverse)),
+        ]
     }
 }
 
@@ -168,6 +175,20 @@ fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         graph.set_output_map(output_map);
         graph
     }
+
+    fn parameters(&self) -> Vec<Property> {
+        let mut params = Vec::new();
+        if let Some(keepdims) = self.keepdims {
+            params.push(Property::new("keepdims", PropertyValue::Bool(keepdims)));
+        }
+        if let Some(axes) = &self.axes_attr {
+            params.push(Property::new("axes", PropertyValue::IntList(axes.clone())));
+        }
+        if let Some(noop) = self.noop_with_empty_axes {
+            params.push(Property::new("noop_with_empty_axes", PropertyValue::Bool(noop)));
+        }
+        params
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -236,6 +257,20 @@ impl Node for ReduceSumOperation {
     }
 }
 impl Operation for ReduceSumOperation {
+    fn parameters(&self) -> Vec<Property> {
+        let mut params = Vec::new();
+        if let Some(keepdims) = self.keepdims {
+            params.push(Property::new("keepdims", PropertyValue::Bool(keepdims)));
+        }
+        if let Some(axes) = &self.axes_attr {
+            params.push(Property::new("axes", PropertyValue::IntList(axes.clone())));
+        }
+        if let Some(noop) = self.noop_with_empty_axes {
+            params.push(Property::new("noop_with_empty_axes", PropertyValue::Bool(noop)));
+        }
+        params
+    }
+
     fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let axes = if let Some(input_axes) = &self.input_axes {
@@ -328,6 +363,20 @@ impl Node for ReduceMaxOperation {
     }
 }
 impl Operation for ReduceMaxOperation {
+    fn parameters(&self) -> Vec<Property> {
+        let mut params = Vec::new();
+        if let Some(keepdims) = self.keepdims {
+            params.push(Property::new("keepdims", PropertyValue::Bool(keepdims)));
+        }
+        if let Some(axes) = &self.axes_attr {
+            params.push(Property::new("axes", PropertyValue::IntList(axes.clone())));
+        }
+        if let Some(noop) = self.noop_with_empty_axes {
+            params.push(Property::new("noop_with_empty_axes", PropertyValue::Bool(noop)));
+        }
+        params
+    }
+
     fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let axes = if let Some(input_axes) = &self.input_axes {
@@ -421,6 +470,20 @@ impl Node for ReduceMinOperation {
 }
 
 impl Operation for ReduceMinOperation {
+    fn parameters(&self) -> Vec<Property> {
+        let mut params = Vec::new();
+        if let Some(keepdims) = self.keepdims {
+            params.push(Property::new("keepdims", PropertyValue::Bool(keepdims)));
+        }
+        if let Some(axes) = &self.axes_attr {
+            params.push(Property::new("axes", PropertyValue::IntList(axes.clone())));
+        }
+        if let Some(noop) = self.noop_with_empty_axes {
+            params.push(Property::new("noop_with_empty_axes", PropertyValue::Bool(noop)));
+        }
+        params
+    }
+
     fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let axes = if let Some(input_axes) = &self.input_axes {
@@ -514,7 +577,21 @@ impl Node for ReduceProdOperation {
 }
 
 impl Operation for ReduceProdOperation {
-fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
+    fn parameters(&self) -> Vec<Property> {
+        let mut params = Vec::new();
+        if let Some(keepdims) = self.keepdims {
+            params.push(Property::new("keepdims", PropertyValue::Bool(keepdims)));
+        }
+        if let Some(axes) = &self.axes_attr {
+            params.push(Property::new("axes", PropertyValue::IntList(axes.clone())));
+        }
+        if let Some(noop) = self.noop_with_empty_axes {
+            params.push(Property::new("noop_with_empty_axes", PropertyValue::Bool(noop)));
+        }
+        params
+    }
+
+    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let axes = if let Some(input_axes) = &self.input_axes {
             Some(input_map[input_axes])

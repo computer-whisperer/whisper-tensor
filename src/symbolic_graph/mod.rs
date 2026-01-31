@@ -6,7 +6,7 @@ use crate::backends::ModelLoadedTensorCache;
 use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::{NDArrayNumericTensor, NDArrayNumericTensorError};
 use crate::dtype::DType;
-use crate::graph::{GlobalId, Graph, Link, Node};
+use crate::graph::{GlobalId, Graph, Link, LinkCategory, LinkMetadata, Node, NodeMetadata, Property};
 use crate::numeric_scalar::NumericScalar;
 use crate::numeric_tensor::NumericTensor;
 use crate::scalar_info::ScalarInfoTyped;
@@ -1646,6 +1646,25 @@ impl Link for ONNXTensorInfo {
     }
 }
 
+impl LinkMetadata for ONNXTensorInfo {
+    fn dtype(&self) -> Option<DType> {
+        self.dtype
+    }
+
+    fn shape(&self) -> Option<Vec<ScalarInfoTyped<u64>>> {
+        self.shape.clone()
+    }
+
+    fn category(&self) -> Option<LinkCategory> {
+        Some(match &self.tensor_type {
+            TensorType::Input(_) => LinkCategory::Input,
+            TensorType::Output => LinkCategory::Output,
+            TensorType::Intermediate => LinkCategory::Intermediate,
+            TensorType::Constant(_) => LinkCategory::Constant,
+        })
+    }
+}
+
 impl Node for GraphOperation {
     type OpKind = String;
 
@@ -1667,5 +1686,15 @@ impl Node for GraphOperation {
 
     fn label(&self) -> Option<String> {
         self.name.clone()
+    }
+}
+
+impl NodeMetadata for GraphOperation {
+    fn parameters(&self) -> Vec<Property> {
+        self.op.parameters()
+    }
+
+    fn has_subgraph(&self) -> bool {
+        !self.op.get_sub_graphs().is_empty()
     }
 }

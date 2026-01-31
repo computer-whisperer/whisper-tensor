@@ -1,5 +1,5 @@
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
-use crate::graph::{GlobalId, Graph, Node};
+use crate::graph::{GlobalId, Graph, Node, Property, PropertyValue};
 use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::ops::*;
 use crate::numeric_scalar::NumericScalar;
@@ -66,6 +66,20 @@ impl Node for ConstantOfShapeOperation {
 }
 
 impl Operation for ConstantOfShapeOperation {
+    fn parameters(&self) -> Vec<Property> {
+        let value_str = match &self.value {
+            NumericScalar::F32(v) => format!("{}", v),
+            NumericScalar::F64(v) => format!("{}", v),
+            NumericScalar::I32(v) => format!("{}", v),
+            NumericScalar::I64(v) => format!("{}", v),
+            NumericScalar::U8(v) => format!("{}", v),
+            NumericScalar::U32(v) => format!("{}", v),
+            NumericScalar::BOOL(v) => format!("{}", v),
+            _ => format!("{:?}", self.value),
+        };
+        vec![Property::new("value", PropertyValue::String(value_str))]
+    }
+
     fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let node =
@@ -144,6 +158,31 @@ impl Node for ConstantOperation {
 }
 
 impl Operation for ConstantOperation {
+    fn parameters(&self) -> Vec<Property> {
+        let shape: Vec<i64> = self.value.shape().iter().map(|&x| x as i64).collect();
+        let total_elements: usize = shape.iter().map(|&x| x as usize).product();
+
+        let mut params = vec![
+            Property::new("dtype", PropertyValue::DType(self.value.dtype())),
+            Property::new("shape", PropertyValue::IntList(shape)),
+        ];
+
+        // For small constants, show the actual value
+        if total_elements == 1 {
+            let value_str = format!("{}", self.value.first_element());
+            params.push(Property::new("value", PropertyValue::String(value_str)));
+        } else if total_elements <= 8 {
+            // Show first few elements for small tensors
+            let flat = self.value.flatten();
+            if let Ok(values) = TryInto::<Vec<f32>>::try_into(flat) {
+                let preview: Vec<String> = values.iter().map(|v| format!("{:.4}", v)).collect();
+                params.push(Property::new("values", PropertyValue::String(format!("[{}]", preview.join(", ")))));
+            }
+        }
+
+        params
+    }
+
     fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, _input_map) = MilliOpGraph::new(self.inputs(), rng);
 

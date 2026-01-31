@@ -6,10 +6,13 @@
 //! - Enable shared tooling and passes across all graphs.
 
 use std::any::Any;
+use std::borrow::Cow;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::fmt::{Debug, Display};
 use std::hash::Hash;
+use crate::dtype::DType;
+use crate::scalar_info::ScalarInfoTyped;
 
 #[derive(Clone, Debug, Serialize, Deserialize, Hash, PartialEq, Eq, Copy, Ord, PartialOrd)]
 pub struct GlobalId(pub(crate) u64);
@@ -25,6 +28,160 @@ impl Display for GlobalId {
         write!(f, "GlobalId({})", self.0)
     }
 }
+
+// ============================================================================
+// Metadata Types
+// ============================================================================
+
+/// Dynamic property value for introspection of node parameters.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PropertyValue {
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    String(String),
+    IntList(Vec<i64>),
+    FloatList(Vec<f64>),
+    DType(DType),
+    GlobalId(GlobalId),
+    GlobalIdList(Vec<GlobalId>),
+    None,
+}
+
+impl Display for PropertyValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PropertyValue::Int(v) => write!(f, "{}", v),
+            PropertyValue::Float(v) => write!(f, "{:.6}", v),
+            PropertyValue::Bool(v) => write!(f, "{}", v),
+            PropertyValue::String(v) => write!(f, "{}", v),
+            PropertyValue::IntList(v) => write!(f, "{:?}", v),
+            PropertyValue::FloatList(v) => write!(f, "{:?}", v),
+            PropertyValue::DType(v) => write!(f, "{:?}", v),
+            PropertyValue::GlobalId(v) => write!(f, "{}", v),
+            PropertyValue::GlobalIdList(v) => write!(f, "{:?}", v),
+            PropertyValue::None => write!(f, "None"),
+        }
+    }
+}
+
+/// A named property with its value.
+#[derive(Clone, Debug)]
+pub struct Property {
+    pub name: Cow<'static, str>,
+    pub value: PropertyValue,
+}
+
+impl Property {
+    pub fn new(name: impl Into<Cow<'static, str>>, value: PropertyValue) -> Self {
+        Self {
+            name: name.into(),
+            value,
+        }
+    }
+}
+
+/// Category of a link within a graph.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinkCategory {
+    Input,
+    Output,
+    Intermediate,
+    Constant,
+}
+
+impl Display for LinkCategory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LinkCategory::Input => write!(f, "Input"),
+            LinkCategory::Output => write!(f, "Output"),
+            LinkCategory::Intermediate => write!(f, "Intermediate"),
+            LinkCategory::Constant => write!(f, "Constant"),
+        }
+    }
+}
+
+/// Metadata about a link (tensor/value) in a graph.
+pub trait LinkMetadata: Link {
+    /// The data type of this link, if known.
+    fn dtype(&self) -> Option<DType> {
+        None
+    }
+
+    /// The shape of this link, if known. Each dimension may be concrete or symbolic.
+    fn shape(&self) -> Option<Vec<ScalarInfoTyped<u64>>> {
+        None
+    }
+
+    /// The category of this link (input, output, intermediate, constant).
+    fn category(&self) -> Option<LinkCategory> {
+        None
+    }
+
+    /// Additional properties specific to this link type.
+    fn properties(&self) -> Vec<Property> {
+        Vec::new()
+    }
+}
+
+/// Metadata about a node (operation) in a graph.
+pub trait NodeMetadata: Node {
+    /// Operation parameters as key-value pairs for introspection.
+    fn parameters(&self) -> Vec<Property> {
+        Vec::new()
+    }
+
+    /// Whether this node contains a subgraph (e.g., If, Scan operations).
+    fn has_subgraph(&self) -> bool {
+        false
+    }
+}
+
+/// Object-safe version of LinkMetadata for dynamic dispatch.
+pub trait LinkMetadataDyn: Link {
+    fn dtype(&self) -> Option<DType>;
+    fn shape(&self) -> Option<Vec<ScalarInfoTyped<u64>>>;
+    fn category(&self) -> Option<LinkCategory>;
+    fn properties(&self) -> Vec<Property>;
+}
+
+impl<L: LinkMetadata> LinkMetadataDyn for L {
+    fn dtype(&self) -> Option<DType> {
+        LinkMetadata::dtype(self)
+    }
+
+    fn shape(&self) -> Option<Vec<ScalarInfoTyped<u64>>> {
+        LinkMetadata::shape(self)
+    }
+
+    fn category(&self) -> Option<LinkCategory> {
+        LinkMetadata::category(self)
+    }
+
+    fn properties(&self) -> Vec<Property> {
+        LinkMetadata::properties(self)
+    }
+}
+
+/// Object-safe version of NodeMetadata for dynamic dispatch.
+pub trait NodeMetadataDyn: NodeDyn {
+    fn parameters(&self) -> Vec<Property>;
+    fn has_subgraph(&self) -> bool;
+}
+
+impl<N: NodeMetadata> NodeMetadataDyn for N {
+    fn parameters(&self) -> Vec<Property> {
+        NodeMetadata::parameters(self)
+    }
+
+    fn has_subgraph(&self) -> bool {
+        NodeMetadata::has_subgraph(self)
+    }
+}
+
+// ============================================================================
+// Core Graph Traits
+// ============================================================================
 
 /// A directed connection between a producer node output and a consumer node input.
 pub trait Link {
@@ -92,8 +249,8 @@ impl<N: Node> NodeDyn for N
 /// Root graph abstraction that can host an InnerGraph and provide naming/paths.
 pub trait Graph {
     type Error: Debug;
-    type AnyNode: Node;
-    type AnyLink: Link;
+    type AnyNode: Node + NodeMetadata;
+    type AnyLink: Link + LinkMetadata;
 
     /// Unique identifier for the graph layer.
     fn global_id(&self) -> GlobalId;
@@ -133,6 +290,10 @@ pub trait GraphDyn {
     fn get_node_by_id(&self, id: &GlobalId) -> Option<&dyn NodeDyn>;
     fn get_link_by_id(&self, id: &GlobalId) -> Option<&dyn Link>;
     fn as_any(&self) -> &dyn Any;
+
+    // Metadata accessors
+    fn get_node_metadata_by_id(&self, id: &GlobalId) -> Option<&dyn NodeMetadataDyn>;
+    fn get_link_metadata_by_id(&self, id: &GlobalId) -> Option<&dyn LinkMetadataDyn>;
 }
 
 impl<G: Graph + 'static> GraphDyn for G {
@@ -162,6 +323,12 @@ impl<G: Graph + 'static> GraphDyn for G {
     }
     fn as_any<'a>(&'a self) -> &'a dyn Any {
         self as &'a dyn Any
+    }
+    fn get_node_metadata_by_id(&self, id: &GlobalId) -> Option<&dyn NodeMetadataDyn> {
+        self.get_node_by_id(id).map(|x| x as &dyn NodeMetadataDyn)
+    }
+    fn get_link_metadata_by_id(&self, id: &GlobalId) -> Option<&dyn LinkMetadataDyn> {
+        self.get_link_by_id(id).map(|x| x as &dyn LinkMetadataDyn)
     }
 }
 

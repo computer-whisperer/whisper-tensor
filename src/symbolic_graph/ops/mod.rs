@@ -54,7 +54,7 @@ pub use unary::{
 use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::NDArrayNumericTensorError;
 use crate::dtype::{DType, DTypeError};
-use crate::graph::{GlobalId, Node};
+use crate::graph::{GlobalId, Node, Property};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::numeric_tensor::{NumericTensor, NumericTensorError};
 use crate::tensor_rank::DynRank;
@@ -103,6 +103,10 @@ pub trait Operation: Node {
     fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph;
     fn get_sub_graphs(&self) -> Vec<&SymbolicGraph> {
         vec![]
+    }
+    /// Returns introspectable parameters for this operation.
+    fn parameters(&self) -> Vec<Property> {
+        Vec::new()
     }
 }
 
@@ -238,4 +242,6 @@ impl Operation for AnyOperation {
     ) -> Result<Box<dyn Iterator<Item=(GlobalId, NumericTensor<DynRank>)>>, EvalError>);
 
     delegate!(get_milli_op_graph(rng: &mut impl Rng) -> MilliOpGraph);
+
+    delegate!(parameters() -> Vec<Property>);
 }

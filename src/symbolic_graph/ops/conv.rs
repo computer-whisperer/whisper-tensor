@@ -1,5 +1,5 @@
 use rand::Rng;
-use crate::graph::{GlobalId, Node};
+use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::MilliOpGraph;
 use crate::onnx;
 use crate::symbolic_graph::ops::Operation;
@@ -107,6 +107,31 @@ impl Node for ConvOperation {
 }
 
 impl Operation for ConvOperation {
+    fn parameters(&self) -> Vec<Property> {
+        let mut params = Vec::new();
+        let auto_pad_str = match &self.auto_pad {
+            ConvOperationAutoPad::NotSet => "NOTSET",
+            ConvOperationAutoPad::SameUpper => "SAME_UPPER",
+            ConvOperationAutoPad::SameLower => "SAME_LOWER",
+            ConvOperationAutoPad::Valid => "VALID",
+        };
+        params.push(Property::new("auto_pad", PropertyValue::String(auto_pad_str.to_string())));
+        if !self.dilations.is_empty() {
+            params.push(Property::new("dilations", PropertyValue::IntList(self.dilations.clone())));
+        }
+        params.push(Property::new("group", PropertyValue::Int(self.group)));
+        if !self.kernel_shape.is_empty() {
+            params.push(Property::new("kernel_shape", PropertyValue::IntList(self.kernel_shape.clone())));
+        }
+        if !self.pads.is_empty() {
+            params.push(Property::new("pads", PropertyValue::IntList(self.pads.clone())));
+        }
+        if !self.strides.is_empty() {
+            params.push(Property::new("strides", PropertyValue::IntList(self.strides.clone())));
+        }
+        params
+    }
+
     fn get_milli_op_graph(&self, _rng: &mut impl Rng) -> MilliOpGraph {
         unimplemented!();
     }

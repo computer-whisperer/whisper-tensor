@@ -1,5 +1,5 @@
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
-use crate::graph::{GlobalId, Node};
+use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::MilliOpGraph;
 use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{ONNXDecodingError, query_attribute_int};
@@ -76,6 +76,18 @@ impl Node for RotaryEmbeddingOperation {
     }
 }
 impl Operation for RotaryEmbeddingOperation {
+    fn parameters(&self) -> Vec<Property> {
+        let mut params = Vec::new();
+        params.push(Property::new("interleaved", PropertyValue::Bool(self.interleaved)));
+        if let Some(num_heads) = self.num_heads {
+            params.push(Property::new("num_heads", PropertyValue::Int(num_heads)));
+        }
+        if self.rotary_embedding_dim != 0 {
+            params.push(Property::new("rotary_embedding_dim", PropertyValue::Int(self.rotary_embedding_dim)));
+        }
+        params
+    }
+
     fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
 

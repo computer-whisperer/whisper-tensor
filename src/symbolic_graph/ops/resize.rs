@@ -1,5 +1,5 @@
 use rand::Rng;
-use crate::graph::{GlobalId, Node};
+use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::MilliOpGraph;
 use crate::onnx;
 use crate::symbolic_graph::ops::Operation;
@@ -174,6 +174,61 @@ impl Node for ResizeOperation {
     }
 }
 impl Operation for ResizeOperation {
+    fn parameters(&self) -> Vec<Property> {
+        let mode_str = match &self.mode {
+            ResizeMode::Nearest => "nearest",
+            ResizeMode::Linear => "linear",
+            ResizeMode::Cubic => "cubic",
+        };
+        let coord_mode_str = match &self.coordinate_transformation_mode {
+            ResizeCoordinateTransformationMode::HalfPixel => "half_pixel",
+            ResizeCoordinateTransformationMode::HalfPixelSymmetric => "half_pixel_symmetric",
+            ResizeCoordinateTransformationMode::PytorchHalfPixel => "pytorch_half_pixel",
+            ResizeCoordinateTransformationMode::AlignCorners => "align_corners",
+            ResizeCoordinateTransformationMode::Asymmetric => "asymmetric",
+            ResizeCoordinateTransformationMode::TFCropAndResize => "tf_crop_and_resize",
+        };
+        let nearest_mode_str = match &self.nearest_mode {
+            ResizeNearestMode::RoundPreferFloor => "round_prefer_floor",
+            ResizeNearestMode::Ceil => "ceil",
+            ResizeNearestMode::Floor => "floor",
+        };
+        let aspect_policy_str = match &self.keep_aspect_ratio_policy {
+            ResizeKeepAspectRatioPolicy::Stretch => "stretch",
+            ResizeKeepAspectRatioPolicy::NotLarger => "not_larger",
+            ResizeKeepAspectRatioPolicy::NotSmaller => "not_smaller",
+        };
+
+        let mut params = vec![
+            Property::new("mode", PropertyValue::String(mode_str.to_string())),
+            Property::new("coordinate_transform", PropertyValue::String(coord_mode_str.to_string())),
+        ];
+
+        if matches!(self.mode, ResizeMode::Nearest) {
+            params.push(Property::new("nearest_mode", PropertyValue::String(nearest_mode_str.to_string())));
+        }
+        if matches!(self.mode, ResizeMode::Cubic) {
+            params.push(Property::new("cubic_coeff_a", PropertyValue::Float(self.cubic_coeff_a as f64)));
+        }
+        if self.antialias {
+            params.push(Property::new("antialias", PropertyValue::Bool(true)));
+        }
+        if self.exclude_outside {
+            params.push(Property::new("exclude_outside", PropertyValue::Bool(true)));
+        }
+        if self.extrapolation_value != 0.0 {
+            params.push(Property::new("extrapolation_value", PropertyValue::Float(self.extrapolation_value as f64)));
+        }
+        if !self.axes.is_empty() {
+            params.push(Property::new("axes", PropertyValue::IntList(self.axes.clone())));
+        }
+        if !matches!(self.keep_aspect_ratio_policy, ResizeKeepAspectRatioPolicy::Stretch) {
+            params.push(Property::new("keep_aspect_ratio_policy", PropertyValue::String(aspect_policy_str.to_string())));
+        }
+
+        params
+    }
+
     fn get_milli_op_graph(&self, _rng: &mut impl Rng) -> MilliOpGraph {
         todo!()
     }

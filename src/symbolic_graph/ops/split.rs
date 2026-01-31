@@ -1,5 +1,5 @@
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
-use crate::graph::{GlobalId, Node};
+use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::{self, MilliOpGraph};
 use crate::onnx;
 use crate::symbolic_graph::ops::Operation;
@@ -75,6 +75,20 @@ impl Node for SplitOperation {
     }
 }
 impl Operation for SplitOperation {
+    fn parameters(&self) -> Vec<Property> {
+        let mut params = Vec::new();
+        if let Some(axis) = self.axis {
+            params.push(Property::new("axis", PropertyValue::Int(axis)));
+        }
+        if let Some(num_outputs) = self.num_outputs {
+            params.push(Property::new("num_outputs", PropertyValue::Int(num_outputs)));
+        }
+        if let Some(split) = &self.split_attribute {
+            params.push(Property::new("split", PropertyValue::IntList(split.clone())));
+        }
+        params
+    }
+
     fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
 

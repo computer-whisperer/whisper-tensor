@@ -1,4 +1,4 @@
-use crate::graph::{GlobalId, Node};
+use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::ops::Transpose;
 use crate::onnx;
@@ -54,6 +54,14 @@ impl Node for TransposeOperation {
     }
 }
 impl Operation for TransposeOperation {
+    fn parameters(&self) -> Vec<Property> {
+        let mut params = Vec::new();
+        if let Some(perm) = &self.perm {
+            params.push(Property::new("perm", PropertyValue::IntList(perm.clone())));
+        }
+        params
+    }
+
     fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let out = Transpose::push_new(&mut graph, input_map[&self.input], self.perm.clone(), rng);

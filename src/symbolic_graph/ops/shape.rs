@@ -1,4 +1,4 @@
-use crate::graph::{GlobalId, Node};
+use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::{self, MilliOpGraph, ops_helpers};
 use crate::onnx;
 use crate::symbolic_graph::ops::Operation;
@@ -68,6 +68,17 @@ impl Node for ShapeOperation {
     }
 }
 impl Operation for ShapeOperation {
+    fn parameters(&self) -> Vec<Property> {
+        let mut params = Vec::new();
+        if let Some(start) = self.start {
+            params.push(Property::new("start", PropertyValue::Int(start)));
+        }
+        if let Some(end) = self.end {
+            params.push(Property::new("end", PropertyValue::Int(end)));
+        }
+        params
+    }
+
     fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let out = milli_graph::ops::Shape::push_new(&mut graph, input_map[&self.input], rng);

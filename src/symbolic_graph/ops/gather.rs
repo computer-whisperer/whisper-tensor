@@ -1,4 +1,4 @@
-use crate::graph::{GlobalId, Node};
+use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::ops::*;
 use crate::onnx;
@@ -63,6 +63,10 @@ impl Node for GatherOperation {
 }
 
 impl Operation for GatherOperation {
+    fn parameters(&self) -> Vec<Property> {
+        vec![Property::new("axis", PropertyValue::Int(self.axis))]
+    }
+
     fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let out = Gather::push_new(

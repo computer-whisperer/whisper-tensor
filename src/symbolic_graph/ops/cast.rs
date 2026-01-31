@@ -1,5 +1,5 @@
 use crate::dtype::DType;
-use crate::graph::{GlobalId, Node};
+use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::{self, MilliOpGraph};
 use crate::onnx;
 use crate::symbolic_graph::ops::Operation;
@@ -127,6 +127,10 @@ impl Node for CastOperation {
 }
 
 impl Operation for CastOperation {
+    fn parameters(&self) -> Vec<Property> {
+        vec![Property::new("to", PropertyValue::DType(self.to))]
+    }
+
     fn get_milli_op_graph(&self, rng: &mut impl rand::Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let out = milli_graph::ops::Cast::push_new(&mut graph, input_map[&self.input], self.to, rng);

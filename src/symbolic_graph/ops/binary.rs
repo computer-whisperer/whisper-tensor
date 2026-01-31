@@ -1,4 +1,4 @@
-use crate::graph::{GlobalId, Node};
+use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::MilliOpGraph;
 use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{
@@ -79,6 +79,10 @@ impl Node for BinaryOperation {
 }
 
 impl Operation for BinaryOperation {
+    fn parameters(&self) -> Vec<Property> {
+        vec![Property::new("operation", PropertyValue::String(self.which.to_string()))]
+    }
+
     fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         let input_ids: Vec<_> = self.inputs().collect();
         let (mut graph, input_map) = MilliOpGraph::new(input_ids, rng);
@@ -256,6 +260,23 @@ impl Node for GemmOperation {
 }
 
 impl Operation for GemmOperation {
+    fn parameters(&self) -> Vec<Property> {
+        let mut params = Vec::new();
+        if let Some(alpha) = self.alpha {
+            params.push(Property::new("alpha", PropertyValue::Float(alpha as f64)));
+        }
+        if let Some(beta) = self.beta {
+            params.push(Property::new("beta", PropertyValue::Float(beta as f64)));
+        }
+        if let Some(trans_a) = self.trans_a {
+            params.push(Property::new("transA", PropertyValue::Bool(trans_a)));
+        }
+        if let Some(trans_b) = self.trans_b {
+            params.push(Property::new("transB", PropertyValue::Bool(trans_b)));
+        }
+        params
+    }
+
     fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
 
@@ -370,6 +391,14 @@ impl Node for ArgMaxOperation {
 }
 
 impl Operation for ArgMaxOperation {
+    fn parameters(&self) -> Vec<Property> {
+        vec![
+            Property::new("axis", PropertyValue::Int(self.axis)),
+            Property::new("keepdims", PropertyValue::Bool(self.keepdims)),
+            Property::new("select_last_index", PropertyValue::Bool(self.select_last_index)),
+        ]
+    }
+
     fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
 
@@ -446,6 +475,14 @@ impl Node for ArgMinOperation {
 }
 
 impl Operation for ArgMinOperation {
+    fn parameters(&self) -> Vec<Property> {
+        vec![
+            Property::new("axis", PropertyValue::Int(self.axis)),
+            Property::new("keepdims", PropertyValue::Bool(self.keepdims)),
+            Property::new("select_last_index", PropertyValue::Bool(self.select_last_index)),
+        ]
+    }
+
     fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
 
@@ -514,6 +551,10 @@ impl Node for MaxOperation {
 }
 
 impl Operation for MaxOperation {
+    fn parameters(&self) -> Vec<Property> {
+        vec![Property::new("num_inputs", PropertyValue::Int(self.inputs.len() as i64))]
+    }
+
     fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let mut x = input_map[&self.inputs[0]];
@@ -577,6 +618,10 @@ impl Node for MinOperation {
 }
 
 impl Operation for MinOperation {
+    fn parameters(&self) -> Vec<Property> {
+        vec![Property::new("num_inputs", PropertyValue::Int(self.inputs.len() as i64))]
+    }
+
     fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let mut x = input_map[&self.inputs[0]];
@@ -643,6 +688,14 @@ impl Node for ModuloOperation {
 }
 
 impl Operation for ModuloOperation {
+    fn parameters(&self) -> Vec<Property> {
+        let mut params = Vec::new();
+        if let Some(fmod) = self.fmod {
+            params.push(Property::new("fmod", PropertyValue::Bool(fmod)));
+        }
+        params
+    }
+
     fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let a = input_map[&self.a];

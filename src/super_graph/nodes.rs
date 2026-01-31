@@ -3,7 +3,7 @@ use crate::backends::eval_backend;
 use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::compiler::CompiledProgramObserver;
-use crate::graph::{GlobalId, Graph, Node};
+use crate::graph::{GlobalId, Graph, Node, NodeMetadata, Property, PropertyValue};
 use crate::milli_graph::observer::MilliOpGraphObserver;
 use crate::milli_graph::{MilliOpGraph};
 use crate::numeric_tensor::NumericTensor;
@@ -1260,4 +1260,26 @@ impl SuperGraphNode for SuperGraphAnyNode {
     delegate!(inputs() -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_>);
     delegate!(outputs() -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_>);
     delegate!(global_id() -> GlobalId);
+}
+
+impl NodeMetadata for SuperGraphAnyNode {
+    fn parameters(&self) -> Vec<Property> {
+        match self {
+            SuperGraphAnyNode::ModelExecution(node) => {
+                vec![
+                    Property::new("symbolic_graph_id", PropertyValue::Int(node.symbolic_graph_id as i64)),
+                ]
+            }
+            SuperGraphAnyNode::Scan(node) => {
+                vec![
+                    Property::new("num_scan_inputs", PropertyValue::Int(node.scan_inputs.len() as i64)),
+                ]
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn has_subgraph(&self) -> bool {
+        matches!(self, SuperGraphAnyNode::Scan(_))
+    }
 }

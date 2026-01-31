@@ -1,6 +1,6 @@
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::dtype::DType;
-use crate::graph::{GlobalId, Node};
+use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::{MilliOpGraph, ops_helpers};
 use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{
@@ -101,6 +101,13 @@ impl Operation for LpNormalizationOperation {
         output_map.insert(out, self.output);
         graph.set_output_map(output_map);
         graph
+    }
+
+    fn parameters(&self) -> Vec<Property> {
+        vec![
+            Property::new("axis", PropertyValue::Int(self.axis)),
+            Property::new("p", PropertyValue::Int(self.p)),
+        ]
     }
 }
 
@@ -279,6 +286,14 @@ impl Operation for GroupNormalizationOperation {
         graph.set_output_map(output_map);
         graph
     }
+
+    fn parameters(&self) -> Vec<Property> {
+        vec![
+            Property::new("epsilon", PropertyValue::Float(self.epsilon as f64)),
+            Property::new("num_groups", PropertyValue::Int(self.num_groups as i64)),
+            Property::new("stash_type", PropertyValue::DType(self.stash_type)),
+        ]
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -449,6 +464,14 @@ impl Operation for RMSNormalizationOperation {
         output_map.insert(out, self.output);
         graph.set_output_map(output_map);
         graph
+    }
+
+    fn parameters(&self) -> Vec<Property> {
+        vec![
+            Property::new("axis", PropertyValue::Int(self.axis)),
+            Property::new("epsilon", PropertyValue::Float(self.epsilon as f64)),
+            Property::new("stash_type", PropertyValue::DType(self.stash_type)),
+        ]
     }
 }
 
@@ -634,6 +657,14 @@ fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         graph.set_output_map(output_map);
         graph
     }
+
+    fn parameters(&self) -> Vec<Property> {
+        vec![
+            Property::new("axis", PropertyValue::Int(self.axis)),
+            Property::new("epsilon", PropertyValue::Float(self.epsilon as f64)),
+            Property::new("stash_type", PropertyValue::DType(self.stash_type)),
+        ]
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -703,5 +734,13 @@ impl Node for InstanceNormalizationOperation {
 impl Operation for InstanceNormalizationOperation {
     fn get_milli_op_graph(&self, _rng: &mut impl Rng) -> MilliOpGraph {
         unimplemented!();
+    }
+
+    fn parameters(&self) -> Vec<Property> {
+        let mut params = Vec::new();
+        if let Some(eps) = self.epsilon {
+            params.push(Property::new("epsilon", PropertyValue::Float(eps as f64)));
+        }
+        params
     }
 }

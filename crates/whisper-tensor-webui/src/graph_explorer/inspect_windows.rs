@@ -5,13 +5,11 @@ use crate::graph_explorer::{
 };
 use crate::websockets::ServerRequestManager;
 use crate::widgets::tensor_view::{TensorViewState, tensor_view};
-use egui::Color32;
+use egui::{Color32, CornerRadius, RichText, Stroke, Vec2};
 use whisper_tensor::DynRank;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
-use whisper_tensor::graph::{GlobalId, Graph, GraphDyn};
+use whisper_tensor::graph::{GlobalId, Graph, GraphDyn, Property};
 use whisper_tensor::scalar_info::ScalarInfoTyped;
-use whisper_tensor::super_graph::SuperGraph;
-use whisper_tensor::super_graph::links::SuperGraphAnyLink;
 use whisper_tensor::symbolic_graph::SymbolicGraph;
 use whisper_tensor::symbolic_graph::tensor_store::TensorStoreTensorId;
 use whisper_tensor::symbolic_graph::{StoredOrNotTensor, TensorType};
@@ -42,13 +40,14 @@ pub(crate) enum ValueSourcePreference {
     Stored, // Prefer stored value
 }
 
-/// Metadata about a link extracted from the graph
+/// Metadata about a link extracted from the graph for UI display.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct LinkMetadata {
+pub(crate) struct LinkMetadataUI {
     pub label: Option<String>,
     pub dtype: Option<String>,
     pub shape: Option<Vec<ScalarInfoTyped<u64>>>,
     pub category: Option<String>,
+    pub properties: Vec<Property>,
 }
 
 /// Response from rendering an interactive link row
@@ -176,46 +175,19 @@ impl AnyInspectWindow {
 // Metadata Extraction Helpers
 // ============================================================================
 
-/// Get link metadata from any graph type
-fn get_link_metadata(graph: &dyn GraphDyn, link_id: GlobalId) -> LinkMetadata {
-    let mut meta = LinkMetadata::default();
+/// Get link metadata from any graph type using the new introspection traits.
+fn get_link_metadata(graph: &dyn GraphDyn, link_id: GlobalId) -> LinkMetadataUI {
+    let mut meta = LinkMetadataUI::default();
 
-    // Get label from the graph trait
-    if let Some(link) = graph.get_link_by_id(&link_id) {
-        meta.label = link.label();
-    }
+    // Use the new metadata trait for generic access
+    if let Some(link_meta) = graph.get_link_metadata_by_id(&link_id) {
+        meta.label = graph.get_link_by_id(&link_id).and_then(|l| l.label());
+        meta.dtype = link_meta.dtype().map(|d| format!("{:?}", d));
+        meta.shape = link_meta.shape();
+        meta.category = link_meta.category().map(|c| c.to_string());
 
-    // For SymbolicGraph, get tensor-specific info
-    if let Some(symbolic_graph) = graph.as_any().downcast_ref::<SymbolicGraph>() {
-        if let Some(tensor_info) = symbolic_graph.get_tensors().get(&link_id) {
-            meta.dtype = tensor_info.dtype().map(|d| format!("{:?}", d));
-            meta.shape = tensor_info.shape();
-            meta.category = Some(
-                match &tensor_info.tensor_type {
-                    TensorType::Input(_) => "Input",
-                    TensorType::Output => "Output",
-                    TensorType::Intermediate => "Intermediate",
-                    TensorType::Constant(_) => "Constant",
-                }
-                .to_string(),
-            );
-        }
-    }
-
-    // For SuperGraph, get link type
-    if let Some(super_graph) = graph.as_any().downcast_ref::<SuperGraph>() {
-        if let Some(link) = super_graph.links_by_global_id.get(&link_id) {
-            meta.category = Some(
-                match link {
-                    SuperGraphAnyLink::Tensor(_) => "Tensor",
-                    SuperGraphAnyLink::String(_) => "String",
-                    SuperGraphAnyLink::TensorMap(_) => "TensorMap",
-                    SuperGraphAnyLink::Tokenizer(_) => "Tokenizer",
-                    SuperGraphAnyLink::Hash(_) => "Hash",
-                }
-                .to_string(),
-            );
-        }
+        // Include additional properties from the link
+        meta.properties = link_meta.properties();
     }
 
     meta
@@ -343,6 +315,80 @@ fn format_bytes(bytes: usize) -> String {
         format!("{:.2} KB", bytes as f64 / 1024.0)
     } else {
         format!("{} B", bytes)
+    }
+}
+
+// ============================================================================
+// UI Styling Helpers
+// ============================================================================
+
+/// Colors for UI elements
+mod colors {
+    use egui::Color32;
+
+    pub const DTYPE_BG: Color32 = Color32::from_rgb(60, 80, 100);
+    pub const CATEGORY_INPUT: Color32 = Color32::from_rgb(70, 100, 70);
+    pub const CATEGORY_OUTPUT: Color32 = Color32::from_rgb(100, 70, 70);
+    pub const CATEGORY_CONST: Color32 = Color32::from_rgb(80, 70, 100);
+    pub const CATEGORY_INTERMEDIATE: Color32 = Color32::from_rgb(70, 70, 80);
+    pub const STAT_LABEL: Color32 = Color32::from_rgb(140, 140, 140);
+    pub const STAT_VALUE: Color32 = Color32::from_rgb(220, 220, 220);
+    pub const WARNING: Color32 = Color32::from_rgb(220, 180, 80);
+    pub const SECTION_BG: Color32 = Color32::from_rgb(35, 38, 42);
+}
+
+/// Format a float with appropriate precision based on magnitude
+fn format_stat_value(v: f64) -> String {
+    if v == 0.0 {
+        "0".to_string()
+    } else if v.abs() >= 1000.0 || v.abs() < 0.001 {
+        format!("{:.3e}", v)
+    } else if v.abs() >= 1.0 {
+        format!("{:.4}", v)
+    } else {
+        format!("{:.6}", v)
+    }
+}
+
+/// Render a styled badge/tag
+fn render_badge(ui: &mut egui::Ui, text: &str, bg_color: Color32) {
+    let padding = Vec2::new(6.0, 2.0);
+    egui::Frame::new()
+        .fill(bg_color)
+        .corner_radius(CornerRadius::same(3))
+        .inner_margin(padding)
+        .show(ui, |ui| {
+            ui.label(RichText::new(text).small().strong().color(Color32::WHITE));
+        });
+}
+
+/// Render a key-value pair with styling
+fn render_kv_row(ui: &mut egui::Ui, label: &str, value: &str, monospace: bool) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(label).color(colors::STAT_LABEL));
+        if monospace {
+            ui.label(RichText::new(value).monospace().color(colors::STAT_VALUE));
+        } else {
+            ui.label(RichText::new(value).strong().color(colors::STAT_VALUE));
+        }
+    });
+}
+
+/// Render a stat card (label on top, large value below)
+fn render_stat_card(ui: &mut egui::Ui, label: &str, value: &str) {
+    ui.vertical(|ui| {
+        ui.label(RichText::new(label).small().color(colors::STAT_LABEL));
+        ui.label(RichText::new(value).monospace().size(14.0).color(colors::STAT_VALUE));
+    });
+}
+
+/// Get background color for a category
+fn category_color(category: &str) -> Color32 {
+    match category {
+        "Input" => colors::CATEGORY_INPUT,
+        "Output" => colors::CATEGORY_OUTPUT,
+        "Constant" => colors::CATEGORY_CONST,
+        _ => colors::CATEGORY_INTERMEDIATE,
     }
 }
 
@@ -573,37 +619,44 @@ impl GraphExplorerApp {
                             .default_open(window.inputs_expanded)
                             .show(ui, |ui| {
                                 if inputs.is_empty() {
-                                    ui.label("None");
+                                    ui.label(RichText::new("None").italics().color(colors::STAT_LABEL));
                                 } else {
-                                    egui::Grid::new(ui.id().with("inputs_grid"))
-                                        .num_columns(5)
-                                        .striped(true)
-                                        .min_col_width(40.0)
+                                    egui::Frame::new()
+                                        .fill(colors::SECTION_BG)
+                                        .corner_radius(CornerRadius::same(4))
+                                        .inner_margin(6.0)
                                         .show(ui, |ui| {
-                                            // Header row
-                                            ui.strong("#");
-                                            ui.strong("Name");
-                                            ui.strong("DType");
-                                            ui.strong("Shape");
-                                            ui.strong("");
-                                            ui.end_row();
+                                            egui::Grid::new(ui.id().with("inputs_grid"))
+                                                .num_columns(5)
+                                                .striped(true)
+                                                .spacing([8.0, 4.0])
+                                                .min_col_width(40.0)
+                                                .show(ui, |ui| {
+                                                    // Header row
+                                                    ui.label(RichText::new("#").small().color(colors::STAT_LABEL));
+                                                    ui.label(RichText::new("Name").small().color(colors::STAT_LABEL));
+                                                    ui.label(RichText::new("DType").small().color(colors::STAT_LABEL));
+                                                    ui.label(RichText::new("Shape").small().color(colors::STAT_LABEL));
+                                                    ui.label("");
+                                                    ui.end_row();
 
-                                            for (i, &input_id) in inputs.iter().enumerate() {
-                                                let interaction =
-                                                    self.render_link_row(ui, i, input_id, graph);
+                                                    for (i, &input_id) in inputs.iter().enumerate() {
+                                                        let interaction =
+                                                            self.render_link_row(ui, i, input_id, graph);
 
-                                                if interaction.hovered {
-                                                    hovered_link = Some(input_id);
-                                                }
-                                                if interaction.clicked {
-                                                    clicked_link = Some(input_id);
-                                                }
-                                                if interaction.open_requested {
-                                                    let mut link_path = parent_path.clone();
-                                                    link_path.push(input_id);
-                                                    new_windows.push(link_path);
-                                                }
-                                            }
+                                                        if interaction.hovered {
+                                                            hovered_link = Some(input_id);
+                                                        }
+                                                        if interaction.clicked {
+                                                            clicked_link = Some(input_id);
+                                                        }
+                                                        if interaction.open_requested {
+                                                            let mut link_path = parent_path.clone();
+                                                            link_path.push(input_id);
+                                                            new_windows.push(link_path);
+                                                        }
+                                                    }
+                                                });
                                         });
                                 }
                             });
@@ -615,40 +668,74 @@ impl GraphExplorerApp {
                             .default_open(window.outputs_expanded)
                             .show(ui, |ui| {
                                 if outputs.is_empty() {
-                                    ui.label("None");
+                                    ui.label(RichText::new("None").italics().color(colors::STAT_LABEL));
                                 } else {
-                                    egui::Grid::new(ui.id().with("outputs_grid"))
-                                        .num_columns(5)
-                                        .striped(true)
-                                        .min_col_width(40.0)
+                                    egui::Frame::new()
+                                        .fill(colors::SECTION_BG)
+                                        .corner_radius(CornerRadius::same(4))
+                                        .inner_margin(6.0)
                                         .show(ui, |ui| {
-                                            // Header row
-                                            ui.strong("#");
-                                            ui.strong("Name");
-                                            ui.strong("DType");
-                                            ui.strong("Shape");
-                                            ui.strong("");
-                                            ui.end_row();
+                                            egui::Grid::new(ui.id().with("outputs_grid"))
+                                                .num_columns(5)
+                                                .striped(true)
+                                                .spacing([8.0, 4.0])
+                                                .min_col_width(40.0)
+                                                .show(ui, |ui| {
+                                                    // Header row
+                                                    ui.label(RichText::new("#").small().color(colors::STAT_LABEL));
+                                                    ui.label(RichText::new("Name").small().color(colors::STAT_LABEL));
+                                                    ui.label(RichText::new("DType").small().color(colors::STAT_LABEL));
+                                                    ui.label(RichText::new("Shape").small().color(colors::STAT_LABEL));
+                                                    ui.label("");
+                                                    ui.end_row();
 
-                                            for (i, &output_id) in outputs.iter().enumerate() {
-                                                let interaction =
-                                                    self.render_link_row(ui, i, output_id, graph);
+                                                    for (i, &output_id) in outputs.iter().enumerate() {
+                                                        let interaction =
+                                                            self.render_link_row(ui, i, output_id, graph);
 
-                                                if interaction.hovered {
-                                                    hovered_link = Some(output_id);
-                                                }
-                                                if interaction.clicked {
-                                                    clicked_link = Some(output_id);
-                                                }
-                                                if interaction.open_requested {
-                                                    let mut link_path = parent_path.clone();
-                                                    link_path.push(output_id);
-                                                    new_windows.push(link_path);
-                                                }
-                                            }
+                                                        if interaction.hovered {
+                                                            hovered_link = Some(output_id);
+                                                        }
+                                                        if interaction.clicked {
+                                                            clicked_link = Some(output_id);
+                                                        }
+                                                        if interaction.open_requested {
+                                                            let mut link_path = parent_path.clone();
+                                                            link_path.push(output_id);
+                                                            new_windows.push(link_path);
+                                                        }
+                                                    }
+                                                });
                                         });
                                 }
                             });
+
+                        // Parameters section (using new metadata trait)
+                        if let Some(node_meta) = graph.get_node_metadata_by_id(&node_id) {
+                            let params = node_meta.parameters();
+                            if !params.is_empty() {
+                                egui::CollapsingHeader::new(format!("Parameters ({})", params.len()))
+                                    .default_open(window.show_op_params)
+                                    .show(ui, |ui| {
+                                        egui::Frame::new()
+                                            .fill(colors::SECTION_BG)
+                                            .corner_radius(CornerRadius::same(4))
+                                            .inner_margin(8.0)
+                                            .show(ui, |ui| {
+                                                egui::Grid::new(ui.id().with("params_grid"))
+                                                    .num_columns(2)
+                                                    .spacing([12.0, 4.0])
+                                                    .show(ui, |ui| {
+                                                        for param in params {
+                                                            ui.label(RichText::new(&*param.name).color(colors::STAT_LABEL));
+                                                            ui.label(RichText::new(format!("{}", param.value)).monospace().color(colors::STAT_VALUE));
+                                                            ui.end_row();
+                                                        }
+                                                    });
+                                            });
+                                    });
+                            }
+                        }
 
                         // Subgraph navigation
                         if self.node_has_subgraph(graph, node_id, loaded_models) {
@@ -663,17 +750,17 @@ impl GraphExplorerApp {
 
                         // Debug info (collapsed by default)
                         ui.add_space(8.0);
-                        egui::CollapsingHeader::new("Debug Info")
+                        egui::CollapsingHeader::new(RichText::new("Debug Info").small().color(colors::STAT_LABEL))
                             .default_open(window.show_debug_info)
                             .show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    ui.label("GlobalId:");
-                                    ui.monospace(format!("{}", node_id));
-                                });
-                                ui.horizontal(|ui| {
-                                    ui.label("Path:");
-                                    ui.monospace(format!("{:?}", window.path));
-                                });
+                                egui::Frame::new()
+                                    .fill(colors::SECTION_BG)
+                                    .corner_radius(CornerRadius::same(4))
+                                    .inner_margin(6.0)
+                                    .show(ui, |ui| {
+                                        render_kv_row(ui, "GlobalId:", &format!("{}", node_id), true);
+                                        render_kv_row(ui, "Path:", &format!("{:?}", window.path), true);
+                                    });
                             });
                     } else {
                         ui.colored_label(Color32::RED, "Node not found in graph");
@@ -694,12 +781,12 @@ impl GraphExplorerApp {
         (is_open, new_windows)
     }
 
-    /// Render an interactive node row in the connectivity section
-    fn render_node_row(
+    /// Render a styled node row for connectivity display
+    fn render_node_row_styled(
         &self,
         ui: &mut egui::Ui,
         node_id: GlobalId,
-        port_info: &str,
+        input_idx: Option<usize>,
         graph: &dyn GraphDyn,
     ) -> NodeRowInteraction {
         let mut interaction = NodeRowInteraction::default();
@@ -708,27 +795,43 @@ impl GraphExplorerApp {
             let op = node.op_kind();
             let label = node.label();
 
-            let text = if let Some(label) = label {
-                format!("{}: {}  {}  ", op, label, port_info)
-            } else {
-                format!("{}  {}  ", op, port_info)
-            };
+            let resp = egui::Frame::new()
+                .fill(Color32::from_rgb(45, 48, 55))
+                .stroke(Stroke::new(1.0, Color32::from_rgb(60, 65, 75)))
+                .corner_radius(CornerRadius::same(3))
+                .inner_margin(Vec2::new(8.0, 4.0))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        // Op type badge
+                        ui.label(RichText::new(&op).strong().color(Color32::from_rgb(130, 180, 220)));
 
-            ui.horizontal(|ui| {
-                let resp = ui.label(text);
-                if resp.hovered() {
-                    interaction.hovered = true;
-                }
-                if resp.clicked() {
-                    interaction.clicked = true;
-                }
+                        // Label if present
+                        if let Some(label) = label {
+                            ui.label(RichText::new(label).color(colors::STAT_VALUE));
+                        }
 
-                if ui.small_button("Open").clicked() {
-                    interaction.open_requested = true;
-                }
-            });
+                        // Input index if present
+                        if let Some(idx) = input_idx {
+                            ui.label(RichText::new(format!("[{}]", idx)).small().color(colors::STAT_LABEL));
+                        }
+
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("→").on_hover_text("Open").clicked() {
+                                interaction.open_requested = true;
+                            }
+                        });
+                    });
+                })
+                .response;
+
+            if resp.hovered() {
+                interaction.hovered = true;
+            }
+            if resp.clicked() {
+                interaction.clicked = true;
+            }
         } else {
-            ui.label(format!("Unknown node {}", port_info));
+            ui.label(RichText::new("Unknown node").italics().color(colors::STAT_LABEL));
         }
 
         interaction
@@ -789,58 +892,55 @@ impl GraphExplorerApp {
                     );
                     ui.label(egui::RichText::new(breadcrumb).weak().italics());
 
-                    // Category
-                    if let Some(category) = &meta.category {
-                        ui.label(format!("{} tensor", category));
+                    // Header row with badges
+                    ui.horizontal(|ui| {
+                        if let Some(dtype) = &meta.dtype {
+                            render_badge(ui, dtype, colors::DTYPE_BG);
+                        }
+                        if let Some(category) = &meta.category {
+                            render_badge(ui, category, category_color(category));
+                        }
+                        if let Some(shape) = &meta.shape {
+                            if let Some(bytes) = calculate_memory_size(shape, meta.dtype.as_deref()) {
+                                render_badge(ui, &format_bytes(bytes), Color32::from_rgb(60, 60, 70));
+                            }
+                        }
+                    });
+
+                    ui.add_space(6.0);
+
+                    // Shape display - more prominent
+                    if let Some(shape) = &meta.shape {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Shape:").color(colors::STAT_LABEL));
+                            ui.label(RichText::new(format_shape(shape)).monospace().strong().size(15.0));
+                        });
+
+                        // Calculate total elements
+                        let total: Option<u64> = shape
+                            .iter()
+                            .map(|s| match s {
+                                ScalarInfoTyped::Numeric(n) => Some(*n),
+                                ScalarInfoTyped::Symbolic(_) => None,
+                            })
+                            .collect::<Option<Vec<_>>>()
+                            .map(|v| v.iter().product());
+
+                        if let Some(total) = total {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("Elements:").color(colors::STAT_LABEL));
+                                ui.label(RichText::new(format!("{}", total)).monospace());
+                            });
+                        }
                     }
 
-                    ui.add_space(4.0);
-
-                    // Type info section
-                    egui::CollapsingHeader::new("Type Info")
-                        .default_open(true)
-                        .show(ui, |ui| {
-                            egui::Grid::new(ui.id().with("type_info"))
-                                .num_columns(2)
-                                .show(ui, |ui| {
-                                    if let Some(dtype) = &meta.dtype {
-                                        ui.label("DType:");
-                                        ui.strong(dtype);
-                                        ui.end_row();
-                                    }
-
-                                    if let Some(shape) = &meta.shape {
-                                        ui.label("Shape:");
-                                        ui.strong(format_shape(shape));
-                                        ui.end_row();
-
-                                        // Calculate total elements
-                                        let total: Option<u64> = shape
-                                            .iter()
-                                            .map(|s| match s {
-                                                ScalarInfoTyped::Numeric(n) => Some(*n),
-                                                ScalarInfoTyped::Symbolic(_) => None,
-                                            })
-                                            .collect::<Option<Vec<_>>>()
-                                            .map(|v| v.iter().product());
-
-                                        if let Some(total) = total {
-                                            ui.label("Elements:");
-                                            ui.label(format!("{}", total));
-                                            ui.end_row();
-                                        }
-
-                                        // Memory size
-                                        if let Some(bytes) =
-                                            calculate_memory_size(shape, meta.dtype.as_deref())
-                                        {
-                                            ui.label("Memory:");
-                                            ui.label(format_bytes(bytes));
-                                            ui.end_row();
-                                        }
-                                    }
-                                });
-                        });
+                    // Additional properties (if any)
+                    if !meta.properties.is_empty() {
+                        ui.add_space(4.0);
+                        for prop in &meta.properties {
+                            render_kv_row(ui, &format!("{}:", prop.name), &format!("{}", prop.value), true);
+                        }
+                    }
 
                     // Connectivity section
                     egui::CollapsingHeader::new("Connectivity")
@@ -868,55 +968,64 @@ impl GraphExplorerApp {
                                 }
                             }
 
-                            ui.label("Source:");
-                            if let Some(src_id) = source_node {
-                                ui.indent("source", |ui| {
-                                    let interaction =
-                                        self.render_node_row(ui, src_id, "[output]", graph);
-                                    if interaction.hovered {
-                                        hovered_node = Some(src_id);
-                                    }
-                                    if interaction.clicked {
-                                        clicked_node = Some(src_id);
-                                    }
-                                    if interaction.open_requested {
-                                        let mut node_path = parent_path.clone();
-                                        node_path.push(src_id);
-                                        new_windows.push(node_path);
-                                    }
-                                });
-                            } else {
-                                ui.indent("source", |ui| {
-                                    ui.label("(Graph input)");
-                                });
-                            }
-
-                            ui.add_space(4.0);
-                            ui.label(format!("Destinations ({}):", dest_nodes.len()));
-                            if dest_nodes.is_empty() {
-                                ui.indent("dests", |ui| {
-                                    ui.label("(Graph output or unused)");
-                                });
-                            } else {
-                                ui.indent("dests", |ui| {
-                                    for (dest_id, input_idx) in &dest_nodes {
-                                        let port_info = format!("[input {}]", input_idx);
+                            egui::Frame::new()
+                                .fill(colors::SECTION_BG)
+                                .corner_radius(CornerRadius::same(4))
+                                .inner_margin(8.0)
+                                .show(ui, |ui| {
+                                    // Source
+                                    ui.horizontal(|ui| {
+                                        ui.label(RichText::new("From").color(colors::STAT_LABEL).small());
+                                        ui.label(RichText::new("→").color(Color32::from_rgb(100, 180, 100)));
+                                    });
+                                    if let Some(src_id) = source_node {
                                         let interaction =
-                                            self.render_node_row(ui, *dest_id, &port_info, graph);
+                                            self.render_node_row_styled(ui, src_id, None, graph);
                                         if interaction.hovered {
-                                            hovered_node = Some(*dest_id);
+                                            hovered_node = Some(src_id);
                                         }
                                         if interaction.clicked {
-                                            clicked_node = Some(*dest_id);
+                                            clicked_node = Some(src_id);
                                         }
                                         if interaction.open_requested {
                                             let mut node_path = parent_path.clone();
-                                            node_path.push(*dest_id);
+                                            node_path.push(src_id);
                                             new_windows.push(node_path);
+                                        }
+                                    } else {
+                                        ui.label(RichText::new("Graph Input").italics().color(colors::STAT_LABEL));
+                                    }
+
+                                    ui.add_space(8.0);
+
+                                    // Destinations
+                                    ui.horizontal(|ui| {
+                                        ui.label(RichText::new("To").color(colors::STAT_LABEL).small());
+                                        ui.label(RichText::new("→").color(Color32::from_rgb(180, 100, 100)));
+                                        if dest_nodes.len() > 1 {
+                                            ui.label(RichText::new(format!("({})", dest_nodes.len())).small().color(colors::STAT_LABEL));
+                                        }
+                                    });
+                                    if dest_nodes.is_empty() {
+                                        ui.label(RichText::new("Graph Output").italics().color(colors::STAT_LABEL));
+                                    } else {
+                                        for (dest_id, input_idx) in &dest_nodes {
+                                            let interaction =
+                                                self.render_node_row_styled(ui, *dest_id, Some(*input_idx), graph);
+                                            if interaction.hovered {
+                                                hovered_node = Some(*dest_id);
+                                            }
+                                            if interaction.clicked {
+                                                clicked_node = Some(*dest_id);
+                                            }
+                                            if interaction.open_requested {
+                                                let mut node_path = parent_path.clone();
+                                                node_path.push(*dest_id);
+                                                new_windows.push(node_path);
+                                            }
                                         }
                                     }
                                 });
-                            }
                         });
 
                     ui.add_space(4.0);
@@ -981,27 +1090,41 @@ impl GraphExplorerApp {
                             egui::CollapsingHeader::new("Statistics")
                                 .default_open(true)
                                 .show(ui, |ui| {
-                                    egui::Grid::new(ui.id().with("stats"))
-                                        .num_columns(4)
+                                    // Stats in a framed box
+                                    egui::Frame::new()
+                                        .fill(colors::SECTION_BG)
+                                        .corner_radius(CornerRadius::same(4))
+                                        .inner_margin(8.0)
                                         .show(ui, |ui| {
-                                            ui.label("Min:");
-                                            ui.monospace(format!("{:.4}", stats.min));
-                                            ui.label("Max:");
-                                            ui.monospace(format!("{:.4}", stats.max));
-                                            ui.end_row();
+                                            // First row: Min/Max with visual range indicator
+                                            ui.horizontal(|ui| {
+                                                ui.spacing_mut().item_spacing.x = 16.0;
+                                                render_stat_card(ui, "Min", &format_stat_value(stats.min));
+                                                render_stat_card(ui, "Max", &format_stat_value(stats.max));
+                                                render_stat_card(ui, "Mean", &format_stat_value(stats.mean));
+                                                render_stat_card(ui, "Std", &format_stat_value(stats.std));
+                                            });
 
-                                            ui.label("Mean:");
-                                            ui.monospace(format!("{:.4}", stats.mean));
-                                            ui.label("Std:");
-                                            ui.monospace(format!("{:.4}", stats.std));
-                                            ui.end_row();
-
-                                            if stats.nan_count > 0 || stats.inf_count > 0 {
-                                                ui.label("NaN:");
-                                                ui.monospace(format!("{}", stats.nan_count));
-                                                ui.label("Inf:");
-                                                ui.monospace(format!("{}", stats.inf_count));
-                                                ui.end_row();
+                                            // Warning indicators for NaN/Inf
+                                            if stats.nan_count > 0 || stats.inf_count > 0 || stats.zero_count > 0 {
+                                                ui.add_space(6.0);
+                                                ui.horizontal(|ui| {
+                                                    if stats.nan_count > 0 {
+                                                        ui.label(RichText::new(format!("{} NaN", stats.nan_count))
+                                                            .color(colors::WARNING)
+                                                            .small());
+                                                    }
+                                                    if stats.inf_count > 0 {
+                                                        ui.label(RichText::new(format!("{} Inf", stats.inf_count))
+                                                            .color(colors::WARNING)
+                                                            .small());
+                                                    }
+                                                    if stats.zero_count > 0 {
+                                                        ui.label(RichText::new(format!("{} zeros", stats.zero_count))
+                                                            .color(colors::STAT_LABEL)
+                                                            .small());
+                                                    }
+                                                });
                                             }
                                         });
                                 });
@@ -1037,17 +1160,17 @@ impl GraphExplorerApp {
 
                     // Debug info (collapsed by default)
                     ui.add_space(8.0);
-                    egui::CollapsingHeader::new("Debug Info")
+                    egui::CollapsingHeader::new(RichText::new("Debug Info").small().color(colors::STAT_LABEL))
                         .default_open(window.show_debug_info)
                         .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.label("GlobalId:");
-                                ui.monospace(format!("{}", link_id));
-                            });
-                            ui.horizontal(|ui| {
-                                ui.label("Path:");
-                                ui.monospace(format!("{:?}", window.path));
-                            });
+                            egui::Frame::new()
+                                .fill(colors::SECTION_BG)
+                                .corner_radius(CornerRadius::same(4))
+                                .inner_margin(6.0)
+                                .show(ui, |ui| {
+                                    render_kv_row(ui, "GlobalId:", &format!("{}", link_id), true);
+                                    render_kv_row(ui, "Path:", &format!("{:?}", window.path), true);
+                                });
                         });
                 } else {
                     ui.colored_label(Color32::RED, "Could not resolve path");

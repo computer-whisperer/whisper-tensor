@@ -54,7 +54,7 @@ pub use where_op::*;
 
 use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
-use crate::graph::{GlobalId, Node};
+use crate::graph::{GlobalId, Node, NodeMetadata};
 use crate::milli_graph::{MilliOpGraphError};
 use crate::numeric_tensor::NumericTensor;
 use crate::scalar_info::ScalarInfoTyped;
@@ -316,4 +316,9 @@ impl Node for AnyMilliOp {
     delegate!(inputs() ->  Box<dyn Iterator<Item = GlobalId> + '_>);
     delegate!(outputs() -> Box<dyn Iterator<Item = GlobalId> + '_>);
     delegate!(global_id() -> GlobalId);
+}
+
+impl NodeMetadata for AnyMilliOp {
+    // MilliOp nodes currently don't expose parameters via introspection
+    // This can be expanded later by adding parameters() to MilliOp trait
 }

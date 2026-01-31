@@ -1,5 +1,5 @@
 use crate::dtype::DType;
-use crate::graph::{GlobalId, Node};
+use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::MilliOpGraph;
 use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{ONNXDecodingError, query_attribute_int};
@@ -81,6 +81,10 @@ impl Node for UnaryOperation {
     }
 }
 impl Operation for UnaryOperation {
+    fn parameters(&self) -> Vec<Property> {
+        vec![Property::new("operation", PropertyValue::String(self.which.to_string()))]
+    }
+
     fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let a = input_map[&self.input];
@@ -187,6 +191,14 @@ impl Node for SoftmaxOperation {
     }
 }
 impl Operation for SoftmaxOperation {
+    fn parameters(&self) -> Vec<Property> {
+        let mut params = Vec::new();
+        if let Some(axis) = self.axis {
+            params.push(Property::new("axis", PropertyValue::Int(axis)));
+        }
+        params
+    }
+
     fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
 
@@ -249,6 +261,14 @@ impl Node for LogSoftmaxOperation {
 }
 
 impl Operation for LogSoftmaxOperation {
+    fn parameters(&self) -> Vec<Property> {
+        let mut params = Vec::new();
+        if let Some(axis) = self.axis {
+            params.push(Property::new("axis", PropertyValue::Int(axis)));
+        }
+        params
+    }
+
     fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
 
@@ -317,6 +337,17 @@ impl Node for IsInfOperation {
     }
 }
 impl Operation for IsInfOperation {
+    fn parameters(&self) -> Vec<Property> {
+        let mut params = Vec::new();
+        if let Some(detect_negative) = self.detect_negative {
+            params.push(Property::new("detect_negative", PropertyValue::Bool(detect_negative)));
+        }
+        if let Some(detect_positive) = self.detect_positive {
+            params.push(Property::new("detect_positive", PropertyValue::Bool(detect_positive)));
+        }
+        params
+    }
+
     fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let input = input_map[&self.input];

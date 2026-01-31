@@ -1,6 +1,6 @@
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use crate::graph::GlobalId;
+use crate::graph::{GlobalId, LinkMetadata, Property, PropertyValue};
 
 pub trait SuperGraphLink {
     fn to_any(&self) -> SuperGraphAnyLink;
@@ -196,5 +196,18 @@ impl SuperGraphLinkTriple {
             SuperGraphLinkTriple::Tokenizer(_, _, t3) => SuperGraphAnyLink::Tokenizer(*t3),
             SuperGraphLinkTriple::Hash(_, _, h3) => SuperGraphAnyLink::Hash(*h3),
         }
+    }
+}
+
+impl LinkMetadata for SuperGraphAnyLink {
+    fn properties(&self) -> Vec<Property> {
+        let link_type = match self {
+            SuperGraphAnyLink::Tensor(_) => "Tensor",
+            SuperGraphAnyLink::String(_) => "String",
+            SuperGraphAnyLink::TensorMap(_) => "TensorMap",
+            SuperGraphAnyLink::Tokenizer(_) => "Tokenizer",
+            SuperGraphAnyLink::Hash(_) => "Hash",
+        };
+        vec![Property::new("link_type", PropertyValue::String(link_type.to_string()))]
     }
 }

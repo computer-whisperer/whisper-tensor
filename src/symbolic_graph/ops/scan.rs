@@ -1,5 +1,5 @@
 use crate::backends::eval_backend::EvalBackend;
-use crate::graph::{GlobalId, Node};
+use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::MilliOpGraph;
 use crate::numeric_tensor::NumericTensor;
 use crate::symbolic_graph::ops::{EvalError, Operation};
@@ -103,6 +103,29 @@ impl Node for ScanOperation {
 }
 
 impl Operation for ScanOperation {
+    fn parameters(&self) -> Vec<Property> {
+        let mut params = Vec::new();
+        params.push(Property::new("num_scan_inputs", PropertyValue::Int(self.scan_inputs.len() as i64)));
+        params.push(Property::new("num_state_inputs", PropertyValue::Int(self.state_inputs.len() as i64)));
+        if let Some(axes) = &self.scan_input_axes {
+            params.push(Property::new("scan_input_axes", PropertyValue::IntList(axes.clone())));
+        }
+        if let Some(dirs) = &self.scan_input_directions {
+            params.push(Property::new("scan_input_directions", PropertyValue::IntList(dirs.clone())));
+        }
+        if let Some(axes) = &self.scan_output_axes {
+            params.push(Property::new("scan_output_axes", PropertyValue::IntList(axes.clone())));
+        }
+        if let Some(dirs) = &self.scan_output_directions {
+            params.push(Property::new("scan_output_directions", PropertyValue::IntList(dirs.clone())));
+        }
+        params
+    }
+
+    fn get_sub_graphs(&self) -> Vec<&SymbolicGraph> {
+        vec![&self.body]
+    }
+
     fn eval(
         &self,
         backend: &mut EvalBackend,

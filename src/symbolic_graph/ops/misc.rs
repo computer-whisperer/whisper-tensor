@@ -1,6 +1,6 @@
 use crate::backends::eval_backend::EvalBackend;
 use crate::dtype::DType;
-use crate::graph::{GlobalId, Node};
+use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::ops::*;
 use crate::numeric_tensor::NumericTensor;
@@ -163,6 +163,14 @@ impl Node for IfOperation {
 }
 
 impl Operation for IfOperation {
+    fn parameters(&self) -> Vec<Property> {
+        vec![Property::new("num_outputs", PropertyValue::Int(self.outputs.len() as i64))]
+    }
+
+    fn get_sub_graphs(&self) -> Vec<&SymbolicGraph> {
+        vec![&self.then_branch, &self.else_branch]
+    }
+
     fn eval(
         &self,
         backend: &mut EvalBackend,
@@ -282,6 +290,16 @@ impl Node for PadOperation {
 }
 
 impl Operation for PadOperation {
+    fn parameters(&self) -> Vec<Property> {
+        let mode_str = match &self.mode {
+            PadMode::Constant => "constant",
+            PadMode::Reflect => "reflect",
+            PadMode::Edge => "edge",
+            PadMode::Wrap => "wrap",
+        };
+        vec![Property::new("mode", PropertyValue::String(mode_str.to_string()))]
+    }
+
     fn get_milli_op_graph(&self, _rng: &mut impl Rng) -> MilliOpGraph {
         todo!()
     }
@@ -358,6 +376,19 @@ impl Node for RandomNormalLikeOperation {
 }
 
 impl Operation for RandomNormalLikeOperation {
+    fn parameters(&self) -> Vec<Property> {
+        let mut params = Vec::new();
+        if let Some(dtype) = self.dtype {
+            params.push(Property::new("dtype", PropertyValue::DType(dtype)));
+        }
+        params.push(Property::new("mean", PropertyValue::Float(self.mean as f64)));
+        params.push(Property::new("scale", PropertyValue::Float(self.scale as f64)));
+        if let Some(seed) = self.seed {
+            params.push(Property::new("seed", PropertyValue::Float(seed as f64)));
+        }
+        params
+    }
+
     fn get_milli_op_graph(&self, _rng: &mut impl Rng) -> MilliOpGraph {
         todo!()
     }
