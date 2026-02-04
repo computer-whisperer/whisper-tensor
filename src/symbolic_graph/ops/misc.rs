@@ -1,31 +1,31 @@
 use crate::backends::eval_backend::EvalBackend;
 use crate::dtype::DType;
-use crate::graph::Node;
+use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::ops::*;
 use crate::numeric_tensor::NumericTensor;
 use crate::symbolic_graph::ops::{EvalError, Operation};
-use crate::symbolic_graph::{
-    ONNXDecodingError, SymbolicGraphInner, SymbolicGraphMutator, SymbolicGraphTensorId,
-    query_attribute_float, query_attribute_graph, query_attribute_string,
-};
+use crate::symbolic_graph::{ONNXDecodingError, SymbolicGraphMutator, query_attribute_float, query_attribute_graph, query_attribute_string, SymbolicGraph};
 use crate::{DynRank, onnx};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use rand::Rng;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WhereOperation {
-    condition: SymbolicGraphTensorId,
-    x: SymbolicGraphTensorId,
-    y: SymbolicGraphTensorId,
-    output: SymbolicGraphTensorId,
+    global_id: GlobalId,
+    condition: GlobalId,
+    x: GlobalId,
+    y: GlobalId,
+    output: GlobalId,
 }
 
 impl WhereOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<SymbolicGraphTensorId>],
-        outputs: &[Option<SymbolicGraphTensorId>],
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
         _attributes: &[onnx::AttributeProto],
+        rng: &mut impl Rng,
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 3 {
             return Err(ONNXDecodingError::InvalidOperatorInputs("Where"));
@@ -35,6 +35,7 @@ impl WhereOperation {
         }
 
         Ok(Self {
+            global_id: GlobalId::new(rng),
             condition: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Where"))?,
             x: inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs("Where"))?,
             y: inputs[2].ok_or(ONNXDecodingError::InvalidOperatorInputs("Where"))?,
@@ -43,27 +44,31 @@ impl WhereOperation {
     }
 }
 
-impl Node<SymbolicGraphTensorId> for WhereOperation {
+impl Node for WhereOperation {
     type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
     fn op_kind(&self) -> Self::OpKind {
         "Where".to_string()
     }
-    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new([self.condition, self.x, self.y].into_iter())
     }
-    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(std::iter::once(self.output))
     }
 }
 
 impl Operation for WhereOperation {
-    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        let (mut graph, input_map) = MilliOpGraph::new(self.inputs());
+    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let out = Where::push_new(
             &mut graph,
             input_map[&self.condition],
             input_map[&self.x],
             input_map[&self.y],
+            rng
         );
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
@@ -74,19 +79,21 @@ impl Operation for WhereOperation {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct IfOperation {
-    outputs: Vec<SymbolicGraphTensorId>,
-    condition: SymbolicGraphTensorId,
-    then_branch: SymbolicGraphInner,
-    else_branch: SymbolicGraphInner,
+    global_id: GlobalId,
+    outputs: Vec<GlobalId>,
+    condition: GlobalId,
+    then_branch: SymbolicGraph,
+    else_branch: SymbolicGraph,
 }
 
 impl IfOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<SymbolicGraphTensorId>],
-        outputs: &[Option<SymbolicGraphTensorId>],
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
         attributes: &[onnx::AttributeProto],
         symbolic_graph_mutator: &mut SymbolicGraphMutator,
         core_opset_version: usize,
+        rng: &mut impl Rng,
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 1 {
             return Err(ONNXDecodingError::InvalidOperatorInputs("If"));
@@ -98,27 +105,30 @@ impl IfOperation {
         let then_branch_graph = query_attribute_graph(attributes, "then_branch")
             .ok_or(ONNXDecodingError::MissingField("then_branch"))?;
         let then_branch_graph = {
-            let mut inner_graph = SymbolicGraphInner::new();
+            let mut inner_graph = SymbolicGraph::new(rng);
             inner_graph.populate(
                 symbolic_graph_mutator,
                 then_branch_graph,
                 core_opset_version,
+                rng
             )?;
             inner_graph
         };
         let else_branch_graph = query_attribute_graph(attributes, "else_branch")
             .ok_or(ONNXDecodingError::MissingField("else_branch"))?;
         let else_branch_graph = {
-            let mut inner_graph = SymbolicGraphInner::new();
+            let mut inner_graph = SymbolicGraph::new(rng);
             inner_graph.populate(
                 symbolic_graph_mutator,
                 else_branch_graph,
                 core_opset_version,
+                rng
             )?;
             inner_graph
         };
 
         Ok(Self {
+            global_id: GlobalId::new(rng),
             condition: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("If"))?,
             outputs: outputs
                 .iter()
@@ -130,12 +140,15 @@ impl IfOperation {
     }
 }
 
-impl Node<SymbolicGraphTensorId> for IfOperation {
+impl Node for IfOperation {
     type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
     fn op_kind(&self) -> Self::OpKind {
         "If".to_string()
     }
-    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         let mut inputs_set = HashSet::new();
         inputs_set.insert(self.condition);
         inputs_set.extend(self.then_branch.get_foreign_tensor_ids());
@@ -144,17 +157,25 @@ impl Node<SymbolicGraphTensorId> for IfOperation {
         inputs_vec.sort(); // Deterministic ordering
         Box::new(inputs_vec.into_iter())
     }
-    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(self.outputs.clone().into_iter())
     }
 }
 
 impl Operation for IfOperation {
+    fn parameters(&self) -> Vec<Property> {
+        vec![Property::new("num_outputs", PropertyValue::Int(self.outputs.len() as i64))]
+    }
+
+    fn get_sub_graphs(&self) -> Vec<&SymbolicGraph> {
+        vec![&self.then_branch, &self.else_branch]
+    }
+
     fn eval(
         &self,
         backend: &mut EvalBackend,
-        inputs: &HashMap<SymbolicGraphTensorId, NumericTensor<DynRank>>,
-    ) -> Result<Box<dyn Iterator<Item = (SymbolicGraphTensorId, NumericTensor<DynRank>)>>, EvalError>
+        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
+    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, EvalError>
     {
         let condition = inputs.get(&self.condition).unwrap();
         let condition: bool = condition.first_element().into();
@@ -174,7 +195,7 @@ impl Operation for IfOperation {
         Ok(Box::new(outputs.into_iter()))
     }
 
-    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
+    fn get_milli_op_graph(&self, _rng: &mut impl Rng) -> MilliOpGraph {
         todo!()
     }
 }
@@ -189,19 +210,21 @@ pub(crate) enum PadMode {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PadOperation {
-    input: SymbolicGraphTensorId,
-    pads: SymbolicGraphTensorId,
-    constant_value: Option<SymbolicGraphTensorId>,
-    axes: Option<SymbolicGraphTensorId>,
+    global_id: GlobalId,
+    input: GlobalId,
+    pads: GlobalId,
+    constant_value: Option<GlobalId>,
+    axes: Option<GlobalId>,
     mode: PadMode,
-    output: SymbolicGraphTensorId,
+    output: GlobalId,
 }
 
 impl PadOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<SymbolicGraphTensorId>],
-        outputs: &[Option<SymbolicGraphTensorId>],
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
         attributes: &[onnx::AttributeProto],
+        rng: &mut impl Rng,
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() < 2 || inputs.len() > 4 {
             return Err(ONNXDecodingError::InvalidOperatorInputs("Pad"));
@@ -234,18 +257,23 @@ impl PadOperation {
             },
             mode: pad_mode,
             output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Pad"))?,
+            global_id: GlobalId::new(rng),
         })
     }
 }
 
-impl Node<SymbolicGraphTensorId> for PadOperation {
+impl Node for PadOperation {
     type OpKind = String;
+
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
 
     fn op_kind(&self) -> Self::OpKind {
         "Pad".to_string()
     }
 
-    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         let mut ret = vec![self.input, self.pads];
         if let Some(constant_value) = self.constant_value {
             ret.push(constant_value);
@@ -256,21 +284,32 @@ impl Node<SymbolicGraphTensorId> for PadOperation {
         Box::new(ret.into_iter())
     }
 
-    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(std::iter::once(self.output))
     }
 }
 
 impl Operation for PadOperation {
-    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
+    fn parameters(&self) -> Vec<Property> {
+        let mode_str = match &self.mode {
+            PadMode::Constant => "constant",
+            PadMode::Reflect => "reflect",
+            PadMode::Edge => "edge",
+            PadMode::Wrap => "wrap",
+        };
+        vec![Property::new("mode", PropertyValue::String(mode_str.to_string()))]
+    }
+
+    fn get_milli_op_graph(&self, _rng: &mut impl Rng) -> MilliOpGraph {
         todo!()
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RandomNormalLikeOperation {
-    input: SymbolicGraphTensorId,
-    output: SymbolicGraphTensorId,
+    global_id: GlobalId,
+    input: GlobalId,
+    output: GlobalId,
     dtype: Option<DType>,
     mean: f32,
     scale: f32,
@@ -279,9 +318,10 @@ pub struct RandomNormalLikeOperation {
 
 impl RandomNormalLikeOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<SymbolicGraphTensorId>],
-        outputs: &[Option<SymbolicGraphTensorId>],
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
         attributes: &[onnx::AttributeProto],
+        rng: &mut impl Rng,
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 1 {
             return Err(ONNXDecodingError::InvalidOperatorInputs("RandomNormalLike"));
@@ -306,6 +346,7 @@ impl RandomNormalLikeOperation {
         let seed = query_attribute_float(attributes, "seed");
 
         Ok(Self {
+            global_id: GlobalId::new(rng),
             input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("RandomNormalLike"))?,
             output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs(
                 "RandomNormalLike",
@@ -318,37 +359,55 @@ impl RandomNormalLikeOperation {
     }
 }
 
-impl Node<SymbolicGraphTensorId> for RandomNormalLikeOperation {
+impl Node for RandomNormalLikeOperation {
     type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
     fn op_kind(&self) -> Self::OpKind {
         "RandomNormalLike".to_string()
     }
-    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(std::iter::once(self.input))
     }
-    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(std::iter::once(self.output))
     }
 }
 
 impl Operation for RandomNormalLikeOperation {
-    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
+    fn parameters(&self) -> Vec<Property> {
+        let mut params = Vec::new();
+        if let Some(dtype) = self.dtype {
+            params.push(Property::new("dtype", PropertyValue::DType(dtype)));
+        }
+        params.push(Property::new("mean", PropertyValue::Float(self.mean as f64)));
+        params.push(Property::new("scale", PropertyValue::Float(self.scale as f64)));
+        if let Some(seed) = self.seed {
+            params.push(Property::new("seed", PropertyValue::Float(seed as f64)));
+        }
+        params
+    }
+
+    fn get_milli_op_graph(&self, _rng: &mut impl Rng) -> MilliOpGraph {
         todo!()
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ExpandOperation {
-    input: SymbolicGraphTensorId,
-    shape: SymbolicGraphTensorId,
-    output: SymbolicGraphTensorId,
+    global_id: GlobalId,
+    input: GlobalId,
+    shape: GlobalId,
+    output: GlobalId,
 }
 
 impl ExpandOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<SymbolicGraphTensorId>],
-        outputs: &[Option<SymbolicGraphTensorId>],
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
         _attributes: &[onnx::AttributeProto],
+        rng: &mut impl Rng,
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 2 {
             return Err(ONNXDecodingError::InvalidOperatorInputs("Expand"));
@@ -358,6 +417,7 @@ impl ExpandOperation {
         }
 
         Ok(Self {
+            global_id: GlobalId::new(rng),
             input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Expand"))?,
             shape: inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs("Expand"))?,
             output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Expand"))?,
@@ -365,24 +425,27 @@ impl ExpandOperation {
     }
 }
 
-impl Node<SymbolicGraphTensorId> for ExpandOperation {
+impl Node for ExpandOperation {
     type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
     fn op_kind(&self) -> Self::OpKind {
         "Expand".to_string()
     }
-    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(std::iter::once(self.input).chain(std::iter::once(self.shape)))
     }
-    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(std::iter::once(self.output))
     }
 }
 
 impl Operation for ExpandOperation {
-    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        let (mut graph, input_map) = MilliOpGraph::new(self.inputs());
+    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
 
-        let x = Expand::push_new(&mut graph, input_map[&self.input], input_map[&self.shape]);
+        let x = Expand::push_new(&mut graph, input_map[&self.input], input_map[&self.shape], rng);
 
         let mut output_map = HashMap::new();
         output_map.insert(x, self.output);
@@ -393,17 +456,19 @@ impl Operation for ExpandOperation {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ClipOperation {
-    input: SymbolicGraphTensorId,
-    min: Option<SymbolicGraphTensorId>,
-    max: Option<SymbolicGraphTensorId>,
-    output: SymbolicGraphTensorId,
+    global_id: GlobalId,
+    input: GlobalId,
+    min: Option<GlobalId>,
+    max: Option<GlobalId>,
+    output: GlobalId,
 }
 
 impl ClipOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<SymbolicGraphTensorId>],
-        outputs: &[Option<SymbolicGraphTensorId>],
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
         _attributes: &[onnx::AttributeProto],
+        rng: &mut impl Rng,
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.is_empty() || inputs.len() > 3 {
             return Err(ONNXDecodingError::InvalidOperatorInputs("Clip"));
@@ -413,6 +478,7 @@ impl ClipOperation {
         }
 
         Ok(Self {
+            global_id: GlobalId::new(rng),
             input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Clip"))?,
             min: if inputs.len() > 1 {
                 Some(inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs("Clip"))?)
@@ -429,12 +495,15 @@ impl ClipOperation {
     }
 }
 
-impl Node<SymbolicGraphTensorId> for ClipOperation {
+impl Node for ClipOperation {
     type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
     fn op_kind(&self) -> Self::OpKind {
         "Clip".to_string()
     }
-    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         let mut o = vec![self.input];
         if let Some(min) = self.min {
             o.push(min);
@@ -444,21 +513,21 @@ impl Node<SymbolicGraphTensorId> for ClipOperation {
         }
         Box::new(o.into_iter())
     }
-    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(std::iter::once(self.output))
     }
 }
 impl Operation for ClipOperation {
-    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        let (mut graph, input_map) = MilliOpGraph::new(self.inputs());
+    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let mut x = input_map[&self.input];
         if let Some(min) = self.min {
             let min = input_map[&min];
-            x = SimpleBinary::max(&mut graph, x, min);
+            x = SimpleBinary::max(&mut graph, x, min, rng);
         }
         if let Some(max) = self.max {
             let max = input_map[&max];
-            x = SimpleBinary::min(&mut graph, x, max);
+            x = SimpleBinary::min(&mut graph, x, max, rng);
         }
         let mut output_map = HashMap::new();
         output_map.insert(x, self.output);
@@ -469,16 +538,18 @@ impl Operation for ClipOperation {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RangeOperation {
-    start: SymbolicGraphTensorId,
-    end: SymbolicGraphTensorId,
-    delta: SymbolicGraphTensorId,
-    output: SymbolicGraphTensorId,
+    global_id: GlobalId,
+    start: GlobalId,
+    end: GlobalId,
+    delta: GlobalId,
+    output: GlobalId,
 }
 
 impl RangeOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<SymbolicGraphTensorId>],
-        outputs: &[Option<SymbolicGraphTensorId>],
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
+        rng: &mut impl Rng,
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 3 {
             return Err(ONNXDecodingError::InvalidOperatorInputs("Range"));
@@ -487,6 +558,7 @@ impl RangeOperation {
             return Err(ONNXDecodingError::InvalidOperatorOutputs("Range"));
         }
         Ok(Self {
+            global_id: GlobalId::new(rng),
             start: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Range"))?,
             end: inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs("Range"))?,
             delta: inputs[2].ok_or(ONNXDecodingError::InvalidOperatorInputs("Range"))?,
@@ -495,32 +567,36 @@ impl RangeOperation {
     }
 }
 
-impl Node<SymbolicGraphTensorId> for RangeOperation {
+impl Node for RangeOperation {
     type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
     fn op_kind(&self) -> Self::OpKind {
         "Range".to_string()
     }
-    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(
             std::iter::once(self.start)
                 .chain(std::iter::once(self.end))
                 .chain(std::iter::once(self.delta)),
         )
     }
-    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(std::iter::once(self.output))
     }
 }
 
 impl Operation for RangeOperation {
-    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
-        let (mut graph, input_map) = MilliOpGraph::new(self.inputs());
+    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
 
         let out = Range::push_new(
             &mut graph,
             input_map[&self.start],
             input_map[&self.end],
             input_map[&self.delta],
+            rng
         );
 
         let mut output_map = HashMap::new();

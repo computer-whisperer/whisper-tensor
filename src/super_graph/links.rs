@@ -1,8 +1,10 @@
+use rand::Rng;
 use serde::{Deserialize, Serialize};
+use crate::graph::{GlobalId, LinkMetadata, Property, PropertyValue};
 
 pub trait SuperGraphLink {
-    fn id(&self) -> SuperGraphLinkId;
     fn to_any(&self) -> SuperGraphAnyLink;
+    fn global_id(&self) -> GlobalId;
 }
 
 impl<T: SuperGraphLink> From<&T> for SuperGraphAnyLink {
@@ -12,85 +14,82 @@ impl<T: SuperGraphLink> From<&T> for SuperGraphAnyLink {
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
-pub struct SuperGraphLinkId(pub(crate) u32);
-
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
-pub struct SuperGraphLinkString(SuperGraphLinkId);
+pub struct SuperGraphLinkString(GlobalId);
 impl SuperGraphLinkString {
-    pub fn new(id: SuperGraphLinkId) -> Self {
-        Self(id)
+    pub fn new(rng: &mut impl Rng) -> Self {
+        Self(GlobalId::new(rng))
     }
 }
 impl SuperGraphLink for SuperGraphLinkString {
-    fn id(&self) -> SuperGraphLinkId {
-        self.0
-    }
     fn to_any(&self) -> SuperGraphAnyLink {
         SuperGraphAnyLink::String(*self)
     }
+    fn global_id(&self) -> GlobalId {
+        self.0
+    }
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
-pub struct SuperGraphLinkTensor(SuperGraphLinkId);
+pub struct SuperGraphLinkTensor(pub(crate) GlobalId);
 impl SuperGraphLinkTensor {
-    pub fn new(id: SuperGraphLinkId) -> Self {
-        Self(id)
+    pub fn new(rng: &mut impl Rng) -> Self {
+        Self(GlobalId::new(rng))
     }
 }
 impl SuperGraphLink for SuperGraphLinkTensor {
-    fn id(&self) -> SuperGraphLinkId {
-        self.0
-    }
     fn to_any(&self) -> SuperGraphAnyLink {
         SuperGraphAnyLink::Tensor(*self)
     }
+    fn global_id(&self) -> GlobalId {
+        self.0
+    }
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
-pub struct SuperGraphLinkTensorMap(SuperGraphLinkId);
+pub struct SuperGraphLinkTensorMap(GlobalId);
 impl SuperGraphLinkTensorMap {
-    pub fn new(id: SuperGraphLinkId) -> Self {
-        Self(id)
+    pub fn new(rng: &mut impl Rng) -> Self {
+        Self(GlobalId::new(rng))
     }
 }
 impl SuperGraphLink for SuperGraphLinkTensorMap {
-    fn id(&self) -> SuperGraphLinkId {
-        self.0
-    }
     fn to_any(&self) -> SuperGraphAnyLink {
         SuperGraphAnyLink::TensorMap(*self)
     }
+    fn global_id(&self) -> GlobalId {
+        self.0
+    }
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
-pub struct SuperGraphLinkTokenizer(SuperGraphLinkId);
+pub struct SuperGraphLinkTokenizer(GlobalId);
 impl SuperGraphLinkTokenizer {
-    pub fn new(id: SuperGraphLinkId) -> Self {
-        Self(id)
+    pub fn new(rng: &mut impl Rng) -> Self {
+        Self(GlobalId::new(rng))
     }
 }
 impl SuperGraphLink for SuperGraphLinkTokenizer {
-    fn id(&self) -> SuperGraphLinkId {
-        self.0
-    }
     fn to_any(&self) -> SuperGraphAnyLink {
         SuperGraphAnyLink::Tokenizer(*self)
+    }
+    fn global_id(&self) -> GlobalId {
+        self.0
     }
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
-pub struct SuperGraphLinkHash(SuperGraphLinkId);
+pub struct SuperGraphLinkHash(GlobalId);
 impl SuperGraphLinkHash {
-    pub fn new(id: SuperGraphLinkId) -> Self {
-        Self(id)
+    pub fn new(rng: &mut impl Rng) -> Self {
+        Self(GlobalId::new(rng))
     }
 }
 impl SuperGraphLink for SuperGraphLinkHash {
-    fn id(&self) -> SuperGraphLinkId {
-        self.0
-    }
     fn to_any(&self) -> SuperGraphAnyLink {
         SuperGraphAnyLink::Hash(*self)
+    }
+    fn global_id(&self) -> GlobalId {
+        self.0
     }
 }
 
@@ -104,14 +103,13 @@ pub enum SuperGraphAnyLink {
 }
 
 impl SuperGraphAnyLink {
-    #[allow(dead_code)]
-    pub(crate) fn id(&self) -> SuperGraphLinkId {
+    pub(crate) fn global_id(&self) -> GlobalId {
         match self {
-            SuperGraphAnyLink::Tensor(link) => link.id(),
-            SuperGraphAnyLink::String(link) => link.id(),
-            SuperGraphAnyLink::TensorMap(link) => link.id(),
-            SuperGraphAnyLink::Tokenizer(link) => link.id(),
-            SuperGraphAnyLink::Hash(link) => link.id(),
+            SuperGraphAnyLink::Tensor(link) => link.global_id(),
+            SuperGraphAnyLink::String(link) => link.global_id(),
+            SuperGraphAnyLink::TensorMap(link) => link.global_id(),
+            SuperGraphAnyLink::Tokenizer(link) => link.global_id(),
+            SuperGraphAnyLink::Hash(link) => link.global_id(),
         }
     }
 }
@@ -198,5 +196,18 @@ impl SuperGraphLinkTriple {
             SuperGraphLinkTriple::Tokenizer(_, _, t3) => SuperGraphAnyLink::Tokenizer(*t3),
             SuperGraphLinkTriple::Hash(_, _, h3) => SuperGraphAnyLink::Hash(*h3),
         }
+    }
+}
+
+impl LinkMetadata for SuperGraphAnyLink {
+    fn properties(&self) -> Vec<Property> {
+        let link_type = match self {
+            SuperGraphAnyLink::Tensor(_) => "Tensor",
+            SuperGraphAnyLink::String(_) => "String",
+            SuperGraphAnyLink::TensorMap(_) => "TensorMap",
+            SuperGraphAnyLink::Tokenizer(_) => "Tokenizer",
+            SuperGraphAnyLink::Hash(_) => "Hash",
+        };
+        vec![Property::new("link_type", PropertyValue::String(link_type.to_string()))]
     }
 }

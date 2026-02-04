@@ -1,9 +1,10 @@
-use crate::graph::Node;
+use rand::Rng;
+use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::MilliOpGraph;
 use crate::onnx;
 use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{
-    ONNXDecodingError, SymbolicGraphTensorId, query_attribute_bool, query_attribute_float,
+    ONNXDecodingError, query_attribute_bool, query_attribute_float,
     query_attribute_ints, query_attribute_string,
 };
 use serde::{Deserialize, Serialize};
@@ -41,11 +42,12 @@ pub(crate) enum ResizeNearestMode {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ResizeOperation {
-    input: SymbolicGraphTensorId,
-    roi: Option<SymbolicGraphTensorId>,
-    scales: Option<SymbolicGraphTensorId>,
-    sizes: Option<SymbolicGraphTensorId>,
-    output: SymbolicGraphTensorId,
+    global_id: GlobalId,
+    input: GlobalId,
+    roi: Option<GlobalId>,
+    scales: Option<GlobalId>,
+    sizes: Option<GlobalId>,
+    output: GlobalId,
     antialias: bool,
     axes: Vec<i64>,
     coordinate_transformation_mode: ResizeCoordinateTransformationMode,
@@ -59,9 +61,10 @@ pub struct ResizeOperation {
 
 impl ResizeOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<SymbolicGraphTensorId>],
-        outputs: &[Option<SymbolicGraphTensorId>],
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
         attributes: &[onnx::AttributeProto],
+        rng: &mut impl Rng,
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.is_empty() || inputs.len() > 4 {
             return Err(ONNXDecodingError::InvalidOperatorInputs("Resize"));
@@ -114,6 +117,7 @@ impl ResizeOperation {
         };
 
         Ok(Self {
+            global_id: GlobalId::new(rng),
             input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Resize"))?,
             roi: if inputs.len() > 1 {
                 Some(inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs("Resize"))?)
@@ -144,12 +148,15 @@ impl ResizeOperation {
     }
 }
 
-impl Node<SymbolicGraphTensorId> for ResizeOperation {
+impl Node for ResizeOperation {
     type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
     fn op_kind(&self) -> Self::OpKind {
         "Resize".to_string()
     }
-    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         let mut ret = vec![self.input];
         if let Some(roi) = &self.roi {
             ret.push(*roi);
@@ -162,12 +169,67 @@ impl Node<SymbolicGraphTensorId> for ResizeOperation {
         }
         Box::new(ret.into_iter())
     }
-    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(std::iter::once(self.output))
     }
 }
 impl Operation for ResizeOperation {
-    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
+    fn parameters(&self) -> Vec<Property> {
+        let mode_str = match &self.mode {
+            ResizeMode::Nearest => "nearest",
+            ResizeMode::Linear => "linear",
+            ResizeMode::Cubic => "cubic",
+        };
+        let coord_mode_str = match &self.coordinate_transformation_mode {
+            ResizeCoordinateTransformationMode::HalfPixel => "half_pixel",
+            ResizeCoordinateTransformationMode::HalfPixelSymmetric => "half_pixel_symmetric",
+            ResizeCoordinateTransformationMode::PytorchHalfPixel => "pytorch_half_pixel",
+            ResizeCoordinateTransformationMode::AlignCorners => "align_corners",
+            ResizeCoordinateTransformationMode::Asymmetric => "asymmetric",
+            ResizeCoordinateTransformationMode::TFCropAndResize => "tf_crop_and_resize",
+        };
+        let nearest_mode_str = match &self.nearest_mode {
+            ResizeNearestMode::RoundPreferFloor => "round_prefer_floor",
+            ResizeNearestMode::Ceil => "ceil",
+            ResizeNearestMode::Floor => "floor",
+        };
+        let aspect_policy_str = match &self.keep_aspect_ratio_policy {
+            ResizeKeepAspectRatioPolicy::Stretch => "stretch",
+            ResizeKeepAspectRatioPolicy::NotLarger => "not_larger",
+            ResizeKeepAspectRatioPolicy::NotSmaller => "not_smaller",
+        };
+
+        let mut params = vec![
+            Property::new("mode", PropertyValue::String(mode_str.to_string())),
+            Property::new("coordinate_transform", PropertyValue::String(coord_mode_str.to_string())),
+        ];
+
+        if matches!(self.mode, ResizeMode::Nearest) {
+            params.push(Property::new("nearest_mode", PropertyValue::String(nearest_mode_str.to_string())));
+        }
+        if matches!(self.mode, ResizeMode::Cubic) {
+            params.push(Property::new("cubic_coeff_a", PropertyValue::Float(self.cubic_coeff_a as f64)));
+        }
+        if self.antialias {
+            params.push(Property::new("antialias", PropertyValue::Bool(true)));
+        }
+        if self.exclude_outside {
+            params.push(Property::new("exclude_outside", PropertyValue::Bool(true)));
+        }
+        if self.extrapolation_value != 0.0 {
+            params.push(Property::new("extrapolation_value", PropertyValue::Float(self.extrapolation_value as f64)));
+        }
+        if !self.axes.is_empty() {
+            params.push(Property::new("axes", PropertyValue::IntList(self.axes.clone())));
+        }
+        if !matches!(self.keep_aspect_ratio_policy, ResizeKeepAspectRatioPolicy::Stretch) {
+            params.push(Property::new("keep_aspect_ratio_policy", PropertyValue::String(aspect_policy_str.to_string())));
+        }
+
+        params
+    }
+
+    fn get_milli_op_graph(&self, _rng: &mut impl Rng) -> MilliOpGraph {
         todo!()
     }
 }

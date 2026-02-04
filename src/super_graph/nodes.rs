@@ -3,9 +3,9 @@ use crate::backends::eval_backend;
 use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::compiler::CompiledProgramObserver;
-use crate::graph::{InnerGraph, Node};
+use crate::graph::{GlobalId, Graph, Node, NodeMetadata, Property, PropertyValue};
 use crate::milli_graph::observer::MilliOpGraphObserver;
-use crate::milli_graph::{MilliOpGraph, MilliOpGraphNodePath, MilliOpGraphTensorPath};
+use crate::milli_graph::{MilliOpGraph};
 use crate::numeric_tensor::NumericTensor;
 use crate::super_graph::links::{
     SuperGraphAnyLink, SuperGraphLink, SuperGraphLinkDouble, SuperGraphLinkHash,
@@ -13,34 +13,51 @@ use crate::super_graph::links::{
     SuperGraphLinkTriple,
 };
 use crate::super_graph::observer::SuperGraphObserver;
-use crate::super_graph::{
-    SuperGraphBuilder, SuperGraphContext, SuperGraphData, SuperGraphError, SuperGraphInner,
-    SuperGraphNodeId, SuperGraphNodePath, SuperGraphTensorPath,
-};
+use crate::super_graph::{SuperGraph, SuperGraphBuilder, SuperGraphContext, SuperGraphData, SuperGraphError};
 use crate::symbolic_graph::observer::SymbolicGraphObserver;
-use crate::symbolic_graph::{SymbolicGraphNodePath, SymbolicGraphTensorPath};
 use crate::tokenizer::{AnyTokenizer, Tokenizer};
 use rwkv_tokenizer::WorldTokenizer;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ptr;
 use std::time::Instant;
+use rand::RngCore;
 use typenum::P1;
 use whisper_tensor_import::onnx_graph::TokenizerInfo;
 
 pub trait SuperGraphNode {
     fn to_any(self) -> SuperGraphAnyNode;
+
+    fn op_kind(&self) -> String;
+    fn inputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_>;
+    fn outputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_>;
+    fn global_id(&self) -> GlobalId;
+
     fn eval<'a, 'b, 'c, 'd, T: SuperGraphObserver>(
         &'a self,
-        this_path: &[SuperGraphNodeId],
+        this_path: &[GlobalId],
         data: &mut SuperGraphData<'b>,
         context: &mut SuperGraphContext<'a, 'b, 'c, 'd, T>,
     ) -> Result<(), SuperGraphError>;
 }
 
-impl<T: SuperGraphNode> From<T> for SuperGraphAnyNode {
-    fn from(value: T) -> Self {
-        value.to_any()
+impl<T: SuperGraphNode> Node for T {
+    type OpKind = String;
+
+    fn global_id(&self) -> GlobalId {
+        <Self as SuperGraphNode>::global_id(self)
+    }
+
+    fn op_kind(&self) -> Self::OpKind {
+        <Self as SuperGraphNode>::op_kind(self)
+    }
+
+    fn inputs(&self) -> Box<dyn Iterator<Item=GlobalId> + '_> {
+        Box::new(<Self as SuperGraphNode>::inputs(self).map(|x| x.global_id()))
+    }
+
+    fn outputs(&self) -> Box<dyn Iterator<Item=GlobalId> + '_> {
+        Box::new(<Self as SuperGraphNode>::outputs(self).map(|x| x.global_id()))
     }
 }
 
@@ -51,6 +68,7 @@ pub struct ModelReference {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SuperGraphNodeModelExecution {
+    global_id: GlobalId,
     tensor_map: SuperGraphLinkTensorMap,
     pub symbolic_graph_id: usize, // Which graph (passed to
     tensor_inputs: Vec<(SuperGraphLinkTensor, String)>,
@@ -59,12 +77,14 @@ pub struct SuperGraphNodeModelExecution {
 
 impl SuperGraphNodeModelExecution {
     pub fn new(
+        rng: &mut impl RngCore,
         tensor_map: SuperGraphLinkTensorMap,
         symbolic_graph_id: usize,
         tensor_inputs: Vec<(SuperGraphLinkTensor, String)>,
         tensor_outputs: Vec<(String, SuperGraphLinkTensor)>,
     ) -> Self {
         Self {
+            global_id: GlobalId::new(rng),
             tensor_map,
             symbolic_graph_id,
             tensor_inputs,
@@ -73,37 +93,16 @@ impl SuperGraphNodeModelExecution {
     }
 }
 
-impl Node<SuperGraphAnyLink> for SuperGraphNodeModelExecution {
-    type OpKind = String;
-    fn op_kind(&self) -> Self::OpKind {
-        "Model Execution".to_string()
-    }
-
-    fn inputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
-        let ret = self.tensor_inputs.clone().into_iter().map(|x| x.0.to_any());
-        Box::new(ret.chain(std::iter::once(self.tensor_map.to_any())))
-    }
-
-    fn outputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
-        Box::new(
-            self.tensor_outputs
-                .clone()
-                .into_iter()
-                .map(|x| x.1.to_any()),
-        )
-    }
-}
-
 struct SymbolicGraphObserverWrapper<'a, T: SuperGraphObserver> {
     inner: &'a mut T,
-    node_path: Vec<SuperGraphNodeId>,
+    path: Vec<GlobalId>,
 }
 
 impl<'a, T: SuperGraphObserver> SymbolicGraphObserverWrapper<'a, T> {
-    fn new(inner: &'a mut T, node_path: &[SuperGraphNodeId]) -> Self {
+    fn new(inner: &'a mut T, path: &[GlobalId]) -> Self {
         Self {
             inner,
-            node_path: node_path.to_vec(),
+            path: path.to_vec(),
         }
     }
 }
@@ -111,13 +110,14 @@ impl<'a, T: SuperGraphObserver> SymbolicGraphObserverWrapper<'a, T> {
 impl<'a, T: SuperGraphObserver> SymbolicGraphObserver for SymbolicGraphObserverWrapper<'a, T> {
     fn on_op_executed(
         &mut self,
-        node_path: &SymbolicGraphNodePath,
+        node_path: &[GlobalId],
         start_instant: Instant,
         end_instant: Instant,
         backend: &mut EvalBackend,
     ) {
+        let node_path = self.path.clone().into_iter().chain(node_path.iter().cloned()).collect::<Vec<_>>();
         self.inner.on_node_executed(
-            &SuperGraphNodePath::SymbolicGraphNode(self.node_path.clone(), node_path.clone()),
+            node_path.as_slice(),
             start_instant,
             end_instant,
             backend,
@@ -126,12 +126,13 @@ impl<'a, T: SuperGraphObserver> SymbolicGraphObserver for SymbolicGraphObserverW
 
     fn on_tensor_assigned(
         &mut self,
-        tensor_path: &SymbolicGraphTensorPath,
+        tensor_path: &[GlobalId],
         tensor: &NumericTensor<DynRank>,
         backend: &mut EvalBackend,
     ) {
+        let tensor_path = self.path.clone().into_iter().chain(tensor_path.iter().cloned()).collect::<Vec<_>>();
         self.inner.on_tensor_assigned(
-            &SuperGraphTensorPath::SymbolicGraphTensor(self.node_path.clone(), tensor_path.clone()),
+            tensor_path.as_slice(),
             tensor,
             backend,
         )
@@ -141,13 +142,14 @@ impl<'a, T: SuperGraphObserver> SymbolicGraphObserver for SymbolicGraphObserverW
 impl<'a, T: SuperGraphObserver> CompiledProgramObserver for SymbolicGraphObserverWrapper<'a, T> {
     fn on_op_executed(
         &mut self,
-        node_path: &SymbolicGraphNodePath,
+        node_path: &[GlobalId],
         start_instant: Instant,
         end_instant: Instant,
         backend: &mut EvalBackend,
     ) {
+        let node_path = self.path.clone().into_iter().chain(node_path.iter().cloned()).collect::<Vec<_>>();
         self.inner.on_node_executed(
-            &SuperGraphNodePath::SymbolicGraphNode(self.node_path.clone(), node_path.clone()),
+            node_path.as_slice(),
             start_instant,
             end_instant,
             backend,
@@ -156,12 +158,13 @@ impl<'a, T: SuperGraphObserver> CompiledProgramObserver for SymbolicGraphObserve
 
     fn on_tensor_assigned(
         &mut self,
-        tensor_path: &SymbolicGraphTensorPath,
+        tensor_path: &[GlobalId],
         tensor: &NumericTensor<DynRank>,
         backend: &mut EvalBackend,
     ) {
+        let tensor_path = self.path.clone().into_iter().chain(tensor_path.iter().cloned()).collect::<Vec<_>>();
         self.inner.on_tensor_assigned(
-            &SuperGraphTensorPath::SymbolicGraphTensor(self.node_path.clone(), tensor_path.clone()),
+            tensor_path.as_slice(),
             tensor,
             backend,
         )
@@ -174,7 +177,7 @@ impl SuperGraphNode for SuperGraphNodeModelExecution {
     }
     fn eval<T: SuperGraphObserver>(
         &self,
-        node_path: &[SuperGraphNodeId],
+        node_path: &[GlobalId],
         data: &mut SuperGraphData,
         context: &mut SuperGraphContext<T>,
     ) -> Result<(), SuperGraphError> {
@@ -199,7 +202,8 @@ impl SuperGraphNode for SuperGraphNodeModelExecution {
 
         let symbolic_graph = context.symbolic_graphs[self.symbolic_graph_id];
 
-        let mut observer = SymbolicGraphObserverWrapper::new(context.observer, node_path);
+        let global_id = node_path.iter().chain(core::iter::once(&self.global_id)).cloned().collect::<Vec<_>>();
+        let mut observer = SymbolicGraphObserverWrapper::new(context.observer, global_id.as_slice());
         if context.use_compiled_models
             && let Some(compiled_models) = &context.compiled_models
         {
@@ -237,29 +241,54 @@ impl SuperGraphNode for SuperGraphNodeModelExecution {
 
         Ok(())
     }
+
+    fn op_kind(&self) -> String {
+        "Model Execution".to_string()
+    }
+
+    fn inputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        let ret = self.tensor_inputs.clone().into_iter().map(|x| x.0.to_any());
+        Box::new(ret.chain(std::iter::once(self.tensor_map.to_any())))
+    }
+
+    fn outputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new(
+            self.tensor_outputs
+                .clone()
+                .into_iter()
+                .map(|x| x.1.to_any()),
+        )
+    }
+
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SuperGraphNodeTokenizerLoad {
+    global_id: GlobalId,
     info: TokenizerInfo,
     output: SuperGraphLinkTokenizer,
 }
 
 impl SuperGraphNodeTokenizerLoad {
-    pub fn new(builder: &mut SuperGraphBuilder, info: TokenizerInfo) -> Self {
+    pub fn new(_builder: &mut SuperGraphBuilder, info: TokenizerInfo, rng: &mut impl RngCore) -> Self {
         Self {
+            global_id: GlobalId::new(rng),
             info,
-            output: SuperGraphLinkTokenizer::new(builder.get_next_link_id()),
+            output: SuperGraphLinkTokenizer::new(rng),
         }
     }
 
     pub fn new_and_add(
         builder: &mut SuperGraphBuilder,
         info: TokenizerInfo,
+        rng: &mut impl RngCore,
     ) -> SuperGraphLinkTokenizer {
-        let node = Self::new(builder, info);
+        let node = Self::new(builder, info, rng);
         let output = node.get_tokenizer_output();
-        builder.add_node(node.into());
+        builder.add_node(node.to_any());
         output
     }
 
@@ -268,25 +297,13 @@ impl SuperGraphNodeTokenizerLoad {
     }
 }
 
-impl Node<SuperGraphAnyLink> for SuperGraphNodeTokenizerLoad {
-    type OpKind = String;
-    fn op_kind(&self) -> Self::OpKind {
-        "Tokenizer Load".to_string()
-    }
-    fn inputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
-        Box::new(std::iter::empty())
-    }
-    fn outputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
-        Box::new(std::iter::once(self.output.to_any()))
-    }
-}
 impl SuperGraphNode for SuperGraphNodeTokenizerLoad {
     fn to_any(self) -> SuperGraphAnyNode {
         SuperGraphAnyNode::TokenizerLoad(self)
     }
     fn eval<T: SuperGraphObserver>(
         &self,
-        _this_path: &[SuperGraphNodeId],
+        _this_path: &[GlobalId],
         data: &mut SuperGraphData,
         _context: &mut SuperGraphContext<T>,
     ) -> Result<(), SuperGraphError> {
@@ -318,10 +335,24 @@ impl SuperGraphNode for SuperGraphNodeTokenizerLoad {
         data.tokenizers.insert(self.output, tokenizer);
         Ok(())
     }
+
+    fn op_kind(&self) -> String {
+        "Tokenizer Load".to_string()
+    }
+    fn inputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new(std::iter::empty())
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new(std::iter::once(self.output.to_any()))
+    }
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SuperGraphNodeTokenizerEncode {
+    global_id: GlobalId,
     tokenizer: SuperGraphLinkTokenizer,
     text_input: SuperGraphLinkString,
     tensor_output: SuperGraphLinkTensor,
@@ -329,14 +360,16 @@ pub struct SuperGraphNodeTokenizerEncode {
 
 impl SuperGraphNodeTokenizerEncode {
     pub fn new(
-        builder: &mut SuperGraphBuilder,
+        _builder: &mut SuperGraphBuilder,
         tokenizer: SuperGraphLinkTokenizer,
         text_input: SuperGraphLinkString,
+        rng: &mut impl RngCore,
     ) -> Self {
         Self {
+            global_id: GlobalId::new(rng),
             tokenizer,
             text_input,
-            tensor_output: SuperGraphLinkTensor::new(builder.get_next_link_id()),
+            tensor_output: SuperGraphLinkTensor::new(rng),
         }
     }
 
@@ -344,10 +377,11 @@ impl SuperGraphNodeTokenizerEncode {
         builder: &mut SuperGraphBuilder,
         tokenizer: SuperGraphLinkTokenizer,
         text_input: SuperGraphLinkString,
+        rng: &mut impl RngCore,
     ) -> SuperGraphLinkTensor {
-        let node = Self::new(builder, tokenizer, text_input);
+        let node = Self::new(builder, tokenizer, text_input, rng);
         let output = node.get_tensor_output();
-        builder.add_node(node.into());
+        builder.add_node(node.to_any());
         output
     }
 
@@ -356,28 +390,13 @@ impl SuperGraphNodeTokenizerEncode {
     }
 }
 
-impl Node<SuperGraphAnyLink> for SuperGraphNodeTokenizerEncode {
-    type OpKind = String;
-    fn op_kind(&self) -> Self::OpKind {
-        "Tokenizer Encode".to_string()
-    }
-    fn inputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
-        Box::new(
-            std::iter::once(self.tokenizer.to_any())
-                .chain(std::iter::once(self.text_input.to_any())),
-        )
-    }
-    fn outputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
-        Box::new(std::iter::once(self.tensor_output.to_any()))
-    }
-}
 impl SuperGraphNode for SuperGraphNodeTokenizerEncode {
     fn to_any(self) -> SuperGraphAnyNode {
         SuperGraphAnyNode::TokenizerEncode(self)
     }
     fn eval<T: SuperGraphObserver>(
         &self,
-        _this_path: &[SuperGraphNodeId],
+        _this_path: &[GlobalId],
         data: &mut SuperGraphData,
         _context: &mut SuperGraphContext<T>,
     ) -> Result<(), SuperGraphError> {
@@ -397,10 +416,27 @@ impl SuperGraphNode for SuperGraphNodeTokenizerEncode {
         data.tensors.insert(self.tensor_output, input_tensor);
         Ok(())
     }
+
+    fn op_kind(&self) -> String {
+        "Tokenizer Encode".to_string()
+    }
+    fn inputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new(
+            std::iter::once(self.tokenizer.to_any())
+                .chain(std::iter::once(self.text_input.to_any())),
+        )
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new(std::iter::once(self.tensor_output.to_any()))
+    }
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SuperGraphNodeTokenizerDecode {
+    global_id: GlobalId,
     tokenizer: SuperGraphLinkTokenizer,
     tensor_input: SuperGraphLinkTensor,
     text_output: SuperGraphLinkString,
@@ -408,14 +444,16 @@ pub struct SuperGraphNodeTokenizerDecode {
 
 impl SuperGraphNodeTokenizerDecode {
     pub fn new(
-        builder: &mut SuperGraphBuilder,
+        _builder: &mut SuperGraphBuilder,
         tokenizer: SuperGraphLinkTokenizer,
         tensor_input: SuperGraphLinkTensor,
+        rng: &mut impl RngCore,
     ) -> Self {
         Self {
+            global_id: GlobalId::new(rng),
             tokenizer,
             tensor_input,
-            text_output: SuperGraphLinkString::new(builder.get_next_link_id()),
+            text_output: SuperGraphLinkString::new(rng),
         }
     }
     pub fn get_string_output(&self) -> SuperGraphLinkString {
@@ -425,27 +463,12 @@ impl SuperGraphNodeTokenizerDecode {
         builder: &mut SuperGraphBuilder,
         tokenizer: SuperGraphLinkTokenizer,
         tensor_input: SuperGraphLinkTensor,
+        rng: &mut impl RngCore,
     ) -> SuperGraphLinkString {
-        let node = Self::new(builder, tokenizer, tensor_input);
+        let node = Self::new(builder, tokenizer, tensor_input, rng);
         let output = node.get_string_output();
         builder.add_node(node.to_any());
         output
-    }
-}
-
-impl Node<SuperGraphAnyLink> for SuperGraphNodeTokenizerDecode {
-    type OpKind = String;
-    fn op_kind(&self) -> Self::OpKind {
-        "Tokenizer Decode".to_string()
-    }
-    fn inputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
-        Box::new(
-            std::iter::once(self.tokenizer.to_any())
-                .chain(std::iter::once(self.tensor_input.to_any())),
-        )
-    }
-    fn outputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
-        Box::new(std::iter::once(self.text_output.to_any()))
     }
 }
 
@@ -455,7 +478,7 @@ impl SuperGraphNode for SuperGraphNodeTokenizerDecode {
     }
     fn eval<T: SuperGraphObserver>(
         &self,
-        _node_path: &[SuperGraphNodeId],
+        _node_path: &[GlobalId],
         data: &mut SuperGraphData,
         _context: &mut SuperGraphContext<T>,
     ) -> Result<(), SuperGraphError> {
@@ -467,26 +490,42 @@ impl SuperGraphNode for SuperGraphNodeTokenizerDecode {
         data.strings.insert(self.text_output, text);
         Ok(())
     }
+    fn op_kind(&self) -> String {
+        "Tokenizer Decode".to_string()
+    }
+    fn inputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new(
+            std::iter::once(self.tokenizer.to_any())
+                .chain(std::iter::once(self.tensor_input.to_any())),
+        )
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new(std::iter::once(self.text_output.to_any()))
+    }
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SuperGraphNodeMilliOpGraph {
-    pub graph: MilliOpGraph<SuperGraphLinkTensor>,
+    global_id: GlobalId,
+    pub graph: MilliOpGraph,
 }
 
 impl SuperGraphNodeMilliOpGraph {
-    pub fn new(graph: MilliOpGraph<SuperGraphLinkTensor>) -> Self {
-        Self { graph }
+    pub fn new(graph: MilliOpGraph, rng: &mut impl RngCore) -> Self {
+        Self { graph , global_id: GlobalId::new(rng) }
     }
 }
 
 struct MilliOpGraphObserverWrapper<'a, T: SuperGraphObserver> {
     inner: &'a mut T,
-    node_path: Vec<SuperGraphNodeId>,
+    node_path: Vec<GlobalId>,
 }
 
 impl<'a, T: SuperGraphObserver> MilliOpGraphObserverWrapper<'a, T> {
-    fn new(inner: &'a mut T, node_path: &[SuperGraphNodeId]) -> Self {
+    fn new(inner: &'a mut T, node_path: &[GlobalId]) -> Self {
         Self {
             inner,
             node_path: node_path.to_vec(),
@@ -497,12 +536,13 @@ impl<'a, T: SuperGraphObserver> MilliOpGraphObserverWrapper<'a, T> {
 impl<'a, T: SuperGraphObserver> MilliOpGraphObserver for MilliOpGraphObserverWrapper<'a, T> {
     fn on_tensor_assigned(
         &mut self,
-        tensor_path: &MilliOpGraphTensorPath,
+        tensor_path: &[GlobalId],
         tensor: &NumericTensor<DynRank>,
         backend: &mut EvalBackend,
     ) {
+        let tensor_path = self.node_path.iter().chain(tensor_path.iter()).copied().collect::<Vec<_>>();
         self.inner.on_tensor_assigned(
-            &SuperGraphTensorPath::MilliOpGraphTensor(self.node_path.clone(), tensor_path.clone()),
+            tensor_path.as_slice(),
             tensor,
             backend,
         );
@@ -510,30 +550,18 @@ impl<'a, T: SuperGraphObserver> MilliOpGraphObserver for MilliOpGraphObserverWra
 
     fn on_node_executed(
         &mut self,
-        node_path: &MilliOpGraphNodePath,
+        node_path: &[GlobalId],
         start_instant: Instant,
         end_instant: Instant,
         backend: &mut EvalBackend,
     ) {
+        let node_path = self.node_path.iter().chain(node_path.iter()).copied().collect::<Vec<_>>();
         self.inner.on_node_executed(
-            &SuperGraphNodePath::MilliOpGraphNode(self.node_path.clone(), node_path.clone()),
+            node_path.as_slice(),
             start_instant,
             end_instant,
             backend,
         );
-    }
-}
-
-impl Node<SuperGraphAnyLink> for SuperGraphNodeMilliOpGraph {
-    type OpKind = String;
-    fn op_kind(&self) -> Self::OpKind {
-        "MilliOpGraph".to_string()
-    }
-    fn inputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
-        Box::new(self.graph.input_links().map(|(a, _b)| a.to_any()))
-    }
-    fn outputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
-        Box::new(self.graph.output_links().map(|(a, _b)| a.to_any()))
     }
 }
 
@@ -543,29 +571,43 @@ impl SuperGraphNode for SuperGraphNodeMilliOpGraph {
     }
     fn eval<T: SuperGraphObserver>(
         &self,
-        node_path: &[SuperGraphNodeId],
+        node_path: &[GlobalId],
         data: &mut SuperGraphData,
         context: &mut SuperGraphContext<T>,
     ) -> Result<(), SuperGraphError> {
         let inputs = {
             let mut inputs = HashMap::new();
-            for input in &self.graph.get_inputs() {
-                inputs.insert(*input, data.tensors.get(input).unwrap().clone());
+            for input in self.graph.get_inputs() {
+                inputs.insert(input, data.tensors.get(&SuperGraphLinkTensor(input)).unwrap().clone());
             }
             inputs
         };
-        let mut observer = MilliOpGraphObserverWrapper::new(context.observer, node_path);
+        let node_path = node_path.iter().chain(core::iter::once(&self.global_id)).copied().collect::<Vec<_>>();
+        let mut observer = MilliOpGraphObserverWrapper::new(context.observer, node_path.as_slice());
         let res = self
             .graph
             .eval(&inputs, &mut observer, context.eval_backend)?;
-        data.tensors.extend(res);
+        data.tensors.extend(res.map(|(k, v)| (SuperGraphLinkTensor(k), v)));
         Ok(())
+    }
+    fn op_kind(&self) -> String {
+        "MilliOpGraph".to_string()
+    }
+    fn inputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new(self.graph.input_link_ids().map(|(a, _b)| SuperGraphLinkTensor(a).to_any()))
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new(self.graph.output_link_ids().map(|(a, _b)| SuperGraphLinkTensor(a).to_any()))
+    }
+    fn global_id(&self) -> GlobalId {
+        self.global_id
     }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SuperGraphNodeScan {
-    inner_graph: SuperGraphInner,
+    global_id: GlobalId,
+    inner_graph: SuperGraph,
     iteration_count: SuperGraphLinkTensor,
     simple_inputs: Vec<SuperGraphLinkDouble>,
     state_links: Vec<SuperGraphLinkTriple>,
@@ -576,13 +618,14 @@ pub struct SuperGraphNodeScan {
 
 impl SuperGraphNodeScan {
     pub fn new(
-        inner_graph: SuperGraphInner,
+        inner_graph: SuperGraph,
         iteration_count: SuperGraphLinkTensor,
         simple_inputs: Vec<SuperGraphLinkDouble>,
         state_links: Vec<SuperGraphLinkTriple>,
         scan_inputs: Vec<(SuperGraphLinkTensor, SuperGraphLinkTensor, u32)>,
         scan_outputs: Vec<(SuperGraphLinkTensor, SuperGraphLinkTensor, u32)>,
         simple_outputs: Vec<SuperGraphLinkDouble>,
+        rng: &mut impl RngCore,
     ) -> Self {
         Self {
             inner_graph,
@@ -592,40 +635,11 @@ impl SuperGraphNodeScan {
             scan_inputs,
             scan_outputs,
             simple_outputs,
+            global_id: GlobalId::new(rng),
         }
     }
 }
 
-impl Node<SuperGraphAnyLink> for SuperGraphNodeScan {
-    type OpKind = String;
-    fn op_kind(&self) -> Self::OpKind {
-        "Scan".to_string()
-    }
-    fn inputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
-        let mut inputs = Vec::new();
-        inputs.push(self.iteration_count.to_any());
-        for link in &self.simple_inputs {
-            inputs.push(link.first());
-        }
-        for link in &self.state_links {
-            inputs.push(link.first());
-        }
-        for (input, _, _) in &self.scan_inputs {
-            inputs.push(input.to_any());
-        }
-        Box::new(inputs.into_iter())
-    }
-    fn outputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
-        let mut outputs = Vec::new();
-        for link in &self.simple_outputs {
-            outputs.push(link.second());
-        }
-        for (_, output, _) in &self.scan_outputs {
-            outputs.push(output.to_any());
-        }
-        Box::new(outputs.into_iter())
-    }
-}
 impl SuperGraphNode for SuperGraphNodeScan {
     fn to_any(self) -> SuperGraphAnyNode {
         SuperGraphAnyNode::Scan(self)
@@ -633,7 +647,7 @@ impl SuperGraphNode for SuperGraphNodeScan {
 
     fn eval<'a, 'b, 'c, 'd, T: SuperGraphObserver>(
         &'a self,
-        node_path: &[SuperGraphNodeId],
+        node_path: &[GlobalId],
         data: &mut SuperGraphData<'b>,
         context: &mut SuperGraphContext<'a, 'b, 'c, 'd, T>,
     ) -> Result<(), SuperGraphError> {
@@ -642,6 +656,8 @@ impl SuperGraphNode for SuperGraphNodeScan {
             .get(&self.iteration_count)
             .ok_or(SuperGraphError::MissingLinkError())?;
         let iteration_count: i64 = iteration_count_tensor.first_element().into();
+
+        let node_path = node_path.iter().chain(core::iter::once(&self.global_id)).copied().collect::<Vec<_>>();
 
         let simple_inputs = {
             let mut simple_inputs = SuperGraphData::new();
@@ -784,7 +800,7 @@ impl SuperGraphNode for SuperGraphNodeScan {
                 }
                 iter_inputs
             };
-            let iter_outputs = self.inner_graph.eval(node_path, iter_inputs, context)?;
+            let iter_outputs = self.inner_graph.eval(node_path.as_slice(), iter_inputs, context)?;
 
             for (inner, outer, _scan_axis) in &self.scan_outputs {
                 let tensor = iter_outputs
@@ -941,10 +957,41 @@ impl SuperGraphNode for SuperGraphNodeScan {
         data.extend(&output_data);
         Ok(())
     }
+    fn op_kind(&self) -> String {
+        "Scan".to_string()
+    }
+    fn inputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        let mut inputs = Vec::new();
+        inputs.push(self.iteration_count.to_any());
+        for link in &self.simple_inputs {
+            inputs.push(link.first());
+        }
+        for link in &self.state_links {
+            inputs.push(link.first());
+        }
+        for (input, _, _) in &self.scan_inputs {
+            inputs.push(input.to_any());
+        }
+        Box::new(inputs.into_iter())
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        let mut outputs = Vec::new();
+        for link in &self.simple_outputs {
+            outputs.push(link.second());
+        }
+        for (_, output, _) in &self.scan_outputs {
+            outputs.push(output.to_any());
+        }
+        Box::new(outputs.into_iter())
+    }
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SuperGraphNodeRNNCacheRead {
+    global_id: GlobalId,
     key_input: SuperGraphLinkHash,
     tokens_input: SuperGraphLinkTensor,
     tokens_output: SuperGraphLinkTensor,
@@ -959,34 +1006,16 @@ impl SuperGraphNodeRNNCacheRead {
         tokens_output: SuperGraphLinkTensor,
         state_outputs: Vec<(String, SuperGraphLinkTensor)>,
         default_state_inputs: Vec<(String, SuperGraphLinkTensor)>,
+        rng: &mut impl RngCore,
     ) -> Self {
         Self {
+            global_id: GlobalId::new(rng),
             key_input,
             tokens_input,
             tokens_output,
             state_outputs,
             default_state_inputs,
         }
-    }
-}
-
-impl Node<SuperGraphAnyLink> for SuperGraphNodeRNNCacheRead {
-    type OpKind = String;
-    fn op_kind(&self) -> Self::OpKind {
-        "RNNCacheRead".to_string()
-    }
-    fn inputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
-        Box::new(
-            [self.key_input.to_any(), self.tokens_input.to_any()]
-                .into_iter()
-                .chain(self.default_state_inputs.iter().map(|x| x.1.to_any())),
-        )
-    }
-    fn outputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
-        Box::new(
-            std::iter::once(self.tokens_output.to_any())
-                .chain(self.state_outputs.iter().map(|x| x.1.to_any())),
-        )
     }
 }
 
@@ -997,7 +1026,7 @@ impl SuperGraphNode for SuperGraphNodeRNNCacheRead {
 
     fn eval<T: SuperGraphObserver>(
         &self,
-        _node_path: &[SuperGraphNodeId],
+        _node_path: &[GlobalId],
         data: &mut SuperGraphData,
         context: &mut SuperGraphContext<T>,
     ) -> Result<(), SuperGraphError> {
@@ -1061,10 +1090,31 @@ impl SuperGraphNode for SuperGraphNodeRNNCacheRead {
         }
         Ok(())
     }
+
+    fn op_kind(&self) -> String {
+        "RNNCacheRead".to_string()
+    }
+    fn inputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new(
+            [self.key_input.to_any(), self.tokens_input.to_any()]
+                .into_iter()
+                .chain(self.default_state_inputs.iter().map(|x| x.1.to_any())),
+        )
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new(
+            std::iter::once(self.tokens_output.to_any())
+                .chain(self.state_outputs.iter().map(|x| x.1.to_any())),
+        )
+    }
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SuperGraphNodeRNNCacheWrite {
+    global_id: GlobalId,
     key_input: SuperGraphLinkHash,
     tokens_input: SuperGraphLinkTensor,
     state_inputs: Vec<(String, SuperGraphLinkTensor)>,
@@ -1075,8 +1125,10 @@ impl SuperGraphNodeRNNCacheWrite {
         key_input: SuperGraphLinkHash,
         tokens_input: SuperGraphLinkTensor,
         state_inputs: Vec<(String, SuperGraphLinkTensor)>,
+        rng: &mut impl RngCore,
     ) -> Self {
         Self {
+            global_id: GlobalId::new(rng),
             key_input,
             tokens_input,
             state_inputs,
@@ -1084,22 +1136,6 @@ impl SuperGraphNodeRNNCacheWrite {
     }
 }
 
-impl Node<SuperGraphAnyLink> for SuperGraphNodeRNNCacheWrite {
-    type OpKind = String;
-    fn op_kind(&self) -> Self::OpKind {
-        "RNNCacheWrite".to_string()
-    }
-    fn inputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
-        Box::new(
-            [self.key_input.to_any(), self.tokens_input.to_any()]
-                .into_iter()
-                .chain(self.state_inputs.iter().map(|x| x.1.to_any())),
-        )
-    }
-    fn outputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
-        Box::new(std::iter::empty())
-    }
-}
 impl SuperGraphNode for SuperGraphNodeRNNCacheWrite {
     fn to_any(self) -> SuperGraphAnyNode {
         SuperGraphAnyNode::RNNCacheWrite(self)
@@ -1107,7 +1143,7 @@ impl SuperGraphNode for SuperGraphNodeRNNCacheWrite {
 
     fn eval<T: SuperGraphObserver>(
         &self,
-        _node_path: &[SuperGraphNodeId],
+        _node_path: &[GlobalId],
         data: &mut SuperGraphData,
         context: &mut SuperGraphContext<T>,
     ) -> Result<(), SuperGraphError> {
@@ -1141,6 +1177,22 @@ impl SuperGraphNode for SuperGraphNodeRNNCacheWrite {
         }
         Ok(())
     }
+    fn op_kind(&self) -> String {
+        "RNNCacheWrite".to_string()
+    }
+    fn inputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new(
+            [self.key_input.to_any(), self.tokens_input.to_any()]
+                .into_iter()
+                .chain(self.state_inputs.iter().map(|x| x.1.to_any())),
+        )
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new(std::iter::empty())
+    }
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1159,23 +1211,36 @@ macro_rules! delegate {
     ($name:ident($($arg:ident: $ty:ty),*) -> $ret:ty) => {
         fn $name(&self, $($arg: $ty),*) -> $ret {
             match self {
-                SuperGraphAnyNode::ModelExecution(x) => x.$name($($arg),*),
-                SuperGraphAnyNode::TokenizerEncode(x) => x.$name($($arg),*),
-                SuperGraphAnyNode::TokenizerDecode(x) => x.$name($($arg),*),
-                SuperGraphAnyNode::TokenizerLoad(x) => x.$name($($arg),*),
-                SuperGraphAnyNode::MilliOpGraph(x) => x.$name($($arg),*),
-                SuperGraphAnyNode::Scan(x) => x.$name($($arg),*),
-                SuperGraphAnyNode::RNNCacheRead(x) => x.$name($($arg),*),
-                SuperGraphAnyNode::RNNCacheWrite(x) => x.$name($($arg),*),
+                SuperGraphAnyNode::ModelExecution(x) => SuperGraphNode::$name(x,$($arg),*),
+                SuperGraphAnyNode::TokenizerEncode(x) => SuperGraphNode::$name(x,$($arg),*),
+                SuperGraphAnyNode::TokenizerDecode(x) => SuperGraphNode::$name(x,$($arg),*),
+                SuperGraphAnyNode::TokenizerLoad(x) => SuperGraphNode::$name(x,$($arg),*),
+                SuperGraphAnyNode::MilliOpGraph(x) => SuperGraphNode::$name(x,$($arg),*),
+                SuperGraphAnyNode::Scan(x) => SuperGraphNode::$name(x,$($arg),*),
+                SuperGraphAnyNode::RNNCacheRead(x) => SuperGraphNode::$name(x,$($arg),*),
+                SuperGraphAnyNode::RNNCacheWrite(x) => SuperGraphNode::$name(x,$($arg),*),
             }
         }
     }
 }
 
 impl SuperGraphAnyNode {
-    pub(crate) fn eval<'a, 'b, 'c, 'd, T: SuperGraphObserver>(
+    pub fn get_sub_graph(&self) -> Option<&SuperGraph> {
+        match self {
+            SuperGraphAnyNode::Scan(x) => Some(&x.inner_graph),
+            _ => None,
+        }
+    }
+}
+
+impl SuperGraphNode for SuperGraphAnyNode {
+    fn to_any(self) -> SuperGraphAnyNode {
+        self
+    }
+
+    fn eval<'a, 'b, 'c, 'd, T: SuperGraphObserver>(
         &'a self,
-        node_path: &[SuperGraphNodeId],
+        node_path: &[GlobalId],
         data: &mut SuperGraphData<'b>,
         context: &mut SuperGraphContext<'a, 'b, 'c, 'd, T>,
     ) -> Result<(), SuperGraphError> {
@@ -1191,17 +1256,30 @@ impl SuperGraphAnyNode {
         }
     }
 
-    pub fn get_sub_graph(&self) -> Option<&SuperGraphInner> {
-        match self {
-            SuperGraphAnyNode::Scan(x) => Some(&x.inner_graph),
-            _ => None,
-        }
-    }
-}
-
-impl Node<SuperGraphAnyLink> for SuperGraphAnyNode {
-    type OpKind = String;
-    delegate!(op_kind() -> Self::OpKind);
+    delegate!(op_kind() -> String);
     delegate!(inputs() -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_>);
     delegate!(outputs() -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_>);
+    delegate!(global_id() -> GlobalId);
+}
+
+impl NodeMetadata for SuperGraphAnyNode {
+    fn parameters(&self) -> Vec<Property> {
+        match self {
+            SuperGraphAnyNode::ModelExecution(node) => {
+                vec![
+                    Property::new("symbolic_graph_id", PropertyValue::Int(node.symbolic_graph_id as i64)),
+                ]
+            }
+            SuperGraphAnyNode::Scan(node) => {
+                vec![
+                    Property::new("num_scan_inputs", PropertyValue::Int(node.scan_inputs.len() as i64)),
+                ]
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn has_subgraph(&self) -> bool {
+        matches!(self, SuperGraphAnyNode::Scan(_))
+    }
 }

@@ -1,9 +1,10 @@
-use crate::graph::Node;
+use rand::Rng;
+use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::MilliOpGraph;
 use crate::onnx;
 use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{
-    ONNXDecodingError, SymbolicGraphTensorId, query_attribute_int, query_attribute_ints,
+    ONNXDecodingError, query_attribute_int, query_attribute_ints,
     query_attribute_string,
 };
 use serde::{Deserialize, Serialize};
@@ -18,10 +19,11 @@ pub(crate) enum ConvOperationAutoPad {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ConvOperation {
-    input: SymbolicGraphTensorId,
-    output: SymbolicGraphTensorId,
-    weight: SymbolicGraphTensorId,
-    bias: Option<SymbolicGraphTensorId>,
+    global_id: GlobalId,
+    input: GlobalId,
+    output: GlobalId,
+    weight: GlobalId,
+    bias: Option<GlobalId>,
     auto_pad: ConvOperationAutoPad,
     dilations: Vec<i64>,
     group: i64,
@@ -32,9 +34,10 @@ pub struct ConvOperation {
 
 impl ConvOperation {
     pub(crate) fn from_onnx(
-        inputs: &[Option<SymbolicGraphTensorId>],
-        outputs: &[Option<SymbolicGraphTensorId>],
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
         attributes: &[onnx::AttributeProto],
+        rng: &mut impl Rng,
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() < 2 || inputs.len() > 3 {
             return Err(ONNXDecodingError::InvalidOperatorInputs("Conv"));
@@ -62,6 +65,7 @@ impl ConvOperation {
         let strides = query_attribute_ints(attributes, "strides").unwrap_or_default();
 
         Ok(Self {
+            global_id: GlobalId::new(rng),
             input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Conv"))?,
             weight: inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs("Conv"))?,
             bias: if inputs.len() > 2 {
@@ -80,13 +84,16 @@ impl ConvOperation {
     }
 }
 
-impl Node<SymbolicGraphTensorId> for ConvOperation {
+impl Node for ConvOperation {
     type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
     fn op_kind(&self) -> Self::OpKind {
         "Conv".to_string()
     }
 
-    fn inputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         if let Some(bias) = self.bias {
             Box::new([self.input, self.weight, bias].into_iter())
         } else {
@@ -94,13 +101,38 @@ impl Node<SymbolicGraphTensorId> for ConvOperation {
         }
     }
 
-    fn outputs(&self) -> Box<dyn Iterator<Item = SymbolicGraphTensorId>> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new(std::iter::once(self.output))
     }
 }
 
 impl Operation for ConvOperation {
-    fn get_milli_op_graph(&self) -> MilliOpGraph<SymbolicGraphTensorId> {
+    fn parameters(&self) -> Vec<Property> {
+        let mut params = Vec::new();
+        let auto_pad_str = match &self.auto_pad {
+            ConvOperationAutoPad::NotSet => "NOTSET",
+            ConvOperationAutoPad::SameUpper => "SAME_UPPER",
+            ConvOperationAutoPad::SameLower => "SAME_LOWER",
+            ConvOperationAutoPad::Valid => "VALID",
+        };
+        params.push(Property::new("auto_pad", PropertyValue::String(auto_pad_str.to_string())));
+        if !self.dilations.is_empty() {
+            params.push(Property::new("dilations", PropertyValue::IntList(self.dilations.clone())));
+        }
+        params.push(Property::new("group", PropertyValue::Int(self.group)));
+        if !self.kernel_shape.is_empty() {
+            params.push(Property::new("kernel_shape", PropertyValue::IntList(self.kernel_shape.clone())));
+        }
+        if !self.pads.is_empty() {
+            params.push(Property::new("pads", PropertyValue::IntList(self.pads.clone())));
+        }
+        if !self.strides.is_empty() {
+            params.push(Property::new("strides", PropertyValue::IntList(self.strides.clone())));
+        }
+        params
+    }
+
+    fn get_milli_op_graph(&self, _rng: &mut impl Rng) -> MilliOpGraph {
         unimplemented!();
     }
 }

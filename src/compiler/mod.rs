@@ -4,9 +4,10 @@ use crate::backends::eval_backend::EvalBackend;
 use crate::numeric_tensor::NumericTensor;
 use crate::symbolic_graph::observer::SymbolicGraphObserver;
 use crate::symbolic_graph::tensor_store::TensorStore;
-use crate::symbolic_graph::{SymbolicGraph, SymbolicGraphNodePath, SymbolicGraphTensorPath};
+use crate::symbolic_graph::{SymbolicGraph};
 use std::sync::Arc;
 use std::time::Instant;
+use crate::graph::GlobalId;
 
 pub enum CompilationSubject {
     SymbolicGraph { symbolic_graph: Arc<SymbolicGraph> },
@@ -15,14 +16,14 @@ pub enum CompilationSubject {
 pub trait CompiledProgramObserver {
     fn on_op_executed(
         &mut self,
-        node_path: &SymbolicGraphNodePath,
+        node_path: &[GlobalId],
         start_instant: Instant,
         end_instant: Instant,
         backend: &mut EvalBackend,
     );
     fn on_tensor_assigned(
         &mut self,
-        tensor_path: &SymbolicGraphTensorPath,
+        tensor_path: &[GlobalId],
         tensor: &NumericTensor<DynRank>,
         backend: &mut EvalBackend,
     );
@@ -45,7 +46,7 @@ struct SymbolicGraphObserverWrapper<'a, T: CompiledProgramObserver> {
 impl<T: CompiledProgramObserver> SymbolicGraphObserver for SymbolicGraphObserverWrapper<'_, T> {
     fn on_op_executed(
         &mut self,
-        node_path: &SymbolicGraphNodePath,
+        node_path: &[GlobalId],
         start_instant: Instant,
         end_instant: Instant,
         backend: &mut EvalBackend,
@@ -56,7 +57,7 @@ impl<T: CompiledProgramObserver> SymbolicGraphObserver for SymbolicGraphObserver
 
     fn on_tensor_assigned(
         &mut self,
-        tensor_path: &SymbolicGraphTensorPath,
+        tensor_path: &[GlobalId],
         tensor: &NumericTensor<DynRank>,
         backend: &mut EvalBackend,
     ) {

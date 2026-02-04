@@ -7,17 +7,17 @@ edition = "2024"
 crate-type = ["cdylib", "lib"]
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-tracing-subscriber = "0.3.19"
-egui = { version = "0.33.0" }
-egui_extras = { version = "0.33.0" }
-eframe = {version = "0.33.0", default-features = false, features = [
+tracing-subscriber = "0.3.22"
+egui = { version = "0.33.3" }
+egui_extras = { version = "0.33.3" }
+eframe = {version = "0.33.3", default-features = false, features = [
     "default_fonts", # Embed the default egui fonts.
     "glow",          # Use the glow rendering backend. Alternative: "wgpu".
     "persistence",   # Enable restoring app state when restarting the app.
 ]}
-log = "0.4.27"
-wasm-bindgen-futures = "0.4.50"
-web-sys = { version = "0.3.70", features = ['Document',
+log = "0.4.29"
+wasm-bindgen-futures = "0.4.58"
+web-sys = { version = "0.3.85", features = ['Document',
     'Element',
     'HtmlElement',
     'Node',
@@ -30,10 +30,10 @@ web-sys = { version = "0.3.70", features = ['Document',
     'FileReader'
 ] }
 ciborium = { version="0.2.2"}
-wasm-bindgen = "0.2.100"
+wasm-bindgen = "0.2.108"
 getrandom = { version = "0.3", features = ["wasm_js"] }
 web-time = "1.1.0"
-tokio = {version = "1.45.0", default-features = false, features = ["sync"]}
+tokio = {version = "1.49.0", default-features = false, features = ["sync"]}
 futures = {version = "0.3.31"}
 rwkv-tokenizer = { workspace = true }
 
@@ -45,5 +45,5 @@ whisper-tensor-server = {workspace=true, default-features = false}
 strum = "0.27.1"
 serde = { version = "1.0.219", features = ["derive"] }
 rand = "0.9.2"
-tokenizers = {version="0.22.1", default-features = false, features = ["unstable_wasm"]}
+tokenizers = {version="0.22.2", default-features = false, features = ["unstable_wasm"]}
 thiserror = "2.0.12"

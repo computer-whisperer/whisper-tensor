@@ -1,8 +1,8 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
-use crate::graph::Node;
+use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp, MilliOpTensorIDOrLiteral};
-use crate::milli_graph::{MilliOpGraph, MilliOpGraphError, MilliOpGraphTensorId};
+use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::numeric_tensor::NumericTensor;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -10,8 +10,9 @@ use typenum::P1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Split {
-    output: MilliOpGraphTensorId,
-    data: MilliOpGraphTensorId,
+    global_id: GlobalId,
+    output: GlobalId,
+    data: GlobalId,
     split: Option<MilliOpTensorIDOrLiteral>,
     axis: i64,
     num_outputs: Option<usize>,
@@ -19,16 +20,18 @@ pub struct Split {
 }
 
 impl Split {
-    pub fn push_new<T: std::hash::Hash + Clone + Eq + 'static>(
-        graph: &mut MilliOpGraph<T>,
-        data: MilliOpGraphTensorId,
+    pub fn push_new(
+        graph: &mut MilliOpGraph,
+        data: GlobalId,
         split: Option<MilliOpTensorIDOrLiteral>,
         axis: i64,
         num_outputs: Option<usize>,
         output_id: usize,
-    ) -> MilliOpGraphTensorId {
-        let output = graph.get_new_tensor_id();
+        rng: &mut impl rand::Rng,
+    ) -> GlobalId {
+        let output = graph.get_new_tensor_id(rng);
         let node = Self {
+            global_id: GlobalId::new(rng),
             output,
             data,
             split,
@@ -41,15 +44,18 @@ impl Split {
     }
 }
 
-impl Node<MilliOpGraphTensorId> for Split {
+impl Node for Split {
     type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
     fn op_kind(&self) -> String {
         "Split".to_string()
     }
-    fn inputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new([self.data].into_iter())
     }
-    fn outputs(&self) -> Box<dyn Iterator<Item = MilliOpGraphTensorId>> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new([self.output].into_iter())
     }
 }
@@ -57,10 +63,10 @@ impl Node<MilliOpGraphTensorId> for Split {
 impl MilliOp for Split {
     fn eval(
         &self,
-        inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
+        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
     ) -> Result<
-        Box<dyn Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>>,
+        Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>,
         MilliOpGraphError,
     > {
         // Determine the split sizes
@@ -125,20 +131,25 @@ mod tests {
 
     #[test]
     fn test_split_num_outputs_even_axis0() {
+        let rng = &mut rand::rng();
         // Build a tiny graph with one input and two split outputs, then run eval
+
+        let input_id = GlobalId::new(rng);
         let (mut graph, input_map) =
-            MilliOpGraph::new(std::iter::once(MilliOpGraphTensorId { inner: 0 }));
-        let data_id = input_map[&MilliOpGraphTensorId { inner: 0 }];
-        let out0 = Split::push_new(&mut graph, data_id, None, 0, Some(2), 0);
-        let out1 = Split::push_new(&mut graph, data_id, None, 0, Some(2), 1);
+            MilliOpGraph::new(std::iter::once(input_id), rng);
+        let data_id = input_map[&input_id];
+        let out0 = Split::push_new(&mut graph, data_id, None, 0, Some(2), 0, rng);
+        let out1 = Split::push_new(&mut graph, data_id, None, 0, Some(2), 1, rng);
         let mut output_map = HashMap::new();
-        output_map.insert(out0, MilliOpGraphTensorId { inner: 1 });
-        output_map.insert(out1, MilliOpGraphTensorId { inner: 2 });
+        let out0_id = GlobalId::new(rng);
+        let out1_id = GlobalId::new(rng);
+        output_map.insert(out0, out0_id);
+        output_map.insert(out1, out1_id);
         graph.set_output_map(output_map);
 
         let mut inputs = HashMap::new();
         let x = NumericTensor::<DynRank>::from_vec_shape(vec![1f32, 2., 3., 4.], vec![4]).unwrap();
-        inputs.insert(MilliOpGraphTensorId { inner: 0 }, x);
+        inputs.insert(input_id, x);
 
         let mut backend = EvalBackend::NDArray;
         let mut obs = ();
@@ -146,8 +157,8 @@ mod tests {
             .eval(&inputs, &mut obs, &mut backend)
             .unwrap()
             .collect::<HashMap<_, _>>();
-        let out0 = res[&MilliOpGraphTensorId { inner: 1 }].clone();
-        let out1 = res[&MilliOpGraphTensorId { inner: 2 }].clone();
+        let out0 = res[&out0_id].clone();
+        let out1 = res[&out1_id].clone();
 
         assert_eq!(out0.shape(), vec![2u64]);
         assert_eq!(out1.shape(), vec![2u64]);
@@ -162,12 +173,15 @@ mod tests {
 
     #[test]
     fn test_split_num_outputs_negative_axis() {
+        let rng = &mut rand::rng();
+        let input_id = GlobalId::new(rng);
         let (mut graph, input_map) =
-            MilliOpGraph::new(std::iter::once(MilliOpGraphTensorId { inner: 0 }));
-        let data_id = input_map[&MilliOpGraphTensorId { inner: 0 }];
-        let out = Split::push_new(&mut graph, data_id, None, -1, Some(2), 1);
+            MilliOpGraph::new(std::iter::once(input_id), rng);
+        let data_id = input_map[&input_id];
+        let out = Split::push_new(&mut graph, data_id, None, -1, Some(2), 1, rng);
         let mut output_map = HashMap::new();
-        output_map.insert(out, MilliOpGraphTensorId { inner: 1 });
+        let output_id = GlobalId::new(rng);
+        output_map.insert(out, output_id);
         graph.set_output_map(output_map);
 
         let mut inputs = HashMap::new();
@@ -177,7 +191,7 @@ mod tests {
             vec![2, 4],
         )
         .unwrap();
-        inputs.insert(MilliOpGraphTensorId { inner: 0 }, x);
+        inputs.insert(input_id, x);
 
         let mut backend = EvalBackend::NDArray;
         let mut obs = ();
@@ -185,7 +199,7 @@ mod tests {
             .eval(&inputs, &mut obs, &mut backend)
             .unwrap()
             .collect::<HashMap<_, _>>();
-        let out = res[&MilliOpGraphTensorId { inner: 1 }].clone();
+        let out = res[&output_id].clone();
         assert_eq!(out.shape(), vec![2u64, 2u64]);
         let v: Vec<f32> = out.flatten().unwrap().try_into().unwrap();
         // Expect second half along last axis: [[3,4],[7,8]]
@@ -194,21 +208,25 @@ mod tests {
 
     #[test]
     fn test_split_num_outputs_uneven_distribution_axis0() {
+        let rng = &mut rand::rng();
+        let input_id = GlobalId::new(rng);
         let (mut graph, input_map) =
-            MilliOpGraph::new(std::iter::once(MilliOpGraphTensorId { inner: 0 }));
-        let data_id = input_map[&MilliOpGraphTensorId { inner: 0 }];
+            MilliOpGraph::new(std::iter::once(input_id), rng);
+        let data_id = input_map[&input_id];
         // dim=5, num_outputs=2 -> sizes [3,2]
-        let out0 = Split::push_new(&mut graph, data_id, None, 0, Some(2), 0);
-        let out1 = Split::push_new(&mut graph, data_id, None, 0, Some(2), 1);
+        let out0_id = GlobalId::new(rng);
+        let out1_id = GlobalId::new(rng);
+        let out0 = Split::push_new(&mut graph, data_id, None, 0, Some(2), 0, rng);
+        let out1 = Split::push_new(&mut graph, data_id, None, 0, Some(2), 1, rng);
         let mut output_map = HashMap::new();
-        output_map.insert(out0, MilliOpGraphTensorId { inner: 1 });
-        output_map.insert(out1, MilliOpGraphTensorId { inner: 2 });
+        output_map.insert(out0, out0_id);
+        output_map.insert(out1, out1_id);
         graph.set_output_map(output_map);
 
         let mut inputs = HashMap::new();
         let x =
             NumericTensor::<DynRank>::from_vec_shape(vec![1f32, 2., 3., 4., 5.], vec![5]).unwrap();
-        inputs.insert(MilliOpGraphTensorId { inner: 0 }, x);
+        inputs.insert(input_id, x);
 
         let mut backend = EvalBackend::NDArray;
         let mut obs = ();
@@ -216,8 +234,8 @@ mod tests {
             .eval(&inputs, &mut obs, &mut backend)
             .unwrap()
             .collect::<HashMap<_, _>>();
-        let out0 = res[&MilliOpGraphTensorId { inner: 1 }].clone();
-        let out1 = res[&MilliOpGraphTensorId { inner: 2 }].clone();
+        let out0 = res[&out0_id].clone();
+        let out1 = res[&out1_id].clone();
 
         assert_eq!(out0.shape(), vec![3u64]);
         assert_eq!(out1.shape(), vec![2u64]);

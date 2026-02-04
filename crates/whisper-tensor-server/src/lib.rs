@@ -5,13 +5,14 @@ use whisper_tensor::DynRank;
 use whisper_tensor::backends::eval_backend::EvalBackend;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::dtype::DType;
+use whisper_tensor::graph::GlobalId;
 use whisper_tensor::interfaces::AnyInterface;
 use whisper_tensor::numeric_tensor::NumericTensor;
 use whisper_tensor::super_graph::links::{
     SuperGraphLinkHash, SuperGraphLinkString, SuperGraphLinkTensor, SuperGraphLinkTensorMap,
 };
 use whisper_tensor::super_graph::{
-    SuperGraph, SuperGraphHash, SuperGraphNodePath, SuperGraphTensorPath,
+    SuperGraph, SuperGraphHash,
 };
 use whisper_tensor::symbolic_graph::tensor_store::TensorStoreTensorId;
 use whisper_tensor_import::ModelTypeHint;
@@ -28,7 +29,7 @@ impl core::fmt::Display for LoadedModelId {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AbbreviatedTensorReportSettings {
     pub downsampled_size: u64,
-    pub subscribed_tensors: Vec<SuperGraphTensorPath>,
+    pub subscribed_tensors: Vec<Vec<GlobalId>>,
     pub do_all: bool,
 }
 
@@ -61,7 +62,7 @@ pub struct SuperGraphRequest {
     pub tensor_inputs: HashMap<SuperGraphLinkTensor, NDArrayNumericTensor<DynRank>>,
     pub model_inputs: HashMap<SuperGraphLinkTensorMap, LoadedModelId>,
     pub symbolic_graph_ids: Vec<LoadedModelId>,
-    pub subscribed_tensors: Vec<SuperGraphTensorPath>,
+    pub subscribed_tensors: Vec<Vec<GlobalId>>,
     pub do_node_execution_reports: bool,
     pub abbreviated_tensor_report_settings: Option<AbbreviatedTensorReportSettings>,
 }
@@ -323,9 +324,9 @@ impl AbbreviatedTensorValue {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SuperGraphExecutionReport {
     pub attention: Option<u64>,
-    pub node_executions: Vec<(SuperGraphNodePath, Duration, Duration)>,
-    pub abbreviated_tensor_assignments: Vec<(SuperGraphTensorPath, AbbreviatedTensorValue)>,
-    pub tensor_assignments: Vec<(SuperGraphTensorPath, NDArrayNumericTensor<DynRank>)>,
+    pub node_executions: Vec<(Vec<GlobalId>, Duration, Duration)>,
+    pub abbreviated_tensor_assignments: Vec<(Vec<GlobalId>, AbbreviatedTensorValue)>,
+    pub tensor_assignments: Vec<(Vec<GlobalId>, NDArrayNumericTensor<DynRank>)>,
 }
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]

@@ -14,8 +14,9 @@ use whisper_tensor::numeric_tensor::NumericTensor;
 use whisper_tensor::super_graph::cache::{SuperGraphCache, SuperGraphTensorCache};
 use whisper_tensor::super_graph::data::SuperGraphData;
 use whisper_tensor::super_graph::observer::SuperGraphObserver;
-use whisper_tensor::super_graph::{SuperGraphContext, SuperGraphNodePath, SuperGraphTensorPath};
+use whisper_tensor::super_graph::{SuperGraphContext};
 use whisper_tensor::{DynRank, compiler};
+use whisper_tensor::graph::GlobalId;
 use whisper_tensor_server::{
     AbbreviatedTensorReportSettings, AbbreviatedTensorValue, LoadedModelId, SuperGraphRequest,
     SuperGraphRequestBackendMode, SuperGraphResponse, SuperGraphResponseData,
@@ -26,20 +27,20 @@ pub struct SchedulerReportSuperGraphNodeExecuted {
     pub attention: Option<u64>,
     pub start_instant: Instant,
     pub end_instant: Instant,
-    pub path: SuperGraphNodePath,
+    pub path: Vec<GlobalId>,
 }
 
 #[derive(Debug)]
 pub struct SchedulerReportSuperGraphTensorAssigned {
     pub attention: Option<u64>,
-    pub path: SuperGraphTensorPath,
+    pub path: Vec<GlobalId>,
     pub value: NDArrayNumericTensor<DynRank>,
 }
 
 #[derive(Debug)]
 pub struct SchedulerReportSuperGraphTensorAssignedAbbreviated {
     pub attention: Option<u64>,
-    pub path: SuperGraphTensorPath,
+    pub path: Vec<GlobalId>,
     pub value: AbbreviatedTensorValue,
 }
 
@@ -105,9 +106,9 @@ struct LocalSuperGraphObserver {
     attention: Option<u64>,
     do_node_execute_report: bool,
     reporter: Option<SchedulerReporter>,
-    subscribed_tensors: HashSet<SuperGraphTensorPath>,
+    subscribed_tensors: HashSet<Vec<GlobalId>>,
     abbreviated_tensor_settings: Option<AbbreviatedTensorReportSettings>,
-    abbreviated_tensor_subscribed_table: Option<HashSet<SuperGraphTensorPath>>,
+    abbreviated_tensor_subscribed_table: Option<HashSet<Vec<GlobalId>>>,
 }
 
 impl LocalSuperGraphObserver {
@@ -116,7 +117,7 @@ impl LocalSuperGraphObserver {
         do_node_execute_report: bool,
         abbreviated_tensor_settings: Option<AbbreviatedTensorReportSettings>,
         reporter: Option<SchedulerReporter>,
-        subscribed_tensors: HashSet<SuperGraphTensorPath>,
+        subscribed_tensors: HashSet<Vec<GlobalId>>,
     ) -> Self {
         let abbreviated_tensor_subscribed_table = abbreviated_tensor_settings
             .as_ref()
@@ -135,7 +136,7 @@ impl LocalSuperGraphObserver {
 impl SuperGraphObserver for LocalSuperGraphObserver {
     fn on_node_executed(
         &mut self,
-        path: &SuperGraphNodePath,
+        path: &[GlobalId],
         start_instant: Instant,
         end_instant: Instant,
         _backend: &mut EvalBackend,
@@ -146,7 +147,7 @@ impl SuperGraphObserver for LocalSuperGraphObserver {
             let report =
                 SchedulerReport::SuperGraphNodeExecuted(SchedulerReportSuperGraphNodeExecuted {
                     attention: self.attention,
-                    path: path.clone(),
+                    path: path.to_vec(),
                     start_instant,
                     end_instant,
                 });
@@ -156,7 +157,7 @@ impl SuperGraphObserver for LocalSuperGraphObserver {
 
     fn on_tensor_assigned(
         &mut self,
-        path: &SuperGraphTensorPath,
+        path: &[GlobalId],
         tensor: &NumericTensor<DynRank>,
         backend: &mut EvalBackend,
     ) {
@@ -165,7 +166,7 @@ impl SuperGraphObserver for LocalSuperGraphObserver {
                 let report = SchedulerReport::SuperGraphTensorAssignedFull(
                     SchedulerReportSuperGraphTensorAssigned {
                         attention: self.attention,
-                        path: path.clone(),
+                        path: path.to_vec(),
                         value: tensor.to_ndarray().unwrap(),
                     },
                 );
@@ -182,7 +183,7 @@ impl SuperGraphObserver for LocalSuperGraphObserver {
                     let report = SchedulerReport::SuperGraphTensorAssignedAbbreviated(
                         SchedulerReportSuperGraphTensorAssignedAbbreviated {
                             attention: self.attention,
-                            path: path.clone(),
+                            path: path.to_vec(),
                             value: AbbreviatedTensorValue::from_tensor(
                                 tensor,
                                 settings.downsampled_size,

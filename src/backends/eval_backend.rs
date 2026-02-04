@@ -2,14 +2,13 @@ use crate::backends::ModelLoadedTensorCache;
 #[cfg(feature = "vulkan")]
 use crate::backends::vulkan_backend::VulkanImmediateExecutor;
 use crate::dtype::{DType, DTypeError};
-use crate::graph::Node;
+use crate::graph::{GlobalId, Link, Node};
 use crate::numeric_tensor::NumericTensor;
 use crate::symbolic_graph::observer::SymbolicGraphObserver;
 use crate::symbolic_graph::ops::{EvalError, Operation};
 use crate::symbolic_graph::tensor_store::TensorStore;
 use crate::symbolic_graph::{
-    GraphOperation, SymbolicGraph, SymbolicGraphNodePath, SymbolicGraphOperationId,
-    SymbolicGraphTensorId, SymbolicGraphTensorPath, check_tensor_matches,
+    GraphOperation, SymbolicGraph, check_tensor_matches,
 };
 use crate::tensor_rank::{DynRank, Rank};
 use std::collections::{HashMap, HashSet};
@@ -130,8 +129,8 @@ pub fn run<T: SymbolicGraphObserver>(
     } else {
         model.get_initialized_tensors(tensor_store)
     };
-    let mut tensor_uses_left: HashMap<SymbolicGraphTensorId, usize> = HashMap::new();
-    let mut active_tensors: HashMap<SymbolicGraphTensorId, NumericTensor<DynRank>> = HashMap::new();
+    let mut tensor_uses_left: HashMap<GlobalId, usize> = HashMap::new();
+    let mut active_tensors: HashMap<GlobalId, NumericTensor<DynRank>> = HashMap::new();
     for (tensor_id, tensor) in initialized_tensors {
         // Start with 1 extra use with initialized tensors, assuming they will stay on-device after
         *tensor_uses_left.entry(tensor_id).or_insert(0) += 1;
@@ -140,8 +139,9 @@ pub fn run<T: SymbolicGraphObserver>(
     let tensors_by_name = model.get_tensors_by_name();
     for (name, tensor) in inputs {
         if let Some(tensor_id) = tensors_by_name.get(&name) {
+            let onnx_tensor = model.get_tensor_info(*tensor_id).unwrap();
             observer.on_tensor_assigned(
-                &SymbolicGraphTensorPath::Tensor(*tensor_id),
+                &[onnx_tensor.global_id()],
                 &tensor,
                 eval_backend,
             );
@@ -164,7 +164,7 @@ pub fn run<T: SymbolicGraphObserver>(
     let mut tensors_just_created = vec![];
 
     let ops = model.get_operations();
-    let mut remaining_ops_to_complete: HashSet<SymbolicGraphOperationId> =
+    let mut remaining_ops_to_complete: HashSet<GlobalId> =
         ops.keys().copied().collect();
     loop {
         // Pick the next op to use
@@ -234,7 +234,7 @@ pub fn run<T: SymbolicGraphObserver>(
                 .map_err(|x| EvalRuntimeError::EvalError(name.clone(), x))?;
             let end_instant = Instant::now();
             observer.on_op_executed(
-                &SymbolicGraphNodePath::Node(op_id),
+                &[op.global_id()],
                 start_instant,
                 end_instant,
                 eval_backend,
@@ -249,7 +249,7 @@ pub fn run<T: SymbolicGraphObserver>(
                     .map_err(|x| EvalRuntimeError::EvalError(name.clone(), x))?;
 
                 observer.on_tensor_assigned(
-                    &SymbolicGraphTensorPath::Tensor(tensor_id),
+                    &[tensor_info.global_id()],
                     &value,
                     eval_backend,
                 );

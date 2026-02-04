@@ -54,8 +54,8 @@ pub use where_op::*;
 
 use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
-use crate::graph::Node;
-use crate::milli_graph::{MilliOpGraphError, MilliOpGraphTensorId};
+use crate::graph::{GlobalId, Node, NodeMetadata};
+use crate::milli_graph::{MilliOpGraphError};
 use crate::numeric_tensor::NumericTensor;
 use crate::scalar_info::ScalarInfoTyped;
 use crate::symbolic_scalar::{SymbolicResolver, SymbolicScalarTyped};
@@ -67,21 +67,21 @@ use typenum::P1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MilliOpTensorIDOrLiteral {
-    TensorID(MilliOpGraphTensorId),
+    TensorID(GlobalId),
     Literal(NDArrayNumericTensor<DynRank>),
 }
 
 pub type EvalResult = Result<
-    Box<dyn Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>>,
+    Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>,
     MilliOpGraphError,
 >;
-pub trait MilliOp: Node<MilliOpGraphTensorId> {
+pub trait MilliOp: Node {
     fn infer(
         &self,
-        known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>,
+        known_inputs: &HashMap<GlobalId, TensorInfo>,
         _symbolic_resolver: &mut SymbolicResolver,
         backend: &mut EvalBackend,
-    ) -> Result<Box<dyn Iterator<Item = (MilliOpGraphTensorId, TensorInfo)>>, MilliOpGraphError>
+    ) -> Result<Box<dyn Iterator<Item = (GlobalId, TensorInfo)>>, MilliOpGraphError>
     {
         let mut resolved_inputs = HashMap::new();
         for input in self.inputs() {
@@ -96,16 +96,16 @@ pub trait MilliOp: Node<MilliOpGraphTensorId> {
             }
         }
 
-        let collected: Vec<(MilliOpGraphTensorId, TensorInfo)> = self
+        let collected: Vec<(GlobalId, TensorInfo)> = self
             .eval(&resolved_inputs, backend)?
             .map(|(a, b)| (a, TensorInfo::from(b)))
             .collect();
         Ok(Box::new(collected.into_iter()))
     }
-    //fn infer(&self, known_inputs: &HashMap<MilliOpGraphTensorId, TensorInfo>, _symbolic_resolver: &mut SymbolicResolver, backend: &mut EvalBackend) -> Result<TensorInfo, MilliOpGraphError>;
+    //fn infer(&self, known_inputs: &HashMap<GlobalId, TensorInfo>, _symbolic_resolver: &mut SymbolicResolver, backend: &mut EvalBackend) -> Result<TensorInfo, MilliOpGraphError>;
     fn eval(
         &self,
-        inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
+        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
         _backend: &mut EvalBackend,
     ) -> EvalResult;
 }
@@ -302,17 +302,23 @@ macro_rules! delegate {
 
 impl MilliOp for AnyMilliOp {
     delegate!(eval(
-        inputs: &HashMap<MilliOpGraphTensorId, NumericTensor<DynRank>>,
+        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend
     ) -> Result<
-        Box<dyn Iterator<Item = (MilliOpGraphTensorId, NumericTensor<DynRank>)>>,
+        Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>,
         MilliOpGraphError,
     > );
 }
 
-impl Node<MilliOpGraphTensorId> for AnyMilliOp {
+impl Node for AnyMilliOp {
     type OpKind = String;
     delegate!(op_kind() -> String);
-    delegate!(inputs() ->  Box<dyn Iterator<Item = MilliOpGraphTensorId> + '_>);
-    delegate!(outputs() -> Box<dyn Iterator<Item = MilliOpGraphTensorId> + '_>);
+    delegate!(inputs() ->  Box<dyn Iterator<Item = GlobalId> + '_>);
+    delegate!(outputs() -> Box<dyn Iterator<Item = GlobalId> + '_>);
+    delegate!(global_id() -> GlobalId);
+}
+
+impl NodeMetadata for AnyMilliOp {
+    // MilliOp nodes currently don't expose parameters via introspection
+    // This can be expanded later by adding parameters() to MilliOp trait
 }
