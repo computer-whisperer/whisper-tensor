@@ -78,11 +78,16 @@ pub struct MilliOpGroup {
     pub phase: MilliOpPhase,
     /// Human-readable label for UI
     pub label: Option<String>,
+    /// For backward groups: the forward group this is the gradient of
+    pub backward_of: Option<GlobalId>,
+    /// For optimizer groups: the parameter this updates
+    pub optimizes_param: Option<GlobalId>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MilliOpPhase {
     Forward,
+    Loss,
     Backward,
     Optimizer,
     Custom,
@@ -107,57 +112,51 @@ pub struct MilliOpGraph {
     // New: grouping and source linkage
     groups: HashMap<GlobalId, MilliOpGroup>,
     op_to_group: HashMap<GlobalId, GlobalId>,
+    default_group: Option<GlobalId>,
 
     // New: training metadata (optional)
-    training_metadata: Option<TrainingMetadata>,
+    pub training_metadata: Option<TrainingMetadata>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct TrainingMetadata {
-    /// Parameter tensor → Gradient tensor
-    pub param_to_grad: HashMap<GlobalId, GlobalId>,
-    /// Parameter tensor → New parameter tensor (post-optimizer)
-    pub param_to_new_param: HashMap<GlobalId, GlobalId>,
-    /// Optimizer state: (param, state_name) → tensor
-    pub optimizer_state: HashMap<(GlobalId, String), GlobalId>,
-    /// New optimizer state: (param, state_name) → new tensor
-    pub new_optimizer_state: HashMap<(GlobalId, String), GlobalId>,
-    /// Global optimizer state (timestep, etc.)
-    pub global_state: HashMap<String, GlobalId>,
-    pub new_global_state: HashMap<String, GlobalId>,
-    /// Loss tensor
+    /// The scalar loss tensor (output of loss computation)
     pub loss: Option<GlobalId>,
+    /// Original parameter tensor → gradient tensor
+    pub param_to_grad: HashMap<GlobalId, GlobalId>,
+    /// Original parameter tensor → updated parameter tensor (post-optimizer)
+    pub param_to_new_param: HashMap<GlobalId, GlobalId>,
+    /// (param_id, state_name) → input state tensor, e.g. (W_id, "m") → m_W_input_id
+    pub optimizer_state_inputs: HashMap<(GlobalId, String), GlobalId>,
+    /// (param_id, state_name) → output state tensor (after update)
+    pub optimizer_state_outputs: HashMap<(GlobalId, String), GlobalId>,
+    /// Global optimizer state inputs (e.g., "timestep" → t_input_id)
+    pub global_state_inputs: HashMap<String, GlobalId>,
+    /// Global optimizer state outputs
+    pub global_state_outputs: HashMap<String, GlobalId>,
+    /// Named external inputs (e.g., "labels" → labels_tensor_id)
+    pub external_inputs: HashMap<String, GlobalId>,
 }
 ```
 
 ### Extended Tensor Metadata
 
 ```rust
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Hash, Ord, PartialOrd, Eq, PartialEq, Serialize, Deserialize)]
 pub struct MilliOpGraphTensor {
-    global_id: GlobalId,
-    /// Link back to source SymbolicGraph tensor (if any)
+    pub global_id: GlobalId,
+    /// Link back to source SymbolicGraph tensor (if any).
+    /// Set during generate_milli_graph() for tensors that correspond to a SymbolicGraph tensor.
+    /// Intrinsic provenance — set once at creation, never changes.
     pub source_tensor: Option<GlobalId>,
-    /// Tensor role in training
-    pub role: TensorRole,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TensorRole {
-    /// Regular intermediate tensor
-    Intermediate,
-    /// A trainable parameter
-    Parameter,
-    /// Gradient of a parameter
-    Gradient { of_param: GlobalId },
-    /// Optimizer state (momentum, variance, etc.)
-    OptimizerState { for_param: GlobalId, name: &'static str },
-    /// Data input (changes each batch)
-    DataInput,
-    /// Loss value
-    Loss,
 }
 ```
+
+**Design decision: no `role` field on tensors.** Semantic role (parameter, gradient, optimizer state,
+etc.) is derived from `TrainingMetadata`, which is the single source of truth for training semantics.
+This avoids duplication between tensor fields and TrainingMetadata maps, keeps MilliOpGraphTensor
+`Copy`-compatible, and prevents consistency drift during surgical graph editing. Query methods on
+MilliOpGraph derive role on demand from TrainingMetadata (see "Derived Tensor Role Queries").
 
 ---
 
@@ -175,103 +174,189 @@ impl SymbolicGraph {
         options: &MilliGraphGenOptions,
         rng: &mut impl Rng,
     ) -> Result<MilliOpGraph, MilliGraphGenError> {
-        let mut graph = MilliOpGraph::new_with_groups(rng);
-        let mut tensor_map = HashMap::new();  // SymbolicGraph tensor → MilliOpGraph tensor
+        let mut graph = MilliOpGraph::new_empty(rng);
+        // Maps SymbolicGraph tensor IDs → combined MilliOpGraph tensor IDs.
+        // Maintained across all merge_graph calls.
+        let mut sym_to_combined: HashMap<GlobalId, GlobalId> = HashMap::new();
 
-        // 1. Generate forward pass
+        // 1a. Map graph inputs (runtime data: Input(None))
+        //     and initialized weights (Input(Some(data)))
+        for input_id in &self.ordered_inputs {
+            let internal_id = graph.add_input_with_id(*input_id, rng);
+            sym_to_combined.insert(*input_id, internal_id);
+        }
+
+        // 1b. Map standalone constants (initializers not in ordered_inputs)
+        for const_id in self.constant_link_ids() {
+            let internal_id = graph.add_input_with_id(const_id, rng);
+            sym_to_combined.insert(const_id, internal_id);
+        }
+
+        // 2. Generate forward pass — walk ops in topological order
         for op in self.topological_order() {
             let group_id = graph.create_group(MilliOpGroup {
+                id: GlobalId::new(rng),
                 source_op: Some(op.global_id()),
                 source_graph: Some(self.global_id()),
                 phase: MilliOpPhase::Forward,
                 label: Some(op.op_kind()),
                 ..Default::default()
-            }, rng);
+            });
 
             let forward_milli = op.get_milli_op_graph(rng);
-            graph.merge_graph(forward_milli, group_id, &mut tensor_map);
+            graph.merge_graph(forward_milli, Some(group_id), &mut sym_to_combined, rng);
         }
 
-        // 2. Generate backward pass (if requested)
+        // 3. Compose loss graph (if training)
         if let Some(ref backward_opts) = options.backward {
-            // Initialize loss gradient to 1.0
-            let loss_tensor = tensor_map[&backward_opts.loss];
+            let loss_group = graph.create_group(MilliOpGroup {
+                id: GlobalId::new(rng),
+                phase: MilliOpPhase::Loss,
+                label: Some("loss".into()),
+                ..Default::default()
+            });
+
+            // Wire loss graph inputs to forward outputs / external inputs
+            let mut loss_wiring: HashMap<GlobalId, GlobalId> = HashMap::new();
+            let mut external_inputs: HashMap<String, GlobalId> = HashMap::new();
+            for wire in &backward_opts.loss_wiring {
+                let combined_id = match &wire.source {
+                    LossInputSource::ForwardOutput(sym_id) => sym_to_combined[sym_id],
+                    LossInputSource::ExternalInput { name } => {
+                        let ext_id = graph.add_input(rng);
+                        external_inputs.insert(name.clone(), ext_id);
+                        ext_id
+                    }
+                };
+                loss_wiring.insert(wire.loss_input, combined_id);
+            }
+            graph.merge_graph(
+                backward_opts.loss_graph.clone(), Some(loss_group),
+                &mut loss_wiring, rng,
+            );
+            let loss_tensor = loss_wiring[&backward_opts.loss_output];
+
+            // 4. Generate backward pass
+
+            // 4a. Backward through loss graph (milli-op level differentiation)
             let loss_grad = graph.add_constant_ones_like(loss_tensor, rng);
-            let mut grad_map = HashMap::new();
+            let mut grad_map: HashMap<GlobalId, GlobalId> = HashMap::new();
             grad_map.insert(loss_tensor, loss_grad);
 
-            // Walk operations in reverse
+            let loss_grads = generate_milli_backward(
+                &mut graph, loss_group, &grad_map, rng,
+            );
+            grad_map.extend(loss_grads);
+            // Now grad_map has gradients for loss graph inputs (logits, targets, etc.)
+
+            // 4b. Backward through SymbolicGraph ops (Operation-level)
             for op in self.topological_order().rev() {
-                // Skip if no outputs have gradients
-                let output_grads: Vec<_> = op.outputs()
+                let output_grads: HashMap<GlobalId, GlobalId> = op.outputs()
                     .filter_map(|out_id| {
-                        let milli_id = tensor_map.get(&out_id)?;
-                        grad_map.get(milli_id).map(|g| (*milli_id, *g))
+                        let combined_id = sym_to_combined.get(&out_id)?;
+                        grad_map.get(combined_id).map(|g| (*combined_id, *g))
                     })
                     .collect();
 
-                if output_grads.is_empty() {
-                    continue;
-                }
-
-                // Skip stop-gradient boundaries
-                if backward_opts.stop_gradients.contains(&op.global_id()) {
-                    continue;
-                }
+                if output_grads.is_empty() { continue; }
+                if backward_opts.stop_gradients.contains(&op.global_id()) { continue; }
 
                 let ctx = BackwardGenContext {
-                    output_grads: output_grads.into_iter().collect(),
-                    forward_inputs: op.inputs().map(|id| tensor_map[&id]).collect(),
-                    forward_outputs: op.outputs().map(|id| tensor_map[&id]).collect(),
+                    output_grads,
+                    forward_inputs: op.inputs().map(|id| sym_to_combined[&id]).collect(),
+                    forward_outputs: op.outputs().map(|id| sym_to_combined[&id]).collect(),
+                    tensor_shapes: op.inputs().chain(op.outputs())
+                        .filter_map(|id| self.tensor_info(id).map(|info| (id, info)))
+                        .collect(),
                 };
 
-                if let Some(backward_milli) = op.get_backward_milli_ops(&ctx, rng) {
-                    let group_id = graph.create_group(MilliOpGroup {
+                if let Some(backward_result) = op.get_backward_milli_ops(&ctx, rng) {
+                    let bwd_group = graph.create_group(MilliOpGroup {
+                        id: GlobalId::new(rng),
                         source_op: Some(op.global_id()),
                         source_graph: Some(self.global_id()),
                         phase: MilliOpPhase::Backward,
+                        backward_of: Some(op.global_id()),
                         label: Some(format!("{}_backward", op.op_kind())),
                         ..Default::default()
-                    }, rng);
+                    });
 
-                    // Merge backward ops and accumulate gradients
-                    for (input_id, grad_id) in backward_milli.input_grads {
-                        let orig_id = /* reverse lookup from tensor_map */;
-                        grad_map.entry(input_id)
+                    // Build wiring map: combined-space identity mappings.
+                    // Every combined-space tensor (forward values and gradients)
+                    // maps to itself, so the backward graph's external input keys
+                    // resolve directly. We do NOT include grad_map entries here —
+                    // that would cause fan-out conflicts (a tensor's grad_map entry
+                    // would shadow its forward value when a later backward needs it).
+                    let mut bwd_wiring: HashMap<GlobalId, GlobalId> = HashMap::new();
+                    for &combined_id in sym_to_combined.values() {
+                        bwd_wiring.insert(combined_id, combined_id);
+                    }
+                    for &grad_id in grad_map.values() {
+                        bwd_wiring.insert(grad_id, grad_id);
+                    }
+                    graph.merge_graph(
+                        backward_result.graph, Some(bwd_group),
+                        &mut bwd_wiring, rng,
+                    );
+
+                    // Accumulate gradients for each forward input.
+                    // The backward graph's output_map maps each grad tensor to its
+                    // forward input ID, so after merge bwd_wiring[fwd_input_id]
+                    // gives the remapped gradient tensor in combined-graph space.
+                    for fwd_input_id in &backward_result.differentiable_inputs {
+                        let remapped_grad = bwd_wiring[fwd_input_id];
+                        grad_map.entry(*fwd_input_id)
                             .and_modify(|existing| {
-                                // Accumulate: existing += grad
-                                let sum = graph.add_op_in_group(
-                                    SimpleBinary::add(existing, grad_id),
-                                    group_id
+                                let sum = SimpleBinary::add(
+                                    &mut graph, *existing, remapped_grad, rng,
                                 );
                                 *existing = sum;
                             })
-                            .or_insert(grad_id);
+                            .or_insert(remapped_grad);
                     }
                 }
             }
 
-            // Record param → grad mapping
+            // Record training metadata.
+            // Invariant: all IDs in TrainingMetadata that the training loop INSERTS
+            // into SuperGraphData are external input IDs (what get_inputs() returns).
+            // All IDs the training loop READS from SuperGraphData are external output
+            // IDs (from output_map — currently combined-space via self-mapping).
+            // For SymbolicGraph params: external input ID == sym-space ID (*param).
+            // For add_input-created tensors: external == internal (see add_input).
             let mut training_meta = TrainingMetadata::default();
             training_meta.loss = Some(loss_tensor);
+            training_meta.external_inputs = external_inputs;
             for param in &backward_opts.trainable_params {
-                if let Some(&grad) = grad_map.get(&tensor_map[param]) {
-                    training_meta.param_to_grad.insert(tensor_map[param], grad);
+                let combined_param = sym_to_combined[param];
+                if let Some(&grad) = grad_map.get(&combined_param) {
+                    // Key is sym-space (external input ID), value is combined-space
+                    // (also an external output ID via self-mapping in set_output_map).
+                    training_meta.param_to_grad.insert(*param, grad);
                 }
             }
 
-            // 3. Generate optimizer (if requested)
+            // 5. Generate optimizer (if requested)
             if let Some(ref optim_opts) = options.optimizer {
                 generate_optimizer_ops(
                     &mut graph,
                     &mut training_meta,
                     optim_opts,
-                    &tensor_map,
+                    &sym_to_combined,
                     rng,
                 )?;
             }
 
-            graph.training_metadata = Some(training_meta);
+            graph.training_metadata = Some(training_meta.clone());
+
+            // Set up output_map so the training graph is evaluable.
+            // Expose all tensors the training loop needs to extract.
+            graph.set_output_map(
+                training_meta.loss.iter().map(|&id| (id, id))
+                    .chain(training_meta.param_to_new_param.values().map(|&id| (id, id)))
+                    .chain(training_meta.optimizer_state_outputs.values().map(|&id| (id, id)))
+                    .chain(training_meta.global_state_outputs.values().map(|&id| (id, id)))
+            );
         }
 
         Ok(graph)
@@ -381,20 +466,36 @@ Common loss functions provided as helpers:
 ```rust
 impl MilliOpGraph {
     /// Cross-entropy loss for classification
-    /// Input: logits [batch, classes], targets [batch] (class indices) or [batch, classes] (one-hot)
+    /// Input: logits [batch, classes], targets [batch, classes] (one-hot)
     /// Output: scalar loss
+    ///
+    /// Uses numerically stable log-softmax: log_softmax(x) = x - max(x) - log(sum(exp(x - max(x))))
+    /// Composed from existing milli ops — no LogSoftmax primitive needed.
     pub fn cross_entropy_loss(rng: &mut impl Rng) -> (Self, LossGraphInfo) {
         let mut graph = MilliOpGraph::new_empty(rng);
-        let logits = graph.add_input(rng);
-        let targets = graph.add_input(rng);
+        let logits = graph.add_input(rng);   // [batch, classes]
+        let targets = graph.add_input(rng);  // [batch, classes] (one-hot)
 
-        // log_softmax for numerical stability
-        let log_probs = ops::LogSoftmax::push_new(&mut graph, logits, -1, rng);
-        // negative log likelihood
+        // Axis constant for class dimension
+        let axis = ops::Constant::new_scalar(&mut graph, -1i64, rng);
+
+        // Numerically stable log_softmax:
+        //   shifted = logits - max(logits, axis=-1, keepdims=true)
+        let max_logits = ops::ReduceMax::push_new(&mut graph, logits, Some(axis), true, false, rng);
+        let shifted = ops::SimpleBinary::sub(&mut graph, logits, max_logits, rng);
+        //   log_sum_exp = log(sum(exp(shifted), axis=-1, keepdims=true))
+        let exp_shifted = ops::SimpleUnaryOp::exp(&mut graph, shifted, rng);
+        let sum_exp = ops::ReduceSum::push_new(&mut graph, exp_shifted, Some(axis), true, false, rng);
+        let log_sum_exp = ops::SimpleUnaryOp::ln(&mut graph, sum_exp, rng);
+        //   log_probs = shifted - log_sum_exp
+        let log_probs = ops::SimpleBinary::sub(&mut graph, shifted, log_sum_exp, rng);
+
+        // Negative log likelihood: -mean(sum(targets * log_probs, axis=-1))
         let nll = ops::SimpleBinary::mul(&mut graph, targets, log_probs, rng);
-        let sum = ops::ReduceSum::push_new(&mut graph, nll, &[-1], false, rng);
-        let neg = ops::SimpleUnary::neg(&mut graph, sum, rng);
-        let loss = ops::ReduceMean::push_new(&mut graph, neg, &[], false, rng);
+        let sum = ops::ReduceSum::push_new(&mut graph, nll, Some(axis), false, false, rng);
+        let neg = ops::SimpleUnaryOp::neg(&mut graph, sum, rng);
+        // Mean over batch (reduce all remaining axes)
+        let loss = ops::ReduceMean::push_new(&mut graph, neg, None, false, false, rng);
 
         graph.set_outputs(vec![loss]);
 
@@ -415,7 +516,8 @@ impl MilliOpGraph {
 
         let diff = ops::SimpleBinary::sub(&mut graph, predictions, targets, rng);
         let sq = ops::SimpleBinary::mul(&mut graph, diff, diff, rng);
-        let loss = ops::ReduceMean::push_new(&mut graph, sq, &[], false, rng);
+        // Mean over all dimensions
+        let loss = ops::ReduceMean::push_new(&mut graph, sq, None, false, false, rng);
 
         graph.set_outputs(vec![loss]);
 
@@ -452,7 +554,10 @@ pub struct LossGraphInfo {
 ```rust
 // Load forward model
 let forward_model = SymbolicGraph::from_onnx("classifier.onnx")?;
-let logits_output = forward_model.get_output_by_name("logits")?;
+let tensors_by_name = forward_model.get_tensors_by_name();
+let logits_output = tensors_by_name["logits"];
+// get_trainable_params() returns all float-dtype Input(Some(_)) and Constant(_) tensors.
+// User can override via trainable_params in BackwardGenOptions.
 let param_ids = forward_model.get_trainable_params();
 
 // Create loss graph
@@ -494,11 +599,23 @@ let training_graph = forward_model.generate_milli_graph(&MilliGraphGenOptions {
 // Wrap in SuperGraph node for execution
 let training_node = SuperGraphNodeMilliOpGraph::new(training_graph, &mut rng);
 ```
-```
 
 ---
 
 ## Optimizer Graph Generation
+
+```rust
+/// Generate optimizer ops for all trainable parameters.
+/// Adds optimizer groups, state inputs/outputs, and parameter update ops to the graph.
+/// Implementation deferred to Phase 8.
+fn generate_optimizer_ops(
+    graph: &mut MilliOpGraph,
+    training_meta: &mut TrainingMetadata,
+    options: &OptimizerGenOptions,
+    sym_to_combined: &HashMap<GlobalId, GlobalId>,
+    rng: &mut impl Rng,
+) -> Result<(), MilliGraphGenError>;
+```
 
 ### Adam Example
 
@@ -584,21 +701,118 @@ pub trait Operation: Node {
 }
 
 pub struct BackwardGenContext {
-    /// Output tensor → its gradient tensor (both in milli graph ID space)
+    /// Output tensor → its gradient tensor (both in combined graph ID space)
     pub output_grads: HashMap<GlobalId, GlobalId>,
-    /// Forward input tensor IDs (in milli graph ID space)
+    /// Forward input tensor IDs (in combined graph ID space)
     pub forward_inputs: Vec<GlobalId>,
-    /// Forward output tensor IDs (in milli graph ID space)
+    /// Forward output tensor IDs (in combined graph ID space)
     pub forward_outputs: Vec<GlobalId>,
+    /// Shape information for forward tensors (from SymbolicGraph TensorInfo).
+    /// Keyed by SymbolicGraph tensor ID. Used for broadcast analysis.
+    pub tensor_shapes: HashMap<GlobalId, TensorInfo>,
 }
 
 pub struct BackwardGenResult {
-    /// The backward ops (will be merged into main graph)
-    pub ops: Vec<AnyMilliOp>,
-    /// Input tensor → gradient tensor mapping
-    pub input_grads: HashMap<GlobalId, GlobalId>,
+    /// Self-contained backward computation graph.
+    /// Input map external keys are combined-graph-space tensor IDs
+    /// (upstream gradients, forward tensor values, etc.), so merge_graph
+    /// can wire them directly via the caller's sym_to_combined map.
+    ///
+    /// The graph's output_map must map each gradient output tensor to the
+    /// corresponding forward input ID (combined-graph-space). After merge_graph,
+    /// the caller finds the gradient via `bwd_wiring[fwd_input_id]`.
+    pub graph: MilliOpGraph,
+    /// Which forward input tensor IDs (combined-graph-space) have gradients
+    /// computed by this backward graph. Each ID must appear as an external
+    /// key in graph.output_map. After merge_graph, the gradient for each
+    /// is found via bwd_wiring[fwd_input_id].
+    pub differentiable_inputs: Vec<GlobalId>,
 }
 ```
+
+---
+
+## MilliOp-Level Backward (for Loss Graph Differentiation)
+
+The backward pass through SymbolicGraph operations uses `Operation::get_backward_milli_ops()`,
+but the loss graph is a raw MilliOpGraph — not a SymbolicGraph operation. To propagate gradients
+through the loss computation, we differentiate at the milli-op level using a generic function.
+
+**Key insight:** Milli-op backward is simpler than Operation-level backward because milli ops
+don't broadcast (broadcasting is handled at the SymbolicGraph level). Shapes always match at
+the milli level.
+
+```rust
+/// Extension to the MilliOp trait for backward generation.
+pub trait MilliOp: Node {
+    // existing methods...
+
+    /// Generate backward ops for this milli op.
+    /// Returns input_id → gradient_id for each differentiable input,
+    /// with new gradient ops added directly to `graph`.
+    fn backward(
+        &self,
+        output_grads: &HashMap<GlobalId, GlobalId>,
+        graph: &mut MilliOpGraph,
+        rng: &mut impl Rng,
+    ) -> Option<HashMap<GlobalId, GlobalId>> {
+        None // default: not differentiable
+    }
+}
+
+/// Differentiate through a section of a MilliOpGraph (e.g., the loss group).
+/// Walks `ops` in reverse order, calling each milli op's backward().
+/// Returns a gradient map: tensor_id → gradient_tensor_id.
+fn generate_milli_backward(
+    graph: &mut MilliOpGraph,
+    group_id: GlobalId,
+    initial_grad_map: &HashMap<GlobalId, GlobalId>,
+    rng: &mut impl Rng,
+) -> HashMap<GlobalId, GlobalId> {
+    let mut grad_map = initial_grad_map.clone();
+
+    // Walk ops in reverse within the group
+    let ops_in_group: Vec<GlobalId> = graph.ops_in_group(group_id)
+        .filter(|op_id| graph.op_ordering.iter().position(|id| id == op_id).is_some())
+        .collect();
+    // Sort by op_ordering position, then reverse
+    let mut ordered: Vec<GlobalId> = ops_in_group;
+    ordered.sort_by_key(|op_id| {
+        graph.op_ordering.iter().position(|id| id == op_id).unwrap()
+    });
+    ordered.reverse();
+
+    for op_id in ordered {
+        let op = graph.ops[&op_id].clone();
+
+        // Collect output gradients for this op
+        let output_grads: HashMap<GlobalId, GlobalId> = op.outputs()
+            .filter_map(|out_id| grad_map.get(&out_id).map(|&g| (out_id, g)))
+            .collect();
+
+        if output_grads.is_empty() { continue; }
+
+        // Generate backward ops (added directly to the graph)
+        if let Some(input_grads) = op.backward(&output_grads, graph, rng) {
+            // Accumulate gradients (handles fan-out)
+            for (input_id, grad_id) in input_grads {
+                grad_map.entry(input_id)
+                    .and_modify(|existing| {
+                        let sum = SimpleBinary::add(graph, *existing, grad_id, rng);
+                        *existing = sum;
+                    })
+                    .or_insert(grad_id);
+            }
+        }
+    }
+
+    grad_map
+}
+```
+
+**Note:** Unlike `Operation::get_backward_milli_ops()` which returns a separate MilliOpGraph
+that gets merged, `MilliOp::backward()` adds ops directly to the combined graph. This is
+simpler because the milli ops are already in the combined graph's ID space — no remapping needed.
 
 ---
 
@@ -608,7 +822,7 @@ pub struct BackwardGenResult {
 impl MilliOpGraph {
     // === Group management ===
 
-    pub fn create_group(&mut self, group: MilliOpGroup, rng: &mut impl Rng) -> GlobalId;
+    pub fn create_group(&mut self, group: MilliOpGroup) -> GlobalId;
     pub fn get_group(&self, group_id: GlobalId) -> Option<&MilliOpGroup>;
     pub fn get_group_mut(&mut self, group_id: GlobalId) -> Option<&mut MilliOpGroup>;
     pub fn ops_in_group(&self, group_id: GlobalId) -> impl Iterator<Item = GlobalId> + '_;
@@ -620,8 +834,14 @@ impl MilliOpGraph {
     /// Replace an op with another (must have same inputs/outputs signature)
     pub fn replace_op(&mut self, old: GlobalId, new: AnyMilliOp) -> Result<(), EditError>;
 
-    /// Insert an op after a tensor, rewiring downstream consumers
-    pub fn insert_after_tensor(&mut self, tensor: GlobalId, op: AnyMilliOp) -> Result<GlobalId, EditError>;
+    /// Insert an op after a tensor, rewiring downstream consumers.
+    /// The closure receives the input tensor ID and rng, returns (new_op, new_output_id).
+    pub fn insert_after_tensor(
+        &mut self,
+        tensor_id: GlobalId,
+        op_fn: impl FnOnce(GlobalId, &mut impl Rng) -> (AnyMilliOp, GlobalId),
+        rng: &mut impl Rng,
+    ) -> Result<GlobalId, EditError>;
 
     /// Delete a group and all its ops (must not have external dependents)
     pub fn delete_group(&mut self, group: GlobalId) -> Result<(), EditError>;
@@ -629,20 +849,24 @@ impl MilliOpGraph {
     /// Rewire a tensor reference (all uses of `from` become `to`)
     pub fn rewire_tensor(&mut self, from: GlobalId, to: GlobalId) -> Result<(), EditError>;
 
-    /// Add an op to an existing group
-    pub fn add_op_to_group(&mut self, op: AnyMilliOp, group: GlobalId) -> GlobalId;
+    /// Add an op to a specific group
+    pub fn push_op_in_group(&mut self, op: AnyMilliOp, group_id: GlobalId) -> GlobalId;
 
     // === Merging ===
 
-    /// Merge another MilliOpGraph into this one, assigning to a group
+    /// Merge another MilliOpGraph into this one, optionally assigning to a group.
+    /// `sym_to_combined` maps external/SymbolicGraph tensor IDs to combined-graph
+    /// tensor IDs. merge_graph reads it to wire inputs and updates it with new
+    /// output mappings. The caller maintains this map across all merge calls.
     pub fn merge_graph(
         &mut self,
         other: MilliOpGraph,
-        group: GlobalId,
-        tensor_map: &mut HashMap<GlobalId, GlobalId>,
+        group_id: Option<GlobalId>,
+        sym_to_combined: &mut HashMap<GlobalId, GlobalId>,
+        rng: &mut impl Rng,
     );
 
-    // === Queries ===
+    // === Queries (derived from TrainingMetadata — see "Derived Tensor Role Queries") ===
 
     pub fn tensor_role(&self, tensor: GlobalId) -> Option<TensorRole>;
     pub fn gradient_of(&self, param: GlobalId) -> Option<GlobalId>;
@@ -664,6 +888,8 @@ Since training is just MilliOpGraph execution, we use existing infrastructure:
 ```rust
 // 1. Load forward model
 let forward_model = SymbolicGraph::from_onnx("model.onnx")?;
+let tensors_by_name = forward_model.get_tensors_by_name();
+let logits_id = tensors_by_name["logits"];
 let param_ids = forward_model.get_trainable_params();
 
 // 2. Create loss graph
@@ -676,7 +902,7 @@ let training_graph = forward_model.generate_milli_graph(&MilliGraphGenOptions {
         loss_wiring: vec![
             LossWiring {
                 loss_input: loss_info.predictions_input,
-                source: LossInputSource::ForwardOutput(forward_model.output("logits")),
+                source: LossInputSource::ForwardOutput(logits_id),
             },
             LossWiring {
                 loss_input: loss_info.targets_input,
@@ -712,7 +938,7 @@ let super_graph = builder.build(&mut rng, &inputs, &outputs);
 // 6. Initialize state
 let meta = training_graph.training_metadata.as_ref().unwrap();
 let mut params: HashMap<GlobalId, NumericTensor<DynRank>> = load_initial_params();
-let mut optim_state: HashMap<GlobalId, NumericTensor<DynRank>> = meta.initialize_optimizer_state();
+let mut optim_state = meta.initialize_optimizer_state(&params, &mut eval_backend);
 
 // 7. Training loop
 for epoch in 0..num_epochs {
@@ -739,8 +965,9 @@ for epoch in 0..num_epochs {
         for (old_param, new_param) in &meta.param_to_new_param {
             params.insert(*old_param, outputs.tensors[&SuperGraphLinkTensor(*new_param)].clone());
         }
-        for ((param, name), new_state) in &meta.new_optimizer_state {
-            optim_state.insert(*new_state, outputs.tensors[&SuperGraphLinkTensor(*new_state)].clone());
+        for ((param, name), new_state) in &meta.optimizer_state_outputs {
+            let input_id = &meta.optimizer_state_inputs[&(*param, name.clone())];
+            optim_state.insert(*input_id, outputs.tensors[&SuperGraphLinkTensor(*new_state)].clone());
         }
 
         // Log progress
@@ -784,33 +1011,42 @@ for epoch in 0..num_epochs {
 
 ### Phase 1: Forward-Only Graph Generation
 
-The first implementation phase focuses on `SymbolicGraph::generate_milli_graph()` for forward pass only. This validates the merge infrastructure and provides a foundation for backward generation.
+The first implementation phase focuses on `SymbolicGraph::generate_milli_graph()` for forward pass only (no `MilliGraphGenOptions` yet — that comes in Phase 4). This validates the merge infrastructure and provides a foundation for backward generation.
 
 **Core implementation:**
 
 ```rust
 impl SymbolicGraph {
+    /// Phase 1: forward-only graph generation (simplified signature).
+    /// Later phases extend this to accept MilliGraphGenOptions for backward/optimizer.
     pub fn generate_milli_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         let mut combined = MilliOpGraph::new_empty(rng);
-        // SymbolicGraph tensor ID → MilliOpGraph tensor ID
-        let mut tensor_map: HashMap<GlobalId, GlobalId> = HashMap::new();
+        let mut sym_to_combined: HashMap<GlobalId, GlobalId> = HashMap::new();
 
-        // Map graph inputs
+        // Map graph inputs (runtime data inputs + initialized weights)
+        // Note: ordered_inputs contains Input(None) and Input(Some(data)) tensors.
+        // Input(Some(data)) are ONNX initializers that were also listed as inputs —
+        // these are typically model weights.
         for input_id in &self.ordered_inputs {
-            let internal_id = combined.add_input_with_external_id(*input_id, rng);
-            tensor_map.insert(*input_id, internal_id);
+            let internal_id = combined.add_input_with_id(*input_id, rng);
+            sym_to_combined.insert(*input_id, internal_id);
+        }
+
+        // Map standalone constants (ONNX initializers NOT in ordered_inputs)
+        for const_id in self.constant_link_ids() {
+            let internal_id = combined.add_input_with_id(const_id, rng);
+            sym_to_combined.insert(const_id, internal_id);
         }
 
         // Walk forward ops in topological order
         for op in self.topological_order() {
             let op_graph = op.get_milli_op_graph(rng);
-            combined.merge_graph(op_graph, &mut tensor_map, rng);
-            // merge_graph updates tensor_map with new output mappings
+            combined.merge_graph(op_graph, None, &mut sym_to_combined, rng);
         }
 
         // Map graph outputs
         for output_id in &self.ordered_outputs {
-            combined.add_output(tensor_map[output_id], *output_id);
+            combined.add_output(sym_to_combined[output_id], *output_id);
         }
 
         combined
@@ -821,17 +1057,21 @@ impl SymbolicGraph {
 **Required infrastructure:**
 
 - [ ] `MilliOpGraph::new_empty(rng)` - create empty graph for building programmatically
-- [ ] `MilliOpGraph::add_input_with_external_id(external_id, rng)` - add input with known external ID, returns internal ID
-- [ ] `MilliOpGraph::merge_graph(other, tensor_map, rng)` - merge ops from another graph, remapping tensor IDs via tensor_map, updating tensor_map with new outputs
+- [ ] `MilliOpGraph::add_input_with_id(external_id, rng)` - add input with known external ID, returns internal ID
+- [ ] `MilliOpGraph::merge_graph(other, group_id: Option, sym_to_combined, rng)` - merge ops from another graph, reading/updating the running tensor map. group_id is None in Phase 1
 - [ ] `MilliOpGraph::add_output(internal_id, external_id)` - mark tensor as output
-- [ ] `SymbolicGraph::topological_order()` - iterate ops in dependency order (check if exists)
+- [ ] `SymbolicGraph::topological_order()` - iterate ops in dependency order (currently not implemented; extract from eval's greedy scheduler)
 - [ ] `SymbolicGraph::generate_milli_graph(rng)` - the main method
+- [ ] `SymbolicGraph::get_trainable_params()` - return GlobalIds of float-dtype `Input(Some(_))` and `Constant(_)` tensors (heuristic; user overrides via `BackwardGenOptions::trainable_params`)
+
+**ONNX parameter discovery note:** ONNX has no explicit trainable/frozen distinction. Weights typically appear as `Input(Some(data))` (listed in both ONNX `input` and `initializer`). Some models store initializers as standalone `Constant(data)` instead. `get_trainable_params()` returns all data-carrying tensors with float dtype as a best-effort default.
 
 **Testing:**
 
 - [ ] Generate MilliOpGraph from simple SymbolicGraph (single op)
 - [ ] Generate from multi-op graph, verify tensor wiring
 - [ ] **Equivalence test**: Generated MilliOpGraph should produce identical outputs to direct SymbolicGraph evaluation for same inputs
+- [ ] Verify both `Input(Some(_))` and standalone `Constant(_)` tensors are correctly mapped
 
 ### Phase 2: Grouping and Source Linkage
 
@@ -851,11 +1091,14 @@ impl SymbolicGraph {
 
 ### Phase 4: Backward Generation Infrastructure
 
+- [ ] Add `MilliOp::backward()` to the MilliOp trait with default impl
+- [ ] Add `generate_milli_backward()` function for milli-op-level differentiation
 - [ ] Add `BroadcastAnalysis` struct and `analyze_broadcast()` function
 - [ ] Add `get_backward_milli_ops()` to Operation trait with default impl
 - [ ] Add generation options struct with backward/loss config
 - [ ] Add loss graph composition logic to `generate_milli_graph()`
-- [ ] Add backward pass generation (reverse walk, gradient accumulation)
+- [ ] Add loss backward generation (via `generate_milli_backward`)
+- [ ] Add SymbolicGraph backward pass generation (reverse walk, gradient accumulation)
 - [ ] Tests for broadcast analysis (verify correct reduce axes computed)
 
 ### Phase 5: Backward Ops - Simple
@@ -975,32 +1218,40 @@ pub enum MilliOpPhase {
     Custom,
 }
 
-/// Extended tensor with source tracking
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Tensor in a MilliOpGraph — kept minimal and Copy-compatible.
+/// Semantic role (parameter, gradient, etc.) is derived from TrainingMetadata,
+/// not stored here. See "Design decision: no role field on tensors" above.
+#[derive(Debug, Clone, Copy, Hash, Ord, PartialOrd, Eq, PartialEq, Serialize, Deserialize)]
 pub struct MilliOpGraphTensor {
     pub global_id: GlobalId,
 
-    /// Link to source tensor in SymbolicGraph (if this came from expansion)
+    /// Link to source tensor in SymbolicGraph (if this came from expansion).
+    /// Intrinsic provenance — set once during generation, never changes.
     pub source_tensor: Option<GlobalId>,
-
-    /// Semantic role (for training graphs)
-    pub role: Option<TensorRole>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Semantic role of a tensor in a training graph.
+/// NOT stored on tensors — derived from TrainingMetadata on demand.
+/// Used as a return type for MilliOpGraph::tensor_role() queries.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TensorRole {
-    /// Regular computation intermediate
-    Intermediate,
     /// Model input (data)
     DataInput { name: String },
     /// Trainable parameter
-    Parameter { name: Option<String> },
+    Parameter,
     /// Gradient of a parameter
     Gradient { of_param: GlobalId },
+    /// Updated parameter (post-optimizer)
+    UpdatedParameter { of_param: GlobalId },
     /// Optimizer state (momentum, variance, etc.)
     OptimizerState {
         for_param: GlobalId,
-        state_name: String,  // "m", "v", "velocity", etc.
+        state_name: String,
+    },
+    /// Updated optimizer state (post-step)
+    UpdatedOptimizerState {
+        for_param: GlobalId,
+        state_name: String,
     },
     /// The loss scalar
     Loss,
@@ -1100,6 +1351,119 @@ impl TrainingMetadata {
 }
 ```
 
+### Error Types
+
+```rust
+#[derive(Debug, thiserror::Error)]
+pub enum MilliGraphGenError {
+    #[error("Operation {0:?} failed backward generation")]
+    BackwardGenFailed(GlobalId),
+    #[error("Optimizer generation failed: {0}")]
+    OptimizerError(String),
+    #[error("Missing required tensor: {0:?}")]
+    MissingTensor(GlobalId),
+}
+```
+
+### Constant Tensor Helpers
+
+```rust
+impl ops::Constant {
+    /// Create a scalar constant (existing — note: pub(crate) in current code, may need pub)
+    pub fn new_scalar<T: NDArrayNumericTensorType>(graph: &mut MilliOpGraph, v: T, rng: &mut impl Rng) -> GlobalId;
+
+    /// Create a 1D constant tensor from a slice (for axes arrays, etc.)
+    pub fn new_1d(graph: &mut MilliOpGraph, values: &[i64], rng: &mut impl Rng) -> GlobalId {
+        let tensor = NDArrayNumericTensor::from(values.to_vec());
+        ops::Constant::push_new(graph, tensor.to_dyn(), rng)
+    }
+}
+```
+
+### Derived Tensor Role Queries
+
+Tensor roles are derived from `TrainingMetadata` — no duplication, single source of truth.
+
+```rust
+impl MilliOpGraph {
+    /// Derive the semantic role of a tensor from TrainingMetadata.
+    /// Returns None for inference graphs or tensors with no special role (intermediates).
+    pub fn tensor_role(&self, id: GlobalId) -> Option<TensorRole> {
+        let meta = self.training_metadata.as_ref()?;
+
+        // Loss
+        if meta.loss == Some(id) {
+            return Some(TensorRole::Loss);
+        }
+
+        // External inputs (labels, etc.)
+        for (name, &tensor_id) in &meta.external_inputs {
+            if tensor_id == id {
+                return Some(TensorRole::DataInput { name: name.clone() });
+            }
+        }
+
+        // Parameters (original inputs to optimizer)
+        if meta.param_to_grad.contains_key(&id) {
+            return Some(TensorRole::Parameter);
+        }
+
+        // Gradients
+        for (&param_id, &grad_id) in &meta.param_to_grad {
+            if grad_id == id {
+                return Some(TensorRole::Gradient { of_param: param_id });
+            }
+        }
+
+        // Updated parameters
+        for (&param_id, &new_param_id) in &meta.param_to_new_param {
+            if new_param_id == id {
+                return Some(TensorRole::UpdatedParameter { of_param: param_id });
+            }
+        }
+
+        // Optimizer state inputs
+        for ((param_id, state_name), &tensor_id) in &meta.optimizer_state_inputs {
+            if tensor_id == id {
+                return Some(TensorRole::OptimizerState {
+                    for_param: *param_id,
+                    state_name: state_name.clone(),
+                });
+            }
+        }
+
+        // Optimizer state outputs
+        for ((param_id, state_name), &tensor_id) in &meta.optimizer_state_outputs {
+            if tensor_id == id {
+                return Some(TensorRole::UpdatedOptimizerState {
+                    for_param: *param_id,
+                    state_name: state_name.clone(),
+                });
+            }
+        }
+
+        None
+    }
+
+    /// Convenience: get gradient tensor for a parameter
+    pub fn gradient_of(&self, param: GlobalId) -> Option<GlobalId> {
+        self.training_metadata.as_ref()?.param_to_grad.get(&param).copied()
+    }
+
+    /// Convenience: find which parameter a gradient belongs to
+    pub fn param_of_gradient(&self, grad: GlobalId) -> Option<GlobalId> {
+        self.training_metadata.as_ref()?
+            .param_to_grad.iter()
+            .find(|(_, &g)| g == grad)
+            .map(|(&p, _)| p)
+    }
+}
+```
+
+**Performance note:** `tensor_role()` does a linear scan of TrainingMetadata maps. This is fine
+for UI/debug queries. If hot-path role lookups are ever needed, a cached `HashMap<GlobalId, TensorRole>`
+can be built on demand and invalidated when TrainingMetadata changes.
+
 ### MilliOpGraph Construction & Manipulation
 
 ```rust
@@ -1134,18 +1498,20 @@ impl MilliOpGraph {
 
     // === Input/Output Management ===
 
-    /// Add an input tensor, returns internal tensor ID
+    /// Add an input tensor, returns its ID.
+    /// Uses the same ID for both external key and internal tensor (external == internal).
+    /// This is correct because merge_graph remaps internal IDs anyway, and callers
+    /// need a single ID that works both for op construction and for external wiring
+    /// (e.g., LossGraphInfo, TrainingMetadata external_inputs).
     pub fn add_input(&mut self, rng: &mut impl Rng) -> GlobalId {
-        let external_id = GlobalId::new(rng);
-        let internal_id = GlobalId::new(rng);
-        self.input_map.insert(external_id, internal_id);
-        self.input_ordering.push(external_id);
-        self.tensors.insert(internal_id, MilliOpGraphTensor {
-            global_id: internal_id,
+        let id = GlobalId::new(rng);
+        self.input_map.insert(id, id);
+        self.input_ordering.push(id);
+        self.tensors.insert(id, MilliOpGraphTensor {
+            global_id: id,
             source_tensor: None,
-            role: None,
         });
-        internal_id
+        id
     }
 
     /// Add an input tensor with explicit external ID
@@ -1160,7 +1526,6 @@ impl MilliOpGraph {
         self.tensors.insert(internal_id, MilliOpGraphTensor {
             global_id: internal_id,
             source_tensor: Some(external_id),
-            role: None,
         });
         internal_id
     }
@@ -1173,6 +1538,40 @@ impl MilliOpGraph {
         }
         self.output_map.as_mut().unwrap().insert(internal_id, external_id);
         self.output_ordering.as_mut().unwrap().push(external_id);
+    }
+
+    /// Set outputs by internal ID only (external IDs auto-generated).
+    /// Convenience for loss graph helpers where external IDs don't matter.
+    pub fn set_outputs(&mut self, internal_ids: Vec<GlobalId>) {
+        let mut map = HashMap::new();
+        let mut ordering = Vec::new();
+        for id in internal_ids {
+            map.insert(id, id); // external = internal (will be remapped by merge_graph)
+            ordering.push(id);
+        }
+        self.output_map = Some(map);
+        self.output_ordering = Some(ordering);
+    }
+
+    /// Set output map from (internal_id, external_id) pairs.
+    /// Used by backward generators to expose gradient outputs keyed by forward input IDs.
+    pub fn set_output_map(&mut self, pairs: impl IntoIterator<Item = (GlobalId, GlobalId)>) {
+        let mut map = HashMap::new();
+        let mut ordering = Vec::new();
+        for (internal, external) in pairs {
+            map.insert(internal, external);
+            ordering.push(external);
+        }
+        self.output_map = Some(map);
+        self.output_ordering = Some(ordering);
+    }
+
+    /// Add a scalar constant of 1.0 with same dtype as the given tensor.
+    /// Used for initializing the loss gradient (dL/dL = 1).
+    pub fn add_constant_ones_like(&mut self, tensor: GlobalId, rng: &mut impl Rng) -> GlobalId {
+        // At generation time we don't know the dtype, so use f32 scalar 1.0.
+        // The backend will broadcast/cast as needed.
+        ops::Constant::new_scalar(self, 1.0f32, rng)
     }
 
     // === Group Management ===
@@ -1239,69 +1638,71 @@ impl MilliOpGraph {
 
     // === Graph Composition ===
 
-    /// Merge another graph into this one, remapping IDs
-    /// Returns mapping from other's tensor IDs to this graph's tensor IDs
+    /// Merge another graph into this one, remapping IDs.
+    ///
+    /// `sym_to_combined` maps external tensor IDs (e.g. SymbolicGraph tensor IDs) to
+    /// combined-graph tensor IDs. merge_graph reads it to wire inputs (via the merged
+    /// graph's input_map external keys) and writes to it with new output mappings
+    /// (via the merged graph's output_map external values). The caller maintains this
+    /// map across all merge calls.
+    ///
+    /// `group_id` is optional — if None, merged ops are ungrouped.
     pub fn merge_graph(
         &mut self,
         other: MilliOpGraph,
-        group_id: GlobalId,
-        input_wiring: &HashMap<GlobalId, GlobalId>,  // other's input → this graph's tensor
+        group_id: Option<GlobalId>,
+        sym_to_combined: &mut HashMap<GlobalId, GlobalId>,
         rng: &mut impl Rng,
-    ) -> MergeResult {
-        let mut tensor_remap: HashMap<GlobalId, GlobalId> = HashMap::new();
+    ) {
+        // Build internal_remap: other's internal IDs → self's IDs
+        let mut internal_remap: HashMap<GlobalId, GlobalId> = HashMap::new();
 
-        // Map other's inputs to existing tensors via wiring
-        for (other_external, other_internal) in &other.input_map {
-            if let Some(&this_tensor) = input_wiring.get(other_external) {
-                tensor_remap.insert(*other_internal, this_tensor);
+        // Wire inputs: other.input_map maps external_id → other_internal_id
+        // Look up external_id in sym_to_combined to find the combined-graph tensor
+        for (external_id, other_internal_id) in &other.input_map {
+            if let Some(&combined_id) = sym_to_combined.get(external_id) {
+                internal_remap.insert(*other_internal_id, combined_id);
             } else {
-                // Input not wired - create as new input to this graph
-                let new_id = self.add_input_with_id(*other_external, rng);
-                tensor_remap.insert(*other_internal, new_id);
+                // Input not in map — create as new input to this graph
+                let new_id = self.add_input_with_id(*external_id, rng);
+                internal_remap.insert(*other_internal_id, new_id);
+                sym_to_combined.insert(*external_id, new_id);
             }
         }
 
         // Remap and add ops
         for op_id in &other.op_ordering {
             let op = other.ops[op_id].clone();
-            let remapped_op = op.remap_tensors(&tensor_remap, rng);
+            let remapped_op = op.remap_tensors(&internal_remap, rng);
 
             // Register new output tensors
             for output in remapped_op.outputs() {
-                if !tensor_remap.contains_key(&output) {
+                if !internal_remap.contains_key(&output) {
                     let new_id = GlobalId::new(rng);
-                    tensor_remap.insert(output, new_id);
+                    internal_remap.insert(output, new_id);
                     self.tensors.insert(new_id, MilliOpGraphTensor {
                         global_id: new_id,
                         source_tensor: other.tensors.get(&output)
                             .and_then(|t| t.source_tensor),
-                        role: other.tensors.get(&output)
-                            .and_then(|t| t.role.clone()),
                     });
                 }
             }
 
-            self.push_op_in_group(remapped_op, group_id);
+            if let Some(gid) = group_id {
+                self.push_op_in_group(remapped_op, gid);
+            } else {
+                self.push_op(remapped_op);
+            }
         }
 
-        // Map outputs
-        let output_map: HashMap<GlobalId, GlobalId> = other.output_map
-            .map(|om| {
-                om.into_iter()
-                    .map(|(internal, external)| (external, tensor_remap[&internal]))
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        MergeResult { tensor_remap, output_map }
+        // Update sym_to_combined with output mappings
+        if let Some(output_map) = &other.output_map {
+            for (other_internal_id, external_id) in output_map {
+                let combined_id = internal_remap[other_internal_id];
+                sym_to_combined.insert(*external_id, combined_id);
+            }
+        }
     }
-}
-
-pub struct MergeResult {
-    /// Mapping from merged graph's tensor IDs to this graph's tensor IDs
-    pub tensor_remap: HashMap<GlobalId, GlobalId>,
-    /// Mapping from merged graph's external output IDs to this graph's internal tensor IDs
-    pub output_map: HashMap<GlobalId, GlobalId>,
 }
 ```
 
@@ -1377,11 +1778,10 @@ impl MilliOpGraph {
         self.ops.insert(new_op_id, new_op);
         self.op_ordering.insert(insert_pos, new_op_id);
 
-        // Add the new tensor
+        // Add the new tensor (no source_tensor — this is a synthetic insertion)
         self.tensors.insert(new_output, MilliOpGraphTensor {
             global_id: new_output,
             source_tensor: None,
-            role: None,
         });
 
         Ok(new_output)
@@ -1497,47 +1897,42 @@ impl AnyMilliOp {
 
 ```rust
 /// Context provided to Operation::get_backward_milli_ops()
+///
+/// All tensor IDs are in combined-graph space. The backward implementation
+/// uses these IDs as external input keys when constructing its MilliOpGraph,
+/// so merge_graph can wire them automatically via sym_to_combined.
 pub struct BackwardGenContext {
     /// Maps forward output tensor IDs to their gradient tensor IDs
-    /// (both IDs are in the combined training MilliOpGraph space)
+    /// (both in combined-graph space)
     pub output_grads: HashMap<GlobalId, GlobalId>,
 
-    /// Forward input tensor IDs (in combined graph space)
+    /// Forward input tensor IDs (in combined-graph space)
     /// Ordered to match Operation::inputs()
     pub forward_inputs: Vec<GlobalId>,
 
-    /// Forward output tensor IDs (in combined graph space)
+    /// Forward output tensor IDs (in combined-graph space)
     /// Ordered to match Operation::outputs()
     pub forward_outputs: Vec<GlobalId>,
+
+    /// Shape information for forward tensors (from SymbolicGraph TensorInfo).
+    /// Keyed by SymbolicGraph tensor ID. Used for broadcast analysis.
+    pub tensor_shapes: HashMap<GlobalId, TensorInfo>,
 }
 
-/// Result of backward op generation
+/// Result of backward op generation.
+///
+/// The backward graph's input_map external keys are combined-graph-space IDs
+/// (from BackwardGenContext), so merge_graph wires them automatically.
+/// The graph's output_map maps each gradient tensor to the corresponding
+/// forward input ID — after merge_graph, the caller finds gradients via
+/// bwd_wiring[fwd_input_id].
 pub struct BackwardGenResult {
-    /// The MilliOpGraph containing backward computation
+    /// Self-contained backward computation graph.
     pub graph: MilliOpGraph,
 
-    /// Maps forward input tensor IDs to their gradient tensor IDs
-    /// (forward input ID → gradient tensor ID within `graph`)
-    pub input_grads: HashMap<GlobalId, GlobalId>,
-
-    /// Any additional inputs the backward graph needs
-    /// (e.g., forward input values for Mul backward)
-    /// Maps: what the backward graph calls it → what to wire it to
-    pub additional_inputs: Vec<BackwardInput>,
-}
-
-pub struct BackwardInput {
-    /// Tensor ID within the backward graph that needs wiring
-    pub graph_input: GlobalId,
-    /// What this should be connected to
-    pub source: BackwardInputSource,
-}
-
-pub enum BackwardInputSource {
-    /// A forward tensor value (needed for ops like Mul, MatMul)
-    ForwardTensor(GlobalId),
-    /// An upstream gradient
-    UpstreamGrad(GlobalId),
+    /// Which forward inputs (combined-graph-space) have gradients computed.
+    /// Each must appear as an external key in graph.output_map.
+    pub differentiable_inputs: Vec<GlobalId>,
 }
 ```
 
@@ -1555,70 +1950,54 @@ impl BinaryOperation {
                 // d/da(a * b) = dout * b
                 // d/db(a * b) = dout * a
 
-                let mut graph = MilliOpGraph::new_empty(rng);
+                // Use combined-graph-space IDs as external input keys.
+                // merge_graph resolves these via sym_to_combined automatically.
+                let dout_id = ctx.output_grads[&ctx.forward_outputs[0]];
+                let a_fwd_id = ctx.forward_inputs[0];
+                let b_fwd_id = ctx.forward_inputs[1];
 
-                // Inputs we need:
-                let dout = graph.add_input(rng);      // upstream gradient
-                let a_fwd = graph.add_input(rng);     // forward value of a
-                let b_fwd = graph.add_input(rng);     // forward value of b
+                let (mut graph, input_map) = MilliOpGraph::new(
+                    [dout_id, a_fwd_id, b_fwd_id], rng,
+                );
+                let dout = input_map[&dout_id];
+                let a_fwd = input_map[&a_fwd_id];
+                let b_fwd = input_map[&b_fwd_id];
 
                 // Compute gradients
                 let da = ops::SimpleBinary::mul(&mut graph, dout, b_fwd, rng);
                 let db = ops::SimpleBinary::mul(&mut graph, dout, a_fwd, rng);
 
-                // Set outputs
-                graph.add_output(da, self.a);  // gradient for input a
-                graph.add_output(db, self.b);  // gradient for input b
+                // Output map: internal grad tensor → forward input ID (external key).
+                // After merge_graph, bwd_wiring[a_fwd_id] → remapped da, etc.
+                graph.set_output_map([(da, a_fwd_id), (db, b_fwd_id)]);
 
                 Some(BackwardGenResult {
                     graph,
-                    input_grads: [
-                        (self.a, da),
-                        (self.b, db),
-                    ].into_iter().collect(),
-                    additional_inputs: vec![
-                        BackwardInput {
-                            graph_input: dout,
-                            source: BackwardInputSource::UpstreamGrad(self.output),
-                        },
-                        BackwardInput {
-                            graph_input: a_fwd,
-                            source: BackwardInputSource::ForwardTensor(ctx.forward_inputs[0]),
-                        },
-                        BackwardInput {
-                            graph_input: b_fwd,
-                            source: BackwardInputSource::ForwardTensor(ctx.forward_inputs[1]),
-                        },
-                    ],
+                    differentiable_inputs: vec![a_fwd_id, b_fwd_id],
                 })
             }
 
             WhichBinaryOperation::Add => {
                 // d/da(a + b) = dout
                 // d/db(a + b) = dout
-                // Simpler: both grads are just dout (no additional forward values needed)
+                // (broadcast reduction handled separately)
+                let dout_id = ctx.output_grads[&ctx.forward_outputs[0]];
 
-                let mut graph = MilliOpGraph::new_empty(rng);
-                let dout = graph.add_input(rng);
+                let (mut graph, input_map) = MilliOpGraph::new([dout_id], rng);
+                let dout = input_map[&dout_id];
 
-                // da = dout, db = dout (identity, but may need broadcast reduction)
-                // For simplicity, assuming shapes match; real impl handles broadcasting
+                let a_fwd_id = ctx.forward_inputs[0];
+                let b_fwd_id = ctx.forward_inputs[1];
 
-                graph.add_output(dout, self.a);
-                graph.add_output(dout, self.b);
+                // Identity ops create distinct internal tensors — output_map is a
+                // HashMap so we can't map the same internal ID to two external keys.
+                let da = ops::Identity::push_new(&mut graph, dout, rng);
+                let db = ops::Identity::push_new(&mut graph, dout, rng);
+                graph.set_output_map([(da, a_fwd_id), (db, b_fwd_id)]);
 
                 Some(BackwardGenResult {
                     graph,
-                    input_grads: [
-                        (self.a, dout),
-                        (self.b, dout),
-                    ].into_iter().collect(),
-                    additional_inputs: vec![
-                        BackwardInput {
-                            graph_input: dout,
-                            source: BackwardInputSource::UpstreamGrad(self.output),
-                        },
-                    ],
+                    differentiable_inputs: vec![a_fwd_id, b_fwd_id],
                 })
             }
 
@@ -1801,9 +2180,9 @@ impl BinaryOperation {
         rng: &mut impl Rng,
     ) -> Option<BackwardGenResult> {
         // Get shape info from SymbolicGraph context
-        let a_shape = ctx.tensor_info(self.a);
-        let b_shape = ctx.tensor_info(self.b);
-        let broadcast = analyze_broadcast(&a_shape, &b_shape)?;
+        let a_shape = &ctx.tensor_shapes[&self.a];
+        let b_shape = &ctx.tensor_shapes[&self.b];
+        let broadcast = analyze_broadcast(a_shape, b_shape)?;
 
         match self.which {
             WhichBinaryOperation::Add => {
@@ -1811,21 +2190,10 @@ impl BinaryOperation {
                 // d/db(a + b) = dout (reduced if b was broadcast)
                 let dout = ctx.output_grads[&self.output];
 
-                let da = if broadcast.a_broadcast_axes.is_empty() {
-                    dout
-                } else {
-                    ReduceSum::push_new(&mut graph, dout, &broadcast.a_broadcast_axes, true, rng)
-                };
-
-                let db = if broadcast.b_broadcast_axes.is_empty() {
-                    dout
-                } else {
-                    ReduceSum::push_new(&mut graph, dout, &broadcast.b_broadcast_axes, true, rng)
-                };
-
-                // Handle rank padding: squeeze leading dims if needed
-                let da = squeeze_leading(&mut graph, da, broadcast.a_rank_padding, rng);
-                let db = squeeze_leading(&mut graph, db, broadcast.b_rank_padding, rng);
+                let da = reduce_and_squeeze(&mut graph, dout, &broadcast.a_broadcast_axes,
+                                            broadcast.a_rank_padding, rng);
+                let db = reduce_and_squeeze(&mut graph, dout, &broadcast.b_broadcast_axes,
+                                            broadcast.b_rank_padding, rng);
 
                 // ... return result
             }
@@ -1854,6 +2222,30 @@ impl BinaryOperation {
             WhichBinaryOperation::Equal | WhichBinaryOperation::Greater => None,
         }
     }
+}
+
+/// Squeeze leading dimensions from rank-padding during broadcast.
+fn squeeze_leading(
+    graph: &mut MilliOpGraph, data: GlobalId, num_leading: usize, rng: &mut impl Rng,
+) -> GlobalId {
+    if num_leading == 0 { return data; }
+    let axes: Vec<i64> = (0..num_leading as i64).collect();
+    let axes_id = ops::Constant::new_1d(graph, &axes, rng);
+    ops::Squeeze::push_new(graph, data, axes_id, rng)
+}
+
+/// Reduce along broadcast axes and squeeze leading rank-padding dims.
+fn reduce_and_squeeze(
+    graph: &mut MilliOpGraph, data: GlobalId, broadcast_axes: &[i64],
+    rank_padding: usize, rng: &mut impl Rng,
+) -> GlobalId {
+    let reduced = if broadcast_axes.is_empty() {
+        data
+    } else {
+        let axes_id = ops::Constant::new_1d(graph, broadcast_axes, rng);
+        ops::ReduceSum::push_new(graph, data, Some(axes_id), true, false, rng)
+    };
+    squeeze_leading(graph, reduced, rank_padding, rng)
 }
 ```
 
@@ -1993,5 +2385,5 @@ fn test_backward_finite_diff<F>(
 ---
 
 *Document created: 2026-01-31*
-*Last updated: 2026-02-03*
+*Last updated: 2026-03-04*
 *Status: Design phase - ready for Phase 1 implementation*
