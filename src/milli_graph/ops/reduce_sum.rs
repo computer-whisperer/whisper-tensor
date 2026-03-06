@@ -100,6 +100,34 @@ impl MilliOp for ReduceSum {
 
         Ok(Box::new([(self.output, out)].into_iter()))
     }
+
+    fn backward(
+        &self,
+        output_grads: &HashMap<GlobalId, GlobalId>,
+        graph: &mut MilliOpGraph,
+        rng: &mut impl rand::Rng,
+    ) -> Option<HashMap<GlobalId, GlobalId>> {
+        let grad_output = *output_grads.get(&self.output)?;
+        // Backward of ReduceSum: expand grad_output back to input shape.
+        // If keepdims=false, first unsqueeze along the reduced axes.
+        let expanded_grad = if self.keepdims {
+            grad_output
+        } else if let Some(axes) = self.axes {
+            // Unsqueeze along the specific reduced axes
+            super::Unsqueeze::push_new(graph, grad_output, axes, rng)
+        } else {
+            // Reduced all axes to scalar — reshape to all-ones shape via unsqueeze
+            // We don't know the rank, so use Reshape to [1,1,...] matching input shape
+            // Actually, Expand handles broadcasting from scalar, just get input shape
+            grad_output
+        };
+        // Expand to input shape
+        let input_shape = super::Shape::push_new(graph, self.data, rng);
+        let grad_input = super::Expand::push_new(graph, expanded_grad, input_shape, rng);
+        let mut result = HashMap::new();
+        result.insert(self.data, grad_input);
+        Some(result)
+    }
 }
 
 impl Node for ReduceSum {

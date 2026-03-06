@@ -286,6 +286,13 @@ impl MilliOp for SimpleUnaryOp {
                 let neg_grad = SimpleUnaryOp::neg(graph, grad_output, rng);
                 super::SimpleBinary::div(graph, neg_grad, input_sq, rng)
             }
+            // d/dx(tanh(x)) = 1 - tanh(x)^2 = 1 - output^2
+            WhichSimpleUnaryOp::Trig(crate::TrigOp::Tanh) => {
+                let out_sq = super::SimpleBinary::mul(graph, self.output, self.output, rng);
+                let one = super::Constant::new_scalar(graph, 1.0f32, rng);
+                let one_minus = super::SimpleBinary::sub(graph, one, out_sq, rng);
+                super::SimpleBinary::mul(graph, grad_output, one_minus, rng)
+            }
             _ => return None,
         };
         let mut result = HashMap::new();
@@ -356,5 +363,23 @@ impl MilliOp for ClampMin {
     > {
         let out = inputs[&self.input].clamp_min(self.value, backend)?;
         Ok(Box::new([(self.output, out)].into_iter()))
+    }
+
+    fn backward(
+        &self,
+        output_grads: &HashMap<GlobalId, GlobalId>,
+        graph: &mut MilliOpGraph,
+        rng: &mut impl rand::Rng,
+    ) -> Option<HashMap<GlobalId, GlobalId>> {
+        let grad_output = *output_grads.get(&self.output)?;
+        // grad_input = grad_output where input >= value, 0 otherwise
+        // mask = cast(input >= value, float)
+        let threshold = super::Constant::new_scalar(graph, self.value, rng);
+        let mask = super::SimpleBinary::greater_or_equal(graph, self.input, threshold, rng);
+        let mask_float = super::Cast::push_new(graph, mask, crate::dtype::DType::F32, rng);
+        let grad_input = super::SimpleBinary::mul(graph, grad_output, mask_float, rng);
+        let mut result = HashMap::new();
+        result.insert(self.input, grad_input);
+        Some(result)
     }
 }

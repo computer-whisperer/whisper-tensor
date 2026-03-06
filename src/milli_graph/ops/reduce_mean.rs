@@ -101,4 +101,54 @@ impl MilliOp for ReduceMean {
         let out = data.reduce_mean(axes, self.keepdims, backend)?;
         Ok(Box::new([(self.output, out)].into_iter()))
     }
+
+    fn backward(
+        &self,
+        output_grads: &HashMap<GlobalId, GlobalId>,
+        graph: &mut MilliOpGraph,
+        rng: &mut impl rand::Rng,
+    ) -> Option<HashMap<GlobalId, GlobalId>> {
+        let grad_output = *output_grads.get(&self.output)?;
+        // ReduceMean backward: like ReduceSum but divide by number of reduced elements.
+        // count = product of reduced dimensions = total_input_elems / total_output_elems
+        // We compute: grad_input = expand(grad_output, input_shape) / count
+        //
+        // To get count dynamically: use Shape to get input shape, then ReduceProd
+        // the relevant axes. Simpler: total_input / total_output.
+        // Even simpler for the common cases: use Shape + Gather + ReduceProd.
+        //
+        // Approach: get input_shape, gather the reduced dims, product them = count,
+        // then grad_input = expand(unsqueeze(grad_output), input_shape) / count
+
+        let expanded_grad = if self.keepdims {
+            grad_output
+        } else if let Some(axes) = self.axes {
+            super::Unsqueeze::push_new(graph, grad_output, axes, rng)
+        } else {
+            grad_output
+        };
+        let input_shape = super::Shape::push_new(graph, self.data, rng);
+        let expanded = super::Expand::push_new(graph, expanded_grad, input_shape, rng);
+
+        // Compute count of reduced elements: gather reduced dims from input_shape, then product
+        if let Some(axes) = self.axes {
+            // Gather the specific axes from input_shape, then ReduceProd
+            let count = super::Gather::push_new(graph, input_shape, axes, 0, rng);
+            let count_scalar = super::ReduceProd::push_new(graph, count, None, false, false, rng);
+            let count_float = super::Cast::push_new(graph, count_scalar, crate::dtype::DType::F32, rng);
+            let grad_input = super::SimpleBinary::div(graph, expanded, count_float, rng);
+            let mut result = HashMap::new();
+            result.insert(self.data, grad_input);
+            Some(result)
+        } else {
+            // All axes reduced — count = total number of input elements
+            // ReduceProd(input_shape) gives the total element count
+            let total = super::ReduceProd::push_new(graph, input_shape, None, false, false, rng);
+            let total_float = super::Cast::push_new(graph, total, crate::dtype::DType::F32, rng);
+            let grad_input = super::SimpleBinary::div(graph, expanded, total_float, rng);
+            let mut result = HashMap::new();
+            result.insert(self.data, grad_input);
+            Some(result)
+        }
+    }
 }
