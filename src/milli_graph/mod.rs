@@ -1181,7 +1181,7 @@ mod tests {
     // Finite difference gradient tests for Phase 5 backward ops
     // ============================================================
 
-    use crate::milli_graph::ops::{SimpleUnaryOp, ReduceSum};
+    use crate::milli_graph::ops::{SimpleUnaryOp, ReduceSum, ReduceMean, ClampMin, MatMul};
 
     /// Helper: build a graph that applies `build_fn` to inputs, reduces to scalar via ReduceSum,
     /// then run forward to get the scalar output. Returns the scalar value.
@@ -1588,11 +1588,38 @@ mod tests {
         let ext_out = GlobalId::new(rng);
         graph.add_output(scalar, ext_out);
 
+        // Run a forward-only eval to determine op_out's shape for the gradient seed
+        let output_shape = {
+            let mut fwd_graph = MilliOpGraph::new_empty(&mut wyrand::WyRand::new(99));
+            let rng2 = &mut wyrand::WyRand::new(99);
+            let mut fwd_ext = Vec::new();
+            let mut fwd_int = Vec::new();
+            for _ in 0..n {
+                let ext = GlobalId::new(rng2);
+                let int = fwd_graph.add_input_with_id(ext, rng2);
+                fwd_ext.push(ext);
+                fwd_int.push(int);
+            }
+            let fwd_out = build_fn(&mut fwd_graph, &fwd_int, rng2);
+            let fwd_ext_out = GlobalId::new(rng2);
+            fwd_graph.add_output(fwd_out, fwd_ext_out);
+            let mut fwd_inputs = HashMap::new();
+            for (i, ext) in fwd_ext.iter().enumerate() {
+                let t = NumericTensor::<DynRank>::from_vec_shape(
+                    input_values[i].clone(), input_shapes[i].clone(),
+                ).unwrap();
+                fwd_inputs.insert(*ext, t);
+            }
+            let mut backend = EvalBackend::NDArray;
+            let fwd_results: HashMap<_, _> = fwd_graph.eval(&fwd_inputs, &mut (), &mut backend).unwrap().collect();
+            fwd_results[&fwd_ext_out].shape().to_vec()
+        };
+
         // Seed gradient with shape-matching ones
-        let total_elems = input_values[0].len();
+        let total_elems: usize = output_shape.iter().map(|&s| s as usize).product();
         let ones_data = NDArrayNumericTensor::<DynRank>::from_vec_shape(
-            vec![1.0f32; total_elems],
-            &input_shapes[0].iter().map(|&s| s as u64).collect::<Vec<_>>(),
+            vec![1.0f32; total_elems.max(1)],
+            &output_shape,
         ).unwrap();
         let ones = Constant::push_new(&mut graph, ones_data, rng);
         let mut grad_map = HashMap::new();
@@ -1745,6 +1772,117 @@ mod tests {
             },
             &[vec![1.0, 2.0, 3.0, 4.0], vec![0.5, 1.5, 2.5, 3.5]],
             &[vec![2, 2], vec![2, 2]],
+            1e-3, 1e-2,
+        );
+    }
+
+    // ============================================================
+    // Phase 6: Core Neural Net backward ops
+    // ============================================================
+
+    #[test]
+    fn test_backward_matmul() {
+        // f(A, B) = sum(A @ B), A=[2,3], B=[3,2]
+        check_general_backward(
+            |g, ids, r| {
+                MatMul::push_new(g, ids[0], ids[1], r)
+            },
+            &[
+                vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],   // A [2,3]
+                vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],   // B [3,2]
+            ],
+            &[vec![2, 3], vec![3, 2]],
+            1e-3, 1e-2,
+        );
+    }
+
+    #[test]
+    fn test_backward_clampmin_relu() {
+        // f(x) = sum(clamp_min(x, 0.0)) — this is ReLU
+        // d/dx_i = 1 if x_i >= 0, 0 otherwise
+        check_general_backward(
+            |g, ids, r| {
+                ClampMin::push_new(g, ids[0], 0.0, r)
+            },
+            &[vec![1.0, -2.0, 3.0, -0.5]],
+            &[vec![2, 2]],
+            1e-3, 1e-2,
+        );
+    }
+
+    #[test]
+    fn test_backward_tanh() {
+        // f(x) = sum(tanh(x))
+        // d/dx_i = 1 - tanh(x_i)^2
+        check_general_backward(
+            |g, ids, r| {
+                SimpleUnaryOp::trig(g, ids[0], crate::TrigOp::Tanh, r)
+            },
+            &[vec![0.5, -0.3, 1.0, 0.1]],
+            &[vec![2, 2]],
+            1e-3, 1e-2,
+        );
+    }
+
+    #[test]
+    fn test_backward_reduce_sum_all() {
+        // f(x) = reduce_sum(x * x, all_axes)
+        // This tests ReduceSum backward with axes=None
+        // d/dx_i = 2*x_i (from the mul backward), ReduceSum just broadcasts
+        check_general_backward(
+            |g, ids, r| {
+                let sq = SimpleBinary::mul(g, ids[0], ids[0], r);
+                ReduceSum::push_new(g, sq, None, false, false, r)
+            },
+            &[vec![1.0, 2.0, 3.0, 4.0]],
+            &[vec![2, 2]],
+            1e-3, 1e-2,
+        );
+    }
+
+    #[test]
+    fn test_backward_reduce_sum_axis() {
+        // f(x) = sum(reduce_sum(x, axis=1))
+        // x=[2,3], reduce along axis 1 gives [2], then sum gives scalar
+        // d/dx_ij = 1 for all i,j
+        check_general_backward(
+            |g, ids, r| {
+                let axis = ops::Constant::new_scalar(g, 1i64, r);
+                ReduceSum::push_new(g, ids[0], Some(axis), false, false, r)
+            },
+            &[vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]],
+            &[vec![2, 3]],
+            1e-3, 1e-2,
+        );
+    }
+
+    #[test]
+    fn test_backward_reduce_mean_all() {
+        // f(x) = reduce_mean(x * x, all_axes)
+        // d/dx_i = 2*x_i / n where n=4
+        check_general_backward(
+            |g, ids, r| {
+                let sq = SimpleBinary::mul(g, ids[0], ids[0], r);
+                ReduceMean::push_new(g, sq, None, false, false, r)
+            },
+            &[vec![1.0, 2.0, 3.0, 4.0]],
+            &[vec![2, 2]],
+            1e-3, 1e-2,
+        );
+    }
+
+    #[test]
+    fn test_backward_reduce_mean_axis() {
+        // f(x) = sum(reduce_mean(x, axis=1))
+        // x=[2,3], mean along axis 1 gives [2], then sum gives scalar
+        // d/dx_ij = 1/3 for all i,j
+        check_general_backward(
+            |g, ids, r| {
+                let axis = ops::Constant::new_scalar(g, 1i64, r);
+                ReduceMean::push_new(g, ids[0], Some(axis), false, false, r)
+            },
+            &[vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]],
+            &[vec![2, 3]],
             1e-3, 1e-2,
         );
     }

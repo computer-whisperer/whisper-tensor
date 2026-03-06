@@ -435,6 +435,32 @@ impl MilliOp for MatMul {
         let out = NumericTensor::<DynRank>::matmul(a_input, b_input, accumulate_dtype, backend)?;
         Ok(Box::new([(self.output, out)].into_iter()))
     }
+
+    fn backward(
+        &self,
+        output_grads: &HashMap<GlobalId, GlobalId>,
+        graph: &mut crate::milli_graph::MilliOpGraph,
+        rng: &mut impl Rng,
+    ) -> Option<HashMap<GlobalId, GlobalId>> {
+        let grad_output = *output_grads.get(&self.output)?;
+        // d/dA (A @ B) = grad @ B^T
+        let b_t = super::Transpose::push_new(graph, self.b, Some(vec![-1, -2]), rng);
+        let grad_a = MatMul::push_new(graph, grad_output, b_t, rng);
+        // d/dB (A @ B) = A^T @ grad
+        let a_t = super::Transpose::push_new(graph, self.a, Some(vec![-1, -2]), rng);
+        let grad_b = MatMul::push_new(graph, a_t, grad_output, rng);
+
+        // Accumulate if self.a == self.b (self-matmul)
+        let mut result = HashMap::new();
+        for (input_id, grad_id) in [(self.a, grad_a), (self.b, grad_b)] {
+            result.entry(input_id)
+                .and_modify(|existing: &mut GlobalId| {
+                    *existing = SimpleBinary::add(graph, *existing, grad_id, rng);
+                })
+                .or_insert(grad_id);
+        }
+        Some(result)
+    }
 }
 
 impl Node for SimpleBinary {
