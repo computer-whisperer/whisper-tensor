@@ -225,6 +225,15 @@ impl SimpleBinary {
     }
 }
 
+impl SimpleBinary {
+    pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl Rng) {
+        self.global_id = GlobalId::new(rng);
+        super::remap(&mut self.output, map);
+        super::remap(&mut self.a, map);
+        super::remap(&mut self.b, map);
+    }
+}
+
 impl MilliOp for SimpleBinary {
     fn eval(
         &self,
@@ -303,6 +312,15 @@ impl Pow {
     }
 }
 
+impl Pow {
+    pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl Rng) {
+        self.global_id = GlobalId::new(rng);
+        super::remap(&mut self.output, map);
+        super::remap(&mut self.a, map);
+        super::remap(&mut self.b, map);
+    }
+}
+
 impl MilliOp for Pow {
     fn eval(
         &self,
@@ -336,6 +354,15 @@ impl MatMul {
         let node = Self { output, a, b, global_id: GlobalId::new(rng) };
         graph.push_op(AnyMilliOp::MatMul(node));
         output
+    }
+}
+
+impl MatMul {
+    pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl Rng) {
+        self.global_id = GlobalId::new(rng);
+        super::remap(&mut self.output, map);
+        super::remap(&mut self.a, map);
+        super::remap(&mut self.b, map);
     }
 }
 

@@ -543,6 +543,103 @@ impl SymbolicGraph {
         Ok(())
     }
 
+    /// Topological sort of operations using Kahn's algorithm.
+    /// Returns op IDs in dependency order.
+    pub fn topological_order_vec(&self) -> Vec<GlobalId> {
+        use crate::graph::Node;
+
+        // Build tensor_producer: tensor_id → producing op_id
+        let mut tensor_producer: HashMap<GlobalId, GlobalId> = HashMap::new();
+        for (op_id, graph_op) in &self.operations {
+            for output_id in graph_op.op.outputs() {
+                tensor_producer.insert(output_id, *op_id);
+            }
+        }
+
+        // Build in-degree per op (count of distinct producer ops for its inputs)
+        let mut in_degree: HashMap<GlobalId, usize> = HashMap::new();
+        let mut dependents: HashMap<GlobalId, Vec<GlobalId>> = HashMap::new();
+
+        for (op_id, graph_op) in &self.operations {
+            // Collect distinct producer ops for this op's inputs
+            let mut producer_ops: HashSet<GlobalId> = HashSet::new();
+            for input_id in graph_op.op.inputs() {
+                if let Some(&producer_op) = tensor_producer.get(&input_id) {
+                    producer_ops.insert(producer_op);
+                }
+            }
+            in_degree.insert(*op_id, producer_ops.len());
+            for &producer_op in &producer_ops {
+                dependents.entry(producer_op).or_default().push(*op_id);
+            }
+        }
+
+        // Seed queue with in-degree 0 ops
+        let mut queue: std::collections::VecDeque<GlobalId> = std::collections::VecDeque::new();
+        for (op_id, &deg) in &in_degree {
+            if deg == 0 {
+                queue.push_back(*op_id);
+            }
+        }
+
+        // Drain queue
+        let mut result = Vec::with_capacity(self.operations.len());
+        while let Some(op_id) = queue.pop_front() {
+            result.push(op_id);
+            if let Some(deps) = dependents.get(&op_id) {
+                for &dep_id in deps {
+                    let deg = in_degree.get_mut(&dep_id).unwrap();
+                    *deg -= 1;
+                    if *deg == 0 {
+                        queue.push_back(dep_id);
+                    }
+                }
+            }
+        }
+
+        assert_eq!(
+            result.len(),
+            self.operations.len(),
+            "Topological sort did not visit all operations — possible cycle"
+        );
+
+        result
+    }
+
+    /// Flatten this SymbolicGraph into a single combined MilliOpGraph.
+    pub fn generate_milli_graph(&self, rng: &mut impl Rng) -> crate::milli_graph::MilliOpGraph {
+        use crate::graph::Graph;
+        use crate::milli_graph::MilliOpGraph;
+
+        let mut combined = MilliOpGraph::new_empty(rng);
+        let mut sym_to_combined: HashMap<GlobalId, GlobalId> = HashMap::new();
+
+        // 1. Map ordered_inputs
+        for &input_id in &self.ordered_inputs {
+            let internal = combined.add_input_with_id(input_id, rng);
+            sym_to_combined.insert(input_id, internal);
+        }
+
+        // 2. Map standalone constants
+        for const_id in self.constant_link_ids() {
+            let internal = combined.add_input_with_id(const_id, rng);
+            sym_to_combined.insert(const_id, internal);
+        }
+
+        // 3. Walk ops in topological order, merge each
+        for op_id in self.topological_order_vec() {
+            let op_graph = self.operations[&op_id].op.get_milli_op_graph(rng);
+            combined.merge_graph(op_graph, &mut sym_to_combined, rng);
+        }
+
+        // 4. Map outputs
+        for &output_id in &self.ordered_outputs {
+            combined.add_output(sym_to_combined[&output_id], output_id);
+        }
+
+        combined
+    }
+
     fn eval(
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
@@ -1635,6 +1732,10 @@ impl Graph for SymbolicGraph {
             }
         })
     }
+
+    fn topological_order(&self) -> Option<Box<dyn Iterator<Item = GlobalId>>> {
+        Some(Box::new(self.topological_order_vec().into_iter()))
+    }
 }
 
 impl Link for ONNXTensorInfo {
@@ -1696,5 +1797,182 @@ impl NodeMetadata for GraphOperation {
 
     fn has_subgraph(&self) -> bool {
         !self.op.get_sub_graphs().is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backends::eval_backend::EvalBackend;
+
+    /// Helper: load an ONNX node test, evaluate via SymbolicGraph::eval and
+    /// via generate_milli_graph, assert outputs match.
+    fn test_equivalence_for_onnx_dir(dir: &str) {
+        let dir_path = std::path::Path::new(dir);
+        let model_path = dir_path.join("model.onnx");
+        if !model_path.exists() {
+            panic!("Model not found: {}", model_path.display());
+        }
+
+        let model_bytes = std::fs::read(&model_path).unwrap();
+        let rng = &mut rand::rng();
+        let (graph, tensor_store) =
+            SymbolicGraphMutator::from_onnx_bytes(&model_bytes, rng)
+                .unwrap()
+                .get_inner();
+
+        // Load test data set 0
+        let test_data_dir = dir_path.join("test_data_set_0");
+        let mut user_inputs: HashMap<String, crate::numeric_tensor::NumericTensor<crate::tensor_rank::DynRank>> = HashMap::new();
+        for entry in std::fs::read_dir(&test_data_dir).unwrap() {
+            let entry = entry.unwrap();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("input_") && name.ends_with(".pb") {
+                let data = std::fs::read(entry.path()).unwrap();
+                let tensor_proto = crate::onnx::TensorProto::decode(data.as_slice()).unwrap();
+                let tensor = crate::backends::ndarray_backend::NDArrayNumericTensor::<crate::tensor_rank::DynRank>::try_from(&tensor_proto).unwrap();
+                let idx: usize = name.strip_prefix("input_").unwrap().strip_suffix(".pb").unwrap().parse().unwrap();
+                // Map by input ordering
+                let input_id = graph.ordered_inputs[idx];
+                let input_name = graph.get_tensor_name(input_id).unwrap().to_string();
+                user_inputs.insert(input_name, tensor.into());
+            }
+        }
+
+        // Build full inputs (initialized tensors + user inputs)
+        let initialized_tensors = graph.get_initialized_tensors(&tensor_store);
+        let mut all_inputs: HashMap<GlobalId, crate::numeric_tensor::NumericTensor<crate::tensor_rank::DynRank>> = initialized_tensors;
+        let tensors_by_name = graph.get_tensors_by_name();
+        for (name, tensor) in &user_inputs {
+            let tensor_id = tensors_by_name[name];
+            all_inputs.insert(tensor_id, tensor.clone());
+        }
+
+        // Evaluate via SymbolicGraph::eval
+        let mut backend = EvalBackend::NDArray;
+        let symbolic_result = graph.eval(&all_inputs, &mut backend).unwrap();
+
+        // Evaluate via generate_milli_graph
+        let combined = graph.generate_milli_graph(rng);
+        let milli_result: HashMap<_, _> = combined
+            .eval(&all_inputs, &mut (), &mut backend)
+            .unwrap()
+            .collect();
+
+        // Compare outputs
+        for &output_id in &graph.ordered_outputs {
+            let sym_tensor = &symbolic_result[&output_id];
+            let milli_tensor = &milli_result[&output_id];
+
+            assert_eq!(
+                sym_tensor.shape(),
+                milli_tensor.shape(),
+                "Shape mismatch for output {:?}",
+                output_id
+            );
+            assert_eq!(
+                sym_tensor.dtype(),
+                milli_tensor.dtype(),
+                "DType mismatch for output {:?}",
+                output_id
+            );
+
+            let sym_values: Vec<f64> = sym_tensor
+                .cast(crate::dtype::DType::F64, &mut EvalBackend::NDArray)
+                .unwrap()
+                .to_ndarray()
+                .unwrap()
+                .flatten()
+                .try_to_vec()
+                .unwrap();
+            let milli_values: Vec<f64> = milli_tensor
+                .cast(crate::dtype::DType::F64, &mut EvalBackend::NDArray)
+                .unwrap()
+                .to_ndarray()
+                .unwrap()
+                .flatten()
+                .try_to_vec()
+                .unwrap();
+
+            for (i, (s, m)) in sym_values.iter().zip(milli_values.iter()).enumerate() {
+                let diff = (s - m).abs();
+                let tol = 1e-5 + 1e-3 * s.abs();
+                assert!(
+                    diff <= tol,
+                    "Value mismatch at index {} for output {:?}: symbolic={}, milli={}",
+                    i,
+                    output_id,
+                    s,
+                    m
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_topological_order_basic() {
+        // Build a small symbolic graph and verify topological order
+        // We'll use the actual ONNX add test which is simple
+        let dir = "libs/onnx/onnx/backend/test/data/node/test_add";
+        if !std::path::Path::new(dir).join("model.onnx").exists() {
+            eprintln!("Skipping test_topological_order_basic: ONNX test data not found");
+            return;
+        }
+        let model_bytes = std::fs::read(std::path::Path::new(dir).join("model.onnx")).unwrap();
+        let rng = &mut rand::rng();
+        let (graph, _) = SymbolicGraphMutator::from_onnx_bytes(&model_bytes, rng)
+            .unwrap()
+            .get_inner();
+
+        let topo = graph.topological_order_vec();
+        // Should have exactly the number of operations
+        assert_eq!(topo.len(), graph.operations.len());
+
+        // Every op should appear exactly once
+        let topo_set: HashSet<_> = topo.iter().copied().collect();
+        assert_eq!(topo_set.len(), topo.len());
+        for op_id in graph.operations.keys() {
+            assert!(topo_set.contains(op_id));
+        }
+    }
+
+    #[test]
+    fn test_generate_milli_graph_add() {
+        let dir = "libs/onnx/onnx/backend/test/data/node/test_add";
+        if !std::path::Path::new(dir).join("model.onnx").exists() {
+            eprintln!("Skipping test: ONNX test data not found");
+            return;
+        }
+        test_equivalence_for_onnx_dir(dir);
+    }
+
+    #[test]
+    fn test_generate_milli_graph_relu() {
+        let dir = "libs/onnx/onnx/backend/test/data/node/test_relu";
+        if !std::path::Path::new(dir).join("model.onnx").exists() {
+            eprintln!("Skipping test: ONNX test data not found");
+            return;
+        }
+        test_equivalence_for_onnx_dir(dir);
+    }
+
+    #[test]
+    fn test_generate_milli_graph_matmul_2d() {
+        let dir = "libs/onnx/onnx/backend/test/data/node/test_matmul_2d";
+        if !std::path::Path::new(dir).join("model.onnx").exists() {
+            eprintln!("Skipping test: ONNX test data not found");
+            return;
+        }
+        test_equivalence_for_onnx_dir(dir);
+    }
+
+    #[test]
+    fn test_generate_milli_graph_reshape() {
+        let dir = "libs/onnx/onnx/backend/test/data/node/test_reshape_extended_dims";
+        if !std::path::Path::new(dir).join("model.onnx").exists() {
+            eprintln!("Skipping test: ONNX test data not found");
+            return;
+        }
+        test_equivalence_for_onnx_dir(dir);
     }
 }

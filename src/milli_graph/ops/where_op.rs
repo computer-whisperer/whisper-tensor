@@ -37,6 +37,16 @@ impl Where {
     }
 }
 
+impl Where {
+    pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl rand::Rng) {
+        self.global_id = GlobalId::new(rng);
+        super::remap(&mut self.output, map);
+        super::remap(&mut self.condition, map);
+        super::remap(&mut self.x, map);
+        super::remap(&mut self.y, map);
+    }
+}
+
 impl Node for Where {
     type OpKind = String;
     fn global_id(&self) -> GlobalId {

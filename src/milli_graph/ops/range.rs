@@ -39,6 +39,16 @@ impl Range {
     }
 }
 
+impl Range {
+    pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl rand::Rng) {
+        self.global_id = GlobalId::new(rng);
+        super::remap(&mut self.output, map);
+        super::remap(&mut self.start, map);
+        super::remap(&mut self.end, map);
+        super::remap(&mut self.delta, map);
+    }
+}
+
 impl crate::graph::Node for Range {
     type OpKind = String;
     fn global_id(&self) -> GlobalId {

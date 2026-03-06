@@ -45,6 +45,18 @@ impl Slice {
     }
 }
 
+impl Slice {
+    pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl rand::Rng) {
+        self.global_id = GlobalId::new(rng);
+        super::remap(&mut self.output, map);
+        super::remap(&mut self.data, map);
+        super::remap(&mut self.starts, map);
+        super::remap(&mut self.ends, map);
+        super::remap_opt(&mut self.steps, map);
+        super::remap_opt(&mut self.axes, map);
+    }
+}
+
 impl crate::graph::Node for Slice {
     type OpKind = String;
     fn global_id(&self) -> GlobalId {

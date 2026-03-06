@@ -176,6 +176,14 @@ impl SimpleUnaryOp {
     }
 }
 
+impl SimpleUnaryOp {
+    pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl rand::Rng) {
+        self.global_id = GlobalId::new(rng);
+        super::remap(&mut self.output, map);
+        super::remap(&mut self.input, map);
+    }
+}
+
 impl Node for SimpleUnaryOp {
     type OpKind = String;
     fn op_kind(&self) -> Self::OpKind {
@@ -269,6 +277,14 @@ impl ClampMin {
         };
         graph.push_op(AnyMilliOp::ClampMin(node));
         output
+    }
+}
+
+impl ClampMin {
+    pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl rand::Rng) {
+        self.global_id = GlobalId::new(rng);
+        super::remap(&mut self.output, map);
+        super::remap(&mut self.input, map);
     }
 }
 

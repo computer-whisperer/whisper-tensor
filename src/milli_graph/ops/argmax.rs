@@ -41,6 +41,14 @@ impl ArgMax {
     }
 }
 
+impl ArgMax {
+    pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl rand::Rng) {
+        self.global_id = GlobalId::new(rng);
+        super::remap(&mut self.output, map);
+        super::remap(&mut self.input, map);
+    }
+}
+
 impl MilliOp for ArgMax {
     fn eval(
         &self,

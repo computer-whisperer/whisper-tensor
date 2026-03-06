@@ -58,6 +58,13 @@ impl Constant {
     }
 }
 
+impl Constant {
+    pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl Rng) {
+        self.global_id = GlobalId::new(rng);
+        super::remap(&mut self.output, map);
+    }
+}
+
 impl Node for Constant {
     type OpKind = String;
     fn global_id(&self) -> GlobalId {
@@ -111,6 +118,14 @@ impl ConstantOfShape {
             shape,
         };
         graph.push_op(AnyMilliOp::ConstantOfShape(node))
+    }
+}
+
+impl ConstantOfShape {
+    pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl Rng) {
+        self.global_id = GlobalId::new(rng);
+        super::remap(&mut self.output, map);
+        super::remap(&mut self.shape, map);
     }
 }
 

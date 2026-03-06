@@ -35,6 +35,16 @@ impl Concat {
     }
 }
 
+impl Concat {
+    pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl rand::Rng) {
+        self.global_id = GlobalId::new(rng);
+        super::remap(&mut self.output, map);
+        for id in &mut self.inputs {
+            super::remap(id, map);
+        }
+    }
+}
+
 impl crate::graph::Node for Concat {
     type OpKind = String;
     fn global_id(&self) -> GlobalId {

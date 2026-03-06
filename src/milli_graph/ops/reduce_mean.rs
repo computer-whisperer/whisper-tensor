@@ -41,6 +41,15 @@ impl ReduceMean {
     }
 }
 
+impl ReduceMean {
+    pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl rand::Rng) {
+        self.global_id = GlobalId::new(rng);
+        super::remap(&mut self.output, map);
+        super::remap(&mut self.data, map);
+        super::remap_opt(&mut self.axes, map);
+    }
+}
+
 impl Node for ReduceMean {
     type OpKind = String;
     fn global_id(&self) -> GlobalId {

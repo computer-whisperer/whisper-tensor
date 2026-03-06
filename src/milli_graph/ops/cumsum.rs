@@ -43,6 +43,15 @@ impl CumSum {
     }
 }
 
+impl CumSum {
+    pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl rand::Rng) {
+        self.global_id = GlobalId::new(rng);
+        super::remap(&mut self.output, map);
+        super::remap(&mut self.input, map);
+        super::remap(&mut self.axis, map);
+    }
+}
+
 impl Node for CumSum {
     type OpKind = String;
     fn global_id(&self) -> GlobalId {

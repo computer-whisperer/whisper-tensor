@@ -61,9 +61,22 @@ use crate::scalar_info::ScalarInfoTyped;
 use crate::symbolic_scalar::{SymbolicResolver, SymbolicScalarTyped};
 use crate::tensor_info::{TensorInfo, TensorInfoTypedRanked};
 use crate::tensor_rank::DynRank;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use typenum::P1;
+
+pub(crate) fn remap(id: &mut GlobalId, map: &HashMap<GlobalId, GlobalId>) {
+    if let Some(&new) = map.get(id) {
+        *id = new;
+    }
+}
+
+pub(crate) fn remap_opt(id: &mut Option<GlobalId>, map: &HashMap<GlobalId, GlobalId>) {
+    if let Some(inner) = id {
+        remap(inner, map);
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MilliOpTensorIDOrLiteral {
@@ -259,6 +272,43 @@ pub enum AnyMilliOp {
     Expand(Expand),
     ArgMax(ArgMax),
     ArgMin(ArgMin),
+}
+
+impl AnyMilliOp {
+    pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl Rng) {
+        match self {
+            AnyMilliOp::Constant(x) => x.remap_tensors(map, rng),
+            AnyMilliOp::ConstantOfShape(x) => x.remap_tensors(map, rng),
+            AnyMilliOp::SimpleBinary(x) => x.remap_tensors(map, rng),
+            AnyMilliOp::MatMul(x) => x.remap_tensors(map, rng),
+            AnyMilliOp::Pow(x) => x.remap_tensors(map, rng),
+            AnyMilliOp::SimpleUnary(x) => x.remap_tensors(map, rng),
+            AnyMilliOp::ClampMin(x) => x.remap_tensors(map, rng),
+            AnyMilliOp::NonZero(x) => x.remap_tensors(map, rng),
+            AnyMilliOp::CumSum(x) => x.remap_tensors(map, rng),
+            AnyMilliOp::Shape(x) => x.remap_tensors(map, rng),
+            AnyMilliOp::Reshape(x) => x.remap_tensors(map, rng),
+            AnyMilliOp::Slice(x) => x.remap_tensors(map, rng),
+            AnyMilliOp::ReduceSum(x) => x.remap_tensors(map, rng),
+            AnyMilliOp::ReduceMin(x) => x.remap_tensors(map, rng),
+            AnyMilliOp::ReduceMax(x) => x.remap_tensors(map, rng),
+            AnyMilliOp::ReduceProd(x) => x.remap_tensors(map, rng),
+            AnyMilliOp::ReduceMean(x) => x.remap_tensors(map, rng),
+            AnyMilliOp::Cast(x) => x.remap_tensors(map, rng),
+            AnyMilliOp::CastLike(x) => x.remap_tensors(map, rng),
+            AnyMilliOp::Transpose(x) => x.remap_tensors(map, rng),
+            AnyMilliOp::Squeeze(x) => x.remap_tensors(map, rng),
+            AnyMilliOp::Unsqueeze(x) => x.remap_tensors(map, rng),
+            AnyMilliOp::Gather(x) => x.remap_tensors(map, rng),
+            AnyMilliOp::Concat(x) => x.remap_tensors(map, rng),
+            AnyMilliOp::Split(x) => x.remap_tensors(map, rng),
+            AnyMilliOp::Where(x) => x.remap_tensors(map, rng),
+            AnyMilliOp::Range(x) => x.remap_tensors(map, rng),
+            AnyMilliOp::Expand(x) => x.remap_tensors(map, rng),
+            AnyMilliOp::ArgMax(x) => x.remap_tensors(map, rng),
+            AnyMilliOp::ArgMin(x) => x.remap_tensors(map, rng),
+        }
+    }
 }
 
 macro_rules! delegate {
