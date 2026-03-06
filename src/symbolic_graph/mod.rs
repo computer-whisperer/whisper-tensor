@@ -608,8 +608,8 @@ impl SymbolicGraph {
 
     /// Flatten this SymbolicGraph into a single combined MilliOpGraph.
     pub fn generate_milli_graph(&self, rng: &mut impl Rng) -> crate::milli_graph::MilliOpGraph {
-        use crate::graph::Graph;
-        use crate::milli_graph::MilliOpGraph;
+        use crate::graph::{Graph, Node};
+        use crate::milli_graph::{MilliOpGraph, MilliOpGroup, MilliOpPhase};
 
         let mut combined = MilliOpGraph::new_empty(rng);
         let mut sym_to_combined: HashMap<GlobalId, GlobalId> = HashMap::new();
@@ -626,10 +626,23 @@ impl SymbolicGraph {
             sym_to_combined.insert(const_id, internal);
         }
 
-        // 3. Walk ops in topological order, merge each
+        // 3. Walk ops in topological order, merge each with a group
         for op_id in self.topological_order_vec() {
-            let op_graph = self.operations[&op_id].op.get_milli_op_graph(rng);
-            combined.merge_graph(op_graph, &mut sym_to_combined, rng);
+            let graph_op = &self.operations[&op_id];
+            let label = graph_op.name.clone()
+                .unwrap_or_else(|| graph_op.op.op_kind());
+            let group = MilliOpGroup {
+                id: GlobalId::new(rng),
+                source_op: Some(op_id),
+                source_graph: Some(self.global_id),
+                phase: MilliOpPhase::Forward,
+                label: Some(label),
+                ..Default::default()
+            };
+            let group_id = combined.create_group(group);
+
+            let op_graph = graph_op.op.get_milli_op_graph(rng);
+            combined.merge_graph(op_graph, &mut sym_to_combined, rng, Some(group_id));
         }
 
         // 4. Map outputs
