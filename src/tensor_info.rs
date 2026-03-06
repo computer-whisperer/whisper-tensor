@@ -1056,6 +1056,17 @@ impl TensorInfo {
         }
     }
 
+    /// Create a TensorInfo with known shape from a u64 slice. Dtype defaults to F32.
+    /// Useful for broadcast analysis and tests.
+    pub fn from_shape_u64(shape: &[u64]) -> Self {
+        use crate::numeric_scalar::NumericScalar;
+        let dims: Vec<ScalarInfoTyped<u64>> = shape.iter()
+            .map(|&v| ScalarInfoTyped::Numeric(v))
+            .collect();
+        let first_element = ScalarInfo::Numeric(NumericScalar::F32(0.0));
+        TensorInfo::Ranked(TensorInfoRanked::Ranked(RankedTensor::new(first_element, dims)))
+    }
+
     #[allow(dead_code)]
     pub(crate) fn try_to_rank<R: KnownRank>(
         &self,

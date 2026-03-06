@@ -704,6 +704,122 @@ impl Graph for MilliOpGraph
     }
 }
 
+// --- Broadcast Analysis ---
+
+/// Computed broadcast information for backward generation.
+#[derive(Clone, Debug)]
+pub struct BroadcastAnalysis {
+    /// Axes where input A broadcasts (A's dim is 1 or rank-padded, B's is not).
+    pub a_broadcast_axes: Vec<i64>,
+    /// Axes where input B broadcasts.
+    pub b_broadcast_axes: Vec<i64>,
+    /// Number of dims A was left-padded (for rank alignment).
+    pub a_rank_padding: usize,
+    /// Number of dims B was left-padded.
+    pub b_rank_padding: usize,
+}
+
+/// Analyze shapes to determine which axes were broadcast.
+///
+/// Returns `None` if rank is unknown for either input.
+/// Used at generation time to insert correct ReduceSum ops in backward pass.
+pub fn analyze_broadcast(
+    a_shape: &TensorInfo,
+    b_shape: &TensorInfo,
+) -> Option<BroadcastAnalysis> {
+    let a_rank = a_shape.rank_if_known()?;
+    let b_rank = b_shape.rank_if_known()?;
+    let target_rank = a_rank.max(b_rank);
+
+    let a_padding = target_rank - a_rank;
+    let b_padding = target_rank - b_rank;
+
+    let mut a_broadcast = vec![];
+    let mut b_broadcast = vec![];
+
+    for i in 0..target_rank {
+        let a_dim = if i < a_padding {
+            Some(1) // Left-padded with 1
+        } else {
+            a_shape.dim_if_known(i - a_padding)
+        };
+
+        let b_dim = if i < b_padding {
+            Some(1)
+        } else {
+            b_shape.dim_if_known(i - b_padding)
+        };
+
+        match (a_dim, b_dim) {
+            (Some(1), Some(d)) if d != 1 => a_broadcast.push(i as i64),
+            (Some(1), None) => a_broadcast.push(i as i64), // 1 vs symbolic → assume broadcast
+            (Some(d), Some(1)) if d != 1 => b_broadcast.push(i as i64),
+            (None, Some(1)) => b_broadcast.push(i as i64),
+            _ => {} // Same size or both symbolic (assume equal)
+        }
+    }
+
+    Some(BroadcastAnalysis {
+        a_broadcast_axes: a_broadcast,
+        b_broadcast_axes: b_broadcast,
+        a_rank_padding: a_padding,
+        b_rank_padding: b_padding,
+    })
+}
+
+// --- Milli-op level backward ---
+
+/// Differentiate through a section of a MilliOpGraph (e.g., the loss group).
+///
+/// Walks ops in reverse order within the group, calling each op's `backward()`.
+/// Accumulates gradients for fan-out (multiple consumers of the same tensor).
+/// Returns a gradient map: tensor_id → gradient_tensor_id.
+pub fn generate_milli_backward(
+    graph: &mut MilliOpGraph,
+    group_id: GlobalId,
+    initial_grad_map: &HashMap<GlobalId, GlobalId>,
+    rng: &mut impl Rng,
+) -> HashMap<GlobalId, GlobalId> {
+    let mut grad_map = initial_grad_map.clone();
+
+    // Collect ops in this group, sorted by op_ordering position, reversed
+    let mut ordered: Vec<(usize, GlobalId)> = graph.op_to_group.iter()
+        .filter(|&(_, &gid)| gid == group_id)
+        .filter_map(|(&op_id, _)| {
+            graph.op_ordering.iter().position(|id| *id == op_id)
+                .map(|pos| (pos, op_id))
+        })
+        .collect();
+    ordered.sort_by_key(|&(pos, _)| pos);
+    ordered.reverse();
+
+    for (_, op_id) in ordered {
+        let op = graph.ops[&op_id].clone();
+
+        // Collect output gradients for this op
+        let output_grads: HashMap<GlobalId, GlobalId> = op.outputs()
+            .filter_map(|out_id| grad_map.get(&out_id).map(|&g| (out_id, g)))
+            .collect();
+
+        if output_grads.is_empty() { continue; }
+
+        // Generate backward ops (added directly to the graph)
+        if let Some(input_grads) = op.backward(&output_grads, graph, rng) {
+            // Accumulate gradients (handles fan-out)
+            for (input_id, grad_id) in input_grads {
+                grad_map.entry(input_id)
+                    .and_modify(|existing| {
+                        let sum = ops::SimpleBinary::add(graph, *existing, grad_id, rng);
+                        *existing = sum;
+                    })
+                    .or_insert(grad_id);
+            }
+        }
+    }
+
+    grad_map
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -998,6 +1114,67 @@ mod tests {
         let loss2 = eval_loss(&graph, &info, preds2, targets2);
         let expected = 13.0f32 / 3.0;
         assert!((loss2 - expected).abs() < 1e-5, "expected {}, got {}", expected, loss2);
+    }
+
+    #[test]
+    fn test_broadcast_analysis_same_shape() {
+        // Both [batch, hidden] — no broadcasting
+        use crate::tensor_info::TensorInfo;
+        let a = TensorInfo::from_shape_u64(&[32, 256]);
+        let b = TensorInfo::from_shape_u64(&[32, 256]);
+        let result = analyze_broadcast(&a, &b).unwrap();
+        assert!(result.a_broadcast_axes.is_empty());
+        assert!(result.b_broadcast_axes.is_empty());
+        assert_eq!(result.a_rank_padding, 0);
+        assert_eq!(result.b_rank_padding, 0);
+    }
+
+    #[test]
+    fn test_broadcast_analysis_bias_add() {
+        // a=[batch, hidden], b=[1, hidden] — b broadcasts axis 0
+        use crate::tensor_info::TensorInfo;
+        let a = TensorInfo::from_shape_u64(&[32, 256]);
+        let b = TensorInfo::from_shape_u64(&[1, 256]);
+        let result = analyze_broadcast(&a, &b).unwrap();
+        assert!(result.a_broadcast_axes.is_empty());
+        assert_eq!(result.b_broadcast_axes, vec![0]);
+    }
+
+    #[test]
+    fn test_broadcast_analysis_rank_mismatch() {
+        // a=[batch, seq, hidden], b=[hidden] — b left-padded to [1, 1, hidden]
+        use crate::tensor_info::TensorInfo;
+        let a = TensorInfo::from_shape_u64(&[32, 128, 256]);
+        let b = TensorInfo::from_shape_u64(&[256]);
+        let result = analyze_broadcast(&a, &b).unwrap();
+        assert!(result.a_broadcast_axes.is_empty());
+        assert_eq!(result.b_broadcast_axes, vec![0, 1]);
+        assert_eq!(result.a_rank_padding, 0);
+        assert_eq!(result.b_rank_padding, 2);
+    }
+
+    #[test]
+    fn test_broadcast_analysis_both_broadcast() {
+        // a=[batch, 1, hidden], b=[1, seq, hidden]
+        use crate::tensor_info::TensorInfo;
+        let a = TensorInfo::from_shape_u64(&[32, 1, 256]);
+        let b = TensorInfo::from_shape_u64(&[1, 128, 256]);
+        let result = analyze_broadcast(&a, &b).unwrap();
+        assert_eq!(result.a_broadcast_axes, vec![1]); // a's dim 1 is 1
+        assert_eq!(result.b_broadcast_axes, vec![0]); // b's dim 0 is 1
+    }
+
+    #[test]
+    fn test_broadcast_analysis_scalar() {
+        // a=[batch, hidden], b=[] (scalar) — b broadcasts all axes
+        use crate::tensor_info::TensorInfo;
+        let a = TensorInfo::from_shape_u64(&[32, 256]);
+        let b = TensorInfo::from_shape_u64(&[]);
+        let result = analyze_broadcast(&a, &b).unwrap();
+        assert!(result.a_broadcast_axes.is_empty());
+        // scalar left-padded to [1, 1], both broadcast
+        assert_eq!(result.b_broadcast_axes, vec![0, 1]);
+        assert_eq!(result.b_rank_padding, 2);
     }
 }
 
