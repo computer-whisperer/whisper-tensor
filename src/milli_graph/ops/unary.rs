@@ -251,6 +251,47 @@ impl MilliOp for SimpleUnaryOp {
         };
         Ok(Box::new([(self.output, out)].into_iter()))
     }
+
+    fn backward(
+        &self,
+        output_grads: &HashMap<GlobalId, GlobalId>,
+        graph: &mut MilliOpGraph,
+        rng: &mut impl rand::Rng,
+    ) -> Option<HashMap<GlobalId, GlobalId>> {
+        let grad_output = *output_grads.get(&self.output)?;
+        let grad_input = match self.op {
+            // d/dx(-x) = -1 => grad_input = -grad_output
+            WhichSimpleUnaryOp::Neg => {
+                SimpleUnaryOp::neg(graph, grad_output, rng)
+            }
+            // d/dx(exp(x)) = exp(x) => grad_input = grad_output * output
+            WhichSimpleUnaryOp::Exp => {
+                // output = exp(input), reuse the forward output
+                super::SimpleBinary::mul(graph, grad_output, self.output, rng)
+            }
+            // d/dx(ln(x)) = 1/x => grad_input = grad_output / input
+            WhichSimpleUnaryOp::Ln => {
+                super::SimpleBinary::div(graph, grad_output, self.input, rng)
+            }
+            // d/dx(sqrt(x)) = 1/(2*sqrt(x)) => grad_input = grad_output / (2 * output)
+            WhichSimpleUnaryOp::Sqrt => {
+                let two = super::Constant::new_scalar(graph, 2.0f32, rng);
+                let two_output = super::SimpleBinary::mul(graph, two, self.output, rng);
+                super::SimpleBinary::div(graph, grad_output, two_output, rng)
+            }
+            // d/dx(1/x) = -1/x^2 => grad_input = -grad_output * output^2
+            // equivalently: -grad_output / (input * input)
+            WhichSimpleUnaryOp::Reciprocal => {
+                let input_sq = super::SimpleBinary::mul(graph, self.input, self.input, rng);
+                let neg_grad = SimpleUnaryOp::neg(graph, grad_output, rng);
+                super::SimpleBinary::div(graph, neg_grad, input_sq, rng)
+            }
+            _ => return None,
+        };
+        let mut result = HashMap::new();
+        result.insert(self.input, grad_input);
+        Some(result)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

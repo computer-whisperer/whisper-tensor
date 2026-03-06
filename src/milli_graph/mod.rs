@@ -1176,6 +1176,578 @@ mod tests {
         assert_eq!(result.b_broadcast_axes, vec![0, 1]);
         assert_eq!(result.b_rank_padding, 2);
     }
+
+    // ============================================================
+    // Finite difference gradient tests for Phase 5 backward ops
+    // ============================================================
+
+    use crate::milli_graph::ops::{SimpleUnaryOp, ReduceSum};
+
+    /// Helper: build a graph that applies `build_fn` to inputs, reduces to scalar via ReduceSum,
+    /// then run forward to get the scalar output. Returns the scalar value.
+    fn eval_scalar_graph(
+        build_fn: &dyn Fn(&mut MilliOpGraph, &[GlobalId], &mut wyrand::WyRand) -> GlobalId,
+        input_values: &[Vec<f32>],
+        input_shapes: &[Vec<usize>],
+    ) -> f32 {
+        let rng = &mut wyrand::WyRand::new(42);
+        let mut graph = MilliOpGraph::new_empty(rng);
+
+        // Create input tensors
+        let mut ext_ids = Vec::new();
+        let mut int_ids = Vec::new();
+        for _ in 0..input_values.len() {
+            let ext = GlobalId::new(rng);
+            let int = graph.add_input_with_id(ext, rng);
+            ext_ids.push(ext);
+            int_ids.push(int);
+        }
+
+        // Build the op under test
+        let result = build_fn(&mut graph, &int_ids, rng);
+
+        // Reduce to scalar
+        let scalar = ReduceSum::push_new(&mut graph, result, None, false, false, rng);
+
+        // Set output
+        let ext_out = GlobalId::new(rng);
+        graph.add_output(scalar, ext_out);
+
+        // Prepare inputs
+        let mut inputs = HashMap::new();
+        for (i, ext) in ext_ids.iter().enumerate() {
+            let shape_u64: Vec<u64> = input_shapes[i].iter().map(|&s| s as u64).collect();
+            let t = NumericTensor::<DynRank>::from_vec_shape(
+                input_values[i].clone(), input_shapes[i].clone(),
+            ).unwrap();
+            inputs.insert(*ext, t);
+        }
+
+        let mut backend = EvalBackend::NDArray;
+        let results: HashMap<_, _> = graph.eval(&inputs, &mut (), &mut backend).unwrap().collect();
+        let val: Vec<f32> = results[&ext_out].flatten().unwrap().try_into().unwrap();
+        val[0]
+    }
+
+    /// Finite difference gradient check for a unary op.
+    /// Computes analytic gradient via backward, compares to (f(x+eps) - f(x-eps)) / (2*eps).
+    fn check_unary_backward(
+        build_fn: impl Fn(&mut MilliOpGraph, GlobalId, &mut wyrand::WyRand) -> GlobalId,
+        input_values: Vec<f32>,
+        input_shape: Vec<usize>,
+        eps: f32,
+        tol: f32,
+    ) {
+        let rng = &mut wyrand::WyRand::new(42);
+
+        // Build graph: input -> op -> reduce_sum -> scalar
+        let mut graph = MilliOpGraph::new_empty(rng);
+        let ext_in = GlobalId::new(rng);
+        let int_in = graph.add_input_with_id(ext_in, rng);
+
+        // Create a group for the ops so generate_milli_backward can find them
+        let group = graph.create_group(MilliOpGroup {
+            id: GlobalId::new(rng),
+            phase: MilliOpPhase::Forward,
+            ..Default::default()
+        });
+        graph.set_default_group(Some(group));
+
+        let op_out = build_fn(&mut graph, int_in, rng);
+
+        // ReduceSum is outside the group — backward won't try to differentiate through it
+        graph.set_default_group(None);
+        let scalar = ReduceSum::push_new(&mut graph, op_out, None, false, false, rng);
+
+        // Set output
+        let ext_out = GlobalId::new(rng);
+        graph.add_output(scalar, ext_out);
+
+        // Seed gradient at op_out with shape-matching ones
+        let ones_data = NDArrayNumericTensor::<DynRank>::from_vec_shape(
+            vec![1.0f32; input_values.len()],
+            &input_shape.iter().map(|&s| s as u64).collect::<Vec<_>>(),
+        ).unwrap();
+        let ones = Constant::push_new(&mut graph, ones_data, rng);
+        let mut grad_map = HashMap::new();
+        grad_map.insert(op_out, ones);
+        let grads = generate_milli_backward(&mut graph, group, &grad_map, rng);
+
+        // The gradient of the input should be in grads
+        let grad_tensor_id = grads.get(&int_in)
+            .unwrap_or_else(|| panic!("No gradient produced for input"));
+
+        // Also expose gradient as output
+        let ext_grad = GlobalId::new(rng);
+        graph.add_output(*grad_tensor_id, ext_grad);
+
+        // Evaluate to get analytic gradient
+        let shape_u64: Vec<u64> = input_shape.iter().map(|&s| s as u64).collect();
+        let input_tensor = NumericTensor::<DynRank>::from_vec_shape(
+            input_values.clone(), input_shape.clone(),
+        ).unwrap();
+        let mut inputs = HashMap::new();
+        inputs.insert(ext_in, input_tensor);
+
+        let mut backend = EvalBackend::NDArray;
+        let results: HashMap<_, _> = graph.eval(&inputs, &mut (), &mut backend).unwrap().collect();
+        let analytic_grad: Vec<f32> = results[&ext_grad].flatten().unwrap().try_into().unwrap();
+
+        // Finite difference check for each element
+        for i in 0..input_values.len() {
+            let mut plus = input_values.clone();
+            plus[i] += eps;
+            let mut minus = input_values.clone();
+            minus[i] -= eps;
+
+            let f_plus = eval_scalar_graph(
+                &|g, ids, r| {
+                    let out = build_fn(g, ids[0], r);
+                    out
+                },
+                &[plus],
+                &[input_shape.clone()],
+            );
+            let f_minus = eval_scalar_graph(
+                &|g, ids, r| {
+                    let out = build_fn(g, ids[0], r);
+                    out
+                },
+                &[minus],
+                &[input_shape.clone()],
+            );
+
+            let numerical_grad = (f_plus - f_minus) / (2.0 * eps);
+            let diff = (analytic_grad[i] - numerical_grad).abs();
+            let scale = analytic_grad[i].abs().max(numerical_grad.abs()).max(1e-7);
+            assert!(
+                diff / scale < tol,
+                "Gradient mismatch at element {}: analytic={}, numerical={}, rel_diff={}",
+                i, analytic_grad[i], numerical_grad, diff / scale
+            );
+        }
+    }
+
+    /// Finite difference gradient check for a binary op.
+    fn check_binary_backward(
+        build_fn: impl Fn(&mut MilliOpGraph, GlobalId, GlobalId, &mut wyrand::WyRand) -> GlobalId,
+        a_values: Vec<f32>,
+        b_values: Vec<f32>,
+        shape: Vec<usize>,
+        eps: f32,
+        tol: f32,
+    ) {
+        let rng = &mut wyrand::WyRand::new(42);
+
+        let mut graph = MilliOpGraph::new_empty(rng);
+        let ext_a = GlobalId::new(rng);
+        let ext_b = GlobalId::new(rng);
+        let int_a = graph.add_input_with_id(ext_a, rng);
+        let int_b = graph.add_input_with_id(ext_b, rng);
+
+        let group = graph.create_group(MilliOpGroup {
+            id: GlobalId::new(rng),
+            phase: MilliOpPhase::Forward,
+            ..Default::default()
+        });
+        graph.set_default_group(Some(group));
+
+        let op_out = build_fn(&mut graph, int_a, int_b, rng);
+
+        // ReduceSum outside the group
+        graph.set_default_group(None);
+        let scalar = ReduceSum::push_new(&mut graph, op_out, None, false, false, rng);
+
+        let ext_out = GlobalId::new(rng);
+        graph.add_output(scalar, ext_out);
+
+        // Seed gradient at op_out with shape-matching ones
+        let ones_data = NDArrayNumericTensor::<DynRank>::from_vec_shape(
+            vec![1.0f32; a_values.len()],
+            &shape.iter().map(|&s| s as u64).collect::<Vec<_>>(),
+        ).unwrap();
+        let ones = Constant::push_new(&mut graph, ones_data, rng);
+        let mut grad_map = HashMap::new();
+        grad_map.insert(op_out, ones);
+        let grads = generate_milli_backward(&mut graph, group, &grad_map, rng);
+
+        let grad_a_id = grads.get(&int_a).expect("No gradient for input a");
+        let grad_b_id = grads.get(&int_b).expect("No gradient for input b");
+
+        let ext_grad_a = GlobalId::new(rng);
+        graph.add_output(*grad_a_id, ext_grad_a);
+        // If both grads point to same tensor, reuse the same external output ID
+        let ext_grad_b = if grad_a_id == grad_b_id {
+            ext_grad_a
+        } else {
+            let id = GlobalId::new(rng);
+            graph.add_output(*grad_b_id, id);
+            id
+        };
+
+        let input_a = NumericTensor::<DynRank>::from_vec_shape(a_values.clone(), shape.clone()).unwrap();
+        let input_b = NumericTensor::<DynRank>::from_vec_shape(b_values.clone(), shape.clone()).unwrap();
+        let mut inputs = HashMap::new();
+        inputs.insert(ext_a, input_a);
+        inputs.insert(ext_b, input_b);
+
+        let mut backend = EvalBackend::NDArray;
+        let results: HashMap<_, _> = graph.eval(&inputs, &mut (), &mut backend).unwrap().collect();
+        let analytic_grad_a: Vec<f32> = results[&ext_grad_a].flatten().unwrap().try_into().unwrap();
+        let analytic_grad_b: Vec<f32> = results[&ext_grad_b].flatten().unwrap().try_into().unwrap();
+
+        // Check gradients w.r.t. a
+        for i in 0..a_values.len() {
+            let mut plus = a_values.clone();
+            plus[i] += eps;
+            let mut minus = a_values.clone();
+            minus[i] -= eps;
+
+            let f_plus = eval_scalar_graph(
+                &|g, ids, r| build_fn(g, ids[0], ids[1], r),
+                &[plus, b_values.clone()],
+                &[shape.clone(), shape.clone()],
+            );
+            let f_minus = eval_scalar_graph(
+                &|g, ids, r| build_fn(g, ids[0], ids[1], r),
+                &[minus, b_values.clone()],
+                &[shape.clone(), shape.clone()],
+            );
+
+            let numerical = (f_plus - f_minus) / (2.0 * eps);
+            let diff = (analytic_grad_a[i] - numerical).abs();
+            let scale = analytic_grad_a[i].abs().max(numerical.abs()).max(1e-7);
+            assert!(
+                diff / scale < tol,
+                "Grad a mismatch at {}: analytic={}, numerical={}, rel_diff={}",
+                i, analytic_grad_a[i], numerical, diff / scale
+            );
+        }
+
+        // Check gradients w.r.t. b
+        for i in 0..b_values.len() {
+            let mut plus = b_values.clone();
+            plus[i] += eps;
+            let mut minus = b_values.clone();
+            minus[i] -= eps;
+
+            let f_plus = eval_scalar_graph(
+                &|g, ids, r| build_fn(g, ids[0], ids[1], r),
+                &[a_values.clone(), plus],
+                &[shape.clone(), shape.clone()],
+            );
+            let f_minus = eval_scalar_graph(
+                &|g, ids, r| build_fn(g, ids[0], ids[1], r),
+                &[a_values.clone(), minus],
+                &[shape.clone(), shape.clone()],
+            );
+
+            let numerical = (f_plus - f_minus) / (2.0 * eps);
+            let diff = (analytic_grad_b[i] - numerical).abs();
+            let scale = analytic_grad_b[i].abs().max(numerical.abs()).max(1e-7);
+            assert!(
+                diff / scale < tol,
+                "Grad b mismatch at {}: analytic={}, numerical={}, rel_diff={}",
+                i, analytic_grad_b[i], numerical, diff / scale
+            );
+        }
+    }
+
+    #[test]
+    fn test_backward_neg() {
+        check_unary_backward(
+            SimpleUnaryOp::neg,
+            vec![1.0, -2.0, 3.0, -0.5],
+            vec![2, 2],
+            1e-3, 1e-2,
+        );
+    }
+
+    #[test]
+    fn test_backward_exp() {
+        check_unary_backward(
+            SimpleUnaryOp::exp,
+            vec![0.5, -0.3, 1.0, 0.1],
+            vec![2, 2],
+            1e-3, 1e-2,
+        );
+    }
+
+    #[test]
+    fn test_backward_ln() {
+        // Use positive values only
+        check_unary_backward(
+            SimpleUnaryOp::ln,
+            vec![1.0, 2.0, 0.5, 3.0],
+            vec![2, 2],
+            1e-3, 1e-2,
+        );
+    }
+
+    #[test]
+    fn test_backward_sqrt() {
+        check_unary_backward(
+            SimpleUnaryOp::sqrt,
+            vec![1.0, 4.0, 0.25, 9.0],
+            vec![2, 2],
+            1e-3, 1e-2,
+        );
+    }
+
+    #[test]
+    fn test_backward_reciprocal() {
+        check_unary_backward(
+            SimpleUnaryOp::reciprocal,
+            vec![1.0, 2.0, 0.5, -3.0],
+            vec![2, 2],
+            1e-3, 1e-2,
+        );
+    }
+
+    #[test]
+    fn test_backward_add() {
+        check_binary_backward(
+            SimpleBinary::add,
+            vec![1.0, 2.0, 3.0, 4.0],
+            vec![5.0, 6.0, 7.0, 8.0],
+            vec![2, 2],
+            1e-3, 1e-2,
+        );
+    }
+
+    #[test]
+    fn test_backward_sub() {
+        check_binary_backward(
+            SimpleBinary::sub,
+            vec![1.0, 2.0, 3.0, 4.0],
+            vec![5.0, 6.0, 7.0, 8.0],
+            vec![2, 2],
+            1e-3, 1e-2,
+        );
+    }
+
+    #[test]
+    fn test_backward_mul() {
+        check_binary_backward(
+            SimpleBinary::mul,
+            vec![1.0, 2.0, 3.0, 4.0],
+            vec![5.0, 6.0, 7.0, 8.0],
+            vec![2, 2],
+            1e-3, 1e-2,
+        );
+    }
+
+    #[test]
+    fn test_backward_div() {
+        // Avoid zero in denominator
+        check_binary_backward(
+            SimpleBinary::div,
+            vec![1.0, 2.0, 3.0, 4.0],
+            vec![5.0, 2.0, 7.0, 3.0],
+            vec![2, 2],
+            1e-3, 1e-2,
+        );
+    }
+
+    /// General finite difference checker for N-input graphs.
+    /// `build_fn` receives N internal tensor IDs and builds the computation, returning the final tensor.
+    /// Checks analytic gradients (via generate_milli_backward) against numerical finite differences.
+    fn check_general_backward(
+        build_fn: impl Fn(&mut MilliOpGraph, &[GlobalId], &mut wyrand::WyRand) -> GlobalId,
+        input_values: &[Vec<f32>],
+        input_shapes: &[Vec<usize>],
+        eps: f32,
+        tol: f32,
+    ) {
+        let rng = &mut wyrand::WyRand::new(42);
+
+        let n = input_values.len();
+        let mut graph = MilliOpGraph::new_empty(rng);
+
+        let mut ext_ids = Vec::new();
+        let mut int_ids = Vec::new();
+        for _ in 0..n {
+            let ext = GlobalId::new(rng);
+            let int = graph.add_input_with_id(ext, rng);
+            ext_ids.push(ext);
+            int_ids.push(int);
+        }
+
+        let group = graph.create_group(MilliOpGroup {
+            id: GlobalId::new(rng),
+            phase: MilliOpPhase::Forward,
+            ..Default::default()
+        });
+        graph.set_default_group(Some(group));
+
+        let op_out = build_fn(&mut graph, &int_ids, rng);
+
+        graph.set_default_group(None);
+        let scalar = ReduceSum::push_new(&mut graph, op_out, None, false, false, rng);
+
+        let ext_out = GlobalId::new(rng);
+        graph.add_output(scalar, ext_out);
+
+        // Seed gradient with shape-matching ones
+        let total_elems = input_values[0].len();
+        let ones_data = NDArrayNumericTensor::<DynRank>::from_vec_shape(
+            vec![1.0f32; total_elems],
+            &input_shapes[0].iter().map(|&s| s as u64).collect::<Vec<_>>(),
+        ).unwrap();
+        let ones = Constant::push_new(&mut graph, ones_data, rng);
+        let mut grad_map = HashMap::new();
+        grad_map.insert(op_out, ones);
+        let grads = generate_milli_backward(&mut graph, group, &grad_map, rng);
+
+        // Expose gradients as outputs
+        let mut ext_grad_ids = Vec::new();
+        let mut already_output: HashMap<GlobalId, GlobalId> = HashMap::new();
+        for i in 0..n {
+            if let Some(&grad_id) = grads.get(&int_ids[i]) {
+                // Handle same gradient tensor mapped to multiple outputs
+                let ext = if let Some(&existing_ext) = already_output.get(&grad_id) {
+                    existing_ext
+                } else {
+                    let ext = GlobalId::new(rng);
+                    graph.add_output(grad_id, ext);
+                    already_output.insert(grad_id, ext);
+                    ext
+                };
+                ext_grad_ids.push(Some(ext));
+            } else {
+                ext_grad_ids.push(None);
+            }
+        }
+
+        // Evaluate
+        let mut inputs = HashMap::new();
+        for (i, ext) in ext_ids.iter().enumerate() {
+            let t = NumericTensor::<DynRank>::from_vec_shape(
+                input_values[i].clone(), input_shapes[i].clone(),
+            ).unwrap();
+            inputs.insert(*ext, t);
+        }
+
+        let mut backend = EvalBackend::NDArray;
+        let results: HashMap<_, _> = graph.eval(&inputs, &mut (), &mut backend).unwrap().collect();
+
+        // Check each input's gradient
+        for input_idx in 0..n {
+            let ext_grad = match ext_grad_ids[input_idx] {
+                Some(id) => id,
+                None => continue,
+            };
+            let analytic: Vec<f32> = results[&ext_grad].flatten().unwrap().try_into().unwrap();
+
+            for elem in 0..input_values[input_idx].len() {
+                let mut plus_vals: Vec<Vec<f32>> = input_values.to_vec();
+                plus_vals[input_idx][elem] += eps;
+                let mut minus_vals: Vec<Vec<f32>> = input_values.to_vec();
+                minus_vals[input_idx][elem] -= eps;
+
+                let f_plus = eval_scalar_graph(&build_fn, &plus_vals, input_shapes);
+                let f_minus = eval_scalar_graph(&build_fn, &minus_vals, input_shapes);
+
+                let numerical = (f_plus - f_minus) / (2.0 * eps);
+                let diff = (analytic[elem] - numerical).abs();
+                let scale = analytic[elem].abs().max(numerical.abs()).max(1e-7);
+                assert!(
+                    diff / scale < tol,
+                    "Input {} elem {}: analytic={}, numerical={}, rel_diff={}",
+                    input_idx, elem, analytic[elem], numerical, diff / scale
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_backward_chain_exp_neg() {
+        // f(x) = sum(exp(neg(x))) = sum(exp(-x))
+        // d/dx = -exp(-x)
+        check_general_backward(
+            |g, ids, r| {
+                let neg = SimpleUnaryOp::neg(g, ids[0], r);
+                SimpleUnaryOp::exp(g, neg, r)
+            },
+            &[vec![0.5, -0.3, 1.0, 0.1]],
+            &[vec![2, 2]],
+            1e-3, 1e-2,
+        );
+    }
+
+    #[test]
+    fn test_backward_chain_sqrt_mul() {
+        // f(a, b) = sum(sqrt(a * b))
+        check_general_backward(
+            |g, ids, r| {
+                let prod = SimpleBinary::mul(g, ids[0], ids[1], r);
+                SimpleUnaryOp::sqrt(g, prod, r)
+            },
+            &[vec![1.0, 2.0, 3.0, 4.0], vec![4.0, 3.0, 2.0, 1.0]],
+            &[vec![2, 2], vec![2, 2]],
+            1e-3, 1e-2,
+        );
+    }
+
+    #[test]
+    fn test_backward_fanout_x_times_x() {
+        // f(x) = sum(x * x) — same tensor as both inputs to mul
+        // d/dx_i = 2 * x_i
+        check_general_backward(
+            |g, ids, r| {
+                SimpleBinary::mul(g, ids[0], ids[0], r)
+            },
+            &[vec![1.0, 2.0, 3.0, 4.0]],
+            &[vec![2, 2]],
+            1e-3, 1e-2,
+        );
+    }
+
+    #[test]
+    fn test_backward_fanout_x_plus_x() {
+        // f(x) = sum(x + x) — same tensor as both inputs to add
+        // d/dx_i = 2
+        check_general_backward(
+            |g, ids, r| {
+                SimpleBinary::add(g, ids[0], ids[0], r)
+            },
+            &[vec![1.0, -2.0, 3.0, -0.5]],
+            &[vec![2, 2]],
+            1e-3, 1e-2,
+        );
+    }
+
+    #[test]
+    fn test_backward_multi_consumer() {
+        // f(x) = sum(exp(x) + neg(x)) — x fans out to two different ops
+        // d/dx_i = exp(x_i) - 1
+        check_general_backward(
+            |g, ids, r| {
+                let e = SimpleUnaryOp::exp(g, ids[0], r);
+                let n = SimpleUnaryOp::neg(g, ids[0], r);
+                SimpleBinary::add(g, e, n, r)
+            },
+            &[vec![0.5, -0.3, 1.0, 0.1]],
+            &[vec![2, 2]],
+            1e-3, 1e-2,
+        );
+    }
+
+    #[test]
+    fn test_backward_composition_mul_add_sub() {
+        // f(a, b) = sum((a + b) * (a - b)) = sum(a^2 - b^2)
+        // d/da_i = 2*a_i, d/db_i = -2*b_i
+        check_general_backward(
+            |g, ids, r| {
+                let sum = SimpleBinary::add(g, ids[0], ids[1], r);
+                let diff = SimpleBinary::sub(g, ids[0], ids[1], r);
+                SimpleBinary::mul(g, sum, diff, r)
+            },
+            &[vec![1.0, 2.0, 3.0, 4.0], vec![0.5, 1.5, 2.5, 3.5]],
+            &[vec![2, 2], vec![2, 2]],
+            1e-3, 1e-2,
+        );
+    }
 }
 
 impl crate::graph::Link for MilliOpGraphTensor {

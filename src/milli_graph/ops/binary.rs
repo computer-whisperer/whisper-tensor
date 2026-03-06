@@ -288,6 +288,57 @@ impl MilliOp for SimpleBinary {
         };
         Ok(Box::new([(self.output, out)].into_iter()))
     }
+
+    fn backward(
+        &self,
+        output_grads: &HashMap<GlobalId, GlobalId>,
+        graph: &mut MilliOpGraph,
+        rng: &mut impl Rng,
+    ) -> Option<HashMap<GlobalId, GlobalId>> {
+        let grad_output = *output_grads.get(&self.output)?;
+
+        // Compute per-input gradients as (input_id, grad_tensor_id) pairs.
+        // Using a Vec instead of HashMap so that when self.a == self.b,
+        // both contributions are preserved and summed below.
+        let pairs: Vec<(GlobalId, GlobalId)> = match self.which_op {
+            // d/da(a+b) = 1, d/db(a+b) = 1
+            WhichSimpleBinaryOp::Add => {
+                vec![(self.a, grad_output), (self.b, grad_output)]
+            }
+            // d/da(a-b) = 1, d/db(a-b) = -1
+            WhichSimpleBinaryOp::Sub => {
+                let neg_grad = super::SimpleUnaryOp::neg(graph, grad_output, rng);
+                vec![(self.a, grad_output), (self.b, neg_grad)]
+            }
+            // d/da(a*b) = b, d/db(a*b) = a
+            WhichSimpleBinaryOp::Mul => {
+                let grad_a = SimpleBinary::mul(graph, grad_output, self.b, rng);
+                let grad_b = SimpleBinary::mul(graph, grad_output, self.a, rng);
+                vec![(self.a, grad_a), (self.b, grad_b)]
+            }
+            // d/da(a/b) = 1/b, d/db(a/b) = -a/b^2
+            WhichSimpleBinaryOp::Div => {
+                let grad_a = SimpleBinary::div(graph, grad_output, self.b, rng);
+                let b_sq = SimpleBinary::mul(graph, self.b, self.b, rng);
+                let a_over_b_sq = SimpleBinary::div(graph, self.a, b_sq, rng);
+                let neg = super::SimpleUnaryOp::neg(graph, a_over_b_sq, rng);
+                let grad_b = SimpleBinary::mul(graph, grad_output, neg, rng);
+                vec![(self.a, grad_a), (self.b, grad_b)]
+            }
+            _ => return None,
+        };
+
+        // Accumulate: if self.a == self.b, sum both gradient contributions
+        let mut result = HashMap::new();
+        for (input_id, grad_id) in pairs {
+            result.entry(input_id)
+                .and_modify(|existing: &mut GlobalId| {
+                    *existing = SimpleBinary::add(graph, *existing, grad_id, rng);
+                })
+                .or_insert(grad_id);
+        }
+        Some(result)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
