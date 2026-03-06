@@ -741,7 +741,7 @@ impl SymbolicGraph {
             // 4. Generate backward pass
 
             // 4a. Backward through loss graph (milli-op level differentiation)
-            let loss_grad = combined.add_constant_ones_like(loss_tensor, rng);
+            let loss_grad = combined.add_scalar_one(rng);
             let mut grad_map: HashMap<GlobalId, GlobalId> = HashMap::new();
             grad_map.insert(loss_tensor, loss_grad);
 
@@ -2280,7 +2280,15 @@ mod tests {
         assert!(meta.loss.is_some());
         assert_eq!(meta.external_inputs.len(), 1); // targets
 
-        // Note: param_to_grad will be empty since no ops implement backward() yet.
-        // That's expected — this test validates the orchestration plumbing.
+        // The default get_backward_milli_ops() should produce gradients for
+        // both inputs of the Add operation.
+        // param_to_grad keys are combined-space IDs, so check count matches.
+        assert_eq!(
+            meta.param_to_grad.len(),
+            graph.ordered_inputs.len(),
+            "Expected gradient for each trainable param. Got {} gradients for {} params",
+            meta.param_to_grad.len(),
+            graph.ordered_inputs.len(),
+        );
     }
 }

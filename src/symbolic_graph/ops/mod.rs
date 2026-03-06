@@ -110,18 +110,96 @@ pub trait Operation: Node {
     }
 
     /// Generate a backward computation graph for this operation.
-    /// Returns `None` if not differentiable (default).
+    ///
+    /// The default implementation builds the forward milli-op graph, runs
+    /// `generate_milli_backward` on it, and returns the result. This works
+    /// for any operation whose milli ops implement `backward()`. Operations
+    /// can override this for custom backward logic, or return `None` if
+    /// not differentiable.
     fn get_backward_milli_ops(
         &self,
-        _ctx: &crate::milli_graph::BackwardGenContext,
-        _rng: &mut impl Rng,
+        ctx: &crate::milli_graph::BackwardGenContext,
+        rng: &mut impl Rng,
     ) -> Option<crate::milli_graph::BackwardGenResult> {
-        None
+        use crate::milli_graph::{
+            MilliOpGraph, MilliOpGroup, MilliOpPhase, BackwardGenResult,
+            generate_milli_backward,
+        };
+
+        let fwd = self.get_milli_op_graph(rng);
+        let sym_inputs: Vec<GlobalId> = self.inputs().collect();
+        let sym_outputs: Vec<GlobalId> = self.outputs().collect();
+
+        // Build workspace graph with combined-space external keys
+        let mut workspace = MilliOpGraph::new_empty(rng);
+        let mut comb_to_internal: HashMap<GlobalId, GlobalId> = HashMap::new();
+
+        // Add forward input tensors
+        for &comb_id in &ctx.forward_inputs {
+            let internal = workspace.add_input_with_id(comb_id, rng);
+            comb_to_internal.insert(comb_id, internal);
+        }
+        // Add output gradient tensors
+        for (_, &grad_id) in &ctx.output_grads {
+            if !comb_to_internal.contains_key(&grad_id) {
+                let internal = workspace.add_input_with_id(grad_id, rng);
+                comb_to_internal.insert(grad_id, internal);
+            }
+        }
+
+        // Merge forward ops into workspace, mapping sym IDs → workspace internals
+        let mut wiring: HashMap<GlobalId, GlobalId> = HashMap::new();
+        for (sym, &comb) in sym_inputs.iter().zip(ctx.forward_inputs.iter()) {
+            wiring.insert(*sym, comb_to_internal[&comb]);
+        }
+        let fwd_group = workspace.create_group(MilliOpGroup {
+            id: GlobalId::new(rng),
+            phase: MilliOpPhase::Forward,
+            ..Default::default()
+        });
+        workspace.merge_graph(fwd, &mut wiring, rng, Some(fwd_group));
+
+        // Build output grad map in workspace-internal space
+        let mut internal_output_grads: HashMap<GlobalId, GlobalId> = HashMap::new();
+        for (sym, &comb) in sym_outputs.iter().zip(ctx.forward_outputs.iter()) {
+            if let Some(&grad_comb) = ctx.output_grads.get(&comb) {
+                let internal_out = wiring[sym];
+                let internal_grad = comb_to_internal[&grad_comb];
+                internal_output_grads.insert(internal_out, internal_grad);
+            }
+        }
+        if internal_output_grads.is_empty() {
+            return None;
+        }
+
+        // Generate backward through forward group
+        let grads = generate_milli_backward(&mut workspace, fwd_group, &internal_output_grads, rng);
+
+        // Set outputs: gradient for each forward input → combined forward input ID
+        let mut differentiable_inputs = Vec::new();
+        for &comb_input in ctx.forward_inputs.iter() {
+            let internal_input = comb_to_internal[&comb_input];
+            if let Some(&grad_internal) = grads.get(&internal_input) {
+                workspace.add_output(grad_internal, comb_input);
+                differentiable_inputs.push(comb_input);
+            }
+        }
+
+        if differentiable_inputs.is_empty() {
+            return None;
+        }
+
+        Some(BackwardGenResult {
+            graph: workspace,
+            differentiable_inputs,
+        })
     }
 
     /// Whether this operation supports differentiation.
+    /// Default: true (the default get_backward_milli_ops uses milli-level backward).
+    /// Override to return false for non-differentiable ops.
     fn is_differentiable(&self) -> bool {
-        false
+        true
     }
 }
 

@@ -63,6 +63,10 @@ impl MilliOp for Transpose {
         let grad_output = *output_grads.get(&self.output)?;
         // Inverse transpose: if perm is None (reverse), inverse is also None.
         // Otherwise compute inverse permutation.
+        // NOTE: For partial perms (len < rank), the inverse is computed using
+        // p.len() not actual rank. This is correct for the [-1,-2] swap case
+        // (only current usage) but would be wrong for general partial perms.
+        // Fix by expanding partial perms at construction time if needed.
         let inv_perm = self.perm.as_ref().map(|p| {
             let n = p.len();
             let normalized: Vec<usize> = p
@@ -89,7 +93,25 @@ impl MilliOp for Transpose {
         Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>,
         MilliOpGraphError,
     > {
-        let out = inputs[&self.data].transpose(self.perm.clone(), backend)?;
+        // Handle partial perms: if perm has fewer elements than the rank,
+        // prepend identity dims. This allows perm=[-1,-2] to mean "swap last
+        // two dims" regardless of rank.
+        let perm = if let Some(ref p) = self.perm {
+            let rank = inputs[&self.data].rank();
+            if p.len() < rank {
+                let prefix_len = rank - p.len();
+                let mut full_perm: Vec<i64> = (0..prefix_len as i64).collect();
+                full_perm.extend(p.iter().map(|&x| {
+                    if x < 0 { x + rank as i64 } else { x }
+                }));
+                Some(full_perm)
+            } else {
+                Some(p.clone())
+            }
+        } else {
+            None
+        };
+        let out = inputs[&self.data].transpose(perm, backend)?;
         Ok(Box::new([(self.output, out)].into_iter()))
     }
 }

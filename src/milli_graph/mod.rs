@@ -528,8 +528,8 @@ impl MilliOpGraph {
 
     // --- Utility ---
 
-    /// Push a scalar `1.0f32` constant op. Useful for backward pass seed.
-    pub fn add_constant_ones_like(&mut self, _tensor: GlobalId, rng: &mut impl Rng) -> GlobalId {
+    /// Push a scalar `1.0f32` constant op. Useful as backward pass loss gradient seed.
+    pub fn add_scalar_one(&mut self, rng: &mut impl Rng) -> GlobalId {
         use crate::backends::ndarray_backend::NDArrayNumericTensor;
         let data = NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![1.0f32], &vec![1]).unwrap();
         ops::Constant::push_new(self, data, rng)
@@ -2322,6 +2322,85 @@ mod tests {
         );
     }
 
+    // ---- Broadcast backward tests ----
+
+    #[test]
+    fn test_backward_add_broadcast_scalar() {
+        // a=[2,3] + b=[1] → grad_a should be [2,3], grad_b should be scalar sum
+        check_general_backward(
+            |graph, inputs, rng| {
+                SimpleBinary::add(graph, inputs[0], inputs[1], rng)
+            },
+            &[vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![10.0]],
+            &[vec![2, 3], vec![1]],
+            1e-3, 1e-2,
+        );
+    }
+
+    #[test]
+    fn test_backward_mul_broadcast_row() {
+        // a=[3,4] * b=[1,4] → grad_b must reduce axis 0
+        check_general_backward(
+            |graph, inputs, rng| {
+                SimpleBinary::mul(graph, inputs[0], inputs[1], rng)
+            },
+            &[
+                vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
+                vec![0.5, 1.0, 1.5, 2.0],
+            ],
+            &[vec![3, 4], vec![1, 4]],
+            1e-3, 1e-2,
+        );
+    }
+
+    #[test]
+    fn test_backward_div_broadcast_col() {
+        // a=[3,1] / b=[3,4] → grad_a must reduce axis 1
+        check_general_backward(
+            |graph, inputs, rng| {
+                SimpleBinary::div(graph, inputs[0], inputs[1], rng)
+            },
+            &[
+                vec![1.0, 2.0, 3.0],
+                vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
+            ],
+            &[vec![3, 1], vec![3, 4]],
+            1e-3, 1e-2,
+        );
+    }
+
+    #[test]
+    fn test_backward_sub_broadcast_rank() {
+        // a=[2,3] - b=[3] → grad_b must reduce axis 0 (rank padding)
+        check_general_backward(
+            |graph, inputs, rng| {
+                SimpleBinary::sub(graph, inputs[0], inputs[1], rng)
+            },
+            &[
+                vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+                vec![10.0, 20.0, 30.0],
+            ],
+            &[vec![2, 3], vec![3]],
+            1e-3, 1e-2,
+        );
+    }
+
+    #[test]
+    fn test_backward_matmul_broadcast_batch() {
+        // A=[2,3,4] @ B=[4,2] → output=[2,3,2], grad_B must sum out batch dim
+        check_general_backward(
+            |graph, inputs, rng| {
+                ops::MatMul::push_new(graph, inputs[0], inputs[1], rng)
+            },
+            &[
+                (1..=24).map(|x| x as f32 * 0.1).collect(),
+                vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
+            ],
+            &[vec![2, 3, 4], vec![4, 2]],
+            1e-3, 1e-2,
+        );
+    }
+
     // ---- Phase 8: Optimizer tests ----
 
     /// Helper to build a simple "param * 2 -> reduce_sum -> loss" graph
@@ -2347,16 +2426,15 @@ mod tests {
         // Loss: reduce_sum (outside the group)
         let loss = ops::ReduceSum::push_new(&mut graph, scaled, None, false, false, rng);
 
-        // Seed gradient on the forward output (scaled), not on loss
-        // The ReduceSum backward is: expand grad to input shape.
-        // Since ReduceSum reduces to scalar, grad of scaled = ones_like(scaled).
-        // We use ones matching scaled shape. In practice, shapes aren't known at
-        // graph construction, so use the forward group backward which handles this.
-        let ones = ops::Constant::push_new(
+        // Seed gradient on the forward output (scaled), not on loss.
+        // Expand scalar 1.0 to match scaled's shape dynamically.
+        let ones_scalar = ops::Constant::push_new(
             &mut graph,
             NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![1.0f32], &vec![1]).unwrap(),
             rng,
         );
+        let scaled_shape = ops::Shape::push_new(&mut graph, scaled, rng);
+        let ones = ops::Expand::push_new(&mut graph, ones_scalar, scaled_shape, rng);
         let mut grad_map = HashMap::new();
         grad_map.insert(scaled, ones);
         let grads = generate_milli_backward(&mut graph, group, &grad_map, rng);

@@ -20,6 +20,7 @@ mod shape;
 mod slice;
 mod split;
 mod squeeze;
+mod sum_to;
 mod transpose;
 mod unary;
 mod unsqueeze;
@@ -47,6 +48,7 @@ pub use shape::*;
 pub use slice::*;
 pub use split::*;
 pub use squeeze::*;
+pub use sum_to::*;
 pub use transpose::*;
 pub use unary::*;
 pub use unsqueeze::*;
@@ -283,6 +285,7 @@ pub enum AnyMilliOp {
     Where(Where),
     Range(Range),
     Expand(Expand),
+    SumTo(SumTo),
     ArgMax(ArgMax),
     ArgMin(ArgMin),
 }
@@ -318,6 +321,7 @@ impl AnyMilliOp {
             AnyMilliOp::Where(x) => x.remap_tensors(map, rng),
             AnyMilliOp::Range(x) => x.remap_tensors(map, rng),
             AnyMilliOp::Expand(x) => x.remap_tensors(map, rng),
+            AnyMilliOp::SumTo(x) => x.remap_tensors(map, rng),
             AnyMilliOp::ArgMax(x) => x.remap_tensors(map, rng),
             AnyMilliOp::ArgMin(x) => x.remap_tensors(map, rng),
         }
@@ -356,6 +360,7 @@ macro_rules! delegate {
                 AnyMilliOp::Where(x) => x.$name($($arg),*),
                 AnyMilliOp::Range(x) => x.$name($($arg),*),
                 AnyMilliOp::Expand(x) => x.$name($($arg),*),
+                AnyMilliOp::SumTo(x) => x.$name($($arg),*),
                 AnyMilliOp::ArgMax(x) => x.$name($($arg),*),
                 AnyMilliOp::ArgMin(x) => x.$name($($arg),*),
             }
@@ -407,6 +412,7 @@ impl MilliOp for AnyMilliOp {
             AnyMilliOp::Where(x) => x.backward(output_grads, graph, rng),
             AnyMilliOp::Range(x) => x.backward(output_grads, graph, rng),
             AnyMilliOp::Expand(x) => x.backward(output_grads, graph, rng),
+            AnyMilliOp::SumTo(x) => x.backward(output_grads, graph, rng),
             AnyMilliOp::ArgMax(x) => x.backward(output_grads, graph, rng),
             AnyMilliOp::ArgMin(x) => x.backward(output_grads, graph, rng),
         }
