@@ -78,10 +78,14 @@ pub struct TrainingMetadata {
     pub loss: Option<GlobalId>,
     pub param_to_grad: HashMap<GlobalId, GlobalId>,
     pub param_to_new_param: HashMap<GlobalId, GlobalId>,
-    pub optimizer_state_inputs: Vec<GlobalId>,
-    pub optimizer_state_outputs: Vec<GlobalId>,
-    pub global_state_inputs: Vec<GlobalId>,
-    pub global_state_outputs: Vec<GlobalId>,
+    /// (param_id, state_name) → input state tensor, e.g. (W_id, "m") → m_W_input_id
+    pub optimizer_state_inputs: HashMap<(GlobalId, String), GlobalId>,
+    /// (param_id, state_name) → output state tensor (after update)
+    pub optimizer_state_outputs: HashMap<(GlobalId, String), GlobalId>,
+    /// Global optimizer state inputs, e.g. "timestep" → t_input_id
+    pub global_state_inputs: HashMap<String, GlobalId>,
+    /// Global optimizer state outputs
+    pub global_state_outputs: HashMap<String, GlobalId>,
     pub external_inputs: Vec<GlobalId>,
 }
 
@@ -492,6 +496,22 @@ impl MilliOpGraph {
                 return Some(TensorRole::UpdatedParameter { of_param: param });
             }
         }
+        for ((param_id, state_name), &tensor_id) in &meta.optimizer_state_inputs {
+            if tensor_id == id {
+                return Some(TensorRole::OptimizerState {
+                    for_param: *param_id,
+                    state_name: state_name.clone(),
+                });
+            }
+        }
+        for ((param_id, state_name), &tensor_id) in &meta.optimizer_state_outputs {
+            if tensor_id == id {
+                return Some(TensorRole::UpdatedOptimizerState {
+                    for_param: *param_id,
+                    state_name: state_name.clone(),
+                });
+            }
+        }
         None
     }
 
@@ -818,6 +838,211 @@ pub fn generate_milli_backward(
     }
 
     grad_map
+}
+
+/// Generate optimizer update ops for all trainable parameters.
+///
+/// For each parameter with a gradient, generates the appropriate update ops
+/// (SGD, Adam, etc.) and populates TrainingMetadata with state mappings.
+pub fn generate_optimizer_ops(
+    graph: &mut MilliOpGraph,
+    training_meta: &mut TrainingMetadata,
+    options: &OptimizerGenOptions,
+    rng: &mut impl Rng,
+) {
+    // Shared constants group (for Adam: β^t computations)
+    let shared_group = graph.create_group(MilliOpGroup {
+        id: GlobalId::new(rng),
+        phase: MilliOpPhase::Optimizer,
+        label: Some("optimizer_shared".into()),
+        ..Default::default()
+    });
+
+    // Generate shared state for Adam/AdamW
+    let shared = match &options.kind {
+        OptimizerKind::Adam { beta1, beta2, .. }
+        | OptimizerKind::AdamW { beta1, beta2, .. } => {
+            graph.set_default_group(Some(shared_group));
+
+            // t input (timestep)
+            let t_in = graph.add_input(rng);
+            training_meta.global_state_inputs.insert("timestep".into(), t_in);
+
+            let one_i = ops::Constant::new_scalar(graph, 1i64, rng);
+            let t_new = ops::SimpleBinary::add(graph, t_in, one_i, rng);
+            // Cast to float for pow
+            let t_float = ops::Cast::push_new(graph, t_new, crate::dtype::DType::F32, rng);
+            training_meta.global_state_outputs.insert("timestep".into(), t_new);
+
+            let beta1_c = ops::Constant::new_scalar(graph, *beta1, rng);
+            let beta2_c = ops::Constant::new_scalar(graph, *beta2, rng);
+            let one_f = ops::Constant::new_scalar(graph, 1.0f32, rng);
+
+            // β₁^t, β₂^t
+            let beta1_t = ops::Pow::push_new(graph, beta1_c, t_float, rng);
+            let beta2_t = ops::Pow::push_new(graph, beta2_c, t_float, rng);
+            // 1 - β₁^t, 1 - β₂^t
+            let one_minus_beta1_t = ops::SimpleBinary::sub(graph, one_f, beta1_t, rng);
+            let one_minus_beta2_t = ops::SimpleBinary::sub(graph, one_f, beta2_t, rng);
+            // 1 - β₁, 1 - β₂ (constant, shared across params)
+            let one_minus_beta1 = ops::SimpleBinary::sub(graph, one_f, beta1_c, rng);
+            let one_minus_beta2 = ops::SimpleBinary::sub(graph, one_f, beta2_c, rng);
+
+            graph.set_default_group(None);
+            Some(AdamShared {
+                beta1_c, beta2_c,
+                one_minus_beta1, one_minus_beta2,
+                one_minus_beta1_t, one_minus_beta2_t,
+            })
+        }
+        _ => None,
+    };
+
+    // Generate per-parameter update ops
+    let params: Vec<(GlobalId, GlobalId)> = training_meta.param_to_grad.iter()
+        .map(|(&p, &g)| (p, g))
+        .collect();
+
+    for (param_id, grad_id) in params {
+        let param_group = graph.create_group(MilliOpGroup {
+            id: GlobalId::new(rng),
+            phase: MilliOpPhase::Optimizer,
+            label: Some(format!("optimizer_param_{:?}", param_id)),
+            optimizes_param: Some(param_id),
+            ..Default::default()
+        });
+        graph.set_default_group(Some(param_group));
+
+        let new_param = match &options.kind {
+            OptimizerKind::SGD { lr } => {
+                // new_param = param - lr * grad
+                let lr_c = ops::Constant::new_scalar(graph, *lr, rng);
+                let scaled_grad = ops::SimpleBinary::mul(graph, lr_c, grad_id, rng);
+                ops::SimpleBinary::sub(graph, param_id, scaled_grad, rng)
+            }
+            OptimizerKind::SGDMomentum { lr, momentum, nesterov } => {
+                // v_new = momentum * v + grad
+                // if nesterov: new_param = param - lr * (momentum * v_new + grad)
+                // else:        new_param = param - lr * v_new
+                let v_in = graph.add_input(rng);
+                training_meta.optimizer_state_inputs.insert(
+                    (param_id, "velocity".into()), v_in,
+                );
+
+                let mom_c = ops::Constant::new_scalar(graph, *momentum, rng);
+                let lr_c = ops::Constant::new_scalar(graph, *lr, rng);
+
+                let mom_v = ops::SimpleBinary::mul(graph, mom_c, v_in, rng);
+                let v_new = ops::SimpleBinary::add(graph, mom_v, grad_id, rng);
+
+                training_meta.optimizer_state_outputs.insert(
+                    (param_id, "velocity".into()), v_new,
+                );
+
+                let update = if *nesterov {
+                    let mom_v_new = ops::SimpleBinary::mul(graph, mom_c, v_new, rng);
+                    ops::SimpleBinary::add(graph, mom_v_new, grad_id, rng)
+                } else {
+                    v_new
+                };
+
+                let scaled = ops::SimpleBinary::mul(graph, lr_c, update, rng);
+                ops::SimpleBinary::sub(graph, param_id, scaled, rng)
+            }
+            OptimizerKind::Adam { lr, epsilon, weight_decay, .. }
+            | OptimizerKind::AdamW { lr, epsilon, weight_decay, .. } => {
+                let shared = shared.as_ref().unwrap();
+                let is_adamw = matches!(options.kind, OptimizerKind::AdamW { .. });
+
+                // State inputs
+                let m_in = graph.add_input(rng);
+                let v_in = graph.add_input(rng);
+                training_meta.optimizer_state_inputs.insert(
+                    (param_id, "m".into()), m_in,
+                );
+                training_meta.optimizer_state_inputs.insert(
+                    (param_id, "v".into()), v_in,
+                );
+
+                let lr_c = ops::Constant::new_scalar(graph, *lr, rng);
+                let eps_c = ops::Constant::new_scalar(graph, *epsilon, rng);
+
+                // Apply L2 weight decay to gradient (Adam only, not AdamW)
+                let effective_grad = if !is_adamw && *weight_decay != 0.0 {
+                    let wd_c = ops::Constant::new_scalar(graph, *weight_decay, rng);
+                    let wd_param = ops::SimpleBinary::mul(graph, wd_c, param_id, rng);
+                    ops::SimpleBinary::add(graph, grad_id, wd_param, rng)
+                } else {
+                    grad_id
+                };
+
+                // m_new = β₁ * m + (1 - β₁) * grad
+                let beta1_m = ops::SimpleBinary::mul(graph, shared.beta1_c, m_in, rng);
+                let one_minus_beta1_grad = ops::SimpleBinary::mul(
+                    graph, shared.one_minus_beta1, effective_grad, rng,
+                );
+                let m_new = ops::SimpleBinary::add(graph, beta1_m, one_minus_beta1_grad, rng);
+
+                // v_new = β₂ * v + (1 - β₂) * grad²
+                let beta2_v = ops::SimpleBinary::mul(graph, shared.beta2_c, v_in, rng);
+                let grad_sq = ops::SimpleBinary::mul(
+                    graph, effective_grad, effective_grad, rng,
+                );
+                let one_minus_beta2_gradsq = ops::SimpleBinary::mul(
+                    graph, shared.one_minus_beta2, grad_sq, rng,
+                );
+                let v_new = ops::SimpleBinary::add(graph, beta2_v, one_minus_beta2_gradsq, rng);
+
+                training_meta.optimizer_state_outputs.insert(
+                    (param_id, "m".into()), m_new,
+                );
+                training_meta.optimizer_state_outputs.insert(
+                    (param_id, "v".into()), v_new,
+                );
+
+                // Bias-corrected estimates
+                // m_hat = m_new / (1 - β₁^t)
+                let m_hat = ops::SimpleBinary::div(
+                    graph, m_new, shared.one_minus_beta1_t, rng,
+                );
+                // v_hat = v_new / (1 - β₂^t)
+                let v_hat = ops::SimpleBinary::div(
+                    graph, v_new, shared.one_minus_beta2_t, rng,
+                );
+
+                // update = lr * m_hat / (sqrt(v_hat) + ε)
+                let sqrt_v = ops::SimpleUnaryOp::sqrt(graph, v_hat, rng);
+                let denom = ops::SimpleBinary::add(graph, sqrt_v, eps_c, rng);
+                let step = ops::SimpleBinary::div(graph, m_hat, denom, rng);
+                let scaled_step = ops::SimpleBinary::mul(graph, lr_c, step, rng);
+
+                let mut updated = ops::SimpleBinary::sub(graph, param_id, scaled_step, rng);
+
+                // AdamW: decoupled weight decay
+                if is_adamw && *weight_decay != 0.0 {
+                    let wd_c = ops::Constant::new_scalar(graph, *weight_decay, rng);
+                    let lr_wd = ops::SimpleBinary::mul(graph, lr_c, wd_c, rng);
+                    let decay = ops::SimpleBinary::mul(graph, lr_wd, param_id, rng);
+                    updated = ops::SimpleBinary::sub(graph, updated, decay, rng);
+                }
+
+                updated
+            }
+        };
+
+        training_meta.param_to_new_param.insert(param_id, new_param);
+        graph.set_default_group(None);
+    }
+}
+
+/// Shared tensors for Adam/AdamW optimizer (bias correction terms).
+struct AdamShared {
+    beta1_c: GlobalId,
+    beta2_c: GlobalId,
+    one_minus_beta1: GlobalId,
+    one_minus_beta2: GlobalId,
+    one_minus_beta1_t: GlobalId,
+    one_minus_beta2_t: GlobalId,
 }
 
 
@@ -2095,6 +2320,423 @@ mod tests {
             &[vec![2, 2], vec![2, 2]],
             1e-3, 1e-2,
         );
+    }
+
+    // ---- Phase 8: Optimizer tests ----
+
+    /// Helper to build a simple "param * 2 -> reduce_sum -> loss" graph
+    /// with backward pass already generated. Returns (graph, param_internal, loss, training_meta).
+    fn build_simple_training_graph(rng: &mut wyrand::WyRand) -> (
+        MilliOpGraph, GlobalId, GlobalId, GlobalId, TrainingMetadata,
+    ) {
+        let mut graph = MilliOpGraph::new_empty(rng);
+        let param_ext = GlobalId::new(rng);
+        let param = graph.add_input_with_id(param_ext, rng);
+
+        // Forward group: param * 2
+        let group = graph.create_group(MilliOpGroup {
+            id: GlobalId::new(rng),
+            phase: MilliOpPhase::Forward,
+            ..Default::default()
+        });
+        graph.set_default_group(Some(group));
+        let two = ops::Constant::new_scalar(&mut graph, 2.0f32, rng);
+        let scaled = SimpleBinary::mul(&mut graph, param, two, rng);
+        graph.set_default_group(None);
+
+        // Loss: reduce_sum (outside the group)
+        let loss = ops::ReduceSum::push_new(&mut graph, scaled, None, false, false, rng);
+
+        // Seed gradient on the forward output (scaled), not on loss
+        // The ReduceSum backward is: expand grad to input shape.
+        // Since ReduceSum reduces to scalar, grad of scaled = ones_like(scaled).
+        // We use ones matching scaled shape. In practice, shapes aren't known at
+        // graph construction, so use the forward group backward which handles this.
+        let ones = ops::Constant::push_new(
+            &mut graph,
+            NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![1.0f32], &vec![1]).unwrap(),
+            rng,
+        );
+        let mut grad_map = HashMap::new();
+        grad_map.insert(scaled, ones);
+        let grads = generate_milli_backward(&mut graph, group, &grad_map, rng);
+
+        let mut training_meta = TrainingMetadata::default();
+        training_meta.loss = Some(loss);
+        training_meta.param_to_grad.insert(param, grads[&param]);
+
+        (graph, param_ext, param, loss, training_meta)
+    }
+
+    #[test]
+    fn test_optimizer_sgd() {
+        // output = sum(param * 2), grad(param) = 2
+        // SGD: new_param = param - lr * grad = param - 0.1 * 2 = param - 0.2
+        let rng = &mut wyrand::WyRand::new(42);
+        let (mut graph, param_ext, param, loss, mut training_meta) =
+            build_simple_training_graph(rng);
+
+        generate_optimizer_ops(
+            &mut graph, &mut training_meta,
+            &OptimizerGenOptions { kind: OptimizerKind::SGD { lr: 0.1 } },
+            rng,
+        );
+
+        // Set up outputs
+        let loss_ext = GlobalId::new(rng);
+        graph.add_output(loss, loss_ext);
+        let new_param_id = training_meta.param_to_new_param[&param];
+        let new_param_ext = GlobalId::new(rng);
+        graph.add_output(new_param_id, new_param_ext);
+
+        // Evaluate
+        let param_val = NumericTensor::<DynRank>::from_vec_shape(
+            vec![1.0f32, 2.0, 3.0, 4.0], vec![4],
+        ).unwrap();
+        let mut inputs = HashMap::new();
+        inputs.insert(param_ext, param_val);
+
+        let mut backend = EvalBackend::NDArray;
+        let results: HashMap<_, _> = graph.eval(&inputs, &mut (), &mut backend).unwrap().collect();
+
+        let new_param: Vec<f32> = results[&new_param_ext].flatten().unwrap().try_into().unwrap();
+        // new_param = [1, 2, 3, 4] - 0.1 * 2 = [0.8, 1.8, 2.8, 3.8]
+        for (i, &v) in new_param.iter().enumerate() {
+            let expected = (i + 1) as f32 - 0.2;
+            assert!((v - expected).abs() < 1e-5, "elem {}: got {}, expected {}", i, v, expected);
+        }
+    }
+
+    #[test]
+    fn test_optimizer_adam() {
+        let rng = &mut wyrand::WyRand::new(42);
+        let (mut graph, param_ext, param, loss, mut training_meta) =
+            build_simple_training_graph(rng);
+
+        let lr = 0.001;
+        let beta1 = 0.9;
+        let beta2 = 0.999;
+        let epsilon = 1e-8;
+        generate_optimizer_ops(
+            &mut graph, &mut training_meta,
+            &OptimizerGenOptions {
+                kind: OptimizerKind::Adam { lr, beta1, beta2, epsilon, weight_decay: 0.0 },
+            },
+            rng,
+        );
+
+        // Set up outputs
+        let loss_ext = GlobalId::new(rng);
+        graph.add_output(loss, loss_ext);
+        let new_param_id = training_meta.param_to_new_param[&param];
+        let new_param_ext = GlobalId::new(rng);
+        graph.add_output(new_param_id, new_param_ext);
+        let m_out_id = training_meta.optimizer_state_outputs[&(param, "m".into())];
+        let m_out_ext = GlobalId::new(rng);
+        graph.add_output(m_out_id, m_out_ext);
+        let v_out_id = training_meta.optimizer_state_outputs[&(param, "v".into())];
+        let v_out_ext = GlobalId::new(rng);
+        graph.add_output(v_out_id, v_out_ext);
+        let t_out_id = training_meta.global_state_outputs["timestep"];
+        let t_out_ext = GlobalId::new(rng);
+        graph.add_output(t_out_id, t_out_ext);
+
+        // Inputs: param, m, v, t
+        let param_val = NumericTensor::<DynRank>::from_vec_shape(
+            vec![1.0f32, 2.0, 3.0, 4.0], vec![4],
+        ).unwrap();
+        let m_in_id = training_meta.optimizer_state_inputs[&(param, "m".into())];
+        let v_in_id = training_meta.optimizer_state_inputs[&(param, "v".into())];
+        let t_in_id = training_meta.global_state_inputs["timestep"];
+        let zeros = NumericTensor::<DynRank>::from_vec_shape(
+            vec![0.0f32; 4], vec![4],
+        ).unwrap();
+        let t_zero = NumericTensor::<DynRank>::from_vec_shape(vec![0i64], vec![1]).unwrap();
+
+        let mut inputs = HashMap::new();
+        inputs.insert(param_ext, param_val);
+        inputs.insert(m_in_id, zeros.clone());
+        inputs.insert(v_in_id, zeros);
+        inputs.insert(t_in_id, t_zero);
+
+        let mut backend = EvalBackend::NDArray;
+        let results: HashMap<_, _> = graph.eval(&inputs, &mut (), &mut backend).unwrap().collect();
+
+        // Verify manually: grad = 2 for all elements
+        // t_new = 1
+        // m_new = 0.9*0 + 0.1*2 = 0.2
+        // v_new = 0.999*0 + 0.001*4 = 0.004
+        // m_hat = 0.2 / (1 - 0.9^1) = 0.2 / 0.1 = 2.0
+        // v_hat = 0.004 / (1 - 0.999^1) = 0.004 / 0.001 = 4.0
+        // step = lr * m_hat / (sqrt(v_hat) + eps) = 0.001 * 2.0 / (2.0 + 1e-8) ≈ 0.001
+        // new_param = param - step ≈ param - 0.001
+
+        let new_param: Vec<f32> = results[&new_param_ext].flatten().unwrap().try_into().unwrap();
+        let expected_step = lr * 2.0 / (4.0f32.sqrt() + epsilon);
+        for (i, &v) in new_param.iter().enumerate() {
+            let expected = (i + 1) as f32 - expected_step;
+            assert!(
+                (v - expected).abs() < 1e-5,
+                "elem {}: got {}, expected {}", i, v, expected,
+            );
+        }
+
+        // Verify m and v outputs
+        let m_out: Vec<f32> = results[&m_out_ext].flatten().unwrap().try_into().unwrap();
+        let v_out: Vec<f32> = results[&v_out_ext].flatten().unwrap().try_into().unwrap();
+        for &m in &m_out {
+            assert!((m - 0.2).abs() < 1e-5, "m: got {}, expected 0.2", m);
+        }
+        for &v in &v_out {
+            assert!((v - 0.004).abs() < 1e-5, "v: got {}, expected 0.004", v);
+        }
+    }
+
+    #[test]
+    fn test_optimizer_sgd_momentum() {
+        let rng = &mut wyrand::WyRand::new(42);
+        let (mut graph, param_ext, param, loss, mut training_meta) =
+            build_simple_training_graph(rng);
+
+        let lr = 0.1;
+        let momentum = 0.9;
+        generate_optimizer_ops(
+            &mut graph, &mut training_meta,
+            &OptimizerGenOptions {
+                kind: OptimizerKind::SGDMomentum { lr, momentum, nesterov: false },
+            },
+            rng,
+        );
+
+        let loss_ext = GlobalId::new(rng);
+        graph.add_output(loss, loss_ext);
+        let new_param_id = training_meta.param_to_new_param[&param];
+        let new_param_ext = GlobalId::new(rng);
+        graph.add_output(new_param_id, new_param_ext);
+
+        let param_val = NumericTensor::<DynRank>::from_vec_shape(
+            vec![1.0f32, 2.0, 3.0, 4.0], vec![4],
+        ).unwrap();
+        let v_in_id = training_meta.optimizer_state_inputs[&(param, "velocity".into())];
+        let v_zeros = NumericTensor::<DynRank>::from_vec_shape(
+            vec![0.0f32; 4], vec![4],
+        ).unwrap();
+
+        let mut inputs = HashMap::new();
+        inputs.insert(param_ext, param_val);
+        inputs.insert(v_in_id, v_zeros);
+
+        let mut backend = EvalBackend::NDArray;
+        let results: HashMap<_, _> = graph.eval(&inputs, &mut (), &mut backend).unwrap().collect();
+
+        // grad = 2, v_old = 0
+        // v_new = 0.9 * 0 + 2 = 2
+        // new_param = param - 0.1 * 2 = param - 0.2
+        let new_param: Vec<f32> = results[&new_param_ext].flatten().unwrap().try_into().unwrap();
+        for (i, &v) in new_param.iter().enumerate() {
+            let expected = (i + 1) as f32 - 0.2;
+            assert!((v - expected).abs() < 1e-5, "elem {}: got {}, expected {}", i, v, expected);
+        }
+    }
+
+    #[test]
+    fn test_optimizer_sgd_nesterov() {
+        let rng = &mut wyrand::WyRand::new(42);
+        let (mut graph, param_ext, param, loss, mut training_meta) =
+            build_simple_training_graph(rng);
+
+        let lr = 0.1;
+        let momentum = 0.9;
+        generate_optimizer_ops(
+            &mut graph, &mut training_meta,
+            &OptimizerGenOptions {
+                kind: OptimizerKind::SGDMomentum { lr, momentum, nesterov: true },
+            },
+            rng,
+        );
+
+        let loss_ext = GlobalId::new(rng);
+        graph.add_output(loss, loss_ext);
+        let new_param_id = training_meta.param_to_new_param[&param];
+        let new_param_ext = GlobalId::new(rng);
+        graph.add_output(new_param_id, new_param_ext);
+
+        let param_val = NumericTensor::<DynRank>::from_vec_shape(
+            vec![1.0f32, 2.0, 3.0, 4.0], vec![4],
+        ).unwrap();
+        let v_in_id = training_meta.optimizer_state_inputs[&(param, "velocity".into())];
+        let v_zeros = NumericTensor::<DynRank>::from_vec_shape(
+            vec![0.0f32; 4], vec![4],
+        ).unwrap();
+
+        let mut inputs = HashMap::new();
+        inputs.insert(param_ext, param_val);
+        inputs.insert(v_in_id, v_zeros);
+
+        let mut backend = EvalBackend::NDArray;
+        let results: HashMap<_, _> = graph.eval(&inputs, &mut (), &mut backend).unwrap().collect();
+
+        // grad = 2, v_old = 0
+        // v_new = 0.9 * 0 + 2 = 2
+        // nesterov update = momentum * v_new + grad = 0.9 * 2 + 2 = 3.8
+        // new_param = param - 0.1 * 3.8 = param - 0.38
+        let new_param: Vec<f32> = results[&new_param_ext].flatten().unwrap().try_into().unwrap();
+        for (i, &v) in new_param.iter().enumerate() {
+            let expected = (i + 1) as f32 - 0.38;
+            assert!((v - expected).abs() < 1e-5, "elem {}: got {}, expected {}", i, v, expected);
+        }
+    }
+
+    #[test]
+    fn test_optimizer_adamw() {
+        let rng = &mut wyrand::WyRand::new(42);
+        let (mut graph, param_ext, param, loss, mut training_meta) =
+            build_simple_training_graph(rng);
+
+        let lr = 0.001f32;
+        let beta1 = 0.9f32;
+        let beta2 = 0.999f32;
+        let epsilon = 1e-8f32;
+        let weight_decay = 0.01f32;
+        generate_optimizer_ops(
+            &mut graph, &mut training_meta,
+            &OptimizerGenOptions {
+                kind: OptimizerKind::AdamW { lr, beta1, beta2, epsilon, weight_decay },
+            },
+            rng,
+        );
+
+        let loss_ext = GlobalId::new(rng);
+        graph.add_output(loss, loss_ext);
+        let new_param_id = training_meta.param_to_new_param[&param];
+        let new_param_ext = GlobalId::new(rng);
+        graph.add_output(new_param_id, new_param_ext);
+
+        let param_vals = vec![1.0f32, 2.0, 3.0, 4.0];
+        let param_val = NumericTensor::<DynRank>::from_vec_shape(
+            param_vals.clone(), vec![4],
+        ).unwrap();
+        let m_in_id = training_meta.optimizer_state_inputs[&(param, "m".into())];
+        let v_in_id = training_meta.optimizer_state_inputs[&(param, "v".into())];
+        let t_in_id = training_meta.global_state_inputs["timestep"];
+        let zeros = NumericTensor::<DynRank>::from_vec_shape(vec![0.0f32; 4], vec![4]).unwrap();
+        let t_zero = NumericTensor::<DynRank>::from_vec_shape(vec![0i64], vec![1]).unwrap();
+
+        let mut inputs = HashMap::new();
+        inputs.insert(param_ext, param_val);
+        inputs.insert(m_in_id, zeros.clone());
+        inputs.insert(v_in_id, zeros);
+        inputs.insert(t_in_id, t_zero);
+
+        let mut backend = EvalBackend::NDArray;
+        let results: HashMap<_, _> = graph.eval(&inputs, &mut (), &mut backend).unwrap().collect();
+
+        // grad = 2 (unmodified for AdamW, no L2 on grad)
+        // m_new = 0.1 * 2 = 0.2, v_new = 0.001 * 4 = 0.004
+        // m_hat = 0.2/0.1 = 2.0, v_hat = 0.004/0.001 = 4.0
+        // adam_step = lr * m_hat / (sqrt(v_hat) + eps) = 0.001 * 2.0 / 2.0 ≈ 0.001
+        // decay_step = lr * weight_decay * param
+        // new_param = param - adam_step - decay_step
+        let adam_step = lr * 2.0 / (4.0f32.sqrt() + epsilon);
+        let new_param: Vec<f32> = results[&new_param_ext].flatten().unwrap().try_into().unwrap();
+        for (i, &v) in new_param.iter().enumerate() {
+            let p = param_vals[i];
+            let decay_step = lr * weight_decay * p;
+            let expected = p - adam_step - decay_step;
+            assert!(
+                (v - expected).abs() < 1e-5,
+                "elem {}: got {}, expected {}", i, v, expected,
+            );
+        }
+    }
+
+    #[test]
+    fn test_optimizer_adam_two_steps() {
+        // Run Adam for 2 steps, verify state carries over correctly
+        let rng = &mut wyrand::WyRand::new(42);
+        let (mut graph, param_ext, param, loss, mut training_meta) =
+            build_simple_training_graph(rng);
+
+        let lr = 0.001f32;
+        let beta1 = 0.9f32;
+        let beta2 = 0.999f32;
+        let epsilon = 1e-8f32;
+        generate_optimizer_ops(
+            &mut graph, &mut training_meta,
+            &OptimizerGenOptions {
+                kind: OptimizerKind::Adam { lr, beta1, beta2, epsilon, weight_decay: 0.0 },
+            },
+            rng,
+        );
+
+        let loss_ext = GlobalId::new(rng);
+        graph.add_output(loss, loss_ext);
+        let new_param_id = training_meta.param_to_new_param[&param];
+        let new_param_ext = GlobalId::new(rng);
+        graph.add_output(new_param_id, new_param_ext);
+        let m_out_id = training_meta.optimizer_state_outputs[&(param, "m".into())];
+        let m_out_ext = GlobalId::new(rng);
+        graph.add_output(m_out_id, m_out_ext);
+        let v_out_id = training_meta.optimizer_state_outputs[&(param, "v".into())];
+        let v_out_ext = GlobalId::new(rng);
+        graph.add_output(v_out_id, v_out_ext);
+        let t_out_id = training_meta.global_state_outputs["timestep"];
+        let t_out_ext = GlobalId::new(rng);
+        graph.add_output(t_out_id, t_out_ext);
+
+        let m_in_id = training_meta.optimizer_state_inputs[&(param, "m".into())];
+        let v_in_id = training_meta.optimizer_state_inputs[&(param, "v".into())];
+        let t_in_id = training_meta.global_state_inputs["timestep"];
+
+        let grad = 2.0f32; // constant grad since f(x) = sum(x * 2)
+        let mut m = 0.0f32;
+        let mut v = 0.0f32;
+        let mut p = vec![1.0f32, 2.0, 3.0, 4.0];
+        let mut t = 0i64;
+
+        for step in 0..2 {
+            let mut inputs = HashMap::new();
+            inputs.insert(param_ext, NumericTensor::<DynRank>::from_vec_shape(
+                p.clone(), vec![4],
+            ).unwrap());
+            inputs.insert(m_in_id, NumericTensor::<DynRank>::from_vec_shape(
+                vec![m; 4], vec![4],
+            ).unwrap());
+            inputs.insert(v_in_id, NumericTensor::<DynRank>::from_vec_shape(
+                vec![v; 4], vec![4],
+            ).unwrap());
+            inputs.insert(t_in_id, NumericTensor::<DynRank>::from_vec_shape(
+                vec![t], vec![1],
+            ).unwrap());
+
+            let mut backend = EvalBackend::NDArray;
+            let results: HashMap<_, _> = graph.eval(&inputs, &mut (), &mut backend).unwrap().collect();
+
+            // Compute expected values
+            t += 1;
+            m = beta1 * m + (1.0 - beta1) * grad;
+            v = beta2 * v + (1.0 - beta2) * grad * grad;
+            let m_hat = m / (1.0 - beta1.powi(t as i32));
+            let v_hat = v / (1.0 - beta2.powi(t as i32));
+            let adam_step = lr * m_hat / (v_hat.sqrt() + epsilon);
+            for x in &mut p {
+                *x -= adam_step;
+            }
+
+            let actual_param: Vec<f32> = results[&new_param_ext].flatten().unwrap().try_into().unwrap();
+            for (i, &actual) in actual_param.iter().enumerate() {
+                assert!(
+                    (actual - p[i]).abs() < 1e-4,
+                    "step {} elem {}: got {}, expected {}", step, i, actual, p[i],
+                );
+            }
+
+            // Carry state forward
+            let m_out: Vec<f32> = results[&m_out_ext].flatten().unwrap().try_into().unwrap();
+            let v_out: Vec<f32> = results[&v_out_ext].flatten().unwrap().try_into().unwrap();
+            assert!((m_out[0] - m).abs() < 1e-5, "step {} m: got {}, expected {}", step, m_out[0], m);
+            assert!((v_out[0] - v).abs() < 1e-5, "step {} v: got {}, expected {}", step, v_out[0], v);
+        }
     }
 }
 

@@ -831,13 +831,23 @@ impl SymbolicGraph {
             for param in &backward_opts.trainable_params {
                 let combined_param = sym_to_combined[param];
                 if let Some(&grad) = grad_map.get(&combined_param) {
-                    training_meta.param_to_grad.insert(*param, grad);
+                    training_meta.param_to_grad.insert(combined_param, grad);
                 }
             }
 
-            combined.training_metadata = Some(training_meta);
+            // 5. Generate optimizer (if requested)
+            if let Some(ref optim_opts) = options.optimizer {
+                crate::milli_graph::generate_optimizer_ops(
+                    &mut combined,
+                    &mut training_meta,
+                    optim_opts,
+                    rng,
+                );
+            }
 
-            // Set outputs: loss + forward outputs
+            combined.training_metadata = Some(training_meta.clone());
+
+            // Set outputs: loss + forward outputs + updated params + optimizer state
             let mut output_ids: Vec<(GlobalId, GlobalId)> = vec![];
             output_ids.push((loss_tensor, loss_tensor));
             // Include forward outputs
@@ -850,6 +860,18 @@ impl SymbolicGraph {
                 if let Some(&grad) = grad_map.get(&sym_to_combined[param]) {
                     output_ids.push((grad, grad));
                 }
+            }
+            // Include updated parameters as outputs
+            for &new_param in training_meta.param_to_new_param.values() {
+                output_ids.push((new_param, new_param));
+            }
+            // Include optimizer state outputs
+            for &state_out in training_meta.optimizer_state_outputs.values() {
+                output_ids.push((state_out, state_out));
+            }
+            // Include global state outputs (e.g., updated timestep)
+            for &global_out in training_meta.global_state_outputs.values() {
+                output_ids.push((global_out, global_out));
             }
             combined.set_output_map(output_ids);
         } else {
