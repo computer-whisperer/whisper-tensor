@@ -2738,6 +2738,474 @@ mod tests {
             assert!((v_out[0] - v).abs() < 1e-5, "step {} v: got {}, expected {}", step, v_out[0], v);
         }
     }
+
+    // ---- Phase 9: End-to-end training tests ----
+
+    /// Build a training graph for linear regression: y = matmul(x, W)
+    /// with MSE loss: loss = mean((y - targets)^2)
+    ///
+    /// Returns (graph, x_ext, w_ext, targets_ext, loss_ext, new_w_ext, training_meta)
+    fn build_linear_regression_graph(
+        lr: f32,
+        rng: &mut wyrand::WyRand,
+    ) -> (
+        MilliOpGraph,
+        GlobalId, GlobalId, GlobalId, // x, w, targets external IDs
+        GlobalId, GlobalId,            // loss, new_w external IDs
+        TrainingMetadata,
+    ) {
+        let mut graph = MilliOpGraph::new_empty(rng);
+
+        // Inputs: x [batch, features], W [features, 1], targets [batch, 1]
+        let x_ext = GlobalId::new(rng);
+        let w_ext = GlobalId::new(rng);
+        let targets_ext = GlobalId::new(rng);
+        let x = graph.add_input_with_id(x_ext, rng);
+        let w = graph.add_input_with_id(w_ext, rng);
+        let targets = graph.add_input_with_id(targets_ext, rng);
+
+        // Forward group: y = matmul(x, W)
+        let fwd_group = graph.create_group(MilliOpGroup {
+            id: GlobalId::new(rng),
+            phase: MilliOpPhase::Forward,
+            label: Some("forward".into()),
+            ..Default::default()
+        });
+        graph.set_default_group(Some(fwd_group));
+        let y = ops::MatMul::push_new(&mut graph, x, w, rng);
+        graph.set_default_group(None);
+
+        // Loss group: mse = mean((y - targets)^2)
+        let loss_group = graph.create_group(MilliOpGroup {
+            id: GlobalId::new(rng),
+            phase: MilliOpPhase::Loss,
+            label: Some("mse_loss".into()),
+            ..Default::default()
+        });
+        graph.set_default_group(Some(loss_group));
+        let diff = SimpleBinary::sub(&mut graph, y, targets, rng);
+        let diff_sq = SimpleBinary::mul(&mut graph, diff, diff, rng);
+        let loss = ops::ReduceMean::push_new(&mut graph, diff_sq, None, false, false, rng);
+        graph.set_default_group(None);
+
+        // Backward: seed with ones on loss, backward through loss group then forward group
+        let ones = ops::Constant::push_new(
+            &mut graph,
+            NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![1.0f32], &vec![1]).unwrap(),
+            rng,
+        );
+        let mut grad_map = HashMap::new();
+        grad_map.insert(loss, ones);
+
+        // Backward through loss group
+        let loss_grads = generate_milli_backward(&mut graph, loss_group, &grad_map, rng);
+        grad_map.extend(loss_grads);
+
+        // Backward through forward group
+        let fwd_grads = generate_milli_backward(&mut graph, fwd_group, &grad_map, rng);
+        grad_map.extend(fwd_grads);
+
+        // Training metadata
+        let mut training_meta = TrainingMetadata::default();
+        training_meta.loss = Some(loss);
+        training_meta.param_to_grad.insert(w, grad_map[&w]);
+
+        // Optimizer
+        generate_optimizer_ops(
+            &mut graph, &mut training_meta,
+            &OptimizerGenOptions { kind: OptimizerKind::SGD { lr } },
+            rng,
+        );
+
+        // Outputs
+        let loss_ext = GlobalId::new(rng);
+        graph.add_output(loss, loss_ext);
+        let new_w = training_meta.param_to_new_param[&w];
+        let new_w_ext = GlobalId::new(rng);
+        graph.add_output(new_w, new_w_ext);
+
+        (graph, x_ext, w_ext, targets_ext, loss_ext, new_w_ext, training_meta)
+    }
+
+    #[test]
+    fn test_e2e_linear_regression_sgd() {
+        // Train y = 3*x1 - 2*x2 using SGD
+        // Starting from W = [0, 0], should converge to [3, -2]
+        let rng = &mut wyrand::WyRand::new(123);
+        let (graph, x_ext, w_ext, targets_ext, loss_ext, new_w_ext, _meta) =
+            build_linear_regression_graph(0.01, rng);
+
+        // Training data: x = [[1,0],[0,1],[1,1],[2,1]]
+        // true W = [3, -2], so targets = [3, -2, 1, 4]
+        let x_data = vec![1.0f32, 0.0, 0.0, 1.0, 1.0, 1.0, 2.0, 1.0];
+        let targets_data = vec![3.0f32, -2.0, 1.0, 4.0];
+
+        let mut w_vals = vec![0.0f32, 0.0]; // start from zeros
+        let mut losses = Vec::new();
+
+        for _step in 0..500 {
+            let mut inputs = HashMap::new();
+            inputs.insert(x_ext, NumericTensor::<DynRank>::from_vec_shape(
+                x_data.clone(), vec![4, 2],
+            ).unwrap());
+            inputs.insert(w_ext, NumericTensor::<DynRank>::from_vec_shape(
+                w_vals.clone(), vec![2, 1],
+            ).unwrap());
+            inputs.insert(targets_ext, NumericTensor::<DynRank>::from_vec_shape(
+                targets_data.clone(), vec![4, 1],
+            ).unwrap());
+
+            let mut backend = EvalBackend::NDArray;
+            let results: HashMap<_, _> = graph.eval(&inputs, &mut (), &mut backend).unwrap().collect();
+
+            let loss_val: Vec<f32> = results[&loss_ext].flatten().unwrap().try_into().unwrap();
+            losses.push(loss_val[0]);
+
+            let new_w: Vec<f32> = results[&new_w_ext].flatten().unwrap().try_into().unwrap();
+            w_vals = new_w;
+        }
+
+        // Loss should decrease significantly
+        assert!(
+            losses.last().unwrap() < &(losses[0] * 0.05),
+            "Loss didn't decrease enough: first={}, last={}",
+            losses[0], losses.last().unwrap(),
+        );
+
+        // W should converge near [3, -2] (SGD converges slowly, allow 0.2 tolerance)
+        assert!(
+            (w_vals[0] - 3.0).abs() < 0.2,
+            "W[0] should be ~3.0, got {}", w_vals[0],
+        );
+        assert!(
+            (w_vals[1] - (-2.0)).abs() < 0.2,
+            "W[1] should be ~-2.0, got {}", w_vals[1],
+        );
+    }
+
+    #[test]
+    fn test_e2e_linear_regression_adam() {
+        // Same as above but with Adam — should converge faster
+        let rng = &mut wyrand::WyRand::new(456);
+
+        let mut graph = MilliOpGraph::new_empty(rng);
+        let x_ext = GlobalId::new(rng);
+        let w_ext = GlobalId::new(rng);
+        let targets_ext = GlobalId::new(rng);
+        let x = graph.add_input_with_id(x_ext, rng);
+        let w = graph.add_input_with_id(w_ext, rng);
+        let targets = graph.add_input_with_id(targets_ext, rng);
+
+        let fwd_group = graph.create_group(MilliOpGroup {
+            id: GlobalId::new(rng),
+            phase: MilliOpPhase::Forward,
+            ..Default::default()
+        });
+        graph.set_default_group(Some(fwd_group));
+        let y = ops::MatMul::push_new(&mut graph, x, w, rng);
+        graph.set_default_group(None);
+
+        let loss_group = graph.create_group(MilliOpGroup {
+            id: GlobalId::new(rng),
+            phase: MilliOpPhase::Loss,
+            ..Default::default()
+        });
+        graph.set_default_group(Some(loss_group));
+        let diff = SimpleBinary::sub(&mut graph, y, targets, rng);
+        let diff_sq = SimpleBinary::mul(&mut graph, diff, diff, rng);
+        let loss = ops::ReduceMean::push_new(&mut graph, diff_sq, None, false, false, rng);
+        graph.set_default_group(None);
+
+        let ones = ops::Constant::push_new(
+            &mut graph,
+            NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![1.0f32], &vec![1]).unwrap(),
+            rng,
+        );
+        let mut grad_map = HashMap::new();
+        grad_map.insert(loss, ones);
+        let loss_grads = generate_milli_backward(&mut graph, loss_group, &grad_map, rng);
+        grad_map.extend(loss_grads);
+        let fwd_grads = generate_milli_backward(&mut graph, fwd_group, &grad_map, rng);
+        grad_map.extend(fwd_grads);
+
+        let mut training_meta = TrainingMetadata::default();
+        training_meta.loss = Some(loss);
+        training_meta.param_to_grad.insert(w, grad_map[&w]);
+
+        generate_optimizer_ops(
+            &mut graph, &mut training_meta,
+            &OptimizerGenOptions {
+                kind: OptimizerKind::Adam {
+                    lr: 0.1, beta1: 0.9, beta2: 0.999, epsilon: 1e-8, weight_decay: 0.0,
+                },
+            },
+            rng,
+        );
+
+        let loss_ext = GlobalId::new(rng);
+        graph.add_output(loss, loss_ext);
+        let new_w = training_meta.param_to_new_param[&w];
+        let new_w_ext = GlobalId::new(rng);
+        graph.add_output(new_w, new_w_ext);
+        let m_out_id = training_meta.optimizer_state_outputs[&(w, "m".into())];
+        let m_out_ext = GlobalId::new(rng);
+        graph.add_output(m_out_id, m_out_ext);
+        let v_out_id = training_meta.optimizer_state_outputs[&(w, "v".into())];
+        let v_out_ext = GlobalId::new(rng);
+        graph.add_output(v_out_id, v_out_ext);
+        let t_out_id = training_meta.global_state_outputs["timestep"];
+        let t_out_ext = GlobalId::new(rng);
+        graph.add_output(t_out_id, t_out_ext);
+
+        let m_in_id = training_meta.optimizer_state_inputs[&(w, "m".into())];
+        let v_in_id = training_meta.optimizer_state_inputs[&(w, "v".into())];
+        let t_in_id = training_meta.global_state_inputs["timestep"];
+
+        let x_data = vec![1.0f32, 0.0, 0.0, 1.0, 1.0, 1.0, 2.0, 1.0];
+        let targets_data = vec![3.0f32, -2.0, 1.0, 4.0];
+
+        let mut w_vals = vec![0.0f32, 0.0];
+        let mut m_vals = vec![0.0f32, 0.0];
+        let mut v_vals = vec![0.0f32, 0.0];
+        let mut t_val = 0i64;
+        let mut losses = Vec::new();
+
+        for _step in 0..100 {
+            let mut inputs = HashMap::new();
+            inputs.insert(x_ext, NumericTensor::<DynRank>::from_vec_shape(
+                x_data.clone(), vec![4, 2],
+            ).unwrap());
+            inputs.insert(w_ext, NumericTensor::<DynRank>::from_vec_shape(
+                w_vals.clone(), vec![2, 1],
+            ).unwrap());
+            inputs.insert(targets_ext, NumericTensor::<DynRank>::from_vec_shape(
+                targets_data.clone(), vec![4, 1],
+            ).unwrap());
+            inputs.insert(m_in_id, NumericTensor::<DynRank>::from_vec_shape(
+                m_vals.clone(), vec![2, 1],
+            ).unwrap());
+            inputs.insert(v_in_id, NumericTensor::<DynRank>::from_vec_shape(
+                v_vals.clone(), vec![2, 1],
+            ).unwrap());
+            inputs.insert(t_in_id, NumericTensor::<DynRank>::from_vec_shape(
+                vec![t_val], vec![1],
+            ).unwrap());
+
+            let mut backend = EvalBackend::NDArray;
+            let results: HashMap<_, _> = graph.eval(&inputs, &mut (), &mut backend).unwrap().collect();
+
+            let loss_val: Vec<f32> = results[&loss_ext].flatten().unwrap().try_into().unwrap();
+            losses.push(loss_val[0]);
+
+            w_vals = results[&new_w_ext].flatten().unwrap().try_into().unwrap();
+            m_vals = results[&m_out_ext].flatten().unwrap().try_into().unwrap();
+            v_vals = results[&v_out_ext].flatten().unwrap().try_into().unwrap();
+            let t_out_val: Vec<i64> = results[&t_out_ext].flatten().unwrap().try_into().unwrap();
+            t_val = t_out_val[0];
+        }
+
+        // Adam with lr=0.1 should converge quickly
+        assert!(
+            *losses.last().unwrap() < 0.01,
+            "Loss should be near 0, got {}", losses.last().unwrap(),
+        );
+        assert!(
+            (w_vals[0] - 3.0).abs() < 0.15,
+            "W[0] should be ~3.0, got {}", w_vals[0],
+        );
+        assert!(
+            (w_vals[1] - (-2.0)).abs() < 0.15,
+            "W[1] should be ~-2.0, got {}", w_vals[1],
+        );
+    }
+
+    #[test]
+    fn test_e2e_mlp_xor() {
+        // 2-layer MLP solving XOR: x -> matmul(x, W1) -> clamp_min(0) -> matmul(_, W2) -> y
+        // XOR: [0,0]->0, [0,1]->1, [1,0]->1, [1,1]->0
+        let rng = &mut wyrand::WyRand::new(789);
+
+        let mut graph = MilliOpGraph::new_empty(rng);
+        let x_ext = GlobalId::new(rng);
+        let w1_ext = GlobalId::new(rng);
+        let w2_ext = GlobalId::new(rng);
+        let targets_ext = GlobalId::new(rng);
+        let x = graph.add_input_with_id(x_ext, rng);
+        let w1 = graph.add_input_with_id(w1_ext, rng);
+        let w2 = graph.add_input_with_id(w2_ext, rng);
+        let targets = graph.add_input_with_id(targets_ext, rng);
+
+        // Forward: h = relu(matmul(x, W1)), y = matmul(h, W2)
+        // Using 8 hidden units for more robust XOR learning
+        let fwd_group = graph.create_group(MilliOpGroup {
+            id: GlobalId::new(rng),
+            phase: MilliOpPhase::Forward,
+            ..Default::default()
+        });
+        graph.set_default_group(Some(fwd_group));
+        let h_pre = ops::MatMul::push_new(&mut graph, x, w1, rng);
+        let h = ops::ClampMin::push_new(&mut graph, h_pre, 0.0, rng);
+        let y = ops::MatMul::push_new(&mut graph, h, w2, rng);
+        graph.set_default_group(None);
+
+        // Loss: MSE
+        let loss_group = graph.create_group(MilliOpGroup {
+            id: GlobalId::new(rng),
+            phase: MilliOpPhase::Loss,
+            ..Default::default()
+        });
+        graph.set_default_group(Some(loss_group));
+        let diff = SimpleBinary::sub(&mut graph, y, targets, rng);
+        let diff_sq = SimpleBinary::mul(&mut graph, diff, diff, rng);
+        let loss = ops::ReduceMean::push_new(&mut graph, diff_sq, None, false, false, rng);
+        graph.set_default_group(None);
+
+        // Backward
+        let ones = ops::Constant::push_new(
+            &mut graph,
+            NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![1.0f32], &vec![1]).unwrap(),
+            rng,
+        );
+        let mut grad_map = HashMap::new();
+        grad_map.insert(loss, ones);
+        let loss_grads = generate_milli_backward(&mut graph, loss_group, &grad_map, rng);
+        grad_map.extend(loss_grads);
+        let fwd_grads = generate_milli_backward(&mut graph, fwd_group, &grad_map, rng);
+        grad_map.extend(fwd_grads);
+
+        let mut training_meta = TrainingMetadata::default();
+        training_meta.loss = Some(loss);
+        training_meta.param_to_grad.insert(w1, grad_map[&w1]);
+        training_meta.param_to_grad.insert(w2, grad_map[&w2]);
+
+        generate_optimizer_ops(
+            &mut graph, &mut training_meta,
+            &OptimizerGenOptions {
+                kind: OptimizerKind::Adam {
+                    lr: 0.05, beta1: 0.9, beta2: 0.999, epsilon: 1e-8, weight_decay: 0.0,
+                },
+            },
+            rng,
+        );
+
+        // Outputs
+        let loss_ext = GlobalId::new(rng);
+        graph.add_output(loss, loss_ext);
+        let new_w1 = training_meta.param_to_new_param[&w1];
+        let new_w1_ext = GlobalId::new(rng);
+        graph.add_output(new_w1, new_w1_ext);
+        let new_w2 = training_meta.param_to_new_param[&w2];
+        let new_w2_ext = GlobalId::new(rng);
+        graph.add_output(new_w2, new_w2_ext);
+
+        // Optimizer state outputs (W1)
+        let m1_out = training_meta.optimizer_state_outputs[&(w1, "m".into())];
+        let m1_out_ext = GlobalId::new(rng);
+        graph.add_output(m1_out, m1_out_ext);
+        let v1_out = training_meta.optimizer_state_outputs[&(w1, "v".into())];
+        let v1_out_ext = GlobalId::new(rng);
+        graph.add_output(v1_out, v1_out_ext);
+        // Optimizer state outputs (W2)
+        let m2_out = training_meta.optimizer_state_outputs[&(w2, "m".into())];
+        let m2_out_ext = GlobalId::new(rng);
+        graph.add_output(m2_out, m2_out_ext);
+        let v2_out = training_meta.optimizer_state_outputs[&(w2, "v".into())];
+        let v2_out_ext = GlobalId::new(rng);
+        graph.add_output(v2_out, v2_out_ext);
+        // Global state
+        let t_out = training_meta.global_state_outputs["timestep"];
+        let t_out_ext = GlobalId::new(rng);
+        graph.add_output(t_out, t_out_ext);
+
+        let m1_in = training_meta.optimizer_state_inputs[&(w1, "m".into())];
+        let v1_in = training_meta.optimizer_state_inputs[&(w1, "v".into())];
+        let m2_in = training_meta.optimizer_state_inputs[&(w2, "m".into())];
+        let v2_in = training_meta.optimizer_state_inputs[&(w2, "v".into())];
+        let t_in = training_meta.global_state_inputs["timestep"];
+
+        // XOR data
+        let x_data = vec![0.0f32, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0];
+        let targets_data = vec![0.0f32, 1.0, 1.0, 0.0];
+
+        // Initialize weights with small random values (deterministic)
+        // W1: [2, 8] (2 inputs, 8 hidden), W2: [8, 1]
+        let mut w_rng = wyrand::WyRand::new(42);
+        let mut w1_vals: Vec<f32> = (0..16).map(|_| {
+            (rand::Rng::random::<f32>(&mut w_rng) - 0.5) * 1.0
+        }).collect();
+        let mut w2_vals: Vec<f32> = (0..8).map(|_| {
+            (rand::Rng::random::<f32>(&mut w_rng) - 0.5) * 1.0
+        }).collect();
+
+        let mut m1_vals = vec![0.0f32; 16];
+        let mut v1_vals = vec![0.0f32; 16];
+        let mut m2_vals = vec![0.0f32; 8];
+        let mut v2_vals = vec![0.0f32; 8];
+        let mut t_val = 0i64;
+        let mut losses = Vec::new();
+
+        for _step in 0..1000 {
+            let mut inputs = HashMap::new();
+            inputs.insert(x_ext, NumericTensor::<DynRank>::from_vec_shape(
+                x_data.clone(), vec![4, 2],
+            ).unwrap());
+            inputs.insert(w1_ext, NumericTensor::<DynRank>::from_vec_shape(
+                w1_vals.clone(), vec![2, 8],
+            ).unwrap());
+            inputs.insert(w2_ext, NumericTensor::<DynRank>::from_vec_shape(
+                w2_vals.clone(), vec![8, 1],
+            ).unwrap());
+            inputs.insert(targets_ext, NumericTensor::<DynRank>::from_vec_shape(
+                targets_data.clone(), vec![4, 1],
+            ).unwrap());
+            inputs.insert(m1_in, NumericTensor::<DynRank>::from_vec_shape(
+                m1_vals.clone(), vec![2, 8],
+            ).unwrap());
+            inputs.insert(v1_in, NumericTensor::<DynRank>::from_vec_shape(
+                v1_vals.clone(), vec![2, 8],
+            ).unwrap());
+            inputs.insert(m2_in, NumericTensor::<DynRank>::from_vec_shape(
+                m2_vals.clone(), vec![8, 1],
+            ).unwrap());
+            inputs.insert(v2_in, NumericTensor::<DynRank>::from_vec_shape(
+                v2_vals.clone(), vec![8, 1],
+            ).unwrap());
+            inputs.insert(t_in, NumericTensor::<DynRank>::from_vec_shape(
+                vec![t_val], vec![1],
+            ).unwrap());
+
+            let mut backend = EvalBackend::NDArray;
+            let results: HashMap<_, _> = graph.eval(&inputs, &mut (), &mut backend).unwrap().collect();
+
+            let loss_val: Vec<f32> = results[&loss_ext].flatten().unwrap().try_into().unwrap();
+            losses.push(loss_val[0]);
+
+            // Update state
+            w1_vals = results[&new_w1_ext].flatten().unwrap().try_into().unwrap();
+            w2_vals = results[&new_w2_ext].flatten().unwrap().try_into().unwrap();
+            m1_vals = results[&m1_out_ext].flatten().unwrap().try_into().unwrap();
+            v1_vals = results[&v1_out_ext].flatten().unwrap().try_into().unwrap();
+            m2_vals = results[&m2_out_ext].flatten().unwrap().try_into().unwrap();
+            v2_vals = results[&v2_out_ext].flatten().unwrap().try_into().unwrap();
+            let t_out_val: Vec<i64> = results[&t_out_ext].flatten().unwrap().try_into().unwrap();
+            t_val = t_out_val[0];
+        }
+
+        // MLP should learn XOR — loss should be very small
+        let final_loss = *losses.last().unwrap();
+        assert!(
+            final_loss < 0.05,
+            "XOR MLP didn't converge: final loss = {} (expected < 0.05). \
+             Loss trajectory: first={}, mid={}, last={}",
+            final_loss, losses[0], losses[losses.len() / 2], final_loss,
+        );
+
+        // Verify: loss decreased significantly from start
+        assert!(
+            final_loss < losses[0] * 0.1,
+            "Loss didn't decrease enough: {} -> {}", losses[0], final_loss,
+        );
+    }
 }
 
 impl crate::graph::Link for MilliOpGraphTensor {
