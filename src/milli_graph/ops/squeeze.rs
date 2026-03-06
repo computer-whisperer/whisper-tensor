@@ -58,6 +58,20 @@ impl Node for Squeeze {
 }
 
 impl MilliOp for Squeeze {
+    fn backward(
+        &self,
+        output_grads: &HashMap<GlobalId, GlobalId>,
+        graph: &mut MilliOpGraph,
+        rng: &mut impl rand::Rng,
+    ) -> Option<HashMap<GlobalId, GlobalId>> {
+        let grad_output = *output_grads.get(&self.output)?;
+        // Squeeze backward = Unsqueeze along the same axes
+        let grad_input = super::Unsqueeze::push_new(graph, grad_output, self.axes, rng);
+        let mut result = HashMap::new();
+        result.insert(self.data, grad_input);
+        Some(result)
+    }
+
     fn eval(
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
@@ -83,22 +97,14 @@ impl MilliOp for Squeeze {
         } else {
             // Multiple axes (use reshape)
             let input_shape = inputs[&self.data].shape();
+            let normalized_axes: Vec<usize> = axes
+                .iter()
+                .map(|&a| if a < 0 { (input_shape.len() as i64 + a) as usize } else { a as usize })
+                .collect();
             let mut output_shape = Vec::new();
-            for i in 0..(input_shape.len() - axes.len()) {
-                let mut is_selected = false;
-                for axis in &axes {
-                    let axis = if *axis < 0 {
-                        input_shape.len() as i64 + *axis
-                    } else {
-                        *axis
-                    };
-                    if axis == i as i64 {
-                        is_selected = true;
-                        break;
-                    }
-                }
-                if is_selected {
-                    // Skip it
+            for i in 0..input_shape.len() {
+                if normalized_axes.contains(&i) {
+                    // Skip squeezed dimension (should be size 1)
                 } else {
                     output_shape.push(input_shape[i]);
                 }

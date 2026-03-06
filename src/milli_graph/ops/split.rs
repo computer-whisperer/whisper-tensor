@@ -64,7 +64,11 @@ impl Node for Split {
         "Split".to_string()
     }
     fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
-        Box::new([self.data].into_iter())
+        let mut ids = vec![self.data];
+        if let Some(MilliOpTensorIDOrLiteral::TensorID(id)) = &self.split {
+            ids.push(*id);
+        }
+        Box::new(ids.into_iter())
     }
     fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
         Box::new([self.output].into_iter())

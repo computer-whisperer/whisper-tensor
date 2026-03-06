@@ -1886,6 +1886,216 @@ mod tests {
             1e-3, 1e-2,
         );
     }
+
+    // ---- Phase 7: Shape ops backward ----
+
+    #[test]
+    fn test_backward_reshape() {
+        // f(x) = sum(reshape(x, [3, 2])) where x is [2, 3]
+        // Gradient flows through reshape; d/dx_i = 1 for all i
+        check_general_backward(
+            |g, ids, r| {
+                let shape = ops::Constant::push_new(
+                    g,
+                    NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![3i64, 2], &vec![2]).unwrap(),
+                    r,
+                );
+                ops::Reshape::push_new(g, ids[0], shape, false, r)
+            },
+            &[vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]],
+            &[vec![2, 3]],
+            1e-3, 1e-2,
+        );
+    }
+
+    #[test]
+    fn test_backward_reshape_chain() {
+        // f(x) = sum(reshape(x * 2, [6])) where x is [2, 3]
+        // d/dx_i = 2 for all i
+        check_general_backward(
+            |g, ids, r| {
+                let two = ops::Constant::new_scalar(g, 2.0f32, r);
+                let scaled = SimpleBinary::mul(g, ids[0], two, r);
+                let shape = ops::Constant::push_new(
+                    g,
+                    NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![6i64], &vec![1]).unwrap(),
+                    r,
+                );
+                ops::Reshape::push_new(g, scaled, shape, false, r)
+            },
+            &[vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]],
+            &[vec![2, 3]],
+            1e-3, 1e-2,
+        );
+    }
+
+    #[test]
+    fn test_backward_transpose() {
+        // f(x) = sum(transpose(x, perm=[1,0])) where x is [2, 3]
+        // Gradient flows through transpose; d/dx_i = 1 for all i
+        check_general_backward(
+            |g, ids, r| {
+                ops::Transpose::push_new(g, ids[0], Some(vec![1, 0]), r)
+            },
+            &[vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]],
+            &[vec![2, 3]],
+            1e-3, 1e-2,
+        );
+    }
+
+    #[test]
+    fn test_backward_transpose_3d() {
+        // f(x) = sum(transpose(x, perm=[2,0,1])) where x is [2, 3, 4]
+        check_general_backward(
+            |g, ids, r| {
+                ops::Transpose::push_new(g, ids[0], Some(vec![2, 0, 1]), r)
+            },
+            &[(1..=24).map(|x| x as f32).collect()],
+            &[vec![2, 3, 4]],
+            1e-3, 1e-2,
+        );
+    }
+
+    #[test]
+    fn test_backward_transpose_reverse() {
+        // f(x) = sum(transpose(x, None)) — reverses all dims
+        check_general_backward(
+            |g, ids, r| {
+                ops::Transpose::push_new(g, ids[0], None, r)
+            },
+            &[vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]],
+            &[vec![2, 3]],
+            1e-3, 1e-2,
+        );
+    }
+
+    #[test]
+    fn test_backward_squeeze() {
+        // f(x) = sum(squeeze(x, axes=[1])) where x is [2, 1, 3]
+        check_general_backward(
+            |g, ids, r| {
+                let axes = ops::Constant::push_new(
+                    g,
+                    NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![1i64], &vec![1]).unwrap(),
+                    r,
+                );
+                ops::Squeeze::push_new(g, ids[0], axes, r)
+            },
+            &[vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]],
+            &[vec![2, 1, 3]],
+            1e-3, 1e-2,
+        );
+    }
+
+    #[test]
+    fn test_backward_unsqueeze() {
+        // f(x) = sum(unsqueeze(x, axes=[1])) where x is [2, 3]
+        check_general_backward(
+            |g, ids, r| {
+                let axes = ops::Constant::push_new(
+                    g,
+                    NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![1i64], &vec![1]).unwrap(),
+                    r,
+                );
+                ops::Unsqueeze::push_new(g, ids[0], axes, r)
+            },
+            &[vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]],
+            &[vec![2, 3]],
+            1e-3, 1e-2,
+        );
+    }
+
+    #[test]
+    fn test_backward_squeeze_unsqueeze_roundtrip() {
+        // f(x) = sum(squeeze(unsqueeze(x * 2, axes=[0]), axes=[0]))
+        // Should be identity on shape, gradient = 2
+        check_general_backward(
+            |g, ids, r| {
+                let two = ops::Constant::new_scalar(g, 2.0f32, r);
+                let scaled = SimpleBinary::mul(g, ids[0], two, r);
+                let axes = ops::Constant::push_new(
+                    g,
+                    NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
+                    r,
+                );
+                let unsq = ops::Unsqueeze::push_new(g, scaled, axes, r);
+                ops::Squeeze::push_new(g, unsq, axes, r)
+            },
+            &[vec![1.0, 2.0, 3.0, 4.0]],
+            &[vec![2, 2]],
+            1e-3, 1e-2,
+        );
+    }
+
+    #[test]
+    fn test_backward_concat() {
+        // f(a, b) = sum(concat([a, b], axis=0))
+        // a=[2,3], b=[3,3] -> output=[5,3]
+        // d/da_i = 1, d/db_i = 1
+        check_general_backward(
+            |g, ids, r| {
+                ops::Concat::push_new(g, vec![ids[0], ids[1]], 0, r)
+            },
+            &[
+                vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+                vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0],
+            ],
+            &[vec![2, 3], vec![3, 3]],
+            1e-3, 1e-2,
+        );
+    }
+
+    #[test]
+    fn test_backward_concat_axis1() {
+        // f(a, b) = sum(concat([a, b], axis=1))
+        // a=[2,3], b=[2,2] -> output=[2,5]
+        check_general_backward(
+            |g, ids, r| {
+                ops::Concat::push_new(g, vec![ids[0], ids[1]], 1, r)
+            },
+            &[
+                vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+                vec![7.0, 8.0, 9.0, 10.0],
+            ],
+            &[vec![2, 3], vec![2, 2]],
+            1e-3, 1e-2,
+        );
+    }
+
+    #[test]
+    fn test_backward_concat_same_input() {
+        // f(x) = sum(concat([x, x], axis=0))
+        // x=[2,3], output=[4,3], d/dx_i = 2 (gradient from both branches)
+        check_general_backward(
+            |g, ids, r| {
+                ops::Concat::push_new(g, vec![ids[0], ids[0]], 0, r)
+            },
+            &[vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]],
+            &[vec![2, 3]],
+            1e-3, 1e-2,
+        );
+    }
+
+    #[test]
+    fn test_backward_concat_with_computation() {
+        // f(a, b) = sum(concat([a * 2, b * 3], axis=0))
+        // d/da_i = 2, d/db_i = 3
+        check_general_backward(
+            |g, ids, r| {
+                let two = ops::Constant::new_scalar(g, 2.0f32, r);
+                let three = ops::Constant::new_scalar(g, 3.0f32, r);
+                let a2 = SimpleBinary::mul(g, ids[0], two, r);
+                let b3 = SimpleBinary::mul(g, ids[1], three, r);
+                ops::Concat::push_new(g, vec![a2, b3], 0, r)
+            },
+            &[
+                vec![1.0, 2.0, 3.0, 4.0],
+                vec![5.0, 6.0, 7.0, 8.0],
+            ],
+            &[vec![2, 2], vec![2, 2]],
+            1e-3, 1e-2,
+        );
+    }
 }
 
 impl crate::graph::Link for MilliOpGraphTensor {

@@ -54,6 +54,33 @@ impl Node for Transpose {
 }
 
 impl MilliOp for Transpose {
+    fn backward(
+        &self,
+        output_grads: &HashMap<GlobalId, GlobalId>,
+        graph: &mut MilliOpGraph,
+        rng: &mut impl rand::Rng,
+    ) -> Option<HashMap<GlobalId, GlobalId>> {
+        let grad_output = *output_grads.get(&self.output)?;
+        // Inverse transpose: if perm is None (reverse), inverse is also None.
+        // Otherwise compute inverse permutation.
+        let inv_perm = self.perm.as_ref().map(|p| {
+            let n = p.len();
+            let normalized: Vec<usize> = p
+                .iter()
+                .map(|&x| if x < 0 { (x + n as i64) as usize } else { x as usize })
+                .collect();
+            let mut inv = vec![0i64; n];
+            for (i, &ni) in normalized.iter().enumerate() {
+                inv[ni] = i as i64;
+            }
+            inv
+        });
+        let grad_input = Transpose::push_new(graph, grad_output, inv_perm, rng);
+        let mut result = HashMap::new();
+        result.insert(self.data, grad_input);
+        Some(result)
+    }
+
     fn eval(
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,

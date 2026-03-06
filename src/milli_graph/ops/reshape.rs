@@ -114,6 +114,21 @@ impl Node for Reshape {
 }
 
 impl MilliOp for Reshape {
+    fn backward(
+        &self,
+        output_grads: &HashMap<GlobalId, GlobalId>,
+        graph: &mut MilliOpGraph,
+        rng: &mut impl rand::Rng,
+    ) -> Option<HashMap<GlobalId, GlobalId>> {
+        let grad_output = *output_grads.get(&self.output)?;
+        // Reshape grad back to input shape
+        let input_shape = super::Shape::push_new(graph, self.data, rng);
+        let grad_input = Reshape::push_new(graph, grad_output, input_shape, false, rng);
+        let mut result = HashMap::new();
+        result.insert(self.data, grad_input);
+        Some(result)
+    }
+
     fn eval(
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,

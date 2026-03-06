@@ -58,6 +58,20 @@ impl Node for Unsqueeze {
 }
 
 impl MilliOp for Unsqueeze {
+    fn backward(
+        &self,
+        output_grads: &HashMap<GlobalId, GlobalId>,
+        graph: &mut MilliOpGraph,
+        rng: &mut impl rand::Rng,
+    ) -> Option<HashMap<GlobalId, GlobalId>> {
+        let grad_output = *output_grads.get(&self.output)?;
+        // Unsqueeze backward = Squeeze along the same axes
+        let grad_input = super::Squeeze::push_new(graph, grad_output, self.axes, rng);
+        let mut result = HashMap::new();
+        result.insert(self.data, grad_input);
+        Some(result)
+    }
+
     fn eval(
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,

@@ -1,6 +1,6 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
-use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
+use crate::milli_graph::ops::{AnyMilliOp, MilliOp, MilliOpTensorIDOrLiteral};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::numeric_tensor::NumericTensor;
 use serde::{Deserialize, Serialize};
@@ -62,6 +62,55 @@ impl crate::graph::Node for Concat {
 }
 
 impl MilliOp for Concat {
+    fn backward(
+        &self,
+        output_grads: &HashMap<GlobalId, GlobalId>,
+        graph: &mut MilliOpGraph,
+        rng: &mut impl Rng,
+    ) -> Option<HashMap<GlobalId, GlobalId>> {
+        let grad_output = *output_grads.get(&self.output)?;
+        let n = self.inputs.len();
+
+        // Build split sizes by gathering each input's dim along the concat axis
+        let axis_idx = super::Constant::push_new(
+            graph,
+            crate::backends::ndarray_backend::NDArrayNumericTensor::<DynRank>::from_vec_shape(
+                vec![self.axis],
+                &vec![1],
+            )
+            .unwrap(),
+            rng,
+        );
+        let mut size_tensors = Vec::new();
+        for &input_id in &self.inputs {
+            let shape = super::Shape::push_new(graph, input_id, rng);
+            let size = super::Gather::push_new(graph, shape, axis_idx, 0, rng);
+            size_tensors.push(size);
+        }
+        let split_sizes = super::Concat::push_new(graph, size_tensors, 0, rng);
+
+        // Split the gradient along the same axis
+        let mut result = HashMap::new();
+        for (i, &input_id) in self.inputs.iter().enumerate() {
+            let grad_i = super::Split::push_new(
+                graph,
+                grad_output,
+                Some(MilliOpTensorIDOrLiteral::TensorID(split_sizes)),
+                self.axis,
+                Some(n),
+                i,
+                rng,
+            );
+            result
+                .entry(input_id)
+                .and_modify(|existing: &mut GlobalId| {
+                    *existing = super::SimpleBinary::add(graph, *existing, grad_i, rng);
+                })
+                .or_insert(grad_i);
+        }
+        Some(result)
+    }
+
     fn eval(
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
