@@ -1032,6 +1032,30 @@ impl TensorInfo {
         }
     }
 
+    /// Returns the rank if statically known.
+    pub fn rank_if_known(&self) -> Option<usize> {
+        match self {
+            TensorInfo::Ranked(tensor) => Some(tensor.rank()),
+            TensorInfo::Minimal(_) => None,
+        }
+    }
+
+    /// Returns the size of dimension `i` if statically known as a concrete value.
+    /// Returns `None` if the rank is unknown, `i` is out of bounds, or the dim is symbolic.
+    pub fn dim_if_known(&self, i: usize) -> Option<u64> {
+        match self {
+            TensorInfo::Ranked(tensor) => {
+                let shape = tensor.shape();
+                let dim = shape.get(i)?;
+                match dim {
+                    ScalarInfoTyped::Numeric(v) => Some(*v),
+                    ScalarInfoTyped::Symbolic(_) => None,
+                }
+            }
+            TensorInfo::Minimal(_) => None,
+        }
+    }
+
     #[allow(dead_code)]
     pub(crate) fn try_to_rank<R: KnownRank>(
         &self,

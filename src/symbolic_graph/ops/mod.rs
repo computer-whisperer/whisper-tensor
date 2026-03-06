@@ -108,6 +108,21 @@ pub trait Operation: Node {
     fn parameters(&self) -> Vec<Property> {
         Vec::new()
     }
+
+    /// Generate a backward computation graph for this operation.
+    /// Returns `None` if not differentiable (default).
+    fn get_backward_milli_ops(
+        &self,
+        _ctx: &crate::milli_graph::BackwardGenContext,
+        _rng: &mut impl Rng,
+    ) -> Option<crate::milli_graph::BackwardGenResult> {
+        None
+    }
+
+    /// Whether this operation supports differentiation.
+    fn is_differentiable(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Clone, Debug, strum_macros::VariantNames, Serialize, Deserialize)]
@@ -244,4 +259,11 @@ impl Operation for AnyOperation {
     delegate!(get_milli_op_graph(rng: &mut impl Rng) -> MilliOpGraph);
 
     delegate!(parameters() -> Vec<Property>);
+
+    delegate!(get_backward_milli_ops(
+        ctx: &crate::milli_graph::BackwardGenContext,
+        rng: &mut impl Rng
+    ) -> Option<crate::milli_graph::BackwardGenResult>);
+
+    delegate!(is_differentiable() -> bool);
 }

@@ -5,7 +5,7 @@ use crate::graph::{GlobalId, Graph, Link, Node};
 use crate::milli_graph::observer::MilliOpGraphObserver;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::numeric_tensor::NumericTensor;
-use crate::tensor_info::TensorInfoError;
+use crate::tensor_info::{TensorInfo, TensorInfoError};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
@@ -106,6 +106,105 @@ pub struct LossGraphInfo {
     pub targets_input: GlobalId,
     /// Output tensor containing the scalar loss.
     pub loss_output: GlobalId,
+}
+
+// --- Backward generation types ---
+
+/// Options for generating a MilliOpGraph from a SymbolicGraph.
+pub struct MilliGraphGenOptions {
+    /// Generate backward pass for training.
+    pub backward: Option<BackwardGenOptions>,
+    /// Generate optimizer updates (requires backward).
+    pub optimizer: Option<OptimizerGenOptions>,
+}
+
+/// Options for backward pass generation.
+pub struct BackwardGenOptions {
+    /// Loss computation graph to compose into the training graph.
+    pub loss_graph: MilliOpGraph,
+    /// How to wire loss_graph inputs to forward outputs or external inputs.
+    pub loss_wiring: Vec<LossWiring>,
+    /// Which output of loss_graph is the scalar loss to differentiate.
+    pub loss_output: GlobalId,
+    /// Parameters to compute gradients for.
+    pub trainable_params: Vec<GlobalId>,
+    /// Ops where gradient flow stops (e.g., for freezing layers).
+    pub stop_gradients: HashSet<GlobalId>,
+}
+
+/// Specifies how a loss graph input gets wired.
+pub struct LossWiring {
+    /// Input tensor ID within the loss_graph.
+    pub loss_input: GlobalId,
+    /// Where this input comes from.
+    pub source: LossInputSource,
+}
+
+/// Source for a loss graph input.
+pub enum LossInputSource {
+    /// Wire to this output tensor of the forward SymbolicGraph.
+    ForwardOutput(GlobalId),
+    /// Create as new external input to the training graph (e.g., labels).
+    ExternalInput { name: String },
+}
+
+/// Placeholder for optimizer generation options (Phase 8).
+pub struct OptimizerGenOptions {
+    pub kind: OptimizerKind,
+}
+
+/// Optimizer algorithm selection.
+pub enum OptimizerKind {
+    SGD { lr: f32 },
+    SGDMomentum { lr: f32, momentum: f32, nesterov: bool },
+    Adam { lr: f32, beta1: f32, beta2: f32, epsilon: f32, weight_decay: f32 },
+    AdamW { lr: f32, beta1: f32, beta2: f32, epsilon: f32, weight_decay: f32 },
+}
+
+/// Error type for milli graph generation.
+#[derive(Debug, thiserror::Error)]
+pub enum MilliGraphGenError {
+    #[error("Backward generation requires at least one trainable parameter")]
+    NoTrainableParams,
+    #[error("Loss wiring references unknown tensor")]
+    InvalidLossWiring,
+    #[error("Optimizer requires backward pass")]
+    OptimizerWithoutBackward,
+}
+
+/// Context provided to `Operation::get_backward_milli_ops()`.
+///
+/// All tensor IDs are in combined-graph space. The backward implementation
+/// uses these IDs as external input keys when constructing its MilliOpGraph,
+/// so merge_graph can wire them automatically via sym_to_combined.
+pub struct BackwardGenContext {
+    /// Maps forward output tensor IDs to their gradient tensor IDs
+    /// (both in combined-graph space).
+    pub output_grads: HashMap<GlobalId, GlobalId>,
+    /// Forward input tensor IDs (in combined-graph space),
+    /// ordered to match Operation::inputs().
+    pub forward_inputs: Vec<GlobalId>,
+    /// Forward output tensor IDs (in combined-graph space),
+    /// ordered to match Operation::outputs().
+    pub forward_outputs: Vec<GlobalId>,
+    /// Shape information for forward tensors (from SymbolicGraph TensorInfo).
+    /// Keyed by SymbolicGraph tensor ID. Used for broadcast analysis.
+    pub tensor_shapes: HashMap<GlobalId, TensorInfo>,
+}
+
+/// Result of backward op generation from `Operation::get_backward_milli_ops()`.
+///
+/// The backward graph's input_map external keys are combined-graph-space IDs
+/// (from BackwardGenContext), so merge_graph wires them automatically.
+/// The graph's output_map maps each gradient tensor to the corresponding
+/// forward input ID — after merge_graph, the caller finds gradients via
+/// `bwd_wiring[fwd_input_id]`.
+pub struct BackwardGenResult {
+    /// Self-contained backward computation graph.
+    pub graph: MilliOpGraph,
+    /// Which forward inputs (combined-graph-space) have gradients computed.
+    /// Each must appear as an external key in graph.output_map.
+    pub differentiable_inputs: Vec<GlobalId>,
 }
 
 #[derive(Debug, Clone, Copy, Hash, Ord, PartialOrd, Eq, PartialEq, Serialize, Deserialize)]

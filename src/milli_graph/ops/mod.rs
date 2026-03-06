@@ -115,12 +115,25 @@ pub trait MilliOp: Node {
             .collect();
         Ok(Box::new(collected.into_iter()))
     }
-    //fn infer(&self, known_inputs: &HashMap<GlobalId, TensorInfo>, _symbolic_resolver: &mut SymbolicResolver, backend: &mut EvalBackend) -> Result<TensorInfo, MilliOpGraphError>;
+
     fn eval(
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
         _backend: &mut EvalBackend,
     ) -> EvalResult;
+
+    /// Generate backward ops for this milli op.
+    /// `output_grads` maps each output tensor ID to its gradient tensor ID.
+    /// New gradient ops are added directly to `graph`.
+    /// Returns input_id → gradient_id for each differentiable input.
+    fn backward(
+        &self,
+        _output_grads: &HashMap<GlobalId, GlobalId>,
+        _graph: &mut crate::milli_graph::MilliOpGraph,
+        _rng: &mut impl Rng,
+    ) -> Option<HashMap<GlobalId, GlobalId>> {
+        None // default: not differentiable
+    }
 }
 
 #[allow(dead_code)]
@@ -358,6 +371,46 @@ impl MilliOp for AnyMilliOp {
         Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>,
         MilliOpGraphError,
     > );
+
+    fn backward(
+        &self,
+        output_grads: &HashMap<GlobalId, GlobalId>,
+        graph: &mut crate::milli_graph::MilliOpGraph,
+        rng: &mut impl Rng,
+    ) -> Option<HashMap<GlobalId, GlobalId>> {
+        match self {
+            AnyMilliOp::Constant(x) => x.backward(output_grads, graph, rng),
+            AnyMilliOp::ConstantOfShape(x) => x.backward(output_grads, graph, rng),
+            AnyMilliOp::SimpleBinary(x) => x.backward(output_grads, graph, rng),
+            AnyMilliOp::MatMul(x) => x.backward(output_grads, graph, rng),
+            AnyMilliOp::Pow(x) => x.backward(output_grads, graph, rng),
+            AnyMilliOp::SimpleUnary(x) => x.backward(output_grads, graph, rng),
+            AnyMilliOp::ClampMin(x) => x.backward(output_grads, graph, rng),
+            AnyMilliOp::NonZero(x) => x.backward(output_grads, graph, rng),
+            AnyMilliOp::CumSum(x) => x.backward(output_grads, graph, rng),
+            AnyMilliOp::Shape(x) => x.backward(output_grads, graph, rng),
+            AnyMilliOp::Reshape(x) => x.backward(output_grads, graph, rng),
+            AnyMilliOp::Slice(x) => x.backward(output_grads, graph, rng),
+            AnyMilliOp::ReduceSum(x) => x.backward(output_grads, graph, rng),
+            AnyMilliOp::ReduceMin(x) => x.backward(output_grads, graph, rng),
+            AnyMilliOp::ReduceMax(x) => x.backward(output_grads, graph, rng),
+            AnyMilliOp::ReduceProd(x) => x.backward(output_grads, graph, rng),
+            AnyMilliOp::ReduceMean(x) => x.backward(output_grads, graph, rng),
+            AnyMilliOp::Cast(x) => x.backward(output_grads, graph, rng),
+            AnyMilliOp::CastLike(x) => x.backward(output_grads, graph, rng),
+            AnyMilliOp::Transpose(x) => x.backward(output_grads, graph, rng),
+            AnyMilliOp::Squeeze(x) => x.backward(output_grads, graph, rng),
+            AnyMilliOp::Unsqueeze(x) => x.backward(output_grads, graph, rng),
+            AnyMilliOp::Gather(x) => x.backward(output_grads, graph, rng),
+            AnyMilliOp::Concat(x) => x.backward(output_grads, graph, rng),
+            AnyMilliOp::Split(x) => x.backward(output_grads, graph, rng),
+            AnyMilliOp::Where(x) => x.backward(output_grads, graph, rng),
+            AnyMilliOp::Range(x) => x.backward(output_grads, graph, rng),
+            AnyMilliOp::Expand(x) => x.backward(output_grads, graph, rng),
+            AnyMilliOp::ArgMax(x) => x.backward(output_grads, graph, rng),
+            AnyMilliOp::ArgMin(x) => x.backward(output_grads, graph, rng),
+        }
+    }
 }
 
 impl Node for AnyMilliOp {
