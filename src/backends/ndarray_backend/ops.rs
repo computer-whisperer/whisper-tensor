@@ -273,7 +273,7 @@ impl ReduceOp {
         keepdims: bool,
     ) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError>
     where
-        T: Clone + Zero + NumCast + std::ops::Div<Output = T> + Copy + One,
+        T: Clone + Zero + NumCast + std::ops::Div<Output = T> + Copy + One + PartialOrd,
     {
         Ok(match self {
             ReduceOp::Sum => reduce_sum(tensor, axes, keepdims)?,
@@ -282,9 +282,7 @@ impl ReduceOp {
             ReduceOp::Min => Err(NDArrayOperationError::UnimplementedOp(
                 "ReduceMin".to_string(),
             ))?,
-            ReduceOp::Max => Err(NDArrayOperationError::UnimplementedOp(
-                "ReduceMax".to_string(),
-            ))?,
+            ReduceOp::Max => reduce_max(tensor, axes, keepdims)?,
         })
     }
 }
@@ -431,6 +429,43 @@ where
     }
 
     // 4) Wrap in ArcArray and return
+    Ok(ArcArray::from(result))
+}
+
+pub fn reduce_max<T>(
+    tensor: ArcArray<T, IxDyn>,
+    axes: Vec<usize>,
+    keepdims: bool,
+) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError>
+where
+    T: Clone + Copy + PartialOrd,
+{
+    let mut ax = axes;
+    {
+        let mut sorted = ax.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        if sorted.len() != ax.len() {
+            return Err(NDArrayOperationError::IncompatibleShape);
+        }
+        sorted.reverse();
+        ax = sorted;
+    }
+
+    let mut result: ArrayD<T> = tensor.view().to_owned().into_dyn();
+
+    for &axis in &ax {
+        let maxed = result.map_axis(Axis(axis), |lane| {
+            lane.iter().copied().reduce(|a, b| if b > a { b } else { a }).unwrap()
+        });
+
+        result = if keepdims {
+            maxed.insert_axis(Axis(axis)).into_dyn()
+        } else {
+            maxed.into_dyn()
+        };
+    }
+
     Ok(ArcArray::from(result))
 }
 

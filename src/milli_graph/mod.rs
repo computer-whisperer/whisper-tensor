@@ -97,6 +97,17 @@ pub enum TensorRole {
     UpdatedOptimizerState { for_param: GlobalId, state_name: String },
 }
 
+/// Metadata about a loss graph's inputs/outputs.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct LossGraphInfo {
+    /// Input tensor for model predictions (logits).
+    pub predictions_input: GlobalId,
+    /// Input tensor for ground truth targets.
+    pub targets_input: GlobalId,
+    /// Output tensor containing the scalar loss.
+    pub loss_output: GlobalId,
+}
+
 #[derive(Debug, Clone, Copy, Hash, Ord, PartialOrd, Eq, PartialEq, Serialize, Deserialize)]
 pub struct MilliOpGraphTensor {
     global_id: GlobalId,
@@ -405,6 +416,90 @@ impl MilliOpGraph {
         ops::Constant::push_new(self, data, rng)
     }
 
+    // --- Loss graph helpers ---
+
+    /// Cross-entropy loss for classification.
+    /// Inputs: logits [batch, classes], targets [batch, classes] (one-hot).
+    /// Output: scalar loss.
+    ///
+    /// Uses numerically stable log-softmax: log_softmax(x) = x - max(x) - log(sum(exp(x - max(x))))
+    pub fn cross_entropy_loss(rng: &mut impl Rng) -> (Self, LossGraphInfo) {
+        let mut graph = Self::new_empty(rng);
+        let logits = graph.add_input(rng);
+        let targets = graph.add_input(rng);
+
+        // Axis constant for class dimension (-1)
+        let axis = ops::Constant::new_scalar(&mut graph, -1i64, rng);
+
+        // Numerically stable log_softmax:
+        //   shifted = logits - max(logits, axis=-1, keepdims=true)
+        let max_logits = ops::ReduceMax::push_new(&mut graph, logits, Some(axis), true, false, rng);
+        let shifted = ops::SimpleBinary::sub(&mut graph, logits, max_logits, rng);
+        //   log_sum_exp = log(sum(exp(shifted), axis=-1, keepdims=true))
+        let exp_shifted = ops::SimpleUnaryOp::exp(&mut graph, shifted, rng);
+        let sum_exp = ops::ReduceSum::push_new(&mut graph, exp_shifted, Some(axis), true, false, rng);
+        let log_sum_exp = ops::SimpleUnaryOp::ln(&mut graph, sum_exp, rng);
+        //   log_probs = shifted - log_sum_exp
+        let log_probs = ops::SimpleBinary::sub(&mut graph, shifted, log_sum_exp, rng);
+
+        // Negative log likelihood: -mean(sum(targets * log_probs, axis=-1))
+        let nll = ops::SimpleBinary::mul(&mut graph, targets, log_probs, rng);
+        let sum = ops::ReduceSum::push_new(&mut graph, nll, Some(axis), false, false, rng);
+        let neg = ops::SimpleUnaryOp::neg(&mut graph, sum, rng);
+        // Mean over batch (reduce all remaining axes)
+        let loss = ops::ReduceMean::push_new(&mut graph, neg, None, false, false, rng);
+
+        graph.set_outputs(vec![loss]);
+
+        (graph, LossGraphInfo {
+            predictions_input: logits,
+            targets_input: targets,
+            loss_output: loss,
+        })
+    }
+
+    /// Mean squared error loss for regression.
+    /// Inputs: predictions [batch, ...], targets [batch, ...] (same shape).
+    /// Output: scalar loss.
+    pub fn mse_loss(rng: &mut impl Rng) -> (Self, LossGraphInfo) {
+        let mut graph = Self::new_empty(rng);
+        let predictions = graph.add_input(rng);
+        let targets = graph.add_input(rng);
+
+        let diff = ops::SimpleBinary::sub(&mut graph, predictions, targets, rng);
+        let sq = ops::SimpleBinary::mul(&mut graph, diff, diff, rng);
+        let loss = ops::ReduceMean::push_new(&mut graph, sq, None, false, false, rng);
+
+        graph.set_outputs(vec![loss]);
+
+        (graph, LossGraphInfo {
+            predictions_input: predictions,
+            targets_input: targets,
+            loss_output: loss,
+        })
+    }
+
+    /// L1 / Mean Absolute Error loss.
+    /// Inputs: predictions [batch, ...], targets [batch, ...] (same shape).
+    /// Output: scalar loss.
+    pub fn l1_loss(rng: &mut impl Rng) -> (Self, LossGraphInfo) {
+        let mut graph = Self::new_empty(rng);
+        let predictions = graph.add_input(rng);
+        let targets = graph.add_input(rng);
+
+        let diff = ops::SimpleBinary::sub(&mut graph, predictions, targets, rng);
+        let abs_diff = ops::SimpleUnaryOp::abs(&mut graph, diff, rng);
+        let loss = ops::ReduceMean::push_new(&mut graph, abs_diff, None, false, false, rng);
+
+        graph.set_outputs(vec![loss]);
+
+        (graph, LossGraphInfo {
+            predictions_input: predictions,
+            targets_input: targets,
+            loss_output: loss,
+        })
+    }
+
     #[allow(clippy::type_complexity)]
     pub(crate) fn eval<T: MilliOpGraphObserver>(
         &self,
@@ -705,6 +800,105 @@ mod tests {
         // Unknown tensor
         let unknown = GlobalId::new(rng);
         assert!(graph.tensor_role(unknown).is_none());
+    }
+
+    /// Helper: evaluate a loss graph with the given prediction and target tensors.
+    fn eval_loss(
+        graph: &MilliOpGraph,
+        loss_info: &LossGraphInfo,
+        predictions: NumericTensor<DynRank>,
+        targets: NumericTensor<DynRank>,
+    ) -> f32 {
+        let mut inputs = HashMap::new();
+        inputs.insert(loss_info.predictions_input, predictions);
+        inputs.insert(loss_info.targets_input, targets);
+        let mut backend = EvalBackend::NDArray;
+        let results: HashMap<_, _> = graph.eval(&inputs, &mut (), &mut backend).unwrap().collect();
+        let result = &results[&loss_info.loss_output];
+        let values: Vec<f32> = result.flatten().unwrap().try_into().unwrap();
+        assert_eq!(values.len(), 1);
+        values[0]
+    }
+
+    #[test]
+    fn test_cross_entropy_loss() {
+        let rng = &mut rand::rng();
+        let (graph, info) = MilliOpGraph::cross_entropy_loss(rng);
+
+        // batch=1, 3 classes. logits=[0, 0, 100], target=[0, 0, 1] (class 2)
+        // Correct class has overwhelming logit → loss ≈ 0
+        let logits = NumericTensor::<DynRank>::from_vec_shape(
+            vec![0.0f32, 0.0, 100.0], vec![1, 3],
+        ).unwrap();
+        let targets = NumericTensor::<DynRank>::from_vec_shape(
+            vec![0.0f32, 0.0, 1.0], vec![1, 3],
+        ).unwrap();
+        let loss = eval_loss(&graph, &info, logits, targets);
+        assert!(loss.abs() < 1e-4, "expected ~0, got {}", loss);
+
+        // Wrong class: logits=[100, 0, 0], target=[0, 0, 1] (class 2)
+        // Correct class has logit 0, dominant class has logit 100 → loss ≈ 100
+        let logits2 = NumericTensor::<DynRank>::from_vec_shape(
+            vec![100.0f32, 0.0, 0.0], vec![1, 3],
+        ).unwrap();
+        let targets2 = NumericTensor::<DynRank>::from_vec_shape(
+            vec![0.0f32, 0.0, 1.0], vec![1, 3],
+        ).unwrap();
+        let loss2 = eval_loss(&graph, &info, logits2, targets2);
+        assert!(loss2 > 90.0, "expected ~100, got {}", loss2);
+    }
+
+    #[test]
+    fn test_mse_loss() {
+        let rng = &mut rand::rng();
+        let (graph, info) = MilliOpGraph::mse_loss(rng);
+
+        // predictions=[1,2,3], targets=[1,2,3] → MSE = 0
+        let preds = NumericTensor::<DynRank>::from_vec_shape(
+            vec![1.0f32, 2.0, 3.0], vec![1, 3],
+        ).unwrap();
+        let targets = NumericTensor::<DynRank>::from_vec_shape(
+            vec![1.0f32, 2.0, 3.0], vec![1, 3],
+        ).unwrap();
+        let loss = eval_loss(&graph, &info, preds, targets);
+        assert!(loss.abs() < 1e-6, "expected 0, got {}", loss);
+
+        // predictions=[1,2,3], targets=[4,5,6] → diffs=[3,3,3], sq=[9,9,9], mean=9
+        let preds2 = NumericTensor::<DynRank>::from_vec_shape(
+            vec![1.0f32, 2.0, 3.0], vec![1, 3],
+        ).unwrap();
+        let targets2 = NumericTensor::<DynRank>::from_vec_shape(
+            vec![4.0f32, 5.0, 6.0], vec![1, 3],
+        ).unwrap();
+        let loss2 = eval_loss(&graph, &info, preds2, targets2);
+        assert!((loss2 - 9.0).abs() < 1e-5, "expected 9, got {}", loss2);
+    }
+
+    #[test]
+    fn test_l1_loss() {
+        let rng = &mut rand::rng();
+        let (graph, info) = MilliOpGraph::l1_loss(rng);
+
+        // predictions=[1,2,3], targets=[1,2,3] → L1 = 0
+        let preds = NumericTensor::<DynRank>::from_vec_shape(
+            vec![1.0f32, 2.0, 3.0], vec![1, 3],
+        ).unwrap();
+        let targets = NumericTensor::<DynRank>::from_vec_shape(
+            vec![1.0f32, 2.0, 3.0], vec![1, 3],
+        ).unwrap();
+        let loss = eval_loss(&graph, &info, preds, targets);
+        assert!(loss.abs() < 1e-6, "expected 0, got {}", loss);
+
+        // predictions=[1,2,3], targets=[4,6,9] → diffs=[3,4,6], mean=13/3≈4.333
+        let preds2 = NumericTensor::<DynRank>::from_vec_shape(
+            vec![1.0f32, 2.0, 3.0], vec![1, 3],
+        ).unwrap();
+        let targets2 = NumericTensor::<DynRank>::from_vec_shape(
+            vec![4.0f32, 6.0, 9.0], vec![1, 3],
+        ).unwrap();
+        let loss2 = eval_loss(&graph, &info, preds2, targets2);
+        let expected = 13.0f32 / 3.0;
+        assert!((loss2 - expected).abs() < 1e-5, "expected {}, got {}", expected, loss2);
     }
 }
 
