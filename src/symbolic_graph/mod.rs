@@ -653,6 +653,215 @@ impl SymbolicGraph {
         combined
     }
 
+    /// Generate a MilliOpGraph with optional backward pass and optimizer.
+    ///
+    /// With `options.backward = None`, equivalent to `generate_milli_graph`.
+    /// With backward options, composes loss graph, generates backward pass,
+    /// and populates TrainingMetadata.
+    pub fn generate_milli_graph_with_options(
+        &self,
+        options: &crate::milli_graph::MilliGraphGenOptions,
+        rng: &mut impl Rng,
+    ) -> Result<crate::milli_graph::MilliOpGraph, crate::milli_graph::MilliGraphGenError> {
+        use crate::graph::{Graph, Node};
+        use crate::milli_graph::{
+            MilliOpGraph, MilliOpGroup, MilliOpPhase, MilliGraphGenError,
+            BackwardGenContext, LossInputSource, TrainingMetadata,
+            generate_milli_backward,
+        };
+        use crate::tensor_info::TensorInfo;
+
+        if options.optimizer.is_some() && options.backward.is_none() {
+            return Err(MilliGraphGenError::OptimizerWithoutBackward);
+        }
+
+        let mut combined = MilliOpGraph::new_empty(rng);
+        let mut sym_to_combined: HashMap<GlobalId, GlobalId> = HashMap::new();
+
+        // 1a. Map graph inputs
+        for &input_id in &self.ordered_inputs {
+            let internal = combined.add_input_with_id(input_id, rng);
+            sym_to_combined.insert(input_id, internal);
+        }
+
+        // 1b. Map standalone constants
+        for const_id in self.constant_link_ids() {
+            let internal = combined.add_input_with_id(const_id, rng);
+            sym_to_combined.insert(const_id, internal);
+        }
+
+        // 2. Generate forward pass — walk ops in topological order
+        let topo_order = self.topological_order_vec();
+        for &op_id in &topo_order {
+            let graph_op = &self.operations[&op_id];
+            let label = graph_op.name.clone()
+                .unwrap_or_else(|| graph_op.op.op_kind());
+            let group = MilliOpGroup {
+                id: GlobalId::new(rng),
+                source_op: Some(op_id),
+                source_graph: Some(self.global_id),
+                phase: MilliOpPhase::Forward,
+                label: Some(label),
+                ..Default::default()
+            };
+            let group_id = combined.create_group(group);
+
+            let op_graph = graph_op.op.get_milli_op_graph(rng);
+            combined.merge_graph(op_graph, &mut sym_to_combined, rng, Some(group_id));
+        }
+
+        // 3. Compose loss graph and generate backward (if training)
+        if let Some(ref backward_opts) = options.backward {
+            let loss_group = combined.create_group(MilliOpGroup {
+                id: GlobalId::new(rng),
+                phase: MilliOpPhase::Loss,
+                label: Some("loss".into()),
+                ..Default::default()
+            });
+
+            // Wire loss graph inputs to forward outputs / external inputs
+            let mut loss_wiring: HashMap<GlobalId, GlobalId> = HashMap::new();
+            let mut external_inputs: Vec<GlobalId> = Vec::new();
+            for wire in &backward_opts.loss_wiring {
+                let combined_id = match &wire.source {
+                    LossInputSource::ForwardOutput(sym_id) => sym_to_combined[sym_id],
+                    LossInputSource::ExternalInput { .. } => {
+                        let ext_id = combined.add_input(rng);
+                        external_inputs.push(ext_id);
+                        ext_id
+                    }
+                };
+                loss_wiring.insert(wire.loss_input, combined_id);
+            }
+            combined.merge_graph(
+                backward_opts.loss_graph.clone(), &mut loss_wiring, rng, Some(loss_group),
+            );
+            let loss_tensor = loss_wiring[&backward_opts.loss_output];
+
+            // 4. Generate backward pass
+
+            // 4a. Backward through loss graph (milli-op level differentiation)
+            let loss_grad = combined.add_constant_ones_like(loss_tensor, rng);
+            let mut grad_map: HashMap<GlobalId, GlobalId> = HashMap::new();
+            grad_map.insert(loss_tensor, loss_grad);
+
+            let loss_grads = generate_milli_backward(
+                &mut combined, loss_group, &grad_map, rng,
+            );
+            grad_map.extend(loss_grads);
+
+            // 4b. Backward through SymbolicGraph ops (Operation-level)
+            for &op_id in topo_order.iter().rev() {
+                let graph_op = &self.operations[&op_id];
+
+                // Collect output gradients for this op
+                let output_grads: HashMap<GlobalId, GlobalId> = graph_op.op.outputs()
+                    .filter_map(|out_id| {
+                        let combined_id = sym_to_combined.get(&out_id)?;
+                        grad_map.get(combined_id).map(|g| (*combined_id, *g))
+                    })
+                    .collect();
+
+                if output_grads.is_empty() { continue; }
+                if backward_opts.stop_gradients.contains(&op_id) { continue; }
+
+                // Build tensor shape map from ONNXTensorInfo
+                let tensor_shapes: HashMap<GlobalId, TensorInfo> = graph_op.op.inputs()
+                    .chain(graph_op.op.outputs())
+                    .filter_map(|id| {
+                        let info = self.get_tensor_info(id)?;
+                        let shape = info.shape.as_ref()?;
+                        Some((id, TensorInfo::from_shape_scalars(shape)))
+                    })
+                    .collect();
+
+                let ctx = BackwardGenContext {
+                    output_grads,
+                    forward_inputs: graph_op.op.inputs()
+                        .map(|id| sym_to_combined[&id])
+                        .collect(),
+                    forward_outputs: graph_op.op.outputs()
+                        .map(|id| sym_to_combined[&id])
+                        .collect(),
+                    tensor_shapes,
+                };
+
+                if let Some(backward_result) = graph_op.op.get_backward_milli_ops(&ctx, rng) {
+                    let bwd_group = combined.create_group(MilliOpGroup {
+                        id: GlobalId::new(rng),
+                        source_op: Some(op_id),
+                        source_graph: Some(self.global_id),
+                        phase: MilliOpPhase::Backward,
+                        backward_of: Some(op_id),
+                        label: Some(format!("{}_backward", graph_op.op.op_kind())),
+                        ..Default::default()
+                    });
+
+                    // Build wiring map: combined-space identity mappings
+                    let mut bwd_wiring: HashMap<GlobalId, GlobalId> = HashMap::new();
+                    for &combined_id in sym_to_combined.values() {
+                        bwd_wiring.insert(combined_id, combined_id);
+                    }
+                    for &grad_id in grad_map.values() {
+                        bwd_wiring.insert(grad_id, grad_id);
+                    }
+                    combined.merge_graph(
+                        backward_result.graph, &mut bwd_wiring, rng, Some(bwd_group),
+                    );
+
+                    // Accumulate gradients for each forward input
+                    for fwd_input_id in &backward_result.differentiable_inputs {
+                        let remapped_grad = bwd_wiring[fwd_input_id];
+                        grad_map.entry(*fwd_input_id)
+                            .and_modify(|existing| {
+                                let sum = crate::milli_graph::ops::SimpleBinary::add(
+                                    &mut combined, *existing, remapped_grad, rng,
+                                );
+                                *existing = sum;
+                            })
+                            .or_insert(remapped_grad);
+                    }
+                }
+            }
+
+            // Record training metadata
+            let mut training_meta = TrainingMetadata::default();
+            training_meta.loss = Some(loss_tensor);
+            training_meta.external_inputs = external_inputs;
+            for param in &backward_opts.trainable_params {
+                let combined_param = sym_to_combined[param];
+                if let Some(&grad) = grad_map.get(&combined_param) {
+                    training_meta.param_to_grad.insert(*param, grad);
+                }
+            }
+
+            combined.training_metadata = Some(training_meta);
+
+            // Set outputs: loss + forward outputs
+            let mut output_ids: Vec<(GlobalId, GlobalId)> = vec![];
+            output_ids.push((loss_tensor, loss_tensor));
+            // Include forward outputs
+            for &output_id in &self.ordered_outputs {
+                let combined_id = sym_to_combined[&output_id];
+                output_ids.push((combined_id, output_id));
+            }
+            // Include gradients as outputs
+            for param in &backward_opts.trainable_params {
+                if let Some(&grad) = grad_map.get(&sym_to_combined[param]) {
+                    output_ids.push((grad, grad));
+                }
+            }
+            combined.set_output_map(output_ids);
+        } else {
+            // Forward-only: map outputs normally
+            for &output_id in &self.ordered_outputs {
+                combined.add_output(sym_to_combined[&output_id], output_id);
+            }
+        }
+
+        Ok(combined)
+    }
+
     fn eval(
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
@@ -1987,5 +2196,69 @@ mod tests {
             return;
         }
         test_equivalence_for_onnx_dir(dir);
+    }
+
+    #[test]
+    fn test_generate_milli_graph_with_backward_plumbing() {
+        // Test that backward orchestration runs without panic.
+        // No ops implement backward() yet, so no actual gradients are produced,
+        // but the loss graph is composed, generate_milli_backward runs, and
+        // TrainingMetadata is populated.
+        use crate::milli_graph::{
+            MilliOpGraph, MilliGraphGenOptions, BackwardGenOptions,
+            LossWiring, LossInputSource,
+        };
+
+        let dir = "libs/onnx/onnx/backend/test/data/node/test_add";
+        if !std::path::Path::new(dir).join("model.onnx").exists() {
+            eprintln!("Skipping test: ONNX test data not found");
+            return;
+        }
+
+        let model_bytes = std::fs::read(
+            std::path::Path::new(dir).join("model.onnx"),
+        ).unwrap();
+        let rng = &mut rand::rng();
+        let (graph, _tensor_store) =
+            SymbolicGraphMutator::from_onnx_bytes(&model_bytes, rng)
+                .unwrap()
+                .get_inner();
+
+        // Create a simple MSE loss graph
+        let (loss_graph, loss_info) = MilliOpGraph::mse_loss(rng);
+
+        // The add model has inputs and outputs. Wire the first output to loss predictions.
+        let forward_output = graph.ordered_outputs[0];
+
+        let options = MilliGraphGenOptions {
+            backward: Some(BackwardGenOptions {
+                loss_graph,
+                loss_wiring: vec![
+                    LossWiring {
+                        loss_input: loss_info.predictions_input,
+                        source: LossInputSource::ForwardOutput(forward_output),
+                    },
+                    LossWiring {
+                        loss_input: loss_info.targets_input,
+                        source: LossInputSource::ExternalInput { name: "targets".into() },
+                    },
+                ],
+                loss_output: loss_info.loss_output,
+                trainable_params: graph.ordered_inputs.clone(),
+                stop_gradients: std::collections::HashSet::new(),
+            }),
+            optimizer: None,
+        };
+
+        let result = graph.generate_milli_graph_with_options(&options, rng);
+        let combined = result.unwrap();
+
+        // Verify TrainingMetadata was populated
+        let meta = combined.training_metadata.as_ref().unwrap();
+        assert!(meta.loss.is_some());
+        assert_eq!(meta.external_inputs.len(), 1); // targets
+
+        // Note: param_to_grad will be empty since no ops implement backward() yet.
+        // That's expected — this test validates the orchestration plumbing.
     }
 }

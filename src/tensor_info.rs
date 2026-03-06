@@ -1056,6 +1056,17 @@ impl TensorInfo {
         }
     }
 
+    /// Create a TensorInfo from ScalarInfoTyped<u64> dims (as stored in ONNXTensorInfo).
+    /// Dims that are Numeric become known; Symbolic dims remain unknown.
+    pub fn from_shape_scalars(shape: &[ScalarInfoTyped<u64>]) -> Self {
+        use crate::numeric_scalar::NumericScalar;
+        let first_element = ScalarInfo::Numeric(NumericScalar::F32(0.0));
+        TensorInfo::Ranked(TensorInfoRanked::Ranked(RankedTensor::new(
+            first_element,
+            shape.to_vec(),
+        )))
+    }
+
     /// Create a TensorInfo with known shape from a u64 slice. Dtype defaults to F32.
     /// Useful for broadcast analysis and tests.
     pub fn from_shape_u64(shape: &[u64]) -> Self {
