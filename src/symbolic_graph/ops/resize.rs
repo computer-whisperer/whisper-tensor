@@ -1,6 +1,8 @@
 use rand::Rng;
+use std::collections::HashMap;
 use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::MilliOpGraph;
+use crate::milli_graph::ops as milli_ops;
 use crate::onnx;
 use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{
@@ -36,6 +38,7 @@ pub(crate) enum ResizeMode {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) enum ResizeNearestMode {
     RoundPreferFloor,
+    RoundPreferCeil,
     Ceil,
     Floor,
 }
@@ -111,6 +114,7 @@ impl ResizeOperation {
             .unwrap_or("round_prefer_floor".to_string());
         let nearest_mode = match nearest_mode.as_str() {
             "round_prefer_floor" => ResizeNearestMode::RoundPreferFloor,
+            "round_prefer_ceil" => ResizeNearestMode::RoundPreferCeil,
             "floor" => ResizeNearestMode::Floor,
             "ceil" => ResizeNearestMode::Ceil,
             _ => ResizeNearestMode::RoundPreferFloor,
@@ -119,21 +123,9 @@ impl ResizeOperation {
         Ok(Self {
             global_id: GlobalId::new(rng),
             input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Resize"))?,
-            roi: if inputs.len() > 1 {
-                Some(inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs("Resize"))?)
-            } else {
-                None
-            },
-            scales: if inputs.len() > 2 {
-                Some(inputs[2].ok_or(ONNXDecodingError::InvalidOperatorInputs("Resize"))?)
-            } else {
-                None
-            },
-            sizes: if inputs.len() > 3 {
-                Some(inputs[3].ok_or(ONNXDecodingError::InvalidOperatorInputs("Resize"))?)
-            } else {
-                None
-            },
+            roi: inputs.get(1).copied().flatten(),
+            scales: inputs.get(2).copied().flatten(),
+            sizes: inputs.get(3).copied().flatten(),
             output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Resize"))?,
             antialias,
             axes,
@@ -190,6 +182,7 @@ impl Operation for ResizeOperation {
         };
         let nearest_mode_str = match &self.nearest_mode {
             ResizeNearestMode::RoundPreferFloor => "round_prefer_floor",
+            ResizeNearestMode::RoundPreferCeil => "round_prefer_ceil",
             ResizeNearestMode::Ceil => "ceil",
             ResizeNearestMode::Floor => "floor",
         };
@@ -229,7 +222,55 @@ impl Operation for ResizeOperation {
         params
     }
 
-    fn get_milli_op_graph(&self, _rng: &mut impl Rng) -> MilliOpGraph {
-        todo!()
+    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
+
+        let milli_mode = match &self.mode {
+            ResizeMode::Nearest => milli_ops::ResizeMode::Nearest,
+            ResizeMode::Linear => milli_ops::ResizeMode::Linear,
+            ResizeMode::Cubic => milli_ops::ResizeMode::Cubic,
+        };
+        let milli_coord = match &self.coordinate_transformation_mode {
+            ResizeCoordinateTransformationMode::HalfPixel => milli_ops::ResizeCoordTransform::HalfPixel,
+            ResizeCoordinateTransformationMode::HalfPixelSymmetric => milli_ops::ResizeCoordTransform::HalfPixelSymmetric,
+            ResizeCoordinateTransformationMode::PytorchHalfPixel => milli_ops::ResizeCoordTransform::PytorchHalfPixel,
+            ResizeCoordinateTransformationMode::AlignCorners => milli_ops::ResizeCoordTransform::AlignCorners,
+            ResizeCoordinateTransformationMode::Asymmetric => milli_ops::ResizeCoordTransform::Asymmetric,
+            ResizeCoordinateTransformationMode::TFCropAndResize => milli_ops::ResizeCoordTransform::TFCropAndResize,
+        };
+        let milli_nearest = match &self.nearest_mode {
+            ResizeNearestMode::RoundPreferFloor => milli_ops::ResizeNearestMode::RoundPreferFloor,
+            ResizeNearestMode::RoundPreferCeil => milli_ops::ResizeNearestMode::RoundPreferCeil,
+            ResizeNearestMode::Ceil => milli_ops::ResizeNearestMode::Ceil,
+            ResizeNearestMode::Floor => milli_ops::ResizeNearestMode::Floor,
+        };
+        let milli_policy = match &self.keep_aspect_ratio_policy {
+            ResizeKeepAspectRatioPolicy::Stretch => milli_ops::ResizeKeepAspectRatioPolicy::Stretch,
+            ResizeKeepAspectRatioPolicy::NotLarger => milli_ops::ResizeKeepAspectRatioPolicy::NotLarger,
+            ResizeKeepAspectRatioPolicy::NotSmaller => milli_ops::ResizeKeepAspectRatioPolicy::NotSmaller,
+        };
+
+        let out = milli_ops::Resize::push_new(
+            &mut graph,
+            input_map[&self.input],
+            self.roi.map(|id| input_map[&id]),
+            self.scales.map(|id| input_map[&id]),
+            self.sizes.map(|id| input_map[&id]),
+            milli_mode,
+            milli_coord,
+            milli_nearest,
+            self.cubic_coeff_a,
+            self.antialias,
+            self.exclude_outside,
+            self.extrapolation_value,
+            self.axes.clone(),
+            milli_policy,
+            rng,
+        );
+
+        let mut output_map = HashMap::new();
+        output_map.insert(out, self.output);
+        graph.set_output_map(output_map);
+        graph
     }
 }

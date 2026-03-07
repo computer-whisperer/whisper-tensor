@@ -11,6 +11,7 @@ mod gather;
 mod nonzero;
 mod range;
 mod reduce_max;
+mod resize;
 mod reduce_mean;
 mod reduce_min;
 mod reduce_prod;
@@ -40,6 +41,7 @@ pub use nonzero::*;
 pub use range::*;
 pub use reduce_max::*;
 pub use reduce_mean::*;
+pub use resize::*;
 pub use reduce_min::*;
 pub use reduce_prod::*;
 pub use reduce_sum::*;
@@ -288,6 +290,7 @@ pub enum AnyMilliOp {
     SumTo(SumTo),
     ArgMax(ArgMax),
     ArgMin(ArgMin),
+    Resize(Resize),
 }
 
 impl AnyMilliOp {
@@ -324,6 +327,7 @@ impl AnyMilliOp {
             AnyMilliOp::SumTo(x) => x.remap_tensors(map, rng),
             AnyMilliOp::ArgMax(x) => x.remap_tensors(map, rng),
             AnyMilliOp::ArgMin(x) => x.remap_tensors(map, rng),
+            AnyMilliOp::Resize(x) => x.remap_tensors(map, rng),
         }
     }
 }
@@ -363,6 +367,7 @@ macro_rules! delegate {
                 AnyMilliOp::SumTo(x) => x.$name($($arg),*),
                 AnyMilliOp::ArgMax(x) => x.$name($($arg),*),
                 AnyMilliOp::ArgMin(x) => x.$name($($arg),*),
+                AnyMilliOp::Resize(x) => x.$name($($arg),*),
             }
         }
     }
@@ -415,6 +420,7 @@ impl MilliOp for AnyMilliOp {
             AnyMilliOp::SumTo(x) => x.backward(output_grads, graph, rng),
             AnyMilliOp::ArgMax(x) => x.backward(output_grads, graph, rng),
             AnyMilliOp::ArgMin(x) => x.backward(output_grads, graph, rng),
+            AnyMilliOp::Resize(x) => x.backward(output_grads, graph, rng),
         }
     }
 }

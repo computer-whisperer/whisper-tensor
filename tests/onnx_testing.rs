@@ -1511,7 +1511,6 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_reshape_reordered_last_dims);
         do_test!($runner_fn, $runner_name, test_reshape_zero_and_negative_dim);
         do_test!($runner_fn, $runner_name, test_reshape_zero_dim);
-        /*
         do_test!($runner_fn, $runner_name, test_resize_downsample_scales_cubic);
         do_test!($runner_fn, $runner_name, test_resize_downsample_scales_cubic_align_corners);
         do_test!($runner_fn, $runner_name, test_resize_downsample_scales_cubic_A_n0p5_exclude_outside);
@@ -1551,7 +1550,6 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_resize_upsample_sizes_nearest_not_larger);
         do_test!($runner_fn, $runner_name, test_resize_upsample_sizes_nearest_not_smaller);
         do_test!($runner_fn, $runner_name, test_resize_upsample_sizes_nearest_round_prefer_ceil_asymmetric);
-        */
 
         //do_test!($runner_fn, $runner_name, test_reversesequence_batch);
         //do_test!($runner_fn, $runner_name, test_reversesequence_time);

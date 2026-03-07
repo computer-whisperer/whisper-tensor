@@ -22,9 +22,9 @@ use rand::Rng;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ONNXDecodingError {
-    #[error("Invalid operator inputs")]
+    #[error("Invalid operator inputs: {0}")]
     InvalidOperatorInputs(&'static str),
-    #[error("Invalid operator outputs")]
+    #[error("Invalid operator outputs: {0}")]
     InvalidOperatorOutputs(&'static str),
     #[error("Missing field \"{0}\"")]
     MissingField(&'static str),
