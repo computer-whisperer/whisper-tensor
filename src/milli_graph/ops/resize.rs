@@ -6,6 +6,7 @@ use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::MilliOpGraphError;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::numeric_tensor::NumericTensor;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use typenum::P1;
@@ -139,10 +140,195 @@ impl crate::graph::Node for Resize {
 }
 
 // =============================================================================
-// ONNX-spec-compliant resize implementation (separable, 1D-at-a-time)
+// Fast paths for common cases
 // =============================================================================
 
-/// Standard cubic interpolation kernel (Keys' convolution)
+/// Compute the original (input-space) coordinate for a given output coordinate.
+/// Shared by both nearest and linear fast paths.
+fn fast_path_original_coord(
+    out_coord: usize,
+    scale: f32,
+    in_size: usize,
+    out_size: usize,
+    coord_transform: ResizeCoordTransform,
+) -> f32 {
+    let x = out_coord as f32;
+    match coord_transform {
+        ResizeCoordTransform::HalfPixel => (x + 0.5) / scale - 0.5,
+        ResizeCoordTransform::Asymmetric => x / scale,
+        ResizeCoordTransform::PytorchHalfPixel => {
+            if out_size > 1 { (x + 0.5) / scale - 0.5 } else { -0.5 }
+        }
+        ResizeCoordTransform::AlignCorners => {
+            let output_width = scale * in_size as f32;
+            if output_width <= 1.0 { 0.0 } else { x * (in_size as f32 - 1.0) / (output_width - 1.0) }
+        }
+        ResizeCoordTransform::HalfPixelSymmetric => {
+            let output_width = scale * in_size as f32;
+            let adjustment = out_size as f32 / output_width;
+            let center = in_size as f32 / 2.0;
+            let offset = center * (1.0 - adjustment);
+            offset + (x + 0.5) / scale - 0.5
+        }
+        ResizeCoordTransform::TFCropAndResize => x / scale, // simplified, no ROI
+    }
+}
+
+/// Map an output coordinate back to an input coordinate for nearest-mode.
+/// Returns the clamped input index.
+fn nearest_input_coord(
+    out_coord: usize,
+    scale: f32,
+    in_size: usize,
+    out_size: usize,
+    coord_transform: ResizeCoordTransform,
+    nearest_mode: ResizeNearestMode,
+) -> usize {
+    let x_ori = fast_path_original_coord(out_coord, scale, in_size, out_size, coord_transform);
+
+    let nearest_idx = match nearest_mode {
+        ResizeNearestMode::RoundPreferFloor => {
+            if x_ori == x_ori.floor() + 0.5 { x_ori.floor() as i64 } else { (x_ori + 0.5).floor() as i64 }
+        }
+        ResizeNearestMode::RoundPreferCeil => x_ori.round() as i64,
+        ResizeNearestMode::Floor => x_ori.floor() as i64,
+        ResizeNearestMode::Ceil => x_ori.ceil() as i64,
+    };
+    nearest_idx.max(0).min(in_size as i64 - 1) as usize
+}
+
+/// Fast path: NCHW nearest resize where only H and W change.
+/// Parallelizes across N*C channels.
+fn resize_nchw_nearest(
+    input: &[f32],
+    n: usize,
+    c: usize,
+    in_h: usize,
+    in_w: usize,
+    out_h: usize,
+    out_w: usize,
+    scale_h: f32,
+    scale_w: f32,
+    coord_transform: ResizeCoordTransform,
+    nearest_mode: ResizeNearestMode,
+) -> Vec<f32> {
+    // Precompute index maps for H and W
+    let h_map: Vec<usize> = (0..out_h)
+        .map(|oh| nearest_input_coord(oh, scale_h, in_h, out_h, coord_transform, nearest_mode))
+        .collect();
+    let w_map: Vec<usize> = (0..out_w)
+        .map(|ow| nearest_input_coord(ow, scale_w, in_w, out_w, coord_transform, nearest_mode))
+        .collect();
+
+    let in_spatial = in_h * in_w;
+    let out_spatial = out_h * out_w;
+    let total_channels = n * c;
+
+    let chunks: Vec<Vec<f32>> = (0..total_channels)
+        .into_par_iter()
+        .map(|ch| {
+            let in_base = ch * in_spatial;
+            let mut out_buf = vec![0.0f32; out_spatial];
+            for oh in 0..out_h {
+                let ih = h_map[oh];
+                let in_row = in_base + ih * in_w;
+                let out_row = oh * out_w;
+                for ow in 0..out_w {
+                    out_buf[out_row + ow] = input[in_row + w_map[ow]];
+                }
+            }
+            out_buf
+        })
+        .collect();
+
+    let mut output = Vec::with_capacity(total_channels * out_spatial);
+    for chunk in chunks {
+        output.extend_from_slice(&chunk);
+    }
+    output
+}
+
+/// Fast path: NCHW bilinear resize where only H and W change.
+/// Parallelizes across N*C channels.
+fn resize_nchw_linear(
+    input: &[f32],
+    n: usize,
+    c: usize,
+    in_h: usize,
+    in_w: usize,
+    out_h: usize,
+    out_w: usize,
+    scale_h: f32,
+    scale_w: f32,
+    coord_transform: ResizeCoordTransform,
+) -> Vec<f32> {
+    // Precompute interpolation parameters for H and W
+    let h_params: Vec<(usize, usize, f32)> = (0..out_h)
+        .map(|oh| bilinear_params(oh, scale_h, in_h, out_h, coord_transform))
+        .collect();
+    let w_params: Vec<(usize, usize, f32)> = (0..out_w)
+        .map(|ow| bilinear_params(ow, scale_w, in_w, out_w, coord_transform))
+        .collect();
+
+    let in_spatial = in_h * in_w;
+    let out_spatial = out_h * out_w;
+    let total_channels = n * c;
+
+    let chunks: Vec<Vec<f32>> = (0..total_channels)
+        .into_par_iter()
+        .map(|ch| {
+            let in_base = ch * in_spatial;
+            let mut out_buf = vec![0.0f32; out_spatial];
+            for oh in 0..out_h {
+                let (ih0, ih1, fh) = h_params[oh];
+                let out_row = oh * out_w;
+                for ow in 0..out_w {
+                    let (iw0, iw1, fw) = w_params[ow];
+                    // Bilinear: (1-fh)*(1-fw)*TL + (1-fh)*fw*TR + fh*(1-fw)*BL + fh*fw*BR
+                    let tl = input[in_base + ih0 * in_w + iw0];
+                    let tr = input[in_base + ih0 * in_w + iw1];
+                    let bl = input[in_base + ih1 * in_w + iw0];
+                    let br = input[in_base + ih1 * in_w + iw1];
+                    out_buf[out_row + ow] =
+                        (1.0 - fh) * ((1.0 - fw) * tl + fw * tr)
+                        + fh * ((1.0 - fw) * bl + fw * br);
+                }
+            }
+            out_buf
+        })
+        .collect();
+
+    let mut output = Vec::with_capacity(total_channels * out_spatial);
+    for chunk in chunks {
+        output.extend_from_slice(&chunk);
+    }
+    output
+}
+
+/// Compute bilinear interpolation parameters for one output coordinate.
+/// Returns (idx0, idx1, frac) where frac is the weight for idx1.
+fn bilinear_params(
+    out_coord: usize,
+    scale: f32,
+    in_size: usize,
+    out_size: usize,
+    coord_transform: ResizeCoordTransform,
+) -> (usize, usize, f32) {
+    let x_ori = fast_path_original_coord(out_coord, scale, in_size, out_size, coord_transform);
+
+    let x0_raw = x_ori.floor() as i64;
+    let x1_raw = x0_raw + 1;
+    let frac = x_ori - x0_raw as f32;
+    // Clamp independently for edge-padding
+    let x0 = x0_raw.max(0).min(in_size as i64 - 1) as usize;
+    let x1 = x1_raw.max(0).min(in_size as i64 - 1) as usize;
+    (x0, x1, frac)
+}
+
+// =============================================================================
+// Generic fallback (ONNX-spec-compliant separable interpolation)
+// =============================================================================
+
 fn cubic_kernel(x: f32, a: f32) -> f32 {
     let abs_x = x.abs();
     if abs_x <= 1.0 {
@@ -154,9 +340,6 @@ fn cubic_kernel(x: f32, a: f32) -> f32 {
     }
 }
 
-/// Compute cubic coefficients for a given ratio (ONNX convention).
-/// `ratio` is in (0, 1] where integer coords get ratio=1.
-/// Returns 4 coefficients for taps at [-1, 0, 1, 2] relative to floor(x_ori).
 fn cubic_coeffs(ratio: f32, a: f32) -> [f32; 4] {
     [
         cubic_kernel(ratio + 1.0, a),
@@ -166,7 +349,6 @@ fn cubic_coeffs(ratio: f32, a: f32) -> [f32; 4] {
     ]
 }
 
-/// Compute cubic coefficients with antialias scaling (ONNX reference-compatible).
 fn cubic_coeffs_antialias(ratio: f32, scale: f32, a: f32) -> Vec<f32> {
     let s = scale.min(1.0);
     let i_start = (-2.0 / s).floor() as i32 + 1;
@@ -185,7 +367,6 @@ fn cubic_coeffs_antialias(ratio: f32, scale: f32, a: f32) -> Vec<f32> {
     coeffs
 }
 
-/// Compute linear coefficients with antialias scaling (ONNX reference-compatible).
 fn linear_coeffs_antialias(ratio: f32, scale: f32) -> Vec<f32> {
     let s = scale.min(1.0);
     let start = (-1.0 / s).floor() as i32 + 1;
@@ -205,8 +386,6 @@ fn linear_coeffs_antialias(ratio: f32, scale: f32) -> Vec<f32> {
     coeffs
 }
 
-/// Get n nearest neighbor indices to x, preferring smaller indices.
-/// Returns indices that may be < 0 or >= limit (for edge padding).
 fn get_neighbor_idxes(x: f32, n: usize, limit: usize) -> Vec<i64> {
     let mut idxes: Vec<i64> = (0..limit as i64).collect();
     idxes.sort_by(|&a, &b| {
@@ -219,10 +398,8 @@ fn get_neighbor_idxes(x: f32, n: usize, limit: usize) -> Vec<i64> {
     idxes
 }
 
-/// Get n neighbors of x with edge-padding, returning (original_indices, values).
 fn get_neighbor(x: f32, n: usize, data: &[f32]) -> (Vec<i64>, Vec<f32>) {
     let pad_width = ((n as f32) / 2.0).ceil() as usize;
-    // Create edge-padded data
     let padded_len = data.len() + 2 * pad_width;
     let mut padded = vec![0.0f32; padded_len];
     for p in &mut padded[..pad_width] {
@@ -242,14 +419,12 @@ fn get_neighbor(x: f32, n: usize, data: &[f32]) -> (Vec<i64>, Vec<f32>) {
     (original_idxes, values)
 }
 
-/// Transform output coordinate to input coordinate.
-/// Uses `output_width` (float = scale * input_width) for align_corners, etc.
 fn get_original_coordinate(
     x: f32,
     scale_factor: f32,
     input_width: usize,
     output_width_int: usize,
-    roi: &[f32], // [roi_start, roi_end] for this dimension
+    roi: &[f32],
     coord_transform: ResizeCoordTransform,
 ) -> f32 {
     let output_width = scale_factor * input_width as f32;
@@ -290,8 +465,6 @@ fn get_original_coordinate(
     }
 }
 
-/// 1D interpolation at a single output coordinate.
-/// `data` is a 1D slice of f32 values.
 #[allow(clippy::too_many_arguments)]
 fn interpolate_1d_with_x(
     data: &[f32],
@@ -305,7 +478,7 @@ fn interpolate_1d_with_x(
     antialias: bool,
     exclude_outside: bool,
     extrapolation_value: f32,
-    roi: &[f32], // [roi_start, roi_end]
+    roi: &[f32],
 ) -> f32 {
     let input_width = data.len();
     let x_ori = get_original_coordinate(
@@ -317,7 +490,6 @@ fn interpolate_1d_with_x(
         coord_transform,
     );
 
-    // TF crop and resize: out-of-bounds returns extrapolation value
     if matches!(coord_transform, ResizeCoordTransform::TFCropAndResize)
         && (x_ori < 0.0 || x_ori > (input_width as f32 - 1.0))
     {
@@ -445,9 +617,6 @@ fn interpolate_1d_with_x(
     }
 }
 
-/// Recursively perform N-dimensional separable interpolation.
-/// `data` is a flat array with shape `input_shape`.
-/// This processes dimension 0 first, then recurses on the remaining dimensions.
 #[allow(clippy::too_many_arguments)]
 fn interpolate_nd(
     data: &[f32],
@@ -462,7 +631,7 @@ fn interpolate_nd(
     antialias: bool,
     exclude_outside: bool,
     extrapolation_value: f32,
-    roi: &[f32], // full ROI: [start_d0, start_d1, ..., end_d0, end_d1, ...]
+    roi: &[f32],
 ) -> f32 {
     let n = input_shape.len();
     if n == 1 {
@@ -487,7 +656,6 @@ fn interpolate_nd(
         );
     }
 
-    // Build 1D slices along dimension 0 by recursing on remaining dimensions
     let inner_size: usize = input_shape[1..].iter().product();
     let mut res1d = Vec::with_capacity(input_shape[0]);
 
@@ -496,7 +664,6 @@ fn interpolate_nd(
         let slice_end = slice_start + inner_size;
         let inner_data = &data[slice_start..slice_end];
 
-        // ROI for inner dimensions: remove dimension 0's entries
         let inner_roi = if roi.len() >= 2 * n {
             let mut ir = Vec::with_capacity(2 * (n - 1));
             ir.extend_from_slice(&roi[1..n]);
@@ -524,7 +691,6 @@ fn interpolate_nd(
         res1d.push(val);
     }
 
-    // Now interpolate along dimension 0
     let dim_roi = if roi.len() >= 2 * n {
         vec![roi[0], roi[n]]
     } else {
@@ -547,7 +713,10 @@ fn interpolate_nd(
     )
 }
 
-/// Compute output shape from scales or sizes.
+// =============================================================================
+// Shape / scale computation
+// =============================================================================
+
 fn compute_output_shape(
     input_shape: &[u64],
     scales: Option<&[f32]>,
@@ -562,13 +731,7 @@ fn compute_output_shape(
         (0..rank).collect()
     } else {
         axes.iter()
-            .map(|&a| {
-                if a < 0 {
-                    (rank as i64 + a) as usize
-                } else {
-                    a as usize
-                }
-            })
+            .map(|&a| if a < 0 { (rank as i64 + a) as usize } else { a as usize })
             .collect()
     };
 
@@ -613,7 +776,6 @@ fn round_half_up(x: f32) -> usize {
     (x + 0.5).floor() as usize
 }
 
-/// Compute per-axis scale factors.
 fn compute_scales(
     input_shape: &[u64],
     output_shape: &[usize],
@@ -626,13 +788,7 @@ fn compute_scales(
         (0..rank).collect()
     } else {
         axes.iter()
-            .map(|&a| {
-                if a < 0 {
-                    (rank as i64 + a) as usize
-                } else {
-                    a as usize
-                }
-            })
+            .map(|&a| if a < 0 { (rank as i64 + a) as usize } else { a as usize })
             .collect()
     };
 
@@ -642,11 +798,7 @@ fn compute_scales(
         for (i, &axis) in resolved_axes.iter().enumerate() {
             scales[axis] = provided[i];
         }
-        // For keep_aspect_ratio_policy with sizes, recompute scales from output/input
-        if !matches!(
-            keep_aspect_ratio_policy,
-            ResizeKeepAspectRatioPolicy::Stretch
-        ) {
+        if !matches!(keep_aspect_ratio_policy, ResizeKeepAspectRatioPolicy::Stretch) {
             for &axis in &resolved_axes {
                 scales[axis] = output_shape[axis] as f32 / input_shape[axis] as f32;
             }
@@ -660,6 +812,10 @@ fn compute_scales(
     scales
 }
 
+// =============================================================================
+// eval
+// =============================================================================
+
 impl MilliOp for Resize {
     fn eval(
         &self,
@@ -672,11 +828,10 @@ impl MilliOp for Resize {
         let original_dtype = input.dtype();
         let rank = input_shape.len();
 
-        // Cast input to f32 and flatten for computation
         let input_f32 = input.cast(DType::F32, backend)?;
         let input_flat: Vec<f32> = input_f32.flatten()?.try_into()?;
 
-        // Get ROI if provided
+        // Get ROI
         let roi_raw: Vec<f32> = if let Some(roi_id) = self.roi {
             if let Some(roi_tensor) = inputs.get(&roi_id) {
                 let roi_f32 = roi_tensor.cast(DType::F32, backend)?;
@@ -688,18 +843,9 @@ impl MilliOp for Resize {
             vec![]
         };
 
-        // Expand ROI from axes-relative to full-rank
         let full_roi = if !self.axes.is_empty() && !roi_raw.is_empty() {
-            let resolved_axes: Vec<usize> = self
-                .axes
-                .iter()
-                .map(|&a| {
-                    if a < 0 {
-                        (rank as i64 + a) as usize
-                    } else {
-                        a as usize
-                    }
-                })
+            let resolved_axes: Vec<usize> = self.axes.iter()
+                .map(|&a| if a < 0 { (rank as i64 + a) as usize } else { a as usize })
                 .collect();
             let num_axes = resolved_axes.len();
             let mut full = vec![0.0f32; 2 * rank];
@@ -715,18 +861,14 @@ impl MilliOp for Resize {
             roi_raw
         };
 
-        // Get scales if provided
+        // Get scales
         let scales_vec: Option<Vec<f32>> = if let Some(scales_id) = self.scales {
             if let Some(scales_tensor) = inputs.get(&scales_id) {
                 let s: Vec<f32> = scales_tensor
                     .cast(DType::F32, backend)?
                     .try_to_rank::<P1>()?
                     .try_into()?;
-                if s.iter().all(|&x| x == 0.0) {
-                    None
-                } else {
-                    Some(s)
-                }
+                if s.iter().all(|&x| x == 0.0) { None } else { Some(s) }
             } else {
                 None
             }
@@ -734,14 +876,15 @@ impl MilliOp for Resize {
             None
         };
 
-        // Get sizes if provided
+        // Get sizes
         let sizes_vec: Option<Vec<i64>> = if let Some(sizes_id) = self.sizes {
             if let Some(sizes_tensor) = inputs.get(&sizes_id) {
-                let s: Vec<i64> = sizes_tensor
-                    .cast(DType::I64, backend)?
-                    .try_to_rank::<P1>()?
-                    .try_into()?;
-                Some(s)
+                Some(
+                    sizes_tensor
+                        .cast(DType::I64, backend)?
+                        .try_to_rank::<P1>()?
+                        .try_into()?,
+                )
             } else {
                 None
             }
@@ -765,44 +908,52 @@ impl MilliOp for Resize {
             self.keep_aspect_ratio_policy,
         );
 
-        let input_shape_usize: Vec<usize> = input_shape.iter().map(|&x| x as usize).collect();
+        // Try NCHW fast paths: rank==4, only H/W dimensions change, no antialias,
+        // no exclude_outside, no TFCropAndResize ROI
+        let use_fast_path = rank == 4
+            && output_shape[0] == input_shape[0] as usize
+            && output_shape[1] == input_shape[1] as usize
+            && !self.antialias
+            && !self.exclude_outside
+            && !matches!(self.coord_transform, ResizeCoordTransform::TFCropAndResize);
 
-        // Compute output
-        let output_numel: usize = output_shape.iter().product();
-        let mut output_data = vec![0.0f32; output_numel];
+        let output_data = if use_fast_path {
+            let n = input_shape[0] as usize;
+            let c = input_shape[1] as usize;
+            let in_h = input_shape[2] as usize;
+            let in_w = input_shape[3] as usize;
+            let out_h = output_shape[2];
+            let out_w = output_shape[3];
 
-        // Compute output strides
-        let mut output_strides = vec![1usize; rank];
-        for i in (0..rank.saturating_sub(1)).rev() {
-            output_strides[i] = output_strides[i + 1] * output_shape[i + 1];
-        }
-
-        for (out_idx, output_val) in output_data.iter_mut().enumerate() {
-            let mut out_coords = vec![0usize; rank];
-            let mut remaining = out_idx;
-            for d in 0..rank {
-                out_coords[d] = remaining / output_strides[d];
-                remaining %= output_strides[d];
+            match self.mode {
+                ResizeMode::Nearest => resize_nchw_nearest(
+                    &input_flat, n, c, in_h, in_w, out_h, out_w,
+                    scales[2], scales[3],
+                    self.coord_transform, self.nearest_mode,
+                ),
+                ResizeMode::Linear => resize_nchw_linear(
+                    &input_flat, n, c, in_h, in_w, out_h, out_w,
+                    scales[2], scales[3],
+                    self.coord_transform,
+                ),
+                ResizeMode::Cubic => {
+                    // Fall through to generic for cubic
+                    resize_generic(
+                        &input_flat, &input_shape, &output_shape, &scales,
+                        &full_roi, self.mode, self.coord_transform, self.nearest_mode,
+                        self.cubic_coeff_a, self.antialias, self.exclude_outside,
+                        self.extrapolation_value,
+                    )
+                }
             }
-
-            let val = interpolate_nd(
-                &input_flat,
-                &input_shape_usize,
-                &output_shape,
-                &scales,
-                &out_coords,
-                self.mode,
-                self.coord_transform,
-                self.nearest_mode,
-                self.cubic_coeff_a,
-                self.antialias,
-                self.exclude_outside,
+        } else {
+            resize_generic(
+                &input_flat, &input_shape, &output_shape, &scales,
+                &full_roi, self.mode, self.coord_transform, self.nearest_mode,
+                self.cubic_coeff_a, self.antialias, self.exclude_outside,
                 self.extrapolation_value,
-                &full_roi,
-            );
-
-            *output_val = val;
-        }
+            )
+        };
 
         let output_tensor: NumericTensor<DynRank> =
             NumericTensor::from_vec_shape(output_data, output_shape)?;
@@ -810,4 +961,59 @@ impl MilliOp for Resize {
 
         Ok(Box::new(std::iter::once((self.output, output_tensor))))
     }
+}
+
+/// Generic fallback using recursive separable interpolation with rayon.
+fn resize_generic(
+    input_flat: &[f32],
+    input_shape: &[u64],
+    output_shape: &[usize],
+    scales: &[f32],
+    full_roi: &[f32],
+    mode: ResizeMode,
+    coord_transform: ResizeCoordTransform,
+    nearest_mode: ResizeNearestMode,
+    cubic_coeff_a: f32,
+    antialias: bool,
+    exclude_outside: bool,
+    extrapolation_value: f32,
+) -> Vec<f32> {
+    let rank = input_shape.len();
+    let input_shape_usize: Vec<usize> = input_shape.iter().map(|&x| x as usize).collect();
+
+    let output_numel: usize = output_shape.iter().product();
+    let mut output_strides = vec![1usize; rank];
+    for i in (0..rank.saturating_sub(1)).rev() {
+        output_strides[i] = output_strides[i + 1] * output_shape[i + 1];
+    }
+
+    let output_data: Vec<f32> = (0..output_numel)
+        .into_par_iter()
+        .map(|out_idx| {
+            let mut out_coords = vec![0usize; rank];
+            let mut remaining = out_idx;
+            for d in 0..rank {
+                out_coords[d] = remaining / output_strides[d];
+                remaining %= output_strides[d];
+            }
+
+            interpolate_nd(
+                input_flat,
+                &input_shape_usize,
+                output_shape,
+                scales,
+                &out_coords,
+                mode,
+                coord_transform,
+                nearest_mode,
+                cubic_coeff_a,
+                antialias,
+                exclude_outside,
+                extrapolation_value,
+                full_roi,
+            )
+        })
+        .collect();
+
+    output_data
 }

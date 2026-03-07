@@ -28,12 +28,13 @@ use web_time::{Duration, Instant};
 use whisper_tensor::DynRank;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::graph::{GlobalId, Graph, GraphDyn};
-use whisper_tensor::interfaces::AnyInterface;
+use whisper_tensor::interfaces::{AnyInterface, StableDiffusionInterface};
 use whisper_tensor::scalar_info::ScalarInfoTyped;
 use whisper_tensor::super_graph::nodes::SuperGraphAnyNode;
 use whisper_tensor::super_graph::{SuperGraph, SuperGraphLinkTensor};
 use whisper_tensor::tokenizer::Tokenizer;
 use whisper_tensor_import::onnx_graph::TokenizerInfo;
+use crate::sd_explorer::{generate_normal_noise, simple_clip_tokenize, tensor_to_egui_texture};
 use whisper_tensor_server::{
     AbbreviatedTensorReportSettings, AbbreviatedTensorValue, LoadedModelId, ServerConfigReport,
     SuperGraphRequest, SuperGraphRequestBackendMode, WebsocketClientServerMessage,
@@ -77,6 +78,37 @@ pub(crate) struct TextInferenceData {
     selected_mode: SuperGraphRequestBackendMode,
 }
 
+#[derive(Clone)]
+pub(crate) struct SDInferenceData {
+    prompt: String,
+    num_steps: usize,
+    guidance_scale: f32,
+    latent_h: usize,
+    latent_w: usize,
+    seed: u64,
+    selected_mode: SuperGraphRequestBackendMode,
+    pending_request: Option<(u64, SuperGraphLinkTensor)>,
+    generated_image: Option<TextureHandle>,
+    status_message: Option<String>,
+}
+
+impl Default for SDInferenceData {
+    fn default() -> Self {
+        Self {
+            prompt: "a photo of a cat".to_string(),
+            num_steps: 20,
+            guidance_scale: 7.5,
+            latent_h: 8,
+            latent_w: 8,
+            seed: 42,
+            selected_mode: SuperGraphRequestBackendMode::NDArray,
+            pending_request: None,
+            generated_image: None,
+            status_message: None,
+        }
+    }
+}
+
 pub(crate) struct GraphExplorerApp {
     pub(crate) root_selection: GraphRootSubjectSelection,
     pub(crate) explorer_selection: Option<GlobalId>,
@@ -91,6 +123,7 @@ pub(crate) struct GraphExplorerApp {
     pub(crate) graph_subject_path: Vec<GlobalId>,
     pub(crate) next_graph_subject_path: Option<Vec<GlobalId>>,
     pub(crate) text_inference_data: HashMap<InterfaceId, TextInferenceData>,
+    pub(crate) sd_inference_data: HashMap<InterfaceId, SDInferenceData>,
     node_execution_timestamps: HashMap<Vec<GlobalId>, Instant>,
     node_execution_durations: HashMap<Vec<GlobalId>, Duration>,
     abbreviated_tensor_reports: HashMap<Vec<GlobalId>, AbbreviatedTensorValue>,
@@ -328,6 +361,7 @@ impl GraphExplorerApp {
             graph_subject_path: Vec::new(),
             next_graph_subject_path: None,
             text_inference_data: HashMap::new(),
+            sd_inference_data: HashMap::new(),
             node_execution_timestamps: HashMap::new(),
             node_execution_durations: HashMap::new(),
             abbreviated_tensor_reports: HashMap::new(),
@@ -1297,8 +1331,205 @@ impl GraphExplorerApp {
                             }
                         });
                     }
-                    AnyInterface::StableDiffusionInterface(_) => {
-                        ui.label("Stable Diffusion pipeline");
+                    AnyInterface::StableDiffusionInterface(sd_interface) => {
+                        let sd_data = self
+                            .sd_inference_data
+                            .entry(interface_id)
+                            .or_default();
+
+                        // Handle pending reports (node wave, tensor swatches)
+                        if let Some((request_id, _)) = &sd_data.pending_request {
+                            if let Some(reports) = server_request_manager.get_reports(*request_id) {
+                                let time_now = Instant::now();
+                                for report in reports {
+                                    for (path, value) in report.tensor_assignments {
+                                        self.inspect_window_tensor_subscription_returns.insert(path, value);
+                                    }
+                                    for (node_path, age, execution_duration) in report.node_executions {
+                                        let time = time_now - age;
+                                        self.node_execution_timestamps.insert(node_path.clone(), time);
+                                        self.node_execution_durations.insert(node_path, execution_duration);
+                                    }
+                                    for (tensor_path, value) in report.abbreviated_tensor_assignments {
+                                        self.rendered_tensor_swatches.remove(&tensor_path);
+                                        self.abbreviated_tensor_reports.insert(tensor_path, value);
+                                    }
+                                }
+                            }
+                            if let Some(response) = server_request_manager.get_response(*request_id) {
+                                let (_, output_link) = sd_data.pending_request.take().unwrap();
+                                match response.result {
+                                    Ok(mut data) => {
+                                        if let Some(image_tensor) = data.tensor_outputs.remove(&output_link) {
+                                            sd_data.status_message = Some(format!("Image generated: {:?}", image_tensor.shape()));
+                                            sd_data.generated_image = Some(tensor_to_egui_texture(&image_tensor, ui.ctx()));
+                                        } else {
+                                            sd_data.status_message = Some("Error: output tensor not found".to_string());
+                                        }
+                                    }
+                                    Err(err) => {
+                                        self.error_popup = Some(err);
+                                        sd_data.status_message = Some("Error (see popup)".to_string());
+                                    }
+                                }
+                            }
+                        }
+
+                        // UI panel
+                        let frame = egui::Frame::default()
+                            .stroke(ui.visuals().window_stroke)
+                            .inner_margin(5.0);
+                        frame.show(ui, |ui| {
+                            ui.vertical(|ui| {
+                                ui.heading("Stable Diffusion");
+
+                                ui.horizontal(|ui| {
+                                    ui.label("Prompt:");
+                                    ui.text_edit_singleline(&mut sd_data.prompt);
+                                });
+
+                                ui.horizontal(|ui| {
+                                    ui.label("Steps:");
+                                    ui.add(egui::DragValue::new(&mut sd_data.num_steps).range(1..=100));
+                                    ui.label("Guidance:");
+                                    ui.add(egui::DragValue::new(&mut sd_data.guidance_scale).speed(0.1).range(1.0..=30.0));
+                                    ui.label("Seed:");
+                                    ui.add(egui::DragValue::new(&mut sd_data.seed));
+                                });
+
+                                ui.horizontal(|ui| {
+                                    ui.label("Latent H:");
+                                    ui.add(egui::DragValue::new(&mut sd_data.latent_h).range(4..=16));
+                                    ui.label("Latent W:");
+                                    ui.add(egui::DragValue::new(&mut sd_data.latent_w).range(4..=16));
+                                    ui.label(format!("({}x{} px)", sd_data.latent_w * 8, sd_data.latent_h * 8));
+                                });
+
+                                if sd_data.pending_request.is_some() {
+                                    ui.horizontal(|ui| {
+                                        ui.spinner();
+                                        ui.label("Generating...");
+                                    });
+                                } else {
+                                    ui.horizontal(|ui| {
+                                        egui::ComboBox::from_id_salt("sd_backend_mode")
+                                            .selected_text(sd_data.selected_mode.to_string())
+                                            .show_ui(ui, |ui| {
+                                                ui.selectable_value(
+                                                    &mut sd_data.selected_mode,
+                                                    SuperGraphRequestBackendMode::NDArray,
+                                                    SuperGraphRequestBackendMode::NDArray.to_string(),
+                                                );
+                                                if server_config_report.vulkan_available {
+                                                    ui.selectable_value(
+                                                        &mut sd_data.selected_mode,
+                                                        SuperGraphRequestBackendMode::Vulkan,
+                                                        SuperGraphRequestBackendMode::Vulkan.to_string(),
+                                                    );
+                                                }
+                                                ui.selectable_value(
+                                                    &mut sd_data.selected_mode,
+                                                    SuperGraphRequestBackendMode::Compiler,
+                                                    SuperGraphRequestBackendMode::Compiler.to_string(),
+                                                );
+                                            });
+                                        if ui.button("Generate").clicked() {
+                                            let seq_len = 77;
+                                            let cond_ids = simple_clip_tokenize(&sd_data.prompt, seq_len);
+                                            let mut uncond_ids = vec![0i32; seq_len];
+                                            uncond_ids[0] = 49406; // BOS
+                                            uncond_ids[1] = 49407; // EOS
+
+                                            let cond_tensor = NDArrayNumericTensor::from_vec_shape(cond_ids, &vec![1, seq_len as u64]).unwrap();
+                                            let uncond_tensor = NDArrayNumericTensor::from_vec_shape(uncond_ids, &vec![1, seq_len as u64]).unwrap();
+
+                                            let (timestep_values, dt_values, init_sigma) =
+                                                StableDiffusionInterface::compute_euler_schedule(sd_data.num_steps);
+
+                                            let latent_n = 1 * 4 * sd_data.latent_h * sd_data.latent_w;
+                                            let initial_noise = generate_normal_noise(latent_n, sd_data.seed);
+                                            let scaled_noise: Vec<f32> = initial_noise.iter().map(|&x| x * init_sigma).collect();
+
+                                            let latent_tensor = NDArrayNumericTensor::from_vec_shape(
+                                                scaled_noise,
+                                                &vec![1, 4, sd_data.latent_h as u64, sd_data.latent_w as u64],
+                                            ).unwrap();
+
+                                            let timesteps_tensor = NDArrayNumericTensor::from_vec_shape(
+                                                timestep_values,
+                                                &vec![sd_data.num_steps as u64],
+                                            ).unwrap();
+                                            let dt_tensor = NDArrayNumericTensor::from_vec_shape(
+                                                dt_values,
+                                                &vec![sd_data.num_steps as u64],
+                                            ).unwrap();
+                                            let iter_count = NDArrayNumericTensor::from_vec_shape(
+                                                vec![sd_data.num_steps as i64],
+                                                &vec![1],
+                                            ).unwrap();
+                                            let guidance = NDArrayNumericTensor::from_vec(vec![sd_data.guidance_scale]).to_dyn();
+
+                                            // model_ids order: [text_encoder, unet, vae_decoder]
+                                            let text_encoder_id = interface.model_ids[0];
+                                            let unet_id = interface.model_ids[1];
+                                            let vae_decoder_id = interface.model_ids[2];
+
+                                            let swatch_settings = if state.do_explorer_swatches_in_view || state.do_all_explorer_swatches {
+                                                Some(AbbreviatedTensorReportSettings {
+                                                    downsampled_size: (state.swatch_dimension * state.swatch_dimension) as u64,
+                                                    subscribed_tensors: self.tensors_in_view.iter().cloned().collect(),
+                                                    do_all: state.do_all_explorer_swatches,
+                                                })
+                                            } else {
+                                                None
+                                            };
+
+                                            let token = server_request_manager.submit_supergraph_request(SuperGraphRequest {
+                                                do_node_execution_reports: state.explorer_node_wave,
+                                                abbreviated_tensor_report_settings: swatch_settings,
+                                                attention_token: None,
+                                                super_graph: sd_interface.super_graph.clone(),
+                                                subscribed_tensors: self.inspect_window_tensor_subscriptions.iter().cloned().collect(),
+                                                string_inputs: HashMap::new(),
+                                                use_cache: None,
+                                                backend_mode: sd_data.selected_mode,
+                                                symbolic_graph_ids: vec![text_encoder_id, unet_id, vae_decoder_id],
+                                                tensor_inputs: HashMap::from([
+                                                    (sd_interface.cond_ids_input, cond_tensor),
+                                                    (sd_interface.uncond_ids_input, uncond_tensor),
+                                                    (sd_interface.initial_latent_input, latent_tensor),
+                                                    (sd_interface.timesteps_input, timesteps_tensor),
+                                                    (sd_interface.dt_input, dt_tensor),
+                                                    (sd_interface.iteration_count_input, iter_count),
+                                                    (sd_interface.guidance_scale_input, guidance),
+                                                ]),
+                                                model_inputs: HashMap::from([
+                                                    (sd_interface.text_encoder_weights, text_encoder_id),
+                                                    (sd_interface.unet_weights, unet_id),
+                                                    (sd_interface.vae_decoder_weights, vae_decoder_id),
+                                                ]),
+                                                hash_inputs: HashMap::new(),
+                                            });
+
+                                            sd_data.pending_request = Some((token, sd_interface.image_output));
+                                            sd_data.status_message = Some("Running SD pipeline...".to_string());
+                                        }
+                                    });
+                                }
+
+                                if let Some(msg) = &sd_data.status_message {
+                                    ui.label(msg);
+                                }
+                            });
+                        });
+
+                        // Display generated image
+                        if let Some(texture) = &sd_data.generated_image {
+                            let size = texture.size_vec2();
+                            let scale = (400.0 / size.x.max(size.y)).max(1.0);
+                            let display_size = egui::vec2(size.x * scale, size.y * scale);
+                            ui.image(egui::load::SizedTexture::new(texture.id(), display_size));
+                        }
                     }
                 }
                 ui.allocate_exact_size(ui.available_size_before_wrap(), Sense::click());

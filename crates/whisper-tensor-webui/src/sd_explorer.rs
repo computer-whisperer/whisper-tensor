@@ -282,7 +282,7 @@ impl SDExplorerApp {
 }
 
 /// Convert an output tensor (NCHW, f16) to an egui texture.
-fn tensor_to_egui_texture(
+pub(crate) fn tensor_to_egui_texture(
     tensor: &NDArrayNumericTensor<whisper_tensor::DynRank>,
     ctx: &egui::Context,
 ) -> egui::TextureHandle {
@@ -337,7 +337,7 @@ fn tensor_to_egui_texture(
 
 /// Simple CLIP tokenizer — just uses hardcoded BOS/EOS and a small lookup table.
 /// For real usage, load the proper CLIP tokenizer from HuggingFace.
-fn simple_clip_tokenize(text: &str, seq_len: usize) -> Vec<i32> {
+pub(crate) fn simple_clip_tokenize(text: &str, seq_len: usize) -> Vec<i32> {
     // Common CLIP token IDs for simple words
     let token_map: HashMap<&str, i32> = HashMap::from([
         ("a", 320),
@@ -410,7 +410,7 @@ fn simple_clip_tokenize(text: &str, seq_len: usize) -> Vec<i32> {
 }
 
 /// Generate normally distributed noise using Box-Muller transform.
-fn generate_normal_noise(n: usize, seed: u64) -> Vec<f32> {
+pub(crate) fn generate_normal_noise(n: usize, seed: u64) -> Vec<f32> {
     use rand::SeedableRng;
     let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
     let mut vals = Vec::with_capacity(n);
