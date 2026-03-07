@@ -28,6 +28,7 @@ pub struct SchedulerReportSuperGraphNodeExecuted {
     pub start_instant: Instant,
     pub end_instant: Instant,
     pub path: Vec<GlobalId>,
+    pub op_kind: String,
 }
 
 #[derive(Debug)]
@@ -137,6 +138,7 @@ impl SuperGraphObserver for LocalSuperGraphObserver {
     fn on_node_executed(
         &mut self,
         path: &[GlobalId],
+        op_kind: &str,
         start_instant: Instant,
         end_instant: Instant,
         _backend: &mut EvalBackend,
@@ -148,6 +150,7 @@ impl SuperGraphObserver for LocalSuperGraphObserver {
                 SchedulerReport::SuperGraphNodeExecuted(SchedulerReportSuperGraphNodeExecuted {
                     attention: self.attention,
                     path: path.to_vec(),
+                    op_kind: op_kind.to_string(),
                     start_instant,
                     end_instant,
                 });

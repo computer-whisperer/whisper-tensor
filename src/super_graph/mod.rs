@@ -146,6 +146,7 @@ impl SuperGraph {
                 let end_instant = Instant::now();
                 context.observer.on_node_executed(
                     &this_path,
+                    &op.op_kind(),
                     start_instant,
                     end_instant,
                     context.eval_backend,

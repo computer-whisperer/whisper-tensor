@@ -332,7 +332,7 @@ impl AbbreviatedTensorValue {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SuperGraphExecutionReport {
     pub attention: Option<u64>,
-    pub node_executions: Vec<(Vec<GlobalId>, Duration, Duration)>,
+    pub node_executions: Vec<(Vec<GlobalId>, String, Duration, Duration)>,
     pub abbreviated_tensor_assignments: Vec<(Vec<GlobalId>, AbbreviatedTensorValue)>,
     pub tensor_assignments: Vec<(Vec<GlobalId>, NDArrayNumericTensor<DynRank>)>,
 }

@@ -8,6 +8,7 @@ pub trait SuperGraphObserver {
     fn on_node_executed(
         &mut self,
         path: &[GlobalId],
+        op_kind: &str,
         start_instant: Instant,
         end_instant: Instant,
         backend: &mut EvalBackend,
@@ -24,6 +25,7 @@ impl SuperGraphObserver for () {
     fn on_node_executed(
         &mut self,
         _path: &[GlobalId],
+        _op_kind: &str,
         _start_instant: Instant,
         _end_instant: Instant,
         _backend: &mut EvalBackend,

@@ -137,10 +137,7 @@ impl ModelServer {
         Ok(())
     }
 
-    pub(crate) async fn load_sd_pipeline(
-        &self,
-        base_path: &Path,
-    ) -> Result<(), anyhow::Error> {
+    pub(crate) async fn load_sd_pipeline(&self, base_path: &Path) -> Result<(), anyhow::Error> {
         let submodels = [
             ("text_encoder", "text_encoder"),
             ("unet", "unet"),
@@ -416,7 +413,7 @@ async fn handle_socket(
                             let duration = x.end_instant - x.start_instant;
                             report
                                 .node_executions
-                                .push((x.path.clone(), delta, duration));
+                                .push((x.path.clone(), x.op_kind.clone(), delta, duration));
                         }
                         SchedulerReport::SuperGraphTensorAssignedFull(x) => {
                             report

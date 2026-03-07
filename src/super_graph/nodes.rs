@@ -124,7 +124,7 @@ impl<'a, T: SuperGraphObserver> SymbolicGraphObserver for SymbolicGraphObserverW
             .chain(node_path.iter().cloned())
             .collect::<Vec<_>>();
         self.inner
-            .on_node_executed(node_path.as_slice(), start_instant, end_instant, backend)
+            .on_node_executed(node_path.as_slice(), "", start_instant, end_instant, backend)
     }
 
     fn on_tensor_assigned(
@@ -159,7 +159,7 @@ impl<'a, T: SuperGraphObserver> CompiledProgramObserver for SymbolicGraphObserve
             .chain(node_path.iter().cloned())
             .collect::<Vec<_>>();
         self.inner
-            .on_node_executed(node_path.as_slice(), start_instant, end_instant, backend)
+            .on_node_executed(node_path.as_slice(), "", start_instant, end_instant, backend)
     }
 
     fn on_tensor_assigned(
@@ -584,7 +584,7 @@ impl<'a, T: SuperGraphObserver> MilliOpGraphObserver for MilliOpGraphObserverWra
             .copied()
             .collect::<Vec<_>>();
         self.inner
-            .on_node_executed(node_path.as_slice(), start_instant, end_instant, backend);
+            .on_node_executed(node_path.as_slice(), "", start_instant, end_instant, backend);
     }
 }
 

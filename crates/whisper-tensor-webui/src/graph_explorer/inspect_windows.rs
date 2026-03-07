@@ -399,7 +399,7 @@ fn category_color(category: &str) -> Color32 {
 impl GraphExplorerApp {
     /// Resolves a path to the containing graph and the target element ID.
     /// Returns (graph containing the element, element's GlobalId)
-    fn resolve_path_to_graph<'a>(
+    pub(crate) fn resolve_path_to_graph<'a>(
         &self,
         path: &[GlobalId],
         root_graph: &'a dyn GraphDyn,

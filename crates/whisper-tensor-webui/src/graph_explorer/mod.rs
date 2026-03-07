@@ -86,6 +86,7 @@ pub(crate) struct SDInferenceData {
     latent_h: usize,
     latent_w: usize,
     seed: u64,
+    use_cache: bool,
     selected_mode: SuperGraphRequestBackendMode,
     pending_request: Option<(u64, SuperGraphLinkTensor)>,
     generated_image: Option<TextureHandle>,
@@ -102,6 +103,7 @@ impl Default for SDInferenceData {
             latent_h: 8,
             latent_w: 8,
             seed: 42,
+            use_cache: false,
             selected_mode: SuperGraphRequestBackendMode::NDArray,
             pending_request: None,
             generated_image: None,
@@ -128,11 +130,13 @@ pub(crate) struct GraphExplorerApp {
     pub(crate) sd_inference_data: HashMap<InterfaceId, SDInferenceData>,
     node_execution_timestamps: HashMap<Vec<GlobalId>, Instant>,
     node_execution_durations: HashMap<Vec<GlobalId>, Duration>,
+    node_execution_op_kinds: HashMap<Vec<GlobalId>, String>,
     abbreviated_tensor_reports: HashMap<Vec<GlobalId>, AbbreviatedTensorValue>,
     rendered_tensor_swatches: HashMap<Vec<GlobalId>, TextureHandle>,
     tensors_in_view: HashSet<Vec<GlobalId>>,
     nodes_in_view: HashSet<Vec<GlobalId>>,
     error_popup: Option<String>,
+    pub(crate) show_profiling_window: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -366,12 +370,122 @@ impl GraphExplorerApp {
             sd_inference_data: HashMap::new(),
             node_execution_timestamps: HashMap::new(),
             node_execution_durations: HashMap::new(),
+            node_execution_op_kinds: HashMap::new(),
             abbreviated_tensor_reports: HashMap::new(),
             rendered_tensor_swatches: HashMap::new(),
             nodes_in_view: HashSet::new(),
             tensors_in_view: HashSet::new(),
             error_popup: None,
+            show_profiling_window: false,
         }
+    }
+
+    fn resolve_op_kind(&self, path: &[GlobalId], root_graph: &dyn GraphDyn, loaded_models: &LoadedModels) -> String {
+        // First check cached op_kind from observer
+        if let Some(op_kind) = self.node_execution_op_kinds.get(path) {
+            if !op_kind.is_empty() {
+                return op_kind.clone();
+            }
+        }
+        // Resolve through graph hierarchy like inspect windows do
+        if let Some((graph, node_id)) = self.resolve_path_to_graph(path, root_graph, loaded_models) {
+            let graph: &dyn GraphDyn = graph;
+            if let Some(node) = graph.get_node_by_id(&node_id) {
+                return node.op_kind();
+            }
+        }
+        "?".to_string()
+    }
+
+    fn render_profiling_window(&self, ui: &mut Ui, root_graph: &dyn GraphDyn, loaded_models: &LoadedModels) {
+        if self.node_execution_durations.is_empty() {
+            ui.label("No profiling data yet. Run a graph to collect timing.");
+            return;
+        }
+
+        let prefix = &self.graph_subject_path;
+
+        // Show graph-level total if available
+        if let Some(graph_dur) = self.node_execution_durations.get(prefix) {
+            ui.strong(format!("Total: {:.1}ms", graph_dur.as_secs_f64() * 1000.0));
+        }
+
+        // Filter to descendants of the current graph, excluding the graph node itself
+        let mut nodes_by_duration: Vec<_> = self
+            .node_execution_durations
+            .iter()
+            .filter(|(path, _)| path.starts_with(prefix) && path.len() > prefix.len())
+            .map(|(path, dur)| {
+                let op_kind = self.resolve_op_kind(path, root_graph, loaded_models);
+                (path, op_kind, *dur)
+            })
+            .collect();
+        nodes_by_duration.sort_by(|a, b| b.2.cmp(&a.2));
+
+        // Accumulated by op type
+        let mut by_op_type: HashMap<String, (Duration, usize)> = HashMap::new();
+        for (_, op_kind, dur) in &nodes_by_duration {
+            let entry = by_op_type.entry(op_kind.clone()).or_default();
+            entry.0 += *dur;
+            entry.1 += 1;
+        }
+        let mut op_type_sorted: Vec<_> = by_op_type.into_iter().collect();
+        op_type_sorted.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
+
+        ui.label(format!("{} nodes", nodes_by_duration.len()));
+        ui.separator();
+
+        egui::CollapsingHeader::new("By Op Type")
+            .default_open(true)
+            .show(ui, |ui| {
+                egui::Grid::new("profiling_op_type_grid")
+                    .num_columns(4)
+                    .striped(true)
+                    .show(ui, |ui| {
+                        ui.strong("Op");
+                        ui.strong("Total");
+                        ui.strong("Count");
+                        ui.strong("Avg");
+                        ui.end_row();
+                        for (op, (total, count)) in op_type_sorted.iter().take(15) {
+                            ui.label(op);
+                            ui.label(format!("{:.2}ms", total.as_secs_f64() * 1000.0));
+                            ui.label(format!("{}", count));
+                            ui.label(format!(
+                                "{:.2}ms",
+                                total.as_secs_f64() * 1000.0 / *count as f64
+                            ));
+                            ui.end_row();
+                        }
+                    });
+            });
+
+        ui.separator();
+
+        egui::CollapsingHeader::new("Top Individual Nodes")
+            .default_open(true)
+            .show(ui, |ui| {
+                egui::Grid::new("profiling_individual_grid")
+                    .num_columns(3)
+                    .striped(true)
+                    .show(ui, |ui| {
+                        ui.strong("Op");
+                        ui.strong("Duration");
+                        ui.strong("Path");
+                        ui.end_row();
+                        for (path, op_kind, dur) in nodes_by_duration.iter().take(15) {
+                            ui.label(op_kind.as_str());
+                            ui.label(format!("{:.2}ms", dur.as_secs_f64() * 1000.0));
+                            let path_str = path
+                                .iter()
+                                .map(|id| id.to_string())
+                                .collect::<Vec<_>>()
+                                .join("/");
+                            ui.label(path_str);
+                            ui.end_row();
+                        }
+                    });
+            });
     }
 
     pub(crate) fn get_tensor_swatch(
@@ -584,25 +698,44 @@ impl GraphExplorerApp {
         let interface_panel_height = 150.0;
 
         // Find the graph we are working with
-        let graph_and_path = {
-            let initial_graph: Option<&dyn GraphDyn> = match self.root_selection {
-                GraphRootSubjectSelection::Model(model_id) => {
-                    let res = loaded_models
-                        .loaded_models
-                        .get(&model_id)
-                        .map(|x| x as &dyn GraphDyn);
-                    if res.is_none() {
-                        models_to_load.insert(model_id);
-                    }
-                    res
+        let root_graph: Option<&dyn GraphDyn> = match self.root_selection {
+            GraphRootSubjectSelection::Model(model_id) => {
+                let res = loaded_models
+                    .loaded_models
+                    .get(&model_id)
+                    .map(|x| x as &dyn GraphDyn);
+                if res.is_none() {
+                    models_to_load.insert(model_id);
                 }
-                GraphRootSubjectSelection::Interface(interface_id) => loaded_models
-                    .current_interfaces
-                    .get(&interface_id)
-                    .map(|interface| interface.interface.get_super_graph() as &dyn GraphDyn),
-            };
+                res
+            }
+            GraphRootSubjectSelection::Interface(interface_id) => loaded_models
+                .current_interfaces
+                .get(&interface_id)
+                .map(|interface| interface.interface.get_super_graph() as &dyn GraphDyn),
+        };
 
-            if let Some(graph) = initial_graph {
+        // Profiling window
+        if self.show_profiling_window {
+            let mut open = true;
+            egui::Window::new("Profiling")
+                .open(&mut open)
+                .resizable(true)
+                .default_size([500.0, 400.0])
+                .show(ui.ctx(), |ui| {
+                    if let Some(root_graph) = root_graph {
+                        self.render_profiling_window(ui, root_graph, loaded_models);
+                    } else {
+                        ui.label("No graph loaded.");
+                    }
+                });
+            if !open {
+                self.show_profiling_window = false;
+            }
+        }
+
+        let graph_and_path = {
+            if let Some(graph) = root_graph {
                 let mut current_graph = graph;
                 let mut current_path = vec![];
                 for node_id in &self.graph_subject_path {
@@ -1134,10 +1267,13 @@ impl GraphExplorerApp {
                                                     for (path, value) in report.tensor_assignments {
                                                         self.inspect_window_tensor_subscription_returns.insert(path, value);
                                                     }
-                                                    for (node_path, age, execution_duration) in report.node_executions {
+                                                    for (node_path, op_kind, age, execution_duration) in report.node_executions {
                                                         let time = time_now - age;
                                                         self.node_execution_timestamps.insert(node_path.clone(), time);
-                                                        self.node_execution_durations.insert(node_path, execution_duration);
+                                                        self.node_execution_durations.insert(node_path.clone(), execution_duration);
+                                                        if !op_kind.is_empty() {
+                                                            self.node_execution_op_kinds.insert(node_path, op_kind);
+                                                        }
                                                     }
                                                     for (tensor_path, value) in report.abbreviated_tensor_assignments {
                                                         self.rendered_tensor_swatches.remove(&tensor_path);
@@ -1347,10 +1483,13 @@ impl GraphExplorerApp {
                                     for (path, value) in report.tensor_assignments {
                                         self.inspect_window_tensor_subscription_returns.insert(path, value);
                                     }
-                                    for (node_path, age, execution_duration) in report.node_executions {
+                                    for (node_path, op_kind, age, execution_duration) in report.node_executions {
                                         let time = time_now - age;
                                         self.node_execution_timestamps.insert(node_path.clone(), time);
-                                        self.node_execution_durations.insert(node_path, execution_duration);
+                                        self.node_execution_durations.insert(node_path.clone(), execution_duration);
+                                        if !op_kind.is_empty() {
+                                            self.node_execution_op_kinds.insert(node_path, op_kind);
+                                        }
                                     }
                                     for (tensor_path, value) in report.abbreviated_tensor_assignments {
                                         self.rendered_tensor_swatches.remove(&tensor_path);
@@ -1436,6 +1575,8 @@ impl GraphExplorerApp {
                                                     SuperGraphRequestBackendMode::Compiler.to_string(),
                                                 );
                                             });
+                                        toggle_ui(ui, &mut sd_data.use_cache);
+                                        ui.label("Cache");
                                         if ui.button("Generate").clicked() {
                                             let seq_len = 77;
                                             let cond_ids = simple_clip_tokenize(&sd_data.prompt, seq_len);
@@ -1498,7 +1639,7 @@ impl GraphExplorerApp {
                                                 super_graph: sd_interface.super_graph.clone(),
                                                 subscribed_tensors: self.inspect_window_tensor_subscriptions.iter().cloned().collect(),
                                                 string_inputs: HashMap::new(),
-                                                use_cache: None,
+                                                use_cache: if sd_data.use_cache { Some(200 + interface_id as u64) } else { None },
                                                 backend_mode: sd_data.selected_mode,
                                                 symbolic_graph_ids: vec![text_encoder_id, unet_id, vae_decoder_id],
                                                 tensor_inputs: HashMap::from([

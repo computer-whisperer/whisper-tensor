@@ -485,6 +485,12 @@ impl eframe::App for WebUIApp {
                                 &mut self.app_state.graph_explorer_settings.explorer_minimap,
                             );
                             ui.label("Minimap:");
+                            if let Some(selected_tab) = self.selected_graph_explorer_tab {
+                                if let Some(ge) = self.graph_explorer_app.get_mut(&selected_tab) {
+                                    toggle_ui(ui, &mut ge.show_profiling_window);
+                                    ui.label("Profiling:");
+                                }
+                            }
                             toggle_ui(
                                 ui,
                                 &mut self.app_state.graph_explorer_settings.explorer_physics,
