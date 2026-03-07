@@ -239,7 +239,23 @@ impl NumericScalar {
     }
 
     pub fn erf(&self) -> Self {
-        unimplemented!();
+        fn erf_f32(x: f32) -> f32 {
+            let a = x.abs();
+            let t = 1.0 / (1.0 + 0.3275911 * a);
+            let poly = t
+                * (0.254_829_6
+                    + t * (-0.284_496_72
+                        + t * (1.421_413_8 + t * (-1.453_152_1 + t * 1.061_405_4))));
+            let result = 1.0 - poly * (-a * a).exp();
+            result.copysign(x)
+        }
+        match self {
+            NumericScalar::F64(x) => Self::F64(erf_f32(*x as f32) as f64),
+            NumericScalar::F32(x) => Self::F32(erf_f32(*x)),
+            NumericScalar::BF16(x) => Self::BF16(half::bf16::from_f32(erf_f32(x.to_f32()))),
+            NumericScalar::F16(x) => Self::F16(half::f16::from_f32(erf_f32(x.to_f32()))),
+            _ => panic!("Cannot erf this type"),
+        }
     }
 
     pub fn ln(&self) -> Self {

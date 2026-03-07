@@ -414,7 +414,47 @@ impl<R: Rank> NDArrayNumericTensor<R> {
     }
 
     pub fn erf(self) -> Result<Self, NDArrayNumericTensorError> {
-        unimplemented!();
+        /// Abramowitz & Stegun approximation (max error ~1.5e-7).
+        fn erf_f32(x: f32) -> f32 {
+            let a = x.abs();
+            let t = 1.0 / (1.0 + 0.3275911 * a);
+            let poly = t
+                * (0.254_829_6
+                    + t * (-0.284_496_72
+                        + t * (1.421_413_8 + t * (-1.453_152_1 + t * 1.061_405_4))));
+            let result = 1.0 - poly * (-a * a).exp();
+            result.copysign(x)
+        }
+        fn erf_f64(x: f64) -> f64 {
+            let a = x.abs();
+            let t = 1.0 / (1.0 + 0.3275911 * a);
+            let poly = t
+                * (0.254829592
+                    + t * (-0.284496736
+                        + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
+            let result = 1.0 - poly * (-a * a).exp();
+            result.copysign(x)
+        }
+        Ok(match self {
+            NDArrayNumericTensor::F32(x) => {
+                NDArrayNumericTensor::F32(x.map(|&v| erf_f32(v)).to_shared())
+            }
+            NDArrayNumericTensor::F64(x) => {
+                NDArrayNumericTensor::F64(x.map(|&v| erf_f64(v)).to_shared())
+            }
+            NDArrayNumericTensor::BF16(x) => NDArrayNumericTensor::BF16(
+                x.map(|&v| half::bf16::from_f32(erf_f32(v.to_f32())))
+                    .to_shared(),
+            ),
+            NDArrayNumericTensor::F16(x) => NDArrayNumericTensor::F16(
+                x.map(|&v| half::f16::from_f32(erf_f32(v.to_f32())))
+                    .to_shared(),
+            ),
+            _ => Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes(
+                "erf".to_string(),
+                vec![self.dtype()],
+            ))?,
+        })
     }
 
     pub fn abs(self) -> Result<Self, NDArrayNumericTensorError> {
