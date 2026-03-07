@@ -69,7 +69,7 @@ impl SDExplorerApp {
                             self.status_message =
                                 Some(format!("Image generated: {:?}", image_tensor.shape()));
                             self.generated_image =
-                                Some(tensor_to_egui_texture(&image_tensor, ui.ctx()));
+                                Some(tensor_to_egui_texture(&image_tensor, ui.ctx()).0);
                         } else {
                             self.status_message =
                                 Some("Error: output tensor not found".to_string());
@@ -285,11 +285,11 @@ impl SDExplorerApp {
     }
 }
 
-/// Convert an output tensor (NCHW, f16) to an egui texture.
+/// Convert an output tensor (NCHW, f16) to an egui texture and color image.
 pub(crate) fn tensor_to_egui_texture(
     tensor: &NDArrayNumericTensor<whisper_tensor::DynRank>,
     ctx: &egui::Context,
-) -> egui::TextureHandle {
+) -> (egui::TextureHandle, egui::ColorImage) {
     let shape = tensor.shape();
     let ch = shape[1] as usize;
     let img_h = shape[2] as usize;
@@ -333,7 +333,8 @@ pub(crate) fn tensor_to_egui_texture(
         source_size: egui::Vec2::new(img_w as f32, img_h as f32),
     };
 
-    ctx.load_texture("sd_output", color_image, egui::TextureOptions::NEAREST)
+    let texture = ctx.load_texture("sd_output", color_image.clone(), egui::TextureOptions::NEAREST);
+    (texture, color_image)
 }
 
 /// Simple CLIP tokenizer — just uses hardcoded BOS/EOS and a small lookup table.
