@@ -1,3 +1,4 @@
+#[cfg(feature = "blas")]
 extern crate blas_src;
 
 use num_traits::Float;

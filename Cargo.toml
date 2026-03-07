@@ -28,9 +28,9 @@ tch = {optional=true, version="0.22.0"}
 wyrand = "0.3.2"
 rand = "0.9.2"
 
-ndarray = { version = "0.16.1", features = ["serde", "rayon", "matrixmultiply-threading", "blas"] }
-blas-src = { version = "0.10", features = ["openblas"] }
-openblas-src = { version = "0.10", features = ["cblas", "system"] }
+ndarray = { version = "0.16.1", features = ["serde", "rayon", "matrixmultiply-threading"] }
+blas-src = { version = "0.10", features = ["openblas"], optional = true }
+openblas-src = { version = "0.10", features = ["cblas", "system"], optional = true }
 rayon = "1.10"
 rwkv-tokenizer = {workspace=true, optional=true, features = ["serde"] }
 env_logger = "0.11.8"
@@ -44,7 +44,8 @@ image = "0.25"
 ndarray-npy = "0.9"
 
 [features]
-default = ["tokenizers", "rwkv-tokenizer", "http"]
+default = ["tokenizers", "rwkv-tokenizer", "http", "blas"]
+blas = ["ndarray/blas", "dep:blas-src", "dep:openblas-src"]
 onnx-reference = ["pyo3"]
 candle = ["candle-onnx", "candle-core"]
 tokenizers = ["dep:tokenizers"]
