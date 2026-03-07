@@ -10,7 +10,7 @@ use whisper_tensor::numeric_tensor::NumericTensor;
 #[allow(unused_imports)]
 use whisper_tensor::symbolic_graph::observer::SymbolicGraphObserver;
 use whisper_tensor_import::identify_and_load;
-use whisper_tensor_import::onnx_graph::WeightStorageStrategy;
+use whisper_tensor_import::onnx_graph::{TokenizerInfo, WeightStorageStrategy};
 
 const SD_BASE: &str = "/mnt/secondary/neural_networks/stable-diffusion-1.5-onnx-fp16";
 
@@ -78,7 +78,10 @@ fn main() {
     println!("=== Building StableDiffusionInterface ===");
     let start = Instant::now();
     let mut rng = rand::rng();
-    let sd_interface = StableDiffusionInterface::new(&mut rng);
+    let sd_interface = StableDiffusionInterface::new(
+        &mut rng,
+        TokenizerInfo::HFTokenizer("openai/clip-vit-large-patch14".to_string()),
+    );
     println!("  Built in {:.2?}", start.elapsed());
     println!();
 

@@ -6,7 +6,7 @@ use crate::app::{InterfaceId, LoadedModels, LoadedTokenizers};
 use crate::graph_explorer::inspect_windows::{
     AnyInspectWindow, InspectWindowGraphLink, InspectWindowGraphNode,
 };
-use crate::sd_explorer::{generate_normal_noise, simple_clip_tokenize, tensor_to_egui_texture};
+use crate::sd_explorer::{clip_tokenize, generate_normal_noise, tensor_to_egui_texture};
 use crate::websockets::ServerRequestManager;
 use crate::widgets::toggle::toggle_ui;
 use crate::widgets::tokenized_rich_text::TokenizedRichText;
@@ -1596,12 +1596,24 @@ impl GraphExplorerApp {
                                             });
                                         toggle_ui(ui, &mut sd_data.use_cache);
                                         ui.label("Cache");
-                                        if ui.button("Generate").clicked() {
+                                        let tokenizer = loaded_tokenizers
+                                            .loaded_tokenizers
+                                            .get(&sd_interface.tokenizer)
+                                            .cloned()
+                                            .flatten();
+                                        let can_generate = matches!(&tokenizer, Some(Ok(_)));
+                                        if !can_generate {
+                                            if let Some(Err(err)) = &tokenizer {
+                                                ui.label(format!("Tokenizer error: {err}"));
+                                            } else {
+                                                ui.spinner();
+                                            }
+                                        }
+                                        if can_generate && ui.button("Generate").clicked() {
+                                            let tokenizer = tokenizer.unwrap().unwrap();
                                             let seq_len = 77;
-                                            let cond_ids = simple_clip_tokenize(&sd_data.prompt, seq_len);
-                                            let mut uncond_ids = vec![0i32; seq_len];
-                                            uncond_ids[0] = 49406; // BOS
-                                            uncond_ids[1] = 49407; // EOS
+                                            let cond_ids = clip_tokenize(tokenizer.as_ref(), &sd_data.prompt, seq_len);
+                                            let uncond_ids = clip_tokenize(tokenizer.as_ref(), "", seq_len);
 
                                             let cond_tensor = NDArrayNumericTensor::from_vec_shape(cond_ids, &vec![1, seq_len as u64]).unwrap();
                                             let uncond_tensor = NDArrayNumericTensor::from_vec_shape(uncond_ids, &vec![1, seq_len as u64]).unwrap();

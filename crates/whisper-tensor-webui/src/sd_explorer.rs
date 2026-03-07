@@ -1,11 +1,13 @@
-use crate::app::{InterfaceId, LoadedModels, ModelLoadState};
+use crate::app::{InterfaceId, LoadedModels, LoadedTokenizers, ModelLoadState};
 use crate::websockets::ServerRequestManager;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Arc;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::dtype::DType;
 use whisper_tensor::interfaces::{AnyInterface, StableDiffusionInterface};
 use whisper_tensor::super_graph::links::SuperGraphLinkTensor;
+use whisper_tensor::tokenizer::{AnyTokenizer, Tokenizer};
 use whisper_tensor_server::{
     SuperGraphRequest, SuperGraphRequestBackendMode, WebsocketClientServerMessage,
 };
@@ -56,6 +58,7 @@ impl SDExplorerApp {
         &mut self,
         state: &mut SDExplorerState,
         loaded_models: &mut LoadedModels,
+        loaded_tokenizers: &mut LoadedTokenizers,
         server_request_manager: &mut ServerRequestManager,
         ui: &mut egui::Ui,
     ) {
@@ -166,18 +169,31 @@ impl SDExplorerApp {
                 });
 
                 let is_running = self.pending_request.is_some();
+                let tokenizer = loaded_tokenizers
+                    .loaded_tokenizers
+                    .get(&sd.tokenizer)
+                    .cloned()
+                    .flatten();
 
                 ui.horizontal(|ui| {
                     if is_running {
                         ui.spinner();
                         ui.label("Generating...");
-                    } else if ui.button("Generate").clicked() {
-                        self.run_generation(
-                            state,
-                            sd,
-                            interface.model_ids.clone(),
-                            server_request_manager,
-                        );
+                    } else if let Some(Ok(tokenizer)) = &tokenizer {
+                        if ui.button("Generate").clicked() {
+                            self.run_generation(
+                                state,
+                                sd,
+                                interface.model_ids.clone(),
+                                tokenizer,
+                                server_request_manager,
+                            );
+                        }
+                    } else if let Some(Err(err)) = &tokenizer {
+                        ui.label(format!("Tokenizer error: {err}"));
+                    } else {
+                        ui.spinner();
+                        ui.label("Loading tokenizer...");
                     }
                 });
 
@@ -205,15 +221,13 @@ impl SDExplorerApp {
         state: &SDExplorerState,
         sd: &StableDiffusionInterface,
         model_ids: Vec<whisper_tensor_server::LoadedModelId>,
+        tokenizer: &Arc<AnyTokenizer>,
         server_request_manager: &mut ServerRequestManager,
     ) {
         let seq_len = 77;
 
-        // Simple CLIP tokenization: split on spaces, use hardcoded common tokens
-        let cond_ids = simple_clip_tokenize(&state.prompt_text, seq_len);
-        let mut uncond_ids = vec![0i32; seq_len];
-        uncond_ids[0] = 49406; // BOS
-        uncond_ids[1] = 49407; // EOS
+        let cond_ids = clip_tokenize(tokenizer.as_ref(), &state.prompt_text, seq_len);
+        let uncond_ids = clip_tokenize(tokenizer.as_ref(), "", seq_len);
 
         let cond_tensor =
             NDArrayNumericTensor::from_vec_shape(cond_ids, &vec![1, seq_len as u64]).unwrap();
@@ -337,76 +351,27 @@ pub(crate) fn tensor_to_egui_texture(
     (texture, color_image)
 }
 
-/// Simple CLIP tokenizer — just uses hardcoded BOS/EOS and a small lookup table.
-/// For real usage, load the proper CLIP tokenizer from HuggingFace.
-pub(crate) fn simple_clip_tokenize(text: &str, seq_len: usize) -> Vec<i32> {
-    // Common CLIP token IDs for simple words
-    let token_map: HashMap<&str, i32> = HashMap::from([
-        ("a", 320),
-        ("the", 518),
-        ("of", 539),
-        ("in", 530),
-        ("on", 525),
-        ("with", 593),
-        ("and", 537),
-        ("is", 533),
-        ("an", 550),
-        ("photo", 1125),
-        ("photograph", 8853),
-        ("picture", 1674),
-        ("image", 1491),
-        ("painting", 3086),
-        ("beautiful", 1546),
-        ("landscape", 3067),
-        ("cat", 2368),
-        ("dog", 1929),
-        ("person", 2039),
-        ("man", 786),
-        ("woman", 2308),
-        ("tree", 2995),
-        ("house", 1316),
-        ("car", 1400),
-        ("sky", 2390),
-        ("water", 1336),
-        ("sun", 3103),
-        ("mountain", 3860),
-        ("flower", 3656),
-        ("bird", 3329),
-        ("ocean", 4026),
-        ("forest", 3880),
-        ("city", 1304),
-        ("street", 2956),
-        ("night", 1558),
-        ("day", 1208),
-        ("red", 736),
-        ("blue", 1612),
-        ("green", 1901),
-        ("white", 1579),
-        ("black", 1173),
-        ("big", 1205),
-        ("small", 1236),
-        ("old", 793),
-        ("new", 665),
-    ]);
+/// Tokenize text for CLIP: encode with the real tokenizer, wrap with
+/// BOS/EOS special tokens, then truncate/pad to `seq_len`.
+///
+/// The tokenizer trait's `encode` doesn't add special tokens, so we
+/// manually prepend BOS (49406) and append EOS (49407) per the CLIP spec.
+pub(crate) fn clip_tokenize(tokenizer: &dyn Tokenizer, text: &str, seq_len: usize) -> Vec<i32> {
+    const CLIP_BOS: u32 = 49406;
+    const CLIP_EOS: u32 = 49407;
+
+    let raw_ids = tokenizer.encode(text);
 
     let mut ids = vec![0i32; seq_len];
-    ids[0] = 49406; // BOS
+    ids[0] = CLIP_BOS as i32;
 
-    let words: Vec<&str> = text.split_whitespace().collect();
-    let mut pos = 1;
-    for word in &words {
-        if pos >= seq_len - 1 {
-            break;
-        }
-        let lower = word.to_lowercase();
-        let lower = lower.trim_matches(|c: char| !c.is_alphanumeric());
-        if let Some(&token_id) = token_map.get(&*lower) {
-            ids[pos] = token_id;
-            pos += 1;
-        }
-        // Unknown words are silently skipped
+    // Copy token IDs, leaving room for BOS at start and EOS
+    let max_content = seq_len.saturating_sub(2);
+    let content_len = raw_ids.len().min(max_content);
+    for i in 0..content_len {
+        ids[1 + i] = raw_ids[i] as i32;
     }
-    ids[pos] = 49407; // EOS
+    ids[1 + content_len] = CLIP_EOS as i32;
 
     ids
 }

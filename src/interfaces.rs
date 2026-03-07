@@ -674,10 +674,12 @@ pub struct StableDiffusionInterface {
     pub vae_decoder_weights: SuperGraphLinkTensorMap,
     // Output
     pub image_output: SuperGraphLinkTensor,
+    // Tokenizer
+    pub tokenizer: TokenizerInfo,
 }
 
 impl StableDiffusionInterface {
-    pub fn new(rng: &mut impl Rng) -> Self {
+    pub fn new(rng: &mut impl Rng, tokenizer: TokenizerInfo) -> Self {
         let mut builder = SuperGraphBuilder::new();
 
         // Create input links
@@ -960,6 +962,7 @@ impl StableDiffusionInterface {
             unet_weights,
             vae_decoder_weights,
             image_output,
+            tokenizer,
         }
     }
 

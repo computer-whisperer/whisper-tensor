@@ -188,7 +188,10 @@ impl ModelServer {
         // Create the SD interface
         let sd_interface = {
             let mut rng = rand::rng();
-            StableDiffusionInterface::new(&mut rng)
+            StableDiffusionInterface::new(
+                &mut rng,
+                TokenizerInfo::HFTokenizer("openai/clip-vit-large-patch14".to_string()),
+            )
         };
         let pipeline_name = base_path
             .file_name()
@@ -297,6 +300,7 @@ use hf_hub::{Repo, RepoType};
 use tokenizers::FromPretrainedParameters;
 use whisper_tensor::compiler::CompiledProgram;
 use whisper_tensor::interfaces::{StableDiffusionInterface, get_automatic_interfaces_from_model};
+use whisper_tensor_import::onnx_graph::TokenizerInfo;
 use whisper_tensor::model::Model;
 use whisper_tensor::numeric_tensor::NumericTensor;
 use whisper_tensor::symbolic_graph::tensor_store::TensorStoreTensorId;

@@ -188,11 +188,13 @@ impl eframe::App for WebUIApp {
                             // Prompt tokenizer loading
                             let mut needed_tokenizers = Vec::new();
                             for interface in self.loaded_models.current_interfaces.values() {
-                                if let AnyInterface::TextInferenceTokensInLogitOutInterface(
-                                    interface,
-                                ) = &interface.interface
-                                {
-                                    needed_tokenizers.push(interface.get_tokenizer().clone());
+                                match &interface.interface {
+                                    AnyInterface::TextInferenceTokensInLogitOutInterface(iface) => {
+                                        needed_tokenizers.push(iface.get_tokenizer().clone());
+                                    }
+                                    AnyInterface::StableDiffusionInterface(iface) => {
+                                        needed_tokenizers.push(iface.tokenizer.clone());
+                                    }
                                 }
                             }
                             for tokenizer_info in needed_tokenizers {
@@ -552,6 +554,7 @@ impl eframe::App for WebUIApp {
                     self.sd_explorer_app.update(
                         &mut self.app_state.sd_explorer_state,
                         &mut self.loaded_models,
+                        &mut self.loaded_tokenizers,
                         &mut self.server_request_manager,
                         ui,
                     );
