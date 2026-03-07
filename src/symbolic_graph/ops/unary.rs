@@ -213,9 +213,20 @@ impl Operation for SoftmaxOperation {
     fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
 
-        let e = milli_graph::ops::SimpleUnaryOp::exp(&mut graph, input_map[&self.input], rng);
         let axis_tid =
             milli_graph::ops::Constant::new_scalar(&mut graph, self.axis.unwrap_or(-1), rng);
+        // Subtract row max before exp to prevent overflow (critical for f16)
+        let row_max = milli_graph::ops::ReduceMax::push_new(
+            &mut graph,
+            input_map[&self.input],
+            Some(axis_tid),
+            true,
+            false,
+            rng,
+        );
+        let shifted =
+            milli_graph::ops::SimpleBinary::sub(&mut graph, input_map[&self.input], row_max, rng);
+        let e = milli_graph::ops::SimpleUnaryOp::exp(&mut graph, shifted, rng);
         let sum =
             milli_graph::ops::ReduceSum::push_new(&mut graph, e, Some(axis_tid), true, false, rng);
         let out_tid = milli_graph::ops::SimpleBinary::div(&mut graph, e, sum, rng);
@@ -285,9 +296,20 @@ impl Operation for LogSoftmaxOperation {
     fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
 
-        let e_tid = milli_graph::ops::SimpleUnaryOp::exp(&mut graph, input_map[&self.input], rng);
         let axis_tid =
             milli_graph::ops::Constant::new_scalar(&mut graph, self.axis.unwrap_or(-1), rng);
+        // Subtract row max before exp to prevent overflow (critical for f16)
+        let row_max = milli_graph::ops::ReduceMax::push_new(
+            &mut graph,
+            input_map[&self.input],
+            Some(axis_tid),
+            true,
+            false,
+            rng,
+        );
+        let shifted =
+            milli_graph::ops::SimpleBinary::sub(&mut graph, input_map[&self.input], row_max, rng);
+        let e_tid = milli_graph::ops::SimpleUnaryOp::exp(&mut graph, shifted, rng);
         let sum_tid = milli_graph::ops::ReduceSum::push_new(
             &mut graph,
             e_tid,
@@ -296,8 +318,9 @@ impl Operation for LogSoftmaxOperation {
             false,
             rng,
         );
-        let softmax_tid = milli_graph::ops::SimpleBinary::div(&mut graph, e_tid, sum_tid, rng);
-        let out_tid = milli_graph::ops::SimpleUnaryOp::ln(&mut graph, softmax_tid, rng);
+        let log_sum = milli_graph::ops::SimpleUnaryOp::ln(&mut graph, sum_tid, rng);
+        // log_softmax(x) = (x - max) - log(sum(exp(x - max)))
+        let out_tid = milli_graph::ops::SimpleBinary::sub(&mut graph, shifted, log_sum, rng);
         let mut output_map = HashMap::new();
         output_map.insert(out_tid, self.output);
         graph.set_output_map(output_map);

@@ -123,6 +123,8 @@ pub struct ScaleParams {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AbbreviatedTensorValue {
     pub value: Option<(Vec<u8>, ScaleParams)>,
+    /// Mask of non-finite values (NaN/Inf). If present, true = non-finite.
+    pub non_finite_mask: Option<Vec<bool>>,
     pub dtype: DType,
     pub shape: Vec<u64>,
 }
@@ -139,21 +141,23 @@ impl AbbreviatedTensorValue {
         tensor: &NumericTensor<DynRank>,
         digest_len: u64,
         backend: &mut EvalBackend,
-    ) -> Option<(Vec<u8>, ScaleParams)> {
+    ) -> (Option<(Vec<u8>, ScaleParams)>, Option<Vec<bool>>) {
         match tensor.dtype() {
             DType::F32 | DType::F64 | DType::BF16 | DType::F16 => {
                 // Ok
             }
             _ => {
-                return None;
+                return (None, None);
             }
         }
         let flattened_tensor = tensor.flatten().unwrap().to_dyn_rank();
-        let num_elements = flattened_tensor.shape()[0];
+        // Cast to f32 before cumsum to avoid overflow (f16 cumsum saturates at ±65504)
+        let flattened_f32 = flattened_tensor.cast(DType::F32, backend).unwrap();
+        let num_elements = flattened_f32.shape()[0];
         let digest_len = digest_len.min(num_elements);
         let digest = if num_elements > digest_len {
-            let ones = flattened_tensor.ones_like(backend).unwrap();
-            let ps = flattened_tensor
+            let ones = flattened_f32.ones_like(backend).unwrap();
+            let ps = flattened_f32
                 .cumsum(Some(0), false, false, backend)
                 .unwrap();
             let pc = ones.cumsum(Some(0), false, false, backend).unwrap();
@@ -175,18 +179,20 @@ impl AbbreviatedTensorValue {
             let cnt_k = NumericTensor::max(&tmp, &tmp2, backend).unwrap();
             NumericTensor::div(&sum_k, &cnt_k, backend).unwrap()
         } else {
-            flattened_tensor
+            flattened_f32
         };
-        let res_vec: Vec<f32> = digest
-            .to_ndarray()
-            .unwrap()
-            .flatten()
-            .cast(DType::F32)
-            .unwrap()
-            .try_to_vec()
-            .unwrap();
+        let res_vec: Vec<f32> = digest.to_ndarray().unwrap().flatten().try_to_vec().unwrap();
 
-        Some(Self::scale_and_quantize(&res_vec, ScaleMode::MinMax))
+        let has_non_finite = res_vec.iter().any(|v| !v.is_finite());
+        let non_finite_mask = if has_non_finite {
+            Some(res_vec.iter().map(|v| !v.is_finite()).collect())
+        } else {
+            None
+        };
+        (
+            Some(Self::scale_and_quantize(&res_vec, ScaleMode::MinMax)),
+            non_finite_mask,
+        )
     }
 
     /// Scale + normalize + quantize to u8.
@@ -313,9 +319,10 @@ impl AbbreviatedTensorValue {
         digest_len: u64,
         backend: &mut EvalBackend,
     ) -> Self {
-        let value = Self::get_digest(tensor, digest_len, backend);
+        let (value, non_finite_mask) = Self::get_digest(tensor, digest_len, backend);
         Self {
             value,
+            non_finite_mask,
             dtype: tensor.dtype(),
             shape: tensor.shape().to_vec(),
         }

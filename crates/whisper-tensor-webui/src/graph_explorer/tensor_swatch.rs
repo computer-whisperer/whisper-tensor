@@ -1,24 +1,40 @@
 use egui::Color32;
 use whisper_tensor_server::{AbbreviatedTensorValue, ScaleParams};
 
+/// Bright red used to highlight NaN / Inf values in tensor swatches.
+const NON_FINITE_COLOR: Color32 = Color32::from_rgb(255, 30, 30);
+
 pub(crate) fn build_tensor_swatch(
     abbreviated_tensor: &AbbreviatedTensorValue,
     width: usize,
     height: usize,
 ) -> Option<Vec<Color32>> {
     if let Some((a, _b)) = &abbreviated_tensor.value {
-        if a.len() == width * height {
-            Some(colors_from_quantized(a, Colormap::AuroraMuted))
+        let (quantized, mask) = if a.len() == width * height {
+            (a.clone(), abbreviated_tensor.non_finite_mask.clone())
         } else if a.len() < width {
-            None
+            return None;
         } else {
-            let mut values = vec![];
             let scale = (width * height) / (a.len());
-            for i in 0..width * height {
-                values.push(a[(i / scale) % a.len()]);
+            let values: Vec<u8> = (0..width * height)
+                .map(|i| a[(i / scale) % a.len()])
+                .collect();
+            let resampled_mask = abbreviated_tensor.non_finite_mask.as_ref().map(|m| {
+                (0..width * height)
+                    .map(|i| m[(i / scale) % m.len()])
+                    .collect()
+            });
+            (values, resampled_mask)
+        };
+        let mut colors = colors_from_quantized(&quantized, Colormap::AuroraMuted);
+        if let Some(mask) = mask {
+            for (i, &is_non_finite) in mask.iter().enumerate() {
+                if is_non_finite {
+                    colors[i] = NON_FINITE_COLOR;
+                }
             }
-            Some(colors_from_quantized(&values, Colormap::AuroraMuted))
         }
+        Some(colors)
     } else {
         None
     }
