@@ -1,3 +1,5 @@
+extern crate blas_src;
+
 use num_traits::Float;
 use serde::{Deserialize, Serialize};
 pub mod backends;
