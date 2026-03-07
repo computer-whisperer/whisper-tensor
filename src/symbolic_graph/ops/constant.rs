@@ -5,13 +5,13 @@ use crate::milli_graph::ops::*;
 use crate::numeric_scalar::NumericScalar;
 use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{
-    ONNXDecodingError, query_attribute_float, query_attribute_floats,
-    query_attribute_int, query_attribute_ints, query_attribute_tensor,
+    ONNXDecodingError, query_attribute_float, query_attribute_floats, query_attribute_int,
+    query_attribute_ints, query_attribute_tensor,
 };
 use crate::{DynRank, onnx};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use rand::Rng;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ConstantOfShapeOperation {
@@ -176,7 +176,10 @@ impl Operation for ConstantOperation {
             let flat = self.value.flatten();
             if let Ok(values) = TryInto::<Vec<f32>>::try_into(flat) {
                 let preview: Vec<String> = values.iter().map(|v| format!("{:.4}", v)).collect();
-                params.push(Property::new("values", PropertyValue::String(format!("[{}]", preview.join(", ")))));
+                params.push(Property::new(
+                    "values",
+                    PropertyValue::String(format!("[{}]", preview.join(", "))),
+                ));
             }
         }
 

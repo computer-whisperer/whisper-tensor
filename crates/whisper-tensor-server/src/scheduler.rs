@@ -10,13 +10,13 @@ use whisper_tensor::backends::ModelLoadedTensorCache;
 use whisper_tensor::backends::eval_backend::EvalBackend;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::compiler::CompilationSubject;
+use whisper_tensor::graph::GlobalId;
 use whisper_tensor::numeric_tensor::NumericTensor;
+use whisper_tensor::super_graph::SuperGraphContext;
 use whisper_tensor::super_graph::cache::{SuperGraphCache, SuperGraphTensorCache};
 use whisper_tensor::super_graph::data::SuperGraphData;
 use whisper_tensor::super_graph::observer::SuperGraphObserver;
-use whisper_tensor::super_graph::{SuperGraphContext};
 use whisper_tensor::{DynRank, compiler};
-use whisper_tensor::graph::GlobalId;
 use whisper_tensor_server::{
     AbbreviatedTensorReportSettings, AbbreviatedTensorValue, LoadedModelId, SuperGraphRequest,
     SuperGraphRequestBackendMode, SuperGraphResponse, SuperGraphResponseData,
@@ -208,7 +208,7 @@ pub async fn scheduler(mut input: mpsc::Receiver<SchedulerJob>, model_server: Ar
         ))
     };
     let caches = Arc::new(Mutex::new(HashMap::new()));
-    let vulkan_tensor_load_caches: Arc<Mutex<HashMap<LoadedModelId, ModelLoadedTensorCache>>> =
+    let _vulkan_tensor_load_caches: Arc<Mutex<HashMap<LoadedModelId, ModelLoadedTensorCache>>> =
         Arc::new(Mutex::new(HashMap::new()));
     loop {
         if let Some(x) = input.recv().await {

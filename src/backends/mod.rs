@@ -1,7 +1,7 @@
 use crate::DynRank;
+use crate::graph::GlobalId;
 use crate::numeric_tensor::NumericTensor;
 use std::collections::HashMap;
-use crate::graph::GlobalId;
 
 #[cfg(feature = "candle")]
 pub mod candle_backend;

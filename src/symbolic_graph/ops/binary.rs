@@ -2,13 +2,12 @@ use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::MilliOpGraph;
 use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{
-    ONNXDecodingError, query_attribute_bool, query_attribute_float,
-    query_attribute_int,
+    ONNXDecodingError, query_attribute_bool, query_attribute_float, query_attribute_int,
 };
 use crate::{milli_graph, onnx};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use rand::Rng;
 
 #[derive(Clone, Debug, PartialEq, strum_macros::Display, Serialize, Deserialize)]
 pub enum WhichBinaryOperation {
@@ -80,7 +79,10 @@ impl Node for BinaryOperation {
 
 impl Operation for BinaryOperation {
     fn parameters(&self) -> Vec<Property> {
-        vec![Property::new("operation", PropertyValue::String(self.which.to_string()))]
+        vec![Property::new(
+            "operation",
+            PropertyValue::String(self.which.to_string()),
+        )]
     }
 
     fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
@@ -93,7 +95,9 @@ impl Operation for BinaryOperation {
             WhichBinaryOperation::Sub => milli_graph::ops::SimpleBinary::sub(&mut graph, a, b, rng),
             WhichBinaryOperation::Mul => milli_graph::ops::SimpleBinary::mul(&mut graph, a, b, rng),
             WhichBinaryOperation::Div => milli_graph::ops::SimpleBinary::div(&mut graph, a, b, rng),
-            WhichBinaryOperation::MatMul => milli_graph::ops::MatMul::push_new(&mut graph, a, b, rng),
+            WhichBinaryOperation::MatMul => {
+                milli_graph::ops::MatMul::push_new(&mut graph, a, b, rng)
+            }
             WhichBinaryOperation::And => milli_graph::ops::SimpleBinary::and(&mut graph, a, b, rng),
             WhichBinaryOperation::Or => milli_graph::ops::SimpleBinary::or(&mut graph, a, b, rng),
             WhichBinaryOperation::Xor => milli_graph::ops::SimpleBinary::xor(&mut graph, a, b, rng),
@@ -106,14 +110,18 @@ impl Operation for BinaryOperation {
             WhichBinaryOperation::BitwiseXor => {
                 milli_graph::ops::SimpleBinary::bitwise_xor(&mut graph, a, b, rng)
             }
-            WhichBinaryOperation::Equal => milli_graph::ops::SimpleBinary::equal(&mut graph, a, b, rng),
+            WhichBinaryOperation::Equal => {
+                milli_graph::ops::SimpleBinary::equal(&mut graph, a, b, rng)
+            }
             WhichBinaryOperation::Greater => {
                 milli_graph::ops::SimpleBinary::greater(&mut graph, a, b, rng)
             }
             WhichBinaryOperation::GreaterOrEqual => {
                 milli_graph::ops::SimpleBinary::greater_or_equal(&mut graph, a, b, rng)
             }
-            WhichBinaryOperation::Less => milli_graph::ops::SimpleBinary::less(&mut graph, a, b, rng),
+            WhichBinaryOperation::Less => {
+                milli_graph::ops::SimpleBinary::less(&mut graph, a, b, rng)
+            }
             WhichBinaryOperation::LessOrEqual => {
                 milli_graph::ops::SimpleBinary::less_or_equal(&mut graph, a, b, rng)
             }
@@ -179,7 +187,7 @@ impl Operation for PowOperation {
             &mut graph,
             input_map[&self.input_x],
             input_map[&self.input_y],
-            rng
+            rng,
         );
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
@@ -395,7 +403,10 @@ impl Operation for ArgMaxOperation {
         vec![
             Property::new("axis", PropertyValue::Int(self.axis)),
             Property::new("keepdims", PropertyValue::Bool(self.keepdims)),
-            Property::new("select_last_index", PropertyValue::Bool(self.select_last_index)),
+            Property::new(
+                "select_last_index",
+                PropertyValue::Bool(self.select_last_index),
+            ),
         ]
     }
 
@@ -408,7 +419,7 @@ impl Operation for ArgMaxOperation {
             self.axis,
             self.keepdims,
             self.select_last_index,
-            rng
+            rng,
         );
 
         let mut output_map = HashMap::new();
@@ -479,7 +490,10 @@ impl Operation for ArgMinOperation {
         vec![
             Property::new("axis", PropertyValue::Int(self.axis)),
             Property::new("keepdims", PropertyValue::Bool(self.keepdims)),
-            Property::new("select_last_index", PropertyValue::Bool(self.select_last_index)),
+            Property::new(
+                "select_last_index",
+                PropertyValue::Bool(self.select_last_index),
+            ),
         ]
     }
 
@@ -492,7 +506,7 @@ impl Operation for ArgMinOperation {
             self.axis,
             self.keepdims,
             self.select_last_index,
-            rng
+            rng,
         );
 
         let mut output_map = HashMap::new();
@@ -552,7 +566,10 @@ impl Node for MaxOperation {
 
 impl Operation for MaxOperation {
     fn parameters(&self) -> Vec<Property> {
-        vec![Property::new("num_inputs", PropertyValue::Int(self.inputs.len() as i64))]
+        vec![Property::new(
+            "num_inputs",
+            PropertyValue::Int(self.inputs.len() as i64),
+        )]
     }
 
     fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
@@ -619,7 +636,10 @@ impl Node for MinOperation {
 
 impl Operation for MinOperation {
     fn parameters(&self) -> Vec<Property> {
-        vec![Property::new("num_inputs", PropertyValue::Int(self.inputs.len() as i64))]
+        vec![Property::new(
+            "num_inputs",
+            PropertyValue::Int(self.inputs.len() as i64),
+        )]
     }
 
     fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {

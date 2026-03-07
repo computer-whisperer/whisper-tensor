@@ -1,15 +1,15 @@
-use rand::Rng;
-use std::collections::HashMap;
 use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::ops as milli_ops;
 use crate::onnx;
 use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{
-    ONNXDecodingError, query_attribute_bool, query_attribute_float,
-    query_attribute_ints, query_attribute_string,
+    ONNXDecodingError, query_attribute_bool, query_attribute_float, query_attribute_ints,
+    query_attribute_string,
 };
+use rand::Rng;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) enum ResizeCoordinateTransformationMode {
@@ -194,14 +194,23 @@ impl Operation for ResizeOperation {
 
         let mut params = vec![
             Property::new("mode", PropertyValue::String(mode_str.to_string())),
-            Property::new("coordinate_transform", PropertyValue::String(coord_mode_str.to_string())),
+            Property::new(
+                "coordinate_transform",
+                PropertyValue::String(coord_mode_str.to_string()),
+            ),
         ];
 
         if matches!(self.mode, ResizeMode::Nearest) {
-            params.push(Property::new("nearest_mode", PropertyValue::String(nearest_mode_str.to_string())));
+            params.push(Property::new(
+                "nearest_mode",
+                PropertyValue::String(nearest_mode_str.to_string()),
+            ));
         }
         if matches!(self.mode, ResizeMode::Cubic) {
-            params.push(Property::new("cubic_coeff_a", PropertyValue::Float(self.cubic_coeff_a as f64)));
+            params.push(Property::new(
+                "cubic_coeff_a",
+                PropertyValue::Float(self.cubic_coeff_a as f64),
+            ));
         }
         if self.antialias {
             params.push(Property::new("antialias", PropertyValue::Bool(true)));
@@ -210,13 +219,25 @@ impl Operation for ResizeOperation {
             params.push(Property::new("exclude_outside", PropertyValue::Bool(true)));
         }
         if self.extrapolation_value != 0.0 {
-            params.push(Property::new("extrapolation_value", PropertyValue::Float(self.extrapolation_value as f64)));
+            params.push(Property::new(
+                "extrapolation_value",
+                PropertyValue::Float(self.extrapolation_value as f64),
+            ));
         }
         if !self.axes.is_empty() {
-            params.push(Property::new("axes", PropertyValue::IntList(self.axes.clone())));
+            params.push(Property::new(
+                "axes",
+                PropertyValue::IntList(self.axes.clone()),
+            ));
         }
-        if !matches!(self.keep_aspect_ratio_policy, ResizeKeepAspectRatioPolicy::Stretch) {
-            params.push(Property::new("keep_aspect_ratio_policy", PropertyValue::String(aspect_policy_str.to_string())));
+        if !matches!(
+            self.keep_aspect_ratio_policy,
+            ResizeKeepAspectRatioPolicy::Stretch
+        ) {
+            params.push(Property::new(
+                "keep_aspect_ratio_policy",
+                PropertyValue::String(aspect_policy_str.to_string()),
+            ));
         }
 
         params
@@ -231,12 +252,24 @@ impl Operation for ResizeOperation {
             ResizeMode::Cubic => milli_ops::ResizeMode::Cubic,
         };
         let milli_coord = match &self.coordinate_transformation_mode {
-            ResizeCoordinateTransformationMode::HalfPixel => milli_ops::ResizeCoordTransform::HalfPixel,
-            ResizeCoordinateTransformationMode::HalfPixelSymmetric => milli_ops::ResizeCoordTransform::HalfPixelSymmetric,
-            ResizeCoordinateTransformationMode::PytorchHalfPixel => milli_ops::ResizeCoordTransform::PytorchHalfPixel,
-            ResizeCoordinateTransformationMode::AlignCorners => milli_ops::ResizeCoordTransform::AlignCorners,
-            ResizeCoordinateTransformationMode::Asymmetric => milli_ops::ResizeCoordTransform::Asymmetric,
-            ResizeCoordinateTransformationMode::TFCropAndResize => milli_ops::ResizeCoordTransform::TFCropAndResize,
+            ResizeCoordinateTransformationMode::HalfPixel => {
+                milli_ops::ResizeCoordTransform::HalfPixel
+            }
+            ResizeCoordinateTransformationMode::HalfPixelSymmetric => {
+                milli_ops::ResizeCoordTransform::HalfPixelSymmetric
+            }
+            ResizeCoordinateTransformationMode::PytorchHalfPixel => {
+                milli_ops::ResizeCoordTransform::PytorchHalfPixel
+            }
+            ResizeCoordinateTransformationMode::AlignCorners => {
+                milli_ops::ResizeCoordTransform::AlignCorners
+            }
+            ResizeCoordinateTransformationMode::Asymmetric => {
+                milli_ops::ResizeCoordTransform::Asymmetric
+            }
+            ResizeCoordinateTransformationMode::TFCropAndResize => {
+                milli_ops::ResizeCoordTransform::TFCropAndResize
+            }
         };
         let milli_nearest = match &self.nearest_mode {
             ResizeNearestMode::RoundPreferFloor => milli_ops::ResizeNearestMode::RoundPreferFloor,
@@ -246,8 +279,12 @@ impl Operation for ResizeOperation {
         };
         let milli_policy = match &self.keep_aspect_ratio_policy {
             ResizeKeepAspectRatioPolicy::Stretch => milli_ops::ResizeKeepAspectRatioPolicy::Stretch,
-            ResizeKeepAspectRatioPolicy::NotLarger => milli_ops::ResizeKeepAspectRatioPolicy::NotLarger,
-            ResizeKeepAspectRatioPolicy::NotSmaller => milli_ops::ResizeKeepAspectRatioPolicy::NotSmaller,
+            ResizeKeepAspectRatioPolicy::NotLarger => {
+                milli_ops::ResizeKeepAspectRatioPolicy::NotLarger
+            }
+            ResizeKeepAspectRatioPolicy::NotSmaller => {
+                milli_ops::ResizeKeepAspectRatioPolicy::NotSmaller
+            }
         };
 
         let out = milli_ops::Resize::push_new(

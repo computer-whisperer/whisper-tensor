@@ -6,11 +6,11 @@ use crate::milli_graph::observer::MilliOpGraphObserver;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::numeric_tensor::NumericTensor;
 use crate::tensor_info::{TensorInfo, TensorInfoError};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::time::Instant;
-use rand::Rng;
 
 pub mod observer;
 pub mod ops;
@@ -93,12 +93,24 @@ pub struct TrainingMetadata {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TensorRole {
     Loss,
-    DataInput { name: String },
+    DataInput {
+        name: String,
+    },
     Parameter,
-    Gradient { of_param: GlobalId },
-    UpdatedParameter { of_param: GlobalId },
-    OptimizerState { for_param: GlobalId, state_name: String },
-    UpdatedOptimizerState { for_param: GlobalId, state_name: String },
+    Gradient {
+        of_param: GlobalId,
+    },
+    UpdatedParameter {
+        of_param: GlobalId,
+    },
+    OptimizerState {
+        for_param: GlobalId,
+        state_name: String,
+    },
+    UpdatedOptimizerState {
+        for_param: GlobalId,
+        state_name: String,
+    },
 }
 
 /// Metadata about a loss graph's inputs/outputs.
@@ -159,10 +171,28 @@ pub struct OptimizerGenOptions {
 
 /// Optimizer algorithm selection.
 pub enum OptimizerKind {
-    SGD { lr: f32 },
-    SGDMomentum { lr: f32, momentum: f32, nesterov: bool },
-    Adam { lr: f32, beta1: f32, beta2: f32, epsilon: f32, weight_decay: f32 },
-    AdamW { lr: f32, beta1: f32, beta2: f32, epsilon: f32, weight_decay: f32 },
+    SGD {
+        lr: f32,
+    },
+    SGDMomentum {
+        lr: f32,
+        momentum: f32,
+        nesterov: bool,
+    },
+    Adam {
+        lr: f32,
+        beta1: f32,
+        beta2: f32,
+        epsilon: f32,
+        weight_decay: f32,
+    },
+    AdamW {
+        lr: f32,
+        beta1: f32,
+        beta2: f32,
+        epsilon: f32,
+        weight_decay: f32,
+    },
 }
 
 /// Error type for milli graph generation.
@@ -234,15 +264,24 @@ pub struct MilliOpGraph {
 }
 
 impl MilliOpGraph {
-    pub fn new(inputs: impl IntoIterator<Item = GlobalId>, rng: &mut impl Rng) -> (Self, HashMap<GlobalId, GlobalId>) {
+    pub fn new(
+        inputs: impl IntoIterator<Item = GlobalId>,
+        rng: &mut impl Rng,
+    ) -> (Self, HashMap<GlobalId, GlobalId>) {
         let mut input_map = HashMap::new();
         let mut input_ordering = Vec::new();
         let mut tensors = HashMap::new();
         for input in inputs {
-            input_ordering.push(input.clone());
+            input_ordering.push(input);
             let global_id = GlobalId::new(rng);
-            input_map.insert(input.clone(), global_id);
-            tensors.insert(global_id, MilliOpGraphTensor { global_id, source_tensor: None });
+            input_map.insert(input, global_id);
+            tensors.insert(
+                global_id,
+                MilliOpGraphTensor {
+                    global_id,
+                    source_tensor: None,
+                },
+            );
         }
         (
             Self {
@@ -285,7 +324,13 @@ impl MilliOpGraph {
         let internal_id = GlobalId::new(rng);
         self.input_map.insert(external_id, internal_id);
         self.input_ordering.push(external_id);
-        self.tensors.insert(internal_id, MilliOpGraphTensor { global_id: internal_id, source_tensor: Some(external_id) });
+        self.tensors.insert(
+            internal_id,
+            MilliOpGraphTensor {
+                global_id: internal_id,
+                source_tensor: Some(external_id),
+            },
+        );
         internal_id
     }
 
@@ -323,10 +368,10 @@ impl MilliOpGraph {
             if !input_internals.contains(&tensor_id) {
                 let fresh_id = self.get_new_tensor_id(rng);
                 // Propagate source_tensor from the other graph's tensor
-                if let Some(src) = tensor.source_tensor {
-                    if let Some(t) = self.tensors.get_mut(&fresh_id) {
-                        t.source_tensor = Some(src);
-                    }
+                if let Some(src) = tensor.source_tensor
+                    && let Some(t) = self.tensors.get_mut(&fresh_id)
+                {
+                    t.source_tensor = Some(src);
                 }
                 tensor_map.insert(tensor_id, fresh_id);
             }
@@ -378,10 +423,7 @@ impl MilliOpGraph {
         }
     }
 
-    pub fn set_output_map(
-        &mut self,
-        output_map: impl IntoIterator<Item = (GlobalId, GlobalId)>,
-    ) {
+    pub fn set_output_map(&mut self, output_map: impl IntoIterator<Item = (GlobalId, GlobalId)>) {
         assert!(self.output_map.is_none());
         self.output_map = Some(output_map.into_iter().collect());
     }
@@ -399,7 +441,13 @@ impl MilliOpGraph {
 
     pub fn get_new_tensor_id(&mut self, rng: &mut impl Rng) -> GlobalId {
         let global_id = GlobalId::new(rng);
-        self.tensors.insert(global_id, MilliOpGraphTensor { global_id, source_tensor: None });
+        self.tensors.insert(
+            global_id,
+            MilliOpGraphTensor {
+                global_id,
+                source_tensor: None,
+            },
+        );
         global_id
     }
 
@@ -442,13 +490,15 @@ impl MilliOpGraph {
     }
 
     pub fn ops_in_group(&self, group_id: GlobalId) -> impl Iterator<Item = GlobalId> + '_ {
-        self.op_to_group.iter()
+        self.op_to_group
+            .iter()
             .filter(move |&(_, &gid)| gid == group_id)
             .map(|(&op_id, _)| op_id)
     }
 
     pub fn groups_by_phase(&self, phase: MilliOpPhase) -> impl Iterator<Item = GlobalId> + '_ {
-        self.groups.iter()
+        self.groups
+            .iter()
             .filter(move |(_, g)| g.phase == phase)
             .map(|(&id, _)| id)
     }
@@ -460,7 +510,13 @@ impl MilliOpGraph {
         let id = GlobalId::new(rng);
         self.input_map.insert(id, id);
         self.input_ordering.push(id);
-        self.tensors.insert(id, MilliOpGraphTensor { global_id: id, source_tensor: None });
+        self.tensors.insert(
+            id,
+            MilliOpGraphTensor {
+                global_id: id,
+                source_tensor: None,
+            },
+        );
         id
     }
 
@@ -516,12 +572,17 @@ impl MilliOpGraph {
     }
 
     pub fn gradient_of(&self, param: GlobalId) -> Option<GlobalId> {
-        self.training_metadata.as_ref()?.param_to_grad.get(&param).copied()
+        self.training_metadata
+            .as_ref()?
+            .param_to_grad
+            .get(&param)
+            .copied()
     }
 
     pub fn param_of_gradient(&self, grad: GlobalId) -> Option<GlobalId> {
         let meta = self.training_metadata.as_ref()?;
-        meta.param_to_grad.iter()
+        meta.param_to_grad
+            .iter()
             .find(|&(_, &g)| g == grad)
             .map(|(&p, _)| p)
     }
@@ -556,7 +617,8 @@ impl MilliOpGraph {
         let shifted = ops::SimpleBinary::sub(&mut graph, logits, max_logits, rng);
         //   log_sum_exp = log(sum(exp(shifted), axis=-1, keepdims=true))
         let exp_shifted = ops::SimpleUnaryOp::exp(&mut graph, shifted, rng);
-        let sum_exp = ops::ReduceSum::push_new(&mut graph, exp_shifted, Some(axis), true, false, rng);
+        let sum_exp =
+            ops::ReduceSum::push_new(&mut graph, exp_shifted, Some(axis), true, false, rng);
         let log_sum_exp = ops::SimpleUnaryOp::ln(&mut graph, sum_exp, rng);
         //   log_probs = shifted - log_sum_exp
         let log_probs = ops::SimpleBinary::sub(&mut graph, shifted, log_sum_exp, rng);
@@ -570,11 +632,14 @@ impl MilliOpGraph {
 
         graph.set_outputs(vec![loss]);
 
-        (graph, LossGraphInfo {
-            predictions_input: logits,
-            targets_input: targets,
-            loss_output: loss,
-        })
+        (
+            graph,
+            LossGraphInfo {
+                predictions_input: logits,
+                targets_input: targets,
+                loss_output: loss,
+            },
+        )
     }
 
     /// Mean squared error loss for regression.
@@ -591,11 +656,14 @@ impl MilliOpGraph {
 
         graph.set_outputs(vec![loss]);
 
-        (graph, LossGraphInfo {
-            predictions_input: predictions,
-            targets_input: targets,
-            loss_output: loss,
-        })
+        (
+            graph,
+            LossGraphInfo {
+                predictions_input: predictions,
+                targets_input: targets,
+                loss_output: loss,
+            },
+        )
     }
 
     /// L1 / Mean Absolute Error loss.
@@ -612,11 +680,14 @@ impl MilliOpGraph {
 
         graph.set_outputs(vec![loss]);
 
-        (graph, LossGraphInfo {
-            predictions_input: predictions,
-            targets_input: targets,
-            loss_output: loss,
-        })
+        (
+            graph,
+            LossGraphInfo {
+                predictions_input: predictions,
+                targets_input: targets,
+                loss_output: loss,
+            },
+        )
     }
 
     #[allow(clippy::type_complexity)]
@@ -625,7 +696,8 @@ impl MilliOpGraph {
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
         observer: &mut T,
         backend: &mut EvalBackend,
-    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError> {
+    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
+    {
         assert!(self.output_map.is_some());
 
         let mut intermediate_values = HashMap::new();
@@ -638,12 +710,7 @@ impl MilliOpGraph {
             let start_instant = Instant::now();
             let out_vec: Vec<_> = op.eval(&intermediate_values, backend)?.collect();
             let end_instant = Instant::now();
-            observer.on_node_executed(
-                &[op.global_id()],
-                start_instant,
-                end_instant,
-                backend,
-            );
+            observer.on_node_executed(&[op.global_id()], start_instant, end_instant, backend);
             for (tensor_id, value) in out_vec {
                 observer.on_tensor_assigned(
                     &[self.tensors[&tensor_id].global_id()],
@@ -656,15 +723,14 @@ impl MilliOpGraph {
 
         let mut outputs = HashMap::new();
         for (a, b) in self.output_map.as_ref().unwrap() {
-            outputs.insert(b.clone(), intermediate_values[a].clone());
+            outputs.insert(*b, intermediate_values[a].clone());
         }
 
         Ok(Box::new(outputs.into_iter()))
     }
 }
 
-impl Graph for MilliOpGraph
-{
+impl Graph for MilliOpGraph {
     type Error = ();
     type AnyNode = AnyMilliOp;
     type AnyLink = MilliOpGraphTensor;
@@ -690,9 +756,7 @@ impl Graph for MilliOpGraph
     }
 
     fn input_link_ids(&self) -> impl Iterator<Item = (GlobalId, GlobalId)> {
-        self.input_ordering
-            .iter()
-            .map(|x| (x.clone(), self.input_map[x]))
+        self.input_ordering.iter().map(|x| (*x, self.input_map[x]))
     }
 
     fn constant_link_ids(&self) -> impl Iterator<Item = GlobalId> {
@@ -717,7 +781,7 @@ impl Graph for MilliOpGraph
                     .as_ref()
                     .unwrap()
                     .iter()
-                    .map(|(tid, id)| (id.clone(), *tid)),
+                    .map(|(tid, id)| (*id, *tid)),
             )
         }
         output.into_iter()
@@ -743,10 +807,7 @@ pub struct BroadcastAnalysis {
 ///
 /// Returns `None` if rank is unknown for either input.
 /// Used at generation time to insert correct ReduceSum ops in backward pass.
-pub fn analyze_broadcast(
-    a_shape: &TensorInfo,
-    b_shape: &TensorInfo,
-) -> Option<BroadcastAnalysis> {
+pub fn analyze_broadcast(a_shape: &TensorInfo, b_shape: &TensorInfo) -> Option<BroadcastAnalysis> {
     let a_rank = a_shape.rank_if_known()?;
     let b_rank = b_shape.rank_if_known()?;
     let target_rank = a_rank.max(b_rank);
@@ -803,10 +864,15 @@ pub fn generate_milli_backward(
     let mut grad_map = initial_grad_map.clone();
 
     // Collect ops in this group, sorted by op_ordering position, reversed
-    let mut ordered: Vec<(usize, GlobalId)> = graph.op_to_group.iter()
+    let mut ordered: Vec<(usize, GlobalId)> = graph
+        .op_to_group
+        .iter()
         .filter(|&(_, &gid)| gid == group_id)
         .filter_map(|(&op_id, _)| {
-            graph.op_ordering.iter().position(|id| *id == op_id)
+            graph
+                .op_ordering
+                .iter()
+                .position(|id| *id == op_id)
                 .map(|pos| (pos, op_id))
         })
         .collect();
@@ -817,17 +883,21 @@ pub fn generate_milli_backward(
         let op = graph.ops[&op_id].clone();
 
         // Collect output gradients for this op
-        let output_grads: HashMap<GlobalId, GlobalId> = op.outputs()
+        let output_grads: HashMap<GlobalId, GlobalId> = op
+            .outputs()
             .filter_map(|out_id| grad_map.get(&out_id).map(|&g| (out_id, g)))
             .collect();
 
-        if output_grads.is_empty() { continue; }
+        if output_grads.is_empty() {
+            continue;
+        }
 
         // Generate backward ops (added directly to the graph)
         if let Some(input_grads) = op.backward(&output_grads, graph, rng) {
             // Accumulate gradients (handles fan-out)
             for (input_id, grad_id) in input_grads {
-                grad_map.entry(input_id)
+                grad_map
+                    .entry(input_id)
                     .and_modify(|existing| {
                         let sum = ops::SimpleBinary::add(graph, *existing, grad_id, rng);
                         *existing = sum;
@@ -860,19 +930,22 @@ pub fn generate_optimizer_ops(
 
     // Generate shared state for Adam/AdamW
     let shared = match &options.kind {
-        OptimizerKind::Adam { beta1, beta2, .. }
-        | OptimizerKind::AdamW { beta1, beta2, .. } => {
+        OptimizerKind::Adam { beta1, beta2, .. } | OptimizerKind::AdamW { beta1, beta2, .. } => {
             graph.set_default_group(Some(shared_group));
 
             // t input (timestep)
             let t_in = graph.add_input(rng);
-            training_meta.global_state_inputs.insert("timestep".into(), t_in);
+            training_meta
+                .global_state_inputs
+                .insert("timestep".into(), t_in);
 
             let one_i = ops::Constant::new_scalar(graph, 1i64, rng);
             let t_new = ops::SimpleBinary::add(graph, t_in, one_i, rng);
             // Cast to float for pow
             let t_float = ops::Cast::push_new(graph, t_new, crate::dtype::DType::F32, rng);
-            training_meta.global_state_outputs.insert("timestep".into(), t_new);
+            training_meta
+                .global_state_outputs
+                .insert("timestep".into(), t_new);
 
             let beta1_c = ops::Constant::new_scalar(graph, *beta1, rng);
             let beta2_c = ops::Constant::new_scalar(graph, *beta2, rng);
@@ -890,16 +963,21 @@ pub fn generate_optimizer_ops(
 
             graph.set_default_group(None);
             Some(AdamShared {
-                beta1_c, beta2_c,
-                one_minus_beta1, one_minus_beta2,
-                one_minus_beta1_t, one_minus_beta2_t,
+                beta1_c,
+                beta2_c,
+                one_minus_beta1,
+                one_minus_beta2,
+                one_minus_beta1_t,
+                one_minus_beta2_t,
             })
         }
         _ => None,
     };
 
     // Generate per-parameter update ops
-    let params: Vec<(GlobalId, GlobalId)> = training_meta.param_to_grad.iter()
+    let params: Vec<(GlobalId, GlobalId)> = training_meta
+        .param_to_grad
+        .iter()
         .map(|(&p, &g)| (p, g))
         .collect();
 
@@ -920,14 +998,18 @@ pub fn generate_optimizer_ops(
                 let scaled_grad = ops::SimpleBinary::mul(graph, lr_c, grad_id, rng);
                 ops::SimpleBinary::sub(graph, param_id, scaled_grad, rng)
             }
-            OptimizerKind::SGDMomentum { lr, momentum, nesterov } => {
+            OptimizerKind::SGDMomentum {
+                lr,
+                momentum,
+                nesterov,
+            } => {
                 // v_new = momentum * v + grad
                 // if nesterov: new_param = param - lr * (momentum * v_new + grad)
                 // else:        new_param = param - lr * v_new
                 let v_in = graph.add_input(rng);
-                training_meta.optimizer_state_inputs.insert(
-                    (param_id, "velocity".into()), v_in,
-                );
+                training_meta
+                    .optimizer_state_inputs
+                    .insert((param_id, "velocity".into()), v_in);
 
                 let mom_c = ops::Constant::new_scalar(graph, *momentum, rng);
                 let lr_c = ops::Constant::new_scalar(graph, *lr, rng);
@@ -935,9 +1017,9 @@ pub fn generate_optimizer_ops(
                 let mom_v = ops::SimpleBinary::mul(graph, mom_c, v_in, rng);
                 let v_new = ops::SimpleBinary::add(graph, mom_v, grad_id, rng);
 
-                training_meta.optimizer_state_outputs.insert(
-                    (param_id, "velocity".into()), v_new,
-                );
+                training_meta
+                    .optimizer_state_outputs
+                    .insert((param_id, "velocity".into()), v_new);
 
                 let update = if *nesterov {
                     let mom_v_new = ops::SimpleBinary::mul(graph, mom_c, v_new, rng);
@@ -949,20 +1031,30 @@ pub fn generate_optimizer_ops(
                 let scaled = ops::SimpleBinary::mul(graph, lr_c, update, rng);
                 ops::SimpleBinary::sub(graph, param_id, scaled, rng)
             }
-            OptimizerKind::Adam { lr, epsilon, weight_decay, .. }
-            | OptimizerKind::AdamW { lr, epsilon, weight_decay, .. } => {
+            OptimizerKind::Adam {
+                lr,
+                epsilon,
+                weight_decay,
+                ..
+            }
+            | OptimizerKind::AdamW {
+                lr,
+                epsilon,
+                weight_decay,
+                ..
+            } => {
                 let shared = shared.as_ref().unwrap();
                 let is_adamw = matches!(options.kind, OptimizerKind::AdamW { .. });
 
                 // State inputs
                 let m_in = graph.add_input(rng);
                 let v_in = graph.add_input(rng);
-                training_meta.optimizer_state_inputs.insert(
-                    (param_id, "m".into()), m_in,
-                );
-                training_meta.optimizer_state_inputs.insert(
-                    (param_id, "v".into()), v_in,
-                );
+                training_meta
+                    .optimizer_state_inputs
+                    .insert((param_id, "m".into()), m_in);
+                training_meta
+                    .optimizer_state_inputs
+                    .insert((param_id, "v".into()), v_in);
 
                 let lr_c = ops::Constant::new_scalar(graph, *lr, rng);
                 let eps_c = ops::Constant::new_scalar(graph, *epsilon, rng);
@@ -978,37 +1070,29 @@ pub fn generate_optimizer_ops(
 
                 // m_new = β₁ * m + (1 - β₁) * grad
                 let beta1_m = ops::SimpleBinary::mul(graph, shared.beta1_c, m_in, rng);
-                let one_minus_beta1_grad = ops::SimpleBinary::mul(
-                    graph, shared.one_minus_beta1, effective_grad, rng,
-                );
+                let one_minus_beta1_grad =
+                    ops::SimpleBinary::mul(graph, shared.one_minus_beta1, effective_grad, rng);
                 let m_new = ops::SimpleBinary::add(graph, beta1_m, one_minus_beta1_grad, rng);
 
                 // v_new = β₂ * v + (1 - β₂) * grad²
                 let beta2_v = ops::SimpleBinary::mul(graph, shared.beta2_c, v_in, rng);
-                let grad_sq = ops::SimpleBinary::mul(
-                    graph, effective_grad, effective_grad, rng,
-                );
-                let one_minus_beta2_gradsq = ops::SimpleBinary::mul(
-                    graph, shared.one_minus_beta2, grad_sq, rng,
-                );
+                let grad_sq = ops::SimpleBinary::mul(graph, effective_grad, effective_grad, rng);
+                let one_minus_beta2_gradsq =
+                    ops::SimpleBinary::mul(graph, shared.one_minus_beta2, grad_sq, rng);
                 let v_new = ops::SimpleBinary::add(graph, beta2_v, one_minus_beta2_gradsq, rng);
 
-                training_meta.optimizer_state_outputs.insert(
-                    (param_id, "m".into()), m_new,
-                );
-                training_meta.optimizer_state_outputs.insert(
-                    (param_id, "v".into()), v_new,
-                );
+                training_meta
+                    .optimizer_state_outputs
+                    .insert((param_id, "m".into()), m_new);
+                training_meta
+                    .optimizer_state_outputs
+                    .insert((param_id, "v".into()), v_new);
 
                 // Bias-corrected estimates
                 // m_hat = m_new / (1 - β₁^t)
-                let m_hat = ops::SimpleBinary::div(
-                    graph, m_new, shared.one_minus_beta1_t, rng,
-                );
+                let m_hat = ops::SimpleBinary::div(graph, m_new, shared.one_minus_beta1_t, rng);
                 // v_hat = v_new / (1 - β₂^t)
-                let v_hat = ops::SimpleBinary::div(
-                    graph, v_new, shared.one_minus_beta2_t, rng,
-                );
+                let v_hat = ops::SimpleBinary::div(graph, v_new, shared.one_minus_beta2_t, rng);
 
                 // update = lr * m_hat / (sqrt(v_hat) + ε)
                 let sqrt_v = ops::SimpleUnaryOp::sqrt(graph, v_hat, rng);
@@ -1045,7 +1129,6 @@ struct AdamShared {
     one_minus_beta2_t: GlobalId,
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1067,8 +1150,7 @@ mod tests {
         let ext_sum_xy = GlobalId::new(rng); // output of graph A
 
         // Build graph A: add(x, y) -> sum_xy
-        let (mut graph_a, a_input_map) =
-            MilliOpGraph::new([ext_x, ext_y], rng);
+        let (mut graph_a, a_input_map) = MilliOpGraph::new([ext_x, ext_y], rng);
         let a_x = a_input_map[&ext_x];
         let a_y = a_input_map[&ext_y];
         let a_out = SimpleBinary::add(&mut graph_a, a_x, a_y, rng);
@@ -1078,8 +1160,7 @@ mod tests {
 
         // Build graph B: add(sum_xy, const(10)) -> final_out
         let ext_final = GlobalId::new(rng);
-        let (mut graph_b, b_input_map) =
-            MilliOpGraph::new([ext_sum_xy], rng);
+        let (mut graph_b, b_input_map) = MilliOpGraph::new([ext_sum_xy], rng);
         let b_in = b_input_map[&ext_sum_xy];
         let b_const = Constant::push_new(
             &mut graph_b,
@@ -1128,7 +1209,10 @@ mod tests {
         );
 
         let mut backend = EvalBackend::NDArray;
-        let results: HashMap<_, _> = combined.eval(&inputs, &mut (), &mut backend).unwrap().collect();
+        let results: HashMap<_, _> = combined
+            .eval(&inputs, &mut (), &mut backend)
+            .unwrap()
+            .collect();
         let result = &results[&ext_final];
         let values: Vec<f32> = result.flatten().unwrap().try_into().unwrap();
         assert_eq!(values, vec![18.0f32]);
@@ -1192,7 +1276,10 @@ mod tests {
 
         // Verify group metadata
         assert_eq!(graph.get_group(g1).unwrap().label.as_deref(), Some("conv1"));
-        assert_eq!(graph.get_group(g2).unwrap().label.as_deref(), Some("conv1_grad"));
+        assert_eq!(
+            graph.get_group(g2).unwrap().label.as_deref(),
+            Some("conv1_grad")
+        );
 
         // Suppress unused warnings
         let _ = (out1, const_tensor);
@@ -1219,7 +1306,10 @@ mod tests {
         assert!(matches!(graph.tensor_role(loss_id), Some(TensorRole::Loss)));
 
         // Parameter role
-        assert!(matches!(graph.tensor_role(param_id), Some(TensorRole::Parameter)));
+        assert!(matches!(
+            graph.tensor_role(param_id),
+            Some(TensorRole::Parameter)
+        ));
 
         // Gradient role
         match graph.tensor_role(grad_id) {
@@ -1253,7 +1343,10 @@ mod tests {
         inputs.insert(loss_info.predictions_input, predictions);
         inputs.insert(loss_info.targets_input, targets);
         let mut backend = EvalBackend::NDArray;
-        let results: HashMap<_, _> = graph.eval(&inputs, &mut (), &mut backend).unwrap().collect();
+        let results: HashMap<_, _> = graph
+            .eval(&inputs, &mut (), &mut backend)
+            .unwrap()
+            .collect();
         let result = &results[&loss_info.loss_output];
         let values: Vec<f32> = result.flatten().unwrap().try_into().unwrap();
         assert_eq!(values.len(), 1);
@@ -1267,23 +1360,19 @@ mod tests {
 
         // batch=1, 3 classes. logits=[0, 0, 100], target=[0, 0, 1] (class 2)
         // Correct class has overwhelming logit → loss ≈ 0
-        let logits = NumericTensor::<DynRank>::from_vec_shape(
-            vec![0.0f32, 0.0, 100.0], vec![1, 3],
-        ).unwrap();
-        let targets = NumericTensor::<DynRank>::from_vec_shape(
-            vec![0.0f32, 0.0, 1.0], vec![1, 3],
-        ).unwrap();
+        let logits =
+            NumericTensor::<DynRank>::from_vec_shape(vec![0.0f32, 0.0, 100.0], vec![1, 3]).unwrap();
+        let targets =
+            NumericTensor::<DynRank>::from_vec_shape(vec![0.0f32, 0.0, 1.0], vec![1, 3]).unwrap();
         let loss = eval_loss(&graph, &info, logits, targets);
         assert!(loss.abs() < 1e-4, "expected ~0, got {}", loss);
 
         // Wrong class: logits=[100, 0, 0], target=[0, 0, 1] (class 2)
         // Correct class has logit 0, dominant class has logit 100 → loss ≈ 100
-        let logits2 = NumericTensor::<DynRank>::from_vec_shape(
-            vec![100.0f32, 0.0, 0.0], vec![1, 3],
-        ).unwrap();
-        let targets2 = NumericTensor::<DynRank>::from_vec_shape(
-            vec![0.0f32, 0.0, 1.0], vec![1, 3],
-        ).unwrap();
+        let logits2 =
+            NumericTensor::<DynRank>::from_vec_shape(vec![100.0f32, 0.0, 0.0], vec![1, 3]).unwrap();
+        let targets2 =
+            NumericTensor::<DynRank>::from_vec_shape(vec![0.0f32, 0.0, 1.0], vec![1, 3]).unwrap();
         let loss2 = eval_loss(&graph, &info, logits2, targets2);
         assert!(loss2 > 90.0, "expected ~100, got {}", loss2);
     }
@@ -1294,22 +1383,18 @@ mod tests {
         let (graph, info) = MilliOpGraph::mse_loss(rng);
 
         // predictions=[1,2,3], targets=[1,2,3] → MSE = 0
-        let preds = NumericTensor::<DynRank>::from_vec_shape(
-            vec![1.0f32, 2.0, 3.0], vec![1, 3],
-        ).unwrap();
-        let targets = NumericTensor::<DynRank>::from_vec_shape(
-            vec![1.0f32, 2.0, 3.0], vec![1, 3],
-        ).unwrap();
+        let preds =
+            NumericTensor::<DynRank>::from_vec_shape(vec![1.0f32, 2.0, 3.0], vec![1, 3]).unwrap();
+        let targets =
+            NumericTensor::<DynRank>::from_vec_shape(vec![1.0f32, 2.0, 3.0], vec![1, 3]).unwrap();
         let loss = eval_loss(&graph, &info, preds, targets);
         assert!(loss.abs() < 1e-6, "expected 0, got {}", loss);
 
         // predictions=[1,2,3], targets=[4,5,6] → diffs=[3,3,3], sq=[9,9,9], mean=9
-        let preds2 = NumericTensor::<DynRank>::from_vec_shape(
-            vec![1.0f32, 2.0, 3.0], vec![1, 3],
-        ).unwrap();
-        let targets2 = NumericTensor::<DynRank>::from_vec_shape(
-            vec![4.0f32, 5.0, 6.0], vec![1, 3],
-        ).unwrap();
+        let preds2 =
+            NumericTensor::<DynRank>::from_vec_shape(vec![1.0f32, 2.0, 3.0], vec![1, 3]).unwrap();
+        let targets2 =
+            NumericTensor::<DynRank>::from_vec_shape(vec![4.0f32, 5.0, 6.0], vec![1, 3]).unwrap();
         let loss2 = eval_loss(&graph, &info, preds2, targets2);
         assert!((loss2 - 9.0).abs() < 1e-5, "expected 9, got {}", loss2);
     }
@@ -1320,25 +1405,26 @@ mod tests {
         let (graph, info) = MilliOpGraph::l1_loss(rng);
 
         // predictions=[1,2,3], targets=[1,2,3] → L1 = 0
-        let preds = NumericTensor::<DynRank>::from_vec_shape(
-            vec![1.0f32, 2.0, 3.0], vec![1, 3],
-        ).unwrap();
-        let targets = NumericTensor::<DynRank>::from_vec_shape(
-            vec![1.0f32, 2.0, 3.0], vec![1, 3],
-        ).unwrap();
+        let preds =
+            NumericTensor::<DynRank>::from_vec_shape(vec![1.0f32, 2.0, 3.0], vec![1, 3]).unwrap();
+        let targets =
+            NumericTensor::<DynRank>::from_vec_shape(vec![1.0f32, 2.0, 3.0], vec![1, 3]).unwrap();
         let loss = eval_loss(&graph, &info, preds, targets);
         assert!(loss.abs() < 1e-6, "expected 0, got {}", loss);
 
         // predictions=[1,2,3], targets=[4,6,9] → diffs=[3,4,6], mean=13/3≈4.333
-        let preds2 = NumericTensor::<DynRank>::from_vec_shape(
-            vec![1.0f32, 2.0, 3.0], vec![1, 3],
-        ).unwrap();
-        let targets2 = NumericTensor::<DynRank>::from_vec_shape(
-            vec![4.0f32, 6.0, 9.0], vec![1, 3],
-        ).unwrap();
+        let preds2 =
+            NumericTensor::<DynRank>::from_vec_shape(vec![1.0f32, 2.0, 3.0], vec![1, 3]).unwrap();
+        let targets2 =
+            NumericTensor::<DynRank>::from_vec_shape(vec![4.0f32, 6.0, 9.0], vec![1, 3]).unwrap();
         let loss2 = eval_loss(&graph, &info, preds2, targets2);
         let expected = 13.0f32 / 3.0;
-        assert!((loss2 - expected).abs() < 1e-5, "expected {}, got {}", expected, loss2);
+        assert!(
+            (loss2 - expected).abs() < 1e-5,
+            "expected {}, got {}",
+            expected,
+            loss2
+        );
     }
 
     #[test]
@@ -1406,7 +1492,7 @@ mod tests {
     // Finite difference gradient tests for Phase 5 backward ops
     // ============================================================
 
-    use crate::milli_graph::ops::{SimpleUnaryOp, ReduceSum, ReduceMean, ClampMin, MatMul};
+    use crate::milli_graph::ops::{ClampMin, MatMul, ReduceMean, ReduceSum, SimpleUnaryOp};
 
     /// Helper: build a graph that applies `build_fn` to inputs, reduces to scalar via ReduceSum,
     /// then run forward to get the scalar output. Returns the scalar value.
@@ -1443,13 +1529,18 @@ mod tests {
         for (i, ext) in ext_ids.iter().enumerate() {
             let shape_u64: Vec<u64> = input_shapes[i].iter().map(|&s| s as u64).collect();
             let t = NumericTensor::<DynRank>::from_vec_shape(
-                input_values[i].clone(), input_shapes[i].clone(),
-            ).unwrap();
+                input_values[i].clone(),
+                input_shapes[i].clone(),
+            )
+            .unwrap();
             inputs.insert(*ext, t);
         }
 
         let mut backend = EvalBackend::NDArray;
-        let results: HashMap<_, _> = graph.eval(&inputs, &mut (), &mut backend).unwrap().collect();
+        let results: HashMap<_, _> = graph
+            .eval(&inputs, &mut (), &mut backend)
+            .unwrap()
+            .collect();
         let val: Vec<f32> = results[&ext_out].flatten().unwrap().try_into().unwrap();
         val[0]
     }
@@ -1492,14 +1583,16 @@ mod tests {
         let ones_data = NDArrayNumericTensor::<DynRank>::from_vec_shape(
             vec![1.0f32; input_values.len()],
             &input_shape.iter().map(|&s| s as u64).collect::<Vec<_>>(),
-        ).unwrap();
+        )
+        .unwrap();
         let ones = Constant::push_new(&mut graph, ones_data, rng);
         let mut grad_map = HashMap::new();
         grad_map.insert(op_out, ones);
         let grads = generate_milli_backward(&mut graph, group, &grad_map, rng);
 
         // The gradient of the input should be in grads
-        let grad_tensor_id = grads.get(&int_in)
+        let grad_tensor_id = grads
+            .get(&int_in)
             .unwrap_or_else(|| panic!("No gradient produced for input"));
 
         // Also expose gradient as output
@@ -1508,14 +1601,17 @@ mod tests {
 
         // Evaluate to get analytic gradient
         let shape_u64: Vec<u64> = input_shape.iter().map(|&s| s as u64).collect();
-        let input_tensor = NumericTensor::<DynRank>::from_vec_shape(
-            input_values.clone(), input_shape.clone(),
-        ).unwrap();
+        let input_tensor =
+            NumericTensor::<DynRank>::from_vec_shape(input_values.clone(), input_shape.clone())
+                .unwrap();
         let mut inputs = HashMap::new();
         inputs.insert(ext_in, input_tensor);
 
         let mut backend = EvalBackend::NDArray;
-        let results: HashMap<_, _> = graph.eval(&inputs, &mut (), &mut backend).unwrap().collect();
+        let results: HashMap<_, _> = graph
+            .eval(&inputs, &mut (), &mut backend)
+            .unwrap()
+            .collect();
         let analytic_grad: Vec<f32> = results[&ext_grad].flatten().unwrap().try_into().unwrap();
 
         // Finite difference check for each element
@@ -1548,7 +1644,10 @@ mod tests {
             assert!(
                 diff / scale < tol,
                 "Gradient mismatch at element {}: analytic={}, numerical={}, rel_diff={}",
-                i, analytic_grad[i], numerical_grad, diff / scale
+                i,
+                analytic_grad[i],
+                numerical_grad,
+                diff / scale
             );
         }
     }
@@ -1590,7 +1689,8 @@ mod tests {
         let ones_data = NDArrayNumericTensor::<DynRank>::from_vec_shape(
             vec![1.0f32; a_values.len()],
             &shape.iter().map(|&s| s as u64).collect::<Vec<_>>(),
-        ).unwrap();
+        )
+        .unwrap();
         let ones = Constant::push_new(&mut graph, ones_data, rng);
         let mut grad_map = HashMap::new();
         grad_map.insert(op_out, ones);
@@ -1610,14 +1710,19 @@ mod tests {
             id
         };
 
-        let input_a = NumericTensor::<DynRank>::from_vec_shape(a_values.clone(), shape.clone()).unwrap();
-        let input_b = NumericTensor::<DynRank>::from_vec_shape(b_values.clone(), shape.clone()).unwrap();
+        let input_a =
+            NumericTensor::<DynRank>::from_vec_shape(a_values.clone(), shape.clone()).unwrap();
+        let input_b =
+            NumericTensor::<DynRank>::from_vec_shape(b_values.clone(), shape.clone()).unwrap();
         let mut inputs = HashMap::new();
         inputs.insert(ext_a, input_a);
         inputs.insert(ext_b, input_b);
 
         let mut backend = EvalBackend::NDArray;
-        let results: HashMap<_, _> = graph.eval(&inputs, &mut (), &mut backend).unwrap().collect();
+        let results: HashMap<_, _> = graph
+            .eval(&inputs, &mut (), &mut backend)
+            .unwrap()
+            .collect();
         let analytic_grad_a: Vec<f32> = results[&ext_grad_a].flatten().unwrap().try_into().unwrap();
         let analytic_grad_b: Vec<f32> = results[&ext_grad_b].flatten().unwrap().try_into().unwrap();
 
@@ -1645,7 +1750,10 @@ mod tests {
             assert!(
                 diff / scale < tol,
                 "Grad a mismatch at {}: analytic={}, numerical={}, rel_diff={}",
-                i, analytic_grad_a[i], numerical, diff / scale
+                i,
+                analytic_grad_a[i],
+                numerical,
+                diff / scale
             );
         }
 
@@ -1673,7 +1781,10 @@ mod tests {
             assert!(
                 diff / scale < tol,
                 "Grad b mismatch at {}: analytic={}, numerical={}, rel_diff={}",
-                i, analytic_grad_b[i], numerical, diff / scale
+                i,
+                analytic_grad_b[i],
+                numerical,
+                diff / scale
             );
         }
     }
@@ -1684,7 +1795,8 @@ mod tests {
             SimpleUnaryOp::neg,
             vec![1.0, -2.0, 3.0, -0.5],
             vec![2, 2],
-            1e-3, 1e-2,
+            1e-3,
+            1e-2,
         );
     }
 
@@ -1694,7 +1806,8 @@ mod tests {
             SimpleUnaryOp::exp,
             vec![0.5, -0.3, 1.0, 0.1],
             vec![2, 2],
-            1e-3, 1e-2,
+            1e-3,
+            1e-2,
         );
     }
 
@@ -1705,7 +1818,8 @@ mod tests {
             SimpleUnaryOp::ln,
             vec![1.0, 2.0, 0.5, 3.0],
             vec![2, 2],
-            1e-3, 1e-2,
+            1e-3,
+            1e-2,
         );
     }
 
@@ -1715,7 +1829,8 @@ mod tests {
             SimpleUnaryOp::sqrt,
             vec![1.0, 4.0, 0.25, 9.0],
             vec![2, 2],
-            1e-3, 1e-2,
+            1e-3,
+            1e-2,
         );
     }
 
@@ -1725,7 +1840,8 @@ mod tests {
             SimpleUnaryOp::reciprocal,
             vec![1.0, 2.0, 0.5, -3.0],
             vec![2, 2],
-            1e-3, 1e-2,
+            1e-3,
+            1e-2,
         );
     }
 
@@ -1736,7 +1852,8 @@ mod tests {
             vec![1.0, 2.0, 3.0, 4.0],
             vec![5.0, 6.0, 7.0, 8.0],
             vec![2, 2],
-            1e-3, 1e-2,
+            1e-3,
+            1e-2,
         );
     }
 
@@ -1747,7 +1864,8 @@ mod tests {
             vec![1.0, 2.0, 3.0, 4.0],
             vec![5.0, 6.0, 7.0, 8.0],
             vec![2, 2],
-            1e-3, 1e-2,
+            1e-3,
+            1e-2,
         );
     }
 
@@ -1758,7 +1876,8 @@ mod tests {
             vec![1.0, 2.0, 3.0, 4.0],
             vec![5.0, 6.0, 7.0, 8.0],
             vec![2, 2],
-            1e-3, 1e-2,
+            1e-3,
+            1e-2,
         );
     }
 
@@ -1770,7 +1889,8 @@ mod tests {
             vec![1.0, 2.0, 3.0, 4.0],
             vec![5.0, 2.0, 7.0, 3.0],
             vec![2, 2],
-            1e-3, 1e-2,
+            1e-3,
+            1e-2,
         );
     }
 
@@ -1831,12 +1951,17 @@ mod tests {
             let mut fwd_inputs = HashMap::new();
             for (i, ext) in fwd_ext.iter().enumerate() {
                 let t = NumericTensor::<DynRank>::from_vec_shape(
-                    input_values[i].clone(), input_shapes[i].clone(),
-                ).unwrap();
+                    input_values[i].clone(),
+                    input_shapes[i].clone(),
+                )
+                .unwrap();
                 fwd_inputs.insert(*ext, t);
             }
             let mut backend = EvalBackend::NDArray;
-            let fwd_results: HashMap<_, _> = fwd_graph.eval(&fwd_inputs, &mut (), &mut backend).unwrap().collect();
+            let fwd_results: HashMap<_, _> = fwd_graph
+                .eval(&fwd_inputs, &mut (), &mut backend)
+                .unwrap()
+                .collect();
             fwd_results[&fwd_ext_out].shape().to_vec()
         };
 
@@ -1845,7 +1970,8 @@ mod tests {
         let ones_data = NDArrayNumericTensor::<DynRank>::from_vec_shape(
             vec![1.0f32; total_elems.max(1)],
             &output_shape,
-        ).unwrap();
+        )
+        .unwrap();
         let ones = Constant::push_new(&mut graph, ones_data, rng);
         let mut grad_map = HashMap::new();
         grad_map.insert(op_out, ones);
@@ -1875,13 +2001,18 @@ mod tests {
         let mut inputs = HashMap::new();
         for (i, ext) in ext_ids.iter().enumerate() {
             let t = NumericTensor::<DynRank>::from_vec_shape(
-                input_values[i].clone(), input_shapes[i].clone(),
-            ).unwrap();
+                input_values[i].clone(),
+                input_shapes[i].clone(),
+            )
+            .unwrap();
             inputs.insert(*ext, t);
         }
 
         let mut backend = EvalBackend::NDArray;
-        let results: HashMap<_, _> = graph.eval(&inputs, &mut (), &mut backend).unwrap().collect();
+        let results: HashMap<_, _> = graph
+            .eval(&inputs, &mut (), &mut backend)
+            .unwrap()
+            .collect();
 
         // Check each input's gradient
         for input_idx in 0..n {
@@ -1906,7 +2037,11 @@ mod tests {
                 assert!(
                     diff / scale < tol,
                     "Input {} elem {}: analytic={}, numerical={}, rel_diff={}",
-                    input_idx, elem, analytic[elem], numerical, diff / scale
+                    input_idx,
+                    elem,
+                    analytic[elem],
+                    numerical,
+                    diff / scale
                 );
             }
         }
@@ -1923,7 +2058,8 @@ mod tests {
             },
             &[vec![0.5, -0.3, 1.0, 0.1]],
             &[vec![2, 2]],
-            1e-3, 1e-2,
+            1e-3,
+            1e-2,
         );
     }
 
@@ -1937,7 +2073,8 @@ mod tests {
             },
             &[vec![1.0, 2.0, 3.0, 4.0], vec![4.0, 3.0, 2.0, 1.0]],
             &[vec![2, 2], vec![2, 2]],
-            1e-3, 1e-2,
+            1e-3,
+            1e-2,
         );
     }
 
@@ -1946,12 +2083,11 @@ mod tests {
         // f(x) = sum(x * x) — same tensor as both inputs to mul
         // d/dx_i = 2 * x_i
         check_general_backward(
-            |g, ids, r| {
-                SimpleBinary::mul(g, ids[0], ids[0], r)
-            },
+            |g, ids, r| SimpleBinary::mul(g, ids[0], ids[0], r),
             &[vec![1.0, 2.0, 3.0, 4.0]],
             &[vec![2, 2]],
-            1e-3, 1e-2,
+            1e-3,
+            1e-2,
         );
     }
 
@@ -1960,12 +2096,11 @@ mod tests {
         // f(x) = sum(x + x) — same tensor as both inputs to add
         // d/dx_i = 2
         check_general_backward(
-            |g, ids, r| {
-                SimpleBinary::add(g, ids[0], ids[0], r)
-            },
+            |g, ids, r| SimpleBinary::add(g, ids[0], ids[0], r),
             &[vec![1.0, -2.0, 3.0, -0.5]],
             &[vec![2, 2]],
-            1e-3, 1e-2,
+            1e-3,
+            1e-2,
         );
     }
 
@@ -1981,7 +2116,8 @@ mod tests {
             },
             &[vec![0.5, -0.3, 1.0, 0.1]],
             &[vec![2, 2]],
-            1e-3, 1e-2,
+            1e-3,
+            1e-2,
         );
     }
 
@@ -1997,7 +2133,8 @@ mod tests {
             },
             &[vec![1.0, 2.0, 3.0, 4.0], vec![0.5, 1.5, 2.5, 3.5]],
             &[vec![2, 2], vec![2, 2]],
-            1e-3, 1e-2,
+            1e-3,
+            1e-2,
         );
     }
 
@@ -2009,15 +2146,14 @@ mod tests {
     fn test_backward_matmul() {
         // f(A, B) = sum(A @ B), A=[2,3], B=[3,2]
         check_general_backward(
-            |g, ids, r| {
-                MatMul::push_new(g, ids[0], ids[1], r)
-            },
+            |g, ids, r| MatMul::push_new(g, ids[0], ids[1], r),
             &[
-                vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],   // A [2,3]
-                vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],   // B [3,2]
+                vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], // A [2,3]
+                vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], // B [3,2]
             ],
             &[vec![2, 3], vec![3, 2]],
-            1e-3, 1e-2,
+            1e-3,
+            1e-2,
         );
     }
 
@@ -2026,12 +2162,11 @@ mod tests {
         // f(x) = sum(clamp_min(x, 0.0)) — this is ReLU
         // d/dx_i = 1 if x_i >= 0, 0 otherwise
         check_general_backward(
-            |g, ids, r| {
-                ClampMin::push_new(g, ids[0], 0.0, r)
-            },
+            |g, ids, r| ClampMin::push_new(g, ids[0], 0.0, r),
             &[vec![1.0, -2.0, 3.0, -0.5]],
             &[vec![2, 2]],
-            1e-3, 1e-2,
+            1e-3,
+            1e-2,
         );
     }
 
@@ -2040,12 +2175,11 @@ mod tests {
         // f(x) = sum(tanh(x))
         // d/dx_i = 1 - tanh(x_i)^2
         check_general_backward(
-            |g, ids, r| {
-                SimpleUnaryOp::trig(g, ids[0], crate::TrigOp::Tanh, r)
-            },
+            |g, ids, r| SimpleUnaryOp::trig(g, ids[0], crate::TrigOp::Tanh, r),
             &[vec![0.5, -0.3, 1.0, 0.1]],
             &[vec![2, 2]],
-            1e-3, 1e-2,
+            1e-3,
+            1e-2,
         );
     }
 
@@ -2061,7 +2195,8 @@ mod tests {
             },
             &[vec![1.0, 2.0, 3.0, 4.0]],
             &[vec![2, 2]],
-            1e-3, 1e-2,
+            1e-3,
+            1e-2,
         );
     }
 
@@ -2077,7 +2212,8 @@ mod tests {
             },
             &[vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]],
             &[vec![2, 3]],
-            1e-3, 1e-2,
+            1e-3,
+            1e-2,
         );
     }
 
@@ -2092,7 +2228,8 @@ mod tests {
             },
             &[vec![1.0, 2.0, 3.0, 4.0]],
             &[vec![2, 2]],
-            1e-3, 1e-2,
+            1e-3,
+            1e-2,
         );
     }
 
@@ -2108,7 +2245,8 @@ mod tests {
             },
             &[vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]],
             &[vec![2, 3]],
-            1e-3, 1e-2,
+            1e-3,
+            1e-2,
         );
     }
 
@@ -2122,14 +2260,16 @@ mod tests {
             |g, ids, r| {
                 let shape = ops::Constant::push_new(
                     g,
-                    NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![3i64, 2], &vec![2]).unwrap(),
+                    NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![3i64, 2], &vec![2])
+                        .unwrap(),
                     r,
                 );
                 ops::Reshape::push_new(g, ids[0], shape, false, r)
             },
             &[vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]],
             &[vec![2, 3]],
-            1e-3, 1e-2,
+            1e-3,
+            1e-2,
         );
     }
 
@@ -2150,7 +2290,8 @@ mod tests {
             },
             &[vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]],
             &[vec![2, 3]],
-            1e-3, 1e-2,
+            1e-3,
+            1e-2,
         );
     }
 
@@ -2159,12 +2300,11 @@ mod tests {
         // f(x) = sum(transpose(x, perm=[1,0])) where x is [2, 3]
         // Gradient flows through transpose; d/dx_i = 1 for all i
         check_general_backward(
-            |g, ids, r| {
-                ops::Transpose::push_new(g, ids[0], Some(vec![1, 0]), r)
-            },
+            |g, ids, r| ops::Transpose::push_new(g, ids[0], Some(vec![1, 0]), r),
             &[vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]],
             &[vec![2, 3]],
-            1e-3, 1e-2,
+            1e-3,
+            1e-2,
         );
     }
 
@@ -2172,12 +2312,11 @@ mod tests {
     fn test_backward_transpose_3d() {
         // f(x) = sum(transpose(x, perm=[2,0,1])) where x is [2, 3, 4]
         check_general_backward(
-            |g, ids, r| {
-                ops::Transpose::push_new(g, ids[0], Some(vec![2, 0, 1]), r)
-            },
+            |g, ids, r| ops::Transpose::push_new(g, ids[0], Some(vec![2, 0, 1]), r),
             &[(1..=24).map(|x| x as f32).collect()],
             &[vec![2, 3, 4]],
-            1e-3, 1e-2,
+            1e-3,
+            1e-2,
         );
     }
 
@@ -2185,12 +2324,11 @@ mod tests {
     fn test_backward_transpose_reverse() {
         // f(x) = sum(transpose(x, None)) — reverses all dims
         check_general_backward(
-            |g, ids, r| {
-                ops::Transpose::push_new(g, ids[0], None, r)
-            },
+            |g, ids, r| ops::Transpose::push_new(g, ids[0], None, r),
             &[vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]],
             &[vec![2, 3]],
-            1e-3, 1e-2,
+            1e-3,
+            1e-2,
         );
     }
 
@@ -2208,7 +2346,8 @@ mod tests {
             },
             &[vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]],
             &[vec![2, 1, 3]],
-            1e-3, 1e-2,
+            1e-3,
+            1e-2,
         );
     }
 
@@ -2226,7 +2365,8 @@ mod tests {
             },
             &[vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]],
             &[vec![2, 3]],
-            1e-3, 1e-2,
+            1e-3,
+            1e-2,
         );
     }
 
@@ -2248,7 +2388,8 @@ mod tests {
             },
             &[vec![1.0, 2.0, 3.0, 4.0]],
             &[vec![2, 2]],
-            1e-3, 1e-2,
+            1e-3,
+            1e-2,
         );
     }
 
@@ -2258,15 +2399,14 @@ mod tests {
         // a=[2,3], b=[3,3] -> output=[5,3]
         // d/da_i = 1, d/db_i = 1
         check_general_backward(
-            |g, ids, r| {
-                ops::Concat::push_new(g, vec![ids[0], ids[1]], 0, r)
-            },
+            |g, ids, r| ops::Concat::push_new(g, vec![ids[0], ids[1]], 0, r),
             &[
                 vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
                 vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0],
             ],
             &[vec![2, 3], vec![3, 3]],
-            1e-3, 1e-2,
+            1e-3,
+            1e-2,
         );
     }
 
@@ -2275,15 +2415,14 @@ mod tests {
         // f(a, b) = sum(concat([a, b], axis=1))
         // a=[2,3], b=[2,2] -> output=[2,5]
         check_general_backward(
-            |g, ids, r| {
-                ops::Concat::push_new(g, vec![ids[0], ids[1]], 1, r)
-            },
+            |g, ids, r| ops::Concat::push_new(g, vec![ids[0], ids[1]], 1, r),
             &[
                 vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
                 vec![7.0, 8.0, 9.0, 10.0],
             ],
             &[vec![2, 3], vec![2, 2]],
-            1e-3, 1e-2,
+            1e-3,
+            1e-2,
         );
     }
 
@@ -2292,12 +2431,11 @@ mod tests {
         // f(x) = sum(concat([x, x], axis=0))
         // x=[2,3], output=[4,3], d/dx_i = 2 (gradient from both branches)
         check_general_backward(
-            |g, ids, r| {
-                ops::Concat::push_new(g, vec![ids[0], ids[0]], 0, r)
-            },
+            |g, ids, r| ops::Concat::push_new(g, vec![ids[0], ids[0]], 0, r),
             &[vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]],
             &[vec![2, 3]],
-            1e-3, 1e-2,
+            1e-3,
+            1e-2,
         );
     }
 
@@ -2313,12 +2451,10 @@ mod tests {
                 let b3 = SimpleBinary::mul(g, ids[1], three, r);
                 ops::Concat::push_new(g, vec![a2, b3], 0, r)
             },
-            &[
-                vec![1.0, 2.0, 3.0, 4.0],
-                vec![5.0, 6.0, 7.0, 8.0],
-            ],
+            &[vec![1.0, 2.0, 3.0, 4.0], vec![5.0, 6.0, 7.0, 8.0]],
             &[vec![2, 2], vec![2, 2]],
-            1e-3, 1e-2,
+            1e-3,
+            1e-2,
         );
     }
 
@@ -2328,12 +2464,11 @@ mod tests {
     fn test_backward_add_broadcast_scalar() {
         // a=[2,3] + b=[1] → grad_a should be [2,3], grad_b should be scalar sum
         check_general_backward(
-            |graph, inputs, rng| {
-                SimpleBinary::add(graph, inputs[0], inputs[1], rng)
-            },
+            |graph, inputs, rng| SimpleBinary::add(graph, inputs[0], inputs[1], rng),
             &[vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![10.0]],
             &[vec![2, 3], vec![1]],
-            1e-3, 1e-2,
+            1e-3,
+            1e-2,
         );
     }
 
@@ -2341,15 +2476,16 @@ mod tests {
     fn test_backward_mul_broadcast_row() {
         // a=[3,4] * b=[1,4] → grad_b must reduce axis 0
         check_general_backward(
-            |graph, inputs, rng| {
-                SimpleBinary::mul(graph, inputs[0], inputs[1], rng)
-            },
+            |graph, inputs, rng| SimpleBinary::mul(graph, inputs[0], inputs[1], rng),
             &[
-                vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
+                vec![
+                    1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+                ],
                 vec![0.5, 1.0, 1.5, 2.0],
             ],
             &[vec![3, 4], vec![1, 4]],
-            1e-3, 1e-2,
+            1e-3,
+            1e-2,
         );
     }
 
@@ -2357,15 +2493,16 @@ mod tests {
     fn test_backward_div_broadcast_col() {
         // a=[3,1] / b=[3,4] → grad_a must reduce axis 1
         check_general_backward(
-            |graph, inputs, rng| {
-                SimpleBinary::div(graph, inputs[0], inputs[1], rng)
-            },
+            |graph, inputs, rng| SimpleBinary::div(graph, inputs[0], inputs[1], rng),
             &[
                 vec![1.0, 2.0, 3.0],
-                vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
+                vec![
+                    1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+                ],
             ],
             &[vec![3, 1], vec![3, 4]],
-            1e-3, 1e-2,
+            1e-3,
+            1e-2,
         );
     }
 
@@ -2373,15 +2510,11 @@ mod tests {
     fn test_backward_sub_broadcast_rank() {
         // a=[2,3] - b=[3] → grad_b must reduce axis 0 (rank padding)
         check_general_backward(
-            |graph, inputs, rng| {
-                SimpleBinary::sub(graph, inputs[0], inputs[1], rng)
-            },
-            &[
-                vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
-                vec![10.0, 20.0, 30.0],
-            ],
+            |graph, inputs, rng| SimpleBinary::sub(graph, inputs[0], inputs[1], rng),
+            &[vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![10.0, 20.0, 30.0]],
             &[vec![2, 3], vec![3]],
-            1e-3, 1e-2,
+            1e-3,
+            1e-2,
         );
     }
 
@@ -2389,15 +2522,14 @@ mod tests {
     fn test_backward_matmul_broadcast_batch() {
         // A=[2,3,4] @ B=[4,2] → output=[2,3,2], grad_B must sum out batch dim
         check_general_backward(
-            |graph, inputs, rng| {
-                ops::MatMul::push_new(graph, inputs[0], inputs[1], rng)
-            },
+            |graph, inputs, rng| ops::MatMul::push_new(graph, inputs[0], inputs[1], rng),
             &[
                 (1..=24).map(|x| x as f32 * 0.1).collect(),
                 vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
             ],
             &[vec![2, 3, 4], vec![4, 2]],
-            1e-3, 1e-2,
+            1e-3,
+            1e-2,
         );
     }
 
@@ -2405,9 +2537,9 @@ mod tests {
 
     /// Helper to build a simple "param * 2 -> reduce_sum -> loss" graph
     /// with backward pass already generated. Returns (graph, param_internal, loss, training_meta).
-    fn build_simple_training_graph(rng: &mut wyrand::WyRand) -> (
-        MilliOpGraph, GlobalId, GlobalId, GlobalId, TrainingMetadata,
-    ) {
+    fn build_simple_training_graph(
+        rng: &mut wyrand::WyRand,
+    ) -> (MilliOpGraph, GlobalId, GlobalId, GlobalId, TrainingMetadata) {
         let mut graph = MilliOpGraph::new_empty(rng);
         let param_ext = GlobalId::new(rng);
         let param = graph.add_input_with_id(param_ext, rng);
@@ -2455,8 +2587,11 @@ mod tests {
             build_simple_training_graph(rng);
 
         generate_optimizer_ops(
-            &mut graph, &mut training_meta,
-            &OptimizerGenOptions { kind: OptimizerKind::SGD { lr: 0.1 } },
+            &mut graph,
+            &mut training_meta,
+            &OptimizerGenOptions {
+                kind: OptimizerKind::SGD { lr: 0.1 },
+            },
             rng,
         );
 
@@ -2468,20 +2603,32 @@ mod tests {
         graph.add_output(new_param_id, new_param_ext);
 
         // Evaluate
-        let param_val = NumericTensor::<DynRank>::from_vec_shape(
-            vec![1.0f32, 2.0, 3.0, 4.0], vec![4],
-        ).unwrap();
+        let param_val =
+            NumericTensor::<DynRank>::from_vec_shape(vec![1.0f32, 2.0, 3.0, 4.0], vec![4]).unwrap();
         let mut inputs = HashMap::new();
         inputs.insert(param_ext, param_val);
 
         let mut backend = EvalBackend::NDArray;
-        let results: HashMap<_, _> = graph.eval(&inputs, &mut (), &mut backend).unwrap().collect();
+        let results: HashMap<_, _> = graph
+            .eval(&inputs, &mut (), &mut backend)
+            .unwrap()
+            .collect();
 
-        let new_param: Vec<f32> = results[&new_param_ext].flatten().unwrap().try_into().unwrap();
+        let new_param: Vec<f32> = results[&new_param_ext]
+            .flatten()
+            .unwrap()
+            .try_into()
+            .unwrap();
         // new_param = [1, 2, 3, 4] - 0.1 * 2 = [0.8, 1.8, 2.8, 3.8]
         for (i, &v) in new_param.iter().enumerate() {
             let expected = (i + 1) as f32 - 0.2;
-            assert!((v - expected).abs() < 1e-5, "elem {}: got {}, expected {}", i, v, expected);
+            assert!(
+                (v - expected).abs() < 1e-5,
+                "elem {}: got {}, expected {}",
+                i,
+                v,
+                expected
+            );
         }
     }
 
@@ -2496,9 +2643,16 @@ mod tests {
         let beta2 = 0.999;
         let epsilon = 1e-8;
         generate_optimizer_ops(
-            &mut graph, &mut training_meta,
+            &mut graph,
+            &mut training_meta,
             &OptimizerGenOptions {
-                kind: OptimizerKind::Adam { lr, beta1, beta2, epsilon, weight_decay: 0.0 },
+                kind: OptimizerKind::Adam {
+                    lr,
+                    beta1,
+                    beta2,
+                    epsilon,
+                    weight_decay: 0.0,
+                },
             },
             rng,
         );
@@ -2520,15 +2674,12 @@ mod tests {
         graph.add_output(t_out_id, t_out_ext);
 
         // Inputs: param, m, v, t
-        let param_val = NumericTensor::<DynRank>::from_vec_shape(
-            vec![1.0f32, 2.0, 3.0, 4.0], vec![4],
-        ).unwrap();
+        let param_val =
+            NumericTensor::<DynRank>::from_vec_shape(vec![1.0f32, 2.0, 3.0, 4.0], vec![4]).unwrap();
         let m_in_id = training_meta.optimizer_state_inputs[&(param, "m".into())];
         let v_in_id = training_meta.optimizer_state_inputs[&(param, "v".into())];
         let t_in_id = training_meta.global_state_inputs["timestep"];
-        let zeros = NumericTensor::<DynRank>::from_vec_shape(
-            vec![0.0f32; 4], vec![4],
-        ).unwrap();
+        let zeros = NumericTensor::<DynRank>::from_vec_shape(vec![0.0f32; 4], vec![4]).unwrap();
         let t_zero = NumericTensor::<DynRank>::from_vec_shape(vec![0i64], vec![1]).unwrap();
 
         let mut inputs = HashMap::new();
@@ -2538,7 +2689,10 @@ mod tests {
         inputs.insert(t_in_id, t_zero);
 
         let mut backend = EvalBackend::NDArray;
-        let results: HashMap<_, _> = graph.eval(&inputs, &mut (), &mut backend).unwrap().collect();
+        let results: HashMap<_, _> = graph
+            .eval(&inputs, &mut (), &mut backend)
+            .unwrap()
+            .collect();
 
         // Verify manually: grad = 2 for all elements
         // t_new = 1
@@ -2549,13 +2703,20 @@ mod tests {
         // step = lr * m_hat / (sqrt(v_hat) + eps) = 0.001 * 2.0 / (2.0 + 1e-8) ≈ 0.001
         // new_param = param - step ≈ param - 0.001
 
-        let new_param: Vec<f32> = results[&new_param_ext].flatten().unwrap().try_into().unwrap();
+        let new_param: Vec<f32> = results[&new_param_ext]
+            .flatten()
+            .unwrap()
+            .try_into()
+            .unwrap();
         let expected_step = lr * 2.0 / (4.0f32.sqrt() + epsilon);
         for (i, &v) in new_param.iter().enumerate() {
             let expected = (i + 1) as f32 - expected_step;
             assert!(
                 (v - expected).abs() < 1e-5,
-                "elem {}: got {}, expected {}", i, v, expected,
+                "elem {}: got {}, expected {}",
+                i,
+                v,
+                expected,
             );
         }
 
@@ -2579,9 +2740,14 @@ mod tests {
         let lr = 0.1;
         let momentum = 0.9;
         generate_optimizer_ops(
-            &mut graph, &mut training_meta,
+            &mut graph,
+            &mut training_meta,
             &OptimizerGenOptions {
-                kind: OptimizerKind::SGDMomentum { lr, momentum, nesterov: false },
+                kind: OptimizerKind::SGDMomentum {
+                    lr,
+                    momentum,
+                    nesterov: false,
+                },
             },
             rng,
         );
@@ -2592,28 +2758,38 @@ mod tests {
         let new_param_ext = GlobalId::new(rng);
         graph.add_output(new_param_id, new_param_ext);
 
-        let param_val = NumericTensor::<DynRank>::from_vec_shape(
-            vec![1.0f32, 2.0, 3.0, 4.0], vec![4],
-        ).unwrap();
+        let param_val =
+            NumericTensor::<DynRank>::from_vec_shape(vec![1.0f32, 2.0, 3.0, 4.0], vec![4]).unwrap();
         let v_in_id = training_meta.optimizer_state_inputs[&(param, "velocity".into())];
-        let v_zeros = NumericTensor::<DynRank>::from_vec_shape(
-            vec![0.0f32; 4], vec![4],
-        ).unwrap();
+        let v_zeros = NumericTensor::<DynRank>::from_vec_shape(vec![0.0f32; 4], vec![4]).unwrap();
 
         let mut inputs = HashMap::new();
         inputs.insert(param_ext, param_val);
         inputs.insert(v_in_id, v_zeros);
 
         let mut backend = EvalBackend::NDArray;
-        let results: HashMap<_, _> = graph.eval(&inputs, &mut (), &mut backend).unwrap().collect();
+        let results: HashMap<_, _> = graph
+            .eval(&inputs, &mut (), &mut backend)
+            .unwrap()
+            .collect();
 
         // grad = 2, v_old = 0
         // v_new = 0.9 * 0 + 2 = 2
         // new_param = param - 0.1 * 2 = param - 0.2
-        let new_param: Vec<f32> = results[&new_param_ext].flatten().unwrap().try_into().unwrap();
+        let new_param: Vec<f32> = results[&new_param_ext]
+            .flatten()
+            .unwrap()
+            .try_into()
+            .unwrap();
         for (i, &v) in new_param.iter().enumerate() {
             let expected = (i + 1) as f32 - 0.2;
-            assert!((v - expected).abs() < 1e-5, "elem {}: got {}, expected {}", i, v, expected);
+            assert!(
+                (v - expected).abs() < 1e-5,
+                "elem {}: got {}, expected {}",
+                i,
+                v,
+                expected
+            );
         }
     }
 
@@ -2626,9 +2802,14 @@ mod tests {
         let lr = 0.1;
         let momentum = 0.9;
         generate_optimizer_ops(
-            &mut graph, &mut training_meta,
+            &mut graph,
+            &mut training_meta,
             &OptimizerGenOptions {
-                kind: OptimizerKind::SGDMomentum { lr, momentum, nesterov: true },
+                kind: OptimizerKind::SGDMomentum {
+                    lr,
+                    momentum,
+                    nesterov: true,
+                },
             },
             rng,
         );
@@ -2639,29 +2820,39 @@ mod tests {
         let new_param_ext = GlobalId::new(rng);
         graph.add_output(new_param_id, new_param_ext);
 
-        let param_val = NumericTensor::<DynRank>::from_vec_shape(
-            vec![1.0f32, 2.0, 3.0, 4.0], vec![4],
-        ).unwrap();
+        let param_val =
+            NumericTensor::<DynRank>::from_vec_shape(vec![1.0f32, 2.0, 3.0, 4.0], vec![4]).unwrap();
         let v_in_id = training_meta.optimizer_state_inputs[&(param, "velocity".into())];
-        let v_zeros = NumericTensor::<DynRank>::from_vec_shape(
-            vec![0.0f32; 4], vec![4],
-        ).unwrap();
+        let v_zeros = NumericTensor::<DynRank>::from_vec_shape(vec![0.0f32; 4], vec![4]).unwrap();
 
         let mut inputs = HashMap::new();
         inputs.insert(param_ext, param_val);
         inputs.insert(v_in_id, v_zeros);
 
         let mut backend = EvalBackend::NDArray;
-        let results: HashMap<_, _> = graph.eval(&inputs, &mut (), &mut backend).unwrap().collect();
+        let results: HashMap<_, _> = graph
+            .eval(&inputs, &mut (), &mut backend)
+            .unwrap()
+            .collect();
 
         // grad = 2, v_old = 0
         // v_new = 0.9 * 0 + 2 = 2
         // nesterov update = momentum * v_new + grad = 0.9 * 2 + 2 = 3.8
         // new_param = param - 0.1 * 3.8 = param - 0.38
-        let new_param: Vec<f32> = results[&new_param_ext].flatten().unwrap().try_into().unwrap();
+        let new_param: Vec<f32> = results[&new_param_ext]
+            .flatten()
+            .unwrap()
+            .try_into()
+            .unwrap();
         for (i, &v) in new_param.iter().enumerate() {
             let expected = (i + 1) as f32 - 0.38;
-            assert!((v - expected).abs() < 1e-5, "elem {}: got {}, expected {}", i, v, expected);
+            assert!(
+                (v - expected).abs() < 1e-5,
+                "elem {}: got {}, expected {}",
+                i,
+                v,
+                expected
+            );
         }
     }
 
@@ -2677,9 +2868,16 @@ mod tests {
         let epsilon = 1e-8f32;
         let weight_decay = 0.01f32;
         generate_optimizer_ops(
-            &mut graph, &mut training_meta,
+            &mut graph,
+            &mut training_meta,
             &OptimizerGenOptions {
-                kind: OptimizerKind::AdamW { lr, beta1, beta2, epsilon, weight_decay },
+                kind: OptimizerKind::AdamW {
+                    lr,
+                    beta1,
+                    beta2,
+                    epsilon,
+                    weight_decay,
+                },
             },
             rng,
         );
@@ -2691,9 +2889,8 @@ mod tests {
         graph.add_output(new_param_id, new_param_ext);
 
         let param_vals = vec![1.0f32, 2.0, 3.0, 4.0];
-        let param_val = NumericTensor::<DynRank>::from_vec_shape(
-            param_vals.clone(), vec![4],
-        ).unwrap();
+        let param_val =
+            NumericTensor::<DynRank>::from_vec_shape(param_vals.clone(), vec![4]).unwrap();
         let m_in_id = training_meta.optimizer_state_inputs[&(param, "m".into())];
         let v_in_id = training_meta.optimizer_state_inputs[&(param, "v".into())];
         let t_in_id = training_meta.global_state_inputs["timestep"];
@@ -2707,7 +2904,10 @@ mod tests {
         inputs.insert(t_in_id, t_zero);
 
         let mut backend = EvalBackend::NDArray;
-        let results: HashMap<_, _> = graph.eval(&inputs, &mut (), &mut backend).unwrap().collect();
+        let results: HashMap<_, _> = graph
+            .eval(&inputs, &mut (), &mut backend)
+            .unwrap()
+            .collect();
 
         // grad = 2 (unmodified for AdamW, no L2 on grad)
         // m_new = 0.1 * 2 = 0.2, v_new = 0.001 * 4 = 0.004
@@ -2716,14 +2916,21 @@ mod tests {
         // decay_step = lr * weight_decay * param
         // new_param = param - adam_step - decay_step
         let adam_step = lr * 2.0 / (4.0f32.sqrt() + epsilon);
-        let new_param: Vec<f32> = results[&new_param_ext].flatten().unwrap().try_into().unwrap();
+        let new_param: Vec<f32> = results[&new_param_ext]
+            .flatten()
+            .unwrap()
+            .try_into()
+            .unwrap();
         for (i, &v) in new_param.iter().enumerate() {
             let p = param_vals[i];
             let decay_step = lr * weight_decay * p;
             let expected = p - adam_step - decay_step;
             assert!(
                 (v - expected).abs() < 1e-5,
-                "elem {}: got {}, expected {}", i, v, expected,
+                "elem {}: got {}, expected {}",
+                i,
+                v,
+                expected,
             );
         }
     }
@@ -2740,9 +2947,16 @@ mod tests {
         let beta2 = 0.999f32;
         let epsilon = 1e-8f32;
         generate_optimizer_ops(
-            &mut graph, &mut training_meta,
+            &mut graph,
+            &mut training_meta,
             &OptimizerGenOptions {
-                kind: OptimizerKind::Adam { lr, beta1, beta2, epsilon, weight_decay: 0.0 },
+                kind: OptimizerKind::Adam {
+                    lr,
+                    beta1,
+                    beta2,
+                    epsilon,
+                    weight_decay: 0.0,
+                },
             },
             rng,
         );
@@ -2774,21 +2988,28 @@ mod tests {
 
         for step in 0..2 {
             let mut inputs = HashMap::new();
-            inputs.insert(param_ext, NumericTensor::<DynRank>::from_vec_shape(
-                p.clone(), vec![4],
-            ).unwrap());
-            inputs.insert(m_in_id, NumericTensor::<DynRank>::from_vec_shape(
-                vec![m; 4], vec![4],
-            ).unwrap());
-            inputs.insert(v_in_id, NumericTensor::<DynRank>::from_vec_shape(
-                vec![v; 4], vec![4],
-            ).unwrap());
-            inputs.insert(t_in_id, NumericTensor::<DynRank>::from_vec_shape(
-                vec![t], vec![1],
-            ).unwrap());
+            inputs.insert(
+                param_ext,
+                NumericTensor::<DynRank>::from_vec_shape(p.clone(), vec![4]).unwrap(),
+            );
+            inputs.insert(
+                m_in_id,
+                NumericTensor::<DynRank>::from_vec_shape(vec![m; 4], vec![4]).unwrap(),
+            );
+            inputs.insert(
+                v_in_id,
+                NumericTensor::<DynRank>::from_vec_shape(vec![v; 4], vec![4]).unwrap(),
+            );
+            inputs.insert(
+                t_in_id,
+                NumericTensor::<DynRank>::from_vec_shape(vec![t], vec![1]).unwrap(),
+            );
 
             let mut backend = EvalBackend::NDArray;
-            let results: HashMap<_, _> = graph.eval(&inputs, &mut (), &mut backend).unwrap().collect();
+            let results: HashMap<_, _> = graph
+                .eval(&inputs, &mut (), &mut backend)
+                .unwrap()
+                .collect();
 
             // Compute expected values
             t += 1;
@@ -2801,19 +3022,39 @@ mod tests {
                 *x -= adam_step;
             }
 
-            let actual_param: Vec<f32> = results[&new_param_ext].flatten().unwrap().try_into().unwrap();
+            let actual_param: Vec<f32> = results[&new_param_ext]
+                .flatten()
+                .unwrap()
+                .try_into()
+                .unwrap();
             for (i, &actual) in actual_param.iter().enumerate() {
                 assert!(
                     (actual - p[i]).abs() < 1e-4,
-                    "step {} elem {}: got {}, expected {}", step, i, actual, p[i],
+                    "step {} elem {}: got {}, expected {}",
+                    step,
+                    i,
+                    actual,
+                    p[i],
                 );
             }
 
             // Carry state forward
             let m_out: Vec<f32> = results[&m_out_ext].flatten().unwrap().try_into().unwrap();
             let v_out: Vec<f32> = results[&v_out_ext].flatten().unwrap().try_into().unwrap();
-            assert!((m_out[0] - m).abs() < 1e-5, "step {} m: got {}, expected {}", step, m_out[0], m);
-            assert!((v_out[0] - v).abs() < 1e-5, "step {} v: got {}, expected {}", step, v_out[0], v);
+            assert!(
+                (m_out[0] - m).abs() < 1e-5,
+                "step {} m: got {}, expected {}",
+                step,
+                m_out[0],
+                m
+            );
+            assert!(
+                (v_out[0] - v).abs() < 1e-5,
+                "step {} v: got {}, expected {}",
+                step,
+                v_out[0],
+                v
+            );
         }
     }
 
@@ -2828,8 +3069,11 @@ mod tests {
         rng: &mut wyrand::WyRand,
     ) -> (
         MilliOpGraph,
-        GlobalId, GlobalId, GlobalId, // x, w, targets external IDs
-        GlobalId, GlobalId,            // loss, new_w external IDs
+        GlobalId,
+        GlobalId,
+        GlobalId, // x, w, targets external IDs
+        GlobalId,
+        GlobalId, // loss, new_w external IDs
         TrainingMetadata,
     ) {
         let mut graph = MilliOpGraph::new_empty(rng);
@@ -2890,8 +3134,11 @@ mod tests {
 
         // Optimizer
         generate_optimizer_ops(
-            &mut graph, &mut training_meta,
-            &OptimizerGenOptions { kind: OptimizerKind::SGD { lr } },
+            &mut graph,
+            &mut training_meta,
+            &OptimizerGenOptions {
+                kind: OptimizerKind::SGD { lr },
+            },
             rng,
         );
 
@@ -2902,7 +3149,15 @@ mod tests {
         let new_w_ext = GlobalId::new(rng);
         graph.add_output(new_w, new_w_ext);
 
-        (graph, x_ext, w_ext, targets_ext, loss_ext, new_w_ext, training_meta)
+        (
+            graph,
+            x_ext,
+            w_ext,
+            targets_ext,
+            loss_ext,
+            new_w_ext,
+            training_meta,
+        )
     }
 
     #[test]
@@ -2923,18 +3178,24 @@ mod tests {
 
         for _step in 0..500 {
             let mut inputs = HashMap::new();
-            inputs.insert(x_ext, NumericTensor::<DynRank>::from_vec_shape(
-                x_data.clone(), vec![4, 2],
-            ).unwrap());
-            inputs.insert(w_ext, NumericTensor::<DynRank>::from_vec_shape(
-                w_vals.clone(), vec![2, 1],
-            ).unwrap());
-            inputs.insert(targets_ext, NumericTensor::<DynRank>::from_vec_shape(
-                targets_data.clone(), vec![4, 1],
-            ).unwrap());
+            inputs.insert(
+                x_ext,
+                NumericTensor::<DynRank>::from_vec_shape(x_data.clone(), vec![4, 2]).unwrap(),
+            );
+            inputs.insert(
+                w_ext,
+                NumericTensor::<DynRank>::from_vec_shape(w_vals.clone(), vec![2, 1]).unwrap(),
+            );
+            inputs.insert(
+                targets_ext,
+                NumericTensor::<DynRank>::from_vec_shape(targets_data.clone(), vec![4, 1]).unwrap(),
+            );
 
             let mut backend = EvalBackend::NDArray;
-            let results: HashMap<_, _> = graph.eval(&inputs, &mut (), &mut backend).unwrap().collect();
+            let results: HashMap<_, _> = graph
+                .eval(&inputs, &mut (), &mut backend)
+                .unwrap()
+                .collect();
 
             let loss_val: Vec<f32> = results[&loss_ext].flatten().unwrap().try_into().unwrap();
             losses.push(loss_val[0]);
@@ -2947,17 +3208,20 @@ mod tests {
         assert!(
             losses.last().unwrap() < &(losses[0] * 0.05),
             "Loss didn't decrease enough: first={}, last={}",
-            losses[0], losses.last().unwrap(),
+            losses[0],
+            losses.last().unwrap(),
         );
 
         // W should converge near [3, -2] (SGD converges slowly, allow 0.2 tolerance)
         assert!(
             (w_vals[0] - 3.0).abs() < 0.2,
-            "W[0] should be ~3.0, got {}", w_vals[0],
+            "W[0] should be ~3.0, got {}",
+            w_vals[0],
         );
         assert!(
             (w_vals[1] - (-2.0)).abs() < 0.2,
-            "W[1] should be ~-2.0, got {}", w_vals[1],
+            "W[1] should be ~-2.0, got {}",
+            w_vals[1],
         );
     }
 
@@ -3011,10 +3275,15 @@ mod tests {
         training_meta.param_to_grad.insert(w, grad_map[&w]);
 
         generate_optimizer_ops(
-            &mut graph, &mut training_meta,
+            &mut graph,
+            &mut training_meta,
             &OptimizerGenOptions {
                 kind: OptimizerKind::Adam {
-                    lr: 0.1, beta1: 0.9, beta2: 0.999, epsilon: 1e-8, weight_decay: 0.0,
+                    lr: 0.1,
+                    beta1: 0.9,
+                    beta2: 0.999,
+                    epsilon: 1e-8,
+                    weight_decay: 0.0,
                 },
             },
             rng,
@@ -3050,27 +3319,36 @@ mod tests {
 
         for _step in 0..100 {
             let mut inputs = HashMap::new();
-            inputs.insert(x_ext, NumericTensor::<DynRank>::from_vec_shape(
-                x_data.clone(), vec![4, 2],
-            ).unwrap());
-            inputs.insert(w_ext, NumericTensor::<DynRank>::from_vec_shape(
-                w_vals.clone(), vec![2, 1],
-            ).unwrap());
-            inputs.insert(targets_ext, NumericTensor::<DynRank>::from_vec_shape(
-                targets_data.clone(), vec![4, 1],
-            ).unwrap());
-            inputs.insert(m_in_id, NumericTensor::<DynRank>::from_vec_shape(
-                m_vals.clone(), vec![2, 1],
-            ).unwrap());
-            inputs.insert(v_in_id, NumericTensor::<DynRank>::from_vec_shape(
-                v_vals.clone(), vec![2, 1],
-            ).unwrap());
-            inputs.insert(t_in_id, NumericTensor::<DynRank>::from_vec_shape(
-                vec![t_val], vec![1],
-            ).unwrap());
+            inputs.insert(
+                x_ext,
+                NumericTensor::<DynRank>::from_vec_shape(x_data.clone(), vec![4, 2]).unwrap(),
+            );
+            inputs.insert(
+                w_ext,
+                NumericTensor::<DynRank>::from_vec_shape(w_vals.clone(), vec![2, 1]).unwrap(),
+            );
+            inputs.insert(
+                targets_ext,
+                NumericTensor::<DynRank>::from_vec_shape(targets_data.clone(), vec![4, 1]).unwrap(),
+            );
+            inputs.insert(
+                m_in_id,
+                NumericTensor::<DynRank>::from_vec_shape(m_vals.clone(), vec![2, 1]).unwrap(),
+            );
+            inputs.insert(
+                v_in_id,
+                NumericTensor::<DynRank>::from_vec_shape(v_vals.clone(), vec![2, 1]).unwrap(),
+            );
+            inputs.insert(
+                t_in_id,
+                NumericTensor::<DynRank>::from_vec_shape(vec![t_val], vec![1]).unwrap(),
+            );
 
             let mut backend = EvalBackend::NDArray;
-            let results: HashMap<_, _> = graph.eval(&inputs, &mut (), &mut backend).unwrap().collect();
+            let results: HashMap<_, _> = graph
+                .eval(&inputs, &mut (), &mut backend)
+                .unwrap()
+                .collect();
 
             let loss_val: Vec<f32> = results[&loss_ext].flatten().unwrap().try_into().unwrap();
             losses.push(loss_val[0]);
@@ -3085,15 +3363,18 @@ mod tests {
         // Adam with lr=0.1 should converge quickly
         assert!(
             *losses.last().unwrap() < 0.01,
-            "Loss should be near 0, got {}", losses.last().unwrap(),
+            "Loss should be near 0, got {}",
+            losses.last().unwrap(),
         );
         assert!(
             (w_vals[0] - 3.0).abs() < 0.15,
-            "W[0] should be ~3.0, got {}", w_vals[0],
+            "W[0] should be ~3.0, got {}",
+            w_vals[0],
         );
         assert!(
             (w_vals[1] - (-2.0)).abs() < 0.15,
-            "W[1] should be ~-2.0, got {}", w_vals[1],
+            "W[1] should be ~-2.0, got {}",
+            w_vals[1],
         );
     }
 
@@ -3157,10 +3438,15 @@ mod tests {
         training_meta.param_to_grad.insert(w2, grad_map[&w2]);
 
         generate_optimizer_ops(
-            &mut graph, &mut training_meta,
+            &mut graph,
+            &mut training_meta,
             &OptimizerGenOptions {
                 kind: OptimizerKind::Adam {
-                    lr: 0.05, beta1: 0.9, beta2: 0.999, epsilon: 1e-8, weight_decay: 0.0,
+                    lr: 0.05,
+                    beta1: 0.9,
+                    beta2: 0.999,
+                    epsilon: 1e-8,
+                    weight_decay: 0.0,
                 },
             },
             rng,
@@ -3208,12 +3494,12 @@ mod tests {
         // Initialize weights with small random values (deterministic)
         // W1: [2, 8] (2 inputs, 8 hidden), W2: [8, 1]
         let mut w_rng = wyrand::WyRand::new(42);
-        let mut w1_vals: Vec<f32> = (0..16).map(|_| {
-            (rand::Rng::random::<f32>(&mut w_rng) - 0.5) * 1.0
-        }).collect();
-        let mut w2_vals: Vec<f32> = (0..8).map(|_| {
-            (rand::Rng::random::<f32>(&mut w_rng) - 0.5) * 1.0
-        }).collect();
+        let mut w1_vals: Vec<f32> = (0..16)
+            .map(|_| (rand::Rng::random::<f32>(&mut w_rng) - 0.5) * 1.0)
+            .collect();
+        let mut w2_vals: Vec<f32> = (0..8)
+            .map(|_| (rand::Rng::random::<f32>(&mut w_rng) - 0.5) * 1.0)
+            .collect();
 
         let mut m1_vals = vec![0.0f32; 16];
         let mut v1_vals = vec![0.0f32; 16];
@@ -3224,36 +3510,48 @@ mod tests {
 
         for _step in 0..1000 {
             let mut inputs = HashMap::new();
-            inputs.insert(x_ext, NumericTensor::<DynRank>::from_vec_shape(
-                x_data.clone(), vec![4, 2],
-            ).unwrap());
-            inputs.insert(w1_ext, NumericTensor::<DynRank>::from_vec_shape(
-                w1_vals.clone(), vec![2, 8],
-            ).unwrap());
-            inputs.insert(w2_ext, NumericTensor::<DynRank>::from_vec_shape(
-                w2_vals.clone(), vec![8, 1],
-            ).unwrap());
-            inputs.insert(targets_ext, NumericTensor::<DynRank>::from_vec_shape(
-                targets_data.clone(), vec![4, 1],
-            ).unwrap());
-            inputs.insert(m1_in, NumericTensor::<DynRank>::from_vec_shape(
-                m1_vals.clone(), vec![2, 8],
-            ).unwrap());
-            inputs.insert(v1_in, NumericTensor::<DynRank>::from_vec_shape(
-                v1_vals.clone(), vec![2, 8],
-            ).unwrap());
-            inputs.insert(m2_in, NumericTensor::<DynRank>::from_vec_shape(
-                m2_vals.clone(), vec![8, 1],
-            ).unwrap());
-            inputs.insert(v2_in, NumericTensor::<DynRank>::from_vec_shape(
-                v2_vals.clone(), vec![8, 1],
-            ).unwrap());
-            inputs.insert(t_in, NumericTensor::<DynRank>::from_vec_shape(
-                vec![t_val], vec![1],
-            ).unwrap());
+            inputs.insert(
+                x_ext,
+                NumericTensor::<DynRank>::from_vec_shape(x_data.clone(), vec![4, 2]).unwrap(),
+            );
+            inputs.insert(
+                w1_ext,
+                NumericTensor::<DynRank>::from_vec_shape(w1_vals.clone(), vec![2, 8]).unwrap(),
+            );
+            inputs.insert(
+                w2_ext,
+                NumericTensor::<DynRank>::from_vec_shape(w2_vals.clone(), vec![8, 1]).unwrap(),
+            );
+            inputs.insert(
+                targets_ext,
+                NumericTensor::<DynRank>::from_vec_shape(targets_data.clone(), vec![4, 1]).unwrap(),
+            );
+            inputs.insert(
+                m1_in,
+                NumericTensor::<DynRank>::from_vec_shape(m1_vals.clone(), vec![2, 8]).unwrap(),
+            );
+            inputs.insert(
+                v1_in,
+                NumericTensor::<DynRank>::from_vec_shape(v1_vals.clone(), vec![2, 8]).unwrap(),
+            );
+            inputs.insert(
+                m2_in,
+                NumericTensor::<DynRank>::from_vec_shape(m2_vals.clone(), vec![8, 1]).unwrap(),
+            );
+            inputs.insert(
+                v2_in,
+                NumericTensor::<DynRank>::from_vec_shape(v2_vals.clone(), vec![8, 1]).unwrap(),
+            );
+            inputs.insert(
+                t_in,
+                NumericTensor::<DynRank>::from_vec_shape(vec![t_val], vec![1]).unwrap(),
+            );
 
             let mut backend = EvalBackend::NDArray;
-            let results: HashMap<_, _> = graph.eval(&inputs, &mut (), &mut backend).unwrap().collect();
+            let results: HashMap<_, _> = graph
+                .eval(&inputs, &mut (), &mut backend)
+                .unwrap()
+                .collect();
 
             let loss_val: Vec<f32> = results[&loss_ext].flatten().unwrap().try_into().unwrap();
             losses.push(loss_val[0]);
@@ -3275,13 +3573,18 @@ mod tests {
             final_loss < 0.05,
             "XOR MLP didn't converge: final loss = {} (expected < 0.05). \
              Loss trajectory: first={}, mid={}, last={}",
-            final_loss, losses[0], losses[losses.len() / 2], final_loss,
+            final_loss,
+            losses[0],
+            losses[losses.len() / 2],
+            final_loss,
         );
 
         // Verify: loss decreased significantly from start
         assert!(
             final_loss < losses[0] * 0.1,
-            "Loss didn't decrease enough: {} -> {}", losses[0], final_loss,
+            "Loss didn't decrease enough: {} -> {}",
+            losses[0],
+            final_loss,
         );
     }
 }

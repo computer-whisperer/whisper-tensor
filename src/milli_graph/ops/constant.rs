@@ -4,15 +4,13 @@ use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::backends::ndarray_backend::conversions::NDArrayNumericTensorType;
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
-use crate::milli_graph::{
-    MilliOpGraph, MilliOpGraphError,
-};
+use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::numeric_scalar::NumericScalar;
 use crate::numeric_tensor::NumericTensor;
 
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use rand::Rng;
 use typenum::P1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,11 +36,7 @@ impl Constant {
         out
     }
 
-    pub(crate) fn new_scalar<T>(
-        graph: &mut MilliOpGraph,
-        v: T,
-        rng: &mut impl Rng,
-    ) -> GlobalId
+    pub(crate) fn new_scalar<T>(graph: &mut MilliOpGraph, v: T, rng: &mut impl Rng) -> GlobalId
     where
         T: NDArrayNumericTensorType,
     {
@@ -86,10 +80,8 @@ impl MilliOp for Constant {
         &self,
         _inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
         _backend: &mut EvalBackend,
-    ) -> Result<
-        Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>,
-        MilliOpGraphError,
-    > {
+    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
+    {
         Ok(Box::new(
             [(self.output, self.data.clone().into())].into_iter(),
         ))
@@ -150,10 +142,8 @@ impl MilliOp for ConstantOfShape {
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
         _backend: &mut EvalBackend,
-    ) -> Result<
-        Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>,
-        MilliOpGraphError,
-    > {
+    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
+    {
         let shape: Vec<i64> = inputs[&self.shape].try_to_rank::<P1>()?.try_into()?;
         let shape_usize = shape.iter().map(|x| *x as u64).collect::<Vec<_>>();
         let out: NumericTensor<DynRank> =

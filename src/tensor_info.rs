@@ -1071,11 +1071,13 @@ impl TensorInfo {
     /// Useful for broadcast analysis and tests.
     pub fn from_shape_u64(shape: &[u64]) -> Self {
         use crate::numeric_scalar::NumericScalar;
-        let dims: Vec<ScalarInfoTyped<u64>> = shape.iter()
-            .map(|&v| ScalarInfoTyped::Numeric(v))
-            .collect();
+        let dims: Vec<ScalarInfoTyped<u64>> =
+            shape.iter().map(|&v| ScalarInfoTyped::Numeric(v)).collect();
         let first_element = ScalarInfo::Numeric(NumericScalar::F32(0.0));
-        TensorInfo::Ranked(TensorInfoRanked::Ranked(RankedTensor::new(first_element, dims)))
+        TensorInfo::Ranked(TensorInfoRanked::Ranked(RankedTensor::new(
+            first_element,
+            dims,
+        )))
     }
 
     #[allow(dead_code)]

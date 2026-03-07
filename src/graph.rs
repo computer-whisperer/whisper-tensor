@@ -5,14 +5,14 @@
 //! - Future graph layers (import, symbolic, milli-op, super) implement these to align.
 //! - Enable shared tooling and passes across all graphs.
 
-use std::any::Any;
-use std::borrow::Cow;
-use rand::Rng;
-use serde::{Deserialize, Serialize};
-use std::fmt::{Debug, Display};
-use std::hash::Hash;
 use crate::dtype::DType;
 use crate::scalar_info::ScalarInfoTyped;
+use rand::Rng;
+use serde::{Deserialize, Serialize};
+use std::any::Any;
+use std::borrow::Cow;
+use std::fmt::{Debug, Display};
+use std::hash::Hash;
 
 #[derive(Clone, Debug, Serialize, Deserialize, Hash, PartialEq, Eq, Copy, Ord, PartialOrd)]
 pub struct GlobalId(pub(crate) u64);
@@ -223,8 +223,7 @@ pub trait NodeDyn {
     fn label(&self) -> Option<String>;
 }
 
-impl<N: Node> NodeDyn for N
-{
+impl<N: Node> NodeDyn for N {
     fn global_id(&self) -> GlobalId {
         self.global_id()
     }
@@ -237,11 +236,11 @@ impl<N: Node> NodeDyn for N
         self.label()
     }
 
-    fn inputs(&self) -> Box<dyn Iterator<Item=GlobalId> + '_> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId> + '_> {
         self.inputs()
     }
 
-    fn outputs(&self)  -> Box<dyn Iterator<Item=GlobalId> + '_> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId> + '_> {
         self.outputs()
     }
 }
@@ -334,13 +333,7 @@ impl<G: Graph + 'static> GraphDyn for G {
 
 /// Observer API for instrumentation across graph execution and transformations.
 pub trait Observer<G: Graph> {
-    fn on_node_scheduled(&mut self, _path: &[GlobalId], _node: &G::AnyNode) {
-    }
+    fn on_node_scheduled(&mut self, _path: &[GlobalId], _node: &G::AnyNode) {}
     fn on_node_executed(&mut self, _path: &[GlobalId], _node: &G::AnyNode) {}
-    fn on_tensor_assigned(
-        &mut self,
-        _path: &[GlobalId],
-        _tensor: &G::AnyLink,
-    ) {
-    }
+    fn on_tensor_assigned(&mut self, _path: &[GlobalId], _tensor: &G::AnyLink) {}
 }

@@ -1,7 +1,7 @@
+use rand::rng;
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
-use rand::rng;
 use whisper_tensor::backends::ModelLoadedTensorCache;
 use whisper_tensor::backends::eval_backend::EvalBackend;
 use whisper_tensor::backends::vulkan_backend::{VulkanContext, VulkanImmediateExecutor};

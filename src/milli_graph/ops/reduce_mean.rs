@@ -74,10 +74,8 @@ impl MilliOp for ReduceMean {
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
-    ) -> Result<
-        Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>,
-        MilliOpGraphError,
-    > {
+    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
+    {
         let data = &inputs[&self.data];
         let axes = if let Some(axes) = self.axes {
             Vec::<i64>::try_from(inputs[&axes].try_to_rank::<P1>()?)?
@@ -135,7 +133,8 @@ impl MilliOp for ReduceMean {
             // Gather the specific axes from input_shape, then ReduceProd
             let count = super::Gather::push_new(graph, input_shape, axes, 0, rng);
             let count_scalar = super::ReduceProd::push_new(graph, count, None, false, false, rng);
-            let count_float = super::Cast::push_new(graph, count_scalar, crate::dtype::DType::F32, rng);
+            let count_float =
+                super::Cast::push_new(graph, count_scalar, crate::dtype::DType::F32, rng);
             let grad_input = super::SimpleBinary::div(graph, expanded, count_float, rng);
             let mut result = HashMap::new();
             result.insert(self.data, grad_input);

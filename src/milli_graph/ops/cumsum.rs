@@ -1,14 +1,14 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
+use crate::graph::{GlobalId, Node};
 use crate::milli_graph::MilliOpGraph;
-use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::MilliOpGraphError;
+use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::numeric_scalar::NumericScalarType;
 use crate::numeric_tensor::NumericTensor;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use rand::Rng;
-use crate::graph::{GlobalId, Node};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CumSum {
@@ -73,10 +73,8 @@ impl MilliOp for CumSum {
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
-    ) -> Result<
-        Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>,
-        MilliOpGraphError,
-    > {
+    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
+    {
         let data = &inputs[&self.input];
         let axis = i64::cast_from_numeric_scalar(&inputs[&self.axis].first_element());
         let out = data.cumsum(Some(axis as isize), self.exclusive, self.reverse, backend)?;

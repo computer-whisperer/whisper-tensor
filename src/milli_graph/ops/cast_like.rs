@@ -1,12 +1,12 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
+use crate::graph::GlobalId;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::numeric_tensor::NumericTensor;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use rand::Rng;
-use crate::graph::GlobalId;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CastLike {
@@ -65,10 +65,8 @@ impl MilliOp for CastLike {
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
-    ) -> Result<
-        Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>,
-        MilliOpGraphError,
-    > {
+    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
+    {
         let out = inputs[&self.data].cast(inputs[&self.target_type].dtype(), backend)?;
         Ok(Box::new([(self.output, out)].into_iter()))
     }

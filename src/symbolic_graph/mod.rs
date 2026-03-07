@@ -6,7 +6,9 @@ use crate::backends::ModelLoadedTensorCache;
 use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::{NDArrayNumericTensor, NDArrayNumericTensorError};
 use crate::dtype::DType;
-use crate::graph::{GlobalId, Graph, Link, LinkCategory, LinkMetadata, Node, NodeMetadata, Property};
+use crate::graph::{
+    GlobalId, Graph, Link, LinkCategory, LinkMetadata, Node, NodeMetadata, Property,
+};
 use crate::numeric_scalar::NumericScalar;
 use crate::numeric_tensor::NumericTensor;
 use crate::scalar_info::ScalarInfoTyped;
@@ -16,9 +18,9 @@ use crate::symbolic_scalar::{SymbolicResolver, SymbolicScalar, SymbolicScalarTyp
 use crate::tensor_rank::DynRank;
 use crate::{TrigOp, onnx};
 use prost::Message;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use rand::Rng;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ONNXDecodingError {
@@ -629,7 +631,9 @@ impl SymbolicGraph {
         // 3. Walk ops in topological order, merge each with a group
         for op_id in self.topological_order_vec() {
             let graph_op = &self.operations[&op_id];
-            let label = graph_op.name.clone()
+            let label = graph_op
+                .name
+                .clone()
                 .unwrap_or_else(|| graph_op.op.op_kind());
             let group = MilliOpGroup {
                 id: GlobalId::new(rng),
@@ -665,9 +669,8 @@ impl SymbolicGraph {
     ) -> Result<crate::milli_graph::MilliOpGraph, crate::milli_graph::MilliGraphGenError> {
         use crate::graph::{Graph, Node};
         use crate::milli_graph::{
-            MilliOpGraph, MilliOpGroup, MilliOpPhase, MilliGraphGenError,
-            BackwardGenContext, LossInputSource, TrainingMetadata,
-            generate_milli_backward,
+            BackwardGenContext, LossInputSource, MilliGraphGenError, MilliOpGraph, MilliOpGroup,
+            MilliOpPhase, TrainingMetadata, generate_milli_backward,
         };
         use crate::tensor_info::TensorInfo;
 
@@ -694,7 +697,9 @@ impl SymbolicGraph {
         let topo_order = self.topological_order_vec();
         for &op_id in &topo_order {
             let graph_op = &self.operations[&op_id];
-            let label = graph_op.name.clone()
+            let label = graph_op
+                .name
+                .clone()
                 .unwrap_or_else(|| graph_op.op.op_kind());
             let group = MilliOpGroup {
                 id: GlobalId::new(rng),
@@ -734,7 +739,10 @@ impl SymbolicGraph {
                 loss_wiring.insert(wire.loss_input, combined_id);
             }
             combined.merge_graph(
-                backward_opts.loss_graph.clone(), &mut loss_wiring, rng, Some(loss_group),
+                backward_opts.loss_graph.clone(),
+                &mut loss_wiring,
+                rng,
+                Some(loss_group),
             );
             let loss_tensor = loss_wiring[&backward_opts.loss_output];
 
@@ -745,9 +753,7 @@ impl SymbolicGraph {
             let mut grad_map: HashMap<GlobalId, GlobalId> = HashMap::new();
             grad_map.insert(loss_tensor, loss_grad);
 
-            let loss_grads = generate_milli_backward(
-                &mut combined, loss_group, &grad_map, rng,
-            );
+            let loss_grads = generate_milli_backward(&mut combined, loss_group, &grad_map, rng);
             grad_map.extend(loss_grads);
 
             // 4b. Backward through SymbolicGraph ops (Operation-level)
@@ -755,18 +761,26 @@ impl SymbolicGraph {
                 let graph_op = &self.operations[&op_id];
 
                 // Collect output gradients for this op
-                let output_grads: HashMap<GlobalId, GlobalId> = graph_op.op.outputs()
+                let output_grads: HashMap<GlobalId, GlobalId> = graph_op
+                    .op
+                    .outputs()
                     .filter_map(|out_id| {
                         let combined_id = sym_to_combined.get(&out_id)?;
                         grad_map.get(combined_id).map(|g| (*combined_id, *g))
                     })
                     .collect();
 
-                if output_grads.is_empty() { continue; }
-                if backward_opts.stop_gradients.contains(&op_id) { continue; }
+                if output_grads.is_empty() {
+                    continue;
+                }
+                if backward_opts.stop_gradients.contains(&op_id) {
+                    continue;
+                }
 
                 // Build tensor shape map from ONNXTensorInfo
-                let tensor_shapes: HashMap<GlobalId, TensorInfo> = graph_op.op.inputs()
+                let tensor_shapes: HashMap<GlobalId, TensorInfo> = graph_op
+                    .op
+                    .inputs()
                     .chain(graph_op.op.outputs())
                     .filter_map(|id| {
                         let info = self.get_tensor_info(id)?;
@@ -777,10 +791,14 @@ impl SymbolicGraph {
 
                 let ctx = BackwardGenContext {
                     output_grads,
-                    forward_inputs: graph_op.op.inputs()
+                    forward_inputs: graph_op
+                        .op
+                        .inputs()
                         .map(|id| sym_to_combined[&id])
                         .collect(),
-                    forward_outputs: graph_op.op.outputs()
+                    forward_outputs: graph_op
+                        .op
+                        .outputs()
                         .map(|id| sym_to_combined[&id])
                         .collect(),
                     tensor_shapes,
@@ -806,16 +824,23 @@ impl SymbolicGraph {
                         bwd_wiring.insert(grad_id, grad_id);
                     }
                     combined.merge_graph(
-                        backward_result.graph, &mut bwd_wiring, rng, Some(bwd_group),
+                        backward_result.graph,
+                        &mut bwd_wiring,
+                        rng,
+                        Some(bwd_group),
                     );
 
                     // Accumulate gradients for each forward input
                     for fwd_input_id in &backward_result.differentiable_inputs {
                         let remapped_grad = bwd_wiring[fwd_input_id];
-                        grad_map.entry(*fwd_input_id)
+                        grad_map
+                            .entry(*fwd_input_id)
                             .and_modify(|existing| {
                                 let sum = crate::milli_graph::ops::SimpleBinary::add(
-                                    &mut combined, *existing, remapped_grad, rng,
+                                    &mut combined,
+                                    *existing,
+                                    remapped_grad,
+                                    rng,
                                 );
                                 *existing = sum;
                             })
@@ -825,9 +850,11 @@ impl SymbolicGraph {
             }
 
             // Record training metadata
-            let mut training_meta = TrainingMetadata::default();
-            training_meta.loss = Some(loss_tensor);
-            training_meta.external_inputs = external_inputs;
+            let mut training_meta = TrainingMetadata {
+                loss: Some(loss_tensor),
+                external_inputs,
+                ..TrainingMetadata::default()
+            };
             for param in &backward_opts.trainable_params {
                 let combined_param = sym_to_combined[param];
                 if let Some(&grad) = grad_map.get(&combined_param) {
@@ -889,12 +916,10 @@ impl SymbolicGraph {
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
         eval_backend: &mut EvalBackend,
     ) -> Result<HashMap<GlobalId, NumericTensor<DynRank>>, EvalError> {
-        let mut active_tensors: HashMap<GlobalId, NumericTensor<DynRank>> =
-            inputs.clone();
+        let mut active_tensors: HashMap<GlobalId, NumericTensor<DynRank>> = inputs.clone();
 
         let ops = self.get_operations();
-        let mut remaining_ops_to_complete: Vec<GlobalId> =
-            ops.keys().copied().collect();
+        let mut remaining_ops_to_complete: Vec<GlobalId> = ops.keys().copied().collect();
         let mut total_ops_completed: Vec<GlobalId> = vec![];
         loop {
             let mut ops_completed_now = vec![];
@@ -1097,7 +1122,10 @@ impl SymbolicGraphMutator {
         }
     }
 
-    pub fn from_onnx_bytes(onnx_bytes: &[u8], rng: &mut impl Rng) -> Result<Self, ONNXDecodingError> {
+    pub fn from_onnx_bytes(
+        onnx_bytes: &[u8],
+        rng: &mut impl Rng,
+    ) -> Result<Self, ONNXDecodingError> {
         let model = onnx::ModelProto::decode(onnx_bytes)
             .map_err(|x| ONNXDecodingError::ProtobufDecodeError(anyhow::Error::from(x)))?;
         Self::from_onnx_model_proto(model, rng)
@@ -1116,7 +1144,7 @@ impl SymbolicGraphMutator {
             tensor_type,
             dtype: None,
             shape: None,
-            global_id
+            global_id,
         };
         inner_graph.tensors.insert(global_id, tensor);
         self.tensors_by_name.insert(name.to_string(), global_id);
@@ -1197,7 +1225,7 @@ impl SymbolicGraphMutator {
                 dtype: Some(dtype),
                 shape: Some(dimensions),
                 tensor_type,
-                global_id
+                global_id,
             },
         );
         Ok(global_id)
@@ -1223,7 +1251,7 @@ impl SymbolicGraphMutator {
                 dtype: Some(value.dtype()),
                 shape: Some(shape),
                 tensor_type: TensorType::Constant(StoredOrNotTensor::NotStored(value)),
-                global_id
+                global_id,
             },
         );
         if let Some(name) = name {
@@ -1255,7 +1283,7 @@ impl SymbolicGraphMutator {
                 dtype: Some(tensor_ref.dtype()),
                 shape: Some(shape),
                 tensor_type: TensorType::Constant(StoredOrNotTensor::Stored(id)),
-                global_id
+                global_id,
             },
         );
         if let Some(name) = name {
@@ -1766,7 +1794,7 @@ impl SymbolicGraphMutator {
                     &input_tensors,
                     &output_tensors,
                     &onnx_node.attribute,
-                    rng
+                    rng,
                 )?,
             )),
             "Gemm" => Some(AnyOperation::Gemm(ops::GemmOperation::from_onnx(
@@ -1811,7 +1839,7 @@ impl SymbolicGraphMutator {
                 &input_tensors,
                 &output_tensors,
                 &onnx_node.attribute,
-                rng
+                rng,
             )?)),
             "Identity" => Some(AnyOperation::Identity(ops::IdentityOperation::from_onnx(
                 &input_tensors,
@@ -1893,7 +1921,7 @@ impl SymbolicGraphMutator {
         };
 
         if let Some(op) = new_op {
-            let op = GraphOperation { name, op};
+            let op = GraphOperation { name, op };
 
             inner_graph.operations.insert(op.global_id(), op);
         }
@@ -1901,7 +1929,10 @@ impl SymbolicGraphMutator {
         Ok(())
     }
 
-    pub fn from_onnx_model_proto(model_proto: onnx::ModelProto, rng: &mut impl Rng) -> Result<Self, ONNXDecodingError> {
+    pub fn from_onnx_model_proto(
+        model_proto: onnx::ModelProto,
+        rng: &mut impl Rng,
+    ) -> Result<Self, ONNXDecodingError> {
         let mut core_opset_version = 0;
         for opset_proto in model_proto.opset_import {
             if opset_proto.domain.is_empty() {
@@ -1967,7 +1998,7 @@ impl Graph for SymbolicGraph {
         })
     }
 
-    fn constant_link_ids(&self) -> impl Iterator<Item=GlobalId> {
+    fn constant_link_ids(&self) -> impl Iterator<Item = GlobalId> {
         self.tensors.iter().filter_map(|(id, info)| {
             if let TensorType::Constant(_) = info.tensor_type {
                 Some(*id)
@@ -2060,22 +2091,33 @@ mod tests {
 
         let model_bytes = std::fs::read(&model_path).unwrap();
         let rng = &mut rand::rng();
-        let (graph, tensor_store) =
-            SymbolicGraphMutator::from_onnx_bytes(&model_bytes, rng)
-                .unwrap()
-                .get_inner();
+        let (graph, tensor_store) = SymbolicGraphMutator::from_onnx_bytes(&model_bytes, rng)
+            .unwrap()
+            .get_inner();
 
         // Load test data set 0
         let test_data_dir = dir_path.join("test_data_set_0");
-        let mut user_inputs: HashMap<String, crate::numeric_tensor::NumericTensor<crate::tensor_rank::DynRank>> = HashMap::new();
+        let mut user_inputs: HashMap<
+            String,
+            crate::numeric_tensor::NumericTensor<crate::tensor_rank::DynRank>,
+        > = HashMap::new();
         for entry in std::fs::read_dir(&test_data_dir).unwrap() {
             let entry = entry.unwrap();
             let name = entry.file_name().to_string_lossy().to_string();
             if name.starts_with("input_") && name.ends_with(".pb") {
                 let data = std::fs::read(entry.path()).unwrap();
                 let tensor_proto = crate::onnx::TensorProto::decode(data.as_slice()).unwrap();
-                let tensor = crate::backends::ndarray_backend::NDArrayNumericTensor::<crate::tensor_rank::DynRank>::try_from(&tensor_proto).unwrap();
-                let idx: usize = name.strip_prefix("input_").unwrap().strip_suffix(".pb").unwrap().parse().unwrap();
+                let tensor = crate::backends::ndarray_backend::NDArrayNumericTensor::<
+                    crate::tensor_rank::DynRank,
+                >::try_from(&tensor_proto)
+                .unwrap();
+                let idx: usize = name
+                    .strip_prefix("input_")
+                    .unwrap()
+                    .strip_suffix(".pb")
+                    .unwrap()
+                    .parse()
+                    .unwrap();
                 // Map by input ordering
                 let input_id = graph.ordered_inputs[idx];
                 let input_name = graph.get_tensor_name(input_id).unwrap().to_string();
@@ -2085,7 +2127,10 @@ mod tests {
 
         // Build full inputs (initialized tensors + user inputs)
         let initialized_tensors = graph.get_initialized_tensors(&tensor_store);
-        let mut all_inputs: HashMap<GlobalId, crate::numeric_tensor::NumericTensor<crate::tensor_rank::DynRank>> = initialized_tensors;
+        let mut all_inputs: HashMap<
+            GlobalId,
+            crate::numeric_tensor::NumericTensor<crate::tensor_rank::DynRank>,
+        > = initialized_tensors;
         let tensors_by_name = graph.get_tensors_by_name();
         for (name, tensor) in &user_inputs {
             let tensor_id = tensors_by_name[name];
@@ -2227,8 +2272,7 @@ mod tests {
         // but the loss graph is composed, generate_milli_backward runs, and
         // TrainingMetadata is populated.
         use crate::milli_graph::{
-            MilliOpGraph, MilliGraphGenOptions, BackwardGenOptions,
-            LossWiring, LossInputSource,
+            BackwardGenOptions, LossInputSource, LossWiring, MilliGraphGenOptions, MilliOpGraph,
         };
 
         let dir = "libs/onnx/onnx/backend/test/data/node/test_add";
@@ -2237,14 +2281,11 @@ mod tests {
             return;
         }
 
-        let model_bytes = std::fs::read(
-            std::path::Path::new(dir).join("model.onnx"),
-        ).unwrap();
+        let model_bytes = std::fs::read(std::path::Path::new(dir).join("model.onnx")).unwrap();
         let rng = &mut rand::rng();
-        let (graph, _tensor_store) =
-            SymbolicGraphMutator::from_onnx_bytes(&model_bytes, rng)
-                .unwrap()
-                .get_inner();
+        let (graph, _tensor_store) = SymbolicGraphMutator::from_onnx_bytes(&model_bytes, rng)
+            .unwrap()
+            .get_inner();
 
         // Create a simple MSE loss graph
         let (loss_graph, loss_info) = MilliOpGraph::mse_loss(rng);
@@ -2262,7 +2303,9 @@ mod tests {
                     },
                     LossWiring {
                         loss_input: loss_info.targets_input,
-                        source: LossInputSource::ExternalInput { name: "targets".into() },
+                        source: LossInputSource::ExternalInput {
+                            name: "targets".into(),
+                        },
                     },
                 ],
                 loss_output: loss_info.loss_output,

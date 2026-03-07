@@ -1,22 +1,14 @@
-use rand::Rng;
 use super::ops::*;
 use crate::backends::ndarray_backend::conversions::NDArrayNumericTensorType;
-use crate::milli_graph::{MilliOpGraph, GlobalId};
+use crate::milli_graph::{GlobalId, MilliOpGraph};
+use rand::Rng;
 
-pub(crate) fn rank(
-    graph: &mut MilliOpGraph,
-    tensor: GlobalId,
-    rng: &mut impl Rng
-) -> GlobalId {
+pub(crate) fn rank(graph: &mut MilliOpGraph, tensor: GlobalId, rng: &mut impl Rng) -> GlobalId {
     let shape_tid = Shape::push_new(graph, tensor, rng);
     Shape::push_new(graph, shape_tid, rng)
 }
 
-pub(crate) fn scalar_const<T>(
-    graph: &mut MilliOpGraph,
-    value: T,
-    rng: &mut impl Rng
-) -> GlobalId
+pub(crate) fn scalar_const<T>(graph: &mut MilliOpGraph, value: T, rng: &mut impl Rng) -> GlobalId
 where
     T: NDArrayNumericTensorType,
 {
@@ -27,7 +19,7 @@ pub(crate) fn resolve_axes(
     graph: &mut MilliOpGraph,
     axes: GlobalId,
     tensor: GlobalId,
-    rng: &mut impl Rng
+    rng: &mut impl Rng,
 ) -> GlobalId {
     let shape_tid = Shape::push_new(graph, tensor, rng);
     let rank_tid = Shape::push_new(graph, shape_tid, rng);

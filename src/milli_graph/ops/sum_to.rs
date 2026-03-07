@@ -72,10 +72,8 @@ impl MilliOp for SumTo {
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
-    ) -> Result<
-        Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>,
-        MilliOpGraphError,
-    > {
+    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
+    {
         let data = &inputs[&self.data];
         let target_shape_tensor = &inputs[&self.target_shape];
         let target_shape: Vec<i64> = target_shape_tensor

@@ -3,12 +3,10 @@ use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::{self, MilliOpGraph};
 use crate::onnx;
 use crate::symbolic_graph::ops::Operation;
-use crate::symbolic_graph::{
-    ONNXDecodingError, query_attribute_int, query_attribute_ints,
-};
+use crate::symbolic_graph::{ONNXDecodingError, query_attribute_int, query_attribute_ints};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use rand::Rng;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SplitOperation {
@@ -26,7 +24,7 @@ impl SplitOperation {
         inputs: &[Option<GlobalId>],
         outputs: &[Option<GlobalId>],
         attributes: &[onnx::AttributeProto],
-        rng: &mut impl Rng
+        rng: &mut impl Rng,
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.is_empty() || inputs.len() > 2 {
             return Err(ONNXDecodingError::InvalidOperatorInputs("Split"));
@@ -81,10 +79,16 @@ impl Operation for SplitOperation {
             params.push(Property::new("axis", PropertyValue::Int(axis)));
         }
         if let Some(num_outputs) = self.num_outputs {
-            params.push(Property::new("num_outputs", PropertyValue::Int(num_outputs)));
+            params.push(Property::new(
+                "num_outputs",
+                PropertyValue::Int(num_outputs),
+            ));
         }
         if let Some(split) = &self.split_attribute {
-            params.push(Property::new("split", PropertyValue::IntList(split.clone())));
+            params.push(Property::new(
+                "split",
+                PropertyValue::IntList(split.clone()),
+            ));
         }
         params
     }
@@ -114,7 +118,7 @@ impl Operation for SplitOperation {
                 self.axis.unwrap_or_default(),
                 self.num_outputs.map(|x| x as usize),
                 output_id,
-                rng
+                rng,
             );
 
             output_map.insert(out, *output_tensor_id);

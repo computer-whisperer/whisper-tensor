@@ -11,9 +11,7 @@ use whisper_tensor::numeric_tensor::NumericTensor;
 use whisper_tensor::super_graph::links::{
     SuperGraphLinkHash, SuperGraphLinkString, SuperGraphLinkTensor, SuperGraphLinkTensorMap,
 };
-use whisper_tensor::super_graph::{
-    SuperGraph, SuperGraphHash,
-};
+use whisper_tensor::super_graph::{SuperGraph, SuperGraphHash};
 use whisper_tensor::symbolic_graph::tensor_store::TensorStoreTensorId;
 use whisper_tensor_import::ModelTypeHint;
 

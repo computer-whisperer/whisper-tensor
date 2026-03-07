@@ -23,7 +23,11 @@ impl Shape {
         rng: &mut impl rand::Rng,
     ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
-        let node = Self { output, input, global_id: GlobalId::new(rng) };
+        let node = Self {
+            output,
+            input,
+            global_id: GlobalId::new(rng),
+        };
         graph.push_op(AnyMilliOp::Shape(node));
         output
     }
@@ -42,10 +46,8 @@ impl MilliOp for Shape {
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
         _backend: &mut EvalBackend,
-    ) -> Result<
-        Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>,
-        MilliOpGraphError,
-    > {
+    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
+    {
         let output_shape = inputs[&self.input]
             .shape()
             .into_iter()

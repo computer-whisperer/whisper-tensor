@@ -46,58 +46,35 @@ impl SimpleUnaryOp {
         rng: &mut impl rand::Rng,
     ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
-        let node = Self { output, input, op, global_id: GlobalId::new(rng)};
+        let node = Self {
+            output,
+            input,
+            op,
+            global_id: GlobalId::new(rng),
+        };
         graph.push_op(AnyMilliOp::SimpleUnary(node));
         output
     }
 
-    pub fn neg(
-        graph: &mut MilliOpGraph,
-        input: GlobalId,
-        rng: &mut impl rand::Rng,
-    ) -> GlobalId {
+    pub fn neg(graph: &mut MilliOpGraph, input: GlobalId, rng: &mut impl rand::Rng) -> GlobalId {
         Self::new_internal(graph, input, WhichSimpleUnaryOp::Neg, rng)
     }
-    pub fn abs(
-        graph: &mut MilliOpGraph,
-        input: GlobalId,
-        rng: &mut impl rand::Rng,
-    ) -> GlobalId {
+    pub fn abs(graph: &mut MilliOpGraph, input: GlobalId, rng: &mut impl rand::Rng) -> GlobalId {
         Self::new_internal(graph, input, WhichSimpleUnaryOp::Abs, rng)
     }
-    pub fn exp(
-        graph: &mut MilliOpGraph,
-        input: GlobalId,
-        rng: &mut impl rand::Rng,
-    ) -> GlobalId {
+    pub fn exp(graph: &mut MilliOpGraph, input: GlobalId, rng: &mut impl rand::Rng) -> GlobalId {
         Self::new_internal(graph, input, WhichSimpleUnaryOp::Exp, rng)
     }
-    pub fn ln(
-        graph: &mut MilliOpGraph,
-        input: GlobalId,
-        rng: &mut impl rand::Rng,
-    ) -> GlobalId {
+    pub fn ln(graph: &mut MilliOpGraph, input: GlobalId, rng: &mut impl rand::Rng) -> GlobalId {
         Self::new_internal(graph, input, WhichSimpleUnaryOp::Ln, rng)
     }
-    pub fn sqrt(
-        graph: &mut MilliOpGraph,
-        input: GlobalId,
-        rng: &mut impl rand::Rng,
-    ) -> GlobalId {
+    pub fn sqrt(graph: &mut MilliOpGraph, input: GlobalId, rng: &mut impl rand::Rng) -> GlobalId {
         Self::new_internal(graph, input, WhichSimpleUnaryOp::Sqrt, rng)
     }
-    pub fn not(
-        graph: &mut MilliOpGraph,
-        input: GlobalId,
-        rng: &mut impl rand::Rng,
-    ) -> GlobalId {
+    pub fn not(graph: &mut MilliOpGraph, input: GlobalId, rng: &mut impl rand::Rng) -> GlobalId {
         Self::new_internal(graph, input, WhichSimpleUnaryOp::Not, rng)
     }
-    pub fn sign(
-        graph: &mut MilliOpGraph,
-        input: GlobalId,
-        rng: &mut impl rand::Rng,
-    ) -> GlobalId {
+    pub fn sign(graph: &mut MilliOpGraph, input: GlobalId, rng: &mut impl rand::Rng) -> GlobalId {
         Self::new_internal(graph, input, WhichSimpleUnaryOp::Sign, rng)
     }
     pub fn bitwise_not(
@@ -122,25 +99,13 @@ impl SimpleUnaryOp {
     ) -> GlobalId {
         Self::new_internal(graph, input, WhichSimpleUnaryOp::Trig(trig_op), rng)
     }
-    pub fn floor(
-        graph: &mut MilliOpGraph,
-        input: GlobalId,
-        rng: &mut impl rand::Rng,
-    ) -> GlobalId {
+    pub fn floor(graph: &mut MilliOpGraph, input: GlobalId, rng: &mut impl rand::Rng) -> GlobalId {
         Self::new_internal(graph, input, WhichSimpleUnaryOp::Floor, rng)
     }
-    pub fn ceil(
-        graph: &mut MilliOpGraph,
-        input: GlobalId,
-        rng: &mut impl rand::Rng,
-    ) -> GlobalId {
+    pub fn ceil(graph: &mut MilliOpGraph, input: GlobalId, rng: &mut impl rand::Rng) -> GlobalId {
         Self::new_internal(graph, input, WhichSimpleUnaryOp::Ceil, rng)
     }
-    pub fn round(
-        graph: &mut MilliOpGraph,
-        input: GlobalId,
-        rng: &mut impl rand::Rng,
-    ) -> GlobalId {
+    pub fn round(graph: &mut MilliOpGraph, input: GlobalId, rng: &mut impl rand::Rng) -> GlobalId {
         Self::new_internal(graph, input, WhichSimpleUnaryOp::Round, rng)
     }
     pub fn is_inf(
@@ -157,21 +122,13 @@ impl SimpleUnaryOp {
                 detect_positive,
                 detect_negative,
             },
-            rng
+            rng,
         )
     }
-    pub fn is_nan(
-        graph: &mut MilliOpGraph,
-        input: GlobalId,
-        rng: &mut impl rand::Rng,
-    ) -> GlobalId {
+    pub fn is_nan(graph: &mut MilliOpGraph, input: GlobalId, rng: &mut impl rand::Rng) -> GlobalId {
         Self::new_internal(graph, input, WhichSimpleUnaryOp::IsNan, rng)
     }
-    pub fn erf(
-        graph: &mut MilliOpGraph,
-        input: GlobalId,
-        rng: &mut impl rand::Rng,
-    ) -> GlobalId {
+    pub fn erf(graph: &mut MilliOpGraph, input: GlobalId, rng: &mut impl rand::Rng) -> GlobalId {
         Self::new_internal(graph, input, WhichSimpleUnaryOp::Erf, rng)
     }
 }
@@ -223,10 +180,8 @@ impl MilliOp for SimpleUnaryOp {
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
-    ) -> Result<
-        Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>,
-        MilliOpGraphError,
-    > {
+    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
+    {
         let input = &inputs[&self.input];
         let out = match self.op {
             WhichSimpleUnaryOp::Neg => input.neg(backend)?,
@@ -261,18 +216,14 @@ impl MilliOp for SimpleUnaryOp {
         let grad_output = *output_grads.get(&self.output)?;
         let grad_input = match self.op {
             // d/dx(-x) = -1 => grad_input = -grad_output
-            WhichSimpleUnaryOp::Neg => {
-                SimpleUnaryOp::neg(graph, grad_output, rng)
-            }
+            WhichSimpleUnaryOp::Neg => SimpleUnaryOp::neg(graph, grad_output, rng),
             // d/dx(exp(x)) = exp(x) => grad_input = grad_output * output
             WhichSimpleUnaryOp::Exp => {
                 // output = exp(input), reuse the forward output
                 super::SimpleBinary::mul(graph, grad_output, self.output, rng)
             }
             // d/dx(ln(x)) = 1/x => grad_input = grad_output / input
-            WhichSimpleUnaryOp::Ln => {
-                super::SimpleBinary::div(graph, grad_output, self.input, rng)
-            }
+            WhichSimpleUnaryOp::Ln => super::SimpleBinary::div(graph, grad_output, self.input, rng),
             // d/dx(sqrt(x)) = 1/(2*sqrt(x)) => grad_input = grad_output / (2 * output)
             WhichSimpleUnaryOp::Sqrt => {
                 let two = super::Constant::new_scalar(graph, 2.0f32, rng);
@@ -357,10 +308,8 @@ impl MilliOp for ClampMin {
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
-    ) -> Result<
-        Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>,
-        MilliOpGraphError,
-    > {
+    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
+    {
         let out = inputs[&self.input].clamp_min(self.value, backend)?;
         Ok(Box::new([(self.output, out)].into_iter()))
     }

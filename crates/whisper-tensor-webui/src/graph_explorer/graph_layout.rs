@@ -57,7 +57,6 @@ pub(crate) struct GraphLayoutNodeInitData {
     pub outputs: Vec<GraphLayoutLinkId>,
 }
 
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct GraphLayoutLinkData {
     pub(crate) global_id: GlobalId,

@@ -11,6 +11,9 @@ pub enum DTypeError {
     #[cfg(feature = "tch")]
     #[error("The tch dtype {0:?} is not supported")]
     UnsupportedTCHDType(tch::Kind),
+    #[cfg(feature = "candle")]
+    #[error("The candle dtype {0:?} is not supported")]
+    UnsupportedCandleDType(candle_core::DType),
 }
 
 #[derive(Copy, Clone, Debug, Hash, Eq, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -175,9 +178,10 @@ impl TryFrom<DType> for candle_core::DType {
 }
 
 #[cfg(feature = "candle")]
-impl From<candle_core::DType> for DType {
-    fn from(value: candle_core::DType) -> Self {
-        match value {
+impl TryFrom<candle_core::DType> for DType {
+    type Error = DTypeError;
+    fn try_from(value: candle_core::DType) -> Result<Self, Self::Error> {
+        Ok(match value {
             candle_core::DType::F64 => DType::F64,
             candle_core::DType::F32 => DType::F32,
             candle_core::DType::BF16 => DType::BF16,
@@ -185,7 +189,8 @@ impl From<candle_core::DType> for DType {
             candle_core::DType::I64 => DType::I64,
             candle_core::DType::U8 => DType::U8,
             candle_core::DType::U32 => DType::U32,
-        }
+            _ => return Err(DTypeError::UnsupportedCandleDType(value)),
+        })
     }
 }
 

@@ -195,7 +195,7 @@ impl<R: Rank> NumericTensor<R> {
             #[cfg(feature = "onnx-reference")]
             NumericTensor::ONNXReference(x) => x.dtype(),
             #[cfg(feature = "candle")]
-            NumericTensor::Candle(x) => x.dtype().into(),
+            NumericTensor::Candle(x) => x.dtype().try_into().unwrap(),
             #[cfg(feature = "vulkan")]
             NumericTensor::Vulkan(x) => x.dtype(),
             #[cfg(feature = "tch")]

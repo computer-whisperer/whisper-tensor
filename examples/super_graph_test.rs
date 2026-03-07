@@ -13,7 +13,10 @@ use whisper_tensor::super_graph::data::SuperGraphData;
 use whisper_tensor::super_graph::links::{
     SuperGraphLink, SuperGraphLinkString, SuperGraphLinkTensor, SuperGraphLinkTensorMap,
 };
-use whisper_tensor::super_graph::nodes::{SuperGraphNode, SuperGraphNodeMilliOpGraph, SuperGraphNodeModelExecution, SuperGraphNodeTokenizerDecode, SuperGraphNodeTokenizerEncode, SuperGraphNodeTokenizerLoad};
+use whisper_tensor::super_graph::nodes::{
+    SuperGraphNode, SuperGraphNodeMilliOpGraph, SuperGraphNodeModelExecution,
+    SuperGraphNodeTokenizerDecode, SuperGraphNodeTokenizerEncode, SuperGraphNodeTokenizerLoad,
+};
 use whisper_tensor::super_graph::{SuperGraphBuilder, SuperGraphContext};
 use whisper_tensor_import::onnx_graph::{TokenizerInfo, WeightStorageStrategy};
 use whisper_tensor_import::{ModelTypeHint, identify_and_load};
@@ -43,8 +46,12 @@ fn main() {
         &mut rng,
     );
 
-    let tokens =
-        SuperGraphNodeTokenizerEncode::new_and_add(&mut builder, tokenizer_link, text_input_link, &mut rng);
+    let tokens = SuperGraphNodeTokenizerEncode::new_and_add(
+        &mut builder,
+        tokenizer_link,
+        text_input_link,
+        &mut rng,
+    );
 
     // Model invocation
     let logit_output = {
@@ -110,8 +117,12 @@ fn main() {
         output_tensor
     };
 
-    let text_output =
-        SuperGraphNodeTokenizerDecode::new_and_add(&mut builder, tokenizer_link, chosen_token, &mut rng);
+    let text_output = SuperGraphNodeTokenizerDecode::new_and_add(
+        &mut builder,
+        tokenizer_link,
+        chosen_token,
+        &mut rng,
+    );
 
     let inputs = vec![model_link.to_any(), text_input_link.to_any()];
     let outputs = vec![text_output.to_any()];

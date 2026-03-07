@@ -26,7 +26,12 @@ impl Unsqueeze {
         rng: &mut impl rand::Rng,
     ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
-        let node = Self { output, data, axes, global_id: GlobalId::new(rng) };
+        let node = Self {
+            output,
+            data,
+            axes,
+            global_id: GlobalId::new(rng),
+        };
         graph.push_op(AnyMilliOp::Unsqueeze(node));
         output
     }
@@ -76,10 +81,8 @@ impl MilliOp for Unsqueeze {
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
-    ) -> Result<
-        Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>,
-        MilliOpGraphError,
-    > {
+    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
+    {
         let axes_ndarray = NDArrayNumericTensor::<DynRank>::try_from(
             inputs[&self.axes].cast(DType::I64, backend)?,
         )?;

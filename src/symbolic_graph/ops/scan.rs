@@ -3,11 +3,14 @@ use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::MilliOpGraph;
 use crate::numeric_tensor::NumericTensor;
 use crate::symbolic_graph::ops::{EvalError, Operation};
-use crate::symbolic_graph::{ONNXDecodingError, SymbolicGraphMutator, query_attribute_graph, query_attribute_int, query_attribute_ints, SymbolicGraph};
+use crate::symbolic_graph::{
+    ONNXDecodingError, SymbolicGraph, SymbolicGraphMutator, query_attribute_graph,
+    query_attribute_int, query_attribute_ints,
+};
 use crate::{DynRank, onnx};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use rand::Rng;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ScanOperation {
@@ -30,7 +33,7 @@ impl ScanOperation {
         attributes: &[onnx::AttributeProto],
         symbolic_graph_mutator: &mut SymbolicGraphMutator,
         core_opset_version: usize,
-        rng: &mut impl Rng
+        rng: &mut impl Rng,
     ) -> Result<Self, ONNXDecodingError> {
         let body = query_attribute_graph(attributes, "body")
             .ok_or(ONNXDecodingError::MissingField("body"))?;
@@ -105,19 +108,37 @@ impl Node for ScanOperation {
 impl Operation for ScanOperation {
     fn parameters(&self) -> Vec<Property> {
         let mut params = Vec::new();
-        params.push(Property::new("num_scan_inputs", PropertyValue::Int(self.scan_inputs.len() as i64)));
-        params.push(Property::new("num_state_inputs", PropertyValue::Int(self.state_inputs.len() as i64)));
+        params.push(Property::new(
+            "num_scan_inputs",
+            PropertyValue::Int(self.scan_inputs.len() as i64),
+        ));
+        params.push(Property::new(
+            "num_state_inputs",
+            PropertyValue::Int(self.state_inputs.len() as i64),
+        ));
         if let Some(axes) = &self.scan_input_axes {
-            params.push(Property::new("scan_input_axes", PropertyValue::IntList(axes.clone())));
+            params.push(Property::new(
+                "scan_input_axes",
+                PropertyValue::IntList(axes.clone()),
+            ));
         }
         if let Some(dirs) = &self.scan_input_directions {
-            params.push(Property::new("scan_input_directions", PropertyValue::IntList(dirs.clone())));
+            params.push(Property::new(
+                "scan_input_directions",
+                PropertyValue::IntList(dirs.clone()),
+            ));
         }
         if let Some(axes) = &self.scan_output_axes {
-            params.push(Property::new("scan_output_axes", PropertyValue::IntList(axes.clone())));
+            params.push(Property::new(
+                "scan_output_axes",
+                PropertyValue::IntList(axes.clone()),
+            ));
         }
         if let Some(dirs) = &self.scan_output_directions {
-            params.push(Property::new("scan_output_directions", PropertyValue::IntList(dirs.clone())));
+            params.push(Property::new(
+                "scan_output_directions",
+                PropertyValue::IntList(dirs.clone()),
+            ));
         }
         params
     }
@@ -130,8 +151,7 @@ impl Operation for ScanOperation {
         &self,
         backend: &mut EvalBackend,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
-    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, EvalError>
-    {
+    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, EvalError> {
         let state_inputs: Vec<_> = self
             .state_inputs
             .iter()

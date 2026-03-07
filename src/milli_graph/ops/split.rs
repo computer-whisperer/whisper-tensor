@@ -80,10 +80,8 @@ impl MilliOp for Split {
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
-    ) -> Result<
-        Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>,
-        MilliOpGraphError,
-    > {
+    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
+    {
         // Determine the split sizes
         let split: Vec<i64> = if let Some(split) = &self.split {
             match split {
@@ -150,8 +148,7 @@ mod tests {
         // Build a tiny graph with one input and two split outputs, then run eval
 
         let input_id = GlobalId::new(rng);
-        let (mut graph, input_map) =
-            MilliOpGraph::new(std::iter::once(input_id), rng);
+        let (mut graph, input_map) = MilliOpGraph::new(std::iter::once(input_id), rng);
         let data_id = input_map[&input_id];
         let out0 = Split::push_new(&mut graph, data_id, None, 0, Some(2), 0, rng);
         let out1 = Split::push_new(&mut graph, data_id, None, 0, Some(2), 1, rng);
@@ -190,8 +187,7 @@ mod tests {
     fn test_split_num_outputs_negative_axis() {
         let rng = &mut rand::rng();
         let input_id = GlobalId::new(rng);
-        let (mut graph, input_map) =
-            MilliOpGraph::new(std::iter::once(input_id), rng);
+        let (mut graph, input_map) = MilliOpGraph::new(std::iter::once(input_id), rng);
         let data_id = input_map[&input_id];
         let out = Split::push_new(&mut graph, data_id, None, -1, Some(2), 1, rng);
         let mut output_map = HashMap::new();
@@ -225,8 +221,7 @@ mod tests {
     fn test_split_num_outputs_uneven_distribution_axis0() {
         let rng = &mut rand::rng();
         let input_id = GlobalId::new(rng);
-        let (mut graph, input_map) =
-            MilliOpGraph::new(std::iter::once(input_id), rng);
+        let (mut graph, input_map) = MilliOpGraph::new(std::iter::once(input_id), rng);
         let data_id = input_map[&input_id];
         // dim=5, num_outputs=2 -> sizes [3,2]
         let out0_id = GlobalId::new(rng);

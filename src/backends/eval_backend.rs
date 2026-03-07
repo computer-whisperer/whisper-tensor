@@ -7,9 +7,7 @@ use crate::numeric_tensor::NumericTensor;
 use crate::symbolic_graph::observer::SymbolicGraphObserver;
 use crate::symbolic_graph::ops::{EvalError, Operation};
 use crate::symbolic_graph::tensor_store::TensorStore;
-use crate::symbolic_graph::{
-    GraphOperation, SymbolicGraph, check_tensor_matches,
-};
+use crate::symbolic_graph::{GraphOperation, SymbolicGraph, check_tensor_matches};
 use crate::tensor_rank::{DynRank, Rank};
 use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
@@ -140,11 +138,7 @@ pub fn run<T: SymbolicGraphObserver>(
     for (name, tensor) in inputs {
         if let Some(tensor_id) = tensors_by_name.get(&name) {
             let onnx_tensor = model.get_tensor_info(*tensor_id).unwrap();
-            observer.on_tensor_assigned(
-                &[onnx_tensor.global_id()],
-                &tensor,
-                eval_backend,
-            );
+            observer.on_tensor_assigned(&[onnx_tensor.global_id()], &tensor, eval_backend);
             active_tensors.insert(*tensor_id, tensor);
         }
     }
@@ -164,8 +158,7 @@ pub fn run<T: SymbolicGraphObserver>(
     let mut tensors_just_created = vec![];
 
     let ops = model.get_operations();
-    let mut remaining_ops_to_complete: HashSet<GlobalId> =
-        ops.keys().copied().collect();
+    let mut remaining_ops_to_complete: HashSet<GlobalId> = ops.keys().copied().collect();
     loop {
         // Pick the next op to use
         let mut best_op_id = None;
@@ -233,12 +226,7 @@ pub fn run<T: SymbolicGraphObserver>(
                 .eval(eval_backend, &input_values)
                 .map_err(|x| EvalRuntimeError::EvalError(name.clone(), x))?;
             let end_instant = Instant::now();
-            observer.on_op_executed(
-                &[op.global_id()],
-                start_instant,
-                end_instant,
-                eval_backend,
-            );
+            observer.on_op_executed(&[op.global_id()], start_instant, end_instant, eval_backend);
             let mut new_tensors = vec![];
             for (tensor_id, value) in outputs {
                 //assert_eq!(value.has_nan().unwrap(), false);
@@ -248,11 +236,7 @@ pub fn run<T: SymbolicGraphObserver>(
                 check_tensor_matches(&value, tensor_info)
                     .map_err(|x| EvalRuntimeError::EvalError(name.clone(), x))?;
 
-                observer.on_tensor_assigned(
-                    &[tensor_info.global_id()],
-                    &value,
-                    eval_backend,
-                );
+                observer.on_tensor_assigned(&[tensor_info.global_id()], &value, eval_backend);
                 if let Some(x) = tensor_uses_left.get(&tensor_id)
                     && *x > 0
                 {

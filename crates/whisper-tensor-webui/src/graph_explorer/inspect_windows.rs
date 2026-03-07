@@ -36,7 +36,7 @@ pub(crate) struct TensorStats {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum ValueSourcePreference {
     #[default]
-    Live,   // Prefer subscribed/live value
+    Live, // Prefer subscribed/live value
     Stored, // Prefer stored value
 }
 
@@ -169,7 +169,6 @@ impl AnyInspectWindow {
         false
     }
 }
-
 
 // ============================================================================
 // Metadata Extraction Helpers
@@ -378,7 +377,12 @@ fn render_kv_row(ui: &mut egui::Ui, label: &str, value: &str, monospace: bool) {
 fn render_stat_card(ui: &mut egui::Ui, label: &str, value: &str) {
     ui.vertical(|ui| {
         ui.label(RichText::new(label).small().color(colors::STAT_LABEL));
-        ui.label(RichText::new(value).monospace().size(14.0).color(colors::STAT_VALUE));
+        ui.label(
+            RichText::new(value)
+                .monospace()
+                .size(14.0)
+                .color(colors::STAT_VALUE),
+        );
     });
 }
 
@@ -619,7 +623,9 @@ impl GraphExplorerApp {
                             .default_open(window.inputs_expanded)
                             .show(ui, |ui| {
                                 if inputs.is_empty() {
-                                    ui.label(RichText::new("None").italics().color(colors::STAT_LABEL));
+                                    ui.label(
+                                        RichText::new("None").italics().color(colors::STAT_LABEL),
+                                    );
                                 } else {
                                     egui::Frame::new()
                                         .fill(colors::SECTION_BG)
@@ -633,16 +639,34 @@ impl GraphExplorerApp {
                                                 .min_col_width(40.0)
                                                 .show(ui, |ui| {
                                                     // Header row
-                                                    ui.label(RichText::new("#").small().color(colors::STAT_LABEL));
-                                                    ui.label(RichText::new("Name").small().color(colors::STAT_LABEL));
-                                                    ui.label(RichText::new("DType").small().color(colors::STAT_LABEL));
-                                                    ui.label(RichText::new("Shape").small().color(colors::STAT_LABEL));
+                                                    ui.label(
+                                                        RichText::new("#")
+                                                            .small()
+                                                            .color(colors::STAT_LABEL),
+                                                    );
+                                                    ui.label(
+                                                        RichText::new("Name")
+                                                            .small()
+                                                            .color(colors::STAT_LABEL),
+                                                    );
+                                                    ui.label(
+                                                        RichText::new("DType")
+                                                            .small()
+                                                            .color(colors::STAT_LABEL),
+                                                    );
+                                                    ui.label(
+                                                        RichText::new("Shape")
+                                                            .small()
+                                                            .color(colors::STAT_LABEL),
+                                                    );
                                                     ui.label("");
                                                     ui.end_row();
 
-                                                    for (i, &input_id) in inputs.iter().enumerate() {
-                                                        let interaction =
-                                                            self.render_link_row(ui, i, input_id, graph);
+                                                    for (i, &input_id) in inputs.iter().enumerate()
+                                                    {
+                                                        let interaction = self.render_link_row(
+                                                            ui, i, input_id, graph,
+                                                        );
 
                                                         if interaction.hovered {
                                                             hovered_link = Some(input_id);
@@ -668,7 +692,9 @@ impl GraphExplorerApp {
                             .default_open(window.outputs_expanded)
                             .show(ui, |ui| {
                                 if outputs.is_empty() {
-                                    ui.label(RichText::new("None").italics().color(colors::STAT_LABEL));
+                                    ui.label(
+                                        RichText::new("None").italics().color(colors::STAT_LABEL),
+                                    );
                                 } else {
                                     egui::Frame::new()
                                         .fill(colors::SECTION_BG)
@@ -682,16 +708,35 @@ impl GraphExplorerApp {
                                                 .min_col_width(40.0)
                                                 .show(ui, |ui| {
                                                     // Header row
-                                                    ui.label(RichText::new("#").small().color(colors::STAT_LABEL));
-                                                    ui.label(RichText::new("Name").small().color(colors::STAT_LABEL));
-                                                    ui.label(RichText::new("DType").small().color(colors::STAT_LABEL));
-                                                    ui.label(RichText::new("Shape").small().color(colors::STAT_LABEL));
+                                                    ui.label(
+                                                        RichText::new("#")
+                                                            .small()
+                                                            .color(colors::STAT_LABEL),
+                                                    );
+                                                    ui.label(
+                                                        RichText::new("Name")
+                                                            .small()
+                                                            .color(colors::STAT_LABEL),
+                                                    );
+                                                    ui.label(
+                                                        RichText::new("DType")
+                                                            .small()
+                                                            .color(colors::STAT_LABEL),
+                                                    );
+                                                    ui.label(
+                                                        RichText::new("Shape")
+                                                            .small()
+                                                            .color(colors::STAT_LABEL),
+                                                    );
                                                     ui.label("");
                                                     ui.end_row();
 
-                                                    for (i, &output_id) in outputs.iter().enumerate() {
-                                                        let interaction =
-                                                            self.render_link_row(ui, i, output_id, graph);
+                                                    for (i, &output_id) in
+                                                        outputs.iter().enumerate()
+                                                    {
+                                                        let interaction = self.render_link_row(
+                                                            ui, i, output_id, graph,
+                                                        );
 
                                                         if interaction.hovered {
                                                             hovered_link = Some(output_id);
@@ -714,26 +759,39 @@ impl GraphExplorerApp {
                         if let Some(node_meta) = graph.get_node_metadata_by_id(&node_id) {
                             let params = node_meta.parameters();
                             if !params.is_empty() {
-                                egui::CollapsingHeader::new(format!("Parameters ({})", params.len()))
-                                    .default_open(window.show_op_params)
-                                    .show(ui, |ui| {
-                                        egui::Frame::new()
-                                            .fill(colors::SECTION_BG)
-                                            .corner_radius(CornerRadius::same(4))
-                                            .inner_margin(8.0)
-                                            .show(ui, |ui| {
-                                                egui::Grid::new(ui.id().with("params_grid"))
-                                                    .num_columns(2)
-                                                    .spacing([12.0, 4.0])
-                                                    .show(ui, |ui| {
-                                                        for param in params {
-                                                            ui.label(RichText::new(&*param.name).color(colors::STAT_LABEL));
-                                                            ui.label(RichText::new(format!("{}", param.value)).monospace().color(colors::STAT_VALUE));
-                                                            ui.end_row();
-                                                        }
-                                                    });
-                                            });
-                                    });
+                                egui::CollapsingHeader::new(format!(
+                                    "Parameters ({})",
+                                    params.len()
+                                ))
+                                .default_open(window.show_op_params)
+                                .show(ui, |ui| {
+                                    egui::Frame::new()
+                                        .fill(colors::SECTION_BG)
+                                        .corner_radius(CornerRadius::same(4))
+                                        .inner_margin(8.0)
+                                        .show(ui, |ui| {
+                                            egui::Grid::new(ui.id().with("params_grid"))
+                                                .num_columns(2)
+                                                .spacing([12.0, 4.0])
+                                                .show(ui, |ui| {
+                                                    for param in params {
+                                                        ui.label(
+                                                            RichText::new(&*param.name)
+                                                                .color(colors::STAT_LABEL),
+                                                        );
+                                                        ui.label(
+                                                            RichText::new(format!(
+                                                                "{}",
+                                                                param.value
+                                                            ))
+                                                            .monospace()
+                                                            .color(colors::STAT_VALUE),
+                                                        );
+                                                        ui.end_row();
+                                                    }
+                                                });
+                                        });
+                                });
                             }
                         }
 
@@ -750,18 +808,22 @@ impl GraphExplorerApp {
 
                         // Debug info (collapsed by default)
                         ui.add_space(8.0);
-                        egui::CollapsingHeader::new(RichText::new("Debug Info").small().color(colors::STAT_LABEL))
-                            .default_open(window.show_debug_info)
-                            .show(ui, |ui| {
-                                egui::Frame::new()
-                                    .fill(colors::SECTION_BG)
-                                    .corner_radius(CornerRadius::same(4))
-                                    .inner_margin(6.0)
-                                    .show(ui, |ui| {
-                                        render_kv_row(ui, "GlobalId:", &format!("{}", node_id), true);
-                                        render_kv_row(ui, "Path:", &format!("{:?}", window.path), true);
-                                    });
-                            });
+                        egui::CollapsingHeader::new(
+                            RichText::new("Debug Info")
+                                .small()
+                                .color(colors::STAT_LABEL),
+                        )
+                        .default_open(window.show_debug_info)
+                        .show(ui, |ui| {
+                            egui::Frame::new()
+                                .fill(colors::SECTION_BG)
+                                .corner_radius(CornerRadius::same(4))
+                                .inner_margin(6.0)
+                                .show(ui, |ui| {
+                                    render_kv_row(ui, "GlobalId:", &format!("{}", node_id), true);
+                                    render_kv_row(ui, "Path:", &format!("{:?}", window.path), true);
+                                });
+                        });
                     } else {
                         ui.colored_label(Color32::RED, "Node not found in graph");
                     }
@@ -803,7 +865,11 @@ impl GraphExplorerApp {
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         // Op type badge
-                        ui.label(RichText::new(&op).strong().color(Color32::from_rgb(130, 180, 220)));
+                        ui.label(
+                            RichText::new(&op)
+                                .strong()
+                                .color(Color32::from_rgb(130, 180, 220)),
+                        );
 
                         // Label if present
                         if let Some(label) = label {
@@ -812,7 +878,11 @@ impl GraphExplorerApp {
 
                         // Input index if present
                         if let Some(idx) = input_idx {
-                            ui.label(RichText::new(format!("[{}]", idx)).small().color(colors::STAT_LABEL));
+                            ui.label(
+                                RichText::new(format!("[{}]", idx))
+                                    .small()
+                                    .color(colors::STAT_LABEL),
+                            );
                         }
 
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -831,7 +901,11 @@ impl GraphExplorerApp {
                 interaction.clicked = true;
             }
         } else {
-            ui.label(RichText::new("Unknown node").italics().color(colors::STAT_LABEL));
+            ui.label(
+                RichText::new("Unknown node")
+                    .italics()
+                    .color(colors::STAT_LABEL),
+            );
         }
 
         interaction
@@ -901,8 +975,13 @@ impl GraphExplorerApp {
                             render_badge(ui, category, category_color(category));
                         }
                         if let Some(shape) = &meta.shape {
-                            if let Some(bytes) = calculate_memory_size(shape, meta.dtype.as_deref()) {
-                                render_badge(ui, &format_bytes(bytes), Color32::from_rgb(60, 60, 70));
+                            if let Some(bytes) = calculate_memory_size(shape, meta.dtype.as_deref())
+                            {
+                                render_badge(
+                                    ui,
+                                    &format_bytes(bytes),
+                                    Color32::from_rgb(60, 60, 70),
+                                );
                             }
                         }
                     });
@@ -913,7 +992,12 @@ impl GraphExplorerApp {
                     if let Some(shape) = &meta.shape {
                         ui.horizontal(|ui| {
                             ui.label(RichText::new("Shape:").color(colors::STAT_LABEL));
-                            ui.label(RichText::new(format_shape(shape)).monospace().strong().size(15.0));
+                            ui.label(
+                                RichText::new(format_shape(shape))
+                                    .monospace()
+                                    .strong()
+                                    .size(15.0),
+                            );
                         });
 
                         // Calculate total elements
@@ -938,7 +1022,12 @@ impl GraphExplorerApp {
                     if !meta.properties.is_empty() {
                         ui.add_space(4.0);
                         for prop in &meta.properties {
-                            render_kv_row(ui, &format!("{}:", prop.name), &format!("{}", prop.value), true);
+                            render_kv_row(
+                                ui,
+                                &format!("{}:", prop.name),
+                                &format!("{}", prop.value),
+                                true,
+                            );
                         }
                     }
 
@@ -975,8 +1064,13 @@ impl GraphExplorerApp {
                                 .show(ui, |ui| {
                                     // Source
                                     ui.horizontal(|ui| {
-                                        ui.label(RichText::new("From").color(colors::STAT_LABEL).small());
-                                        ui.label(RichText::new("→").color(Color32::from_rgb(100, 180, 100)));
+                                        ui.label(
+                                            RichText::new("From").color(colors::STAT_LABEL).small(),
+                                        );
+                                        ui.label(
+                                            RichText::new("→")
+                                                .color(Color32::from_rgb(100, 180, 100)),
+                                        );
                                     });
                                     if let Some(src_id) = source_node {
                                         let interaction =
@@ -993,25 +1087,46 @@ impl GraphExplorerApp {
                                             new_windows.push(node_path);
                                         }
                                     } else {
-                                        ui.label(RichText::new("Graph Input").italics().color(colors::STAT_LABEL));
+                                        ui.label(
+                                            RichText::new("Graph Input")
+                                                .italics()
+                                                .color(colors::STAT_LABEL),
+                                        );
                                     }
 
                                     ui.add_space(8.0);
 
                                     // Destinations
                                     ui.horizontal(|ui| {
-                                        ui.label(RichText::new("To").color(colors::STAT_LABEL).small());
-                                        ui.label(RichText::new("→").color(Color32::from_rgb(180, 100, 100)));
+                                        ui.label(
+                                            RichText::new("To").color(colors::STAT_LABEL).small(),
+                                        );
+                                        ui.label(
+                                            RichText::new("→")
+                                                .color(Color32::from_rgb(180, 100, 100)),
+                                        );
                                         if dest_nodes.len() > 1 {
-                                            ui.label(RichText::new(format!("({})", dest_nodes.len())).small().color(colors::STAT_LABEL));
+                                            ui.label(
+                                                RichText::new(format!("({})", dest_nodes.len()))
+                                                    .small()
+                                                    .color(colors::STAT_LABEL),
+                                            );
                                         }
                                     });
                                     if dest_nodes.is_empty() {
-                                        ui.label(RichText::new("Graph Output").italics().color(colors::STAT_LABEL));
+                                        ui.label(
+                                            RichText::new("Graph Output")
+                                                .italics()
+                                                .color(colors::STAT_LABEL),
+                                        );
                                     } else {
                                         for (dest_id, input_idx) in &dest_nodes {
-                                            let interaction =
-                                                self.render_node_row_styled(ui, *dest_id, Some(*input_idx), graph);
+                                            let interaction = self.render_node_row_styled(
+                                                ui,
+                                                *dest_id,
+                                                Some(*input_idx),
+                                                graph,
+                                            );
                                             if interaction.hovered {
                                                 hovered_node = Some(*dest_id);
                                             }
@@ -1031,8 +1146,9 @@ impl GraphExplorerApp {
                     ui.add_space(4.0);
 
                     // Subscription controls
-                    let is_subscribed =
-                        self.inspect_window_tensor_subscriptions.contains(&window.path);
+                    let is_subscribed = self
+                        .inspect_window_tensor_subscriptions
+                        .contains(&window.path);
 
                     ui.horizontal(|ui| {
                         if is_subscribed {
@@ -1075,8 +1191,12 @@ impl GraphExplorerApp {
 
                     // Determine which tensor to show
                     let tensor_to_show = match window.value_source_preference {
-                        ValueSourcePreference::Live => has_subscribed.or(has_stored.and_then(|r| r.as_ref().ok())),
-                        ValueSourcePreference::Stored => has_stored.and_then(|r| r.as_ref().ok()).or(has_subscribed),
+                        ValueSourcePreference::Live => {
+                            has_subscribed.or(has_stored.and_then(|r| r.as_ref().ok()))
+                        }
+                        ValueSourcePreference::Stored => {
+                            has_stored.and_then(|r| r.as_ref().ok()).or(has_subscribed)
+                        }
                     };
 
                     if let Some(tensor) = tensor_to_show {
@@ -1099,30 +1219,64 @@ impl GraphExplorerApp {
                                             // First row: Min/Max with visual range indicator
                                             ui.horizontal(|ui| {
                                                 ui.spacing_mut().item_spacing.x = 16.0;
-                                                render_stat_card(ui, "Min", &format_stat_value(stats.min));
-                                                render_stat_card(ui, "Max", &format_stat_value(stats.max));
-                                                render_stat_card(ui, "Mean", &format_stat_value(stats.mean));
-                                                render_stat_card(ui, "Std", &format_stat_value(stats.std));
+                                                render_stat_card(
+                                                    ui,
+                                                    "Min",
+                                                    &format_stat_value(stats.min),
+                                                );
+                                                render_stat_card(
+                                                    ui,
+                                                    "Max",
+                                                    &format_stat_value(stats.max),
+                                                );
+                                                render_stat_card(
+                                                    ui,
+                                                    "Mean",
+                                                    &format_stat_value(stats.mean),
+                                                );
+                                                render_stat_card(
+                                                    ui,
+                                                    "Std",
+                                                    &format_stat_value(stats.std),
+                                                );
                                             });
 
                                             // Warning indicators for NaN/Inf
-                                            if stats.nan_count > 0 || stats.inf_count > 0 || stats.zero_count > 0 {
+                                            if stats.nan_count > 0
+                                                || stats.inf_count > 0
+                                                || stats.zero_count > 0
+                                            {
                                                 ui.add_space(6.0);
                                                 ui.horizontal(|ui| {
                                                     if stats.nan_count > 0 {
-                                                        ui.label(RichText::new(format!("{} NaN", stats.nan_count))
+                                                        ui.label(
+                                                            RichText::new(format!(
+                                                                "{} NaN",
+                                                                stats.nan_count
+                                                            ))
                                                             .color(colors::WARNING)
-                                                            .small());
+                                                            .small(),
+                                                        );
                                                     }
                                                     if stats.inf_count > 0 {
-                                                        ui.label(RichText::new(format!("{} Inf", stats.inf_count))
+                                                        ui.label(
+                                                            RichText::new(format!(
+                                                                "{} Inf",
+                                                                stats.inf_count
+                                                            ))
                                                             .color(colors::WARNING)
-                                                            .small());
+                                                            .small(),
+                                                        );
                                                     }
                                                     if stats.zero_count > 0 {
-                                                        ui.label(RichText::new(format!("{} zeros", stats.zero_count))
+                                                        ui.label(
+                                                            RichText::new(format!(
+                                                                "{} zeros",
+                                                                stats.zero_count
+                                                            ))
                                                             .color(colors::STAT_LABEL)
-                                                            .small());
+                                                            .small(),
+                                                        );
                                                     }
                                                 });
                                             }
@@ -1160,18 +1314,22 @@ impl GraphExplorerApp {
 
                     // Debug info (collapsed by default)
                     ui.add_space(8.0);
-                    egui::CollapsingHeader::new(RichText::new("Debug Info").small().color(colors::STAT_LABEL))
-                        .default_open(window.show_debug_info)
-                        .show(ui, |ui| {
-                            egui::Frame::new()
-                                .fill(colors::SECTION_BG)
-                                .corner_radius(CornerRadius::same(4))
-                                .inner_margin(6.0)
-                                .show(ui, |ui| {
-                                    render_kv_row(ui, "GlobalId:", &format!("{}", link_id), true);
-                                    render_kv_row(ui, "Path:", &format!("{:?}", window.path), true);
-                                });
-                        });
+                    egui::CollapsingHeader::new(
+                        RichText::new("Debug Info")
+                            .small()
+                            .color(colors::STAT_LABEL),
+                    )
+                    .default_open(window.show_debug_info)
+                    .show(ui, |ui| {
+                        egui::Frame::new()
+                            .fill(colors::SECTION_BG)
+                            .corner_radius(CornerRadius::same(4))
+                            .inner_margin(6.0)
+                            .show(ui, |ui| {
+                                render_kv_row(ui, "GlobalId:", &format!("{}", link_id), true);
+                                render_kv_row(ui, "Path:", &format!("{:?}", window.path), true);
+                            });
+                    });
                 } else {
                     ui.colored_label(Color32::RED, "Could not resolve path");
                 }

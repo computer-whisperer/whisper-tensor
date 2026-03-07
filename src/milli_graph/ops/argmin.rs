@@ -24,7 +24,7 @@ impl ArgMin {
         axis: i64,
         keepdims: bool,
         select_last_index: bool,
-        rng: &mut impl rand::Rng
+        rng: &mut impl rand::Rng,
     ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
         let node = Self {
@@ -53,10 +53,8 @@ impl MilliOp for ArgMin {
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
-    ) -> Result<
-        Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>,
-        MilliOpGraphError,
-    > {
+    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
+    {
         let input = inputs[&self.input].clone();
         let axis = if self.axis < 0 {
             input.shape().len() as i64 + self.axis

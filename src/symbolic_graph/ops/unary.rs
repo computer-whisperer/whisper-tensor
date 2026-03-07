@@ -4,9 +4,9 @@ use crate::milli_graph::MilliOpGraph;
 use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{ONNXDecodingError, query_attribute_int};
 use crate::{TrigOp, milli_graph, onnx};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use rand::Rng;
 
 #[derive(Clone, Debug, PartialEq, strum_macros::Display, Serialize, Deserialize)]
 pub enum WhichUnaryOperation {
@@ -44,7 +44,7 @@ impl UnaryOperation {
         inputs: &[Option<GlobalId>],
         outputs: &[Option<GlobalId>],
         which: WhichUnaryOperation,
-        rng: &mut impl Rng
+        rng: &mut impl Rng,
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 1 {
             return Err(ONNXDecodingError::InvalidOperatorInputs("Unary"));
@@ -82,7 +82,10 @@ impl Node for UnaryOperation {
 }
 impl Operation for UnaryOperation {
     fn parameters(&self) -> Vec<Property> {
-        vec![Property::new("operation", PropertyValue::String(self.which.to_string()))]
+        vec![Property::new(
+            "operation",
+            PropertyValue::String(self.which.to_string()),
+        )]
     }
 
     fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
@@ -96,7 +99,9 @@ impl Operation for UnaryOperation {
             return graph;
         }
         let out_tid = match &self.which {
-            WhichUnaryOperation::Relu => milli_graph::ops::ClampMin::push_new(&mut graph, a, 0.0, rng),
+            WhichUnaryOperation::Relu => {
+                milli_graph::ops::ClampMin::push_new(&mut graph, a, 0.0, rng)
+            }
             WhichUnaryOperation::Sigmoid => {
                 let xn = milli_graph::ops::Cast::push_new(&mut graph, a, DType::F32, rng);
                 let xn = milli_graph::ops::SimpleUnaryOp::neg(&mut graph, xn, rng);
@@ -130,10 +135,16 @@ impl Operation for UnaryOperation {
             }
             WhichUnaryOperation::Not => milli_graph::ops::SimpleUnaryOp::not(&mut graph, a, rng),
             WhichUnaryOperation::Sign => milli_graph::ops::SimpleUnaryOp::sign(&mut graph, a, rng),
-            WhichUnaryOperation::Floor => milli_graph::ops::SimpleUnaryOp::floor(&mut graph, a, rng),
+            WhichUnaryOperation::Floor => {
+                milli_graph::ops::SimpleUnaryOp::floor(&mut graph, a, rng)
+            }
             WhichUnaryOperation::Ceil => milli_graph::ops::SimpleUnaryOp::ceil(&mut graph, a, rng),
-            WhichUnaryOperation::Round => milli_graph::ops::SimpleUnaryOp::round(&mut graph, a, rng),
-            WhichUnaryOperation::IsNan => milli_graph::ops::SimpleUnaryOp::is_nan(&mut graph, a, rng),
+            WhichUnaryOperation::Round => {
+                milli_graph::ops::SimpleUnaryOp::round(&mut graph, a, rng)
+            }
+            WhichUnaryOperation::IsNan => {
+                milli_graph::ops::SimpleUnaryOp::is_nan(&mut graph, a, rng)
+            }
             WhichUnaryOperation::Erf => milli_graph::ops::SimpleUnaryOp::erf(&mut graph, a, rng),
             WhichUnaryOperation::NonZero => unreachable!(),
         };
@@ -157,7 +168,7 @@ impl SoftmaxOperation {
         inputs: &[Option<GlobalId>],
         outputs: &[Option<GlobalId>],
         attributes: &[onnx::AttributeProto],
-        rng: &mut impl Rng
+        rng: &mut impl Rng,
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 1 {
             return Err(ONNXDecodingError::InvalidOperatorInputs("Softmax"));
@@ -203,8 +214,10 @@ impl Operation for SoftmaxOperation {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
 
         let e = milli_graph::ops::SimpleUnaryOp::exp(&mut graph, input_map[&self.input], rng);
-        let axis_tid = milli_graph::ops::Constant::new_scalar(&mut graph, self.axis.unwrap_or(-1), rng);
-        let sum = milli_graph::ops::ReduceSum::push_new(&mut graph, e, Some(axis_tid), true, false, rng);
+        let axis_tid =
+            milli_graph::ops::Constant::new_scalar(&mut graph, self.axis.unwrap_or(-1), rng);
+        let sum =
+            milli_graph::ops::ReduceSum::push_new(&mut graph, e, Some(axis_tid), true, false, rng);
         let out_tid = milli_graph::ops::SimpleBinary::div(&mut graph, e, sum, rng);
         let mut output_map = HashMap::new();
         output_map.insert(out_tid, self.output);
@@ -226,7 +239,7 @@ impl LogSoftmaxOperation {
         inputs: &[Option<GlobalId>],
         outputs: &[Option<GlobalId>],
         attributes: &[onnx::AttributeProto],
-        rng: &mut impl Rng
+        rng: &mut impl Rng,
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 1 {
             return Err(ONNXDecodingError::InvalidOperatorInputs("LogSoftmax"));
@@ -273,9 +286,16 @@ impl Operation for LogSoftmaxOperation {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
 
         let e_tid = milli_graph::ops::SimpleUnaryOp::exp(&mut graph, input_map[&self.input], rng);
-        let axis_tid = milli_graph::ops::Constant::new_scalar(&mut graph, self.axis.unwrap_or(-1), rng);
-        let sum_tid =
-            milli_graph::ops::ReduceSum::push_new(&mut graph, e_tid, Some(axis_tid), true, false, rng);
+        let axis_tid =
+            milli_graph::ops::Constant::new_scalar(&mut graph, self.axis.unwrap_or(-1), rng);
+        let sum_tid = milli_graph::ops::ReduceSum::push_new(
+            &mut graph,
+            e_tid,
+            Some(axis_tid),
+            true,
+            false,
+            rng,
+        );
         let softmax_tid = milli_graph::ops::SimpleBinary::div(&mut graph, e_tid, sum_tid, rng);
         let out_tid = milli_graph::ops::SimpleUnaryOp::ln(&mut graph, softmax_tid, rng);
         let mut output_map = HashMap::new();
@@ -299,7 +319,7 @@ impl IsInfOperation {
         inputs: &[Option<GlobalId>],
         outputs: &[Option<GlobalId>],
         attributes: &[onnx::AttributeProto],
-        rng: &mut impl Rng
+        rng: &mut impl Rng,
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 1 {
             return Err(ONNXDecodingError::InvalidOperatorInputs("IsInf"));
@@ -340,10 +360,16 @@ impl Operation for IsInfOperation {
     fn parameters(&self) -> Vec<Property> {
         let mut params = Vec::new();
         if let Some(detect_negative) = self.detect_negative {
-            params.push(Property::new("detect_negative", PropertyValue::Bool(detect_negative)));
+            params.push(Property::new(
+                "detect_negative",
+                PropertyValue::Bool(detect_negative),
+            ));
         }
         if let Some(detect_positive) = self.detect_positive {
-            params.push(Property::new("detect_positive", PropertyValue::Bool(detect_positive)));
+            params.push(Property::new(
+                "detect_positive",
+                PropertyValue::Bool(detect_positive),
+            ));
         }
         params
     }
@@ -356,7 +382,7 @@ impl Operation for IsInfOperation {
             input,
             self.detect_positive.unwrap_or(true),
             self.detect_negative.unwrap_or(true),
-            rng
+            rng,
         );
         let mut output_map = HashMap::new();
         output_map.insert(out_tid, self.output);
@@ -377,7 +403,7 @@ impl IdentityOperation {
         inputs: &[Option<GlobalId>],
         outputs: &[Option<GlobalId>],
         _attributes: &[onnx::AttributeProto],
-        rng: &mut impl Rng
+        rng: &mut impl Rng,
     ) -> Result<Self, ONNXDecodingError> {
         if inputs.len() != 1 {
             return Err(ONNXDecodingError::InvalidOperatorInputs("Identity"));

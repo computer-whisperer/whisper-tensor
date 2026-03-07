@@ -4,9 +4,9 @@ use crate::milli_graph::MilliOpGraph;
 use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{ONNXDecodingError, query_attribute_int};
 use crate::{milli_graph, onnx};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use rand::Rng;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RotaryEmbeddingOperation {
@@ -78,12 +78,18 @@ impl Node for RotaryEmbeddingOperation {
 impl Operation for RotaryEmbeddingOperation {
     fn parameters(&self) -> Vec<Property> {
         let mut params = Vec::new();
-        params.push(Property::new("interleaved", PropertyValue::Bool(self.interleaved)));
+        params.push(Property::new(
+            "interleaved",
+            PropertyValue::Bool(self.interleaved),
+        ));
         if let Some(num_heads) = self.num_heads {
             params.push(Property::new("num_heads", PropertyValue::Int(num_heads)));
         }
         if self.rotary_embedding_dim != 0 {
-            params.push(Property::new("rotary_embedding_dim", PropertyValue::Int(self.rotary_embedding_dim)));
+            params.push(Property::new(
+                "rotary_embedding_dim",
+                PropertyValue::Int(self.rotary_embedding_dim),
+            ));
         }
         params
     }
@@ -103,7 +109,7 @@ impl Operation for RotaryEmbeddingOperation {
                 &mut graph,
                 NDArrayNumericTensor::from(vec![0i64, 0i64, self.num_heads.unwrap(), -1i64])
                     .to_dyn(),
-                rng
+                rng,
             );
             milli_graph::ops::Reshape::push_new(&mut graph, data, new_shape, false, rng)
         } else {
@@ -119,24 +125,24 @@ impl Operation for RotaryEmbeddingOperation {
         let starts0v = milli_graph::ops::Constant::push_new(
             &mut graph,
             NDArrayNumericTensor::from(vec![0i64]).to_dyn(),
-            rng
+            rng,
         );
         let axeslastv = milli_graph::ops::Constant::push_new(
             &mut graph,
             NDArrayNumericTensor::from(vec![-1i64]).to_dyn(),
-            rng
+            rng,
         );
         let endsrotv = if use_partial {
             milli_graph::ops::Constant::push_new(
                 &mut graph,
                 NDArrayNumericTensor::from(vec![self.rotary_embedding_dim]).to_dyn(),
-                rng
+                rng,
             )
         } else {
             milli_graph::ops::Constant::push_new(
                 &mut graph,
                 NDArrayNumericTensor::from(vec![i64::MAX]).to_dyn(),
-                rng
+                rng,
             )
         };
         let x_rotate = milli_graph::ops::Slice::push_new(
@@ -146,7 +152,7 @@ impl Operation for RotaryEmbeddingOperation {
             endsrotv,
             None,
             Some(axeslastv),
-            rng
+            rng,
         );
 
         // x_not_rotate: from rotary_dim to end (empty if using full)
@@ -154,19 +160,19 @@ impl Operation for RotaryEmbeddingOperation {
             milli_graph::ops::Constant::push_new(
                 &mut graph,
                 NDArrayNumericTensor::from(vec![self.rotary_embedding_dim]).to_dyn(),
-                rng
+                rng,
             )
         } else {
             milli_graph::ops::Constant::push_new(
                 &mut graph,
                 NDArrayNumericTensor::from(vec![i64::MAX]).to_dyn(),
-                rng
+                rng,
             )
         };
         let endsbigv = milli_graph::ops::Constant::push_new(
             &mut graph,
             NDArrayNumericTensor::from(vec![i64::MAX]).to_dyn(),
-            rng
+            rng,
         );
         let x_not_rotate = milli_graph::ops::Slice::push_new(
             &mut graph,
@@ -175,7 +181,7 @@ impl Operation for RotaryEmbeddingOperation {
             endsbigv,
             None,
             Some(axeslastv),
-            rng
+            rng,
         );
 
         // Prepare cos/sin caches
@@ -198,7 +204,7 @@ impl Operation for RotaryEmbeddingOperation {
             let endshalfv = milli_graph::ops::Constant::push_new(
                 &mut graph,
                 NDArrayNumericTensor::from(vec![half]).to_dyn(),
-                rng
+                rng,
             );
             let cos_s = milli_graph::ops::Slice::push_new(
                 &mut graph,
@@ -207,7 +213,7 @@ impl Operation for RotaryEmbeddingOperation {
                 endshalfv,
                 None,
                 Some(axeslastv),
-                rng
+                rng,
             );
             let sin_s = milli_graph::ops::Slice::push_new(
                 &mut graph,
@@ -216,7 +222,7 @@ impl Operation for RotaryEmbeddingOperation {
                 endshalfv,
                 None,
                 Some(axeslastv),
-                rng
+                rng,
             );
             cos = cos_s;
             sin = sin_s;
@@ -226,7 +232,7 @@ impl Operation for RotaryEmbeddingOperation {
         let axis2 = milli_graph::ops::Constant::push_new(
             &mut graph,
             NDArrayNumericTensor::from(vec![2i64]).to_dyn(),
-            rng
+            rng,
         );
         let cos = milli_graph::ops::Unsqueeze::push_new(&mut graph, cos, axis2, rng);
         let sin = milli_graph::ops::Unsqueeze::push_new(&mut graph, sin, axis2, rng);
@@ -237,14 +243,15 @@ impl Operation for RotaryEmbeddingOperation {
             let new_shape = milli_graph::ops::Constant::push_new(
                 &mut graph,
                 NDArrayNumericTensor::from(vec![0i64, 0i64, 0i64, -1i64, 2i64]).to_dyn(),
-                rng
+                rng,
             );
-            let xr5 = milli_graph::ops::Reshape::push_new(&mut graph, x_rotate, new_shape, false, rng);
+            let xr5 =
+                milli_graph::ops::Reshape::push_new(&mut graph, x_rotate, new_shape, false, rng);
             // Split last axis [1,1]
             let split_sizes = milli_graph::ops::Constant::push_new(
                 &mut graph,
                 NDArrayNumericTensor::from(vec![1i64, 1i64]).to_dyn(),
-                rng
+                rng,
             );
             let x1u = milli_graph::ops::Split::push_new(
                 &mut graph,
@@ -255,7 +262,7 @@ impl Operation for RotaryEmbeddingOperation {
                 -1,
                 None,
                 0,
-                rng
+                rng,
             );
             let x2u = milli_graph::ops::Split::push_new(
                 &mut graph,
@@ -266,12 +273,12 @@ impl Operation for RotaryEmbeddingOperation {
                 -1,
                 None,
                 1,
-                rng
+                rng,
             );
             let ax_last = milli_graph::ops::Constant::push_new(
                 &mut graph,
                 NDArrayNumericTensor::from(vec![-1i64]).to_dyn(),
-                rng
+                rng,
             );
             let x1 = milli_graph::ops::Squeeze::push_new(&mut graph, x1u, ax_last, rng);
             let x2 = milli_graph::ops::Squeeze::push_new(&mut graph, x2u, ax_last, rng);
@@ -283,7 +290,7 @@ impl Operation for RotaryEmbeddingOperation {
                 let split_sizes = milli_graph::ops::Constant::push_new(
                     &mut graph,
                     NDArrayNumericTensor::from(vec![half, half]).to_dyn(),
-                    rng
+                    rng,
                 );
                 let x1 = milli_graph::ops::Split::push_new(
                     &mut graph,
@@ -294,7 +301,7 @@ impl Operation for RotaryEmbeddingOperation {
                     -1,
                     None,
                     0,
-                    rng
+                    rng,
                 );
                 let x2 = milli_graph::ops::Split::push_new(
                     &mut graph,
@@ -305,7 +312,7 @@ impl Operation for RotaryEmbeddingOperation {
                     -1,
                     None,
                     1,
-                    rng
+                    rng,
                 );
                 (x1, x2)
             } else {
@@ -314,14 +321,15 @@ impl Operation for RotaryEmbeddingOperation {
                 let new_shape = milli_graph::ops::Constant::push_new(
                     &mut graph,
                     NDArrayNumericTensor::from(vec![0i64, 0i64, 0i64, 2i64, -1i64]).to_dyn(),
-                    rng
+                    rng,
                 );
-                let xr5 =
-                    milli_graph::ops::Reshape::push_new(&mut graph, x_rotate, new_shape, false, rng);
+                let xr5 = milli_graph::ops::Reshape::push_new(
+                    &mut graph, x_rotate, new_shape, false, rng,
+                );
                 let split_sizes = milli_graph::ops::Constant::push_new(
                     &mut graph,
                     NDArrayNumericTensor::from(vec![1i64, 1i64]).to_dyn(),
-                    rng
+                    rng,
                 );
                 let x1u = milli_graph::ops::Split::push_new(
                     &mut graph,
@@ -332,7 +340,7 @@ impl Operation for RotaryEmbeddingOperation {
                     -2,
                     None,
                     0,
-                    rng
+                    rng,
                 );
                 let x2u = milli_graph::ops::Split::push_new(
                     &mut graph,
@@ -343,12 +351,12 @@ impl Operation for RotaryEmbeddingOperation {
                     -2,
                     None,
                     1,
-                    rng
+                    rng,
                 );
                 let ax_minus2 = milli_graph::ops::Constant::push_new(
                     &mut graph,
                     NDArrayNumericTensor::from(vec![-2i64]).to_dyn(),
-                    rng
+                    rng,
                 );
                 let x1 = milli_graph::ops::Squeeze::push_new(&mut graph, x1u, ax_minus2, rng);
                 let x2 = milli_graph::ops::Squeeze::push_new(&mut graph, x2u, ax_minus2, rng);
@@ -369,15 +377,16 @@ impl Operation for RotaryEmbeddingOperation {
             let ax_last = milli_graph::ops::Constant::push_new(
                 &mut graph,
                 NDArrayNumericTensor::from(vec![-1i64]).to_dyn(),
-                rng
+                rng,
             );
             let real_u = milli_graph::ops::Unsqueeze::push_new(&mut graph, real, ax_last, rng);
             let imag_u = milli_graph::ops::Unsqueeze::push_new(&mut graph, imag, ax_last, rng);
-            let stacked = milli_graph::ops::Concat::push_new(&mut graph, vec![real_u, imag_u], -1, rng);
+            let stacked =
+                milli_graph::ops::Concat::push_new(&mut graph, vec![real_u, imag_u], -1, rng);
             let new_shape = milli_graph::ops::Constant::push_new(
                 &mut graph,
                 NDArrayNumericTensor::from(vec![0i64, 0i64, 0i64, -1i64]).to_dyn(),
-                rng
+                rng,
             );
             milli_graph::ops::Reshape::push_new(&mut graph, stacked, new_shape, false, rng)
         } else {

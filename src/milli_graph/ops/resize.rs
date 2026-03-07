@@ -2,9 +2,9 @@ use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::dtype::DType;
 use crate::graph::GlobalId;
+use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::MilliOpGraphError;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
-use crate::milli_graph::MilliOpGraph;
 use crate::numeric_tensor::NumericTensor;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -225,14 +225,14 @@ fn get_neighbor(x: f32, n: usize, data: &[f32]) -> (Vec<i64>, Vec<f32>) {
     // Create edge-padded data
     let padded_len = data.len() + 2 * pad_width;
     let mut padded = vec![0.0f32; padded_len];
-    for i in 0..pad_width {
-        padded[i] = data[0];
+    for p in &mut padded[..pad_width] {
+        *p = data[0];
     }
     for (i, &v) in data.iter().enumerate() {
         padded[pad_width + i] = v;
     }
-    for i in 0..pad_width {
-        padded[pad_width + data.len() + i] = data[data.len() - 1];
+    for p in &mut padded[pad_width + data.len()..] {
+        *p = data[data.len() - 1];
     }
 
     let x_padded = x + pad_width as f32;
@@ -254,9 +254,7 @@ fn get_original_coordinate(
 ) -> f32 {
     let output_width = scale_factor * input_width as f32;
     match coord_transform {
-        ResizeCoordTransform::HalfPixel => {
-            (x + 0.5) / scale_factor - 0.5
-        }
+        ResizeCoordTransform::HalfPixel => (x + 0.5) / scale_factor - 0.5,
         ResizeCoordTransform::HalfPixelSymmetric => {
             let adjustment = output_width_int as f32 / output_width;
             let center = input_width as f32 / 2.0;
@@ -277,16 +275,15 @@ fn get_original_coordinate(
                 x * (input_width as f32 - 1.0) / (output_width - 1.0)
             }
         }
-        ResizeCoordTransform::Asymmetric => {
-            x / scale_factor
-        }
+        ResizeCoordTransform::Asymmetric => x / scale_factor,
         ResizeCoordTransform::TFCropAndResize => {
             if roi.len() < 2 {
                 0.0
             } else if output_width <= 1.0 {
                 (roi[1] - roi[0]) * (input_width as f32 - 1.0) / 2.0
             } else {
-                let x_ori = x * (roi[1] - roi[0]) * (input_width as f32 - 1.0) / (output_width - 1.0);
+                let x_ori =
+                    x * (roi[1] - roi[0]) * (input_width as f32 - 1.0) / (output_width - 1.0);
                 x_ori + roi[0] * (input_width as f32 - 1.0)
             }
         }
@@ -295,6 +292,7 @@ fn get_original_coordinate(
 
 /// 1D interpolation at a single output coordinate.
 /// `data` is a 1D slice of f32 values.
+#[allow(clippy::too_many_arguments)]
 fn interpolate_1d_with_x(
     data: &[f32],
     scale_factor: f32,
@@ -311,14 +309,19 @@ fn interpolate_1d_with_x(
 ) -> f32 {
     let input_width = data.len();
     let x_ori = get_original_coordinate(
-        x, scale_factor, input_width, output_width_int, roi, coord_transform,
+        x,
+        scale_factor,
+        input_width,
+        output_width_int,
+        roi,
+        coord_transform,
     );
 
     // TF crop and resize: out-of-bounds returns extrapolation value
-    if matches!(coord_transform, ResizeCoordTransform::TFCropAndResize) {
-        if x_ori < 0.0 || x_ori > (input_width as f32 - 1.0) {
-            return extrapolation_value;
-        }
+    if matches!(coord_transform, ResizeCoordTransform::TFCropAndResize)
+        && (x_ori < 0.0 || x_ori > (input_width as f32 - 1.0))
+    {
+        return extrapolation_value;
     }
 
     match mode {
@@ -331,9 +334,7 @@ fn interpolate_1d_with_x(
                         (x_ori + 0.5).floor() as i64
                     }
                 }
-                ResizeNearestMode::RoundPreferCeil => {
-                    x_ori.round() as i64
-                }
+                ResizeNearestMode::RoundPreferCeil => x_ori.round() as i64,
                 ResizeNearestMode::Floor => x_ori.floor() as i64,
                 ResizeNearestMode::Ceil => x_ori.ceil() as i64,
             };
@@ -341,17 +342,13 @@ fn interpolate_1d_with_x(
             data[clamped]
         }
         ResizeMode::Linear => {
+            let ratio = if (x_ori - x_ori.floor()).abs() < f32::EPSILON {
+                1.0f32
+            } else {
+                x_ori - x_ori.floor()
+            };
+
             if antialias {
-                let x_ori_int = x_ori.floor() as i64;
-                let ratio = if (x_ori - x_ori.floor()).abs() < f32::EPSILON && x_ori != 0.0 {
-                    1.0
-                } else if x_ori == 0.0 {
-                    // Special case: x_ori is exactly 0
-                    // ratio should be 0 only if floor is 0
-                    x_ori - x_ori.floor()
-                } else {
-                    x_ori - x_ori.floor()
-                };
                 let mut coeffs = linear_coeffs_antialias(ratio, scale_factor);
                 let n = coeffs.len();
                 let (idxes, points) = get_neighbor(x_ori, n, data);
@@ -372,38 +369,27 @@ fn interpolate_1d_with_x(
 
                 coeffs.iter().zip(points.iter()).map(|(c, p)| c * p).sum()
             } else {
-                // Standard 2-tap linear
-                let coeffs = [1.0 - (x_ori - x_ori.floor()), x_ori - x_ori.floor()];
-                // But use the ONNX ratio convention
-                let x_ori_int = x_ori.floor() as i64;
-                let ratio = if (x_ori - x_ori.floor()).abs() < f32::EPSILON {
-                    1.0f32
-                } else {
-                    x_ori - x_ori.floor()
-                };
-                let coeffs = [1.0 - ratio, ratio];
+                let mut coeffs = vec![1.0 - ratio, ratio];
                 let (idxes, points) = get_neighbor(x_ori, 2, data);
 
-                let mut coeffs_adj = coeffs.to_vec();
                 if exclude_outside {
                     for (i, &idx) in idxes.iter().enumerate() {
                         if idx < 0 || idx >= input_width as i64 {
-                            coeffs_adj[i] = 0.0;
+                            coeffs[i] = 0.0;
                         }
                     }
-                    let sum: f32 = coeffs_adj.iter().sum();
+                    let sum: f32 = coeffs.iter().sum();
                     if sum > 0.0 {
-                        for c in &mut coeffs_adj {
+                        for c in &mut coeffs {
                             *c /= sum;
                         }
                     }
                 }
 
-                coeffs_adj.iter().zip(points.iter()).map(|(c, p)| c * p).sum()
+                coeffs.iter().zip(points.iter()).map(|(c, p)| c * p).sum()
             }
         }
         ResizeMode::Cubic => {
-            let x_ori_int = x_ori.floor() as i64;
             let ratio = if (x_ori - x_ori.floor()).abs() < f32::EPSILON {
                 1.0f32
             } else {
@@ -449,7 +435,11 @@ fn interpolate_1d_with_x(
                     }
                 }
 
-                coeffs_adj.iter().zip(points.iter()).map(|(c, p)| c * p).sum()
+                coeffs_adj
+                    .iter()
+                    .zip(points.iter())
+                    .map(|(c, p)| c * p)
+                    .sum()
             }
         }
     }
@@ -458,6 +448,7 @@ fn interpolate_1d_with_x(
 /// Recursively perform N-dimensional separable interpolation.
 /// `data` is a flat array with shape `input_shape`.
 /// This processes dimension 0 first, then recurses on the remaining dimensions.
+#[allow(clippy::too_many_arguments)]
 fn interpolate_nd(
     data: &[f32],
     input_shape: &[usize],
@@ -475,9 +466,8 @@ fn interpolate_nd(
 ) -> f32 {
     let n = input_shape.len();
     if n == 1 {
-        let dim_roi = if roi.len() >= 2 { &roi[..] } else { &[] };
-        let dim_roi_pair: Vec<f32> = if dim_roi.len() >= 2 {
-            vec![dim_roi[0], dim_roi[1]]
+        let dim_roi_pair: Vec<f32> = if roi.len() >= 2 {
+            vec![roi[0], roi[1]]
         } else {
             vec![0.0, 1.0]
         };
@@ -509,12 +499,8 @@ fn interpolate_nd(
         // ROI for inner dimensions: remove dimension 0's entries
         let inner_roi = if roi.len() >= 2 * n {
             let mut ir = Vec::with_capacity(2 * (n - 1));
-            for d in 1..n {
-                ir.push(roi[d]);
-            }
-            for d in 1..n {
-                ir.push(roi[n + d]);
-            }
+            ir.extend_from_slice(&roi[1..n]);
+            ir.extend_from_slice(&roi[n + 1..2 * n]);
             ir
         } else {
             vec![]
@@ -576,7 +562,13 @@ fn compute_output_shape(
         (0..rank).collect()
     } else {
         axes.iter()
-            .map(|&a| if a < 0 { (rank as i64 + a) as usize } else { a as usize })
+            .map(|&a| {
+                if a < 0 {
+                    (rank as i64 + a) as usize
+                } else {
+                    a as usize
+                }
+            })
             .collect()
     };
 
@@ -588,7 +580,9 @@ fn compute_output_shape(
                 }
             }
             ResizeKeepAspectRatioPolicy::NotLarger => {
-                let min_scale = resolved_axes.iter().enumerate()
+                let min_scale = resolved_axes
+                    .iter()
+                    .enumerate()
                     .map(|(i, &axis)| sizes[i] as f32 / input_shape[axis] as f32)
                     .fold(f32::INFINITY, f32::min);
                 for &axis in &resolved_axes {
@@ -596,7 +590,9 @@ fn compute_output_shape(
                 }
             }
             ResizeKeepAspectRatioPolicy::NotSmaller => {
-                let max_scale = resolved_axes.iter().enumerate()
+                let max_scale = resolved_axes
+                    .iter()
+                    .enumerate()
                     .map(|(i, &axis)| sizes[i] as f32 / input_shape[axis] as f32)
                     .fold(0.0f32, f32::max);
                 for &axis in &resolved_axes {
@@ -630,7 +626,13 @@ fn compute_scales(
         (0..rank).collect()
     } else {
         axes.iter()
-            .map(|&a| if a < 0 { (rank as i64 + a) as usize } else { a as usize })
+            .map(|&a| {
+                if a < 0 {
+                    (rank as i64 + a) as usize
+                } else {
+                    a as usize
+                }
+            })
             .collect()
     };
 
@@ -641,7 +643,10 @@ fn compute_scales(
             scales[axis] = provided[i];
         }
         // For keep_aspect_ratio_policy with sizes, recompute scales from output/input
-        if !matches!(keep_aspect_ratio_policy, ResizeKeepAspectRatioPolicy::Stretch) {
+        if !matches!(
+            keep_aspect_ratio_policy,
+            ResizeKeepAspectRatioPolicy::Stretch
+        ) {
             for &axis in &resolved_axes {
                 scales[axis] = output_shape[axis] as f32 / input_shape[axis] as f32;
             }
@@ -660,10 +665,8 @@ impl MilliOp for Resize {
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
-    ) -> Result<
-        Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>,
-        MilliOpGraphError,
-    > {
+    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
+    {
         let input = &inputs[&self.input];
         let input_shape = input.shape();
         let original_dtype = input.dtype();
@@ -687,8 +690,16 @@ impl MilliOp for Resize {
 
         // Expand ROI from axes-relative to full-rank
         let full_roi = if !self.axes.is_empty() && !roi_raw.is_empty() {
-            let resolved_axes: Vec<usize> = self.axes.iter()
-                .map(|&a| if a < 0 { (rank as i64 + a) as usize } else { a as usize })
+            let resolved_axes: Vec<usize> = self
+                .axes
+                .iter()
+                .map(|&a| {
+                    if a < 0 {
+                        (rank as i64 + a) as usize
+                    } else {
+                        a as usize
+                    }
+                })
                 .collect();
             let num_axes = resolved_axes.len();
             let mut full = vec![0.0f32; 2 * rank];
@@ -711,7 +722,11 @@ impl MilliOp for Resize {
                     .cast(DType::F32, backend)?
                     .try_to_rank::<P1>()?
                     .try_into()?;
-                if s.iter().all(|&x| x == 0.0) { None } else { Some(s) }
+                if s.iter().all(|&x| x == 0.0) {
+                    None
+                } else {
+                    Some(s)
+                }
             } else {
                 None
             }
@@ -762,7 +777,7 @@ impl MilliOp for Resize {
             output_strides[i] = output_strides[i + 1] * output_shape[i + 1];
         }
 
-        for out_idx in 0..output_numel {
+        for (out_idx, output_val) in output_data.iter_mut().enumerate() {
             let mut out_coords = vec![0usize; rank];
             let mut remaining = out_idx;
             for d in 0..rank {
@@ -786,7 +801,7 @@ impl MilliOp for Resize {
                 &full_roi,
             );
 
-            output_data[out_idx] = val;
+            *output_val = val;
         }
 
         let output_tensor: NumericTensor<DynRank> =

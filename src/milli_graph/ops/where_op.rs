@@ -68,10 +68,8 @@ impl MilliOp for Where {
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
-    ) -> Result<
-        Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>,
-        MilliOpGraphError,
-    > {
+    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
+    {
         let out = inputs[&self.condition].where_op(&inputs[&self.x], &inputs[&self.y], backend)?;
         Ok(Box::new([(self.output, out)].into_iter()))
     }

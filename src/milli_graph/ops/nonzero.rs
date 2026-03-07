@@ -25,7 +25,11 @@ impl NonZero {
         rng: &mut impl rand::Rng,
     ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
-        let node = Self { output, input, global_id: GlobalId::new(rng) };
+        let node = Self {
+            output,
+            input,
+            global_id: GlobalId::new(rng),
+        };
         graph.push_op(AnyMilliOp::NonZero(node));
         output
     }
@@ -61,8 +65,7 @@ impl MilliOp for NonZero {
         known_inputs: &HashMap<GlobalId, TensorInfo>,
         symbolic_resolver: &mut SymbolicResolver,
         backend: &mut EvalBackend,
-    ) -> Result<Box<dyn Iterator<Item = (GlobalId, TensorInfo)>>, MilliOpGraphError>
-    {
+    ) -> Result<Box<dyn Iterator<Item = (GlobalId, TensorInfo)>>, MilliOpGraphError> {
         if let Some(input) = known_inputs.get(&self.input).and_then(|ti| ti.as_numeric()) {
             let inputs = HashMap::from([(self.input, input.clone())]);
             let out = self
@@ -84,10 +87,8 @@ impl MilliOp for NonZero {
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
-    ) -> Result<
-        Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>,
-        MilliOpGraphError,
-    > {
+    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
+    {
         let out = inputs[&self.input].nonzero(backend)?;
         Ok(Box::new([(self.output, out)].into_iter()))
     }

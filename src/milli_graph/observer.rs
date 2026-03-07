@@ -1,8 +1,8 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
+use crate::graph::GlobalId;
 use crate::numeric_tensor::NumericTensor;
 use std::time::Instant;
-use crate::graph::GlobalId;
 
 pub trait MilliOpGraphObserver {
     fn on_tensor_assigned(

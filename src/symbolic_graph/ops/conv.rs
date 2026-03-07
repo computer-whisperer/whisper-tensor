@@ -1,12 +1,11 @@
-use rand::Rng;
 use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::MilliOpGraph;
 use crate::onnx;
 use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{
-    ONNXDecodingError, query_attribute_int, query_attribute_ints,
-    query_attribute_string,
+    ONNXDecodingError, query_attribute_int, query_attribute_ints, query_attribute_string,
 };
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -115,19 +114,34 @@ impl Operation for ConvOperation {
             ConvOperationAutoPad::SameLower => "SAME_LOWER",
             ConvOperationAutoPad::Valid => "VALID",
         };
-        params.push(Property::new("auto_pad", PropertyValue::String(auto_pad_str.to_string())));
+        params.push(Property::new(
+            "auto_pad",
+            PropertyValue::String(auto_pad_str.to_string()),
+        ));
         if !self.dilations.is_empty() {
-            params.push(Property::new("dilations", PropertyValue::IntList(self.dilations.clone())));
+            params.push(Property::new(
+                "dilations",
+                PropertyValue::IntList(self.dilations.clone()),
+            ));
         }
         params.push(Property::new("group", PropertyValue::Int(self.group)));
         if !self.kernel_shape.is_empty() {
-            params.push(Property::new("kernel_shape", PropertyValue::IntList(self.kernel_shape.clone())));
+            params.push(Property::new(
+                "kernel_shape",
+                PropertyValue::IntList(self.kernel_shape.clone()),
+            ));
         }
         if !self.pads.is_empty() {
-            params.push(Property::new("pads", PropertyValue::IntList(self.pads.clone())));
+            params.push(Property::new(
+                "pads",
+                PropertyValue::IntList(self.pads.clone()),
+            ));
         }
         if !self.strides.is_empty() {
-            params.push(Property::new("strides", PropertyValue::IntList(self.strides.clone())));
+            params.push(Property::new(
+                "strides",
+                PropertyValue::IntList(self.strides.clone()),
+            ));
         }
         params
     }

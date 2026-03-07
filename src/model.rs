@@ -115,7 +115,7 @@ impl Model {
                     &model_inputs,
                     &model_outputs,
                     &symbolic_graph,
-                    rng
+                    rng,
                 )
                 .ok()
             } else {

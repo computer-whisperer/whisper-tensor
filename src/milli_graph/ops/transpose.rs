@@ -23,7 +23,12 @@ impl Transpose {
         rng: &mut impl rand::Rng,
     ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
-        let node = Self { output, data, perm, global_id: GlobalId::new(rng) };
+        let node = Self {
+            output,
+            data,
+            perm,
+            global_id: GlobalId::new(rng),
+        };
         graph.push_op(AnyMilliOp::Transpose(node));
         output
     }
@@ -71,7 +76,13 @@ impl MilliOp for Transpose {
             let n = p.len();
             let normalized: Vec<usize> = p
                 .iter()
-                .map(|&x| if x < 0 { (x + n as i64) as usize } else { x as usize })
+                .map(|&x| {
+                    if x < 0 {
+                        (x + n as i64) as usize
+                    } else {
+                        x as usize
+                    }
+                })
                 .collect();
             let mut inv = vec![0i64; n];
             for (i, &ni) in normalized.iter().enumerate() {
@@ -89,10 +100,8 @@ impl MilliOp for Transpose {
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
-    ) -> Result<
-        Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>,
-        MilliOpGraphError,
-    > {
+    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
+    {
         // Handle partial perms: if perm has fewer elements than the rank,
         // prepend identity dims. This allows perm=[-1,-2] to mean "swap last
         // two dims" regardless of rank.
@@ -101,9 +110,7 @@ impl MilliOp for Transpose {
             if p.len() < rank {
                 let prefix_len = rank - p.len();
                 let mut full_perm: Vec<i64> = (0..prefix_len as i64).collect();
-                full_perm.extend(p.iter().map(|&x| {
-                    if x < 0 { x + rank as i64 } else { x }
-                }));
+                full_perm.extend(p.iter().map(|&x| if x < 0 { x + rank as i64 } else { x }));
                 Some(full_perm)
             } else {
                 Some(p.clone())

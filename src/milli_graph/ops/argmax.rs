@@ -4,9 +4,9 @@ use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::numeric_tensor::NumericTensor;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use rand::Rng;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArgMax {
@@ -25,7 +25,7 @@ impl ArgMax {
         axis: i64,
         keepdims: bool,
         select_last_index: bool,
-        rng: &mut impl Rng
+        rng: &mut impl Rng,
     ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
         let node = Self {
@@ -54,10 +54,8 @@ impl MilliOp for ArgMax {
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
-    ) -> Result<
-        Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>,
-        MilliOpGraphError,
-    > {
+    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
+    {
         let input = inputs[&self.input].clone();
         let axis = if self.axis < 0 {
             input.shape().len() as i64 + self.axis

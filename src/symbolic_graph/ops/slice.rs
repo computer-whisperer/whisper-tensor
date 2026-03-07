@@ -1,11 +1,11 @@
 use crate::graph::{GlobalId, Node};
 use crate::milli_graph::{self, MilliOpGraph};
 use crate::onnx;
-use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::ONNXDecodingError;
+use crate::symbolic_graph::ops::Operation;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use rand::Rng;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SliceOperation {
@@ -84,7 +84,7 @@ impl Operation for SliceOperation {
             input_map[&self.ends],
             self.steps.map(|x| input_map[&x]),
             self.axes.map(|x| input_map[&x]),
-            rng
+            rng,
         );
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);

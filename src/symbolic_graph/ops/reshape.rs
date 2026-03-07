@@ -3,12 +3,10 @@ use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::{self, MilliOpGraph};
 use crate::onnx;
 use crate::symbolic_graph::ops::Operation;
-use crate::symbolic_graph::{
-    ONNXDecodingError, query_attribute_int, query_attribute_ints,
-};
+use crate::symbolic_graph::{ONNXDecodingError, query_attribute_int, query_attribute_ints};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use rand::Rng;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SqueezeOperation {
@@ -86,8 +84,12 @@ impl Operation for SqueezeOperation {
             panic!();
         };
 
-        let out =
-            milli_graph::ops::Squeeze::push_new(&mut graph, input_map[&self.input], axes_input, rng);
+        let out = milli_graph::ops::Squeeze::push_new(
+            &mut graph,
+            input_map[&self.input],
+            axes_input,
+            rng,
+        );
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
         graph.set_output_map(output_map);
@@ -171,8 +173,12 @@ impl Operation for UnsqueezeOperation {
             panic!();
         };
 
-        let out =
-            milli_graph::ops::Unsqueeze::push_new(&mut graph, input_map[&self.input], axes_input, rng);
+        let out = milli_graph::ops::Unsqueeze::push_new(
+            &mut graph,
+            input_map[&self.input],
+            axes_input,
+            rng,
+        );
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
         graph.set_output_map(output_map);
@@ -234,7 +240,7 @@ impl Operation for ReshapeOperation {
             input_map[&self.input],
             input_map[&self.shape],
             false,
-            rng
+            rng,
         );
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
@@ -308,12 +314,12 @@ impl Operation for FlattenOperation {
             let zero_const = milli_graph::ops::Constant::push_new(
                 &mut graph,
                 NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
-                rng
+                rng,
             );
             let axis_const = milli_graph::ops::Constant::push_new(
                 &mut graph,
                 NDArrayNumericTensor::from_vec_shape(vec![self.axis], &vec![1]).unwrap(),
-                rng
+                rng,
             );
             let first_dims = milli_graph::ops::Slice::push_new(
                 &mut graph,
@@ -322,14 +328,15 @@ impl Operation for FlattenOperation {
                 axis_const,
                 None,
                 None,
-                rng
+                rng,
             );
-            let prod =
-                milli_graph::ops::ReduceProd::push_new(&mut graph, first_dims, None, true, false, rng);
+            let prod = milli_graph::ops::ReduceProd::push_new(
+                &mut graph, first_dims, None, true, false, rng,
+            );
             let neg_one_const = milli_graph::ops::Constant::push_new(
                 &mut graph,
                 NDArrayNumericTensor::from_vec_shape(vec![-1i64], &vec![1]).unwrap(),
-                rng
+                rng,
             );
             milli_graph::ops::Concat::push_new(&mut graph, vec![prod, neg_one_const], 0, rng)
         };

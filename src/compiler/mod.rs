@@ -1,13 +1,13 @@
 use crate::DynRank;
 use crate::backends::eval_backend;
 use crate::backends::eval_backend::EvalBackend;
+use crate::graph::GlobalId;
 use crate::numeric_tensor::NumericTensor;
+use crate::symbolic_graph::SymbolicGraph;
 use crate::symbolic_graph::observer::SymbolicGraphObserver;
 use crate::symbolic_graph::tensor_store::TensorStore;
-use crate::symbolic_graph::{SymbolicGraph};
 use std::sync::Arc;
 use std::time::Instant;
-use crate::graph::GlobalId;
 
 pub enum CompilationSubject {
     SymbolicGraph { symbolic_graph: Arc<SymbolicGraph> },

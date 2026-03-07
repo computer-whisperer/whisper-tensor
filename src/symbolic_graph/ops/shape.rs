@@ -1,11 +1,11 @@
 use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::{self, MilliOpGraph, ops_helpers};
 use crate::onnx;
-use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::ONNXDecodingError;
+use crate::symbolic_graph::ops::Operation;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use rand::Rng;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ShapeOperation {

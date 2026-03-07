@@ -1,12 +1,12 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::dtype::DType;
-use crate::milli_graph::ops::MilliOp;
 use crate::milli_graph::MilliOpGraphError;
+use crate::milli_graph::ops::MilliOp;
 use crate::numeric_tensor::NumericTensor;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use rand::Rng;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) enum WhichSimpleBinaryOp {
@@ -62,39 +62,19 @@ impl SimpleBinary {
         graph.push_op(AnyMilliOp::SimpleBinary(node));
         output
     }
-    pub fn add(
-        graph: &mut MilliOpGraph,
-        a: GlobalId,
-        b: GlobalId,
-        rng: &mut impl Rng,
-    ) -> GlobalId {
+    pub fn add(graph: &mut MilliOpGraph, a: GlobalId, b: GlobalId, rng: &mut impl Rng) -> GlobalId {
         Self::push_new(graph, a, b, WhichSimpleBinaryOp::Add, rng)
     }
 
-    pub fn sub(
-        graph: &mut MilliOpGraph,
-        a: GlobalId,
-        b: GlobalId,
-        rng: &mut impl Rng,
-    ) -> GlobalId {
+    pub fn sub(graph: &mut MilliOpGraph, a: GlobalId, b: GlobalId, rng: &mut impl Rng) -> GlobalId {
         Self::push_new(graph, a, b, WhichSimpleBinaryOp::Sub, rng)
     }
 
-    pub fn mul(
-        graph: &mut MilliOpGraph,
-        a: GlobalId,
-        b: GlobalId,
-        rng: &mut impl Rng,
-    ) -> GlobalId {
+    pub fn mul(graph: &mut MilliOpGraph, a: GlobalId, b: GlobalId, rng: &mut impl Rng) -> GlobalId {
         Self::push_new(graph, a, b, WhichSimpleBinaryOp::Mul, rng)
     }
 
-    pub fn div(
-        graph: &mut MilliOpGraph,
-        a: GlobalId,
-        b: GlobalId,
-        rng: &mut impl Rng,
-    ) -> GlobalId {
+    pub fn div(graph: &mut MilliOpGraph, a: GlobalId, b: GlobalId, rng: &mut impl Rng) -> GlobalId {
         Self::push_new(graph, a, b, WhichSimpleBinaryOp::Div, rng)
     }
 
@@ -107,30 +87,15 @@ impl SimpleBinary {
     ) -> GlobalId {
         Self::push_new(graph, a, b, WhichSimpleBinaryOp::Modulo(fmod), rng)
     }
-    pub fn and(
-        graph: &mut MilliOpGraph,
-        a: GlobalId,
-        b: GlobalId,
-        rng: &mut impl Rng,
-    ) -> GlobalId {
+    pub fn and(graph: &mut MilliOpGraph, a: GlobalId, b: GlobalId, rng: &mut impl Rng) -> GlobalId {
         Self::push_new(graph, a, b, WhichSimpleBinaryOp::And, rng)
     }
 
-    pub fn or(
-        graph: &mut MilliOpGraph,
-        a: GlobalId,
-        b: GlobalId,
-        rng: &mut impl Rng,
-    ) -> GlobalId {
+    pub fn or(graph: &mut MilliOpGraph, a: GlobalId, b: GlobalId, rng: &mut impl Rng) -> GlobalId {
         Self::push_new(graph, a, b, WhichSimpleBinaryOp::Or, rng)
     }
 
-    pub fn xor(
-        graph: &mut MilliOpGraph,
-        a: GlobalId,
-        b: GlobalId,
-        rng: &mut impl Rng,
-    ) -> GlobalId {
+    pub fn xor(graph: &mut MilliOpGraph, a: GlobalId, b: GlobalId, rng: &mut impl Rng) -> GlobalId {
         Self::push_new(graph, a, b, WhichSimpleBinaryOp::Xor, rng)
     }
 
@@ -206,21 +171,11 @@ impl SimpleBinary {
         Self::push_new(graph, a, b, WhichSimpleBinaryOp::LessOrEqual, rng)
     }
 
-    pub fn max(
-        graph: &mut MilliOpGraph,
-        a: GlobalId,
-        b: GlobalId,
-        rng: &mut impl Rng,
-    ) -> GlobalId {
+    pub fn max(graph: &mut MilliOpGraph, a: GlobalId, b: GlobalId, rng: &mut impl Rng) -> GlobalId {
         Self::push_new(graph, a, b, WhichSimpleBinaryOp::Max, rng)
     }
 
-    pub fn min(
-        graph: &mut MilliOpGraph,
-        a: GlobalId,
-        b: GlobalId,
-        rng: &mut impl Rng,
-    ) -> GlobalId {
+    pub fn min(graph: &mut MilliOpGraph, a: GlobalId, b: GlobalId, rng: &mut impl Rng) -> GlobalId {
         Self::push_new(graph, a, b, WhichSimpleBinaryOp::Min, rng)
     }
 }
@@ -239,10 +194,8 @@ impl MilliOp for SimpleBinary {
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
-    ) -> Result<
-        Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>,
-        MilliOpGraphError,
-    > {
+    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
+    {
         let a = &inputs[&self.a];
         let b = &inputs[&self.b];
         let out = match self.which_op {
@@ -334,7 +287,8 @@ impl MilliOp for SimpleBinary {
         for (input_id, grad_id) in pairs {
             let shape = super::Shape::push_new(graph, input_id, rng);
             let reduced = super::SumTo::push_new(graph, grad_id, shape, rng);
-            result.entry(input_id)
+            result
+                .entry(input_id)
                 .and_modify(|existing: &mut GlobalId| {
                     *existing = SimpleBinary::add(graph, *existing, reduced, rng);
                 })
@@ -360,7 +314,12 @@ impl Pow {
         rng: &mut impl Rng,
     ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
-        let node = Self { output, a, b, global_id: GlobalId::new(rng)};
+        let node = Self {
+            output,
+            a,
+            b,
+            global_id: GlobalId::new(rng),
+        };
         graph.push_op(AnyMilliOp::Pow(node));
         output
     }
@@ -380,10 +339,8 @@ impl MilliOp for Pow {
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
-    ) -> Result<
-        Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>,
-        MilliOpGraphError,
-    > {
+    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
+    {
         let out = NumericTensor::<DynRank>::pow(&inputs[&self.a], &inputs[&self.b], backend)?;
         Ok(Box::new([(self.output, out)].into_iter()))
     }
@@ -405,7 +362,12 @@ impl MatMul {
         rng: &mut impl Rng,
     ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
-        let node = Self { output, a, b, global_id: GlobalId::new(rng) };
+        let node = Self {
+            output,
+            a,
+            b,
+            global_id: GlobalId::new(rng),
+        };
         graph.push_op(AnyMilliOp::MatMul(node));
         output
     }
@@ -425,10 +387,8 @@ impl MilliOp for MatMul {
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
-    ) -> Result<
-        Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>,
-        MilliOpGraphError,
-    > {
+    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
+    {
         let a_input = &inputs[&self.a];
         let b_input = &inputs[&self.b];
         let accumulate_dtype = match a_input.dtype() {
@@ -459,7 +419,8 @@ impl MilliOp for MatMul {
         for (input_id, grad_id) in [(self.a, grad_a), (self.b, grad_b)] {
             let shape = super::Shape::push_new(graph, input_id, rng);
             let reduced = super::SumTo::push_new(graph, grad_id, shape, rng);
-            result.entry(input_id)
+            result
+                .entry(input_id)
                 .and_modify(|existing: &mut GlobalId| {
                     *existing = SimpleBinary::add(graph, *existing, reduced, rng);
                 })

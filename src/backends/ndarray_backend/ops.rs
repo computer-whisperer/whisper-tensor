@@ -456,7 +456,10 @@ where
 
     for &axis in &ax {
         let maxed = result.map_axis(Axis(axis), |lane| {
-            lane.iter().copied().reduce(|a, b| if b > a { b } else { a }).unwrap()
+            lane.iter()
+                .copied()
+                .reduce(|a, b| if b > a { b } else { a })
+                .unwrap()
         });
 
         result = if keepdims {

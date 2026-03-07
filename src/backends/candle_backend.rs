@@ -96,6 +96,7 @@ impl<R: Rank> TryFrom<&candle_core::Tensor> for NDArrayNumericTensor<R> {
                 let v = tensor_flat.to_vec1::<f32>()?;
                 NDArrayNumericTensor::try_from_vec_shape(v, shape)?
             }
+            other => Err(DTypeError::UnsupportedCandleDType(other))?,
         })
     }
 }

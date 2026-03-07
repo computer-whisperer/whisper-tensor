@@ -133,10 +133,8 @@ impl MilliOp for Reshape {
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
-    ) -> Result<
-        Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>,
-        MilliOpGraphError,
-    > {
+    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
+    {
         let data_input = &inputs[&self.data];
         let shape_input = &inputs[&self.shape];
         let shape_input_value: Vec<i64> = shape_input

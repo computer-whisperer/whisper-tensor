@@ -5,11 +5,14 @@ use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::ops::*;
 use crate::numeric_tensor::NumericTensor;
 use crate::symbolic_graph::ops::{EvalError, Operation};
-use crate::symbolic_graph::{ONNXDecodingError, SymbolicGraphMutator, query_attribute_float, query_attribute_graph, query_attribute_string, SymbolicGraph};
+use crate::symbolic_graph::{
+    ONNXDecodingError, SymbolicGraph, SymbolicGraphMutator, query_attribute_float,
+    query_attribute_graph, query_attribute_string,
+};
 use crate::{DynRank, onnx};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use rand::Rng;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WhereOperation {
@@ -68,7 +71,7 @@ impl Operation for WhereOperation {
             input_map[&self.condition],
             input_map[&self.x],
             input_map[&self.y],
-            rng
+            rng,
         );
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
@@ -110,7 +113,7 @@ impl IfOperation {
                 symbolic_graph_mutator,
                 then_branch_graph,
                 core_opset_version,
-                rng
+                rng,
             )?;
             inner_graph
         };
@@ -122,7 +125,7 @@ impl IfOperation {
                 symbolic_graph_mutator,
                 else_branch_graph,
                 core_opset_version,
-                rng
+                rng,
             )?;
             inner_graph
         };
@@ -164,7 +167,10 @@ impl Node for IfOperation {
 
 impl Operation for IfOperation {
     fn parameters(&self) -> Vec<Property> {
-        vec![Property::new("num_outputs", PropertyValue::Int(self.outputs.len() as i64))]
+        vec![Property::new(
+            "num_outputs",
+            PropertyValue::Int(self.outputs.len() as i64),
+        )]
     }
 
     fn get_sub_graphs(&self) -> Vec<&SymbolicGraph> {
@@ -175,8 +181,7 @@ impl Operation for IfOperation {
         &self,
         backend: &mut EvalBackend,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
-    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, EvalError>
-    {
+    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, EvalError> {
         let condition = inputs.get(&self.condition).unwrap();
         let condition: bool = condition.first_element().into();
         let (active_tensors, output_ids) = if condition {
@@ -297,7 +302,10 @@ impl Operation for PadOperation {
             PadMode::Edge => "edge",
             PadMode::Wrap => "wrap",
         };
-        vec![Property::new("mode", PropertyValue::String(mode_str.to_string()))]
+        vec![Property::new(
+            "mode",
+            PropertyValue::String(mode_str.to_string()),
+        )]
     }
 
     fn get_milli_op_graph(&self, _rng: &mut impl Rng) -> MilliOpGraph {
@@ -381,8 +389,14 @@ impl Operation for RandomNormalLikeOperation {
         if let Some(dtype) = self.dtype {
             params.push(Property::new("dtype", PropertyValue::DType(dtype)));
         }
-        params.push(Property::new("mean", PropertyValue::Float(self.mean as f64)));
-        params.push(Property::new("scale", PropertyValue::Float(self.scale as f64)));
+        params.push(Property::new(
+            "mean",
+            PropertyValue::Float(self.mean as f64),
+        ));
+        params.push(Property::new(
+            "scale",
+            PropertyValue::Float(self.scale as f64),
+        ));
         if let Some(seed) = self.seed {
             params.push(Property::new("seed", PropertyValue::Float(seed as f64)));
         }
@@ -445,7 +459,12 @@ impl Operation for ExpandOperation {
     fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
 
-        let x = Expand::push_new(&mut graph, input_map[&self.input], input_map[&self.shape], rng);
+        let x = Expand::push_new(
+            &mut graph,
+            input_map[&self.input],
+            input_map[&self.shape],
+            rng,
+        );
 
         let mut output_map = HashMap::new();
         output_map.insert(x, self.output);
@@ -596,7 +615,7 @@ impl Operation for RangeOperation {
             input_map[&self.start],
             input_map[&self.end],
             input_map[&self.delta],
-            rng
+            rng,
         );
 
         let mut output_map = HashMap::new();

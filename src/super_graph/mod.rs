@@ -7,9 +7,7 @@ pub mod observer;
 use crate::backends::eval_backend::{EvalBackend, EvalRuntimeError};
 use crate::compiler::{CompiledProgram, CompilerError};
 use crate::graph::{GlobalId, Graph, Link};
-use crate::milli_graph::{
-    MilliOpGraphError,
-};
+use crate::milli_graph::MilliOpGraphError;
 use crate::model::{Model, ModelError};
 use crate::numeric_tensor::NumericTensorError;
 use crate::numeric_tensor_typed::TypedNumericTensorError;
@@ -17,19 +15,17 @@ use crate::super_graph::cache::{SuperGraphCache, SuperGraphTensorCache};
 use crate::super_graph::data::SuperGraphData;
 use crate::super_graph::links::SuperGraphLinkTensorMap;
 pub use crate::super_graph::links::{
-    SuperGraphAnyLink, SuperGraphLinkHash, SuperGraphLinkString,
-    SuperGraphLinkTensor, SuperGraphLinkTokenizer,
+    SuperGraphAnyLink, SuperGraphLinkHash, SuperGraphLinkString, SuperGraphLinkTensor,
+    SuperGraphLinkTokenizer,
 };
 use crate::super_graph::nodes::{SuperGraphAnyNode, SuperGraphNode};
 use crate::super_graph::observer::SuperGraphObserver;
-use crate::symbolic_graph::{
-    SymbolicGraph,
-};
+use crate::symbolic_graph::SymbolicGraph;
 use crate::tokenizer::TokenizerError;
+use rand::{Rng, RngCore};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
-use rand::{Rng, RngCore};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SuperGraphError {
@@ -227,7 +223,10 @@ impl SuperGraphBuilder {
             }
         }
 
-        let links_by_global_id = sourced_links.iter().map(|link| (link.global_id(), *link)).collect::<HashMap<_, _>>();
+        let links_by_global_id = sourced_links
+            .iter()
+            .map(|link| (link.global_id(), *link))
+            .collect::<HashMap<_, _>>();
 
         SuperGraph {
             global_id: GlobalId::new(rng),
@@ -302,14 +301,18 @@ impl Graph for SuperGraph {
     }
 
     fn input_link_ids(&self) -> impl Iterator<Item = (GlobalId, GlobalId)> {
-        self.input_links.iter().map(|x| (x.global_id(), x.global_id()))
+        self.input_links
+            .iter()
+            .map(|x| (x.global_id(), x.global_id()))
     }
 
     fn output_link_ids(&self) -> impl Iterator<Item = (GlobalId, GlobalId)> {
-        self.output_links.iter().map(|x| (x.global_id(), x.global_id()))
+        self.output_links
+            .iter()
+            .map(|x| (x.global_id(), x.global_id()))
     }
 
-    fn constant_link_ids(&self) -> impl Iterator<Item=GlobalId> {
+    fn constant_link_ids(&self) -> impl Iterator<Item = GlobalId> {
         core::iter::empty()
     }
 }

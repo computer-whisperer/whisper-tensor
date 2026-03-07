@@ -3,12 +3,10 @@ use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::{self, MilliOpGraph};
 use crate::onnx;
 use crate::symbolic_graph::ops::Operation;
-use crate::symbolic_graph::{
-    ONNXDecodingError, query_attribute_int, query_attribute_ints,
-};
+use crate::symbolic_graph::{ONNXDecodingError, query_attribute_int, query_attribute_ints};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use rand::Rng;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CumSumOperation {
@@ -151,7 +149,7 @@ impl Node for ReduceMeanOperation {
     }
 }
 impl Operation for ReduceMeanOperation {
-fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
+    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let axes = if let Some(input_axes) = &self.input_axes {
             Some(input_map[input_axes])
@@ -168,7 +166,7 @@ fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
             axes,
             self.keepdims.unwrap_or(true),
             self.noop_with_empty_axes.unwrap_or(false),
-            rng
+            rng,
         );
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
@@ -185,7 +183,10 @@ fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
             params.push(Property::new("axes", PropertyValue::IntList(axes.clone())));
         }
         if let Some(noop) = self.noop_with_empty_axes {
-            params.push(Property::new("noop_with_empty_axes", PropertyValue::Bool(noop)));
+            params.push(Property::new(
+                "noop_with_empty_axes",
+                PropertyValue::Bool(noop),
+            ));
         }
         params
     }
@@ -266,7 +267,10 @@ impl Operation for ReduceSumOperation {
             params.push(Property::new("axes", PropertyValue::IntList(axes.clone())));
         }
         if let Some(noop) = self.noop_with_empty_axes {
-            params.push(Property::new("noop_with_empty_axes", PropertyValue::Bool(noop)));
+            params.push(Property::new(
+                "noop_with_empty_axes",
+                PropertyValue::Bool(noop),
+            ));
         }
         params
     }
@@ -288,7 +292,7 @@ impl Operation for ReduceSumOperation {
             axes,
             self.keepdims.unwrap_or(true),
             self.noop_with_empty_axes.unwrap_or(false),
-            rng
+            rng,
         );
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
@@ -372,7 +376,10 @@ impl Operation for ReduceMaxOperation {
             params.push(Property::new("axes", PropertyValue::IntList(axes.clone())));
         }
         if let Some(noop) = self.noop_with_empty_axes {
-            params.push(Property::new("noop_with_empty_axes", PropertyValue::Bool(noop)));
+            params.push(Property::new(
+                "noop_with_empty_axes",
+                PropertyValue::Bool(noop),
+            ));
         }
         params
     }
@@ -394,7 +401,7 @@ impl Operation for ReduceMaxOperation {
             axes,
             self.keepdims.unwrap_or(true),
             self.noop_with_empty_axes.unwrap_or(false),
-            rng
+            rng,
         );
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
@@ -479,7 +486,10 @@ impl Operation for ReduceMinOperation {
             params.push(Property::new("axes", PropertyValue::IntList(axes.clone())));
         }
         if let Some(noop) = self.noop_with_empty_axes {
-            params.push(Property::new("noop_with_empty_axes", PropertyValue::Bool(noop)));
+            params.push(Property::new(
+                "noop_with_empty_axes",
+                PropertyValue::Bool(noop),
+            ));
         }
         params
     }
@@ -501,7 +511,7 @@ impl Operation for ReduceMinOperation {
             axes,
             self.keepdims.unwrap_or(true),
             self.noop_with_empty_axes.unwrap_or(false),
-            rng
+            rng,
         );
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
@@ -586,7 +596,10 @@ impl Operation for ReduceProdOperation {
             params.push(Property::new("axes", PropertyValue::IntList(axes.clone())));
         }
         if let Some(noop) = self.noop_with_empty_axes {
-            params.push(Property::new("noop_with_empty_axes", PropertyValue::Bool(noop)));
+            params.push(Property::new(
+                "noop_with_empty_axes",
+                PropertyValue::Bool(noop),
+            ));
         }
         params
     }
@@ -608,7 +621,7 @@ impl Operation for ReduceProdOperation {
             axes,
             self.keepdims.unwrap_or(true),
             self.noop_with_empty_axes.unwrap_or(false),
-            rng
+            rng,
         );
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);

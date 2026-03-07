@@ -26,7 +26,12 @@ impl Squeeze {
         rng: &mut impl rand::Rng,
     ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
-        let node = Self { output, data, axes, global_id: GlobalId::new(rng) };
+        let node = Self {
+            output,
+            data,
+            axes,
+            global_id: GlobalId::new(rng),
+        };
         graph.push_op(AnyMilliOp::Squeeze(node));
         output
     }
@@ -76,10 +81,8 @@ impl MilliOp for Squeeze {
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
         backend: &mut EvalBackend,
-    ) -> Result<
-        Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>,
-        MilliOpGraphError,
-    > {
+    ) -> Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>
+    {
         let axes_ndarray = NDArrayNumericTensor::<DynRank>::try_from(
             inputs[&self.axes].cast(DType::I64, backend)?,
         )?;
@@ -99,14 +102,18 @@ impl MilliOp for Squeeze {
             let input_shape = inputs[&self.data].shape();
             let normalized_axes: Vec<usize> = axes
                 .iter()
-                .map(|&a| if a < 0 { (input_shape.len() as i64 + a) as usize } else { a as usize })
+                .map(|&a| {
+                    if a < 0 {
+                        (input_shape.len() as i64 + a) as usize
+                    } else {
+                        a as usize
+                    }
+                })
                 .collect();
             let mut output_shape = Vec::new();
-            for i in 0..input_shape.len() {
-                if normalized_axes.contains(&i) {
-                    // Skip squeezed dimension (should be size 1)
-                } else {
-                    output_shape.push(input_shape[i]);
+            for (i, &dim) in input_shape.iter().enumerate() {
+                if !normalized_axes.contains(&i) {
+                    output_shape.push(dim);
                 }
             }
             let output = inputs[&self.data].reshape(output_shape, backend)?;

@@ -11,12 +11,12 @@ mod gather;
 mod nonzero;
 mod range;
 mod reduce_max;
-mod resize;
 mod reduce_mean;
 mod reduce_min;
 mod reduce_prod;
 mod reduce_sum;
 mod reshape;
+mod resize;
 mod shape;
 mod slice;
 mod split;
@@ -41,11 +41,11 @@ pub use nonzero::*;
 pub use range::*;
 pub use reduce_max::*;
 pub use reduce_mean::*;
-pub use resize::*;
 pub use reduce_min::*;
 pub use reduce_prod::*;
 pub use reduce_sum::*;
 pub use reshape::*;
+pub use resize::*;
 pub use shape::*;
 pub use slice::*;
 pub use split::*;
@@ -59,7 +59,7 @@ pub use where_op::*;
 use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::graph::{GlobalId, Node, NodeMetadata};
-use crate::milli_graph::{MilliOpGraphError};
+use crate::milli_graph::MilliOpGraphError;
 use crate::numeric_tensor::NumericTensor;
 use crate::scalar_info::ScalarInfoTyped;
 use crate::symbolic_scalar::{SymbolicResolver, SymbolicScalarTyped};
@@ -88,18 +88,15 @@ pub enum MilliOpTensorIDOrLiteral {
     Literal(NDArrayNumericTensor<DynRank>),
 }
 
-pub type EvalResult = Result<
-    Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>,
-    MilliOpGraphError,
->;
+pub type EvalResult =
+    Result<Box<dyn Iterator<Item = (GlobalId, NumericTensor<DynRank>)>>, MilliOpGraphError>;
 pub trait MilliOp: Node {
     fn infer(
         &self,
         known_inputs: &HashMap<GlobalId, TensorInfo>,
         _symbolic_resolver: &mut SymbolicResolver,
         backend: &mut EvalBackend,
-    ) -> Result<Box<dyn Iterator<Item = (GlobalId, TensorInfo)>>, MilliOpGraphError>
-    {
+    ) -> Result<Box<dyn Iterator<Item = (GlobalId, TensorInfo)>>, MilliOpGraphError> {
         let mut resolved_inputs = HashMap::new();
         for input in self.inputs() {
             if let Some(tensor_info) = known_inputs.get(&input) {

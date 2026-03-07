@@ -3,13 +3,11 @@ use crate::dtype::DType;
 use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::{MilliOpGraph, ops_helpers};
 use crate::symbolic_graph::ops::Operation;
-use crate::symbolic_graph::{
-    ONNXDecodingError, query_attribute_float, query_attribute_int,
-};
+use crate::symbolic_graph::{ONNXDecodingError, query_attribute_float, query_attribute_int};
 use crate::{milli_graph, onnx};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use rand::Rng;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LpNormalizationOperation {
@@ -88,8 +86,14 @@ impl Operation for LpNormalizationOperation {
         };
         let axis_tid = ops_helpers::scalar_const(&mut graph, self.axis, rng);
         x_tid = milli_graph::ops::Cast::push_new(&mut graph, x_tid, DType::F32, rng);
-        x_tid =
-            milli_graph::ops::ReduceSum::push_new(&mut graph, x_tid, Some(axis_tid), true, false, rng);
+        x_tid = milli_graph::ops::ReduceSum::push_new(
+            &mut graph,
+            x_tid,
+            Some(axis_tid),
+            true,
+            false,
+            rng,
+        );
         if self.p == 2 {
             x_tid = milli_graph::ops::SimpleUnaryOp::sqrt(&mut graph, x_tid, rng);
         }
@@ -206,7 +210,15 @@ impl Operation for GroupNormalizationOperation {
         let num_channels = {
             let starts = ops_helpers::scalar_const(&mut graph, 1i64, rng);
             let ends = ops_helpers::scalar_const(&mut graph, 2i64, rng);
-            milli_graph::ops::Slice::push_new(&mut graph, input_shape, starts, ends, None, None, rng)
+            milli_graph::ops::Slice::push_new(
+                &mut graph,
+                input_shape,
+                starts,
+                ends,
+                None,
+                None,
+                rng,
+            )
         };
         let reshaped_input = {
             let new_shape_tensor =
@@ -223,7 +235,7 @@ impl Operation for GroupNormalizationOperation {
             Some(mean_axis),
             true,
             false,
-            rng
+            rng,
         );
 
         let input = milli_graph::ops::SimpleBinary::sub(&mut graph, reshaped_input, mean, rng);
@@ -236,7 +248,8 @@ impl Operation for GroupNormalizationOperation {
         let input_normalized = {
             let epsilon = milli_graph::ops::Constant::new_scalar(&mut graph, self.epsilon, rng);
             let epsilon = milli_graph::ops::CastLike::push_new(&mut graph, epsilon, variance, rng);
-            let var_plus_eps = milli_graph::ops::SimpleBinary::add(&mut graph, variance, epsilon, rng);
+            let var_plus_eps =
+                milli_graph::ops::SimpleBinary::add(&mut graph, variance, epsilon, rng);
             let val = milli_graph::ops::SimpleUnaryOp::sqrt(&mut graph, var_plus_eps, rng);
             milli_graph::ops::SimpleBinary::div(&mut graph, input, val, rng)
         };
@@ -250,7 +263,7 @@ impl Operation for GroupNormalizationOperation {
                 &mut graph,
                 vec![zero, num_channels, neg_one],
                 0,
-                rng
+                rng,
             );
             milli_graph::ops::Reshape::push_new(&mut graph, input_normalized, new_shape, false, rng)
         };
@@ -271,7 +284,7 @@ impl Operation for GroupNormalizationOperation {
                 &mut graph,
                 input_map[&self.bias],
                 self.stash_type,
-                rng
+                rng,
             );
             let bias = milli_graph::ops::Unsqueeze::push_new(&mut graph, bias_cast, one, rng);
             milli_graph::ops::SimpleBinary::add(&mut graph, y, bias, rng)
@@ -417,7 +430,8 @@ impl Operation for RMSNormalizationOperation {
         let input_data = input_map[&self.input];
         let input_scale = input_map[&self.scale];
 
-        let input_f32 = milli_graph::ops::Cast::push_new(&mut graph, input_data, self.stash_type, rng);
+        let input_f32 =
+            milli_graph::ops::Cast::push_new(&mut graph, input_data, self.stash_type, rng);
 
         let axis = ops_helpers::scalar_const(&mut graph, self.axis, rng);
         let axis = ops_helpers::resolve_axes(&mut graph, axis, input_data, rng);
@@ -427,7 +441,8 @@ impl Operation for RMSNormalizationOperation {
         let normalized_axes =
             milli_graph::ops::Range::push_new(&mut graph, axis, rank_tid, step_tid, rng);
 
-        let input_squared = milli_graph::ops::SimpleBinary::mul(&mut graph, input_f32, input_f32, rng);
+        let input_squared =
+            milli_graph::ops::SimpleBinary::mul(&mut graph, input_f32, input_f32, rng);
 
         let squared_mean = milli_graph::ops::ReduceMean::push_new(
             &mut graph,
@@ -435,12 +450,13 @@ impl Operation for RMSNormalizationOperation {
             Some(normalized_axes),
             true,
             false,
-            rng
+            rng,
         );
 
         let epsilon = milli_graph::ops::Constant::new_scalar(&mut graph, self.epsilon, rng);
         let epsilon = milli_graph::ops::CastLike::push_new(&mut graph, epsilon, squared_mean, rng);
-        let mean_plus_eps = milli_graph::ops::SimpleBinary::add(&mut graph, squared_mean, epsilon, rng);
+        let mean_plus_eps =
+            milli_graph::ops::SimpleBinary::add(&mut graph, squared_mean, epsilon, rng);
         let rms = milli_graph::ops::SimpleUnaryOp::sqrt(&mut graph, mean_plus_eps, rng);
         let rms_inv = milli_graph::ops::SimpleUnaryOp::reciprocal(&mut graph, rms, rng);
 
@@ -448,11 +464,16 @@ impl Operation for RMSNormalizationOperation {
 
         let input_scale_cast =
             milli_graph::ops::Cast::push_new(&mut graph, input_scale, self.stash_type, rng);
-        let out = milli_graph::ops::SimpleBinary::mul(&mut graph, normalized, input_scale_cast, rng);
+        let out =
+            milli_graph::ops::SimpleBinary::mul(&mut graph, normalized, input_scale_cast, rng);
 
         let out = if let Some(bias) = self.bias {
-            let bias_cast =
-                milli_graph::ops::Cast::push_new(&mut graph, input_map[&bias], self.stash_type, rng);
+            let bias_cast = milli_graph::ops::Cast::push_new(
+                &mut graph,
+                input_map[&bias],
+                self.stash_type,
+                rng,
+            );
             milli_graph::ops::SimpleBinary::add(&mut graph, out, bias_cast, rng)
         } else {
             out
@@ -590,12 +611,13 @@ impl Node for LayerNormalizationOperation {
     }
 }
 impl Operation for LayerNormalizationOperation {
-fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
+    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let input_data = input_map[&self.input];
         let input_scale = input_map[&self.scale];
 
-        let input_f32 = milli_graph::ops::Cast::push_new(&mut graph, input_data, self.stash_type, rng);
+        let input_f32 =
+            milli_graph::ops::Cast::push_new(&mut graph, input_data, self.stash_type, rng);
 
         let axis = ops_helpers::scalar_const(&mut graph, self.axis, rng);
         let axis = ops_helpers::resolve_axes(&mut graph, axis, input_data, rng);
@@ -611,7 +633,7 @@ fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
             Some(normalized_axes),
             true,
             false,
-            rng
+            rng,
         );
 
         let d = milli_graph::ops::SimpleBinary::sub(&mut graph, input_f32, mean, rng);
@@ -622,7 +644,7 @@ fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
             Some(normalized_axes),
             true,
             false,
-            rng
+            rng,
         );
         let epsilon = milli_graph::ops::Constant::new_scalar(&mut graph, self.epsilon, rng);
         let epsilon = milli_graph::ops::CastLike::push_new(&mut graph, epsilon, variance, rng);
@@ -634,11 +656,16 @@ fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
 
         let input_scale_cast =
             milli_graph::ops::Cast::push_new(&mut graph, input_scale, self.stash_type, rng);
-        let out = milli_graph::ops::SimpleBinary::mul(&mut graph, normalized, input_scale_cast, rng);
+        let out =
+            milli_graph::ops::SimpleBinary::mul(&mut graph, normalized, input_scale_cast, rng);
 
         let out = if let Some(bias) = self.bias {
-            let bias_cast =
-                milli_graph::ops::Cast::push_new(&mut graph, input_map[&bias], self.stash_type, rng);
+            let bias_cast = milli_graph::ops::Cast::push_new(
+                &mut graph,
+                input_map[&bias],
+                self.stash_type,
+                rng,
+            );
             milli_graph::ops::SimpleBinary::add(&mut graph, out, bias_cast, rng)
         } else {
             out

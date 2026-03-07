@@ -57,12 +57,12 @@ use crate::dtype::{DType, DTypeError};
 use crate::graph::{GlobalId, Node, Property};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::numeric_tensor::{NumericTensor, NumericTensorError};
+use crate::symbolic_graph::SymbolicGraph;
 use crate::tensor_rank::DynRank;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use rand::Rng;
 use wyrand::WyRand;
-use crate::symbolic_graph::SymbolicGraph;
 
 #[derive(Debug, thiserror::Error)]
 pub enum EvalError {
@@ -122,8 +122,7 @@ pub trait Operation: Node {
         rng: &mut impl Rng,
     ) -> Option<crate::milli_graph::BackwardGenResult> {
         use crate::milli_graph::{
-            MilliOpGraph, MilliOpGroup, MilliOpPhase, BackwardGenResult,
-            generate_milli_backward,
+            BackwardGenResult, MilliOpGraph, MilliOpGroup, MilliOpPhase, generate_milli_backward,
         };
 
         let fwd = self.get_milli_op_graph(rng);
@@ -140,11 +139,10 @@ pub trait Operation: Node {
             comb_to_internal.insert(comb_id, internal);
         }
         // Add output gradient tensors
-        for (_, &grad_id) in &ctx.output_grads {
-            if !comb_to_internal.contains_key(&grad_id) {
-                let internal = workspace.add_input_with_id(grad_id, rng);
-                comb_to_internal.insert(grad_id, internal);
-            }
+        for &grad_id in ctx.output_grads.values() {
+            comb_to_internal
+                .entry(grad_id)
+                .or_insert_with(|| workspace.add_input_with_id(grad_id, rng));
         }
 
         // Merge forward ops into workspace, mapping sym IDs → workspace internals

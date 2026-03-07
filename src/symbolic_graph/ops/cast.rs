@@ -2,8 +2,8 @@ use crate::dtype::DType;
 use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::{self, MilliOpGraph};
 use crate::onnx;
-use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::ONNXDecodingError;
+use crate::symbolic_graph::ops::Operation;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -133,7 +133,8 @@ impl Operation for CastOperation {
 
     fn get_milli_op_graph(&self, rng: &mut impl rand::Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
-        let out = milli_graph::ops::Cast::push_new(&mut graph, input_map[&self.input], self.to, rng);
+        let out =
+            milli_graph::ops::Cast::push_new(&mut graph, input_map[&self.input], self.to, rng);
         let mut output_map = HashMap::new();
         output_map.insert(out, self.output);
         graph.set_output_map(output_map);

@@ -4,8 +4,8 @@ use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::compiler::CompiledProgramObserver;
 use crate::graph::{GlobalId, Graph, Node, NodeMetadata, Property, PropertyValue};
+use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::observer::MilliOpGraphObserver;
-use crate::milli_graph::{MilliOpGraph};
 use crate::numeric_tensor::NumericTensor;
 use crate::super_graph::links::{
     SuperGraphAnyLink, SuperGraphLink, SuperGraphLinkDouble, SuperGraphLinkHash,
@@ -13,15 +13,17 @@ use crate::super_graph::links::{
     SuperGraphLinkTriple,
 };
 use crate::super_graph::observer::SuperGraphObserver;
-use crate::super_graph::{SuperGraph, SuperGraphBuilder, SuperGraphContext, SuperGraphData, SuperGraphError};
+use crate::super_graph::{
+    SuperGraph, SuperGraphBuilder, SuperGraphContext, SuperGraphData, SuperGraphError,
+};
 use crate::symbolic_graph::observer::SymbolicGraphObserver;
 use crate::tokenizer::{AnyTokenizer, Tokenizer};
+use rand::RngCore;
 use rwkv_tokenizer::WorldTokenizer;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ptr;
 use std::time::Instant;
-use rand::RngCore;
 use typenum::P1;
 use whisper_tensor_import::onnx_graph::TokenizerInfo;
 
@@ -52,11 +54,11 @@ impl<T: SuperGraphNode> Node for T {
         <Self as SuperGraphNode>::op_kind(self)
     }
 
-    fn inputs(&self) -> Box<dyn Iterator<Item=GlobalId> + '_> {
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId> + '_> {
         Box::new(<Self as SuperGraphNode>::inputs(self).map(|x| x.global_id()))
     }
 
-    fn outputs(&self) -> Box<dyn Iterator<Item=GlobalId> + '_> {
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId> + '_> {
         Box::new(<Self as SuperGraphNode>::outputs(self).map(|x| x.global_id()))
     }
 }
@@ -115,13 +117,14 @@ impl<'a, T: SuperGraphObserver> SymbolicGraphObserver for SymbolicGraphObserverW
         end_instant: Instant,
         backend: &mut EvalBackend,
     ) {
-        let node_path = self.path.clone().into_iter().chain(node_path.iter().cloned()).collect::<Vec<_>>();
-        self.inner.on_node_executed(
-            node_path.as_slice(),
-            start_instant,
-            end_instant,
-            backend,
-        )
+        let node_path = self
+            .path
+            .clone()
+            .into_iter()
+            .chain(node_path.iter().cloned())
+            .collect::<Vec<_>>();
+        self.inner
+            .on_node_executed(node_path.as_slice(), start_instant, end_instant, backend)
     }
 
     fn on_tensor_assigned(
@@ -130,12 +133,14 @@ impl<'a, T: SuperGraphObserver> SymbolicGraphObserver for SymbolicGraphObserverW
         tensor: &NumericTensor<DynRank>,
         backend: &mut EvalBackend,
     ) {
-        let tensor_path = self.path.clone().into_iter().chain(tensor_path.iter().cloned()).collect::<Vec<_>>();
-        self.inner.on_tensor_assigned(
-            tensor_path.as_slice(),
-            tensor,
-            backend,
-        )
+        let tensor_path = self
+            .path
+            .clone()
+            .into_iter()
+            .chain(tensor_path.iter().cloned())
+            .collect::<Vec<_>>();
+        self.inner
+            .on_tensor_assigned(tensor_path.as_slice(), tensor, backend)
     }
 }
 
@@ -147,13 +152,14 @@ impl<'a, T: SuperGraphObserver> CompiledProgramObserver for SymbolicGraphObserve
         end_instant: Instant,
         backend: &mut EvalBackend,
     ) {
-        let node_path = self.path.clone().into_iter().chain(node_path.iter().cloned()).collect::<Vec<_>>();
-        self.inner.on_node_executed(
-            node_path.as_slice(),
-            start_instant,
-            end_instant,
-            backend,
-        )
+        let node_path = self
+            .path
+            .clone()
+            .into_iter()
+            .chain(node_path.iter().cloned())
+            .collect::<Vec<_>>();
+        self.inner
+            .on_node_executed(node_path.as_slice(), start_instant, end_instant, backend)
     }
 
     fn on_tensor_assigned(
@@ -162,12 +168,14 @@ impl<'a, T: SuperGraphObserver> CompiledProgramObserver for SymbolicGraphObserve
         tensor: &NumericTensor<DynRank>,
         backend: &mut EvalBackend,
     ) {
-        let tensor_path = self.path.clone().into_iter().chain(tensor_path.iter().cloned()).collect::<Vec<_>>();
-        self.inner.on_tensor_assigned(
-            tensor_path.as_slice(),
-            tensor,
-            backend,
-        )
+        let tensor_path = self
+            .path
+            .clone()
+            .into_iter()
+            .chain(tensor_path.iter().cloned())
+            .collect::<Vec<_>>();
+        self.inner
+            .on_tensor_assigned(tensor_path.as_slice(), tensor, backend)
     }
 }
 
@@ -202,8 +210,13 @@ impl SuperGraphNode for SuperGraphNodeModelExecution {
 
         let symbolic_graph = context.symbolic_graphs[self.symbolic_graph_id];
 
-        let global_id = node_path.iter().chain(core::iter::once(&self.global_id)).cloned().collect::<Vec<_>>();
-        let mut observer = SymbolicGraphObserverWrapper::new(context.observer, global_id.as_slice());
+        let global_id = node_path
+            .iter()
+            .chain(core::iter::once(&self.global_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut observer =
+            SymbolicGraphObserverWrapper::new(context.observer, global_id.as_slice());
         if context.use_compiled_models
             && let Some(compiled_models) = &context.compiled_models
         {
@@ -273,7 +286,11 @@ pub struct SuperGraphNodeTokenizerLoad {
 }
 
 impl SuperGraphNodeTokenizerLoad {
-    pub fn new(_builder: &mut SuperGraphBuilder, info: TokenizerInfo, rng: &mut impl RngCore) -> Self {
+    pub fn new(
+        _builder: &mut SuperGraphBuilder,
+        info: TokenizerInfo,
+        rng: &mut impl RngCore,
+    ) -> Self {
         Self {
             global_id: GlobalId::new(rng),
             info,
@@ -515,7 +532,10 @@ pub struct SuperGraphNodeMilliOpGraph {
 
 impl SuperGraphNodeMilliOpGraph {
     pub fn new(graph: MilliOpGraph, rng: &mut impl RngCore) -> Self {
-        Self { graph , global_id: GlobalId::new(rng) }
+        Self {
+            graph,
+            global_id: GlobalId::new(rng),
+        }
     }
 }
 
@@ -540,12 +560,14 @@ impl<'a, T: SuperGraphObserver> MilliOpGraphObserver for MilliOpGraphObserverWra
         tensor: &NumericTensor<DynRank>,
         backend: &mut EvalBackend,
     ) {
-        let tensor_path = self.node_path.iter().chain(tensor_path.iter()).copied().collect::<Vec<_>>();
-        self.inner.on_tensor_assigned(
-            tensor_path.as_slice(),
-            tensor,
-            backend,
-        );
+        let tensor_path = self
+            .node_path
+            .iter()
+            .chain(tensor_path.iter())
+            .copied()
+            .collect::<Vec<_>>();
+        self.inner
+            .on_tensor_assigned(tensor_path.as_slice(), tensor, backend);
     }
 
     fn on_node_executed(
@@ -555,13 +577,14 @@ impl<'a, T: SuperGraphObserver> MilliOpGraphObserver for MilliOpGraphObserverWra
         end_instant: Instant,
         backend: &mut EvalBackend,
     ) {
-        let node_path = self.node_path.iter().chain(node_path.iter()).copied().collect::<Vec<_>>();
-        self.inner.on_node_executed(
-            node_path.as_slice(),
-            start_instant,
-            end_instant,
-            backend,
-        );
+        let node_path = self
+            .node_path
+            .iter()
+            .chain(node_path.iter())
+            .copied()
+            .collect::<Vec<_>>();
+        self.inner
+            .on_node_executed(node_path.as_slice(), start_instant, end_instant, backend);
     }
 }
 
@@ -578,26 +601,45 @@ impl SuperGraphNode for SuperGraphNodeMilliOpGraph {
         let inputs = {
             let mut inputs = HashMap::new();
             for input in self.graph.get_inputs() {
-                inputs.insert(input, data.tensors.get(&SuperGraphLinkTensor(input)).unwrap().clone());
+                inputs.insert(
+                    input,
+                    data.tensors
+                        .get(&SuperGraphLinkTensor(input))
+                        .unwrap()
+                        .clone(),
+                );
             }
             inputs
         };
-        let node_path = node_path.iter().chain(core::iter::once(&self.global_id)).copied().collect::<Vec<_>>();
+        let node_path = node_path
+            .iter()
+            .chain(core::iter::once(&self.global_id))
+            .copied()
+            .collect::<Vec<_>>();
         let mut observer = MilliOpGraphObserverWrapper::new(context.observer, node_path.as_slice());
         let res = self
             .graph
             .eval(&inputs, &mut observer, context.eval_backend)?;
-        data.tensors.extend(res.map(|(k, v)| (SuperGraphLinkTensor(k), v)));
+        data.tensors
+            .extend(res.map(|(k, v)| (SuperGraphLinkTensor(k), v)));
         Ok(())
     }
     fn op_kind(&self) -> String {
         "MilliOpGraph".to_string()
     }
     fn inputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
-        Box::new(self.graph.input_link_ids().map(|(a, _b)| SuperGraphLinkTensor(a).to_any()))
+        Box::new(
+            self.graph
+                .input_link_ids()
+                .map(|(a, _b)| SuperGraphLinkTensor(a).to_any()),
+        )
     }
     fn outputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
-        Box::new(self.graph.output_link_ids().map(|(a, _b)| SuperGraphLinkTensor(a).to_any()))
+        Box::new(
+            self.graph
+                .output_link_ids()
+                .map(|(a, _b)| SuperGraphLinkTensor(a).to_any()),
+        )
     }
     fn global_id(&self) -> GlobalId {
         self.global_id
@@ -617,6 +659,7 @@ pub struct SuperGraphNodeScan {
 }
 
 impl SuperGraphNodeScan {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         inner_graph: SuperGraph,
         iteration_count: SuperGraphLinkTensor,
@@ -657,7 +700,11 @@ impl SuperGraphNode for SuperGraphNodeScan {
             .ok_or(SuperGraphError::MissingLinkError())?;
         let iteration_count: i64 = iteration_count_tensor.first_element().into();
 
-        let node_path = node_path.iter().chain(core::iter::once(&self.global_id)).copied().collect::<Vec<_>>();
+        let node_path = node_path
+            .iter()
+            .chain(core::iter::once(&self.global_id))
+            .copied()
+            .collect::<Vec<_>>();
 
         let simple_inputs = {
             let mut simple_inputs = SuperGraphData::new();
@@ -800,7 +847,9 @@ impl SuperGraphNode for SuperGraphNodeScan {
                 }
                 iter_inputs
             };
-            let iter_outputs = self.inner_graph.eval(node_path.as_slice(), iter_inputs, context)?;
+            let iter_outputs = self
+                .inner_graph
+                .eval(node_path.as_slice(), iter_inputs, context)?;
 
             for (inner, outer, _scan_axis) in &self.scan_outputs {
                 let tensor = iter_outputs
@@ -1196,6 +1245,7 @@ impl SuperGraphNode for SuperGraphNodeRNNCacheWrite {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)]
 pub enum SuperGraphAnyNode {
     ModelExecution(SuperGraphNodeModelExecution),
     TokenizerEncode(SuperGraphNodeTokenizerEncode),
@@ -1266,14 +1316,16 @@ impl NodeMetadata for SuperGraphAnyNode {
     fn parameters(&self) -> Vec<Property> {
         match self {
             SuperGraphAnyNode::ModelExecution(node) => {
-                vec![
-                    Property::new("symbolic_graph_id", PropertyValue::Int(node.symbolic_graph_id as i64)),
-                ]
+                vec![Property::new(
+                    "symbolic_graph_id",
+                    PropertyValue::Int(node.symbolic_graph_id as i64),
+                )]
             }
             SuperGraphAnyNode::Scan(node) => {
-                vec![
-                    Property::new("num_scan_inputs", PropertyValue::Int(node.scan_inputs.len() as i64)),
-                ]
+                vec![Property::new(
+                    "num_scan_inputs",
+                    PropertyValue::Int(node.scan_inputs.len() as i64),
+                )]
             }
             _ => Vec::new(),
         }
