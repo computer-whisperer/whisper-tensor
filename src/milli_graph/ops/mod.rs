@@ -5,6 +5,7 @@ mod cast;
 mod cast_like;
 mod concat;
 mod constant;
+mod conv;
 mod cumsum;
 mod expand;
 mod gather;
@@ -34,6 +35,7 @@ pub use cast::*;
 pub use cast_like::*;
 pub use concat::*;
 pub use constant::*;
+pub use conv::*;
 pub use cumsum::*;
 pub use expand::*;
 pub use gather::*;
@@ -288,6 +290,7 @@ pub enum AnyMilliOp {
     ArgMax(ArgMax),
     ArgMin(ArgMin),
     Resize(Resize),
+    Conv(Conv),
 }
 
 impl AnyMilliOp {
@@ -325,6 +328,7 @@ impl AnyMilliOp {
             AnyMilliOp::ArgMax(x) => x.remap_tensors(map, rng),
             AnyMilliOp::ArgMin(x) => x.remap_tensors(map, rng),
             AnyMilliOp::Resize(x) => x.remap_tensors(map, rng),
+            AnyMilliOp::Conv(x) => x.remap_tensors(map, rng),
         }
     }
 }
@@ -365,6 +369,7 @@ macro_rules! delegate {
                 AnyMilliOp::ArgMax(x) => x.$name($($arg),*),
                 AnyMilliOp::ArgMin(x) => x.$name($($arg),*),
                 AnyMilliOp::Resize(x) => x.$name($($arg),*),
+                AnyMilliOp::Conv(x) => x.$name($($arg),*),
             }
         }
     }
@@ -418,6 +423,7 @@ impl MilliOp for AnyMilliOp {
             AnyMilliOp::ArgMax(x) => x.backward(output_grads, graph, rng),
             AnyMilliOp::ArgMin(x) => x.backward(output_grads, graph, rng),
             AnyMilliOp::Resize(x) => x.backward(output_grads, graph, rng),
+            AnyMilliOp::Conv(x) => x.backward(output_grads, graph, rng),
         }
     }
 }

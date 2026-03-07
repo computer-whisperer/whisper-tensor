@@ -504,9 +504,9 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_averagepool_3d_dilations_large_count_include_pad_is_1_ceil_mode_is_True);
         do_test!($runner_fn, $runner_name, test_averagepool_3d_dilations_small);*/
 
-        /*do_test!($runner_fn, $runner_name, test_basic_conv_without_padding);
+        do_test!($runner_fn, $runner_name, test_basic_conv_without_padding);
         do_test!($runner_fn, $runner_name, test_basic_conv_with_padding);
-        do_test!($runner_fn, $runner_name, test_basic_deform_conv_without_padding);
+        /*do_test!($runner_fn, $runner_name, test_basic_deform_conv_without_padding);
         do_test!($runner_fn, $runner_name, test_basic_deform_conv_with_padding);*/
 
         /*do_test!($runner_fn, $runner_name, test_batchnorm_epsilon);
@@ -729,11 +729,11 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_convtranspose_kernel_shape);
         do_test!($runner_fn, $runner_name, test_convtranspose_output_shape);
         do_test!($runner_fn, $runner_name, test_convtranspose_pad);
-        do_test!($runner_fn, $runner_name, test_convtranspose_pads);
+        do_test!($runner_fn, $runner_name, test_convtranspose_pads);*/
         do_test!($runner_fn, $runner_name, test_conv_with_autopad_same);
         do_test!($runner_fn, $runner_name, test_conv_with_strides_and_asymmetric_padding);
         do_test!($runner_fn, $runner_name, test_conv_with_strides_no_padding);
-        do_test!($runner_fn, $runner_name, test_conv_with_strides_padding);*/
+        do_test!($runner_fn, $runner_name, test_conv_with_strides_padding);
 
         do_test!($runner_fn, $runner_name, test_cos);
         do_test!($runner_fn, $runner_name, test_cos_example);

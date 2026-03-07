@@ -1,5 +1,6 @@
 use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::MilliOpGraph;
+use crate::milli_graph::ops as milli_ops;
 use crate::onnx;
 use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{
@@ -7,6 +8,7 @@ use crate::symbolic_graph::{
 };
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) enum ConvOperationAutoPad {
@@ -146,7 +148,33 @@ impl Operation for ConvOperation {
         params
     }
 
-    fn get_milli_op_graph(&self, _rng: &mut impl Rng) -> MilliOpGraph {
-        unimplemented!();
+    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
+
+        let milli_auto_pad = match &self.auto_pad {
+            ConvOperationAutoPad::NotSet => milli_ops::ConvAutoPad::NotSet,
+            ConvOperationAutoPad::SameUpper => milli_ops::ConvAutoPad::SameUpper,
+            ConvOperationAutoPad::SameLower => milli_ops::ConvAutoPad::SameLower,
+            ConvOperationAutoPad::Valid => milli_ops::ConvAutoPad::Valid,
+        };
+
+        let out = milli_ops::Conv::push_new(
+            &mut graph,
+            input_map[&self.input],
+            input_map[&self.weight],
+            self.bias.map(|id| input_map[&id]),
+            milli_auto_pad,
+            self.dilations.clone(),
+            self.group,
+            self.kernel_shape.clone(),
+            self.pads.clone(),
+            self.strides.clone(),
+            rng,
+        );
+
+        let mut output_map = HashMap::new();
+        output_map.insert(out, self.output);
+        graph.set_output_map(output_map);
+        graph
     }
 }
