@@ -211,7 +211,8 @@ pub async fn scheduler(mut input: mpsc::Receiver<SchedulerJob>, model_server: Ar
         ))
     };
     let caches = Arc::new(Mutex::new(HashMap::new()));
-    let _vulkan_tensor_load_caches: Arc<Mutex<HashMap<LoadedModelId, ModelLoadedTensorCache>>> =
+    #[cfg(feature = "vulkan")]
+    let vulkan_tensor_load_caches: Arc<Mutex<HashMap<LoadedModelId, ModelLoadedTensorCache>>> =
         Arc::new(Mutex::new(HashMap::new()));
     loop {
         if let Some(x) = input.recv().await {

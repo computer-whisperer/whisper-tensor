@@ -157,11 +157,19 @@ fn fast_path_original_coord(
         ResizeCoordTransform::HalfPixel => (x + 0.5) / scale - 0.5,
         ResizeCoordTransform::Asymmetric => x / scale,
         ResizeCoordTransform::PytorchHalfPixel => {
-            if out_size > 1 { (x + 0.5) / scale - 0.5 } else { -0.5 }
+            if out_size > 1 {
+                (x + 0.5) / scale - 0.5
+            } else {
+                -0.5
+            }
         }
         ResizeCoordTransform::AlignCorners => {
             let output_width = scale * in_size as f32;
-            if output_width <= 1.0 { 0.0 } else { x * (in_size as f32 - 1.0) / (output_width - 1.0) }
+            if output_width <= 1.0 {
+                0.0
+            } else {
+                x * (in_size as f32 - 1.0) / (output_width - 1.0)
+            }
         }
         ResizeCoordTransform::HalfPixelSymmetric => {
             let output_width = scale * in_size as f32;
@@ -188,7 +196,11 @@ fn nearest_input_coord(
 
     let nearest_idx = match nearest_mode {
         ResizeNearestMode::RoundPreferFloor => {
-            if x_ori == x_ori.floor() + 0.5 { x_ori.floor() as i64 } else { (x_ori + 0.5).floor() as i64 }
+            if x_ori == x_ori.floor() + 0.5 {
+                x_ori.floor() as i64
+            } else {
+                (x_ori + 0.5).floor() as i64
+            }
         }
         ResizeNearestMode::RoundPreferCeil => x_ori.round() as i64,
         ResizeNearestMode::Floor => x_ori.floor() as i64,
@@ -290,8 +302,7 @@ fn resize_nchw_linear(
                     let bl = input[in_base + ih1 * in_w + iw0];
                     let br = input[in_base + ih1 * in_w + iw1];
                     out_buf[out_row + ow] =
-                        (1.0 - fh) * ((1.0 - fw) * tl + fw * tr)
-                        + fh * ((1.0 - fw) * bl + fw * br);
+                        (1.0 - fh) * ((1.0 - fw) * tl + fw * tr) + fh * ((1.0 - fw) * bl + fw * br);
                 }
             }
             out_buf
@@ -731,7 +742,13 @@ fn compute_output_shape(
         (0..rank).collect()
     } else {
         axes.iter()
-            .map(|&a| if a < 0 { (rank as i64 + a) as usize } else { a as usize })
+            .map(|&a| {
+                if a < 0 {
+                    (rank as i64 + a) as usize
+                } else {
+                    a as usize
+                }
+            })
             .collect()
     };
 
@@ -788,7 +805,13 @@ fn compute_scales(
         (0..rank).collect()
     } else {
         axes.iter()
-            .map(|&a| if a < 0 { (rank as i64 + a) as usize } else { a as usize })
+            .map(|&a| {
+                if a < 0 {
+                    (rank as i64 + a) as usize
+                } else {
+                    a as usize
+                }
+            })
             .collect()
     };
 
@@ -798,7 +821,10 @@ fn compute_scales(
         for (i, &axis) in resolved_axes.iter().enumerate() {
             scales[axis] = provided[i];
         }
-        if !matches!(keep_aspect_ratio_policy, ResizeKeepAspectRatioPolicy::Stretch) {
+        if !matches!(
+            keep_aspect_ratio_policy,
+            ResizeKeepAspectRatioPolicy::Stretch
+        ) {
             for &axis in &resolved_axes {
                 scales[axis] = output_shape[axis] as f32 / input_shape[axis] as f32;
             }
@@ -844,8 +870,16 @@ impl MilliOp for Resize {
         };
 
         let full_roi = if !self.axes.is_empty() && !roi_raw.is_empty() {
-            let resolved_axes: Vec<usize> = self.axes.iter()
-                .map(|&a| if a < 0 { (rank as i64 + a) as usize } else { a as usize })
+            let resolved_axes: Vec<usize> = self
+                .axes
+                .iter()
+                .map(|&a| {
+                    if a < 0 {
+                        (rank as i64 + a) as usize
+                    } else {
+                        a as usize
+                    }
+                })
                 .collect();
             let num_axes = resolved_axes.len();
             let mut full = vec![0.0f32; 2 * rank];
@@ -868,7 +902,11 @@ impl MilliOp for Resize {
                     .cast(DType::F32, backend)?
                     .try_to_rank::<P1>()?
                     .try_into()?;
-                if s.iter().all(|&x| x == 0.0) { None } else { Some(s) }
+                if s.iter().all(|&x| x == 0.0) {
+                    None
+                } else {
+                    Some(s)
+                }
             } else {
                 None
             }
@@ -927,30 +965,61 @@ impl MilliOp for Resize {
 
             match self.mode {
                 ResizeMode::Nearest => resize_nchw_nearest(
-                    &input_flat, n, c, in_h, in_w, out_h, out_w,
-                    scales[2], scales[3],
-                    self.coord_transform, self.nearest_mode,
+                    &input_flat,
+                    n,
+                    c,
+                    in_h,
+                    in_w,
+                    out_h,
+                    out_w,
+                    scales[2],
+                    scales[3],
+                    self.coord_transform,
+                    self.nearest_mode,
                 ),
                 ResizeMode::Linear => resize_nchw_linear(
-                    &input_flat, n, c, in_h, in_w, out_h, out_w,
-                    scales[2], scales[3],
+                    &input_flat,
+                    n,
+                    c,
+                    in_h,
+                    in_w,
+                    out_h,
+                    out_w,
+                    scales[2],
+                    scales[3],
                     self.coord_transform,
                 ),
                 ResizeMode::Cubic => {
                     // Fall through to generic for cubic
                     resize_generic(
-                        &input_flat, &input_shape, &output_shape, &scales,
-                        &full_roi, self.mode, self.coord_transform, self.nearest_mode,
-                        self.cubic_coeff_a, self.antialias, self.exclude_outside,
+                        &input_flat,
+                        &input_shape,
+                        &output_shape,
+                        &scales,
+                        &full_roi,
+                        self.mode,
+                        self.coord_transform,
+                        self.nearest_mode,
+                        self.cubic_coeff_a,
+                        self.antialias,
+                        self.exclude_outside,
                         self.extrapolation_value,
                     )
                 }
             }
         } else {
             resize_generic(
-                &input_flat, &input_shape, &output_shape, &scales,
-                &full_roi, self.mode, self.coord_transform, self.nearest_mode,
-                self.cubic_coeff_a, self.antialias, self.exclude_outside,
+                &input_flat,
+                &input_shape,
+                &output_shape,
+                &scales,
+                &full_roi,
+                self.mode,
+                self.coord_transform,
+                self.nearest_mode,
+                self.cubic_coeff_a,
+                self.antialias,
+                self.exclude_outside,
                 self.extrapolation_value,
             )
         };
