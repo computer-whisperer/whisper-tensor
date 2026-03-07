@@ -200,22 +200,40 @@ impl MilliOp for Pad {
             }
             PadMode::Edge => {
                 fill_pad(
-                    &data_flat, &mut out_flat, &shape, &out_shape,
-                    &begin_pads, &in_layout, &out_layout, rank,
+                    &data_flat,
+                    &mut out_flat,
+                    &shape,
+                    &out_shape,
+                    &begin_pads,
+                    &in_layout,
+                    &out_layout,
+                    rank,
                     |idx, dim| idx.clamp(0, dim as i64 - 1) as usize,
                 );
             }
             PadMode::Reflect => {
                 fill_pad(
-                    &data_flat, &mut out_flat, &shape, &out_shape,
-                    &begin_pads, &in_layout, &out_layout, rank,
+                    &data_flat,
+                    &mut out_flat,
+                    &shape,
+                    &out_shape,
+                    &begin_pads,
+                    &in_layout,
+                    &out_layout,
+                    rank,
                     |idx, dim| reflect_index(idx, dim as usize),
                 );
             }
             PadMode::Wrap => {
                 fill_pad(
-                    &data_flat, &mut out_flat, &shape, &out_shape,
-                    &begin_pads, &in_layout, &out_layout, rank,
+                    &data_flat,
+                    &mut out_flat,
+                    &shape,
+                    &out_shape,
+                    &begin_pads,
+                    &in_layout,
+                    &out_layout,
+                    rank,
                     |idx, dim| ((idx % dim as i64 + dim as i64) % dim as i64) as usize,
                 );
             }
