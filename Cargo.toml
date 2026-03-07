@@ -38,6 +38,7 @@ strum = "0.27"
 strum_macros = "0.27"
 paste = "1.0.15"
 image = "0.25"
+ndarray-npy = "0.9"
 
 [features]
 default = ["tokenizers", "rwkv-tokenizer", "http"]
