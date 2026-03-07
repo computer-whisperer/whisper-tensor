@@ -114,6 +114,7 @@ impl IfOperation {
                 then_branch_graph,
                 core_opset_version,
                 rng,
+                None,
             )?;
             inner_graph
         };
@@ -126,6 +127,7 @@ impl IfOperation {
                 else_branch_graph,
                 core_opset_version,
                 rng,
+                None,
             )?;
             inner_graph
         };

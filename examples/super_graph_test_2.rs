@@ -18,7 +18,7 @@ fn main() {
     .unwrap();
 
     let mut rng = rand::rng();
-    let model = Model::new_from_onnx(&onnx_data, &mut rng).unwrap();
+    let model = Model::new_from_onnx(&onnx_data, &mut rng, None).unwrap();
 
     let prompt = "Mary had a little lamb".to_string();
     let mut tokenizer_cache = HashMap::new();

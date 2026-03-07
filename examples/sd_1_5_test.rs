@@ -22,7 +22,7 @@ fn try_load(name: &str, subpath: &str) {
     };
 
     let mut rng = rand::rng();
-    match Model::new_from_onnx(&onnx_data, &mut rng) {
+    match Model::new_from_onnx(&onnx_data, &mut rng, input_path.parent()) {
         Ok(_runtime) => println!("  Model load OK"),
         Err(e) => println!("  Model load FAILED: {e}"),
     }

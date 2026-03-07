@@ -28,7 +28,7 @@ fn main() {
     let mut vulkan_runtime = VulkanImmediateExecutor::new(vulkan_context).unwrap();
     let mut eval_backend = EvalBackend::Vulkan(&mut vulkan_runtime);
 
-    let model = Model::new_from_onnx(&onnx_data, &mut rng()).unwrap();
+    let model = Model::new_from_onnx(&onnx_data, &mut rng(), None).unwrap();
 
     let mut super_graph_caches = SuperGraphCache::new();
     let prompt = "The first 10 numbers in the fibonacci sequence are:".to_string();

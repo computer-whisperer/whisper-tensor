@@ -90,7 +90,7 @@ impl ModelServer {
 
         let runtime_model = {
             let mut rng = rand::rng();
-            Model::new_from_onnx(&onnx_data, &mut rng)?
+            Model::new_from_onnx(&onnx_data, &mut rng, model_path.parent())?
         };
         let model_name = model_path
             .file_stem()

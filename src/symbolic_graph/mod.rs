@@ -369,6 +369,7 @@ impl SymbolicGraph {
         onnx_graph: &onnx::GraphProto,
         core_opset_version: usize,
         rng: &mut impl Rng,
+        base_dir: Option<&std::path::Path>,
     ) -> Result<(), ONNXDecodingError> {
         for t in onnx_graph.input.iter() {
             let tensor_id =
@@ -383,6 +384,16 @@ impl SymbolicGraph {
         for t in onnx_graph.value_info.iter() {
             graph_mutator.new_tensor_from_tensor_info(self, t, TensorType::Intermediate, rng)?;
         }
+
+        let resolve_path = |location: &str| -> String {
+            if let Some(dir) = base_dir {
+                let p = std::path::Path::new(location);
+                if p.is_relative() {
+                    return dir.join(p).to_string_lossy().into_owned();
+                }
+            }
+            location.to_string()
+        };
 
         for t in &onnx_graph.initializer {
             // Detect external data reference
@@ -414,7 +425,7 @@ impl SymbolicGraph {
                                 graph_mutator
                                     .tensor_store
                                     .add_tensor(StoredTensor::ExternalPth {
-                                        path: location.clone(),
+                                        path: resolve_path(location),
                                         tensor_name: tensor_name.clone(),
                                         dtype,
                                         shape: shape.clone(),
@@ -449,7 +460,7 @@ impl SymbolicGraph {
                             let shape = t.dims.iter().map(|x| *x as u64).collect::<Vec<_>>();
                             let id = graph_mutator.tensor_store.add_tensor(
                                 StoredTensor::ExternalBinary {
-                                    path: location.clone(),
+                                    path: resolve_path(location),
                                     offset: offset.parse().unwrap_or(0usize),
                                     length: length.parse().unwrap_or(0usize),
                                     dtype,
@@ -482,7 +493,7 @@ impl SymbolicGraph {
                     let id = graph_mutator
                         .tensor_store
                         .add_tensor(StoredTensor::ExternalBinary {
-                            path: location.clone(),
+                            path: resolve_path(location),
                             offset: offset.parse().unwrap_or(0usize),
                             length: length.parse().unwrap_or(0usize),
                             dtype,
@@ -1125,10 +1136,11 @@ impl SymbolicGraphMutator {
     pub fn from_onnx_bytes(
         onnx_bytes: &[u8],
         rng: &mut impl Rng,
+        base_dir: Option<&std::path::Path>,
     ) -> Result<Self, ONNXDecodingError> {
         let model = onnx::ModelProto::decode(onnx_bytes)
             .map_err(|x| ONNXDecodingError::ProtobufDecodeError(anyhow::Error::from(x)))?;
-        Self::from_onnx_model_proto(model, rng)
+        Self::from_onnx_model_proto(model, rng, base_dir)
     }
 
     pub(crate) fn new_unknown_tensor(
@@ -1932,6 +1944,7 @@ impl SymbolicGraphMutator {
     pub fn from_onnx_model_proto(
         model_proto: onnx::ModelProto,
         rng: &mut impl Rng,
+        base_dir: Option<&std::path::Path>,
     ) -> Result<Self, ONNXDecodingError> {
         let mut core_opset_version = 0;
         for opset_proto in model_proto.opset_import {
@@ -1946,7 +1959,13 @@ impl SymbolicGraphMutator {
         let mut graph_mutator = Self::new(rng);
         let mut inner_graph = graph_mutator.graph.take().unwrap();
 
-        inner_graph.populate(&mut graph_mutator, &onnx_graph, core_opset_version, rng)?;
+        inner_graph.populate(
+            &mut graph_mutator,
+            &onnx_graph,
+            core_opset_version,
+            rng,
+            base_dir,
+        )?;
         graph_mutator.graph = Some(inner_graph);
 
         Ok(graph_mutator)
@@ -2091,7 +2110,7 @@ mod tests {
 
         let model_bytes = std::fs::read(&model_path).unwrap();
         let rng = &mut rand::rng();
-        let (graph, tensor_store) = SymbolicGraphMutator::from_onnx_bytes(&model_bytes, rng)
+        let (graph, tensor_store) = SymbolicGraphMutator::from_onnx_bytes(&model_bytes, rng, None)
             .unwrap()
             .get_inner();
 
@@ -2209,7 +2228,7 @@ mod tests {
         }
         let model_bytes = std::fs::read(std::path::Path::new(dir).join("model.onnx")).unwrap();
         let rng = &mut rand::rng();
-        let (graph, _) = SymbolicGraphMutator::from_onnx_bytes(&model_bytes, rng)
+        let (graph, _) = SymbolicGraphMutator::from_onnx_bytes(&model_bytes, rng, None)
             .unwrap()
             .get_inner();
 
@@ -2283,7 +2302,7 @@ mod tests {
 
         let model_bytes = std::fs::read(std::path::Path::new(dir).join("model.onnx")).unwrap();
         let rng = &mut rand::rng();
-        let (graph, _tensor_store) = SymbolicGraphMutator::from_onnx_bytes(&model_bytes, rng)
+        let (graph, _tensor_store) = SymbolicGraphMutator::from_onnx_bytes(&model_bytes, rng, None)
             .unwrap()
             .get_inner();
 

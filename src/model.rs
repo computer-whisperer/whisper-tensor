@@ -69,7 +69,11 @@ impl Model {
         &self.id
     }
 
-    pub fn new_from_onnx(onnx_data: &[u8], rng: &mut impl Rng) -> Result<Self, ModelError> {
+    pub fn new_from_onnx(
+        onnx_data: &[u8],
+        rng: &mut impl Rng,
+        base_dir: Option<&std::path::Path>,
+    ) -> Result<Self, ModelError> {
         let model_info = ModelProto::decode(onnx_data)?;
         let mut model_metadata = None;
         for StringStringEntryProto { key, value } in model_info.metadata_props {
@@ -106,7 +110,7 @@ impl Model {
         }
 
         let (symbolic_graph, tensor_store) =
-            SymbolicGraphMutator::from_onnx_bytes(onnx_data, rng)?.get_inner();
+            SymbolicGraphMutator::from_onnx_bytes(onnx_data, rng, base_dir)?.get_inner();
 
         let text_inference_tokens_in_logits_out_interface = {
             if let Some(meta) = model_metadata.as_ref() {

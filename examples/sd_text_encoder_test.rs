@@ -20,7 +20,8 @@ fn main() {
         .expect("Failed to import model");
 
     let mut rng = rand::rng();
-    let model = Model::new_from_onnx(&onnx_data, &mut rng).expect("Failed to load model");
+    let model = Model::new_from_onnx(&onnx_data, &mut rng, input_path.parent())
+        .expect("Failed to load model");
 
     // Print model input/output info
     let input_info = model

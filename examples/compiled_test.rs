@@ -27,7 +27,7 @@ fn main() {
     let mut eval_backend = EvalBackend::NDArray;
 
     let mut rng = rand::rng();
-    let model = Arc::new(Model::new_from_onnx(&onnx_data, &mut rng).unwrap());
+    let model = Arc::new(Model::new_from_onnx(&onnx_data, &mut rng, None).unwrap());
     let symbolic_graph = Arc::new(model.get_symbolic_graph().clone());
     let compiled_model = compiler::build_program(compiler::CompilationSubject::SymbolicGraph {
         symbolic_graph: symbolic_graph.clone(),

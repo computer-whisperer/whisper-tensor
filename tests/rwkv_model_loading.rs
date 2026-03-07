@@ -63,7 +63,7 @@ fn rwkv01b_model_loads() {
         )
         .expect("import rwkv7 to onnx");
         let mut rng = rand::rng();
-        let model = Model::new_from_onnx(&onnx_bytes, &mut rng).expect("model loads");
+        let model = Model::new_from_onnx(&onnx_bytes, &mut rng, None).expect("model loads");
 
         // Ensure we can construct Eval backend and load constant tensors (which should trigger
         // lazy external loading for any external_data entries)
@@ -102,7 +102,7 @@ fn rwkv01b_single_step_runs_shape_sanity() {
     )
     .expect("import rwkv7 to onnx");
     let mut rng = rand::rng();
-    let model = Model::new_from_onnx(&onnx_bytes, &mut rng).expect("model loads");
+    let model = Model::new_from_onnx(&onnx_bytes, &mut rng, None).expect("model loads");
 
     //let mut eval = EvalBackend::NDArray;
     let mut observer = ();
@@ -177,7 +177,8 @@ fn rwkv01b_model_loads_with_binfile() {
     std::env::set_current_dir(tempdir.path()).expect("set cwd to tempdir");
 
     let mut rng = rand::rng();
-    let model = Model::new_from_onnx(&onnx_bytes, &mut rng).expect("model loads from onnx bytes");
+    let model =
+        Model::new_from_onnx(&onnx_bytes, &mut rng, None).expect("model loads from onnx bytes");
 
     // Trigger lazy tensor loading via the eval path
     let mut eval = EvalBackend::NDArray;
@@ -210,7 +211,8 @@ fn rwkv01b_model_loads_with_origin_reference() {
 
     // No cwd or symlink manipulation needed: location is absolute inside ONNX now
     let mut rng = rand::rng();
-    let model = Model::new_from_onnx(&onnx_bytes, &mut rng).expect("model loads from onnx bytes");
+    let model =
+        Model::new_from_onnx(&onnx_bytes, &mut rng, None).expect("model loads from onnx bytes");
 
     // Trigger lazy tensor loading via the eval path (fetch tensors from the .pth via candle)
     let mut eval = EvalBackend::NDArray;

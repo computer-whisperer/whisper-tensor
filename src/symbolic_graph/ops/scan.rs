@@ -39,7 +39,7 @@ impl ScanOperation {
             .ok_or(ONNXDecodingError::MissingField("body"))?;
         let body = {
             let mut inner_graph = SymbolicGraph::new(rng);
-            inner_graph.populate(symbolic_graph_mutator, body, core_opset_version, rng)?;
+            inner_graph.populate(symbolic_graph_mutator, body, core_opset_version, rng, None)?;
             inner_graph
         };
 
