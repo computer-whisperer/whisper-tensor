@@ -594,6 +594,17 @@ impl NumericTensor<DynRank> {
         })
     }
 
+    /// Slice with per-axis start/end/step (supports negative steps for reversal).
+    pub fn slice_with_steps(
+        &self,
+        slices: &[(isize, isize, isize)],
+        _backend: &EvalBackend,
+    ) -> Result<Self, NumericTensorError> {
+        Ok(NumericTensor::NDArray(
+            NDArrayNumericTensor::<DynRank>::try_from(self)?.slice_with_steps(slices)?,
+        ))
+    }
+
     /// Insert a size-1 dimension at the given axis.
     ///
     /// - axis is zero-based and may be equal to rank to append a new trailing dim.

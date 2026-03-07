@@ -1774,7 +1774,7 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_slice_end_out_of_bounds);
         do_test!($runner_fn, $runner_name, test_slice_neg);
         do_test!($runner_fn, $runner_name, test_slice_negative_axes);
-        //do_test!($runner_fn, $runner_name, test_slice_neg_steps);
+        do_test!($runner_fn, $runner_name, test_slice_neg_steps);
         do_test!($runner_fn, $runner_name, test_slice_start_out_of_bounds);
         do_test!($runner_fn, $runner_name, test_softmax_axis_0);
         //do_test!($runner_fn, $runner_name, test_softmax_axis_0_expanded);

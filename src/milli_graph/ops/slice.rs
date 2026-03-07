@@ -114,41 +114,48 @@ impl MilliOp for Slice {
             .cast(DType::I64, backend)?
             .try_to_rank::<P1>()?
             .try_into()?;
-        let mut output_slice = vec![];
-        for &dim in &input_shape {
-            output_slice.push(0..dim);
-        }
+
+        // Build per-axis (start, end, step) in ndarray isize convention.
+        // Unmentioned axes get full extent with step 1.
+        let mut slices: Vec<(isize, isize, isize)> = input_shape
+            .iter()
+            .map(|&dim| (0, dim as isize, 1))
+            .collect();
+
         for (i, axis) in axes.into_iter().enumerate() {
             let axis = if axis < 0 {
                 (input_rank as i64 + axis) as usize
             } else {
                 axis as usize
             };
+            let dim = input_shape[axis] as i64;
             let step = steps[i];
-            if step != 1 {
-                return Err(MilliOpGraphError::InvalidInput(format!(
-                    "Step {step} is not supported"
-                )));
+            if step == 0 {
+                return Err(MilliOpGraphError::InvalidInput(
+                    "Step must not be 0".to_string(),
+                ));
             }
 
-            let start = (if starts[i] < 0 {
-                input_shape[axis] as i64 + starts[i]
+            // Clamp start/end per ONNX spec
+            let (start, end) = if step > 0 {
+                let s = starts[i].clamp(-dim, dim);
+                let s = if s < 0 { s + dim } else { s };
+                let e = ends[i].clamp(-dim, dim);
+                let e = if e < 0 { e + dim } else { e };
+                (s as isize, e as isize)
             } else {
-                starts[i]
-            })
-            .min(input_shape[axis] as i64)
-            .max(0) as u64;
+                // Negative step: start clamped to [-1, dim-1], end to [-dim-1, dim-1]
+                let s = starts[i].clamp(-dim, dim - 1);
+                let s = if s < 0 { s + dim } else { s };
+                let e = ends[i].clamp(-dim - 1, dim);
+                let e = if e < 0 { e + dim } else { e };
+                (s as isize, e as isize)
+            };
 
-            let end = (if ends[i] < 0 {
-                input_shape[axis] as i64 + ends[i]
-            } else {
-                ends[i]
-            })
-            .min(input_shape[axis] as i64)
-            .max(0) as u64;
-            output_slice[axis] = start..end;
+            slices[axis] = (start, end, step as isize);
         }
-        let output = data_input.slice(&output_slice, backend)?;
+
+        let output = data_input.slice_with_steps(&slices, backend)?;
         Ok(Box::new([(self.output, output)].into_iter()))
     }
 }

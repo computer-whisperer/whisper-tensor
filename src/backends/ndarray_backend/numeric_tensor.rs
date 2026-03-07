@@ -3004,6 +3004,84 @@ impl NDArrayNumericTensor<DynRank> {
         })
     }
 
+    /// Slice with per-axis start/end/step (absolute indices, supports negative step).
+    /// Each element is (start, end, step) using NumPy/ONNX semantics:
+    /// - For positive step: elements at start, start+step, ... < end
+    /// - For negative step: elements at start, start+step, ... > end
+    pub fn slice_with_steps(
+        &self,
+        slices: &[(isize, isize, isize)],
+    ) -> Result<Self, NDArrayNumericTensorError> {
+        // ndarray's Slice collapses end < start to empty, so we must handle
+        // negative steps manually: extract the forward range, apply forward step,
+        // then reverse axes that had negative step.
+        let mut forward_slices = Vec::with_capacity(slices.len());
+        let mut reverse_axes = Vec::new();
+        for (axis, &(start, end, step)) in slices.iter().enumerate() {
+            if step > 0 {
+                forward_slices.push(SliceInfoElem::Slice {
+                    start,
+                    end: Some(end),
+                    step,
+                });
+            } else if step < 0 {
+                // Negative step from `start` down to `end` (exclusive).
+                // Compute how many elements: ceil((start - end) / |step|)
+                let abs_step = (-step) as usize;
+                let count = if start > end {
+                    ((start - end) as usize).div_ceil(abs_step)
+                } else {
+                    0
+                };
+                // The last element taken is at start + (count-1)*step = start - (count-1)*abs_step
+                // The forward range covering these elements is [last..=start], stepped by abs_step.
+                if count == 0 {
+                    forward_slices.push(SliceInfoElem::Slice {
+                        start: 0,
+                        end: Some(0),
+                        step: 1,
+                    });
+                } else {
+                    let last = start - (count as isize - 1) * abs_step as isize;
+                    forward_slices.push(SliceInfoElem::Slice {
+                        start: last,
+                        end: Some(start + 1),
+                        step: abs_step as isize,
+                    });
+                    reverse_axes.push(axis);
+                }
+            } else {
+                panic!("Slice step must not be zero");
+            }
+        }
+        let s: SliceInfo<Vec<SliceInfoElem>, IxDyn, IxDyn> = SliceInfo::try_from(forward_slices)?;
+        macro_rules! do_slice {
+            ($x:expr) => {{
+                let mut arr = $x.slice(s).to_owned();
+                for &ax in &reverse_axes {
+                    arr.invert_axis(ndarray::Axis(ax));
+                }
+                arr.into_shared()
+            }};
+        }
+        Ok(match self {
+            NDArrayNumericTensor::F32(x) => NDArrayNumericTensor::F32(do_slice!(x)),
+            NDArrayNumericTensor::F64(x) => NDArrayNumericTensor::F64(do_slice!(x)),
+            NDArrayNumericTensor::F16(x) => NDArrayNumericTensor::F16(do_slice!(x)),
+            NDArrayNumericTensor::BF16(x) => NDArrayNumericTensor::BF16(do_slice!(x)),
+            NDArrayNumericTensor::U32(x) => NDArrayNumericTensor::U32(do_slice!(x)),
+            NDArrayNumericTensor::I32(x) => NDArrayNumericTensor::I32(do_slice!(x)),
+            NDArrayNumericTensor::U64(x) => NDArrayNumericTensor::U64(do_slice!(x)),
+            NDArrayNumericTensor::I64(x) => NDArrayNumericTensor::I64(do_slice!(x)),
+            NDArrayNumericTensor::U16(x) => NDArrayNumericTensor::U16(do_slice!(x)),
+            NDArrayNumericTensor::I16(x) => NDArrayNumericTensor::I16(do_slice!(x)),
+            NDArrayNumericTensor::U8(x) => NDArrayNumericTensor::U8(do_slice!(x)),
+            NDArrayNumericTensor::I8(x) => NDArrayNumericTensor::I8(do_slice!(x)),
+            NDArrayNumericTensor::BOOL(x) => NDArrayNumericTensor::BOOL(do_slice!(x)),
+            NDArrayNumericTensor::STRING(x) => NDArrayNumericTensor::STRING(do_slice!(x)),
+        })
+    }
+
     pub fn expand(&self, shape: &[u64]) -> Result<Self, NDArrayNumericTensorError> {
         let shape = shape.iter().map(|x| *x as usize).collect::<Vec<_>>();
         Ok(match self {
