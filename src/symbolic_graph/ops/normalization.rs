@@ -759,8 +759,98 @@ impl Node for InstanceNormalizationOperation {
 }
 
 impl Operation for InstanceNormalizationOperation {
-    fn get_milli_op_graph(&self, _rng: &mut impl Rng) -> MilliOpGraph {
-        unimplemented!();
+    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
+        // InstanceNorm: for each (N, C), normalize over spatial dims.
+        // Same structure as GroupNorm with num_groups = C.
+        // Input: [N, C, D1, D2, ...] → reshape to [N, C, -1] → normalize axis 2
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
+        let original_input = input_map[&self.input];
+
+        let input_cast =
+            milli_graph::ops::Cast::push_new(&mut graph, original_input, DType::F32, rng);
+
+        // Save original shape for reshaping back later
+        let input_shape = milli_graph::ops::Shape::push_new(&mut graph, input_cast, rng);
+
+        // Reshape [N, C, D1, D2, ...] → [N, C, -1]
+        let reshaped_input = {
+            let new_shape_tensor = NDArrayNumericTensor::from(vec![0i64, 0i64, -1]);
+            let new_shape =
+                milli_graph::ops::Constant::push_new(&mut graph, new_shape_tensor.to_dyn(), rng);
+            milli_graph::ops::Reshape::push_new(&mut graph, input_cast, new_shape, false, rng)
+        };
+
+        // Mean over spatial dim (axis 2)
+        let mean_axis = ops_helpers::scalar_const(&mut graph, 2i64, rng);
+        let mean = milli_graph::ops::ReduceMean::push_new(
+            &mut graph,
+            reshaped_input,
+            Some(mean_axis),
+            true,
+            false,
+            rng,
+        );
+
+        let d = milli_graph::ops::SimpleBinary::sub(&mut graph, reshaped_input, mean, rng);
+
+        // Variance = mean(d^2) over axis 2
+        let variance = {
+            let dd = milli_graph::ops::SimpleBinary::mul(&mut graph, d, d, rng);
+            milli_graph::ops::ReduceMean::push_new(
+                &mut graph,
+                dd,
+                Some(mean_axis),
+                true,
+                false,
+                rng,
+            )
+        };
+
+        // Normalize: d / sqrt(variance + epsilon)
+        let normalized = {
+            let eps_val = self.epsilon.unwrap_or(1e-5);
+            let epsilon = milli_graph::ops::Constant::new_scalar(&mut graph, eps_val, rng);
+            let epsilon = milli_graph::ops::CastLike::push_new(&mut graph, epsilon, variance, rng);
+            let var_plus_eps =
+                milli_graph::ops::SimpleBinary::add(&mut graph, variance, epsilon, rng);
+            let stddev = milli_graph::ops::SimpleUnaryOp::sqrt(&mut graph, var_plus_eps, rng);
+            milli_graph::ops::SimpleBinary::div(&mut graph, d, stddev, rng)
+        };
+
+        // Apply scale and bias while still in [N, C, -1] shape (3D),
+        // so unsqueeze(scale, axis=1) gives [C, 1] which broadcasts correctly.
+        let one = milli_graph::ops::Constant::new_scalar(&mut graph, 1i64, rng);
+        let y = {
+            let scale_cast = milli_graph::ops::Cast::push_new(
+                &mut graph,
+                input_map[&self.scale],
+                DType::F32,
+                rng,
+            );
+            let scale = milli_graph::ops::Unsqueeze::push_new(&mut graph, scale_cast, one, rng);
+            milli_graph::ops::SimpleBinary::mul(&mut graph, normalized, scale, rng)
+        };
+
+        let y = {
+            let bias_cast = milli_graph::ops::Cast::push_new(
+                &mut graph,
+                input_map[&self.bias],
+                DType::F32,
+                rng,
+            );
+            let bias = milli_graph::ops::Unsqueeze::push_new(&mut graph, bias_cast, one, rng);
+            milli_graph::ops::SimpleBinary::add(&mut graph, y, bias, rng)
+        };
+
+        // Reshape back to original shape
+        let y = milli_graph::ops::Reshape::push_new(&mut graph, y, input_shape, false, rng);
+
+        let out = milli_graph::ops::CastLike::push_new(&mut graph, y, original_input, rng);
+
+        let mut output_map = HashMap::new();
+        output_map.insert(out, self.output);
+        graph.set_output_map(output_map);
+        graph
     }
 
     fn parameters(&self) -> Vec<Property> {

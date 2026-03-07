@@ -980,8 +980,8 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_image_decoder_decode_tiff_rgb);
         do_test!($runner_fn, $runner_name, test_image_decoder_decode_webp_rgb);*/
 
-        //do_test!($runner_fn, $runner_name, test_instancenorm_epsilon);
-        //do_test!($runner_fn, $runner_name, test_instancenorm_example);
+        do_test!($runner_fn, $runner_name, test_instancenorm_epsilon);
+        do_test!($runner_fn, $runner_name, test_instancenorm_example);
 
         do_test!($runner_fn, $runner_name, test_isinf);
         do_test!($runner_fn, $runner_name, test_isinf_float16);
