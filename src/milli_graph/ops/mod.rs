@@ -11,6 +11,7 @@ mod expand;
 mod gather;
 mod nonzero;
 mod pad;
+mod random_normal_like;
 mod range;
 mod reduce_max;
 mod reduce_mean;
@@ -42,6 +43,7 @@ pub use expand::*;
 pub use gather::*;
 pub use nonzero::*;
 pub use pad::*;
+pub use random_normal_like::*;
 pub use range::*;
 pub use reduce_max::*;
 pub use reduce_mean::*;
@@ -294,6 +296,7 @@ pub enum AnyMilliOp {
     Resize(Resize),
     Conv(Conv),
     Pad(Pad),
+    RandomNormalLike(RandomNormalLike),
 }
 
 impl AnyMilliOp {
@@ -333,6 +336,7 @@ impl AnyMilliOp {
             AnyMilliOp::Resize(x) => x.remap_tensors(map, rng),
             AnyMilliOp::Conv(x) => x.remap_tensors(map, rng),
             AnyMilliOp::Pad(x) => x.remap_tensors(map, rng),
+            AnyMilliOp::RandomNormalLike(x) => x.remap_tensors(map, rng),
         }
     }
 }
@@ -375,6 +379,7 @@ macro_rules! delegate {
                 AnyMilliOp::Resize(x) => x.$name($($arg),*),
                 AnyMilliOp::Conv(x) => x.$name($($arg),*),
                 AnyMilliOp::Pad(x) => x.$name($($arg),*),
+                AnyMilliOp::RandomNormalLike(x) => x.$name($($arg),*),
             }
         }
     }
@@ -430,6 +435,7 @@ impl MilliOp for AnyMilliOp {
             AnyMilliOp::Resize(x) => x.backward(output_grads, graph, rng),
             AnyMilliOp::Conv(x) => x.backward(output_grads, graph, rng),
             AnyMilliOp::Pad(x) => x.backward(output_grads, graph, rng),
+            AnyMilliOp::RandomNormalLike(x) => x.backward(output_grads, graph, rng),
         }
     }
 }

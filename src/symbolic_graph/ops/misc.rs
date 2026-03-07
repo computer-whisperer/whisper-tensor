@@ -424,8 +424,21 @@ impl Operation for RandomNormalLikeOperation {
         params
     }
 
-    fn get_milli_op_graph(&self, _rng: &mut impl Rng) -> MilliOpGraph {
-        todo!()
+    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
+        let out = crate::milli_graph::ops::RandomNormalLike::push_new(
+            &mut graph,
+            input_map[&self.input],
+            self.dtype,
+            self.mean,
+            self.scale,
+            self.seed,
+            rng,
+        );
+        let mut output_map = HashMap::new();
+        output_map.insert(out, self.output);
+        graph.set_output_map(output_map);
+        graph
     }
 }
 
