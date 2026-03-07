@@ -121,8 +121,8 @@ fn resolve_padding(
             let mut pe = vec![0usize; n_spatial];
             for i in 0..n_spatial {
                 let out_size = input_spatial[i].div_ceil(strides[i]);
-                let total_pad =
-                    ((out_size - 1) * strides[i] + dilated_kernel[i]).saturating_sub(input_spatial[i]);
+                let total_pad = ((out_size - 1) * strides[i] + dilated_kernel[i])
+                    .saturating_sub(input_spatial[i]);
                 if matches!(auto_pad, ConvAutoPad::SameUpper) {
                     pb[i] = total_pad / 2;
                     pe[i] = total_pad - pb[i];
@@ -136,18 +136,13 @@ fn resolve_padding(
     }
 }
 
-/// Specialized 2D convolution with rayon parallelism.
-/// Parallelizes across output channels (batch * group * channels_per_group_out).
-fn conv2d_parallel(
+/// im2col for 2D convolution: rearrange input patches into a column matrix.
+/// For a single (batch, group), produces shape [cpg_in * kH * kW, OH * OW].
+fn im2col_2d(
     input_data: &[f32],
-    weight_data: &[f32],
-    bias_data: Option<&[f32]>,
-    batch_size: usize,
-    in_channels: usize,
-    out_channels: usize,
-    group: usize,
+    col: &mut [f32],
+    in_base: usize,
     channels_per_group_in: usize,
-    channels_per_group_out: usize,
     in_h: usize,
     in_w: usize,
     out_h: usize,
@@ -160,81 +155,37 @@ fn conv2d_parallel(
     dilation_w: usize,
     pad_top: usize,
     pad_left: usize,
-) -> Vec<f32> {
+) {
     let out_spatial = out_h * out_w;
     let in_channel_stride = in_h * in_w;
-    let in_batch_stride = in_channels * in_channel_stride;
-    let w_kernel_size = kernel_h * kernel_w;
-    let w_cin_stride = w_kernel_size;
-    let w_cout_stride = channels_per_group_in * w_cin_stride;
-    let total_out = batch_size * out_channels * out_spatial;
 
-    let mut output_data = vec![0.0f32; total_out];
-
-    // Parallelize over (batch, output_channel) pairs
-    let work_items: Vec<(usize, usize, usize)> = (0..batch_size)
-        .flat_map(|n| {
-            (0..group).flat_map(move |g| {
-                (0..channels_per_group_out).map(move |co| (n, g, co))
-            })
-        })
-        .collect();
-
-    let chunk_results: Vec<(usize, Vec<f32>)> = work_items
-        .par_iter()
-        .map(|&(n, g, co)| {
-            let m = g * channels_per_group_out + co;
-            let bias_val = bias_data.map_or(0.0, |b| b[m]);
-            let mut out_buf = vec![0.0f32; out_spatial];
-
-            for ci in 0..channels_per_group_in {
-                let in_c = g * channels_per_group_in + ci;
-                let in_base = n * in_batch_stride + in_c * in_channel_stride;
-                let w_base = m * w_cout_stride + ci * w_cin_stride;
-
+    for ci in 0..channels_per_group_in {
+        let in_c_base = in_base + ci * in_channel_stride;
+        for kh in 0..kernel_h {
+            for kw in 0..kernel_w {
+                let col_row = (ci * kernel_h + kh) * kernel_w + kw;
+                let col_offset = col_row * out_spatial;
                 for oh in 0..out_h {
-                    for ow in 0..out_w {
-                        let mut sum = 0.0f32;
-                        for kh in 0..kernel_h {
-                            let ih = oh * stride_h + kh * dilation_h;
-                            let ih = ih as isize - pad_top as isize;
-                            if ih < 0 || ih >= in_h as isize {
-                                continue;
-                            }
-                            let ih = ih as usize;
-                            let in_row = in_base + ih * in_w;
-                            let w_row = w_base + kh * kernel_w;
-                            for kw in 0..kernel_w {
-                                let iw = ow * stride_w + kw * dilation_w;
-                                let iw = iw as isize - pad_left as isize;
-                                if iw < 0 || iw >= in_w as isize {
-                                    continue;
-                                }
-                                sum += input_data[in_row + iw as usize] * weight_data[w_row + kw];
-                            }
+                    let ih = (oh * stride_h + kh * dilation_h) as isize - pad_top as isize;
+                    if ih < 0 || ih >= in_h as isize {
+                        for ow in 0..out_w {
+                            col[col_offset + oh * out_w + ow] = 0.0;
                         }
-                        out_buf[oh * out_w + ow] += sum;
+                        continue;
+                    }
+                    let in_row_base = in_c_base + ih as usize * in_w;
+                    for ow in 0..out_w {
+                        let iw = (ow * stride_w + kw * dilation_w) as isize - pad_left as isize;
+                        col[col_offset + oh * out_w + ow] = if iw >= 0 && iw < in_w as isize {
+                            input_data[in_row_base + iw as usize]
+                        } else {
+                            0.0
+                        };
                     }
                 }
             }
-
-            // Add bias
-            if bias_val != 0.0 {
-                for v in &mut out_buf {
-                    *v += bias_val;
-                }
-            }
-
-            let out_offset = n * (out_channels * out_spatial) + m * out_spatial;
-            (out_offset, out_buf)
-        })
-        .collect();
-
-    for (offset, buf) in chunk_results {
-        output_data[offset..offset + out_spatial].copy_from_slice(&buf);
+        }
     }
-
-    output_data
 }
 
 /// Generic n-dimensional convolution fallback (1D, 3D+).
@@ -282,9 +233,7 @@ fn conv_nd_generic(
     // Collect work items for parallelism
     let work_items: Vec<(usize, usize, usize)> = (0..batch_size)
         .flat_map(|n| {
-            (0..group).flat_map(move |g| {
-                (0..channels_per_group_out).map(move |co| (n, g, co))
-            })
+            (0..group).flat_map(move |g| (0..channels_per_group_out).map(move |co| (n, g, co)))
         })
         .collect();
 
@@ -374,19 +323,6 @@ impl MilliOp for Conv {
         let input_shape: Vec<usize> = input.shape().iter().map(|&x| x as usize).collect();
         let weight_shape: Vec<usize> = weight.shape().iter().map(|&x| x as usize).collect();
 
-        // Cast to f32 and flatten for computation
-        let input_f32 = input.cast(DType::F32, backend)?;
-        let weight_f32 = weight.cast(DType::F32, backend)?;
-        let input_data: Vec<f32> = input_f32.to_ndarray()?.flatten().try_into()?;
-        let weight_data: Vec<f32> = weight_f32.to_ndarray()?.flatten().try_into()?;
-        let bias_data: Option<Vec<f32>> = if let Some(bias_id) = self.bias {
-            let bias = &inputs[&bias_id];
-            let bias_f32 = bias.cast(DType::F32, backend)?;
-            Some(bias_f32.to_ndarray()?.flatten().try_into()?)
-        } else {
-            None
-        };
-
         let n_spatial = input_shape.len() - 2;
         let batch_size = input_shape[0];
         let in_channels = input_shape[1];
@@ -433,32 +369,156 @@ impl MilliOp for Conv {
             })
             .collect();
 
-        let output_data = if n_spatial == 2 {
-            conv2d_parallel(
-                &input_data,
-                &weight_data,
-                bias_data.as_deref(),
-                batch_size,
-                in_channels,
-                out_channels,
-                group,
-                channels_per_group_in,
-                channels_per_group_out,
-                input_spatial[0],
-                input_spatial[1],
-                out_spatial[0],
-                out_spatial[1],
-                kernel_shape[0],
-                kernel_shape[1],
-                strides[0],
-                strides[1],
-                dilations[0],
-                dilations[1],
-                pad_begin[0],
-                pad_begin[1],
-            )
+        let out_spatial_size: usize = out_spatial.iter().product();
+
+        // Check for 1x1 conv fast path: all kernels=1, strides=1, dilations=1, no padding
+        let is_1x1 = kernel_shape.iter().all(|&k| k == 1)
+            && strides.iter().all(|&s| s == 1)
+            && dilations.iter().all(|&d| d == 1)
+            && pad_begin.iter().all(|&p| p == 0)
+            && pad_end.iter().all(|&p| p == 0);
+
+        // Reshape weight to [group, cpg_out, K] where K = cpg_in (*kH*kW for non-1x1)
+        let k_per_group = if is_1x1 {
+            channels_per_group_in
         } else {
-            conv_nd_generic(
+            channels_per_group_in * kernel_shape.iter().product::<usize>()
+        };
+        // Weight is [C_out, cpg_in, *kernel] = [group * cpg_out, K]
+        // Cast weight to f32 for matmul compatibility (im2col produces f32, and accumulation is f32)
+        let weight_f32 = weight.cast(DType::F32, backend)?;
+        let weight_2d = weight_f32.reshape(
+            vec![
+                group as u64,
+                channels_per_group_out as u64,
+                k_per_group as u64,
+            ],
+            backend,
+        )?;
+
+        let bias_tensor = self.bias.map(|id| inputs[&id].clone());
+
+        // Process each (batch, group) and collect results via matmul
+        let mut result_parts: Vec<NumericTensor<DynRank>> = Vec::with_capacity(batch_size * group);
+
+        if is_1x1 {
+            // 1×1: input is already the column matrix
+            // input: [N, C_in, *spatial] → for each (n, g): [cpg_in, spatial_size]
+            let input_f32 = input.cast(DType::F32, backend)?;
+            let input_3d = input_f32.reshape(
+                vec![
+                    batch_size as u64,
+                    in_channels as u64,
+                    out_spatial_size as u64,
+                ],
+                backend,
+            )?;
+
+            for n in 0..batch_size {
+                for g in 0..group {
+                    let c_start = (g * channels_per_group_in) as i64;
+                    let c_end = ((g + 1) * channels_per_group_in) as i64;
+                    // Slice input: [1, cpg_in, spatial] → squeeze to [cpg_in, spatial]
+                    let in_slice = input_3d.slice(
+                        &[
+                            n as u64..n as u64 + 1,
+                            c_start as u64..c_end as u64,
+                            0..out_spatial_size as u64,
+                        ],
+                        backend,
+                    )?;
+                    let in_2d = in_slice.reshape(
+                        vec![channels_per_group_in as u64, out_spatial_size as u64],
+                        backend,
+                    )?;
+                    // Weight for this group: [cpg_out, cpg_in]
+                    let w_slice = weight_2d.slice(
+                        &[
+                            g as u64..g as u64 + 1,
+                            0..channels_per_group_out as u64,
+                            0..k_per_group as u64,
+                        ],
+                        backend,
+                    )?;
+                    let w_2d = w_slice.reshape(
+                        vec![channels_per_group_out as u64, k_per_group as u64],
+                        backend,
+                    )?;
+                    // matmul: [cpg_out, cpg_in] @ [cpg_in, spatial] → [cpg_out, spatial]
+                    let out_2d = NumericTensor::matmul(&w_2d, &in_2d, Some(DType::F32), backend)?;
+                    result_parts.push(out_2d);
+                }
+            }
+        } else if n_spatial == 2 {
+            // im2col + matmul for 2D conv
+            let input_f32 = input.cast(DType::F32, backend)?;
+            let input_data: Vec<f32> = input_f32.to_ndarray()?.flatten().try_into()?;
+            let in_h = input_spatial[0];
+            let in_w = input_spatial[1];
+            let out_h = out_spatial[0];
+            let out_w = out_spatial[1];
+            let in_batch_stride = in_channels * in_h * in_w;
+
+            for n in 0..batch_size {
+                for g in 0..group {
+                    let in_base = n * in_batch_stride + g * channels_per_group_in * in_h * in_w;
+                    let mut col_data = vec![0.0f32; k_per_group * out_spatial_size];
+                    im2col_2d(
+                        &input_data,
+                        &mut col_data,
+                        in_base,
+                        channels_per_group_in,
+                        in_h,
+                        in_w,
+                        out_h,
+                        out_w,
+                        kernel_shape[0],
+                        kernel_shape[1],
+                        strides[0],
+                        strides[1],
+                        dilations[0],
+                        dilations[1],
+                        pad_begin[0],
+                        pad_begin[1],
+                    );
+                    let col_tensor = NumericTensor::<DynRank>::from_vec_shape(
+                        col_data,
+                        vec![k_per_group as usize, out_spatial_size as usize],
+                    )?;
+                    // Weight for this group: [cpg_out, K]
+                    let w_slice = weight_2d.slice(
+                        &[
+                            g as u64..g as u64 + 1,
+                            0..channels_per_group_out as u64,
+                            0..k_per_group as u64,
+                        ],
+                        backend,
+                    )?;
+                    let w_2d = w_slice.reshape(
+                        vec![channels_per_group_out as u64, k_per_group as u64],
+                        backend,
+                    )?;
+                    // matmul: [cpg_out, K] @ [K, spatial] → [cpg_out, spatial]
+                    let out_2d =
+                        NumericTensor::matmul(&w_2d, &col_tensor, Some(DType::F32), backend)?;
+                    result_parts.push(out_2d);
+                }
+            }
+        } else {
+            // Generic nD fallback: cast to f32 and use direct loops
+            let input_f32 = input.cast(DType::F32, backend)?;
+            let weight_f32 = weight.cast(DType::F32, backend)?;
+            let input_data: Vec<f32> = input_f32.to_ndarray()?.flatten().try_into()?;
+            let weight_data: Vec<f32> = weight_f32.to_ndarray()?.flatten().try_into()?;
+            let bias_data: Option<Vec<f32>> = if let Some(bias_id) = self.bias {
+                let b = &inputs[&bias_id];
+                let b_f32 = b.cast(DType::F32, backend)?;
+                Some(b_f32.to_ndarray()?.flatten().try_into()?)
+            } else {
+                None
+            };
+
+            let output_data = conv_nd_generic(
                 &input_data,
                 &weight_data,
                 bias_data.as_deref(),
@@ -475,17 +535,46 @@ impl MilliOp for Conv {
                 &strides,
                 &dilations,
                 &pad_begin,
-            )
+            );
+
+            let mut out_shape = Vec::with_capacity(2 + n_spatial);
+            out_shape.push(batch_size);
+            out_shape.push(out_channels);
+            out_shape.extend_from_slice(&out_spatial);
+            let result = NumericTensor::<DynRank>::from_vec_shape(output_data, out_shape)?;
+            let result = result.cast(original_dtype, backend)?;
+            return Ok(Box::new(std::iter::once((self.output, result))));
         };
 
-        let mut out_shape = Vec::with_capacity(2 + n_spatial);
-        out_shape.push(batch_size);
-        out_shape.push(out_channels);
-        out_shape.extend_from_slice(&out_spatial);
+        // Assemble result from parts: [N * group * cpg_out, spatial] → [N, C_out, *spatial]
+        // Each part is [cpg_out, out_spatial_size], ordered (n=0,g=0), (n=0,g=1), ..., (n=1,g=0), ...
+        // Stack into [N, group, cpg_out, spatial] then reshape to [N, C_out, *spatial]
+        let unsqueezed: Vec<NumericTensor<DynRank>> = result_parts
+            .iter()
+            .map(|t| t.unsqueeze(0))
+            .collect::<Result<Vec<_>, _>>()?;
+        let unsqueezed_refs: Vec<&NumericTensor<DynRank>> = unsqueezed.iter().collect();
+        let stacked = NumericTensor::concat(&unsqueezed_refs, 0, backend)?;
+        // stacked: [N*group, cpg_out, out_spatial_size]
 
-        let result = NumericTensor::<DynRank>::from_vec_shape(output_data, out_shape)?;
+        let mut out_shape: Vec<u64> = Vec::with_capacity(2 + n_spatial);
+        out_shape.push(batch_size as u64);
+        out_shape.push(out_channels as u64);
+        for &s in &out_spatial {
+            out_shape.push(s as u64);
+        }
+        let mut result = stacked.reshape(out_shape, backend)?;
+
+        // Add bias if present (broadcast [1, C_out, 1, 1, ...])
+        if let Some(bias) = &bias_tensor {
+            let bias_f32 = bias.cast(DType::F32, backend)?;
+            let mut bias_shape = vec![1u64; 2 + n_spatial];
+            bias_shape[1] = out_channels as u64;
+            let bias_reshaped = bias_f32.reshape(bias_shape, backend)?;
+            result = NumericTensor::add(&result, &bias_reshaped, backend)?;
+        }
+
         let result = result.cast(original_dtype, backend)?;
-
         Ok(Box::new(std::iter::once((self.output, result))))
     }
 }
