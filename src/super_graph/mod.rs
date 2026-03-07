@@ -43,8 +43,8 @@ pub enum SuperGraphError {
     ModelNotCompiledError,
     #[error(transparent)]
     CompilerError(#[from] CompilerError),
-    #[error("Missing link")]
-    MissingLinkError(),
+    #[error("Missing link{0}")]
+    MissingLinkError(String),
     #[error(transparent)]
     EvalRuntimeError(#[from] EvalRuntimeError),
 }

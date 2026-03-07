@@ -105,8 +105,7 @@ impl SDExplorerApp {
                 );
             }
             if ui.button("Load SD Pipeline").clicked() {
-                loaded_models.model_load_state =
-                    Some(ModelLoadState::DialogOpen(None));
+                loaded_models.model_load_state = Some(ModelLoadState::DialogOpen(None));
             }
         });
 
@@ -156,9 +155,9 @@ impl SDExplorerApp {
 
                 ui.horizontal(|ui| {
                     ui.label("Latent H:");
-                    ui.add(egui::DragValue::new(&mut state.latent_h).range(4..=16));
+                    ui.add(egui::DragValue::new(&mut state.latent_h).range(4..=128));
                     ui.label("Latent W:");
-                    ui.add(egui::DragValue::new(&mut state.latent_w).range(4..=16));
+                    ui.add(egui::DragValue::new(&mut state.latent_w).range(4..=128));
                     ui.label(format!(
                         "({}x{} pixels)",
                         state.latent_w * 8,
@@ -173,7 +172,12 @@ impl SDExplorerApp {
                         ui.spinner();
                         ui.label("Generating...");
                     } else if ui.button("Generate").clicked() {
-                        self.run_generation(state, sd, interface.model_ids.clone(), server_request_manager);
+                        self.run_generation(
+                            state,
+                            sd,
+                            interface.model_ids.clone(),
+                            server_request_manager,
+                        );
                     }
                 });
 
@@ -217,7 +221,7 @@ impl SDExplorerApp {
             NDArrayNumericTensor::from_vec_shape(uncond_ids, &vec![1, seq_len as u64]).unwrap();
 
         // Compute scheduler params
-        let (timestep_values, dt_values, init_sigma) =
+        let (timestep_values, dt_values, sigma_values, init_sigma) =
             StableDiffusionInterface::compute_euler_schedule(state.num_steps);
 
         // Generate random noise
@@ -231,18 +235,17 @@ impl SDExplorerApp {
         )
         .unwrap();
 
-        let timesteps_tensor = NDArrayNumericTensor::from_vec_shape(
-            timestep_values,
-            &vec![state.num_steps as u64],
-        )
-        .unwrap();
+        let timesteps_tensor =
+            NDArrayNumericTensor::from_vec_shape(timestep_values, &vec![state.num_steps as u64])
+                .unwrap();
         let dt_tensor =
-            NDArrayNumericTensor::from_vec_shape(dt_values, &vec![state.num_steps as u64])
+            NDArrayNumericTensor::from_vec_shape(dt_values, &vec![state.num_steps as u64]).unwrap();
+        let sigmas_tensor =
+            NDArrayNumericTensor::from_vec_shape(sigma_values, &vec![state.num_steps as u64])
                 .unwrap();
         let iter_count =
             NDArrayNumericTensor::from_vec_shape(vec![state.num_steps as i64], &vec![1]).unwrap();
-        let guidance =
-            NDArrayNumericTensor::from_vec(vec![state.guidance_scale]).to_dyn();
+        let guidance = NDArrayNumericTensor::from_vec(vec![state.guidance_scale]).to_dyn();
 
         // model_ids order: [text_encoder, unet, vae_decoder]
         let text_encoder_id = model_ids[0];
@@ -265,6 +268,7 @@ impl SDExplorerApp {
                 (sd.initial_latent_input, latent_tensor),
                 (sd.timesteps_input, timesteps_tensor),
                 (sd.dt_input, dt_tensor),
+                (sd.sigmas_input, sigmas_tensor),
                 (sd.iteration_count_input, iter_count),
                 (sd.guidance_scale_input, guidance),
             ]),
@@ -318,11 +322,8 @@ pub(crate) fn tensor_to_egui_texture(
             } else {
                 0.0
             };
-            pixels[y * img_w + x] = egui::Color32::from_rgb(
-                (r * 255.0) as u8,
-                (g * 255.0) as u8,
-                (b * 255.0) as u8,
-            );
+            pixels[y * img_w + x] =
+                egui::Color32::from_rgb((r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8);
         }
     }
 

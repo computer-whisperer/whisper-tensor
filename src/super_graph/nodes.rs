@@ -694,10 +694,13 @@ impl SuperGraphNode for SuperGraphNodeScan {
         data: &mut SuperGraphData<'b>,
         context: &mut SuperGraphContext<'a, 'b, 'c, 'd, T>,
     ) -> Result<(), SuperGraphError> {
-        let iteration_count_tensor = data
-            .tensors
-            .get(&self.iteration_count)
-            .ok_or(SuperGraphError::MissingLinkError())?;
+        let iteration_count_tensor =
+            data.tensors
+                .get(&self.iteration_count)
+                .ok_or(SuperGraphError::MissingLinkError(format!(
+                    ": scan iteration_count {:?}",
+                    self.iteration_count
+                )))?;
         let iteration_count: i64 = iteration_count_tensor.first_element().into();
 
         let node_path = node_path
@@ -715,7 +718,10 @@ impl SuperGraphNode for SuperGraphNodeScan {
                             *output,
                             data.tensors
                                 .get(input)
-                                .ok_or(SuperGraphError::MissingLinkError())?
+                                .ok_or(SuperGraphError::MissingLinkError(format!(
+                                    ": scan simple_input tensor {:?}",
+                                    input
+                                )))?
                                 .clone(),
                         );
                     }
@@ -724,17 +730,22 @@ impl SuperGraphNode for SuperGraphNodeScan {
                             *output,
                             data.strings
                                 .get(input)
-                                .ok_or(SuperGraphError::MissingLinkError())?
+                                .ok_or(SuperGraphError::MissingLinkError(format!(
+                                    ": scan simple_input string {:?}",
+                                    input
+                                )))?
                                 .clone(),
                         );
                     }
                     SuperGraphLinkDouble::TensorMap(input, output) => {
                         simple_inputs.tensor_maps.insert(
                             *output,
-                            *data
-                                .tensor_maps
-                                .get(input)
-                                .ok_or(SuperGraphError::MissingLinkError())?,
+                            *data.tensor_maps.get(input).ok_or(
+                                SuperGraphError::MissingLinkError(format!(
+                                    ": scan simple_input tensor_map {:?}",
+                                    input
+                                )),
+                            )?,
                         );
                     }
                     SuperGraphLinkDouble::Tokenizer(input, output) => {
@@ -742,7 +753,7 @@ impl SuperGraphNode for SuperGraphNodeScan {
                             *output,
                             data.tokenizers
                                 .get(input)
-                                .ok_or(SuperGraphError::MissingLinkError())?
+                                .ok_or(SuperGraphError::MissingLinkError(String::new()))?
                                 .clone(),
                         );
                     }
@@ -752,7 +763,7 @@ impl SuperGraphNode for SuperGraphNodeScan {
                             *data
                                 .hashes
                                 .get(input)
-                                .ok_or(SuperGraphError::MissingLinkError())?,
+                                .ok_or(SuperGraphError::MissingLinkError(String::new()))?,
                         );
                     }
                 }
@@ -769,7 +780,7 @@ impl SuperGraphNode for SuperGraphNodeScan {
                             *inner_input,
                             data.tensors
                                 .get(initial)
-                                .ok_or(SuperGraphError::MissingLinkError())?
+                                .ok_or(SuperGraphError::MissingLinkError(String::new()))?
                                 .clone(),
                         );
                     }
@@ -778,7 +789,7 @@ impl SuperGraphNode for SuperGraphNodeScan {
                             *inner_input,
                             data.strings
                                 .get(initial)
-                                .ok_or(SuperGraphError::MissingLinkError())?
+                                .ok_or(SuperGraphError::MissingLinkError(String::new()))?
                                 .clone(),
                         );
                     }
@@ -788,7 +799,7 @@ impl SuperGraphNode for SuperGraphNodeScan {
                             *data
                                 .tensor_maps
                                 .get(initial)
-                                .ok_or(SuperGraphError::MissingLinkError())?,
+                                .ok_or(SuperGraphError::MissingLinkError(String::new()))?,
                         );
                     }
                     SuperGraphLinkTriple::Tokenizer(initial, inner_input, _inner_output) => {
@@ -796,7 +807,7 @@ impl SuperGraphNode for SuperGraphNodeScan {
                             *inner_input,
                             data.tokenizers
                                 .get(initial)
-                                .ok_or(SuperGraphError::MissingLinkError())?
+                                .ok_or(SuperGraphError::MissingLinkError(String::new()))?
                                 .clone(),
                         );
                     }
@@ -806,7 +817,7 @@ impl SuperGraphNode for SuperGraphNodeScan {
                             *data
                                 .hashes
                                 .get(initial)
-                                .ok_or(SuperGraphError::MissingLinkError())?,
+                                .ok_or(SuperGraphError::MissingLinkError(String::new()))?,
                         );
                     }
                 }
@@ -826,10 +837,13 @@ impl SuperGraphNode for SuperGraphNodeScan {
                 let mut iter_inputs = simple_inputs.clone();
                 iter_inputs.extend(&state_values);
                 for (outer, inner, scan_axis) in &self.scan_inputs {
-                    let tensor = data
-                        .tensors
-                        .get(outer)
-                        .ok_or(SuperGraphError::MissingLinkError())?;
+                    let tensor =
+                        data.tensors
+                            .get(outer)
+                            .ok_or(SuperGraphError::MissingLinkError(format!(
+                                ": scan_input outer={:?} inner={:?}",
+                                outer, inner
+                            )))?;
                     let slice_arg = {
                         let mut slice_ranges = Vec::new();
                         for j in 0..tensor.rank() {
@@ -855,10 +869,10 @@ impl SuperGraphNode for SuperGraphNodeScan {
                 let tensor = iter_outputs
                     .tensors
                     .get(inner)
-                    .ok_or(SuperGraphError::MissingLinkError())?;
+                    .ok_or(SuperGraphError::MissingLinkError(String::new()))?;
                 let (tensors, _) = output_scan_tensor_parts
                     .get_mut(outer)
-                    .ok_or(SuperGraphError::MissingLinkError())?;
+                    .ok_or(SuperGraphError::MissingLinkError(String::new()))?;
                 tensors.push(tensor.clone());
             }
 
@@ -872,7 +886,7 @@ impl SuperGraphNode for SuperGraphNodeScan {
                                 iter_outputs
                                     .tensors
                                     .get(inner_output)
-                                    .ok_or(SuperGraphError::MissingLinkError())?
+                                    .ok_or(SuperGraphError::MissingLinkError(String::new()))?
                                     .clone(),
                             );
                         }
@@ -882,7 +896,7 @@ impl SuperGraphNode for SuperGraphNodeScan {
                                 iter_outputs
                                     .strings
                                     .get(inner_output)
-                                    .ok_or(SuperGraphError::MissingLinkError())?
+                                    .ok_or(SuperGraphError::MissingLinkError(String::new()))?
                                     .clone(),
                             );
                         }
@@ -892,7 +906,7 @@ impl SuperGraphNode for SuperGraphNodeScan {
                                 iter_outputs
                                     .tokenizers
                                     .get(inner_output)
-                                    .ok_or(SuperGraphError::MissingLinkError())?
+                                    .ok_or(SuperGraphError::MissingLinkError(String::new()))?
                                     .clone(),
                             );
                         }
@@ -902,7 +916,7 @@ impl SuperGraphNode for SuperGraphNodeScan {
                                 *iter_outputs
                                     .tensor_maps
                                     .get(inner_output)
-                                    .ok_or(SuperGraphError::MissingLinkError())?,
+                                    .ok_or(SuperGraphError::MissingLinkError(String::new()))?,
                             );
                         }
                         SuperGraphLinkTriple::Hash(_initial, inner_input, inner_output) => {
@@ -911,7 +925,7 @@ impl SuperGraphNode for SuperGraphNodeScan {
                                 *iter_outputs
                                     .hashes
                                     .get(inner_output)
-                                    .ok_or(SuperGraphError::MissingLinkError())?,
+                                    .ok_or(SuperGraphError::MissingLinkError(String::new()))?,
                             );
                         }
                     }
@@ -934,7 +948,7 @@ impl SuperGraphNode for SuperGraphNodeScan {
                             .unwrap()
                             .tensors
                             .get(input)
-                            .ok_or(SuperGraphError::MissingLinkError())?
+                            .ok_or(SuperGraphError::MissingLinkError(String::new()))?
                             .clone(),
                     );
                 }
@@ -946,7 +960,7 @@ impl SuperGraphNode for SuperGraphNodeScan {
                             .unwrap()
                             .strings
                             .get(input)
-                            .ok_or(SuperGraphError::MissingLinkError())?
+                            .ok_or(SuperGraphError::MissingLinkError(String::new()))?
                             .clone(),
                     );
                 }
@@ -958,7 +972,7 @@ impl SuperGraphNode for SuperGraphNodeScan {
                             .unwrap()
                             .tokenizers
                             .get(input)
-                            .ok_or(SuperGraphError::MissingLinkError())?
+                            .ok_or(SuperGraphError::MissingLinkError(String::new()))?
                             .clone(),
                     );
                 }
@@ -970,7 +984,7 @@ impl SuperGraphNode for SuperGraphNodeScan {
                             .unwrap()
                             .tensor_maps
                             .get(input)
-                            .ok_or(SuperGraphError::MissingLinkError())?,
+                            .ok_or(SuperGraphError::MissingLinkError(String::new()))?,
                     );
                 }
                 SuperGraphLinkDouble::Hash(input, output) => {
@@ -981,7 +995,7 @@ impl SuperGraphNode for SuperGraphNodeScan {
                             .unwrap()
                             .hashes
                             .get(input)
-                            .ok_or(SuperGraphError::MissingLinkError())?,
+                            .ok_or(SuperGraphError::MissingLinkError(String::new()))?,
                     );
                 }
             }
@@ -1082,14 +1096,14 @@ impl SuperGraphNode for SuperGraphNodeRNNCacheRead {
         let tokens_input = data
             .tensors
             .get(&self.tokens_input)
-            .ok_or(SuperGraphError::MissingLinkError())?
+            .ok_or(SuperGraphError::MissingLinkError(String::new()))?
             .clone();
         let mut found = false;
         if let Some(caches) = &mut context.caches {
             let key_input = *data
                 .hashes
                 .get(&self.key_input)
-                .ok_or(SuperGraphError::MissingLinkError())?;
+                .ok_or(SuperGraphError::MissingLinkError(String::new()))?;
             if let Some(rnn_cache) = caches.rnn_cache.get(&key_input) {
                 let tokens_vec: Vec<u32> = tokens_input
                     .to_ndarray()?
@@ -1129,7 +1143,7 @@ impl SuperGraphNode for SuperGraphNodeRNNCacheRead {
                 let value = data
                     .tensors
                     .get(value)
-                    .ok_or(SuperGraphError::MissingLinkError())?;
+                    .ok_or(SuperGraphError::MissingLinkError(String::new()))?;
                 if let Some((_, output_link)) = self.state_outputs.iter().find(|x| x.0 == *key) {
                     data.tensors.insert(*output_link, value.clone());
                 }
@@ -1200,11 +1214,11 @@ impl SuperGraphNode for SuperGraphNodeRNNCacheWrite {
             let key_input = *data
                 .hashes
                 .get(&self.key_input)
-                .ok_or(SuperGraphError::MissingLinkError())?;
+                .ok_or(SuperGraphError::MissingLinkError(String::new()))?;
             let tokens_input = data
                 .tensors
                 .get(&self.tokens_input)
-                .ok_or(SuperGraphError::MissingLinkError())?;
+                .ok_or(SuperGraphError::MissingLinkError(String::new()))?;
             let tokens_vec: Vec<u32> = tokens_input
                 .to_ndarray()?
                 .try_to_rank::<P1>()

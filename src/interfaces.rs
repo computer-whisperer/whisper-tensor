@@ -5,7 +5,9 @@ use crate::compiler::CompiledProgram;
 use crate::dtype::DType;
 use crate::interfaces::Error::GeneralError;
 use crate::milli_graph::MilliOpGraph;
-use crate::milli_graph::ops::{Cast, Constant, Shape, SimpleBinary, Squeeze, Unsqueeze};
+use crate::milli_graph::ops::{
+    Cast, Constant, Shape, SimpleBinary, SimpleUnaryOp, Squeeze, Unsqueeze,
+};
 use crate::model::Model;
 use crate::numeric_tensor::NumericTensor;
 use crate::super_graph::cache::{SuperGraphCache, SuperGraphTensorCache};
@@ -663,6 +665,7 @@ pub struct StableDiffusionInterface {
     pub initial_latent_input: SuperGraphLinkTensor,
     pub timesteps_input: SuperGraphLinkTensor,
     pub dt_input: SuperGraphLinkTensor,
+    pub sigmas_input: SuperGraphLinkTensor,
     pub iteration_count_input: SuperGraphLinkTensor,
     pub guidance_scale_input: SuperGraphLinkTensor,
     // Model weight maps
@@ -683,6 +686,7 @@ impl StableDiffusionInterface {
         let initial_latent_input = builder.new_tensor_link(rng);
         let timesteps_input = builder.new_tensor_link(rng);
         let dt_input = builder.new_tensor_link(rng);
+        let sigmas_input = builder.new_tensor_link(rng);
         let iteration_count_input = builder.new_tensor_link(rng);
         let guidance_scale_input = builder.new_tensor_link(rng);
         let text_encoder_weights = builder.new_model_link(rng);
@@ -729,19 +733,37 @@ impl StableDiffusionInterface {
             let inner_latent_out = inner_builder.new_tensor_link(rng);
             let inner_timestep = inner_builder.new_tensor_link(rng);
             let inner_dt = inner_builder.new_tensor_link(rng);
+            let inner_sigma = inner_builder.new_tensor_link(rng);
 
-            // Inner node 1: Prep — cast latent f32→f16, cast timestep f32→f16, reshape to [1]
+            // Inner node 1: Prep — scale latent by 1/sqrt(sigma²+1), cast f32→f16, cast timestep f32→f16, reshape to [1]
             let f16_latent = inner_builder.new_tensor_link(rng);
             let f16_timestep = inner_builder.new_tensor_link(rng);
             {
                 let (mut mg, input_map) = MilliOpGraph::new(
-                    [inner_latent_in.global_id(), inner_timestep.global_id()],
+                    [
+                        inner_latent_in.global_id(),
+                        inner_timestep.global_id(),
+                        inner_sigma.global_id(),
+                    ],
                     rng,
                 );
                 let lat_in = *input_map.get(&inner_latent_in.global_id()).unwrap();
                 let ts_in = *input_map.get(&inner_timestep.global_id()).unwrap();
+                let sigma_in = *input_map.get(&inner_sigma.global_id()).unwrap();
 
-                let lat_f16 = Cast::push_new(&mut mg, lat_in, DType::F16, rng);
+                // scale = 1 / sqrt(sigma^2 + 1)
+                let sigma_sq = SimpleBinary::mul(&mut mg, sigma_in, sigma_in, rng);
+                let one = Constant::push_new(
+                    &mut mg,
+                    NDArrayNumericTensor::from_vec_shape(vec![1.0f32], &vec![1]).unwrap(),
+                    rng,
+                );
+                let sigma_sq_plus_1 = SimpleBinary::add(&mut mg, sigma_sq, one, rng);
+                let sqrt_val = SimpleUnaryOp::sqrt(&mut mg, sigma_sq_plus_1, rng);
+                let inv_scale = SimpleBinary::div(&mut mg, one, sqrt_val, rng);
+                let scaled_lat = SimpleBinary::mul(&mut mg, lat_in, inv_scale, rng);
+
+                let lat_f16 = Cast::push_new(&mut mg, scaled_lat, DType::F16, rng);
                 let ts_f16 = Cast::push_new(&mut mg, ts_in, DType::F16, rng);
                 let zero_axis = Constant::push_new(
                     &mut mg,
@@ -822,10 +844,7 @@ impl StableDiffusionInterface {
                 let step = SimpleBinary::mul(&mut mg, guided, dt_in, rng);
                 let latent_next = SimpleBinary::add(&mut mg, lat_in, step, rng);
 
-                mg.set_output_map(std::iter::once((
-                    latent_next,
-                    inner_latent_out.global_id(),
-                )));
+                mg.set_output_map(std::iter::once((latent_next, inner_latent_out.global_id())));
                 inner_builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
             }
 
@@ -838,6 +857,7 @@ impl StableDiffusionInterface {
                 inner_latent_in.to_any(),
                 inner_timestep.to_any(),
                 inner_dt.to_any(),
+                inner_sigma.to_any(),
             ];
             let inner_outputs: Vec<_> = vec![inner_latent_out.to_any()];
             let inner_graph = inner_builder.build(rng, &inner_inputs, &inner_outputs);
@@ -863,6 +883,7 @@ impl StableDiffusionInterface {
                 vec![
                     (timesteps_input, inner_timestep, 0),
                     (dt_input, inner_dt, 0),
+                    (sigmas_input, inner_sigma, 0),
                 ],
                 // scan_outputs: none
                 vec![],
@@ -915,6 +936,7 @@ impl StableDiffusionInterface {
             initial_latent_input.to_any(),
             timesteps_input.to_any(),
             dt_input.to_any(),
+            sigmas_input.to_any(),
             iteration_count_input.to_any(),
             guidance_scale_input.to_any(),
             text_encoder_weights.to_any(),
@@ -931,6 +953,7 @@ impl StableDiffusionInterface {
             initial_latent_input,
             timesteps_input,
             dt_input,
+            sigmas_input,
             iteration_count_input,
             guidance_scale_input,
             text_encoder_weights,
@@ -942,7 +965,9 @@ impl StableDiffusionInterface {
 
     /// Pre-compute the Euler discrete scheduler parameters.
     /// Returns (timestep_values, dt_values, initial_sigma).
-    pub fn compute_euler_schedule(num_inference_steps: usize) -> (Vec<f32>, Vec<f32>, f32) {
+    pub fn compute_euler_schedule(
+        num_inference_steps: usize,
+    ) -> (Vec<f32>, Vec<f32>, Vec<f32>, f32) {
         let num_train_timesteps = 1000;
         let beta_start: f32 = 0.00085;
         let beta_end: f32 = 0.012;
@@ -993,7 +1018,7 @@ impl StableDiffusionInterface {
             })
             .collect();
 
-        (timestep_values, dt_values, init_sigma)
+        (timestep_values, dt_values, sigmas, init_sigma)
     }
 
     /// Run the full SD pipeline. Pre-computes scheduler params, packs inputs, runs graph.
@@ -1011,7 +1036,7 @@ impl StableDiffusionInterface {
         guidance_scale: f32,
         backend: &mut EvalBackend,
     ) -> Result<NumericTensor<DynRank>, SuperGraphError> {
-        let (timestep_values, dt_values, init_sigma) =
+        let (timestep_values, dt_values, sigma_values, init_sigma) =
             Self::compute_euler_schedule(num_inference_steps);
 
         // Scale initial noise by initial sigma
@@ -1024,6 +1049,9 @@ impl StableDiffusionInterface {
                 .unwrap();
         let dt_tensor =
             NumericTensor::<DynRank>::from_vec_shape(dt_values, vec![num_inference_steps]).unwrap();
+        let sigmas_tensor =
+            NumericTensor::<DynRank>::from_vec_shape(sigma_values, vec![num_inference_steps])
+                .unwrap();
         let iter_count =
             NumericTensor::<DynRank>::from_vec_shape(vec![num_inference_steps as i64], vec![1])
                 .unwrap();
@@ -1036,13 +1064,11 @@ impl StableDiffusionInterface {
         data.tensors.insert(self.uncond_ids_input, uncond_ids);
         data.tensors
             .insert(self.initial_latent_input, latent_tensor);
-        data.tensors
-            .insert(self.timesteps_input, timesteps_tensor);
+        data.tensors.insert(self.timesteps_input, timesteps_tensor);
         data.tensors.insert(self.dt_input, dt_tensor);
-        data.tensors
-            .insert(self.iteration_count_input, iter_count);
-        data.tensors
-            .insert(self.guidance_scale_input, guidance);
+        data.tensors.insert(self.sigmas_input, sigmas_tensor);
+        data.tensors.insert(self.iteration_count_input, iter_count);
+        data.tensors.insert(self.guidance_scale_input, guidance);
         data.tensor_maps
             .insert(self.text_encoder_weights, text_encoder.get_tensor_store());
         data.tensor_maps

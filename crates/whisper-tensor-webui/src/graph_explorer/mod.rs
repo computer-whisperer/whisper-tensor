@@ -1402,9 +1402,9 @@ impl GraphExplorerApp {
 
                                 ui.horizontal(|ui| {
                                     ui.label("Latent H:");
-                                    ui.add(egui::DragValue::new(&mut sd_data.latent_h).range(4..=16));
+                                    ui.add(egui::DragValue::new(&mut sd_data.latent_h).range(4..=128));
                                     ui.label("Latent W:");
-                                    ui.add(egui::DragValue::new(&mut sd_data.latent_w).range(4..=16));
+                                    ui.add(egui::DragValue::new(&mut sd_data.latent_w).range(4..=128));
                                     ui.label(format!("({}x{} px)", sd_data.latent_w * 8, sd_data.latent_h * 8));
                                 });
 
@@ -1446,7 +1446,7 @@ impl GraphExplorerApp {
                                             let cond_tensor = NDArrayNumericTensor::from_vec_shape(cond_ids, &vec![1, seq_len as u64]).unwrap();
                                             let uncond_tensor = NDArrayNumericTensor::from_vec_shape(uncond_ids, &vec![1, seq_len as u64]).unwrap();
 
-                                            let (timestep_values, dt_values, init_sigma) =
+                                            let (timestep_values, dt_values, sigma_values, init_sigma) =
                                                 StableDiffusionInterface::compute_euler_schedule(sd_data.num_steps);
 
                                             let latent_n = 1 * 4 * sd_data.latent_h * sd_data.latent_w;
@@ -1464,6 +1464,10 @@ impl GraphExplorerApp {
                                             ).unwrap();
                                             let dt_tensor = NDArrayNumericTensor::from_vec_shape(
                                                 dt_values,
+                                                &vec![sd_data.num_steps as u64],
+                                            ).unwrap();
+                                            let sigmas_tensor = NDArrayNumericTensor::from_vec_shape(
+                                                sigma_values,
                                                 &vec![sd_data.num_steps as u64],
                                             ).unwrap();
                                             let iter_count = NDArrayNumericTensor::from_vec_shape(
@@ -1503,6 +1507,7 @@ impl GraphExplorerApp {
                                                     (sd_interface.initial_latent_input, latent_tensor),
                                                     (sd_interface.timesteps_input, timesteps_tensor),
                                                     (sd_interface.dt_input, dt_tensor),
+                                                    (sd_interface.sigmas_input, sigmas_tensor),
                                                     (sd_interface.iteration_count_input, iter_count),
                                                     (sd_interface.guidance_scale_input, guidance),
                                                 ]),

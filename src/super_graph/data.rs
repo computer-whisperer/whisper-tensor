@@ -42,7 +42,11 @@ impl<'models> SuperGraphData<'models> {
                         *t,
                         self.tensors
                             .get(t)
-                            .ok_or(SuperGraphError::MissingLinkError())?
+                            .ok_or(SuperGraphError::MissingLinkError(format!(
+                                ": select tensor {:?} (have: {:?})",
+                                t,
+                                self.tensors.keys().collect::<Vec<_>>()
+                            )))?
                             .clone(),
                     );
                 }
@@ -51,7 +55,10 @@ impl<'models> SuperGraphData<'models> {
                         *s,
                         self.strings
                             .get(s)
-                            .ok_or(SuperGraphError::MissingLinkError())?
+                            .ok_or(SuperGraphError::MissingLinkError(format!(
+                                ": select string {:?}",
+                                s
+                            )))?
                             .clone(),
                     );
                 }
@@ -60,7 +67,10 @@ impl<'models> SuperGraphData<'models> {
                         *t,
                         self.tokenizers
                             .get(t)
-                            .ok_or(SuperGraphError::MissingLinkError())?
+                            .ok_or(SuperGraphError::MissingLinkError(format!(
+                                ": select tokenizer {:?}",
+                                t
+                            )))?
                             .clone(),
                     );
                 }
@@ -70,7 +80,10 @@ impl<'models> SuperGraphData<'models> {
                         *self
                             .tensor_maps
                             .get(m)
-                            .ok_or(SuperGraphError::MissingLinkError())?,
+                            .ok_or(SuperGraphError::MissingLinkError(format!(
+                                ": select tensor_map {:?}",
+                                m
+                            )))?,
                     );
                 }
                 SuperGraphAnyLink::Hash(h) => {
@@ -79,7 +92,7 @@ impl<'models> SuperGraphData<'models> {
                         *self
                             .hashes
                             .get(h)
-                            .ok_or(SuperGraphError::MissingLinkError())?,
+                            .ok_or(SuperGraphError::MissingLinkError(String::new()))?,
                     );
                 }
             }
@@ -103,7 +116,7 @@ impl<'models> SuperGraphData<'models> {
                         output,
                         self.tensors
                             .get(&input)
-                            .ok_or(SuperGraphError::MissingLinkError())?
+                            .ok_or(SuperGraphError::MissingLinkError(String::new()))?
                             .clone(),
                     );
                 }
@@ -112,7 +125,7 @@ impl<'models> SuperGraphData<'models> {
                         output,
                         self.strings
                             .get(&input)
-                            .ok_or(SuperGraphError::MissingLinkError())?
+                            .ok_or(SuperGraphError::MissingLinkError(String::new()))?
                             .clone(),
                     );
                 }
@@ -121,7 +134,7 @@ impl<'models> SuperGraphData<'models> {
                         output,
                         self.tokenizers
                             .get(&input)
-                            .ok_or(SuperGraphError::MissingLinkError())?
+                            .ok_or(SuperGraphError::MissingLinkError(String::new()))?
                             .clone(),
                     );
                 }
@@ -130,7 +143,7 @@ impl<'models> SuperGraphData<'models> {
                         output,
                         self.tensor_maps
                             .get(&input)
-                            .ok_or(SuperGraphError::MissingLinkError())?,
+                            .ok_or(SuperGraphError::MissingLinkError(String::new()))?,
                     );
                 }
                 SuperGraphLinkDouble::Hash(input, output) => {
@@ -139,7 +152,7 @@ impl<'models> SuperGraphData<'models> {
                         *self
                             .hashes
                             .get(&input)
-                            .ok_or(SuperGraphError::MissingLinkError())?,
+                            .ok_or(SuperGraphError::MissingLinkError(String::new()))?,
                     );
                 }
             }
