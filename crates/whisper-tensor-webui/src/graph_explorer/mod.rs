@@ -6,6 +6,7 @@ use crate::app::{InterfaceId, LoadedModels, LoadedTokenizers};
 use crate::graph_explorer::inspect_windows::{
     AnyInspectWindow, InspectWindowGraphLink, InspectWindowGraphNode,
 };
+use crate::sd_explorer::{generate_normal_noise, simple_clip_tokenize, tensor_to_egui_texture};
 use crate::websockets::ServerRequestManager;
 use crate::widgets::toggle::toggle_ui;
 use crate::widgets::tokenized_rich_text::TokenizedRichText;
@@ -34,7 +35,6 @@ use whisper_tensor::super_graph::nodes::SuperGraphAnyNode;
 use whisper_tensor::super_graph::{SuperGraph, SuperGraphLinkTensor};
 use whisper_tensor::tokenizer::Tokenizer;
 use whisper_tensor_import::onnx_graph::TokenizerInfo;
-use crate::sd_explorer::{generate_normal_noise, simple_clip_tokenize, tensor_to_egui_texture};
 use whisper_tensor_server::{
     AbbreviatedTensorReportSettings, AbbreviatedTensorValue, LoadedModelId, ServerConfigReport,
     SuperGraphRequest, SuperGraphRequestBackendMode, WebsocketClientServerMessage,
@@ -90,6 +90,7 @@ pub(crate) struct SDInferenceData {
     pending_request: Option<(u64, SuperGraphLinkTensor)>,
     generated_image: Option<TextureHandle>,
     status_message: Option<String>,
+    show_image_window: bool,
 }
 
 impl Default for SDInferenceData {
@@ -105,6 +106,7 @@ impl Default for SDInferenceData {
             pending_request: None,
             generated_image: None,
             status_message: None,
+            show_image_window: false,
         }
     }
 }
@@ -1376,6 +1378,7 @@ impl GraphExplorerApp {
                         }
 
                         // UI panel
+                        ui.horizontal_top(|ui| {
                         let frame = egui::Frame::default()
                             .stroke(ui.visuals().window_stroke)
                             .inner_margin(5.0);
@@ -1523,12 +1526,36 @@ impl GraphExplorerApp {
                             });
                         });
 
-                        // Display generated image
+                        // Display generated image thumbnail to the right of controls
                         if let Some(texture) = &sd_data.generated_image {
-                            let size = texture.size_vec2();
-                            let scale = (400.0 / size.x.max(size.y)).max(1.0);
-                            let display_size = egui::vec2(size.x * scale, size.y * scale);
-                            ui.image(egui::load::SizedTexture::new(texture.id(), display_size));
+                            ui.vertical(|ui| {
+                                let size = texture.size_vec2();
+                                let thumb_max = 200.0;
+                                let scale = (thumb_max / size.x.max(size.y)).max(1.0);
+                                let display_size = egui::vec2(size.x * scale, size.y * scale);
+                                let response = ui.image(egui::load::SizedTexture::new(texture.id(), display_size));
+                                if response.clicked() {
+                                    sd_data.show_image_window = !sd_data.show_image_window;
+                                }
+                                response.on_hover_text("Click to inspect");
+                            });
+                        }
+                        }); // end horizontal_top
+
+                        // Floating inspect window for full-size image
+                        if sd_data.show_image_window {
+                            if let Some(texture) = &sd_data.generated_image {
+                                let size = texture.size_vec2();
+                                let mut open = sd_data.show_image_window;
+                                egui::Window::new("Generated Image")
+                                    .open(&mut open)
+                                    .resizable(true)
+                                    .default_size(size)
+                                    .show(ui.ctx(), |ui| {
+                                        ui.image(egui::load::SizedTexture::new(texture.id(), size));
+                                    });
+                                sd_data.show_image_window = open;
+                            }
                         }
                     }
                 }
