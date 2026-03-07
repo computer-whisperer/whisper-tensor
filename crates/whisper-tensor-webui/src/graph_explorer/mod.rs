@@ -16,6 +16,24 @@ use egui::{
     StrokeKind, TextureHandle, Ui, UiBuilder, Vec2, vec2,
 };
 use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::wasm_bindgen;
+
+#[wasm_bindgen(inline_js = "
+export function js_copy_image_to_clipboard(rgba_data, width, height) {
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    const img_data = new ImageData(new Uint8ClampedArray(rgba_data), width, height);
+    ctx.putImageData(img_data, 0, 0);
+    canvas.toBlob(function(blob) {
+        navigator.clipboard.write([new ClipboardItem({'image/png': blob})]);
+    }, 'image/png');
+}
+")]
+extern "C" {
+    fn js_copy_image_to_clipboard(rgba_data: &[u8], width: u32, height: u32);
+}
 use graph_layout::{
     GraphLayout, GraphLayoutError, GraphLayoutIOOffsets, GraphLayoutLinkData, GraphLayoutLinkId,
     GraphLayoutNodeId, GraphLayoutNodeInitData, GraphLayoutNodeType,
@@ -1704,9 +1722,14 @@ impl GraphExplorerApp {
                                     .default_size(size)
                                     .show(ui.ctx(), |ui| {
                                         ui.image(egui::load::SizedTexture::new(texture.id(), size));
-                                        if ui.button("Save image").clicked() {
-                                            save_image_to_download(&color_image);
-                                        }
+                                        ui.horizontal(|ui| {
+                                            if ui.button("Save image").clicked() {
+                                                save_image_to_download(&color_image);
+                                            }
+                                            if ui.button("Copy to clipboard").clicked() {
+                                                copy_image_to_clipboard(&color_image);
+                                            }
+                                        });
                                     });
                                 sd_data.show_image_window = open;
                             }
@@ -1736,6 +1759,18 @@ fn save_image_to_download(color_image: &ColorImage) {
     let [w, h] = color_image.size;
     let bmp_data = encode_bmp(w, h, &color_image.pixels);
     let _ = trigger_browser_download("generated_image.bmp", &bmp_data, "image/bmp");
+}
+
+fn copy_image_to_clipboard(color_image: &ColorImage) {
+    let [w, h] = color_image.size;
+    let mut rgba = Vec::with_capacity(w * h * 4);
+    for pixel in &color_image.pixels {
+        rgba.push(pixel.r());
+        rgba.push(pixel.g());
+        rgba.push(pixel.b());
+        rgba.push(pixel.a());
+    }
+    js_copy_image_to_clipboard(&rgba, w as u32, h as u32);
 }
 
 fn encode_bmp(w: usize, h: usize, pixels: &[Color32]) -> Vec<u8> {
@@ -1788,7 +1823,7 @@ fn trigger_browser_download(filename: &str, data: &[u8], mime_type: &str) -> Res
     let array = js_sys::Array::new();
     array.push(&uint8_array.buffer());
 
-    let mut options = web_sys::BlobPropertyBag::new();
+    let options = web_sys::BlobPropertyBag::new();
     options.set_type(mime_type);
     let blob = web_sys::Blob::new_with_u8_array_sequence_and_options(&array, &options)?;
 
