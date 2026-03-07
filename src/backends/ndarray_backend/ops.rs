@@ -9,6 +9,28 @@ use num_traits::{Float, FromPrimitive, Num, NumCast, One, Zero};
 use serde::{Deserialize, Serialize};
 use std::ops::{Add, BitAnd, BitOr, BitXor, Mul};
 
+/// Compute the NumPy-style broadcast output shape for two input shapes.
+/// Right-aligns dimensions, prepending 1s to the shorter shape, then takes
+/// the max at each position (requiring each pair to be equal or one to be 1).
+fn broadcast_shape(a: &[usize], b: &[usize]) -> Vec<usize> {
+    let rank = a.len().max(b.len());
+    let mut out = Vec::with_capacity(rank);
+    for i in 0..rank {
+        let da = if i < rank - a.len() {
+            1
+        } else {
+            a[i - (rank - a.len())]
+        };
+        let db = if i < rank - b.len() {
+            1
+        } else {
+            b[i - (rank - b.len())]
+        };
+        out.push(da.max(db));
+    }
+    out
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum NDArrayOperationError {
     #[error(transparent)]
@@ -632,17 +654,9 @@ impl NativeNumericTensorBinaryOperation {
             + std::ops::Div<Output = T>
             + std::ops::Rem<Output = T>,
     {
-        let a = if let Some(a) = a.broadcast(b.shape()) {
-            a
-        } else {
-            a.view()
-        };
-
-        let b = if let Some(b) = b.broadcast(a.shape()) {
-            b
-        } else {
-            b.view()
-        };
+        let out_shape = broadcast_shape(a.shape(), b.shape());
+        let a = a.broadcast(IxDyn(&out_shape)).unwrap();
+        let b = b.broadcast(IxDyn(&out_shape)).unwrap();
 
         let o: Array<T, IxDyn> = match self {
             Self::Add => &a + &b,
@@ -675,17 +689,9 @@ impl NativeNumericTensorBinaryOperation {
             + std::ops::Div<Output = T>
             + std::ops::Rem<Output = T>,
     {
-        let a = if let Some(a) = a.broadcast(b.shape()) {
-            a
-        } else {
-            a.view()
-        };
-
-        let b = if let Some(b) = b.broadcast(a.shape()) {
-            b
-        } else {
-            b.view()
-        };
+        let out_shape = broadcast_shape(a.shape(), b.shape());
+        let a = a.broadcast(IxDyn(&out_shape)).unwrap();
+        let b = b.broadcast(IxDyn(&out_shape)).unwrap();
 
         let o: Array<T, IxDyn> = match self {
             Self::Add => &a + &b,
@@ -713,17 +719,9 @@ impl NativeNumericTensorBinaryOperationBoolOut {
     where
         T: 'a + Clone + Copy + PartialEq + PartialOrd,
     {
-        let a = if let Some(a) = a.broadcast(b.shape()) {
-            a
-        } else {
-            a.view()
-        };
-
-        let b = if let Some(b) = b.broadcast(a.shape()) {
-            b
-        } else {
-            b.view()
-        };
+        let out_shape = broadcast_shape(a.shape(), b.shape());
+        let a = a.broadcast(IxDyn(&out_shape)).unwrap();
+        let b = b.broadcast(IxDyn(&out_shape)).unwrap();
 
         let o = match self {
             NativeNumericTensorBinaryOperationBoolOut::Equal => {
@@ -754,17 +752,9 @@ pub(crate) fn equal<'a, T>(
 where
     T: 'a + Clone + PartialEq + PartialOrd,
 {
-    let a = if let Some(a) = a.broadcast(b.shape()) {
-        a
-    } else {
-        a.view()
-    };
-
-    let b = if let Some(b) = b.broadcast(a.shape()) {
-        b
-    } else {
-        b.view()
-    };
+    let out_shape = broadcast_shape(a.shape(), b.shape());
+    let a = a.broadcast(IxDyn(&out_shape)).unwrap();
+    let b = b.broadcast(IxDyn(&out_shape)).unwrap();
 
     let o = ndarray::Zip::from(a)
         .and(b)
@@ -782,17 +772,9 @@ impl NativeNumericTensorBitwiseBinaryOperation {
     where
         T: 'a + Clone + Copy + BitAnd<Output = T> + BitOr<Output = T> + BitXor<Output = T>,
     {
-        let a = if let Some(a) = a.broadcast(b.shape()) {
-            a
-        } else {
-            a.view()
-        };
-
-        let b = if let Some(b) = b.broadcast(a.shape()) {
-            b
-        } else {
-            b.view()
-        };
+        let out_shape = broadcast_shape(a.shape(), b.shape());
+        let a = a.broadcast(IxDyn(&out_shape)).unwrap();
+        let b = b.broadcast(IxDyn(&out_shape)).unwrap();
 
         let o: Array<T, IxDyn> = match self {
             Self::And => a.bitand(&b),
