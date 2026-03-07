@@ -310,8 +310,27 @@ impl Operation for PadOperation {
         )]
     }
 
-    fn get_milli_op_graph(&self, _rng: &mut impl Rng) -> MilliOpGraph {
-        todo!()
+    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
+        let mode = match &self.mode {
+            PadMode::Constant => crate::milli_graph::ops::PadMode::Constant,
+            PadMode::Reflect => crate::milli_graph::ops::PadMode::Reflect,
+            PadMode::Edge => crate::milli_graph::ops::PadMode::Edge,
+            PadMode::Wrap => crate::milli_graph::ops::PadMode::Wrap,
+        };
+        let out = crate::milli_graph::ops::Pad::push_new(
+            &mut graph,
+            input_map[&self.input],
+            input_map[&self.pads],
+            self.constant_value.map(|x| input_map[&x]),
+            self.axes.map(|x| input_map[&x]),
+            mode,
+            rng,
+        );
+        let mut output_map = HashMap::new();
+        output_map.insert(out, self.output);
+        graph.set_output_map(output_map);
+        graph
     }
 }
 

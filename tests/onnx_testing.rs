@@ -1295,6 +1295,12 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_or_bcast4v2d);
         do_test!($runner_fn, $runner_name, test_or_bcast4v3d);
         do_test!($runner_fn, $runner_name, test_or_bcast4v4d);
+        do_test!($runner_fn, $runner_name, test_constant_pad);
+        do_test!($runner_fn, $runner_name, test_constant_pad_axes);
+        do_test!($runner_fn, $runner_name, test_constant_pad_negative_axes);
+        do_test!($runner_fn, $runner_name, test_edge_pad);
+        do_test!($runner_fn, $runner_name, test_reflect_pad);
+        do_test!($runner_fn, $runner_name, test_wrap_pad);
         do_test!($runner_fn, $runner_name, test_pow);
         do_test!($runner_fn, $runner_name, test_pow_bcast_array);
         do_test!($runner_fn, $runner_name, test_pow_bcast_scalar);
