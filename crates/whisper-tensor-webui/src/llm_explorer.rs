@@ -118,8 +118,9 @@ impl LLMExplorerApp {
         // Find llm interfaces
         let mut llm_interfaces = HashMap::new();
         for (&interface_id, interface) in &loaded_models.current_interfaces {
-            let AnyInterface::TextInferenceTokensInLogitOutInterface(_x) = &interface.interface;
-            llm_interfaces.insert(interface.interface_name.clone(), interface_id);
+            if let AnyInterface::TextInferenceTokensInLogitOutInterface(_) = &interface.interface {
+                llm_interfaces.insert(interface.interface_name.clone(), interface_id);
+            }
         }
 
         ui.horizontal(|ui| {
@@ -158,14 +159,18 @@ impl LLMExplorerApp {
         }
 
         let tokenizer = if let Some(interface) = interface {
-            let AnyInterface::TextInferenceTokensInLogitOutInterface(interface) =
-                &interface.interface;
-            let info = interface.get_tokenizer();
-            loaded_tokenizers
-                .loaded_tokenizers
-                .get(info)
-                .cloned()
-                .flatten()
+            if let AnyInterface::TextInferenceTokensInLogitOutInterface(interface) =
+                &interface.interface
+            {
+                let info = interface.get_tokenizer();
+                loaded_tokenizers
+                    .loaded_tokenizers
+                    .get(info)
+                    .cloned()
+                    .flatten()
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -173,7 +178,10 @@ impl LLMExplorerApp {
         match (interface, tokenizer) {
             (Some(interface), Some(Ok(tokenizer))) => {
                 let AnyInterface::TextInferenceTokensInLogitOutInterface(llm_interface) =
-                    &interface.interface;
+                    &interface.interface
+                else {
+                    return;
+                };
                 {
                     let v = match &llm_interface.get_tokenizer() {
                         TokenizerInfo::HFTokenizer(x) => {

@@ -1297,7 +1297,9 @@ impl GraphExplorerApp {
                             }
                         });
                     }
-
+                    AnyInterface::StableDiffusionInterface(_) => {
+                        ui.label("Stable Diffusion pipeline");
+                    }
                 }
                 ui.allocate_exact_size(ui.available_size_before_wrap(), Sense::click());
             });

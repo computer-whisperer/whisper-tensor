@@ -5,6 +5,8 @@ mod graph_explorer;
 #[cfg(target_arch = "wasm32")]
 mod llm_explorer;
 #[cfg(target_arch = "wasm32")]
+mod sd_explorer;
+#[cfg(target_arch = "wasm32")]
 mod websockets;
 #[cfg(target_arch = "wasm32")]
 mod widgets;

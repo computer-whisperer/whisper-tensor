@@ -34,6 +34,7 @@ struct ModelData {
 
 pub(crate) struct ModelServer {
     models: RwLock<Vec<ModelData>>,
+    custom_interfaces: RwLock<Vec<CurrentInterfacesReportEntry>>,
     next_model_id: AtomicU32,
     models_report_watch_sender: watch::Sender<CurrentModelsAndInterfacesReport>,
     models_report_watch_receiver: watch::Receiver<CurrentModelsAndInterfacesReport>,
@@ -45,6 +46,7 @@ impl ModelServer {
             watch::channel(CurrentModelsAndInterfacesReport::new());
         Self {
             models: RwLock::new(vec![]),
+            custom_interfaces: RwLock::new(vec![]),
             next_model_id: AtomicU32::new(0),
             models_report_watch_sender,
             models_report_watch_receiver,
@@ -72,6 +74,13 @@ impl ModelServer {
                 });
             }
         }
+
+        // Include custom interfaces (e.g., SD pipelines)
+        let custom = self.custom_interfaces.read().await;
+        for entry in custom.iter() {
+            new_report.interfaces.push(entry.clone());
+        }
+
         self.models_report_watch_sender.send(new_report).unwrap()
     }
 
@@ -120,6 +129,85 @@ impl ModelServer {
         let mut guard = self.models.write().await;
         guard.retain(|model| model.model_id != model_id);
         drop(guard);
+        // Also remove custom interfaces that reference this model
+        let mut custom = self.custom_interfaces.write().await;
+        custom.retain(|entry| !entry.model_ids.contains(&model_id));
+        drop(custom);
+        self.generate_new_model_report().await;
+        Ok(())
+    }
+
+    pub(crate) async fn load_sd_pipeline(
+        &self,
+        base_path: &Path,
+    ) -> Result<(), anyhow::Error> {
+        let submodels = [
+            ("text_encoder", "text_encoder"),
+            ("unet", "unet"),
+            ("vae_decoder", "vae_decoder"),
+        ];
+
+        let mut model_ids = Vec::new();
+
+        for (name, subdir) in &submodels {
+            let storage = if cfg!(feature = "candle") {
+                WeightStorageStrategy::OriginReference
+            } else {
+                WeightStorageStrategy::EmbeddedData
+            };
+            let model_path = base_path.join(subdir).join("model.onnx");
+            tracing::info!("Loading SD {name} from {}", model_path.display());
+            let onnx_data = identify_and_load(&model_path, storage, None)?;
+            let runtime_model = {
+                let mut rng = rand::rng();
+                Model::new_from_onnx(&onnx_data, &mut rng, model_path.parent())?
+            };
+            let model_id = LoadedModelId(
+                self.next_model_id
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            );
+            let model_name = format!(
+                "{}-{}",
+                base_path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_str()
+                    .unwrap_or_default(),
+                name
+            );
+
+            let mut guard = self.models.write().await;
+            guard.push(ModelData {
+                model: Arc::new(runtime_model),
+                model_id,
+                model_name,
+                compiled_program: None,
+            });
+            drop(guard);
+
+            model_ids.push(model_id);
+        }
+
+        // Create the SD interface
+        let sd_interface = {
+            let mut rng = rand::rng();
+            StableDiffusionInterface::new(&mut rng)
+        };
+        let pipeline_name = base_path
+            .file_name()
+            .unwrap_or_default()
+            .to_str()
+            .unwrap_or_default()
+            .to_string();
+
+        let mut custom = self.custom_interfaces.write().await;
+        custom.push(CurrentInterfacesReportEntry {
+            model_ids,
+            interface_name: format!("{pipeline_name}-StableDiffusion"),
+            interface: sd_interface.to_any(),
+        });
+        drop(custom);
+
         self.generate_new_model_report().await;
         Ok(())
     }
@@ -211,7 +299,7 @@ use hf_hub::api::tokio::ApiBuilder;
 use hf_hub::{Repo, RepoType};
 use tokenizers::FromPretrainedParameters;
 use whisper_tensor::compiler::CompiledProgram;
-use whisper_tensor::interfaces::get_automatic_interfaces_from_model;
+use whisper_tensor::interfaces::{StableDiffusionInterface, get_automatic_interfaces_from_model};
 use whisper_tensor::model::Model;
 use whisper_tensor::numeric_tensor::NumericTensor;
 use whisper_tensor::symbolic_graph::tensor_store::TensorStoreTensorId;
@@ -396,6 +484,11 @@ async fn handle_socket(
                                         }
                                         WebsocketClientServerMessage::LoadModel{model_path, model_type_hint} => {
                                             let res = model_server.load_model(Path::new(&model_path), model_type_hint).await;
+                                            let msg_out = WebsocketServerClientMessage::ModelLoadReturn(res.map_err(|x| {x.to_string()}));
+                                            send_message(&mut socket, msg_out).await;
+                                        }
+                                        WebsocketClientServerMessage::LoadSDPipeline{base_path} => {
+                                            let res = model_server.load_sd_pipeline(Path::new(&base_path)).await;
                                             let msg_out = WebsocketServerClientMessage::ModelLoadReturn(res.map_err(|x| {x.to_string()}));
                                             send_message(&mut socket, msg_out).await;
                                         }

@@ -28,7 +28,7 @@ pub trait NDArrayNumericTensorType: Sized + DTypeOfPrimitive + Clone {
 }
 
 impl<R: Rank> NDArrayNumericTensor<R> {
-    pub(crate) fn from_vec_shape<T: NDArrayNumericTensorType>(
+    pub fn from_vec_shape<T: NDArrayNumericTensorType>(
         v: Vec<T>,
         shape: &R::KnownDims,
     ) -> Result<Self, NDArrayNumericTensorError> {

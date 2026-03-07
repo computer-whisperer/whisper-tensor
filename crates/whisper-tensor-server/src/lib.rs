@@ -86,6 +86,9 @@ pub enum WebsocketClientServerMessage {
         model_path: String,
         model_type_hint: Option<ModelTypeHint>,
     },
+    LoadSDPipeline {
+        base_path: String,
+    },
     UnloadModel(LoadedModelId),
     GetModelGraph(LoadedModelId),
     GetStoredTensor(LoadedModelId, TensorStoreTensorId),
