@@ -112,14 +112,17 @@ pub fn compile(
         match kernel {
             KernelOp::Elementwise(ek) => {
                 emit_elementwise(
-                    &mut builder, ek, layout, ptr_table, ptr_type, &math_refs,
+                    &mut builder,
+                    ek,
+                    layout,
+                    ptr_table,
+                    ptr_type,
+                    &math_refs,
                     &mut next_var,
                 )?;
             }
             KernelOp::Gemm(gk) => {
-                emit_gemm(
-                    &mut builder, gk, layout, ptr_table, ptr_type, &mut next_var,
-                )?;
+                emit_gemm(&mut builder, gk, layout, ptr_table, ptr_type, &mut next_var)?;
             }
         }
     }
@@ -152,11 +155,7 @@ struct LoopInfo {
     count: usize,
 }
 
-fn open_loop(
-    builder: &mut FunctionBuilder,
-    count: usize,
-    next_var: &mut u32,
-) -> LoopInfo {
+fn open_loop(builder: &mut FunctionBuilder, count: usize, next_var: &mut u32) -> LoopInfo {
     let var = Variable::from_u32(*next_var);
     *next_var += 1;
     builder.declare_var(var, types::I64);
@@ -280,7 +279,12 @@ fn emit_elementwise(
                             body_values[*b_ref],
                         )
                     } else {
-                        emit_bin_op(builder, ScalarBinOp::Add, body_values[*a_ref], body_values[*b_ref])
+                        emit_bin_op(
+                            builder,
+                            ScalarBinOp::Add,
+                            body_values[*a_ref],
+                            body_values[*b_ref],
+                        )
                     }
                 } else if let BodyOp::BinOp {
                     op: ScalarBinOp::Mul,
@@ -295,10 +299,20 @@ fn emit_elementwise(
                             body_values[*a_ref],
                         )
                     } else {
-                        emit_bin_op(builder, ScalarBinOp::Add, body_values[*a_ref], body_values[*b_ref])
+                        emit_bin_op(
+                            builder,
+                            ScalarBinOp::Add,
+                            body_values[*a_ref],
+                            body_values[*b_ref],
+                        )
                     }
                 } else {
-                    emit_bin_op(builder, ScalarBinOp::Add, body_values[*a_ref], body_values[*b_ref])
+                    emit_bin_op(
+                        builder,
+                        ScalarBinOp::Add,
+                        body_values[*a_ref],
+                        body_values[*b_ref],
+                    )
                 }
             }
             BodyOp::BinOp { op, a_ref, b_ref } => {
@@ -453,12 +467,16 @@ fn emit_gemm(
 
         let a_ptr = builder.use_var(a_ptr_var);
         let b_ptr = builder.use_var(b_ptr_var);
-        let a_val = builder.ins().load(types::F32, MemFlags::trusted(), a_ptr, 0);
+        let a_val = builder
+            .ins()
+            .load(types::F32, MemFlags::trusted(), a_ptr, 0);
 
         // Load 4 consecutive B values (same cache line).
         for i in 0..4 {
             let acc = builder.use_var(acc_vars[i]);
-            let b_val = builder.ins().load(types::F32, MemFlags::trusted(), b_ptr, (i * 4) as i32);
+            let b_val = builder
+                .ins()
+                .load(types::F32, MemFlags::trusted(), b_ptr, (i * 4) as i32);
             let new_acc = builder.ins().fma(a_val, b_val, acc);
             builder.def_var(acc_vars[i], new_acc);
         }
@@ -479,7 +497,9 @@ fn emit_gemm(
         };
         for i in 0..4 {
             let acc = builder.use_var(acc_vars[i]);
-            builder.ins().store(MemFlags::trusted(), acc, c_tile_ptr, (i * 4) as i32);
+            builder
+                .ins()
+                .store(MemFlags::trusted(), acc, c_tile_ptr, (i * 4) as i32);
         }
 
         close_loop(builder, &n_tile_loop);
@@ -517,8 +537,12 @@ fn emit_gemm(
         let a_ptr = builder.use_var(a_ptr_var);
         let b_ptr = builder.use_var(b_ptr_var);
         let acc = builder.use_var(acc_var);
-        let a_val = builder.ins().load(types::F32, MemFlags::trusted(), a_ptr, 0);
-        let b_val = builder.ins().load(types::F32, MemFlags::trusted(), b_ptr, 0);
+        let a_val = builder
+            .ins()
+            .load(types::F32, MemFlags::trusted(), a_ptr, 0);
+        let b_val = builder
+            .ins()
+            .load(types::F32, MemFlags::trusted(), b_ptr, 0);
         let new_acc = builder.ins().fma(a_val, b_val, acc);
         builder.def_var(acc_var, new_acc);
         let a_next = builder.ins().iadd_imm(a_ptr, 4);
@@ -532,7 +556,9 @@ fn emit_gemm(
         let c_byte = builder.ins().ishl_imm(c_off, 2);
         let c_addr = builder.ins().iadd(c_base, c_byte);
         let final_acc = builder.use_var(acc_var);
-        builder.ins().store(MemFlags::trusted(), final_acc, c_addr, 0);
+        builder
+            .ins()
+            .store(MemFlags::trusted(), final_acc, c_addr, 0);
 
         close_loop(builder, &n_tail_loop);
     }
@@ -562,7 +588,6 @@ fn load_tensor_base_ptr(
     let addr = builder.ins().iadd_imm(ptr_table, ptr_offset);
     Ok(builder.ins().load(ptr_type, MemFlags::trusted(), addr, 0))
 }
-
 
 fn emit_bin_op(
     builder: &mut FunctionBuilder,
@@ -708,8 +733,8 @@ fn emit_inline_exp(
     builder.ins().fmul(exp_r, two_n)
 }
 
-fn setup_jit_module(
-) -> Result<(JITModule, HashMap<&'static str, cranelift_module::FuncId>), CodegenError> {
+fn setup_jit_module()
+-> Result<(JITModule, HashMap<&'static str, cranelift_module::FuncId>), CodegenError> {
     let mut flag_builder = settings::builder();
     flag_builder
         .set("use_colocated_libcalls", "false")
@@ -763,9 +788,8 @@ mod tests {
         output_id: GlobalId,
     ) -> Vec<f32> {
         let layout = &compiled.layout;
-        let mut buffers_storage: Vec<Vec<f32>> = (0..layout.num_buffers)
-            .map(|_| Vec::new())
-            .collect();
+        let mut buffers_storage: Vec<Vec<f32>> =
+            (0..layout.num_buffers).map(|_| Vec::new()).collect();
 
         for (id, data) in tensor_data.iter() {
             if let Some(&idx) = layout.tensor_index.get(id) {
@@ -779,10 +803,7 @@ mod tests {
             }
         }
 
-        let mut ptrs: Vec<*mut f32> = buffers_storage
-            .iter_mut()
-            .map(|v| v.as_mut_ptr())
-            .collect();
+        let mut ptrs: Vec<*mut f32> = buffers_storage.iter_mut().map(|v| v.as_mut_ptr()).collect();
 
         unsafe { compiled.execute(&mut ptrs) };
 
@@ -823,11 +844,7 @@ mod tests {
         data.insert(b, b_data.clone());
 
         let result = unsafe { run_compiled_graph(&compiled, &mut data, neg) };
-        let expected: Vec<f32> = a_data
-            .iter()
-            .zip(&b_data)
-            .map(|(a, b)| -(a + b))
-            .collect();
+        let expected: Vec<f32> = a_data.iter().zip(&b_data).map(|(a, b)| -(a + b)).collect();
         assert_eq!(result, expected);
     }
 
@@ -881,12 +898,7 @@ mod tests {
 
         let mm = MatMul::push_new(&mut graph, x, w, &mut rng);
         let add = SimpleBinary::add(&mut graph, mm, b, &mut rng);
-        let tanh = SimpleUnaryOp::trig(
-            &mut graph,
-            add,
-            crate::TrigOp::Tanh,
-            &mut rng,
-        );
+        let tanh = SimpleUnaryOp::trig(&mut graph, add, crate::TrigOp::Tanh, &mut rng);
         let ext_out = GlobalId::new(&mut rng);
         graph.set_output_map([(tanh, ext_out)]);
 
@@ -911,9 +923,7 @@ mod tests {
 
         // Simple values for manual verification.
         let x_data = vec![1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0]; // identity-like rows
-        let w_data = vec![
-            0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2,
-        ];
+        let w_data = vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2];
         let b_data = vec![0.0f32, 0.0, 0.0, 0.0];
         let mut data = HashMap::new();
         data.insert(x, x_data);

@@ -201,10 +201,7 @@ fn compute_deltas(iter0: &[NanoOp], iter1: &[NanoOp]) -> Option<Vec<isize>> {
                 }
                 0
             }
-            (
-                NanoOp::Literal { value: v0, .. },
-                NanoOp::Literal { value: v1, .. },
-            ) => {
+            (NanoOp::Literal { value: v0, .. }, NanoOp::Literal { value: v1, .. }) => {
                 if v0.to_bits() != v1.to_bits() {
                     return None;
                 }
@@ -257,10 +254,9 @@ fn check_iteration(
             ) => *t0 == *t1 && *i1 as isize == *i0 as isize + expected_offset,
             (NanoOp::BinOp { op: op0, .. }, NanoOp::BinOp { op: op1, .. }) => op0 == op1,
             (NanoOp::UnaryOp { op: op0, .. }, NanoOp::UnaryOp { op: op1, .. }) => op0 == op1,
-            (
-                NanoOp::Literal { value: v0, .. },
-                NanoOp::Literal { value: v1, .. },
-            ) => v0.to_bits() == v1.to_bits(),
+            (NanoOp::Literal { value: v0, .. }, NanoOp::Literal { value: v1, .. }) => {
+                v0.to_bits() == v1.to_bits()
+            }
             _ => false,
         };
         if !ok {
@@ -316,10 +312,7 @@ fn build_loop_body(template: &[NanoOp], deltas: &[isize]) -> Option<Vec<LoopBody
             NanoOp::UnaryOp { dst, op, input } => {
                 let input_ref = *nano_to_body.get(&input.0)?;
                 nano_to_body.insert(dst.0, i);
-                LoopBodyOp::UnaryOp {
-                    op: *op,
-                    input_ref,
-                }
+                LoopBodyOp::UnaryOp { op: *op, input_ref }
             }
             NanoOp::Literal { dst, value } => {
                 nano_to_body.insert(dst.0, i);
@@ -469,8 +462,7 @@ mod tests {
         let int_a = input_map[&ext_a];
         let int_b = input_map[&ext_b];
         let mul_out = SimpleBinary::mul(&mut graph, int_a, int_b, &mut rng);
-        let neg_out =
-            crate::milli_graph::ops::SimpleUnaryOp::neg(&mut graph, mul_out, &mut rng);
+        let neg_out = crate::milli_graph::ops::SimpleUnaryOp::neg(&mut graph, mul_out, &mut rng);
 
         let mut shapes = HashMap::new();
         shapes.insert(int_a, vec![16]);

@@ -46,6 +46,31 @@ milli op's GlobalId + element predicate. This enables downstream consumers
 to declare dependencies on specific scalar values and look up which output
 crystal is responsible for them. Deferred to the crystal iteration.
 
+## Directional Intent (v6+)
+
+The long-term target is not a catalog of hard-coded kernel recognizers.
+The compiler should recover high-performance loop schedules from generic
+nano-op dataflow and access patterns.
+
+Desired properties:
+
+- **BLAS-like single-thread performance patterns** from recovered schedules
+  (tiling, reorder, vector-friendly inner loops, register blocking).
+- **No explicit MatMul special-case recognizer** in the synthesis core.
+  Contraction-like behavior should emerge from generic dependence + access
+  analysis and legal loop transforms.
+- **Transformation-driven synthesis**: recover loops, analyze legality,
+  apply reorder/split/tile/fuse/vectorization transforms, then pick schedules
+  via a cost model.
+- **Keep frontend stable**: milli-op -> nano-op lowering stays shared and
+  iterable; current experiments may still `collect()` while schedule synthesis
+  evolves.
+- **Future-proof to heterogeneous backends**: the same recovered schedule
+  concepts should later map to GPU workgroups/warps, not just CPU loops.
+
+In short: derive optimized execution structure from the whitewashed nano-op
+set itself, rather than routing through per-op handcrafted happy paths.
+
 ## Active Experiments
 
 - `common/v1_frontend`: shared nano-op IR + iterator-based lowering frontend.
@@ -54,3 +79,4 @@ crystal is responsible for them. Deferred to the crystal iteration.
 - `v3_nano_fusion`: v1 nano/crystal pipeline with post-crystal loop fusion.
 - `v4_pool_growth`: recover/fuse crystals from unordered nano-op pools.
 - `v5_typed_synthesis`: dtype-aware schedules + software bf16 matmul kernel.
+- `v6_schedule_synthesis`: generic schedule-intent recovery with no explicit matmul match.

@@ -77,9 +77,7 @@ pub fn plan(
 
                 let inputs: Vec<GlobalId> = op.inputs().collect();
                 let outputs: Vec<GlobalId> = op.outputs().collect();
-                kernels.push(build_gemm_kernel(
-                    inputs[0], inputs[1], outputs[0], shapes,
-                )?);
+                kernels.push(build_gemm_kernel(inputs[0], inputs[1], outputs[0], shapes)?);
             }
             OpClass::Unsupported => {
                 return Err(PlanError::UnsupportedOp(kind));
@@ -109,8 +107,8 @@ enum OpClass {
 fn classify_op(kind: &str) -> OpClass {
     match kind {
         "Constant" | "ConstantOfShape" => OpClass::Constant,
-        "Add" | "Sub" | "Mul" | "Div" | "Max" | "Min" | "Neg" | "Abs" | "Exp" | "Ln"
-        | "Sqrt" | "Reciprocal" | "Tanh" | "Floor" | "Ceil" => OpClass::Elementwise,
+        "Add" | "Sub" | "Mul" | "Div" | "Max" | "Min" | "Neg" | "Abs" | "Exp" | "Ln" | "Sqrt"
+        | "Reciprocal" | "Tanh" | "Floor" | "Ceil" => OpClass::Elementwise,
         "MatMul" => OpClass::MatMul,
         _ => OpClass::Unsupported,
     }
@@ -261,11 +259,9 @@ fn finalize_group(
 
     for (tensor_id, value_ref) in produced {
         let needs_store = output_tensors.contains(&tensor_id)
-            || consumer_ops
-                .get(&tensor_id)
-                .map_or(false, |consumers| {
-                    consumers.iter().any(|c| !group.op_ids.contains(c))
-                });
+            || consumer_ops.get(&tensor_id).map_or(false, |consumers| {
+                consumers.iter().any(|c| !group.op_ids.contains(c))
+            });
 
         if needs_store {
             // Store with same strides as if we loaded (it's the output shape).
@@ -558,12 +554,7 @@ mod tests {
 
         let mm = MatMul::push_new(&mut graph, x, w, &mut rng);
         let add = SimpleBinary::add(&mut graph, mm, b, &mut rng);
-        let tanh = SimpleUnaryOp::trig(
-            &mut graph,
-            add,
-            crate::TrigOp::Tanh,
-            &mut rng,
-        );
+        let tanh = SimpleUnaryOp::trig(&mut graph, add, crate::TrigOp::Tanh, &mut rng);
 
         let ext_out = GlobalId::new(&mut rng);
         graph.set_output_map([(tanh, ext_out)]);

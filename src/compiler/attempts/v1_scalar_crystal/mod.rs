@@ -4,8 +4,8 @@
 //! The crystal pass detects repeating index patterns and compresses
 //! them back into loops for codegen.
 
-pub mod nano_op;
 pub mod crystal;
+pub mod nano_op;
 
 #[cfg(feature = "cranelift")]
 pub mod codegen;

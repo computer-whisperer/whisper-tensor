@@ -154,10 +154,9 @@ pub fn compile(
                 // Load tensor base pointer from the table
                 let ptr_offset = (*tidx as i64) * (ptr_type.bytes() as i64);
                 let base_ptr_addr = builder.ins().iadd_imm(ptr_table, ptr_offset);
-                let base_ptr =
-                    builder
-                        .ins()
-                        .load(ptr_type, MemFlags::trusted(), base_ptr_addr, 0);
+                let base_ptr = builder
+                    .ins()
+                    .load(ptr_type, MemFlags::trusted(), base_ptr_addr, 0);
                 // Load f32 element
                 let elem_offset = (*flat_index as i64) * 4;
                 let elem_addr = builder.ins().iadd_imm(base_ptr, elem_offset);
@@ -178,16 +177,13 @@ pub fn compile(
                     .ok_or(CodegenError::UnknownTensor(*tensor))?;
                 let ptr_offset = (*tidx as i64) * (ptr_type.bytes() as i64);
                 let base_ptr_addr = builder.ins().iadd_imm(ptr_table, ptr_offset);
-                let base_ptr =
-                    builder
-                        .ins()
-                        .load(ptr_type, MemFlags::trusted(), base_ptr_addr, 0);
+                let base_ptr = builder
+                    .ins()
+                    .load(ptr_type, MemFlags::trusted(), base_ptr_addr, 0);
                 let elem_offset = (*flat_index as i64) * 4;
                 let elem_addr = builder.ins().iadd_imm(base_ptr, elem_offset);
                 let val = value_map[&src.0];
-                builder
-                    .ins()
-                    .store(MemFlags::trusted(), val, elem_addr, 0);
+                builder.ins().store(MemFlags::trusted(), val, elem_addr, 0);
             }
 
             NanoOp::Literal { dst, value } => {
@@ -367,7 +363,15 @@ fn emit_scalar_nano_op(
             src,
         } => {
             let val = value_map[&src.0];
-            emit_store(builder, layout, ptr_table, ptr_type, *tensor, *flat_index, val)?;
+            emit_store(
+                builder,
+                layout,
+                ptr_table,
+                ptr_type,
+                *tensor,
+                *flat_index,
+                val,
+            )?;
         }
         NanoOp::Literal { dst, value } => {
             let val = builder.ins().f32const(*value as f32);
@@ -407,7 +411,6 @@ fn emit_crystal_loop(
     math_refs: &HashMap<&str, cranelift_codegen::ir::FuncRef>,
     next_var_index: &mut u32,
 ) -> Result<(), CodegenError> {
-
     // Declare a cranelift Variable for the induction variable
     let iv_var = Variable::from_u32(*next_var_index);
     *next_var_index += 1;
@@ -429,7 +432,8 @@ fn emit_crystal_loop(
     let i = builder.use_var(iv_var);
 
     // Body op values: index into body -> cranelift Value
-    let mut body_values: Vec<cranelift_codegen::ir::Value> = Vec::with_capacity(crystal_loop.body.len());
+    let mut body_values: Vec<cranelift_codegen::ir::Value> =
+        Vec::with_capacity(crystal_loop.body.len());
 
     for body_op in &crystal_loop.body {
         let val = match body_op {
@@ -445,10 +449,9 @@ fn emit_crystal_loop(
                 // Load base pointer from table
                 let ptr_offset = (*tidx as i64) * (ptr_type.bytes() as i64);
                 let base_ptr_addr = builder.ins().iadd_imm(ptr_table, ptr_offset);
-                let base_ptr =
-                    builder
-                        .ins()
-                        .load(ptr_type, MemFlags::trusted(), base_ptr_addr, 0);
+                let base_ptr = builder
+                    .ins()
+                    .load(ptr_type, MemFlags::trusted(), base_ptr_addr, 0);
                 // Compute element index: base_index + i * step
                 let elem_idx = if *step == 0 {
                     // Broadcast: always same index
@@ -480,10 +483,9 @@ fn emit_crystal_loop(
                     .ok_or(CodegenError::UnknownTensor(*tensor))?;
                 let ptr_offset = (*tidx as i64) * (ptr_type.bytes() as i64);
                 let base_ptr_addr = builder.ins().iadd_imm(ptr_table, ptr_offset);
-                let base_ptr =
-                    builder
-                        .ins()
-                        .load(ptr_type, MemFlags::trusted(), base_ptr_addr, 0);
+                let base_ptr = builder
+                    .ins()
+                    .load(ptr_type, MemFlags::trusted(), base_ptr_addr, 0);
                 let elem_idx = if *step == 0 {
                     builder.ins().iconst(types::I64, *base_index as i64)
                 } else if *step == 1 {
@@ -496,9 +498,7 @@ fn emit_crystal_loop(
                 let byte_offset = builder.ins().ishl_imm(elem_idx, 2);
                 let elem_addr = builder.ins().iadd(base_ptr, byte_offset);
                 let val = body_values[*value_ref];
-                builder
-                    .ins()
-                    .store(MemFlags::trusted(), val, elem_addr, 0);
+                builder.ins().store(MemFlags::trusted(), val, elem_addr, 0);
                 // Store doesn't produce a value, but we need a placeholder
                 val // reuse the stored value as placeholder
             }
@@ -637,15 +637,13 @@ fn emit_store(
         .load(ptr_type, MemFlags::trusted(), base_ptr_addr, 0);
     let elem_offset = (flat_index as i64) * 4;
     let elem_addr = builder.ins().iadd_imm(base_ptr, elem_offset);
-    builder
-        .ins()
-        .store(MemFlags::trusted(), val, elem_addr, 0);
+    builder.ins().store(MemFlags::trusted(), val, elem_addr, 0);
     Ok(())
 }
 
 /// Set up the JIT module with math function symbols and ISA.
-fn setup_jit_module(
-) -> Result<(JITModule, HashMap<&'static str, cranelift_module::FuncId>), CodegenError> {
+fn setup_jit_module()
+-> Result<(JITModule, HashMap<&'static str, cranelift_module::FuncId>), CodegenError> {
     let mut flag_builder = settings::builder();
     flag_builder
         .set("use_colocated_libcalls", "false")
@@ -777,10 +775,7 @@ mod tests {
             compiled.execute(&mut buffers);
         }
 
-        assert_eq!(
-            out_data,
-            vec![10.0, 200.0, 3000.0, 40.0, 500.0, 6000.0]
-        );
+        assert_eq!(out_data, vec![10.0, 200.0, 3000.0, 40.0, 500.0, 6000.0]);
     }
 
     #[test]
@@ -820,7 +815,9 @@ mod tests {
             compiled.execute(&mut buffers);
         }
 
-        let expected: Vec<f32> = (0..8).map(|i| (i + 1) as f32 + ((i + 1) * 10) as f32).collect();
+        let expected: Vec<f32> = (0..8)
+            .map(|i| (i + 1) as f32 + ((i + 1) * 10) as f32)
+            .collect();
         assert_eq!(out_data, expected);
     }
 
@@ -862,10 +859,7 @@ mod tests {
             compiled.execute(&mut buffers);
         }
 
-        assert_eq!(
-            out_data,
-            vec![10.0, 200.0, 3000.0, 40.0, 500.0, 6000.0]
-        );
+        assert_eq!(out_data, vec![10.0, 200.0, 3000.0, 40.0, 500.0, 6000.0]);
     }
 
     #[test]
@@ -879,8 +873,7 @@ mod tests {
         let int_a = input_map[&ext_a];
         let int_b = input_map[&ext_b];
         let mul_out = SimpleBinary::mul(&mut graph, int_a, int_b, &mut rng);
-        let neg_out =
-            crate::milli_graph::ops::SimpleUnaryOp::neg(&mut graph, mul_out, &mut rng);
+        let neg_out = crate::milli_graph::ops::SimpleUnaryOp::neg(&mut graph, mul_out, &mut rng);
 
         let mut shapes = HashMap::new();
         shapes.insert(int_a, vec![16]);

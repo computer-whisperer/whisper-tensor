@@ -53,10 +53,7 @@ pub enum BodyOp {
         b_ref: usize,
     },
     /// Unary scalar op.
-    UnaryOp {
-        op: ScalarUnaryOp,
-        input_ref: usize,
-    },
+    UnaryOp { op: ScalarUnaryOp, input_ref: usize },
     /// Literal constant.
     Literal { value: f64 },
 }
@@ -124,9 +121,11 @@ pub fn stats(kernels: &[KernelOp]) -> PlanStats {
         match k {
             KernelOp::Elementwise(ek) => {
                 num_elementwise += 1;
-                total_fused_ops += ek.body.iter().filter(|op| {
-                    matches!(op, BodyOp::BinOp { .. } | BodyOp::UnaryOp { .. })
-                }).count();
+                total_fused_ops += ek
+                    .body
+                    .iter()
+                    .filter(|op| matches!(op, BodyOp::BinOp { .. } | BodyOp::UnaryOp { .. }))
+                    .count();
                 total_loop_dims += ek.dims.iter().product::<usize>();
             }
             KernelOp::Gemm(_) => {

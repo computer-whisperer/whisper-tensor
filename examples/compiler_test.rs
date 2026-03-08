@@ -1,6 +1,7 @@
+use half::bf16;
+use rand::RngCore;
 use std::collections::HashMap;
 use std::time::Instant;
-use rand::RngCore;
 
 // v1
 use whisper_tensor::compiler::attempts::v1_scalar_crystal::{
@@ -11,7 +12,13 @@ use whisper_tensor::compiler::attempts::v1_scalar_crystal::{
 use whisper_tensor::compiler::attempts::v2_fusion::{
     codegen as v2_codegen, kernel as v2_kernel, planner as v2_planner,
 };
+use whisper_tensor::compiler::attempts::v3_nano_fusion::{
+    codegen as v3_codegen, fusion as v3_fusion,
+};
+use whisper_tensor::compiler::attempts::v4_pool_growth::codegen as v4_codegen;
+use whisper_tensor::compiler::attempts::v5_typed_synthesis::synth as v5_synth;
 
+use whisper_tensor::dtype::DType;
 use whisper_tensor::graph::GlobalId;
 use whisper_tensor::milli_graph::MilliOpGraph;
 use whisper_tensor::milli_graph::ops::{MatMul, SimpleBinary, SimpleUnaryOp};
@@ -26,7 +33,12 @@ use whisper_tensor::tensor_rank::DynRank;
 fn build_chain_graph(
     shape: &[usize],
     rng: &mut impl rand::Rng,
-) -> (MilliOpGraph, Vec<GlobalId>, GlobalId, HashMap<GlobalId, Vec<usize>>) {
+) -> (
+    MilliOpGraph,
+    Vec<GlobalId>,
+    GlobalId,
+    HashMap<GlobalId, Vec<usize>>,
+) {
     let ext_a = GlobalId::new(rng);
     let ext_b = GlobalId::new(rng);
     let ext_c = GlobalId::new(rng);
@@ -57,7 +69,13 @@ fn build_elementwise_mlp(
     shape: &[usize],
     num_layers: usize,
     rng: &mut impl rand::Rng,
-) -> (MilliOpGraph, GlobalId, Vec<(GlobalId, GlobalId)>, GlobalId, HashMap<GlobalId, Vec<usize>>) {
+) -> (
+    MilliOpGraph,
+    GlobalId,
+    Vec<(GlobalId, GlobalId)>,
+    GlobalId,
+    HashMap<GlobalId, Vec<usize>>,
+) {
     let ext_input = GlobalId::new(rng);
     let mut ext_ids = vec![ext_input];
     let mut layer_params = Vec::new();
@@ -99,7 +117,13 @@ fn build_arithmetic_chain(
     shape: &[usize],
     num_layers: usize,
     rng: &mut impl rand::Rng,
-) -> (MilliOpGraph, GlobalId, Vec<(GlobalId, GlobalId)>, GlobalId, HashMap<GlobalId, Vec<usize>>) {
+) -> (
+    MilliOpGraph,
+    GlobalId,
+    Vec<(GlobalId, GlobalId)>,
+    GlobalId,
+    HashMap<GlobalId, Vec<usize>>,
+) {
     let ext_input = GlobalId::new(rng);
     let mut ext_ids = vec![ext_input];
     let mut layer_params = Vec::new();
@@ -139,7 +163,13 @@ fn build_matmul_mlp(
     batch: usize,
     dims: &[usize], // [in, hidden1, hidden2, ..., out]
     rng: &mut impl rand::Rng,
-) -> (MilliOpGraph, GlobalId, Vec<(GlobalId, GlobalId)>, GlobalId, HashMap<GlobalId, Vec<usize>>) {
+) -> (
+    MilliOpGraph,
+    GlobalId,
+    Vec<(GlobalId, GlobalId)>,
+    GlobalId,
+    HashMap<GlobalId, Vec<usize>>,
+) {
     let ext_input = GlobalId::new(rng);
     let mut ext_ids = vec![ext_input];
     let mut layer_params = Vec::new();
@@ -240,6 +270,24 @@ fn run_v2_compiled(
     bufs[layout.tensor_index[&output_id]][..output_size].to_vec()
 }
 
+fn run_v3_compiled(
+    compiled: &v3_codegen::NativeCompiledGraph,
+    inputs: &HashMap<GlobalId, Vec<f32>>,
+    output_id: GlobalId,
+    output_size: usize,
+) -> Vec<f32> {
+    run_v1_compiled(compiled, inputs, output_id, output_size)
+}
+
+fn run_v4_compiled(
+    compiled: &v4_codegen::NativeCompiledGraph,
+    inputs: &HashMap<GlobalId, Vec<f32>>,
+    output_id: GlobalId,
+    output_size: usize,
+) -> Vec<f32> {
+    run_v1_compiled(compiled, inputs, output_id, output_size)
+}
+
 fn make_random_f32(n: usize, seed: u64) -> Vec<f32> {
     let mut rng = wyrand::WyRand::new(seed);
     (0..n)
@@ -251,7 +299,26 @@ fn make_random_f32(n: usize, seed: u64) -> Vec<f32> {
 }
 
 fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
-    a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max)
+    a.iter()
+        .zip(b)
+        .map(|(x, y)| (x - y).abs())
+        .fold(0.0f32, f32::max)
+}
+
+fn run_reference_bf16_matmul(m: usize, n: usize, k: usize, a: &[u16], b: &[u16]) -> Vec<f32> {
+    let mut out = vec![0.0f32; m * n];
+    for row in 0..m {
+        for col in 0..n {
+            let mut acc = 0.0f32;
+            for kk in 0..k {
+                let av = bf16::from_bits(a[row * k + kk]).to_f32();
+                let bv = bf16::from_bits(b[kk * n + col]).to_f32();
+                acc += av * bv;
+            }
+            out[row * n + col] = acc;
+        }
+    }
+    out
 }
 
 /// Build internal input map for compiled execution.
@@ -262,13 +329,20 @@ fn build_compiled_inputs(
     let mut out = HashMap::new();
     for (ext_id, tensor) in interp_inputs {
         let int_id = graph.input_map[ext_id];
-        out.insert(int_id, Vec::<f32>::try_from(tensor.flatten().unwrap()).unwrap());
+        out.insert(
+            int_id,
+            Vec::<f32>::try_from(tensor.flatten().unwrap()).unwrap(),
+        );
     }
     out
 }
 
 fn find_internal_output(graph: &MilliOpGraph, ext_out: GlobalId) -> GlobalId {
-    *graph.output_map.as_ref().unwrap().keys()
+    *graph
+        .output_map
+        .as_ref()
+        .unwrap()
+        .keys()
         .find(|id| graph.output_map.as_ref().unwrap()[id] == ext_out)
         .unwrap()
 }
@@ -301,7 +375,10 @@ fn main() {
         let mut interp_inputs = HashMap::new();
         for (i, &eid) in ext_ins.iter().enumerate() {
             let data = [&a_data, &b_data, &c_data][i];
-            interp_inputs.insert(eid, NumericTensor::<DynRank>::from_vec_shape(data.clone(), shape.to_vec()).unwrap());
+            interp_inputs.insert(
+                eid,
+                NumericTensor::<DynRank>::from_vec_shape(data.clone(), shape.to_vec()).unwrap(),
+            );
         }
         let interp_result = run_interpreter(&graph, &interp_inputs, ext_out);
         let compiled_inputs = build_compiled_inputs(&graph, &interp_inputs);
@@ -322,11 +399,51 @@ fn main() {
         let v2_compiled = v2_codegen::compile(&kernels, &v2_layout).unwrap();
         let v2_result = run_v2_compiled(&v2_compiled, &compiled_inputs, int_out, total);
 
-        println!("  v2: {} kernels, {} fused ops", v2_stats.num_kernels, v2_stats.total_fused_ops);
-        println!("  v1 crystal diff: {:.2e}", max_abs_diff(&interp_result, &v1_result));
-        println!("  v2 fusion diff:  {:.2e}", max_abs_diff(&interp_result, &v2_result));
+        // v3 nano-fusion (v1 nano ops + fused crystal loops)
+        let (v3_fused_crystals, v3_stats) = v3_fusion::fuse_with_stats(&crystal_ops);
+        let v3_layout = v3_codegen::TensorLayout::from_shapes(&shapes);
+        let v3_compiled = v3_codegen::compile_fused_crystallized(&crystal_ops, &v3_layout).unwrap();
+        let v3_result = run_v3_compiled(&v3_compiled, &compiled_inputs, int_out, total);
+        let (v4_compiled, v4_artifacts) = v4_codegen::compile_graph(&graph, &shapes).unwrap();
+        let v4_result = run_v4_compiled(&v4_compiled, &compiled_inputs, int_out, total);
+
+        println!(
+            "  v2: {} kernels, {} fused ops",
+            v2_stats.num_kernels, v2_stats.total_fused_ops
+        );
+        println!(
+            "  v3: {} -> {} crystal ops, {} fused pairs, {} eliminated loads",
+            crystal_ops.len(),
+            v3_fused_crystals.len(),
+            v3_stats.fused_pairs,
+            v3_stats.eliminated_loads,
+        );
+        println!(
+            "  v1 crystal diff: {:.2e}",
+            max_abs_diff(&interp_result, &v1_result)
+        );
+        println!(
+            "  v2 fusion diff:  {:.2e}",
+            max_abs_diff(&interp_result, &v2_result)
+        );
+        println!(
+            "  v3 nano diff:    {:.2e}",
+            max_abs_diff(&interp_result, &v3_result)
+        );
+        println!(
+            "  v4 pool: {} ordered loops -> {} fused loops ({} fused pairs)",
+            v4_artifacts.plan.stats.ordered_loops,
+            v4_artifacts.plan.stats.fused_loops,
+            v4_artifacts.plan.stats.fused_pairs,
+        );
+        println!(
+            "  v4 pool diff:    {:.2e}",
+            max_abs_diff(&interp_result, &v4_result)
+        );
         assert!(max_abs_diff(&interp_result, &v1_result) < 1e-5);
         assert!(max_abs_diff(&interp_result, &v2_result) < 1e-5);
+        assert!(max_abs_diff(&interp_result, &v3_result) < 1e-5);
+        assert!(max_abs_diff(&interp_result, &v4_result) < 1e-5);
         println!("  PASS\n");
     }
 
@@ -337,16 +454,37 @@ fn main() {
         let shape = &[32, 64];
         let total: usize = shape.iter().product();
         let num_layers = 5;
-        println!("Test 2: {}-layer elementwise MLP, shape {:?}", num_layers, shape);
+        println!(
+            "Test 2: {}-layer elementwise MLP, shape {:?}",
+            num_layers, shape
+        );
 
         let (graph, ext_input, layer_params, ext_out, shapes) =
             build_elementwise_mlp(shape, num_layers, &mut rng);
 
         let mut interp_inputs = HashMap::new();
-        interp_inputs.insert(ext_input, NumericTensor::<DynRank>::from_vec_shape(make_random_f32(total, 100), shape.to_vec()).unwrap());
+        interp_inputs.insert(
+            ext_input,
+            NumericTensor::<DynRank>::from_vec_shape(make_random_f32(total, 100), shape.to_vec())
+                .unwrap(),
+        );
         for (i, (ew, eb)) in layer_params.iter().enumerate() {
-            interp_inputs.insert(*ew, NumericTensor::<DynRank>::from_vec_shape(make_random_f32(total, 200 + i as u64 * 2), shape.to_vec()).unwrap());
-            interp_inputs.insert(*eb, NumericTensor::<DynRank>::from_vec_shape(make_random_f32(total, 201 + i as u64 * 2), shape.to_vec()).unwrap());
+            interp_inputs.insert(
+                *ew,
+                NumericTensor::<DynRank>::from_vec_shape(
+                    make_random_f32(total, 200 + i as u64 * 2),
+                    shape.to_vec(),
+                )
+                .unwrap(),
+            );
+            interp_inputs.insert(
+                *eb,
+                NumericTensor::<DynRank>::from_vec_shape(
+                    make_random_f32(total, 201 + i as u64 * 2),
+                    shape.to_vec(),
+                )
+                .unwrap(),
+            );
         }
 
         let interp_result = run_interpreter(&graph, &interp_inputs, ext_out);
@@ -366,7 +504,10 @@ fn main() {
         let v2_layout = v2_codegen::TensorLayout::from_shapes(&shapes);
         let v2_compiled = v2_codegen::compile(&kernels, &v2_layout).unwrap();
 
-        println!("  v2: {} kernels, {} fused ops", v2_stats.num_kernels, v2_stats.total_fused_ops);
+        println!(
+            "  v2: {} kernels, {} fused ops",
+            v2_stats.num_kernels, v2_stats.total_fused_ops
+        );
 
         let v1_result = run_v1_compiled(&v1_compiled, &compiled_inputs, int_out, total);
         let v2_result = run_v2_compiled(&v2_compiled, &compiled_inputs, int_out, total);
@@ -375,22 +516,35 @@ fn main() {
 
         let n = 100;
         let t = Instant::now();
-        for _ in 0..n { let _ = run_interpreter(&graph, &interp_inputs, ext_out); }
+        for _ in 0..n {
+            let _ = run_interpreter(&graph, &interp_inputs, ext_out);
+        }
         let interp_avg = t.elapsed() / n;
 
         let t = Instant::now();
-        for _ in 0..n { let _ = run_v1_compiled(&v1_compiled, &compiled_inputs, int_out, total); }
+        for _ in 0..n {
+            let _ = run_v1_compiled(&v1_compiled, &compiled_inputs, int_out, total);
+        }
         let v1_avg = t.elapsed() / n;
 
         let t = Instant::now();
-        for _ in 0..n { let _ = run_v2_compiled(&v2_compiled, &compiled_inputs, int_out, total); }
+        for _ in 0..n {
+            let _ = run_v2_compiled(&v2_compiled, &compiled_inputs, int_out, total);
+        }
         let v2_avg = t.elapsed() / n;
 
-        print_timing("Interpreter:", interp_avg, n); println!();
+        print_timing("Interpreter:", interp_avg, n);
+        println!();
         print_timing("v1 crystal:", v1_avg, n);
-        println!("  {:.2}x", interp_avg.as_nanos() as f64 / v1_avg.as_nanos() as f64);
+        println!(
+            "  {:.2}x",
+            interp_avg.as_nanos() as f64 / v1_avg.as_nanos() as f64
+        );
         print_timing("v2 fusion:", v2_avg, n);
-        println!("  {:.2}x", interp_avg.as_nanos() as f64 / v2_avg.as_nanos() as f64);
+        println!(
+            "  {:.2}x",
+            interp_avg.as_nanos() as f64 / v2_avg.as_nanos() as f64
+        );
         println!("  PASS\n");
     }
 
@@ -401,16 +555,37 @@ fn main() {
         let shape = &[32, 64];
         let total: usize = shape.iter().product();
         let num_layers = 5;
-        println!("Test 2b: {}-layer arithmetic chain (mul+add only), shape {:?}", num_layers, shape);
+        println!(
+            "Test 2b: {}-layer arithmetic chain (mul+add only), shape {:?}",
+            num_layers, shape
+        );
 
         let (graph, ext_input, layer_params, ext_out, shapes) =
             build_arithmetic_chain(shape, num_layers, &mut rng);
 
         let mut interp_inputs = HashMap::new();
-        interp_inputs.insert(ext_input, NumericTensor::<DynRank>::from_vec_shape(make_random_f32(total, 400), shape.to_vec()).unwrap());
+        interp_inputs.insert(
+            ext_input,
+            NumericTensor::<DynRank>::from_vec_shape(make_random_f32(total, 400), shape.to_vec())
+                .unwrap(),
+        );
         for (i, (ew, eb)) in layer_params.iter().enumerate() {
-            interp_inputs.insert(*ew, NumericTensor::<DynRank>::from_vec_shape(make_random_f32(total, 500 + i as u64 * 2), shape.to_vec()).unwrap());
-            interp_inputs.insert(*eb, NumericTensor::<DynRank>::from_vec_shape(make_random_f32(total, 501 + i as u64 * 2), shape.to_vec()).unwrap());
+            interp_inputs.insert(
+                *ew,
+                NumericTensor::<DynRank>::from_vec_shape(
+                    make_random_f32(total, 500 + i as u64 * 2),
+                    shape.to_vec(),
+                )
+                .unwrap(),
+            );
+            interp_inputs.insert(
+                *eb,
+                NumericTensor::<DynRank>::from_vec_shape(
+                    make_random_f32(total, 501 + i as u64 * 2),
+                    shape.to_vec(),
+                )
+                .unwrap(),
+            );
         }
 
         let compiled_inputs = build_compiled_inputs(&graph, &interp_inputs);
@@ -429,26 +604,98 @@ fn main() {
         let v2_layout = v2_codegen::TensorLayout::from_shapes(&shapes);
         let v2_compiled = v2_codegen::compile(&kernels, &v2_layout).unwrap();
 
-        println!("  v2: {} kernels, {} fused ops", v2_stats.num_kernels, v2_stats.total_fused_ops);
+        println!(
+            "  v2: {} kernels, {} fused ops",
+            v2_stats.num_kernels, v2_stats.total_fused_ops
+        );
+        let (v3_fused_crystals, v3_stats) = v3_fusion::fuse_with_stats(&crystal_ops);
+        let v3_layout = v3_codegen::TensorLayout::from_shapes(&shapes);
+        let v3_compiled = v3_codegen::compile_fused_crystallized(&crystal_ops, &v3_layout).unwrap();
+        let (v4_compiled, v4_artifacts) = v4_codegen::compile_graph(&graph, &shapes).unwrap();
+        println!(
+            "  v3: {} -> {} crystal ops, {} fused pairs, {} eliminated loads",
+            crystal_ops.len(),
+            v3_fused_crystals.len(),
+            v3_stats.fused_pairs,
+            v3_stats.eliminated_loads,
+        );
+        println!(
+            "  v4: {} recovered loops -> {} fused loops, {} fused pairs",
+            v4_artifacts.plan.stats.ordered_loops,
+            v4_artifacts.plan.stats.fused_loops,
+            v4_artifacts.plan.stats.fused_pairs,
+        );
+
+        let interp_result = run_interpreter(&graph, &interp_inputs, ext_out);
+        let v1_result = run_v1_compiled(&v1_compiled, &compiled_inputs, int_out, total);
+        let v2_result = run_v2_compiled(&v2_compiled, &compiled_inputs, int_out, total);
+        let v3_result = run_v3_compiled(&v3_compiled, &compiled_inputs, int_out, total);
+        let v4_result = run_v4_compiled(&v4_compiled, &compiled_inputs, int_out, total);
+        assert!(max_abs_diff(&interp_result, &v1_result) < 1e-5);
+        assert!(max_abs_diff(&interp_result, &v2_result) < 1e-5);
+        assert!(max_abs_diff(&interp_result, &v3_result) < 1e-5);
+        assert!(max_abs_diff(&interp_result, &v4_result) < 1e-5);
 
         let n = 500;
         let t = Instant::now();
-        for _ in 0..n { let _ = run_interpreter(&graph, &interp_inputs, ext_out); }
+        for _ in 0..n {
+            let _ = run_interpreter(&graph, &interp_inputs, ext_out);
+        }
         let interp_avg = t.elapsed() / n;
 
         let t = Instant::now();
-        for _ in 0..n { let _ = run_v1_compiled(&v1_compiled, &compiled_inputs, int_out, total); }
+        for _ in 0..n {
+            let _ = run_v1_compiled(&v1_compiled, &compiled_inputs, int_out, total);
+        }
         let v1_avg = t.elapsed() / n;
 
         let t = Instant::now();
-        for _ in 0..n { let _ = run_v2_compiled(&v2_compiled, &compiled_inputs, int_out, total); }
+        for _ in 0..n {
+            let _ = run_v2_compiled(&v2_compiled, &compiled_inputs, int_out, total);
+        }
         let v2_avg = t.elapsed() / n;
 
-        print_timing("Interpreter:", interp_avg, n); println!();
+        let t = Instant::now();
+        for _ in 0..n {
+            let _ = run_v3_compiled(&v3_compiled, &compiled_inputs, int_out, total);
+        }
+        let v3_avg = t.elapsed() / n;
+        let t = Instant::now();
+        for _ in 0..n {
+            let _ = run_v4_compiled(&v4_compiled, &compiled_inputs, int_out, total);
+        }
+        let v4_avg = t.elapsed() / n;
+
+        print_timing("Interpreter:", interp_avg, n);
+        println!();
         print_timing("v1 crystal:", v1_avg, n);
-        println!("  {:.2}x", interp_avg.as_nanos() as f64 / v1_avg.as_nanos() as f64);
+        println!(
+            "  {:.2}x",
+            interp_avg.as_nanos() as f64 / v1_avg.as_nanos() as f64
+        );
         print_timing("v2 fusion:", v2_avg, n);
-        println!("  {:.2}x", interp_avg.as_nanos() as f64 / v2_avg.as_nanos() as f64);
+        println!(
+            "  {:.2}x",
+            interp_avg.as_nanos() as f64 / v2_avg.as_nanos() as f64
+        );
+        print_timing("v3 nano-fusion:", v3_avg, n);
+        println!(
+            "  {:.2}x",
+            interp_avg.as_nanos() as f64 / v3_avg.as_nanos() as f64
+        );
+        println!(
+            "  v3 vs v2: {:.2}x",
+            v2_avg.as_nanos() as f64 / v3_avg.as_nanos() as f64
+        );
+        print_timing("v4 pool-growth:", v4_avg, n);
+        println!(
+            "  {:.2}x",
+            interp_avg.as_nanos() as f64 / v4_avg.as_nanos() as f64
+        );
+        println!(
+            "  v4 vs v2: {:.2}x",
+            v2_avg.as_nanos() as f64 / v4_avg.as_nanos() as f64
+        );
         println!("  PASS\n");
     }
 
@@ -459,16 +706,39 @@ fn main() {
         let shape = &[256, 256];
         let total: usize = shape.iter().product();
         let num_layers = 5;
-        println!("Test 2c: {}-layer elementwise MLP, shape {:?} ({}KB per tensor)", num_layers, shape, total * 4 / 1024);
+        println!(
+            "Test 2c: {}-layer elementwise MLP, shape {:?} ({}KB per tensor)",
+            num_layers,
+            shape,
+            total * 4 / 1024
+        );
 
         let (graph, ext_input, layer_params, ext_out, shapes) =
             build_elementwise_mlp(shape, num_layers, &mut rng);
 
         let mut interp_inputs = HashMap::new();
-        interp_inputs.insert(ext_input, NumericTensor::<DynRank>::from_vec_shape(make_random_f32(total, 600), shape.to_vec()).unwrap());
+        interp_inputs.insert(
+            ext_input,
+            NumericTensor::<DynRank>::from_vec_shape(make_random_f32(total, 600), shape.to_vec())
+                .unwrap(),
+        );
         for (i, (ew, eb)) in layer_params.iter().enumerate() {
-            interp_inputs.insert(*ew, NumericTensor::<DynRank>::from_vec_shape(make_random_f32(total, 700 + i as u64 * 2), shape.to_vec()).unwrap());
-            interp_inputs.insert(*eb, NumericTensor::<DynRank>::from_vec_shape(make_random_f32(total, 701 + i as u64 * 2), shape.to_vec()).unwrap());
+            interp_inputs.insert(
+                *ew,
+                NumericTensor::<DynRank>::from_vec_shape(
+                    make_random_f32(total, 700 + i as u64 * 2),
+                    shape.to_vec(),
+                )
+                .unwrap(),
+            );
+            interp_inputs.insert(
+                *eb,
+                NumericTensor::<DynRank>::from_vec_shape(
+                    make_random_f32(total, 701 + i as u64 * 2),
+                    shape.to_vec(),
+                )
+                .unwrap(),
+            );
         }
 
         let interp_result = run_interpreter(&graph, &interp_inputs, ext_out);
@@ -488,7 +758,10 @@ fn main() {
         let v2_layout = v2_codegen::TensorLayout::from_shapes(&shapes);
         let v2_compiled = v2_codegen::compile(&kernels, &v2_layout).unwrap();
 
-        println!("  v2: {} kernels, {} fused ops", v2_stats.num_kernels, v2_stats.total_fused_ops);
+        println!(
+            "  v2: {} kernels, {} fused ops",
+            v2_stats.num_kernels, v2_stats.total_fused_ops
+        );
 
         let v1_result = run_v1_compiled(&v1_compiled, &compiled_inputs, int_out, total);
         let v2_result = run_v2_compiled(&v2_compiled, &compiled_inputs, int_out, total);
@@ -497,22 +770,35 @@ fn main() {
 
         let n = 20;
         let t = Instant::now();
-        for _ in 0..n { let _ = run_interpreter(&graph, &interp_inputs, ext_out); }
+        for _ in 0..n {
+            let _ = run_interpreter(&graph, &interp_inputs, ext_out);
+        }
         let interp_avg = t.elapsed() / n;
 
         let t = Instant::now();
-        for _ in 0..n { let _ = run_v1_compiled(&v1_compiled, &compiled_inputs, int_out, total); }
+        for _ in 0..n {
+            let _ = run_v1_compiled(&v1_compiled, &compiled_inputs, int_out, total);
+        }
         let v1_avg = t.elapsed() / n;
 
         let t = Instant::now();
-        for _ in 0..n { let _ = run_v2_compiled(&v2_compiled, &compiled_inputs, int_out, total); }
+        for _ in 0..n {
+            let _ = run_v2_compiled(&v2_compiled, &compiled_inputs, int_out, total);
+        }
         let v2_avg = t.elapsed() / n;
 
-        print_timing("Interpreter:", interp_avg, n); println!();
+        print_timing("Interpreter:", interp_avg, n);
+        println!();
         print_timing("v1 crystal:", v1_avg, n);
-        println!("  {:.2}x", interp_avg.as_nanos() as f64 / v1_avg.as_nanos() as f64);
+        println!(
+            "  {:.2}x",
+            interp_avg.as_nanos() as f64 / v1_avg.as_nanos() as f64
+        );
         print_timing("v2 fusion:", v2_avg, n);
-        println!("  {:.2}x", interp_avg.as_nanos() as f64 / v2_avg.as_nanos() as f64);
+        println!(
+            "  {:.2}x",
+            interp_avg.as_nanos() as f64 / v2_avg.as_nanos() as f64
+        );
         println!("  PASS\n");
     }
 
@@ -539,8 +825,14 @@ fn main() {
         let a_data = make_random_f32(32, 1);
         let b_data = make_random_f32(24, 2);
         let mut interp_inputs = HashMap::new();
-        interp_inputs.insert(ext_a, NumericTensor::<DynRank>::from_vec_shape(a_data.clone(), vec![4, 8]).unwrap());
-        interp_inputs.insert(ext_b, NumericTensor::<DynRank>::from_vec_shape(b_data.clone(), vec![8, 3]).unwrap());
+        interp_inputs.insert(
+            ext_a,
+            NumericTensor::<DynRank>::from_vec_shape(a_data.clone(), vec![4, 8]).unwrap(),
+        );
+        interp_inputs.insert(
+            ext_b,
+            NumericTensor::<DynRank>::from_vec_shape(b_data.clone(), vec![8, 3]).unwrap(),
+        );
         let interp_result = run_interpreter(&graph, &interp_inputs, ext_out);
 
         let kernels = v2_planner::plan(&graph, &shapes).unwrap();
@@ -567,15 +859,33 @@ fn main() {
             build_matmul_mlp(batch, dims, &mut rng);
 
         let mut interp_inputs = HashMap::new();
-        interp_inputs.insert(ext_input, NumericTensor::<DynRank>::from_vec_shape(
-            make_random_f32(batch * dims[0], 700), vec![batch, dims[0]]).unwrap());
+        interp_inputs.insert(
+            ext_input,
+            NumericTensor::<DynRank>::from_vec_shape(
+                make_random_f32(batch * dims[0], 700),
+                vec![batch, dims[0]],
+            )
+            .unwrap(),
+        );
         for (i, (ew, eb)) in layer_params.iter().enumerate() {
             let in_d = dims[i];
             let out_d = dims[i + 1];
-            interp_inputs.insert(*ew, NumericTensor::<DynRank>::from_vec_shape(
-                make_random_f32(in_d * out_d, 800 + i as u64 * 2), vec![in_d, out_d]).unwrap());
-            interp_inputs.insert(*eb, NumericTensor::<DynRank>::from_vec_shape(
-                make_random_f32(out_d, 801 + i as u64 * 2), vec![1, out_d]).unwrap());
+            interp_inputs.insert(
+                *ew,
+                NumericTensor::<DynRank>::from_vec_shape(
+                    make_random_f32(in_d * out_d, 800 + i as u64 * 2),
+                    vec![in_d, out_d],
+                )
+                .unwrap(),
+            );
+            interp_inputs.insert(
+                *eb,
+                NumericTensor::<DynRank>::from_vec_shape(
+                    make_random_f32(out_d, 801 + i as u64 * 2),
+                    vec![1, out_d],
+                )
+                .unwrap(),
+            );
         }
 
         let interp_result = run_interpreter(&graph, &interp_inputs, ext_out);
@@ -589,8 +899,13 @@ fn main() {
         let compiled = v2_codegen::compile(&kernels, &layout).unwrap();
         let v2_result = run_v2_compiled(&compiled, &compiled_inputs, int_out, out_size);
 
-        println!("  v2: {} kernels ({} gemm, {} elementwise, {} fused ops)",
-            v2_stats.num_kernels, v2_stats.num_gemm, v2_stats.num_elementwise, v2_stats.total_fused_ops);
+        println!(
+            "  v2: {} kernels ({} gemm, {} elementwise, {} fused ops)",
+            v2_stats.num_kernels,
+            v2_stats.num_gemm,
+            v2_stats.num_elementwise,
+            v2_stats.total_fused_ops
+        );
 
         let diff = max_abs_diff(&interp_result, &v2_result);
         println!("  Max abs diff: {:.2e}", diff);
@@ -598,16 +913,24 @@ fn main() {
 
         let n = 200;
         let t = Instant::now();
-        for _ in 0..n { let _ = run_interpreter(&graph, &interp_inputs, ext_out); }
+        for _ in 0..n {
+            let _ = run_interpreter(&graph, &interp_inputs, ext_out);
+        }
         let interp_avg = t.elapsed() / n;
 
         let t = Instant::now();
-        for _ in 0..n { let _ = run_v2_compiled(&compiled, &compiled_inputs, int_out, out_size); }
+        for _ in 0..n {
+            let _ = run_v2_compiled(&compiled, &compiled_inputs, int_out, out_size);
+        }
         let v2_avg = t.elapsed() / n;
 
-        print_timing("Interpreter:", interp_avg, n); println!();
+        print_timing("Interpreter:", interp_avg, n);
+        println!();
         print_timing("v2 fusion:", v2_avg, n);
-        println!("  {:.2}x", interp_avg.as_nanos() as f64 / v2_avg.as_nanos() as f64);
+        println!(
+            "  {:.2}x",
+            interp_avg.as_nanos() as f64 / v2_avg.as_nanos() as f64
+        );
         println!("  PASS\n");
     }
 
@@ -617,21 +940,42 @@ fn main() {
     {
         let batch = 32;
         let dims = &[128, 64, 32, 16];
-        println!("Test 5: MatMul MLP stress, batch={}, dims={:?}", batch, dims);
+        println!(
+            "Test 5: MatMul MLP stress, batch={}, dims={:?}",
+            batch, dims
+        );
 
         let (graph, ext_input, layer_params, ext_out, shapes) =
             build_matmul_mlp(batch, dims, &mut rng);
 
         let mut interp_inputs = HashMap::new();
-        interp_inputs.insert(ext_input, NumericTensor::<DynRank>::from_vec_shape(
-            make_random_f32(batch * dims[0], 900), vec![batch, dims[0]]).unwrap());
+        interp_inputs.insert(
+            ext_input,
+            NumericTensor::<DynRank>::from_vec_shape(
+                make_random_f32(batch * dims[0], 900),
+                vec![batch, dims[0]],
+            )
+            .unwrap(),
+        );
         for (i, (ew, eb)) in layer_params.iter().enumerate() {
             let in_d = dims[i];
             let out_d = dims[i + 1];
-            interp_inputs.insert(*ew, NumericTensor::<DynRank>::from_vec_shape(
-                make_random_f32(in_d * out_d, 1000 + i as u64 * 2), vec![in_d, out_d]).unwrap());
-            interp_inputs.insert(*eb, NumericTensor::<DynRank>::from_vec_shape(
-                make_random_f32(out_d, 1001 + i as u64 * 2), vec![1, out_d]).unwrap());
+            interp_inputs.insert(
+                *ew,
+                NumericTensor::<DynRank>::from_vec_shape(
+                    make_random_f32(in_d * out_d, 1000 + i as u64 * 2),
+                    vec![in_d, out_d],
+                )
+                .unwrap(),
+            );
+            interp_inputs.insert(
+                *eb,
+                NumericTensor::<DynRank>::from_vec_shape(
+                    make_random_f32(out_d, 1001 + i as u64 * 2),
+                    vec![1, out_d],
+                )
+                .unwrap(),
+            );
         }
 
         let interp_result = run_interpreter(&graph, &interp_inputs, ext_out);
@@ -645,8 +989,13 @@ fn main() {
         let compiled = v2_codegen::compile(&kernels, &layout).unwrap();
         let v2_result = run_v2_compiled(&compiled, &compiled_inputs, int_out, out_size);
 
-        println!("  v2: {} kernels ({} gemm, {} elementwise, {} fused ops)",
-            v2_stats.num_kernels, v2_stats.num_gemm, v2_stats.num_elementwise, v2_stats.total_fused_ops);
+        println!(
+            "  v2: {} kernels ({} gemm, {} elementwise, {} fused ops)",
+            v2_stats.num_kernels,
+            v2_stats.num_gemm,
+            v2_stats.num_elementwise,
+            v2_stats.total_fused_ops
+        );
 
         let diff = max_abs_diff(&interp_result, &v2_result);
         println!("  Max abs diff: {:.2e}", diff);
@@ -654,16 +1003,109 @@ fn main() {
 
         let n = 100;
         let t = Instant::now();
-        for _ in 0..n { let _ = run_interpreter(&graph, &interp_inputs, ext_out); }
+        for _ in 0..n {
+            let _ = run_interpreter(&graph, &interp_inputs, ext_out);
+        }
         let interp_avg = t.elapsed() / n;
 
         let t = Instant::now();
-        for _ in 0..n { let _ = run_v2_compiled(&compiled, &compiled_inputs, int_out, out_size); }
+        for _ in 0..n {
+            let _ = run_v2_compiled(&compiled, &compiled_inputs, int_out, out_size);
+        }
         let v2_avg = t.elapsed() / n;
 
-        print_timing("Interpreter:", interp_avg, n); println!();
+        print_timing("Interpreter:", interp_avg, n);
+        println!();
         print_timing("v2 fusion:", v2_avg, n);
-        println!("  {:.2}x", interp_avg.as_nanos() as f64 / v2_avg.as_nanos() as f64);
+        println!(
+            "  {:.2}x",
+            interp_avg.as_nanos() as f64 / v2_avg.as_nanos() as f64
+        );
+        println!("  PASS\n");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 6: v5 typed synthesis from whitewashed pool + software BF16 matmul
+    // -----------------------------------------------------------------------
+    {
+        let (m, n, k) = (96usize, 96usize, 128usize);
+        println!(
+            "Test 6: v5 BF16 matmul synthesis [{}x{}] x [{}x{}]",
+            m, k, k, n
+        );
+
+        let mut rng2 = wyrand::WyRand::new(2026);
+        let ext_a = GlobalId::new(&mut rng2);
+        let ext_b = GlobalId::new(&mut rng2);
+        let (mut graph, input_map) = MilliOpGraph::new([ext_a, ext_b], &mut rng2);
+        let a = input_map[&ext_a];
+        let b = input_map[&ext_b];
+        let c = MatMul::push_new(&mut graph, a, b, &mut rng2);
+        let ext_out = GlobalId::new(&mut rng2);
+        graph.set_output_map([(c, ext_out)]);
+
+        let mut shapes = HashMap::new();
+        shapes.insert(a, vec![m, k]);
+        shapes.insert(b, vec![k, n]);
+        shapes.insert(c, vec![m, n]);
+
+        let mut dtypes = HashMap::new();
+        dtypes.insert(a, DType::BF16);
+        dtypes.insert(b, DType::BF16);
+        dtypes.insert(c, DType::F32);
+
+        let hw = v5_synth::HardwareProfile::default();
+        let (typed_plan, pool_plan) =
+            v5_synth::build_from_graph(&graph, &shapes, &dtypes, hw).expect("v5 build_from_graph");
+        assert_eq!(pool_plan.matmul_crystals.len(), 1);
+        assert_eq!(typed_plan.matmul_kernels.len(), 1);
+        println!(
+            "  recovered: {} matmul crystal from {} pool ops",
+            pool_plan.matmul_crystals.len(),
+            pool_plan.stats.total_nano_ops
+        );
+
+        let a_f = make_random_f32(m * k, 1200);
+        let b_f = make_random_f32(k * n, 1201);
+        let a_bf16: Vec<u16> = a_f.iter().map(|x| bf16::from_f32(*x).to_bits()).collect();
+        let b_bf16: Vec<u16> = b_f.iter().map(|x| bf16::from_f32(*x).to_bits()).collect();
+        let expected = run_reference_bf16_matmul(m, n, k, &a_bf16, &b_bf16);
+
+        let mut plan = typed_plan.matmul_kernels[0].clone();
+        println!(
+            "  blocking: mc={} nc={} kc={} mr={} nr={}",
+            plan.blocking.mc,
+            plan.blocking.nc,
+            plan.blocking.kc,
+            plan.blocking.mr,
+            plan.blocking.nr
+        );
+
+        let iters = 25;
+        for strategy in [
+            v5_synth::Bf16KernelStrategy::OnTheFlyConvert,
+            v5_synth::Bf16KernelStrategy::PackBPanelF32,
+        ] {
+            plan.bf16_strategy = Some(strategy);
+            let mut out = vec![0.0f32; m * n];
+            let stats =
+                v5_synth::execute_matmul_bf16_f32_with_stats(&plan, &a_bf16, &b_bf16, &mut out)
+                    .expect("v5 execute");
+            let diff = max_abs_diff(&expected, &out);
+            assert!(diff < 6e-3, "v5 {strategy:?} diff too high: {diff}");
+
+            let t = Instant::now();
+            for _ in 0..iters {
+                v5_synth::execute_matmul_bf16_f32(&plan, &a_bf16, &b_bf16, &mut out)
+                    .expect("v5 timed execute");
+            }
+            let avg = t.elapsed() / iters;
+            print_timing(&format!("v5 {:?}:", strategy), avg, iters);
+            println!(
+                "  diff {:.2e}, b-conv={}, packed-panels={}",
+                diff, stats.bf16_to_f32_b, stats.packed_b_panels
+            );
+        }
         println!("  PASS\n");
     }
 
