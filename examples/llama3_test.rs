@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
+use whisper_tensor::backends::ModelLoadedTensorCache;
 use whisper_tensor::backends::eval_backend::EvalBackend;
 use whisper_tensor::loader::{ConfigValue, ConfigValues, Loader};
+use whisper_tensor::super_graph::cache::SuperGraphCache;
 use whisper_tensor_import::loaders::TransformersLoader;
 
 fn main() {
@@ -35,25 +37,25 @@ fn main() {
         })
         .expect("No text inference interface found");
 
-    eprintln!("Model loaded. Running inference...");
+    let mut backend = EvalBackend::NDArray;
+    let mut tokenizer_cache = HashMap::new();
+    let mut super_graph_caches = SuperGraphCache::new();
+    let mut model_cache = ModelLoadedTensorCache::new();
 
     let prompt = "The capital of France is".to_string();
-    let mut tokenizer_cache = HashMap::new();
-    let mut backend = EvalBackend::NDArray;
-    let mut context = prompt.clone();
-
     print!("{prompt}");
     std::io::stdout().flush().unwrap();
 
-    for _ in 0..20 {
+    let mut context = prompt;
+    for _ in 0..10 {
         let token = interface
             .run_string_in_string_out(
                 model,
                 None,
                 context.clone(),
                 &mut tokenizer_cache,
-                None,
-                None,
+                Some(&mut model_cache),
+                Some(&mut super_graph_caches),
                 &mut backend,
             )
             .unwrap();

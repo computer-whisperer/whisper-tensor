@@ -1,9 +1,10 @@
 use crate::Error;
 use crate::onnx_graph::WeightStorageStrategy;
 use crate::onnx_graph::operators::{
-    Add, Concat, Gather, MatMul, Mul, RotaryEmbedding, ShapeOp, Softmax, Transpose,
+    Add, Concat, Constant, Gather, MatMul, Mul, Reshape, RotaryEmbedding, ShapeOp, Softmax,
+    Transpose,
 };
-use crate::onnx_graph::pytorch::{div_scalar, linear, reshape, rms_norm, silu, transpose};
+use crate::onnx_graph::pytorch::{div_scalar, linear, reshape, rms_norm, silu, transpose, unsqueeze};
 use crate::onnx_graph::tensor::{
     DType, Dimension, InputTensor, InputTensorInitialized, Shape, Tensor, TensorData,
     TensorDataValue,
@@ -238,8 +239,37 @@ pub fn load_llama3(
                 let repeat_kv =
                     |x: Arc<dyn Tensor>| -> Result<Arc<dyn Tensor>, crate::onnx_graph::Error> {
                         let n_rep = config.num_attention_heads / config.num_key_value_heads;
-                        let x = Concat::new(None, vec![x.clone(); n_rep], 1)?;
-                        Ok(x)
+                        // x: [B, kv_heads, seq, head_dim]
+                        // Interleave each KV head n_rep times:
+                        //   [B, kv_heads, 1, seq, D] -> concat n_rep on dim 2
+                        //   -> [B, kv_heads, n_rep, seq, D] -> reshape [B, num_heads, seq, D]
+                        let seq_dim = x.shape()[2].clone();
+                        let x = unsqueeze(x, 2)?;
+                        let x: Arc<dyn Tensor> =
+                            Concat::new(None, vec![x.clone(); n_rep], 2)?;
+                        let target_dims = vec![
+                            0i64,
+                            config.num_attention_heads as i64,
+                            -1,
+                            head_dim as i64,
+                        ];
+                        let shape_const = Constant::new(
+                            None,
+                            TensorData::new(
+                                target_dims.into(),
+                                Shape::from(&[4usize][..]),
+                            )?,
+                        );
+                        let output_shape = Shape::new(vec![
+                            x.shape()[0].clone(),
+                            Dimension::new(Some(config.num_attention_heads), None, None),
+                            seq_dim,
+                            Dimension::new(Some(head_dim), None, None),
+                        ]);
+                        let x = Reshape::new_with_forced_output(
+                            None, x, shape_const, output_shape,
+                        )?;
+                        Ok(x as Arc<dyn Tensor>)
                     };
 
                 (repeat_kv(k)?, repeat_kv(v)?)
