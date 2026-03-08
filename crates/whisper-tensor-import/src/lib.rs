@@ -10,6 +10,7 @@ use std::sync::Arc;
 pub mod llama3;
 pub mod loaders;
 pub mod onnx_graph;
+pub mod phi3;
 pub mod qwen2;
 pub mod rwkv7;
 pub mod sd15;
@@ -130,6 +131,12 @@ pub fn load_transformers_format(
             println!("Loading as {model_type}");
             let config = qwen2::Qwen2Config::from_huggingface_transformers_json(&config)?;
             qwen2::load_qwen2(weight_manager, config, output_method)
+                .map_err(Error::ModelBuildError)?
+        }
+        "phi3" => {
+            println!("Loading as Phi-3");
+            let config = phi3::Phi3Config::from_huggingface_transformers_json(&config)?;
+            phi3::load_phi3(weight_manager, config, output_method)
                 .map_err(Error::ModelBuildError)?
         }
         model_type => Err(Error::UnknownModelType(model_type.to_string()))?,
