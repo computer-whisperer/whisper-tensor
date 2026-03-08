@@ -4,7 +4,9 @@ use crate::onnx_graph::operators::{
     Add, Concat, Constant, Gather, MatMul, Mul, Reshape, RotaryEmbedding, ShapeOp, Softmax,
     Transpose,
 };
-use crate::onnx_graph::pytorch::{div_scalar, linear, reshape, rms_norm, silu, transpose, unsqueeze};
+use crate::onnx_graph::pytorch::{
+    div_scalar, linear, reshape, rms_norm, silu, transpose, unsqueeze,
+};
 use crate::onnx_graph::tensor::{
     DType, Dimension, InputTensor, InputTensorInitialized, Shape, Tensor, TensorData,
     TensorDataValue,
@@ -98,7 +100,9 @@ pub fn load_qwen2(
     let kv_cache_seq_dim = Dimension::new(None, Some("kv_cache_sequence".to_string()), None);
 
     let model_dim = x.shape().dims.last().unwrap().resolve()?;
-    let head_dim = config.head_dim.unwrap_or(model_dim / config.num_attention_heads);
+    let head_dim = config
+        .head_dim
+        .unwrap_or(model_dim / config.num_attention_heads);
     let kv_cache_input_type = x.dtype();
     let kv_cache_input_shape = Shape::new(vec![
         batch_dimension,
@@ -252,44 +256,35 @@ pub fn load_qwen2(
         input_tensors.push(kv_cache_input_v);
         output_tensors.push((format!("kv_cache_output_v_{i}"), v.clone()));
 
-        let (k, v): (Arc<dyn Tensor>, Arc<dyn Tensor>) =
-            if config.num_key_value_heads == config.num_attention_heads {
-                (k, v)
-            } else {
-                let repeat_kv =
-                    |x: Arc<dyn Tensor>| -> Result<Arc<dyn Tensor>, crate::onnx_graph::Error> {
-                        let n_rep = config.num_attention_heads / config.num_key_value_heads;
-                        let seq_dim = x.shape()[2].clone();
-                        let x = unsqueeze(x, 2)?;
-                        let x: Arc<dyn Tensor> =
-                            Concat::new(None, vec![x.clone(); n_rep], 2)?;
-                        let target_dims = vec![
-                            0i64,
-                            config.num_attention_heads as i64,
-                            -1,
-                            head_dim as i64,
-                        ];
-                        let shape_const = Constant::new(
-                            None,
-                            TensorData::new(
-                                target_dims.into(),
-                                Shape::from(&[4usize][..]),
-                            )?,
-                        );
-                        let output_shape = Shape::new(vec![
-                            x.shape()[0].clone(),
-                            Dimension::new(Some(config.num_attention_heads), None, None),
-                            seq_dim,
-                            Dimension::new(Some(head_dim), None, None),
-                        ]);
-                        let x = Reshape::new_with_forced_output(
-                            None, x, shape_const, output_shape,
-                        )?;
-                        Ok(x as Arc<dyn Tensor>)
-                    };
+        let (k, v): (Arc<dyn Tensor>, Arc<dyn Tensor>) = if config.num_key_value_heads
+            == config.num_attention_heads
+        {
+            (k, v)
+        } else {
+            let repeat_kv =
+                |x: Arc<dyn Tensor>| -> Result<Arc<dyn Tensor>, crate::onnx_graph::Error> {
+                    let n_rep = config.num_attention_heads / config.num_key_value_heads;
+                    let seq_dim = x.shape()[2].clone();
+                    let x = unsqueeze(x, 2)?;
+                    let x: Arc<dyn Tensor> = Concat::new(None, vec![x.clone(); n_rep], 2)?;
+                    let target_dims =
+                        vec![0i64, config.num_attention_heads as i64, -1, head_dim as i64];
+                    let shape_const = Constant::new(
+                        None,
+                        TensorData::new(target_dims.into(), Shape::from(&[4usize][..]))?,
+                    );
+                    let output_shape = Shape::new(vec![
+                        x.shape()[0].clone(),
+                        Dimension::new(Some(config.num_attention_heads), None, None),
+                        seq_dim,
+                        Dimension::new(Some(head_dim), None, None),
+                    ]);
+                    let x = Reshape::new_with_forced_output(None, x, shape_const, output_shape)?;
+                    Ok(x as Arc<dyn Tensor>)
+                };
 
-                (repeat_kv(k)?, repeat_kv(v)?)
-            };
+            (repeat_kv(k)?, repeat_kv(v)?)
+        };
 
         let scores = MatMul::new(None, q, transpose(k.clone()))?;
         let scores = div_scalar(scores, half::bf16::from_f32((head_dim as f32).sqrt()))?;

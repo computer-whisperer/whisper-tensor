@@ -1348,10 +1348,9 @@ impl Reshape {
         if let (Ok(out_elems), Ok(in_elems)) = (
             output_shape.num_elements(),
             data_input.shape().num_elements(),
-        ) {
-            if out_elems != in_elems {
-                Err(Error::InvalidInputError)?
-            }
+        ) && out_elems != in_elems
+        {
+            Err(Error::InvalidInputError)?
         }
 
         Ok(Arc::new(Reshape {

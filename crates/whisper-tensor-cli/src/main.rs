@@ -216,6 +216,7 @@ fn cmd_generate(
     println!();
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_image(
     model_path: PathBuf,
     prompt: String,
@@ -236,12 +237,10 @@ fn cmd_image(
     );
 
     eprintln!("Loading SD model from {}...", model_path.display());
-    let output = SD15Loader
-        .load(config)
-        .unwrap_or_else(|e| {
-            eprintln!("Failed to load model: {e}");
-            std::process::exit(1);
-        });
+    let output = SD15Loader.load(config).unwrap_or_else(|e| {
+        eprintln!("Failed to load model: {e}");
+        std::process::exit(1);
+    });
 
     // SD15Loader produces 3 models: text_encoder, unet, vae_decoder
     assert!(
@@ -272,8 +271,7 @@ fn cmd_image(
     let cond_ids = tokenize_clip(&*tokenizer, &prompt, seq_len);
     let uncond_ids = tokenize_clip(&*tokenizer, &negative_prompt, seq_len);
 
-    let cond_input =
-        NumericTensor::<DynRank>::from_vec_shape(cond_ids, vec![1, seq_len]).unwrap();
+    let cond_input = NumericTensor::<DynRank>::from_vec_shape(cond_ids, vec![1, seq_len]).unwrap();
     let uncond_input =
         NumericTensor::<DynRank>::from_vec_shape(uncond_ids, vec![1, seq_len]).unwrap();
 

@@ -4,7 +4,9 @@ use crate::onnx_graph::operators::{
     Add, Concat, Constant, Gather, MatMul, Mul, Reshape, RotaryEmbedding, ShapeOp, Slice, Softmax,
     Transpose,
 };
-use crate::onnx_graph::pytorch::{div_scalar, reshape, rms_norm, silu, squeeze, transpose, unsqueeze};
+use crate::onnx_graph::pytorch::{
+    div_scalar, reshape, rms_norm, silu, squeeze, transpose, unsqueeze,
+};
 use crate::onnx_graph::tensor::{
     DType, Dimension, InputTensor, InputTensorInitialized, Shape, Tensor, TensorData,
     TensorDataValue,
@@ -78,8 +80,14 @@ fn slice_axis(
         axis
     };
     let const_shape = Shape::new(vec![Dimension::new(Some(1), None, None)]);
-    let starts = Constant::new(None, TensorData::new(vec![start].into(), const_shape.clone())?);
-    let ends = Constant::new(None, TensorData::new(vec![end].into(), const_shape.clone())?);
+    let starts = Constant::new(
+        None,
+        TensorData::new(vec![start].into(), const_shape.clone())?,
+    );
+    let ends = Constant::new(
+        None,
+        TensorData::new(vec![end].into(), const_shape.clone())?,
+    );
     let axes = Constant::new(None, TensorData::new(vec![axis].into(), const_shape)?);
     Slice::new(None, input, starts, ends, Some(axes), None)
 }
@@ -189,8 +197,12 @@ pub fn load_phi3(
         let q: Arc<dyn Tensor> = slice_axis(qkv.clone(), -1, 0, q_dim as i64)?;
         let k: Arc<dyn Tensor> =
             slice_axis(qkv.clone(), -1, q_dim as i64, (q_dim + kv_dim) as i64)?;
-        let v: Arc<dyn Tensor> =
-            slice_axis(qkv, -1, (q_dim + kv_dim) as i64, (q_dim + 2 * kv_dim) as i64)?;
+        let v: Arc<dyn Tensor> = slice_axis(
+            qkv,
+            -1,
+            (q_dim + kv_dim) as i64,
+            (q_dim + 2 * kv_dim) as i64,
+        )?;
 
         // Reshape and transpose to [batch, heads, seq, head_dim]
         let q: Arc<dyn Tensor> = Transpose::new(
@@ -274,44 +286,35 @@ pub fn load_phi3(
         output_tensors.push((format!("kv_cache_output_v_{i}"), v.clone()));
 
         // GQA repeat if needed
-        let (k, v): (Arc<dyn Tensor>, Arc<dyn Tensor>) =
-            if config.num_key_value_heads == config.num_attention_heads {
-                (k, v)
-            } else {
-                let repeat_kv =
-                    |x: Arc<dyn Tensor>| -> Result<Arc<dyn Tensor>, crate::onnx_graph::Error> {
-                        let n_rep = config.num_attention_heads / config.num_key_value_heads;
-                        let seq_dim = x.shape()[2].clone();
-                        let x = unsqueeze(x, 2)?;
-                        let x: Arc<dyn Tensor> =
-                            Concat::new(None, vec![x.clone(); n_rep], 2)?;
-                        let target_dims = vec![
-                            0i64,
-                            config.num_attention_heads as i64,
-                            -1,
-                            head_dim as i64,
-                        ];
-                        let shape_const = Constant::new(
-                            None,
-                            TensorData::new(
-                                target_dims.into(),
-                                Shape::from(&[4usize][..]),
-                            )?,
-                        );
-                        let output_shape = Shape::new(vec![
-                            x.shape()[0].clone(),
-                            Dimension::new(Some(config.num_attention_heads), None, None),
-                            seq_dim,
-                            Dimension::new(Some(head_dim), None, None),
-                        ]);
-                        let x = Reshape::new_with_forced_output(
-                            None, x, shape_const, output_shape,
-                        )?;
-                        Ok(x as Arc<dyn Tensor>)
-                    };
+        let (k, v): (Arc<dyn Tensor>, Arc<dyn Tensor>) = if config.num_key_value_heads
+            == config.num_attention_heads
+        {
+            (k, v)
+        } else {
+            let repeat_kv =
+                |x: Arc<dyn Tensor>| -> Result<Arc<dyn Tensor>, crate::onnx_graph::Error> {
+                    let n_rep = config.num_attention_heads / config.num_key_value_heads;
+                    let seq_dim = x.shape()[2].clone();
+                    let x = unsqueeze(x, 2)?;
+                    let x: Arc<dyn Tensor> = Concat::new(None, vec![x.clone(); n_rep], 2)?;
+                    let target_dims =
+                        vec![0i64, config.num_attention_heads as i64, -1, head_dim as i64];
+                    let shape_const = Constant::new(
+                        None,
+                        TensorData::new(target_dims.into(), Shape::from(&[4usize][..]))?,
+                    );
+                    let output_shape = Shape::new(vec![
+                        x.shape()[0].clone(),
+                        Dimension::new(Some(config.num_attention_heads), None, None),
+                        seq_dim,
+                        Dimension::new(Some(head_dim), None, None),
+                    ]);
+                    let x = Reshape::new_with_forced_output(None, x, shape_const, output_shape)?;
+                    Ok(x as Arc<dyn Tensor>)
+                };
 
-                (repeat_kv(k)?, repeat_kv(v)?)
-            };
+            (repeat_kv(k)?, repeat_kv(v)?)
+        };
 
         // Attention scores
         let scores = MatMul::new(None, q, transpose(k.clone()))?;
