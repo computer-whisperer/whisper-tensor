@@ -5975,6 +5975,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "candle-core",
+ "float8 0.7.0",
  "half",
  "memmap2",
  "prost 0.14.3",

@@ -251,6 +251,8 @@ pub enum DType {
     F32,
     F16,
     BF16,
+    F8E4M3,
+    F8E5M2,
     U16,
     I32,
     I64,
@@ -264,6 +266,8 @@ impl DType {
             safetensors::Dtype::BF16 => Ok(DType::BF16),
             safetensors::Dtype::U16 => Ok(DType::U16),
             safetensors::Dtype::I32 => Ok(DType::I32),
+            safetensors::Dtype::F8_E4M3 => Ok(DType::F8E4M3),
+            safetensors::Dtype::F8_E5M2 => Ok(DType::F8E5M2),
             _ => Err(Error::UnsupportedDTypeError),
         }
     }
@@ -284,6 +288,8 @@ impl From<DType> for onnx::tensor_proto::DataType {
             DType::F32 => onnx::tensor_proto::DataType::Float,
             DType::F16 => onnx::tensor_proto::DataType::Float16,
             DType::BF16 => onnx::tensor_proto::DataType::Bfloat16,
+            DType::F8E4M3 => onnx::tensor_proto::DataType::Float8e4m3fn,
+            DType::F8E5M2 => onnx::tensor_proto::DataType::Float8e5m2,
             DType::U16 => onnx::tensor_proto::DataType::Uint16,
             DType::I32 => onnx::tensor_proto::DataType::Int32,
             DType::I64 => onnx::tensor_proto::DataType::Int64,
@@ -505,6 +511,8 @@ pub enum TensorDataValue {
     F32(Vec<f32>),
     BF16(Vec<half::bf16>),
     F16(Vec<half::f16>),
+    F8E4M3(Vec<float8::F8E4M3>),
+    F8E5M2(Vec<float8::F8E5M2>),
     I32(Vec<i32>),
     I64(Vec<i64>),
 }
@@ -516,6 +524,8 @@ impl TensorDataValue {
             TensorDataValue::I32(v) => v.len(),
             TensorDataValue::BF16(v) => v.len(),
             TensorDataValue::F16(v) => v.len(),
+            TensorDataValue::F8E4M3(v) => v.len(),
+            TensorDataValue::F8E5M2(v) => v.len(),
             TensorDataValue::I64(v) => v.len(),
         }
     }
@@ -529,6 +539,8 @@ impl TensorDataValue {
             TensorDataValue::F32(_) => DType::F32,
             TensorDataValue::BF16(_) => DType::BF16,
             TensorDataValue::F16(_) => DType::F16,
+            TensorDataValue::F8E4M3(_) => DType::F8E4M3,
+            TensorDataValue::F8E5M2(_) => DType::F8E5M2,
             TensorDataValue::I32(_) => DType::I32,
             TensorDataValue::I64(_) => DType::I64,
         }
@@ -539,6 +551,8 @@ impl TensorDataValue {
             TensorDataValue::F32(v) => v.iter().flat_map(|x| x.to_le_bytes()).collect(),
             TensorDataValue::BF16(v) => v.iter().flat_map(|x| x.to_le_bytes()).collect(),
             TensorDataValue::F16(v) => v.iter().flat_map(|x| x.to_le_bytes()).collect(),
+            TensorDataValue::F8E4M3(v) => v.iter().map(|x| x.to_bits()).collect(),
+            TensorDataValue::F8E5M2(v) => v.iter().map(|x| x.to_bits()).collect(),
             TensorDataValue::I32(v) => v.iter().flat_map(|x| x.to_le_bytes()).collect(),
             TensorDataValue::I64(v) => v.iter().flat_map(|x| x.to_le_bytes()).collect(),
         }
@@ -573,6 +587,16 @@ impl TensorDataValue {
                 }
                 Ok(TensorDataValue::BF16(v))
             }
+            DType::F8E4M3 => {
+                let v: Vec<float8::F8E4M3> =
+                    data.iter().map(|&b| float8::F8E4M3::from_bits(b)).collect();
+                Ok(TensorDataValue::F8E4M3(v))
+            }
+            DType::F8E5M2 => {
+                let v: Vec<float8::F8E5M2> =
+                    data.iter().map(|&b| float8::F8E5M2::from_bits(b)).collect();
+                Ok(TensorDataValue::F8E5M2(v))
+            }
             _ => Err(Error::UnsupportedDTypeError),
         }
     }
@@ -593,6 +617,18 @@ impl From<Vec<half::bf16>> for TensorDataValue {
 impl From<Vec<half::f16>> for TensorDataValue {
     fn from(value: Vec<half::f16>) -> Self {
         TensorDataValue::F16(value)
+    }
+}
+
+impl From<Vec<float8::F8E4M3>> for TensorDataValue {
+    fn from(value: Vec<float8::F8E4M3>) -> Self {
+        TensorDataValue::F8E4M3(value)
+    }
+}
+
+impl From<Vec<float8::F8E5M2>> for TensorDataValue {
+    fn from(value: Vec<float8::F8E5M2>) -> Self {
+        TensorDataValue::F8E5M2(value)
     }
 }
 
@@ -637,6 +673,8 @@ impl TensorData {
             DType::F32 => Self::fill(shape, 0.0f32),
             DType::F16 => Self::fill(shape, half::f16::from_f32(0.0f32)),
             DType::BF16 => Self::fill(shape, half::bf16::from_f32(0.0f32)),
+            DType::F8E4M3 => Self::fill(shape, float8::F8E4M3::ZERO),
+            DType::F8E5M2 => Self::fill(shape, float8::F8E5M2::ZERO),
             DType::I32 => Self::fill(shape, 0i32),
             DType::I64 => Self::fill(shape, 0i64),
             _ => Err(Error::UnsupportedDTypeError),

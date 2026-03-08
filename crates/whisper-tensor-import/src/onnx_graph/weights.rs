@@ -292,6 +292,8 @@ impl<'a> WeightExternalOutputManager<'a> for OriginReferenceOutputManager<'a> {
                         DType::F32 => 4,
                         DType::F16 => 2,
                         DType::BF16 => 2,
+                        DType::F8E4M3 => 1,
+                        DType::F8E5M2 => 1,
                         DType::I64 => 8,
                         DType::I32 => 4,
                         DType::U16 => 2,
