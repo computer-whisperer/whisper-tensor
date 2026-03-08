@@ -79,4 +79,7 @@ set itself, rather than routing through per-op handcrafted happy paths.
 - `v3_nano_fusion`: v1 nano/crystal pipeline with post-crystal loop fusion.
 - `v4_pool_growth`: recover/fuse crystals from unordered nano-op pools.
 - `v5_typed_synthesis`: dtype-aware schedules + software bf16 matmul kernel.
-- `v6_schedule_synthesis`: generic schedule-intent recovery with no explicit matmul match.
+- `v6_schedule_synthesis`: generic schedule-intent recovery with no explicit matmul match,
+  including affine access-role recovery and ranked schedule-candidate synthesis
+  for additive-reduction families, plus initial Cranelift lowering for recovered
+  reduction schedules.

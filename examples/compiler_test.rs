@@ -17,6 +17,8 @@ use whisper_tensor::compiler::attempts::v3_nano_fusion::{
 };
 use whisper_tensor::compiler::attempts::v4_pool_growth::codegen as v4_codegen;
 use whisper_tensor::compiler::attempts::v5_typed_synthesis::synth as v5_synth;
+use whisper_tensor::compiler::attempts::v6_schedule_synthesis::codegen as v6_codegen;
+use whisper_tensor::compiler::attempts::v6_schedule_synthesis::synthesis as v6_synth;
 
 use whisper_tensor::dtype::DType;
 use whisper_tensor::graph::GlobalId;
@@ -286,6 +288,30 @@ fn run_v4_compiled(
     output_size: usize,
 ) -> Vec<f32> {
     run_v1_compiled(compiled, inputs, output_id, output_size)
+}
+
+fn run_v6_compiled(
+    compiled: &v6_codegen::NativeCompiledGraph,
+    inputs: &HashMap<GlobalId, Vec<f32>>,
+    output_id: GlobalId,
+    output_size: usize,
+) -> Vec<f32> {
+    let layout = &compiled.layout;
+    let mut bufs: Vec<Vec<f32>> = (0..layout.num_buffers).map(|_| Vec::new()).collect();
+    for (id, data) in inputs {
+        if let Some(&idx) = layout.tensor_index.get(id) {
+            bufs[idx] = data.clone();
+        }
+    }
+    for (id, &size) in &layout.tensor_sizes {
+        let idx = layout.tensor_index[id];
+        if bufs[idx].is_empty() {
+            bufs[idx] = vec![0.0f32; size];
+        }
+    }
+    let mut ptrs: Vec<*mut f32> = bufs.iter_mut().map(|v| v.as_mut_ptr()).collect();
+    unsafe { compiled.execute(&mut ptrs) };
+    bufs[layout.tensor_index[&output_id]][..output_size].to_vec()
 }
 
 fn make_random_f32(n: usize, seed: u64) -> Vec<f32> {
@@ -1106,6 +1132,124 @@ fn main() {
                 diff, stats.bf16_to_f32_b, stats.packed_b_panels
             );
         }
+        println!("  PASS\n");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 7: v6 schedule synthesis + cranelift execution benchmark
+    // -----------------------------------------------------------------------
+    {
+        let (m, n, k) = (64usize, 80usize, 96usize);
+        println!(
+            "Test 7: v6 schedule synthesis + compile [{}x{}] x [{}x{}]",
+            m, k, k, n
+        );
+
+        let mut rng2 = wyrand::WyRand::new(3007);
+        let ext_a = GlobalId::new(&mut rng2);
+        let ext_b = GlobalId::new(&mut rng2);
+        let (mut graph, input_map) = MilliOpGraph::new([ext_a, ext_b], &mut rng2);
+        let a = input_map[&ext_a];
+        let b = input_map[&ext_b];
+        let c = MatMul::push_new(&mut graph, a, b, &mut rng2);
+        let ext_out = GlobalId::new(&mut rng2);
+        graph.set_output_map([(c, ext_out)]);
+
+        let mut shapes = HashMap::new();
+        shapes.insert(a, vec![m, k]);
+        shapes.insert(b, vec![k, n]);
+        shapes.insert(c, vec![m, n]);
+
+        let artifacts = v6_synth::build_from_graph(&graph, &shapes).expect("v6 build_from_graph");
+        let schedule = artifacts.schedule;
+        println!(
+            "  schedule stats: families={} pointwise={} reductions={} unknown={}",
+            schedule.stats.grouped_families,
+            schedule.stats.pointwise_families,
+            schedule.stats.additive_reduction_families,
+            schedule.stats.unknown_families
+        );
+        assert_eq!(schedule.stats.additive_reduction_families, 1);
+
+        let recovered = &schedule.loops[0];
+        let selected = recovered
+            .selected_schedule
+            .expect("v6 selected schedule missing");
+        let best = &recovered.schedule_candidates[selected];
+        println!(
+            "  selected: score={} order={:?} tiles={:?} rtile={} runroll={} vec={:?}",
+            best.score,
+            best.loop_order,
+            best.output_tiles,
+            best.reduction_tile,
+            best.reduction_unroll,
+            best.vectorize
+        );
+        assert!(!recovered.schedule_candidates.is_empty());
+
+        let a_data = make_random_f32(m * k, 1700);
+        let b_data = make_random_f32(k * n, 1701);
+        let mut interp_inputs = HashMap::new();
+        interp_inputs.insert(
+            ext_a,
+            NumericTensor::<DynRank>::from_vec_shape(a_data.clone(), vec![m, k]).unwrap(),
+        );
+        interp_inputs.insert(
+            ext_b,
+            NumericTensor::<DynRank>::from_vec_shape(b_data.clone(), vec![k, n]).unwrap(),
+        );
+        let interp_result = run_interpreter(&graph, &interp_inputs, ext_out);
+        let compiled_inputs = build_compiled_inputs(&graph, &interp_inputs);
+        let out_size = m * n;
+
+        let (v6_compiled, _) = v6_codegen::compile_graph(&graph, &shapes).expect("v6 compile");
+        let v6_result = run_v6_compiled(&v6_compiled, &compiled_inputs, c, out_size);
+        let v6_diff = max_abs_diff(&interp_result, &v6_result);
+        println!("  v6 diff: {:.2e}", v6_diff);
+        assert!(v6_diff < 2e-3, "v6 matmul diverged: {v6_diff}");
+
+        let kernels = v2_planner::plan(&graph, &shapes).unwrap();
+        let v2_layout = v2_codegen::TensorLayout::from_shapes(&shapes);
+        let v2_compiled = v2_codegen::compile(&kernels, &v2_layout).unwrap();
+        let v2_result = run_v2_compiled(&v2_compiled, &compiled_inputs, c, out_size);
+        let v2_diff = max_abs_diff(&interp_result, &v2_result);
+        assert!(v2_diff < 2e-3, "v2 matmul diverged: {v2_diff}");
+
+        let iters = 80;
+        let t = Instant::now();
+        for _ in 0..iters {
+            let _ = run_interpreter(&graph, &interp_inputs, ext_out);
+        }
+        let interp_avg = t.elapsed() / iters;
+
+        let t = Instant::now();
+        for _ in 0..iters {
+            let _ = run_v2_compiled(&v2_compiled, &compiled_inputs, c, out_size);
+        }
+        let v2_avg = t.elapsed() / iters;
+
+        let t = Instant::now();
+        for _ in 0..iters {
+            let _ = run_v6_compiled(&v6_compiled, &compiled_inputs, c, out_size);
+        }
+        let v6_avg = t.elapsed() / iters;
+
+        print_timing("Interpreter:", interp_avg, iters);
+        println!();
+        print_timing("v2 fusion:", v2_avg, iters);
+        println!(
+            "  {:.2}x",
+            interp_avg.as_nanos() as f64 / v2_avg.as_nanos() as f64
+        );
+        print_timing("v6 schedule:", v6_avg, iters);
+        println!(
+            "  {:.2}x",
+            interp_avg.as_nanos() as f64 / v6_avg.as_nanos() as f64
+        );
+        println!(
+            "  v6 vs v2: {:.2}x",
+            v2_avg.as_nanos() as f64 / v6_avg.as_nanos() as f64
+        );
         println!("  PASS\n");
     }
 

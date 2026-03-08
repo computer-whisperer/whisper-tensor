@@ -4,4 +4,5 @@
 //! expression families, then classifies schedule intent using generic pattern
 //! and dependence-style signals.
 
+pub mod codegen;
 pub mod synthesis;
