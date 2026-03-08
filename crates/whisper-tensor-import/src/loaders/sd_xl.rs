@@ -4,23 +4,23 @@ use whisper_tensor::loader::*;
 use whisper_tensor::metadata::TokenizerInfo;
 use whisper_tensor::model::Model;
 
-/// Loader for Stable Diffusion 1.5 checkpoints (.safetensors).
-pub struct SD15Loader;
+/// Loader for Stable Diffusion XL checkpoints (.safetensors).
+pub struct SDXLLoader;
 
-impl Loader for SD15Loader {
+impl Loader for SDXLLoader {
     fn name(&self) -> &str {
-        "Stable Diffusion 1.5"
+        "Stable Diffusion XL"
     }
 
     fn description(&self) -> &str {
-        "Load a Stable Diffusion 1.5 checkpoint (.safetensors) as a multi-model pipeline"
+        "Load an SDXL checkpoint (.safetensors) as a multi-model pipeline"
     }
 
     fn config_schema(&self) -> Vec<ConfigField> {
         vec![ConfigField {
             key: "path".to_string(),
             label: "Checkpoint Path".to_string(),
-            description: "Path to the SD 1.5 .safetensors checkpoint file".to_string(),
+            description: "Path to the SDXL .safetensors checkpoint file".to_string(),
             field_type: ConfigFieldType::FilePath,
             required: true,
             default: None,
@@ -31,7 +31,7 @@ impl Loader for SD15Loader {
         let path = require_path(&config, "path")?;
         let storage = crate::onnx_graph::WeightStorageStrategy::OriginReference;
 
-        // Detect model dtype for the interface (controls casting in the SuperGraph).
+        // Detect model dtype
         let model_dtype = {
             use crate::onnx_graph::weights::SafetensorsWeightManager;
             use memmap2::Mmap;
@@ -54,20 +54,21 @@ impl Loader for SD15Loader {
             }
         };
 
-        let (te_onnx, unet_onnx, vae_onnx) =
-            crate::sd15::load_sd15_checkpoint(&path, storage).map_err(LoaderError::LoadFailed)?;
+        let (te1_onnx, te2_onnx, unet_onnx, vae_onnx) =
+            crate::sd_xl::load_sdxl_checkpoint(&path, storage).map_err(LoaderError::LoadFailed)?;
 
         let base_name = path
             .file_stem()
             .unwrap_or_default()
             .to_str()
-            .unwrap_or("sd15")
+            .unwrap_or("sdxl")
             .to_string();
         let base_dir = path.parent();
 
         let mut models = Vec::new();
         for (suffix, onnx_data) in [
-            ("text_encoder", te_onnx),
+            ("text_encoder_1", te1_onnx),
+            ("text_encoder_2", te2_onnx),
             ("unet", unet_onnx),
             ("vae_decoder", vae_onnx),
         ] {
@@ -82,11 +83,11 @@ impl Loader for SD15Loader {
 
         let interface = {
             let mut rng = rand::rng();
-            ImageGenerationInterface::new_single_te_cfg(
+            // Both SDXL text encoders use the same CLIP tokenizer
+            ImageGenerationInterface::new_sdxl(
                 &mut rng,
                 TokenizerInfo::HFTokenizer("openai/clip-vit-large-patch14".to_string()),
                 model_dtype,
-                0.18215,
             )
         };
 

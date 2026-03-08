@@ -5,7 +5,10 @@ use crate::compiler::CompiledProgram;
 use crate::dtype::DType;
 use crate::metadata::TokenizerInfo;
 use crate::milli_graph::MilliOpGraph;
-use crate::milli_graph::ops::{Cast, Constant, SimpleBinary, SimpleUnaryOp, Unsqueeze};
+use crate::milli_graph::ops::{
+    ArgMax, Cast, Concat as MilliConcat, Constant, Pad, PadMode, SimpleBinary, SimpleUnaryOp,
+    Unsqueeze,
+};
 use crate::model::Model;
 use crate::numeric_tensor::NumericTensor;
 use crate::super_graph::cache::{SuperGraphCache, SuperGraphTensorCache};
@@ -28,7 +31,7 @@ use std::sync::Arc;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum AnyInterface {
     TextInferenceTokensInLogitOutInterface(TextInferenceTokensInLogitOutInterface),
-    StableDiffusionInterface(StableDiffusionInterface),
+    ImageGenerationInterface(ImageGenerationInterface),
 }
 
 impl AnyInterface {
@@ -37,14 +40,14 @@ impl AnyInterface {
             AnyInterface::TextInferenceTokensInLogitOutInterface(_) => {
                 "TextInferenceTokensInLogitsOut".to_string()
             }
-            AnyInterface::StableDiffusionInterface(_) => "StableDiffusion".to_string(),
+            AnyInterface::ImageGenerationInterface(_) => "ImageGeneration".to_string(),
         }
     }
 
     pub fn get_super_graph(&self) -> &SuperGraph {
         match self {
             AnyInterface::TextInferenceTokensInLogitOutInterface(x) => &x.super_graph,
-            AnyInterface::StableDiffusionInterface(x) => &x.super_graph,
+            AnyInterface::ImageGenerationInterface(x) => &x.super_graph,
         }
     }
 }
@@ -151,294 +154,427 @@ impl TextInferenceTokensInLogitOutInterface {
     }
 }
 
+// ============================================================================
+// Image Generation Interface
+// ============================================================================
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct StableDiffusionInterface {
+pub struct ImageGenerationInterface {
     pub super_graph: SuperGraph,
     // Inputs
     pub cond_ids_input: SuperGraphLinkTensor,
-    pub uncond_ids_input: SuperGraphLinkTensor,
+    pub negative_cond_ids_input: Option<SuperGraphLinkTensor>,
     pub initial_latent_input: SuperGraphLinkTensor,
     pub timesteps_input: SuperGraphLinkTensor,
     pub dt_input: SuperGraphLinkTensor,
     pub sigmas_input: SuperGraphLinkTensor,
     pub iteration_count_input: SuperGraphLinkTensor,
     pub guidance_scale_input: SuperGraphLinkTensor,
-    // Model weight maps
-    pub text_encoder_weights: SuperGraphLinkTensorMap,
-    pub unet_weights: SuperGraphLinkTensorMap,
-    pub vae_decoder_weights: SuperGraphLinkTensorMap,
+    // Model weight maps (in order matching loader's model_ids)
+    pub model_weights: Vec<SuperGraphLinkTensorMap>,
     // Output
     pub image_output: SuperGraphLinkTensor,
     // Tokenizer
     pub tokenizer: TokenizerInfo,
 }
 
-impl StableDiffusionInterface {
-    pub fn new(rng: &mut impl Rng, tokenizer: TokenizerInfo) -> Self {
+/// Helper: build a MilliOpGraph node that casts a tensor to a target dtype.
+fn build_cast_node(
+    builder: &mut SuperGraphBuilder,
+    rng: &mut impl Rng,
+    input: SuperGraphLinkTensor,
+    dtype: DType,
+) -> SuperGraphLinkTensor {
+    let output = builder.new_tensor_link(rng);
+    let (mut mg, input_map) = MilliOpGraph::new(std::iter::once(input.global_id()), rng);
+    let inp = *input_map.get(&input.global_id()).unwrap();
+    let casted = Cast::push_new(&mut mg, inp, dtype, rng);
+    mg.set_output_map(std::iter::once((casted, output.global_id())));
+    builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
+    output
+}
+
+/// Helper: build the denoising scan loop.
+///
+/// Returns the final latent link (F32, after Euler integration).
+#[allow(clippy::too_many_arguments)]
+fn build_denoising_loop(
+    builder: &mut SuperGraphBuilder,
+    rng: &mut impl Rng,
+    unet_weights: SuperGraphLinkTensorMap,
+    cond_context: SuperGraphLinkTensor,
+    uncond_context: SuperGraphLinkTensor,
+    cond_y: Option<SuperGraphLinkTensor>,
+    uncond_y: Option<SuperGraphLinkTensor>,
+    guidance_scale_input: SuperGraphLinkTensor,
+    initial_latent_input: SuperGraphLinkTensor,
+    timesteps_input: SuperGraphLinkTensor,
+    dt_input: SuperGraphLinkTensor,
+    sigmas_input: SuperGraphLinkTensor,
+    iteration_count_input: SuperGraphLinkTensor,
+    model_dtype: DType,
+    unet_model_index: usize,
+) -> SuperGraphLinkTensor {
+    let outer_final_latent = builder.new_tensor_link(rng);
+
+    let mut inner_builder = SuperGraphBuilder::new();
+
+    // Inner links
+    let inner_unet_weights = inner_builder.new_model_link(rng);
+    let inner_cond_context = inner_builder.new_tensor_link(rng);
+    let inner_uncond_context = inner_builder.new_tensor_link(rng);
+    let inner_guidance_scale = inner_builder.new_tensor_link(rng);
+    let inner_latent_in = inner_builder.new_tensor_link(rng);
+    let inner_latent_out = inner_builder.new_tensor_link(rng);
+    let inner_timestep = inner_builder.new_tensor_link(rng);
+    let inner_dt = inner_builder.new_tensor_link(rng);
+    let inner_sigma = inner_builder.new_tensor_link(rng);
+
+    // Optional ADM conditioning links
+    let inner_cond_y = cond_y.as_ref().map(|_| inner_builder.new_tensor_link(rng));
+    let inner_uncond_y = uncond_y.as_ref().map(|_| inner_builder.new_tensor_link(rng));
+
+    // Inner node 1: Prep — scale latent by 1/sqrt(sigma²+1), cast to model_dtype, reshape timestep
+    let cast_latent = inner_builder.new_tensor_link(rng);
+    let cast_timestep = inner_builder.new_tensor_link(rng);
+    {
+        let (mut mg, input_map) = MilliOpGraph::new(
+            [
+                inner_latent_in.global_id(),
+                inner_timestep.global_id(),
+                inner_sigma.global_id(),
+            ],
+            rng,
+        );
+        let lat_in = *input_map.get(&inner_latent_in.global_id()).unwrap();
+        let ts_in = *input_map.get(&inner_timestep.global_id()).unwrap();
+        let sigma_in = *input_map.get(&inner_sigma.global_id()).unwrap();
+
+        // scale = 1 / sqrt(sigma^2 + 1)
+        let sigma_sq = SimpleBinary::mul(&mut mg, sigma_in, sigma_in, rng);
+        let one = Constant::push_new(
+            &mut mg,
+            NDArrayNumericTensor::from_vec_shape(vec![1.0f32], &vec![1]).unwrap(),
+            rng,
+        );
+        let sigma_sq_plus_1 = SimpleBinary::add(&mut mg, sigma_sq, one, rng);
+        let sqrt_val = SimpleUnaryOp::sqrt(&mut mg, sigma_sq_plus_1, rng);
+        let inv_scale = SimpleBinary::div(&mut mg, one, sqrt_val, rng);
+        let scaled_lat = SimpleBinary::mul(&mut mg, lat_in, inv_scale, rng);
+
+        let lat_cast = Cast::push_new(&mut mg, scaled_lat, model_dtype, rng);
+        let ts_cast = Cast::push_new(&mut mg, ts_in, model_dtype, rng);
+        let zero_axis = Constant::push_new(
+            &mut mg,
+            NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
+            rng,
+        );
+        let ts_reshaped = Unsqueeze::push_new(&mut mg, ts_cast, zero_axis, rng);
+
+        mg.set_output_map([
+            (lat_cast, cast_latent.global_id()),
+            (ts_reshaped, cast_timestep.global_id()),
+        ]);
+        inner_builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
+    }
+
+    // Inner node 2: UNet unconditional
+    let uncond_noise = inner_builder.new_tensor_link(rng);
+    {
+        let mut inputs = vec![
+            (cast_latent, "sample".to_string()),
+            (cast_timestep, "timestep".to_string()),
+            (inner_uncond_context, "encoder_hidden_states".to_string()),
+        ];
+        if let Some(uy) = inner_uncond_y {
+            inputs.push((uy, "y".to_string()));
+        }
+        inner_builder.add_node(
+            SuperGraphNodeModelExecution::new(
+                rng,
+                inner_unet_weights,
+                unet_model_index,
+                inputs,
+                vec![("out_sample".to_string(), uncond_noise)],
+            )
+            .to_any(),
+        );
+    }
+
+    // Inner node 3: UNet conditional
+    let cond_noise = inner_builder.new_tensor_link(rng);
+    {
+        let mut inputs = vec![
+            (cast_latent, "sample".to_string()),
+            (cast_timestep, "timestep".to_string()),
+            (inner_cond_context, "encoder_hidden_states".to_string()),
+        ];
+        if let Some(cy) = inner_cond_y {
+            inputs.push((cy, "y".to_string()));
+        }
+        inner_builder.add_node(
+            SuperGraphNodeModelExecution::new(
+                rng,
+                inner_unet_weights,
+                unet_model_index,
+                inputs,
+                vec![("out_sample".to_string(), cond_noise)],
+            )
+            .to_any(),
+        );
+    }
+
+    // Inner node 4: CFG + Euler step
+    {
+        let (mut mg, input_map) = MilliOpGraph::new(
+            [
+                uncond_noise.global_id(),
+                cond_noise.global_id(),
+                inner_latent_in.global_id(),
+                inner_guidance_scale.global_id(),
+                inner_dt.global_id(),
+            ],
+            rng,
+        );
+        let uncond_in = *input_map.get(&uncond_noise.global_id()).unwrap();
+        let cond_in = *input_map.get(&cond_noise.global_id()).unwrap();
+        let lat_in = *input_map.get(&inner_latent_in.global_id()).unwrap();
+        let gs_in = *input_map.get(&inner_guidance_scale.global_id()).unwrap();
+        let dt_in = *input_map.get(&inner_dt.global_id()).unwrap();
+
+        // Cast noises to f32
+        let uncond_f32 = Cast::push_new(&mut mg, uncond_in, DType::F32, rng);
+        let cond_f32 = Cast::push_new(&mut mg, cond_in, DType::F32, rng);
+
+        // CFG: uncond + scale * (cond - uncond)
+        let diff = SimpleBinary::sub(&mut mg, cond_f32, uncond_f32, rng);
+        let scaled = SimpleBinary::mul(&mut mg, diff, gs_in, rng);
+        let guided = SimpleBinary::add(&mut mg, uncond_f32, scaled, rng);
+
+        // Euler step: latent + guided * dt
+        let step = SimpleBinary::mul(&mut mg, guided, dt_in, rng);
+        let latent_next = SimpleBinary::add(&mut mg, lat_in, step, rng);
+
+        mg.set_output_map(std::iter::once((latent_next, inner_latent_out.global_id())));
+        inner_builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
+    }
+
+    // Build inner graph
+    let mut inner_inputs: Vec<_> = vec![
+        inner_unet_weights.to_any(),
+        inner_cond_context.to_any(),
+        inner_uncond_context.to_any(),
+        inner_guidance_scale.to_any(),
+        inner_latent_in.to_any(),
+        inner_timestep.to_any(),
+        inner_dt.to_any(),
+        inner_sigma.to_any(),
+    ];
+    if let Some(cy) = inner_cond_y {
+        inner_inputs.push(cy.to_any());
+    }
+    if let Some(uy) = inner_uncond_y {
+        inner_inputs.push(uy.to_any());
+    }
+    let inner_outputs: Vec<_> = vec![inner_latent_out.to_any()];
+    let inner_graph = inner_builder.build(rng, &inner_inputs, &inner_outputs);
+
+    // Create scan node
+    let mut simple_inputs = vec![
+        SuperGraphLinkDouble::TensorMap(unet_weights, inner_unet_weights),
+        SuperGraphLinkDouble::Tensor(cond_context, inner_cond_context),
+        SuperGraphLinkDouble::Tensor(uncond_context, inner_uncond_context),
+        SuperGraphLinkDouble::Tensor(guidance_scale_input, inner_guidance_scale),
+    ];
+    if let (Some(cy_outer), Some(cy_inner)) = (cond_y, inner_cond_y) {
+        simple_inputs.push(SuperGraphLinkDouble::Tensor(cy_outer, cy_inner));
+    }
+    if let (Some(uy_outer), Some(uy_inner)) = (uncond_y, inner_uncond_y) {
+        simple_inputs.push(SuperGraphLinkDouble::Tensor(uy_outer, uy_inner));
+    }
+
+    let scan_node = SuperGraphNodeScan::new(
+        inner_graph,
+        iteration_count_input,
+        simple_inputs,
+        // state_links: (initial, inner_in, inner_out)
+        vec![SuperGraphLinkTriple::Tensor(
+            initial_latent_input,
+            inner_latent_in,
+            inner_latent_out,
+        )],
+        // scan_inputs: (outer, inner, axis)
+        vec![
+            (timesteps_input, inner_timestep, 0),
+            (dt_input, inner_dt, 0),
+            (sigmas_input, inner_sigma, 0),
+        ],
+        // scan_outputs: none
+        vec![],
+        // simple_outputs: final latent
+        vec![SuperGraphLinkDouble::Tensor(
+            inner_latent_out,
+            outer_final_latent,
+        )],
+        rng,
+    );
+    builder.add_node(scan_node.to_any());
+
+    outer_final_latent
+}
+
+/// Helper: build the VAE decode node (scale latent + decode).
+fn build_vae_decode(
+    builder: &mut SuperGraphBuilder,
+    rng: &mut impl Rng,
+    latent: SuperGraphLinkTensor,
+    vae_weights: SuperGraphLinkTensorMap,
+    vae_model_index: usize,
+    vae_scale_factor: f32,
+    model_dtype: DType,
+) -> SuperGraphLinkTensor {
+    // Scale latent by 1/vae_scale_factor and cast to model_dtype
+    let scaled_latent = builder.new_tensor_link(rng);
+    {
+        let (mut mg, input_map) =
+            MilliOpGraph::new(std::iter::once(latent.global_id()), rng);
+        let lat_in = *input_map.get(&latent.global_id()).unwrap();
+
+        let scale = Constant::push_new(
+            &mut mg,
+            NDArrayNumericTensor::from_vec_shape(vec![1.0f32 / vae_scale_factor], &vec![1])
+                .unwrap(),
+            rng,
+        );
+        let scaled = SimpleBinary::mul(&mut mg, lat_in, scale, rng);
+        let scaled_cast = Cast::push_new(&mut mg, scaled, model_dtype, rng);
+
+        mg.set_output_map(std::iter::once((scaled_cast, scaled_latent.global_id())));
+        builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
+    }
+
+    // VAE decoder
+    let image_output = builder.new_tensor_link(rng);
+    builder.add_node(
+        SuperGraphNodeModelExecution::new(
+            rng,
+            vae_weights,
+            vae_model_index,
+            vec![(scaled_latent, "latent_sample".to_string())],
+            vec![("sample".to_string(), image_output)],
+        )
+        .to_any(),
+    );
+
+    image_output
+}
+
+/// Helper: build a MilliOpGraph that computes ArgMax(input_ids, axis=1) → eos_indices.
+fn build_eos_indices_node(
+    builder: &mut SuperGraphBuilder,
+    rng: &mut impl Rng,
+    input_ids: SuperGraphLinkTensor,
+) -> SuperGraphLinkTensor {
+    let eos_indices = builder.new_tensor_link(rng);
+    let (mut mg, input_map) = MilliOpGraph::new(std::iter::once(input_ids.global_id()), rng);
+    let ids_in = *input_map.get(&input_ids.global_id()).unwrap();
+    // EOS (49407) is the max token in CLIP vocab, so argmax finds its position
+    let argmax = ArgMax::push_new(&mut mg, ids_in, 1, false, false, rng);
+    mg.set_output_map(std::iter::once((argmax, eos_indices.global_id())));
+    builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
+    eos_indices
+}
+
+impl ImageGenerationInterface {
+    /// Build interface for single-text-encoder models with CFG (SD 1.5, SD 2).
+    ///
+    /// Model weights order: [text_encoder, unet, vae_decoder]
+    pub fn new_single_te_cfg(
+        rng: &mut impl Rng,
+        tokenizer: TokenizerInfo,
+        model_dtype: DType,
+        vae_scale_factor: f32,
+    ) -> Self {
         let mut builder = SuperGraphBuilder::new();
 
         // Create input links
         let cond_ids_input = builder.new_tensor_link(rng);
-        let uncond_ids_input = builder.new_tensor_link(rng);
+        let negative_cond_ids_input = builder.new_tensor_link(rng);
         let initial_latent_input = builder.new_tensor_link(rng);
         let timesteps_input = builder.new_tensor_link(rng);
         let dt_input = builder.new_tensor_link(rng);
         let sigmas_input = builder.new_tensor_link(rng);
         let iteration_count_input = builder.new_tensor_link(rng);
         let guidance_scale_input = builder.new_tensor_link(rng);
-        let text_encoder_weights = builder.new_model_link(rng);
+        let te_weights = builder.new_model_link(rng);
         let unet_weights = builder.new_model_link(rng);
-        let vae_decoder_weights = builder.new_model_link(rng);
+        let vae_weights = builder.new_model_link(rng);
 
-        // Node 1: Text encoder (conditional)
-        let cond_hidden = builder.new_tensor_link(rng);
+        // Text encoder: conditional → F32, cast to model_dtype
+        let cond_hidden_f32 = builder.new_tensor_link(rng);
         builder.add_node(
             SuperGraphNodeModelExecution::new(
                 rng,
-                text_encoder_weights,
+                te_weights,
                 0,
                 vec![(cond_ids_input, "input_ids".to_string())],
-                vec![("last_hidden_state".to_string(), cond_hidden)],
+                vec![("last_hidden_state".to_string(), cond_hidden_f32)],
             )
             .to_any(),
         );
+        let cond_context = build_cast_node(&mut builder, rng, cond_hidden_f32, model_dtype);
 
-        // Node 2: Text encoder (unconditional)
-        let uncond_hidden = builder.new_tensor_link(rng);
+        // Text encoder: unconditional → F32, cast to model_dtype
+        let uncond_hidden_f32 = builder.new_tensor_link(rng);
         builder.add_node(
             SuperGraphNodeModelExecution::new(
                 rng,
-                text_encoder_weights,
+                te_weights,
                 0,
-                vec![(uncond_ids_input, "input_ids".to_string())],
-                vec![("last_hidden_state".to_string(), uncond_hidden)],
+                vec![(negative_cond_ids_input, "input_ids".to_string())],
+                vec![("last_hidden_state".to_string(), uncond_hidden_f32)],
             )
             .to_any(),
         );
+        let uncond_context = build_cast_node(&mut builder, rng, uncond_hidden_f32, model_dtype);
 
-        // Node 3: Scan (denoising loop)
-        let outer_final_latent = builder.new_tensor_link(rng);
-        {
-            let mut inner_builder = SuperGraphBuilder::new();
-
-            // Inner links
-            let inner_unet_weights = inner_builder.new_model_link(rng);
-            let inner_cond_hidden = inner_builder.new_tensor_link(rng);
-            let inner_uncond_hidden = inner_builder.new_tensor_link(rng);
-            let inner_guidance_scale = inner_builder.new_tensor_link(rng);
-            let inner_latent_in = inner_builder.new_tensor_link(rng);
-            let inner_latent_out = inner_builder.new_tensor_link(rng);
-            let inner_timestep = inner_builder.new_tensor_link(rng);
-            let inner_dt = inner_builder.new_tensor_link(rng);
-            let inner_sigma = inner_builder.new_tensor_link(rng);
-
-            // Inner node 1: Prep — scale latent by 1/sqrt(sigma²+1), cast f32→f16, cast timestep f32→f16, reshape to [1]
-            let f16_latent = inner_builder.new_tensor_link(rng);
-            let f16_timestep = inner_builder.new_tensor_link(rng);
-            {
-                let (mut mg, input_map) = MilliOpGraph::new(
-                    [
-                        inner_latent_in.global_id(),
-                        inner_timestep.global_id(),
-                        inner_sigma.global_id(),
-                    ],
-                    rng,
-                );
-                let lat_in = *input_map.get(&inner_latent_in.global_id()).unwrap();
-                let ts_in = *input_map.get(&inner_timestep.global_id()).unwrap();
-                let sigma_in = *input_map.get(&inner_sigma.global_id()).unwrap();
-
-                // scale = 1 / sqrt(sigma^2 + 1)
-                let sigma_sq = SimpleBinary::mul(&mut mg, sigma_in, sigma_in, rng);
-                let one = Constant::push_new(
-                    &mut mg,
-                    NDArrayNumericTensor::from_vec_shape(vec![1.0f32], &vec![1]).unwrap(),
-                    rng,
-                );
-                let sigma_sq_plus_1 = SimpleBinary::add(&mut mg, sigma_sq, one, rng);
-                let sqrt_val = SimpleUnaryOp::sqrt(&mut mg, sigma_sq_plus_1, rng);
-                let inv_scale = SimpleBinary::div(&mut mg, one, sqrt_val, rng);
-                let scaled_lat = SimpleBinary::mul(&mut mg, lat_in, inv_scale, rng);
-
-                let lat_f16 = Cast::push_new(&mut mg, scaled_lat, DType::F16, rng);
-                let ts_f16 = Cast::push_new(&mut mg, ts_in, DType::F16, rng);
-                let zero_axis = Constant::push_new(
-                    &mut mg,
-                    NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
-                    rng,
-                );
-                let ts_reshaped = Unsqueeze::push_new(&mut mg, ts_f16, zero_axis, rng);
-
-                mg.set_output_map([
-                    (lat_f16, f16_latent.global_id()),
-                    (ts_reshaped, f16_timestep.global_id()),
-                ]);
-                inner_builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
-            }
-
-            // Inner node 2: UNet unconditional
-            let uncond_noise = inner_builder.new_tensor_link(rng);
-            inner_builder.add_node(
-                SuperGraphNodeModelExecution::new(
-                    rng,
-                    inner_unet_weights,
-                    1,
-                    vec![
-                        (f16_latent, "sample".to_string()),
-                        (f16_timestep, "timestep".to_string()),
-                        (inner_uncond_hidden, "encoder_hidden_states".to_string()),
-                    ],
-                    vec![("out_sample".to_string(), uncond_noise)],
-                )
-                .to_any(),
-            );
-
-            // Inner node 3: UNet conditional
-            let cond_noise = inner_builder.new_tensor_link(rng);
-            inner_builder.add_node(
-                SuperGraphNodeModelExecution::new(
-                    rng,
-                    inner_unet_weights,
-                    1,
-                    vec![
-                        (f16_latent, "sample".to_string()),
-                        (f16_timestep, "timestep".to_string()),
-                        (inner_cond_hidden, "encoder_hidden_states".to_string()),
-                    ],
-                    vec![("out_sample".to_string(), cond_noise)],
-                )
-                .to_any(),
-            );
-
-            // Inner node 4: CFG + Euler step
-            {
-                let (mut mg, input_map) = MilliOpGraph::new(
-                    [
-                        uncond_noise.global_id(),
-                        cond_noise.global_id(),
-                        inner_latent_in.global_id(),
-                        inner_guidance_scale.global_id(),
-                        inner_dt.global_id(),
-                    ],
-                    rng,
-                );
-                let uncond_in = *input_map.get(&uncond_noise.global_id()).unwrap();
-                let cond_in = *input_map.get(&cond_noise.global_id()).unwrap();
-                let lat_in = *input_map.get(&inner_latent_in.global_id()).unwrap();
-                let gs_in = *input_map.get(&inner_guidance_scale.global_id()).unwrap();
-                let dt_in = *input_map.get(&inner_dt.global_id()).unwrap();
-
-                // Cast noises to f32
-                let uncond_f32 = Cast::push_new(&mut mg, uncond_in, DType::F32, rng);
-                let cond_f32 = Cast::push_new(&mut mg, cond_in, DType::F32, rng);
-
-                // CFG: uncond + scale * (cond - uncond)
-                let diff = SimpleBinary::sub(&mut mg, cond_f32, uncond_f32, rng);
-                let scaled = SimpleBinary::mul(&mut mg, diff, gs_in, rng);
-                let guided = SimpleBinary::add(&mut mg, uncond_f32, scaled, rng);
-
-                // Euler step: latent + guided * dt
-                let step = SimpleBinary::mul(&mut mg, guided, dt_in, rng);
-                let latent_next = SimpleBinary::add(&mut mg, lat_in, step, rng);
-
-                mg.set_output_map(std::iter::once((latent_next, inner_latent_out.global_id())));
-                inner_builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
-            }
-
-            // Build inner graph
-            let inner_inputs: Vec<_> = vec![
-                inner_unet_weights.to_any(),
-                inner_cond_hidden.to_any(),
-                inner_uncond_hidden.to_any(),
-                inner_guidance_scale.to_any(),
-                inner_latent_in.to_any(),
-                inner_timestep.to_any(),
-                inner_dt.to_any(),
-                inner_sigma.to_any(),
-            ];
-            let inner_outputs: Vec<_> = vec![inner_latent_out.to_any()];
-            let inner_graph = inner_builder.build(rng, &inner_inputs, &inner_outputs);
-
-            // Create scan node
-            let scan_node = SuperGraphNodeScan::new(
-                inner_graph,
-                iteration_count_input,
-                // simple_inputs: constant across iterations
-                vec![
-                    SuperGraphLinkDouble::TensorMap(unet_weights, inner_unet_weights),
-                    SuperGraphLinkDouble::Tensor(cond_hidden, inner_cond_hidden),
-                    SuperGraphLinkDouble::Tensor(uncond_hidden, inner_uncond_hidden),
-                    SuperGraphLinkDouble::Tensor(guidance_scale_input, inner_guidance_scale),
-                ],
-                // state_links: (initial, inner_in, inner_out)
-                vec![SuperGraphLinkTriple::Tensor(
-                    initial_latent_input,
-                    inner_latent_in,
-                    inner_latent_out,
-                )],
-                // scan_inputs: (outer, inner, axis)
-                vec![
-                    (timesteps_input, inner_timestep, 0),
-                    (dt_input, inner_dt, 0),
-                    (sigmas_input, inner_sigma, 0),
-                ],
-                // scan_outputs: none
-                vec![],
-                // simple_outputs: final latent
-                vec![SuperGraphLinkDouble::Tensor(
-                    inner_latent_out,
-                    outer_final_latent,
-                )],
-                rng,
-            );
-            builder.add_node(scan_node.to_any());
-        }
-
-        // Node 4: Scale latent by 1/0.18215 and cast f32→f16
-        let scaled_latent = builder.new_tensor_link(rng);
-        {
-            let (mut mg, input_map) =
-                MilliOpGraph::new(std::iter::once(outer_final_latent.global_id()), rng);
-            let lat_in = *input_map.get(&outer_final_latent.global_id()).unwrap();
-
-            let scale = Constant::push_new(
-                &mut mg,
-                NDArrayNumericTensor::from_vec_shape(vec![1.0f32 / 0.18215], &vec![1]).unwrap(),
-                rng,
-            );
-            let scaled = SimpleBinary::mul(&mut mg, lat_in, scale, rng);
-            let scaled_f16 = Cast::push_new(&mut mg, scaled, DType::F16, rng);
-
-            mg.set_output_map(std::iter::once((scaled_f16, scaled_latent.global_id())));
-            builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
-        }
-
-        // Node 5: VAE decoder
-        let image_output = builder.new_tensor_link(rng);
-        builder.add_node(
-            SuperGraphNodeModelExecution::new(
-                rng,
-                vae_decoder_weights,
-                2,
-                vec![(scaled_latent, "latent_sample".to_string())],
-                vec![("sample".to_string(), image_output)],
-            )
-            .to_any(),
+        // Denoising loop
+        let final_latent = build_denoising_loop(
+            &mut builder,
+            rng,
+            unet_weights,
+            cond_context,
+            uncond_context,
+            None, // no ADM
+            None,
+            guidance_scale_input,
+            initial_latent_input,
+            timesteps_input,
+            dt_input,
+            sigmas_input,
+            iteration_count_input,
+            model_dtype,
+            1, // unet model index
         );
+
+        // VAE decode
+        let image_output =
+            build_vae_decode(&mut builder, rng, final_latent, vae_weights, 2, vae_scale_factor, model_dtype);
 
         // Build outer graph
+        let model_weights = vec![te_weights, unet_weights, vae_weights];
         let input_links: Vec<_> = vec![
             cond_ids_input.to_any(),
-            uncond_ids_input.to_any(),
+            negative_cond_ids_input.to_any(),
             initial_latent_input.to_any(),
             timesteps_input.to_any(),
             dt_input.to_any(),
             sigmas_input.to_any(),
             iteration_count_input.to_any(),
             guidance_scale_input.to_any(),
-            text_encoder_weights.to_any(),
+            te_weights.to_any(),
             unet_weights.to_any(),
-            vae_decoder_weights.to_any(),
+            vae_weights.to_any(),
         ];
         let output_links: Vec<_> = vec![image_output.to_any()];
         let super_graph = builder.build(rng, &input_links, &output_links);
@@ -446,23 +582,238 @@ impl StableDiffusionInterface {
         Self {
             super_graph,
             cond_ids_input,
-            uncond_ids_input,
+            negative_cond_ids_input: Some(negative_cond_ids_input),
             initial_latent_input,
             timesteps_input,
             dt_input,
             sigmas_input,
             iteration_count_input,
             guidance_scale_input,
-            text_encoder_weights,
+            model_weights,
+            image_output,
+            tokenizer,
+        }
+    }
+
+    /// Build interface for SDXL (dual text encoders + ADM conditioning + CFG).
+    ///
+    /// Model weights order: [text_encoder_1, text_encoder_2, unet, vae_decoder]
+    pub fn new_sdxl(rng: &mut impl Rng, tokenizer: TokenizerInfo, model_dtype: DType) -> Self {
+        let mut builder = SuperGraphBuilder::new();
+
+        // Create input links
+        let cond_ids_input = builder.new_tensor_link(rng);
+        let negative_cond_ids_input = builder.new_tensor_link(rng);
+        let initial_latent_input = builder.new_tensor_link(rng);
+        let timesteps_input = builder.new_tensor_link(rng);
+        let dt_input = builder.new_tensor_link(rng);
+        let sigmas_input = builder.new_tensor_link(rng);
+        let iteration_count_input = builder.new_tensor_link(rng);
+        let guidance_scale_input = builder.new_tensor_link(rng);
+        let te1_weights = builder.new_model_link(rng);
+        let te2_weights = builder.new_model_link(rng);
+        let unet_weights = builder.new_model_link(rng);
+        let vae_weights = builder.new_model_link(rng);
+
+        // --- Conditional path ---
+
+        // TE1 conditional: cond_ids → hidden1 [1, 77, 768] (F32)
+        let cond_hidden1_f32 = builder.new_tensor_link(rng);
+        builder.add_node(
+            SuperGraphNodeModelExecution::new(
+                rng,
+                te1_weights,
+                0,
+                vec![(cond_ids_input, "input_ids".to_string())],
+                vec![("last_hidden_state".to_string(), cond_hidden1_f32)],
+            )
+            .to_any(),
+        );
+
+        // Compute eos_indices for conditional
+        let cond_eos = build_eos_indices_node(&mut builder, rng, cond_ids_input);
+
+        // TE2 conditional: cond_ids + eos → penultimate [1, 77, 1280] + pooled [1, 1280] (F32)
+        let cond_penult2_f32 = builder.new_tensor_link(rng);
+        let cond_pooled_f32 = builder.new_tensor_link(rng);
+        builder.add_node(
+            SuperGraphNodeModelExecution::new(
+                rng,
+                te2_weights,
+                1,
+                vec![
+                    (cond_ids_input, "input_ids".to_string()),
+                    (cond_eos, "eos_indices".to_string()),
+                ],
+                vec![
+                    ("penultimate_hidden_state".to_string(), cond_penult2_f32),
+                    ("pooled_output".to_string(), cond_pooled_f32),
+                ],
+            )
+            .to_any(),
+        );
+
+        // Concat hidden1 + penult2 → context [1, 77, 2048], pad pooled → y [1, 2816]
+        // Then cast both to model_dtype
+        let cond_context = builder.new_tensor_link(rng);
+        let cond_y = builder.new_tensor_link(rng);
+        {
+            let (mut mg, input_map) = MilliOpGraph::new(
+                [cond_hidden1_f32.global_id(), cond_penult2_f32.global_id(), cond_pooled_f32.global_id()],
+                rng,
+            );
+            let h1 = *input_map.get(&cond_hidden1_f32.global_id()).unwrap();
+            let p2 = *input_map.get(&cond_penult2_f32.global_id()).unwrap();
+            let pooled = *input_map.get(&cond_pooled_f32.global_id()).unwrap();
+
+            // Concat along last dim: [1,77,768] + [1,77,1280] → [1,77,2048]
+            let ctx = MilliConcat::push_new(&mut mg, vec![h1, p2], -1, rng);
+            let ctx_cast = Cast::push_new(&mut mg, ctx, model_dtype, rng);
+
+            // Pad pooled [1,1280] → [1,2816] (add 1536 zeros on right of dim 1)
+            let pads = Constant::push_new(
+                &mut mg,
+                NDArrayNumericTensor::from_vec_shape(vec![0i64, 0, 0, 1536], &vec![4]).unwrap(),
+                rng,
+            );
+            let padded = Pad::push_new(&mut mg, pooled, pads, None, None, PadMode::Constant, rng);
+            let y_cast = Cast::push_new(&mut mg, padded, model_dtype, rng);
+
+            mg.set_output_map([
+                (ctx_cast, cond_context.global_id()),
+                (y_cast, cond_y.global_id()),
+            ]);
+            builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
+        }
+
+        // --- Unconditional path ---
+
+        // TE1 unconditional
+        let uncond_hidden1_f32 = builder.new_tensor_link(rng);
+        builder.add_node(
+            SuperGraphNodeModelExecution::new(
+                rng,
+                te1_weights,
+                0,
+                vec![(negative_cond_ids_input, "input_ids".to_string())],
+                vec![("last_hidden_state".to_string(), uncond_hidden1_f32)],
+            )
+            .to_any(),
+        );
+
+        // Compute eos_indices for unconditional
+        let uncond_eos = build_eos_indices_node(&mut builder, rng, negative_cond_ids_input);
+
+        // TE2 unconditional
+        let uncond_penult2_f32 = builder.new_tensor_link(rng);
+        let uncond_pooled_f32 = builder.new_tensor_link(rng);
+        builder.add_node(
+            SuperGraphNodeModelExecution::new(
+                rng,
+                te2_weights,
+                1,
+                vec![
+                    (negative_cond_ids_input, "input_ids".to_string()),
+                    (uncond_eos, "eos_indices".to_string()),
+                ],
+                vec![
+                    ("penultimate_hidden_state".to_string(), uncond_penult2_f32),
+                    ("pooled_output".to_string(), uncond_pooled_f32),
+                ],
+            )
+            .to_any(),
+        );
+
+        // Concat + pad for unconditional
+        let uncond_context = builder.new_tensor_link(rng);
+        let uncond_y = builder.new_tensor_link(rng);
+        {
+            let (mut mg, input_map) = MilliOpGraph::new(
+                [uncond_hidden1_f32.global_id(), uncond_penult2_f32.global_id(), uncond_pooled_f32.global_id()],
+                rng,
+            );
+            let h1 = *input_map.get(&uncond_hidden1_f32.global_id()).unwrap();
+            let p2 = *input_map.get(&uncond_penult2_f32.global_id()).unwrap();
+            let pooled = *input_map.get(&uncond_pooled_f32.global_id()).unwrap();
+
+            let ctx = MilliConcat::push_new(&mut mg, vec![h1, p2], -1, rng);
+            let ctx_cast = Cast::push_new(&mut mg, ctx, model_dtype, rng);
+
+            let pads = Constant::push_new(
+                &mut mg,
+                NDArrayNumericTensor::from_vec_shape(vec![0i64, 0, 0, 1536], &vec![4]).unwrap(),
+                rng,
+            );
+            let padded = Pad::push_new(&mut mg, pooled, pads, None, None, PadMode::Constant, rng);
+            let y_cast = Cast::push_new(&mut mg, padded, model_dtype, rng);
+
+            mg.set_output_map([
+                (ctx_cast, uncond_context.global_id()),
+                (y_cast, uncond_y.global_id()),
+            ]);
+            builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
+        }
+
+        // --- Denoising loop ---
+        let final_latent = build_denoising_loop(
+            &mut builder,
+            rng,
             unet_weights,
-            vae_decoder_weights,
+            cond_context,
+            uncond_context,
+            Some(cond_y),    // ADM conditioning
+            Some(uncond_y),
+            guidance_scale_input,
+            initial_latent_input,
+            timesteps_input,
+            dt_input,
+            sigmas_input,
+            iteration_count_input,
+            model_dtype,
+            2, // unet model index (te1=0, te2=1, unet=2)
+        );
+
+        // VAE decode (SDXL uses 0.13025 scale factor)
+        let image_output =
+            build_vae_decode(&mut builder, rng, final_latent, vae_weights, 3, 0.13025, model_dtype);
+
+        // Build outer graph
+        let model_weights = vec![te1_weights, te2_weights, unet_weights, vae_weights];
+        let input_links: Vec<_> = vec![
+            cond_ids_input.to_any(),
+            negative_cond_ids_input.to_any(),
+            initial_latent_input.to_any(),
+            timesteps_input.to_any(),
+            dt_input.to_any(),
+            sigmas_input.to_any(),
+            iteration_count_input.to_any(),
+            guidance_scale_input.to_any(),
+            te1_weights.to_any(),
+            te2_weights.to_any(),
+            unet_weights.to_any(),
+            vae_weights.to_any(),
+        ];
+        let output_links: Vec<_> = vec![image_output.to_any()];
+        let super_graph = builder.build(rng, &input_links, &output_links);
+
+        Self {
+            super_graph,
+            cond_ids_input,
+            negative_cond_ids_input: Some(negative_cond_ids_input),
+            initial_latent_input,
+            timesteps_input,
+            dt_input,
+            sigmas_input,
+            iteration_count_input,
+            guidance_scale_input,
+            model_weights,
             image_output,
             tokenizer,
         }
     }
 
     /// Pre-compute the Euler discrete scheduler parameters.
-    /// Returns (timestep_values, dt_values, initial_sigma).
+    /// Returns (timestep_values, dt_values, sigma_values, initial_sigma).
     pub fn compute_euler_schedule(
         num_inference_steps: usize,
     ) -> (Vec<f32>, Vec<f32>, Vec<f32>, f32) {
@@ -519,21 +870,27 @@ impl StableDiffusionInterface {
         (timestep_values, dt_values, sigmas, init_sigma)
     }
 
-    /// Run the full SD pipeline. Pre-computes scheduler params, packs inputs, runs graph.
+    /// Run the full image generation pipeline.
     #[allow(clippy::too_many_arguments)]
-    pub fn run<'a>(
+    pub fn run(
         &self,
-        text_encoder: &'a Model,
-        unet: &'a Model,
-        vae_decoder: &'a Model,
+        models: &[&Model],
         cond_ids: NumericTensor<DynRank>,
-        uncond_ids: NumericTensor<DynRank>,
+        negative_cond_ids: Option<NumericTensor<DynRank>>,
         initial_noise: Vec<f32>,
         latent_shape: Vec<usize>,
         num_inference_steps: usize,
         guidance_scale: f32,
         backend: &mut EvalBackend,
     ) -> Result<NumericTensor<DynRank>, SuperGraphError> {
+        assert_eq!(
+            models.len(),
+            self.model_weights.len(),
+            "Expected {} models, got {}",
+            self.model_weights.len(),
+            models.len()
+        );
+
         let (timestep_values, dt_values, sigma_values, init_sigma) =
             Self::compute_euler_schedule(num_inference_steps);
 
@@ -559,7 +916,9 @@ impl StableDiffusionInterface {
         // Pack data
         let mut data = SuperGraphData::new();
         data.tensors.insert(self.cond_ids_input, cond_ids);
-        data.tensors.insert(self.uncond_ids_input, uncond_ids);
+        if let (Some(neg_link), Some(neg_ids)) = (self.negative_cond_ids_input, negative_cond_ids) {
+            data.tensors.insert(neg_link, neg_ids);
+        }
         data.tensors
             .insert(self.initial_latent_input, latent_tensor);
         data.tensors.insert(self.timesteps_input, timesteps_tensor);
@@ -567,26 +926,21 @@ impl StableDiffusionInterface {
         data.tensors.insert(self.sigmas_input, sigmas_tensor);
         data.tensors.insert(self.iteration_count_input, iter_count);
         data.tensors.insert(self.guidance_scale_input, guidance);
-        data.tensor_maps
-            .insert(self.text_encoder_weights, text_encoder.get_tensor_store());
-        data.tensor_maps
-            .insert(self.unet_weights, unet.get_tensor_store());
-        data.tensor_maps
-            .insert(self.vae_decoder_weights, vae_decoder.get_tensor_store());
+        for (weight_link, model) in self.model_weights.iter().zip(models.iter()) {
+            data.tensor_maps
+                .insert(*weight_link, model.get_tensor_store());
+        }
 
         // Run
         let mut observer = ();
         let mut tensor_cache = SuperGraphTensorCache::new();
+        let symbolic_graphs: Vec<_> = models.iter().map(|m| m.get_symbolic_graph()).collect();
         let mut context = SuperGraphContext {
             observer: &mut observer,
             eval_backend: backend,
             super_graph_tensor_cache: &mut tensor_cache,
             caches: None,
-            symbolic_graphs: vec![
-                text_encoder.get_symbolic_graph(),
-                unet.get_symbolic_graph(),
-                vae_decoder.get_symbolic_graph(),
-            ],
+            symbolic_graphs,
             use_compiled_models: false,
             compiled_models: None,
         };
@@ -597,6 +951,6 @@ impl StableDiffusionInterface {
     }
 
     pub fn to_any(self) -> AnyInterface {
-        AnyInterface::StableDiffusionInterface(self)
+        AnyInterface::ImageGenerationInterface(self)
     }
 }

@@ -399,7 +399,7 @@ impl eframe::App for WebUIApp {
                                     AnyInterface::TextInferenceTokensInLogitOutInterface(iface) => {
                                         needed_tokenizers.push(iface.get_tokenizer().clone());
                                     }
-                                    AnyInterface::StableDiffusionInterface(iface) => {
+                                    AnyInterface::ImageGenerationInterface(iface) => {
                                         needed_tokenizers.push(iface.tokenizer.clone());
                                     }
                                 }

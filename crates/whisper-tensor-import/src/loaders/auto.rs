@@ -1,4 +1,4 @@
-use super::{OnnxLoader, Rwkv7Loader, SD15Loader, TransformersLoader};
+use super::{OnnxLoader, Rwkv7Loader, SD2Loader, SD15Loader, SDXLLoader, TransformersLoader};
 use crate::onnx_graph::weights::SafetensorsWeightManager;
 use memmap2::Mmap;
 use std::sync::Arc;
@@ -48,16 +48,22 @@ impl Loader for AutoLoader {
                 "onnx" => return OnnxLoader.load(config),
                 "pth" => return Rwkv7Loader.load(config),
                 "safetensors" => {
-                    // Probe if it's an SD 1.5 checkpoint
+                    // Probe safetensors checkpoints for known formats
                     if let Ok(file) = std::fs::File::open(&path)
                         && let Ok(mmap) = unsafe { Mmap::map(&file) }
                         && let Ok(wm) = SafetensorsWeightManager::new(vec![Arc::new(mmap)])
-                        && crate::sd15::is_sd15_checkpoint(&wm)
                     {
-                        return SD15Loader.load(config);
+                        if crate::sd15::is_sd15_checkpoint(&wm) {
+                            return SD15Loader.load(config);
+                        }
+                        if crate::sd2::is_sd2_checkpoint(&wm) {
+                            return SD2Loader.load(config);
+                        }
+                        if crate::sd_xl::is_sdxl_checkpoint(&wm) {
+                            return SDXLLoader.load(config);
+                        }
                     }
-                    // Not SD — could be a single safetensors model, but we don't have
-                    // a standalone safetensors loader yet. Fall through to error.
+                    // Not a recognized format. Fall through to error.
                 }
                 _ => {}
             }

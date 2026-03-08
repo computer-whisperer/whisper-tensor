@@ -48,7 +48,7 @@ use web_time::{Duration, Instant};
 use whisper_tensor::DynRank;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::graph::{GlobalId, Graph, GraphDyn};
-use whisper_tensor::interfaces::{AnyInterface, StableDiffusionInterface};
+use whisper_tensor::interfaces::{AnyInterface, ImageGenerationInterface};
 use whisper_tensor::metadata::TokenizerInfo;
 use whisper_tensor::scalar_info::ScalarInfoTyped;
 use whisper_tensor::super_graph::nodes::SuperGraphAnyNode;
@@ -1495,7 +1495,7 @@ impl GraphExplorerApp {
                             }
                         });
                     }
-                    AnyInterface::StableDiffusionInterface(sd_interface) => {
+                    AnyInterface::ImageGenerationInterface(sd_interface) => {
                         let sd_data = self
                             .sd_inference_data
                             .entry(interface_id)
@@ -1626,7 +1626,7 @@ impl GraphExplorerApp {
                                             let uncond_tensor = NDArrayNumericTensor::from_vec_shape(uncond_ids, &vec![1, seq_len as u64]).unwrap();
 
                                             let (timestep_values, dt_values, sigma_values, init_sigma) =
-                                                StableDiffusionInterface::compute_euler_schedule(sd_data.num_steps);
+                                                ImageGenerationInterface::compute_euler_schedule(sd_data.num_steps);
 
                                             let latent_n = 4 * sd_data.latent_h * sd_data.latent_w;
                                             let initial_noise = generate_normal_noise(latent_n, sd_data.seed);
@@ -1655,10 +1655,26 @@ impl GraphExplorerApp {
                                             ).unwrap();
                                             let guidance = NDArrayNumericTensor::from_vec(vec![sd_data.guidance_scale]).to_dyn();
 
-                                            // model_ids order: [text_encoder, unet, vae_decoder]
-                                            let text_encoder_id = interface.model_ids[0];
-                                            let unet_id = interface.model_ids[1];
-                                            let vae_decoder_id = interface.model_ids[2];
+                                            let symbolic_graph_ids: Vec<_> = interface.model_ids.to_vec();
+                                            let model_inputs: HashMap<_, _> = sd_interface
+                                                .model_weights
+                                                .iter()
+                                                .zip(interface.model_ids.iter())
+                                                .map(|(&link, &id)| (link, id))
+                                                .collect();
+
+                                            let mut tensor_inputs = HashMap::from([
+                                                (sd_interface.cond_ids_input, cond_tensor),
+                                                (sd_interface.initial_latent_input, latent_tensor),
+                                                (sd_interface.timesteps_input, timesteps_tensor),
+                                                (sd_interface.dt_input, dt_tensor),
+                                                (sd_interface.sigmas_input, sigmas_tensor),
+                                                (sd_interface.iteration_count_input, iter_count),
+                                                (sd_interface.guidance_scale_input, guidance),
+                                            ]);
+                                            if let Some(neg_link) = sd_interface.negative_cond_ids_input {
+                                                tensor_inputs.insert(neg_link, uncond_tensor);
+                                            }
 
                                             let swatch_settings = if state.do_explorer_swatches_in_view || state.do_all_explorer_swatches {
                                                 Some(AbbreviatedTensorReportSettings {
@@ -1679,22 +1695,9 @@ impl GraphExplorerApp {
                                                 string_inputs: HashMap::new(),
                                                 use_cache: if sd_data.use_cache { Some(200 + interface_id as u64) } else { None },
                                                 backend_mode: sd_data.selected_mode,
-                                                symbolic_graph_ids: vec![text_encoder_id, unet_id, vae_decoder_id],
-                                                tensor_inputs: HashMap::from([
-                                                    (sd_interface.cond_ids_input, cond_tensor),
-                                                    (sd_interface.uncond_ids_input, uncond_tensor),
-                                                    (sd_interface.initial_latent_input, latent_tensor),
-                                                    (sd_interface.timesteps_input, timesteps_tensor),
-                                                    (sd_interface.dt_input, dt_tensor),
-                                                    (sd_interface.sigmas_input, sigmas_tensor),
-                                                    (sd_interface.iteration_count_input, iter_count),
-                                                    (sd_interface.guidance_scale_input, guidance),
-                                                ]),
-                                                model_inputs: HashMap::from([
-                                                    (sd_interface.text_encoder_weights, text_encoder_id),
-                                                    (sd_interface.unet_weights, unet_id),
-                                                    (sd_interface.vae_decoder_weights, vae_decoder_id),
-                                                ]),
+                                                symbolic_graph_ids,
+                                                tensor_inputs,
+                                                model_inputs,
                                                 hash_inputs: HashMap::new(),
                                             });
 

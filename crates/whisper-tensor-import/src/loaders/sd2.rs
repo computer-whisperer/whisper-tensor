@@ -4,23 +4,23 @@ use whisper_tensor::loader::*;
 use whisper_tensor::metadata::TokenizerInfo;
 use whisper_tensor::model::Model;
 
-/// Loader for Stable Diffusion 1.5 checkpoints (.safetensors).
-pub struct SD15Loader;
+/// Loader for Stable Diffusion 2.x checkpoints (.safetensors).
+pub struct SD2Loader;
 
-impl Loader for SD15Loader {
+impl Loader for SD2Loader {
     fn name(&self) -> &str {
-        "Stable Diffusion 1.5"
+        "Stable Diffusion 2"
     }
 
     fn description(&self) -> &str {
-        "Load a Stable Diffusion 1.5 checkpoint (.safetensors) as a multi-model pipeline"
+        "Load a Stable Diffusion 2.x checkpoint (.safetensors) as a multi-model pipeline"
     }
 
     fn config_schema(&self) -> Vec<ConfigField> {
         vec![ConfigField {
             key: "path".to_string(),
             label: "Checkpoint Path".to_string(),
-            description: "Path to the SD 1.5 .safetensors checkpoint file".to_string(),
+            description: "Path to the SD 2.x .safetensors checkpoint file".to_string(),
             field_type: ConfigFieldType::FilePath,
             required: true,
             default: None,
@@ -55,13 +55,13 @@ impl Loader for SD15Loader {
         };
 
         let (te_onnx, unet_onnx, vae_onnx) =
-            crate::sd15::load_sd15_checkpoint(&path, storage).map_err(LoaderError::LoadFailed)?;
+            crate::sd2::load_sd2_checkpoint(&path, storage).map_err(LoaderError::LoadFailed)?;
 
         let base_name = path
             .file_stem()
             .unwrap_or_default()
             .to_str()
-            .unwrap_or("sd15")
+            .unwrap_or("sd2")
             .to_string();
         let base_dir = path.parent();
 
@@ -84,7 +84,7 @@ impl Loader for SD15Loader {
             let mut rng = rand::rng();
             ImageGenerationInterface::new_single_te_cfg(
                 &mut rng,
-                TokenizerInfo::HFTokenizer("openai/clip-vit-large-patch14".to_string()),
+                TokenizerInfo::HFTokenizer("laion/CLIP-ViT-H-14-laion2B-s32B-b79K".to_string()),
                 model_dtype,
                 0.18215,
             )

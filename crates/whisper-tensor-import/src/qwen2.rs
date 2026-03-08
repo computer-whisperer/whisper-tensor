@@ -287,7 +287,7 @@ pub fn load_qwen2(
         };
 
         let scores = MatMul::new(None, q, transpose(k.clone()))?;
-        let scores = div_scalar(scores, half::bf16::from_f32((head_dim as f32).sqrt()))?;
+        let scores = div_scalar(scores, (head_dim as f32).sqrt())?;
 
         let scores = Softmax::new(None, scores, Some(3));
         let output = MatMul::new(None, scores, v)?;
