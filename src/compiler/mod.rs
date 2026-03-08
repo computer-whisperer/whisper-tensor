@@ -1,3 +1,30 @@
+// See README.md in this directory — this module is a volatile sandbox.
+
+pub mod nano_op;
+
+#[cfg(feature = "cranelift")]
+pub mod codegen;
+
+use crate::milli_graph::MilliOpGraph;
+
+/// Run a MilliOpGraph through the interpreter and return results.
+/// Convenience wrapper for benchmarking the compiler against the interpreter.
+pub fn interpret_milli_graph(
+    graph: &MilliOpGraph,
+    inputs: &std::collections::HashMap<crate::graph::GlobalId, crate::numeric_tensor::NumericTensor<crate::DynRank>>,
+) -> Result<
+    std::collections::HashMap<crate::graph::GlobalId, crate::numeric_tensor::NumericTensor<crate::DynRank>>,
+    crate::milli_graph::MilliOpGraphError,
+> {
+    let mut backend = crate::backends::eval_backend::EvalBackend::NDArray;
+    Ok(graph.eval(inputs, &mut (), &mut backend)?.collect())
+}
+
+// ---------------------------------------------------------------------------
+// Legacy API — kept for backward compatibility with existing callers
+// (interfaces.rs, super_graph/, server, examples)
+// ---------------------------------------------------------------------------
+
 use crate::DynRank;
 use crate::backends::eval_backend;
 use crate::backends::eval_backend::EvalBackend;

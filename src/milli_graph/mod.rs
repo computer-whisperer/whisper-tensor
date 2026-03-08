@@ -295,6 +295,12 @@ pub struct MilliOpGraph {
 }
 
 impl MilliOpGraph {
+    /// Returns the topological op ordering. Used by the compiler to iterate ops
+    /// in execution order.
+    pub(crate) fn op_ordering(&self) -> &[GlobalId] {
+        &self.op_ordering
+    }
+
     pub fn new(
         inputs: impl IntoIterator<Item = GlobalId>,
         rng: &mut impl Rng,

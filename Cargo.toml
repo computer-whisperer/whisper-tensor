@@ -45,6 +45,12 @@ image = "0.25"
 ndarray-npy = "0.9"
 float8 = { version = "0.7.0", features = ["serde", "num-traits", "zerocopy"] }
 
+cranelift-codegen = { version = "0.116", optional = true }
+cranelift-frontend = { version = "0.116", optional = true }
+cranelift-module = { version = "0.116", optional = true }
+cranelift-jit = { version = "0.116", optional = true }
+cranelift-native = { version = "0.116", optional = true }
+
 [dev-dependencies]
 whisper-tensor-import = {workspace=true}
 
@@ -59,6 +65,7 @@ http = ["tokenizers?/http"]
 rwkv-tokenizer = ["dep:rwkv-tokenizer"]
 vulkan = ["dep:vulkano", "dep:vulkano-shaders"]
 tch = ["dep:tch"]
+cranelift = ["dep:cranelift-codegen", "dep:cranelift-frontend", "dep:cranelift-module", "dep:cranelift-jit", "dep:cranelift-native"]
 
 [build-dependencies]
 prost-build = "0.13.3"
@@ -84,6 +91,11 @@ required-features = ["vulkan"]
 name = "super_graph_test_3"
 path = "examples/super_graph_test_3.rs"
 required-features = ["vulkan"]
+
+[[example]]
+name = "compiler_test"
+path = "examples/compiler_test.rs"
+required-features = ["cranelift"]
 
 [[example]]
 name = "matmul_perf_test"
