@@ -49,14 +49,12 @@ impl Loader for AutoLoader {
                 "pth" => return Rwkv7Loader.load(config),
                 "safetensors" => {
                     // Probe if it's an SD 1.5 checkpoint
-                    if let Ok(file) = std::fs::File::open(&path) {
-                        if let Ok(mmap) = unsafe { Mmap::map(&file) } {
-                            if let Ok(wm) = SafetensorsWeightManager::new(vec![Arc::new(mmap)]) {
-                                if crate::sd15::is_sd15_checkpoint(&wm) {
-                                    return SD15Loader.load(config);
-                                }
-                            }
-                        }
+                    if let Ok(file) = std::fs::File::open(&path)
+                        && let Ok(mmap) = unsafe { Mmap::map(&file) }
+                        && let Ok(wm) = SafetensorsWeightManager::new(vec![Arc::new(mmap)])
+                        && crate::sd15::is_sd15_checkpoint(&wm)
+                    {
+                        return SD15Loader.load(config);
                     }
                     // Not SD — could be a single safetensors model, but we don't have
                     // a standalone safetensors loader yet. Fall through to error.

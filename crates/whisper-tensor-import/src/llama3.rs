@@ -93,8 +93,6 @@ pub fn load_llama3(
         cos_sin_cache_shape,
     );
 
-    let mut next_io_id = 0;
-
     let mut layer_output: Arc<dyn Tensor> = x;
     for i in 0..config.num_hidden_layers {
         let layer_weight_manager = model_weight_manager.prefix(&format!("layers.{i}"));
@@ -194,11 +192,9 @@ pub fn load_llama3(
 
         input_tensors.push(kv_cache_input_k);
         output_tensors.push((format!("kv_cache_output_k_{i}"), k.clone()));
-        next_io_id += 1;
 
         input_tensors.push(kv_cache_input_v);
         output_tensors.push((format!("kv_cache_output_v_{i}"), v.clone()));
-        next_io_id += 1;
 
         let (k, v): (Arc<dyn Tensor>, Arc<dyn Tensor>) =
             if config.num_key_value_heads == config.num_attention_heads {

@@ -129,6 +129,8 @@ pub struct ScaleParams {
     pub std: f32,  // used by Std (σ)
 }
 
+type DigestResult = (Option<(Vec<u8>, ScaleParams)>, Option<Vec<bool>>);
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AbbreviatedTensorValue {
     pub value: Option<(Vec<u8>, ScaleParams)>,
@@ -150,7 +152,7 @@ impl AbbreviatedTensorValue {
         tensor: &NumericTensor<DynRank>,
         digest_len: u64,
         backend: &mut EvalBackend,
-    ) -> (Option<(Vec<u8>, ScaleParams)>, Option<Vec<bool>>) {
+    ) -> DigestResult {
         match tensor.dtype() {
             DType::F32 | DType::F64 | DType::BF16 | DType::F16 => {
                 // Ok

@@ -57,6 +57,7 @@ impl Tokenizer for AnyTokenizer {
             AnyTokenizer::Tokenizers(x) => <_ as Tokenizer>::encode(x, text),
             #[cfg(feature = "rwkv-tokenizer")]
             AnyTokenizer::Rwkv(x) => <_ as Tokenizer>::encode(x, text),
+            #[cfg(not(all(feature = "tokenizers", feature = "rwkv-tokenizer")))]
             _ => unreachable!(),
         }
     }
@@ -66,6 +67,7 @@ impl Tokenizer for AnyTokenizer {
             AnyTokenizer::Tokenizers(x) => <_ as Tokenizer>::decode(x, tokens),
             #[cfg(feature = "rwkv-tokenizer")]
             AnyTokenizer::Rwkv(x) => <_ as Tokenizer>::decode(x, tokens),
+            #[cfg(not(all(feature = "tokenizers", feature = "rwkv-tokenizer")))]
             _ => unreachable!(),
         }
     }

@@ -159,12 +159,12 @@ pub(crate) struct GraphExplorerApp {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn render_node_contents<'a>(
+fn render_node_contents(
     ui: &mut egui::Ui,
     node_type: &GraphLayoutNodeType,
     num_inputs: usize,
     num_outputs: usize,
-    graph_subject: &'a dyn GraphDyn,
+    graph_subject: &dyn GraphDyn,
     is_selected: bool,
     is_hovered: bool,
     time_since_exec: Option<Duration>,
@@ -406,10 +406,10 @@ impl GraphExplorerApp {
         loaded_models: &LoadedModels,
     ) -> String {
         // First check cached op_kind from observer
-        if let Some(op_kind) = self.node_execution_op_kinds.get(path) {
-            if !op_kind.is_empty() {
-                return op_kind.clone();
-            }
+        if let Some(op_kind) = self.node_execution_op_kinds.get(path)
+            && !op_kind.is_empty()
+        {
+            return op_kind.clone();
         }
         // Resolve through graph hierarchy like inspect windows do
         if let Some((graph, node_id)) = self.resolve_path_to_graph(path, root_graph, loaded_models)
@@ -604,13 +604,10 @@ impl GraphExplorerApp {
                         let is_selected = self.explorer_selection == Some(node_id);
                         let is_hovered = self.explorer_hovered == Some(node_id);
 
-                        let time_since_last_eval: Option<Duration> = if let Some(eval_time) =
-                            self.node_execution_timestamps.get(&node_path)
-                        {
-                            Some(current_time - *eval_time)
-                        } else {
-                            None
-                        };
+                        let time_since_last_eval: Option<Duration> = self
+                            .node_execution_timestamps
+                            .get(&node_path)
+                            .map(|eval_time| current_time - *eval_time);
 
                         let active_pulse = if let Some(x) = time_since_last_eval {
                             (1.0f32 - x.as_secs_f32() / 0.5f32).max(0.0f32)
@@ -720,11 +717,7 @@ impl GraphExplorerApp {
         }
 
         let do_interface_panel =
-            if let GraphRootSubjectSelection::Interface(_) = self.root_selection {
-                true
-            } else {
-                false
-            };
+            matches!(self.root_selection, GraphRootSubjectSelection::Interface(_));
         let interface_panel_height = 150.0;
 
         // Find the graph we are working with
@@ -887,7 +880,7 @@ impl GraphExplorerApp {
                     }
                 }
                 for global_id in tensor_link_ids.iter().filter_map(|(global_id, link_id)| {
-                    if sourced_links.get(link_id).is_none() {
+                    if !sourced_links.contains(link_id) {
                         Some(global_id)
                     } else {
                         None
@@ -1121,7 +1114,7 @@ impl GraphExplorerApp {
                                                         if !AnyInspectWindow::check_if_already_exists(
                                                             &self.inspect_windows, &node_path) {
                                                             self.inspect_windows.push(
-                                                                InspectWindowGraphNode::new(node_path.clone()).to_any()
+                                                                InspectWindowGraphNode::new(node_path.clone()).into_any()
                                                             )
                                                         }
                                                     }
@@ -1140,7 +1133,7 @@ impl GraphExplorerApp {
                                                 if !AnyInspectWindow::check_if_already_exists(
                                                     &self.inspect_windows, &link_path) {
                                                     self.inspect_windows.push(
-                                                        InspectWindowGraphLink::new(link_path.clone()).to_any()
+                                                        InspectWindowGraphLink::new(link_path.clone()).into_any()
                                                     )
                                                 }
                                             }
@@ -1252,7 +1245,7 @@ impl GraphExplorerApp {
                 }
             }
         } else {
-            ui.label(format!("No graph selected"));
+            ui.label("No graph selected");
         }
         if let GraphRootSubjectSelection::Interface(interface_id) = self.root_selection
             && let Some(interface) = loaded_models.current_interfaces.get(&interface_id)
@@ -1632,7 +1625,7 @@ impl GraphExplorerApp {
                                             let (timestep_values, dt_values, sigma_values, init_sigma) =
                                                 StableDiffusionInterface::compute_euler_schedule(sd_data.num_steps);
 
-                                            let latent_n = 1 * 4 * sd_data.latent_h * sd_data.latent_w;
+                                            let latent_n = 4 * sd_data.latent_h * sd_data.latent_w;
                                             let initial_noise = generate_normal_noise(latent_n, sd_data.seed);
                                             let scaled_noise: Vec<f32> = initial_noise.iter().map(|&x| x * init_sigma).collect();
 
@@ -1734,8 +1727,8 @@ impl GraphExplorerApp {
                         }); // end horizontal_top
 
                         // Floating inspect window for full-size image
-                        if sd_data.show_image_window {
-                            if let Some((texture, color_image)) = &sd_data.generated_image {
+                        if sd_data.show_image_window
+                            && let Some((texture, color_image)) = &sd_data.generated_image {
                                 let size = texture.size_vec2();
                                 let color_image = color_image.clone();
                                 let mut open = sd_data.show_image_window;
@@ -1755,7 +1748,6 @@ impl GraphExplorerApp {
                                         });
                                     });
                                 sd_data.show_image_window = open;
-                            }
                         }
                     }
                 }
@@ -1765,7 +1757,7 @@ impl GraphExplorerApp {
         // Prompt model loading
 
         for model_id in models_to_load {
-            if loaded_models.loaded_models.get(&model_id).is_none()
+            if !loaded_models.loaded_models.contains_key(&model_id)
                 && loaded_models.currently_requesting_model.is_none()
             {
                 log::info!("Loading model: {}", model_id);
@@ -1833,9 +1825,7 @@ fn encode_bmp(w: usize, h: usize, pixels: &[Color32]) -> Vec<u8> {
             data.push(c.g());
             data.push(c.r());
         }
-        for _ in 0..row_padding {
-            data.push(0);
-        }
+        data.resize(data.len() + row_padding, 0);
     }
 
     data

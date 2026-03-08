@@ -59,24 +59,23 @@ impl SDExplorerApp {
         ui: &mut egui::Ui,
     ) {
         // Handle pending response
-        if let Some((request_id, output_link)) = self.pending_request.clone() {
-            if let Some(response) = server_request_manager.get_response(request_id) {
-                self.pending_request = None;
-                match response.result {
-                    Ok(mut data) => {
-                        if let Some(image_tensor) = data.tensor_outputs.remove(&output_link) {
-                            self.status_message =
-                                Some(format!("Image generated: {:?}", image_tensor.shape()));
-                            self.generated_image =
-                                Some(tensor_to_egui_texture(&image_tensor, ui.ctx()).0);
-                        } else {
-                            self.status_message =
-                                Some("Error: output tensor not found".to_string());
-                        }
+        if let Some((request_id, output_link)) = self.pending_request
+            && let Some(response) = server_request_manager.get_response(request_id)
+        {
+            self.pending_request = None;
+            match response.result {
+                Ok(mut data) => {
+                    if let Some(image_tensor) = data.tensor_outputs.remove(&output_link) {
+                        self.status_message =
+                            Some(format!("Image generated: {:?}", image_tensor.shape()));
+                        self.generated_image =
+                            Some(tensor_to_egui_texture(&image_tensor, ui.ctx()).0);
+                    } else {
+                        self.status_message = Some("Error: output tensor not found".to_string());
                     }
-                    Err(err) => {
-                        self.status_message = Some(format!("Error: {err}"));
-                    }
+                }
+                Err(err) => {
+                    self.status_message = Some(format!("Error: {err}"));
                 }
             }
         }
@@ -219,7 +218,7 @@ impl SDExplorerApp {
             StableDiffusionInterface::compute_euler_schedule(state.num_steps);
 
         // Generate random noise
-        let latent_n = 1 * 4 * state.latent_h * state.latent_w;
+        let latent_n = 4 * state.latent_h * state.latent_w;
         let initial_noise = generate_normal_noise(latent_n, state.seed);
         let scaled_noise: Vec<f32> = initial_noise.iter().map(|&x| x * init_sigma).collect();
 
@@ -299,13 +298,13 @@ pub(crate) fn tensor_to_egui_texture(
     for y in 0..img_h {
         for x in 0..img_w {
             let r = if ch > 0 {
-                let idx = 0 * img_h * img_w + y * img_w + x;
+                let idx = y * img_w + x;
                 ((f32_data[idx] + 1.0) * 0.5).clamp(0.0, 1.0)
             } else {
                 0.0
             };
             let g = if ch > 1 {
-                let idx = 1 * img_h * img_w + y * img_w + x;
+                let idx = img_h * img_w + y * img_w + x;
                 ((f32_data[idx] + 1.0) * 0.5).clamp(0.0, 1.0)
             } else {
                 0.0

@@ -106,8 +106,8 @@ impl InspectWindowGraphLink {
         }
     }
 
-    pub(crate) fn to_any(self) -> AnyInspectWindow {
-        AnyInspectWindow::GraphLink(self)
+    pub(crate) fn into_any(self) -> AnyInspectWindow {
+        AnyInspectWindow::GraphLink(Box::new(self))
     }
 }
 
@@ -139,14 +139,14 @@ impl InspectWindowGraphNode {
         }
     }
 
-    pub(crate) fn to_any(self) -> AnyInspectWindow {
+    pub(crate) fn into_any(self) -> AnyInspectWindow {
         AnyInspectWindow::GraphNode(self)
     }
 }
 
 #[derive(Clone, Debug)]
 pub(crate) enum AnyInspectWindow {
-    GraphLink(InspectWindowGraphLink),
+    GraphLink(Box<InspectWindowGraphLink>),
     GraphNode(InspectWindowGraphNode),
 }
 
@@ -439,17 +439,15 @@ impl GraphExplorerApp {
 
     /// Check if we can fetch a stored tensor for this link
     fn can_fetch_stored_tensor(&self, graph: &dyn GraphDyn, link_id: GlobalId) -> bool {
-        if let Some(symbolic_graph) = graph.as_any().downcast_ref::<SymbolicGraph>() {
-            if let Some(tensor_info) = symbolic_graph.get_tensors().get(&link_id) {
-                if let TensorType::Constant(StoredOrNotTensor::Stored(_)) = &tensor_info.tensor_type
-                {
-                    return true;
-                }
-                if let TensorType::Input(Some(StoredOrNotTensor::Stored(_))) =
-                    &tensor_info.tensor_type
-                {
-                    return true;
-                }
+        if let Some(symbolic_graph) = graph.as_any().downcast_ref::<SymbolicGraph>()
+            && let Some(tensor_info) = symbolic_graph.get_tensors().get(&link_id)
+        {
+            if let TensorType::Constant(StoredOrNotTensor::Stored(_)) = &tensor_info.tensor_type {
+                return true;
+            }
+            if let TensorType::Input(Some(StoredOrNotTensor::Stored(_))) = &tensor_info.tensor_type
+            {
+                return true;
             }
         }
         false
@@ -481,25 +479,23 @@ impl GraphExplorerApp {
         loaded_models: &LoadedModels,
         server_request_manager: &mut ServerRequestManager,
     ) {
-        if let Some(symbolic_graph) = graph.as_any().downcast_ref::<SymbolicGraph>() {
-            if let Some(tensor_info) = symbolic_graph.get_tensors().get(&link_id) {
-                let stored_id = match &tensor_info.tensor_type {
-                    TensorType::Constant(StoredOrNotTensor::Stored(id)) => Some(*id),
-                    TensorType::Input(Some(StoredOrNotTensor::Stored(id))) => Some(*id),
-                    _ => None,
-                };
+        if let Some(symbolic_graph) = graph.as_any().downcast_ref::<SymbolicGraph>()
+            && let Some(tensor_info) = symbolic_graph.get_tensors().get(&link_id)
+        {
+            let stored_id = match &tensor_info.tensor_type {
+                TensorType::Constant(StoredOrNotTensor::Stored(id)) => Some(*id),
+                TensorType::Input(Some(StoredOrNotTensor::Stored(id))) => Some(*id),
+                _ => None,
+            };
 
-                if let Some(tensor_store_id) = stored_id {
-                    if let Some(model_id) = self.find_model_id_for_graph(graph, loaded_models) {
-                        window.stored_value_requested = Some(tensor_store_id);
-                        let _ = server_request_manager.send(
-                            WebsocketClientServerMessage::GetStoredTensor(
-                                model_id,
-                                tensor_store_id,
-                            ),
-                        );
-                    }
-                }
+            if let Some(tensor_store_id) = stored_id
+                && let Some(model_id) = self.find_model_id_for_graph(graph, loaded_models)
+            {
+                window.stored_value_requested = Some(tensor_store_id);
+                let _ = server_request_manager.send(WebsocketClientServerMessage::GetStoredTensor(
+                    model_id,
+                    tensor_store_id,
+                ));
             }
         }
     }
@@ -974,15 +970,10 @@ impl GraphExplorerApp {
                         if let Some(category) = &meta.category {
                             render_badge(ui, category, category_color(category));
                         }
-                        if let Some(shape) = &meta.shape {
-                            if let Some(bytes) = calculate_memory_size(shape, meta.dtype.as_deref())
-                            {
-                                render_badge(
-                                    ui,
-                                    &format_bytes(bytes),
-                                    Color32::from_rgb(60, 60, 70),
-                                );
-                            }
+                        if let Some(shape) = &meta.shape
+                            && let Some(bytes) = calculate_memory_size(shape, meta.dtype.as_deref())
+                        {
+                            render_badge(ui, &format_bytes(bytes), Color32::from_rgb(60, 60, 70));
                         }
                     });
 
@@ -1344,18 +1335,17 @@ impl GraphExplorerApp {
             self.inspect_window_tensor_subscriptions
                 .remove(&window.path);
         }
-        if should_fetch_stored {
-            if let Some((graph, link_id)) =
+        if should_fetch_stored
+            && let Some((graph, link_id)) =
                 self.resolve_path_to_graph(&window.path, root_graph, loaded_models)
-            {
-                self.request_stored_tensor(
-                    window,
-                    graph,
-                    link_id,
-                    loaded_models,
-                    server_request_manager,
-                );
-            }
+        {
+            self.request_stored_tensor(
+                window,
+                graph,
+                link_id,
+                loaded_models,
+                server_request_manager,
+            );
         }
 
         // Apply hover/selection to graph
@@ -1448,10 +1438,10 @@ impl GraphExplorerApp {
 
                 if is_node {
                     self.inspect_windows
-                        .push(InspectWindowGraphNode::new(path).to_any());
+                        .push(InspectWindowGraphNode::new(path).into_any());
                 } else {
                     self.inspect_windows
-                        .push(InspectWindowGraphLink::new(path).to_any());
+                        .push(InspectWindowGraphLink::new(path).into_any());
                 }
             }
         }

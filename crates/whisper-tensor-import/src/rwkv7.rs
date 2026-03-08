@@ -141,8 +141,6 @@ pub fn load_rwkv7(
 
     let mut v0: Option<Arc<dyn Tensor>> = None;
 
-    let mut next_io_id = 0;
-
     for layer_id in 0..layer_count {
         let block_weight_manager = weight_manager.prefix(&format!("blocks.{layer_id}"));
         let before_ln1 = x.clone();
@@ -154,7 +152,6 @@ pub fn load_rwkv7(
         );
         input_tensors.push(time_mixer_x_in.clone());
         output_tensors.push((format!("time_mixer_x_out_{layer_id}"), after_ln1.clone()));
-        next_io_id += 1;
 
         let dx_prev = Sub::new(None, time_mixer_x_in, after_ln1.clone())?;
 
@@ -354,7 +351,6 @@ pub fn load_rwkv7(
 
         input_tensors.push(vk_state_in);
         output_tensors.push((format!("vk_state_out_{layer_id}"), vk_state_out));
-        next_io_id += 1;
 
         let value = reshape(value, vec![0, 0, n_heads as i64, -1])?;
 
@@ -395,7 +391,6 @@ pub fn load_rwkv7(
         );
         input_tensors.push(channel_mixer_x_in.clone());
         output_tensors.push((format!("channel_mixer_x_out_{layer_id}"), after_ln2.clone()));
-        next_io_id += 1;
         let hidden_state = lerp(
             after_ln2.clone(),
             channel_mixer_x_in,

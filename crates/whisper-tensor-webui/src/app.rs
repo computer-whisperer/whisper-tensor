@@ -273,64 +273,59 @@ impl WebUIApp {
                     }
 
                     ui.horizontal(|ui| {
-                        if ui.button("Load").clicked() {
-                            if let Some(loader) = registry
+                        if ui.button("Load").clicked()
+                            && let Some(loader) = registry
                                 .loaders
                                 .get(self.app_state.loader_dialog.selected_loader)
-                            {
-                                // Build ConfigValues from field strings
-                                let field_values = self
-                                    .app_state
-                                    .loader_dialog
-                                    .field_values
-                                    .get(&self.app_state.loader_dialog.selected_loader)
-                                    .cloned()
-                                    .unwrap_or_default();
+                        {
+                            // Build ConfigValues from field strings
+                            let field_values = self
+                                .app_state
+                                .loader_dialog
+                                .field_values
+                                .get(&self.app_state.loader_dialog.selected_loader)
+                                .cloned()
+                                .unwrap_or_default();
 
-                                let mut config = HashMap::new();
-                                for field in &loader.config_schema {
-                                    if let Some(raw) = field_values.get(&field.key) {
-                                        if raw.is_empty() && !field.required {
-                                            continue;
-                                        }
-                                        let cv = match &field.field_type {
-                                            ConfigFieldType::FilePath => {
-                                                ConfigValue::FilePath(raw.into())
-                                            }
-                                            ConfigFieldType::String => {
-                                                ConfigValue::String(raw.clone())
-                                            }
-                                            ConfigFieldType::Integer { .. } => {
-                                                match raw.parse::<i64>() {
-                                                    Ok(n) => ConfigValue::Integer(n),
-                                                    Err(_) => ConfigValue::String(raw.clone()),
-                                                }
-                                            }
-                                            ConfigFieldType::Float { .. } => {
-                                                match raw.parse::<f64>() {
-                                                    Ok(f) => ConfigValue::Float(f),
-                                                    Err(_) => ConfigValue::String(raw.clone()),
-                                                }
-                                            }
-                                            ConfigFieldType::Bool => ConfigValue::Bool(
-                                                raw.parse::<bool>().unwrap_or(false),
-                                            ),
-                                            ConfigFieldType::Enum { .. } => {
-                                                ConfigValue::String(raw.clone())
-                                            }
-                                        };
-                                        config.insert(field.key.clone(), cv);
+                            let mut config = HashMap::new();
+                            for field in &loader.config_schema {
+                                if let Some(raw) = field_values.get(&field.key) {
+                                    if raw.is_empty() && !field.required {
+                                        continue;
                                     }
+                                    let cv = match &field.field_type {
+                                        ConfigFieldType::FilePath => {
+                                            ConfigValue::FilePath(raw.into())
+                                        }
+                                        ConfigFieldType::String => ConfigValue::String(raw.clone()),
+                                        ConfigFieldType::Integer { .. } => {
+                                            match raw.parse::<i64>() {
+                                                Ok(n) => ConfigValue::Integer(n),
+                                                Err(_) => ConfigValue::String(raw.clone()),
+                                            }
+                                        }
+                                        ConfigFieldType::Float { .. } => match raw.parse::<f64>() {
+                                            Ok(f) => ConfigValue::Float(f),
+                                            Err(_) => ConfigValue::String(raw.clone()),
+                                        },
+                                        ConfigFieldType::Bool => {
+                                            ConfigValue::Bool(raw.parse::<bool>().unwrap_or(false))
+                                        }
+                                        ConfigFieldType::Enum { .. } => {
+                                            ConfigValue::String(raw.clone())
+                                        }
+                                    };
+                                    config.insert(field.key.clone(), cv);
                                 }
-
-                                self.server_request_manager
-                                    .send(WebsocketClientServerMessage::RunLoader {
-                                        loader_index: self.app_state.loader_dialog.selected_loader,
-                                        config,
-                                    })
-                                    .unwrap();
-                                self.loaded_models.model_load_state = Some(ModelLoadState::Loading);
                             }
+
+                            self.server_request_manager
+                                .send(WebsocketClientServerMessage::RunLoader {
+                                    loader_index: self.app_state.loader_dialog.selected_loader,
+                                    config,
+                                })
+                                .unwrap();
+                            self.loaded_models.model_load_state = Some(ModelLoadState::Loading);
                         }
                         if ui.button("Cancel").clicked() {
                             self.loaded_models.model_load_state = None;
@@ -459,11 +454,10 @@ impl eframe::App for WebUIApp {
                             // Route to all graph explorers that may have requested this tensor
                             for explorer in self.graph_explorer_app.values_mut() {
                                 for window in &mut explorer.inspect_windows {
-                                    if let crate::graph_explorer::inspect_windows::AnyInspectWindow::GraphLink(link_window) = window {
-                                        if link_window.stored_value_requested == Some(stored_tensor_id) {
+                                    if let crate::graph_explorer::inspect_windows::AnyInspectWindow::GraphLink(link_window) = window
+                                        && link_window.stored_value_requested == Some(stored_tensor_id) {
                                             link_window.stored_value = Some(res.clone());
                                             link_window.stored_value_requested = None;
-                                        }
                                     }
                                 }
                             }
@@ -628,11 +622,11 @@ impl eframe::App for WebUIApp {
                                 &mut self.app_state.graph_explorer_settings.explorer_minimap,
                             );
                             ui.label("Minimap:");
-                            if let Some(selected_tab) = self.selected_graph_explorer_tab {
-                                if let Some(ge) = self.graph_explorer_app.get_mut(&selected_tab) {
-                                    toggle_ui(ui, &mut ge.show_profiling_window);
-                                    ui.label("Profiling:");
-                                }
+                            if let Some(selected_tab) = self.selected_graph_explorer_tab
+                                && let Some(ge) = self.graph_explorer_app.get_mut(&selected_tab)
+                            {
+                                toggle_ui(ui, &mut ge.show_profiling_window);
+                                ui.label("Profiling:");
                             }
                             toggle_ui(
                                 ui,
@@ -703,17 +697,16 @@ impl eframe::App for WebUIApp {
             }
         });
 
-        if let SelectedTab::GraphExplorer = self.app_state.selected_tab {
-            if let Some(selected_tab) = self.selected_graph_explorer_tab
-                && let Some(app) = self.graph_explorer_app.get_mut(&selected_tab)
-            {
-                app.update_inspect_windows(
-                    &mut self.app_state.graph_explorer_settings,
-                    ctx,
-                    &mut self.loaded_models,
-                    &mut self.server_request_manager,
-                )
-            }
+        if let SelectedTab::GraphExplorer = self.app_state.selected_tab
+            && let Some(selected_tab) = self.selected_graph_explorer_tab
+            && let Some(app) = self.graph_explorer_app.get_mut(&selected_tab)
+        {
+            app.update_inspect_windows(
+                &mut self.app_state.graph_explorer_settings,
+                ctx,
+                &mut self.loaded_models,
+                &mut self.server_request_manager,
+            )
         }
     }
 
