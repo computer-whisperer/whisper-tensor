@@ -348,63 +348,141 @@ fn emit_gemm(
         builder.ins().imul(m_loop.iv, row_stride)
     };
 
-    // N loop.
-    let n_loop = open_loop(builder, gk.n, next_var);
-
-    // Initialize accumulator.
-    let acc_var = Variable::from_u32(*next_var);
-    *next_var += 1;
-    builder.declare_var(acc_var, types::F32);
-    let zero_f32 = builder.ins().f32const(0.0);
-    builder.def_var(acc_var, zero_f32);
-
-    // K loop.
-    let k_loop = open_loop(builder, gk.k, next_var);
-
-    let acc = builder.use_var(acc_var);
-
-    // A index: batch_off + m*k + k_iv
-    let a_flat = builder.ins().iadd(a_batch_off, m_a_off);
-    let a_flat = builder.ins().iadd(a_flat, k_loop.iv);
-    let a_byte = builder.ins().ishl_imm(a_flat, 2);
-    let a_addr = builder.ins().iadd(a_base, a_byte);
-    let a_val = builder
-        .ins()
-        .load(types::F32, MemFlags::trusted(), a_addr, 0);
-
-    // B index: batch_off + k*n + n_iv
-    let b_row_off = if gk.n == 1 {
-        k_loop.iv
-    } else {
-        let n_stride = builder.ins().iconst(types::I64, gk.n as i64);
-        builder.ins().imul(k_loop.iv, n_stride)
+    // Precompute A row byte address (invariant across N).
+    let a_row_byte_ptr = {
+        let off = builder.ins().iadd(a_batch_off, m_a_off);
+        let byte_off = builder.ins().ishl_imm(off, 2);
+        builder.ins().iadd(a_base, byte_off)
     };
-    let b_flat = builder.ins().iadd(b_batch_off, b_row_off);
-    let b_flat = builder.ins().iadd(b_flat, n_loop.iv);
-    let b_byte = builder.ins().ishl_imm(b_flat, 2);
-    let b_addr = builder.ins().iadd(b_base, b_byte);
-    let b_val = builder
-        .ins()
-        .load(types::F32, MemFlags::trusted(), b_addr, 0);
 
-    // acc += a * b
-    let prod = builder.ins().fmul(a_val, b_val);
-    let new_acc = builder.ins().fadd(acc, prod);
-    builder.def_var(acc_var, new_acc);
+    let b_stride_bytes = (gk.n as i64) * 4;
+    let n_tiles = gk.n / 4;
+    let n_remainder = gk.n % 4;
 
-    close_loop(builder, &k_loop);
+    // --- Tiled N loop: process 4 columns at a time ---
+    if n_tiles > 0 {
+        let n_tile_loop = open_loop(builder, n_tiles, next_var);
 
-    // Store C: batch_off + m*n + n_iv
-    let final_acc = builder.use_var(acc_var);
-    let c_flat = builder.ins().iadd(c_batch_off, m_c_off);
-    let c_flat = builder.ins().iadd(c_flat, n_loop.iv);
-    let c_byte = builder.ins().ishl_imm(c_flat, 2);
-    let c_addr = builder.ins().iadd(c_base, c_byte);
-    builder
-        .ins()
-        .store(MemFlags::trusted(), final_acc, c_addr, 0);
+        // n_elem = n_tile_iv * 4 (element offset for this tile)
+        let n_elem = builder.ins().ishl_imm(n_tile_loop.iv, 2);
 
-    close_loop(builder, &n_loop);
+        // B tile byte address: b_base + (b_batch_off + n_elem) * 4
+        let b_tile_ptr = {
+            let off = builder.ins().iadd(b_batch_off, n_elem);
+            let byte_off = builder.ins().ishl_imm(off, 2);
+            builder.ins().iadd(b_base, byte_off)
+        };
+
+        // Running pointers for K loop.
+        let a_ptr_var = Variable::from_u32(*next_var);
+        *next_var += 1;
+        builder.declare_var(a_ptr_var, types::I64);
+        builder.def_var(a_ptr_var, a_row_byte_ptr);
+
+        let b_ptr_var = Variable::from_u32(*next_var);
+        *next_var += 1;
+        builder.declare_var(b_ptr_var, types::I64);
+        builder.def_var(b_ptr_var, b_tile_ptr);
+
+        // 4 accumulators.
+        let zero_f32 = builder.ins().f32const(0.0);
+        let mut acc_vars = [Variable::from_u32(0); 4];
+        for i in 0..4 {
+            acc_vars[i] = Variable::from_u32(*next_var);
+            *next_var += 1;
+            builder.declare_var(acc_vars[i], types::F32);
+            builder.def_var(acc_vars[i], zero_f32);
+        }
+
+        // K loop.
+        let k_loop = open_loop(builder, gk.k, next_var);
+
+        let a_ptr = builder.use_var(a_ptr_var);
+        let b_ptr = builder.use_var(b_ptr_var);
+        let a_val = builder.ins().load(types::F32, MemFlags::trusted(), a_ptr, 0);
+
+        // Load 4 consecutive B values (same cache line).
+        for i in 0..4 {
+            let acc = builder.use_var(acc_vars[i]);
+            let b_val = builder.ins().load(types::F32, MemFlags::trusted(), b_ptr, (i * 4) as i32);
+            let new_acc = builder.ins().fma(a_val, b_val, acc);
+            builder.def_var(acc_vars[i], new_acc);
+        }
+
+        let a_next = builder.ins().iadd_imm(a_ptr, 4);
+        builder.def_var(a_ptr_var, a_next);
+        let b_next = builder.ins().iadd_imm(b_ptr, b_stride_bytes);
+        builder.def_var(b_ptr_var, b_next);
+
+        close_loop(builder, &k_loop);
+
+        // Store 4 C values.
+        let c_tile_ptr = {
+            let c_off = builder.ins().iadd(c_batch_off, m_c_off);
+            let c_off = builder.ins().iadd(c_off, n_elem);
+            let byte_off = builder.ins().ishl_imm(c_off, 2);
+            builder.ins().iadd(c_base, byte_off)
+        };
+        for i in 0..4 {
+            let acc = builder.use_var(acc_vars[i]);
+            builder.ins().store(MemFlags::trusted(), acc, c_tile_ptr, (i * 4) as i32);
+        }
+
+        close_loop(builder, &n_tile_loop);
+    }
+
+    // --- Scalar tail for remaining N columns ---
+    if n_remainder > 0 {
+        let n_start = (n_tiles * 4) as i64;
+        let n_tail_loop = open_loop(builder, n_remainder, next_var);
+        let n_actual = builder.ins().iadd_imm(n_tail_loop.iv, n_start);
+
+        let b_col_ptr = {
+            let off = builder.ins().iadd(b_batch_off, n_actual);
+            let byte_off = builder.ins().ishl_imm(off, 2);
+            builder.ins().iadd(b_base, byte_off)
+        };
+
+        let a_ptr_var = Variable::from_u32(*next_var);
+        *next_var += 1;
+        builder.declare_var(a_ptr_var, types::I64);
+        builder.def_var(a_ptr_var, a_row_byte_ptr);
+
+        let b_ptr_var = Variable::from_u32(*next_var);
+        *next_var += 1;
+        builder.declare_var(b_ptr_var, types::I64);
+        builder.def_var(b_ptr_var, b_col_ptr);
+
+        let acc_var = Variable::from_u32(*next_var);
+        *next_var += 1;
+        builder.declare_var(acc_var, types::F32);
+        let zero = builder.ins().f32const(0.0);
+        builder.def_var(acc_var, zero);
+
+        let k_loop = open_loop(builder, gk.k, next_var);
+        let a_ptr = builder.use_var(a_ptr_var);
+        let b_ptr = builder.use_var(b_ptr_var);
+        let acc = builder.use_var(acc_var);
+        let a_val = builder.ins().load(types::F32, MemFlags::trusted(), a_ptr, 0);
+        let b_val = builder.ins().load(types::F32, MemFlags::trusted(), b_ptr, 0);
+        let new_acc = builder.ins().fma(a_val, b_val, acc);
+        builder.def_var(acc_var, new_acc);
+        let a_next = builder.ins().iadd_imm(a_ptr, 4);
+        builder.def_var(a_ptr_var, a_next);
+        let b_next = builder.ins().iadd_imm(b_ptr, b_stride_bytes);
+        builder.def_var(b_ptr_var, b_next);
+        close_loop(builder, &k_loop);
+
+        let c_off = builder.ins().iadd(c_batch_off, m_c_off);
+        let c_off = builder.ins().iadd(c_off, n_actual);
+        let c_byte = builder.ins().ishl_imm(c_off, 2);
+        let c_addr = builder.ins().iadd(c_base, c_byte);
+        let final_acc = builder.use_var(acc_var);
+        builder.ins().store(MemFlags::trusted(), final_acc, c_addr, 0);
+
+        close_loop(builder, &n_tail_loop);
+    }
+
     close_loop(builder, &m_loop);
     close_loop(builder, &batch_loop);
 
