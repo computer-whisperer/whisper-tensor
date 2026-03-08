@@ -56,7 +56,7 @@ dependencies = [
  "once_cell",
  "serde",
  "version_check",
- "zerocopy",
+ "zerocopy 0.8.36",
 ]
 
 [[package]]
@@ -555,7 +555,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c15b675b80d994b2eadb20a4bbe434eabeb454eac3ee5e2b4cf6f147ee9be091"
 dependencies = [
  "byteorder",
- "float8",
+ "float8 0.6.0",
  "gemm",
  "half",
  "libm",
@@ -1584,6 +1584,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "float8"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c2d1f04709a8ac06e8e8042875a3c466cc4832d3c1a18dbcb9dba3c6e83046bc"
+dependencies = [
+ "half",
+ "num-traits",
+ "serde",
+ "zerocopy 0.6.6",
+]
+
+[[package]]
 name = "fnv"
 version = "1.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2023,7 +2035,7 @@ dependencies = [
  "rand 0.9.2",
  "rand_distr",
  "serde",
- "zerocopy",
+ "zerocopy 0.8.36",
 ]
 
 [[package]]
@@ -3739,7 +3751,7 @@ version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "85eae3c4ed2f50dcfe72643da4befc30deadb458a9b590d720cde2f2b1e97da9"
 dependencies = [
- "zerocopy",
+ "zerocopy 0.8.36",
 ]
 
 [[package]]
@@ -5910,6 +5922,7 @@ dependencies = [
  "candle-core",
  "candle-onnx",
  "env_logger",
+ "float8 0.7.0",
  "half",
  "image",
  "log",
@@ -5941,7 +5954,7 @@ dependencies = [
  "vulkano-shaders",
  "whisper-tensor-import",
  "wyrand",
- "zerocopy",
+ "zerocopy 0.8.36",
 ]
 
 [[package]]
@@ -6492,11 +6505,32 @@ dependencies = [
 
 [[package]]
 name = "zerocopy"
+version = "0.6.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "854e949ac82d619ee9a14c66a1b674ac730422372ccb759ce0c39cabcf2bf8e6"
+dependencies = [
+ "byteorder",
+ "zerocopy-derive 0.6.6",
+]
+
+[[package]]
+name = "zerocopy"
 version = "0.8.36"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dafd85c832c1b68bbb4ec0c72c7f6f4fc5179627d2bc7c26b30e4c0cc11e76cc"
 dependencies = [
- "zerocopy-derive",
+ "zerocopy-derive 0.8.36",
+]
+
+[[package]]
+name = "zerocopy-derive"
+version = "0.6.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "125139de3f6b9d625c39e2efdd73d41bdac468ccd556556440e322be0e1bbd91"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

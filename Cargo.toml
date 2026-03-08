@@ -43,6 +43,7 @@ strum_macros = "0.27"
 paste = "1.0.15"
 image = "0.25"
 ndarray-npy = "0.9"
+float8 = { version = "0.7.0", features = ["serde", "num-traits", "zerocopy"] }
 
 [dev-dependencies]
 whisper-tensor-import = {workspace=true}

@@ -1,4 +1,5 @@
 use crate::onnx;
+use float8::{F8E4M3, F8E5M2};
 use half::{bf16, f16};
 use serde::{Deserialize, Serialize};
 
@@ -22,6 +23,8 @@ pub enum DType {
     F32,
     BF16,
     F16,
+    F8E4M3,
+    F8E5M2,
     U64,
     I64,
     U32,
@@ -41,6 +44,8 @@ impl DType {
             DType::F32 => Some(4),
             DType::BF16 => Some(2),
             DType::F16 => Some(2),
+            DType::F8E4M3 => Some(1),
+            DType::F8E5M2 => Some(1),
             DType::U64 => Some(8),
             DType::I64 => Some(8),
             DType::U32 => Some(4),
@@ -103,6 +108,8 @@ impl TryFrom<onnx::tensor_proto::DataType> for DType {
             onnx::tensor_proto::DataType::Float => DType::F32,
             onnx::tensor_proto::DataType::Bfloat16 => DType::BF16,
             onnx::tensor_proto::DataType::Float16 => DType::F16,
+            onnx::tensor_proto::DataType::Float8e4m3fn => DType::F8E4M3,
+            onnx::tensor_proto::DataType::Float8e5m2 => DType::F8E5M2,
             onnx::tensor_proto::DataType::Int64 => DType::I64,
             onnx::tensor_proto::DataType::Int32 => DType::I32,
             onnx::tensor_proto::DataType::Uint64 => DType::U64,
@@ -125,6 +132,8 @@ impl From<DType> for onnx::tensor_proto::DataType {
             DType::F32 => onnx::tensor_proto::DataType::Float,
             DType::BF16 => onnx::tensor_proto::DataType::Bfloat16,
             DType::F16 => onnx::tensor_proto::DataType::Float16,
+            DType::F8E4M3 => onnx::tensor_proto::DataType::Float8e4m3fn,
+            DType::F8E5M2 => onnx::tensor_proto::DataType::Float8e5m2,
             DType::I64 => onnx::tensor_proto::DataType::Int64,
             DType::I32 => onnx::tensor_proto::DataType::Int32,
             DType::U64 => onnx::tensor_proto::DataType::Uint64,
@@ -146,6 +155,8 @@ impl std::fmt::Display for DType {
             DType::F32 => write!(f, "Float32"),
             DType::BF16 => write!(f, "BFloat16"),
             DType::F16 => write!(f, "Float16"),
+            DType::F8E4M3 => write!(f, "Float8E4M3"),
+            DType::F8E5M2 => write!(f, "Float8E5M2"),
             DType::I64 => write!(f, "Int64"),
             DType::I32 => write!(f, "Int32"),
             DType::U64 => write!(f, "UInt64"),
@@ -209,6 +220,12 @@ impl DTypeOfPrimitive for bf16 {
 }
 impl DTypeOfPrimitive for f16 {
     const DTYPE: DType = DType::F16;
+}
+impl DTypeOfPrimitive for F8E4M3 {
+    const DTYPE: DType = DType::F8E4M3;
+}
+impl DTypeOfPrimitive for F8E5M2 {
+    const DTYPE: DType = DType::F8E5M2;
 }
 impl DTypeOfPrimitive for i64 {
     const DTYPE: DType = DType::I64;

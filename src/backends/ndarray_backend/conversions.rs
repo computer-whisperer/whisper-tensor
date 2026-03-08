@@ -1,6 +1,7 @@
 use crate::backends::ndarray_backend::{NDArrayNumericTensor, NDArrayNumericTensorError};
 use crate::dtype::DTypeOfPrimitive;
 use crate::tensor_rank::Rank;
+use float8::{F8E4M3, F8E5M2};
 use half::{bf16, f16};
 use ndarray::{ArcArray, ShapeBuilder};
 use typenum::P1;
@@ -161,6 +162,8 @@ impl_type_ndarray_backend!(f64, F64);
 impl_type_ndarray_backend!(f32, F32);
 impl_type_ndarray_backend!(bf16, BF16);
 impl_type_ndarray_backend!(f16, F16);
+impl_type_ndarray_backend!(F8E4M3, F8E4M3);
+impl_type_ndarray_backend!(F8E5M2, F8E5M2);
 impl_type_ndarray_backend!(u64, U64);
 impl_type_ndarray_backend!(i64, I64);
 impl_type_ndarray_backend!(u32, U32);

@@ -1,5 +1,6 @@
 use crate::TrigOp;
 use crate::dtype::{DType, DTypeOfPrimitive};
+use float8::{F8E4M3, F8E5M2};
 use half::{bf16, f16};
 use num_traits::Float;
 use serde::{Deserialize, Serialize};
@@ -11,6 +12,8 @@ pub enum NumericScalar {
     F32(f32),
     BF16(bf16),
     F16(f16),
+    F8E4M3(F8E4M3),
+    F8E5M2(F8E5M2),
     U64(u64),
     I64(i64),
     U32(u32),
@@ -30,6 +33,8 @@ impl std::fmt::Display for NumericScalar {
             NumericScalar::F32(v) => write!(f, "{}", v),
             NumericScalar::BF16(v) => write!(f, "{}", v),
             NumericScalar::F16(v) => write!(f, "{}", v),
+            NumericScalar::F8E4M3(v) => write!(f, "{}", v),
+            NumericScalar::F8E5M2(v) => write!(f, "{}", v),
             NumericScalar::U64(v) => write!(f, "{}", v),
             NumericScalar::I64(v) => write!(f, "{}", v),
             NumericScalar::U32(v) => write!(f, "{}", v),
@@ -51,6 +56,8 @@ impl NumericScalar {
             NumericScalar::F32(_) => DType::F32,
             NumericScalar::BF16(_) => DType::BF16,
             NumericScalar::F16(_) => DType::F16,
+            NumericScalar::F8E4M3(_) => DType::F8E4M3,
+            NumericScalar::F8E5M2(_) => DType::F8E5M2,
             NumericScalar::U64(_) => DType::U64,
             NumericScalar::I64(_) => DType::I64,
             NumericScalar::U32(_) => DType::U32,
@@ -70,6 +77,8 @@ impl NumericScalar {
             DType::F32 => NumericScalar::F32(0.0),
             DType::BF16 => NumericScalar::BF16(bf16::ZERO),
             DType::F16 => NumericScalar::F16(f16::ZERO),
+            DType::F8E4M3 => NumericScalar::F8E4M3(F8E4M3::ZERO),
+            DType::F8E5M2 => NumericScalar::F8E5M2(F8E5M2::ZERO),
             DType::U64 => NumericScalar::U64(0),
             DType::I64 => NumericScalar::I64(0),
             DType::U32 => NumericScalar::U32(0),
@@ -89,6 +98,8 @@ impl NumericScalar {
             NumericScalar::F32(x) => Self::F32(-x),
             NumericScalar::BF16(x) => Self::BF16(-x),
             NumericScalar::F16(x) => Self::F16(-x),
+            NumericScalar::F8E4M3(x) => Self::F8E4M3(-*x),
+            NumericScalar::F8E5M2(x) => Self::F8E5M2(-*x),
             NumericScalar::I64(x) => Self::I64(-x),
             NumericScalar::I32(x) => Self::I32(-x),
             NumericScalar::I16(x) => Self::I16(-x),
@@ -124,6 +135,8 @@ impl NumericScalar {
             NumericScalar::F32(x) => Self::F32(x.abs()),
             NumericScalar::BF16(x) => Self::BF16(x.abs()),
             NumericScalar::F16(x) => Self::F16(x.abs()),
+            NumericScalar::F8E4M3(x) => Self::F8E4M3(x.abs()),
+            NumericScalar::F8E5M2(x) => Self::F8E5M2(x.abs()),
             NumericScalar::I64(x) => Self::I64(x.abs()),
             NumericScalar::U64(x) => Self::U64(*x),
             NumericScalar::I32(x) => Self::I32(x.abs()),
@@ -142,6 +155,8 @@ impl NumericScalar {
             NumericScalar::F32(x) => Self::F32(x.exp()),
             NumericScalar::BF16(x) => Self::BF16(x.exp()),
             NumericScalar::F16(x) => Self::F16(x.exp()),
+            NumericScalar::F8E4M3(x) => Self::F8E4M3(x.exp()),
+            NumericScalar::F8E5M2(x) => Self::F8E5M2(x.exp()),
             _ => panic!("Cannot exp this type"),
         }
     }
@@ -152,6 +167,8 @@ impl NumericScalar {
             NumericScalar::F32(x) => Self::F32(x.ceil()),
             NumericScalar::BF16(x) => Self::BF16(x.ceil()),
             NumericScalar::F16(x) => Self::F16(x.ceil()),
+            NumericScalar::F8E4M3(x) => Self::F8E4M3(x.ceil()),
+            NumericScalar::F8E5M2(x) => Self::F8E5M2(x.ceil()),
             _ => panic!("Cannot ceil this type"),
         }
     }
@@ -162,6 +179,8 @@ impl NumericScalar {
             NumericScalar::F32(x) => Self::F32(x.floor()),
             NumericScalar::BF16(x) => Self::BF16(x.floor()),
             NumericScalar::F16(x) => Self::F16(x.floor()),
+            NumericScalar::F8E4M3(x) => Self::F8E4M3(x.floor()),
+            NumericScalar::F8E5M2(x) => Self::F8E5M2(x.floor()),
             _ => panic!("Cannot floor this type"),
         }
     }
@@ -172,6 +191,8 @@ impl NumericScalar {
             NumericScalar::F32(x) => Self::F32(x.round()),
             NumericScalar::BF16(x) => Self::BF16(x.round()),
             NumericScalar::F16(x) => Self::F16(x.round()),
+            NumericScalar::F8E4M3(x) => Self::F8E4M3(x.round()),
+            NumericScalar::F8E5M2(x) => Self::F8E5M2(x.round()),
             _ => panic!("Cannot round this type"),
         }
     }
@@ -187,6 +208,16 @@ impl NumericScalar {
             }),
             NumericScalar::F16(x) => Self::F16(if x.to_f32() == 0.0 {
                 f16::from_f32(0.0)
+            } else {
+                x.signum()
+            }),
+            NumericScalar::F8E4M3(x) => Self::F8E4M3(if x.to_f32() == 0.0 {
+                F8E4M3::from_f32(0.0)
+            } else {
+                x.signum()
+            }),
+            NumericScalar::F8E5M2(x) => Self::F8E5M2(if x.to_f32() == 0.0 {
+                F8E5M2::from_f32(0.0)
             } else {
                 x.signum()
             }),
@@ -224,6 +255,16 @@ impl NumericScalar {
                     && ((detect_positive && x.is_sign_positive())
                         || (detect_negative && x.is_sign_negative())),
             ),
+            NumericScalar::F8E4M3(x) => Self::BOOL(
+                x.is_infinite()
+                    && ((detect_positive && x.is_sign_positive())
+                        || (detect_negative && x.is_sign_negative())),
+            ),
+            NumericScalar::F8E5M2(x) => Self::BOOL(
+                x.is_infinite()
+                    && ((detect_positive && x.is_sign_positive())
+                        || (detect_negative && x.is_sign_negative())),
+            ),
             _ => panic!("Cannot is_inf this type"),
         }
     }
@@ -234,6 +275,8 @@ impl NumericScalar {
             NumericScalar::F32(x) => Self::BOOL(x.is_nan()),
             NumericScalar::BF16(x) => Self::BOOL(x.is_nan()),
             NumericScalar::F16(x) => Self::BOOL(x.is_nan()),
+            NumericScalar::F8E4M3(x) => Self::BOOL(x.is_nan()),
+            NumericScalar::F8E5M2(x) => Self::BOOL(x.is_nan()),
             _ => panic!("Cannot is_nan this type"),
         }
     }
@@ -254,6 +297,8 @@ impl NumericScalar {
             NumericScalar::F32(x) => Self::F32(erf_f32(*x)),
             NumericScalar::BF16(x) => Self::BF16(half::bf16::from_f32(erf_f32(x.to_f32()))),
             NumericScalar::F16(x) => Self::F16(half::f16::from_f32(erf_f32(x.to_f32()))),
+            NumericScalar::F8E4M3(x) => Self::F8E4M3(F8E4M3::from_f32(erf_f32(x.to_f32()))),
+            NumericScalar::F8E5M2(x) => Self::F8E5M2(F8E5M2::from_f32(erf_f32(x.to_f32()))),
             _ => panic!("Cannot erf this type"),
         }
     }
@@ -264,6 +309,8 @@ impl NumericScalar {
             NumericScalar::F32(x) => Self::F32(x.ln()),
             NumericScalar::BF16(x) => Self::BF16(x.ln()),
             NumericScalar::F16(x) => Self::F16(x.ln()),
+            NumericScalar::F8E4M3(x) => Self::F8E4M3(x.ln()),
+            NumericScalar::F8E5M2(x) => Self::F8E5M2(x.ln()),
             _ => panic!("Cannot ln this type"),
         }
     }
@@ -274,6 +321,8 @@ impl NumericScalar {
             NumericScalar::F32(x) => Self::F32(trig_op.apply(*x)),
             NumericScalar::BF16(x) => Self::BF16(trig_op.apply(*x)),
             NumericScalar::F16(x) => Self::F16(trig_op.apply(*x)),
+            NumericScalar::F8E4M3(x) => Self::F8E4M3(trig_op.apply(*x)),
+            NumericScalar::F8E5M2(x) => Self::F8E5M2(trig_op.apply(*x)),
             _ => panic!("Cannot trig this type"),
         }
     }
@@ -284,6 +333,8 @@ impl NumericScalar {
             NumericScalar::F32(x) => Self::F32(x.sqrt()),
             NumericScalar::BF16(x) => Self::BF16(x.sqrt()),
             NumericScalar::F16(x) => Self::F16(x.sqrt()),
+            NumericScalar::F8E4M3(x) => Self::F8E4M3(x.sqrt()),
+            NumericScalar::F8E5M2(x) => Self::F8E5M2(x.sqrt()),
             _ => panic!("Cannot ln this type"),
         }
     }
@@ -294,6 +345,8 @@ impl NumericScalar {
             NumericScalar::F32(x) => Self::F32(x.recip()),
             NumericScalar::BF16(x) => Self::BF16(x.recip()),
             NumericScalar::F16(x) => Self::F16(x.recip()),
+            NumericScalar::F8E4M3(x) => Self::F8E4M3(x.recip()),
+            NumericScalar::F8E5M2(x) => Self::F8E5M2(x.recip()),
             _ => panic!("Cannot recip this type"),
         }
     }
@@ -304,6 +357,8 @@ impl NumericScalar {
             NumericScalar::F32(x) => Self::F32(x.max(v)),
             NumericScalar::BF16(x) => Self::BF16(x.max(bf16::from_f32(v))),
             NumericScalar::F16(x) => Self::F16(x.max(f16::from_f32(v))),
+            NumericScalar::F8E4M3(x) => Self::F8E4M3(x.max(F8E4M3::from_f32(v))),
+            NumericScalar::F8E5M2(x) => Self::F8E5M2(x.max(F8E5M2::from_f32(v))),
             _ => panic!("Cannot clamp_min this type"),
         }
     }
@@ -314,6 +369,8 @@ impl NumericScalar {
             NumericScalar::F32(x) => x.to_le_bytes().to_vec(),
             NumericScalar::BF16(x) => x.to_le_bytes().to_vec(),
             NumericScalar::F16(x) => x.to_le_bytes().to_vec(),
+            NumericScalar::F8E4M3(x) => vec![x.to_bits()],
+            NumericScalar::F8E5M2(x) => vec![x.to_bits()],
             NumericScalar::U64(x) => x.to_le_bytes().to_vec(),
             NumericScalar::I64(x) => x.to_le_bytes().to_vec(),
             NumericScalar::U32(x) => x.to_le_bytes().to_vec(),
@@ -343,6 +400,8 @@ impl NumericScalarType for f64 {
             NumericScalar::F32(v) => *v as f64,
             NumericScalar::BF16(v) => v.to_f64(),
             NumericScalar::F16(v) => v.to_f64(),
+            NumericScalar::F8E4M3(v) => v.to_f64(),
+            NumericScalar::F8E5M2(v) => v.to_f64(),
             NumericScalar::U64(v) => *v as f64,
             NumericScalar::I64(v) => *v as f64,
             NumericScalar::U32(v) => *v as f64,
@@ -366,6 +425,8 @@ impl NumericScalarType for f32 {
             NumericScalar::F32(v) => *v,
             NumericScalar::BF16(v) => v.to_f32(),
             NumericScalar::F16(v) => v.to_f32(),
+            NumericScalar::F8E4M3(v) => v.to_f32(),
+            NumericScalar::F8E5M2(v) => v.to_f32(),
             NumericScalar::U64(v) => *v as f32,
             NumericScalar::I64(v) => *v as f32,
             NumericScalar::U32(v) => *v as f32,
@@ -389,6 +450,8 @@ impl NumericScalarType for bf16 {
             NumericScalar::F32(v) => bf16::from_f32(*v),
             NumericScalar::BF16(v) => *v,
             NumericScalar::F16(v) => bf16::from_f32(v.to_f32()),
+            NumericScalar::F8E4M3(v) => bf16::from_f32(v.to_f32()),
+            NumericScalar::F8E5M2(v) => bf16::from_f32(v.to_f32()),
             NumericScalar::U64(v) => bf16::from_f32(*v as f32),
             NumericScalar::I64(v) => bf16::from_f32(*v as f32),
             NumericScalar::U32(v) => bf16::from_f32(*v as f32),
@@ -412,6 +475,8 @@ impl NumericScalarType for f16 {
             NumericScalar::F32(v) => f16::from_f32(*v),
             NumericScalar::BF16(v) => f16::from_f32(v.to_f32()),
             NumericScalar::F16(v) => *v,
+            NumericScalar::F8E4M3(v) => f16::from_f32(v.to_f32()),
+            NumericScalar::F8E5M2(v) => f16::from_f32(v.to_f32()),
             NumericScalar::U64(v) => f16::from_f32(*v as f32),
             NumericScalar::I64(v) => f16::from_f32(*v as f32),
             NumericScalar::U32(v) => f16::from_f32(*v as f32),
@@ -421,6 +486,56 @@ impl NumericScalarType for f16 {
             NumericScalar::U8(v) => f16::from_f32(*v as f32),
             NumericScalar::I8(v) => f16::from_f32(*v as f32),
             _ => panic!("Cannot cast from {value:?} to f16"),
+        }
+    }
+}
+
+impl NumericScalarType for F8E4M3 {
+    fn to_numeric_scalar(self) -> NumericScalar {
+        NumericScalar::F8E4M3(self)
+    }
+    fn cast_from_numeric_scalar(value: &NumericScalar) -> Self {
+        match value {
+            NumericScalar::F64(v) => F8E4M3::from_f64(*v),
+            NumericScalar::F32(v) => F8E4M3::from_f32(*v),
+            NumericScalar::BF16(v) => F8E4M3::from_f32(v.to_f32()),
+            NumericScalar::F16(v) => F8E4M3::from_f32(v.to_f32()),
+            NumericScalar::F8E4M3(v) => *v,
+            NumericScalar::F8E5M2(v) => F8E4M3::from_f32(v.to_f32()),
+            NumericScalar::U64(v) => F8E4M3::from_f32(*v as f32),
+            NumericScalar::I64(v) => F8E4M3::from_f32(*v as f32),
+            NumericScalar::U32(v) => F8E4M3::from_f32(*v as f32),
+            NumericScalar::I32(v) => F8E4M3::from_f32(*v as f32),
+            NumericScalar::U16(v) => F8E4M3::from_f32(*v as f32),
+            NumericScalar::I16(v) => F8E4M3::from_f32(*v as f32),
+            NumericScalar::U8(v) => F8E4M3::from_f32(*v as f32),
+            NumericScalar::I8(v) => F8E4M3::from_f32(*v as f32),
+            _ => panic!("Cannot cast from {value:?} to F8E4M3"),
+        }
+    }
+}
+
+impl NumericScalarType for F8E5M2 {
+    fn to_numeric_scalar(self) -> NumericScalar {
+        NumericScalar::F8E5M2(self)
+    }
+    fn cast_from_numeric_scalar(value: &NumericScalar) -> Self {
+        match value {
+            NumericScalar::F64(v) => F8E5M2::from_f64(*v),
+            NumericScalar::F32(v) => F8E5M2::from_f32(*v),
+            NumericScalar::BF16(v) => F8E5M2::from_f32(v.to_f32()),
+            NumericScalar::F16(v) => F8E5M2::from_f32(v.to_f32()),
+            NumericScalar::F8E4M3(v) => F8E5M2::from_f32(v.to_f32()),
+            NumericScalar::F8E5M2(v) => *v,
+            NumericScalar::U64(v) => F8E5M2::from_f32(*v as f32),
+            NumericScalar::I64(v) => F8E5M2::from_f32(*v as f32),
+            NumericScalar::U32(v) => F8E5M2::from_f32(*v as f32),
+            NumericScalar::I32(v) => F8E5M2::from_f32(*v as f32),
+            NumericScalar::U16(v) => F8E5M2::from_f32(*v as f32),
+            NumericScalar::I16(v) => F8E5M2::from_f32(*v as f32),
+            NumericScalar::U8(v) => F8E5M2::from_f32(*v as f32),
+            NumericScalar::I8(v) => F8E5M2::from_f32(*v as f32),
+            _ => panic!("Cannot cast from {value:?} to F8E5M2"),
         }
     }
 }
@@ -435,6 +550,8 @@ impl NumericScalarType for u64 {
             NumericScalar::F32(v) => *v as u64,
             NumericScalar::BF16(v) => v.to_f32() as u64,
             NumericScalar::F16(v) => v.to_f32() as u64,
+            NumericScalar::F8E4M3(v) => v.to_f32() as u64,
+            NumericScalar::F8E5M2(v) => v.to_f32() as u64,
             NumericScalar::U64(v) => *v,
             NumericScalar::I64(v) => *v as u64,
             NumericScalar::U32(v) => *v as u64,
@@ -458,6 +575,8 @@ impl NumericScalarType for i64 {
             NumericScalar::F32(v) => *v as i64,
             NumericScalar::BF16(v) => v.to_f32() as i64,
             NumericScalar::F16(v) => v.to_f32() as i64,
+            NumericScalar::F8E4M3(v) => v.to_f32() as i64,
+            NumericScalar::F8E5M2(v) => v.to_f32() as i64,
             NumericScalar::U64(v) => *v as i64,
             NumericScalar::I64(v) => *v,
             NumericScalar::U32(v) => *v as i64,
@@ -481,6 +600,8 @@ impl NumericScalarType for u32 {
             NumericScalar::F32(v) => *v as u32,
             NumericScalar::BF16(v) => v.to_f32() as u32,
             NumericScalar::F16(v) => v.to_f32() as u32,
+            NumericScalar::F8E4M3(v) => v.to_f32() as u32,
+            NumericScalar::F8E5M2(v) => v.to_f32() as u32,
             NumericScalar::U64(v) => *v as u32,
             NumericScalar::I64(v) => *v as u32,
             NumericScalar::U32(v) => *v,
@@ -504,6 +625,8 @@ impl NumericScalarType for i32 {
             NumericScalar::F32(v) => *v as i32,
             NumericScalar::BF16(v) => v.to_f32() as i32,
             NumericScalar::F16(v) => v.to_f32() as i32,
+            NumericScalar::F8E4M3(v) => v.to_f32() as i32,
+            NumericScalar::F8E5M2(v) => v.to_f32() as i32,
             NumericScalar::U64(v) => *v as i32,
             NumericScalar::I64(v) => *v as i32,
             NumericScalar::U32(v) => *v as i32,
@@ -527,6 +650,8 @@ impl NumericScalarType for u16 {
             NumericScalar::F32(v) => *v as u16,
             NumericScalar::BF16(v) => v.to_f32() as u16,
             NumericScalar::F16(v) => v.to_f32() as u16,
+            NumericScalar::F8E4M3(v) => v.to_f32() as u16,
+            NumericScalar::F8E5M2(v) => v.to_f32() as u16,
             NumericScalar::U64(v) => *v as u16,
             NumericScalar::I64(v) => *v as u16,
             NumericScalar::U32(v) => *v as u16,
@@ -550,6 +675,8 @@ impl NumericScalarType for i16 {
             NumericScalar::F32(v) => *v as i16,
             NumericScalar::BF16(v) => v.to_f32() as i16,
             NumericScalar::F16(v) => v.to_f32() as i16,
+            NumericScalar::F8E4M3(v) => v.to_f32() as i16,
+            NumericScalar::F8E5M2(v) => v.to_f32() as i16,
             NumericScalar::U64(v) => *v as i16,
             NumericScalar::I64(v) => *v as i16,
             NumericScalar::U32(v) => *v as i16,
@@ -573,6 +700,8 @@ impl NumericScalarType for u8 {
             NumericScalar::F32(v) => *v as u8,
             NumericScalar::BF16(v) => v.to_f32() as u8,
             NumericScalar::F16(v) => v.to_f32() as u8,
+            NumericScalar::F8E4M3(v) => v.to_f32() as u8,
+            NumericScalar::F8E5M2(v) => v.to_f32() as u8,
             NumericScalar::U64(v) => *v as u8,
             NumericScalar::I64(v) => *v as u8,
             NumericScalar::U32(v) => *v as u8,
@@ -596,6 +725,8 @@ impl NumericScalarType for i8 {
             NumericScalar::F32(v) => *v as i8,
             NumericScalar::BF16(v) => v.to_f32() as i8,
             NumericScalar::F16(v) => v.to_f32() as i8,
+            NumericScalar::F8E4M3(v) => v.to_f32() as i8,
+            NumericScalar::F8E5M2(v) => v.to_f32() as i8,
             NumericScalar::U64(v) => *v as i8,
             NumericScalar::I64(v) => *v as i8,
             NumericScalar::U32(v) => *v as i8,
