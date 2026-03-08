@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 use std::time::Instant;
 use rand::RngCore;
-use whisper_tensor::compiler::codegen::{self, TensorLayout};
-use whisper_tensor::compiler::nano_op::NanoOpExpander;
+use whisper_tensor::compiler::attempts::v1_scalar_crystal::{codegen, crystal};
+use whisper_tensor::compiler::attempts::v1_scalar_crystal::codegen::TensorLayout;
+use whisper_tensor::compiler::attempts::v1_scalar_crystal::nano_op::NanoOpExpander;
 use whisper_tensor::graph::GlobalId;
 use whisper_tensor::milli_graph::MilliOpGraph;
 use whisper_tensor::milli_graph::ops::{SimpleBinary, SimpleUnaryOp};
@@ -224,40 +225,41 @@ fn main() {
 
         let interp_result = run_interpreter(&graph, &interp_inputs, ext_out);
 
-        // Compile
-        let t0 = Instant::now();
+        // Compile (scalar)
         let mut expander = NanoOpExpander::new(shapes.clone());
         let nano_ops = expander.expand(&graph).unwrap();
-        let expand_time = t0.elapsed();
-
-        let t0 = Instant::now();
         let layout = TensorLayout::from_shapes(&shapes);
         let compiled = codegen::compile(&nano_ops, &layout).unwrap();
-        let compile_time = t0.elapsed();
+
+        // Compile (crystal)
+        let crystal_ops = crystal::crystallize(&nano_ops);
+        let crystal_stats = crystal::stats(&crystal_ops);
+        let crystal_compiled = codegen::compile_crystallized(&crystal_ops, &layout).unwrap();
 
         println!("  Nano ops: {}", nano_ops.len());
-        println!("  Expand time:  {:?}", expand_time);
-        println!("  Compile time: {:?}", compile_time);
+        println!("  Crystal: {} loops, {} scalars, {}/{} nano ops in loops",
+            crystal_stats.num_loops, crystal_stats.num_scalars,
+            crystal_stats.nano_ops_in_loops, nano_ops.len());
 
-        // Run compiled
+        // Run both compiled versions
         let mut compiled_inputs = HashMap::new();
         compiled_inputs.insert(int_a, a_data);
         compiled_inputs.insert(int_b, b_data);
         compiled_inputs.insert(int_c, c_data);
 
-        let compiled_result = run_compiled(&compiled, &compiled_inputs, shapes.keys()
-            .find(|id| {
-                // Find the internal output tensor ID — the one mapped to ext_out
-                graph.output_map.as_ref().unwrap().get(id) == Some(&ext_out)
-            })
-            .copied()
-            .unwrap(),
-            total,
-        );
+        let int_out = *graph.output_map.as_ref().unwrap().keys()
+            .find(|id| graph.output_map.as_ref().unwrap()[id] == ext_out)
+            .unwrap();
 
-        let diff = max_abs_diff(&interp_result, &compiled_result);
-        println!("  Max abs diff: {:.2e}", diff);
-        assert!(diff < 1e-5, "Results diverged! diff={}", diff);
+        let scalar_result = run_compiled(&compiled, &compiled_inputs, int_out, total);
+        let crystal_result = run_compiled(&crystal_compiled, &compiled_inputs, int_out, total);
+
+        let diff_scalar = max_abs_diff(&interp_result, &scalar_result);
+        let diff_crystal = max_abs_diff(&interp_result, &crystal_result);
+        println!("  Max abs diff (scalar):  {:.2e}", diff_scalar);
+        println!("  Max abs diff (crystal): {:.2e}", diff_crystal);
+        assert!(diff_scalar < 1e-5, "Scalar results diverged! diff={}", diff_scalar);
+        assert!(diff_crystal < 1e-5, "Crystal results diverged! diff={}", diff_crystal);
         println!("  PASS\n");
     }
 
@@ -301,20 +303,20 @@ fn main() {
         let interp_result = run_interpreter(&graph, &interp_inputs, ext_out);
         let _interp_time = t0.elapsed();
 
-        // Compile
-        let t0 = Instant::now();
+        // Compile (scalar + crystal)
         let mut expander = NanoOpExpander::new(shapes.clone());
         let nano_ops = expander.expand(&graph).unwrap();
-        let expand_time = t0.elapsed();
-
-        let t0 = Instant::now();
         let layout = TensorLayout::from_shapes(&shapes);
         let compiled = codegen::compile(&nano_ops, &layout).unwrap();
-        let compile_time = t0.elapsed();
+
+        let crystal_ops = crystal::crystallize(&nano_ops);
+        let crystal_stats = crystal::stats(&crystal_ops);
+        let crystal_compiled = codegen::compile_crystallized(&crystal_ops, &layout).unwrap();
 
         println!("  Nano ops: {}", nano_ops.len());
-        println!("  Expand time:  {:?}", expand_time);
-        println!("  Compile time: {:?}", compile_time);
+        println!("  Crystal: {} loops, {} scalars, {}/{} nano ops in loops",
+            crystal_stats.num_loops, crystal_stats.num_scalars,
+            crystal_stats.nano_ops_in_loops, nano_ops.len());
 
         // Build compiled inputs using internal IDs
         let mut compiled_inputs = HashMap::new();
@@ -341,12 +343,10 @@ fn main() {
             .find(|id| graph.output_map.as_ref().unwrap()[id] == ext_out)
             .unwrap();
 
-        // Run compiled with timing
-        let t0 = Instant::now();
         let compiled_result = run_compiled(&compiled, &compiled_inputs, int_out, total);
-        let _compiled_time = t0.elapsed();
+        let crystal_result = run_compiled(&crystal_compiled, &compiled_inputs, int_out, total);
 
-        // Run interpreter and compiled multiple times for better timing
+        // Run all three multiple times for timing
         let n_iters = 100;
         let t0 = Instant::now();
         for _ in 0..n_iters {
@@ -358,17 +358,31 @@ fn main() {
         for _ in 0..n_iters {
             let _ = run_compiled(&compiled, &compiled_inputs, int_out, total);
         }
-        let compiled_avg = t0.elapsed() / n_iters;
+        let scalar_avg = t0.elapsed() / n_iters;
 
-        let diff = max_abs_diff(&interp_result, &compiled_result);
-        println!("  Max abs diff: {:.2e}", diff);
-        println!("  Interpreter avg: {:?} ({} iters)", interp_avg, n_iters);
-        println!("  Compiled avg:    {:?} ({} iters)", compiled_avg, n_iters);
-        if compiled_avg.as_nanos() > 0 {
-            let speedup = interp_avg.as_nanos() as f64 / compiled_avg.as_nanos() as f64;
-            println!("  Speedup: {:.2}x", speedup);
+        let t0 = Instant::now();
+        for _ in 0..n_iters {
+            let _ = run_compiled(&crystal_compiled, &compiled_inputs, int_out, total);
         }
-        assert!(diff < 1e-5, "Results diverged! diff={}", diff);
+        let crystal_avg = t0.elapsed() / n_iters;
+
+        let diff_scalar = max_abs_diff(&interp_result, &compiled_result);
+        let diff_crystal = max_abs_diff(&interp_result, &crystal_result);
+        println!("  Max abs diff (scalar):  {:.2e}", diff_scalar);
+        println!("  Max abs diff (crystal): {:.2e}", diff_crystal);
+        println!("  Interpreter avg:     {:?} ({} iters)", interp_avg, n_iters);
+        println!("  Scalar compiled avg: {:?} ({} iters)", scalar_avg, n_iters);
+        println!("  Crystal compiled avg:{:?} ({} iters)", crystal_avg, n_iters);
+        if scalar_avg.as_nanos() > 0 {
+            println!("  Scalar speedup:  {:.2}x vs interp", interp_avg.as_nanos() as f64 / scalar_avg.as_nanos() as f64);
+        }
+        if crystal_avg.as_nanos() > 0 {
+            println!("  Crystal speedup: {:.2}x vs interp, {:.2}x vs scalar",
+                interp_avg.as_nanos() as f64 / crystal_avg.as_nanos() as f64,
+                scalar_avg.as_nanos() as f64 / crystal_avg.as_nanos() as f64);
+        }
+        assert!(diff_scalar < 1e-5, "Scalar results diverged! diff={}", diff_scalar);
+        assert!(diff_crystal < 1e-5, "Crystal results diverged! diff={}", diff_crystal);
         println!("  PASS\n");
     }
 
@@ -414,19 +428,19 @@ fn main() {
 
         let interp_result = run_interpreter(&graph, &interp_inputs, ext_out);
 
-        let t0 = Instant::now();
         let mut expander = NanoOpExpander::new(shapes.clone());
         let nano_ops = expander.expand(&graph).unwrap();
-        let expand_time = t0.elapsed();
-
-        let t0 = Instant::now();
         let layout = TensorLayout::from_shapes(&shapes);
         let compiled = codegen::compile(&nano_ops, &layout).unwrap();
-        let compile_time = t0.elapsed();
+
+        let crystal_ops = crystal::crystallize(&nano_ops);
+        let crystal_stats = crystal::stats(&crystal_ops);
+        let crystal_compiled = codegen::compile_crystallized(&crystal_ops, &layout).unwrap();
 
         println!("  Nano ops: {}", nano_ops.len());
-        println!("  Expand time:  {:?}", expand_time);
-        println!("  Compile time: {:?}", compile_time);
+        println!("  Crystal: {} loops, {} scalars, {}/{} nano ops in loops",
+            crystal_stats.num_loops, crystal_stats.num_scalars,
+            crystal_stats.nano_ops_in_loops, nano_ops.len());
 
         let mut compiled_inputs = HashMap::new();
         compiled_inputs.insert(
@@ -449,6 +463,7 @@ fn main() {
             .unwrap();
 
         let compiled_result = run_compiled(&compiled, &compiled_inputs, int_out, total);
+        let crystal_result = run_compiled(&crystal_compiled, &compiled_inputs, int_out, total);
 
         let n_iters = 50;
         let t0 = Instant::now();
@@ -461,17 +476,31 @@ fn main() {
         for _ in 0..n_iters {
             let _ = run_compiled(&compiled, &compiled_inputs, int_out, total);
         }
-        let compiled_avg = t0.elapsed() / n_iters;
+        let scalar_avg = t0.elapsed() / n_iters;
 
-        let diff = max_abs_diff(&interp_result, &compiled_result);
-        println!("  Max abs diff: {:.2e}", diff);
-        println!("  Interpreter avg: {:?} ({} iters)", interp_avg, n_iters);
-        println!("  Compiled avg:    {:?} ({} iters)", compiled_avg, n_iters);
-        if compiled_avg.as_nanos() > 0 {
-            let speedup = interp_avg.as_nanos() as f64 / compiled_avg.as_nanos() as f64;
-            println!("  Speedup: {:.2}x", speedup);
+        let t0 = Instant::now();
+        for _ in 0..n_iters {
+            let _ = run_compiled(&crystal_compiled, &compiled_inputs, int_out, total);
         }
-        assert!(diff < 1e-5, "Results diverged! diff={}", diff);
+        let crystal_avg = t0.elapsed() / n_iters;
+
+        let diff_scalar = max_abs_diff(&interp_result, &compiled_result);
+        let diff_crystal = max_abs_diff(&interp_result, &crystal_result);
+        println!("  Max abs diff (scalar):  {:.2e}", diff_scalar);
+        println!("  Max abs diff (crystal): {:.2e}", diff_crystal);
+        println!("  Interpreter avg:     {:?} ({} iters)", interp_avg, n_iters);
+        println!("  Scalar compiled avg: {:?} ({} iters)", scalar_avg, n_iters);
+        println!("  Crystal compiled avg:{:?} ({} iters)", crystal_avg, n_iters);
+        if scalar_avg.as_nanos() > 0 {
+            println!("  Scalar speedup:  {:.2}x vs interp", interp_avg.as_nanos() as f64 / scalar_avg.as_nanos() as f64);
+        }
+        if crystal_avg.as_nanos() > 0 {
+            println!("  Crystal speedup: {:.2}x vs interp, {:.2}x vs scalar",
+                interp_avg.as_nanos() as f64 / crystal_avg.as_nanos() as f64,
+                scalar_avg.as_nanos() as f64 / crystal_avg.as_nanos() as f64);
+        }
+        assert!(diff_scalar < 1e-5, "Scalar results diverged! diff={}", diff_scalar);
+        assert!(diff_crystal < 1e-5, "Crystal results diverged! diff={}", diff_crystal);
         println!("  PASS\n");
     }
 

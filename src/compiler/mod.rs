@@ -1,9 +1,14 @@
 // See README.md in this directory — this module is a volatile sandbox.
 
-pub mod nano_op;
+pub mod attempts;
+
+// Re-export the current best attempt so the rest of the system
+// doesn't need to know which implementation is active.
+pub use attempts::v1_scalar_crystal::nano_op;
+pub use attempts::v1_scalar_crystal::crystal;
 
 #[cfg(feature = "cranelift")]
-pub mod codegen;
+pub use attempts::v1_scalar_crystal::codegen;
 
 use crate::milli_graph::MilliOpGraph;
 
