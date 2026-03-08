@@ -31,6 +31,27 @@ impl Loader for SD15Loader {
         let path = require_path(&config, "path")?;
         let storage = crate::onnx_graph::WeightStorageStrategy::OriginReference;
 
+        // Detect model dtype for the interface (controls casting in the SuperGraph).
+        let model_dtype = {
+            use crate::onnx_graph::weights::SafetensorsWeightManager;
+            use memmap2::Mmap;
+            let file = std::fs::File::open(&path)
+                .map_err(|e| LoaderError::LoadFailed(e.into()))?;
+            let mmap = unsafe { Mmap::map(&file) }
+                .map_err(|e| LoaderError::LoadFailed(e.into()))?;
+            let wm = SafetensorsWeightManager::new(vec![Arc::new(mmap)])
+                .map_err(|e| LoaderError::LoadFailed(e.into()))?;
+            let import_dtype = crate::sd_common::detect_model_dtype(&wm);
+            match import_dtype {
+                crate::onnx_graph::tensor::DType::F16 => whisper_tensor::dtype::DType::F16,
+                crate::onnx_graph::tensor::DType::BF16 => whisper_tensor::dtype::DType::BF16,
+                crate::onnx_graph::tensor::DType::F32 => whisper_tensor::dtype::DType::F32,
+                other => return Err(LoaderError::LoadFailed(
+                    anyhow::anyhow!("Unsupported model dtype: {:?}", other),
+                )),
+            }
+        };
+
         let (te_onnx, unet_onnx, vae_onnx) =
             crate::sd15::load_sd15_checkpoint(&path, storage).map_err(LoaderError::LoadFailed)?;
 
@@ -59,9 +80,10 @@ impl Loader for SD15Loader {
 
         let sd_interface = {
             let mut rng = rand::rng();
-            StableDiffusionInterface::new(
+            StableDiffusionInterface::new_with_dtype(
                 &mut rng,
                 TokenizerInfo::HFTokenizer("openai/clip-vit-large-patch14".to_string()),
+                model_dtype,
             )
         };
 

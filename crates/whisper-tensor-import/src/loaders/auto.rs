@@ -1,4 +1,4 @@
-use super::{OnnxLoader, Rwkv7Loader, SD15Loader, SD2Loader, TransformersLoader};
+use super::{OnnxLoader, Rwkv7Loader, SD15Loader, SD2Loader, SDXLLoader, TransformersLoader};
 use crate::onnx_graph::weights::SafetensorsWeightManager;
 use memmap2::Mmap;
 use std::sync::Arc;
@@ -58,6 +58,9 @@ impl Loader for AutoLoader {
                         }
                         if crate::sd2::is_sd2_checkpoint(&wm) {
                             return SD2Loader.load(config);
+                        }
+                        if crate::sd_xl::is_sdxl_checkpoint(&wm) {
+                            return SDXLLoader.load(config);
                         }
                     }
                     // Not a recognized format. Fall through to error.

@@ -175,7 +175,6 @@ pub struct StableDiffusionInterface {
 
 impl StableDiffusionInterface {
     pub fn new(rng: &mut impl Rng, tokenizer: TokenizerInfo) -> Self {
-        // Default to F16 for backward compatibility (SD 1.5 ONNX models are typically F16)
         Self::new_with_dtype(rng, tokenizer, DType::F16)
     }
 
