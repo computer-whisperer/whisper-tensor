@@ -157,15 +157,9 @@ pub fn gelu(input: Arc<dyn Tensor>) -> Result<Arc<dyn Tensor>, Error> {
     );
     let x_div = Div::new(None, input.clone(), sqrt2)?;
     let erf_val = Erf::new(None, x_div);
-    let one = Constant::new(
-        None,
-        TensorData::fill(Shape::from(&[1usize][..]), 1.0f32)?,
-    );
+    let one = Constant::new(None, TensorData::fill(Shape::from(&[1usize][..]), 1.0f32)?);
     let erf_plus_one = Add::new(None, erf_val, one)?;
-    let half = Constant::new(
-        None,
-        TensorData::fill(Shape::from(&[1usize][..]), 0.5f32)?,
-    );
+    let half = Constant::new(None, TensorData::fill(Shape::from(&[1usize][..]), 0.5f32)?);
     let scaled = Mul::new(None, erf_plus_one, half)?;
     Ok(Mul::new(None, input, scaled)?)
 }
@@ -232,9 +226,7 @@ pub fn conv2d(
     Ok(conv)
 }
 
-pub fn upsample_nearest_2x(
-    input: Arc<dyn Tensor>,
-) -> Result<Arc<dyn Tensor>, Error> {
+pub fn upsample_nearest_2x(input: Arc<dyn Tensor>) -> Result<Arc<dyn Tensor>, Error> {
     let scales = Constant::new(
         None,
         TensorData::new(
@@ -248,14 +240,8 @@ pub fn upsample_nearest_2x(
     output_dims[2] = Dimension::new(Some(h * 2), None, None);
     output_dims[3] = Dimension::new(Some(w * 2), None, None);
     let output_shape = Shape::new(output_dims);
-    Resize::new_with_scales(
-        None,
-        input,
-        scales,
-        "nearest".to_string(),
-        output_shape,
-    )
-    .map(|x| x as Arc<dyn Tensor>)
+    Resize::new_with_scales(None, input, scales, "nearest".to_string(), output_shape)
+        .map(|x| x as Arc<dyn Tensor>)
 }
 
 pub fn linear_with_bias(

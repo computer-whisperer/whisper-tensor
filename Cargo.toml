@@ -7,7 +7,6 @@ resolver = "2"
 readme = "README.md"
 
 [dependencies]
-whisper-tensor-import = {workspace=true}
 prost = "0.14.0"
 vulkano = { version = "0.35.2", optional=true, default-features = false, features = ["serde"] }
 vulkano-shaders = {version = "0.35.0", optional=true}
@@ -42,6 +41,9 @@ strum_macros = "0.27"
 paste = "1.0.15"
 image = "0.25"
 ndarray-npy = "0.9"
+
+[dev-dependencies]
+whisper-tensor-import = {workspace=true}
 
 [features]
 default = ["tokenizers", "rwkv-tokenizer", "http", "blas"]

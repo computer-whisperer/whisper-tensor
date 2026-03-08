@@ -4,6 +4,9 @@ use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::compiler::CompiledProgram;
 use crate::dtype::DType;
 use crate::interfaces::Error::GeneralError;
+use crate::metadata::{
+    InputMetadata, ModelInputType, ModelMetadata, ModelOutputType, OutputMetadata, TokenizerInfo,
+};
 use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::ops::{
     Cast, Constant, Shape, SimpleBinary, SimpleUnaryOp, Squeeze, Unsqueeze,
@@ -28,9 +31,6 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use whisper_tensor_import::onnx_graph::{
-    InputMetadata, ModelInputType, ModelMetadata, ModelOutputType, OutputMetadata, TokenizerInfo,
-};
 
 pub fn get_automatic_interfaces_from_model(model: &Model) -> Vec<AnyInterface> {
     let mut interfaces = Vec::new();

@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 pub mod llama3;
 mod llama4;
+pub mod loaders;
 pub mod onnx_graph;
 pub mod rwkv7;
 pub mod sd15;
@@ -83,7 +84,7 @@ pub fn identify_and_load(
     }
 }
 
-fn load_onnx_file(model_path: &Path, hint: Option<ModelTypeHint>) -> Result<Vec<u8>, Error> {
+pub fn load_onnx_file(model_path: &Path, hint: Option<ModelTypeHint>) -> Result<Vec<u8>, Error> {
     let mut onnx_data = Vec::new();
     File::open(model_path)?.read_to_end(&mut onnx_data)?;
 
@@ -97,7 +98,7 @@ fn load_onnx_file(model_path: &Path, hint: Option<ModelTypeHint>) -> Result<Vec<
     Ok(onnx_data)
 }
 
-fn try_inject_onnx_metadata_for_simple_llm(
+pub fn try_inject_onnx_metadata_for_simple_llm(
     mut onnx_data: Vec<u8>,
     tokenizer_info: TokenizerInfo,
 ) -> Result<Vec<u8>, Error> {
@@ -157,7 +158,7 @@ fn try_inject_onnx_metadata_for_simple_llm(
     Ok(onnx_data)
 }
 
-fn load_transformers_format(
+pub fn load_transformers_format(
     model_path: &Path,
     output_method: WeightStorageStrategy,
     _hint: Option<ModelTypeHint>,

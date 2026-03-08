@@ -4,6 +4,7 @@ use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::compiler::CompiledProgramObserver;
 use crate::graph::{GlobalId, Graph, Node, NodeMetadata, Property, PropertyValue};
+use crate::metadata::TokenizerInfo;
 use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::observer::MilliOpGraphObserver;
 use crate::numeric_tensor::NumericTensor;
@@ -19,13 +20,13 @@ use crate::super_graph::{
 use crate::symbolic_graph::observer::SymbolicGraphObserver;
 use crate::tokenizer::{AnyTokenizer, Tokenizer};
 use rand::RngCore;
+#[cfg(feature = "rwkv-tokenizer")]
 use rwkv_tokenizer::WorldTokenizer;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ptr;
 use std::time::Instant;
 use typenum::P1;
-use whisper_tensor_import::onnx_graph::TokenizerInfo;
 
 pub trait SuperGraphNode {
     fn to_any(self) -> SuperGraphAnyNode;
@@ -123,8 +124,13 @@ impl<'a, T: SuperGraphObserver> SymbolicGraphObserver for SymbolicGraphObserverW
             .into_iter()
             .chain(node_path.iter().cloned())
             .collect::<Vec<_>>();
-        self.inner
-            .on_node_executed(node_path.as_slice(), "", start_instant, end_instant, backend)
+        self.inner.on_node_executed(
+            node_path.as_slice(),
+            "",
+            start_instant,
+            end_instant,
+            backend,
+        )
     }
 
     fn on_tensor_assigned(
@@ -158,8 +164,13 @@ impl<'a, T: SuperGraphObserver> CompiledProgramObserver for SymbolicGraphObserve
             .into_iter()
             .chain(node_path.iter().cloned())
             .collect::<Vec<_>>();
-        self.inner
-            .on_node_executed(node_path.as_slice(), "", start_instant, end_instant, backend)
+        self.inner.on_node_executed(
+            node_path.as_slice(),
+            "",
+            start_instant,
+            end_instant,
+            backend,
+        )
     }
 
     fn on_tensor_assigned(
@@ -583,8 +594,13 @@ impl<'a, T: SuperGraphObserver> MilliOpGraphObserver for MilliOpGraphObserverWra
             .chain(node_path.iter())
             .copied()
             .collect::<Vec<_>>();
-        self.inner
-            .on_node_executed(node_path.as_slice(), "", start_instant, end_instant, backend);
+        self.inner.on_node_executed(
+            node_path.as_slice(),
+            "",
+            start_instant,
+            end_instant,
+            backend,
+        );
     }
 }
 

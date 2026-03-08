@@ -7,13 +7,13 @@ use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::dtype::DType;
 use whisper_tensor::graph::GlobalId;
 use whisper_tensor::interfaces::AnyInterface;
+use whisper_tensor::loader::{ConfigField, ConfigValues};
 use whisper_tensor::numeric_tensor::NumericTensor;
 use whisper_tensor::super_graph::links::{
     SuperGraphLinkHash, SuperGraphLinkString, SuperGraphLinkTensor, SuperGraphLinkTensorMap,
 };
 use whisper_tensor::super_graph::{SuperGraph, SuperGraphHash};
 use whisper_tensor::symbolic_graph::tensor_store::TensorStoreTensorId;
-use whisper_tensor_import::ModelTypeHint;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct LoadedModelId(pub u32);
@@ -79,15 +79,24 @@ pub struct SuperGraphResponse {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct LoaderRegistryEntry {
+    pub name: String,
+    pub description: String,
+    pub config_schema: Vec<ConfigField>,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct LoaderRegistryReport {
+    pub loaders: Vec<LoaderRegistryEntry>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[allow(clippy::large_enum_variant)]
 pub enum WebsocketClientServerMessage {
     Ping,
-    LoadModel {
-        model_path: String,
-        model_type_hint: Option<ModelTypeHint>,
-    },
-    LoadSDPipeline {
-        base_path: String,
+    RunLoader {
+        loader_index: usize,
+        config: ConfigValues,
     },
     UnloadModel(LoadedModelId),
     GetModelGraph(LoadedModelId),
@@ -361,6 +370,7 @@ pub struct ServerConfigReport {
 pub enum WebsocketServerClientMessage {
     Pong,
     ServerConfigReport(ServerConfigReport),
+    LoaderRegistryReport(LoaderRegistryReport),
     ModelLoadReturn(Result<(), String>),
     CurrentModelsReport(CurrentModelsAndInterfacesReport),
     ModelGraphReturn(Result<(LoadedModelId, Vec<u8>), String>),

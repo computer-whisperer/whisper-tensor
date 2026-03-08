@@ -8,9 +8,7 @@ use whisper_tensor::dtype::DType;
 use whisper_tensor::interfaces::{AnyInterface, StableDiffusionInterface};
 use whisper_tensor::super_graph::links::SuperGraphLinkTensor;
 use whisper_tensor::tokenizer::{AnyTokenizer, Tokenizer};
-use whisper_tensor_server::{
-    SuperGraphRequest, SuperGraphRequestBackendMode, WebsocketClientServerMessage,
-};
+use whisper_tensor_server::{SuperGraphRequest, SuperGraphRequestBackendMode};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct SDExplorerState {
@@ -20,7 +18,6 @@ pub(crate) struct SDExplorerState {
     pub latent_h: usize,
     pub latent_w: usize,
     pub seed: u64,
-    pub sd_pipeline_path: String,
 }
 
 impl Default for SDExplorerState {
@@ -32,7 +29,6 @@ impl Default for SDExplorerState {
             latent_h: 8,
             latent_w: 8,
             seed: 42,
-            sd_pipeline_path: String::new(),
         }
     }
 }
@@ -109,22 +105,6 @@ impl SDExplorerApp {
             }
             if ui.button("Load SD Pipeline").clicked() {
                 loaded_models.model_load_state = Some(ModelLoadState::DialogOpen(None));
-            }
-        });
-
-        ui.separator();
-
-        // Pipeline path + load button
-        ui.horizontal(|ui| {
-            ui.label("SD Pipeline Path:");
-            ui.text_edit_singleline(&mut state.sd_pipeline_path);
-            if ui.button("Load").clicked() && !state.sd_pipeline_path.is_empty() {
-                server_request_manager
-                    .send(WebsocketClientServerMessage::LoadSDPipeline {
-                        base_path: state.sd_pipeline_path.clone(),
-                    })
-                    .unwrap();
-                self.status_message = Some("Loading SD pipeline...".to_string());
             }
         });
 
@@ -347,7 +327,11 @@ pub(crate) fn tensor_to_egui_texture(
         source_size: egui::Vec2::new(img_w as f32, img_h as f32),
     };
 
-    let texture = ctx.load_texture("sd_output", color_image.clone(), egui::TextureOptions::NEAREST);
+    let texture = ctx.load_texture(
+        "sd_output",
+        color_image.clone(),
+        egui::TextureOptions::NEAREST,
+    );
     (texture, color_image)
 }
 

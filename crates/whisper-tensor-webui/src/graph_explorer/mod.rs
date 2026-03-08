@@ -49,11 +49,11 @@ use whisper_tensor::DynRank;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::graph::{GlobalId, Graph, GraphDyn};
 use whisper_tensor::interfaces::{AnyInterface, StableDiffusionInterface};
+use whisper_tensor::metadata::TokenizerInfo;
 use whisper_tensor::scalar_info::ScalarInfoTyped;
 use whisper_tensor::super_graph::nodes::SuperGraphAnyNode;
 use whisper_tensor::super_graph::{SuperGraph, SuperGraphLinkTensor};
 use whisper_tensor::tokenizer::Tokenizer;
-use whisper_tensor_import::onnx_graph::TokenizerInfo;
 use whisper_tensor_server::{
     AbbreviatedTensorReportSettings, AbbreviatedTensorValue, LoadedModelId, ServerConfigReport,
     SuperGraphRequest, SuperGraphRequestBackendMode, WebsocketClientServerMessage,
@@ -399,7 +399,12 @@ impl GraphExplorerApp {
         }
     }
 
-    fn resolve_op_kind(&self, path: &[GlobalId], root_graph: &dyn GraphDyn, loaded_models: &LoadedModels) -> String {
+    fn resolve_op_kind(
+        &self,
+        path: &[GlobalId],
+        root_graph: &dyn GraphDyn,
+        loaded_models: &LoadedModels,
+    ) -> String {
         // First check cached op_kind from observer
         if let Some(op_kind) = self.node_execution_op_kinds.get(path) {
             if !op_kind.is_empty() {
@@ -407,7 +412,8 @@ impl GraphExplorerApp {
             }
         }
         // Resolve through graph hierarchy like inspect windows do
-        if let Some((graph, node_id)) = self.resolve_path_to_graph(path, root_graph, loaded_models) {
+        if let Some((graph, node_id)) = self.resolve_path_to_graph(path, root_graph, loaded_models)
+        {
             let graph: &dyn GraphDyn = graph;
             if let Some(node) = graph.get_node_by_id(&node_id) {
                 return node.op_kind();
@@ -416,7 +422,12 @@ impl GraphExplorerApp {
         "?".to_string()
     }
 
-    fn render_profiling_window(&self, ui: &mut Ui, root_graph: &dyn GraphDyn, loaded_models: &LoadedModels) {
+    fn render_profiling_window(
+        &self,
+        ui: &mut Ui,
+        root_graph: &dyn GraphDyn,
+        loaded_models: &LoadedModels,
+    ) {
         if self.node_execution_durations.is_empty() {
             ui.label("No profiling data yet. Run a graph to collect timing.");
             return;
@@ -449,7 +460,7 @@ impl GraphExplorerApp {
             entry.1 += 1;
         }
         let mut op_type_sorted: Vec<_> = by_op_type.into_iter().collect();
-        op_type_sorted.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
+        op_type_sorted.sort_by(|a, b| b.1.0.cmp(&a.1.0));
 
         ui.label(format!("{} nodes", nodes_by_duration.len()));
         ui.separator();
@@ -1830,7 +1841,11 @@ fn encode_bmp(w: usize, h: usize, pixels: &[Color32]) -> Vec<u8> {
     data
 }
 
-fn trigger_browser_download(filename: &str, data: &[u8], mime_type: &str) -> Result<(), wasm_bindgen::JsValue> {
+fn trigger_browser_download(
+    filename: &str,
+    data: &[u8],
+    mime_type: &str,
+) -> Result<(), wasm_bindgen::JsValue> {
     let uint8_array = js_sys::Uint8Array::from(data);
     let array = js_sys::Array::new();
     array.push(&uint8_array.buffer());
@@ -1843,7 +1858,9 @@ fn trigger_browser_download(filename: &str, data: &[u8], mime_type: &str) -> Res
 
     let window = web_sys::window().ok_or("no window")?;
     let document = window.document().ok_or("no document")?;
-    let a = document.create_element("a")?.dyn_into::<web_sys::HtmlAnchorElement>()?;
+    let a = document
+        .create_element("a")?
+        .dyn_into::<web_sys::HtmlAnchorElement>()?;
     a.set_href(&url);
     a.set_download(filename);
     a.style().set_property("display", "none")?;

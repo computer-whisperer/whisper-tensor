@@ -1,13 +1,12 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::PathBuf;
 use std::time::Instant;
 use whisper_tensor::DynRank;
 use whisper_tensor::backends::eval_backend::EvalBackend;
 use whisper_tensor::dtype::DType;
-use whisper_tensor::model::Model;
+use whisper_tensor::loader::{ConfigValue, ConfigValues, Loader};
 use whisper_tensor::numeric_tensor::NumericTensor;
-use whisper_tensor_import::onnx_graph::WeightStorageStrategy;
-use whisper_tensor_import::sd15;
+use whisper_tensor_import::loaders::SD15Loader;
 
 const CHECKPOINT: &str =
     "/ceph/public/neural_models/comfyui/checkpoints/v1-5-pruned-emaonly.safetensors";
@@ -15,48 +14,32 @@ const CHECKPOINT: &str =
 fn main() {
     tracing_subscriber::fmt::init();
 
-    let checkpoint_path = Path::new(CHECKPOINT);
     let total_start = Instant::now();
 
-    // --- Build ONNX models from safetensors ---
-    println!("=== Building ONNX from safetensors ===");
+    // --- Load via SD15 loader ---
+    println!("=== Loading SD 1.5 checkpoint via SD15Loader ===");
     let start = Instant::now();
-    let (te_onnx, unet_onnx, vae_onnx) = sd15::load_sd15_checkpoint(
-        checkpoint_path,
-        WeightStorageStrategy::EmbeddedData,
-    )
-    .expect("Failed to build models from safetensors");
+    let config = ConfigValues::from([(
+        "path".to_string(),
+        ConfigValue::FilePath(PathBuf::from(CHECKPOINT)),
+    )]);
+    let output = SD15Loader.load(config).unwrap();
+    println!("  Loaded in {:.2?}", start.elapsed());
+
+    // Extract models by name
+    let text_encoder = &output.models[0].model;
+    let unet = &output.models[1].model;
+    let vae_decoder = &output.models[2].model;
+
     println!(
-        "  Built in {:.2?} (TE: {:.0} MB, UNet: {:.0} MB, VAE: {:.0} MB)",
-        start.elapsed(),
-        te_onnx.len() as f64 / 1048576.0,
-        unet_onnx.len() as f64 / 1048576.0,
-        vae_onnx.len() as f64 / 1048576.0,
+        "  Models: {} ({}), {} ({}), {} ({})",
+        output.models[0].name,
+        output.models[1].name,
+        output.models[2].name,
+        output.interfaces.len(),
+        "interfaces",
+        "",
     );
-
-    // --- Load into runtime ---
-    println!("\n=== Loading into runtime ===");
-    let mut rng = rand::rng();
-    let parent = checkpoint_path.parent();
-
-    let start = Instant::now();
-    let text_encoder =
-        Model::new_from_onnx(&te_onnx, &mut rng, parent).expect("Failed to load text encoder");
-    println!("  Text encoder loaded in {:.2?}", start.elapsed());
-
-    let start = Instant::now();
-    let unet = Model::new_from_onnx(&unet_onnx, &mut rng, parent).expect("Failed to load UNet");
-    println!("  UNet loaded in {:.2?}", start.elapsed());
-
-    let start = Instant::now();
-    let vae_decoder =
-        Model::new_from_onnx(&vae_onnx, &mut rng, parent).expect("Failed to load VAE decoder");
-    println!("  VAE decoder loaded in {:.2?}", start.elapsed());
-
-    // Drop the ONNX bytes to free memory
-    drop(te_onnx);
-    drop(unet_onnx);
-    drop(vae_onnx);
 
     let mut backend = EvalBackend::NDArray;
 
@@ -130,7 +113,10 @@ fn main() {
         );
     println!("\n=== Scheduler ===");
     println!("  init_sigma={init_sigma}");
-    println!("  timesteps={:?}", &timestep_values[..timestep_values.len().min(3)]);
+    println!(
+        "  timesteps={:?}",
+        &timestep_values[..timestep_values.len().min(3)]
+    );
 
     // --- Initial latent noise ---
     use rand::SeedableRng;
@@ -169,11 +155,9 @@ fn main() {
         let scale = 1.0 / (sigma * sigma + 1.0).sqrt();
         let latent_vals = tensor_to_f32(&latent, &mut backend);
         let scaled_vals: Vec<f32> = latent_vals.iter().map(|&v| v * scale).collect();
-        let scaled_latent = NumericTensor::<DynRank>::from_vec_shape(
-            scaled_vals,
-            vec![1, 4, latent_h, latent_w],
-        )
-        .unwrap();
+        let scaled_latent =
+            NumericTensor::<DynRank>::from_vec_shape(scaled_vals, vec![1, 4, latent_h, latent_w])
+                .unwrap();
 
         let f16_latent = scaled_latent.cast(DType::F16, &mut backend).unwrap();
         let f16_ts = NumericTensor::<DynRank>::from_vec_shape(vec![ts], vec![1])
@@ -188,10 +172,7 @@ fn main() {
                 HashMap::from([
                     ("sample".to_string(), f16_latent.clone()),
                     ("timestep".to_string(), f16_ts.clone()),
-                    (
-                        "encoder_hidden_states".to_string(),
-                        uncond_hidden.clone(),
-                    ),
+                    ("encoder_hidden_states".to_string(), uncond_hidden.clone()),
                 ]),
                 &mut (),
                 None,
@@ -246,9 +227,8 @@ fn main() {
             );
         }
 
-        latent =
-            NumericTensor::<DynRank>::from_vec_shape(new_vals, vec![1, 4, latent_h, latent_w])
-                .unwrap();
+        latent = NumericTensor::<DynRank>::from_vec_shape(new_vals, vec![1, 4, latent_h, latent_w])
+            .unwrap();
     }
     println!("  Denoising took {:.2?}", denoise_start.elapsed());
 
@@ -283,9 +263,7 @@ fn main() {
     let nan_count = image_f32.iter().filter(|v| v.is_nan()).count();
     let min_val = image_f32.iter().cloned().fold(f32::INFINITY, f32::min);
     let max_val = image_f32.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    println!(
-        "  Image values: min={min_val:.4}, max={max_val:.4}, nan={nan_count}"
-    );
+    println!("  Image values: min={min_val:.4}, max={max_val:.4}, nan={nan_count}");
 
     // Save PNG
     let shape = image_tensor.shape();
@@ -322,7 +300,9 @@ fn debug_tensor(label: &str, tensor: &NumericTensor<DynRank>, backend: &mut Eval
 }
 
 fn tensor_to_f32(tensor: &NumericTensor<DynRank>, backend: &mut EvalBackend) -> Vec<f32> {
-    let f32_tensor = tensor.cast(DType::F32, backend).expect("Cast to f32 failed");
+    let f32_tensor = tensor
+        .cast(DType::F32, backend)
+        .expect("Cast to f32 failed");
     let ndarray = f32_tensor.to_ndarray().expect("to_ndarray failed");
     let flat = ndarray.flatten();
     flat.try_into().expect("flatten to vec failed")

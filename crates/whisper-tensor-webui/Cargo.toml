@@ -46,7 +46,6 @@ rwkv-tokenizer = { workspace = true }
 
 
 [dependencies]
-whisper-tensor-import = {workspace=true}
 whisper-tensor = {workspace=true, default-features = false, features=["tokenizers", "rwkv-tokenizer"]}
 whisper-tensor-server = {workspace=true, default-features = false}
 strum = "0.27.1"

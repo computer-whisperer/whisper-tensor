@@ -3,11 +3,11 @@ use std::collections::HashMap;
 use crate::backends::eval_backend::{EvalBackend, EvalRuntimeError};
 use crate::backends::{ModelLoadedTensorCache, eval_backend};
 use crate::dtype::DType;
+use crate::metadata::{InputMetadata, ModelMetadata, OutputMetadata};
 use crate::numeric_tensor::{NumericTensor, NumericTensorError};
 use crate::onnx::{ModelProto, StringStringEntryProto};
 use prost::{DecodeError, Message};
 use rand::Rng;
-use whisper_tensor_import::onnx_graph::{InputMetadata, ModelMetadata, OutputMetadata};
 
 use crate::symbolic_graph::tensor_store::TensorStore;
 use crate::symbolic_graph::{ONNXDecodingError, SymbolicGraph, SymbolicGraphMutator, TensorType};

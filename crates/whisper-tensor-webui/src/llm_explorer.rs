@@ -7,9 +7,9 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::interfaces::AnyInterface;
+use whisper_tensor::metadata::TokenizerInfo;
 use whisper_tensor::super_graph::links::SuperGraphLinkTensor;
 use whisper_tensor::tokenizer::Tokenizer;
-use whisper_tensor_import::onnx_graph::TokenizerInfo;
 use whisper_tensor_server::{SuperGraphRequest, SuperGraphRequestBackendMode};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

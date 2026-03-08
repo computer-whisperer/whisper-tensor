@@ -9,16 +9,15 @@ use rwkv_tokenizer::WorldTokenizer;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use strum::IntoEnumIterator;
 use tokio::sync::mpsc;
 use whisper_tensor::interfaces::AnyInterface;
+use whisper_tensor::loader::{ConfigFieldType, ConfigValue};
+use whisper_tensor::metadata::TokenizerInfo;
 use whisper_tensor::symbolic_graph::SymbolicGraph;
 use whisper_tensor::tokenizer::AnyTokenizer;
-use whisper_tensor_import::ModelTypeHint;
-use whisper_tensor_import::onnx_graph::TokenizerInfo;
 use whisper_tensor_server::{
-    CurrentInterfacesReportEntry, CurrentModelsReportEntry, LoadedModelId, ServerConfigReport,
-    WebsocketClientServerMessage, WebsocketServerClientMessage,
+    CurrentInterfacesReportEntry, CurrentModelsReportEntry, LoadedModelId, LoaderRegistryReport,
+    ServerConfigReport, WebsocketClientServerMessage, WebsocketServerClientMessage,
 };
 
 #[derive(Clone, Debug)]
@@ -35,11 +34,19 @@ enum SelectedTab {
     SDExplorer,
 }
 
+/// Persisted state for the loader dialog's config field values.
+/// Keyed by loader_index, then field key → string value.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct LoaderDialogState {
+    selected_loader: usize,
+    field_values: HashMap<usize, HashMap<String, String>>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct AppState {
     selected_tab: SelectedTab,
-    model_to_load_path_text: String,
-    model_type_hint_selected: Option<ModelTypeHint>,
+
+    loader_dialog: LoaderDialogState,
 
     graph_explorer_settings: GraphExplorerSettings,
     llm_explorer_state: LLMExplorerState,
@@ -50,8 +57,7 @@ impl Default for AppState {
     fn default() -> Self {
         Self {
             selected_tab: SelectedTab::Models,
-            model_to_load_path_text: String::new(),
-            model_type_hint_selected: None,
+            loader_dialog: LoaderDialogState::default(),
             graph_explorer_settings: GraphExplorerSettings::default(),
             llm_explorer_state: LLMExplorerState::default(),
             sd_explorer_state: SDExplorerState::default(),
@@ -93,6 +99,7 @@ pub struct WebUIApp {
     sd_explorer_app: SDExplorerApp,
     loaded_tokenizers: LoadedTokenizers,
     server_config_report: Option<ServerConfigReport>,
+    loader_registry: Option<LoaderRegistryReport>,
 }
 
 impl WebUIApp {
@@ -135,7 +142,209 @@ impl WebUIApp {
             llm_explorer_app: LLMExplorerApp::new(),
             sd_explorer_app: SDExplorerApp::new(),
             server_config_report: None,
+            loader_registry: None,
         }
+    }
+
+    fn render_loader_dialog(&mut self, ctx: &egui::Context) {
+        let Some(model_load_state) = self.loaded_models.model_load_state.clone() else {
+            return;
+        };
+        let Some(registry) = &self.loader_registry else {
+            return;
+        };
+        let registry = registry.clone();
+
+        egui::Modal::new(egui::Id::new("Load Model")).show(ctx, |ui| {
+            {
+                let spacing_mut = ui.spacing_mut();
+                spacing_mut.item_spacing.x = 10.0;
+                spacing_mut.item_spacing.y = 10.0;
+                spacing_mut.window_margin = Margin::same(50)
+            }
+            match model_load_state {
+                ModelLoadState::DialogOpen(err) => {
+                    ui.label("Load Model");
+                    if let Some(err) = err {
+                        ui.scope(|ui| {
+                            ui.visuals_mut().override_text_color = Some(egui::Color32::RED);
+                            ui.style_mut().override_text_style = Some(egui::TextStyle::Monospace);
+                            ui.label(err);
+                        });
+                    }
+
+                    // Loader selector
+                    if !registry.loaders.is_empty() {
+                        let selected = self.app_state.loader_dialog.selected_loader;
+                        let selected_name = registry
+                            .loaders
+                            .get(selected)
+                            .map(|l| l.name.as_str())
+                            .unwrap_or("Select loader");
+
+                        ui.horizontal(|ui| {
+                            ui.label("Loader:");
+                            egui::ComboBox::from_id_salt("loader_selector")
+                                .selected_text(selected_name)
+                                .show_ui(ui, |ui| {
+                                    for (i, loader) in registry.loaders.iter().enumerate() {
+                                        ui.selectable_value(
+                                            &mut self.app_state.loader_dialog.selected_loader,
+                                            i,
+                                            &loader.name,
+                                        );
+                                    }
+                                });
+                        });
+
+                        // Render config fields for selected loader
+                        if let Some(loader) = registry.loaders.get(selected) {
+                            if !loader.description.is_empty() {
+                                ui.label(egui::RichText::new(&loader.description).small().weak());
+                            }
+
+                            let field_values = self
+                                .app_state
+                                .loader_dialog
+                                .field_values
+                                .entry(selected)
+                                .or_default();
+
+                            for field in &loader.config_schema {
+                                let value =
+                                    field_values.entry(field.key.clone()).or_insert_with(|| {
+                                        // Initialize from default
+                                        match &field.default {
+                                            Some(ConfigValue::String(s)) => s.clone(),
+                                            Some(ConfigValue::FilePath(p)) => {
+                                                p.to_string_lossy().to_string()
+                                            }
+                                            Some(ConfigValue::Integer(n)) => n.to_string(),
+                                            Some(ConfigValue::Float(f)) => f.to_string(),
+                                            Some(ConfigValue::Bool(b)) => b.to_string(),
+                                            None => String::new(),
+                                        }
+                                    });
+
+                                ui.horizontal(|ui| {
+                                    let label = if field.required {
+                                        format!("{}*:", field.label)
+                                    } else {
+                                        format!("{}:", field.label)
+                                    };
+                                    ui.label(label);
+
+                                    match &field.field_type {
+                                        ConfigFieldType::FilePath | ConfigFieldType::String => {
+                                            ui.text_edit_singleline(value);
+                                        }
+                                        ConfigFieldType::Integer { .. } => {
+                                            ui.text_edit_singleline(value);
+                                        }
+                                        ConfigFieldType::Float { .. } => {
+                                            ui.text_edit_singleline(value);
+                                        }
+                                        ConfigFieldType::Bool => {
+                                            let mut checked =
+                                                value.parse::<bool>().unwrap_or(false);
+                                            if ui.checkbox(&mut checked, "").changed() {
+                                                *value = checked.to_string();
+                                            }
+                                        }
+                                        ConfigFieldType::Enum { options } => {
+                                            egui::ComboBox::from_id_salt(&field.key)
+                                                .selected_text(value.as_str())
+                                                .show_ui(ui, |ui| {
+                                                    for opt in options {
+                                                        ui.selectable_value(
+                                                            value,
+                                                            opt.clone(),
+                                                            opt,
+                                                        );
+                                                    }
+                                                });
+                                        }
+                                    }
+                                });
+                            }
+                        }
+                    } else {
+                        ui.label("No loaders available (server not connected?)");
+                    }
+
+                    ui.horizontal(|ui| {
+                        if ui.button("Load").clicked() {
+                            if let Some(loader) = registry
+                                .loaders
+                                .get(self.app_state.loader_dialog.selected_loader)
+                            {
+                                // Build ConfigValues from field strings
+                                let field_values = self
+                                    .app_state
+                                    .loader_dialog
+                                    .field_values
+                                    .get(&self.app_state.loader_dialog.selected_loader)
+                                    .cloned()
+                                    .unwrap_or_default();
+
+                                let mut config = HashMap::new();
+                                for field in &loader.config_schema {
+                                    if let Some(raw) = field_values.get(&field.key) {
+                                        if raw.is_empty() && !field.required {
+                                            continue;
+                                        }
+                                        let cv = match &field.field_type {
+                                            ConfigFieldType::FilePath => {
+                                                ConfigValue::FilePath(raw.into())
+                                            }
+                                            ConfigFieldType::String => {
+                                                ConfigValue::String(raw.clone())
+                                            }
+                                            ConfigFieldType::Integer { .. } => {
+                                                match raw.parse::<i64>() {
+                                                    Ok(n) => ConfigValue::Integer(n),
+                                                    Err(_) => ConfigValue::String(raw.clone()),
+                                                }
+                                            }
+                                            ConfigFieldType::Float { .. } => {
+                                                match raw.parse::<f64>() {
+                                                    Ok(f) => ConfigValue::Float(f),
+                                                    Err(_) => ConfigValue::String(raw.clone()),
+                                                }
+                                            }
+                                            ConfigFieldType::Bool => ConfigValue::Bool(
+                                                raw.parse::<bool>().unwrap_or(false),
+                                            ),
+                                            ConfigFieldType::Enum { .. } => {
+                                                ConfigValue::String(raw.clone())
+                                            }
+                                        };
+                                        config.insert(field.key.clone(), cv);
+                                    }
+                                }
+
+                                self.server_request_manager
+                                    .send(WebsocketClientServerMessage::RunLoader {
+                                        loader_index: self.app_state.loader_dialog.selected_loader,
+                                        config,
+                                    })
+                                    .unwrap();
+                                self.loaded_models.model_load_state = Some(ModelLoadState::Loading);
+                            }
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.loaded_models.model_load_state = None;
+                        }
+                    });
+                }
+                ModelLoadState::Loading => {
+                    ui.vertical_centered(|ui| {
+                        ui.label("Loading Model");
+                        ui.spinner();
+                    });
+                }
+            }
+        });
     }
 }
 
@@ -160,6 +369,9 @@ impl eframe::App for WebUIApp {
                                 }
                             }
                         },
+                        WebsocketServerClientMessage::LoaderRegistryReport(report) => {
+                            self.loader_registry = Some(report);
+                        }
                         WebsocketServerClientMessage::CurrentModelsReport(res) => {
                             self.loaded_models.current_models = res.models;
                             // Rebuild interfaces list
@@ -322,78 +534,7 @@ impl eframe::App for WebUIApp {
             });
         });
 
-        if let Some(model_load_state) = self.loaded_models.model_load_state.clone() {
-            egui::Modal::new(egui::Id::new("Load Model")).show(ctx, |ui| {
-                {
-                    let spacing_mut = ui.spacing_mut();
-                    spacing_mut.item_spacing.x = 10.0;
-                    spacing_mut.item_spacing.y = 10.0;
-                    spacing_mut.window_margin = Margin::same(50)
-                }
-                match model_load_state {
-                    ModelLoadState::DialogOpen(err) => {
-                        ui.label("Load Model");
-                        if let Some(err) = err {
-                            ui.scope(|ui| {
-                                ui.visuals_mut().override_text_color = Some(egui::Color32::RED);
-                                ui.style_mut().override_text_style =
-                                    Some(egui::TextStyle::Monospace);
-                                ui.label(err);
-                            });
-                        }
-                        ui.horizontal(|ui| {
-                            ui.label("Path: ");
-                            ui.text_edit_singleline(&mut self.app_state.model_to_load_path_text);
-                            egui::ComboBox::from_id_salt(1245)
-                                .selected_text(
-                                    if let Some(which) = &self.app_state.model_type_hint_selected {
-                                        which.to_string()
-                                    } else {
-                                        String::from("No Hint")
-                                    },
-                                )
-                                .show_ui(ui, |ui| {
-                                    ui.selectable_value(
-                                        &mut self.app_state.model_type_hint_selected,
-                                        None,
-                                        "No Hint",
-                                    );
-                                    for which in ModelTypeHint::iter() {
-                                        ui.selectable_value(
-                                            &mut self.app_state.model_type_hint_selected,
-                                            Some(which.clone()),
-                                            which.to_string(),
-                                        );
-                                    }
-                                });
-                        });
-                        ui.horizontal(|ui| {
-                            if ui.button("Load").clicked() {
-                                self.server_request_manager
-                                    .send(WebsocketClientServerMessage::LoadModel {
-                                        model_path: self.app_state.model_to_load_path_text.clone(),
-                                        model_type_hint: self
-                                            .app_state
-                                            .model_type_hint_selected
-                                            .clone(),
-                                    })
-                                    .unwrap();
-                                self.loaded_models.model_load_state = Some(ModelLoadState::Loading)
-                            }
-                            if ui.button("Cancel").clicked() {
-                                self.loaded_models.model_load_state = None;
-                            }
-                        });
-                    }
-                    ModelLoadState::Loading => {
-                        ui.vertical_centered(|ui| {
-                            ui.label("Loading Model");
-                            ui.spinner();
-                        });
-                    }
-                }
-            });
-        }
+        self.render_loader_dialog(ctx);
 
         egui::CentralPanel::default().show(ctx, |ui| {
             // The central panel the region left after adding TopPanel's and SidePanel's

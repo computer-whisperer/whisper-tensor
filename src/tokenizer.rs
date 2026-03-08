@@ -1,5 +1,5 @@
+use crate::metadata::TokenizerInfo;
 use std::str::Utf8Error;
-use whisper_tensor_import::onnx_graph::TokenizerInfo;
 
 #[derive(Debug, thiserror::Error)]
 pub enum TokenizerError {
@@ -12,6 +12,7 @@ pub enum TokenizerError {
 
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
+#[non_exhaustive]
 pub enum AnyTokenizer {
     #[cfg(feature = "tokenizers")]
     Tokenizers(tokenizers::Tokenizer),
@@ -56,7 +57,7 @@ impl Tokenizer for AnyTokenizer {
             AnyTokenizer::Tokenizers(x) => <_ as Tokenizer>::encode(x, text),
             #[cfg(feature = "rwkv-tokenizer")]
             AnyTokenizer::Rwkv(x) => <_ as Tokenizer>::encode(x, text),
-            //_ => unimplemented!()
+            _ => unreachable!(),
         }
     }
     fn decode(&self, tokens: &[u32]) -> Result<String, TokenizerError> {
@@ -65,7 +66,7 @@ impl Tokenizer for AnyTokenizer {
             AnyTokenizer::Tokenizers(x) => <_ as Tokenizer>::decode(x, tokens),
             #[cfg(feature = "rwkv-tokenizer")]
             AnyTokenizer::Rwkv(x) => <_ as Tokenizer>::decode(x, tokens),
-            //_ => unimplemented!()
+            _ => unreachable!(),
         }
     }
 }

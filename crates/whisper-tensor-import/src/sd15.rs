@@ -1,3 +1,4 @@
+use crate::onnx_graph::WeightStorageStrategy;
 use crate::onnx_graph::operators::{Add, Concat, Conv, Gather, MatMul, Mul, Softmax, Transpose};
 use crate::onnx_graph::pytorch::{
     cast, conv2d, div_scalar, gelu, group_norm, layer_norm, linear, reshape, silu,
@@ -7,7 +8,6 @@ use crate::onnx_graph::tensor::{
     DType, Dimension, InputTensor, InputTensorInitialized, Shape, Tensor, TensorData,
 };
 use crate::onnx_graph::weights::{SafetensorsWeightManager, WeightManager};
-use crate::onnx_graph::WeightStorageStrategy;
 use memmap2::Mmap;
 use prost::Message;
 use std::path::Path;
@@ -37,9 +37,15 @@ pub fn load_sd15_checkpoint(
 
 /// Detect if a safetensors file is an SD 1.5 checkpoint by checking for key prefixes.
 pub fn is_sd15_checkpoint(weight_manager: &impl WeightManager) -> bool {
-    weight_manager.get_tensor("model.diffusion_model.input_blocks.0.0.weight").is_ok()
-        && weight_manager.get_tensor("cond_stage_model.transformer.text_model.embeddings.token_embedding.weight").is_ok()
-        && weight_manager.get_tensor("first_stage_model.decoder.conv_in.weight").is_ok()
+    weight_manager
+        .get_tensor("model.diffusion_model.input_blocks.0.0.weight")
+        .is_ok()
+        && weight_manager
+            .get_tensor("cond_stage_model.transformer.text_model.embeddings.token_embedding.weight")
+            .is_ok()
+        && weight_manager
+            .get_tensor("first_stage_model.decoder.conv_in.weight")
+            .is_ok()
 }
 
 // SD 1.5 UNet config
@@ -115,8 +121,11 @@ pub fn build_text_encoder(
 
     let input_tensors: Vec<(Arc<dyn Tensor>, Option<crate::onnx_graph::InputMetadata>)> =
         vec![(input_ids, None)];
-    let output_tensors: Vec<(String, Arc<dyn Tensor>, Option<crate::onnx_graph::OutputMetadata>)> =
-        vec![("last_hidden_state".to_string(), output, None)];
+    let output_tensors: Vec<(
+        String,
+        Arc<dyn Tensor>,
+        Option<crate::onnx_graph::OutputMetadata>,
+    )> = vec![("last_hidden_state".to_string(), output, None)];
 
     let onnx_model =
         crate::onnx_graph::build_proto(&input_tensors, &output_tensors, output_method, None)?;
@@ -311,12 +320,7 @@ pub fn build_unet(
         current_ch,
         current_ch,
     )?;
-    h = spatial_transformer(
-        &wm.prefix("middle_block.1"),
-        h,
-        context.clone(),
-        current_ch,
-    )?;
+    h = spatial_transformer(&wm.prefix("middle_block.1"), h, context.clone(), current_ch)?;
     h = resnet_block(
         &wm.prefix("middle_block.2"),
         h,
@@ -380,8 +384,11 @@ pub fn build_unet(
         (timestep_input, None),
         (context_input, None),
     ];
-    let output_tensors: Vec<(String, Arc<dyn Tensor>, Option<crate::onnx_graph::OutputMetadata>)> =
-        vec![("out_sample".to_string(), output, None)];
+    let output_tensors: Vec<(
+        String,
+        Arc<dyn Tensor>,
+        Option<crate::onnx_graph::OutputMetadata>,
+    )> = vec![("out_sample".to_string(), output, None)];
 
     let onnx_model =
         crate::onnx_graph::build_proto(&input_tensors, &output_tensors, output_method, None)?;
@@ -567,7 +574,13 @@ fn basic_transformer_block(
 
     // Self-attention
     let normed = layer_norm(&wm.prefix("norm1"), input.clone(), 1e-5)?;
-    let attn1 = cross_attention(&wm.prefix("attn1"), normed.clone(), normed, num_heads, head_dim)?;
+    let attn1 = cross_attention(
+        &wm.prefix("attn1"),
+        normed.clone(),
+        normed,
+        num_heads,
+        head_dim,
+    )?;
     let h = Add::new(None, input, attn1)?;
 
     // Cross-attention
@@ -638,11 +651,7 @@ fn linear_no_bias(
     let weight = transpose(weight);
     let input_rank = input.rank();
     let input = crate::onnx_graph::pytorch::unsqueeze(input, (input_rank as i64) - 1)?;
-    let mat_out = operators::MatMul::new(
-        wm.get_prefix().map(|x| x.to_string()),
-        input,
-        weight,
-    )?;
+    let mat_out = operators::MatMul::new(wm.get_prefix().map(|x| x.to_string()), input, weight)?;
     Ok(crate::onnx_graph::pytorch::squeeze(
         mat_out,
         (input_rank as i64) - 1,
@@ -679,9 +688,18 @@ fn slice_axis(
         axis
     };
     let const_shape = Shape::new(vec![Dimension::new(Some(1), None, None)]);
-    let starts = Constant::new(None, TensorData::new(vec![start].into(), const_shape.clone())?);
-    let ends = Constant::new(None, TensorData::new(vec![end].into(), const_shape.clone())?);
-    let axes = Constant::new(None, TensorData::new(vec![resolved_axis].into(), const_shape)?);
+    let starts = Constant::new(
+        None,
+        TensorData::new(vec![start].into(), const_shape.clone())?,
+    );
+    let ends = Constant::new(
+        None,
+        TensorData::new(vec![end].into(), const_shape.clone())?,
+    );
+    let axes = Constant::new(
+        None,
+        TensorData::new(vec![resolved_axis].into(), const_shape)?,
+    );
     Ok(Slice::new(None, input, starts, ends, Some(axes), None)?)
 }
 
@@ -776,8 +794,11 @@ pub fn build_vae_decoder(
 
     let input_tensors: Vec<(Arc<dyn Tensor>, Option<crate::onnx_graph::InputMetadata>)> =
         vec![(latent_input, None)];
-    let output_tensors: Vec<(String, Arc<dyn Tensor>, Option<crate::onnx_graph::OutputMetadata>)> =
-        vec![("sample".to_string(), h, None)];
+    let output_tensors: Vec<(
+        String,
+        Arc<dyn Tensor>,
+        Option<crate::onnx_graph::OutputMetadata>,
+    )> = vec![("sample".to_string(), h, None)];
 
     let onnx_model =
         crate::onnx_graph::build_proto(&input_tensors, &output_tensors, output_method, None)?;

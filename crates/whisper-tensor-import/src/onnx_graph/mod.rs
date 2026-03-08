@@ -6,7 +6,6 @@ pub mod weights;
 
 use node::*;
 use onnx::StringStringEntryProto;
-use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -88,39 +87,10 @@ impl WeightStorageStrategy {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ModelInputType {
-    TokenID(usize), // Tokenizer ID number
-    PreviousInternal(usize),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InputMetadata {
-    pub model_input_type: ModelInputType,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ModelOutputType {
-    TokenID(usize), // Tokenizer ID number
-    NextInternal(usize),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OutputMetadata {
-    pub model_output_type: ModelOutputType,
-}
-
-#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TokenizerInfo {
-    HFTokenizer(String),
-    RWKVWorld,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ModelMetadata {
-    pub tokenizer_infos: Vec<TokenizerInfo>,
-    pub max_token_batch: Option<usize>,
-}
+// Re-export metadata types from the core crate.
+pub use whisper_tensor::metadata::{
+    InputMetadata, ModelInputType, ModelMetadata, ModelOutputType, OutputMetadata, TokenizerInfo,
+};
 
 pub fn build_proto(
     inputs: &[(Arc<dyn Tensor>, Option<InputMetadata>)],
@@ -280,10 +250,7 @@ pub fn build_proto_with_origin_path(
             } else {
                 vec![]
             };
-            tensor.to_value_info_proto(
-                tensor_names[&(tensor.as_ref())].clone(),
-                meta_props,
-            )
+            tensor.to_value_info_proto(tensor_names[&(tensor.as_ref())].clone(), meta_props)
         })
         .collect();
     let graph_outputs = outputs
@@ -295,10 +262,7 @@ pub fn build_proto_with_origin_path(
             } else {
                 vec![]
             };
-            tensor.to_value_info_proto(
-                name.to_string(),
-                meta_props,
-            )
+            tensor.to_value_info_proto(name.to_string(), meta_props)
         })
         .collect();
 

@@ -1,24 +1,26 @@
 use std::collections::HashMap;
 use std::io::Write;
-use std::path::Path;
+use std::path::PathBuf;
 use whisper_tensor::backends::eval_backend::EvalBackend;
-use whisper_tensor::model::Model;
-use whisper_tensor_import::onnx_graph::WeightStorageStrategy;
-use whisper_tensor_import::{ModelTypeHint, identify_and_load};
+use whisper_tensor::loader::{ConfigValue, ConfigValues, Loader};
+use whisper_tensor_import::loaders::OnnxLoader;
 
 fn main() {
     tracing_subscriber::fmt::init();
 
-    let input_path = Path::new("gpt2-lm-head-10.onnx");
-    let onnx_data = identify_and_load(
-        input_path,
-        WeightStorageStrategy::EmbeddedData,
-        Some(ModelTypeHint::GPT2),
-    )
-    .unwrap();
+    let config = ConfigValues::from([
+        (
+            "path".to_string(),
+            ConfigValue::FilePath(PathBuf::from("gpt2-lm-head-10.onnx")),
+        ),
+        (
+            "model_type".to_string(),
+            ConfigValue::String("GPT2".to_string()),
+        ),
+    ]);
 
-    let mut rng = rand::rng();
-    let model = Model::new_from_onnx(&onnx_data, &mut rng, None).unwrap();
+    let output = OnnxLoader.load(config).unwrap();
+    let model = &output.models[0].model;
 
     let prompt = "Mary had a little lamb".to_string();
     let mut tokenizer_cache = HashMap::new();
@@ -32,7 +34,7 @@ fn main() {
             .as_ref()
             .unwrap()
             .run_string_in_string_out(
-                &model,
+                model,
                 None,
                 context.clone(),
                 &mut tokenizer_cache,
