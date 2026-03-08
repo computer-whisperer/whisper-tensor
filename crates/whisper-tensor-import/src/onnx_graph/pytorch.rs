@@ -3,7 +3,7 @@ use super::operators::{
     LayerNormalization, Mul, RMSNormalization, ReduceSum, Reshape, Resize, Sigmoid, Slice, Squeeze,
     TopK, Transpose, Unsqueeze,
 };
-use super::tensor::{DType, Dimension, Shape, Tensor, TensorData, TensorDataValue};
+use super::tensor::{DType, Dimension, Shape, Tensor, TensorData};
 use super::weights::WeightManager;
 use super::{Error, operators};
 use std::sync::Arc;
@@ -144,6 +144,19 @@ pub fn rms_norm(
     )
 }
 
+/// Create a scalar F32 constant and cast it to match the input tensor's dtype.
+fn f32_scalar_matching(value: f32, input: &dyn Tensor) -> Arc<dyn Tensor> {
+    let c: Arc<dyn Tensor> = Constant::new(
+        None,
+        TensorData::fill(Shape::from(&[1usize][..]), value).unwrap(),
+    );
+    if input.dtype() != DType::F32 {
+        cast(c, input.dtype())
+    } else {
+        c
+    }
+}
+
 pub fn silu(input: Arc<dyn Tensor>) -> Result<Arc<dyn Tensor>, Error> {
     let x = Sigmoid::new(None, input.clone());
     Ok(Mul::new(None, input.clone(), x)?)
@@ -151,25 +164,19 @@ pub fn silu(input: Arc<dyn Tensor>) -> Result<Arc<dyn Tensor>, Error> {
 
 pub fn gelu(input: Arc<dyn Tensor>) -> Result<Arc<dyn Tensor>, Error> {
     // gelu(x) = x * 0.5 * (1 + erf(x / sqrt(2)))
-    let sqrt2 = Constant::new(
-        None,
-        TensorData::fill(Shape::from(&[1usize][..]), std::f32::consts::SQRT_2)?,
-    );
+    let sqrt2 = f32_scalar_matching(std::f32::consts::SQRT_2, input.as_ref());
     let x_div = Div::new(None, input.clone(), sqrt2)?;
     let erf_val = Erf::new(None, x_div);
-    let one = Constant::new(None, TensorData::fill(Shape::from(&[1usize][..]), 1.0f32)?);
+    let one = f32_scalar_matching(1.0, input.as_ref());
     let erf_plus_one = Add::new(None, erf_val, one)?;
-    let half = Constant::new(None, TensorData::fill(Shape::from(&[1usize][..]), 0.5f32)?);
+    let half = f32_scalar_matching(0.5, input.as_ref());
     let scaled = Mul::new(None, erf_plus_one, half)?;
     Ok(Mul::new(None, input, scaled)?)
 }
 
 pub fn quick_gelu(input: Arc<dyn Tensor>) -> Result<Arc<dyn Tensor>, Error> {
     // quick_gelu(x) = x * sigmoid(1.702 * x)
-    let scale = Constant::new(
-        None,
-        TensorData::fill(Shape::from(&[1usize][..]), 1.702f32)?,
-    );
+    let scale = f32_scalar_matching(1.702, input.as_ref());
     let scaled = Mul::new(None, input.clone(), scale)?;
     let sig = Sigmoid::new(None, scaled);
     Ok(Mul::new(None, input, sig)?)
@@ -186,14 +193,8 @@ pub fn swiglu(
     Ok(out)
 }
 
-pub fn div_scalar<T>(input: Arc<dyn Tensor>, scalar: T) -> Result<Arc<Div>, Error>
-where
-    T: Copy,
-    TensorDataValue: From<Vec<T>>,
-{
-    let shape = Shape::new(vec![Dimension::new(Some(1), None, None)]);
-    let constant = Constant::new(None, TensorData::fill(shape, scalar)?);
-
+pub fn div_scalar(input: Arc<dyn Tensor>, scalar: f32) -> Result<Arc<Div>, Error> {
+    let constant = f32_scalar_matching(scalar, input.as_ref());
     Div::new(None, input, constant)
 }
 

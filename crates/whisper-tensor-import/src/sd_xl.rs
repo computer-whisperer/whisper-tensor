@@ -493,7 +493,7 @@ pub fn build_unet(
     output_method: WeightStorageStrategy,
     origin_path: &Path,
 ) -> Result<Vec<u8>, anyhow::Error> {
-    let wm = CastingWeightManager::new(weight_manager.prefix("model.diffusion_model"), DType::F32);
+    let wm = weight_manager.prefix("model.diffusion_model");
 
     let batch_dim = Dimension::new(Some(1), Some("batch".to_string()), None);
     let h_dim = Dimension::new(None, Some("height".to_string()), None);
@@ -516,7 +516,7 @@ pub fn build_unet(
     );
     let context_input = InputTensor::new(
         "encoder_hidden_states".to_string(),
-        DType::F32,
+        model_dtype,
         Shape::new(vec![
             batch_dim.clone(),
             Dimension::new(Some(CLIP_MAX_POSITION), None, None),
@@ -526,20 +526,20 @@ pub fn build_unet(
     // ADM conditioning input
     let y_input = InputTensor::new(
         "y".to_string(),
-        DType::F32,
+        model_dtype,
         Shape::new(vec![
             batch_dim,
             Dimension::new(Some(ADM_IN_CHANNELS), None, None),
         ]),
     );
 
-    let sample = cast(sample_input.clone(), DType::F32);
-    let context = context_input.clone();
+    let sample: Arc<dyn Tensor> = sample_input.clone();
+    let context: Arc<dyn Tensor> = context_input.clone();
     let y: Arc<dyn Tensor> = y_input.clone();
 
-    // Timestep embedding
+    // Timestep embedding (sinusoidal in F32, then cast to model_dtype)
     let t_emb =
-        sd_common::timestep_embedding(&wm, cast(timestep_input.clone(), DType::F32), MODEL_CHANNELS)?;
+        sd_common::timestep_embedding(&wm, cast(timestep_input.clone(), DType::F32), MODEL_CHANNELS, model_dtype)?;
 
     // Label embedding (ADM): y → Linear → SiLU → Linear → add to t_emb
     let y_emb = linear(&wm.prefix("label_emb.0.0"), y)?;
@@ -675,11 +675,9 @@ pub fn build_unet(
     h = silu(h)?;
     h = conv2d(&wm.prefix("out.2"), h, 3, 1, 1)?;
 
-    let output = cast(h, model_dtype);
-
     let input_tensors: Vec<Arc<dyn Tensor>> =
         vec![sample_input, timestep_input, context_input, y_input];
-    let output_tensors: Vec<(String, Arc<dyn Tensor>)> = vec![("out_sample".to_string(), output)];
+    let output_tensors: Vec<(String, Arc<dyn Tensor>)> = vec![("out_sample".to_string(), h)];
 
     let onnx_model = crate::onnx_graph::build_proto_with_origin_path(
         &input_tensors,

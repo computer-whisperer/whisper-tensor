@@ -188,10 +188,16 @@ pub fn build_causal_mask(size: usize) -> Vec<f32> {
 // Timestep embedding
 // ============================================================================
 
+/// Build timestep embedding: sinusoidal basis (F32) → cast to model_dtype → MLP.
+///
+/// The sinusoidal computation runs in F32 for precision, then casts to model_dtype
+/// before the Linear layers (whose weights are in model_dtype). The `timestep` input
+/// should be F32.
 pub fn timestep_embedding(
     wm: &impl WeightManager,
     timestep: Arc<dyn Tensor>,
     model_channels: usize,
+    model_dtype: DType,
 ) -> Result<Arc<dyn Tensor>, Error> {
     let half_dim = model_channels / 2;
     let freqs: Vec<f32> = (0..half_dim)
@@ -208,10 +214,14 @@ pub fn timestep_embedding(
         )?,
     );
 
+    // Sinusoidal embedding in F32
     let args = Mul::new(None, timestep, freq_tensor)?;
     let cos_part = cos_op(args.clone())?;
     let sin_part = sin_op(args)?;
     let emb = Concat::new(None, vec![cos_part, sin_part], -1)?;
+
+    // Cast to model_dtype before MLP (weights are in model_dtype)
+    let emb = cast(emb, model_dtype);
 
     let emb = linear(&wm.prefix("time_embed.0"), emb)?;
     let emb = silu(emb)?;

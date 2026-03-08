@@ -194,31 +194,51 @@ impl StableDiffusionInterface {
         let unet_weights = builder.new_model_link(rng);
         let vae_decoder_weights = builder.new_model_link(rng);
 
-        // Node 1: Text encoder (conditional)
-        let cond_hidden = builder.new_tensor_link(rng);
+        // Node 1: Text encoder (conditional) — outputs F32
+        let cond_hidden_f32 = builder.new_tensor_link(rng);
         builder.add_node(
             SuperGraphNodeModelExecution::new(
                 rng,
                 text_encoder_weights,
                 0,
                 vec![(cond_ids_input, "input_ids".to_string())],
-                vec![("last_hidden_state".to_string(), cond_hidden)],
+                vec![("last_hidden_state".to_string(), cond_hidden_f32)],
             )
             .to_any(),
         );
 
-        // Node 2: Text encoder (unconditional)
-        let uncond_hidden = builder.new_tensor_link(rng);
+        // Node 2: Text encoder (unconditional) — outputs F32
+        let uncond_hidden_f32 = builder.new_tensor_link(rng);
         builder.add_node(
             SuperGraphNodeModelExecution::new(
                 rng,
                 text_encoder_weights,
                 0,
                 vec![(uncond_ids_input, "input_ids".to_string())],
-                vec![("last_hidden_state".to_string(), uncond_hidden)],
+                vec![("last_hidden_state".to_string(), uncond_hidden_f32)],
             )
             .to_any(),
         );
+
+        // Cast text encoder outputs to model_dtype for UNet consumption
+        let cond_hidden = builder.new_tensor_link(rng);
+        {
+            let (mut mg, input_map) =
+                MilliOpGraph::new(std::iter::once(cond_hidden_f32.global_id()), rng);
+            let inp = *input_map.get(&cond_hidden_f32.global_id()).unwrap();
+            let casted = Cast::push_new(&mut mg, inp, model_dtype, rng);
+            mg.set_output_map(std::iter::once((casted, cond_hidden.global_id())));
+            builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
+        }
+        let uncond_hidden = builder.new_tensor_link(rng);
+        {
+            let (mut mg, input_map) =
+                MilliOpGraph::new(std::iter::once(uncond_hidden_f32.global_id()), rng);
+            let inp = *input_map.get(&uncond_hidden_f32.global_id()).unwrap();
+            let casted = Cast::push_new(&mut mg, inp, model_dtype, rng);
+            mg.set_output_map(std::iter::once((casted, uncond_hidden.global_id())));
+            builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
+        }
 
         // Node 3: Scan (denoising loop)
         let outer_final_latent = builder.new_tensor_link(rng);

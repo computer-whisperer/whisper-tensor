@@ -175,19 +175,23 @@ fn main() {
             .cast(model_dtype, &mut backend)
             .expect("cast timestep");
 
-        // Context stays F32 (text encoder outputs are F32)
+        // Context in model_dtype (interface casts text encoder F32 output to model_dtype)
         let context = NumericTensor::<DynRank>::from_vec_shape(
             vec![0.0f32; 77 * 2048],
             vec![1, 77, 2048],
         )
-        .unwrap();
+        .unwrap()
+        .cast(model_dtype, &mut backend)
+        .expect("cast context");
 
-        // ADM conditioning stays F32
+        // ADM conditioning in model_dtype
         let y = NumericTensor::<DynRank>::from_vec_shape(
             vec![0.0f32; 2816],
             vec![1, 2816],
         )
-        .unwrap();
+        .unwrap()
+        .cast(model_dtype, &mut backend)
+        .expect("cast y");
 
         let start = Instant::now();
         let out = unet
