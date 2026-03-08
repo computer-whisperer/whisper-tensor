@@ -350,18 +350,16 @@ impl Gather {
         if data_shape.rank() < 2 {
             return Err(Error::InvalidInputError);
         }
+        // ONNX Gather output shape: data.shape[:axis] + indices.shape + data.shape[axis+1:]
+        // When indices is a scalar (rank 0), the axis dimension is removed entirely.
         let mut output_shape = vec![];
-        let mut data_i = 0usize;
-        loop {
-            if data_i != axis {
-                output_shape.push(data_shape[data_i].clone())
-            } else if indices_shape.rank() > 1 || indices_shape[0].resolve()? > 1 {
-                output_shape.extend_from_slice(&indices_shape.dims[0..indices_shape.rank()])
+        for i in 0..data_shape.rank() {
+            if i != axis {
+                output_shape.push(data_shape[i].clone());
+            } else if indices_shape.rank() > 0 {
+                output_shape.extend_from_slice(&indices_shape.dims[..]);
             }
-            data_i += 1;
-            if data_i >= data_shape.rank() {
-                break;
-            }
+            // rank 0 indices: axis dimension is simply dropped
         }
 
         Ok(Arc::new(Self {

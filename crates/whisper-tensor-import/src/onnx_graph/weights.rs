@@ -210,6 +210,7 @@ impl<'a> WeightExternalOutputManager<'a> for BinOutputManager<'a> {
 struct SafeTensorsTensorPath {
     file_index: usize,
     tensor_name: String,
+    file_path: Option<PathBuf>,
 }
 
 enum StoredOriginReferenceTensor {
@@ -254,11 +255,16 @@ impl<'a> WeightExternalOutputManager<'a> for OriginReferenceOutputManager<'a> {
     ) -> Result<(), Error> {
         let file_index = graph_tensor.file_index;
         let tensor_name = graph_tensor.name.clone();
+        let file_path = graph_tensor
+            .inner
+            .get_file_path(file_index)
+            .map(|p| p.to_path_buf());
         self.stored_tensors.insert(
             graph_tensor,
             StoredOriginReferenceTensor::SafeTensor(SafeTensorsTensorPath {
                 file_index,
                 tensor_name,
+                file_path,
             }),
         );
         Ok(())
@@ -344,12 +350,17 @@ impl<'a> WeightExternalOutputManager<'a> for OriginReferenceOutputManager<'a> {
                     }))
                 }
                 StoredOriginReferenceTensor::SafeTensor(safe_path) => {
-                    // Resolve the safetensors file path, matching pth behavior.
-                    let location_str = if let Some(p) = &self.origin_pth_path {
-                        p.to_string_lossy().to_string()
-                    } else {
-                        format!("<safetensors_file_{}>", safe_path.file_index)
-                    };
+                    let location_str = safe_path
+                        .file_path
+                        .as_ref()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_else(|| {
+                            if let Some(p) = &self.origin_pth_path {
+                                p.to_string_lossy().to_string()
+                            } else {
+                                format!("<safetensors_file_{}>", safe_path.file_index)
+                            }
+                        });
                     let external_data = vec![
                         onnx::StringStringEntryProto {
                             key: "format".to_string(),
@@ -523,10 +534,18 @@ impl WeightManager for PthWeightManager {
 pub struct SafetensorsWeightManagerInner {
     safetensors_files: Vec<Arc<Mmap>>,
     safetensors_metadata: Vec<(usize, Metadata)>,
+    file_paths: Vec<PathBuf>,
 }
 
 impl SafetensorsWeightManagerInner {
     pub fn new(safetensors_files: Vec<Arc<Mmap>>) -> Result<Self, Error> {
+        Self::new_with_paths(safetensors_files, vec![])
+    }
+
+    pub fn new_with_paths(
+        safetensors_files: Vec<Arc<Mmap>>,
+        file_paths: Vec<PathBuf>,
+    ) -> Result<Self, Error> {
         let safetensors_metadata = {
             let mut out = vec![];
             for safetensors_mmap in &safetensors_files {
@@ -539,7 +558,12 @@ impl SafetensorsWeightManagerInner {
         Ok(Self {
             safetensors_files,
             safetensors_metadata,
+            file_paths,
         })
+    }
+
+    pub fn get_file_path(&self, file_index: usize) -> Option<&Path> {
+        self.file_paths.get(file_index).map(|p| p.as_path())
     }
 
     pub fn get_tensor_info(&self, name: &str) -> Option<(usize, TensorInfo)> {
@@ -573,6 +597,20 @@ impl SafetensorsWeightManager {
             prefix_tail: None,
             prefix: None,
             inner: Arc::new(SafetensorsWeightManagerInner::new(safetensors_files)?),
+        })
+    }
+
+    pub fn new_with_paths(
+        safetensors_files: Vec<Arc<Mmap>>,
+        file_paths: Vec<PathBuf>,
+    ) -> Result<Self, Error> {
+        Ok(Self {
+            prefix_tail: None,
+            prefix: None,
+            inner: Arc::new(SafetensorsWeightManagerInner::new_with_paths(
+                safetensors_files,
+                file_paths,
+            )?),
         })
     }
 }

@@ -186,28 +186,28 @@ pub fn load_llama3(
             kv_cache_input_shape.clone(),
         );
 
-        let rope_i = ShapeOp::new(None, kv_cache_input_k.clone(), Some(0), Some(2))?;
+        // Compute RoPE position index from KV cache sequence length.
+        // ShapeOp extracts dim 2 (seq) of kv_cache_input_k as a 1D tensor [seq_len].
+        // Gather cos/sin at that position and reshape to [1, 1, D/2] so the
+        // RotaryEmbedding op (which unsqueezes axis=2) produces [1, 1, 1, D/2]
+        // for correct broadcasting with [B, S, H, D/2].
+        let rope_pos = ShapeOp::new(None, kv_cache_input_k.clone(), Some(2), Some(3))?;
+        let cos_at_pos = Gather::new(None, cos_cache.clone(), rope_pos.clone(), 0)?;
+        let sin_at_pos = Gather::new(None, sin_cache.clone(), rope_pos, 0)?;
+        let cos_at_pos = reshape(cos_at_pos, vec![1, 1, half_head_dim as i64])?;
+        let sin_at_pos = reshape(sin_at_pos, vec![1, 1, half_head_dim as i64])?;
 
         let q = RotaryEmbedding::new(
             None,
             q,
-            cos_cache.clone(),
-            sin_cache.clone(),
-            Some(rope_i.clone()),
+            cos_at_pos.clone(),
+            sin_at_pos.clone(),
             None,
-            None,
-            None,
-        )?;
-        let k = RotaryEmbedding::new(
-            None,
-            k,
-            cos_cache.clone(),
-            sin_cache.clone(),
-            Some(rope_i),
             None,
             None,
             None,
         )?;
+        let k = RotaryEmbedding::new(None, k, cos_at_pos, sin_at_pos, None, None, None, None)?;
 
         let new_seq_len_dim = Dimension::new(None, Some("new_seq_len".to_string()), None);
         let new_shape = Shape::new(vec![

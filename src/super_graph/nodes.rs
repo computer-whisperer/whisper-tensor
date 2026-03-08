@@ -20,8 +20,6 @@ use crate::super_graph::{
 use crate::symbolic_graph::observer::SymbolicGraphObserver;
 use crate::tokenizer::{AnyTokenizer, Tokenizer};
 use rand::RngCore;
-#[cfg(feature = "rwkv-tokenizer")]
-use rwkv_tokenizer::WorldTokenizer;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ptr;
@@ -335,31 +333,7 @@ impl SuperGraphNode for SuperGraphNodeTokenizerLoad {
         data: &mut SuperGraphData,
         _context: &mut SuperGraphContext<T>,
     ) -> Result<(), SuperGraphError> {
-        let tokenizer = match &self.info {
-            #[allow(unused_variables)]
-            TokenizerInfo::HFTokenizer(name) => {
-                #[cfg(all(feature = "tokenizers", feature = "http"))]
-                {
-                    AnyTokenizer::Tokenizers(
-                        tokenizers::Tokenizer::from_pretrained(name, None).unwrap(),
-                    )
-                }
-                #[cfg(not(all(feature = "tokenizers", feature = "http")))]
-                {
-                    panic!("Huggingface tokenizer not supported")
-                }
-            }
-            TokenizerInfo::RWKVWorld => {
-                #[cfg(feature = "rwkv-tokenizer")]
-                {
-                    AnyTokenizer::Rwkv(WorldTokenizer::new(None).unwrap())
-                }
-                #[cfg(not(feature = "rwkv-tokenizer"))]
-                {
-                    panic!("RWKV tokenizer not supported")
-                }
-            }
-        };
+        let tokenizer = AnyTokenizer::from_tokenizer_info(&self.info);
         data.tokenizers.insert(self.output, tokenizer);
         Ok(())
     }

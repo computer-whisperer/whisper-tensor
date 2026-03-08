@@ -94,6 +94,11 @@ pub fn load_transformers_format(
         safetensors_files
     };
 
+    let safetensors_paths: Vec<std::path::PathBuf> = safetensors_files
+        .iter()
+        .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()))
+        .collect();
+
     let safetensors_mmaps = {
         let mut safetensors_mmaps = vec![];
         for safetensors_file in safetensors_files {
@@ -104,9 +109,10 @@ pub fn load_transformers_format(
         safetensors_mmaps
     };
 
-    let weight_manager = SafetensorsWeightManager::new(safetensors_mmaps)
-        .map_err(anyhow::Error::from)
-        .map_err(Error::ModelLoadError)?;
+    let weight_manager =
+        SafetensorsWeightManager::new_with_paths(safetensors_mmaps, safetensors_paths)
+            .map_err(anyhow::Error::from)
+            .map_err(Error::ModelLoadError)?;
 
     let model_type = config
         .get("model_type")

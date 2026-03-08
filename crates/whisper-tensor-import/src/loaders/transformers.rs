@@ -56,13 +56,15 @@ impl Loader for TransformersLoader {
 
         let (model, mut output) = onnx_bytes_to_model(&onnx_data, &model_name, Some(&path))?;
 
-        // Detect architecture from config.json to determine tokenizer
-        let config_path = path.join("config.json");
-        let tokenizer_name = if config_path.exists() {
-            // Use directory name as HF tokenizer ID
-            path.to_str().unwrap_or(&model_name).to_string()
-        } else {
-            model_name.clone()
+        // Resolve tokenizer: prefer local tokenizer.json, fall back to HF repo ID
+        let tokenizer_info = {
+            let local_tokenizer = path.join("tokenizer.json");
+            if local_tokenizer.exists() {
+                let abs = std::fs::canonicalize(&local_tokenizer).unwrap_or(local_tokenizer);
+                TokenizerInfo::HFTokenizerLocal(abs.to_string_lossy().to_string())
+            } else {
+                TokenizerInfo::HFTokenizer(model_name.clone())
+            }
         };
 
         // Inspect model for state pairs (KV cache)
@@ -115,7 +117,7 @@ impl Loader for TransformersLoader {
             let output_rank = output_info.shape.as_ref().map_or(3, |s| s.len());
 
             build_simple_transformer_supergraph(
-                TokenizerInfo::HFTokenizer(tokenizer_name),
+                tokenizer_info.clone(),
                 token_input,
                 logit_output,
                 input_dtype,
@@ -126,7 +128,7 @@ impl Loader for TransformersLoader {
         } else {
             // RNN-style with KV cache
             build_kv_cache_supergraph(
-                TokenizerInfo::HFTokenizer(tokenizer_name),
+                tokenizer_info.clone(),
                 token_input,
                 logit_output,
                 &state_pairs,

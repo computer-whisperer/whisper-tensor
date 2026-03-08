@@ -36,6 +36,17 @@ impl AnyTokenizer {
                     panic!("Huggingface tokenizer not supported")
                 }
             }
+            #[allow(unused_variables)]
+            TokenizerInfo::HFTokenizerLocal(path) => {
+                #[cfg(feature = "tokenizers")]
+                {
+                    AnyTokenizer::Tokenizers(tokenizers::Tokenizer::from_file(path).unwrap())
+                }
+                #[cfg(not(feature = "tokenizers"))]
+                {
+                    panic!("Tokenizers feature not enabled")
+                }
+            }
             TokenizerInfo::RWKVWorld => {
                 #[cfg(feature = "rwkv-tokenizer")]
                 {
