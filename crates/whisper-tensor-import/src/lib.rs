@@ -7,6 +7,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+pub mod deepseek_v2;
 pub mod flux;
 pub mod gguf;
 pub mod llama3;
@@ -143,6 +144,13 @@ pub fn load_transformers_format(
             println!("Loading as Phi-3");
             let config = phi3::Phi3Config::from_huggingface_transformers_json(&config)?;
             phi3::load_phi3(weight_manager, config, output_method)
+                .map_err(Error::ModelBuildError)?
+        }
+        "deepseek_v2" => {
+            println!("Loading as DeepSeek-V2");
+            let config =
+                deepseek_v2::DeepseekV2Config::from_huggingface_transformers_json(&config)?;
+            deepseek_v2::load_deepseek_v2(weight_manager, config, output_method)
                 .map_err(Error::ModelBuildError)?
         }
         model_type => Err(Error::UnknownModelType(model_type.to_string()))?,
