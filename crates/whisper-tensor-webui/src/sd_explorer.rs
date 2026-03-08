@@ -337,13 +337,21 @@ pub(crate) fn tensor_to_egui_texture(
 /// Tokenize text for CLIP: encode with the real tokenizer, wrap with
 /// BOS/EOS special tokens, then truncate/pad to `seq_len`.
 ///
-/// The tokenizer trait's `encode` doesn't add special tokens, so we
-/// manually prepend BOS (49406) and append EOS (49407) per the CLIP spec.
+/// The tokenizer's post-processor may already add BOS/EOS; strip them
+/// so we always produce the canonical [BOS, tokens..., EOS, pad...] layout.
 pub(crate) fn clip_tokenize(tokenizer: &dyn Tokenizer, text: &str, seq_len: usize) -> Vec<i32> {
     const CLIP_BOS: u32 = 49406;
     const CLIP_EOS: u32 = 49407;
 
-    let raw_ids = tokenizer.encode(text);
+    let mut raw_ids = tokenizer.encode(text);
+
+    // Strip BOS/EOS if the tokenizer's post-processor already added them
+    if raw_ids.first() == Some(&CLIP_BOS) {
+        raw_ids.remove(0);
+    }
+    if raw_ids.last() == Some(&CLIP_EOS) {
+        raw_ids.pop();
+    }
 
     let mut ids = vec![0i32; seq_len];
     ids[0] = CLIP_BOS as i32;

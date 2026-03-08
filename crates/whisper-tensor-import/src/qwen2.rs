@@ -13,15 +13,16 @@ use crate::onnx_graph::weights::WeightManager;
 use prost::Message;
 use std::sync::Arc;
 
-pub struct Llama3Config {
+pub struct Qwen2Config {
     pub num_hidden_layers: usize,
     pub num_attention_heads: usize,
     pub num_key_value_heads: usize,
     pub rope_theta: f64,
     pub max_position_embeddings: usize,
+    pub tie_word_embeddings: bool,
 }
 
-impl Llama3Config {
+impl Qwen2Config {
     pub fn from_huggingface_transformers_json(config: &serde_json::Value) -> Result<Self, Error> {
         fn get_int(config: &serde_json::Value, key: &str) -> Result<i64, Error> {
             config
@@ -37,24 +38,29 @@ impl Llama3Config {
         let rope_theta = config
             .get("rope_theta")
             .and_then(|v| v.as_f64())
-            .unwrap_or(10000.0);
+            .unwrap_or(1000000.0);
         let max_position_embeddings = config
             .get("max_position_embeddings")
             .and_then(|v| v.as_i64())
-            .unwrap_or(8192) as usize;
+            .unwrap_or(32768) as usize;
+        let tie_word_embeddings = config
+            .get("tie_word_embeddings")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         Ok(Self {
             num_hidden_layers,
             num_attention_heads,
             num_key_value_heads,
             rope_theta,
             max_position_embeddings,
+            tie_word_embeddings,
         })
     }
 }
 
-pub fn load_llama3(
+pub fn load_qwen2(
     weight_manager: impl WeightManager,
-    config: Llama3Config,
+    config: Qwen2Config,
     output_method: WeightStorageStrategy,
 ) -> Result<Vec<u8>, anyhow::Error> {
     let model_weight_manager = weight_manager.prefix("model");
@@ -74,9 +80,11 @@ pub fn load_llama3(
     let token_input = InputTensor::new("input_ids".to_string(), DType::I32, input_shape);
     input_tensors.push(token_input.clone());
 
+    let embed_weight = model_weight_manager.get_tensor("embed_tokens.weight")?;
+
     let x = Gather::new(
         Some("embed_tokens".to_string()),
-        model_weight_manager.get_tensor("embed_tokens.weight")?,
+        embed_weight.clone(),
         token_input.clone(),
         0,
     )?;
@@ -93,9 +101,7 @@ pub fn load_llama3(
         Dimension::new(Some(head_dim), None, None),
     ]);
 
-    // Precompute RoPE frequency tables and embed as constants.
-    // The RotaryEmbedding op (non-interleaved, full rotation) splits x into two halves
-    // of size head_dim/2 each, so cos/sin caches have shape [max_len, head_dim/2].
+    // Precompute RoPE frequency tables.
     let half_head_dim = head_dim / 2;
     let max_len = config.max_position_embeddings;
     let (cos_values, sin_values) = {
@@ -139,7 +145,7 @@ pub fn load_llama3(
             None,
         )?;
 
-        // Multi-head Attention
+        // Multi-head Attention (QKV projections have bias in Qwen2, handled by linear())
         let q = linear(
             &layer_weight_manager.prefix("self_attn.q_proj"),
             att_norm.clone(),
@@ -187,11 +193,6 @@ pub fn load_llama3(
             kv_cache_input_shape.clone(),
         );
 
-        // Compute RoPE position index from KV cache sequence length.
-        // ShapeOp extracts dim 2 (seq) of kv_cache_input_k as a 1D tensor [seq_len].
-        // Gather cos/sin at that position and reshape to [1, 1, D/2] so the
-        // RotaryEmbedding op (which unsqueezes axis=2) produces [1, 1, 1, D/2]
-        // for correct broadcasting with [B, S, H, D/2].
         let rope_pos = ShapeOp::new(None, kv_cache_input_k.clone(), Some(2), Some(3))?;
         let cos_at_pos = Gather::new(None, cos_cache.clone(), rope_pos.clone(), 0)?;
         let sin_at_pos = Gather::new(None, sin_cache.clone(), rope_pos, 0)?;
@@ -239,10 +240,6 @@ pub fn load_llama3(
                 let repeat_kv =
                     |x: Arc<dyn Tensor>| -> Result<Arc<dyn Tensor>, crate::onnx_graph::Error> {
                         let n_rep = config.num_attention_heads / config.num_key_value_heads;
-                        // x: [B, kv_heads, seq, head_dim]
-                        // Interleave each KV head n_rep times:
-                        //   [B, kv_heads, 1, seq, D] -> concat n_rep on dim 2
-                        //   -> [B, kv_heads, n_rep, seq, D] -> reshape [B, num_heads, seq, D]
                         let seq_dim = x.shape()[2].clone();
                         let x = unsqueeze(x, 2)?;
                         let x: Arc<dyn Tensor> =
@@ -276,7 +273,7 @@ pub fn load_llama3(
             };
 
         let scores = MatMul::new(None, q, transpose(k.clone()))?;
-        let scores = div_scalar(scores, (head_dim as f32).sqrt())?;
+        let scores = div_scalar(scores, half::bf16::from_f32((head_dim as f32).sqrt()))?;
 
         let scores = Softmax::new(None, scores, Some(3));
         let output = MatMul::new(None, scores, v)?;
@@ -292,7 +289,7 @@ pub fn load_llama3(
             None,
         )?;
 
-        // FeedForward
+        // SwiGLU Feed-Forward
         let x = linear(
             &layer_weight_manager.prefix("mlp.gate_proj"),
             ffn_norm.clone(),
@@ -309,7 +306,16 @@ pub fn load_llama3(
     }
 
     let h = rms_norm(&model_weight_manager.prefix("norm"), layer_output, None)?;
-    let out = linear(&weight_manager.prefix("lm_head"), h)?;
+
+    // Qwen2 can tie word embeddings: reuse embed_tokens.weight as the output projection
+    let out = if config.tie_word_embeddings {
+        let weight = transpose(embed_weight);
+        let h_rank = h.rank();
+        let h_unsqueezed = unsqueeze(h, (h_rank as i64) - 1)?;
+        MatMul::new(Some("lm_head".to_string()), h_unsqueezed, weight)?
+    } else {
+        linear(&weight_manager.prefix("lm_head"), h)?
+    };
     output_tensors.push(("logits".to_string(), out));
 
     println!("Built graph, exporting...");

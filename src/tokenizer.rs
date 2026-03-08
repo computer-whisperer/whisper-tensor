@@ -92,7 +92,7 @@ pub trait Tokenizer {
 #[cfg(feature = "tokenizers")]
 impl Tokenizer for tokenizers::Tokenizer {
     fn encode(&self, text: &str) -> Vec<u32> {
-        tokenizers::TokenizerImpl::encode(self, text, false)
+        tokenizers::TokenizerImpl::encode(self, text, true)
             .unwrap()
             .get_ids()
             .to_vec()
