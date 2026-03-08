@@ -45,3 +45,12 @@ Every nano op will eventually carry a deterministic ID derived from its
 milli op's GlobalId + element predicate. This enables downstream consumers
 to declare dependencies on specific scalar values and look up which output
 crystal is responsible for them. Deferred to the crystal iteration.
+
+## Active Experiments
+
+- `common/v1_frontend`: shared nano-op IR + iterator-based lowering frontend.
+- `v1_scalar_crystal`: nano-op expansion + crystal loop detection.
+- `v2_fusion`: direct kernel planning + elementwise fusion + matmul kernel.
+- `v3_nano_fusion`: v1 nano/crystal pipeline with post-crystal loop fusion.
+- `v4_pool_growth`: recover/fuse crystals from unordered nano-op pools.
+- `v5_typed_synthesis`: dtype-aware schedules + software bf16 matmul kernel.

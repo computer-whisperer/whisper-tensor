@@ -1,11 +1,12 @@
 // See README.md in this directory — this module is a volatile sandbox.
 
 pub mod attempts;
+pub mod common;
 
 // Re-export the current best attempt so the rest of the system
 // doesn't need to know which implementation is active.
-pub use attempts::v1_scalar_crystal::nano_op;
 pub use attempts::v1_scalar_crystal::crystal;
+pub use common::v1_frontend::nano_op;
 
 #[cfg(feature = "cranelift")]
 pub use attempts::v1_scalar_crystal::codegen;
@@ -16,9 +17,15 @@ use crate::milli_graph::MilliOpGraph;
 /// Convenience wrapper for benchmarking the compiler against the interpreter.
 pub fn interpret_milli_graph(
     graph: &MilliOpGraph,
-    inputs: &std::collections::HashMap<crate::graph::GlobalId, crate::numeric_tensor::NumericTensor<crate::DynRank>>,
+    inputs: &std::collections::HashMap<
+        crate::graph::GlobalId,
+        crate::numeric_tensor::NumericTensor<crate::DynRank>,
+    >,
 ) -> Result<
-    std::collections::HashMap<crate::graph::GlobalId, crate::numeric_tensor::NumericTensor<crate::DynRank>>,
+    std::collections::HashMap<
+        crate::graph::GlobalId,
+        crate::numeric_tensor::NumericTensor<crate::DynRank>,
+    >,
     crate::milli_graph::MilliOpGraphError,
 > {
     let mut backend = crate::backends::eval_backend::EvalBackend::NDArray;
