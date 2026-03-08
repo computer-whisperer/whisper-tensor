@@ -15,6 +15,7 @@ pub mod llama3;
 mod llama4;
 pub mod onnx_graph;
 pub mod rwkv7;
+pub mod sd15;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

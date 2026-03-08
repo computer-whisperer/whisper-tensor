@@ -2521,3 +2521,308 @@ impl SingleOutputNode for TopK {
         DType::I64
     }
 }
+
+pub struct Conv {
+    name: Option<String>,
+    input: Arc<dyn Tensor>,
+    weight: Arc<dyn Tensor>,
+    bias: Option<Arc<dyn Tensor>>,
+    kernel_shape: Vec<i64>,
+    strides: Vec<i64>,
+    pads: Vec<i64>,
+    dilations: Vec<i64>,
+    group: i64,
+    output_shape: Shape,
+}
+
+impl Conv {
+    #[allow(clippy::arc_with_non_send_sync)]
+    pub fn new(
+        name: Option<String>,
+        input: Arc<dyn Tensor>,
+        weight: Arc<dyn Tensor>,
+        bias: Option<Arc<dyn Tensor>>,
+        kernel_shape: Vec<i64>,
+        strides: Vec<i64>,
+        pads: Vec<i64>,
+        dilations: Vec<i64>,
+        group: i64,
+    ) -> Result<Arc<Self>, Error> {
+        // input: [N, C_in, H, W, ...], weight: [C_out, C_in/group, kH, kW, ...]
+        if input.rank() < 3 {
+            return Err(Error::InputShapeError(input.shape().clone()));
+        }
+        let spatial_dims = input.rank() - 2;
+        if kernel_shape.len() != spatial_dims {
+            return Err(Error::InvalidInputError);
+        }
+
+        let c_out = weight.shape()[0].resolve()?;
+        let mut output_dims = vec![
+            input.shape()[0].clone(),
+            Dimension::new(Some(c_out), None, None),
+        ];
+        for i in 0..spatial_dims {
+            let in_dim = input.shape()[i + 2].resolve()?;
+            let k = kernel_shape[i] as usize;
+            let s = strides[i] as usize;
+            let p_begin = pads[i] as usize;
+            let p_end = pads[i + spatial_dims] as usize;
+            let d = dilations[i] as usize;
+            let out_dim = (in_dim + p_begin + p_end - d * (k - 1) - 1) / s + 1;
+            output_dims.push(Dimension::new(Some(out_dim), None, None));
+        }
+
+        Ok(Arc::new(Self {
+            name,
+            input,
+            weight,
+            bias,
+            kernel_shape,
+            strides,
+            pads,
+            dilations,
+            group,
+            output_shape: Shape::new(output_dims),
+        }))
+    }
+}
+
+impl Node for Conv {
+    fn get_input_tensors(&self) -> Vec<&dyn Tensor> {
+        let mut inputs: Vec<&dyn Tensor> = vec![self.input.as_ref(), self.weight.as_ref()];
+        if let Some(bias) = &self.bias {
+            inputs.push(bias.as_ref());
+        }
+        inputs
+    }
+    fn get_output_tensors(&self) -> Vec<&dyn Tensor> {
+        vec![self]
+    }
+    fn get_name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+    fn get_onnx_type(&self) -> &str {
+        "Conv"
+    }
+    fn get_onnx_attributes(&self) -> Vec<AttributeProto> {
+        vec![
+            make_int_list_attribute("kernel_shape", &self.kernel_shape),
+            make_int_list_attribute("strides", &self.strides),
+            make_int_list_attribute("pads", &self.pads),
+            make_int_list_attribute("dilations", &self.dilations),
+            make_int_attribute("group", self.group),
+        ]
+    }
+}
+
+impl SingleOutputNode for Conv {
+    fn get_output_shape(&self) -> &Shape {
+        &self.output_shape
+    }
+    fn get_output_dtype(&self) -> DType {
+        self.input.dtype()
+    }
+}
+
+pub struct Resize {
+    name: Option<String>,
+    input: Arc<dyn Tensor>,
+    scales: Option<Arc<dyn Tensor>>,
+    sizes: Option<Arc<dyn Tensor>>,
+    mode: String,
+    output_shape: Shape,
+}
+
+impl Resize {
+    #[allow(clippy::arc_with_non_send_sync)]
+    pub fn new_with_scales(
+        name: Option<String>,
+        input: Arc<dyn Tensor>,
+        scales: Arc<dyn Tensor>,
+        mode: String,
+        output_shape: Shape,
+    ) -> Result<Arc<Self>, Error> {
+        Ok(Arc::new(Self {
+            name,
+            input,
+            scales: Some(scales),
+            sizes: None,
+            mode,
+            output_shape,
+        }))
+    }
+}
+
+impl Node for Resize {
+    fn get_input_tensors(&self) -> Vec<&dyn Tensor> {
+        let mut inputs = vec![self.input.as_ref()];
+        if let Some(scales) = &self.scales {
+            inputs.push(scales.as_ref());
+        }
+        if let Some(sizes) = &self.sizes {
+            inputs.push(sizes.as_ref());
+        }
+        inputs
+    }
+    fn get_output_tensors(&self) -> Vec<&dyn Tensor> {
+        vec![self]
+    }
+    fn get_name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+    fn get_onnx_type(&self) -> &str {
+        "Resize"
+    }
+    fn get_onnx_attributes(&self) -> Vec<AttributeProto> {
+        vec![make_string_attribute("mode", &self.mode)]
+    }
+
+    /// Override to emit ONNX-spec input ordering: [X, roi, scales, sizes].
+    /// ROI is always empty for our use case, but the slot must be present
+    /// so that scales lands at position 2.
+    fn to_node_proto(
+        &self,
+        name: Option<String>,
+        tensor_names: &std::collections::HashMap<&dyn Tensor, String>,
+    ) -> super::onnx::NodeProto {
+        let mut inputs = vec![
+            tensor_names[&(self.input.as_ref() as &dyn Tensor)].clone(),
+            String::new(), // empty ROI slot
+        ];
+        if let Some(scales) = &self.scales {
+            inputs.push(tensor_names[&(scales.as_ref() as &dyn Tensor)].clone());
+        }
+        if let Some(sizes) = &self.sizes {
+            inputs.push(tensor_names[&(sizes.as_ref() as &dyn Tensor)].clone());
+        }
+        super::onnx::NodeProto {
+            name: name.unwrap_or_default(),
+            input: inputs,
+            output: self
+                .get_output_tensors()
+                .iter()
+                .map(|tensor| tensor_names[tensor].clone())
+                .collect(),
+            op_type: self.get_onnx_type().to_string(),
+            domain: self.get_onnx_domain().to_string(),
+            attribute: self.get_onnx_attributes(),
+            ..Default::default()
+        }
+    }
+}
+
+impl SingleOutputNode for Resize {
+    fn get_output_shape(&self) -> &Shape {
+        &self.output_shape
+    }
+    fn get_output_dtype(&self) -> DType {
+        self.input.dtype()
+    }
+}
+
+pub struct Pad {
+    name: Option<String>,
+    input: Arc<dyn Tensor>,
+    pads: Arc<dyn Tensor>,
+    constant_value: Option<Arc<dyn Tensor>>,
+    output_shape: Shape,
+}
+
+impl Pad {
+    #[allow(clippy::arc_with_non_send_sync)]
+    pub fn new(
+        name: Option<String>,
+        input: Arc<dyn Tensor>,
+        pads: Arc<dyn Tensor>,
+        constant_value: Option<Arc<dyn Tensor>>,
+        output_shape: Shape,
+    ) -> Result<Arc<Self>, Error> {
+        Ok(Arc::new(Self {
+            name,
+            input,
+            pads,
+            constant_value,
+            output_shape,
+        }))
+    }
+}
+
+impl Node for Pad {
+    fn get_input_tensors(&self) -> Vec<&dyn Tensor> {
+        let mut inputs: Vec<&dyn Tensor> = vec![self.input.as_ref(), self.pads.as_ref()];
+        if let Some(cv) = &self.constant_value {
+            inputs.push(cv.as_ref());
+        }
+        inputs
+    }
+    fn get_output_tensors(&self) -> Vec<&dyn Tensor> {
+        vec![self]
+    }
+    fn get_name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+    fn get_onnx_type(&self) -> &str {
+        "Pad"
+    }
+    fn get_onnx_attributes(&self) -> Vec<AttributeProto> {
+        vec![]
+    }
+}
+
+impl SingleOutputNode for Pad {
+    fn get_output_shape(&self) -> &Shape {
+        &self.output_shape
+    }
+    fn get_output_dtype(&self) -> DType {
+        self.input.dtype()
+    }
+}
+
+fn make_string_attribute(name: &str, value: &str) -> AttributeProto {
+    AttributeProto {
+        name: name.to_string(),
+        r#type: onnx::attribute_proto::AttributeType::String.into(),
+        s: value.as_bytes().to_vec(),
+        ..Default::default()
+    }
+}
+
+pub struct Erf {
+    name: Option<String>,
+    input: Arc<dyn Tensor>,
+}
+
+impl Erf {
+    #[allow(clippy::arc_with_non_send_sync)]
+    pub fn new(name: Option<String>, input: Arc<dyn Tensor>) -> Arc<Self> {
+        Arc::new(Self { name, input })
+    }
+}
+
+impl Node for Erf {
+    fn get_input_tensors(&self) -> Vec<&dyn Tensor> {
+        vec![self.input.as_ref()]
+    }
+    fn get_output_tensors(&self) -> Vec<&dyn Tensor> {
+        vec![self]
+    }
+    fn get_name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+    fn get_onnx_type(&self) -> &str {
+        "Erf"
+    }
+    fn get_onnx_attributes(&self) -> Vec<AttributeProto> {
+        vec![]
+    }
+}
+
+impl SingleOutputNode for Erf {
+    fn get_output_shape(&self) -> &Shape {
+        self.input.shape()
+    }
+    fn get_output_dtype(&self) -> DType {
+        self.input.dtype()
+    }
+}

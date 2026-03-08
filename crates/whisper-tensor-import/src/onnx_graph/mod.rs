@@ -1,4 +1,4 @@
-mod node;
+pub mod node;
 pub mod operators;
 pub mod pytorch;
 pub mod tensor;
@@ -54,6 +54,7 @@ pub enum Error {
     SerdeJsonError(#[from] serde_json::Error),
 }
 
+#[derive(Clone)]
 pub enum WeightStorageStrategy {
     None,
     BinFile(PathBuf),
@@ -273,20 +274,30 @@ pub fn build_proto_with_origin_path(
     let graph_inputs = inputs
         .iter()
         .map(|(tensor, metadata)| {
-            let json_str = serde_json::to_string(&metadata).unwrap();
+            let meta_props = if let Some(metadata) = metadata {
+                let json_str = serde_json::to_string(metadata).unwrap();
+                vec![("whisper_tensor_metadata".to_string(), json_str)]
+            } else {
+                vec![]
+            };
             tensor.to_value_info_proto(
                 tensor_names[&(tensor.as_ref())].clone(),
-                vec![("whisper_tensor_metadata".to_string(), json_str)],
+                meta_props,
             )
         })
         .collect();
     let graph_outputs = outputs
         .iter()
         .map(|(name, tensor, metadata)| {
-            let json_str = serde_json::to_string(&metadata).unwrap();
+            let meta_props = if let Some(metadata) = metadata {
+                let json_str = serde_json::to_string(metadata).unwrap();
+                vec![("whisper_tensor_metadata".to_string(), json_str)]
+            } else {
+                vec![]
+            };
             tensor.to_value_info_proto(
                 name.to_string(),
-                vec![("whisper_tensor_metadata".to_string(), json_str)],
+                meta_props,
             )
         })
         .collect();

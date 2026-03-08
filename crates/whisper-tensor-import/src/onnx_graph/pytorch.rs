@@ -1,6 +1,7 @@
 use super::operators::{
-    Cast, Constant, CumSum, Div, Expand, GroupNormalization, LayerNormalization, Mul,
-    RMSNormalization, ReduceSum, Reshape, Sigmoid, Slice, Squeeze, TopK, Transpose, Unsqueeze,
+    Add, Cast, Concat, Constant, Conv, CumSum, Div, Erf, Expand, GroupNormalization,
+    LayerNormalization, Mul, RMSNormalization, ReduceSum, Reshape, Resize, Sigmoid, Slice, Squeeze,
+    TopK, Transpose, Unsqueeze,
 };
 use super::tensor::{DType, Dimension, Shape, Tensor, TensorData, TensorDataValue};
 use super::weights::WeightManager;
@@ -148,6 +149,38 @@ pub fn silu(input: Arc<dyn Tensor>) -> Result<Arc<dyn Tensor>, Error> {
     Ok(Mul::new(None, input.clone(), x)?)
 }
 
+pub fn gelu(input: Arc<dyn Tensor>) -> Result<Arc<dyn Tensor>, Error> {
+    // gelu(x) = x * 0.5 * (1 + erf(x / sqrt(2)))
+    let sqrt2 = Constant::new(
+        None,
+        TensorData::fill(Shape::from(&[1usize][..]), std::f32::consts::SQRT_2)?,
+    );
+    let x_div = Div::new(None, input.clone(), sqrt2)?;
+    let erf_val = Erf::new(None, x_div);
+    let one = Constant::new(
+        None,
+        TensorData::fill(Shape::from(&[1usize][..]), 1.0f32)?,
+    );
+    let erf_plus_one = Add::new(None, erf_val, one)?;
+    let half = Constant::new(
+        None,
+        TensorData::fill(Shape::from(&[1usize][..]), 0.5f32)?,
+    );
+    let scaled = Mul::new(None, erf_plus_one, half)?;
+    Ok(Mul::new(None, input, scaled)?)
+}
+
+pub fn quick_gelu(input: Arc<dyn Tensor>) -> Result<Arc<dyn Tensor>, Error> {
+    // quick_gelu(x) = x * sigmoid(1.702 * x)
+    let scale = Constant::new(
+        None,
+        TensorData::fill(Shape::from(&[1usize][..]), 1.702f32)?,
+    );
+    let scaled = Mul::new(None, input.clone(), scale)?;
+    let sig = Sigmoid::new(None, scaled);
+    Ok(Mul::new(None, input, sig)?)
+}
+
 pub fn swiglu(
     weight_manager: &impl WeightManager,
     input: Arc<dyn Tensor>,
@@ -174,6 +207,66 @@ pub fn expand(input: Arc<dyn Tensor>, dims: Vec<i64>) -> Result<Arc<Expand>, Err
     let shape = Shape::from(&[dims.len()][..]);
     let c = Constant::new(None, TensorData::new(dims.into(), shape)?);
     Expand::new(None, input, c)
+}
+
+pub fn conv2d(
+    weight_manager: &impl WeightManager,
+    input: Arc<dyn Tensor>,
+    kernel_size: i64,
+    stride: i64,
+    padding: i64,
+) -> Result<Arc<dyn Tensor>, Error> {
+    let weight = weight_manager.get_tensor("weight")?;
+    let bias = weight_manager.get_tensor("bias").ok();
+    let conv = Conv::new(
+        weight_manager.get_prefix().map(|x| x.to_string()),
+        input,
+        weight,
+        bias,
+        vec![kernel_size, kernel_size],
+        vec![stride, stride],
+        vec![padding, padding, padding, padding],
+        vec![1, 1],
+        1,
+    )?;
+    Ok(conv)
+}
+
+pub fn upsample_nearest_2x(
+    input: Arc<dyn Tensor>,
+) -> Result<Arc<dyn Tensor>, Error> {
+    let scales = Constant::new(
+        None,
+        TensorData::new(
+            vec![1.0f32, 1.0, 2.0, 2.0].into(),
+            Shape::from(&[4usize][..]),
+        )?,
+    );
+    let h = input.shape()[2].resolve()?;
+    let w = input.shape()[3].resolve()?;
+    let mut output_dims = input.shape().dims.clone();
+    output_dims[2] = Dimension::new(Some(h * 2), None, None);
+    output_dims[3] = Dimension::new(Some(w * 2), None, None);
+    let output_shape = Shape::new(output_dims);
+    Resize::new_with_scales(
+        None,
+        input,
+        scales,
+        "nearest".to_string(),
+        output_shape,
+    )
+    .map(|x| x as Arc<dyn Tensor>)
+}
+
+pub fn linear_with_bias(
+    weight_manager: &impl WeightManager,
+    input: Arc<dyn Tensor>,
+) -> Result<Arc<dyn Tensor>, Error> {
+    linear(weight_manager, input)
+}
+
+pub fn concat(inputs: Vec<Arc<dyn Tensor>>, axis: i64) -> Result<Arc<dyn Tensor>, Error> {
+    Ok(Concat::new(None, inputs, axis)?)
 }
 
 #[allow(clippy::type_complexity)]

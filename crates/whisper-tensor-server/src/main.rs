@@ -138,51 +138,106 @@ impl ModelServer {
     }
 
     pub(crate) async fn load_sd_pipeline(&self, base_path: &Path) -> Result<(), anyhow::Error> {
-        let submodels = [
-            ("text_encoder", "text_encoder"),
-            ("unet", "unet"),
-            ("vae_decoder", "vae_decoder"),
-        ];
+        let is_safetensors = base_path
+            .extension()
+            .is_some_and(|ext| ext == "safetensors");
 
         let mut model_ids = Vec::new();
 
-        for (name, subdir) in &submodels {
+        if is_safetensors {
+            // Single-file SD checkpoint (.safetensors)
             let storage = if cfg!(feature = "candle") {
                 WeightStorageStrategy::OriginReference
             } else {
                 WeightStorageStrategy::EmbeddedData
             };
-            let model_path = base_path.join(subdir).join("model.onnx");
-            tracing::info!("Loading SD {name} from {}", model_path.display());
-            let onnx_data = identify_and_load(&model_path, storage, None)?;
-            let runtime_model = {
-                let mut rng = rand::rng();
-                Model::new_from_onnx(&onnx_data, &mut rng, model_path.parent())?
-            };
-            let model_id = LoadedModelId(
-                self.next_model_id
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            tracing::info!(
+                "Loading SD 1.5 from safetensors checkpoint: {}",
+                base_path.display()
             );
-            let model_name = format!(
-                "{}-{}",
-                base_path
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_str()
-                    .unwrap_or_default(),
-                name
-            );
+            let (te_onnx, unet_onnx, vae_onnx) =
+                whisper_tensor_import::sd15::load_sd15_checkpoint(base_path, storage)?;
 
-            let mut guard = self.models.write().await;
-            guard.push(ModelData {
-                model: Arc::new(runtime_model),
-                model_id,
-                model_name,
-                compiled_program: None,
-            });
-            drop(guard);
+            for (name, onnx_data) in [
+                ("text_encoder", te_onnx),
+                ("unet", unet_onnx),
+                ("vae_decoder", vae_onnx),
+            ] {
+                let runtime_model = {
+                    let mut rng = rand::rng();
+                    Model::new_from_onnx(&onnx_data, &mut rng, Some(base_path).and_then(|p| p.parent()))?
+                };
+                let model_id = LoadedModelId(
+                    self.next_model_id
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                );
+                let model_name = format!(
+                    "{}-{}",
+                    base_path
+                        .file_stem()
+                        .unwrap_or_default()
+                        .to_str()
+                        .unwrap_or_default(),
+                    name
+                );
 
-            model_ids.push(model_id);
+                let mut guard = self.models.write().await;
+                guard.push(ModelData {
+                    model: Arc::new(runtime_model),
+                    model_id,
+                    model_name,
+                    compiled_program: None,
+                });
+                drop(guard);
+
+                model_ids.push(model_id);
+            }
+        } else {
+            // ONNX directory format (existing path)
+            let submodels = [
+                ("text_encoder", "text_encoder"),
+                ("unet", "unet"),
+                ("vae_decoder", "vae_decoder"),
+            ];
+
+            for (name, subdir) in &submodels {
+                let storage = if cfg!(feature = "candle") {
+                    WeightStorageStrategy::OriginReference
+                } else {
+                    WeightStorageStrategy::EmbeddedData
+                };
+                let model_path = base_path.join(subdir).join("model.onnx");
+                tracing::info!("Loading SD {name} from {}", model_path.display());
+                let onnx_data = identify_and_load(&model_path, storage, None)?;
+                let runtime_model = {
+                    let mut rng = rand::rng();
+                    Model::new_from_onnx(&onnx_data, &mut rng, model_path.parent())?
+                };
+                let model_id = LoadedModelId(
+                    self.next_model_id
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                );
+                let model_name = format!(
+                    "{}-{}",
+                    base_path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_str()
+                        .unwrap_or_default(),
+                    name
+                );
+
+                let mut guard = self.models.write().await;
+                guard.push(ModelData {
+                    model: Arc::new(runtime_model),
+                    model_id,
+                    model_name,
+                    compiled_program: None,
+                });
+                drop(guard);
+
+                model_ids.push(model_id);
+            }
         }
 
         // Create the SD interface
@@ -194,7 +249,7 @@ impl ModelServer {
             )
         };
         let pipeline_name = base_path
-            .file_name()
+            .file_stem()
             .unwrap_or_default()
             .to_str()
             .unwrap_or_default()
