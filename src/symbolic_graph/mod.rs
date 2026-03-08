@@ -443,8 +443,43 @@ impl SymbolicGraph {
                                 StoredOrNotTensor::NotStored(numeric_tensor)
                             }
                         }
+                    } else if fmt == "safetensors" {
+                        if let (Some(location), Some(tensor_name)) =
+                            (map.get("location"), map.get("tensor_name"))
+                        {
+                            let dtype = DType::try_from(
+                                onnx::tensor_proto::DataType::try_from(t.data_type).map_err(
+                                    |x| {
+                                        ONNXDecodingError::ProtobufDecodeError(anyhow::Error::from(
+                                            x,
+                                        ))
+                                    },
+                                )?,
+                            )?;
+                            let shape = t.dims.iter().map(|x| *x as u64).collect::<Vec<_>>();
+                            let id = graph_mutator.tensor_store.add_tensor(
+                                StoredTensor::ExternalSafetensors {
+                                    path: resolve_path(location),
+                                    tensor_name: tensor_name.clone(),
+                                    dtype,
+                                    shape: shape.clone(),
+                                },
+                            );
+                            StoredOrNotTensor::Stored(id)
+                        } else {
+                            // Missing required keys; fallback to eager load
+                            let numeric_tensor = NDArrayNumericTensor::try_from(t)?;
+                            if numeric_tensor.num_elements() > 100 {
+                                let id = graph_mutator.tensor_store.add_tensor(
+                                    StoredTensor::Numeric(NumericTensor::NDArray(numeric_tensor)),
+                                );
+                                StoredOrNotTensor::Stored(id)
+                            } else {
+                                StoredOrNotTensor::NotStored(numeric_tensor)
+                            }
+                        }
                     } else {
-                        // Not pth; try generic external binary with offset/length
+                        // Unknown format; try generic external binary with offset/length
                         if let (Some(location), Some(offset), Some(length)) =
                             (map.get("location"), map.get("offset"), map.get("length"))
                         {

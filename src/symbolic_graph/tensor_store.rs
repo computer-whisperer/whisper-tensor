@@ -22,6 +22,12 @@ pub enum StoredTensor {
         dtype: DType,
         shape: Vec<u64>,
     },
+    ExternalSafetensors {
+        path: String,
+        tensor_name: String,
+        dtype: DType,
+        shape: Vec<u64>,
+    },
 }
 
 impl StoredTensor {
@@ -113,6 +119,42 @@ impl StoredTensor {
                     );
                 }
             }
+            StoredTensor::ExternalSafetensors {
+                path,
+                tensor_name,
+                dtype,
+                shape,
+            } => {
+                #[cfg(feature = "safetensors")]
+                {
+                    use memmap2::Mmap;
+                    use safetensors::SafeTensors;
+                    use std::fs::File;
+
+                    let file = File::open(path).expect("Failed to open safetensors file");
+                    let mmap =
+                        unsafe { Mmap::map(&file) }.expect("Failed to mmap safetensors file");
+                    let st =
+                        SafeTensors::deserialize(&mmap).expect("Failed to parse safetensors");
+                    let view = st.tensor(tensor_name).expect("tensor not found in safetensors");
+                    let bytes = view.data();
+                    let nd =
+                        crate::backends::ndarray_backend::NDArrayNumericTensor::from_raw_data(
+                            bytes,
+                            *dtype,
+                            shape.clone(),
+                        )
+                        .expect("decode external safetensors tensor");
+                    NumericTensor::NDArray(nd)
+                }
+                #[cfg(not(feature = "safetensors"))]
+                {
+                    let _ = (&path, &tensor_name, &dtype, &shape);
+                    panic!(
+                        "ExternalSafetensors tensors require the 'safetensors' feature. Rebuild with --features safetensors"
+                    );
+                }
+            }
         }
     }
 
@@ -121,6 +163,7 @@ impl StoredTensor {
             StoredTensor::Numeric(tensor) => tensor.shape(),
             StoredTensor::ExternalBinary { shape, .. } => shape.clone(),
             StoredTensor::ExternalPth { shape, .. } => shape.clone(),
+            StoredTensor::ExternalSafetensors { shape, .. } => shape.clone(),
         }
     }
 
@@ -129,6 +172,7 @@ impl StoredTensor {
             StoredTensor::Numeric(tensor) => tensor.dtype(),
             StoredTensor::ExternalBinary { dtype, .. } => *dtype,
             StoredTensor::ExternalPth { dtype, .. } => *dtype,
+            StoredTensor::ExternalSafetensors { dtype, .. } => *dtype,
         }
     }
 }

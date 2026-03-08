@@ -8,10 +8,63 @@ use crate::onnx_graph::tensor::{
     DType, Dimension, InputTensor, InputTensorInitialized, Shape, Tensor, TensorData,
 };
 use crate::onnx_graph::weights::{SafetensorsWeightManager, WeightManager};
+use crate::onnx_graph::Error;
 use memmap2::Mmap;
 use prost::Message;
 use std::path::Path;
 use std::sync::Arc;
+
+/// Weight manager wrapper that casts all retrieved tensors to a target dtype.
+/// Used by the SD 1.5 builder to explicitly convert f16/bf16 weights to f32
+/// for sections that compute in f32.
+struct CastingWeightManager<T: WeightManager> {
+    inner: T,
+    target_dtype: DType,
+}
+
+impl<T: WeightManager> CastingWeightManager<T> {
+    fn new(inner: T, target_dtype: DType) -> Self {
+        Self {
+            inner,
+            target_dtype,
+        }
+    }
+}
+
+impl<T: WeightManager> WeightManager for CastingWeightManager<T> {
+    fn prefix(&self, name: &str) -> Self {
+        Self {
+            inner: self.inner.prefix(name),
+            target_dtype: self.target_dtype,
+        }
+    }
+
+    fn get_tensor(&self, name: &str) -> Result<Arc<dyn Tensor>, Error> {
+        let tensor = self.inner.get_tensor(name)?;
+        Ok(cast(tensor, self.target_dtype))
+    }
+
+    fn get_prefix_tail(&self) -> Option<&str> {
+        self.inner.get_prefix_tail()
+    }
+
+    fn get_prefix(&self) -> Option<&str> {
+        self.inner.get_prefix()
+    }
+
+    fn get_tensor_names(&self) -> Vec<String> {
+        self.inner.get_tensor_names()
+    }
+}
+
+/// Detect the storage dtype of the model by checking a canary weight.
+fn detect_model_dtype(weight_manager: &impl WeightManager) -> DType {
+    // Use a UNet conv weight as canary — always present in SD 1.5 checkpoints.
+    let canary = weight_manager
+        .get_tensor("model.diffusion_model.input_blocks.0.0.weight")
+        .expect("cannot detect model dtype: canary weight not found");
+    canary.dtype()
+}
 
 /// ONNX model bytes for the three SD 1.5 sub-models.
 pub type Sd15Models = (Vec<u8>, Vec<u8>, Vec<u8>);
@@ -26,14 +79,27 @@ pub fn load_sd15_checkpoint(
     let mmap = unsafe { Mmap::map(&file) }?;
     let weight_manager = SafetensorsWeightManager::new(vec![Arc::new(mmap)])?;
 
+    let model_dtype = detect_model_dtype(&weight_manager);
+    println!("Detected model dtype: {:?}", model_dtype);
+
+    // Canonicalize the checkpoint path so external references resolve correctly.
+    let origin_path = std::fs::canonicalize(checkpoint_path)
+        .unwrap_or_else(|_| checkpoint_path.to_path_buf());
+
     println!("Building SD 1.5 text encoder...");
-    let text_encoder = build_text_encoder(&weight_manager, output_method.clone())?;
+    let text_encoder = build_text_encoder(
+        &weight_manager, model_dtype, output_method.clone(), &origin_path,
+    )?;
 
     println!("Building SD 1.5 UNet...");
-    let unet = build_unet(&weight_manager, output_method.clone())?;
+    let unet = build_unet(
+        &weight_manager, model_dtype, output_method.clone(), &origin_path,
+    )?;
 
     println!("Building SD 1.5 VAE decoder...");
-    let vae_decoder = build_vae_decoder(&weight_manager, output_method)?;
+    let vae_decoder = build_vae_decoder(
+        &weight_manager, model_dtype, output_method, &origin_path,
+    )?;
 
     Ok((text_encoder, unet, vae_decoder))
 }
@@ -74,10 +140,17 @@ const VAE_NUM_RES_BLOCKS: usize = 2;
 
 pub fn build_text_encoder(
     weight_manager: &impl WeightManager,
+    model_dtype: DType,
     output_method: WeightStorageStrategy,
+    origin_path: &Path,
 ) -> Result<Vec<u8>, anyhow::Error> {
-    let wm = weight_manager.prefix("cond_stage_model.transformer.text_model");
+    // Text encoder always computes in f32 for precision.
+    let wm = CastingWeightManager::new(
+        weight_manager.prefix("cond_stage_model.transformer.text_model"),
+        DType::F32,
+    );
     let emb_wm = wm.prefix("embeddings");
+    let _ = model_dtype; // text encoder is always f32
 
     let batch_dim = Dimension::new(Some(1), Some("batch_size".to_string()), None);
     let seq_dim = Dimension::new(Some(CLIP_MAX_POSITION), Some("seq_len".to_string()), None);
@@ -127,7 +200,9 @@ pub fn build_text_encoder(
         vec![("last_hidden_state".to_string(), output)];
 
     let onnx_model =
-        crate::onnx_graph::build_proto(&input_tensors, &output_tensors, output_method)?;
+        crate::onnx_graph::build_proto_with_origin_path(
+            &input_tensors, &output_tensors, output_method, Some(origin_path),
+        )?;
     Ok(onnx_model.encode_to_vec())
 }
 
@@ -222,17 +297,24 @@ fn clip_mlp(
 
 pub fn build_unet(
     weight_manager: &impl WeightManager,
+    model_dtype: DType,
     output_method: WeightStorageStrategy,
+    origin_path: &Path,
 ) -> Result<Vec<u8>, anyhow::Error> {
-    let wm = weight_manager.prefix("model.diffusion_model");
+    // UNet computes in f32; cast weights from model_dtype as needed.
+    let wm = CastingWeightManager::new(
+        weight_manager.prefix("model.diffusion_model"),
+        DType::F32,
+    );
 
     let batch_dim = Dimension::new(Some(1), Some("batch".to_string()), None);
     let h_dim = Dimension::new(Some(64), Some("height".to_string()), None);
     let w_dim = Dimension::new(Some(64), Some("width".to_string()), None);
 
+    // I/O uses model_dtype (f16 or f32 depending on checkpoint).
     let sample_input = InputTensor::new(
         "sample".to_string(),
-        DType::F16,
+        model_dtype,
         Shape::new(vec![
             batch_dim.clone(),
             Dimension::new(Some(4), None, None),
@@ -242,7 +324,7 @@ pub fn build_unet(
     );
     let timestep_input = InputTensor::new(
         "timestep".to_string(),
-        DType::F16,
+        model_dtype,
         Shape::new(vec![Dimension::new(Some(1), None, None)]),
     );
     let context_input = InputTensor::new(
@@ -374,14 +456,16 @@ pub fn build_unet(
     h = silu(h)?;
     h = conv2d(&wm.prefix("out.2"), h, 3, 1, 1)?;
 
-    // Cast output to F16
-    let output = cast(h, DType::F16);
+    // Cast output back to model dtype
+    let output = cast(h, model_dtype);
 
     let input_tensors: Vec<Arc<dyn Tensor>> = vec![sample_input, timestep_input, context_input];
     let output_tensors: Vec<(String, Arc<dyn Tensor>)> = vec![("out_sample".to_string(), output)];
 
     let onnx_model =
-        crate::onnx_graph::build_proto(&input_tensors, &output_tensors, output_method)?;
+        crate::onnx_graph::build_proto_with_origin_path(
+            &input_tensors, &output_tensors, output_method, Some(origin_path),
+        )?;
     Ok(onnx_model.encode_to_vec())
 }
 
@@ -731,17 +815,24 @@ fn upsample(
 
 pub fn build_vae_decoder(
     weight_manager: &impl WeightManager,
+    model_dtype: DType,
     output_method: WeightStorageStrategy,
+    origin_path: &Path,
 ) -> Result<Vec<u8>, anyhow::Error> {
-    let wm = weight_manager.prefix("first_stage_model");
+    // VAE computes in f32 for precision; cast weights from model_dtype.
+    let wm = CastingWeightManager::new(
+        weight_manager.prefix("first_stage_model"),
+        DType::F32,
+    );
 
     let batch_dim = Dimension::new(Some(1), Some("batch".to_string()), None);
     let h_dim = Dimension::new(Some(64), Some("height".to_string()), None);
     let w_dim = Dimension::new(Some(64), Some("width".to_string()), None);
 
+    // Input uses model_dtype
     let latent_input = InputTensor::new(
         "latent_sample".to_string(),
-        DType::F16,
+        model_dtype,
         Shape::new(vec![
             batch_dim,
             Dimension::new(Some(4), None, None),
@@ -788,7 +879,9 @@ pub fn build_vae_decoder(
     let output_tensors: Vec<(String, Arc<dyn Tensor>)> = vec![("sample".to_string(), h)];
 
     let onnx_model =
-        crate::onnx_graph::build_proto(&input_tensors, &output_tensors, output_method)?;
+        crate::onnx_graph::build_proto_with_origin_path(
+            &input_tensors, &output_tensors, output_method, Some(origin_path),
+        )?;
     Ok(onnx_model.encode_to_vec())
 }
 

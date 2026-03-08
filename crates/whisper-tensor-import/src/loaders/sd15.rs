@@ -1,4 +1,3 @@
-use super::default_storage;
 use std::sync::Arc;
 use whisper_tensor::interfaces::StableDiffusionInterface;
 use whisper_tensor::loader::*;
@@ -30,7 +29,7 @@ impl Loader for SD15Loader {
 
     fn load(&self, config: ConfigValues) -> Result<LoaderOutput, LoaderError> {
         let path = require_path(&config, "path")?;
-        let storage = default_storage();
+        let storage = crate::onnx_graph::WeightStorageStrategy::OriginReference;
 
         let (te_onnx, unet_onnx, vae_onnx) =
             crate::sd15::load_sd15_checkpoint(&path, storage).map_err(LoaderError::LoadFailed)?;

@@ -344,6 +344,12 @@ impl<'a> WeightExternalOutputManager<'a> for OriginReferenceOutputManager<'a> {
                     }))
                 }
                 StoredOriginReferenceTensor::SafeTensor(safe_path) => {
+                    // Resolve the safetensors file path, matching pth behavior.
+                    let location_str = if let Some(p) = &self.origin_pth_path {
+                        p.to_string_lossy().to_string()
+                    } else {
+                        format!("<safetensors_file_{}>", safe_path.file_index)
+                    };
                     let external_data = vec![
                         onnx::StringStringEntryProto {
                             key: "format".to_string(),
@@ -354,8 +360,8 @@ impl<'a> WeightExternalOutputManager<'a> for OriginReferenceOutputManager<'a> {
                             value: safe_path.tensor_name.clone(),
                         },
                         onnx::StringStringEntryProto {
-                            key: "file_index".to_string(),
-                            value: format!("{}", safe_path.file_index),
+                            key: "location".to_string(),
+                            value: location_str,
                         },
                     ];
                     Ok(Some(TensorProto {
