@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use whisper_tensor::interfaces::StableDiffusionInterface;
+use whisper_tensor::interfaces::ImageGenerationInterface;
 use whisper_tensor::loader::*;
 use whisper_tensor::metadata::TokenizerInfo;
 use whisper_tensor::model::Model;
@@ -78,18 +78,19 @@ impl Loader for SD15Loader {
             });
         }
 
-        let sd_interface = {
+        let interface = {
             let mut rng = rand::rng();
-            StableDiffusionInterface::new_with_dtype(
+            ImageGenerationInterface::new_single_te_cfg(
                 &mut rng,
                 TokenizerInfo::HFTokenizer("openai/clip-vit-large-patch14".to_string()),
                 model_dtype,
+                0.18215,
             )
         };
 
         let interfaces = vec![LoadedInterface {
-            name: format!("{base_name}-StableDiffusion"),
-            interface: sd_interface.to_any(),
+            name: format!("{base_name}-ImageGeneration"),
+            interface: interface.to_any(),
         }];
 
         Ok(LoaderOutput { models, interfaces })

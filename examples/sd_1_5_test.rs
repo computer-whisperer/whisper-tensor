@@ -4,7 +4,7 @@ use std::path::Path;
 use std::time::Instant;
 use whisper_tensor::DynRank;
 use whisper_tensor::backends::eval_backend::EvalBackend;
-use whisper_tensor::interfaces::StableDiffusionInterface;
+use whisper_tensor::interfaces::ImageGenerationInterface;
 use whisper_tensor::model::Model;
 use whisper_tensor::numeric_tensor::NumericTensor;
 #[allow(unused_imports)]
@@ -75,12 +75,14 @@ fn main() {
     let mut backend = EvalBackend::NDArray;
 
     // --- Build interface ---
-    println!("=== Building StableDiffusionInterface ===");
+    println!("=== Building ImageGenerationInterface ===");
     let start = Instant::now();
     let mut rng = rand::rng();
-    let _sd_interface = StableDiffusionInterface::new(
+    let _interface = ImageGenerationInterface::new_single_te_cfg(
         &mut rng,
         TokenizerInfo::HFTokenizer("openai/clip-vit-large-patch14".to_string()),
+        whisper_tensor::dtype::DType::F16,
+        0.18215,
     );
     println!("  Built in {:.2?}", start.elapsed());
     println!();
@@ -168,7 +170,7 @@ fn main() {
 
         // Scheduler
         let (timestep_values, dt_values, sigmas, init_sigma) =
-            StableDiffusionInterface::compute_euler_schedule(num_inference_steps);
+            ImageGenerationInterface::compute_euler_schedule(num_inference_steps);
         println!("  init_sigma={init_sigma}");
         println!("  timesteps[0..3]={:?}", &timestep_values[..3]);
         println!("  dt[0..3]={:?}", &dt_values[..3]);

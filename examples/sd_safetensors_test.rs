@@ -106,7 +106,7 @@ fn main() {
     let guidance_scale: f32 = 7.5;
 
     let (timestep_values, dt_values, sigmas, init_sigma) =
-        whisper_tensor::interfaces::StableDiffusionInterface::compute_euler_schedule(
+        whisper_tensor::interfaces::ImageGenerationInterface::compute_euler_schedule(
             num_inference_steps,
         );
     println!("\n=== Scheduler ===");

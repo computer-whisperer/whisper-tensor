@@ -339,12 +339,13 @@ pub fn build_text_encoder_2(
     let final_normed = layer_norm(&wm.prefix("ln_final"), hidden, 1e-5)?;
 
     // Extract EOS token: Gather along seq dim (axis=1) using eos_indices
-    // eos_indices: [batch] → reshape to [batch, 1] for Gather
+    // eos_indices: [batch] → unsqueeze to [batch, 1] for Gather
     let eos_idx_2d = crate::onnx_graph::pytorch::unsqueeze(eos_indices.clone(), 1)?;
-    // Gather: [batch, 77, 1280] gather with [batch, 1] at axis=1 → [batch, 1, 1280]
+    // ONNX Gather output: data[:axis] + indices.shape + data[axis+1:]
+    // = [batch] + [batch, 1] + [1280] = [batch, batch, 1, 1280]
+    // For batch=1 this is [1, 1, 1, 1280]. Reshape to [batch, 1280].
     let eos_token = Gather::new(None, final_normed, eos_idx_2d, 1)?;
-    // Squeeze to [batch, 1280]
-    let eos_token = crate::onnx_graph::pytorch::squeeze(eos_token, 1)?;
+    let eos_token = crate::onnx_graph::pytorch::reshape(eos_token, vec![0, -1])?;
 
     // Project through text_projection: [batch, 1280] @ [1280, 1280] → [batch, 1280]
     let text_projection = wm.get_tensor("text_projection")?;

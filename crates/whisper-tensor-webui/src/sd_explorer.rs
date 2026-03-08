@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::dtype::DType;
-use whisper_tensor::interfaces::{AnyInterface, StableDiffusionInterface};
+use whisper_tensor::interfaces::{AnyInterface, ImageGenerationInterface};
 use whisper_tensor::super_graph::links::SuperGraphLinkTensor;
 use whisper_tensor::tokenizer::{AnyTokenizer, Tokenizer};
 use whisper_tensor_server::{SuperGraphRequest, SuperGraphRequestBackendMode};
@@ -83,7 +83,7 @@ impl SDExplorerApp {
         // Find SD interfaces
         let mut sd_interfaces = HashMap::new();
         for (&interface_id, interface) in &loaded_models.current_interfaces {
-            if let AnyInterface::StableDiffusionInterface(_) = &interface.interface {
+            if let AnyInterface::ImageGenerationInterface(_) = &interface.interface {
                 sd_interfaces.insert(interface.interface_name.clone(), interface_id);
             }
         }
@@ -115,7 +115,7 @@ impl SDExplorerApp {
             .and_then(|id| loaded_models.current_interfaces.get(&id));
 
         if let Some(interface) = interface {
-            if let AnyInterface::StableDiffusionInterface(sd) = &interface.interface {
+            if let AnyInterface::ImageGenerationInterface(sd) = &interface.interface {
                 // Parameter controls
                 ui.horizontal(|ui| {
                     ui.label("Prompt:");
@@ -198,7 +198,7 @@ impl SDExplorerApp {
     fn run_generation(
         &mut self,
         state: &SDExplorerState,
-        sd: &StableDiffusionInterface,
+        sd: &ImageGenerationInterface,
         model_ids: Vec<whisper_tensor_server::LoadedModelId>,
         tokenizer: &Arc<AnyTokenizer>,
         server_request_manager: &mut ServerRequestManager,
@@ -215,7 +215,7 @@ impl SDExplorerApp {
 
         // Compute scheduler params
         let (timestep_values, dt_values, sigma_values, init_sigma) =
-            StableDiffusionInterface::compute_euler_schedule(state.num_steps);
+            ImageGenerationInterface::compute_euler_schedule(state.num_steps);
 
         // Generate random noise
         let latent_n = 4 * state.latent_h * state.latent_w;
@@ -240,10 +240,26 @@ impl SDExplorerApp {
             NDArrayNumericTensor::from_vec_shape(vec![state.num_steps as i64], &vec![1]).unwrap();
         let guidance = NDArrayNumericTensor::from_vec(vec![state.guidance_scale]).to_dyn();
 
-        // model_ids order: [text_encoder, unet, vae_decoder]
-        let text_encoder_id = model_ids[0];
-        let unet_id = model_ids[1];
-        let vae_decoder_id = model_ids[2];
+        let symbolic_graph_ids: Vec<_> = model_ids.to_vec();
+        let model_inputs: HashMap<_, _> = sd
+            .model_weights
+            .iter()
+            .zip(model_ids.iter())
+            .map(|(&link, &id)| (link, id))
+            .collect();
+
+        let mut tensor_inputs = HashMap::from([
+            (sd.cond_ids_input, cond_tensor),
+            (sd.initial_latent_input, latent_tensor),
+            (sd.timesteps_input, timesteps_tensor),
+            (sd.dt_input, dt_tensor),
+            (sd.sigmas_input, sigmas_tensor),
+            (sd.iteration_count_input, iter_count),
+            (sd.guidance_scale_input, guidance),
+        ]);
+        if let Some(neg_link) = sd.negative_cond_ids_input {
+            tensor_inputs.insert(neg_link, uncond_tensor);
+        }
 
         let token = server_request_manager.submit_supergraph_request(SuperGraphRequest {
             do_node_execution_reports: true,
@@ -254,22 +270,9 @@ impl SDExplorerApp {
             string_inputs: HashMap::new(),
             use_cache: None,
             backend_mode: SuperGraphRequestBackendMode::NDArray,
-            symbolic_graph_ids: vec![text_encoder_id, unet_id, vae_decoder_id],
-            tensor_inputs: HashMap::from([
-                (sd.cond_ids_input, cond_tensor),
-                (sd.uncond_ids_input, uncond_tensor),
-                (sd.initial_latent_input, latent_tensor),
-                (sd.timesteps_input, timesteps_tensor),
-                (sd.dt_input, dt_tensor),
-                (sd.sigmas_input, sigmas_tensor),
-                (sd.iteration_count_input, iter_count),
-                (sd.guidance_scale_input, guidance),
-            ]),
-            model_inputs: HashMap::from([
-                (sd.text_encoder_weights, text_encoder_id),
-                (sd.unet_weights, unet_id),
-                (sd.vae_decoder_weights, vae_decoder_id),
-            ]),
+            symbolic_graph_ids,
+            tensor_inputs,
+            model_inputs,
             hash_inputs: HashMap::new(),
         });
 

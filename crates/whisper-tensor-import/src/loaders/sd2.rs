@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use whisper_tensor::interfaces::StableDiffusionInterface;
+use whisper_tensor::interfaces::ImageGenerationInterface;
 use whisper_tensor::loader::*;
 use whisper_tensor::metadata::TokenizerInfo;
 use whisper_tensor::model::Model;
@@ -42,7 +42,6 @@ impl Loader for SD2Loader {
             let wm = SafetensorsWeightManager::new(vec![Arc::new(mmap)])
                 .map_err(|e| LoaderError::LoadFailed(e.into()))?;
             let import_dtype = crate::sd_common::detect_model_dtype(&wm);
-            // Convert import crate DType -> whisper_tensor DType
             match import_dtype {
                 crate::onnx_graph::tensor::DType::F16 => whisper_tensor::dtype::DType::F16,
                 crate::onnx_graph::tensor::DType::BF16 => whisper_tensor::dtype::DType::BF16,
@@ -79,18 +78,19 @@ impl Loader for SD2Loader {
             });
         }
 
-        let sd_interface = {
+        let interface = {
             let mut rng = rand::rng();
-            StableDiffusionInterface::new_with_dtype(
+            ImageGenerationInterface::new_single_te_cfg(
                 &mut rng,
                 TokenizerInfo::HFTokenizer("laion/CLIP-ViT-H-14-laion2B-s32B-b79K".to_string()),
                 model_dtype,
+                0.18215,
             )
         };
 
         let interfaces = vec![LoadedInterface {
-            name: format!("{base_name}-StableDiffusion"),
-            interface: sd_interface.to_any(),
+            name: format!("{base_name}-ImageGeneration"),
+            interface: interface.to_any(),
         }];
 
         Ok(LoaderOutput { models, interfaces })

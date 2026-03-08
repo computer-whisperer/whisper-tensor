@@ -49,6 +49,10 @@ enum Command {
         /// Path to the SD checkpoint (.safetensors)
         model: PathBuf,
 
+        /// SD variant to use
+        #[arg(long, value_enum, default_value = "sd15")]
+        sd_version: SdVersion,
+
         /// Prompt text
         #[arg(long, short)]
         prompt: String,
@@ -91,6 +95,13 @@ enum LoaderChoice {
     Rwkv7,
 }
 
+#[derive(Clone, clap::ValueEnum)]
+enum SdVersion {
+    Sd15,
+    Sd2,
+    Sdxl,
+}
+
 fn load_model(loader: &LoaderChoice, config: ConfigValues) -> whisper_tensor::loader::LoaderOutput {
     match loader {
         LoaderChoice::Auto => AutoLoader.load(config),
@@ -118,6 +129,7 @@ fn main() {
         } => cmd_generate(model, loader, tokenizer, prompt, max_tokens),
         Command::Image {
             model,
+            sd_version,
             prompt,
             negative_prompt,
             output,
@@ -128,6 +140,7 @@ fn main() {
             seed,
         } => cmd_image(
             model,
+            sd_version,
             prompt,
             negative_prompt,
             output,
@@ -218,6 +231,7 @@ fn cmd_generate(
 
 fn cmd_image(
     model_path: PathBuf,
+    sd_version: SdVersion,
     prompt: String,
     negative_prompt: String,
     output_path: PathBuf,
@@ -227,7 +241,7 @@ fn cmd_image(
     latent_w: usize,
     seed: u64,
 ) {
-    use whisper_tensor_import::loaders::SD15Loader;
+    use whisper_tensor_import::loaders::{SD15Loader, SD2Loader, SDXLLoader};
 
     let mut config = ConfigValues::new();
     config.insert(
@@ -236,37 +250,32 @@ fn cmd_image(
     );
 
     eprintln!("Loading SD model from {}...", model_path.display());
-    let output = SD15Loader
-        .load(config)
-        .unwrap_or_else(|e| {
-            eprintln!("Failed to load model: {e}");
-            std::process::exit(1);
-        });
+    let output: whisper_tensor::loader::LoaderOutput = match sd_version {
+        SdVersion::Sd15 => SD15Loader.load(config),
+        SdVersion::Sd2 => SD2Loader.load(config),
+        SdVersion::Sdxl => SDXLLoader.load(config),
+    }
+    .unwrap_or_else(|e| {
+        eprintln!("Failed to load model: {e}");
+        std::process::exit(1);
+    });
 
-    // SD15Loader produces 3 models: text_encoder, unet, vae_decoder
-    assert!(
-        output.models.len() == 3,
-        "Expected 3 models from SD15 loader, got {}",
-        output.models.len()
-    );
-    let text_encoder = &output.models[0].model;
-    let unet = &output.models[1].model;
-    let vae_decoder = &output.models[2].model;
+    let models: Vec<&_> = output.models.iter().map(|m| m.model.as_ref()).collect();
 
-    let sd_interface = output
+    let interface = output
         .interfaces
         .iter()
         .find_map(|i| match &i.interface {
-            AnyInterface::StableDiffusionInterface(x) => Some(x),
+            AnyInterface::ImageGenerationInterface(x) => Some(x),
             _ => None,
         })
         .unwrap_or_else(|| {
-            eprintln!("No StableDiffusion interface found");
+            eprintln!("No ImageGeneration interface found");
             std::process::exit(1);
         });
 
     // Tokenize prompts
-    let tokenizer = Arc::new(AnyTokenizer::from_tokenizer_info(&sd_interface.tokenizer));
+    let tokenizer = Arc::new(AnyTokenizer::from_tokenizer_info(&interface.tokenizer));
     let seq_len = 77;
 
     let cond_ids = tokenize_clip(&*tokenizer, &prompt, seq_len);
@@ -290,13 +299,11 @@ fn cmd_image(
     let mut backend = EvalBackend::NDArray;
     let start = std::time::Instant::now();
 
-    let image_tensor = sd_interface
+    let image_tensor = interface
         .run(
-            text_encoder,
-            unet,
-            vae_decoder,
+            &models,
             cond_input,
-            uncond_input,
+            Some(uncond_input),
             initial_noise,
             vec![1, 4, latent_h, latent_w],
             steps,
