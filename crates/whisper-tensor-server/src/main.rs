@@ -523,17 +523,21 @@ async fn main() {
         .with_max_level(tracing::Level::INFO)
         .init();
 
-    use whisper_tensor_import::loaders::{
-        AutoLoader, OnnxLoader, Rwkv7Loader, SD15Loader, TransformersLoader,
+    #[cfg(feature = "import")]
+    let loaders: Vec<Box<dyn Loader>> = {
+        use whisper_tensor_import::loaders::{
+            AutoLoader, OnnxLoader, Rwkv7Loader, SD15Loader, TransformersLoader,
+        };
+        vec![
+            Box::new(AutoLoader),
+            Box::new(OnnxLoader),
+            Box::new(TransformersLoader),
+            Box::new(Rwkv7Loader),
+            Box::new(SD15Loader),
+        ]
     };
-
-    let loaders: Vec<Box<dyn Loader>> = vec![
-        Box::new(AutoLoader),
-        Box::new(OnnxLoader),
-        Box::new(TransformersLoader),
-        Box::new(Rwkv7Loader),
-        Box::new(SD15Loader),
-    ];
+    #[cfg(not(feature = "import"))]
+    let loaders: Vec<Box<dyn Loader>> = vec![];
 
     let model_server = Arc::new(ModelServer::new(loaders));
 
