@@ -13,6 +13,8 @@ pub mod loaders;
 pub mod onnx_graph;
 pub mod rwkv7;
 pub mod sd15;
+pub mod sd2;
+pub mod sd_common;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

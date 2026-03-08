@@ -2,12 +2,14 @@ mod auto;
 mod onnx;
 mod rwkv7;
 mod sd15;
+mod sd2;
 mod transformers;
 
 pub use self::auto::AutoLoader;
 pub use self::onnx::OnnxLoader;
 pub use self::rwkv7::Rwkv7Loader;
 pub use self::sd15::SD15Loader;
+pub use self::sd2::SD2Loader;
 pub use self::transformers::TransformersLoader;
 
 use crate::onnx_graph::WeightStorageStrategy;

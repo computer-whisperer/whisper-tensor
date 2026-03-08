@@ -175,6 +175,11 @@ pub struct StableDiffusionInterface {
 
 impl StableDiffusionInterface {
     pub fn new(rng: &mut impl Rng, tokenizer: TokenizerInfo) -> Self {
+        // Default to F16 for backward compatibility (SD 1.5 ONNX models are typically F16)
+        Self::new_with_dtype(rng, tokenizer, DType::F16)
+    }
+
+    pub fn new_with_dtype(rng: &mut impl Rng, tokenizer: TokenizerInfo, model_dtype: DType) -> Self {
         let mut builder = SuperGraphBuilder::new();
 
         // Create input links
@@ -232,9 +237,9 @@ impl StableDiffusionInterface {
             let inner_dt = inner_builder.new_tensor_link(rng);
             let inner_sigma = inner_builder.new_tensor_link(rng);
 
-            // Inner node 1: Prep — scale latent by 1/sqrt(sigma²+1), cast f32→f16, cast timestep f32→f16, reshape to [1]
-            let f16_latent = inner_builder.new_tensor_link(rng);
-            let f16_timestep = inner_builder.new_tensor_link(rng);
+            // Inner node 1: Prep — scale latent by 1/sqrt(sigma²+1), cast to model_dtype, reshape timestep to [1]
+            let cast_latent = inner_builder.new_tensor_link(rng);
+            let cast_timestep = inner_builder.new_tensor_link(rng);
             {
                 let (mut mg, input_map) = MilliOpGraph::new(
                     [
@@ -260,18 +265,18 @@ impl StableDiffusionInterface {
                 let inv_scale = SimpleBinary::div(&mut mg, one, sqrt_val, rng);
                 let scaled_lat = SimpleBinary::mul(&mut mg, lat_in, inv_scale, rng);
 
-                let lat_f16 = Cast::push_new(&mut mg, scaled_lat, DType::F16, rng);
-                let ts_f16 = Cast::push_new(&mut mg, ts_in, DType::F16, rng);
+                let lat_cast = Cast::push_new(&mut mg, scaled_lat, model_dtype, rng);
+                let ts_cast = Cast::push_new(&mut mg, ts_in, model_dtype, rng);
                 let zero_axis = Constant::push_new(
                     &mut mg,
                     NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
                     rng,
                 );
-                let ts_reshaped = Unsqueeze::push_new(&mut mg, ts_f16, zero_axis, rng);
+                let ts_reshaped = Unsqueeze::push_new(&mut mg, ts_cast, zero_axis, rng);
 
                 mg.set_output_map([
-                    (lat_f16, f16_latent.global_id()),
-                    (ts_reshaped, f16_timestep.global_id()),
+                    (lat_cast, cast_latent.global_id()),
+                    (ts_reshaped, cast_timestep.global_id()),
                 ]);
                 inner_builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
             }
@@ -284,8 +289,8 @@ impl StableDiffusionInterface {
                     inner_unet_weights,
                     1,
                     vec![
-                        (f16_latent, "sample".to_string()),
-                        (f16_timestep, "timestep".to_string()),
+                        (cast_latent, "sample".to_string()),
+                        (cast_timestep, "timestep".to_string()),
                         (inner_uncond_hidden, "encoder_hidden_states".to_string()),
                     ],
                     vec![("out_sample".to_string(), uncond_noise)],
@@ -301,8 +306,8 @@ impl StableDiffusionInterface {
                     inner_unet_weights,
                     1,
                     vec![
-                        (f16_latent, "sample".to_string()),
-                        (f16_timestep, "timestep".to_string()),
+                        (cast_latent, "sample".to_string()),
+                        (cast_timestep, "timestep".to_string()),
                         (inner_cond_hidden, "encoder_hidden_states".to_string()),
                     ],
                     vec![("out_sample".to_string(), cond_noise)],
@@ -394,7 +399,7 @@ impl StableDiffusionInterface {
             builder.add_node(scan_node.to_any());
         }
 
-        // Node 4: Scale latent by 1/0.18215 and cast f32→f16
+        // Node 4: Scale latent by 1/0.18215 and cast to model_dtype
         let scaled_latent = builder.new_tensor_link(rng);
         {
             let (mut mg, input_map) =
@@ -407,9 +412,9 @@ impl StableDiffusionInterface {
                 rng,
             );
             let scaled = SimpleBinary::mul(&mut mg, lat_in, scale, rng);
-            let scaled_f16 = Cast::push_new(&mut mg, scaled, DType::F16, rng);
+            let scaled_cast = Cast::push_new(&mut mg, scaled, model_dtype, rng);
 
-            mg.set_output_map(std::iter::once((scaled_f16, scaled_latent.global_id())));
+            mg.set_output_map(std::iter::once((scaled_cast, scaled_latent.global_id())));
             builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
         }
 
