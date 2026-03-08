@@ -134,17 +134,17 @@ impl StoredTensor {
                     let file = File::open(path).expect("Failed to open safetensors file");
                     let mmap =
                         unsafe { Mmap::map(&file) }.expect("Failed to mmap safetensors file");
-                    let st =
-                        SafeTensors::deserialize(&mmap).expect("Failed to parse safetensors");
-                    let view = st.tensor(tensor_name).expect("tensor not found in safetensors");
+                    let st = SafeTensors::deserialize(&mmap).expect("Failed to parse safetensors");
+                    let view = st
+                        .tensor(tensor_name)
+                        .expect("tensor not found in safetensors");
                     let bytes = view.data();
-                    let nd =
-                        crate::backends::ndarray_backend::NDArrayNumericTensor::from_raw_data(
-                            bytes,
-                            *dtype,
-                            shape.clone(),
-                        )
-                        .expect("decode external safetensors tensor");
+                    let nd = crate::backends::ndarray_backend::NDArrayNumericTensor::from_raw_data(
+                        bytes,
+                        *dtype,
+                        shape.clone(),
+                    )
+                    .expect("decode external safetensors tensor");
                     NumericTensor::NDArray(nd)
                 }
                 #[cfg(not(feature = "safetensors"))]

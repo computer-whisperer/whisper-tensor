@@ -1286,24 +1286,74 @@ impl Reshape {
         }
         // Backfill the inferred dimension
         if let Some(i) = backfill_dim {
-            let total_input_size = data_input.shape().num_elements()?;
-
-            // Calculate the current product of the dimensions
-            let mut current_product = 1;
-            for (j, dim) in new_shape_dims.iter().enumerate() {
-                if j != i {
-                    current_product *= dim.resolve()?;
+            if let Ok(total_input_size) = data_input.shape().num_elements() {
+                // All dims resolvable: compute directly
+                let mut current_product = 1usize;
+                let mut all_ok = true;
+                for (j, dim) in new_shape_dims.iter().enumerate() {
+                    if j != i {
+                        if let Ok(v) = dim.resolve() {
+                            current_product *= v;
+                        } else {
+                            all_ok = false;
+                            break;
+                        }
+                    }
+                }
+                if all_ok {
+                    new_shape_dims[i] =
+                        Dimension::new(Some(total_input_size / current_product), None, None);
+                }
+            } else {
+                // Input has symbolic dims. If the -1 dim absorbs only resolved original
+                // dims (i.e. all other new dims are copies via '0'), we can still infer
+                // its size from the product of the non-copied original dims.
+                let new_len = new_shape_dims.len();
+                let old_dims = &old_shape_dims;
+                // Compute product of original dims that are NOT copied into '0' slots
+                let mut non_copy_product = 1usize;
+                let mut can_infer = true;
+                for j in 0..old_dims.len() {
+                    let is_copy = j < new_len && j != i && shape_data[j] == 0;
+                    if !is_copy {
+                        if let Ok(v) = old_dims[j].resolve() {
+                            non_copy_product *= v;
+                        } else {
+                            can_infer = false;
+                            break;
+                        }
+                    }
+                }
+                if can_infer {
+                    // Also divide out any explicitly-set new dims (non-zero, non -1)
+                    let mut explicit_product = 1usize;
+                    for (j, dim) in new_shape_dims.iter().enumerate() {
+                        if j != i && shape_data[j] != 0 {
+                            if let Ok(v) = dim.resolve() {
+                                explicit_product *= v;
+                            } else {
+                                can_infer = false;
+                                break;
+                            }
+                        }
+                    }
+                    if can_infer {
+                        new_shape_dims[i] =
+                            Dimension::new(Some(non_copy_product / explicit_product), None, None);
+                    }
                 }
             }
-            // Calculate the inferred dimension size
-            let inferred_size = total_input_size / current_product;
-            new_shape_dims[i] = Dimension::new(Some(inferred_size), None, None);
         }
         let output_shape = Shape::new(new_shape_dims);
 
-        // Verify that the dimensions are compatible
-        if output_shape.num_elements()? != data_input.shape().num_elements()? {
-            Err(Error::InvalidInputError)?
+        // Verify that the dimensions are compatible (skip when symbolic dims are present)
+        if let (Ok(out_elems), Ok(in_elems)) = (
+            output_shape.num_elements(),
+            data_input.shape().num_elements(),
+        ) {
+            if out_elems != in_elems {
+                Err(Error::InvalidInputError)?
+            }
         }
 
         Ok(Arc::new(Reshape {
@@ -2592,10 +2642,7 @@ impl Conv {
             } else {
                 // Symbolic input with non-trivial stride/padding — derive a symbolic output dim.
                 // The actual output shape is computed by the runtime, not by this metadata.
-                let derived_name = in_dim_ref
-                    .name
-                    .as_ref()
-                    .map(|n| format!("{n}_conv_s{s}"));
+                let derived_name = in_dim_ref.name.as_ref().map(|n| format!("{n}_conv_s{s}"));
                 output_dims.push(Dimension::new(None, derived_name, None));
             }
         }

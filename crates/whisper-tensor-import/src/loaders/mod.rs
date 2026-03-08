@@ -41,5 +41,5 @@ fn onnx_bytes_to_model(
 
 /// Get the default weight storage strategy for loaders.
 fn default_storage() -> WeightStorageStrategy {
-    WeightStorageStrategy::EmbeddedData
+    WeightStorageStrategy::OriginReference
 }

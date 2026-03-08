@@ -1,3 +1,4 @@
+use crate::onnx_graph::Error;
 use crate::onnx_graph::WeightStorageStrategy;
 use crate::onnx_graph::operators::{
     Add, Concat, Constant, Conv, Gather, MatMul, Mul, Reshape, ShapeOp, Softmax, Transpose,
@@ -10,7 +11,6 @@ use crate::onnx_graph::tensor::{
     DType, Dimension, InputTensor, InputTensorInitialized, Shape, Tensor, TensorData,
 };
 use crate::onnx_graph::weights::{SafetensorsWeightManager, WeightManager};
-use crate::onnx_graph::Error;
 use memmap2::Mmap;
 use prost::Message;
 use std::path::Path;
@@ -85,23 +85,27 @@ pub fn load_sd15_checkpoint(
     println!("Detected model dtype: {:?}", model_dtype);
 
     // Canonicalize the checkpoint path so external references resolve correctly.
-    let origin_path = std::fs::canonicalize(checkpoint_path)
-        .unwrap_or_else(|_| checkpoint_path.to_path_buf());
+    let origin_path =
+        std::fs::canonicalize(checkpoint_path).unwrap_or_else(|_| checkpoint_path.to_path_buf());
 
     println!("Building SD 1.5 text encoder...");
     let text_encoder = build_text_encoder(
-        &weight_manager, model_dtype, output_method.clone(), &origin_path,
+        &weight_manager,
+        model_dtype,
+        output_method.clone(),
+        &origin_path,
     )?;
 
     println!("Building SD 1.5 UNet...");
     let unet = build_unet(
-        &weight_manager, model_dtype, output_method.clone(), &origin_path,
+        &weight_manager,
+        model_dtype,
+        output_method.clone(),
+        &origin_path,
     )?;
 
     println!("Building SD 1.5 VAE decoder...");
-    let vae_decoder = build_vae_decoder(
-        &weight_manager, model_dtype, output_method, &origin_path,
-    )?;
+    let vae_decoder = build_vae_decoder(&weight_manager, model_dtype, output_method, &origin_path)?;
 
     Ok((text_encoder, unet, vae_decoder))
 }
@@ -151,7 +155,12 @@ fn reshape_symbolic(
     }
     let output_shape = Shape::new(output_dims);
 
-    Ok(Reshape::new_with_forced_output(None, input, shape_const, output_shape)?)
+    Ok(Reshape::new_with_forced_output(
+        None,
+        input,
+        shape_const,
+        output_shape,
+    )?)
 }
 
 // SD 1.5 UNet config
@@ -236,10 +245,12 @@ pub fn build_text_encoder(
     let output_tensors: Vec<(String, Arc<dyn Tensor>)> =
         vec![("last_hidden_state".to_string(), output)];
 
-    let onnx_model =
-        crate::onnx_graph::build_proto_with_origin_path(
-            &input_tensors, &output_tensors, output_method, Some(origin_path),
-        )?;
+    let onnx_model = crate::onnx_graph::build_proto_with_origin_path(
+        &input_tensors,
+        &output_tensors,
+        output_method,
+        Some(origin_path),
+    )?;
     Ok(onnx_model.encode_to_vec())
 }
 
@@ -339,10 +350,7 @@ pub fn build_unet(
     origin_path: &Path,
 ) -> Result<Vec<u8>, anyhow::Error> {
     // UNet computes in f32; cast weights from model_dtype as needed.
-    let wm = CastingWeightManager::new(
-        weight_manager.prefix("model.diffusion_model"),
-        DType::F32,
-    );
+    let wm = CastingWeightManager::new(weight_manager.prefix("model.diffusion_model"), DType::F32);
 
     let batch_dim = Dimension::new(Some(1), Some("batch".to_string()), None);
     let h_dim = Dimension::new(None, Some("height".to_string()), None);
@@ -499,10 +507,12 @@ pub fn build_unet(
     let input_tensors: Vec<Arc<dyn Tensor>> = vec![sample_input, timestep_input, context_input];
     let output_tensors: Vec<(String, Arc<dyn Tensor>)> = vec![("out_sample".to_string(), output)];
 
-    let onnx_model =
-        crate::onnx_graph::build_proto_with_origin_path(
-            &input_tensors, &output_tensors, output_method, Some(origin_path),
-        )?;
+    let onnx_model = crate::onnx_graph::build_proto_with_origin_path(
+        &input_tensors,
+        &output_tensors,
+        output_method,
+        Some(origin_path),
+    )?;
     Ok(onnx_model.encode_to_vec())
 }
 
@@ -859,10 +869,7 @@ pub fn build_vae_decoder(
     origin_path: &Path,
 ) -> Result<Vec<u8>, anyhow::Error> {
     // VAE computes in f32 for precision; cast weights from model_dtype.
-    let wm = CastingWeightManager::new(
-        weight_manager.prefix("first_stage_model"),
-        DType::F32,
-    );
+    let wm = CastingWeightManager::new(weight_manager.prefix("first_stage_model"), DType::F32);
 
     let batch_dim = Dimension::new(Some(1), Some("batch".to_string()), None);
     let h_dim = Dimension::new(None, Some("height".to_string()), None);
@@ -917,10 +924,12 @@ pub fn build_vae_decoder(
     let input_tensors: Vec<Arc<dyn Tensor>> = vec![latent_input];
     let output_tensors: Vec<(String, Arc<dyn Tensor>)> = vec![("sample".to_string(), h)];
 
-    let onnx_model =
-        crate::onnx_graph::build_proto_with_origin_path(
-            &input_tensors, &output_tensors, output_method, Some(origin_path),
-        )?;
+    let onnx_model = crate::onnx_graph::build_proto_with_origin_path(
+        &input_tensors,
+        &output_tensors,
+        output_method,
+        Some(origin_path),
+    )?;
     Ok(onnx_model.encode_to_vec())
 }
 

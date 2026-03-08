@@ -4,20 +4,24 @@ use crate::onnx_graph::operators::{
     Add, Concat, Gather, MatMul, Mul, RotaryEmbedding, ShapeOp, Softmax, Transpose,
 };
 use crate::onnx_graph::pytorch::{div_scalar, linear, reshape, rms_norm, silu, transpose};
-use crate::onnx_graph::tensor::{DType, Dimension, InputTensor, Shape, Tensor};
+use crate::onnx_graph::tensor::{
+    DType, Dimension, InputTensor, InputTensorInitialized, Shape, Tensor, TensorData,
+    TensorDataValue,
+};
 use crate::onnx_graph::weights::WeightManager;
 use prost::Message;
 use std::sync::Arc;
 
 pub struct Llama3Config {
-    num_hidden_layers: usize,
-    num_attention_heads: usize,
-    num_key_value_heads: usize,
+    pub num_hidden_layers: usize,
+    pub num_attention_heads: usize,
+    pub num_key_value_heads: usize,
+    pub rope_theta: f64,
+    pub max_position_embeddings: usize,
 }
 
 impl Llama3Config {
     pub fn from_huggingface_transformers_json(config: &serde_json::Value) -> Result<Self, Error> {
-        println!("Config: {:?}", config);
         fn get_int(config: &serde_json::Value, key: &str) -> Result<i64, Error> {
             config
                 .get(key)
@@ -29,10 +33,20 @@ impl Llama3Config {
         let num_hidden_layers = get_int(config, "num_hidden_layers")? as usize;
         let num_attention_heads = get_int(config, "num_attention_heads")? as usize;
         let num_key_value_heads = get_int(config, "num_key_value_heads")? as usize;
+        let rope_theta = config
+            .get("rope_theta")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(10000.0);
+        let max_position_embeddings = config
+            .get("max_position_embeddings")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(8192) as usize;
         Ok(Self {
             num_hidden_layers,
             num_attention_heads,
             num_key_value_heads,
+            rope_theta,
+            max_position_embeddings,
         })
     }
 }
@@ -78,19 +92,40 @@ pub fn load_llama3(
         Dimension::new(Some(head_dim), None, None),
     ]);
 
+    // Precompute RoPE frequency tables and embed as constants.
+    // The RotaryEmbedding op (non-interleaved, full rotation) splits x into two halves
+    // of size head_dim/2 each, so cos/sin caches have shape [max_len, head_dim/2].
+    let half_head_dim = head_dim / 2;
+    let max_len = config.max_position_embeddings;
+    let (cos_values, sin_values) = {
+        let inv_freq: Vec<f64> = (0..half_head_dim)
+            .map(|i| 1.0 / config.rope_theta.powf(i as f64 * 2.0 / head_dim as f64))
+            .collect();
+        let mut cos_vals = Vec::with_capacity(max_len * half_head_dim);
+        let mut sin_vals = Vec::with_capacity(max_len * half_head_dim);
+        for pos in 0..max_len {
+            for &freq in &inv_freq {
+                let angle = pos as f64 * freq;
+                cos_vals.push(half::bf16::from_f64(angle.cos()));
+                sin_vals.push(half::bf16::from_f64(angle.sin()));
+            }
+        }
+        (cos_vals, sin_vals)
+    };
     let cos_sin_cache_shape = Shape::new(vec![
-        Dimension::new(Some(8192), Some("RoPE max_len".to_string()), None),
-        Dimension::new(Some(model_dim / config.num_attention_heads), None, None),
+        Dimension::new(Some(max_len), None, None),
+        Dimension::new(Some(half_head_dim), None, None),
     ]);
-    let sin_cache = InputTensor::new(
-        "sin_cache".to_string(),
-        kv_cache_input_type,
-        cos_sin_cache_shape.clone(),
-    );
-    let cos_cache = InputTensor::new(
+    let cos_cache = InputTensorInitialized::new(
         "cos_cache".to_string(),
-        kv_cache_input_type,
-        cos_sin_cache_shape,
+        TensorData::new(
+            TensorDataValue::BF16(cos_values),
+            cos_sin_cache_shape.clone(),
+        )?,
+    );
+    let sin_cache = InputTensorInitialized::new(
+        "sin_cache".to_string(),
+        TensorData::new(TensorDataValue::BF16(sin_values), cos_sin_cache_shape)?,
     );
 
     let mut layer_output: Arc<dyn Tensor> = x;
