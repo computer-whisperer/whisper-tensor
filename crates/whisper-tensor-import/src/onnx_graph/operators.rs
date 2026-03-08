@@ -2538,7 +2538,7 @@ impl TopK {
 
 impl Node for TopK {
     fn get_input_tensors(&self) -> Vec<&dyn Tensor> {
-        vec![self.input.as_ref()]
+        vec![self.input.as_ref(), self._k.as_ref()]
     }
 
     fn get_output_tensors(&self) -> Vec<&dyn Tensor> {

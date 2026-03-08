@@ -2209,6 +2209,93 @@ impl NDArrayNumericTensor<DynRank> {
         })
     }
 
+    pub fn topk(
+        data: &Self,
+        k_tensor: &Self,
+        axis: i64,
+        largest: bool,
+        _sorted: bool,
+    ) -> Result<(Self, Self), NDArrayNumericTensorError> {
+        let k_i64 = k_tensor.cast(DType::I64)?;
+        let k = if let NDArrayNumericTensor::I64(ref x) = k_i64 {
+            x.as_slice().unwrap()[0] as usize
+        } else {
+            unreachable!()
+        };
+
+        // Convert data to f32 for comparison
+        let data_f32 = data.cast(DType::F32)?;
+        let data_arr = if let NDArrayNumericTensor::F32(ref x) = data_f32 {
+            x
+        } else {
+            unreachable!()
+        };
+
+        let axis = if axis < 0 {
+            (axis + data_arr.ndim() as i64) as usize
+        } else {
+            axis as usize
+        };
+
+        let shape = data_arr.shape();
+        let axis_len = shape[axis];
+        let k = k.min(axis_len);
+
+        // Build output shape: same as input but with axis dim = k
+        let mut out_shape: Vec<usize> = shape.to_vec();
+        out_shape[axis] = k;
+        let out_len: usize = out_shape.iter().product();
+
+        let mut values_buf = vec![0.0f32; out_len];
+        let mut indices_buf = vec![0i64; out_len];
+
+        // Iterate over all slices along the axis
+        let outer: usize = shape[..axis].iter().product();
+        let inner: usize = shape[axis + 1..].iter().product();
+        let data_slice = data_arr.as_slice().unwrap();
+
+        for o in 0..outer {
+            for i in 0..inner {
+                // Collect (value, original_index) pairs along this axis slice
+                let mut pairs: Vec<(f32, usize)> = (0..axis_len)
+                    .map(|a| {
+                        let idx = o * axis_len * inner + a * inner + i;
+                        (data_slice[idx], a)
+                    })
+                    .collect();
+
+                if largest {
+                    pairs.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                } else {
+                    pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+                }
+
+                for (ki, &(val, orig_idx)) in pairs.iter().take(k).enumerate() {
+                    let out_idx = o * k * inner + ki * inner + i;
+                    values_buf[out_idx] = val;
+                    indices_buf[out_idx] = orig_idx as i64;
+                }
+            }
+        }
+
+        let values_arr = ndarray::ArrayD::from_shape_vec(
+            ndarray::IxDyn(&out_shape),
+            values_buf,
+        )
+        .map_err(NDArrayNumericTensorError::ShapeError)?;
+        let indices_arr = ndarray::ArrayD::from_shape_vec(
+            ndarray::IxDyn(&out_shape),
+            indices_buf,
+        )
+        .map_err(NDArrayNumericTensorError::ShapeError)?;
+
+        // Cast values back to original dtype
+        let values = NDArrayNumericTensor::F32(values_arr.into_shared()).cast(data.dtype())?;
+        let indices = NDArrayNumericTensor::I64(indices_arr.into_shared());
+
+        Ok((values, indices))
+    }
+
     pub fn group_norm(
         &self,
         scale: &Self,

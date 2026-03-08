@@ -2150,6 +2150,12 @@ impl SymbolicGraphMutator {
                     rng,
                 )?,
             )),
+            "TopK" => Some(AnyOperation::TopK(ops::TopKOperation::from_onnx(
+                &input_tensors,
+                &output_tensors,
+                &onnx_node.attribute,
+                rng,
+            )?)),
             "If" => Some(AnyOperation::If(ops::IfOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,

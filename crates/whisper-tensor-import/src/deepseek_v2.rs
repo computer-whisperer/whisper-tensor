@@ -1,11 +1,11 @@
 use crate::Error;
 use crate::onnx_graph::WeightStorageStrategy;
 use crate::onnx_graph::operators::{
-    Add, Concat, Constant, Gather, MatMul, Mul, RotaryEmbedding, ShapeOp, Slice, Softmax,
+    Add, Concat, Constant, Gather, MatMul, Mul, RotaryEmbedding, ShapeOp, Slice, Softmax, TopK,
     Transpose,
 };
 use crate::onnx_graph::pytorch::{
-    div_scalar, linear, reshape, rms_norm, silu, transpose, unsqueeze,
+    div_scalar, linear, reshape, rms_norm, silu, sum_dim, transpose, unsqueeze,
 };
 use crate::onnx_graph::tensor::{
     DType, Dimension, InputTensor, InputTensorInitialized, Shape, Tensor, TensorData,
@@ -26,7 +26,9 @@ pub struct DeepseekV2Config {
     pub v_head_dim: usize,
     pub intermediate_size: usize,
     pub moe_intermediate_size: usize,
+    pub n_routed_experts: usize,
     pub n_shared_experts: usize,
+    pub num_experts_per_tok: usize,
     pub first_k_dense_replace: usize,
     pub rope_theta: f64,
     pub max_position_embeddings: usize,
@@ -59,10 +61,18 @@ impl DeepseekV2Config {
             .get("moe_intermediate_size")
             .and_then(|v| v.as_i64())
             .unwrap_or(0) as usize;
+        let n_routed_experts = config
+            .get("n_routed_experts")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0) as usize;
         let n_shared_experts = config
             .get("n_shared_experts")
             .and_then(|v| v.as_i64())
             .unwrap_or(0) as usize;
+        let num_experts_per_tok = config
+            .get("num_experts_per_tok")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(1) as usize;
         let first_k_dense_replace = config
             .get("first_k_dense_replace")
             .and_then(|v| v.as_i64())
@@ -91,7 +101,9 @@ impl DeepseekV2Config {
             v_head_dim,
             intermediate_size,
             moe_intermediate_size,
+            n_routed_experts,
             n_shared_experts,
+            num_experts_per_tok,
             first_k_dense_replace,
             rope_theta,
             max_position_embeddings,
@@ -433,13 +445,96 @@ pub fn load_deepseek_v2(
             let hidden = Mul::new(None, gate, up)?;
             linear(&layer_weight_manager.prefix("mlp.down_proj"), hidden)?
         } else {
-            // MoE layer — shared experts only (routed experts TODO)
-            let shared_wm = layer_weight_manager.prefix("mlp.shared_experts");
-            let gate = linear(&shared_wm.prefix("gate_proj"), ffn_norm.clone())?;
-            let gate = silu(gate)?;
-            let up = linear(&shared_wm.prefix("up_proj"), ffn_norm)?;
-            let hidden = Mul::new(None, gate, up)?;
-            linear(&shared_wm.prefix("down_proj"), hidden)?
+            // MoE layer: shared experts + routed experts
+            let mlp_wm = layer_weight_manager.prefix("mlp");
+
+            // Shared experts (always active)
+            let shared_wm = mlp_wm.prefix("shared_experts");
+            let shared_gate = linear(&shared_wm.prefix("gate_proj"), ffn_norm.clone())?;
+            let shared_gate = silu(shared_gate)?;
+            let shared_up = linear(&shared_wm.prefix("up_proj"), ffn_norm.clone())?;
+            let shared_hidden = Mul::new(None, shared_gate, shared_up)?;
+            let shared_output: Arc<dyn Tensor> =
+                linear(&shared_wm.prefix("down_proj"), shared_hidden)?;
+
+            // Router: scores over all routed experts
+            // gate.weight: [n_routed_experts, hidden_size]
+            let router_scores = linear(&mlp_wm.prefix("gate"), ffn_norm.clone())?;
+            // [B=1, S=1, n_routed_experts] → softmax on expert dim
+            let router_scores = Softmax::new(None, router_scores, Some(2));
+
+            // TopK selection (largest=true)
+            let k = config.num_experts_per_tok;
+            let k_const = Constant::new(
+                None,
+                TensorData::new(vec![k as i64].into(), Shape::from(&[1usize][..]))?,
+            );
+            let (topk_values, topk_indices) =
+                TopK::new(None, router_scores, k_const, 2, true, false)?;
+            // topk_values: [1, 1, k] (routing weights)
+            // topk_indices: [1, 1, k] (expert indices, I64)
+
+            // Stack all expert weights into [n_routed_experts, ...] tensors
+            let n_experts = config.n_routed_experts;
+            let mut gate_weights: Vec<Arc<dyn Tensor>> = Vec::with_capacity(n_experts);
+            let mut up_weights: Vec<Arc<dyn Tensor>> = Vec::with_capacity(n_experts);
+            let mut down_weights: Vec<Arc<dyn Tensor>> = Vec::with_capacity(n_experts);
+            for e in 0..n_experts {
+                let expert_wm = mlp_wm.prefix(&format!("experts.{e}"));
+                gate_weights.push(unsqueeze(
+                    expert_wm.get_tensor("gate_proj.weight")?,
+                    0,
+                )?);
+                up_weights.push(unsqueeze(
+                    expert_wm.get_tensor("up_proj.weight")?,
+                    0,
+                )?);
+                down_weights.push(unsqueeze(
+                    expert_wm.get_tensor("down_proj.weight")?,
+                    0,
+                )?);
+            }
+            // Each: [n_experts, out_features, in_features]
+            let stacked_gate: Arc<dyn Tensor> =
+                Concat::new(None, gate_weights, 0)?;
+            let stacked_up: Arc<dyn Tensor> =
+                Concat::new(None, up_weights, 0)?;
+            let stacked_down: Arc<dyn Tensor> =
+                Concat::new(None, down_weights, 0)?;
+
+            // Flatten indices from [1, 1, k] to [k] for Gather
+            let indices_flat: Arc<dyn Tensor> =
+                reshape(topk_indices as Arc<dyn Tensor>, vec![k as i64])?;
+
+            // Gather selected expert weights: [k, out_features, in_features]
+            let sel_gate = Gather::new(None, stacked_gate, indices_flat.clone(), 0)?;
+            let sel_up = Gather::new(None, stacked_up, indices_flat.clone(), 0)?;
+            let sel_down = Gather::new(None, stacked_down, indices_flat, 0)?;
+
+            // Batched expert computation
+            // input: ffn_norm [1, 1, hidden]
+            // sel_gate transposed: [k, hidden, moe_intermediate] (linear stores [out, in])
+            // MatMul broadcasts: [1, 1, hidden] @ [k, hidden, intermediate] → [k, 1, intermediate]
+            let gate_out = MatMul::new(None, ffn_norm.clone(), transpose(sel_gate))?;
+            let gate_out = silu(gate_out)?;
+            let up_out = MatMul::new(None, ffn_norm, transpose(sel_up))?;
+            let expert_hidden = Mul::new(None, gate_out, up_out)?;
+            // down_proj: [hidden, intermediate] → transpose → [intermediate, hidden]
+            let expert_out = MatMul::new(None, expert_hidden, transpose(sel_down))?;
+            // expert_out: [k, 1, hidden]
+
+            // Weighted sum by routing weights
+            // topk_values: [1, 1, k] → reshape to [k, 1, 1] for broadcasting
+            let routing_weights: Arc<dyn Tensor> = reshape(
+                topk_values as Arc<dyn Tensor>,
+                vec![k as i64, 1, 1],
+            )?;
+            let weighted = Mul::new(None, expert_out, routing_weights)?;
+            // Sum over expert dim (axis 0) → [1, 1, hidden]
+            let routed_output = sum_dim(weighted, 0, Some(true))?;
+
+            // Combine shared + routed
+            Add::new(None, shared_output, routed_output)?
         };
 
         layer_output = Add::new(None, attention_output, ffn_output)?;
