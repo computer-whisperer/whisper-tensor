@@ -1,7 +1,15 @@
-use super::onnx_bytes_to_output;
+use super::onnx_bytes_to_model;
+use whisper_tensor::dtype::DType;
+use whisper_tensor::interfaces::TextInferenceTokensInLogitOutInterface;
 use whisper_tensor::loader::*;
+use whisper_tensor::metadata::TokenizerInfo;
 
 /// Loader for raw ONNX model files.
+///
+/// For simple transformer models (e.g. GPT-2), set `tokenizer` to
+/// the HuggingFace tokenizer name. The loader will build a
+/// `TextInferenceTokensInLogitOutInterface` assuming the first
+/// graph input is token IDs and the first output is logits.
 pub struct OnnxLoader;
 
 impl Loader for OnnxLoader {
@@ -24,28 +32,22 @@ impl Loader for OnnxLoader {
                 default: None,
             },
             ConfigField {
-                key: "model_type".to_string(),
-                label: "Model Type Hint".to_string(),
-                description: "Optional hint for metadata injection (e.g. GPT2)".to_string(),
-                field_type: ConfigFieldType::Enum {
-                    options: vec!["None".to_string(), "GPT2".to_string()],
-                },
+                key: "tokenizer".to_string(),
+                label: "Tokenizer".to_string(),
+                description: "HuggingFace tokenizer name (e.g. 'gpt2'). If set, builds a text inference interface assuming first input=tokens, first output=logits.".to_string(),
+                field_type: ConfigFieldType::String,
                 required: false,
-                default: Some(ConfigValue::String("None".to_string())),
+                default: None,
             },
         ]
     }
 
     fn load(&self, config: ConfigValues) -> Result<LoaderOutput, LoaderError> {
         let path = require_path(&config, "path")?;
-        let hint_str = get_string(&config, "model_type")?.unwrap_or_default();
-        let hint = match hint_str.as_str() {
-            "GPT2" => Some(crate::ModelTypeHint::GPT2),
-            _ => None,
-        };
+        let tokenizer_name = get_string(&config, "tokenizer")?;
 
         let onnx_data =
-            crate::load_onnx_file(&path, hint).map_err(|e| LoaderError::LoadFailed(e.into()))?;
+            crate::load_onnx_file(&path).map_err(|e| LoaderError::LoadFailed(e.into()))?;
 
         let model_name = path
             .file_stem()
@@ -54,6 +56,47 @@ impl Loader for OnnxLoader {
             .unwrap_or("model")
             .to_string();
 
-        onnx_bytes_to_output(&onnx_data, &model_name, path.parent())
+        let (model, mut output) = onnx_bytes_to_model(&onnx_data, &model_name, path.parent())?;
+
+        // If a tokenizer is specified, build a simple transformer interface
+        if let Some(tok_name) = tokenizer_name {
+            let graph = model.get_symbolic_graph();
+            let input_ids = graph.get_inputs();
+            let output_ids = graph.get_outputs();
+
+            let first_input = input_ids.first().and_then(|id| {
+                let info = graph.get_tensor_info(*id)?;
+                Some((*id, info))
+            });
+            let first_output = output_ids.first().and_then(|id| {
+                let info = graph.get_tensor_info(*id)?;
+                Some((*id, info))
+            });
+
+            if let (Some((_, input_info)), Some((_, output_info))) = (first_input, first_output) {
+                let token_input_name = input_info.name().unwrap();
+                let logit_output_name = output_info.name().unwrap();
+                let input_dtype = input_info.dtype.unwrap_or(DType::I32);
+                let input_rank = input_info.shape.as_ref().map_or(2, |s| s.len());
+                let output_rank = output_info.shape.as_ref().map_or(3, |s| s.len());
+
+                let mut rng = rand::rng();
+                let interface = TextInferenceTokensInLogitOutInterface::build_simple_transformer(
+                    TokenizerInfo::HFTokenizer(tok_name),
+                    &token_input_name,
+                    &logit_output_name,
+                    input_dtype,
+                    input_rank,
+                    output_rank,
+                    &mut rng,
+                );
+                output.interfaces.push(LoadedInterface {
+                    name: format!("{model_name}-TextInference"),
+                    interface: interface.to_any(),
+                });
+            }
+        }
+
+        Ok(output)
     }
 }

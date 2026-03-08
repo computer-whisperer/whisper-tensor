@@ -1,5 +1,7 @@
-use super::{default_storage, onnx_bytes_to_output};
+use super::{default_storage, onnx_bytes_to_model};
+use whisper_tensor::interfaces::TextInferenceTokensInLogitOutInterface;
 use whisper_tensor::loader::*;
+use whisper_tensor::metadata::TokenizerInfo;
 
 /// Loader for RWKV7 .pth model files.
 pub struct Rwkv7Loader;
@@ -38,6 +40,53 @@ impl Loader for Rwkv7Loader {
             .unwrap_or("rwkv7")
             .to_string();
 
-        onnx_bytes_to_output(&onnx_data, &model_name, path.parent())
+        let (model, mut output) = onnx_bytes_to_model(&onnx_data, &model_name, path.parent())?;
+
+        // Build RNN interface — RWKV7 uses "token_input" for tokens,
+        // "output" for logits, and per-layer state pairs.
+        let graph = model.get_symbolic_graph();
+        let names_by_id = graph.get_tensors_by_name();
+
+        // Collect state pairs by finding matching *_in_* / *_out_* patterns
+        let mut state_pairs = Vec::new();
+        for name in names_by_id.keys() {
+            if name.ends_with("_in") || name.contains("_in_") || name.ends_with("_x_in") {
+                // nope, use actual naming from rwkv7 builder
+            }
+        }
+        // RWKV7 state naming: time_mixer_x_in_{i}/time_mixer_x_out_{i},
+        // channel_mixer_x_in_{i}/channel_mixer_x_out_{i}, vk_state_in_{i}/vk_state_out_{i}
+        let mut layer = 0;
+        loop {
+            let mut found_any = false;
+            for prefix in ["time_mixer_x", "channel_mixer_x", "vk_state"] {
+                let in_name = format!("{prefix}_in_{layer}");
+                let out_name = format!("{prefix}_out_{layer}");
+                if names_by_id.contains_key(&in_name) && names_by_id.contains_key(&out_name) {
+                    state_pairs.push((in_name, out_name));
+                    found_any = true;
+                }
+            }
+            if !found_any {
+                break;
+            }
+            layer += 1;
+        }
+
+        let mut rng = rand::rng();
+        let interface = TextInferenceTokensInLogitOutInterface::build_rnn(
+            TokenizerInfo::RWKVWorld,
+            "token_input",
+            "output",
+            &state_pairs,
+            graph,
+            &mut rng,
+        );
+        output.interfaces.push(LoadedInterface {
+            name: format!("{model_name}-TextInference"),
+            interface: interface.to_any(),
+        });
+
+        Ok(output)
     }
 }

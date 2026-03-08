@@ -12,7 +12,6 @@ fn main() {
     let onnx_data = identify_and_load(
         file_in,
         WeightStorageStrategy::BinFile(bin_out.to_path_buf()),
-        None,
     )
     .unwrap();
     File::create(onnx_out)

@@ -119,16 +119,12 @@ pub fn build_text_encoder(
     // Final layer norm
     let output = layer_norm(&wm.prefix("final_layer_norm"), hidden, 1e-5)?;
 
-    let input_tensors: Vec<(Arc<dyn Tensor>, Option<crate::onnx_graph::InputMetadata>)> =
-        vec![(input_ids, None)];
-    let output_tensors: Vec<(
-        String,
-        Arc<dyn Tensor>,
-        Option<crate::onnx_graph::OutputMetadata>,
-    )> = vec![("last_hidden_state".to_string(), output, None)];
+    let input_tensors: Vec<Arc<dyn Tensor>> = vec![input_ids];
+    let output_tensors: Vec<(String, Arc<dyn Tensor>)> =
+        vec![("last_hidden_state".to_string(), output)];
 
     let onnx_model =
-        crate::onnx_graph::build_proto(&input_tensors, &output_tensors, output_method, None)?;
+        crate::onnx_graph::build_proto(&input_tensors, &output_tensors, output_method)?;
     Ok(onnx_model.encode_to_vec())
 }
 
@@ -379,19 +375,11 @@ pub fn build_unet(
     // Cast output to F16
     let output = cast(h, DType::F16);
 
-    let input_tensors: Vec<(Arc<dyn Tensor>, Option<crate::onnx_graph::InputMetadata>)> = vec![
-        (sample_input, None),
-        (timestep_input, None),
-        (context_input, None),
-    ];
-    let output_tensors: Vec<(
-        String,
-        Arc<dyn Tensor>,
-        Option<crate::onnx_graph::OutputMetadata>,
-    )> = vec![("out_sample".to_string(), output, None)];
+    let input_tensors: Vec<Arc<dyn Tensor>> = vec![sample_input, timestep_input, context_input];
+    let output_tensors: Vec<(String, Arc<dyn Tensor>)> = vec![("out_sample".to_string(), output)];
 
     let onnx_model =
-        crate::onnx_graph::build_proto(&input_tensors, &output_tensors, output_method, None)?;
+        crate::onnx_graph::build_proto(&input_tensors, &output_tensors, output_method)?;
     Ok(onnx_model.encode_to_vec())
 }
 
@@ -792,16 +780,11 @@ pub fn build_vae_decoder(
     h = silu(h)?;
     h = conv2d(&dec_wm.prefix("conv_out"), h, 3, 1, 1)?;
 
-    let input_tensors: Vec<(Arc<dyn Tensor>, Option<crate::onnx_graph::InputMetadata>)> =
-        vec![(latent_input, None)];
-    let output_tensors: Vec<(
-        String,
-        Arc<dyn Tensor>,
-        Option<crate::onnx_graph::OutputMetadata>,
-    )> = vec![("sample".to_string(), h, None)];
+    let input_tensors: Vec<Arc<dyn Tensor>> = vec![latent_input];
+    let output_tensors: Vec<(String, Arc<dyn Tensor>)> = vec![("sample".to_string(), h)];
 
     let onnx_model =
-        crate::onnx_graph::build_proto(&input_tensors, &output_tensors, output_method, None)?;
+        crate::onnx_graph::build_proto(&input_tensors, &output_tensors, output_method)?;
     Ok(onnx_model.encode_to_vec())
 }
 

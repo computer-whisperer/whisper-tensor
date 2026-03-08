@@ -36,7 +36,7 @@ fn main() {
     let input_path = Path::new(SD_BASE).join("vae_encoder").join("model.onnx");
     println!("Loading vae_encoder from {}", input_path.display());
 
-    let onnx_data = identify_and_load(&input_path, WeightStorageStrategy::EmbeddedData, None)
+    let onnx_data = identify_and_load(&input_path, WeightStorageStrategy::EmbeddedData)
         .expect("Failed to import model");
     let mut rng = rand::rng();
     let model = Model::new_from_onnx(&onnx_data, &mut rng, input_path.parent())

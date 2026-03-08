@@ -5,7 +5,6 @@ pub mod tensor;
 pub mod weights;
 
 use node::*;
-use onnx::StringStringEntryProto;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -88,29 +87,25 @@ impl WeightStorageStrategy {
 }
 
 // Re-export metadata types from the core crate.
-pub use whisper_tensor::metadata::{
-    InputMetadata, ModelInputType, ModelMetadata, ModelOutputType, OutputMetadata, TokenizerInfo,
-};
+pub use whisper_tensor::metadata::TokenizerInfo;
 
 pub fn build_proto(
-    inputs: &[(Arc<dyn Tensor>, Option<InputMetadata>)],
-    outputs: &[(String, Arc<dyn Tensor>, Option<OutputMetadata>)],
+    inputs: &[Arc<dyn Tensor>],
+    outputs: &[(String, Arc<dyn Tensor>)],
     weight_storage: WeightStorageStrategy,
-    model_metadata: Option<ModelMetadata>,
 ) -> Result<onnx::ModelProto, Error> {
-    build_proto_with_origin_path(inputs, outputs, weight_storage, model_metadata, None)
+    build_proto_with_origin_path(inputs, outputs, weight_storage, None)
 }
 
 pub fn build_proto_with_origin_path(
-    inputs: &[(Arc<dyn Tensor>, Option<InputMetadata>)],
-    outputs: &[(String, Arc<dyn Tensor>, Option<OutputMetadata>)],
+    inputs: &[Arc<dyn Tensor>],
+    outputs: &[(String, Arc<dyn Tensor>)],
     weight_storage: WeightStorageStrategy,
-    model_metadata: Option<ModelMetadata>,
     origin_pth_path: Option<&std::path::Path>,
 ) -> Result<onnx::ModelProto, Error> {
     // Get all nodes in graph
     let mut nodes = HashSet::new();
-    for (_, tensor, _) in outputs {
+    for (_, tensor) in outputs {
         tensor.get_nodes(&mut nodes);
     }
 
@@ -139,7 +134,7 @@ pub fn build_proto_with_origin_path(
 
     // Get all tensors in graph
     let mut tensors = HashSet::new();
-    for (_, tensor, _) in outputs {
+    for (_, tensor) in outputs {
         tensors.insert(tensor.as_ref());
         tensor.get_sub_tensors(&mut tensors);
     }
@@ -160,7 +155,7 @@ pub fn build_proto_with_origin_path(
             tensor_names.insert(*tensor, name);
         }
     }
-    for (name, tensor, _) in outputs {
+    for (name, tensor) in outputs {
         chosen_tensor_names.insert(name.clone());
         tensor_names.insert(tensor.as_ref(), name.clone());
     }
@@ -195,8 +190,8 @@ pub fn build_proto_with_origin_path(
         // Check if tensor is not in inputs and outputs
         if !inputs
             .iter()
-            .any(|(t, _)| (t.as_ref() as &dyn Tensor) == *tensor)
-            && !outputs.iter().any(|(_, t, _)| t.as_ref() == *tensor)
+            .any(|t| (t.as_ref() as &dyn Tensor) == *tensor)
+            && !outputs.iter().any(|(_, t)| t.as_ref() == *tensor)
         {
             tensors_to_enumerate.push(*tensor);
         }
@@ -243,27 +238,11 @@ pub fn build_proto_with_origin_path(
 
     let graph_inputs = inputs
         .iter()
-        .map(|(tensor, metadata)| {
-            let meta_props = if let Some(metadata) = metadata {
-                let json_str = serde_json::to_string(metadata).unwrap();
-                vec![("whisper_tensor_metadata".to_string(), json_str)]
-            } else {
-                vec![]
-            };
-            tensor.to_value_info_proto(tensor_names[&(tensor.as_ref())].clone(), meta_props)
-        })
+        .map(|tensor| tensor.to_value_info_proto(tensor_names[&(tensor.as_ref())].clone(), vec![]))
         .collect();
     let graph_outputs = outputs
         .iter()
-        .map(|(name, tensor, metadata)| {
-            let meta_props = if let Some(metadata) = metadata {
-                let json_str = serde_json::to_string(metadata).unwrap();
-                vec![("whisper_tensor_metadata".to_string(), json_str)]
-            } else {
-                vec![]
-            };
-            tensor.to_value_info_proto(name.to_string(), meta_props)
-        })
+        .map(|(name, tensor)| tensor.to_value_info_proto(name.to_string(), vec![]))
         .collect();
 
     let graph = onnx::GraphProto {
@@ -286,16 +265,6 @@ pub fn build_proto_with_origin_path(
         ..Default::default()
     };
 
-    let model_metadata = if let Some(metadata) = model_metadata {
-        let json_str = serde_json::to_string(&metadata)?;
-        vec![StringStringEntryProto {
-            key: "whisper_tensor_metadata".to_string(),
-            value: json_str,
-        }]
-    } else {
-        vec![]
-    };
-
     let own_version = env!("CARGO_PKG_VERSION").to_string();
     Ok(onnx::ModelProto {
         ir_version: onnx::Version::IrVersion2024325 as i64,
@@ -308,7 +277,7 @@ pub fn build_proto_with_origin_path(
         model_version: 0,
         doc_string: String::new(),
         graph: Some(graph),
-        metadata_props: model_metadata,
+        metadata_props: vec![],
         training_info: vec![],
         functions: vec![],
         ..Default::default()

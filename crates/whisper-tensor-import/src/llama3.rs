@@ -1,14 +1,11 @@
 use crate::Error;
+use crate::onnx_graph::WeightStorageStrategy;
 use crate::onnx_graph::operators::{
     Add, Concat, Gather, MatMul, Mul, RotaryEmbedding, ShapeOp, Softmax, Transpose,
 };
 use crate::onnx_graph::pytorch::{div_scalar, linear, reshape, rms_norm, silu, transpose};
 use crate::onnx_graph::tensor::{DType, Dimension, InputTensor, Shape, Tensor};
 use crate::onnx_graph::weights::WeightManager;
-use crate::onnx_graph::{
-    InputMetadata, ModelInputType, ModelMetadata, ModelOutputType, OutputMetadata, TokenizerInfo,
-    WeightStorageStrategy,
-};
 use prost::Message;
 use std::sync::Arc;
 
@@ -47,8 +44,8 @@ pub fn load_llama3(
 ) -> Result<Vec<u8>, anyhow::Error> {
     let model_weight_manager = weight_manager.prefix("model");
 
-    let mut input_tensors: Vec<(Arc<dyn Tensor>, Option<InputMetadata>)> = vec![];
-    let mut output_tensors: Vec<(String, Arc<dyn Tensor>, Option<OutputMetadata>)> = vec![];
+    let mut input_tensors: Vec<Arc<dyn Tensor>> = vec![];
+    let mut output_tensors: Vec<(String, Arc<dyn Tensor>)> = vec![];
 
     let batch_dimension = Dimension::new(
         Some(1),
@@ -60,12 +57,7 @@ pub fn load_llama3(
     let input_shape = Shape::new(vec![batch_dimension.clone(), sequence_dimension.clone()]);
 
     let token_input = InputTensor::new("input_ids".to_string(), DType::I32, input_shape);
-    input_tensors.push((
-        token_input.clone(),
-        Some(InputMetadata {
-            model_input_type: ModelInputType::TokenID(0),
-        }),
-    ));
+    input_tensors.push(token_input.clone());
 
     let x = Gather::new(
         Some("embed_tokens".to_string()),
@@ -200,34 +192,12 @@ pub fn load_llama3(
         let v =
             Concat::new_with_output_shape(None, vec![kv_cache_input_v.clone(), v], 2, new_shape)?;
 
-        input_tensors.push((
-            kv_cache_input_k,
-            Some(InputMetadata {
-                model_input_type: ModelInputType::PreviousInternal(next_io_id),
-            }),
-        ));
-        output_tensors.push((
-            format!("kv_cache_output_k_{i}"),
-            k.clone(),
-            Some(OutputMetadata {
-                model_output_type: ModelOutputType::NextInternal(next_io_id),
-            }),
-        ));
+        input_tensors.push(kv_cache_input_k);
+        output_tensors.push((format!("kv_cache_output_k_{i}"), k.clone()));
         next_io_id += 1;
 
-        input_tensors.push((
-            kv_cache_input_v,
-            Some(InputMetadata {
-                model_input_type: ModelInputType::PreviousInternal(next_io_id),
-            }),
-        ));
-        output_tensors.push((
-            format!("kv_cache_output_v_{i}"),
-            v.clone(),
-            Some(OutputMetadata {
-                model_output_type: ModelOutputType::NextInternal(next_io_id),
-            }),
-        ));
+        input_tensors.push(kv_cache_input_v);
+        output_tensors.push((format!("kv_cache_output_v_{i}"), v.clone()));
         next_io_id += 1;
 
         let (k, v): (Arc<dyn Tensor>, Arc<dyn Tensor>) =
@@ -279,26 +249,10 @@ pub fn load_llama3(
 
     let h = rms_norm(&model_weight_manager.prefix("norm"), layer_output, None)?;
     let out = linear(&weight_manager.prefix("lm_head"), h)?;
-    output_tensors.push((
-        "logits".to_string(),
-        out,
-        Some(OutputMetadata {
-            model_output_type: ModelOutputType::TokenID(0),
-        }),
-    ));
+    output_tensors.push(("logits".to_string(), out));
 
     println!("Built graph, exporting...");
-    let model_metadata = ModelMetadata {
-        tokenizer_infos: vec![TokenizerInfo::HFTokenizer(
-            "meta-llama/Meta-Llama-3-8B".to_string(),
-        )],
-        max_token_batch: None,
-    };
-    let onnx_model = crate::onnx_graph::build_proto(
-        &input_tensors,
-        &output_tensors,
-        output_method,
-        Some(model_metadata),
-    )?;
+    let onnx_model =
+        crate::onnx_graph::build_proto(&input_tensors, &output_tensors, output_method)?;
     Ok(onnx_model.encode_to_vec())
 }

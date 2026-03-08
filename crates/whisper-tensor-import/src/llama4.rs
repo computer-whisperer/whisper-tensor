@@ -1,12 +1,9 @@
 use crate::Error;
+use crate::onnx_graph::WeightStorageStrategy;
 use crate::onnx_graph::operators::{Add, Gather, Mul};
 use crate::onnx_graph::pytorch::{layer_norm, linear, reshape, rms_norm, silu, topk, transpose};
 use crate::onnx_graph::tensor::{DType, Dimension, InputTensor, Shape, Tensor};
 use crate::onnx_graph::weights::WeightManager;
-use crate::onnx_graph::{
-    InputMetadata, ModelInputType, ModelMetadata, ModelOutputType, OutputMetadata, TokenizerInfo,
-    WeightStorageStrategy,
-};
 use prost::Message;
 use std::sync::Arc;
 
@@ -125,8 +122,8 @@ pub fn load_llama4(
     let weight_manager = weight_manager.prefix("language_model");
     let model_weight_manager = weight_manager.prefix("model");
 
-    let mut input_tensors: Vec<(Arc<dyn Tensor>, Option<InputMetadata>)> = vec![];
-    let mut output_tensors: Vec<(String, Arc<dyn Tensor>, Option<OutputMetadata>)> = vec![];
+    let mut input_tensors: Vec<Arc<dyn Tensor>> = vec![];
+    let mut output_tensors: Vec<(String, Arc<dyn Tensor>)> = vec![];
 
     let batch_dimension = Dimension::new(
         Some(1),
@@ -142,12 +139,7 @@ pub fn load_llama4(
     ]);
 
     let token_input = InputTensor::new("input_ids".to_string(), DType::I32, input_shape);
-    input_tensors.push((
-        token_input.clone(),
-        Some(InputMetadata {
-            model_input_type: ModelInputType::TokenID(0),
-        }),
-    ));
+    input_tensors.push(token_input.clone());
 
     let x = Gather::new(
         Some("embed_tokens".to_string()),
@@ -226,25 +218,11 @@ pub fn load_llama4(
         Some(config.rms_norm_eps),
     )?;
     let out = linear(&weight_manager.prefix("lm_head"), h)?;
-    output_tensors.push((
-        "logits".to_string(),
-        out,
-        Some(OutputMetadata {
-            model_output_type: ModelOutputType::TokenID(0),
-        }),
-    ));
+    output_tensors.push(("logits".to_string(), out));
 
     println!("Built graph, exporting...");
-    let model_metadata = ModelMetadata {
-        tokenizer_infos: vec![TokenizerInfo::HFTokenizer("meta/llama4".to_string())],
-        max_token_batch: Some(1),
-    };
-    let onnx_model = crate::onnx_graph::build_proto(
-        &input_tensors,
-        &output_tensors,
-        output_method,
-        Some(model_metadata),
-    )?;
+    let onnx_model =
+        crate::onnx_graph::build_proto(&input_tensors, &output_tensors, output_method)?;
 
     Ok(onnx_model.encode_to_vec())
 }

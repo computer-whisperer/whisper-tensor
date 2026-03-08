@@ -1,11 +1,7 @@
 use memmap2::Mmap;
-use onnx_graph::onnx::{ModelProto, StringStringEntryProto};
+use onnx_graph::WeightStorageStrategy;
 use onnx_graph::weights::SafetensorsWeightManager;
-use onnx_graph::{
-    InputMetadata, ModelInputType, ModelMetadata, ModelOutputType, OutputMetadata, TokenizerInfo,
-    WeightStorageStrategy,
-};
-use prost::{DecodeError, Message};
+use prost::DecodeError;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -40,42 +36,22 @@ pub enum Error {
     UnsupportedConfigurationError(String, String),
 }
 
-#[derive(
-    Clone,
-    Debug,
-    PartialEq,
-    serde::Serialize,
-    serde::Deserialize,
-    strum_macros::EnumIter,
-    strum_macros::Display,
-)]
-pub enum ModelTypeHint {
-    GPT2,
-    RWKV7,
-}
-
 pub fn identify_and_load(
     model_path: &Path,
     output_method: WeightStorageStrategy,
-    hint: Option<ModelTypeHint>,
 ) -> Result<Vec<u8>, Error> {
     if model_path.is_dir() {
         let config_path = model_path.join("config.json");
         if config_path.exists() {
-            Ok(load_transformers_format(model_path, output_method, hint)?)
+            Ok(load_transformers_format(model_path, output_method)?)
         } else {
             Err(Error::CannotIdentifyModel(model_path.to_path_buf()))
         }
     } else if let Some(ext) = model_path.extension() {
         if ext == "pth" {
-            if let Some(ModelTypeHint::RWKV7) = hint {
-                Ok(rwkv7::load_rwkv7_pth(model_path, output_method)
-                    .map_err(Error::ModelBuildError)?)
-            } else {
-                Err(Error::CannotIdentifyModel(model_path.to_path_buf()))
-            }
+            Ok(rwkv7::load_rwkv7_pth(model_path, output_method).map_err(Error::ModelBuildError)?)
         } else if ext == "onnx" {
-            Ok(load_onnx_file(model_path, hint)?)
+            Ok(load_onnx_file(model_path)?)
         } else {
             Err(Error::CannotIdentifyModel(model_path.to_path_buf()))
         }
@@ -84,84 +60,15 @@ pub fn identify_and_load(
     }
 }
 
-pub fn load_onnx_file(model_path: &Path, hint: Option<ModelTypeHint>) -> Result<Vec<u8>, Error> {
+pub fn load_onnx_file(model_path: &Path) -> Result<Vec<u8>, Error> {
     let mut onnx_data = Vec::new();
     File::open(model_path)?.read_to_end(&mut onnx_data)?;
-
-    if let Some(ModelTypeHint::GPT2) = hint {
-        onnx_data = try_inject_onnx_metadata_for_simple_llm(
-            onnx_data,
-            TokenizerInfo::HFTokenizer("gpt2".to_string()),
-        )?;
-    }
-
-    Ok(onnx_data)
-}
-
-pub fn try_inject_onnx_metadata_for_simple_llm(
-    mut onnx_data: Vec<u8>,
-    tokenizer_info: TokenizerInfo,
-) -> Result<Vec<u8>, Error> {
-    let mut model_proto = ModelProto::decode(onnx_data.as_slice())?;
-    let metadata = ModelMetadata {
-        tokenizer_infos: vec![tokenizer_info],
-        max_token_batch: None,
-    };
-    model_proto.metadata_props.push(StringStringEntryProto {
-        key: "whisper_tensor_metadata".to_string(),
-        value: serde_json::to_string(&metadata).unwrap(),
-    });
-    let mut do_reencode = true;
-    if let Some(graph) = &mut model_proto.graph {
-        let mut token_input = None;
-        if graph.input.len() == 1 {
-            token_input = Some(&mut graph.input[0]);
-        } else {
-            // Maybe try to find it with some heuristic?
-        }
-        if let Some(input) = token_input {
-            let meta = InputMetadata {
-                model_input_type: ModelInputType::TokenID(0),
-            };
-            input.metadata_props.push(StringStringEntryProto {
-                key: "whisper_tensor_metadata".to_string(),
-                value: serde_json::to_string(&meta).unwrap(),
-            });
-            do_reencode = true;
-        }
-
-        let mut token_output = None;
-        if graph.output.len() == 1 {
-            token_output = Some(&mut graph.input[0]);
-        } else if !graph.output.is_empty() {
-            // Use the first one for now
-            token_output = Some(&mut graph.output[0])
-        } else {
-            // Can't find
-        }
-        if let Some(output) = token_output {
-            let meta = OutputMetadata {
-                model_output_type: ModelOutputType::TokenID(0),
-            };
-            output.metadata_props.push(StringStringEntryProto {
-                key: "whisper_tensor_metadata".to_string(),
-                value: serde_json::to_string(&meta).unwrap(),
-            });
-            do_reencode = true;
-        }
-    }
-
-    // Re-serialize
-    if do_reencode {
-        onnx_data = model_proto.encode_to_vec();
-    }
     Ok(onnx_data)
 }
 
 pub fn load_transformers_format(
     model_path: &Path,
     output_method: WeightStorageStrategy,
-    _hint: Option<ModelTypeHint>,
 ) -> Result<Vec<u8>, Error> {
     println!(
         "Loading hf transformers weights from {}",

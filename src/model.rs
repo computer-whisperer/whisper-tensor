@@ -3,19 +3,14 @@ use std::collections::HashMap;
 use crate::backends::eval_backend::{EvalBackend, EvalRuntimeError};
 use crate::backends::{ModelLoadedTensorCache, eval_backend};
 use crate::dtype::DType;
-use crate::metadata::{InputMetadata, ModelMetadata, OutputMetadata};
 use crate::numeric_tensor::{NumericTensor, NumericTensorError};
-use crate::onnx::{ModelProto, StringStringEntryProto};
-use prost::{DecodeError, Message};
+use prost::DecodeError;
 use rand::Rng;
 
 use crate::symbolic_graph::tensor_store::TensorStore;
 use crate::symbolic_graph::{ONNXDecodingError, SymbolicGraph, SymbolicGraphMutator, TensorType};
 
-//#[cfg(feature = "ort")]
-//use crate::backends::ort_backend::ORTNumericTensor;
 use crate::DynRank;
-use crate::interfaces::TextInferenceTokensInLogitOutInterface;
 use crate::scalar_info::ScalarInfoTyped;
 use crate::symbolic_graph::observer::SymbolicGraphObserver;
 
@@ -27,8 +22,6 @@ pub enum ModelError {
     ONNXDecodingError(#[from] ONNXDecodingError),
     #[error(transparent)]
     EvalRuntimeError(#[from] EvalRuntimeError),
-    #[error(transparent)]
-    SerdeJSONError(#[from] serde_json::Error),
     #[cfg(feature = "candle")]
     #[error(transparent)]
     Candle(#[from] candle_core::Error),
@@ -57,11 +50,6 @@ pub struct Model {
     tensor_store: TensorStore,
     #[allow(dead_code)]
     onnx_data: Vec<u8>,
-    model_metadata: Option<ModelMetadata>,
-    pub model_inputs: HashMap<String, Option<InputMetadata>>,
-    pub model_outputs: HashMap<String, Option<OutputMetadata>>,
-    pub text_inference_tokens_in_logits_out_interface:
-        Option<TextInferenceTokensInLogitOutInterface>,
 }
 
 impl Model {
@@ -74,58 +62,8 @@ impl Model {
         rng: &mut impl Rng,
         base_dir: Option<&std::path::Path>,
     ) -> Result<Self, ModelError> {
-        let model_info = ModelProto::decode(onnx_data)?;
-        let mut model_metadata = None;
-        for StringStringEntryProto { key, value } in model_info.metadata_props {
-            if key == "whisper_tensor_metadata" {
-                let v: ModelMetadata = serde_json::from_str(&value)?;
-                model_metadata = Some(v);
-            }
-        }
-        let mut model_inputs = HashMap::new();
-        let mut model_outputs = HashMap::new();
-        if let Some(graph) = model_info.graph {
-            for input in graph.input {
-                if !input.name.is_empty() {
-                    let mut meta = None;
-                    for StringStringEntryProto { key, value } in input.metadata_props {
-                        if key == "whisper_tensor_metadata" {
-                            meta = Some(serde_json::from_str(&value)?);
-                        }
-                    }
-                    model_inputs.insert(input.name.clone(), meta);
-                }
-            }
-            for output in graph.output {
-                if !output.name.is_empty() {
-                    let mut meta = None;
-                    for StringStringEntryProto { key, value } in output.metadata_props {
-                        if key == "whisper_tensor_metadata" {
-                            meta = Some(serde_json::from_str(&value)?);
-                        }
-                    }
-                    model_outputs.insert(output.name.clone(), meta);
-                }
-            }
-        }
-
         let (symbolic_graph, tensor_store) =
             SymbolicGraphMutator::from_onnx_bytes(onnx_data, rng, base_dir)?.get_inner();
-
-        let text_inference_tokens_in_logits_out_interface = {
-            if let Some(meta) = model_metadata.as_ref() {
-                TextInferenceTokensInLogitOutInterface::try_from_onnx_metadata(
-                    meta,
-                    &model_inputs,
-                    &model_outputs,
-                    &symbolic_graph,
-                    rng,
-                )
-                .ok()
-            } else {
-                None
-            }
-        };
 
         Ok(Self {
             id: ModelID {
@@ -134,10 +72,6 @@ impl Model {
             graph: symbolic_graph,
             tensor_store,
             onnx_data: onnx_data.to_vec(),
-            model_metadata,
-            model_inputs,
-            model_outputs,
-            text_inference_tokens_in_logits_out_interface,
         })
     }
 
@@ -207,10 +141,6 @@ impl Model {
 
     pub fn get_tensor_store(&self) -> &TensorStore {
         &self.tensor_store
-    }
-
-    pub fn get_model_metadata(&self) -> Option<&ModelMetadata> {
-        self.model_metadata.as_ref()
     }
 
     #[allow(clippy::type_complexity)]

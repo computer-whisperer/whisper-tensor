@@ -1,8 +1,8 @@
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
+use whisper_tensor_import::identify_and_load;
 use whisper_tensor_import::onnx_graph::WeightStorageStrategy;
-use whisper_tensor_import::{ModelTypeHint, identify_and_load};
 
 fn main() {
     //let file_in = Path::new("/mnt/secondary/temp-latest-training-models/RWKV7-G1-1.5B-50%trained-20250330-ctx4k.pth");
@@ -13,7 +13,6 @@ fn main() {
         file_in,
         //WeightStorageStrategy::BinFile(bin_out.to_path_buf()),
         WeightStorageStrategy::OriginReference,
-        Some(ModelTypeHint::RWKV7),
     )
     .unwrap();
     File::create(onnx_out)

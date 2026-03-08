@@ -56,12 +56,8 @@ fn rwkv01b_model_loads() {
     ensure_not_lfs_pointer(&pth_path);
     // Use EmbeddedData output method to avoid external file dependencies
     for strategy in [whisper_tensor_import::onnx_graph::WeightStorageStrategy::EmbeddedData] {
-        let onnx_bytes = whisper_tensor_import::identify_and_load(
-            &pth_path,
-            strategy,
-            Some(whisper_tensor_import::ModelTypeHint::RWKV7),
-        )
-        .expect("import rwkv7 to onnx");
+        let onnx_bytes = whisper_tensor_import::identify_and_load(&pth_path, strategy)
+            .expect("import rwkv7 to onnx");
         let mut rng = rand::rng();
         let model = Model::new_from_onnx(&onnx_bytes, &mut rng, None).expect("model loads");
 
@@ -98,7 +94,6 @@ fn rwkv01b_single_step_runs_shape_sanity() {
     let onnx_bytes = whisper_tensor_import::identify_and_load(
         &pth_path,
         whisper_tensor_import::onnx_graph::WeightStorageStrategy::EmbeddedData,
-        Some(whisper_tensor_import::ModelTypeHint::RWKV7),
     )
     .expect("import rwkv7 to onnx");
     let mut rng = rand::rng();
@@ -163,7 +158,6 @@ fn rwkv01b_model_loads_with_binfile() {
     let onnx_bytes = whisper_tensor_import::identify_and_load(
         &pth_path,
         whisper_tensor_import::onnx_graph::WeightStorageStrategy::BinFile(bin_path.clone()),
-        Some(whisper_tensor_import::ModelTypeHint::RWKV7),
     )
     .expect("import rwkv7 to onnx (BinFile)");
 
@@ -205,7 +199,6 @@ fn rwkv01b_model_loads_with_origin_reference() {
     let onnx_bytes = whisper_tensor_import::identify_and_load(
         &pth_path,
         whisper_tensor_import::onnx_graph::WeightStorageStrategy::OriginReference,
-        Some(whisper_tensor_import::ModelTypeHint::RWKV7),
     )
     .expect("import rwkv7 to onnx (OriginReference)");
 

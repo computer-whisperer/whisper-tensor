@@ -18,19 +18,14 @@ use whisper_tensor::super_graph::nodes::{
     SuperGraphNodeTokenizerDecode, SuperGraphNodeTokenizerEncode, SuperGraphNodeTokenizerLoad,
 };
 use whisper_tensor::super_graph::{SuperGraphBuilder, SuperGraphContext};
+use whisper_tensor_import::identify_and_load;
 use whisper_tensor_import::onnx_graph::{TokenizerInfo, WeightStorageStrategy};
-use whisper_tensor_import::{ModelTypeHint, identify_and_load};
 
 fn main() {
     tracing_subscriber::fmt::init();
 
     let input_path = Path::new("gpt2-lm-head-10.onnx");
-    let onnx_data = identify_and_load(
-        input_path,
-        WeightStorageStrategy::EmbeddedData,
-        Some(ModelTypeHint::GPT2),
-    )
-    .unwrap();
+    let onnx_data = identify_and_load(input_path, WeightStorageStrategy::EmbeddedData).unwrap();
 
     let mut rng = rand::rng();
     let model = Model::new_from_onnx(&onnx_data, &mut rng, None).unwrap();

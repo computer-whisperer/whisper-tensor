@@ -1,34 +1,43 @@
 use std::collections::HashMap;
 use std::io::Write;
-use std::path::Path;
-use std::sync::Arc;
+use std::path::PathBuf;
 use whisper_tensor::backends::ModelLoadedTensorCache;
 use whisper_tensor::backends::eval_backend::EvalBackend;
 use whisper_tensor::compiler;
-use whisper_tensor::model::Model;
+use whisper_tensor::loader::{ConfigValue, ConfigValues, Loader};
 use whisper_tensor::super_graph::cache::SuperGraphCache;
-use whisper_tensor_import::onnx_graph::WeightStorageStrategy;
-use whisper_tensor_import::{ModelTypeHint, identify_and_load};
+use whisper_tensor_import::loaders::Rwkv7Loader;
 
 fn main() {
     tracing_subscriber::fmt::init();
-    let input_path =
-        Path::new("/mnt/secondary/rwkv-7-world/RWKV-x070-World-0.4B-v2.9-20250107-ctx4096.pth");
-    //let input_path = Path::new("/mnt/secondary/neural_networks/llms/Llama-3.1-8B-Instruct");
-    //let onnx_out = Path::new("out.onnx");
-    //let _bin_out = Path::new("out.bin");
-    let onnx_data = identify_and_load(
-        input_path,
-        WeightStorageStrategy::OriginReference,
-        Some(ModelTypeHint::RWKV7),
-    )
-    .unwrap();
+
+    let config = ConfigValues::from([(
+        "path".to_string(),
+        ConfigValue::FilePath(PathBuf::from(
+            "/mnt/secondary/rwkv-7-world/RWKV-x070-World-0.4B-v2.9-20250107-ctx4096.pth",
+        )),
+    )]);
+
+    let output = Rwkv7Loader.load(config).unwrap();
+    let model = &output.models[0].model;
+    let interface = output
+        .interfaces
+        .iter()
+        .find_map(|i| {
+            if let whisper_tensor::interfaces::AnyInterface::TextInferenceTokensInLogitOutInterface(
+                x,
+            ) = &i.interface
+            {
+                Some(x)
+            } else {
+                None
+            }
+        })
+        .expect("No text inference interface found");
 
     let mut eval_backend = EvalBackend::NDArray;
 
-    let mut rng = rand::rng();
-    let model = Arc::new(Model::new_from_onnx(&onnx_data, &mut rng, None).unwrap());
-    let symbolic_graph = Arc::new(model.get_symbolic_graph().clone());
+    let symbolic_graph = std::sync::Arc::new(model.get_symbolic_graph().clone());
     let compiled_model = compiler::build_program(compiler::CompilationSubject::SymbolicGraph {
         symbolic_graph: symbolic_graph.clone(),
     });
@@ -41,12 +50,9 @@ fn main() {
     let mut context = prompt.clone();
     let mut model_cache = ModelLoadedTensorCache::new();
     for _ in 0..10 {
-        let res = model
-            .text_inference_tokens_in_logits_out_interface
-            .as_ref()
-            .unwrap()
+        let res = interface
             .run_string_in_string_out(
-                &model,
+                model,
                 Some(&compiled_model),
                 context.clone(),
                 &mut tokenizer_cache,
