@@ -37,16 +37,19 @@ fn try_multidirectional_broadcasting(a: &Shape, b: &Shape) -> Result<Shape, Erro
                     Err(Error::ShapeMismatchError(a.clone(), b.clone()))?
                 }
             } else {
-                Err(Error::ShapeMismatchError(a.clone(), b.clone()))?
+                // a is concrete (non-1), b is symbolic — assume compatible at runtime
+                a[i].clone()
             }
         } else if let Ok(b_val) = b[i].resolve() {
             if b_val == 1 {
                 a[i].clone()
             } else {
-                Err(Error::ShapeMismatchError(a.clone(), b.clone()))?
+                // a is symbolic, b is concrete (non-1) — assume compatible at runtime
+                b[i].clone()
             }
         } else {
-            Err(Error::ShapeMismatchError(a.clone(), b.clone()))?
+            // Both symbolic — assume compatible, prefer a
+            a[i].clone()
         });
     }
 
@@ -514,15 +517,20 @@ impl MatMul {
             a_shape = a_shape.unsqueeze(0)
         }
 
-        // Validate shapes
-        if a_shape.dim(-1).as_ref() != b_shape.dim(-2).as_ref() {
+        // Validate shapes — skip check if either inner dim is symbolic
+        let a_inner = a_shape.dim(-1);
+        let b_inner = b_shape.dim(-2);
+        if a_inner.value.is_some()
+            && b_inner.value.is_some()
+            && a_inner.as_ref() != b_inner.as_ref()
+        {
             Err(Error::ShapeMismatchError(a_shape.clone(), b_shape.clone()))?
         }
 
         let mut output_dims = vec![];
         // Start with batch dims
         for i in 0..a_shape.rank() - 2 {
-            output_dims.push(if a_shape[i].as_ref() != b_shape[i].as_ref() {
+            output_dims.push(if a_shape[i].as_ref() == b_shape[i].as_ref() {
                 a_shape[i].clone()
             } else if let Some(a_value) = a_shape[i].value {
                 if a_value == 1 {
@@ -537,25 +545,19 @@ impl MatMul {
                         ))?
                     }
                 } else {
-                    Err(Error::IncompatibleShapeError(
-                        a_shape.clone(),
-                        b_shape.clone(),
-                    ))?
+                    // a concrete (non-1), b symbolic — assume compatible
+                    a_shape[i].clone()
                 }
             } else if let Some(b_value) = b_shape[i].value {
                 if b_value == 1 {
                     a_shape[i].clone()
                 } else {
-                    Err(Error::IncompatibleShapeError(
-                        a_shape.clone(),
-                        b_shape.clone(),
-                    ))?
+                    // a symbolic, b concrete (non-1) — assume compatible
+                    b_shape[i].clone()
                 }
             } else {
-                Err(Error::IncompatibleShapeError(
-                    a_shape.clone(),
-                    b_shape.clone(),
-                ))?
+                // Both symbolic — assume compatible, prefer a
+                a_shape[i].clone()
             })
         }
         // Add output dims
@@ -767,15 +769,26 @@ impl Concat {
                 }
                 output_dims.push(Dimension::new(v, None, None));
             } else {
-                output_dims.push(inputs[0].shape()[i].clone());
+                // For non-concat axes, prefer a concrete dimension if available.
+                // Skip strict equality checks when either dim is symbolic — runtime
+                // will validate shapes.
+                let mut chosen = inputs[0].shape()[i].clone();
                 for input in &inputs {
-                    if input.shape()[i].as_ref() != output_dims[i].as_ref() {
+                    let other = &input.shape()[i];
+                    if chosen.value.is_none() && other.value.is_some() {
+                        chosen = other.clone();
+                    } else if chosen.value.is_some()
+                        && other.value.is_some()
+                        && chosen.as_ref() != other.as_ref()
+                    {
                         Err(Error::ShapeMismatchError(
                             inputs[0].shape().clone(),
                             input.shape().clone(),
                         ))?;
                     }
+                    // If either is symbolic (None value), skip the check
                 }
+                output_dims.push(chosen);
             }
         }
         let output_shape = Shape::new(output_dims);
@@ -2563,14 +2576,28 @@ impl Conv {
             Dimension::new(Some(c_out), None, None),
         ];
         for i in 0..spatial_dims {
-            let in_dim = input.shape()[i + 2].resolve()?;
             let k = kernel_shape[i] as usize;
             let s = strides[i] as usize;
             let p_begin = pads[i] as usize;
             let p_end = pads[i + spatial_dims] as usize;
             let d = dilations[i] as usize;
-            let out_dim = (in_dim + p_begin + p_end - d * (k - 1) - 1) / s + 1;
-            output_dims.push(Dimension::new(Some(out_dim), None, None));
+            let in_dim_ref = &input.shape()[i + 2];
+            if let Ok(in_dim) = in_dim_ref.resolve() {
+                // Concrete dimension — compute exactly
+                let out_dim = (in_dim + p_begin + p_end - d * (k - 1) - 1) / s + 1;
+                output_dims.push(Dimension::new(Some(out_dim), None, None));
+            } else if s == 1 && p_begin + p_end == d * (k - 1) {
+                // Same-padding: output spatial == input spatial — propagate symbolic dim
+                output_dims.push(in_dim_ref.clone());
+            } else {
+                // Symbolic input with non-trivial stride/padding — derive a symbolic output dim.
+                // The actual output shape is computed by the runtime, not by this metadata.
+                let derived_name = in_dim_ref
+                    .name
+                    .as_ref()
+                    .map(|n| format!("{n}_conv_s{s}"));
+                output_dims.push(Dimension::new(None, derived_name, None));
+            }
         }
 
         Ok(Arc::new(Self {

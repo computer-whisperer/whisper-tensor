@@ -1,5 +1,7 @@
 use crate::onnx_graph::WeightStorageStrategy;
-use crate::onnx_graph::operators::{Add, Concat, Conv, Gather, MatMul, Mul, Softmax, Transpose};
+use crate::onnx_graph::operators::{
+    Add, Concat, Constant, Conv, Gather, MatMul, Mul, Reshape, ShapeOp, Softmax, Transpose,
+};
 use crate::onnx_graph::pytorch::{
     cast, conv2d, div_scalar, gelu, group_norm, layer_norm, linear, reshape, silu,
     upsample_nearest_2x,
@@ -115,6 +117,41 @@ pub fn is_sd15_checkpoint(weight_manager: &impl WeightManager) -> bool {
         && weight_manager
             .get_tensor("first_stage_model.decoder.conv_in.weight")
             .is_ok()
+}
+
+/// Reshape that supports symbolic (unresolved) dimensions.
+///
+/// `dims` uses the same convention as ONNX Reshape: 0 = copy from input, -1 = infer.
+/// Positive values are taken literally. The output shape is constructed symbolically
+/// so that downstream operators can propagate symbolic dims.
+fn reshape_symbolic(
+    input: Arc<dyn Tensor>,
+    dims: Vec<i64>,
+) -> Result<Arc<dyn Tensor>, crate::onnx_graph::Error> {
+    // Build the constant shape tensor (for ONNX)
+    let shape_const = Constant::new(
+        None,
+        TensorData::new(
+            dims.clone().into(),
+            Shape::new(vec![Dimension::new(Some(dims.len()), None, None)]),
+        )?,
+    );
+
+    // Build the output shape symbolically
+    let mut output_dims = Vec::new();
+    for (i, &d) in dims.iter().enumerate() {
+        if d == 0 {
+            output_dims.push(input.shape()[i].clone());
+        } else if d == -1 {
+            // Inferred dim — symbolic, name-only
+            output_dims.push(Dimension::new(None, Some("inferred".to_string()), None));
+        } else {
+            output_dims.push(Dimension::new(Some(d as usize), None, None));
+        }
+    }
+    let output_shape = Shape::new(output_dims);
+
+    Ok(Reshape::new_with_forced_output(None, input, shape_const, output_shape)?)
 }
 
 // SD 1.5 UNet config
@@ -308,8 +345,8 @@ pub fn build_unet(
     );
 
     let batch_dim = Dimension::new(Some(1), Some("batch".to_string()), None);
-    let h_dim = Dimension::new(Some(64), Some("height".to_string()), None);
-    let w_dim = Dimension::new(Some(64), Some("width".to_string()), None);
+    let h_dim = Dimension::new(None, Some("height".to_string()), None);
+    let w_dim = Dimension::new(None, Some("width".to_string()), None);
 
     // I/O uses model_dtype (f16 or f32 depending on checkpoint).
     let sample_input = InputTensor::new(
@@ -612,11 +649,13 @@ fn spatial_transformer(
     // proj_in is a 1x1 conv
     let h = conv2d(&wm.prefix("proj_in"), h, 1, 1, 0)?;
 
-    // Reshape NCHW -> [N, H*W, C]
-    let c = h.shape()[1].resolve()?;
-    let spatial_h = h.shape()[2].resolve()?;
-    let spatial_w = h.shape()[3].resolve()?;
-    let h = reshape(h, vec![0, c as i64, -1])?;
+    // Capture NCHW shape for restoring later (supports symbolic spatial dims)
+    let nchw_shape = ShapeOp::new(None, h.clone(), None, None)?;
+    let nchw_output_shape = h.shape().clone();
+
+    // Reshape NCHW -> [N, C, H*W]
+    let c = h.shape()[1].resolve()?; // channel dim is always concrete
+    let h = reshape_symbolic(h, vec![0, c as i64, -1])?;
     // Transpose to [N, H*W, C]
     let h = Transpose::new(None, h, Some(vec![0, 2, 1]));
 
@@ -629,8 +668,8 @@ fn spatial_transformer(
 
     // Transpose back [N, H*W, C] -> [N, C, H*W]
     let h = Transpose::new(None, h, Some(vec![0, 2, 1]));
-    // Reshape to [N, C, H, W]
-    let h = reshape(h, vec![0, c as i64, spatial_h as i64, spatial_w as i64])?;
+    // Reshape to [N, C, H, W] using the captured NCHW shape
+    let h = Reshape::new_with_forced_output(None, h, nchw_shape, nchw_output_shape)?;
 
     // proj_out (1x1 conv)
     let h = conv2d(&wm.prefix("proj_out"), h, 1, 1, 0)?;
@@ -686,17 +725,17 @@ fn cross_attention(
     // Reshape to multi-head
     let q = Transpose::new(
         None,
-        reshape(q, vec![0, -1, num_heads as i64, head_dim as i64])?,
+        reshape_symbolic(q, vec![0, -1, num_heads as i64, head_dim as i64])?,
         Some(vec![0, 2, 1, 3]),
     );
     let k = Transpose::new(
         None,
-        reshape(k, vec![0, -1, num_heads as i64, head_dim as i64])?,
+        reshape_symbolic(k, vec![0, -1, num_heads as i64, head_dim as i64])?,
         Some(vec![0, 2, 1, 3]),
     );
     let v = Transpose::new(
         None,
-        reshape(v, vec![0, -1, num_heads as i64, head_dim as i64])?,
+        reshape_symbolic(v, vec![0, -1, num_heads as i64, head_dim as i64])?,
         Some(vec![0, 2, 1, 3]),
     );
 
@@ -710,7 +749,7 @@ fn cross_attention(
     // Reshape back
     let output = Transpose::new(None, output, Some(vec![0, 2, 1, 3]));
     let hidden_dim = num_heads * head_dim;
-    let output = reshape(output, vec![0, -1, hidden_dim as i64])?;
+    let output = reshape_symbolic(output, vec![0, -1, hidden_dim as i64])?;
 
     // Output projection (has bias)
     linear(&wm.prefix("to_out.0"), output)
@@ -826,8 +865,8 @@ pub fn build_vae_decoder(
     );
 
     let batch_dim = Dimension::new(Some(1), Some("batch".to_string()), None);
-    let h_dim = Dimension::new(Some(64), Some("height".to_string()), None);
-    let w_dim = Dimension::new(Some(64), Some("width".to_string()), None);
+    let h_dim = Dimension::new(None, Some("height".to_string()), None);
+    let w_dim = Dimension::new(None, Some("width".to_string()), None);
 
     // Input uses model_dtype
     let latent_input = InputTensor::new(
@@ -929,11 +968,11 @@ fn vae_attention(
     let v = conv2d(&wm.prefix("v"), h, 1, 1, 0)?;
 
     // Reshape [N, C, H, W] -> [N, C, H*W] -> [N, H*W, C]
-    let q = reshape(q, vec![0, channels as i64, -1])?;
+    let q = reshape_symbolic(q, vec![0, channels as i64, -1])?;
     let q = Transpose::new(None, q, Some(vec![0, 2, 1]));
-    let k = reshape(k, vec![0, channels as i64, -1])?;
+    let k = reshape_symbolic(k, vec![0, channels as i64, -1])?;
     // k stays as [N, C, H*W] for Q @ K^T
-    let v = reshape(v, vec![0, channels as i64, -1])?;
+    let v = reshape_symbolic(v, vec![0, channels as i64, -1])?;
     let v = Transpose::new(None, v, Some(vec![0, 2, 1]));
 
     // Attention: softmax(Q @ K / sqrt(C)) @ V
@@ -944,12 +983,10 @@ fn vae_attention(
 
     // Reshape back: [N, H*W, C] -> [N, C, H*W] -> [N, C, H, W]
     let output = Transpose::new(None, output, Some(vec![0, 2, 1]));
-    let spatial_h = residual.shape()[2].resolve()?;
-    let spatial_w = residual.shape()[3].resolve()?;
-    let output = reshape(
-        output,
-        vec![0, channels as i64, spatial_h as i64, spatial_w as i64],
-    )?;
+    // Use ShapeOp on the residual to get the original NCHW shape dynamically
+    let nchw_shape = ShapeOp::new(None, residual.clone(), None, None)?;
+    let nchw_output_shape = residual.shape().clone();
+    let output = Reshape::new_with_forced_output(None, output, nchw_shape, nchw_output_shape)?;
 
     // proj_out (1x1 conv)
     let output = conv2d(&wm.prefix("proj_out"), output, 1, 1, 0)?;

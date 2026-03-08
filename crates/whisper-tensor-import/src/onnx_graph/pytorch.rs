@@ -234,11 +234,19 @@ pub fn upsample_nearest_2x(input: Arc<dyn Tensor>) -> Result<Arc<dyn Tensor>, Er
             Shape::from(&[4usize][..]),
         )?,
     );
-    let h = input.shape()[2].resolve()?;
-    let w = input.shape()[3].resolve()?;
     let mut output_dims = input.shape().dims.clone();
-    output_dims[2] = Dimension::new(Some(h * 2), None, None);
-    output_dims[3] = Dimension::new(Some(w * 2), None, None);
+    // Compute output spatial dims: double if concrete, symbolic name if symbolic
+    for d in 2..output_dims.len() {
+        if let Ok(v) = output_dims[d].resolve() {
+            output_dims[d] = Dimension::new(Some(v * 2), None, None);
+        } else {
+            output_dims[d] = Dimension::new(
+                None,
+                output_dims[d].name.as_ref().map(|n| format!("{n}_x2")),
+                None,
+            );
+        }
+    }
     let output_shape = Shape::new(output_dims);
     Resize::new_with_scales(None, input, scales, "nearest".to_string(), output_shape)
         .map(|x| x as Arc<dyn Tensor>)
