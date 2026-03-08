@@ -126,8 +126,8 @@ pub fn load_transformers_format(
             llama3::load_llama3(weight_manager, config, output_method)
                 .map_err(Error::ModelBuildError)?
         }
-        "qwen2" => {
-            println!("Loading as Qwen2");
+        "qwen2" | "qwen3" => {
+            println!("Loading as {model_type}");
             let config = qwen2::Qwen2Config::from_huggingface_transformers_json(&config)?;
             qwen2::load_qwen2(weight_manager, config, output_method)
                 .map_err(Error::ModelBuildError)?

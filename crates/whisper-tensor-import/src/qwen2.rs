@@ -17,6 +17,7 @@ pub struct Qwen2Config {
     pub num_hidden_layers: usize,
     pub num_attention_heads: usize,
     pub num_key_value_heads: usize,
+    pub head_dim: Option<usize>,
     pub rope_theta: f64,
     pub max_position_embeddings: usize,
     pub tie_word_embeddings: bool,
@@ -43,6 +44,10 @@ impl Qwen2Config {
             .get("max_position_embeddings")
             .and_then(|v| v.as_i64())
             .unwrap_or(32768) as usize;
+        let head_dim = config
+            .get("head_dim")
+            .and_then(|v| v.as_i64())
+            .map(|v| v as usize);
         let tie_word_embeddings = config
             .get("tie_word_embeddings")
             .and_then(|v| v.as_bool())
@@ -51,6 +56,7 @@ impl Qwen2Config {
             num_hidden_layers,
             num_attention_heads,
             num_key_value_heads,
+            head_dim,
             rope_theta,
             max_position_embeddings,
             tie_word_embeddings,
@@ -92,7 +98,7 @@ pub fn load_qwen2(
     let kv_cache_seq_dim = Dimension::new(None, Some("kv_cache_sequence".to_string()), None);
 
     let model_dim = x.shape().dims.last().unwrap().resolve()?;
-    let head_dim = model_dim / config.num_attention_heads;
+    let head_dim = config.head_dim.unwrap_or(model_dim / config.num_attention_heads);
     let kv_cache_input_type = x.dtype();
     let kv_cache_input_shape = Shape::new(vec![
         batch_dimension,
@@ -156,7 +162,7 @@ pub fn load_qwen2(
         )?;
         let v = linear(&layer_weight_manager.prefix("self_attn.v_proj"), att_norm)?;
 
-        let q = Transpose::new(
+        let q: Arc<dyn Tensor> = Transpose::new(
             None,
             reshape(
                 q,
@@ -164,7 +170,7 @@ pub fn load_qwen2(
             )?,
             Some(vec![0, 2, 1, 3]),
         );
-        let k = Transpose::new(
+        let k: Arc<dyn Tensor> = Transpose::new(
             None,
             reshape(
                 k,
@@ -180,6 +186,19 @@ pub fn load_qwen2(
             )?,
             Some(vec![0, 2, 1, 3]),
         );
+
+        // QK-norm (Qwen3): RMS norm on Q and K per-head before RoPE
+        let attn_wm = layer_weight_manager.prefix("self_attn");
+        let q: Arc<dyn Tensor> = if attn_wm.prefix("q_norm").get_tensor("weight").is_ok() {
+            rms_norm(&attn_wm.prefix("q_norm"), q, None)?
+        } else {
+            q
+        };
+        let k: Arc<dyn Tensor> = if attn_wm.prefix("k_norm").get_tensor("weight").is_ok() {
+            rms_norm(&attn_wm.prefix("k_norm"), k, None)?
+        } else {
+            k
+        };
 
         let kv_cache_input_k = InputTensor::new(
             format!("kv_cache_input_k_{i}"),
