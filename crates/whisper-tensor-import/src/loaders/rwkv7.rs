@@ -47,13 +47,10 @@ impl Loader for Rwkv7Loader {
         let graph = model.get_symbolic_graph();
         let names_by_id = graph.get_tensors_by_name();
 
-        // Collect state pairs by finding matching *_in_* / *_out_* patterns
+        // Collect state pairs from RWKV7 naming convention:
+        // time_mixer_x_in_{i}/time_mixer_x_out_{i},
+        // channel_mixer_x_in_{i}/channel_mixer_x_out_{i}, vk_state_in_{i}/vk_state_out_{i}
         let mut state_pairs = Vec::new();
-        for name in names_by_id.keys() {
-            if name.ends_with("_in") || name.contains("_in_") || name.ends_with("_x_in") {
-                // nope, use actual naming from rwkv7 builder
-            }
-        }
         // RWKV7 state naming: time_mixer_x_in_{i}/time_mixer_x_out_{i},
         // channel_mixer_x_in_{i}/channel_mixer_x_out_{i}, vk_state_in_{i}/vk_state_out_{i}
         let mut layer = 0;

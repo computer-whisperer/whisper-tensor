@@ -446,7 +446,7 @@ impl TextInferenceTokensInLogitOutInterface {
             model_input_link.to_any(),
             token_context_input_link.to_any(),
         ];
-        let super_graph_outputs = vec![processed_logit_output_link.to_any()];
+        let super_graph_outputs = vec![outer_logit_output_link.to_any()];
         let super_graph = super_graph_builder.build(
             rng,
             super_graph_inputs.as_slice(),
@@ -457,7 +457,7 @@ impl TextInferenceTokensInLogitOutInterface {
             tokenizer,
             model_input_link,
             token_context_input_link,
-            logit_output_link: processed_logit_output_link,
+            logit_output_link: outer_logit_output_link,
             super_graph,
             cache_key_input_link: cache_key,
         }
