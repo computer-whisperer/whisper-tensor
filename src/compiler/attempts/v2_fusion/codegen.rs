@@ -222,6 +222,20 @@ fn emit_elementwise(
         loops.push(open_loop(builder, dim, next_var));
     }
 
+    // Precompute reference counts for mul+add → FMA fusion.
+    let mut ref_counts = vec![0u32; kernel.body.len()];
+    for body_op in &kernel.body {
+        match body_op {
+            BodyOp::BinOp { a_ref, b_ref, .. } => {
+                ref_counts[*a_ref] += 1;
+                ref_counts[*b_ref] += 1;
+            }
+            BodyOp::UnaryOp { input_ref, .. } => ref_counts[*input_ref] += 1,
+            BodyOp::Store { value_ref, .. } => ref_counts[*value_ref] += 1,
+            _ => {}
+        }
+    }
+
     // Emit body.
     let mut body_values: Vec<cranelift_codegen::ir::Value> = Vec::new();
 
@@ -246,6 +260,46 @@ fn emit_elementwise(
                 let val = body_values[*value_ref];
                 builder.ins().store(MemFlags::trusted(), val, addr, 0);
                 val
+            }
+            BodyOp::BinOp {
+                op: ScalarBinOp::Add,
+                a_ref,
+                b_ref,
+            } => {
+                // Try to fuse mul+add → FMA when the mul result is only used here.
+                if let BodyOp::BinOp {
+                    op: ScalarBinOp::Mul,
+                    a_ref: mul_a,
+                    b_ref: mul_b,
+                } = &kernel.body[*a_ref]
+                {
+                    if ref_counts[*a_ref] == 1 {
+                        builder.ins().fma(
+                            body_values[*mul_a],
+                            body_values[*mul_b],
+                            body_values[*b_ref],
+                        )
+                    } else {
+                        emit_bin_op(builder, ScalarBinOp::Add, body_values[*a_ref], body_values[*b_ref])
+                    }
+                } else if let BodyOp::BinOp {
+                    op: ScalarBinOp::Mul,
+                    a_ref: mul_a,
+                    b_ref: mul_b,
+                } = &kernel.body[*b_ref]
+                {
+                    if ref_counts[*b_ref] == 1 {
+                        builder.ins().fma(
+                            body_values[*mul_a],
+                            body_values[*mul_b],
+                            body_values[*a_ref],
+                        )
+                    } else {
+                        emit_bin_op(builder, ScalarBinOp::Add, body_values[*a_ref], body_values[*b_ref])
+                    }
+                } else {
+                    emit_bin_op(builder, ScalarBinOp::Add, body_values[*a_ref], body_values[*b_ref])
+                }
             }
             BodyOp::BinOp { op, a_ref, b_ref } => {
                 emit_bin_op(builder, *op, body_values[*a_ref], body_values[*b_ref])
