@@ -1,0 +1,16 @@
+[package]
+name = "whisper-tensor-cli"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "wt"
+path = "src/main.rs"
+
+[dependencies]
+whisper-tensor = { workspace = true, features = ["tokenizers", "rwkv-tokenizer", "http", "blas", "safetensors"] }
+whisper-tensor-import = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+rand = "0.9.2"
+image = "0.25"

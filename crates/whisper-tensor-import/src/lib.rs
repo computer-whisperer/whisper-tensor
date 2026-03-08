@@ -8,9 +8,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub mod llama3;
-mod llama4;
 pub mod loaders;
 pub mod onnx_graph;
+pub mod qwen2;
 pub mod rwkv7;
 pub mod sd15;
 
@@ -126,10 +126,10 @@ pub fn load_transformers_format(
             llama3::load_llama3(weight_manager, config, output_method)
                 .map_err(Error::ModelBuildError)?
         }
-        "llama4" => {
-            println!("Loading as Llama4");
-            let config = llama4::Llama4Config::from_huggingface_transformers_json(&config)?;
-            llama4::load_llama4(weight_manager, config, output_method)
+        "qwen2" => {
+            println!("Loading as Qwen2");
+            let config = qwen2::Qwen2Config::from_huggingface_transformers_json(&config)?;
+            qwen2::load_qwen2(weight_manager, config, output_method)
                 .map_err(Error::ModelBuildError)?
         }
         model_type => Err(Error::UnknownModelType(model_type.to_string()))?,

@@ -63,7 +63,7 @@ tch = ["dep:tch"]
 prost-build = "0.13.3"
 
 [workspace]
-members = [ "crates/whisper-tensor-import", "crates/whisper-tensor-webui", "crates/whisper-tensor-server"]
+members = [ "crates/whisper-tensor-cli", "crates/whisper-tensor-import", "crates/whisper-tensor-webui", "crates/whisper-tensor-server"]
 
 [workspace.dependencies]
 rwkv-tokenizer = { path = "libs/rwkv-tokenizer/rwkv-tokenizer" }
