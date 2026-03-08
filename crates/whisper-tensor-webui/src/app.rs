@@ -421,6 +421,18 @@ impl eframe::App for WebUIApp {
                                                 .loaded_tokenizers
                                                 .insert(tokenizer_info, None);
                                         }
+                                        TokenizerInfo::HFTokenizerLocal(path) => {
+                                            self.server_request_manager
+                                                .send(
+                                                    WebsocketClientServerMessage::GetTokenizerFile(
+                                                        path.clone(),
+                                                    ),
+                                                )
+                                                .unwrap();
+                                            self.loaded_tokenizers
+                                                .loaded_tokenizers
+                                                .insert(tokenizer_info, None);
+                                        }
                                         TokenizerInfo::RWKVWorld => {
                                             self.loaded_tokenizers.loaded_tokenizers.insert(
                                                 tokenizer_info,
@@ -472,6 +484,19 @@ impl eframe::App for WebUIApp {
 
                             self.loaded_tokenizers.loaded_tokenizers.insert(
                                 TokenizerInfo::HFTokenizer(hf_name.clone()),
+                                Some(tokenizer.clone()),
+                            );
+                        }
+                        WebsocketServerClientMessage::TokenizerFileReturn(path, bytes_res) => {
+                            let tokenizer = match bytes_res {
+                                Ok(x) => tokenizers::Tokenizer::from_bytes(x)
+                                    .map_err(|x| x.to_string())
+                                    .map(|x| Arc::new(AnyTokenizer::Tokenizers(x))),
+                                Err(err) => Err(err),
+                            };
+
+                            self.loaded_tokenizers.loaded_tokenizers.insert(
+                                TokenizerInfo::HFTokenizerLocal(path.clone()),
                                 Some(tokenizer.clone()),
                             );
                         }

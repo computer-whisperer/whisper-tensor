@@ -1368,6 +1368,9 @@ impl GraphExplorerApp {
                                                         TokenizerInfo::HFTokenizer(x) => {
                                                             format!("Huggingface: {x}")
                                                         }
+                                                        TokenizerInfo::HFTokenizerLocal(path) => {
+                                                            format!("Local: {path}")
+                                                        }
                                                         TokenizerInfo::RWKVWorld => {
                                                             "RWKV World".to_string()
                                                         }

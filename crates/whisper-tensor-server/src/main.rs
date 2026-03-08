@@ -480,6 +480,13 @@ async fn handle_socket(
                                                 }));
                                             send_message(&mut socket, msg_out).await;
                                         }
+                                        WebsocketClientServerMessage::GetTokenizerFile(path) => {
+                                            tracing::debug!("Getting tokenizer file: {path}");
+                                            let result = std::fs::read(&path)
+                                                .map_err(|e| format!("Failed to read tokenizer file {path}: {e}"));
+                                            let msg_out = WebsocketServerClientMessage::TokenizerFileReturn(path, result);
+                                            send_message(&mut socket, msg_out).await;
+                                        }
                                         WebsocketClientServerMessage::SuperGraphRequest(request) => {
                                             let job = SchedulerJob::SuperGraphRequest((request, finished_supergraph_job_tx.clone(), Some(SchedulerReporter::new(report_queue.clone(), report_notify.clone()))));
                                             scheduler_sender.send(job).await.unwrap();

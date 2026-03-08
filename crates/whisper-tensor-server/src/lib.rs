@@ -102,6 +102,7 @@ pub enum WebsocketClientServerMessage {
     GetModelGraph(LoadedModelId),
     GetStoredTensor(LoadedModelId, TensorStoreTensorId),
     GetHFTokenizer(String),
+    GetTokenizerFile(String),
     SuperGraphRequest(SuperGraphRequest),
     CompileModel(LoadedModelId),
 }
@@ -382,6 +383,7 @@ pub enum WebsocketServerClientMessage {
         Result<NDArrayNumericTensor<DynRank>, String>,
     ),
     HFTokenizerReturn(String, Result<Vec<u8>, String>),
+    TokenizerFileReturn(String, Result<Vec<u8>, String>),
     SuperGraphResponse(SuperGraphResponse),
     SuperGraphExecutionReport(SuperGraphExecutionReport),
 }
