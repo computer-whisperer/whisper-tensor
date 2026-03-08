@@ -136,11 +136,8 @@ fn resolve_padding(
     }
 }
 
-/// im2col for 2D convolution: rearrange input patches into a column matrix.
-/// For a single (batch, group), produces shape [cpg_in * kH * kW, OH * OW].
-fn im2col_2d(
-    input_data: &[f32],
-    col: &mut [f32],
+/// Parameters for 2D im2col operation.
+struct Im2Col2dParams {
     in_base: usize,
     channels_per_group_in: usize,
     in_h: usize,
@@ -155,28 +152,33 @@ fn im2col_2d(
     dilation_w: usize,
     pad_top: usize,
     pad_left: usize,
-) {
-    let out_spatial = out_h * out_w;
-    let in_channel_stride = in_h * in_w;
+}
 
-    for ci in 0..channels_per_group_in {
-        let in_c_base = in_base + ci * in_channel_stride;
-        for kh in 0..kernel_h {
-            for kw in 0..kernel_w {
-                let col_row = (ci * kernel_h + kh) * kernel_w + kw;
+/// im2col for 2D convolution: rearrange input patches into a column matrix.
+/// For a single (batch, group), produces shape [cpg_in * kH * kW, OH * OW].
+fn im2col_2d(input_data: &[f32], col: &mut [f32], p: &Im2Col2dParams) {
+    let out_spatial = p.out_h * p.out_w;
+    let in_channel_stride = p.in_h * p.in_w;
+
+    for ci in 0..p.channels_per_group_in {
+        let in_c_base = p.in_base + ci * in_channel_stride;
+        for kh in 0..p.kernel_h {
+            for kw in 0..p.kernel_w {
+                let col_row = (ci * p.kernel_h + kh) * p.kernel_w + kw;
                 let col_offset = col_row * out_spatial;
-                for oh in 0..out_h {
-                    let ih = (oh * stride_h + kh * dilation_h) as isize - pad_top as isize;
-                    if ih < 0 || ih >= in_h as isize {
-                        for ow in 0..out_w {
-                            col[col_offset + oh * out_w + ow] = 0.0;
+                for oh in 0..p.out_h {
+                    let ih = (oh * p.stride_h + kh * p.dilation_h) as isize - p.pad_top as isize;
+                    if ih < 0 || ih >= p.in_h as isize {
+                        for ow in 0..p.out_w {
+                            col[col_offset + oh * p.out_w + ow] = 0.0;
                         }
                         continue;
                     }
-                    let in_row_base = in_c_base + ih as usize * in_w;
-                    for ow in 0..out_w {
-                        let iw = (ow * stride_w + kw * dilation_w) as isize - pad_left as isize;
-                        col[col_offset + oh * out_w + ow] = if iw >= 0 && iw < in_w as isize {
+                    let in_row_base = in_c_base + ih as usize * p.in_w;
+                    for ow in 0..p.out_w {
+                        let iw =
+                            (ow * p.stride_w + kw * p.dilation_w) as isize - p.pad_left as isize;
+                        col[col_offset + oh * p.out_w + ow] = if iw >= 0 && iw < p.in_w as isize {
                             input_data[in_row_base + iw as usize]
                         } else {
                             0.0
@@ -188,11 +190,11 @@ fn im2col_2d(
     }
 }
 
-/// Generic n-dimensional convolution fallback (1D, 3D+).
-fn conv_nd_generic(
-    input_data: &[f32],
-    weight_data: &[f32],
-    bias_data: Option<&[f32]>,
+/// Parameters for generic n-dimensional convolution.
+struct ConvNdParams<'a> {
+    input_data: &'a [f32],
+    weight_data: &'a [f32],
+    bias_data: Option<&'a [f32]>,
     batch_size: usize,
     in_channels: usize,
     out_channels: usize,
@@ -200,60 +202,63 @@ fn conv_nd_generic(
     channels_per_group_in: usize,
     channels_per_group_out: usize,
     n_spatial: usize,
-    input_spatial: &[usize],
-    out_spatial: &[usize],
-    kernel_shape: &[usize],
-    strides: &[usize],
-    dilations: &[usize],
-    pad_begin: &[usize],
-) -> Vec<f32> {
-    let out_spatial_size: usize = out_spatial.iter().product();
-    let total_out = batch_size * out_channels * out_spatial_size;
-    let in_channel_stride: usize = input_spatial.iter().product();
-    let in_batch_stride = in_channels * in_channel_stride;
-    let w_kernel_size: usize = kernel_shape.iter().product();
-    let w_cin_stride = w_kernel_size;
-    let w_cout_stride = channels_per_group_in * w_cin_stride;
+    input_spatial: &'a [usize],
+    out_spatial: &'a [usize],
+    kernel_shape: &'a [usize],
+    strides: &'a [usize],
+    dilations: &'a [usize],
+    pad_begin: &'a [usize],
+}
 
-    let mut in_spatial_strides = vec![1usize; n_spatial];
-    for i in (0..n_spatial.saturating_sub(1)).rev() {
-        in_spatial_strides[i] = in_spatial_strides[i + 1] * input_spatial[i + 1];
+/// Generic n-dimensional convolution fallback (1D, 3D+).
+fn conv_nd_generic(p: &ConvNdParams) -> Vec<f32> {
+    let out_spatial_size: usize = p.out_spatial.iter().product();
+    let total_out = p.batch_size * p.out_channels * out_spatial_size;
+    let in_channel_stride: usize = p.input_spatial.iter().product();
+    let in_batch_stride = p.in_channels * in_channel_stride;
+    let w_kernel_size: usize = p.kernel_shape.iter().product();
+    let w_cin_stride = w_kernel_size;
+    let w_cout_stride = p.channels_per_group_in * w_cin_stride;
+
+    let mut in_spatial_strides = vec![1usize; p.n_spatial];
+    for i in (0..p.n_spatial.saturating_sub(1)).rev() {
+        in_spatial_strides[i] = in_spatial_strides[i + 1] * p.input_spatial[i + 1];
     }
-    let mut out_spatial_strides = vec![1usize; n_spatial];
-    for i in (0..n_spatial.saturating_sub(1)).rev() {
-        out_spatial_strides[i] = out_spatial_strides[i + 1] * out_spatial[i + 1];
+    let mut out_spatial_strides = vec![1usize; p.n_spatial];
+    for i in (0..p.n_spatial.saturating_sub(1)).rev() {
+        out_spatial_strides[i] = out_spatial_strides[i + 1] * p.out_spatial[i + 1];
     }
-    let mut kernel_strides = vec![1usize; n_spatial];
-    for i in (0..n_spatial.saturating_sub(1)).rev() {
-        kernel_strides[i] = kernel_strides[i + 1] * kernel_shape[i + 1];
+    let mut kernel_strides = vec![1usize; p.n_spatial];
+    for i in (0..p.n_spatial.saturating_sub(1)).rev() {
+        kernel_strides[i] = kernel_strides[i + 1] * p.kernel_shape[i + 1];
     }
 
     let mut output_data = vec![0.0f32; total_out];
 
     // Collect work items for parallelism
-    let work_items: Vec<(usize, usize, usize)> = (0..batch_size)
+    let work_items: Vec<(usize, usize, usize)> = (0..p.batch_size)
         .flat_map(|n| {
-            (0..group).flat_map(move |g| (0..channels_per_group_out).map(move |co| (n, g, co)))
+            (0..p.group).flat_map(move |g| (0..p.channels_per_group_out).map(move |co| (n, g, co)))
         })
         .collect();
 
     let chunk_results: Vec<(usize, Vec<f32>)> = work_items
         .par_iter()
         .map(|&(n, g, co)| {
-            let m = g * channels_per_group_out + co;
-            let bias_val = bias_data.map_or(0.0, |b| b[m]);
+            let m = g * p.channels_per_group_out + co;
+            let bias_val = p.bias_data.map_or(0.0, |b| b[m]);
             let mut out_buf = vec![0.0f32; out_spatial_size];
 
-            let mut out_coords = vec![0usize; n_spatial];
-            let mut k_coords = vec![0usize; n_spatial];
+            let mut out_coords = vec![0usize; p.n_spatial];
+            let mut k_coords = vec![0usize; p.n_spatial];
 
-            for ci in 0..channels_per_group_in {
-                let in_c = g * channels_per_group_in + ci;
+            for ci in 0..p.channels_per_group_in {
+                let in_c = g * p.channels_per_group_in + ci;
 
-                for out_idx in 0..out_spatial_size {
+                for (out_idx, out_val) in out_buf.iter_mut().enumerate() {
                     // Decompose out_idx into spatial coordinates
                     let mut remaining = out_idx;
-                    for d in 0..n_spatial {
+                    for d in 0..p.n_spatial {
                         out_coords[d] = remaining / out_spatial_strides[d];
                         remaining %= out_spatial_strides[d];
                     }
@@ -262,18 +267,18 @@ fn conv_nd_generic(
 
                     for k_idx in 0..w_kernel_size {
                         let mut k_remaining = k_idx;
-                        for d in 0..n_spatial {
+                        for d in 0..p.n_spatial {
                             k_coords[d] = k_remaining / kernel_strides[d];
                             k_remaining %= kernel_strides[d];
                         }
 
                         let mut in_bounds = true;
                         let mut in_spatial_offset = 0usize;
-                        for d in 0..n_spatial {
-                            let pos = (out_coords[d] * strides[d] + k_coords[d] * dilations[d])
+                        for d in 0..p.n_spatial {
+                            let pos = (out_coords[d] * p.strides[d] + k_coords[d] * p.dilations[d])
                                 as isize
-                                - pad_begin[d] as isize;
-                            if pos < 0 || pos >= input_spatial[d] as isize {
+                                - p.pad_begin[d] as isize;
+                            if pos < 0 || pos >= p.input_spatial[d] as isize {
                                 in_bounds = false;
                                 break;
                             }
@@ -284,10 +289,10 @@ fn conv_nd_generic(
                             let in_offset =
                                 n * in_batch_stride + in_c * in_channel_stride + in_spatial_offset;
                             let w_offset = m * w_cout_stride + ci * w_cin_stride + k_idx;
-                            sum += input_data[in_offset] * weight_data[w_offset];
+                            sum += p.input_data[in_offset] * p.weight_data[w_offset];
                         }
                     }
-                    out_buf[out_idx] += sum;
+                    *out_val += sum;
                 }
             }
 
@@ -298,7 +303,7 @@ fn conv_nd_generic(
                 }
             }
 
-            let out_offset = n * (out_channels * out_spatial_size) + m * out_spatial_size;
+            let out_offset = n * (p.out_channels * out_spatial_size) + m * out_spatial_size;
             (out_offset, out_buf)
         })
         .collect();
@@ -466,24 +471,26 @@ impl MilliOp for Conv {
                     im2col_2d(
                         &input_data,
                         &mut col_data,
-                        in_base,
-                        channels_per_group_in,
-                        in_h,
-                        in_w,
-                        out_h,
-                        out_w,
-                        kernel_shape[0],
-                        kernel_shape[1],
-                        strides[0],
-                        strides[1],
-                        dilations[0],
-                        dilations[1],
-                        pad_begin[0],
-                        pad_begin[1],
+                        &Im2Col2dParams {
+                            in_base,
+                            channels_per_group_in,
+                            in_h,
+                            in_w,
+                            out_h,
+                            out_w,
+                            kernel_h: kernel_shape[0],
+                            kernel_w: kernel_shape[1],
+                            stride_h: strides[0],
+                            stride_w: strides[1],
+                            dilation_h: dilations[0],
+                            dilation_w: dilations[1],
+                            pad_top: pad_begin[0],
+                            pad_left: pad_begin[1],
+                        },
                     );
                     let col_tensor = NumericTensor::<DynRank>::from_vec_shape(
                         col_data,
-                        vec![k_per_group as usize, out_spatial_size as usize],
+                        vec![k_per_group, out_spatial_size],
                     )?;
                     // Weight for this group: [cpg_out, K]
                     let w_slice = weight_2d.slice(
@@ -518,10 +525,10 @@ impl MilliOp for Conv {
                 None
             };
 
-            let output_data = conv_nd_generic(
-                &input_data,
-                &weight_data,
-                bias_data.as_deref(),
+            let output_data = conv_nd_generic(&ConvNdParams {
+                input_data: &input_data,
+                weight_data: &weight_data,
+                bias_data: bias_data.as_deref(),
                 batch_size,
                 in_channels,
                 out_channels,
@@ -529,13 +536,13 @@ impl MilliOp for Conv {
                 channels_per_group_in,
                 channels_per_group_out,
                 n_spatial,
-                &input_spatial,
-                &out_spatial,
-                &kernel_shape,
-                &strides,
-                &dilations,
-                &pad_begin,
-            );
+                input_spatial: &input_spatial,
+                out_spatial: &out_spatial,
+                kernel_shape: &kernel_shape,
+                strides: &strides,
+                dilations: &dilations,
+                pad_begin: &pad_begin,
+            });
 
             let mut out_shape = Vec::with_capacity(2 + n_spatial);
             out_shape.push(batch_size);

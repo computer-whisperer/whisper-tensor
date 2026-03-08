@@ -78,7 +78,7 @@ fn main() {
     println!("=== Building StableDiffusionInterface ===");
     let start = Instant::now();
     let mut rng = rand::rng();
-    let sd_interface = StableDiffusionInterface::new(
+    let _sd_interface = StableDiffusionInterface::new(
         &mut rng,
         TokenizerInfo::HFTokenizer("openai/clip-vit-large-patch14".to_string()),
     );
@@ -108,7 +108,7 @@ fn main() {
         NumericTensor::<DynRank>::from_vec_shape(uncond_ids, vec![1, seq_len]).unwrap();
 
     // Generate initial random latent noise (seeded for reproducibility)
-    let latent_n = 1 * 4 * latent_h * latent_w;
+    let latent_n = 4 * latent_h * latent_w;
     use rand::SeedableRng;
     let mut latent_rng = rand::rngs::StdRng::seed_from_u64(42);
     let initial_noise: Vec<f32> = {

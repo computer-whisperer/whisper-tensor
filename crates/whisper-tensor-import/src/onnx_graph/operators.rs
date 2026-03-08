@@ -2536,7 +2536,7 @@ pub struct Conv {
 }
 
 impl Conv {
-    #[allow(clippy::arc_with_non_send_sync)]
+    #[allow(clippy::arc_with_non_send_sync, clippy::too_many_arguments)]
     pub fn new(
         name: Option<String>,
         input: Arc<dyn Tensor>,

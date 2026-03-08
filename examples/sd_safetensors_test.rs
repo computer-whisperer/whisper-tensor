@@ -32,13 +32,11 @@ fn main() {
     let vae_decoder = &output.models[2].model;
 
     println!(
-        "  Models: {} ({}), {} ({}), {} ({})",
+        "  Models: {}, {}, {} ({} interfaces)",
         output.models[0].name,
         output.models[1].name,
         output.models[2].name,
         output.interfaces.len(),
-        "interfaces",
-        "",
     );
 
     let mut backend = EvalBackend::NDArray;
@@ -121,7 +119,7 @@ fn main() {
     // --- Initial latent noise ---
     use rand::SeedableRng;
     let mut latent_rng = rand::rngs::StdRng::seed_from_u64(42);
-    let latent_n = 1 * 4 * latent_h * latent_w;
+    let latent_n = 4 * latent_h * latent_w;
     let initial_noise: Vec<f32> = {
         let mut vals = Vec::with_capacity(latent_n);
         while vals.len() + 1 < latent_n {

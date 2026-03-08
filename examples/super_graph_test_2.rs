@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
 use whisper_tensor::backends::eval_backend::EvalBackend;
-use whisper_tensor::interfaces::TextInferenceTokensInLogitOutInterface;
 use whisper_tensor::loader::{ConfigValue, ConfigValues, Loader};
 use whisper_tensor_import::loaders::OnnxLoader;
 

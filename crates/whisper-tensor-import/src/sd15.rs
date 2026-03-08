@@ -13,12 +13,15 @@ use prost::Message;
 use std::path::Path;
 use std::sync::Arc;
 
+/// ONNX model bytes for the three SD 1.5 sub-models.
+pub type Sd15Models = (Vec<u8>, Vec<u8>, Vec<u8>);
+
 /// Load a standard SD 1.5 checkpoint (.safetensors) and produce three ONNX models.
 /// Returns (text_encoder_onnx, unet_onnx, vae_decoder_onnx).
 pub fn load_sd15_checkpoint(
     checkpoint_path: &Path,
     output_method: WeightStorageStrategy,
-) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>), anyhow::Error> {
+) -> Result<Sd15Models, anyhow::Error> {
     let file = std::fs::File::open(checkpoint_path)?;
     let mmap = unsafe { Mmap::map(&file) }?;
     let weight_manager = SafetensorsWeightManager::new(vec![Arc::new(mmap)])?;
@@ -274,8 +277,7 @@ pub fn build_unet(
     let mut input_block_idx = 1;
     let mut current_ch = MODEL_CHANNELS;
 
-    for level in 0..4 {
-        let ch = channels[level];
+    for (level, &ch) in channels.iter().enumerate() {
         for _block in 0..NUM_RES_BLOCKS {
             h = resnet_block(
                 &wm.prefix(&format!("input_blocks.{input_block_idx}.0")),
@@ -426,6 +428,7 @@ fn timestep_embedding(
     Ok(emb)
 }
 
+#[allow(clippy::arc_with_non_send_sync)]
 fn cos_op(input: Arc<dyn Tensor>) -> Result<Arc<dyn Tensor>, crate::onnx_graph::Error> {
     Ok(Arc::new(UnaryOp {
         name: None,
@@ -434,6 +437,7 @@ fn cos_op(input: Arc<dyn Tensor>) -> Result<Arc<dyn Tensor>, crate::onnx_graph::
     }))
 }
 
+#[allow(clippy::arc_with_non_send_sync)]
 fn sin_op(input: Arc<dyn Tensor>) -> Result<Arc<dyn Tensor>, crate::onnx_graph::Error> {
     Ok(Arc::new(UnaryOp {
         name: None,

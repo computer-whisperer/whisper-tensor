@@ -209,10 +209,7 @@ fn nearest_input_coord(
     nearest_idx.max(0).min(in_size as i64 - 1) as usize
 }
 
-/// Fast path: NCHW nearest resize where only H and W change.
-/// Parallelizes across N*C channels.
-fn resize_nchw_nearest(
-    input: &[f32],
+struct NchwNearestParams {
     n: usize,
     c: usize,
     in_h: usize,
@@ -223,29 +220,50 @@ fn resize_nchw_nearest(
     scale_w: f32,
     coord_transform: ResizeCoordTransform,
     nearest_mode: ResizeNearestMode,
-) -> Vec<f32> {
+}
+
+/// Fast path: NCHW nearest resize where only H and W change.
+/// Parallelizes across N*C channels.
+fn resize_nchw_nearest(input: &[f32], p: &NchwNearestParams) -> Vec<f32> {
     // Precompute index maps for H and W
-    let h_map: Vec<usize> = (0..out_h)
-        .map(|oh| nearest_input_coord(oh, scale_h, in_h, out_h, coord_transform, nearest_mode))
+    let h_map: Vec<usize> = (0..p.out_h)
+        .map(|oh| {
+            nearest_input_coord(
+                oh,
+                p.scale_h,
+                p.in_h,
+                p.out_h,
+                p.coord_transform,
+                p.nearest_mode,
+            )
+        })
         .collect();
-    let w_map: Vec<usize> = (0..out_w)
-        .map(|ow| nearest_input_coord(ow, scale_w, in_w, out_w, coord_transform, nearest_mode))
+    let w_map: Vec<usize> = (0..p.out_w)
+        .map(|ow| {
+            nearest_input_coord(
+                ow,
+                p.scale_w,
+                p.in_w,
+                p.out_w,
+                p.coord_transform,
+                p.nearest_mode,
+            )
+        })
         .collect();
 
-    let in_spatial = in_h * in_w;
-    let out_spatial = out_h * out_w;
-    let total_channels = n * c;
+    let in_spatial = p.in_h * p.in_w;
+    let out_spatial = p.out_h * p.out_w;
+    let total_channels = p.n * p.c;
 
     let chunks: Vec<Vec<f32>> = (0..total_channels)
         .into_par_iter()
         .map(|ch| {
             let in_base = ch * in_spatial;
             let mut out_buf = vec![0.0f32; out_spatial];
-            for oh in 0..out_h {
-                let ih = h_map[oh];
-                let in_row = in_base + ih * in_w;
-                let out_row = oh * out_w;
-                for ow in 0..out_w {
+            for (oh, &ih) in h_map.iter().enumerate() {
+                let in_row = in_base + ih * p.in_w;
+                let out_row = oh * p.out_w;
+                for ow in 0..p.out_w {
                     out_buf[out_row + ow] = input[in_row + w_map[ow]];
                 }
             }
@@ -260,10 +278,7 @@ fn resize_nchw_nearest(
     output
 }
 
-/// Fast path: NCHW bilinear resize where only H and W change.
-/// Parallelizes across N*C channels.
-fn resize_nchw_linear(
-    input: &[f32],
+struct NchwLinearParams {
     n: usize,
     c: usize,
     in_h: usize,
@@ -273,34 +288,37 @@ fn resize_nchw_linear(
     scale_h: f32,
     scale_w: f32,
     coord_transform: ResizeCoordTransform,
-) -> Vec<f32> {
+}
+
+/// Fast path: NCHW bilinear resize where only H and W change.
+/// Parallelizes across N*C channels.
+fn resize_nchw_linear(input: &[f32], p: &NchwLinearParams) -> Vec<f32> {
     // Precompute interpolation parameters for H and W
-    let h_params: Vec<(usize, usize, f32)> = (0..out_h)
-        .map(|oh| bilinear_params(oh, scale_h, in_h, out_h, coord_transform))
+    let h_params: Vec<(usize, usize, f32)> = (0..p.out_h)
+        .map(|oh| bilinear_params(oh, p.scale_h, p.in_h, p.out_h, p.coord_transform))
         .collect();
-    let w_params: Vec<(usize, usize, f32)> = (0..out_w)
-        .map(|ow| bilinear_params(ow, scale_w, in_w, out_w, coord_transform))
+    let w_params: Vec<(usize, usize, f32)> = (0..p.out_w)
+        .map(|ow| bilinear_params(ow, p.scale_w, p.in_w, p.out_w, p.coord_transform))
         .collect();
 
-    let in_spatial = in_h * in_w;
-    let out_spatial = out_h * out_w;
-    let total_channels = n * c;
+    let in_spatial = p.in_h * p.in_w;
+    let out_spatial = p.out_h * p.out_w;
+    let total_channels = p.n * p.c;
 
     let chunks: Vec<Vec<f32>> = (0..total_channels)
         .into_par_iter()
         .map(|ch| {
             let in_base = ch * in_spatial;
             let mut out_buf = vec![0.0f32; out_spatial];
-            for oh in 0..out_h {
-                let (ih0, ih1, fh) = h_params[oh];
-                let out_row = oh * out_w;
-                for ow in 0..out_w {
+            for (oh, &(ih0, ih1, fh)) in h_params.iter().enumerate() {
+                let out_row = oh * p.out_w;
+                for ow in 0..p.out_w {
                     let (iw0, iw1, fw) = w_params[ow];
                     // Bilinear: (1-fh)*(1-fw)*TL + (1-fh)*fw*TR + fh*(1-fw)*BL + fh*fw*BR
-                    let tl = input[in_base + ih0 * in_w + iw0];
-                    let tr = input[in_base + ih0 * in_w + iw1];
-                    let bl = input[in_base + ih1 * in_w + iw0];
-                    let br = input[in_base + ih1 * in_w + iw1];
+                    let tl = input[in_base + ih0 * p.in_w + iw0];
+                    let tr = input[in_base + ih0 * p.in_w + iw1];
+                    let bl = input[in_base + ih1 * p.in_w + iw0];
+                    let br = input[in_base + ih1 * p.in_w + iw1];
                     out_buf[out_row + ow] =
                         (1.0 - fh) * ((1.0 - fw) * tl + fw * tr) + fh * ((1.0 - fw) * bl + fw * br);
                 }
@@ -966,61 +984,69 @@ impl MilliOp for Resize {
             match self.mode {
                 ResizeMode::Nearest => resize_nchw_nearest(
                     &input_flat,
-                    n,
-                    c,
-                    in_h,
-                    in_w,
-                    out_h,
-                    out_w,
-                    scales[2],
-                    scales[3],
-                    self.coord_transform,
-                    self.nearest_mode,
+                    &NchwNearestParams {
+                        n,
+                        c,
+                        in_h,
+                        in_w,
+                        out_h,
+                        out_w,
+                        scale_h: scales[2],
+                        scale_w: scales[3],
+                        coord_transform: self.coord_transform,
+                        nearest_mode: self.nearest_mode,
+                    },
                 ),
                 ResizeMode::Linear => resize_nchw_linear(
                     &input_flat,
-                    n,
-                    c,
-                    in_h,
-                    in_w,
-                    out_h,
-                    out_w,
-                    scales[2],
-                    scales[3],
-                    self.coord_transform,
+                    &NchwLinearParams {
+                        n,
+                        c,
+                        in_h,
+                        in_w,
+                        out_h,
+                        out_w,
+                        scale_h: scales[2],
+                        scale_w: scales[3],
+                        coord_transform: self.coord_transform,
+                    },
                 ),
                 ResizeMode::Cubic => {
                     // Fall through to generic for cubic
                     resize_generic(
                         &input_flat,
-                        &input_shape,
-                        &output_shape,
-                        &scales,
-                        &full_roi,
-                        self.mode,
-                        self.coord_transform,
-                        self.nearest_mode,
-                        self.cubic_coeff_a,
-                        self.antialias,
-                        self.exclude_outside,
-                        self.extrapolation_value,
+                        &ResizeGenericParams {
+                            input_shape: &input_shape,
+                            output_shape: &output_shape,
+                            scales: &scales,
+                            full_roi: &full_roi,
+                            mode: self.mode,
+                            coord_transform: self.coord_transform,
+                            nearest_mode: self.nearest_mode,
+                            cubic_coeff_a: self.cubic_coeff_a,
+                            antialias: self.antialias,
+                            exclude_outside: self.exclude_outside,
+                            extrapolation_value: self.extrapolation_value,
+                        },
                     )
                 }
             }
         } else {
             resize_generic(
                 &input_flat,
-                &input_shape,
-                &output_shape,
-                &scales,
-                &full_roi,
-                self.mode,
-                self.coord_transform,
-                self.nearest_mode,
-                self.cubic_coeff_a,
-                self.antialias,
-                self.exclude_outside,
-                self.extrapolation_value,
+                &ResizeGenericParams {
+                    input_shape: &input_shape,
+                    output_shape: &output_shape,
+                    scales: &scales,
+                    full_roi: &full_roi,
+                    mode: self.mode,
+                    coord_transform: self.coord_transform,
+                    nearest_mode: self.nearest_mode,
+                    cubic_coeff_a: self.cubic_coeff_a,
+                    antialias: self.antialias,
+                    exclude_outside: self.exclude_outside,
+                    extrapolation_value: self.extrapolation_value,
+                },
             )
         };
 
@@ -1032,13 +1058,11 @@ impl MilliOp for Resize {
     }
 }
 
-/// Generic fallback using recursive separable interpolation with rayon.
-fn resize_generic(
-    input_flat: &[f32],
-    input_shape: &[u64],
-    output_shape: &[usize],
-    scales: &[f32],
-    full_roi: &[f32],
+struct ResizeGenericParams<'a> {
+    input_shape: &'a [u64],
+    output_shape: &'a [usize],
+    scales: &'a [f32],
+    full_roi: &'a [f32],
     mode: ResizeMode,
     coord_transform: ResizeCoordTransform,
     nearest_mode: ResizeNearestMode,
@@ -1046,14 +1070,17 @@ fn resize_generic(
     antialias: bool,
     exclude_outside: bool,
     extrapolation_value: f32,
-) -> Vec<f32> {
-    let rank = input_shape.len();
-    let input_shape_usize: Vec<usize> = input_shape.iter().map(|&x| x as usize).collect();
+}
 
-    let output_numel: usize = output_shape.iter().product();
+/// Generic fallback using recursive separable interpolation with rayon.
+fn resize_generic(input_flat: &[f32], p: &ResizeGenericParams) -> Vec<f32> {
+    let rank = p.input_shape.len();
+    let input_shape_usize: Vec<usize> = p.input_shape.iter().map(|&x| x as usize).collect();
+
+    let output_numel: usize = p.output_shape.iter().product();
     let mut output_strides = vec![1usize; rank];
     for i in (0..rank.saturating_sub(1)).rev() {
-        output_strides[i] = output_strides[i + 1] * output_shape[i + 1];
+        output_strides[i] = output_strides[i + 1] * p.output_shape[i + 1];
     }
 
     let output_data: Vec<f32> = (0..output_numel)
@@ -1069,17 +1096,17 @@ fn resize_generic(
             interpolate_nd(
                 input_flat,
                 &input_shape_usize,
-                output_shape,
-                scales,
+                p.output_shape,
+                p.scales,
                 &out_coords,
-                mode,
-                coord_transform,
-                nearest_mode,
-                cubic_coeff_a,
-                antialias,
-                exclude_outside,
-                extrapolation_value,
-                full_roi,
+                p.mode,
+                p.coord_transform,
+                p.nearest_mode,
+                p.cubic_coeff_a,
+                p.antialias,
+                p.exclude_outside,
+                p.extrapolation_value,
+                p.full_roi,
             )
         })
         .collect();
