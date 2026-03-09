@@ -448,6 +448,16 @@ impl eframe::App for WebUIApp {
                                                 )))),
                                             );
                                         }
+                                        TokenizerInfo::HFTokenizerJson(_) => {
+                                            self.loaded_tokenizers.loaded_tokenizers.insert(
+                                                tokenizer_info.clone(),
+                                                Some(Ok(Arc::new(
+                                                    AnyTokenizer::from_tokenizer_info(
+                                                        &tokenizer_info,
+                                                    ),
+                                                ))),
+                                            );
+                                        }
                                     }
                                 }
                             }

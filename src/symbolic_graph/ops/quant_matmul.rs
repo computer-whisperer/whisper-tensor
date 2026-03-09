@@ -28,12 +28,7 @@ pub struct QuantMatMulOperation {
 }
 
 impl QuantMatMulOperation {
-    pub fn new(
-        input: GlobalId,
-        weight: GlobalId,
-        output: GlobalId,
-        rng: &mut impl Rng,
-    ) -> Self {
+    pub fn new(input: GlobalId, weight: GlobalId, output: GlobalId, rng: &mut impl Rng) -> Self {
         Self {
             global_id: GlobalId::new(rng),
             input,

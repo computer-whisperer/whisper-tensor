@@ -9,7 +9,6 @@ use crate::TrigOp;
 #[cfg(feature = "candle")]
 use crate::backends::candle_backend;
 use crate::backends::ndarray_backend::conversions::NDArrayNumericTensorType;
-use crate::packed_tensor::PackedTensor;
 #[cfg(feature = "tch")]
 use crate::backends::tch_backend::{self, TCHNumericTensor};
 #[cfg(feature = "vulkan")]
@@ -18,6 +17,7 @@ use crate::backends::vulkan_backend::tensor::VulkanTensor;
 use crate::backends::vulkan_backend::{VulkanError, VulkanImmediateExecutor};
 use crate::numeric_scalar::NumericScalar;
 use crate::numeric_tensor_typed::NumericTensorTyped;
+use crate::packed_tensor::PackedTensor;
 use crate::tensor_rank::{DimContainer, DynRank, Rank};
 
 #[derive(Debug, thiserror::Error)]

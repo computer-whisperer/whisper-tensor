@@ -178,8 +178,7 @@ impl GgufFile {
             let ggml_type = read_u32(f)?;
             let offset_in_data = read_u64(f)?;
 
-            let (dtype, byte_length) =
-                resolve_ggml_type(ggml_type, &dimensions)?;
+            let (dtype, byte_length) = resolve_ggml_type(ggml_type, &dimensions)?;
 
             tensors.push(GgufTensorInfo {
                 name,
@@ -227,10 +226,7 @@ impl GgufFile {
 }
 
 /// Map a ggml_type id + dimensions to our DType and compute the byte length.
-fn resolve_ggml_type(
-    ggml_type: u32,
-    dimensions: &[u64],
-) -> Result<(DType, usize), GgufParseError> {
+fn resolve_ggml_type(ggml_type: u32, dimensions: &[u64]) -> Result<(DType, usize), GgufParseError> {
     // Non-packed types first
     let num_elements: u64 = dimensions.iter().product();
     match ggml_type {
@@ -385,12 +381,16 @@ mod tests {
         assert_eq!(gguf.tensors.len(), 291);
 
         // Check token_embd.weight — [vocab_size, hidden_dim] in standard order
-        let embd = gguf.get_tensor("token_embd.weight").expect("missing token_embd");
+        let embd = gguf
+            .get_tensor("token_embd.weight")
+            .expect("missing token_embd");
         assert_eq!(embd.dtype, DType::Packed(PackedFormat::Q4_0));
         assert_eq!(embd.dimensions, vec![128256, 4096]);
 
         // Check that an F32 norm weight exists
-        let norm = gguf.get_tensor("output_norm.weight").expect("missing output_norm");
+        let norm = gguf
+            .get_tensor("output_norm.weight")
+            .expect("missing output_norm");
         assert_eq!(norm.dtype, DType::F32);
         assert_eq!(norm.dimensions, vec![4096]);
 
@@ -419,7 +419,10 @@ mod tests {
             .expect("missing blk.0.attn_q.weight");
         // Q4_K_M uses Q4_K for most attention weights
         assert!(
-            matches!(q_proj.dtype, DType::Packed(PackedFormat::Q4_K) | DType::Packed(PackedFormat::Q6_K)),
+            matches!(
+                q_proj.dtype,
+                DType::Packed(PackedFormat::Q4_K) | DType::Packed(PackedFormat::Q6_K)
+            ),
             "Unexpected dtype for Q4_K_M attention: {:?}",
             q_proj.dtype
         );

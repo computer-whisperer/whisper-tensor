@@ -206,7 +206,7 @@ fn dequantize_q5_0(data: &[u8], output: &mut [f32]) {
 
         for j in 0..QK / 2 {
             let xh_0 = ((qh >> (j as u32)) << 4) & 0x10;
-            let xh_1 = ((qh >> (j as u32 + 12))) & 0x10;
+            let xh_1 = (qh >> (j as u32 + 12)) & 0x10;
             let x0 = ((qs[j] & 0x0F) as u32 | xh_0) as i32 - 16;
             let x1 = ((qs[j] >> 4) as u32 | xh_1) as i32 - 16;
             output[i * QK + j] = x0 as f32 * d;
@@ -229,7 +229,7 @@ fn dequantize_q5_1(data: &[u8], output: &mut [f32]) {
 
         for j in 0..QK / 2 {
             let xh_0 = ((qh >> (j as u32)) << 4) & 0x10;
-            let xh_1 = ((qh >> (j as u32 + 12))) & 0x10;
+            let xh_1 = (qh >> (j as u32 + 12)) & 0x10;
             let x0 = (qs[j] & 0x0F) as u32 | xh_0;
             let x1 = (qs[j] >> 4) as u32 | xh_1;
             output[i * QK + j] = x0 as f32 * d + m;
@@ -501,12 +501,10 @@ fn dequantize_q6_k(data: &[u8], output: &mut [f32]) {
             for l in 0..32 {
                 let is = l / 16;
                 let q1 =
-                    ((ql[ql_offset + l] & 0xF) | (((qh[qh_offset + l] >> 0) & 3) << 4)) as i8
-                        - 32;
-                let q2 =
-                    ((ql[ql_offset + 32 + l] & 0xF) | (((qh[qh_offset + l] >> 2) & 3) << 4))
-                        as i8
-                        - 32;
+                    ((ql[ql_offset + l] & 0xF) | (((qh[qh_offset + l] >> 0) & 3) << 4)) as i8 - 32;
+                let q2 = ((ql[ql_offset + 32 + l] & 0xF) | (((qh[qh_offset + l] >> 2) & 3) << 4))
+                    as i8
+                    - 32;
                 let q3 =
                     ((ql[ql_offset + l] >> 4) | (((qh[qh_offset + l] >> 4) & 3) << 4)) as i8 - 32;
                 let q4 = ((ql[ql_offset + 32 + l] >> 4) | (((qh[qh_offset + l] >> 6) & 3) << 4))

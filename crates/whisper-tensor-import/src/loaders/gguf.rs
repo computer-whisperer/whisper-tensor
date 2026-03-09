@@ -41,8 +41,8 @@ impl Loader for GgufLoader {
         let tokenizer_name = get_string(&config, "tokenizer")?;
 
         // Parse GGUF once, detect architecture, dispatch to builder
-        let gguf = crate::gguf::GgufFile::open(&path)
-            .map_err(|e| LoaderError::LoadFailed(e.into()))?;
+        let gguf =
+            crate::gguf::GgufFile::open(&path).map_err(|e| LoaderError::LoadFailed(e.into()))?;
 
         let arch = gguf
             .architecture()
@@ -59,7 +59,7 @@ impl Loader for GgufLoader {
             _ => {
                 return Err(LoaderError::LoadFailed(anyhow::anyhow!(
                     "Unsupported GGUF architecture: {arch}"
-                )))
+                )));
             }
         };
 
@@ -81,7 +81,7 @@ impl Loader for GgufLoader {
 
         // Build TextInference interface if we have state pairs AND a tokenizer
         if !info.state_pairs.is_empty() {
-            if let Some(tokenizer_info) = resolve_tokenizer(&tokenizer_name, &path) {
+            if let Some(tokenizer_info) = resolve_tokenizer(&tokenizer_name, &path, &gguf) {
                 let graph = model.get_symbolic_graph();
                 let mut rng = rand::rng();
                 let interface = build_rnn_supergraph(
@@ -103,10 +103,11 @@ impl Loader for GgufLoader {
     }
 }
 
-/// Resolve tokenizer from config or adjacent files. Returns None if no tokenizer available.
+/// Resolve tokenizer from config, adjacent files, or embedded GGUF metadata.
 fn resolve_tokenizer(
     tokenizer_name: &Option<String>,
     gguf_path: &std::path::Path,
+    gguf: &crate::gguf::GgufFile,
 ) -> Option<TokenizerInfo> {
     // Explicitly provided tokenizer
     if let Some(name) = tokenizer_name {
@@ -129,6 +130,11 @@ fn resolve_tokenizer(
                 abs.to_string_lossy().to_string(),
             ));
         }
+    }
+
+    // Synthesize from GGUF embedded tokenizer metadata
+    if let Some(json) = crate::gguf::tokenizer::synthesize_tokenizer_json(gguf) {
+        return Some(TokenizerInfo::HFTokenizerJson(json));
     }
 
     None

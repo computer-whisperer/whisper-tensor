@@ -1374,6 +1374,9 @@ impl GraphExplorerApp {
                                                         TokenizerInfo::RWKVWorld => {
                                                             "RWKV World".to_string()
                                                         }
+                                                        TokenizerInfo::HFTokenizerJson(_) => {
+                                                            "GGUF embedded".to_string()
+                                                        }
                                                     };
                                                     ui.label(format!("Tokenizer: {v}"));
                                                 }

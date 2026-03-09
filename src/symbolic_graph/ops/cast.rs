@@ -143,7 +143,10 @@ impl Operation for CastOperation {
     fn eval(
         &self,
         backend: &mut crate::backends::eval_backend::EvalBackend,
-        inputs: &HashMap<GlobalId, crate::numeric_tensor::NumericTensor<crate::tensor_rank::DynRank>>,
+        inputs: &HashMap<
+            GlobalId,
+            crate::numeric_tensor::NumericTensor<crate::tensor_rank::DynRank>,
+        >,
     ) -> super::OperationEvalRet {
         let input = inputs
             .get(&self.input)
@@ -151,8 +154,7 @@ impl Operation for CastOperation {
 
         // Handle packed (quantized) inputs: dequantize to F32, then cast if needed
         if let crate::numeric_tensor::NumericTensor::Packed(p) = input {
-            let f32_tensor =
-                crate::numeric_tensor::NumericTensor::NDArray(p.dequantize());
+            let f32_tensor = crate::numeric_tensor::NumericTensor::NDArray(p.dequantize());
             let result = if self.to == crate::dtype::DType::F32 {
                 f32_tensor
             } else {

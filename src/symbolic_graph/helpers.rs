@@ -120,12 +120,7 @@ impl SymbolicGraphMutator {
         out
     }
 
-    pub fn push_sigmoid(
-        &mut self,
-        name: &str,
-        input: GlobalId,
-        rng: &mut impl Rng,
-    ) -> GlobalId {
+    pub fn push_sigmoid(&mut self, name: &str, input: GlobalId, rng: &mut impl Rng) -> GlobalId {
         self.push_unary(name, input, WhichUnaryOperation::Sigmoid, rng)
     }
 
@@ -271,8 +266,8 @@ impl SymbolicGraphMutator {
         let op = RotaryEmbeddingOperation::new(
             data, cos, sin, None, // no position_ids
             out, false, // not interleaved
-            None, // num_heads
-            0,    // full head rotation
+            None,  // num_heads
+            0,     // full head rotation
             rng,
         );
         self.push_op(name, AnyOperation::RotaryEmbedding(op), rng);
@@ -282,12 +277,7 @@ impl SymbolicGraphMutator {
     // ── composites ───────────────────────────────────────────────────
 
     /// SiLU activation: x * sigmoid(x). Synthesized since there is no SiLU primitive.
-    pub fn push_silu(
-        &mut self,
-        name: &str,
-        input: GlobalId,
-        rng: &mut impl Rng,
-    ) -> GlobalId {
+    pub fn push_silu(&mut self, name: &str, input: GlobalId, rng: &mut impl Rng) -> GlobalId {
         let sig = self.push_sigmoid(&format!("{name}/sigmoid"), input, rng);
         self.push_mul(name, input, sig, rng)
     }

@@ -47,6 +47,19 @@ impl AnyTokenizer {
                     panic!("Tokenizers feature not enabled")
                 }
             }
+            #[allow(unused_variables)]
+            TokenizerInfo::HFTokenizerJson(json) => {
+                #[cfg(feature = "tokenizers")]
+                {
+                    AnyTokenizer::Tokenizers(
+                        tokenizers::Tokenizer::from_bytes(json.as_bytes()).unwrap(),
+                    )
+                }
+                #[cfg(not(feature = "tokenizers"))]
+                {
+                    panic!("Tokenizers feature not enabled")
+                }
+            }
             TokenizerInfo::RWKVWorld => {
                 #[cfg(feature = "rwkv-tokenizer")]
                 {

@@ -63,9 +63,7 @@ impl Model {
         tensor_store: TensorStore,
     ) -> Self {
         Self {
-            id: ModelID {
-                name: name.into(),
-            },
+            id: ModelID { name: name.into() },
             graph,
             tensor_store,
             onnx_data: Vec::new(),

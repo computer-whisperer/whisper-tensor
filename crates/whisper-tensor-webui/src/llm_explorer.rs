@@ -191,6 +191,7 @@ impl LLMExplorerApp {
                             format!("Local: {path}")
                         }
                         TokenizerInfo::RWKVWorld => "RWKV World".to_string(),
+                        TokenizerInfo::HFTokenizerJson(_) => "GGUF embedded".to_string(),
                     };
                     ui.label(format!("Using tokenizer: {v}"));
                 }

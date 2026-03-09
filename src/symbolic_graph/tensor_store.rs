@@ -177,8 +177,7 @@ impl StoredTensor {
                 ..
             } => {
                 use std::io::{Read, Seek, SeekFrom};
-                let mut file =
-                    std::fs::File::open(path).expect("Failed to open GGUF tensor file");
+                let mut file = std::fs::File::open(path).expect("Failed to open GGUF tensor file");
                 file.seek(SeekFrom::Start(*offset as u64))
                     .expect("seek failed");
                 let mut buf = vec![0u8; *length];

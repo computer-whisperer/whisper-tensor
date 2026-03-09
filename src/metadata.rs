@@ -4,5 +4,7 @@ use serde::{Deserialize, Serialize};
 pub enum TokenizerInfo {
     HFTokenizer(String),
     HFTokenizerLocal(String),
+    /// In-memory tokenizer.json content (e.g. synthesized from GGUF metadata).
+    HFTokenizerJson(String),
     RWKVWorld,
 }

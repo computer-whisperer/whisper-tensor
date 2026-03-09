@@ -35,13 +35,10 @@ impl GgufLlama3Config {
         };
 
         let num_hidden_layers = get_u64(&format!("{prefix}.block_count"))? as usize;
-        let num_attention_heads =
-            get_u64(&format!("{prefix}.attention.head_count"))? as usize;
-        let num_key_value_heads =
-            get_u64(&format!("{prefix}.attention.head_count_kv"))? as usize;
+        let num_attention_heads = get_u64(&format!("{prefix}.attention.head_count"))? as usize;
+        let num_key_value_heads = get_u64(&format!("{prefix}.attention.head_count_kv"))? as usize;
         let embedding_length = get_u64(&format!("{prefix}.embedding_length"))? as usize;
-        let feed_forward_length =
-            get_u64(&format!("{prefix}.feed_forward_length"))? as usize;
+        let feed_forward_length = get_u64(&format!("{prefix}.feed_forward_length"))? as usize;
         let rope_theta = gguf
             .get_metadata(&format!("{prefix}.rope.freq_base"))
             .and_then(|v| v.as_f32_coerce())
@@ -142,7 +139,11 @@ impl<'a> GraphBuilder<'a> {
     }
 
     /// Load a GGUF tensor as a stored constant in the graph.
-    fn load_weight(&mut self, name: &str, rng: &mut impl rand::Rng) -> Result<GlobalId, anyhow::Error> {
+    fn load_weight(
+        &mut self,
+        name: &str,
+        rng: &mut impl rand::Rng,
+    ) -> Result<GlobalId, anyhow::Error> {
         let info = self
             .gguf
             .get_tensor(name)
@@ -157,7 +158,9 @@ impl<'a> GraphBuilder<'a> {
             shape: info.dimensions.clone(),
         };
         let store_id = self.m.tensor_store_mut().add_tensor(stored);
-        Ok(self.m.push_stored_tensor(store_id, Some(name.to_string()), rng))
+        Ok(self
+            .m
+            .push_stored_tensor(store_id, Some(name.to_string()), rng))
     }
 
     /// Create an input tensor node with dtype and shape info.
@@ -201,8 +204,12 @@ impl<'a> GraphBuilder<'a> {
 
         // -- Embedding (dequantize packed weight, then gather) --
         let embed_weight = self.load_weight("token_embd.weight", rng)?;
-        let embed_weight = self.m.push_cast("embed_tokens/cast", embed_weight, DType::F32, rng);
-        let x = self.m.push_gather("embed_tokens", embed_weight, input_ids, 0, rng);
+        let embed_weight = self
+            .m
+            .push_cast("embed_tokens/cast", embed_weight, DType::F32, rng);
+        let x = self
+            .m
+            .push_gather("embed_tokens", embed_weight, input_ids, 0, rng);
 
         // -- Precompute RoPE cos/sin caches --
         let max_len = config.max_position_embeddings;
@@ -222,8 +229,12 @@ impl<'a> GraphBuilder<'a> {
             let shape = vec![max_len as u64, half_head_dim as u64];
             let cos_nd = NDArrayNumericTensor::from_vec_shape(cos_vals, &shape).unwrap();
             let sin_nd = NDArrayNumericTensor::from_vec_shape(sin_vals, &shape).unwrap();
-            let cos_id = self.m.push_constant_tensor(cos_nd, Some("cos_cache".to_string()), rng);
-            let sin_id = self.m.push_constant_tensor(sin_nd, Some("sin_cache".to_string()), rng);
+            let cos_id = self
+                .m
+                .push_constant_tensor(cos_nd, Some("cos_cache".to_string()), rng);
+            let sin_id = self
+                .m
+                .push_constant_tensor(sin_nd, Some("sin_cache".to_string()), rng);
             (cos_id, sin_id)
         };
 
@@ -255,9 +266,15 @@ impl<'a> GraphBuilder<'a> {
             let k_w = self.load_weight(&format!("blk.{i}.attn_k.weight"), rng)?;
             let v_w = self.load_weight(&format!("blk.{i}.attn_v.weight"), rng)?;
 
-            let q = self.m.push_quant_linear(&format!("blk.{i}.attn_q"), att_normed, q_w, rng);
-            let k = self.m.push_quant_linear(&format!("blk.{i}.attn_k"), att_normed, k_w, rng);
-            let v = self.m.push_quant_linear(&format!("blk.{i}.attn_v"), att_normed, v_w, rng);
+            let q = self
+                .m
+                .push_quant_linear(&format!("blk.{i}.attn_q"), att_normed, q_w, rng);
+            let k = self
+                .m
+                .push_quant_linear(&format!("blk.{i}.attn_k"), att_normed, k_w, rng);
+            let v = self
+                .m
+                .push_quant_linear(&format!("blk.{i}.attn_v"), att_normed, v_w, rng);
 
             // Reshape to [B, S, H, D] then transpose to [B, H, S, D]
             let q = self.m.push_reshape(
@@ -266,48 +283,49 @@ impl<'a> GraphBuilder<'a> {
                 &[0, 0, config.num_attention_heads as i64, head_dim as i64],
                 rng,
             );
-            let q = self.m.push_transpose(
-                &format!("blk.{i}.q_transpose"),
-                q,
-                &[0, 2, 1, 3],
-                rng,
-            );
+            let q = self
+                .m
+                .push_transpose(&format!("blk.{i}.q_transpose"), q, &[0, 2, 1, 3], rng);
             let k = self.m.push_reshape(
                 &format!("blk.{i}.k_reshape"),
                 k,
                 &[0, 0, config.num_key_value_heads as i64, head_dim as i64],
                 rng,
             );
-            let k = self.m.push_transpose(
-                &format!("blk.{i}.k_transpose"),
-                k,
-                &[0, 2, 1, 3],
-                rng,
-            );
+            let k = self
+                .m
+                .push_transpose(&format!("blk.{i}.k_transpose"), k, &[0, 2, 1, 3], rng);
             let v = self.m.push_reshape(
                 &format!("blk.{i}.v_reshape"),
                 v,
                 &[0, 0, config.num_key_value_heads as i64, head_dim as i64],
                 rng,
             );
-            let v = self.m.push_transpose(
-                &format!("blk.{i}.v_transpose"),
-                v,
-                &[0, 2, 1, 3],
-                rng,
-            );
+            let v = self
+                .m
+                .push_transpose(&format!("blk.{i}.v_transpose"), v, &[0, 2, 1, 3], rng);
 
             // KV cache inputs
             let kv_cache_k = self.input_tensor(
                 &format!("kv_cache_input_k_{i}"),
                 DType::F32,
-                vec![Some(1), Some(config.num_key_value_heads as u64), None, Some(head_dim as u64)],
+                vec![
+                    Some(1),
+                    Some(config.num_key_value_heads as u64),
+                    None,
+                    Some(head_dim as u64),
+                ],
                 rng,
             );
             let kv_cache_v = self.input_tensor(
                 &format!("kv_cache_input_v_{i}"),
                 DType::F32,
-                vec![Some(1), Some(config.num_key_value_heads as u64), None, Some(head_dim as u64)],
+                vec![
+                    Some(1),
+                    Some(config.num_key_value_heads as u64),
+                    None,
+                    Some(head_dim as u64),
+                ],
                 rng,
             );
 
@@ -365,10 +383,26 @@ impl<'a> GraphBuilder<'a> {
             // Concat with KV cache — output tensors have explicit names
             let k_out_name = format!("kv_cache_output_k_{i}");
             let v_out_name = format!("kv_cache_output_v_{i}");
-            let k_out = self.m.push_unknown_tensor(&k_out_name, TensorType::Intermediate, rng);
-            let v_out = self.m.push_unknown_tensor(&v_out_name, TensorType::Intermediate, rng);
-            self.m.push_concat_into(&format!("blk.{i}.k_concat"), vec![kv_cache_k, k], 2, k_out, rng);
-            self.m.push_concat_into(&format!("blk.{i}.v_concat"), vec![kv_cache_v, v], 2, v_out, rng);
+            let k_out = self
+                .m
+                .push_unknown_tensor(&k_out_name, TensorType::Intermediate, rng);
+            let v_out = self
+                .m
+                .push_unknown_tensor(&v_out_name, TensorType::Intermediate, rng);
+            self.m.push_concat_into(
+                &format!("blk.{i}.k_concat"),
+                vec![kv_cache_k, k],
+                2,
+                k_out,
+                rng,
+            );
+            self.m.push_concat_into(
+                &format!("blk.{i}.v_concat"),
+                vec![kv_cache_v, v],
+                2,
+                v_out,
+                rng,
+            );
 
             self.output_tensor(k_out);
             self.output_tensor(v_out);
@@ -389,7 +423,9 @@ impl<'a> GraphBuilder<'a> {
                     rng,
                 );
                 let k_copies: Vec<GlobalId> = vec![k_unsq; n_rep];
-                let k_repeated = self.m.push_concat(&format!("blk.{i}.k_gqa_repeat"), k_copies, 2, rng);
+                let k_repeated =
+                    self.m
+                        .push_concat(&format!("blk.{i}.k_gqa_repeat"), k_copies, 2, rng);
                 let k = self.m.push_reshape(
                     &format!("blk.{i}.k_gqa_merge"),
                     k_repeated,
@@ -405,7 +441,9 @@ impl<'a> GraphBuilder<'a> {
                     rng,
                 );
                 let v_copies: Vec<GlobalId> = vec![v_unsq; n_rep];
-                let v_repeated = self.m.push_concat(&format!("blk.{i}.v_gqa_repeat"), v_copies, 2, rng);
+                let v_repeated =
+                    self.m
+                        .push_concat(&format!("blk.{i}.v_gqa_repeat"), v_copies, 2, rng);
                 let v = self.m.push_reshape(
                     &format!("blk.{i}.v_gqa_merge"),
                     v_repeated,
@@ -419,13 +457,23 @@ impl<'a> GraphBuilder<'a> {
             };
 
             // Attention: scores = Q @ K^T / sqrt(d)
-            let kt = self.m.push_transpose(&format!("blk.{i}.kt"), k, &[0, 1, 3, 2], rng);
-            let scores = self.m.push_matmul(&format!("blk.{i}.attn_scores"), q, kt, rng);
-            let scores = self.m.push_div(&format!("blk.{i}.attn_scale"), scores, scale_const, rng);
-            let scores = self.m.push_softmax(&format!("blk.{i}.attn_softmax"), scores, 3, rng);
+            let kt = self
+                .m
+                .push_transpose(&format!("blk.{i}.kt"), k, &[0, 1, 3, 2], rng);
+            let scores = self
+                .m
+                .push_matmul(&format!("blk.{i}.attn_scores"), q, kt, rng);
+            let scores = self
+                .m
+                .push_div(&format!("blk.{i}.attn_scale"), scores, scale_const, rng);
+            let scores = self
+                .m
+                .push_softmax(&format!("blk.{i}.attn_softmax"), scores, 3, rng);
 
             // Weighted sum: output = scores @ V
-            let attn_out = self.m.push_matmul(&format!("blk.{i}.attn_weighted"), scores, v, rng);
+            let attn_out = self
+                .m
+                .push_matmul(&format!("blk.{i}.attn_weighted"), scores, v, rng);
 
             // Transpose back [B, H, S, D] -> [B, S, H, D] and reshape to [B, S, H*D]
             let attn_out = self.m.push_transpose(
@@ -443,33 +491,52 @@ impl<'a> GraphBuilder<'a> {
 
             // Output projection
             let o_w = self.load_weight(&format!("blk.{i}.attn_output.weight"), rng)?;
-            let attn_proj = self.m.push_quant_linear(&format!("blk.{i}.attn_output"), attn_out, o_w, rng);
+            let attn_proj =
+                self.m
+                    .push_quant_linear(&format!("blk.{i}.attn_output"), attn_out, o_w, rng);
 
             // Residual
-            let h = self.m.push_add(&format!("blk.{i}.attn_residual"), layer_input, attn_proj, rng);
+            let h = self.m.push_add(
+                &format!("blk.{i}.attn_residual"),
+                layer_input,
+                attn_proj,
+                rng,
+            );
 
             // FFN norm
             let ffn_norm_w = self.load_weight(&format!("blk.{i}.ffn_norm.weight"), rng)?;
-            let ffn_normed = self.m.push_rms_norm(&format!("blk.{i}.ffn_norm"), h, ffn_norm_w, eps, rng);
+            let ffn_normed =
+                self.m
+                    .push_rms_norm(&format!("blk.{i}.ffn_norm"), h, ffn_norm_w, eps, rng);
 
             // FFN: SwiGLU
             let gate_w = self.load_weight(&format!("blk.{i}.ffn_gate.weight"), rng)?;
             let up_w = self.load_weight(&format!("blk.{i}.ffn_up.weight"), rng)?;
             let down_w = self.load_weight(&format!("blk.{i}.ffn_down.weight"), rng)?;
 
-            let gate = self.m.push_quant_linear(&format!("blk.{i}.ffn_gate"), ffn_normed, gate_w, rng);
+            let gate =
+                self.m
+                    .push_quant_linear(&format!("blk.{i}.ffn_gate"), ffn_normed, gate_w, rng);
             let gate = self.m.push_silu(&format!("blk.{i}.ffn_silu"), gate, rng);
-            let up = self.m.push_quant_linear(&format!("blk.{i}.ffn_up"), ffn_normed, up_w, rng);
+            let up = self
+                .m
+                .push_quant_linear(&format!("blk.{i}.ffn_up"), ffn_normed, up_w, rng);
             let hidden = self.m.push_mul(&format!("blk.{i}.ffn_mul"), gate, up, rng);
-            let down = self.m.push_quant_linear(&format!("blk.{i}.ffn_down"), hidden, down_w, rng);
+            let down = self
+                .m
+                .push_quant_linear(&format!("blk.{i}.ffn_down"), hidden, down_w, rng);
 
             // Residual
-            layer_output = self.m.push_add(&format!("blk.{i}.ffn_residual"), h, down, rng);
+            layer_output = self
+                .m
+                .push_add(&format!("blk.{i}.ffn_residual"), h, down, rng);
         }
 
         // Final norm
         let output_norm_w = self.load_weight("output_norm.weight", rng)?;
-        let h = self.m.push_rms_norm("output_norm", layer_output, output_norm_w, eps, rng);
+        let h = self
+            .m
+            .push_rms_norm("output_norm", layer_output, output_norm_w, eps, rng);
 
         // LM head — create output tensor with explicit name and shape info
         let output_w = self.load_weight("output.weight", rng)?;
@@ -489,7 +556,8 @@ impl<'a> GraphBuilder<'a> {
             ]),
             rng,
         );
-        self.m.push_quant_linear_into("output", h, output_w, logits, rng);
+        self.m
+            .push_quant_linear_into("output", h, output_w, logits, rng);
         self.output_tensor(logits);
 
         Ok(BuildInfo {
@@ -518,15 +586,27 @@ mod tests {
 
         // Should have input_ids + 32 layers * 2 KV cache inputs = 65 inputs
         let inputs = graph.get_inputs();
-        assert_eq!(inputs.len(), 65, "Expected 65 inputs (1 token + 32*2 KV cache)");
+        assert_eq!(
+            inputs.len(),
+            65,
+            "Expected 65 inputs (1 token + 32*2 KV cache)"
+        );
 
         // Should have 32 layers * 2 KV outputs + 1 logits = 65 outputs
         let outputs = graph.get_outputs();
-        assert_eq!(outputs.len(), 65, "Expected 65 outputs (32*2 KV cache + logits)");
+        assert_eq!(
+            outputs.len(),
+            65,
+            "Expected 65 outputs (32*2 KV cache + logits)"
+        );
 
         // Should have operations
         let ops = graph.get_operations();
-        assert!(ops.len() > 100, "Expected many operations, got {}", ops.len());
+        assert!(
+            ops.len() > 100,
+            "Expected many operations, got {}",
+            ops.len()
+        );
 
         // State pairs should match layer count
         assert_eq!(info.state_pairs.len(), 64, "Expected 32*2 state pairs");
