@@ -797,7 +797,7 @@ mod tests {
         let a = GlobalId(1001);
         let b = GlobalId(1002);
         let c = GlobalId(1003);
-        let mut next_value = 0u32;
+        let mut next_value = 0u64;
         let m = 2usize;
         let n = 2usize;
         let k = 3usize;

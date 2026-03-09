@@ -16,6 +16,10 @@ pub struct Transpose {
 }
 
 impl Transpose {
+    pub(crate) fn perm(&self) -> Option<&[i64]> {
+        self.perm.as_deref()
+    }
+
     pub fn push_new(
         graph: &mut MilliOpGraph,
         data: GlobalId,

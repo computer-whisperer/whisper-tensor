@@ -18,6 +18,10 @@ pub struct Cast {
 }
 
 impl Cast {
+    pub(crate) fn target_dtype(&self) -> DType {
+        self.dtype
+    }
+
     pub fn push_new(
         graph: &mut MilliOpGraph,
         data: GlobalId,

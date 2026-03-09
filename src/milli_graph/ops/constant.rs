@@ -21,6 +21,10 @@ pub struct Constant {
 }
 
 impl Constant {
+    pub(crate) fn data(&self) -> &NDArrayNumericTensor<DynRank> {
+        &self.data
+    }
+
     pub fn push_new(
         graph: &mut MilliOpGraph,
         a: NDArrayNumericTensor<DynRank>,

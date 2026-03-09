@@ -39,6 +39,10 @@ pub struct SimpleUnaryOp {
 }
 
 impl SimpleUnaryOp {
+    pub(crate) fn which_op(&self) -> &WhichSimpleUnaryOp {
+        &self.op
+    }
+
     fn new_internal(
         graph: &mut MilliOpGraph,
         input: GlobalId,

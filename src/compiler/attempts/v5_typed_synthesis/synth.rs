@@ -498,7 +498,7 @@ mod tests {
         b: GlobalId,
         c: GlobalId,
     ) -> Vec<NanoOp> {
-        let mut next_value = 0u32;
+        let mut next_value = 0u64;
         let mut ops = Vec::new();
         for row in 0..m {
             for col in 0..n {
