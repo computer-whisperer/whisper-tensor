@@ -194,10 +194,10 @@ impl PromptInput {
             PromptEncoding::ClipStyle { bos, eos, pad } => {
                 let mut encoded = tokenizer.encode(text);
                 // Strip BOS/EOS if the tokenizer's post-processor already added them
-                if encoded.first() == Some(&(*bos)) {
+                if encoded.first() == Some(bos) {
                     encoded.remove(0);
                 }
-                if encoded.last() == Some(&(*eos)) {
+                if encoded.last() == Some(eos) {
                     encoded.pop();
                 }
                 let mut ids = Vec::with_capacity(self.seq_len);

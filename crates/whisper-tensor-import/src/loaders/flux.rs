@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use whisper_tensor::interfaces::ImageGenerationInterface;
 use whisper_tensor::loader::*;
@@ -305,7 +305,7 @@ fn make_flux_config(img_size: usize, has_guidance: bool) -> crate::flux::FluxCon
 
 /// Build models and interface from the 4 ONNX blobs.
 fn assemble_output(
-    reference_path: &PathBuf,
+    reference_path: &Path,
     variant: &str,
     compute_dtype: whisper_tensor::dtype::DType,
     has_guidance: bool,

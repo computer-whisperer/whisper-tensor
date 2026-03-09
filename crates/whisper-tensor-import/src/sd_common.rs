@@ -79,11 +79,9 @@ pub fn detect_model_dtype_with_canary(
     weight_manager: &impl WeightManager,
     canary_name: &str,
 ) -> DType {
-    let canary = weight_manager
-        .get_tensor(canary_name)
-        .unwrap_or_else(|e| {
-            panic!("cannot detect model dtype: canary weight '{canary_name}' not found: {e}")
-        });
+    let canary = weight_manager.get_tensor(canary_name).unwrap_or_else(|e| {
+        panic!("cannot detect model dtype: canary weight '{canary_name}' not found: {e}")
+    });
     canary.dtype()
 }
 

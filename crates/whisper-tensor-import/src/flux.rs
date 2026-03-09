@@ -13,6 +13,8 @@ use crate::onnx_graph::tensor::{
 use crate::onnx_graph::weights::WeightManager;
 use crate::sd_common::{CastingWeightManager, build_causal_mask, cos_op, sin_op};
 use prost::Message;
+
+type TensorPair = (Arc<dyn Tensor>, Arc<dyn Tensor>);
 use std::sync::Arc;
 
 pub struct FluxConfig {
@@ -231,7 +233,7 @@ fn qk_norm(
     k: Arc<dyn Tensor>,
     q_scale: Arc<dyn Tensor>,
     k_scale: Arc<dyn Tensor>,
-) -> Result<(Arc<dyn Tensor>, Arc<dyn Tensor>), crate::onnx_graph::Error> {
+) -> Result<TensorPair, crate::onnx_graph::Error> {
     let q = RMSNormalization::new(None, q, q_scale, None, -1)?;
     let k = RMSNormalization::new(None, k, k_scale, None, -1)?;
     Ok((q, k))
@@ -336,7 +338,7 @@ fn flux_double_block(
     cos_cache: Arc<dyn Tensor>,
     sin_cache: Arc<dyn Tensor>,
     config: &FluxConfig,
-) -> Result<(Arc<dyn Tensor>, Arc<dyn Tensor>), crate::onnx_graph::Error> {
+) -> Result<TensorPair, crate::onnx_graph::Error> {
     let h = config.hidden_dim;
     let nh = config.num_heads as i64;
     let hd = config.head_dim as i64;
