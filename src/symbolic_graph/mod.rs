@@ -920,11 +920,24 @@ impl SymbolicGraph {
                 );
             }
 
-            // Build external-space param update mapping
+            // Build external-space mappings for caller convenience
             for &sym_param in &backward_opts.trainable_params {
                 let combined_param = sym_to_combined[&sym_param];
                 if let Some(&new_param) = training_meta.param_to_new_param.get(&combined_param) {
                     training_meta.param_updates.insert(sym_param, new_param);
+                }
+                // Remap optimizer state entries to external param IDs
+                for (key, &input_id) in &training_meta.optimizer_state_inputs {
+                    if key.0 == combined_param {
+                        let output_id = training_meta.optimizer_state_outputs[key];
+                        training_meta.state_updates.insert(
+                            (sym_param, key.1.clone()),
+                            crate::milli_graph::StateUpdate {
+                                input: input_id,
+                                output: output_id,
+                            },
+                        );
+                    }
                 }
             }
 

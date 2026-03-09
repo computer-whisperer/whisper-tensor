@@ -103,6 +103,21 @@ pub struct TrainingMetadata {
     /// Only populated when the graph was generated via
     /// `SymbolicGraph::generate_milli_graph_with_options`.
     pub param_updates: HashMap<GlobalId, GlobalId>,
+
+    /// Like `optimizer_state_inputs`/`optimizer_state_outputs`, but keyed by
+    /// external (symbolic-space) parameter IDs instead of combined-space IDs.
+    ///
+    /// Only populated via `SymbolicGraph::generate_milli_graph_with_options`.
+    pub state_updates: HashMap<(GlobalId, String), StateUpdate>,
+}
+
+/// Per-parameter optimizer state entry for the external-facing API.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StateUpdate {
+    /// Feed this tensor as an input each step (the current state value).
+    pub input: GlobalId,
+    /// Read this tensor from outputs each step (the updated state value).
+    pub output: GlobalId,
 }
 
 /// Semantic role of a tensor within the training graph.
