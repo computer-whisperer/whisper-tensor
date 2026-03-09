@@ -87,6 +87,36 @@ enum Command {
         #[arg(long, default_value = "42")]
         seed: u64,
     },
+
+    /// Synthesize speech from text
+    Tts {
+        /// Path to the model directory
+        model: Option<PathBuf>,
+
+        /// Loader to use
+        #[arg(long, value_enum, default_value = "auto")]
+        loader: LoaderChoice,
+
+        /// Extra loader config (key=value, repeatable)
+        #[arg(long = "config", value_name = "KEY=VALUE")]
+        configs: Vec<String>,
+
+        /// Text to speak
+        #[arg(long, short)]
+        prompt: String,
+
+        /// Voice name (e.g. "af_bella"). Looked up in <model>/voices/<name>.bin
+        #[arg(long, default_value = "af")]
+        voice: String,
+
+        /// Speech speed multiplier
+        #[arg(long, default_value = "1.0")]
+        speed: f32,
+
+        /// Output WAV path
+        #[arg(long, short, default_value = "output.wav")]
+        output: PathBuf,
+    },
 }
 
 #[derive(Clone, clap::ValueEnum)]
@@ -99,6 +129,7 @@ enum LoaderChoice {
     Sd2,
     Sdxl,
     Flux,
+    Kokoro,
 }
 
 // ============================================================================
@@ -152,6 +183,7 @@ fn load_model(loader: &LoaderChoice, config: ConfigValues) -> LoaderOutput {
         LoaderChoice::Sd2 => SD2Loader.load(config),
         LoaderChoice::Sdxl => SDXLLoader.load(config),
         LoaderChoice::Flux => FluxLoader.load(config),
+        LoaderChoice::Kokoro => KokoroLoader.load(config),
     };
 
     result.unwrap_or_else(|e| {
@@ -208,6 +240,21 @@ fn main() {
                 latent_w,
                 seed,
             );
+        }
+        Command::Tts {
+            model,
+            loader,
+            configs,
+            prompt,
+            voice,
+            speed,
+            output,
+        } => {
+            let model_dir = model.clone().unwrap_or_else(|| PathBuf::from("."));
+            let config = build_config(model, &configs);
+            eprintln!("Loading model...");
+            let loaded = load_model(&loader, config);
+            cmd_tts(loaded, model_dir, prompt, voice, speed, output);
         }
     }
 }
@@ -358,6 +405,277 @@ fn cmd_image(
 
     save_image_tensor(&image_tensor, &output_path, &mut backend);
     eprintln!("Saved to {}", output_path.display());
+}
+
+// ============================================================================
+// Text-to-speech
+// ============================================================================
+
+fn cmd_tts(output: LoaderOutput, model_dir: PathBuf, text: String, voice_name: String, speed: f32, output_path: PathBuf) {
+    use whisper_tensor::super_graph::cache::SuperGraphTensorCache;
+    use whisper_tensor::super_graph::data::SuperGraphData;
+    use whisper_tensor::super_graph::SuperGraphContext;
+
+    let model = &output.models[0].model;
+
+    let interface = output
+        .interfaces
+        .iter()
+        .find_map(|i| match &i.interface {
+            AnyInterface::TextToSpeechInterface(x) => Some(x),
+            _ => None,
+        })
+        .unwrap_or_else(|| {
+            eprintln!("No TextToSpeech interface found");
+            std::process::exit(1);
+        });
+
+    // Convert text to phonemes via espeak-ng, then apply E2M conversion
+    let phonemes = text_to_kokoro_phonemes(&text);
+    eprintln!("Phonemes: {phonemes}");
+
+    // Tokenize phonemes using the vocab from tokenizer.json.
+    // Kokoro's tokenizer is character-level with a simple vocab lookup.
+    // We wrap with $ (token 0) as BOS/EOS.
+    let vocab = load_kokoro_vocab(&interface.tokenizer);
+    let token_ids: Vec<i64> = {
+        let mut ids = Vec::new();
+        ids.push(0i64); // BOS ($)
+        for ch in phonemes.chars() {
+            if let Some(&id) = vocab.get(&ch) {
+                ids.push(id as i64);
+            }
+            // Characters not in vocab are silently dropped (matches tokenizer normalizer behavior)
+        }
+        ids.push(0i64); // EOS ($)
+        ids
+    };
+    let num_tokens = token_ids.len();
+    eprintln!("Tokens: {num_tokens}");
+
+    let input_ids_tensor =
+        NumericTensor::<DynRank>::from_vec_shape(token_ids, vec![1, num_tokens]).unwrap();
+
+    // Load voice embedding
+    let voice_path = model_dir.join("voices").join(format!("{voice_name}.bin"));
+    if !voice_path.exists() {
+        eprintln!("Voice file not found: {}", voice_path.display());
+        let voices_dir = model_dir.join("voices");
+        if voices_dir.is_dir() {
+            let mut available: Vec<String> = std::fs::read_dir(&voices_dir)
+                .unwrap()
+                .filter_map(|e| {
+                    let name = e.ok()?.file_name().to_string_lossy().to_string();
+                    name.strip_suffix(".bin").map(|s| s.to_string())
+                })
+                .collect();
+            available.sort();
+            eprintln!("Available voices: {}", available.join(", "));
+        }
+        std::process::exit(1);
+    }
+
+    let style_tensor = load_voice_style(&voice_path, num_tokens);
+    let speed_tensor = NumericTensor::<DynRank>::from_vec_shape(vec![speed], vec![1]).unwrap();
+
+    // Run inference
+    eprintln!("Running inference...");
+    let mut backend = EvalBackend::NDArray;
+    let start = std::time::Instant::now();
+
+    let super_graph_data = {
+        let mut data = SuperGraphData::new();
+        data.tensor_maps
+            .insert(interface.model_weights_link, model.get_tensor_store());
+        data.tensors.insert(interface.input_ids_link, input_ids_tensor);
+        data.tensors.insert(interface.style_link, style_tensor);
+        data.tensors.insert(interface.speed_link, speed_tensor);
+        data
+    };
+
+    let super_graph_output = {
+        let mut observer = ();
+        let mut super_graph_tensor_cache = SuperGraphTensorCache::new();
+        let mut context = SuperGraphContext {
+            observer: &mut observer,
+            eval_backend: &mut backend,
+            super_graph_tensor_cache: &mut super_graph_tensor_cache,
+            caches: None,
+            symbolic_graphs: vec![model.get_symbolic_graph()],
+            use_compiled_models: false,
+            compiled_models: None,
+        };
+        interface
+            .super_graph
+            .run(super_graph_data, &mut context)
+            .unwrap_or_else(|e| {
+                eprintln!("Inference error: {e}");
+                std::process::exit(1);
+            })
+    };
+
+    let audio = super_graph_output
+        .tensors
+        .get(&interface.audio_output_link)
+        .expect("No audio output tensor");
+
+    eprintln!("Generated in {:.2?}", start.elapsed());
+
+    // Write WAV
+    let audio_f32 = audio
+        .cast(whisper_tensor::dtype::DType::F32, &mut backend)
+        .expect("cast to f32 failed");
+    let audio_ndarray = audio_f32.to_ndarray().expect("to_ndarray failed");
+    let samples: Vec<f32> = audio_ndarray.flatten().try_into().expect("flatten failed");
+
+    save_wav(&samples, interface.sample_rate, &output_path);
+    eprintln!(
+        "Saved {:.1}s of audio to {}",
+        samples.len() as f64 / interface.sample_rate as f64,
+        output_path.display()
+    );
+}
+
+/// Load Kokoro's phoneme vocab from tokenizer.json as a char -> token_id map.
+fn load_kokoro_vocab(info: &whisper_tensor::metadata::TokenizerInfo) -> HashMap<char, u32> {
+    let path = match info {
+        whisper_tensor::metadata::TokenizerInfo::HFTokenizerLocal(p) => p.clone(),
+        _ => panic!("Expected HFTokenizerLocal for Kokoro tokenizer"),
+    };
+    let json = std::fs::read_to_string(&path).expect("Failed to read tokenizer.json");
+    let value: serde_json::Value = serde_json::from_str(&json).expect("Invalid JSON");
+    let vocab = value["model"]["vocab"]
+        .as_object()
+        .expect("No vocab in tokenizer.json");
+    let mut map = HashMap::new();
+    for (key, val) in vocab {
+        let id = val.as_u64().expect("vocab id not u64") as u32;
+        // Each key should be a single character
+        if let Some(ch) = key.chars().next() {
+            if key.chars().count() == 1 {
+                map.insert(ch, id);
+            }
+        }
+    }
+    map
+}
+
+/// Load a voice style vector from a .bin file, indexed by token count.
+///
+/// Voice files contain (N, 1, 256) f32 vectors. We index by token count
+/// (clamped to the file's range) and return a (1, 256) tensor.
+fn load_voice_style(path: &std::path::Path, num_tokens: usize) -> NumericTensor<DynRank> {
+    let data = std::fs::read(path).expect("Failed to read voice file");
+    let floats: Vec<f32> = data
+        .chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+        .collect();
+
+    let num_vectors = floats.len() / 256;
+    let idx = num_tokens.min(num_vectors.saturating_sub(1));
+    let start = idx * 256;
+    let style: Vec<f32> = floats[start..start + 256].to_vec();
+
+    NumericTensor::<DynRank>::from_vec_shape(style, vec![1, 256]).unwrap()
+}
+
+/// Save f32 samples as a WAV file.
+fn save_wav(samples: &[f32], sample_rate: u32, path: &std::path::Path) {
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut writer = hound::WavWriter::create(path, spec).expect("Failed to create WAV file");
+    for &s in samples {
+        let sample = (s * 32767.0).clamp(-32768.0, 32767.0) as i16;
+        writer.write_sample(sample).expect("Failed to write sample");
+    }
+    writer.finalize().expect("Failed to finalize WAV");
+}
+
+// ============================================================================
+// Phonemization (espeak-ng + E2M conversion for Kokoro)
+// ============================================================================
+
+/// Convert English text to Kokoro-compatible phoneme string.
+///
+/// Pipeline: text -> espeak-ng IPA -> E2M (espeak-to-Misaki) conversion
+fn text_to_kokoro_phonemes(text: &str) -> String {
+    let sentences = espeak_rs::text_to_phonemes(text, "en-us", None, true, false)
+        .expect("espeak-ng phonemization failed");
+    let ipa = sentences.join(" ");
+    espeak_to_misaki(&ipa)
+}
+
+/// Apply espeak-to-Misaki (E2M) phoneme conversion.
+///
+/// Converts espeak-ng's IPA output into the Misaki phoneme format
+/// that Kokoro's tokenizer expects. Replacements are applied in
+/// longest-first order to handle multi-character sequences correctly.
+fn espeak_to_misaki(ipa: &str) -> String {
+    // E2M replacements, applied longest-first
+    static E2M: &[(&str, &str)] = &[
+        // Multi-char (longest first)
+        ("a\u{0361}\u{026a}", "I"),     // a͡ɪ -> I (PRICE)
+        ("a\u{0361}\u{028a}", "W"),     // a͡ʊ -> W (MOUTH)
+        ("d\u{0361}\u{0292}", "\u{02A4}"), // d͡ʒ -> ʤ
+        ("e\u{0361}\u{026a}", "A"),     // e͡ɪ -> A (FACE)
+        ("t\u{0361}\u{0283}", "\u{02A7}"), // t͡ʃ -> ʧ
+        ("\u{0254}\u{0361}\u{026a}", "Y"), // ɔ͡ɪ -> Y (CHOICE)
+        ("o\u{0361}\u{028a}", "O"),     // o͡ʊ -> O (GOAT, US)
+        // Without tie bar (fallback)
+        ("a\u{026a}", "I"),             // aɪ -> I
+        ("a\u{028a}", "W"),             // aʊ -> W
+        ("d\u{0292}", "\u{02A4}"),      // dʒ -> ʤ
+        ("e\u{026a}", "A"),             // eɪ -> A
+        ("t\u{0283}", "\u{02A7}"),      // tʃ -> ʧ
+        ("\u{0254}\u{026a}", "Y"),      // ɔɪ -> Y
+        ("o\u{028a}", "O"),             // oʊ -> O
+        // Syllabic patterns
+        ("\u{0294}\u{02cc}n\u{0329}", "t\u{1d4a}n"),  // ʔˌn̩ -> tᵊn
+        ("\u{0294}n", "t\u{1d4a}n"),                    // ʔn -> tᵊn
+        ("\u{0259}\u{0361}l", "\u{1d4a}l"),            // ə͡l -> ᵊl
+        ("\u{0259}l", "\u{1d4a}l"),                     // əl -> ᵊl (no tie)
+        // R-colored
+        ("\u{025a}", "\u{0259}\u{0279}"),              // ɚ -> əɹ
+        // US English specifics
+        ("\u{025c}\u{02d0}\u{0279}", "\u{025c}\u{0279}"), // ɜːɹ -> ɜɹ
+        ("\u{025c}\u{02d0}", "\u{025c}\u{0279}"),          // ɜː -> ɜɹ
+        ("\u{026a}\u{0259}", "i\u{0259}"),                 // ɪə -> iə
+        // Single-char
+        ("e", "A"),                     // bare e -> A
+        ("r", "\u{0279}"),             // r -> ɹ
+        ("x", "k"),
+        ("\u{00e7}", "k"),             // ç -> k
+        ("\u{0250}", "\u{0259}"),      // ɐ -> ə
+        ("\u{026c}", "l"),             // ɬ -> l
+        ("\u{0294}", "t"),             // ʔ -> t
+        ("o", "\u{0254}"),             // o -> ɔ
+        ("\u{027e}", "T"),             // ɾ -> T
+    ];
+
+    let mut result = ipa.to_string();
+
+    // Remove combining tilde
+    result = result.replace('\u{0303}', "");
+
+    // Remove remaining palatalization marker
+    result = result.replace('\u{02b2}', "");
+
+    // Apply E2M replacements
+    for &(from, to) in E2M {
+        result = result.replace(from, to);
+    }
+
+    // Remove length marks (US English)
+    result = result.replace('\u{02d0}', "");
+
+    // Remove syllabic marker (any remaining)
+    result = result.replace('\u{0329}', "");
+
+    result
 }
 
 // ============================================================================
