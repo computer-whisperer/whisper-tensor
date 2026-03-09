@@ -36,6 +36,11 @@ impl SuperGraphLinkTensor {
         Self(GlobalId::new(rng))
     }
 }
+impl From<GlobalId> for SuperGraphLinkTensor {
+    fn from(id: GlobalId) -> Self {
+        Self(id)
+    }
+}
 impl SuperGraphLink for SuperGraphLinkTensor {
     fn to_any(&self) -> SuperGraphAnyLink {
         SuperGraphAnyLink::Tensor(*self)
@@ -103,6 +108,10 @@ pub enum SuperGraphAnyLink {
 }
 
 impl SuperGraphAnyLink {
+    pub fn tensor(id: GlobalId) -> Self {
+        SuperGraphAnyLink::Tensor(SuperGraphLinkTensor(id))
+    }
+
     pub(crate) fn global_id(&self) -> GlobalId {
         match self {
             SuperGraphAnyLink::Tensor(link) => link.global_id(),

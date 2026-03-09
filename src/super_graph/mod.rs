@@ -61,6 +61,28 @@ pub struct SuperGraphContext<'short, 'model, 'c, 'd, T: SuperGraphObserver> {
     pub compiled_models: Option<Vec<(&'model Model, &'short CompiledProgram)>>,
 }
 
+impl<'short, 'model, 'c, 'd, T: SuperGraphObserver>
+    SuperGraphContext<'short, 'model, 'c, 'd, T>
+{
+    /// Construct a context with only the required fields; caches, compiled
+    /// models, and symbolic graphs default to empty/None.
+    pub fn new(
+        eval_backend: &'c mut EvalBackend<'d>,
+        observer: &'short mut T,
+        tensor_cache: &'short mut SuperGraphTensorCache<'model>,
+    ) -> Self {
+        Self {
+            observer,
+            eval_backend,
+            caches: None,
+            super_graph_tensor_cache: tensor_cache,
+            use_compiled_models: false,
+            symbolic_graphs: vec![],
+            compiled_models: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SuperGraph {
     global_id: GlobalId,
