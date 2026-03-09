@@ -34,10 +34,12 @@ pub struct FluxConfig {
     pub img_width: usize,
     /// Maximum T5 text sequence length.
     pub max_txt_seq_len: usize,
+    /// Whether the model has a guidance embedding (Dev=true, Schnell=false).
+    pub has_guidance: bool,
 }
 
 impl FluxConfig {
-    pub fn schnell(img_size: usize, max_txt_seq_len: usize) -> Self {
+    fn base(img_size: usize, max_txt_seq_len: usize, has_guidance: bool) -> Self {
         Self {
             hidden_dim: 3072,
             num_heads: 24,
@@ -55,7 +57,16 @@ impl FluxConfig {
             img_height: img_size,
             img_width: img_size,
             max_txt_seq_len,
+            has_guidance,
         }
+    }
+
+    pub fn schnell(img_size: usize, max_txt_seq_len: usize) -> Self {
+        Self::base(img_size, max_txt_seq_len, false)
+    }
+
+    pub fn dev(img_size: usize, max_txt_seq_len: usize) -> Self {
+        Self::base(img_size, max_txt_seq_len, true)
     }
 
     pub fn schnell_1024(max_txt_seq_len: usize) -> Self {
@@ -652,12 +663,26 @@ pub fn load_flux_dit_with_origin(
         ]),
     );
 
-    let input_tensors: Vec<Arc<dyn Tensor>> = vec![
+    // Optional guidance input (Flux Dev only)
+    let guidance_input = if config.has_guidance {
+        Some(InputTensor::new(
+            "guidance".to_string(),
+            DType::F32,
+            Shape::new(vec![batch_dim.clone(), Dimension::new(Some(1), None, None)]),
+        ))
+    } else {
+        None
+    };
+
+    let mut input_tensors: Vec<Arc<dyn Tensor>> = vec![
         latent_input.clone(),
         timestep_input.clone(),
         clip_pooled_input.clone(),
         t5_hidden_input.clone(),
     ];
+    if let Some(ref gi) = guidance_input {
+        input_tensors.push(gi.clone());
+    }
 
     // --- Precompute RoPE ---
     let (cos_vals, sin_vals) = precompute_flux_rope(&config);
@@ -702,8 +727,23 @@ pub fn load_flux_dit_with_origin(
     let vec_emb = silu(vec_emb)?;
     let vec_emb = linear(&weight_manager.prefix("vector_in.out_layer"), vec_emb)?;
 
+    // Guidance embedding (Dev only)
+    let guidance_emb: Option<Arc<dyn Tensor>> = if let Some(ref gi) = guidance_input {
+        Some(flux_timestep_embedding(
+            &weight_manager.prefix("guidance_in"),
+            gi.clone(),
+            &config,
+            model_dtype,
+        )?)
+    } else {
+        None
+    };
+
     // Conditioning vector
-    let vec_cond = Add::new(None, t_emb, vec_emb)?;
+    let mut vec_cond: Arc<dyn Tensor> = Add::new(None, t_emb, vec_emb)?;
+    if let Some(g_emb) = guidance_emb {
+        vec_cond = Add::new(None, vec_cond, g_emb)?;
+    }
 
     println!(
         "Building Flux DiT: {} double + {} single blocks...",

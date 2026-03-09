@@ -1,4 +1,6 @@
-use super::{OnnxLoader, Rwkv7Loader, SD2Loader, SD15Loader, SDXLLoader, TransformersLoader};
+use super::{
+    FluxLoader, OnnxLoader, Rwkv7Loader, SD2Loader, SD15Loader, SDXLLoader, TransformersLoader,
+};
 use crate::onnx_graph::weights::SafetensorsWeightManager;
 use memmap2::Mmap;
 use std::sync::Arc;
@@ -53,6 +55,9 @@ impl Loader for AutoLoader {
                         && let Ok(mmap) = unsafe { Mmap::map(&file) }
                         && let Ok(wm) = SafetensorsWeightManager::new(vec![Arc::new(mmap)])
                     {
+                        if super::flux::is_flux_single_file_checkpoint(&wm) {
+                            return FluxLoader.load(config);
+                        }
                         if crate::sd15::is_sd15_checkpoint(&wm) {
                             return SD15Loader.load(config);
                         }

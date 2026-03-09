@@ -572,6 +572,7 @@ fn build_flux_denoising_loop(
     dt_input: SuperGraphLinkTensor,
     _sigmas_input: SuperGraphLinkTensor,
     iteration_count_input: SuperGraphLinkTensor,
+    guidance_input: Option<SuperGraphLinkTensor>,
     model_dtype: DType,
     dit_model_index: usize,
 ) -> SuperGraphLinkTensor {
@@ -587,15 +588,18 @@ fn build_flux_denoising_loop(
     let inner_latent_out = inner_builder.new_tensor_link(rng);
     let inner_timestep = inner_builder.new_tensor_link(rng);
     let inner_dt = inner_builder.new_tensor_link(rng);
+    let inner_guidance = guidance_input.map(|_| inner_builder.new_tensor_link(rng));
 
-    // Inner node 1: Prep — cast latent to model_dtype, reshape timestep
+    // Inner node 1: Prep — cast latent to model_dtype, reshape timestep (and guidance)
     let cast_latent = inner_builder.new_tensor_link(rng);
     let cast_timestep = inner_builder.new_tensor_link(rng);
+    let cast_guidance = inner_guidance.map(|_| inner_builder.new_tensor_link(rng));
     {
-        let (mut mg, input_map) = MilliOpGraph::new(
-            [inner_latent_in.global_id(), inner_timestep.global_id()],
-            rng,
-        );
+        let mut input_ids = vec![inner_latent_in.global_id(), inner_timestep.global_id()];
+        if let Some(ig) = inner_guidance {
+            input_ids.push(ig.global_id());
+        }
+        let (mut mg, input_map) = MilliOpGraph::new(input_ids, rng);
         let lat_in = *input_map.get(&inner_latent_in.global_id()).unwrap();
         let ts_in = *input_map.get(&inner_timestep.global_id()).unwrap();
 
@@ -611,26 +615,45 @@ fn build_flux_denoising_loop(
         let ts_reshaped =
             crate::milli_graph::ops::Reshape::push_new(&mut mg, ts_in, ts_shape, false, rng);
 
-        mg.set_output_map([
+        let mut outputs = vec![
             (lat_cast, cast_latent.global_id()),
             (ts_reshaped, cast_timestep.global_id()),
-        ]);
+        ];
+
+        // Reshape guidance from scalar to [1, 1] (same as timestep)
+        if let (Some(ig), Some(cg)) = (inner_guidance, cast_guidance) {
+            let g_in = *input_map.get(&ig.global_id()).unwrap();
+            let g_shape = Constant::push_new(
+                &mut mg,
+                NDArrayNumericTensor::from_vec_shape(vec![1i64, 1], &vec![2]).unwrap(),
+                rng,
+            );
+            let g_reshaped =
+                crate::milli_graph::ops::Reshape::push_new(&mut mg, g_in, g_shape, false, rng);
+            outputs.push((g_reshaped, cg.global_id()));
+        }
+
+        mg.set_output_map(outputs);
         inner_builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
     }
 
     // Inner node 2: DiT forward pass
     let dit_output = inner_builder.new_tensor_link(rng);
+    let mut dit_inputs = vec![
+        (cast_latent, "latent_sample".to_string()),
+        (cast_timestep, "timestep".to_string()),
+        (inner_clip_pooled, "clip_pooled".to_string()),
+        (inner_t5_hidden, "t5_hidden_states".to_string()),
+    ];
+    if let Some(cg) = cast_guidance {
+        dit_inputs.push((cg, "guidance".to_string()));
+    }
     inner_builder.add_node(
         SuperGraphNodeModelExecution::new(
             rng,
             inner_dit_weights,
             dit_model_index,
-            vec![
-                (cast_latent, "latent_sample".to_string()),
-                (cast_timestep, "timestep".to_string()),
-                (inner_clip_pooled, "clip_pooled".to_string()),
-                (inner_t5_hidden, "t5_hidden_states".to_string()),
-            ],
+            dit_inputs,
             vec![("out_sample".to_string(), dit_output)],
         )
         .to_any(),
@@ -662,7 +685,7 @@ fn build_flux_denoising_loop(
     }
 
     // Build inner graph
-    let inner_inputs: Vec<_> = vec![
+    let mut inner_inputs: Vec<_> = vec![
         inner_dit_weights.to_any(),
         inner_clip_pooled.to_any(),
         inner_t5_hidden.to_any(),
@@ -670,15 +693,21 @@ fn build_flux_denoising_loop(
         inner_timestep.to_any(),
         inner_dt.to_any(),
     ];
+    if let Some(ig) = inner_guidance {
+        inner_inputs.push(ig.to_any());
+    }
     let inner_outputs: Vec<_> = vec![inner_latent_out.to_any()];
     let inner_graph = inner_builder.build(rng, &inner_inputs, &inner_outputs);
 
     // Create scan node
-    let simple_inputs = vec![
+    let mut simple_inputs = vec![
         SuperGraphLinkDouble::TensorMap(dit_weights, inner_dit_weights),
         SuperGraphLinkDouble::Tensor(clip_pooled, inner_clip_pooled),
         SuperGraphLinkDouble::Tensor(t5_hidden, inner_t5_hidden),
     ];
+    if let (Some(outer_g), Some(ig)) = (guidance_input, inner_guidance) {
+        simple_inputs.push(SuperGraphLinkDouble::Tensor(outer_g, ig));
+    }
 
     let scan_node = SuperGraphNodeScan::new(
         inner_graph,
@@ -1234,18 +1263,19 @@ impl ImageGenerationInterface {
         (timestep_values, dt_values, sigmas)
     }
 
-    /// Build interface for Flux Schnell (CLIP-L + T5-XXL + DiT + VAE, no CFG).
+    /// Build interface for Flux (CLIP-L + T5-XXL + DiT + VAE, rectified flow).
     ///
     /// Model weights order: [clip_l, t5_xxl, dit, vae_decoder]
     ///
-    /// The denoising loop uses rectified flow (no CFG, single forward pass per step).
-    /// DiT inputs: latent_sample, timestep, clip_pooled, t5_hidden_states
+    /// When `has_guidance` is true (Flux Dev), the DiT expects a guidance input
+    /// and `guidance_scale_input` is populated. When false (Schnell), no guidance.
     #[allow(clippy::too_many_arguments)]
-    pub fn new_flux_schnell(
+    pub fn new_flux(
         rng: &mut impl Rng,
         clip_tokenizer: TokenizerInfo,
         t5_tokenizer: TokenizerInfo,
         model_dtype: DType,
+        has_guidance: bool,
     ) -> Self {
         let mut builder = SuperGraphBuilder::new();
 
@@ -1257,6 +1287,11 @@ impl ImageGenerationInterface {
         let dt_input = builder.new_tensor_link(rng);
         let sigmas_input = builder.new_tensor_link(rng);
         let iteration_count_input = builder.new_tensor_link(rng);
+        let guidance_scale_link = if has_guidance {
+            Some(builder.new_tensor_link(rng))
+        } else {
+            None
+        };
         let clip_weights = builder.new_model_link(rng);
         let t5_weights = builder.new_model_link(rng);
         let dit_weights = builder.new_model_link(rng);
@@ -1294,7 +1329,7 @@ impl ImageGenerationInterface {
         );
         let t5_hidden = build_cast_node(&mut builder, rng, t5_hidden_f32, model_dtype);
 
-        // --- Denoising loop (rectified flow, no CFG) ---
+        // --- Denoising loop (rectified flow) ---
         let final_latent = build_flux_denoising_loop(
             &mut builder,
             rng,
@@ -1306,18 +1341,18 @@ impl ImageGenerationInterface {
             dt_input,
             sigmas_input,
             iteration_count_input,
+            guidance_scale_link,
             model_dtype,
             2, // dit model index
         );
 
         // --- VAE decode ---
         // Flux VAE: latent / 0.3611 + 0.1159
-        let image_output =
-            build_flux_vae_decode(&mut builder, rng, final_latent, vae_weights, 3);
+        let image_output = build_flux_vae_decode(&mut builder, rng, final_latent, vae_weights, 3);
 
         // Build outer graph
         let model_weights = vec![clip_weights, t5_weights, dit_weights, vae_weights];
-        let input_links: Vec<_> = vec![
+        let mut input_links: Vec<_> = vec![
             cond_ids_input.to_any(),
             t5_ids_input.to_any(),
             initial_latent_input.to_any(),
@@ -1325,11 +1360,16 @@ impl ImageGenerationInterface {
             dt_input.to_any(),
             sigmas_input.to_any(),
             iteration_count_input.to_any(),
+        ];
+        if let Some(gl) = guidance_scale_link {
+            input_links.push(gl.to_any());
+        }
+        input_links.extend([
             clip_weights.to_any(),
             t5_weights.to_any(),
             dit_weights.to_any(),
             vae_weights.to_any(),
-        ];
+        ]);
         let output_links: Vec<_> = vec![image_output.to_any()];
         let super_graph = builder.build(rng, &input_links, &output_links);
 
@@ -1359,7 +1399,7 @@ impl ImageGenerationInterface {
             dt_input,
             sigmas_input,
             iteration_count_input,
-            guidance_scale_input: None,
+            guidance_scale_input: guidance_scale_link,
             model_weights,
             image_output,
             scheduler: SchedulerType::RectifiedFlow,

@@ -98,8 +98,7 @@ enum LoaderChoice {
     Sd15,
     Sd2,
     Sdxl,
-    FluxSchnell,
-    FluxSchnellFp8,
+    Flux,
 }
 
 // ============================================================================
@@ -152,8 +151,7 @@ fn load_model(loader: &LoaderChoice, config: ConfigValues) -> LoaderOutput {
         LoaderChoice::Sd15 => SD15Loader.load(config),
         LoaderChoice::Sd2 => SD2Loader.load(config),
         LoaderChoice::Sdxl => SDXLLoader.load(config),
-        LoaderChoice::FluxSchnell => FluxSchnellLoader.load(config),
-        LoaderChoice::FluxSchnellFp8 => FluxSchnellFP8Loader.load(config),
+        LoaderChoice::Flux => FluxLoader.load(config),
     };
 
     result.unwrap_or_else(|e| {
