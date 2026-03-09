@@ -55,11 +55,13 @@ impl Loader for GgufLoader {
 
         let info = match arch.as_str() {
             "llama" => crate::gguf::llama3::load_llama3_gguf(&gguf, &path)
-                .map_err(|e| LoaderError::LoadFailed(e))?,
+                .map_err(LoaderError::LoadFailed)?,
             "qwen2" => crate::gguf::qwen2::load_qwen2_gguf(&gguf, &path)
-                .map_err(|e| LoaderError::LoadFailed(e))?,
+                .map_err(LoaderError::LoadFailed)?,
             "qwen3" => crate::gguf::qwen3::load_qwen3_gguf(&gguf, &path)
-                .map_err(|e| LoaderError::LoadFailed(e))?,
+                .map_err(LoaderError::LoadFailed)?,
+            "phi3" => crate::gguf::phi3::load_phi3_gguf(&gguf, &path)
+                .map_err(LoaderError::LoadFailed)?,
             _ => {
                 return Err(LoaderError::LoadFailed(anyhow::anyhow!(
                     "Unsupported GGUF architecture: {arch}"
@@ -84,23 +86,23 @@ impl Loader for GgufLoader {
         };
 
         // Build TextInference interface if we have state pairs AND a tokenizer
-        if !info.state_pairs.is_empty() {
-            if let Some(tokenizer_info) = resolve_tokenizer(&tokenizer_name, &path, &gguf) {
-                let graph = model.get_symbolic_graph();
-                let mut rng = rand::rng();
-                let interface = build_rnn_supergraph(
-                    tokenizer_info,
-                    &info.token_input_name,
-                    &info.logit_output_name,
-                    &info.state_pairs,
-                    graph,
-                    &mut rng,
-                );
-                output.interfaces.push(LoadedInterface {
-                    name: format!("{model_name}-TextInference"),
-                    interface: interface.to_any(),
-                });
-            }
+        if !info.state_pairs.is_empty()
+            && let Some(tokenizer_info) = resolve_tokenizer(&tokenizer_name, &path, &gguf)
+        {
+            let graph = model.get_symbolic_graph();
+            let mut rng = rand::rng();
+            let interface = build_rnn_supergraph(
+                tokenizer_info,
+                &info.token_input_name,
+                &info.logit_output_name,
+                &info.state_pairs,
+                graph,
+                &mut rng,
+            );
+            output.interfaces.push(LoadedInterface {
+                name: format!("{model_name}-TextInference"),
+                interface: interface.to_any(),
+            });
         }
 
         Ok(output)

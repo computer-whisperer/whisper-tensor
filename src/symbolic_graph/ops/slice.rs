@@ -19,6 +19,26 @@ pub struct SliceOperation {
 }
 
 impl SliceOperation {
+    pub fn new_from_parts(
+        data: GlobalId,
+        starts: GlobalId,
+        ends: GlobalId,
+        axes: Option<GlobalId>,
+        steps: Option<GlobalId>,
+        output: GlobalId,
+        rng: &mut impl Rng,
+    ) -> Self {
+        Self {
+            global_id: GlobalId::new(rng),
+            data,
+            starts,
+            ends,
+            axes,
+            steps,
+            output,
+        }
+    }
+
     pub(crate) fn from_onnx(
         inputs: &[Option<GlobalId>],
         outputs: &[Option<GlobalId>],
