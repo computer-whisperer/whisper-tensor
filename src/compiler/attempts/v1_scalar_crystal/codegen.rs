@@ -138,7 +138,7 @@ pub fn compile(
     let ptr_table = builder.block_params(entry)[0];
 
     // Map NanoValue -> cranelift Value
-    let mut value_map: HashMap<u32, cranelift_codegen::ir::Value> = HashMap::new();
+    let mut value_map: HashMap<u64, cranelift_codegen::ir::Value> = HashMap::new();
 
     for nano_op in nano_ops {
         match nano_op {
@@ -346,7 +346,7 @@ fn emit_scalar_nano_op(
     ptr_table: cranelift_codegen::ir::Value,
     ptr_type: cranelift_codegen::ir::Type,
     math_refs: &HashMap<&str, cranelift_codegen::ir::FuncRef>,
-    value_map: &mut HashMap<u32, cranelift_codegen::ir::Value>,
+    value_map: &mut HashMap<u64, cranelift_codegen::ir::Value>,
 ) -> Result<(), CodegenError> {
     match nano_op {
         NanoOp::Load {

@@ -270,7 +270,7 @@ fn check_iteration(
 fn build_loop_body(template: &[NanoOp], deltas: &[isize]) -> Option<Vec<LoopBodyOp>> {
     let mut body = Vec::with_capacity(template.len());
     // Map NanoValue id -> body op index (for resolving references)
-    let mut nano_to_body: HashMap<u32, usize> = HashMap::new();
+    let mut nano_to_body: HashMap<u64, usize> = HashMap::new();
 
     for (i, op) in template.iter().enumerate() {
         let body_op = match op {
