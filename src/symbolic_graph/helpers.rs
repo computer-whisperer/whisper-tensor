@@ -120,6 +120,10 @@ impl SymbolicGraphMutator {
         out
     }
 
+    pub fn push_relu(&mut self, name: &str, input: GlobalId, rng: &mut impl Rng) -> GlobalId {
+        self.push_unary(name, input, WhichUnaryOperation::Relu, rng)
+    }
+
     pub fn push_sigmoid(&mut self, name: &str, input: GlobalId, rng: &mut impl Rng) -> GlobalId {
         self.push_unary(name, input, WhichUnaryOperation::Sigmoid, rng)
     }

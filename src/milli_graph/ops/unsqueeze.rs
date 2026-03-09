@@ -107,6 +107,7 @@ impl MilliOp for Unsqueeze {
             for i in 0..output_rank {
                 let mut is_selected = false;
                 for axis in &axes {
+                    // Negative axes relative to output rank
                     let axis = if *axis < 0 {
                         output_rank as i64 + *axis
                     } else {

@@ -87,6 +87,37 @@ pub struct TrainingMetadata {
     /// Global optimizer state outputs
     pub global_state_outputs: HashMap<String, GlobalId>,
     pub external_inputs: Vec<GlobalId>,
+
+    /// Maps external (symbolic-space) parameter IDs to updated-parameter output IDs.
+    ///
+    /// This is the caller-facing version of `param_to_new_param` (which uses
+    /// combined-space IDs). Use this in the training loop to feed updated
+    /// parameters back:
+    ///
+    /// ```ignore
+    /// for (&ext_param, &new_param_output) in &meta.param_updates {
+    ///     params.insert(ext_param, results[&new_param_output].clone());
+    /// }
+    /// ```
+    ///
+    /// Only populated when the graph was generated via
+    /// `SymbolicGraph::generate_milli_graph_with_options`.
+    pub param_updates: HashMap<GlobalId, GlobalId>,
+
+    /// Like `optimizer_state_inputs`/`optimizer_state_outputs`, but keyed by
+    /// external (symbolic-space) parameter IDs instead of combined-space IDs.
+    ///
+    /// Only populated via `SymbolicGraph::generate_milli_graph_with_options`.
+    pub state_updates: HashMap<(GlobalId, String), StateUpdate>,
+}
+
+/// Per-parameter optimizer state entry for the external-facing API.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StateUpdate {
+    /// Feed this tensor as an input each step (the current state value).
+    pub input: GlobalId,
+    /// Read this tensor from outputs each step (the updated state value).
+    pub output: GlobalId,
 }
 
 /// Semantic role of a tensor within the training graph.
@@ -691,7 +722,7 @@ impl MilliOpGraph {
     }
 
     #[allow(clippy::type_complexity)]
-    pub(crate) fn eval<T: MilliOpGraphObserver>(
+    pub fn eval<T: MilliOpGraphObserver>(
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
         observer: &mut T,
@@ -702,7 +733,9 @@ impl MilliOpGraph {
 
         let mut intermediate_values = HashMap::new();
         for (tensor_id, tensor_value) in inputs {
-            intermediate_values.insert(self.input_map[tensor_id], tensor_value.clone());
+            if let Some(&internal_id) = self.input_map.get(tensor_id) {
+                intermediate_values.insert(internal_id, tensor_value.clone());
+            }
         }
 
         for op_id in &self.op_ordering {
@@ -2528,6 +2561,120 @@ mod tests {
                 vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
             ],
             &[vec![2, 3, 4], vec![4, 2]],
+            1e-3,
+            1e-2,
+        );
+    }
+
+    #[test]
+    fn test_backward_conv_no_bias() {
+        // Conv2d: input=[1,1,4,4], weight=[1,1,3,3], no bias, stride=1, pad=0
+        // 16 input elements, 9 weight elements
+        let input_data: Vec<f32> = (1..=16).map(|x| x as f32 * 0.1).collect();
+        let weight_data: Vec<f32> = vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9];
+        check_general_backward(
+            |graph, inputs, rng| {
+                ops::Conv::push_new(
+                    graph,
+                    inputs[0],
+                    inputs[1],
+                    None,
+                    ops::ConvAutoPad::NotSet,
+                    vec![1, 1],
+                    1,
+                    vec![3, 3],
+                    vec![0, 0, 0, 0],
+                    vec![1, 1],
+                    rng,
+                )
+            },
+            &[input_data, weight_data],
+            &[vec![1, 1, 4, 4], vec![1, 1, 3, 3]],
+            1e-3,
+            1e-2,
+        );
+    }
+
+    #[test]
+    fn test_backward_conv_with_bias() {
+        // Conv2d with bias: input=[1,1,4,4], weight=[2,1,3,3], bias=[2]
+        let input_data: Vec<f32> = (1..=16).map(|x| x as f32 * 0.1).collect();
+        let weight_data: Vec<f32> = (1..=18).map(|x| x as f32 * 0.05).collect();
+        let bias_data: Vec<f32> = vec![0.1, -0.2];
+        check_general_backward(
+            |graph, inputs, rng| {
+                ops::Conv::push_new(
+                    graph,
+                    inputs[0],
+                    inputs[1],
+                    Some(inputs[2]),
+                    ops::ConvAutoPad::NotSet,
+                    vec![1, 1],
+                    1,
+                    vec![3, 3],
+                    vec![0, 0, 0, 0],
+                    vec![1, 1],
+                    rng,
+                )
+            },
+            &[input_data, weight_data, bias_data],
+            &[vec![1, 1, 4, 4], vec![2, 1, 3, 3], vec![2]],
+            1e-3,
+            1e-2,
+        );
+    }
+
+    #[test]
+    fn test_backward_conv_with_padding() {
+        // Conv2d with padding: input=[1,1,3,3], weight=[1,1,3,3], pad=1
+        let input_data: Vec<f32> = (1..=9).map(|x| x as f32 * 0.1).collect();
+        let weight_data: Vec<f32> = vec![0.1, 0.2, 0.1, 0.0, 0.5, 0.0, 0.1, 0.2, 0.1];
+        check_general_backward(
+            |graph, inputs, rng| {
+                ops::Conv::push_new(
+                    graph,
+                    inputs[0],
+                    inputs[1],
+                    None,
+                    ops::ConvAutoPad::NotSet,
+                    vec![1, 1],
+                    1,
+                    vec![3, 3],
+                    vec![1, 1, 1, 1],
+                    vec![1, 1],
+                    rng,
+                )
+            },
+            &[input_data, weight_data],
+            &[vec![1, 1, 3, 3], vec![1, 1, 3, 3]],
+            1e-3,
+            1e-2,
+        );
+    }
+
+    #[test]
+    fn test_backward_conv_stride2() {
+        // Conv2d with stride=2: input=[1,1,6,6], weight=[1,1,3,3]
+        let input_data: Vec<f32> = (1..=36).map(|x| x as f32 * 0.05).collect();
+        let weight_data: Vec<f32> = vec![0.1, 0.2, 0.1, 0.3, 0.0, -0.1, 0.1, 0.2, 0.1];
+        check_general_backward(
+            |graph, inputs, rng| {
+                ops::Conv::push_new(
+                    graph,
+                    inputs[0],
+                    inputs[1],
+                    None,
+                    ops::ConvAutoPad::NotSet,
+                    vec![1, 1],
+                    1,
+                    vec![3, 3],
+                    vec![0, 0, 0, 0],
+                    vec![2, 2],
+                    rng,
+                )
+            },
+            &[input_data, weight_data],
+            &[vec![1, 1, 6, 6], vec![1, 1, 3, 3]],
             1e-3,
             1e-2,
         );

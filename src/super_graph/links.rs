@@ -30,10 +30,15 @@ impl SuperGraphLink for SuperGraphLinkString {
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
-pub struct SuperGraphLinkTensor(pub(crate) GlobalId);
+pub struct SuperGraphLinkTensor(pub GlobalId);
 impl SuperGraphLinkTensor {
     pub fn new(rng: &mut impl Rng) -> Self {
         Self(GlobalId::new(rng))
+    }
+}
+impl From<GlobalId> for SuperGraphLinkTensor {
+    fn from(id: GlobalId) -> Self {
+        Self(id)
     }
 }
 impl SuperGraphLink for SuperGraphLinkTensor {
@@ -103,6 +108,10 @@ pub enum SuperGraphAnyLink {
 }
 
 impl SuperGraphAnyLink {
+    pub fn tensor(id: GlobalId) -> Self {
+        SuperGraphAnyLink::Tensor(SuperGraphLinkTensor(id))
+    }
+
     pub(crate) fn global_id(&self) -> GlobalId {
         match self {
             SuperGraphAnyLink::Tensor(link) => link.global_id(),
