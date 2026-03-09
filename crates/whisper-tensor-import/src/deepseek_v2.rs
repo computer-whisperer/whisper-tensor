@@ -1,8 +1,8 @@
 use crate::Error;
 use crate::onnx_graph::WeightStorageStrategy;
 use crate::onnx_graph::operators::{
-    Add, Concat, Constant, Gather, MatMul, Mul, RotaryEmbedding, ShapeOp, Slice, Softmax, TopK,
-    Transpose,
+    Add, Concat, Constant, Div, Gather, MatMul, Mul, RotaryEmbedding, ShapeOp, Slice, Softmax,
+    TopK, Transpose,
 };
 use crate::onnx_graph::pytorch::{
     div_scalar, linear, reshape, rms_norm, silu, sum_dim, transpose, unsqueeze,
@@ -474,7 +474,16 @@ pub fn load_deepseek_v2(
             // topk_values: [1, 1, k] (routing weights)
             // topk_indices: [1, 1, k] (expert indices, I64)
 
+            // Renormalize routing weights so selected experts sum to 1
+            let topk_sum = sum_dim(topk_values.clone() as Arc<dyn Tensor>, 2, Some(true))?;
+            let topk_values: Arc<dyn Tensor> =
+                Div::new(None, topk_values as Arc<dyn Tensor>, topk_sum)?;
+
             // Stack all expert weights into [n_routed_experts, ...] tensors
+            // TODO: This Concat materializes all expert weights into one contiguous tensor
+            // per MoE layer, roughly doubling the model's memory footprint. The
+            // compiler/optimizer should recognize Gather-from-Concat-of-constants and
+            // select weights directly without the intermediate stacked tensor.
             let n_experts = config.n_routed_experts;
             let mut gate_weights: Vec<Arc<dyn Tensor>> = Vec::with_capacity(n_experts);
             let mut up_weights: Vec<Arc<dyn Tensor>> = Vec::with_capacity(n_experts);
@@ -525,10 +534,8 @@ pub fn load_deepseek_v2(
 
             // Weighted sum by routing weights
             // topk_values: [1, 1, k] → reshape to [k, 1, 1] for broadcasting
-            let routing_weights: Arc<dyn Tensor> = reshape(
-                topk_values as Arc<dyn Tensor>,
-                vec![k as i64, 1, 1],
-            )?;
+            let routing_weights: Arc<dyn Tensor> =
+                reshape(topk_values, vec![k as i64, 1, 1])?;
             let weighted = Mul::new(None, expert_out, routing_weights)?;
             // Sum over expert dim (axis 0) → [1, 1, hidden]
             let routed_output = sum_dim(weighted, 0, Some(true))?;
