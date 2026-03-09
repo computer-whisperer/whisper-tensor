@@ -541,7 +541,10 @@ impl Node for LeakyReluOperation {
 
 impl Operation for LeakyReluOperation {
     fn parameters(&self) -> Vec<Property> {
-        vec![Property::new("alpha", PropertyValue::Float(self.alpha.into()))]
+        vec![Property::new(
+            "alpha",
+            PropertyValue::Float(self.alpha.into()),
+        )]
     }
 
     fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {

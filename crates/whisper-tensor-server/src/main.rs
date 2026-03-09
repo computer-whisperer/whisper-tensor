@@ -533,8 +533,8 @@ async fn main() {
     #[cfg(feature = "import")]
     let loaders: Vec<Box<dyn Loader>> = {
         use whisper_tensor_import::loaders::{
-            AutoLoader, FluxLoader, KittenTTSLoader, KokoroLoader, OnnxLoader, PiperLoader,
-            Rwkv7Loader, SD15Loader, TransformersLoader,
+            AutoLoader, FluxLoader, KokoroLoader, OnnxLoader, PiperLoader, Rwkv7Loader, SD15Loader,
+            TransformersLoader,
         };
         vec![
             Box::new(AutoLoader),
@@ -544,7 +544,6 @@ async fn main() {
             Box::new(SD15Loader),
             Box::new(FluxLoader),
             Box::new(KokoroLoader),
-            Box::new(KittenTTSLoader),
             Box::new(PiperLoader),
         ]
     };

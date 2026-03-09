@@ -17,9 +17,9 @@ mod rotary_embedding;
 mod scan;
 mod scatter_nd;
 mod shape;
-mod stft;
 mod slice;
 mod split;
+mod stft;
 mod transpose;
 mod unary;
 

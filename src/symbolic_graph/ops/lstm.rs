@@ -4,10 +4,10 @@ use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::MilliOpGraph;
 use crate::numeric_tensor::NumericTensor;
+use crate::onnx;
 use crate::symbolic_graph::ops::{EvalError, Operation};
 use crate::symbolic_graph::{ONNXDecodingError, query_attribute_int, query_attribute_string};
 use crate::tensor_rank::DynRank;
-use crate::onnx;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -37,7 +37,8 @@ impl LstmOperation {
         rng: &mut impl Rng,
     ) -> Result<Self, ONNXDecodingError> {
         let hidden_size = query_attribute_int(attributes, "hidden_size")
-            .ok_or(ONNXDecodingError::MissingField("hidden_size"))? as usize;
+            .ok_or(ONNXDecodingError::MissingField("hidden_size"))?
+            as usize;
 
         let direction = match query_attribute_string(attributes, "direction").as_deref() {
             Some("reverse") => LstmDirection::Reverse,

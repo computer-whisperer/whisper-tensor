@@ -1,6 +1,6 @@
 use super::{
-    FluxLoader, GgufLoader, KokoroLoader, OnnxLoader, PiperLoader, Rwkv7Loader,
-    SD2Loader, SD15Loader, SDXLLoader, TransformersLoader,
+    FluxLoader, GgufLoader, KokoroLoader, OnnxLoader, PiperLoader, Rwkv7Loader, SD2Loader,
+    SD15Loader, SDXLLoader, TransformersLoader,
 };
 use crate::onnx_graph::weights::SafetensorsWeightManager;
 use memmap2::Mmap;

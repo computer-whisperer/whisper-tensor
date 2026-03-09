@@ -200,10 +200,10 @@ pub fn check_tensor_matches(
     // Note: shape validation is intentionally lenient. Many ONNX models have
     // incorrect shape annotations (e.g. static 1 for what should be dynamic).
     // We only validate rank (number of dims) and dtype, not individual dim values.
-    if let Some(shape) = tensor_info.shape() {
-        if shape.len() != tensor.shape().len() {
-            Err(EvalError::UnexpectedRank(shape.len(), tensor.shape().len()))?;
-        }
+    if let Some(shape) = tensor_info.shape()
+        && shape.len() != tensor.shape().len()
+    {
+        Err(EvalError::UnexpectedRank(shape.len(), tensor.shape().len()))?;
     }
     if let Some(dtype) = tensor_info.dtype() {
         let tensor_dtype = tensor.dtype();
@@ -1692,14 +1692,12 @@ impl SymbolicGraphMutator {
                 ops::WhichUnaryOperation::Relu,
                 rng,
             )?)),
-            "LeakyRelu" => Some(AnyOperation::LeakyRelu(
-                ops::LeakyReluOperation::from_onnx(
-                    &input_tensors,
-                    &output_tensors,
-                    &onnx_node.attribute,
-                    rng,
-                )?,
-            )),
+            "LeakyRelu" => Some(AnyOperation::LeakyRelu(ops::LeakyReluOperation::from_onnx(
+                &input_tensors,
+                &output_tensors,
+                &onnx_node.attribute,
+                rng,
+            )?)),
             "Sigmoid" => Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
@@ -2214,22 +2212,18 @@ impl SymbolicGraphMutator {
                 &onnx_node.attribute,
                 rng,
             )?)),
-            "BiasGelu" => Some(AnyOperation::BiasGelu(
-                ops::BiasGeluOperation::from_onnx(
-                    &input_tensors,
-                    &output_tensors,
-                    &onnx_node.attribute,
-                    rng,
-                )?,
-            )),
-            "ReduceL2" => Some(AnyOperation::ReduceL2(
-                ops::ReduceL2Operation::from_onnx(
-                    &input_tensors,
-                    &output_tensors,
-                    &onnx_node.attribute,
-                    rng,
-                )?,
-            )),
+            "BiasGelu" => Some(AnyOperation::BiasGelu(ops::BiasGeluOperation::from_onnx(
+                &input_tensors,
+                &output_tensors,
+                &onnx_node.attribute,
+                rng,
+            )?)),
+            "ReduceL2" => Some(AnyOperation::ReduceL2(ops::ReduceL2Operation::from_onnx(
+                &input_tensors,
+                &output_tensors,
+                &onnx_node.attribute,
+                rng,
+            )?)),
             x => Err(ONNXDecodingError::UnsupportedONNXType(x.to_string()))?,
         };
 

@@ -1790,6 +1790,9 @@ impl GraphExplorerApp {
                                 sd_data.show_image_window = open;
                         }
                     }
+                    AnyInterface::TextToSpeechInterface(_) => {
+                        ui.label("TTS interface (not yet supported in WebUI)");
+                    }
                 }
                 ui.allocate_exact_size(ui.available_size_before_wrap(), Sense::click());
             });

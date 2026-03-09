@@ -28,7 +28,9 @@ impl Loader for KokoroLoader {
             ConfigField {
                 key: "path".to_string(),
                 label: "Model Directory".to_string(),
-                description: "Path to the Kokoro model directory (containing onnx/, tokenizer.json, voices/)".to_string(),
+                description:
+                    "Path to the Kokoro model directory (containing onnx/, tokenizer.json, voices/)"
+                        .to_string(),
                 field_type: ConfigFieldType::FilePath,
                 required: true,
                 default: None,
@@ -53,8 +55,7 @@ impl Loader for KokoroLoader {
 
     fn load(&self, config: ConfigValues) -> Result<LoaderOutput, LoaderError> {
         let dir = require_path(&config, "path")?;
-        let variant = get_string(&config, "variant")?
-            .unwrap_or_else(|| "model".to_string());
+        let variant = get_string(&config, "variant")?.unwrap_or_else(|| "model".to_string());
 
         // Load the ONNX model
         let onnx_path = dir.join("onnx").join(format!("{variant}.onnx"));

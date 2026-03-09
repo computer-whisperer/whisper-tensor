@@ -4,10 +4,10 @@ use crate::dtype::DType;
 use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::MilliOpGraph;
 use crate::numeric_tensor::NumericTensor;
+use crate::onnx;
 use crate::symbolic_graph::ops::{EvalError, Operation};
 use crate::symbolic_graph::{ONNXDecodingError, query_attribute_string};
 use crate::tensor_rank::DynRank;
-use crate::onnx;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -153,22 +153,16 @@ impl Operation for ScatterNDOperation {
                         Reduction::None => out_data[data_idx] = update_val,
                         Reduction::Add => out_data[data_idx] += update_val,
                         Reduction::Mul => out_data[data_idx] *= update_val,
-                        Reduction::Max => {
-                            out_data[data_idx] = out_data[data_idx].max(update_val)
-                        }
-                        Reduction::Min => {
-                            out_data[data_idx] = out_data[data_idx].min(update_val)
-                        }
+                        Reduction::Max => out_data[data_idx] = out_data[data_idx].max(update_val),
+                        Reduction::Min => out_data[data_idx] = out_data[data_idx].min(update_val),
                     }
                 }
             }
         }
 
         let out_shape: Vec<u64> = data_shape.iter().map(|&v| v as u64).collect();
-        let mut out = NumericTensor::NDArray(NDArrayNumericTensor::from_vec_shape(
-            out_data,
-            &out_shape,
-        )?);
+        let mut out =
+            NumericTensor::NDArray(NDArrayNumericTensor::from_vec_shape(out_data, &out_shape)?);
 
         let original_dtype = data.dtype();
         if original_dtype != DType::F32 {

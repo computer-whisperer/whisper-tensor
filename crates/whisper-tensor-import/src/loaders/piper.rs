@@ -53,10 +53,10 @@ impl Loader for PiperLoader {
         })?;
 
         // Parse the Piper config
-        let config_json = std::fs::read_to_string(&config_path)
-            .map_err(|e| LoaderError::LoadFailed(e.into()))?;
-        let config_value: serde_json::Value = serde_json::from_str(&config_json)
-            .map_err(|e| LoaderError::LoadFailed(e.into()))?;
+        let config_json =
+            std::fs::read_to_string(&config_path).map_err(|e| LoaderError::LoadFailed(e.into()))?;
+        let config_value: serde_json::Value =
+            serde_json::from_str(&config_json).map_err(|e| LoaderError::LoadFailed(e.into()))?;
 
         let sample_rate = config_value["audio"]["sample_rate"]
             .as_u64()
@@ -99,7 +99,9 @@ pub fn is_piper_model(path: &std::path::Path) -> bool {
     if path.is_file() {
         path.extension().is_some_and(|e| e == "onnx") && find_piper_config(path).is_some()
     } else if path.is_dir() {
-        find_onnx_in_dir(path).ok().is_some_and(|onnx| find_piper_config(&onnx).is_some())
+        find_onnx_in_dir(path)
+            .ok()
+            .is_some_and(|onnx| find_piper_config(&onnx).is_some())
     } else {
         false
     }

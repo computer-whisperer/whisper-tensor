@@ -415,19 +415,30 @@ fn cmd_image(
 // Text-to-speech
 // ============================================================================
 
-fn cmd_tts(output: LoaderOutput, model_dir: PathBuf, text: String, voice_name: String, speed: f32, output_path: PathBuf) {
+fn cmd_tts(
+    output: LoaderOutput,
+    model_dir: PathBuf,
+    text: String,
+    voice_name: String,
+    speed: f32,
+    output_path: PathBuf,
+) {
     use whisper_tensor::interfaces::TTSInputConfig;
+    use whisper_tensor::super_graph::SuperGraphContext;
     use whisper_tensor::super_graph::cache::SuperGraphTensorCache;
     use whisper_tensor::super_graph::data::SuperGraphData;
-    use whisper_tensor::super_graph::SuperGraphContext;
 
-    let interface = output.interfaces.iter().find_map(|i| match &i.interface {
-        AnyInterface::TextToSpeechInterface(x) => Some(x),
-        _ => None,
-    }).unwrap_or_else(|| {
-        eprintln!("No TTS interface found in loaded model");
-        std::process::exit(1);
-    });
+    let interface = output
+        .interfaces
+        .iter()
+        .find_map(|i| match &i.interface {
+            AnyInterface::TextToSpeechInterface(x) => Some(x),
+            _ => None,
+        })
+        .unwrap_or_else(|| {
+            eprintln!("No TTS interface found in loaded model");
+            std::process::exit(1);
+        });
 
     // Tokenize and build SuperGraph inputs based on model type
     let mut data = SuperGraphData::new();
@@ -439,7 +450,11 @@ fn cmd_tts(output: LoaderOutput, model_dir: PathBuf, text: String, voice_name: S
     }
 
     match &interface.input_config {
-        TTSInputConfig::Kokoro { style_link, speed_link, tokenizer } => {
+        TTSInputConfig::Kokoro {
+            style_link,
+            speed_link,
+            tokenizer,
+        } => {
             let phonemes = text_to_kokoro_phonemes(&text);
             let vocab = load_tts_vocab(tokenizer);
             let token_ids: Vec<i64> = {
@@ -470,7 +485,8 @@ fn cmd_tts(output: LoaderOutput, model_dir: PathBuf, text: String, voice_name: S
             let speed_tensor =
                 NumericTensor::<DynRank>::from_vec_shape(vec![speed], vec![1]).unwrap();
 
-            data.tensors.insert(interface.text_ids_link, input_ids_tensor);
+            data.tensors
+                .insert(interface.text_ids_link, input_ids_tensor);
             data.tensors.insert(*style_link, style_tensor);
             data.tensors.insert(*speed_link, speed_tensor);
         }
@@ -482,9 +498,8 @@ fn cmd_tts(output: LoaderOutput, model_dir: PathBuf, text: String, voice_name: S
             espeak_voice,
             ..
         } => {
-            let sentences =
-                espeak_rs::text_to_phonemes(&text, espeak_voice, None, true, false)
-                    .expect("espeak-ng phonemization failed");
+            let sentences = espeak_rs::text_to_phonemes(&text, espeak_voice, None, true, false)
+                .expect("espeak-ng phonemization failed");
             let ipa = sentences.join(" ");
             eprintln!("Phonemes: {ipa}");
 
@@ -511,9 +526,11 @@ fn cmd_tts(output: LoaderOutput, model_dir: PathBuf, text: String, voice_name: S
             let input_lengths_tensor =
                 NumericTensor::<DynRank>::from_vec_shape(vec![num_tokens as i64], vec![1]).unwrap();
             let length_scale = 1.0 / speed;
-            let scales_tensor =
-                NumericTensor::<DynRank>::from_vec_shape(vec![0.667f32, length_scale, 0.8], vec![3])
-                    .unwrap();
+            let scales_tensor = NumericTensor::<DynRank>::from_vec_shape(
+                vec![0.667f32, length_scale, 0.8],
+                vec![3],
+            )
+            .unwrap();
 
             data.tensors.insert(interface.text_ids_link, input_tensor);
             data.tensors
@@ -537,7 +554,11 @@ fn cmd_tts(output: LoaderOutput, model_dir: PathBuf, text: String, voice_name: S
     let mut backend = EvalBackend::NDArray;
     let start = std::time::Instant::now();
 
-    let symbolic_graphs: Vec<_> = output.models.iter().map(|m| m.model.get_symbolic_graph()).collect();
+    let symbolic_graphs: Vec<_> = output
+        .models
+        .iter()
+        .map(|m| m.model.get_symbolic_graph())
+        .collect();
     let super_graph_output = {
         let mut observer = ();
         let mut super_graph_tensor_cache = SuperGraphTensorCache::new();
@@ -702,42 +723,42 @@ fn espeak_to_misaki(ipa: &str) -> String {
     // E2M replacements, applied longest-first
     static E2M: &[(&str, &str)] = &[
         // Multi-char (longest first)
-        ("a\u{0361}\u{026a}", "I"),     // a͡ɪ -> I (PRICE)
-        ("a\u{0361}\u{028a}", "W"),     // a͡ʊ -> W (MOUTH)
+        ("a\u{0361}\u{026a}", "I"),        // a͡ɪ -> I (PRICE)
+        ("a\u{0361}\u{028a}", "W"),        // a͡ʊ -> W (MOUTH)
         ("d\u{0361}\u{0292}", "\u{02A4}"), // d͡ʒ -> ʤ
-        ("e\u{0361}\u{026a}", "A"),     // e͡ɪ -> A (FACE)
+        ("e\u{0361}\u{026a}", "A"),        // e͡ɪ -> A (FACE)
         ("t\u{0361}\u{0283}", "\u{02A7}"), // t͡ʃ -> ʧ
         ("\u{0254}\u{0361}\u{026a}", "Y"), // ɔ͡ɪ -> Y (CHOICE)
-        ("o\u{0361}\u{028a}", "O"),     // o͡ʊ -> O (GOAT, US)
+        ("o\u{0361}\u{028a}", "O"),        // o͡ʊ -> O (GOAT, US)
         // Without tie bar (fallback)
-        ("a\u{026a}", "I"),             // aɪ -> I
-        ("a\u{028a}", "W"),             // aʊ -> W
-        ("d\u{0292}", "\u{02A4}"),      // dʒ -> ʤ
-        ("e\u{026a}", "A"),             // eɪ -> A
-        ("t\u{0283}", "\u{02A7}"),      // tʃ -> ʧ
-        ("\u{0254}\u{026a}", "Y"),      // ɔɪ -> Y
-        ("o\u{028a}", "O"),             // oʊ -> O
+        ("a\u{026a}", "I"),        // aɪ -> I
+        ("a\u{028a}", "W"),        // aʊ -> W
+        ("d\u{0292}", "\u{02A4}"), // dʒ -> ʤ
+        ("e\u{026a}", "A"),        // eɪ -> A
+        ("t\u{0283}", "\u{02A7}"), // tʃ -> ʧ
+        ("\u{0254}\u{026a}", "Y"), // ɔɪ -> Y
+        ("o\u{028a}", "O"),        // oʊ -> O
         // Syllabic patterns
-        ("\u{0294}\u{02cc}n\u{0329}", "t\u{1d4a}n"),  // ʔˌn̩ -> tᵊn
-        ("\u{0294}n", "t\u{1d4a}n"),                    // ʔn -> tᵊn
-        ("\u{0259}\u{0361}l", "\u{1d4a}l"),            // ə͡l -> ᵊl
-        ("\u{0259}l", "\u{1d4a}l"),                     // əl -> ᵊl (no tie)
+        ("\u{0294}\u{02cc}n\u{0329}", "t\u{1d4a}n"), // ʔˌn̩ -> tᵊn
+        ("\u{0294}n", "t\u{1d4a}n"),                 // ʔn -> tᵊn
+        ("\u{0259}\u{0361}l", "\u{1d4a}l"),          // ə͡l -> ᵊl
+        ("\u{0259}l", "\u{1d4a}l"),                  // əl -> ᵊl (no tie)
         // R-colored
-        ("\u{025a}", "\u{0259}\u{0279}"),              // ɚ -> əɹ
+        ("\u{025a}", "\u{0259}\u{0279}"), // ɚ -> əɹ
         // US English specifics
         ("\u{025c}\u{02d0}\u{0279}", "\u{025c}\u{0279}"), // ɜːɹ -> ɜɹ
-        ("\u{025c}\u{02d0}", "\u{025c}\u{0279}"),          // ɜː -> ɜɹ
-        ("\u{026a}\u{0259}", "i\u{0259}"),                 // ɪə -> iə
+        ("\u{025c}\u{02d0}", "\u{025c}\u{0279}"),         // ɜː -> ɜɹ
+        ("\u{026a}\u{0259}", "i\u{0259}"),                // ɪə -> iə
         // Single-char
-        ("e", "A"),                     // bare e -> A
-        ("r", "\u{0279}"),             // r -> ɹ
+        ("e", "A"),        // bare e -> A
+        ("r", "\u{0279}"), // r -> ɹ
         ("x", "k"),
-        ("\u{00e7}", "k"),             // ç -> k
-        ("\u{0250}", "\u{0259}"),      // ɐ -> ə
-        ("\u{026c}", "l"),             // ɬ -> l
-        ("\u{0294}", "t"),             // ʔ -> t
-        ("o", "\u{0254}"),             // o -> ɔ
-        ("\u{027e}", "T"),             // ɾ -> T
+        ("\u{00e7}", "k"),        // ç -> k
+        ("\u{0250}", "\u{0259}"), // ɐ -> ə
+        ("\u{026c}", "l"),        // ɬ -> l
+        ("\u{0294}", "t"),        // ʔ -> t
+        ("o", "\u{0254}"),        // o -> ɔ
+        ("\u{027e}", "T"),        // ɾ -> T
     ];
 
     let mut result = ipa.to_string();

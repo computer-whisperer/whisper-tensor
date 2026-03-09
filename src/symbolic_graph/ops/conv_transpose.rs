@@ -4,12 +4,12 @@ use crate::dtype::DType;
 use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::MilliOpGraph;
 use crate::numeric_tensor::NumericTensor;
+use crate::onnx;
 use crate::symbolic_graph::ops::{EvalError, Operation};
 use crate::symbolic_graph::{
     ONNXDecodingError, query_attribute_int, query_attribute_ints, query_attribute_string,
 };
 use crate::tensor_rank::DynRank;
-use crate::onnx;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -68,8 +68,7 @@ impl ConvTransposeOperation {
             input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("ConvTranspose"))?,
             weight: inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs("ConvTranspose"))?,
             bias: inputs.get(2).and_then(|x| *x),
-            output: outputs[0]
-                .ok_or(ONNXDecodingError::InvalidOperatorOutputs("ConvTranspose"))?,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("ConvTranspose"))?,
             auto_pad,
             dilations: query_attribute_ints(attributes, "dilations").unwrap_or_default(),
             group: query_attribute_int(attributes, "group").unwrap_or(1),
@@ -161,14 +160,26 @@ impl Operation for ConvTransposeOperation {
         };
         let groups = self.group as usize;
         let c_out = c_out_per_group * groups;
-        let stride = if self.strides.is_empty() { 1 } else { self.strides[0] as usize };
-        let dilation = if self.dilations.is_empty() { 1 } else { self.dilations[0] as usize };
+        let stride = if self.strides.is_empty() {
+            1
+        } else {
+            self.strides[0] as usize
+        };
+        let dilation = if self.dilations.is_empty() {
+            1
+        } else {
+            self.dilations[0] as usize
+        };
         let (pad_begin, pad_end) = if self.pads.len() >= 2 {
             (self.pads[0] as usize, self.pads[1] as usize)
         } else {
             (0, 0)
         };
-        let output_pad = if self.output_padding.is_empty() { 0 } else { self.output_padding[0] as usize };
+        let output_pad = if self.output_padding.is_empty() {
+            0
+        } else {
+            self.output_padding[0] as usize
+        };
 
         let effective_kernel = (kernel - 1) * dilation + 1;
         let l_out = (l_in - 1) * stride - pad_begin - pad_end + effective_kernel + output_pad;
@@ -198,7 +209,8 @@ impl Operation for ConvTransposeOperation {
                                     + k as isize * dilation as isize
                                     - pad_begin as isize;
                                 if o_pos >= 0 && (o_pos as usize) < l_out {
-                                    out_data[b * c_out * l_out + out_ch * l_out + o_pos as usize] +=
+                                    out_data
+                                        [b * c_out * l_out + out_ch * l_out + o_pos as usize] +=
                                         x_val
                                             * w_data[in_ch * c_out_per_group * kernel
                                                 + c_o * kernel

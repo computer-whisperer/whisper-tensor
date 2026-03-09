@@ -4,10 +4,10 @@ use crate::dtype::DType;
 use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::MilliOpGraph;
 use crate::numeric_tensor::NumericTensor;
+use crate::onnx;
 use crate::symbolic_graph::ops::{EvalError, Operation};
 use crate::symbolic_graph::{ONNXDecodingError, query_attribute_int};
 use crate::tensor_rank::DynRank;
-use crate::onnx;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -97,10 +97,7 @@ impl Operation for StftOperation {
         let frame_step_tensor = &inputs[&self.inputs[1].unwrap()];
 
         // frame_step: scalar i64
-        let frame_step_data: Vec<i64> = frame_step_tensor
-            .to_ndarray()?
-            .flatten()
-            .try_into()?;
+        let frame_step_data: Vec<i64> = frame_step_tensor.to_ndarray()?.flatten().try_into()?;
         let frame_step = frame_step_data[0] as usize;
 
         // window (optional, input 2)
@@ -147,8 +144,8 @@ impl Operation for StftOperation {
         let twiddles: Vec<(f64, f64)> = (0..fft_length)
             .flat_map(|k| {
                 (0..frame_length).map(move |n| {
-                    let angle = -2.0 * std::f64::consts::PI * k as f64 * n as f64
-                        / frame_length as f64;
+                    let angle =
+                        -2.0 * std::f64::consts::PI * k as f64 * n as f64 / frame_length as f64;
                     (angle.cos(), angle.sin())
                 })
             })

@@ -49,8 +49,7 @@ impl GatherElementsOperation {
         Ok(Self {
             global_id: GlobalId::new(rng),
             data: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("GatherElements"))?,
-            indices: inputs[1]
-                .ok_or(ONNXDecodingError::InvalidOperatorInputs("GatherElements"))?,
+            indices: inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs("GatherElements"))?,
             output: outputs[0]
                 .ok_or(ONNXDecodingError::InvalidOperatorOutputs("GatherElements"))?,
             axis,
@@ -269,7 +268,10 @@ impl Operation for GatherNDOperation {
         }
 
         let slice_size: usize = slice_dims.iter().product::<usize>().max(1);
-        let num_lookups: usize = indices_shape[..indices_rank - 1].iter().product::<usize>().max(1);
+        let num_lookups: usize = indices_shape[..indices_rank - 1]
+            .iter()
+            .product::<usize>()
+            .max(1);
         let total_out = out_shape.iter().product::<usize>();
 
         // Handle empty output
@@ -322,9 +324,8 @@ impl Operation for GatherNDOperation {
 
             // Copy slice
             let out_start = lookup * slice_size;
-            for s in 0..slice_size {
-                out[out_start + s] = data_flat[data_offset + s];
-            }
+            out[out_start..out_start + slice_size]
+                .copy_from_slice(&data_flat[data_offset..data_offset + slice_size]);
         }
 
         let out_shape_u64: Vec<u64> = out_shape.iter().map(|&v| v as u64).collect();

@@ -226,7 +226,7 @@ pub fn run<T: SymbolicGraphObserver>(
             }
 
             let start_instant = Instant::now();
-            let input_shapes: Vec<_> = input_values.iter().map(|(_, v)| v.shape()).collect();
+            let input_shapes: Vec<_> = input_values.values().map(|v| v.shape()).collect();
             let outputs = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 op.eval(eval_backend, &input_values)
             }))
