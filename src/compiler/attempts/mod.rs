@@ -10,3 +10,5 @@ pub mod v3_nano_fusion;
 pub mod v4_pool_growth;
 pub mod v5_typed_synthesis;
 pub mod v6_schedule_synthesis;
+pub mod v7_parallel_crystal;
+pub mod v8_generic_kernel;

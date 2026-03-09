@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 /// SSA-style value reference within the nano op stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct NanoValue(pub u32);
+pub struct NanoValue(pub u64);
 
 /// Scalar binary operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,8 +96,11 @@ pub enum NanoExpandError {
 /// All tensor shapes must be fully concrete (no symbolic dimensions).
 /// Constants are not expanded — the runtime must pre-fill their buffers.
 pub struct NanoOpExpander {
-    next_value: u32,
+    next_value: u64,
     tensor_shapes: HashMap<GlobalId, Vec<usize>>,
+    /// Target number of output elements to sample per op.
+    /// `0` means emit all elements (no sampling).
+    max_output_samples: usize,
 }
 
 impl NanoOpExpander {
@@ -105,12 +108,30 @@ impl NanoOpExpander {
         Self {
             next_value: 0,
             tensor_shapes,
+            max_output_samples: 0,
+        }
+    }
+
+    /// Create an expander that samples at most `n` output elements per op.
+    ///
+    /// Sampled elements are spread across the output space on a uniform grid
+    /// so that every output axis has varied coordinates — enough for affine
+    /// coefficient inference.  The full reduction depth (K) is always
+    /// preserved; only the number of output positions is bounded.
+    pub fn new_sampled(tensor_shapes: HashMap<GlobalId, Vec<usize>>, max_output_samples: usize) -> Self {
+        Self {
+            next_value: 0,
+            tensor_shapes,
+            max_output_samples,
         }
     }
 
     fn alloc_value(&mut self) -> NanoValue {
         let v = NanoValue(self.next_value);
-        self.next_value += 1;
+        self.next_value = self
+            .next_value
+            .checked_add(1)
+            .expect("NanoValue id overflow");
         v
     }
 
@@ -222,6 +243,13 @@ impl NanoOpExpander {
         let a_strides = broadcast_strides(&a_shape, &out_shape);
         let b_strides = broadcast_strides(&b_shape, &out_shape);
 
+        let total: usize = out_shape.iter().product();
+        let output_stride = if self.max_output_samples > 0 && total > self.max_output_samples {
+            (total / self.max_output_samples).max(1)
+        } else {
+            1
+        };
+
         Ok(BinaryEmitter {
             a_id,
             b_id,
@@ -230,8 +258,9 @@ impl NanoOpExpander {
             out_shape: out_shape.clone(),
             a_strides,
             b_strides,
-            total: out_shape.iter().product(),
+            total,
             flat_out: 0,
+            output_stride,
             stage: BinaryStage::LoadA,
             flat_a: 0,
             flat_b: 0,
@@ -248,12 +277,19 @@ impl NanoOpExpander {
         op: ScalarUnaryOp,
     ) -> Result<UnaryEmitter, NanoExpandError> {
         let out_shape = self.get_shape(&out_id)?.to_vec();
+        let total: usize = out_shape.iter().product();
+        let output_stride = if self.max_output_samples > 0 && total > self.max_output_samples {
+            (total / self.max_output_samples).max(1)
+        } else {
+            1
+        };
         Ok(UnaryEmitter {
             input_id,
             out_id,
             op,
-            total: out_shape.iter().product(),
+            total,
             flat_idx: 0,
+            output_stride,
             stage: UnaryStage::Load,
             vin: None,
             vout: None,
@@ -292,6 +328,16 @@ impl NanoOpExpander {
             MatMulPhase::OutputStart
         };
 
+        // Compute sampling strides: pick ~sqrt(max_samples) points per axis.
+        let (row_stride, col_stride) = if self.max_output_samples > 0 {
+            let per_axis = (self.max_output_samples as f64).sqrt().ceil() as usize;
+            let rs = if m > per_axis { m / per_axis } else { 1 };
+            let cs = if n > per_axis { n / per_axis } else { 1 };
+            (rs.max(1), cs.max(1))
+        } else {
+            (1, 1)
+        };
+
         Ok(MatMulEmitter {
             a_id,
             b_id,
@@ -302,6 +348,8 @@ impl NanoOpExpander {
             row: 0,
             col: 0,
             kk: 0,
+            row_stride,
+            col_stride,
             phase,
             acc: None,
             va: None,
@@ -406,6 +454,8 @@ struct BinaryEmitter {
     b_strides: Vec<usize>,
     total: usize,
     flat_out: usize,
+    /// Step between sampled output elements (1 = no sampling).
+    output_stride: usize,
     stage: BinaryStage,
     flat_a: usize,
     flat_b: usize,
@@ -457,11 +507,12 @@ impl BinaryEmitter {
                 }
             }
             BinaryStage::Store => {
+                let store_idx = self.flat_out;
                 self.stage = BinaryStage::LoadA;
-                self.flat_out += 1;
+                self.flat_out += self.output_stride;
                 NanoOp::Store {
                     tensor: self.out_id,
-                    flat_index: self.flat_out - 1,
+                    flat_index: store_idx,
                     src: self.vout.unwrap(),
                 }
             }
@@ -484,6 +535,8 @@ struct UnaryEmitter {
     op: ScalarUnaryOp,
     total: usize,
     flat_idx: usize,
+    /// Step between sampled output elements (1 = no sampling).
+    output_stride: usize,
     stage: UnaryStage,
     vin: Option<NanoValue>,
     vout: Option<NanoValue>,
@@ -517,11 +570,12 @@ impl UnaryEmitter {
                 }
             }
             UnaryStage::Store => {
+                let store_idx = self.flat_idx;
                 self.stage = UnaryStage::Load;
-                self.flat_idx += 1;
+                self.flat_idx += self.output_stride;
                 NanoOp::Store {
                     tensor: self.out_id,
-                    flat_index: self.flat_idx - 1,
+                    flat_index: store_idx,
                     src: self.vout.unwrap(),
                 }
             }
@@ -552,6 +606,10 @@ struct MatMulEmitter {
     row: usize,
     col: usize,
     kk: usize,
+    /// Row step between sampled output elements (1 = no sampling).
+    row_stride: usize,
+    /// Column step between sampled output elements (1 = no sampling).
+    col_stride: usize,
     phase: MatMulPhase,
     acc: Option<NanoValue>,
     va: Option<NanoValue>,
@@ -638,10 +696,10 @@ impl MatMulEmitter {
                     src: self.acc.unwrap(),
                 };
 
-                self.col += 1;
+                self.col += self.col_stride;
                 if self.col >= self.n {
                     self.col = 0;
-                    self.row += 1;
+                    self.row += self.row_stride;
                 }
                 self.phase = MatMulPhase::OutputStart;
                 Some(store)

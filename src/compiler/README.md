@@ -82,4 +82,19 @@ set itself, rather than routing through per-op handcrafted happy paths.
 - `v6_schedule_synthesis`: generic schedule-intent recovery with no explicit matmul match,
   including affine access-role recovery and ranked schedule-candidate synthesis
   for additive-reduction families, plus initial Cranelift lowering for recovered
-  reduction schedules.
+  reduction schedules. Schedule synthesis now runs as a streaming two-pass
+  nano-op iterator (use-count pass + grouping pass) instead of collecting full
+  ordered/whitewashed nano-op vectors. Current safety cap is
+  `8_000_000` estimated nano ops; override with
+  `WT_V6_MAX_MATERIALIZED_NANO_OPS=<n>` for intentional stress runs.
+- `v7_parallel_crystal`: parallel-ready execution planning that converts recovered
+  additive-reduction loops into explicit non-overlapping output tile tasks,
+  plus a configurable task executor (single-thread + loop-parallel CPU mode)
+  for correctness benchmarking and an
+  initial Cranelift emitter for planned rank-2 `sum_k(a*b)` tile kernels.
+  Current codegen supports multiple planned reduction loops, affine pointwise
+  loop emission from recovered canonical terms (including unary math calls),
+  dependency-ordered full-graph emission, and a reduction-only compile mode.
+  Executor parallel mode currently uses per-loop barriers and row-block task
+  partitioning; next steps are persistent workers/work-stealing, stronger
+  vectorization, and broader reduction term coverage.

@@ -7,11 +7,15 @@
 use crate::compiler::common::v1_frontend::nano_op::{
     NanoExpandError, NanoOp, NanoOpExpander, NanoValue, ScalarBinOp, ScalarUnaryOp,
 };
-use crate::graph::GlobalId;
+use crate::graph::{GlobalId, Graph, Node};
 use crate::milli_graph::MilliOpGraph;
+use crate::milli_graph::ops::AnyMilliOp;
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+
+const DEFAULT_MAX_MATERIALIZED_NANO_OPS: usize = 8_000_000;
+const MAX_MATERIALIZED_NANO_OPS_ENV: &str = "WT_V6_MAX_MATERIALIZED_NANO_OPS";
 
 #[derive(Debug, thiserror::Error)]
 pub enum PipelineError {
@@ -28,6 +32,21 @@ pub enum PipelineError {
         tensor: GlobalId,
         flat_index: usize,
         shape: Vec<usize>,
+    },
+    #[error(
+        "v6 synthesis estimated {estimated_ops} nano ops exceeds materialization limit {limit_ops}; set {env_var} to override"
+    )]
+    NanoOpBudgetExceeded {
+        estimated_ops: usize,
+        limit_ops: usize,
+        env_var: &'static str,
+    },
+    #[error("v6 synthesis nano-op estimate overflow ({context})")]
+    NanoOpEstimateOverflow { context: String },
+    #[error("Invalid value for {env_var}: {value}")]
+    InvalidNanoOpLimit {
+        env_var: &'static str,
+        value: String,
     },
 }
 
@@ -60,9 +79,16 @@ pub struct RecoveredLoop {
 
 #[derive(Debug, Clone)]
 pub enum LoopIntent {
-    Pointwise { contiguous_output: bool },
+    Pointwise(PointwiseIntent),
     AdditiveReduction(ReductionIntent),
     Unknown,
+}
+
+#[derive(Debug, Clone)]
+pub struct PointwiseIntent {
+    pub contiguous_output: bool,
+    pub canonical_term: ReductionTermPattern,
+    pub accesses: Vec<RecoveredTensorAccess>,
 }
 
 #[derive(Debug, Clone)]
@@ -174,16 +200,578 @@ pub fn build_from_graph(
     graph: &MilliOpGraph,
     shapes: &HashMap<GlobalId, Vec<usize>>,
 ) -> Result<PipelineArtifacts, PipelineError> {
-    let mut expander = NanoOpExpander::new(shapes.clone());
-    let ordered_nano_ops = expander.expand_iter(graph).collect::<Result<Vec<_>, _>>()?;
-    let whitewashed_nano_ops = whitewash_pool_order(ordered_nano_ops.clone());
-    let schedule = analyze_from_pool(&whitewashed_nano_ops, shapes)?;
+    let nano_op_limit = read_nano_op_limit_from_env()?;
+    build_from_graph_with_limit(graph, shapes, nano_op_limit)
+}
+
+fn build_from_graph_with_limit(
+    graph: &MilliOpGraph,
+    shapes: &HashMap<GlobalId, Vec<usize>>,
+    nano_op_limit: usize,
+) -> Result<PipelineArtifacts, PipelineError> {
+    let estimated = estimate_nano_op_materialization(graph, shapes)?;
+    if estimated > nano_op_limit {
+        return Err(PipelineError::NanoOpBudgetExceeded {
+            estimated_ops: estimated,
+            limit_ops: nano_op_limit,
+            env_var: MAX_MATERIALIZED_NANO_OPS_ENV,
+        });
+    }
+
+    let schedule = analyze_from_graph_streaming(graph, shapes)?;
 
     Ok(PipelineArtifacts {
-        ordered_nano_ops,
-        whitewashed_nano_ops,
+        // v6 now streams synthesis directly from the nano-op iterator.
+        // Keep these vectors for API compatibility with existing callsites.
+        ordered_nano_ops: Vec::new(),
+        whitewashed_nano_ops: Vec::new(),
         schedule,
     })
+}
+
+/// Memory-bounded synthesis using sampled nano-op expansion.
+///
+/// Instead of materializing all nano-ops (which is O(M×N×K) for matmul),
+/// this function:
+/// 1. Expands only a sampled subset of output elements per op (~256),
+///    preserving full reduction depth so access patterns are correct.
+/// 2. Uses a single pass with `.remove()` instead of `.get().cloned()`,
+///    eliminating the need for a global use-count vector.
+/// 3. Stores at most `RESERVOIR_SIZE` instances per group, bounding memory
+///    regardless of output tensor size.
+///
+/// For a [4096, 8192] × [8192, 22528] matmul, the full stream would be
+/// ~3 trillion nano-ops and ~12 TB of StoreInstances. This function
+/// processes ~256 × 32K = 8M nano-ops and stores ~256 × 131KB = 33 MB.
+pub fn build_from_graph_sampled(
+    graph: &MilliOpGraph,
+    shapes: &HashMap<GlobalId, Vec<usize>>,
+) -> Result<PipelineArtifacts, PipelineError> {
+    let schedule = analyze_from_graph_sampled(graph, shapes)?;
+    Ok(PipelineArtifacts {
+        ordered_nano_ops: Vec::new(),
+        whitewashed_nano_ops: Vec::new(),
+        schedule,
+    })
+}
+
+/// Target number of output elements to sample per op.
+const SAMPLED_OUTPUT_TARGET: usize = 256;
+
+/// Maximum instances kept per store group (reservoir size).
+const RESERVOIR_SIZE: usize = 512;
+
+fn analyze_from_graph_sampled(
+    graph: &MilliOpGraph,
+    shapes: &HashMap<GlobalId, Vec<usize>>,
+) -> Result<ScheduleIR, PipelineError> {
+    let mut expander = NanoOpExpander::new_sampled(shapes.clone(), SAMPLED_OUTPUT_TARGET);
+    let mut value_exprs: HashMap<NanoValue, Expr> = HashMap::new();
+    let mut raw_groups: HashMap<GroupKey, ReservoirStoreGroup> = HashMap::new();
+    let mut total_stores = 0usize;
+    let mut total_nano_ops = 0usize;
+
+    for op in expander.expand_iter(graph) {
+        let op = op?;
+        total_nano_ops += 1;
+        match op {
+            NanoOp::Load {
+                dst,
+                tensor,
+                flat_index,
+            } => {
+                value_exprs.insert(dst, Expr::Load { tensor, flat_index });
+            }
+            NanoOp::Literal { dst, value } => {
+                value_exprs.insert(
+                    dst,
+                    Expr::Literal {
+                        value_bits: value.to_bits(),
+                    },
+                );
+            }
+            NanoOp::UnaryOp { dst, op, input } => {
+                // Move instead of clone — all current emitters produce single-use values.
+                let input_expr = value_exprs
+                    .remove(&input)
+                    .ok_or(PipelineError::MissingDefinition(input))?;
+                value_exprs.insert(
+                    dst,
+                    Expr::Unary {
+                        op,
+                        input: Box::new(input_expr),
+                    },
+                );
+            }
+            NanoOp::BinOp { dst, op, a, b } => {
+                let a_expr = value_exprs
+                    .remove(&a)
+                    .ok_or(PipelineError::MissingDefinition(a))?;
+                let b_expr = value_exprs
+                    .remove(&b)
+                    .ok_or(PipelineError::MissingDefinition(b))?;
+                value_exprs.insert(
+                    dst,
+                    Expr::Bin {
+                        op,
+                        a: Box::new(a_expr),
+                        b: Box::new(b_expr),
+                    },
+                );
+            }
+            NanoOp::Store {
+                tensor,
+                flat_index,
+                src,
+            } => {
+                total_stores += 1;
+                let src_expr = value_exprs
+                    .remove(&src)
+                    .ok_or(PipelineError::MissingDefinition(src))?;
+                absorb_store_expr_reservoir(&mut raw_groups, tensor, flat_index, &src_expr);
+            }
+        }
+    }
+
+    finalize_grouped_schedule_sampled(raw_groups, total_nano_ops, total_stores, shapes)
+}
+
+fn absorb_store_expr_reservoir(
+    raw_groups: &mut HashMap<GroupKey, ReservoirStoreGroup>,
+    output_tensor: GlobalId,
+    out_flat_index: usize,
+    expr: &Expr,
+) {
+    let mut load_tensors = Vec::new();
+    let pattern = pattern_expr(expr, &mut load_tensors);
+    let mut load_indices = Vec::new();
+    collect_load_indices(expr, &mut load_indices);
+
+    let key = GroupKey {
+        output_tensor,
+        pattern_hash: stable_hash(&pattern),
+        load_tensors_hash: stable_hash(&load_tensors),
+    };
+
+    let instance = StoreInstance {
+        out_flat_index,
+        load_indices,
+    };
+
+    let entry = raw_groups.entry(key).or_insert_with(|| ReservoirStoreGroup {
+        output_tensor,
+        pattern: pattern.clone(),
+        load_tensors: load_tensors.clone(),
+        reservoir: Vec::with_capacity(RESERVOIR_SIZE),
+        total_count: 0,
+        rng_state: 0xDEAD_BEEF_CAFE_BABEu64,
+    });
+
+    // Hash collision fallback.
+    if entry.pattern != pattern || entry.load_tensors != load_tensors {
+        let mut alt_key = key;
+        alt_key.pattern_hash ^= 0x9E37_79B9_7F4A_7C15;
+        let alt_entry = raw_groups
+            .entry(alt_key)
+            .or_insert_with(|| ReservoirStoreGroup {
+                output_tensor,
+                pattern,
+                load_tensors,
+                reservoir: Vec::with_capacity(RESERVOIR_SIZE),
+                total_count: 0,
+                rng_state: 0xDEAD_BEEF_CAFE_BABEu64,
+            });
+        reservoir_insert(alt_entry, instance);
+        return;
+    }
+
+    reservoir_insert(entry, instance);
+}
+
+/// Algorithm R reservoir sampling: keep first RESERVOIR_SIZE items,
+/// then replace with probability RESERVOIR_SIZE / total_count.
+fn reservoir_insert(group: &mut ReservoirStoreGroup, instance: StoreInstance) {
+    group.total_count += 1;
+    if group.reservoir.len() < RESERVOIR_SIZE {
+        group.reservoir.push(instance);
+    } else {
+        // Simple xorshift64 PRNG for replacement decisions.
+        group.rng_state ^= group.rng_state << 13;
+        group.rng_state ^= group.rng_state >> 7;
+        group.rng_state ^= group.rng_state << 17;
+        let idx = (group.rng_state as usize) % group.total_count;
+        if idx < RESERVOIR_SIZE {
+            group.reservoir[idx] = instance;
+        }
+    }
+}
+
+fn finalize_grouped_schedule_sampled(
+    raw_groups: HashMap<GroupKey, ReservoirStoreGroup>,
+    total_nano_ops: usize,
+    total_stores: usize,
+    shapes: &HashMap<GlobalId, Vec<usize>>,
+) -> Result<ScheduleIR, PipelineError> {
+    // Convert ReservoirStoreGroups to StoreGroups for classify_group reuse.
+    let mut groups: Vec<StoreGroup> = raw_groups
+        .into_values()
+        .map(|rg| StoreGroup {
+            output_tensor: rg.output_tensor,
+            pattern: rg.pattern,
+            load_tensors: rg.load_tensors,
+            instances: rg.reservoir,
+        })
+        .collect();
+    groups.sort_by_key(|g| g.output_tensor);
+
+    let mut loops = Vec::new();
+    let mut pointwise = 0usize;
+    let mut reductions = 0usize;
+    let mut unknown = 0usize;
+
+    for group in groups {
+        let recovered = classify_group(&group, shapes)?;
+        match &recovered.intent {
+            LoopIntent::Pointwise(_) => pointwise += 1,
+            LoopIntent::AdditiveReduction(_) => reductions += 1,
+            LoopIntent::Unknown => unknown += 1,
+        }
+        loops.push(recovered);
+    }
+
+    let stats = ScheduleStats {
+        total_nano_ops,
+        total_stores,
+        grouped_families: loops.len(),
+        pointwise_families: pointwise,
+        additive_reduction_families: reductions,
+        unknown_families: unknown,
+    };
+
+    Ok(ScheduleIR { loops, stats })
+}
+
+#[derive(Debug, Clone)]
+struct ReservoirStoreGroup {
+    output_tensor: GlobalId,
+    pattern: PatternExpr,
+    load_tensors: Vec<GlobalId>,
+    reservoir: Vec<StoreInstance>,
+    total_count: usize,
+    rng_state: u64,
+}
+
+fn analyze_from_graph_streaming(
+    graph: &MilliOpGraph,
+    shapes: &HashMap<GlobalId, Vec<usize>>,
+) -> Result<ScheduleIR, PipelineError> {
+    let mut pass1_expander = NanoOpExpander::new(shapes.clone());
+    let (mut remaining_uses, total_nano_ops) =
+        count_nano_value_uses(pass1_expander.expand_iter(graph))?;
+
+    let mut pass2_expander = NanoOpExpander::new(shapes.clone());
+    let mut value_exprs: HashMap<NanoValue, Expr> = HashMap::new();
+    let mut raw_groups: HashMap<GroupKey, StoreGroup> = HashMap::new();
+    let mut total_stores = 0usize;
+
+    for op in pass2_expander.expand_iter(graph) {
+        let op = op?;
+        match op {
+            NanoOp::Load {
+                dst,
+                tensor,
+                flat_index,
+            } => {
+                insert_value_expr(&mut value_exprs, dst, Expr::Load { tensor, flat_index })?;
+                maybe_drop_dead_value(&mut value_exprs, &remaining_uses, dst);
+            }
+            NanoOp::Literal { dst, value } => {
+                insert_value_expr(
+                    &mut value_exprs,
+                    dst,
+                    Expr::Literal {
+                        value_bits: value.to_bits(),
+                    },
+                )?;
+                maybe_drop_dead_value(&mut value_exprs, &remaining_uses, dst);
+            }
+            NanoOp::UnaryOp { dst, op, input } => {
+                let input_expr = value_exprs
+                    .get(&input)
+                    .cloned()
+                    .ok_or(PipelineError::MissingDefinition(input))?;
+                insert_value_expr(
+                    &mut value_exprs,
+                    dst,
+                    Expr::Unary {
+                        op,
+                        input: Box::new(input_expr),
+                    },
+                )?;
+                consume_value_use(&mut remaining_uses, &mut value_exprs, input)?;
+                maybe_drop_dead_value(&mut value_exprs, &remaining_uses, dst);
+            }
+            NanoOp::BinOp { dst, op, a, b } => {
+                let a_expr = value_exprs
+                    .get(&a)
+                    .cloned()
+                    .ok_or(PipelineError::MissingDefinition(a))?;
+                let b_expr = value_exprs
+                    .get(&b)
+                    .cloned()
+                    .ok_or(PipelineError::MissingDefinition(b))?;
+                insert_value_expr(
+                    &mut value_exprs,
+                    dst,
+                    Expr::Bin {
+                        op,
+                        a: Box::new(a_expr),
+                        b: Box::new(b_expr),
+                    },
+                )?;
+                consume_value_use(&mut remaining_uses, &mut value_exprs, a)?;
+                consume_value_use(&mut remaining_uses, &mut value_exprs, b)?;
+                maybe_drop_dead_value(&mut value_exprs, &remaining_uses, dst);
+            }
+            NanoOp::Store {
+                tensor,
+                flat_index,
+                src,
+            } => {
+                total_stores = checked_add_usize(total_stores, 1, "total stores")?;
+                let src_expr = value_exprs
+                    .get(&src)
+                    .ok_or(PipelineError::MissingDefinition(src))?;
+                absorb_store_expr(&mut raw_groups, tensor, flat_index, src_expr);
+                consume_value_use(&mut remaining_uses, &mut value_exprs, src)?;
+            }
+        }
+    }
+
+    finalize_grouped_schedule(raw_groups, total_nano_ops, total_stores, shapes)
+}
+
+fn count_nano_value_uses<'a, I>(iter: I) -> Result<(Vec<usize>, usize), PipelineError>
+where
+    I: IntoIterator<Item = Result<NanoOp, NanoExpandError>>,
+{
+    let mut use_counts = Vec::<usize>::new();
+    let mut defined = Vec::<bool>::new();
+    let mut total_nano_ops = 0usize;
+
+    for op in iter {
+        let op = op?;
+        total_nano_ops = checked_add_usize(total_nano_ops, 1, "total nano ops")?;
+
+        if let Some(dst) = op.dst() {
+            let dst_i = dst.0 as usize;
+            if dst_i >= defined.len() {
+                defined.resize(dst_i + 1, false);
+            }
+            if defined[dst_i] {
+                return Err(PipelineError::DuplicateDefinition(dst));
+            }
+            defined[dst_i] = true;
+            if dst_i >= use_counts.len() {
+                use_counts.resize(dst_i + 1, 0);
+            }
+        }
+
+        match op {
+            NanoOp::Store { src, .. } => increment_use_count(&mut use_counts, src)?,
+            NanoOp::BinOp { a, b, .. } => {
+                increment_use_count(&mut use_counts, a)?;
+                increment_use_count(&mut use_counts, b)?;
+            }
+            NanoOp::UnaryOp { input, .. } => increment_use_count(&mut use_counts, input)?,
+            NanoOp::Load { .. } | NanoOp::Literal { .. } => {}
+        }
+    }
+
+    Ok((use_counts, total_nano_ops))
+}
+
+fn increment_use_count(use_counts: &mut Vec<usize>, value: NanoValue) -> Result<(), PipelineError> {
+    let idx = value.0 as usize;
+    if idx >= use_counts.len() {
+        use_counts.resize(idx + 1, 0);
+    }
+    use_counts[idx] = checked_add_usize(use_counts[idx], 1, "value use count")?;
+    Ok(())
+}
+
+fn insert_value_expr(
+    value_exprs: &mut HashMap<NanoValue, Expr>,
+    dst: NanoValue,
+    expr: Expr,
+) -> Result<(), PipelineError> {
+    if value_exprs.insert(dst, expr).is_some() {
+        return Err(PipelineError::DuplicateDefinition(dst));
+    }
+    Ok(())
+}
+
+fn consume_value_use(
+    remaining_uses: &mut [usize],
+    value_exprs: &mut HashMap<NanoValue, Expr>,
+    value: NanoValue,
+) -> Result<(), PipelineError> {
+    let idx = value.0 as usize;
+    let Some(rem) = remaining_uses.get_mut(idx) else {
+        return Err(PipelineError::MissingDefinition(value));
+    };
+    if *rem == 0 {
+        return Err(PipelineError::MissingDefinition(value));
+    }
+    *rem -= 1;
+    if *rem == 0 {
+        value_exprs.remove(&value);
+    }
+    Ok(())
+}
+
+fn maybe_drop_dead_value(
+    value_exprs: &mut HashMap<NanoValue, Expr>,
+    remaining_uses: &[usize],
+    value: NanoValue,
+) {
+    let idx = value.0 as usize;
+    if remaining_uses.get(idx).copied().unwrap_or(0) == 0 {
+        value_exprs.remove(&value);
+    }
+}
+
+fn read_nano_op_limit_from_env() -> Result<usize, PipelineError> {
+    match std::env::var(MAX_MATERIALIZED_NANO_OPS_ENV) {
+        Ok(raw) => {
+            let parsed = raw
+                .parse::<usize>()
+                .map_err(|_| PipelineError::InvalidNanoOpLimit {
+                    env_var: MAX_MATERIALIZED_NANO_OPS_ENV,
+                    value: raw.clone(),
+                })?;
+            if parsed == 0 {
+                return Err(PipelineError::InvalidNanoOpLimit {
+                    env_var: MAX_MATERIALIZED_NANO_OPS_ENV,
+                    value: raw,
+                });
+            }
+            Ok(parsed)
+        }
+        Err(std::env::VarError::NotPresent) => Ok(DEFAULT_MAX_MATERIALIZED_NANO_OPS),
+        Err(std::env::VarError::NotUnicode(_)) => Err(PipelineError::InvalidNanoOpLimit {
+            env_var: MAX_MATERIALIZED_NANO_OPS_ENV,
+            value: "<non-unicode>".to_string(),
+        }),
+    }
+}
+
+fn estimate_nano_op_materialization(
+    graph: &MilliOpGraph,
+    shapes: &HashMap<GlobalId, Vec<usize>>,
+) -> Result<usize, PipelineError> {
+    let mut total = 0usize;
+    for op_id in graph.op_ordering() {
+        let op = graph.get_node_by_id(op_id).unwrap();
+        let est = estimate_op_nano_count(op, shapes)?;
+        total = checked_add_usize(total, est, "total nano-op estimate accumulation")?;
+    }
+    Ok(total)
+}
+
+fn estimate_op_nano_count(
+    op: &AnyMilliOp,
+    shapes: &HashMap<GlobalId, Vec<usize>>,
+) -> Result<usize, PipelineError> {
+    let kind = op.op_kind();
+    let outputs: Vec<GlobalId> = op.outputs().collect();
+    let inputs: Vec<GlobalId> = op.inputs().collect();
+
+    let scalar_elems = |tensor: GlobalId| -> Result<usize, PipelineError> {
+        let shape = shapes
+            .get(&tensor)
+            .ok_or(PipelineError::MissingShape(tensor))?;
+        shape.iter().try_fold(1usize, |acc, &dim| {
+            checked_mul_usize(
+                acc,
+                dim,
+                &format!("shape product for tensor {tensor} in op {kind}"),
+            )
+        })
+    };
+
+    match kind.as_str() {
+        "Constant" | "ConstantOfShape" => Ok(0),
+        "Add" | "Sub" | "Mul" | "Div" | "Max" | "Min" => {
+            let out =
+                outputs
+                    .first()
+                    .copied()
+                    .ok_or_else(|| PipelineError::NanoOpEstimateOverflow {
+                        context: format!("missing output for op {kind}"),
+                    })?;
+            let elems = scalar_elems(out)?;
+            checked_mul_usize(elems, 4, &format!("binary op count for {kind}"))
+        }
+        "Neg" | "Abs" | "Exp" | "Ln" | "Sqrt" | "Reciprocal" | "Floor" | "Ceil" | "Tanh" => {
+            let out =
+                outputs
+                    .first()
+                    .copied()
+                    .ok_or_else(|| PipelineError::NanoOpEstimateOverflow {
+                        context: format!("missing output for op {kind}"),
+                    })?;
+            let elems = scalar_elems(out)?;
+            checked_mul_usize(elems, 3, &format!("unary op count for {kind}"))
+        }
+        "MatMul" => {
+            if inputs.len() < 2 || outputs.is_empty() {
+                return Err(PipelineError::NanoOpEstimateOverflow {
+                    context: "matmul inputs/outputs missing".to_string(),
+                });
+            }
+            let a_shape = shapes
+                .get(&inputs[0])
+                .ok_or(PipelineError::MissingShape(inputs[0]))?;
+            let b_shape = shapes
+                .get(&inputs[1])
+                .ok_or(PipelineError::MissingShape(inputs[1]))?;
+            let out_shape = shapes
+                .get(&outputs[0])
+                .ok_or(PipelineError::MissingShape(outputs[0]))?;
+            if a_shape.len() != 2 || b_shape.len() != 2 || out_shape.len() != 2 {
+                return Ok(0);
+            }
+            let m = out_shape[0];
+            let n = out_shape[1];
+            if m == 0 || n == 0 {
+                return Ok(0);
+            }
+            let k = a_shape[1];
+            let out_elems = checked_mul_usize(m, n, "matmul output elements")?;
+            let per_out = checked_add_usize(
+                checked_mul_usize(4, k, "matmul per-output k terms")?,
+                2,
+                "matmul per-output fixed terms",
+            )?;
+            checked_mul_usize(out_elems, per_out, "matmul nano-op estimate")
+        }
+        _ => Ok(0),
+    }
+}
+
+fn checked_mul_usize(a: usize, b: usize, context: &str) -> Result<usize, PipelineError> {
+    a.checked_mul(b)
+        .ok_or_else(|| PipelineError::NanoOpEstimateOverflow {
+            context: context.to_string(),
+        })
+}
+
+fn checked_add_usize(a: usize, b: usize, context: &str) -> Result<usize, PipelineError> {
+    a.checked_add(b)
+        .ok_or_else(|| PipelineError::NanoOpEstimateOverflow {
+            context: context.to_string(),
+        })
 }
 
 pub fn analyze_from_pool(
@@ -208,50 +796,68 @@ pub fn analyze_from_pool(
         total_stores += 1;
         let expr = build_expr(src, &defs, &mut expr_cache)?;
 
-        let mut load_tensors = Vec::new();
-        let pattern = pattern_expr(&expr, &mut load_tensors);
-        let mut load_indices = Vec::new();
-        collect_load_indices(&expr, &mut load_indices);
-
-        let key = GroupKey {
-            output_tensor,
-            pattern_hash: stable_hash(&pattern),
-            load_tensors_hash: stable_hash(&load_tensors),
-        };
-
-        let entry = raw_groups.entry(key).or_insert_with(|| StoreGroup {
-            output_tensor,
-            pattern: pattern.clone(),
-            load_tensors: load_tensors.clone(),
-            instances: Vec::new(),
-        });
-
-        // Hash collision fallback.
-        if entry.pattern != pattern || entry.load_tensors != load_tensors {
-            let mut alt_key = key;
-            alt_key.pattern_hash ^= 0x9E37_79B9_7F4A_7C15;
-            raw_groups
-                .entry(alt_key)
-                .or_insert_with(|| StoreGroup {
-                    output_tensor,
-                    pattern,
-                    load_tensors,
-                    instances: Vec::new(),
-                })
-                .instances
-                .push(StoreInstance {
-                    out_flat_index,
-                    load_indices,
-                });
-            continue;
-        }
-
-        entry.instances.push(StoreInstance {
-            out_flat_index,
-            load_indices,
-        });
+        absorb_store_expr(&mut raw_groups, output_tensor, out_flat_index, &expr);
     }
 
+    finalize_grouped_schedule(raw_groups, nano_ops.len(), total_stores, shapes)
+}
+
+fn absorb_store_expr(
+    raw_groups: &mut HashMap<GroupKey, StoreGroup>,
+    output_tensor: GlobalId,
+    out_flat_index: usize,
+    expr: &Expr,
+) {
+    let mut load_tensors = Vec::new();
+    let pattern = pattern_expr(expr, &mut load_tensors);
+    let mut load_indices = Vec::new();
+    collect_load_indices(expr, &mut load_indices);
+
+    let key = GroupKey {
+        output_tensor,
+        pattern_hash: stable_hash(&pattern),
+        load_tensors_hash: stable_hash(&load_tensors),
+    };
+
+    let entry = raw_groups.entry(key).or_insert_with(|| StoreGroup {
+        output_tensor,
+        pattern: pattern.clone(),
+        load_tensors: load_tensors.clone(),
+        instances: Vec::new(),
+    });
+
+    // Hash collision fallback.
+    if entry.pattern != pattern || entry.load_tensors != load_tensors {
+        let mut alt_key = key;
+        alt_key.pattern_hash ^= 0x9E37_79B9_7F4A_7C15;
+        raw_groups
+            .entry(alt_key)
+            .or_insert_with(|| StoreGroup {
+                output_tensor,
+                pattern,
+                load_tensors,
+                instances: Vec::new(),
+            })
+            .instances
+            .push(StoreInstance {
+                out_flat_index,
+                load_indices,
+            });
+        return;
+    }
+
+    entry.instances.push(StoreInstance {
+        out_flat_index,
+        load_indices,
+    });
+}
+
+fn finalize_grouped_schedule(
+    raw_groups: HashMap<GroupKey, StoreGroup>,
+    total_nano_ops: usize,
+    total_stores: usize,
+    shapes: &HashMap<GlobalId, Vec<usize>>,
+) -> Result<ScheduleIR, PipelineError> {
     let mut loops = Vec::new();
     let mut grouped: Vec<_> = raw_groups.into_values().collect();
     grouped.sort_by_key(|g| g.output_tensor);
@@ -263,7 +869,7 @@ pub fn analyze_from_pool(
     for group in grouped {
         let recovered = classify_group(&group, shapes)?;
         match &recovered.intent {
-            LoopIntent::Pointwise { .. } => pointwise += 1,
+            LoopIntent::Pointwise(_) => pointwise += 1,
             LoopIntent::AdditiveReduction(_) => reductions += 1,
             LoopIntent::Unknown => unknown += 1,
         }
@@ -271,7 +877,7 @@ pub fn analyze_from_pool(
     }
 
     let stats = ScheduleStats {
-        total_nano_ops: nano_ops.len(),
+        total_nano_ops,
         total_stores,
         grouped_families: loops.len(),
         pointwise_families: pointwise,
@@ -433,19 +1039,6 @@ fn stable_hash<T: Hash>(value: &T) -> u64 {
     hasher.finish()
 }
 
-/// Deterministic, structure-destroying reorder for pool-style recovery tests.
-fn whitewash_pool_order(mut ops: Vec<NanoOp>) -> Vec<NanoOp> {
-    if ops.len() < 3 {
-        return ops;
-    }
-    let len = ops.len();
-    ops.rotate_left(len / 3);
-    for chunk in ops.chunks_mut(7) {
-        chunk.reverse();
-    }
-    ops
-}
-
 fn build_defs(nano_ops: &[NanoOp]) -> Result<HashMap<NanoValue, NanoOp>, PipelineError> {
     let mut defs = HashMap::new();
     for op in nano_ops {
@@ -547,9 +1140,7 @@ fn classify_group(
         .ok_or(PipelineError::MissingShape(group.output_tensor))?;
     let output_elements = output_shape.iter().product::<usize>();
 
-    let intent = if let Some(contiguous_output) = is_simple_pointwise(group, output_elements) {
-        LoopIntent::Pointwise { contiguous_output }
-    } else if let Some(reduction_match) = try_classify_additive_reduction(group) {
+    let intent = if let Some(reduction_match) = try_classify_additive_reduction(group) {
         let accesses = infer_reduction_accesses(group, &output_shape, shapes, &reduction_match)?;
         LoopIntent::AdditiveReduction(ReductionIntent {
             terms: reduction_match.terms,
@@ -557,6 +1148,8 @@ fn classify_group(
             term_load_tensors: reduction_match.term_load_tensors,
             accesses,
         })
+    } else if let Some(pointwise) = try_classify_pointwise(group, &output_shape, output_elements, shapes)? {
+        LoopIntent::Pointwise(pointwise)
     } else {
         LoopIntent::Unknown
     };
@@ -574,42 +1167,137 @@ fn classify_group(
     })
 }
 
-fn is_simple_pointwise(group: &StoreGroup, output_elements: usize) -> Option<bool> {
-    if group.instances.len() < 2 {
-        return None;
-    }
-
+fn try_classify_pointwise(
+    group: &StoreGroup,
+    output_shape: &[usize],
+    output_elements: usize,
+    shapes: &HashMap<GlobalId, Vec<usize>>,
+) -> Result<Option<PointwiseIntent>, PipelineError> {
     let mut inst = group.instances.clone();
+    if inst.is_empty() {
+        return Ok(None);
+    }
     inst.sort_by_key(|i| i.out_flat_index);
+    if inst.windows(2).any(|w| w[0].out_flat_index == w[1].out_flat_index) {
+        return Ok(None);
+    }
+    let contiguous_output = is_contiguous_output(&inst, output_elements);
 
-    let out_step = (inst[1].out_flat_index as isize) - (inst[0].out_flat_index as isize);
-    if !inst
-        .windows(2)
-        .all(|w| (w[1].out_flat_index as isize) - (w[0].out_flat_index as isize) == out_step)
+    let mut output_coords = Vec::with_capacity(inst.len());
+    for sample in &inst {
+        let coords = unflatten_index(sample.out_flat_index, output_shape).ok_or(
+            PipelineError::InvalidFlatIndex {
+                tensor: group.output_tensor,
+                flat_index: sample.out_flat_index,
+                shape: output_shape.to_vec(),
+            },
+        )?;
+        output_coords.push(coords);
+    }
+
+    let mut term_tensors = Vec::new();
+    let mut slot_map = HashMap::new();
+    let canonical_term = if let Some(term) =
+        canonicalize_term(&group.pattern, group, &mut slot_map, &mut term_tensors)
     {
-        return None;
+        term
+    } else {
+        return Ok(None);
+    };
+    if term_tensors.is_empty() {
+        return Ok(None);
     }
 
-    let num_slots = group.load_tensors.len();
-    for slot in 0..num_slots {
-        if inst[0].load_indices.len() <= slot || inst[1].load_indices.len() <= slot {
-            return None;
+    let mut orig_slot_for_canonical = vec![usize::MAX; term_tensors.len()];
+    for (orig_slot, canonical_slot) in slot_map {
+        if canonical_slot >= orig_slot_for_canonical.len() {
+            return Ok(None);
         }
-
-        let step = (inst[1].load_indices[slot] as isize) - (inst[0].load_indices[slot] as isize);
-        if !inst.windows(2).all(|w| {
-            (w[1].load_indices[slot] as isize) - (w[0].load_indices[slot] as isize) == step
-        }) {
-            return None;
-        }
+        orig_slot_for_canonical[canonical_slot] = orig_slot;
+    }
+    if orig_slot_for_canonical.contains(&usize::MAX) {
+        return Ok(None);
     }
 
-    let contiguous_output = inst[0].out_flat_index == 0
-        && out_step == 1
-        && inst.len() == output_elements
-        && inst.iter().enumerate().all(|(i, x)| x.out_flat_index == i);
+    let output_rank = output_shape.len();
+    let output_step = sampling_step(inst.len(), 128);
+    let mut accesses = Vec::with_capacity(term_tensors.len());
+    for (canonical_slot, &tensor) in term_tensors.iter().enumerate() {
+        let tensor_shape = shapes
+            .get(&tensor)
+            .cloned()
+            .ok_or(PipelineError::MissingShape(tensor))?;
+        let orig_slot = orig_slot_for_canonical[canonical_slot];
+        let var_count = output_rank;
+        let mut sample_vars_flat = Vec::new();
+        let mut sample_dim_values = vec![Vec::new(); tensor_shape.len()];
+        let mut samples_valid = true;
 
-    Some(contiguous_output)
+        for inst_i in (0..inst.len()).step_by(output_step) {
+            let sample = &inst[inst_i];
+            let Some(&flat_index) = sample.load_indices.get(orig_slot) else {
+                samples_valid = false;
+                break;
+            };
+            let coords = unflatten_index(flat_index, &tensor_shape).ok_or(
+                PipelineError::InvalidFlatIndex {
+                    tensor,
+                    flat_index,
+                    shape: tensor_shape.clone(),
+                },
+            )?;
+            sample_vars_flat.extend(output_coords[inst_i].iter().map(|&v| v as isize));
+            for dim in 0..coords.len() {
+                sample_dim_values[dim].push(coords[dim] as isize);
+            }
+        }
+
+        let sample_count = if var_count == 0 {
+            sample_dim_values.first().map(|x| x.len()).unwrap_or(0)
+        } else {
+            sample_vars_flat.len() / var_count
+        };
+        let dim_roles = if !samples_valid || sample_count == 0 {
+            vec![AccessDimRole::Unknown; tensor_shape.len()]
+        } else {
+            let mut roles = Vec::with_capacity(tensor_shape.len());
+            for dim in 0..tensor_shape.len() {
+                let role = infer_affine_dim_role_pointwise(
+                    &sample_vars_flat,
+                    var_count,
+                    &sample_dim_values[dim],
+                    output_rank,
+                );
+                roles.push(role);
+            }
+            roles
+        };
+        if dim_roles.iter().any(|r| matches!(r, AccessDimRole::Unknown)) {
+            return Ok(None);
+        }
+
+        accesses.push(RecoveredTensorAccess {
+            tensor,
+            tensor_shape,
+            dim_roles,
+        });
+    }
+
+    Ok(Some(PointwiseIntent {
+        contiguous_output,
+        canonical_term,
+        accesses,
+    }))
+}
+
+fn is_contiguous_output(instances: &[StoreInstance], output_elements: usize) -> bool {
+    !instances.is_empty()
+        && instances[0].out_flat_index == 0
+        && instances.len() == output_elements
+        && instances
+            .iter()
+            .enumerate()
+            .all(|(i, x)| x.out_flat_index == i)
 }
 
 fn try_classify_additive_reduction(group: &StoreGroup) -> Option<ReductionMatch> {
@@ -659,8 +1347,8 @@ fn synthesize_schedule_candidates(
     output_shape: &[usize],
 ) -> Vec<LoopScheduleCandidate> {
     match intent {
-        LoopIntent::Pointwise { contiguous_output } => {
-            synthesize_pointwise_candidates(output_shape, *contiguous_output)
+        LoopIntent::Pointwise(pointwise) => {
+            synthesize_pointwise_candidates(output_shape, pointwise.contiguous_output)
         }
         LoopIntent::AdditiveReduction(reduction) => {
             synthesize_additive_reduction_candidates(output_shape, reduction)
@@ -676,6 +1364,51 @@ fn synthesize_schedule_candidates(
             score: 1,
             rationale: "Fallback schedule for unknown intent".to_string(),
         }],
+    }
+}
+
+fn infer_affine_dim_role_pointwise(
+    vars_flat: &[isize],
+    var_count: usize,
+    values: &[isize],
+    output_rank: usize,
+) -> AccessDimRole {
+    let Some((offset, coeffs)) = infer_affine_coefficients(vars_flat, var_count, values) else {
+        return AccessDimRole::Unknown;
+    };
+
+    if coeffs.len() != output_rank {
+        return AccessDimRole::Unknown;
+    }
+
+    let output_strides: Vec<(usize, isize)> = coeffs
+        .iter()
+        .enumerate()
+        .filter_map(|(axis, &stride)| (stride != 0).then_some((axis, stride)))
+        .collect();
+
+    if output_strides.is_empty() {
+        if offset >= 0 {
+            return AccessDimRole::Constant {
+                value: offset as usize,
+            };
+        }
+        return AccessDimRole::Unknown;
+    }
+
+    if output_strides.len() == 1 {
+        let (axis, stride) = output_strides[0];
+        return AccessDimRole::OutputAxis {
+            axis,
+            stride,
+            offset,
+        };
+    }
+
+    AccessDimRole::AffineMixed {
+        output_strides,
+        reduction_stride: 0,
+        offset,
     }
 }
 
@@ -1334,6 +2067,7 @@ fn unflatten_index(flat_index: usize, shape: &[usize]) -> Option<Vec<usize>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compiler::common::v1_frontend::nano_op::NanoOpExpander;
     use crate::graph::GlobalId;
     use crate::milli_graph::ops::{MatMul, SimpleBinary};
 
@@ -1358,7 +2092,7 @@ mod tests {
         assert_eq!(artifacts.schedule.stats.additive_reduction_families, 0);
 
         match &artifacts.schedule.loops[0].intent {
-            LoopIntent::Pointwise { contiguous_output } => assert!(*contiguous_output),
+            LoopIntent::Pointwise(pointwise) => assert!(pointwise.contiguous_output),
             _ => panic!("expected pointwise intent"),
         }
         let loop0 = &artifacts.schedule.loops[0];
@@ -1447,5 +2181,85 @@ mod tests {
         assert!(best.vectorize.is_some());
         assert!(best.reduction_tile >= 1);
         assert!(best.score >= 1);
+    }
+
+    #[test]
+    fn test_rejects_oversized_nano_materialization() {
+        let mut rng = wyrand::WyRand::new(13);
+        let ext_a = GlobalId::new(&mut rng);
+        let ext_b = GlobalId::new(&mut rng);
+        let (mut graph, input_map) = MilliOpGraph::new([ext_a, ext_b], &mut rng);
+        let a = input_map[&ext_a];
+        let b = input_map[&ext_b];
+        let c = MatMul::push_new(&mut graph, a, b, &mut rng);
+
+        let mut shapes = HashMap::new();
+        shapes.insert(a, vec![256, 384]);
+        shapes.insert(b, vec![384, 320]);
+        shapes.insert(c, vec![256, 320]);
+
+        let err =
+            build_from_graph_with_limit(&graph, &shapes, 8_000_000).expect_err("expected guard");
+        match err {
+            PipelineError::NanoOpBudgetExceeded {
+                estimated_ops,
+                limit_ops,
+                ..
+            } => {
+                assert_eq!(limit_ops, 8_000_000);
+                assert!(estimated_ops > limit_ops);
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_streaming_build_matches_pool_analysis() {
+        let mut rng = wyrand::WyRand::new(14);
+        let ext_a = GlobalId::new(&mut rng);
+        let ext_b = GlobalId::new(&mut rng);
+        let (mut graph, input_map) = MilliOpGraph::new([ext_a, ext_b], &mut rng);
+        let a = input_map[&ext_a];
+        let b = input_map[&ext_b];
+        let c = MatMul::push_new(&mut graph, a, b, &mut rng);
+
+        let mut shapes = HashMap::new();
+        shapes.insert(a, vec![8, 16]);
+        shapes.insert(b, vec![16, 6]);
+        shapes.insert(c, vec![8, 6]);
+
+        let mut expander = NanoOpExpander::new(shapes.clone());
+        let ordered = expander
+            .expand_iter(&graph)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("expand nano stream");
+        let pool_schedule = analyze_from_pool(&ordered, &shapes).expect("pool schedule");
+
+        let stream_artifacts = build_from_graph(&graph, &shapes).expect("stream build");
+        assert!(stream_artifacts.ordered_nano_ops.is_empty());
+        assert!(stream_artifacts.whitewashed_nano_ops.is_empty());
+        let stream_schedule = stream_artifacts.schedule;
+
+        assert_eq!(
+            stream_schedule.stats.total_nano_ops,
+            pool_schedule.stats.total_nano_ops
+        );
+        assert_eq!(
+            stream_schedule.stats.total_stores,
+            pool_schedule.stats.total_stores
+        );
+        assert_eq!(
+            stream_schedule.stats.additive_reduction_families,
+            pool_schedule.stats.additive_reduction_families
+        );
+        assert_eq!(
+            stream_schedule.stats.pointwise_families,
+            pool_schedule.stats.pointwise_families
+        );
+        assert_eq!(stream_schedule.loops.len(), pool_schedule.loops.len());
+        assert_eq!(
+            stream_schedule.loops[0].selected_schedule,
+            pool_schedule.loops[0].selected_schedule
+        );
     }
 }

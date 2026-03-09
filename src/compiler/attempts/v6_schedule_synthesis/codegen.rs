@@ -1245,10 +1245,14 @@ fn declare_math_functions(
 mod tests {
     use super::*;
     use crate::milli_graph::ops::MatMul;
+    use rand::RngCore;
 
-    #[test]
-    fn test_compile_recovered_matmul_kernel() {
-        let mut rng = wyrand::WyRand::new(77);
+    fn run_compiled_rank2_matmul(
+        m: usize,
+        k: usize,
+        n: usize,
+    ) -> Result<(Vec<f32>, Vec<f32>), V6CodegenError> {
+        let mut rng = wyrand::WyRand::new(77 + (m as u64) + (n as u64));
         let ext_a = GlobalId::new(&mut rng);
         let ext_b = GlobalId::new(&mut rng);
         let (mut graph, input_map) = MilliOpGraph::new([ext_a, ext_b], &mut rng);
@@ -1257,35 +1261,57 @@ mod tests {
         let c = MatMul::push_new(&mut graph, a, b, &mut rng);
 
         let mut shapes = HashMap::new();
-        shapes.insert(a, vec![4, 8]);
-        shapes.insert(b, vec![8, 3]);
-        shapes.insert(c, vec![4, 3]);
+        shapes.insert(a, vec![m, k]);
+        shapes.insert(b, vec![k, n]);
+        shapes.insert(c, vec![m, n]);
 
-        let (compiled, artifacts) = compile_graph(&graph, &shapes).expect("v6 compile");
+        let (compiled, artifacts) = compile_graph(&graph, &shapes)?;
         assert_eq!(artifacts.schedule.loops.len(), 1);
         assert_eq!(artifacts.schedule.stats.additive_reduction_families, 1);
 
         let layout = &compiled.layout;
         let mut bufs: Vec<Vec<f32>> = (0..layout.num_buffers).map(|_| Vec::new()).collect();
-        bufs[layout.tensor_index[&a]] = (0..32).map(|x| x as f32 * 0.01).collect();
-        bufs[layout.tensor_index[&b]] = (0..24).map(|x| x as f32 * 0.02).collect();
-        bufs[layout.tensor_index[&c]] = vec![0.0; 12];
+        let mut rng_a = wyrand::WyRand::new(5001 + m as u64 + k as u64);
+        let mut rng_b = wyrand::WyRand::new(6001 + k as u64 + n as u64);
+        bufs[layout.tensor_index[&a]] = (0..(m * k))
+            .map(|_| (rng_a.next_u32() as f32 / u32::MAX as f32) * 2.0 - 1.0)
+            .collect();
+        bufs[layout.tensor_index[&b]] = (0..(k * n))
+            .map(|_| (rng_b.next_u32() as f32 / u32::MAX as f32) * 2.0 - 1.0)
+            .collect();
+        bufs[layout.tensor_index[&c]] = vec![0.0; m * n];
         let mut ptrs: Vec<*mut f32> = bufs.iter_mut().map(|v| v.as_mut_ptr()).collect();
         unsafe { compiled.execute(&mut ptrs) };
 
-        let mut ref_out = vec![0.0f32; 12];
-        for i in 0..4 {
-            for j in 0..3 {
+        let mut ref_out = vec![0.0f32; m * n];
+        for i in 0..m {
+            for j in 0..n {
                 let mut acc = 0.0f32;
-                for kk in 0..8 {
-                    acc += bufs[layout.tensor_index[&a]][i * 8 + kk]
-                        * bufs[layout.tensor_index[&b]][kk * 3 + j];
+                for kk in 0..k {
+                    acc += bufs[layout.tensor_index[&a]][i * k + kk]
+                        * bufs[layout.tensor_index[&b]][kk * n + j];
                 }
-                ref_out[i * 3 + j] = acc;
+                ref_out[i * n + j] = acc;
             }
         }
-        for i in 0..12 {
-            assert!((bufs[layout.tensor_index[&c]][i] - ref_out[i]).abs() < 1e-4);
+
+        let got = bufs[layout.tensor_index[&c]].clone();
+        Ok((got, ref_out))
+    }
+
+    #[test]
+    fn test_compile_recovered_matmul_kernel() {
+        let (got, ref_out) = run_compiled_rank2_matmul(4, 8, 3).expect("v6 compile");
+        for i in 0..got.len() {
+            assert!((got[i] - ref_out[i]).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn test_compile_recovered_matmul_kernel_larger() {
+        let (got, ref_out) = run_compiled_rank2_matmul(80, 96, 96).expect("v6 compile");
+        for i in 0..got.len() {
+            assert!((got[i] - ref_out[i]).abs() < 2e-3);
         }
     }
 }

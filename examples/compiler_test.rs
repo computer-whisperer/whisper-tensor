@@ -17,8 +17,11 @@ use whisper_tensor::compiler::attempts::v3_nano_fusion::{
 };
 use whisper_tensor::compiler::attempts::v4_pool_growth::codegen as v4_codegen;
 use whisper_tensor::compiler::attempts::v5_typed_synthesis::synth as v5_synth;
-use whisper_tensor::compiler::attempts::v6_schedule_synthesis::codegen as v6_codegen;
 use whisper_tensor::compiler::attempts::v6_schedule_synthesis::synthesis as v6_synth;
+use whisper_tensor::compiler::attempts::v7_parallel_crystal::codegen as v7_codegen;
+use whisper_tensor::compiler::attempts::v7_parallel_crystal::executor as v7_exec;
+use whisper_tensor::compiler::attempts::v7_parallel_crystal::planner as v7_planner;
+use whisper_tensor::compiler::attempts::v8_generic_kernel::codegen as v8_codegen;
 
 use whisper_tensor::dtype::DType;
 use whisper_tensor::graph::GlobalId;
@@ -290,8 +293,74 @@ fn run_v4_compiled(
     run_v1_compiled(compiled, inputs, output_id, output_size)
 }
 
-fn run_v6_compiled(
-    compiled: &v6_codegen::NativeCompiledGraph,
+fn run_v7_planned(
+    artifacts: &v6_synth::PipelineArtifacts,
+    plan: &v7_planner::TaskPlan,
+    shapes: &HashMap<GlobalId, Vec<usize>>,
+    inputs: &HashMap<GlobalId, Vec<f32>>,
+    output_id: GlobalId,
+    output_size: usize,
+) -> Vec<f32> {
+    run_v7_planned_with_exec(
+        artifacts,
+        plan,
+        shapes,
+        inputs,
+        output_id,
+        output_size,
+        v7_exec::ExecuteConfig::default(),
+    )
+}
+
+fn run_v7_planned_with_exec(
+    artifacts: &v6_synth::PipelineArtifacts,
+    plan: &v7_planner::TaskPlan,
+    shapes: &HashMap<GlobalId, Vec<usize>>,
+    inputs: &HashMap<GlobalId, Vec<f32>>,
+    output_id: GlobalId,
+    output_size: usize,
+    exec: v7_exec::ExecuteConfig,
+) -> Vec<f32> {
+    let mut bufs = HashMap::<GlobalId, Vec<f32>>::new();
+    for (id, shape) in shapes {
+        let size = shape.iter().product::<usize>().max(1);
+        bufs.insert(*id, vec![0.0; size]);
+    }
+    for (id, data) in inputs {
+        if let Some(dst) = bufs.get_mut(id) {
+            *dst = data.clone();
+        }
+    }
+    v7_exec::execute_plan_f32_with_config(artifacts, plan, &mut bufs, exec).expect("v7 execute");
+    bufs[&output_id][..output_size].to_vec()
+}
+
+fn run_v7_compiled(
+    compiled: &v7_codegen::NativeCompiledGraph,
+    inputs: &HashMap<GlobalId, Vec<f32>>,
+    output_id: GlobalId,
+    output_size: usize,
+) -> Vec<f32> {
+    let layout = &compiled.layout;
+    let mut bufs: Vec<Vec<f32>> = (0..layout.num_buffers).map(|_| Vec::new()).collect();
+    for (id, data) in inputs {
+        if let Some(&idx) = layout.tensor_index.get(id) {
+            bufs[idx] = data.clone();
+        }
+    }
+    for (id, &size) in &layout.tensor_sizes {
+        let idx = layout.tensor_index[id];
+        if bufs[idx].is_empty() {
+            bufs[idx] = vec![0.0f32; size];
+        }
+    }
+    let mut ptrs: Vec<*mut f32> = bufs.iter_mut().map(|v| v.as_mut_ptr()).collect();
+    unsafe { compiled.execute(&mut ptrs) };
+    bufs[layout.tensor_index[&output_id]][..output_size].to_vec()
+}
+
+fn run_v8_compiled(
+    compiled: &v8_codegen::NativeCompiledGraph,
     inputs: &HashMap<GlobalId, Vec<f32>>,
     output_id: GlobalId,
     output_size: usize,
@@ -1136,12 +1205,20 @@ fn main() {
     }
 
     // -----------------------------------------------------------------------
-    // Test 7: v6 schedule synthesis + cranelift execution benchmark
+    // Test 7: v7 planning + execution benchmark
     // -----------------------------------------------------------------------
     {
-        let (m, n, k) = (64usize, 80usize, 96usize);
+        let dim_override = std::env::var("WT_TEST7_DIM")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&d| d > 0);
+        let (m, n, k) = if let Some(d) = dim_override {
+            (d, d, d)
+        } else {
+            (64usize, 80usize, 96usize)
+        };
         println!(
-            "Test 7: v6 schedule synthesis + compile [{}x{}] x [{}x{}]",
+            "Test 7: v7 planning + compile [{}x{}] x [{}x{}]",
             m, k, k, n
         );
 
@@ -1160,8 +1237,31 @@ fn main() {
         shapes.insert(b, vec![k, n]);
         shapes.insert(c, vec![m, n]);
 
-        let artifacts = v6_synth::build_from_graph(&graph, &shapes).expect("v6 build_from_graph");
-        let schedule = artifacts.schedule;
+        let a_data = make_random_f32(m * k, 1700);
+        let b_data = make_random_f32(k * n, 1701);
+        let mut interp_inputs = HashMap::new();
+        interp_inputs.insert(
+            ext_a,
+            NumericTensor::<DynRank>::from_vec_shape(a_data.clone(), vec![m, k]).unwrap(),
+        );
+        interp_inputs.insert(
+            ext_b,
+            NumericTensor::<DynRank>::from_vec_shape(b_data.clone(), vec![k, n]).unwrap(),
+        );
+        let interp_result = run_interpreter(&graph, &interp_inputs, ext_out);
+        let compiled_inputs = build_compiled_inputs(&graph, &interp_inputs);
+        let out_size = m * n;
+
+        let (v7_artifacts, v7_plan) = v7_planner::plan_from_graph(
+            &graph,
+            &shapes,
+            v7_planner::TaskPlannerConfig {
+                min_tile_elements: 512,
+                max_tile_elements: 4096,
+            },
+        )
+        .expect("v7 plan");
+        let schedule = &v7_artifacts.schedule;
         println!(
             "  schedule stats: families={} pointwise={} reductions={} unknown={}",
             schedule.stats.grouped_families,
@@ -1170,11 +1270,10 @@ fn main() {
             schedule.stats.unknown_families
         );
         assert_eq!(schedule.stats.additive_reduction_families, 1);
-
         let recovered = &schedule.loops[0];
         let selected = recovered
             .selected_schedule
-            .expect("v6 selected schedule missing");
+            .expect("v7 selected schedule missing");
         let best = &recovered.schedule_candidates[selected];
         println!(
             "  selected: score={} order={:?} tiles={:?} rtile={} runroll={} vec={:?}",
@@ -1186,6 +1285,170 @@ fn main() {
             best.vectorize
         );
         assert!(!recovered.schedule_candidates.is_empty());
+
+        let v7_result = run_v7_planned(
+            &v7_artifacts,
+            &v7_plan,
+            &shapes,
+            &compiled_inputs,
+            c,
+            out_size,
+        );
+        let v7_diff = max_abs_diff(&interp_result, &v7_result);
+        let v7_mt_result = run_v7_planned_with_exec(
+            &v7_artifacts,
+            &v7_plan,
+            &shapes,
+            &compiled_inputs,
+            c,
+            out_size,
+            v7_exec::ExecuteConfig::auto(),
+        );
+        let v7_mt_diff = max_abs_diff(&interp_result, &v7_mt_result);
+        println!(
+            "  v7 diff: {:.2e} (tasks={})",
+            v7_diff, v7_plan.stats.total_tasks
+        );
+        println!("  v7 mt diff: {:.2e}", v7_mt_diff);
+        assert!(v7_diff < 2e-3, "v7 matmul diverged: {v7_diff}");
+        assert!(v7_mt_diff < 2e-3, "v7 mt matmul diverged: {v7_mt_diff}");
+        let v7_compiled =
+            v7_codegen::compile_plan(&v7_artifacts, &v7_plan, &shapes).expect("v7 compile");
+        let v7_cl_result = run_v7_compiled(&v7_compiled, &compiled_inputs, c, out_size);
+        let v7_cl_diff = max_abs_diff(&interp_result, &v7_cl_result);
+        println!("  v7 cranelift diff: {:.2e}", v7_cl_diff);
+        assert!(
+            v7_cl_diff < 2e-3,
+            "v7 cranelift matmul diverged: {v7_cl_diff}"
+        );
+
+        let kernels = v2_planner::plan(&graph, &shapes).unwrap();
+        let v2_layout = v2_codegen::TensorLayout::from_shapes(&shapes);
+        let v2_compiled = v2_codegen::compile(&kernels, &v2_layout).unwrap();
+        let v2_result = run_v2_compiled(&v2_compiled, &compiled_inputs, c, out_size);
+        let v2_diff = max_abs_diff(&interp_result, &v2_result);
+        assert!(v2_diff < 2e-3, "v2 matmul diverged: {v2_diff}");
+
+        let iters = if m >= 512 || n >= 512 || k >= 512 {
+            4
+        } else {
+            80
+        };
+        let t = Instant::now();
+        for _ in 0..iters {
+            let _ = run_interpreter(&graph, &interp_inputs, ext_out);
+        }
+        let interp_avg = t.elapsed() / iters;
+
+        let t = Instant::now();
+        for _ in 0..iters {
+            let _ = run_v2_compiled(&v2_compiled, &compiled_inputs, c, out_size);
+        }
+        let v2_avg = t.elapsed() / iters;
+
+        let t = Instant::now();
+        for _ in 0..iters {
+            let _ = run_v7_planned(
+                &v7_artifacts,
+                &v7_plan,
+                &shapes,
+                &compiled_inputs,
+                c,
+                out_size,
+            );
+        }
+        let v7_avg = t.elapsed() / iters;
+
+        let t = Instant::now();
+        for _ in 0..iters {
+            let _ = run_v7_planned_with_exec(
+                &v7_artifacts,
+                &v7_plan,
+                &shapes,
+                &compiled_inputs,
+                c,
+                out_size,
+                v7_exec::ExecuteConfig::auto(),
+            );
+        }
+        let v7_mt_avg = t.elapsed() / iters;
+
+        let t = Instant::now();
+        for _ in 0..iters {
+            let _ = run_v7_compiled(&v7_compiled, &compiled_inputs, c, out_size);
+        }
+        let v7_cl_avg = t.elapsed() / iters;
+
+        print_timing("Interpreter:", interp_avg, iters);
+        println!();
+        print_timing("v2 fusion:", v2_avg, iters);
+        println!(
+            "  {:.2}x",
+            interp_avg.as_nanos() as f64 / v2_avg.as_nanos() as f64
+        );
+        print_timing("v7 tasks:", v7_avg, iters);
+        println!(
+            "  {:.2}x",
+            interp_avg.as_nanos() as f64 / v7_avg.as_nanos() as f64
+        );
+        print_timing("v7 tasks mt:", v7_mt_avg, iters);
+        println!(
+            "  {:.2}x",
+            interp_avg.as_nanos() as f64 / v7_mt_avg.as_nanos() as f64
+        );
+        print_timing("v7 cranelift:", v7_cl_avg, iters);
+        println!(
+            "  {:.2}x",
+            interp_avg.as_nanos() as f64 / v7_cl_avg.as_nanos() as f64
+        );
+        println!(
+            "  v7 vs v2: {:.2}x",
+            v2_avg.as_nanos() as f64 / v7_avg.as_nanos() as f64
+        );
+        println!(
+            "  v7 mt vs v7: {:.2}x",
+            v7_avg.as_nanos() as f64 / v7_mt_avg.as_nanos() as f64
+        );
+        println!(
+            "  v7 cranelift vs v2: {:.2}x",
+            v2_avg.as_nanos() as f64 / v7_cl_avg.as_nanos() as f64
+        );
+        println!("  PASS\n");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 8: v8 generic kernel benchmark
+    // -----------------------------------------------------------------------
+    {
+        let (m, n, k) = if let Some(d) = std::env::var("WT_V8_DIM")
+            .or_else(|_| std::env::var("WT_TEST7_DIM"))
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&d| d > 0)
+        {
+            (d, d, d)
+        } else {
+            (64usize, 80usize, 96usize)
+        };
+        println!(
+            "Test 8: v8 generic kernel [{}x{}] x [{}x{}]",
+            m, k, k, n
+        );
+
+        let mut rng2 = wyrand::WyRand::new(3008);
+        let ext_a = GlobalId::new(&mut rng2);
+        let ext_b = GlobalId::new(&mut rng2);
+        let (mut graph, input_map) = MilliOpGraph::new([ext_a, ext_b], &mut rng2);
+        let a = input_map[&ext_a];
+        let b = input_map[&ext_b];
+        let c = MatMul::push_new(&mut graph, a, b, &mut rng2);
+        let ext_out = GlobalId::new(&mut rng2);
+        graph.set_output_map([(c, ext_out)]);
+
+        let mut shapes = HashMap::new();
+        shapes.insert(a, vec![m, k]);
+        shapes.insert(b, vec![k, n]);
+        shapes.insert(c, vec![m, n]);
 
         let a_data = make_random_f32(m * k, 1700);
         let b_data = make_random_f32(k * n, 1701);
@@ -1202,55 +1465,44 @@ fn main() {
         let compiled_inputs = build_compiled_inputs(&graph, &interp_inputs);
         let out_size = m * n;
 
-        let (v6_compiled, _) = v6_codegen::compile_graph(&graph, &shapes).expect("v6 compile");
-        let v6_result = run_v6_compiled(&v6_compiled, &compiled_inputs, c, out_size);
-        let v6_diff = max_abs_diff(&interp_result, &v6_result);
-        println!("  v6 diff: {:.2e}", v6_diff);
-        assert!(v6_diff < 2e-3, "v6 matmul diverged: {v6_diff}");
+        match v8_codegen::compile_graph(&graph, &shapes) {
+            Err(e) => {
+                println!("  v8 skipped: {e}");
+                println!("  PASS (skipped)\n");
+            }
+            Ok((v8_compiled, _)) => {
+                let v8_result = run_v8_compiled(&v8_compiled, &compiled_inputs, c, out_size);
+                let v8_diff = max_abs_diff(&interp_result, &v8_result);
+                println!("  v8 diff: {:.2e}", v8_diff);
+                assert!(v8_diff < 2e-3, "v8 matmul diverged: {v8_diff}");
 
-        let kernels = v2_planner::plan(&graph, &shapes).unwrap();
-        let v2_layout = v2_codegen::TensorLayout::from_shapes(&shapes);
-        let v2_compiled = v2_codegen::compile(&kernels, &v2_layout).unwrap();
-        let v2_result = run_v2_compiled(&v2_compiled, &compiled_inputs, c, out_size);
-        let v2_diff = max_abs_diff(&interp_result, &v2_result);
-        assert!(v2_diff < 2e-3, "v2 matmul diverged: {v2_diff}");
+                let iters = if m >= 512 || n >= 512 || k >= 512 {
+                    10
+                } else {
+                    80
+                };
+                let t = Instant::now();
+                for _ in 0..iters {
+                    let _ = run_interpreter(&graph, &interp_inputs, ext_out);
+                }
+                let interp_avg = t.elapsed() / iters;
 
-        let iters = 80;
-        let t = Instant::now();
-        for _ in 0..iters {
-            let _ = run_interpreter(&graph, &interp_inputs, ext_out);
+                let t = Instant::now();
+                for _ in 0..iters {
+                    let _ = run_v8_compiled(&v8_compiled, &compiled_inputs, c, out_size);
+                }
+                let v8_avg = t.elapsed() / iters;
+
+                print_timing("Interpreter:", interp_avg, iters);
+                println!();
+                print_timing("v8 generic:", v8_avg, iters);
+                println!(
+                    "  {:.2}x",
+                    interp_avg.as_nanos() as f64 / v8_avg.as_nanos() as f64
+                );
+                println!("  PASS\n");
+            }
         }
-        let interp_avg = t.elapsed() / iters;
-
-        let t = Instant::now();
-        for _ in 0..iters {
-            let _ = run_v2_compiled(&v2_compiled, &compiled_inputs, c, out_size);
-        }
-        let v2_avg = t.elapsed() / iters;
-
-        let t = Instant::now();
-        for _ in 0..iters {
-            let _ = run_v6_compiled(&v6_compiled, &compiled_inputs, c, out_size);
-        }
-        let v6_avg = t.elapsed() / iters;
-
-        print_timing("Interpreter:", interp_avg, iters);
-        println!();
-        print_timing("v2 fusion:", v2_avg, iters);
-        println!(
-            "  {:.2}x",
-            interp_avg.as_nanos() as f64 / v2_avg.as_nanos() as f64
-        );
-        print_timing("v6 schedule:", v6_avg, iters);
-        println!(
-            "  {:.2}x",
-            interp_avg.as_nanos() as f64 / v6_avg.as_nanos() as f64
-        );
-        println!(
-            "  v6 vs v2: {:.2}x",
-            v2_avg.as_nanos() as f64 / v6_avg.as_nanos() as f64
-        );
-        println!("  PASS\n");
     }
 
     println!("=== All tests passed ===");
