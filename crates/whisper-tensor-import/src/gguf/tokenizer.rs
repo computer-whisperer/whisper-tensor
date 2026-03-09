@@ -7,9 +7,13 @@ enum PreTokenizerType {
     Gpt2,
     /// Llama-3 style: Split with regex + ByteLevel.
     Llama3,
+    /// Qwen2 style: Split with regex + ByteLevel (single-digit number matching).
+    Qwen2,
 }
 
 const LLAMA3_REGEX: &str = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
+
+const QWEN2_REGEX: &str = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
 
 /// Synthesize a tokenizer.json string from GGUF embedded tokenizer metadata.
 ///
@@ -52,6 +56,7 @@ pub fn synthesize_tokenizer_json(gguf: &GgufFile) -> Option<String> {
         .and_then(|v| v.as_str())
     {
         Some("llama3" | "llama-bpe") => PreTokenizerType::Llama3,
+        Some("qwen2") => PreTokenizerType::Qwen2,
         Some("gpt-2" | "gpt2") => PreTokenizerType::Gpt2,
         None => PreTokenizerType::Gpt2,
         Some(_) => PreTokenizerType::Gpt2,
@@ -98,23 +103,30 @@ pub fn synthesize_tokenizer_json(gguf: &GgufFile) -> Option<String> {
             "trim_offsets": true,
             "use_regex": true
         }),
-        PreTokenizerType::Llama3 => json!({
-            "type": "Sequence",
-            "pretokenizers": [
-                {
-                    "type": "Split",
-                    "pattern": { "Regex": LLAMA3_REGEX },
-                    "behavior": "Isolated",
-                    "invert": false
-                },
-                {
-                    "type": "ByteLevel",
-                    "add_prefix_space": false,
-                    "trim_offsets": true,
-                    "use_regex": false
-                }
-            ]
-        }),
+        PreTokenizerType::Llama3 | PreTokenizerType::Qwen2 => {
+            let regex = match pre_type {
+                PreTokenizerType::Llama3 => LLAMA3_REGEX,
+                PreTokenizerType::Qwen2 => QWEN2_REGEX,
+                _ => unreachable!(),
+            };
+            json!({
+                "type": "Sequence",
+                "pretokenizers": [
+                    {
+                        "type": "Split",
+                        "pattern": { "Regex": regex },
+                        "behavior": "Isolated",
+                        "invert": false
+                    },
+                    {
+                        "type": "ByteLevel",
+                        "add_prefix_space": false,
+                        "trim_offsets": true,
+                        "use_regex": false
+                    }
+                ]
+            })
+        }
     };
 
     let tokenizer_json = json!({
