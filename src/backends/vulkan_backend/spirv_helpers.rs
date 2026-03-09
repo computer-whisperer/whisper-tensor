@@ -21,7 +21,7 @@ pub fn get_spirv_datatype(
         DType::I8 => b.type_int(8, 1),
         DType::U8 => b.type_int(8, 0),
         DType::BOOL => b.type_bool(),
-        DType::STRING => panic!(),
+        DType::STRING | DType::Packed(_) => panic!("no SPIR-V type for {dtype:?}"),
     })
 }
 

@@ -41,7 +41,7 @@ impl<R: Rank> PackedTensor<R> {
         let inner_dim = *shape_slice.last().expect("shape must be non-empty");
 
         assert!(
-            inner_dim as usize % format.block_size() == 0,
+            (inner_dim as usize).is_multiple_of(format.block_size()),
             "innermost dimension ({inner_dim}) must be a multiple of block_size ({})",
             format.block_size()
         );
@@ -500,8 +500,7 @@ fn dequantize_q6_k(data: &[u8], output: &mut [f32]) {
         for _n in (0..QK).step_by(128) {
             for l in 0..32 {
                 let is = l / 16;
-                let q1 =
-                    ((ql[ql_offset + l] & 0xF) | (((qh[qh_offset + l] >> 0) & 3) << 4)) as i8 - 32;
+                let q1 = ((ql[ql_offset + l] & 0xF) | (((qh[qh_offset + l]) & 3) << 4)) as i8 - 32;
                 let q2 = ((ql[ql_offset + 32 + l] & 0xF) | (((qh[qh_offset + l] >> 2) & 3) << 4))
                     as i8
                     - 32;

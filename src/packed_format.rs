@@ -81,7 +81,7 @@ impl PackedFormat {
     /// `num_elements` must be a multiple of `block_size()`.
     pub fn storage_bytes(&self, num_elements: usize) -> usize {
         assert!(
-            num_elements % self.block_size() == 0,
+            num_elements.is_multiple_of(self.block_size()),
             "num_elements ({}) must be a multiple of block_size ({})",
             num_elements,
             self.block_size()

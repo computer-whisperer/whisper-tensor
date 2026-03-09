@@ -22,6 +22,7 @@ pub struct RotaryEmbeddingOperation {
 }
 
 impl RotaryEmbeddingOperation {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         data_input: GlobalId,
         cos_cache: GlobalId,
