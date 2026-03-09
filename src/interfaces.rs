@@ -718,13 +718,15 @@ fn build_flux_vae_decode(
     latent: SuperGraphLinkTensor,
     vae_weights: SuperGraphLinkTensorMap,
     vae_model_index: usize,
-    model_dtype: DType,
 ) -> SuperGraphLinkTensor {
-    // Scale latent: x / 0.3611 + 0.1159
+    // Scale latent: x / 0.3611 + 0.1159, cast to F32 for VAE
     let scaled_latent = builder.new_tensor_link(rng);
     {
         let (mut mg, input_map) = MilliOpGraph::new(std::iter::once(latent.global_id()), rng);
         let lat_in = *input_map.get(&latent.global_id()).unwrap();
+
+        // Cast to F32 first (denoising loop outputs in model_dtype which may be BF16)
+        let f32_lat = Cast::push_new(&mut mg, lat_in, DType::F32, rng);
 
         let inv_scale = Constant::push_new(
             &mut mg,
@@ -736,11 +738,10 @@ fn build_flux_vae_decode(
             NDArrayNumericTensor::from_vec_shape(vec![0.1159f32], &vec![1]).unwrap(),
             rng,
         );
-        let scaled = SimpleBinary::mul(&mut mg, lat_in, inv_scale, rng);
+        let scaled = SimpleBinary::mul(&mut mg, f32_lat, inv_scale, rng);
         let shifted = SimpleBinary::add(&mut mg, scaled, shift, rng);
-        let cast = Cast::push_new(&mut mg, shifted, model_dtype, rng);
 
-        mg.set_output_map(std::iter::once((cast, scaled_latent.global_id())));
+        mg.set_output_map(std::iter::once((shifted, scaled_latent.global_id())));
         builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
     }
 
@@ -1312,7 +1313,7 @@ impl ImageGenerationInterface {
         // --- VAE decode ---
         // Flux VAE: latent / 0.3611 + 0.1159
         let image_output =
-            build_flux_vae_decode(&mut builder, rng, final_latent, vae_weights, 3, model_dtype);
+            build_flux_vae_decode(&mut builder, rng, final_latent, vae_weights, 3);
 
         // Build outer graph
         let model_weights = vec![clip_weights, t5_weights, dit_weights, vae_weights];

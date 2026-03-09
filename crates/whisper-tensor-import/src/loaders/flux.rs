@@ -64,6 +64,10 @@ impl Loader for FluxSchnellLoader {
         let vae_path = require_path(&config, "vae_path")?;
         let clip_path = require_path(&config, "clip_path")?;
         let t5_path = require_path(&config, "t5_path")?;
+        let img_size = match config.get("img_size") {
+            Some(ConfigValue::Integer(n)) => *n as usize,
+            _ => 1024,
+        };
         let storage = super::default_storage();
 
         // Detect DiT model dtype
@@ -76,7 +80,10 @@ impl Loader for FluxSchnellLoader {
                 unsafe { Mmap::map(&file) }.map_err(|e| LoaderError::LoadFailed(e.into()))?;
             let wm = SafetensorsWeightManager::new(vec![Arc::new(mmap)])
                 .map_err(|e| LoaderError::LoadFailed(e.into()))?;
-            let import_dtype = crate::sd_common::detect_model_dtype(&wm);
+            let import_dtype = crate::sd_common::detect_model_dtype_with_canary(
+                &wm,
+                "double_blocks.0.img_attn.qkv.weight",
+            );
             match import_dtype {
                 crate::onnx_graph::tensor::DType::F16 => whisper_tensor::dtype::DType::F16,
                 crate::onnx_graph::tensor::DType::BF16 => whisper_tensor::dtype::DType::BF16,
@@ -106,7 +113,7 @@ impl Loader for FluxSchnellLoader {
         // Build Flux DiT
         println!("Building Flux DiT...");
         let dit_onnx = build_from_safetensors(&dit_path, |wm| {
-            let config = crate::flux::FluxConfig::schnell_1024(256);
+            let config = crate::flux::FluxConfig::schnell(img_size, 256);
             crate::flux::load_flux_dit_with_origin(wm, config, storage.clone(), Some(&dit_path))
         })?;
 
@@ -143,7 +150,7 @@ impl Loader for FluxSchnellLoader {
             ImageGenerationInterface::new_flux_schnell(
                 &mut rng,
                 TokenizerInfo::HFTokenizer("openai/clip-vit-large-patch14".to_string()),
-                TokenizerInfo::HFTokenizer("google/t5-v1_1-xxl".to_string()),
+                TokenizerInfo::HFTokenizer("google-t5/t5-base".to_string()),
                 model_dtype,
             )
         };

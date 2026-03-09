@@ -37,7 +37,7 @@ pub struct FluxConfig {
 }
 
 impl FluxConfig {
-    pub fn schnell_1024(max_txt_seq_len: usize) -> Self {
+    pub fn schnell(img_size: usize, max_txt_seq_len: usize) -> Self {
         Self {
             hidden_dim: 3072,
             num_heads: 24,
@@ -52,10 +52,14 @@ impl FluxConfig {
             timestep_dim: 256,
             theta: 10_000.0,
             axes_dim: [16, 56, 56],
-            img_height: 1024,
-            img_width: 1024,
+            img_height: img_size,
+            img_width: img_size,
             max_txt_seq_len,
         }
+    }
+
+    pub fn schnell_1024(max_txt_seq_len: usize) -> Self {
+        Self::schnell(1024, max_txt_seq_len)
     }
 
     fn latent_h(&self) -> usize {

@@ -68,9 +68,22 @@ impl<T: WeightManager> WeightManager for CastingWeightManager<T> {
 
 /// Detect the storage dtype of an SD checkpoint by checking a canary weight.
 pub fn detect_model_dtype(weight_manager: &impl WeightManager) -> DType {
+    detect_model_dtype_with_canary(
+        weight_manager,
+        "model.diffusion_model.input_blocks.0.0.weight",
+    )
+}
+
+/// Detect model dtype using a specific canary weight name.
+pub fn detect_model_dtype_with_canary(
+    weight_manager: &impl WeightManager,
+    canary_name: &str,
+) -> DType {
     let canary = weight_manager
-        .get_tensor("model.diffusion_model.input_blocks.0.0.weight")
-        .expect("cannot detect model dtype: canary weight not found");
+        .get_tensor(canary_name)
+        .unwrap_or_else(|e| {
+            panic!("cannot detect model dtype: canary weight '{canary_name}' not found: {e}")
+        });
     canary.dtype()
 }
 
