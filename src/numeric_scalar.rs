@@ -89,6 +89,7 @@ impl NumericScalar {
             DType::I8 => NumericScalar::I8(0),
             DType::BOOL => NumericScalar::BOOL(false),
             DType::STRING => NumericScalar::STRING(String::new()),
+            DType::Packed(fmt) => panic!("Cannot create scalar zero for packed format {fmt}"),
         }
     }
 

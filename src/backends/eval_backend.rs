@@ -46,9 +46,9 @@ impl<'a> EvalBackend<'a> {
                     | DType::I64
                     | DType::U8
             ),
-            EvalBackend::NDArray => true,
+            EvalBackend::NDArray => !_dtype.is_packed(),
             #[cfg(feature = "vulkan")]
-            EvalBackend::Vulkan(_) => !matches!(_dtype, DType::STRING),
+            EvalBackend::Vulkan(_) => !matches!(_dtype, DType::STRING) && !_dtype.is_packed(),
             #[cfg(feature = "tch")]
             EvalBackend::TCH => matches!(
                 _dtype,

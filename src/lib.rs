@@ -14,6 +14,8 @@ pub mod milli_graph;
 pub mod model;
 pub mod numeric_scalar;
 pub mod numeric_tensor;
+pub mod packed_format;
+pub mod packed_tensor;
 pub mod numeric_tensor_typed;
 pub mod scalar_info;
 pub mod super_graph;

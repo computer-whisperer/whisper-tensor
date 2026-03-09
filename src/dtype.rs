@@ -1,4 +1,5 @@
 use crate::onnx;
+use crate::packed_format::PackedFormat;
 use float8::{F8E4M3, F8E5M2};
 use half::{bf16, f16};
 use serde::{Deserialize, Serialize};
@@ -35,6 +36,7 @@ pub enum DType {
     I8,
     BOOL,
     STRING,
+    Packed(PackedFormat),
 }
 
 impl DType {
@@ -56,6 +58,7 @@ impl DType {
             DType::I8 => Some(1),
             DType::BOOL => Some(1),
             DType::STRING => None,
+            DType::Packed(_) => None,
         }
     }
 }
@@ -97,6 +100,21 @@ impl TryFrom<DType> for tch::Kind {
             DType::BOOL => Ok(tch::Kind::Bool),
             _ => Err(DTypeError::DTypeNotSupportedByBackend(v)),
         }
+    }
+}
+
+impl DType {
+    /// Returns the packed format if this is a Packed dtype, None otherwise.
+    pub fn packed_format(&self) -> Option<PackedFormat> {
+        match self {
+            DType::Packed(fmt) => Some(*fmt),
+            _ => None,
+        }
+    }
+
+    /// Returns true if this is a packed (block-quantized) type.
+    pub fn is_packed(&self) -> bool {
+        matches!(self, DType::Packed(_))
     }
 }
 
@@ -144,6 +162,7 @@ impl From<DType> for onnx::tensor_proto::DataType {
             DType::I8 => onnx::tensor_proto::DataType::Int8,
             DType::BOOL => onnx::tensor_proto::DataType::Bool,
             DType::STRING => onnx::tensor_proto::DataType::String,
+            DType::Packed(fmt) => panic!("Packed format {fmt} has no ONNX DataType equivalent"),
         }
     }
 }
@@ -167,6 +186,7 @@ impl std::fmt::Display for DType {
             DType::I8 => write!(f, "Int8"),
             DType::BOOL => write!(f, "Bool"),
             DType::STRING => write!(f, "String"),
+            DType::Packed(fmt) => write!(f, "Packed({fmt})"),
         }
     }
 }

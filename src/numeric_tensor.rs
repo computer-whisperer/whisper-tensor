@@ -9,6 +9,7 @@ use crate::TrigOp;
 #[cfg(feature = "candle")]
 use crate::backends::candle_backend;
 use crate::backends::ndarray_backend::conversions::NDArrayNumericTensorType;
+use crate::packed_tensor::PackedTensor;
 #[cfg(feature = "tch")]
 use crate::backends::tch_backend::{self, TCHNumericTensor};
 #[cfg(feature = "vulkan")]
@@ -42,6 +43,7 @@ pub enum NumericTensorError {
 #[derive(Debug, Clone)]
 pub enum NumericTensor<R: Rank> {
     NDArray(NDArrayNumericTensor<R>),
+    Packed(PackedTensor<R>),
     #[cfg(feature = "onnx-reference")]
     ONNXReference(crate::backends::onnx_reference_backend::ONNXReferenceTensor),
     #[cfg(feature = "candle")]
@@ -63,6 +65,7 @@ impl<R: Rank> NumericTensor<R> {
     pub fn to_ndarray(&self) -> Result<NDArrayNumericTensor<R>, NumericTensorError> {
         match self {
             NumericTensor::NDArray(x) => Ok(x.clone()),
+            NumericTensor::Packed(x) => Ok(x.dequantize()),
             #[cfg(feature = "onnx-reference")]
             NumericTensor::ONNXReference(x) => Ok(x.to_ndarray()?),
             #[cfg(feature = "candle")]
@@ -82,6 +85,7 @@ impl<R: Rank> NumericTensor<R> {
     pub fn into_ndarray(self) -> Result<NDArrayNumericTensor<R>, NumericTensorError> {
         match self {
             NumericTensor::NDArray(x) => Ok(x.clone()),
+            NumericTensor::Packed(x) => Ok(x.dequantize()),
             #[cfg(feature = "onnx-reference")]
             NumericTensor::ONNXReference(x) => Ok(x.to_ndarray()?),
             #[cfg(feature = "candle")]
@@ -185,6 +189,9 @@ impl<R: Rank> NumericTensor<R> {
 
     /// Convert to a dynamically-ranked tensor view (DynRank), preserving data and shape.
     pub fn to_dyn_rank(&self) -> NumericTensor<DynRank> {
+        if let NumericTensor::Packed(x) = self {
+            return NumericTensor::Packed(x.to_dyn_rank());
+        }
         NumericTensor::NDArray(self.to_ndarray().unwrap().to_dyn())
     }
 
@@ -192,6 +199,7 @@ impl<R: Rank> NumericTensor<R> {
     pub fn dtype(&self) -> DType {
         match self {
             NumericTensor::NDArray(x) => x.dtype(),
+            NumericTensor::Packed(x) => x.dtype(),
             #[cfg(feature = "onnx-reference")]
             NumericTensor::ONNXReference(x) => x.dtype(),
             #[cfg(feature = "candle")]
@@ -207,6 +215,7 @@ impl<R: Rank> NumericTensor<R> {
     pub fn shape(&self) -> R::KnownDims {
         match self {
             NumericTensor::NDArray(x) => x.shape(),
+            NumericTensor::Packed(x) => x.shape().clone(),
             #[cfg(feature = "onnx-reference")]
             NumericTensor::ONNXReference(x) => {
                 let s = x.shape();
@@ -230,6 +239,7 @@ impl<R: Rank> NumericTensor<R> {
     pub fn rank(&self) -> usize {
         match self {
             NumericTensor::NDArray(x) => x.rank(),
+            NumericTensor::Packed(x) => x.rank(),
             #[cfg(feature = "onnx-reference")]
             NumericTensor::ONNXReference(x) => x.rank(),
             #[cfg(feature = "candle")]
