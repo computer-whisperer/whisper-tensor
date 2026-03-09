@@ -1178,7 +1178,7 @@ impl SymbolicGraphMutator {
         Self::from_onnx_model_proto(model, rng, base_dir)
     }
 
-    pub(crate) fn new_unknown_tensor(
+    pub fn new_unknown_tensor(
         &mut self,
         inner_graph: &mut SymbolicGraph,
         name: &str,
@@ -1278,7 +1278,7 @@ impl SymbolicGraphMutator {
         Ok(global_id)
     }
 
-    pub(crate) fn new_constant_tensor(
+    pub fn new_constant_tensor(
         &mut self,
         inner_graph: &mut SymbolicGraph,
         value: NDArrayNumericTensor<DynRank>,
@@ -1308,7 +1308,7 @@ impl SymbolicGraphMutator {
         global_id
     }
 
-    pub(crate) fn new_stored_tensor(
+    pub fn new_stored_tensor(
         &mut self,
         inner_graph: &mut SymbolicGraph,
         id: TensorStoreTensorId,
@@ -1338,6 +1338,36 @@ impl SymbolicGraphMutator {
         }
 
         global_id
+    }
+
+    /// Add an operation to the graph. Returns the operation's GlobalId.
+    pub fn add_operation(
+        &mut self,
+        inner_graph: &mut SymbolicGraph,
+        name: Option<String>,
+        op: AnyOperation,
+        rng: &mut impl Rng,
+    ) -> GlobalId {
+        let op_id = GlobalId::new(rng);
+        inner_graph
+            .operations
+            .insert(op_id, GraphOperation { name, op });
+        op_id
+    }
+
+    /// Register a tensor as a graph input.
+    pub fn add_input(&mut self, inner_graph: &mut SymbolicGraph, tensor_id: GlobalId) {
+        inner_graph.ordered_inputs.push(tensor_id);
+    }
+
+    /// Register a tensor as a graph output.
+    pub fn add_output(&mut self, inner_graph: &mut SymbolicGraph, tensor_id: GlobalId) {
+        inner_graph.ordered_outputs.push(tensor_id);
+    }
+
+    /// Direct access to the tensor store, for adding stored tensors.
+    pub fn tensor_store_mut(&mut self) -> &mut TensorStore {
+        &mut self.tensor_store
     }
 
     pub(crate) fn new_node_from_onnx_node(

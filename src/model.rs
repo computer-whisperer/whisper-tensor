@@ -57,6 +57,21 @@ impl Model {
         &self.id
     }
 
+    pub fn new_from_graph(
+        name: impl Into<String>,
+        graph: SymbolicGraph,
+        tensor_store: TensorStore,
+    ) -> Self {
+        Self {
+            id: ModelID {
+                name: name.into(),
+            },
+            graph,
+            tensor_store,
+            onnx_data: Vec::new(),
+        }
+    }
+
     pub fn new_from_onnx(
         onnx_data: &[u8],
         rng: &mut impl Rng,

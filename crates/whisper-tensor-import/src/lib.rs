@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub mod flux;
+pub mod gguf;
 pub mod llama3;
 pub mod loaders;
 pub mod onnx_graph;
