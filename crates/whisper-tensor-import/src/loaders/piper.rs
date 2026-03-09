@@ -1,5 +1,5 @@
 use super::onnx_bytes_to_model;
-use whisper_tensor::interfaces::PiperInterface;
+use whisper_tensor::interfaces::{TTSInputConfig, TextToSpeechInterface};
 use whisper_tensor::loader::*;
 use whisper_tensor::super_graph::SuperGraphBuilder;
 use whisper_tensor::super_graph::links::SuperGraphLink;
@@ -86,7 +86,7 @@ impl Loader for PiperLoader {
         );
 
         output.interfaces.push(LoadedInterface {
-            name: "piper-Piper".to_string(),
+            name: "piper-TextToSpeech".to_string(),
             interface: interface.to_any(),
         });
 
@@ -106,7 +106,6 @@ pub fn is_piper_model(path: &std::path::Path) -> bool {
 }
 
 fn find_onnx_in_dir(dir: &std::path::Path) -> Result<std::path::PathBuf, LoaderError> {
-    // Look for .onnx files directly in the directory
     let entries: Vec<_> = std::fs::read_dir(dir)
         .map_err(|e| LoaderError::LoadFailed(e.into()))?
         .filter_map(|e| e.ok())
@@ -120,7 +119,6 @@ fn find_onnx_in_dir(dir: &std::path::Path) -> Result<std::path::PathBuf, LoaderE
         ))),
         1 => Ok(entries[0].path()),
         _ => {
-            // Multiple ONNX files — pick the first one alphabetically
             let mut paths: Vec<_> = entries.into_iter().map(|e| e.path()).collect();
             paths.sort();
             Ok(paths[0].clone())
@@ -129,12 +127,10 @@ fn find_onnx_in_dir(dir: &std::path::Path) -> Result<std::path::PathBuf, LoaderE
 }
 
 fn find_piper_config(onnx_path: &std::path::Path) -> Option<std::path::PathBuf> {
-    // Piper config is <name>.onnx.json alongside the .onnx file
     let config_path = onnx_path.with_extension("onnx.json");
     if config_path.exists() {
         return Some(config_path);
     }
-    // Also try just appending .json
     let alt = std::path::PathBuf::from(format!("{}.json", onnx_path.display()));
     if alt.exists() {
         return Some(alt);
@@ -148,7 +144,7 @@ fn build_piper_supergraph(
     espeak_voice: String,
     phoneme_id_map_json: String,
     rng: &mut impl rand::Rng,
-) -> PiperInterface {
+) -> TextToSpeechInterface {
     let mut builder = SuperGraphBuilder::new();
 
     let input_link = builder.new_tensor_link(rng);
@@ -196,17 +192,19 @@ fn build_piper_supergraph(
     let sg_outputs = vec![audio_output_link.to_any()];
     let super_graph = builder.build(rng, &sg_inputs, &sg_outputs);
 
-    PiperInterface {
+    TextToSpeechInterface {
         super_graph,
-        input_link,
-        input_lengths_link,
-        scales_link,
-        speaker_id_link,
-        model_weights_link,
+        text_ids_link: input_link,
+        model_weights: vec![model_weights_link],
         audio_output_link,
         sample_rate,
-        num_speakers,
-        phoneme_id_map_json,
-        espeak_voice,
+        input_config: TTSInputConfig::Piper {
+            input_lengths_link,
+            scales_link,
+            speaker_id_link,
+            num_speakers,
+            phoneme_id_map_json,
+            espeak_voice,
+        },
     }
 }

@@ -33,7 +33,6 @@ pub enum AnyInterface {
     TextInferenceTokensInLogitOutInterface(TextInferenceTokensInLogitOutInterface),
     ImageGenerationInterface(ImageGenerationInterface),
     TextToSpeechInterface(TextToSpeechInterface),
-    PiperInterface(PiperInterface),
 }
 
 impl AnyInterface {
@@ -44,7 +43,6 @@ impl AnyInterface {
             }
             AnyInterface::ImageGenerationInterface(_) => "ImageGeneration".to_string(),
             AnyInterface::TextToSpeechInterface(_) => "TextToSpeech".to_string(),
-            AnyInterface::PiperInterface(_) => "Piper".to_string(),
         }
     }
 
@@ -53,7 +51,6 @@ impl AnyInterface {
             AnyInterface::TextInferenceTokensInLogitOutInterface(x) => &x.super_graph,
             AnyInterface::ImageGenerationInterface(x) => &x.super_graph,
             AnyInterface::TextToSpeechInterface(x) => &x.super_graph,
-            AnyInterface::PiperInterface(x) => &x.super_graph,
         }
     }
 }
@@ -1514,67 +1511,60 @@ impl ImageGenerationInterface {
 // Text-to-Speech Interface
 // ============================================================================
 
-/// Interface for text-to-speech models (e.g. Kokoro).
+/// Model-specific input configuration for TTS.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum TTSInputConfig {
+    /// Kokoro-style: phoneme IDs + style embedding + speed scalar.
+    /// Tokenizer points to tokenizer.json with char→id vocab.
+    Kokoro {
+        style_link: SuperGraphLinkTensor,
+        speed_link: SuperGraphLinkTensor,
+        tokenizer: TokenizerInfo,
+    },
+    /// Piper VITS: phoneme IDs + input_lengths + scales + optional speaker ID.
+    Piper {
+        input_lengths_link: SuperGraphLinkTensor,
+        scales_link: SuperGraphLinkTensor,
+        speaker_id_link: Option<SuperGraphLinkTensor>,
+        num_speakers: u32,
+        /// IPA character → list of token IDs (JSON-serialized).
+        phoneme_id_map_json: String,
+        /// eSpeak voice code (e.g. "en-us").
+        espeak_voice: String,
+    },
+    /// F5-TTS: text IDs + reference audio + max_duration.
+    /// 3-model pipeline with ODE loop baked into SuperGraph.
+    F5 {
+        ref_audio_link: SuperGraphLinkTensor,
+        max_duration_link: SuperGraphLinkTensor,
+        /// Character-level vocab: line number = token ID.
+        vocab: String,
+    },
+}
+
+/// Unified interface for all text-to-speech models.
 ///
-/// The model takes phoneme token IDs, a style embedding, and a speed scalar,
-/// and produces an audio waveform.
+/// Each model family builds a different SuperGraph that hides its internal
+/// complexity (single model, multi-model pipelines, ODE loops, etc.).
+/// The caller provides tokenized text IDs and model-specific conditioning
+/// inputs described by `input_config`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TextToSpeechInterface {
     pub super_graph: SuperGraph,
-    /// Phoneme token IDs input (shape depends on model; Kokoro uses [1, seq_len]).
-    pub input_ids_link: SuperGraphLinkTensor,
-    /// Style/voice embedding input (e.g. [1, 1, 256] for Kokoro).
-    pub style_link: SuperGraphLinkTensor,
-    /// Speed control scalar input (e.g. [1]).
-    pub speed_link: SuperGraphLinkTensor,
-    /// Model weights.
-    pub model_weights_link: SuperGraphLinkTensorMap,
-    /// Output audio waveform (e.g. [1, audio_length]).
+    /// Tokenized text/phoneme IDs input [1, seq_len].
+    pub text_ids_link: SuperGraphLinkTensor,
+    /// Model weights (one per model in the pipeline).
+    pub model_weights: Vec<SuperGraphLinkTensorMap>,
+    /// Output audio waveform.
     pub audio_output_link: SuperGraphLinkTensor,
     /// Sample rate of the output audio in Hz.
     pub sample_rate: u32,
-    /// Tokenizer for phoneme encoding.
-    pub tokenizer: TokenizerInfo,
+    /// Model-specific input configuration and tokenization metadata.
+    pub input_config: TTSInputConfig,
 }
 
 impl TextToSpeechInterface {
     pub fn to_any(self) -> AnyInterface {
         AnyInterface::TextToSpeechInterface(self)
-    }
-}
-
-/// Interface for Piper VITS TTS models.
-///
-/// Piper models take phoneme IDs, input lengths, and scale parameters,
-/// with an optional speaker ID for multi-speaker models.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PiperInterface {
-    pub super_graph: SuperGraph,
-    /// Phoneme ID sequence input [1, phoneme_count] i64.
-    pub input_link: SuperGraphLinkTensor,
-    /// Input sequence length [1] i64.
-    pub input_lengths_link: SuperGraphLinkTensor,
-    /// Scale parameters [3] f32: [noise_scale, length_scale, noise_scale_w].
-    pub scales_link: SuperGraphLinkTensor,
-    /// Speaker ID [1] i64 (only used for multi-speaker models).
-    pub speaker_id_link: Option<SuperGraphLinkTensor>,
-    /// Model weights.
-    pub model_weights_link: SuperGraphLinkTensorMap,
-    /// Output audio waveform [1, 1, time] f32.
-    pub audio_output_link: SuperGraphLinkTensor,
-    /// Sample rate of the output audio in Hz (from config).
-    pub sample_rate: u32,
-    /// Number of speakers (1 = single-speaker).
-    pub num_speakers: u32,
-    /// Phoneme ID map: IPA character → list of token IDs (from config).
-    /// Stored as JSON string for serialization.
-    pub phoneme_id_map_json: String,
-    /// eSpeak voice code (e.g. "en-us") for phonemization.
-    pub espeak_voice: String,
-}
-
-impl PiperInterface {
-    pub fn to_any(self) -> AnyInterface {
-        AnyInterface::PiperInterface(self)
     }
 }

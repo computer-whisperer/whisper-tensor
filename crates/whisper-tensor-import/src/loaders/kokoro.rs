@@ -1,12 +1,10 @@
 use super::onnx_bytes_to_model;
-use whisper_tensor::interfaces::TextToSpeechInterface;
+use whisper_tensor::interfaces::{TTSInputConfig, TextToSpeechInterface};
 use whisper_tensor::loader::*;
 use whisper_tensor::metadata::TokenizerInfo;
 use whisper_tensor::super_graph::SuperGraphBuilder;
 use whisper_tensor::super_graph::links::SuperGraphLink;
-use whisper_tensor::super_graph::nodes::{
-    SuperGraphNode, SuperGraphNodeModelExecution,
-};
+use whisper_tensor::super_graph::nodes::{SuperGraphNode, SuperGraphNodeModelExecution};
 
 /// Loader for Kokoro TTS models (ONNX format).
 ///
@@ -142,12 +140,14 @@ fn build_kokoro_supergraph(
 
     TextToSpeechInterface {
         super_graph,
-        input_ids_link,
-        style_link,
-        speed_link,
-        model_weights_link,
+        text_ids_link: input_ids_link,
+        model_weights: vec![model_weights_link],
         audio_output_link,
         sample_rate: 24000,
-        tokenizer,
+        input_config: TTSInputConfig::Kokoro {
+            style_link,
+            speed_link,
+            tokenizer,
+        },
     }
 }

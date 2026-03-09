@@ -414,85 +414,128 @@ fn cmd_image(
 // ============================================================================
 
 fn cmd_tts(output: LoaderOutput, model_dir: PathBuf, text: String, voice_name: String, speed: f32, output_path: PathBuf) {
-    let model = &output.models[0].model;
-
-    // Dispatch based on which interface the loader produced
-    if let Some(interface) = output.interfaces.iter().find_map(|i| match &i.interface {
-        AnyInterface::TextToSpeechInterface(x) => Some(x),
-        _ => None,
-    }) {
-        cmd_tts_kokoro_style(model, interface, &model_dir, &text, &voice_name, speed, &output_path);
-    } else if let Some(interface) = output.interfaces.iter().find_map(|i| match &i.interface {
-        AnyInterface::PiperInterface(x) => Some(x),
-        _ => None,
-    }) {
-        cmd_tts_piper(model, interface, &text, speed, &output_path);
-    } else {
-        eprintln!("No TTS interface found in loaded model");
-        std::process::exit(1);
-    }
-}
-
-/// Run TTS with Kokoro-style interface (input_ids + style + speed).
-fn cmd_tts_kokoro_style(
-    model: &std::sync::Arc<whisper_tensor::model::Model>,
-    interface: &whisper_tensor::interfaces::TextToSpeechInterface,
-    model_dir: &std::path::Path,
-    text: &str,
-    voice_name: &str,
-    speed: f32,
-    output_path: &std::path::Path,
-) {
+    use whisper_tensor::interfaces::TTSInputConfig;
     use whisper_tensor::super_graph::cache::SuperGraphTensorCache;
     use whisper_tensor::super_graph::data::SuperGraphData;
     use whisper_tensor::super_graph::SuperGraphContext;
 
-    // Phonemize and tokenize: espeak-ng IPA → E2M conversion → char-level vocab lookup
-    let phonemes = text_to_kokoro_phonemes(text);
-    let vocab = load_tts_vocab(&interface.tokenizer);
-    let token_ids: Vec<i64> = {
-        let mut ids = vec![0i64]; // BOS ($)
-        for ch in phonemes.chars() {
-            if let Some(&id) = vocab.get(&ch) {
-                ids.push(id as i64);
+    let interface = output.interfaces.iter().find_map(|i| match &i.interface {
+        AnyInterface::TextToSpeechInterface(x) => Some(x),
+        _ => None,
+    }).unwrap_or_else(|| {
+        eprintln!("No TTS interface found in loaded model");
+        std::process::exit(1);
+    });
+
+    // Tokenize and build SuperGraph inputs based on model type
+    let mut data = SuperGraphData::new();
+    for (i, model_weights_link) in interface.model_weights.iter().enumerate() {
+        data.tensor_maps.insert(
+            *model_weights_link,
+            output.models[i].model.get_tensor_store(),
+        );
+    }
+
+    match &interface.input_config {
+        TTSInputConfig::Kokoro { style_link, speed_link, tokenizer } => {
+            let phonemes = text_to_kokoro_phonemes(&text);
+            let vocab = load_tts_vocab(tokenizer);
+            let token_ids: Vec<i64> = {
+                let mut ids = vec![0i64]; // BOS ($)
+                for ch in phonemes.chars() {
+                    if let Some(&id) = vocab.get(&ch) {
+                        ids.push(id as i64);
+                    }
+                }
+                ids.push(0i64); // EOS ($)
+                ids
+            };
+            eprintln!("Phonemes: {phonemes}");
+            let num_tokens = token_ids.len();
+            eprintln!("Tokens: {num_tokens}");
+
+            let input_ids_tensor =
+                NumericTensor::<DynRank>::from_vec_shape(token_ids, vec![1, num_tokens]).unwrap();
+
+            let voice_bin = model_dir.join("voices").join(format!("{voice_name}.bin"));
+            let style_tensor = if voice_bin.exists() {
+                load_voice_style_bin(&voice_bin, num_tokens)
+            } else {
+                eprintln!("No voice file found: {}", voice_bin.display());
+                list_available_voices(&model_dir);
+                std::process::exit(1);
+            };
+            let speed_tensor =
+                NumericTensor::<DynRank>::from_vec_shape(vec![speed], vec![1]).unwrap();
+
+            data.tensors.insert(interface.text_ids_link, input_ids_tensor);
+            data.tensors.insert(*style_link, style_tensor);
+            data.tensors.insert(*speed_link, speed_tensor);
+        }
+        TTSInputConfig::Piper {
+            input_lengths_link,
+            scales_link,
+            speaker_id_link,
+            phoneme_id_map_json,
+            espeak_voice,
+            ..
+        } => {
+            let sentences =
+                espeak_rs::text_to_phonemes(&text, espeak_voice, None, true, false)
+                    .expect("espeak-ng phonemization failed");
+            let ipa = sentences.join(" ");
+            eprintln!("Phonemes: {ipa}");
+
+            let phoneme_id_map = parse_piper_phoneme_id_map(phoneme_id_map_json);
+
+            let mut token_ids: Vec<i64> = Vec::new();
+            token_ids.push(1); // BOS (^)
+            token_ids.push(0); // PAD (_)
+            for ch in ipa.chars() {
+                if let Some(ids) = phoneme_id_map.get(&ch) {
+                    for &id in ids {
+                        token_ids.push(id);
+                    }
+                }
+                token_ids.push(0); // PAD
+            }
+            token_ids.push(2); // EOS ($)
+
+            let num_tokens = token_ids.len();
+            eprintln!("Tokens: {num_tokens}");
+
+            let input_tensor =
+                NumericTensor::<DynRank>::from_vec_shape(token_ids, vec![1, num_tokens]).unwrap();
+            let input_lengths_tensor =
+                NumericTensor::<DynRank>::from_vec_shape(vec![num_tokens as i64], vec![1]).unwrap();
+            let length_scale = 1.0 / speed;
+            let scales_tensor =
+                NumericTensor::<DynRank>::from_vec_shape(vec![0.667f32, length_scale, 0.8], vec![3])
+                    .unwrap();
+
+            data.tensors.insert(interface.text_ids_link, input_tensor);
+            data.tensors
+                .insert(*input_lengths_link, input_lengths_tensor);
+            data.tensors.insert(*scales_link, scales_tensor);
+            if let Some(sid_link) = speaker_id_link {
+                data.tensors.insert(
+                    *sid_link,
+                    NumericTensor::<DynRank>::from_vec_shape(vec![0i64], vec![1]).unwrap(),
+                );
             }
         }
-        ids.push(0i64); // EOS ($)
-        ids
-    };
-    eprintln!("Phonemes: {phonemes}");
-    let num_tokens = token_ids.len();
-    eprintln!("Tokens: {num_tokens}");
-
-    let input_ids_tensor =
-        NumericTensor::<DynRank>::from_vec_shape(token_ids, vec![1, num_tokens]).unwrap();
-
-    // Load voice embedding
-    let voice_bin = model_dir.join("voices").join(format!("{voice_name}.bin"));
-    let style_tensor = if voice_bin.exists() {
-        load_voice_style_bin(&voice_bin, num_tokens)
-    } else {
-        eprintln!("No voice file found: {}", voice_bin.display());
-        list_available_voices(model_dir);
-        std::process::exit(1);
-    };
-    let speed_tensor = NumericTensor::<DynRank>::from_vec_shape(vec![speed], vec![1]).unwrap();
+        TTSInputConfig::F5 { .. } => {
+            eprintln!("F5-TTS inference not yet implemented");
+            std::process::exit(1);
+        }
+    }
 
     // Run inference
     eprintln!("Running inference...");
     let mut backend = EvalBackend::NDArray;
     let start = std::time::Instant::now();
 
-    let super_graph_data = {
-        let mut data = SuperGraphData::new();
-        data.tensor_maps
-            .insert(interface.model_weights_link, model.get_tensor_store());
-        data.tensors.insert(interface.input_ids_link, input_ids_tensor);
-        data.tensors.insert(interface.style_link, style_tensor);
-        data.tensors.insert(interface.speed_link, speed_tensor);
-        data
-    };
-
+    let symbolic_graphs: Vec<_> = output.models.iter().map(|m| m.model.get_symbolic_graph()).collect();
     let super_graph_output = {
         let mut observer = ();
         let mut super_graph_tensor_cache = SuperGraphTensorCache::new();
@@ -501,13 +544,13 @@ fn cmd_tts_kokoro_style(
             eval_backend: &mut backend,
             super_graph_tensor_cache: &mut super_graph_tensor_cache,
             caches: None,
-            symbolic_graphs: vec![model.get_symbolic_graph()],
+            symbolic_graphs,
             use_compiled_models: false,
             compiled_models: None,
         };
         interface
             .super_graph
-            .run(super_graph_data, &mut context)
+            .run(data, &mut context)
             .unwrap_or_else(|e| {
                 eprintln!("Inference error: {e}");
                 std::process::exit(1);
@@ -522,112 +565,7 @@ fn cmd_tts_kokoro_style(
     eprintln!("Generated in {:.2?}", start.elapsed());
 
     let samples = audio_tensor_to_samples(audio, &mut backend);
-    save_wav(&samples, interface.sample_rate, output_path);
-    eprintln!(
-        "Saved {:.1}s of audio to {}",
-        samples.len() as f64 / interface.sample_rate as f64,
-        output_path.display()
-    );
-}
-
-/// Run TTS with Piper VITS interface (input + input_lengths + scales).
-fn cmd_tts_piper(
-    model: &std::sync::Arc<whisper_tensor::model::Model>,
-    interface: &whisper_tensor::interfaces::PiperInterface,
-    text: &str,
-    speed: f32,
-    output_path: &std::path::Path,
-) {
-    use whisper_tensor::super_graph::cache::SuperGraphTensorCache;
-    use whisper_tensor::super_graph::data::SuperGraphData;
-    use whisper_tensor::super_graph::SuperGraphContext;
-
-    // Phonemize text via espeak-ng using the voice code from config
-    let sentences = espeak_rs::text_to_phonemes(text, &interface.espeak_voice, None, true, false)
-        .expect("espeak-ng phonemization failed");
-    let ipa = sentences.join(" ");
-    eprintln!("Phonemes: {ipa}");
-
-    // Build phoneme ID map from the stored JSON
-    let phoneme_id_map = parse_piper_phoneme_id_map(&interface.phoneme_id_map_json);
-
-    // Tokenize: BOS + (phoneme_ids interleaved with PAD) + EOS
-    let mut token_ids: Vec<i64> = Vec::new();
-    token_ids.push(1); // BOS (^)
-    token_ids.push(0); // PAD (_)
-    for ch in ipa.chars() {
-        if let Some(ids) = phoneme_id_map.get(&ch) {
-            for &id in ids {
-                token_ids.push(id);
-            }
-        }
-        token_ids.push(0); // PAD interspersed
-    }
-    token_ids.push(2); // EOS ($)
-
-    let num_tokens = token_ids.len();
-    eprintln!("Tokens: {num_tokens}");
-
-    let input_tensor =
-        NumericTensor::<DynRank>::from_vec_shape(token_ids, vec![1, num_tokens]).unwrap();
-    let input_lengths_tensor =
-        NumericTensor::<DynRank>::from_vec_shape(vec![num_tokens as i64], vec![1]).unwrap();
-
-    // Scales: [noise_scale, length_scale, noise_scale_w]
-    // length_scale is 1/speed (higher speed = shorter durations)
-    let length_scale = 1.0 / speed;
-    let scales_tensor =
-        NumericTensor::<DynRank>::from_vec_shape(vec![0.667f32, length_scale, 0.8], vec![3]).unwrap();
-
-    eprintln!("Running inference...");
-    let mut backend = EvalBackend::NDArray;
-    let start = std::time::Instant::now();
-
-    let super_graph_data = {
-        let mut data = SuperGraphData::new();
-        data.tensor_maps
-            .insert(interface.model_weights_link, model.get_tensor_store());
-        data.tensors.insert(interface.input_link, input_tensor);
-        data.tensors.insert(interface.input_lengths_link, input_lengths_tensor);
-        data.tensors.insert(interface.scales_link, scales_tensor);
-        if let Some(sid_link) = interface.speaker_id_link {
-            let sid_tensor =
-                NumericTensor::<DynRank>::from_vec_shape(vec![0i64], vec![1]).unwrap();
-            data.tensors.insert(sid_link, sid_tensor);
-        }
-        data
-    };
-
-    let super_graph_output = {
-        let mut observer = ();
-        let mut super_graph_tensor_cache = SuperGraphTensorCache::new();
-        let mut context = SuperGraphContext {
-            observer: &mut observer,
-            eval_backend: &mut backend,
-            super_graph_tensor_cache: &mut super_graph_tensor_cache,
-            caches: None,
-            symbolic_graphs: vec![model.get_symbolic_graph()],
-            use_compiled_models: false,
-            compiled_models: None,
-        };
-        interface
-            .super_graph
-            .run(super_graph_data, &mut context)
-            .unwrap_or_else(|e| {
-                eprintln!("Inference error: {e}");
-                std::process::exit(1);
-            })
-    };
-
-    let audio = super_graph_output
-        .tensors
-        .get(&interface.audio_output_link)
-        .expect("No audio output tensor");
-
-    eprintln!("Generated in {:.2?}", start.elapsed());
-
-    let samples = audio_tensor_to_samples(audio, &mut backend);
-    save_wav(&samples, interface.sample_rate, output_path);
+    save_wav(&samples, interface.sample_rate, &output_path);
     eprintln!(
         "Saved {:.1}s of audio to {}",
         samples.len() as f64 / interface.sample_rate as f64,
