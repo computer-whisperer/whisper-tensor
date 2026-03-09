@@ -90,23 +90,28 @@ impl MilliOp for Unsqueeze {
         if axes.len() == 1 {
             let axis = axes[0];
             let input_shape = inputs[&self.data].shape();
+            // Negative axes are relative to the output rank (input_rank + 1),
+            // per the ONNX Unsqueeze spec.
+            let output_rank = input_shape.len() + 1;
             let axis = if axis >= 0 {
                 axis as usize
             } else {
-                (input_shape.len() as i64 + axis) as usize
+                (output_rank as i64 + axis) as usize
             };
             let output = inputs[&self.data].unsqueeze(axis)?;
             Ok(Box::new([(self.output, output)].into_iter()))
         } else {
             // Multiple axes (use reshape)
             let input_shape = inputs[&self.data].shape();
+            let output_rank = input_shape.len() + axes.len();
             let mut output_shape = Vec::new();
             let mut input_index = 0;
-            for i in 0..(input_shape.len() + axes.len()) {
+            for i in 0..output_rank {
                 let mut is_selected = false;
                 for axis in &axes {
+                    // Negative axes relative to output rank
                     let axis = if *axis < 0 {
-                        input_shape.len() as i64 + *axis
+                        output_rank as i64 + *axis
                     } else {
                         *axis
                     };

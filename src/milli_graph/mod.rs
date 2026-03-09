@@ -691,7 +691,7 @@ impl MilliOpGraph {
     }
 
     #[allow(clippy::type_complexity)]
-    pub(crate) fn eval<T: MilliOpGraphObserver>(
+    pub fn eval<T: MilliOpGraphObserver>(
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
         observer: &mut T,
@@ -702,7 +702,9 @@ impl MilliOpGraph {
 
         let mut intermediate_values = HashMap::new();
         for (tensor_id, tensor_value) in inputs {
-            intermediate_values.insert(self.input_map[tensor_id], tensor_value.clone());
+            if let Some(&internal_id) = self.input_map.get(tensor_id) {
+                intermediate_values.insert(internal_id, tensor_value.clone());
+            }
         }
 
         for op_id in &self.op_ordering {
