@@ -56,6 +56,13 @@ impl Loader for GgufLoader {
         let info = match arch.as_str() {
             "llama" => crate::gguf::llama3::load_llama3_gguf(&gguf, &path)
                 .map_err(LoaderError::LoadFailed)?,
+            "qwen2" => crate::gguf::qwen2::load_qwen2_gguf(&gguf, &path)
+                .map_err(LoaderError::LoadFailed)?,
+            "qwen3" => crate::gguf::qwen3::load_qwen3_gguf(&gguf, &path)
+                .map_err(LoaderError::LoadFailed)?,
+            "phi3" => {
+                crate::gguf::phi3::load_phi3_gguf(&gguf, &path).map_err(LoaderError::LoadFailed)?
+            }
             _ => {
                 return Err(LoaderError::LoadFailed(anyhow::anyhow!(
                     "Unsupported GGUF architecture: {arch}"

@@ -323,6 +323,37 @@ impl SymbolicGraphMutator {
         out
     }
 
+    /// Slice along a single axis: `data[start..end]` on the given axis.
+    pub fn push_slice(
+        &mut self,
+        name: &str,
+        data: GlobalId,
+        axis: i64,
+        start: i64,
+        end: i64,
+        rng: &mut impl Rng,
+    ) -> GlobalId {
+        let starts = self.push_constant_tensor(
+            NDArrayNumericTensor::from_vec_shape(vec![start], &vec![1u64]).unwrap(),
+            None,
+            rng,
+        );
+        let ends = self.push_constant_tensor(
+            NDArrayNumericTensor::from_vec_shape(vec![end], &vec![1u64]).unwrap(),
+            None,
+            rng,
+        );
+        let axes = self.push_constant_tensor(
+            NDArrayNumericTensor::from_vec_shape(vec![axis], &vec![1u64]).unwrap(),
+            None,
+            rng,
+        );
+        let out = self.push_intermediate(name, rng);
+        let op = SliceOperation::new_from_parts(data, starts, ends, Some(axes), None, out, rng);
+        self.push_op(name, AnyOperation::Slice(op), rng);
+        out
+    }
+
     /// Quantized linear layer targeting a pre-existing output tensor.
     pub fn push_quant_linear_into(
         &mut self,
