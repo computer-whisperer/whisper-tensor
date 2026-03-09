@@ -164,6 +164,8 @@ pub struct ImageGenerationInterface {
     // Inputs
     pub cond_ids_input: SuperGraphLinkTensor,
     pub negative_cond_ids_input: Option<SuperGraphLinkTensor>,
+    /// T5 token IDs input (Flux only).
+    pub t5_ids_input: Option<SuperGraphLinkTensor>,
     pub initial_latent_input: SuperGraphLinkTensor,
     pub timesteps_input: SuperGraphLinkTensor,
     pub dt_input: SuperGraphLinkTensor,
@@ -174,8 +176,10 @@ pub struct ImageGenerationInterface {
     pub model_weights: Vec<SuperGraphLinkTensorMap>,
     // Output
     pub image_output: SuperGraphLinkTensor,
-    // Tokenizer
+    // Tokenizer (CLIP for SD/SDXL/Flux)
     pub tokenizer: TokenizerInfo,
+    /// T5 tokenizer (Flux only).
+    pub t5_tokenizer: Option<TokenizerInfo>,
 }
 
 /// Helper: build a MilliOpGraph node that casts a tensor to a target dtype.
@@ -485,6 +489,213 @@ fn build_eos_indices_node(
     eos_indices
 }
 
+/// Helper: build the Flux rectified flow denoising scan loop.
+///
+/// No CFG — single DiT forward pass per step. No input scaling.
+/// DiT inputs: latent_sample, timestep, clip_pooled, t5_hidden_states
+/// Returns the final latent link (F32, after Euler integration).
+#[allow(clippy::too_many_arguments)]
+fn build_flux_denoising_loop(
+    builder: &mut SuperGraphBuilder,
+    rng: &mut impl Rng,
+    dit_weights: SuperGraphLinkTensorMap,
+    clip_pooled: SuperGraphLinkTensor,
+    t5_hidden: SuperGraphLinkTensor,
+    initial_latent_input: SuperGraphLinkTensor,
+    timesteps_input: SuperGraphLinkTensor,
+    dt_input: SuperGraphLinkTensor,
+    _sigmas_input: SuperGraphLinkTensor,
+    iteration_count_input: SuperGraphLinkTensor,
+    model_dtype: DType,
+    dit_model_index: usize,
+) -> SuperGraphLinkTensor {
+    let outer_final_latent = builder.new_tensor_link(rng);
+
+    let mut inner_builder = SuperGraphBuilder::new();
+
+    // Inner links
+    let inner_dit_weights = inner_builder.new_model_link(rng);
+    let inner_clip_pooled = inner_builder.new_tensor_link(rng);
+    let inner_t5_hidden = inner_builder.new_tensor_link(rng);
+    let inner_latent_in = inner_builder.new_tensor_link(rng);
+    let inner_latent_out = inner_builder.new_tensor_link(rng);
+    let inner_timestep = inner_builder.new_tensor_link(rng);
+    let inner_dt = inner_builder.new_tensor_link(rng);
+
+    // Inner node 1: Prep — cast latent to model_dtype, reshape timestep
+    let cast_latent = inner_builder.new_tensor_link(rng);
+    let cast_timestep = inner_builder.new_tensor_link(rng);
+    {
+        let (mut mg, input_map) = MilliOpGraph::new(
+            [inner_latent_in.global_id(), inner_timestep.global_id()],
+            rng,
+        );
+        let lat_in = *input_map.get(&inner_latent_in.global_id()).unwrap();
+        let ts_in = *input_map.get(&inner_timestep.global_id()).unwrap();
+
+        // No sigma scaling for Flux (rectified flow operates directly on latents)
+        let lat_cast = Cast::push_new(&mut mg, lat_in, model_dtype, rng);
+
+        // Reshape timestep from scalar to [1, 1]
+        let ts_shape = Constant::push_new(
+            &mut mg,
+            NDArrayNumericTensor::from_vec_shape(vec![1i64, 1], &vec![2]).unwrap(),
+            rng,
+        );
+        let ts_reshaped = crate::milli_graph::ops::Reshape::push_new(&mut mg, ts_in, ts_shape, false, rng);
+
+        mg.set_output_map([
+            (lat_cast, cast_latent.global_id()),
+            (ts_reshaped, cast_timestep.global_id()),
+        ]);
+        inner_builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
+    }
+
+    // Inner node 2: DiT forward pass
+    let dit_output = inner_builder.new_tensor_link(rng);
+    inner_builder.add_node(
+        SuperGraphNodeModelExecution::new(
+            rng,
+            inner_dit_weights,
+            dit_model_index,
+            vec![
+                (cast_latent, "latent_sample".to_string()),
+                (cast_timestep, "timestep".to_string()),
+                (inner_clip_pooled, "clip_pooled".to_string()),
+                (inner_t5_hidden, "t5_hidden_states".to_string()),
+            ],
+            vec![("out_sample".to_string(), dit_output)],
+        )
+        .to_any(),
+    );
+
+    // Inner node 3: Euler step — latent_new = latent + velocity * dt
+    {
+        let (mut mg, input_map) = MilliOpGraph::new(
+            [
+                dit_output.global_id(),
+                inner_latent_in.global_id(),
+                inner_dt.global_id(),
+            ],
+            rng,
+        );
+        let velocity = *input_map.get(&dit_output.global_id()).unwrap();
+        let lat_in = *input_map.get(&inner_latent_in.global_id()).unwrap();
+        let dt_in = *input_map.get(&inner_dt.global_id()).unwrap();
+
+        // Cast velocity to f32
+        let velocity_f32 = Cast::push_new(&mut mg, velocity, DType::F32, rng);
+
+        // Euler step: latent + velocity * dt
+        let step = SimpleBinary::mul(&mut mg, velocity_f32, dt_in, rng);
+        let latent_next = SimpleBinary::add(&mut mg, lat_in, step, rng);
+
+        mg.set_output_map(std::iter::once((latent_next, inner_latent_out.global_id())));
+        inner_builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
+    }
+
+    // Build inner graph
+    let inner_inputs: Vec<_> = vec![
+        inner_dit_weights.to_any(),
+        inner_clip_pooled.to_any(),
+        inner_t5_hidden.to_any(),
+        inner_latent_in.to_any(),
+        inner_timestep.to_any(),
+        inner_dt.to_any(),
+    ];
+    let inner_outputs: Vec<_> = vec![inner_latent_out.to_any()];
+    let inner_graph = inner_builder.build(rng, &inner_inputs, &inner_outputs);
+
+    // Create scan node
+    let simple_inputs = vec![
+        SuperGraphLinkDouble::TensorMap(dit_weights, inner_dit_weights),
+        SuperGraphLinkDouble::Tensor(clip_pooled, inner_clip_pooled),
+        SuperGraphLinkDouble::Tensor(t5_hidden, inner_t5_hidden),
+    ];
+
+    let scan_node = SuperGraphNodeScan::new(
+        inner_graph,
+        iteration_count_input,
+        simple_inputs,
+        // state_links: latent carried across iterations
+        vec![SuperGraphLinkTriple::Tensor(
+            initial_latent_input,
+            inner_latent_in,
+            inner_latent_out,
+        )],
+        // scan_inputs: timestep and dt scanned along axis 0
+        vec![
+            (timesteps_input, inner_timestep, 0),
+            (dt_input, inner_dt, 0),
+        ],
+        // scan_outputs: none
+        vec![],
+        // simple_outputs: final latent
+        vec![SuperGraphLinkDouble::Tensor(
+            inner_latent_out,
+            outer_final_latent,
+        )],
+        rng,
+    );
+    builder.add_node(scan_node.to_any());
+
+    outer_final_latent
+}
+
+/// Helper: build the Flux VAE decode node.
+///
+/// Flux VAE scaling: latent_for_vae = latent / 0.3611 + 0.1159
+fn build_flux_vae_decode(
+    builder: &mut SuperGraphBuilder,
+    rng: &mut impl Rng,
+    latent: SuperGraphLinkTensor,
+    vae_weights: SuperGraphLinkTensorMap,
+    vae_model_index: usize,
+    model_dtype: DType,
+) -> SuperGraphLinkTensor {
+    // Scale latent: x / 0.3611 + 0.1159
+    let scaled_latent = builder.new_tensor_link(rng);
+    {
+        let (mut mg, input_map) =
+            MilliOpGraph::new(std::iter::once(latent.global_id()), rng);
+        let lat_in = *input_map.get(&latent.global_id()).unwrap();
+
+        let inv_scale = Constant::push_new(
+            &mut mg,
+            NDArrayNumericTensor::from_vec_shape(vec![1.0f32 / 0.3611], &vec![1])
+                .unwrap(),
+            rng,
+        );
+        let shift = Constant::push_new(
+            &mut mg,
+            NDArrayNumericTensor::from_vec_shape(vec![0.1159f32], &vec![1])
+                .unwrap(),
+            rng,
+        );
+        let scaled = SimpleBinary::mul(&mut mg, lat_in, inv_scale, rng);
+        let shifted = SimpleBinary::add(&mut mg, scaled, shift, rng);
+        let cast = Cast::push_new(&mut mg, shifted, model_dtype, rng);
+
+        mg.set_output_map(std::iter::once((cast, scaled_latent.global_id())));
+        builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
+    }
+
+    // VAE decoder
+    let image_output = builder.new_tensor_link(rng);
+    builder.add_node(
+        SuperGraphNodeModelExecution::new(
+            rng,
+            vae_weights,
+            vae_model_index,
+            vec![(scaled_latent, "latent_sample".to_string())],
+            vec![("sample".to_string(), image_output)],
+        )
+        .to_any(),
+    );
+
+    image_output
+}
+
 impl ImageGenerationInterface {
     /// Build interface for single-text-encoder models with CFG (SD 1.5, SD 2).
     ///
@@ -583,6 +794,7 @@ impl ImageGenerationInterface {
             super_graph,
             cond_ids_input,
             negative_cond_ids_input: Some(negative_cond_ids_input),
+            t5_ids_input: None,
             initial_latent_input,
             timesteps_input,
             dt_input,
@@ -592,6 +804,7 @@ impl ImageGenerationInterface {
             model_weights,
             image_output,
             tokenizer,
+            t5_tokenizer: None,
         }
     }
 
@@ -800,6 +1013,7 @@ impl ImageGenerationInterface {
             super_graph,
             cond_ids_input,
             negative_cond_ids_input: Some(negative_cond_ids_input),
+            t5_ids_input: None,
             initial_latent_input,
             timesteps_input,
             dt_input,
@@ -809,6 +1023,7 @@ impl ImageGenerationInterface {
             model_weights,
             image_output,
             tokenizer,
+            t5_tokenizer: None,
         }
     }
 
@@ -868,6 +1083,155 @@ impl ImageGenerationInterface {
             .collect();
 
         (timestep_values, dt_values, sigmas, init_sigma)
+    }
+
+    /// Pre-compute the rectified flow scheduler parameters for Flux Schnell.
+    ///
+    /// Flux uses flow matching: timesteps go from 1.0 (noise) to 0.0 (clean).
+    /// Returns (timestep_values, dt_values, sigma_values).
+    /// For Flux, sigma values equal timestep values (used for interface compatibility).
+    pub fn compute_flux_schedule(num_inference_steps: usize) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+        // Linearly spaced timesteps from 1.0 to near 0.0
+        // sigmas[i] = 1.0 - i/(N), giving [1.0, 1-1/N, ..., 1/N]
+        // Final sigma (after last step) is 0.0
+        let sigmas: Vec<f32> = (0..num_inference_steps)
+            .map(|i| 1.0 - i as f32 / num_inference_steps as f32)
+            .collect();
+
+        let timestep_values = sigmas.clone();
+
+        // dt[i] = sigma[i+1] - sigma[i], with sigma[num_steps] = 0
+        let dt_values: Vec<f32> = (0..num_inference_steps)
+            .map(|i| {
+                let sigma_next = if i + 1 < num_inference_steps {
+                    sigmas[i + 1]
+                } else {
+                    0.0
+                };
+                sigma_next - sigmas[i]
+            })
+            .collect();
+
+        (timestep_values, dt_values, sigmas)
+    }
+
+    /// Build interface for Flux Schnell (CLIP-L + T5-XXL + DiT + VAE, no CFG).
+    ///
+    /// Model weights order: [clip_l, t5_xxl, dit, vae_decoder]
+    ///
+    /// The denoising loop uses rectified flow (no CFG, single forward pass per step).
+    /// DiT inputs: latent_sample, timestep, clip_pooled, t5_hidden_states
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_flux_schnell(
+        rng: &mut impl Rng,
+        clip_tokenizer: TokenizerInfo,
+        t5_tokenizer: TokenizerInfo,
+        model_dtype: DType,
+    ) -> Self {
+        let mut builder = SuperGraphBuilder::new();
+
+        // Create input links
+        let cond_ids_input = builder.new_tensor_link(rng);       // CLIP token IDs
+        let t5_ids_input = builder.new_tensor_link(rng);         // T5 token IDs
+        let initial_latent_input = builder.new_tensor_link(rng);
+        let timesteps_input = builder.new_tensor_link(rng);
+        let dt_input = builder.new_tensor_link(rng);
+        let sigmas_input = builder.new_tensor_link(rng);
+        let iteration_count_input = builder.new_tensor_link(rng);
+        let guidance_scale_input = builder.new_tensor_link(rng); // unused but kept for compat
+        let clip_weights = builder.new_model_link(rng);
+        let t5_weights = builder.new_model_link(rng);
+        let dit_weights = builder.new_model_link(rng);
+        let vae_weights = builder.new_model_link(rng);
+
+        // --- CLIP-L: input_ids + eos_indices → pooled_output [1, 768] ---
+        let clip_pooled_f32 = builder.new_tensor_link(rng);
+        let clip_eos = build_eos_indices_node(&mut builder, rng, cond_ids_input);
+        builder.add_node(
+            SuperGraphNodeModelExecution::new(
+                rng,
+                clip_weights,
+                0,
+                vec![
+                    (cond_ids_input, "input_ids".to_string()),
+                    (clip_eos, "eos_indices".to_string()),
+                ],
+                vec![("pooled_output".to_string(), clip_pooled_f32)],
+            )
+            .to_any(),
+        );
+        let clip_pooled = build_cast_node(&mut builder, rng, clip_pooled_f32, model_dtype);
+
+        // --- T5-XXL: input_ids → hidden_states [1, seq, 4096] ---
+        let t5_hidden_f32 = builder.new_tensor_link(rng);
+        builder.add_node(
+            SuperGraphNodeModelExecution::new(
+                rng,
+                t5_weights,
+                1,
+                vec![(t5_ids_input, "input_ids".to_string())],
+                vec![("hidden_states".to_string(), t5_hidden_f32)],
+            )
+            .to_any(),
+        );
+        let t5_hidden = build_cast_node(&mut builder, rng, t5_hidden_f32, model_dtype);
+
+        // --- Denoising loop (rectified flow, no CFG) ---
+        let final_latent = build_flux_denoising_loop(
+            &mut builder,
+            rng,
+            dit_weights,
+            clip_pooled,
+            t5_hidden,
+            initial_latent_input,
+            timesteps_input,
+            dt_input,
+            sigmas_input,
+            iteration_count_input,
+            model_dtype,
+            2, // dit model index
+        );
+
+        // --- VAE decode ---
+        // Flux VAE: latent / 0.3611 + 0.1159
+        let image_output =
+            build_flux_vae_decode(&mut builder, rng, final_latent, vae_weights, 3, model_dtype);
+
+        // Build outer graph
+        let model_weights = vec![clip_weights, t5_weights, dit_weights, vae_weights];
+        let input_links: Vec<_> = vec![
+            cond_ids_input.to_any(),
+            t5_ids_input.to_any(),
+            initial_latent_input.to_any(),
+            timesteps_input.to_any(),
+            dt_input.to_any(),
+            sigmas_input.to_any(),
+            iteration_count_input.to_any(),
+            guidance_scale_input.to_any(),
+            clip_weights.to_any(),
+            t5_weights.to_any(),
+            dit_weights.to_any(),
+            vae_weights.to_any(),
+        ];
+        let output_links: Vec<_> = vec![image_output.to_any()];
+        let super_graph = builder.build(rng, &input_links, &output_links);
+
+        Self {
+            super_graph,
+            cond_ids_input,
+            negative_cond_ids_input: None,
+            t5_ids_input: Some(t5_ids_input),
+            initial_latent_input,
+            timesteps_input,
+            dt_input,
+            sigmas_input,
+            iteration_count_input,
+            guidance_scale_input,
+            model_weights,
+            image_output,
+            tokenizer: clip_tokenizer,
+            t5_tokenizer: Some(t5_tokenizer),
+        }
     }
 
     /// Run the full image generation pipeline.

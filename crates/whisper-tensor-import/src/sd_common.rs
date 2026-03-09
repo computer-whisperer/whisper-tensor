@@ -489,11 +489,13 @@ pub fn upsample(wm: &impl WeightManager, input: Arc<dyn Tensor>) -> Result<Arc<d
 }
 
 // ============================================================================
-// VAE Decoder (shared between SD 1.5 and SD 2.x — identical architecture)
+// VAE Decoder (shared between SD 1.5, SD 2.x, SDXL, and Flux)
 // ============================================================================
 
 const VAE_NUM_RES_BLOCKS: usize = 2;
 
+/// Build a VAE decoder for SD 1.5/2.x/SDXL (4-channel latent, with post_quant_conv,
+/// weights under `first_stage_model.*`).
 pub fn build_vae_decoder(
     weight_manager: &impl WeightManager,
     model_dtype: DType,
@@ -501,7 +503,29 @@ pub fn build_vae_decoder(
     origin_path: &Path,
 ) -> Result<Vec<u8>, anyhow::Error> {
     let wm = CastingWeightManager::new(weight_manager.prefix("first_stage_model"), DType::F32);
+    build_vae_decoder_core(&wm, model_dtype, output_method, origin_path, 4, true)
+}
 
+/// Build a VAE decoder for Flux (16-channel latent, no post_quant_conv,
+/// weights at root level `decoder.*`).
+pub fn build_flux_vae_decoder(
+    weight_manager: impl WeightManager,
+    model_dtype: DType,
+    output_method: WeightStorageStrategy,
+    origin_path: &Path,
+) -> Result<Vec<u8>, anyhow::Error> {
+    let wm = CastingWeightManager::new(weight_manager, DType::F32);
+    build_vae_decoder_core(&wm, model_dtype, output_method, origin_path, 16, false)
+}
+
+fn build_vae_decoder_core(
+    wm: &impl WeightManager,
+    model_dtype: DType,
+    output_method: WeightStorageStrategy,
+    origin_path: &Path,
+    latent_channels: usize,
+    has_post_quant_conv: bool,
+) -> Result<Vec<u8>, anyhow::Error> {
     let batch_dim = Dimension::new(Some(1), Some("batch".to_string()), None);
     let h_dim = Dimension::new(None, Some("height".to_string()), None);
     let w_dim = Dimension::new(None, Some("width".to_string()), None);
@@ -511,28 +535,28 @@ pub fn build_vae_decoder(
         model_dtype,
         Shape::new(vec![
             batch_dim,
-            Dimension::new(Some(4), None, None),
+            Dimension::new(Some(latent_channels), None, None),
             h_dim,
             w_dim,
         ]),
     );
 
-    let h = cast(latent_input.clone(), DType::F32);
+    let mut h: Arc<dyn Tensor> = cast(latent_input.clone(), DType::F32);
 
-    // post_quant_conv (1x1)
-    let h = conv2d(&wm.prefix("post_quant_conv"), h, 1, 1, 0)?;
+    if has_post_quant_conv {
+        h = conv2d(&wm.prefix("post_quant_conv"), h, 1, 1, 0)?;
+    }
 
     // Decoder
     let dec_wm = wm.prefix("decoder");
-    let h = conv2d(&dec_wm.prefix("conv_in"), h, 3, 1, 1)?;
+    h = conv2d(&dec_wm.prefix("conv_in"), h, 3, 1, 1)?;
 
     // mid block
-    let h = vae_resnet_block(&dec_wm.prefix("mid.block_1"), h)?;
-    let h = vae_attention(&dec_wm.prefix("mid.attn_1"), h)?;
-    let h = vae_resnet_block(&dec_wm.prefix("mid.block_2"), h)?;
+    h = vae_resnet_block(&dec_wm.prefix("mid.block_1"), h)?;
+    h = vae_attention(&dec_wm.prefix("mid.attn_1"), h)?;
+    h = vae_resnet_block(&dec_wm.prefix("mid.block_2"), h)?;
 
     // up blocks (level 3, 2, 1, 0)
-    let mut h = h;
     for level in (0..4).rev() {
         for block in 0..(VAE_NUM_RES_BLOCKS + 1) {
             h = vae_resnet_block(&dec_wm.prefix(&format!("up.{level}.block.{block}")), h)?;

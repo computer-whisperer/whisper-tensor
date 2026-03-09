@@ -157,7 +157,7 @@ pub fn build_text_encoder(
     Ok(onnx_model.encode_to_vec())
 }
 
-fn clip_encoder_layer(
+pub(crate) fn clip_encoder_layer(
     wm: &impl WeightManager,
     input: Arc<dyn Tensor>,
     causal_mask: Arc<dyn Tensor>,
@@ -171,7 +171,7 @@ fn clip_encoder_layer(
     Ok(Add::new(None, x, mlp_out)?)
 }
 
-fn clip_attention(
+pub(crate) fn clip_attention(
     wm: &impl WeightManager,
     input: Arc<dyn Tensor>,
     causal_mask: Arc<dyn Tensor>,
@@ -226,7 +226,7 @@ fn clip_attention(
     linear(&wm.prefix("out_proj"), attn_output)
 }
 
-fn clip_mlp(wm: &impl WeightManager, input: Arc<dyn Tensor>) -> Result<Arc<dyn Tensor>, Error> {
+pub(crate) fn clip_mlp(wm: &impl WeightManager, input: Arc<dyn Tensor>) -> Result<Arc<dyn Tensor>, Error> {
     let x = linear(&wm.prefix("fc1"), input)?;
     let x = crate::onnx_graph::pytorch::quick_gelu(x)?;
     linear(&wm.prefix("fc2"), x)

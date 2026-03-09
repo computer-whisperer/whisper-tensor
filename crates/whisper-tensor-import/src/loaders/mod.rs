@@ -1,4 +1,5 @@
 mod auto;
+mod flux;
 mod onnx;
 mod rwkv7;
 mod sd15;
@@ -7,6 +8,7 @@ mod sd_xl;
 mod transformers;
 
 pub use self::auto::AutoLoader;
+pub use self::flux::FluxSchnellLoader;
 pub use self::onnx::OnnxLoader;
 pub use self::rwkv7::Rwkv7Loader;
 pub use self::sd_xl::SDXLLoader;
