@@ -32,6 +32,20 @@ pub fn interpret_milli_graph(
     Ok(graph.eval(inputs, &mut (), &mut backend)?.collect())
 }
 
+/// Return a sorted list of (op_kind, count) for all ops in the graph.
+pub fn op_census(graph: &MilliOpGraph) -> Vec<(String, usize)> {
+    use crate::graph::{Graph, Node};
+    let mut counts = std::collections::HashMap::<String, usize>::new();
+    for id in graph.node_ids() {
+        if let Some(op) = graph.get_node_by_id(&id) {
+            *counts.entry(op.op_kind()).or_default() += 1;
+        }
+    }
+    let mut sorted: Vec<_> = counts.into_iter().collect();
+    sorted.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    sorted
+}
+
 // ---------------------------------------------------------------------------
 // Legacy API — kept for backward compatibility with existing callers
 // (interfaces.rs, super_graph/, server, examples)

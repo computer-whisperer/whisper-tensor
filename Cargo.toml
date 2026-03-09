@@ -98,6 +98,11 @@ path = "examples/compiler_test.rs"
 required-features = ["cranelift"]
 
 [[example]]
+name = "v8_model_test"
+path = "examples/v8_model_test.rs"
+required-features = ["cranelift"]
+
+[[example]]
 name = "matmul_perf_test"
 path = "examples/matmul_perf_test.rs"
 required-features = ["vulkan"]

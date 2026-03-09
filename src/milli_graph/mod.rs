@@ -767,6 +767,37 @@ impl MilliOpGraph {
 
         Ok(Box::new(outputs.into_iter()))
     }
+
+    /// Run the graph through the interpreter and return the shape of every
+    /// internal tensor (inputs, constants, intermediates, outputs).
+    ///
+    /// The returned HashMap uses internal tensor IDs — the same IDs used
+    /// by `op_ordering()`, `get_node_by_id()`, and `compile_graph()`.
+    pub fn collect_all_shapes(
+        &self,
+        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
+    ) -> Result<HashMap<GlobalId, Vec<usize>>, MilliOpGraphError> {
+        let mut backend = EvalBackend::NDArray;
+        let mut shapes = HashMap::new();
+
+        let mut intermediate_values = HashMap::new();
+        for (ext_id, tensor_value) in inputs {
+            let int_id = self.input_map[ext_id];
+            shapes.insert(int_id, tensor_value.shape().iter().map(|&d| d as usize).collect());
+            intermediate_values.insert(int_id, tensor_value.clone());
+        }
+
+        for op_id in &self.op_ordering {
+            let op = &self.ops[op_id];
+            let out_vec: Vec<_> = op.eval(&intermediate_values, &mut backend)?.collect();
+            for (tensor_id, value) in out_vec {
+                shapes.insert(tensor_id, value.shape().iter().map(|&d| d as usize).collect());
+                intermediate_values.insert(tensor_id, value);
+            }
+        }
+
+        Ok(shapes)
+    }
 }
 
 impl Graph for MilliOpGraph {
