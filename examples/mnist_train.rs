@@ -147,11 +147,41 @@ fn build_mlp_graph(
     let s = |v: u64| ScalarInfoTyped::Numeric(v);
 
     // Inputs: images and weight/bias parameters
-    let images = m.push_typed_tensor("images", TensorType::Input(None), Some(DType::F32), Some(vec![s(0), s(784)]), rng);
-    let w1 = m.push_typed_tensor("W1", TensorType::Input(None), Some(DType::F32), Some(vec![s(784), s(128)]), rng);
-    let b1 = m.push_typed_tensor("b1", TensorType::Input(None), Some(DType::F32), Some(vec![s(128)]), rng);
-    let w2 = m.push_typed_tensor("W2", TensorType::Input(None), Some(DType::F32), Some(vec![s(128), s(10)]), rng);
-    let b2 = m.push_typed_tensor("b2", TensorType::Input(None), Some(DType::F32), Some(vec![s(10)]), rng);
+    let images = m.push_typed_tensor(
+        "images",
+        TensorType::Input(None),
+        Some(DType::F32),
+        Some(vec![s(0), s(784)]),
+        rng,
+    );
+    let w1 = m.push_typed_tensor(
+        "W1",
+        TensorType::Input(None),
+        Some(DType::F32),
+        Some(vec![s(784), s(128)]),
+        rng,
+    );
+    let b1 = m.push_typed_tensor(
+        "b1",
+        TensorType::Input(None),
+        Some(DType::F32),
+        Some(vec![s(128)]),
+        rng,
+    );
+    let w2 = m.push_typed_tensor(
+        "W2",
+        TensorType::Input(None),
+        Some(DType::F32),
+        Some(vec![s(128), s(10)]),
+        rng,
+    );
+    let b2 = m.push_typed_tensor(
+        "b2",
+        TensorType::Input(None),
+        Some(DType::F32),
+        Some(vec![s(10)]),
+        rng,
+    );
 
     m.push_input(images);
     m.push_input(w1);

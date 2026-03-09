@@ -2566,6 +2566,120 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_backward_conv_no_bias() {
+        // Conv2d: input=[1,1,4,4], weight=[1,1,3,3], no bias, stride=1, pad=0
+        // 16 input elements, 9 weight elements
+        let input_data: Vec<f32> = (1..=16).map(|x| x as f32 * 0.1).collect();
+        let weight_data: Vec<f32> = vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9];
+        check_general_backward(
+            |graph, inputs, rng| {
+                ops::Conv::push_new(
+                    graph,
+                    inputs[0],
+                    inputs[1],
+                    None,
+                    ops::ConvAutoPad::NotSet,
+                    vec![1, 1],
+                    1,
+                    vec![3, 3],
+                    vec![0, 0, 0, 0],
+                    vec![1, 1],
+                    rng,
+                )
+            },
+            &[input_data, weight_data],
+            &[vec![1, 1, 4, 4], vec![1, 1, 3, 3]],
+            1e-3,
+            1e-2,
+        );
+    }
+
+    #[test]
+    fn test_backward_conv_with_bias() {
+        // Conv2d with bias: input=[1,1,4,4], weight=[2,1,3,3], bias=[2]
+        let input_data: Vec<f32> = (1..=16).map(|x| x as f32 * 0.1).collect();
+        let weight_data: Vec<f32> = (1..=18).map(|x| x as f32 * 0.05).collect();
+        let bias_data: Vec<f32> = vec![0.1, -0.2];
+        check_general_backward(
+            |graph, inputs, rng| {
+                ops::Conv::push_new(
+                    graph,
+                    inputs[0],
+                    inputs[1],
+                    Some(inputs[2]),
+                    ops::ConvAutoPad::NotSet,
+                    vec![1, 1],
+                    1,
+                    vec![3, 3],
+                    vec![0, 0, 0, 0],
+                    vec![1, 1],
+                    rng,
+                )
+            },
+            &[input_data, weight_data, bias_data],
+            &[vec![1, 1, 4, 4], vec![2, 1, 3, 3], vec![2]],
+            1e-3,
+            1e-2,
+        );
+    }
+
+    #[test]
+    fn test_backward_conv_with_padding() {
+        // Conv2d with padding: input=[1,1,3,3], weight=[1,1,3,3], pad=1
+        let input_data: Vec<f32> = (1..=9).map(|x| x as f32 * 0.1).collect();
+        let weight_data: Vec<f32> = vec![0.1, 0.2, 0.1, 0.0, 0.5, 0.0, 0.1, 0.2, 0.1];
+        check_general_backward(
+            |graph, inputs, rng| {
+                ops::Conv::push_new(
+                    graph,
+                    inputs[0],
+                    inputs[1],
+                    None,
+                    ops::ConvAutoPad::NotSet,
+                    vec![1, 1],
+                    1,
+                    vec![3, 3],
+                    vec![1, 1, 1, 1],
+                    vec![1, 1],
+                    rng,
+                )
+            },
+            &[input_data, weight_data],
+            &[vec![1, 1, 3, 3], vec![1, 1, 3, 3]],
+            1e-3,
+            1e-2,
+        );
+    }
+
+    #[test]
+    fn test_backward_conv_stride2() {
+        // Conv2d with stride=2: input=[1,1,6,6], weight=[1,1,3,3]
+        let input_data: Vec<f32> = (1..=36).map(|x| x as f32 * 0.05).collect();
+        let weight_data: Vec<f32> = vec![0.1, 0.2, 0.1, 0.3, 0.0, -0.1, 0.1, 0.2, 0.1];
+        check_general_backward(
+            |graph, inputs, rng| {
+                ops::Conv::push_new(
+                    graph,
+                    inputs[0],
+                    inputs[1],
+                    None,
+                    ops::ConvAutoPad::NotSet,
+                    vec![1, 1],
+                    1,
+                    vec![3, 3],
+                    vec![0, 0, 0, 0],
+                    vec![2, 2],
+                    rng,
+                )
+            },
+            &[input_data, weight_data],
+            &[vec![1, 1, 6, 6], vec![1, 1, 3, 3]],
+            1e-3,
+            1e-2,
+        );
+    }
+
     // ---- Phase 8: Optimizer tests ----
 
     /// Helper to build a simple "param * 2 -> reduce_sum -> loss" graph

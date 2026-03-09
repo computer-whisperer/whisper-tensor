@@ -295,6 +295,9 @@ pub enum AnyMilliOp {
     ArgMin(ArgMin),
     Resize(Resize),
     Conv(Conv),
+    ConvInputGrad(ConvInputGrad),
+    ConvWeightGrad(ConvWeightGrad),
+    ConvBiasGrad(ConvBiasGrad),
     Pad(Pad),
     RandomNormalLike(RandomNormalLike),
 }
@@ -335,6 +338,9 @@ impl AnyMilliOp {
             AnyMilliOp::ArgMin(x) => x.remap_tensors(map, rng),
             AnyMilliOp::Resize(x) => x.remap_tensors(map, rng),
             AnyMilliOp::Conv(x) => x.remap_tensors(map, rng),
+            AnyMilliOp::ConvInputGrad(x) => x.remap_tensors(map, rng),
+            AnyMilliOp::ConvWeightGrad(x) => x.remap_tensors(map, rng),
+            AnyMilliOp::ConvBiasGrad(x) => x.remap_tensors(map, rng),
             AnyMilliOp::Pad(x) => x.remap_tensors(map, rng),
             AnyMilliOp::RandomNormalLike(x) => x.remap_tensors(map, rng),
         }
@@ -378,6 +384,9 @@ macro_rules! delegate {
                 AnyMilliOp::ArgMin(x) => x.$name($($arg),*),
                 AnyMilliOp::Resize(x) => x.$name($($arg),*),
                 AnyMilliOp::Conv(x) => x.$name($($arg),*),
+                AnyMilliOp::ConvInputGrad(x) => x.$name($($arg),*),
+                AnyMilliOp::ConvWeightGrad(x) => x.$name($($arg),*),
+                AnyMilliOp::ConvBiasGrad(x) => x.$name($($arg),*),
                 AnyMilliOp::Pad(x) => x.$name($($arg),*),
                 AnyMilliOp::RandomNormalLike(x) => x.$name($($arg),*),
             }
@@ -434,6 +443,9 @@ impl MilliOp for AnyMilliOp {
             AnyMilliOp::ArgMin(x) => x.backward(output_grads, graph, rng),
             AnyMilliOp::Resize(x) => x.backward(output_grads, graph, rng),
             AnyMilliOp::Conv(x) => x.backward(output_grads, graph, rng),
+            AnyMilliOp::ConvInputGrad(x) => x.backward(output_grads, graph, rng),
+            AnyMilliOp::ConvWeightGrad(x) => x.backward(output_grads, graph, rng),
+            AnyMilliOp::ConvBiasGrad(x) => x.backward(output_grads, graph, rng),
             AnyMilliOp::Pad(x) => x.backward(output_grads, graph, rng),
             AnyMilliOp::RandomNormalLike(x) => x.backward(output_grads, graph, rng),
         }

@@ -20,7 +20,9 @@ use whisper_tensor::scalar_info::ScalarInfoTyped;
 use whisper_tensor::super_graph::cache::SuperGraphTensorCache;
 use whisper_tensor::super_graph::data::SuperGraphData;
 use whisper_tensor::super_graph::links::{SuperGraphLinkDouble, SuperGraphLinkTriple};
-use whisper_tensor::super_graph::nodes::{SuperGraphNode, SuperGraphNodeMilliOpGraph, SuperGraphNodeScan};
+use whisper_tensor::super_graph::nodes::{
+    SuperGraphNode, SuperGraphNodeMilliOpGraph, SuperGraphNodeScan,
+};
 use whisper_tensor::super_graph::{
     SuperGraphAnyLink, SuperGraphBuilder, SuperGraphContext, SuperGraphLinkTensor,
 };
@@ -116,11 +118,41 @@ fn build_mlp_graph(
     let mut m = SymbolicGraphMutator::new(rng);
     let s = |v: u64| ScalarInfoTyped::Numeric(v);
 
-    let images = m.push_typed_tensor("images", TensorType::Input(None), Some(DType::F32), Some(vec![s(0), s(784)]), rng);
-    let w1 = m.push_typed_tensor("W1", TensorType::Input(None), Some(DType::F32), Some(vec![s(784), s(128)]), rng);
-    let b1 = m.push_typed_tensor("b1", TensorType::Input(None), Some(DType::F32), Some(vec![s(128)]), rng);
-    let w2 = m.push_typed_tensor("W2", TensorType::Input(None), Some(DType::F32), Some(vec![s(128), s(10)]), rng);
-    let b2 = m.push_typed_tensor("b2", TensorType::Input(None), Some(DType::F32), Some(vec![s(10)]), rng);
+    let images = m.push_typed_tensor(
+        "images",
+        TensorType::Input(None),
+        Some(DType::F32),
+        Some(vec![s(0), s(784)]),
+        rng,
+    );
+    let w1 = m.push_typed_tensor(
+        "W1",
+        TensorType::Input(None),
+        Some(DType::F32),
+        Some(vec![s(784), s(128)]),
+        rng,
+    );
+    let b1 = m.push_typed_tensor(
+        "b1",
+        TensorType::Input(None),
+        Some(DType::F32),
+        Some(vec![s(128)]),
+        rng,
+    );
+    let w2 = m.push_typed_tensor(
+        "W2",
+        TensorType::Input(None),
+        Some(DType::F32),
+        Some(vec![s(128), s(10)]),
+        rng,
+    );
+    let b2 = m.push_typed_tensor(
+        "b2",
+        TensorType::Input(None),
+        Some(DType::F32),
+        Some(vec![s(10)]),
+        rng,
+    );
 
     m.push_input(images);
     m.push_input(w1);
@@ -151,12 +183,24 @@ fn init_weights(
     let mut params = HashMap::new();
     let std1 = (2.0f32 / 784.0).sqrt();
     let w1: Vec<f32> = (0..784 * 128).map(|_| rand_normal(rng) * std1).collect();
-    params.insert(param_ids[0], NumericTensor::from_vec_shape(w1, vec![784, 128]).unwrap());
-    params.insert(param_ids[1], NumericTensor::from_vec_shape(vec![0.0f32; 128], vec![128]).unwrap());
+    params.insert(
+        param_ids[0],
+        NumericTensor::from_vec_shape(w1, vec![784, 128]).unwrap(),
+    );
+    params.insert(
+        param_ids[1],
+        NumericTensor::from_vec_shape(vec![0.0f32; 128], vec![128]).unwrap(),
+    );
     let std2 = (2.0f32 / 128.0).sqrt();
     let w2: Vec<f32> = (0..128 * 10).map(|_| rand_normal(rng) * std2).collect();
-    params.insert(param_ids[2], NumericTensor::from_vec_shape(w2, vec![128, 10]).unwrap());
-    params.insert(param_ids[3], NumericTensor::from_vec_shape(vec![0.0f32; 10], vec![10]).unwrap());
+    params.insert(
+        param_ids[2],
+        NumericTensor::from_vec_shape(w2, vec![128, 10]).unwrap(),
+    );
+    params.insert(
+        param_ids[3],
+        NumericTensor::from_vec_shape(vec![0.0f32; 10], vec![10]).unwrap(),
+    );
     params
 }
 
@@ -200,7 +244,12 @@ fn eval_accuracy(
         let logits: Vec<f32> = results[&logits_id].flatten().unwrap().try_into().unwrap();
         for b in 0..actual {
             let row = &logits[b * 10..(b + 1) * 10];
-            let pred = row.iter().enumerate().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap().0;
+            let pred = row
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                .unwrap()
+                .0;
             if pred == test.labels[i + b] as usize {
                 correct += 1;
             }
@@ -278,11 +327,9 @@ fn main() {
     for i in 0..used_samples {
         one_hot_all[i * 10 + data.train.labels[i] as usize] = 1.0;
     }
-    let batched_labels = NumericTensor::<DynRank>::from_vec_shape(
-        one_hot_all,
-        vec![num_batches, batch_size, 10],
-    )
-    .unwrap();
+    let batched_labels =
+        NumericTensor::<DynRank>::from_vec_shape(one_hot_all, vec![num_batches, batch_size, 10])
+            .unwrap();
 
     eprintln!(
         "Pre-batched: {} batches of {} (dropped {} samples)",
@@ -313,9 +360,7 @@ fn main() {
     inner_output_links.push(SuperGraphAnyLink::tensor(loss_id));
 
     let mut inner_builder = SuperGraphBuilder::new();
-    inner_builder.add_node(
-        SuperGraphNodeMilliOpGraph::new(training_graph, &mut rng).to_any(),
-    );
+    inner_builder.add_node(SuperGraphNodeMilliOpGraph::new(training_graph, &mut rng).to_any());
     let inner_graph = inner_builder.build(&mut rng, &inner_input_links, &inner_output_links);
 
     // 6. Build outer SuperGraph with Scan
@@ -381,7 +426,7 @@ fn main() {
     let scan_node = SuperGraphNodeScan::new(
         inner_graph,
         iter_count_link,
-        vec![],          // simple_inputs: none needed
+        vec![], // simple_inputs: none needed
         state_links,
         scan_inputs,
         scan_outputs,
@@ -415,21 +460,31 @@ fn main() {
     let num_epochs = 5;
     let mut backend = EvalBackend::NDArray;
 
-    let acc = eval_accuracy(&fwd_graph, &data.test, &params, image_id, logits_id, &mut backend);
+    let acc = eval_accuracy(
+        &fwd_graph,
+        &data.test,
+        &params,
+        image_id,
+        logits_id,
+        &mut backend,
+    );
     eprintln!("Initial test accuracy: {:.2}%", acc * 100.0);
 
-    let iter_count_tensor = NumericTensor::<DynRank>::from_vec_shape(
-        vec![num_batches as i64],
-        vec![1],
-    )
-    .unwrap();
+    let iter_count_tensor =
+        NumericTensor::<DynRank>::from_vec_shape(vec![num_batches as i64], vec![1]).unwrap();
 
     for epoch in 0..num_epochs {
         // Populate outer SuperGraph data
         let mut sg_data = SuperGraphData::new();
-        sg_data.tensors.insert(iter_count_link, iter_count_tensor.clone());
-        sg_data.tensors.insert(outer_images_link, batched_images.clone());
-        sg_data.tensors.insert(outer_labels_link, batched_labels.clone());
+        sg_data
+            .tensors
+            .insert(iter_count_link, iter_count_tensor.clone());
+        sg_data
+            .tensors
+            .insert(outer_images_link, batched_images.clone());
+        sg_data
+            .tensors
+            .insert(outer_labels_link, batched_labels.clone());
         for &(ext_param, outer_initial, _) in &outer_param_links {
             sg_data
                 .tensors
@@ -439,11 +494,7 @@ fn main() {
         // Run one epoch
         let mut tensor_cache = SuperGraphTensorCache::new();
         let mut observer = ();
-        let mut context = SuperGraphContext::new(
-            &mut backend,
-            &mut observer,
-            &mut tensor_cache,
-        );
+        let mut context = SuperGraphContext::new(&mut backend, &mut observer, &mut tensor_cache);
 
         let results = epoch_graph.run(sg_data, &mut context).unwrap();
 

@@ -61,9 +61,7 @@ pub struct SuperGraphContext<'short, 'model, 'c, 'd, T: SuperGraphObserver> {
     pub compiled_models: Option<Vec<(&'model Model, &'short CompiledProgram)>>,
 }
 
-impl<'short, 'model, 'c, 'd, T: SuperGraphObserver>
-    SuperGraphContext<'short, 'model, 'c, 'd, T>
-{
+impl<'short, 'model, 'c, 'd, T: SuperGraphObserver> SuperGraphContext<'short, 'model, 'c, 'd, T> {
     /// Construct a context with only the required fields; caches, compiled
     /// models, and symbolic graphs default to empty/None.
     pub fn new(
