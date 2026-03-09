@@ -6,7 +6,7 @@ use crate::app::{InterfaceId, LoadedModels, LoadedTokenizers};
 use crate::graph_explorer::inspect_windows::{
     AnyInspectWindow, InspectWindowGraphLink, InspectWindowGraphNode,
 };
-use crate::sd_explorer::{clip_tokenize, generate_normal_noise, tensor_to_egui_texture};
+use crate::sd_explorer::{generate_normal_noise, tensor_to_egui_texture};
 use crate::websockets::ServerRequestManager;
 use crate::widgets::toggle::toggle_ui;
 use crate::widgets::tokenized_rich_text::TokenizedRichText;
@@ -1603,38 +1603,73 @@ impl GraphExplorerApp {
                                             });
                                         toggle_ui(ui, &mut sd_data.use_cache);
                                         ui.label("Cache");
-                                        let tokenizer = loaded_tokenizers
-                                            .loaded_tokenizers
-                                            .get(&sd_interface.tokenizer)
-                                            .cloned()
-                                            .flatten();
-                                        let can_generate = matches!(&tokenizer, Some(Ok(_)));
+                                        // Check all tokenizers ready
+                                        let all_tok_infos: Vec<_> = sd_interface.positive_prompts.iter()
+                                            .chain(sd_interface.negative_prompts.iter().flatten())
+                                            .map(|pi| &pi.tokenizer)
+                                            .collect();
+                                        let can_generate = all_tok_infos.iter().all(|ti| {
+                                            matches!(
+                                                loaded_tokenizers.loaded_tokenizers.get(*ti).and_then(|v| v.as_ref()),
+                                                Some(Ok(_))
+                                            )
+                                        });
                                         if !can_generate {
-                                            if let Some(Err(err)) = &tokenizer {
-                                                ui.label(format!("Tokenizer error: {err}"));
+                                            let has_error = all_tok_infos.iter().any(|ti| {
+                                                matches!(
+                                                    loaded_tokenizers.loaded_tokenizers.get(*ti).and_then(|v| v.as_ref()),
+                                                    Some(Err(_))
+                                                )
+                                            });
+                                            if has_error {
+                                                ui.label("Tokenizer error");
                                             } else {
                                                 ui.spinner();
                                             }
                                         }
                                         if can_generate && ui.button("Generate").clicked() {
-                                            let tokenizer = tokenizer.unwrap().unwrap();
-                                            let seq_len = 77;
-                                            let cond_ids = clip_tokenize(tokenizer.as_ref(), &sd_data.prompt, seq_len);
-                                            let uncond_ids = clip_tokenize(tokenizer.as_ref(), "", seq_len);
+                                            // Tokenize positive prompts
+                                            let mut tensor_inputs = HashMap::new();
+                                            for pi in &sd_interface.positive_prompts {
+                                                let tokenizer = loaded_tokenizers.loaded_tokenizers.get(&pi.tokenizer)
+                                                    .and_then(|v| v.as_ref()).and_then(|r| r.as_ref().ok()).unwrap();
+                                                let ids = pi.tokenize(tokenizer.as_ref(), &sd_data.prompt);
+                                                let tensor = NDArrayNumericTensor::from_vec_shape(ids, &vec![1, pi.seq_len as u64]).unwrap();
+                                                tensor_inputs.insert(pi.link, tensor);
+                                            }
+                                            // Tokenize negative prompts
+                                            if let Some(neg_prompts) = &sd_interface.negative_prompts {
+                                                for pi in neg_prompts {
+                                                    let tokenizer = loaded_tokenizers.loaded_tokenizers.get(&pi.tokenizer)
+                                                        .and_then(|v| v.as_ref()).and_then(|r| r.as_ref().ok()).unwrap();
+                                                    let ids = pi.tokenize(tokenizer.as_ref(), "");
+                                                    let tensor = NDArrayNumericTensor::from_vec_shape(ids, &vec![1, pi.seq_len as u64]).unwrap();
+                                                    tensor_inputs.insert(pi.link, tensor);
+                                                }
+                                            }
 
-                                            let cond_tensor = NDArrayNumericTensor::from_vec_shape(cond_ids, &vec![1, seq_len as u64]).unwrap();
-                                            let uncond_tensor = NDArrayNumericTensor::from_vec_shape(uncond_ids, &vec![1, seq_len as u64]).unwrap();
-
-                                            let (timestep_values, dt_values, sigma_values, init_sigma) =
-                                                ImageGenerationInterface::compute_euler_schedule(sd_data.num_steps);
-
-                                            let latent_n = 4 * sd_data.latent_h * sd_data.latent_w;
-                                            let initial_noise = generate_normal_noise(latent_n, sd_data.seed);
-                                            let scaled_noise: Vec<f32> = initial_noise.iter().map(|&x| x * init_sigma).collect();
+                                            let channels = sd_interface.latent_channels;
+                                            let (timestep_values, dt_values, sigma_values, initial_noise) = match &sd_interface.scheduler {
+                                                whisper_tensor::interfaces::SchedulerType::EulerDiscrete => {
+                                                    let (ts, dt, sigmas, init_sigma) =
+                                                        ImageGenerationInterface::compute_euler_schedule(sd_data.num_steps);
+                                                    let latent_n = channels * sd_data.latent_h * sd_data.latent_w;
+                                                    let noise = generate_normal_noise(latent_n, sd_data.seed);
+                                                    let scaled: Vec<f32> = noise.iter().map(|&x| x * init_sigma).collect();
+                                                    (ts, dt, sigmas, scaled)
+                                                }
+                                                whisper_tensor::interfaces::SchedulerType::RectifiedFlow => {
+                                                    let (ts, dt, sigmas) =
+                                                        ImageGenerationInterface::compute_flux_schedule(sd_data.num_steps);
+                                                    let latent_n = channels * sd_data.latent_h * sd_data.latent_w;
+                                                    let noise = generate_normal_noise(latent_n, sd_data.seed);
+                                                    (ts, dt, sigmas, noise)
+                                                }
+                                            };
 
                                             let latent_tensor = NDArrayNumericTensor::from_vec_shape(
-                                                scaled_noise,
-                                                &vec![1, 4, sd_data.latent_h as u64, sd_data.latent_w as u64],
+                                                initial_noise,
+                                                &vec![1, channels as u64, sd_data.latent_h as u64, sd_data.latent_w as u64],
                                             ).unwrap();
 
                                             let timesteps_tensor = NDArrayNumericTensor::from_vec_shape(
@@ -1653,7 +1688,16 @@ impl GraphExplorerApp {
                                                 vec![sd_data.num_steps as i64],
                                                 &vec![1],
                                             ).unwrap();
-                                            let guidance = NDArrayNumericTensor::from_vec(vec![sd_data.guidance_scale]).to_dyn();
+
+                                            tensor_inputs.insert(sd_interface.initial_latent_input, latent_tensor);
+                                            tensor_inputs.insert(sd_interface.timesteps_input, timesteps_tensor);
+                                            tensor_inputs.insert(sd_interface.dt_input, dt_tensor);
+                                            tensor_inputs.insert(sd_interface.sigmas_input, sigmas_tensor);
+                                            tensor_inputs.insert(sd_interface.iteration_count_input, iter_count);
+                                            if let Some(gs_link) = sd_interface.guidance_scale_input {
+                                                let guidance = NDArrayNumericTensor::from_vec(vec![sd_data.guidance_scale]).to_dyn();
+                                                tensor_inputs.insert(gs_link, guidance);
+                                            }
 
                                             let symbolic_graph_ids: Vec<_> = interface.model_ids.to_vec();
                                             let model_inputs: HashMap<_, _> = sd_interface
@@ -1662,19 +1706,6 @@ impl GraphExplorerApp {
                                                 .zip(interface.model_ids.iter())
                                                 .map(|(&link, &id)| (link, id))
                                                 .collect();
-
-                                            let mut tensor_inputs = HashMap::from([
-                                                (sd_interface.cond_ids_input, cond_tensor),
-                                                (sd_interface.initial_latent_input, latent_tensor),
-                                                (sd_interface.timesteps_input, timesteps_tensor),
-                                                (sd_interface.dt_input, dt_tensor),
-                                                (sd_interface.sigmas_input, sigmas_tensor),
-                                                (sd_interface.iteration_count_input, iter_count),
-                                                (sd_interface.guidance_scale_input, guidance),
-                                            ]);
-                                            if let Some(neg_link) = sd_interface.negative_cond_ids_input {
-                                                tensor_inputs.insert(neg_link, uncond_tensor);
-                                            }
 
                                             let swatch_settings = if state.do_explorer_swatches_in_view || state.do_all_explorer_swatches {
                                                 Some(AbbreviatedTensorReportSettings {

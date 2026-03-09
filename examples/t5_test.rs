@@ -35,7 +35,11 @@ fn main() {
     )
     .expect("T5 build failed");
 
-    println!("  Built in {:.2?} ({:.1}MB ONNX)", start.elapsed(), onnx_data.len() as f64 / 1e6);
+    println!(
+        "  Built in {:.2?} ({:.1}MB ONNX)",
+        start.elapsed(),
+        onnx_data.len() as f64 / 1e6
+    );
 
     // Load model
     let start = Instant::now();
@@ -88,7 +92,9 @@ fn main() {
     let inf_count = flat.iter().filter(|v| v.is_infinite()).count();
     let min_val = flat.iter().cloned().fold(f32::INFINITY, f32::min);
     let max_val = flat.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    println!("  hidden_states: min={min_val:.4}, max={max_val:.4}, nan={nan_count}, inf={inf_count}");
+    println!(
+        "  hidden_states: min={min_val:.4}, max={max_val:.4}, nan={nan_count}, inf={inf_count}"
+    );
 
     // Check first few values at position 0
     let first_8: Vec<f32> = flat[..8].to_vec();

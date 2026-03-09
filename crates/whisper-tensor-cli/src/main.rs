@@ -2,16 +2,14 @@ use clap::Parser;
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::Arc;
 use whisper_tensor::backends::ModelLoadedTensorCache;
 use whisper_tensor::backends::eval_backend::EvalBackend;
 use whisper_tensor::interfaces::AnyInterface;
-use whisper_tensor::loader::{ConfigValue, ConfigValues, Loader};
+use whisper_tensor::loader::{ConfigValue, ConfigValues, Loader, LoaderOutput};
 use whisper_tensor::numeric_tensor::NumericTensor;
 use whisper_tensor::super_graph::cache::SuperGraphCache;
 use whisper_tensor::tensor_rank::DynRank;
-use whisper_tensor::tokenizer::{AnyTokenizer, Tokenizer};
-use whisper_tensor_import::loaders::{AutoLoader, OnnxLoader, Rwkv7Loader, TransformersLoader};
+use whisper_tensor::tokenizer::AnyTokenizer;
 
 #[derive(Parser)]
 #[command(name = "wt", about = "Whisper Tensor CLI")]
@@ -25,15 +23,15 @@ enum Command {
     /// Generate text from a language model
     Generate {
         /// Path to the model (directory or file)
-        model: PathBuf,
+        model: Option<PathBuf>,
 
         /// Loader to use
         #[arg(long, value_enum, default_value = "auto")]
         loader: LoaderChoice,
 
-        /// HuggingFace tokenizer name (for ONNX loader)
-        #[arg(long)]
-        tokenizer: Option<String>,
+        /// Extra loader config (key=value, repeatable)
+        #[arg(long = "config", value_name = "KEY=VALUE")]
+        configs: Vec<String>,
 
         /// Prompt text (reads from stdin if not provided)
         #[arg(long, short)]
@@ -44,14 +42,18 @@ enum Command {
         max_tokens: usize,
     },
 
-    /// Generate an image from a Stable Diffusion model
+    /// Generate an image from a diffusion model
     Image {
-        /// Path to the SD checkpoint (.safetensors)
-        model: PathBuf,
+        /// Path to the model file (shorthand for --config path=<...>)
+        model: Option<PathBuf>,
 
-        /// SD variant to use
-        #[arg(long, value_enum, default_value = "sd15")]
-        sd_version: SdVersion,
+        /// Loader to use
+        #[arg(long, value_enum, default_value = "auto")]
+        loader: LoaderChoice,
+
+        /// Extra loader config (key=value, repeatable)
+        #[arg(long = "config", value_name = "KEY=VALUE")]
+        configs: Vec<String>,
 
         /// Prompt text
         #[arg(long, short)]
@@ -93,27 +95,74 @@ enum LoaderChoice {
     Transformers,
     Onnx,
     Rwkv7,
-}
-
-#[derive(Clone, clap::ValueEnum)]
-enum SdVersion {
     Sd15,
     Sd2,
     Sdxl,
+    FluxSchnell,
 }
 
-fn load_model(loader: &LoaderChoice, config: ConfigValues) -> whisper_tensor::loader::LoaderOutput {
-    match loader {
+// ============================================================================
+// Shared loading
+// ============================================================================
+
+/// Build a ConfigValues map from the positional model path and --config args.
+fn build_config(model: Option<PathBuf>, configs: &[String]) -> ConfigValues {
+    let mut config = ConfigValues::new();
+    if let Some(path) = model {
+        config.insert("path".to_string(), ConfigValue::FilePath(path));
+    }
+    for entry in configs {
+        if let Some((key, value)) = entry.split_once('=') {
+            config.insert(key.to_string(), parse_config_value(value));
+        } else {
+            eprintln!("Warning: ignoring malformed --config '{entry}' (expected key=value)");
+        }
+    }
+    config
+}
+
+/// Infer ConfigValue type from a string.
+fn parse_config_value(value: &str) -> ConfigValue {
+    let path = PathBuf::from(value);
+    if path.exists() || value.contains('/') || value.contains('\\') {
+        ConfigValue::FilePath(path)
+    } else if value.eq_ignore_ascii_case("true") {
+        ConfigValue::Bool(true)
+    } else if value.eq_ignore_ascii_case("false") {
+        ConfigValue::Bool(false)
+    } else if let Ok(i) = value.parse::<i64>() {
+        ConfigValue::Integer(i)
+    } else if let Ok(f) = value.parse::<f64>() {
+        ConfigValue::Float(f)
+    } else {
+        ConfigValue::String(value.to_string())
+    }
+}
+
+/// Dispatch to the appropriate loader.
+fn load_model(loader: &LoaderChoice, config: ConfigValues) -> LoaderOutput {
+    use whisper_tensor_import::loaders::*;
+
+    let result = match loader {
         LoaderChoice::Auto => AutoLoader.load(config),
         LoaderChoice::Transformers => TransformersLoader.load(config),
         LoaderChoice::Onnx => OnnxLoader.load(config),
         LoaderChoice::Rwkv7 => Rwkv7Loader.load(config),
-    }
-    .unwrap_or_else(|e| {
+        LoaderChoice::Sd15 => SD15Loader.load(config),
+        LoaderChoice::Sd2 => SD2Loader.load(config),
+        LoaderChoice::Sdxl => SDXLLoader.load(config),
+        LoaderChoice::FluxSchnell => FluxSchnellLoader.load(config),
+    };
+
+    result.unwrap_or_else(|e| {
         eprintln!("Failed to load model: {e}");
         std::process::exit(1);
     })
 }
+
+// ============================================================================
+// Main
+// ============================================================================
 
 fn main() {
     tracing_subscriber::fmt::init();
@@ -123,13 +172,19 @@ fn main() {
         Command::Generate {
             model,
             loader,
-            tokenizer,
+            configs,
             prompt,
             max_tokens,
-        } => cmd_generate(model, loader, tokenizer, prompt, max_tokens),
+        } => {
+            let config = build_config(model, &configs);
+            eprintln!("Loading model...");
+            let output = load_model(&loader, config);
+            cmd_generate(output, prompt, max_tokens);
+        }
         Command::Image {
             model,
-            sd_version,
+            loader,
+            configs,
             prompt,
             negative_prompt,
             output,
@@ -138,28 +193,30 @@ fn main() {
             latent_h,
             latent_w,
             seed,
-        } => cmd_image(
-            model,
-            sd_version,
-            prompt,
-            negative_prompt,
-            output,
-            steps,
-            guidance_scale,
-            latent_h,
-            latent_w,
-            seed,
-        ),
+        } => {
+            let config = build_config(model, &configs);
+            eprintln!("Loading model...");
+            let loaded = load_model(&loader, config);
+            cmd_image(
+                loaded,
+                prompt,
+                negative_prompt,
+                output,
+                steps,
+                guidance_scale,
+                latent_h,
+                latent_w,
+                seed,
+            );
+        }
     }
 }
 
-fn cmd_generate(
-    model_path: PathBuf,
-    loader: LoaderChoice,
-    tokenizer_name: Option<String>,
-    prompt: Option<String>,
-    max_tokens: usize,
-) {
+// ============================================================================
+// Text generation
+// ============================================================================
+
+fn cmd_generate(output: LoaderOutput, prompt: Option<String>, max_tokens: usize) {
     let prompt = match prompt {
         Some(p) => p,
         None => {
@@ -171,17 +228,6 @@ fn cmd_generate(
         }
     };
 
-    let mut config = ConfigValues::new();
-    config.insert(
-        "path".to_string(),
-        ConfigValue::FilePath(model_path.clone()),
-    );
-    if let Some(tok) = &tokenizer_name {
-        config.insert("tokenizer".to_string(), ConfigValue::String(tok.clone()));
-    }
-
-    eprintln!("Loading model from {}...", model_path.display());
-    let output = load_model(&loader, config);
     let model = &output.models[0].model;
 
     let interface = output
@@ -229,10 +275,13 @@ fn cmd_generate(
     println!();
 }
 
+// ============================================================================
+// Image generation
+// ============================================================================
+
 #[allow(clippy::too_many_arguments)]
 fn cmd_image(
-    model_path: PathBuf,
-    sd_version: SdVersion,
+    output: LoaderOutput,
     prompt: String,
     negative_prompt: String,
     output_path: PathBuf,
@@ -242,25 +291,6 @@ fn cmd_image(
     latent_w: usize,
     seed: u64,
 ) {
-    use whisper_tensor_import::loaders::{SD2Loader, SD15Loader, SDXLLoader};
-
-    let mut config = ConfigValues::new();
-    config.insert(
-        "path".to_string(),
-        ConfigValue::FilePath(model_path.clone()),
-    );
-
-    eprintln!("Loading SD model from {}...", model_path.display());
-    let output: whisper_tensor::loader::LoaderOutput = match sd_version {
-        SdVersion::Sd15 => SD15Loader.load(config),
-        SdVersion::Sd2 => SD2Loader.load(config),
-        SdVersion::Sdxl => SDXLLoader.load(config),
-    }
-    .unwrap_or_else(|e| {
-        eprintln!("Failed to load model: {e}");
-        std::process::exit(1);
-    });
-
     let models: Vec<&_> = output.models.iter().map(|m| m.model.as_ref()).collect();
 
     let interface = output
@@ -275,19 +305,29 @@ fn cmd_image(
             std::process::exit(1);
         });
 
-    // Tokenize prompts
-    let tokenizer = Arc::new(AnyTokenizer::from_tokenizer_info(&interface.tokenizer));
-    let seq_len = 77;
+    // Tokenize positive prompt for all input slots
+    let mut prompt_tokens = HashMap::new();
+    for pi in &interface.positive_prompts {
+        let tokenizer = AnyTokenizer::from_tokenizer_info(&pi.tokenizer);
+        let ids = pi.tokenize(&tokenizer, &prompt);
+        let tensor = NumericTensor::<DynRank>::from_vec_shape(ids, vec![1, pi.seq_len]).unwrap();
+        prompt_tokens.insert(pi.link, tensor);
+    }
 
-    let cond_ids = tokenize_clip(&*tokenizer, &prompt, seq_len);
-    let uncond_ids = tokenize_clip(&*tokenizer, &negative_prompt, seq_len);
+    // Tokenize negative prompt for all input slots (if CFG)
+    if let Some(neg_prompts) = &interface.negative_prompts {
+        for pi in neg_prompts {
+            let tokenizer = AnyTokenizer::from_tokenizer_info(&pi.tokenizer);
+            let ids = pi.tokenize(&tokenizer, &negative_prompt);
+            let tensor =
+                NumericTensor::<DynRank>::from_vec_shape(ids, vec![1, pi.seq_len]).unwrap();
+            prompt_tokens.insert(pi.link, tensor);
+        }
+    }
 
-    let cond_input = NumericTensor::<DynRank>::from_vec_shape(cond_ids, vec![1, seq_len]).unwrap();
-    let uncond_input =
-        NumericTensor::<DynRank>::from_vec_shape(uncond_ids, vec![1, seq_len]).unwrap();
-
-    // Generate initial noise (Box-Muller)
-    let latent_n = 4 * latent_h * latent_w;
+    // Generate initial noise
+    let channels = interface.latent_channels;
+    let latent_n = channels * latent_h * latent_w;
     let initial_noise = generate_gaussian_noise(latent_n, seed);
 
     eprintln!(
@@ -302,10 +342,9 @@ fn cmd_image(
     let image_tensor = interface
         .run(
             &models,
-            cond_input,
-            Some(uncond_input),
+            prompt_tokens,
             initial_noise,
-            vec![1, 4, latent_h, latent_w],
+            vec![1, channels, latent_h, latent_w],
             steps,
             guidance_scale,
             &mut backend,
@@ -317,28 +356,13 @@ fn cmd_image(
 
     eprintln!("Generated in {:.2?}", start.elapsed());
 
-    // Convert NCHW float tensor to RGB PNG
     save_image_tensor(&image_tensor, &output_path, &mut backend);
     eprintln!("Saved to {}", output_path.display());
 }
 
-/// Tokenize text for CLIP: encode, prepend BOS (49406), append EOS (49407), pad to seq_len with zeros.
-fn tokenize_clip(tokenizer: &dyn Tokenizer, text: &str, seq_len: usize) -> Vec<i32> {
-    let bos: u32 = 49406;
-    let eos: u32 = 49407;
-
-    let encoded = tokenizer.encode(text);
-
-    let mut ids = Vec::with_capacity(seq_len);
-    ids.push(bos as i32);
-    let max_text_tokens = seq_len - 2; // room for BOS + EOS
-    for &id in encoded.iter().take(max_text_tokens) {
-        ids.push(id as i32);
-    }
-    ids.push(eos as i32);
-    ids.resize(seq_len, 0);
-    ids
-}
+// ============================================================================
+// Utilities
+// ============================================================================
 
 /// Generate standard normal noise via Box-Muller transform.
 fn generate_gaussian_noise(n: usize, seed: u64) -> Vec<f32> {

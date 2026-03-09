@@ -400,7 +400,14 @@ impl eframe::App for WebUIApp {
                                         needed_tokenizers.push(iface.get_tokenizer().clone());
                                     }
                                     AnyInterface::ImageGenerationInterface(iface) => {
-                                        needed_tokenizers.push(iface.tokenizer.clone());
+                                        for pi in &iface.positive_prompts {
+                                            needed_tokenizers.push(pi.tokenizer.clone());
+                                        }
+                                        if let Some(neg) = &iface.negative_prompts {
+                                            for pi in neg {
+                                                needed_tokenizers.push(pi.tokenizer.clone());
+                                            }
+                                        }
                                     }
                                 }
                             }

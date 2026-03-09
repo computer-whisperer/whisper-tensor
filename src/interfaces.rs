@@ -158,28 +158,93 @@ impl TextInferenceTokensInLogitOutInterface {
 // Image Generation Interface
 // ============================================================================
 
+/// Scheduler type for the denoising loop.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum SchedulerType {
+    /// Euler discrete scheduler (SD 1.5, SD 2, SDXL).
+    /// Initial noise is scaled by init_sigma.
+    EulerDiscrete,
+    /// Rectified flow scheduler (Flux).
+    /// No noise scaling.
+    RectifiedFlow,
+}
+
+/// How to encode a text prompt into token IDs for a specific input slot.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum PromptEncoding {
+    /// CLIP-style: prepend BOS, append EOS, pad to seq_len with pad token.
+    ClipStyle { bos: u32, eos: u32, pad: u32 },
+    /// Raw encode and pad to seq_len (e.g. T5 SentencePiece).
+    RawPad { pad: u32 },
+}
+
+/// A single prompt input slot: tokenizer, target link, sequence length, and encoding style.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PromptInput {
+    pub tokenizer: TokenizerInfo,
+    pub link: SuperGraphLinkTensor,
+    pub seq_len: usize,
+    pub encoding: PromptEncoding,
+}
+
+impl PromptInput {
+    /// Tokenize a text prompt according to this input's encoding style.
+    pub fn tokenize(&self, tokenizer: &dyn Tokenizer, text: &str) -> Vec<i32> {
+        match &self.encoding {
+            PromptEncoding::ClipStyle { bos, eos, pad } => {
+                let mut encoded = tokenizer.encode(text);
+                // Strip BOS/EOS if the tokenizer's post-processor already added them
+                if encoded.first() == Some(&(*bos)) {
+                    encoded.remove(0);
+                }
+                if encoded.last() == Some(&(*eos)) {
+                    encoded.pop();
+                }
+                let mut ids = Vec::with_capacity(self.seq_len);
+                ids.push(*bos as i32);
+                let max_text_tokens = self.seq_len.saturating_sub(2);
+                for &id in encoded.iter().take(max_text_tokens) {
+                    ids.push(id as i32);
+                }
+                ids.push(*eos as i32);
+                ids.resize(self.seq_len, *pad as i32);
+                ids
+            }
+            PromptEncoding::RawPad { pad } => {
+                let encoded = tokenizer.encode(text);
+                let mut ids: Vec<i32> = encoded
+                    .iter()
+                    .take(self.seq_len)
+                    .map(|&id| id as i32)
+                    .collect();
+                ids.resize(self.seq_len, *pad as i32);
+                ids
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ImageGenerationInterface {
     pub super_graph: SuperGraph,
-    // Inputs
-    pub cond_ids_input: SuperGraphLinkTensor,
-    pub negative_cond_ids_input: Option<SuperGraphLinkTensor>,
-    /// T5 token IDs input (Flux only).
-    pub t5_ids_input: Option<SuperGraphLinkTensor>,
+    // Prompt inputs
+    pub positive_prompts: Vec<PromptInput>,
+    pub negative_prompts: Option<Vec<PromptInput>>,
+    // Latent / scheduler inputs
     pub initial_latent_input: SuperGraphLinkTensor,
     pub timesteps_input: SuperGraphLinkTensor,
     pub dt_input: SuperGraphLinkTensor,
     pub sigmas_input: SuperGraphLinkTensor,
     pub iteration_count_input: SuperGraphLinkTensor,
-    pub guidance_scale_input: SuperGraphLinkTensor,
+    pub guidance_scale_input: Option<SuperGraphLinkTensor>,
     // Model weight maps (in order matching loader's model_ids)
     pub model_weights: Vec<SuperGraphLinkTensorMap>,
     // Output
     pub image_output: SuperGraphLinkTensor,
-    // Tokenizer (CLIP for SD/SDXL/Flux)
-    pub tokenizer: TokenizerInfo,
-    /// T5 tokenizer (Flux only).
-    pub t5_tokenizer: Option<TokenizerInfo>,
+    /// Scheduler type for the denoising loop.
+    pub scheduler: SchedulerType,
+    /// Number of latent channels (4 for SD/SDXL, 16 for Flux).
+    pub latent_channels: usize,
 }
 
 /// Helper: build a MilliOpGraph node that casts a tensor to a target dtype.
@@ -236,7 +301,9 @@ fn build_denoising_loop(
 
     // Optional ADM conditioning links
     let inner_cond_y = cond_y.as_ref().map(|_| inner_builder.new_tensor_link(rng));
-    let inner_uncond_y = uncond_y.as_ref().map(|_| inner_builder.new_tensor_link(rng));
+    let inner_uncond_y = uncond_y
+        .as_ref()
+        .map(|_| inner_builder.new_tensor_link(rng));
 
     // Inner node 1: Prep — scale latent by 1/sqrt(sigma²+1), cast to model_dtype, reshape timestep
     let cast_latent = inner_builder.new_tensor_link(rng);
@@ -440,8 +507,7 @@ fn build_vae_decode(
     // Scale latent by 1/vae_scale_factor and cast to model_dtype
     let scaled_latent = builder.new_tensor_link(rng);
     {
-        let (mut mg, input_map) =
-            MilliOpGraph::new(std::iter::once(latent.global_id()), rng);
+        let (mut mg, input_map) = MilliOpGraph::new(std::iter::once(latent.global_id()), rng);
         let lat_in = *input_map.get(&latent.global_id()).unwrap();
 
         let scale = Constant::push_new(
@@ -542,7 +608,8 @@ fn build_flux_denoising_loop(
             NDArrayNumericTensor::from_vec_shape(vec![1i64, 1], &vec![2]).unwrap(),
             rng,
         );
-        let ts_reshaped = crate::milli_graph::ops::Reshape::push_new(&mut mg, ts_in, ts_shape, false, rng);
+        let ts_reshaped =
+            crate::milli_graph::ops::Reshape::push_new(&mut mg, ts_in, ts_shape, false, rng);
 
         mg.set_output_map([
             (lat_cast, cast_latent.global_id()),
@@ -656,20 +723,17 @@ fn build_flux_vae_decode(
     // Scale latent: x / 0.3611 + 0.1159
     let scaled_latent = builder.new_tensor_link(rng);
     {
-        let (mut mg, input_map) =
-            MilliOpGraph::new(std::iter::once(latent.global_id()), rng);
+        let (mut mg, input_map) = MilliOpGraph::new(std::iter::once(latent.global_id()), rng);
         let lat_in = *input_map.get(&latent.global_id()).unwrap();
 
         let inv_scale = Constant::push_new(
             &mut mg,
-            NDArrayNumericTensor::from_vec_shape(vec![1.0f32 / 0.3611], &vec![1])
-                .unwrap(),
+            NDArrayNumericTensor::from_vec_shape(vec![1.0f32 / 0.3611], &vec![1]).unwrap(),
             rng,
         );
         let shift = Constant::push_new(
             &mut mg,
-            NDArrayNumericTensor::from_vec_shape(vec![0.1159f32], &vec![1])
-                .unwrap(),
+            NDArrayNumericTensor::from_vec_shape(vec![0.1159f32], &vec![1]).unwrap(),
             rng,
         );
         let scaled = SimpleBinary::mul(&mut mg, lat_in, inv_scale, rng);
@@ -769,8 +833,15 @@ impl ImageGenerationInterface {
         );
 
         // VAE decode
-        let image_output =
-            build_vae_decode(&mut builder, rng, final_latent, vae_weights, 2, vae_scale_factor, model_dtype);
+        let image_output = build_vae_decode(
+            &mut builder,
+            rng,
+            final_latent,
+            vae_weights,
+            2,
+            vae_scale_factor,
+            model_dtype,
+        );
 
         // Build outer graph
         let model_weights = vec![te_weights, unet_weights, vae_weights];
@@ -790,21 +861,37 @@ impl ImageGenerationInterface {
         let output_links: Vec<_> = vec![image_output.to_any()];
         let super_graph = builder.build(rng, &input_links, &output_links);
 
+        let clip_prompt = PromptInput {
+            tokenizer,
+            link: cond_ids_input,
+            seq_len: 77,
+            encoding: PromptEncoding::ClipStyle {
+                bos: 49406,
+                eos: 49407,
+                pad: 0,
+            },
+        };
+        let clip_neg_prompt = PromptInput {
+            tokenizer: clip_prompt.tokenizer.clone(),
+            link: negative_cond_ids_input,
+            seq_len: 77,
+            encoding: clip_prompt.encoding.clone(),
+        };
+
         Self {
             super_graph,
-            cond_ids_input,
-            negative_cond_ids_input: Some(negative_cond_ids_input),
-            t5_ids_input: None,
+            positive_prompts: vec![clip_prompt],
+            negative_prompts: Some(vec![clip_neg_prompt]),
             initial_latent_input,
             timesteps_input,
             dt_input,
             sigmas_input,
             iteration_count_input,
-            guidance_scale_input,
+            guidance_scale_input: Some(guidance_scale_input),
             model_weights,
             image_output,
-            tokenizer,
-            t5_tokenizer: None,
+            scheduler: SchedulerType::EulerDiscrete,
+            latent_channels: 4,
         }
     }
 
@@ -872,7 +959,11 @@ impl ImageGenerationInterface {
         let cond_y = builder.new_tensor_link(rng);
         {
             let (mut mg, input_map) = MilliOpGraph::new(
-                [cond_hidden1_f32.global_id(), cond_penult2_f32.global_id(), cond_pooled_f32.global_id()],
+                [
+                    cond_hidden1_f32.global_id(),
+                    cond_penult2_f32.global_id(),
+                    cond_pooled_f32.global_id(),
+                ],
                 rng,
             );
             let h1 = *input_map.get(&cond_hidden1_f32.global_id()).unwrap();
@@ -942,7 +1033,11 @@ impl ImageGenerationInterface {
         let uncond_y = builder.new_tensor_link(rng);
         {
             let (mut mg, input_map) = MilliOpGraph::new(
-                [uncond_hidden1_f32.global_id(), uncond_penult2_f32.global_id(), uncond_pooled_f32.global_id()],
+                [
+                    uncond_hidden1_f32.global_id(),
+                    uncond_penult2_f32.global_id(),
+                    uncond_pooled_f32.global_id(),
+                ],
                 rng,
             );
             let h1 = *input_map.get(&uncond_hidden1_f32.global_id()).unwrap();
@@ -974,7 +1069,7 @@ impl ImageGenerationInterface {
             unet_weights,
             cond_context,
             uncond_context,
-            Some(cond_y),    // ADM conditioning
+            Some(cond_y), // ADM conditioning
             Some(uncond_y),
             guidance_scale_input,
             initial_latent_input,
@@ -987,8 +1082,15 @@ impl ImageGenerationInterface {
         );
 
         // VAE decode (SDXL uses 0.13025 scale factor)
-        let image_output =
-            build_vae_decode(&mut builder, rng, final_latent, vae_weights, 3, 0.13025, model_dtype);
+        let image_output = build_vae_decode(
+            &mut builder,
+            rng,
+            final_latent,
+            vae_weights,
+            3,
+            0.13025,
+            model_dtype,
+        );
 
         // Build outer graph
         let model_weights = vec![te1_weights, te2_weights, unet_weights, vae_weights];
@@ -1009,21 +1111,37 @@ impl ImageGenerationInterface {
         let output_links: Vec<_> = vec![image_output.to_any()];
         let super_graph = builder.build(rng, &input_links, &output_links);
 
+        let clip_prompt = PromptInput {
+            tokenizer,
+            link: cond_ids_input,
+            seq_len: 77,
+            encoding: PromptEncoding::ClipStyle {
+                bos: 49406,
+                eos: 49407,
+                pad: 0,
+            },
+        };
+        let clip_neg_prompt = PromptInput {
+            tokenizer: clip_prompt.tokenizer.clone(),
+            link: negative_cond_ids_input,
+            seq_len: 77,
+            encoding: clip_prompt.encoding.clone(),
+        };
+
         Self {
             super_graph,
-            cond_ids_input,
-            negative_cond_ids_input: Some(negative_cond_ids_input),
-            t5_ids_input: None,
+            positive_prompts: vec![clip_prompt],
+            negative_prompts: Some(vec![clip_neg_prompt]),
             initial_latent_input,
             timesteps_input,
             dt_input,
             sigmas_input,
             iteration_count_input,
-            guidance_scale_input,
+            guidance_scale_input: Some(guidance_scale_input),
             model_weights,
             image_output,
-            tokenizer,
-            t5_tokenizer: None,
+            scheduler: SchedulerType::EulerDiscrete,
+            latent_channels: 4,
         }
     }
 
@@ -1131,14 +1249,13 @@ impl ImageGenerationInterface {
         let mut builder = SuperGraphBuilder::new();
 
         // Create input links
-        let cond_ids_input = builder.new_tensor_link(rng);       // CLIP token IDs
-        let t5_ids_input = builder.new_tensor_link(rng);         // T5 token IDs
+        let cond_ids_input = builder.new_tensor_link(rng); // CLIP token IDs
+        let t5_ids_input = builder.new_tensor_link(rng); // T5 token IDs
         let initial_latent_input = builder.new_tensor_link(rng);
         let timesteps_input = builder.new_tensor_link(rng);
         let dt_input = builder.new_tensor_link(rng);
         let sigmas_input = builder.new_tensor_link(rng);
         let iteration_count_input = builder.new_tensor_link(rng);
-        let guidance_scale_input = builder.new_tensor_link(rng); // unused but kept for compat
         let clip_weights = builder.new_model_link(rng);
         let t5_weights = builder.new_model_link(rng);
         let dit_weights = builder.new_model_link(rng);
@@ -1207,7 +1324,6 @@ impl ImageGenerationInterface {
             dt_input.to_any(),
             sigmas_input.to_any(),
             iteration_count_input.to_any(),
-            guidance_scale_input.to_any(),
             clip_weights.to_any(),
             t5_weights.to_any(),
             dit_weights.to_any(),
@@ -1216,31 +1332,49 @@ impl ImageGenerationInterface {
         let output_links: Vec<_> = vec![image_output.to_any()];
         let super_graph = builder.build(rng, &input_links, &output_links);
 
+        let clip_prompt = PromptInput {
+            tokenizer: clip_tokenizer,
+            link: cond_ids_input,
+            seq_len: 77,
+            encoding: PromptEncoding::ClipStyle {
+                bos: 49406,
+                eos: 49407,
+                pad: 0,
+            },
+        };
+        let t5_prompt = PromptInput {
+            tokenizer: t5_tokenizer,
+            link: t5_ids_input,
+            seq_len: 256,
+            encoding: PromptEncoding::RawPad { pad: 0 },
+        };
+
         Self {
             super_graph,
-            cond_ids_input,
-            negative_cond_ids_input: None,
-            t5_ids_input: Some(t5_ids_input),
+            positive_prompts: vec![clip_prompt, t5_prompt],
+            negative_prompts: None,
             initial_latent_input,
             timesteps_input,
             dt_input,
             sigmas_input,
             iteration_count_input,
-            guidance_scale_input,
+            guidance_scale_input: None,
             model_weights,
             image_output,
-            tokenizer: clip_tokenizer,
-            t5_tokenizer: Some(t5_tokenizer),
+            scheduler: SchedulerType::RectifiedFlow,
+            latent_channels: 16,
         }
     }
 
     /// Run the full image generation pipeline.
+    ///
+    /// `prompt_tokens` contains pre-tokenized tensors keyed by SuperGraphLinkTensor,
+    /// one entry per prompt input slot (positive and negative).
     #[allow(clippy::too_many_arguments)]
     pub fn run(
         &self,
         models: &[&Model],
-        cond_ids: NumericTensor<DynRank>,
-        negative_cond_ids: Option<NumericTensor<DynRank>>,
+        prompt_tokens: HashMap<SuperGraphLinkTensor, NumericTensor<DynRank>>,
         initial_noise: Vec<f32>,
         latent_shape: Vec<usize>,
         num_inference_steps: usize,
@@ -1255,13 +1389,22 @@ impl ImageGenerationInterface {
             models.len()
         );
 
-        let (timestep_values, dt_values, sigma_values, init_sigma) =
-            Self::compute_euler_schedule(num_inference_steps);
-
-        // Scale initial noise by initial sigma
-        let scaled_noise: Vec<f32> = initial_noise.iter().map(|&x| x * init_sigma).collect();
-        let latent_tensor =
-            NumericTensor::<DynRank>::from_vec_shape(scaled_noise, latent_shape).unwrap();
+        // Compute schedule and prepare latent based on scheduler type
+        let (timestep_values, dt_values, sigma_values, latent_tensor) = match &self.scheduler {
+            SchedulerType::EulerDiscrete => {
+                let (ts, dt, sigmas, init_sigma) =
+                    Self::compute_euler_schedule(num_inference_steps);
+                let scaled: Vec<f32> = initial_noise.iter().map(|&x| x * init_sigma).collect();
+                let lat = NumericTensor::<DynRank>::from_vec_shape(scaled, latent_shape).unwrap();
+                (ts, dt, sigmas, lat)
+            }
+            SchedulerType::RectifiedFlow => {
+                let (ts, dt, sigmas) = Self::compute_flux_schedule(num_inference_steps);
+                let lat =
+                    NumericTensor::<DynRank>::from_vec_shape(initial_noise, latent_shape).unwrap();
+                (ts, dt, sigmas, lat)
+            }
+        };
 
         let timesteps_tensor =
             NumericTensor::<DynRank>::from_vec_shape(timestep_values, vec![num_inference_steps])
@@ -1274,14 +1417,11 @@ impl ImageGenerationInterface {
         let iter_count =
             NumericTensor::<DynRank>::from_vec_shape(vec![num_inference_steps as i64], vec![1])
                 .unwrap();
-        let guidance =
-            NumericTensor::<DynRank>::from_vec_shape(vec![guidance_scale], vec![]).unwrap();
 
         // Pack data
         let mut data = SuperGraphData::new();
-        data.tensors.insert(self.cond_ids_input, cond_ids);
-        if let (Some(neg_link), Some(neg_ids)) = (self.negative_cond_ids_input, negative_cond_ids) {
-            data.tensors.insert(neg_link, neg_ids);
+        for (link, tensor) in prompt_tokens {
+            data.tensors.insert(link, tensor);
         }
         data.tensors
             .insert(self.initial_latent_input, latent_tensor);
@@ -1289,7 +1429,11 @@ impl ImageGenerationInterface {
         data.tensors.insert(self.dt_input, dt_tensor);
         data.tensors.insert(self.sigmas_input, sigmas_tensor);
         data.tensors.insert(self.iteration_count_input, iter_count);
-        data.tensors.insert(self.guidance_scale_input, guidance);
+        if let Some(gs_link) = self.guidance_scale_input {
+            let guidance =
+                NumericTensor::<DynRank>::from_vec_shape(vec![guidance_scale], vec![]).unwrap();
+            data.tensors.insert(gs_link, guidance);
+        }
         for (weight_link, model) in self.model_weights.iter().zip(models.iter()) {
             data.tensor_maps
                 .insert(*weight_link, model.get_tensor_store());

@@ -22,7 +22,9 @@ impl Loader for FluxSchnellLoader {
             ConfigField {
                 key: "dit_path".to_string(),
                 label: "DiT Path".to_string(),
-                description: "Path to the Flux DiT .safetensors file (e.g. flux1-schnell.safetensors)".to_string(),
+                description:
+                    "Path to the Flux DiT .safetensors file (e.g. flux1-schnell.safetensors)"
+                        .to_string(),
                 field_type: ConfigFieldType::FilePath,
                 required: true,
                 default: None,
@@ -30,7 +32,8 @@ impl Loader for FluxSchnellLoader {
             ConfigField {
                 key: "vae_path".to_string(),
                 label: "VAE Path".to_string(),
-                description: "Path to the Flux VAE .safetensors file (e.g. ae.safetensors)".to_string(),
+                description: "Path to the Flux VAE .safetensors file (e.g. ae.safetensors)"
+                    .to_string(),
                 field_type: ConfigFieldType::FilePath,
                 required: true,
                 default: None,
@@ -38,7 +41,8 @@ impl Loader for FluxSchnellLoader {
             ConfigField {
                 key: "clip_path".to_string(),
                 label: "CLIP-L Path".to_string(),
-                description: "Path to the CLIP-L .safetensors file (e.g. clip_l.safetensors)".to_string(),
+                description: "Path to the CLIP-L .safetensors file (e.g. clip_l.safetensors)"
+                    .to_string(),
                 field_type: ConfigFieldType::FilePath,
                 required: true,
                 default: None,
@@ -46,7 +50,8 @@ impl Loader for FluxSchnellLoader {
             ConfigField {
                 key: "t5_path".to_string(),
                 label: "T5-XXL Path".to_string(),
-                description: "Path to the T5-XXL .safetensors file (e.g. t5xxl_fp16.safetensors)".to_string(),
+                description: "Path to the T5-XXL .safetensors file (e.g. t5xxl_fp16.safetensors)"
+                    .to_string(),
                 field_type: ConfigFieldType::FilePath,
                 required: true,
                 default: None,
@@ -65,8 +70,10 @@ impl Loader for FluxSchnellLoader {
         let model_dtype = {
             use crate::onnx_graph::weights::SafetensorsWeightManager;
             use memmap2::Mmap;
-            let file = std::fs::File::open(&dit_path).map_err(|e| LoaderError::LoadFailed(e.into()))?;
-            let mmap = unsafe { Mmap::map(&file) }.map_err(|e| LoaderError::LoadFailed(e.into()))?;
+            let file =
+                std::fs::File::open(&dit_path).map_err(|e| LoaderError::LoadFailed(e.into()))?;
+            let mmap =
+                unsafe { Mmap::map(&file) }.map_err(|e| LoaderError::LoadFailed(e.into()))?;
             let wm = SafetensorsWeightManager::new(vec![Arc::new(mmap)])
                 .map_err(|e| LoaderError::LoadFailed(e.into()))?;
             let import_dtype = crate::sd_common::detect_model_dtype(&wm);

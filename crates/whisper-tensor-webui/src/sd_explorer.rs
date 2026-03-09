@@ -2,12 +2,9 @@ use crate::app::{InterfaceId, LoadedModels, LoadedTokenizers, ModelLoadState};
 use crate::websockets::ServerRequestManager;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Arc;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
-use whisper_tensor::dtype::DType;
 use whisper_tensor::interfaces::{AnyInterface, ImageGenerationInterface};
 use whisper_tensor::super_graph::links::SuperGraphLinkTensor;
-use whisper_tensor::tokenizer::{AnyTokenizer, Tokenizer};
 use whisper_tensor_server::{SuperGraphRequest, SuperGraphRequestBackendMode};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -148,28 +145,50 @@ impl SDExplorerApp {
                 });
 
                 let is_running = self.pending_request.is_some();
-                let tokenizer = loaded_tokenizers
-                    .loaded_tokenizers
-                    .get(&sd.tokenizer)
-                    .cloned()
-                    .flatten();
+
+                // Check all needed tokenizers are loaded
+                let all_tokenizer_infos: Vec<_> = sd
+                    .positive_prompts
+                    .iter()
+                    .chain(sd.negative_prompts.iter().flatten())
+                    .map(|pi| &pi.tokenizer)
+                    .collect();
+                let mut tokenizers_ready = true;
+                let mut tokenizer_error = None;
+                for tok_info in &all_tokenizer_infos {
+                    match loaded_tokenizers
+                        .loaded_tokenizers
+                        .get(*tok_info)
+                        .and_then(|v| v.as_ref())
+                    {
+                        Some(Ok(_)) => {}
+                        Some(Err(err)) => {
+                            tokenizer_error = Some(err.clone());
+                            break;
+                        }
+                        None => {
+                            tokenizers_ready = false;
+                            break;
+                        }
+                    }
+                }
 
                 ui.horizontal(|ui| {
                     if is_running {
                         ui.spinner();
                         ui.label("Generating...");
-                    } else if let Some(Ok(tokenizer)) = &tokenizer {
+                    } else if let Some(err) = &tokenizer_error {
+                        ui.label(format!("Tokenizer error: {err}"));
+                    } else if tokenizers_ready {
                         if ui.button("Generate").clicked() {
                             self.run_generation(
                                 state,
                                 sd,
                                 interface.model_ids.clone(),
-                                tokenizer,
+                                loaded_tokenizers,
                                 server_request_manager,
                             );
                         }
-                    } else if let Some(Err(err)) = &tokenizer {
-                        ui.label(format!("Tokenizer error: {err}"));
                     } else {
                         ui.spinner();
                         ui.label("Loading tokenizer...");
@@ -200,31 +219,68 @@ impl SDExplorerApp {
         state: &SDExplorerState,
         sd: &ImageGenerationInterface,
         model_ids: Vec<whisper_tensor_server::LoadedModelId>,
-        tokenizer: &Arc<AnyTokenizer>,
+        loaded_tokenizers: &LoadedTokenizers,
         server_request_manager: &mut ServerRequestManager,
     ) {
-        let seq_len = 77;
+        // Tokenize positive prompts
+        let mut tensor_inputs = HashMap::new();
+        for pi in &sd.positive_prompts {
+            let tokenizer = loaded_tokenizers
+                .loaded_tokenizers
+                .get(&pi.tokenizer)
+                .and_then(|v| v.as_ref())
+                .and_then(|r| r.as_ref().ok())
+                .expect("tokenizer should be loaded");
+            let ids = pi.tokenize(tokenizer.as_ref(), &state.prompt_text);
+            let tensor =
+                NDArrayNumericTensor::from_vec_shape(ids, &vec![1, pi.seq_len as u64]).unwrap();
+            tensor_inputs.insert(pi.link, tensor);
+        }
 
-        let cond_ids = clip_tokenize(tokenizer.as_ref(), &state.prompt_text, seq_len);
-        let uncond_ids = clip_tokenize(tokenizer.as_ref(), "", seq_len);
-
-        let cond_tensor =
-            NDArrayNumericTensor::from_vec_shape(cond_ids, &vec![1, seq_len as u64]).unwrap();
-        let uncond_tensor =
-            NDArrayNumericTensor::from_vec_shape(uncond_ids, &vec![1, seq_len as u64]).unwrap();
+        // Tokenize negative prompts
+        if let Some(neg_prompts) = &sd.negative_prompts {
+            for pi in neg_prompts {
+                let tokenizer = loaded_tokenizers
+                    .loaded_tokenizers
+                    .get(&pi.tokenizer)
+                    .and_then(|v| v.as_ref())
+                    .and_then(|r| r.as_ref().ok())
+                    .expect("tokenizer should be loaded");
+                let ids = pi.tokenize(tokenizer.as_ref(), "");
+                let tensor =
+                    NDArrayNumericTensor::from_vec_shape(ids, &vec![1, pi.seq_len as u64]).unwrap();
+                tensor_inputs.insert(pi.link, tensor);
+            }
+        }
 
         // Compute scheduler params
-        let (timestep_values, dt_values, sigma_values, init_sigma) =
-            ImageGenerationInterface::compute_euler_schedule(state.num_steps);
-
-        // Generate random noise
-        let latent_n = 4 * state.latent_h * state.latent_w;
-        let initial_noise = generate_normal_noise(latent_n, state.seed);
-        let scaled_noise: Vec<f32> = initial_noise.iter().map(|&x| x * init_sigma).collect();
+        let channels = sd.latent_channels;
+        let (timestep_values, dt_values, sigma_values, initial_noise) = match &sd.scheduler {
+            whisper_tensor::interfaces::SchedulerType::EulerDiscrete => {
+                let (ts, dt, sigmas, init_sigma) =
+                    ImageGenerationInterface::compute_euler_schedule(state.num_steps);
+                let latent_n = channels * state.latent_h * state.latent_w;
+                let noise = generate_normal_noise(latent_n, state.seed);
+                let scaled: Vec<f32> = noise.iter().map(|&x| x * init_sigma).collect();
+                (ts, dt, sigmas, scaled)
+            }
+            whisper_tensor::interfaces::SchedulerType::RectifiedFlow => {
+                let (ts, dt, sigmas) =
+                    ImageGenerationInterface::compute_flux_schedule(state.num_steps);
+                let latent_n = channels * state.latent_h * state.latent_w;
+                let noise = generate_normal_noise(latent_n, state.seed);
+                (ts, dt, sigmas, noise)
+            }
+        };
 
         let latent_tensor = NDArrayNumericTensor::from_vec_shape(
-            scaled_noise,
-            &vec![1, 4, state.latent_h as u64, state.latent_w as u64],
+            initial_noise,
+            &vec![
+                1,
+                channels as u64,
+                state.latent_h as u64,
+                state.latent_w as u64,
+            ],
         )
         .unwrap();
 
@@ -238,7 +294,16 @@ impl SDExplorerApp {
                 .unwrap();
         let iter_count =
             NDArrayNumericTensor::from_vec_shape(vec![state.num_steps as i64], &vec![1]).unwrap();
-        let guidance = NDArrayNumericTensor::from_vec(vec![state.guidance_scale]).to_dyn();
+
+        tensor_inputs.insert(sd.initial_latent_input, latent_tensor);
+        tensor_inputs.insert(sd.timesteps_input, timesteps_tensor);
+        tensor_inputs.insert(sd.dt_input, dt_tensor);
+        tensor_inputs.insert(sd.sigmas_input, sigmas_tensor);
+        tensor_inputs.insert(sd.iteration_count_input, iter_count);
+        if let Some(gs_link) = sd.guidance_scale_input {
+            let guidance = NDArrayNumericTensor::from_vec(vec![state.guidance_scale]).to_dyn();
+            tensor_inputs.insert(gs_link, guidance);
+        }
 
         let symbolic_graph_ids: Vec<_> = model_ids.to_vec();
         let model_inputs: HashMap<_, _> = sd
@@ -247,19 +312,6 @@ impl SDExplorerApp {
             .zip(model_ids.iter())
             .map(|(&link, &id)| (link, id))
             .collect();
-
-        let mut tensor_inputs = HashMap::from([
-            (sd.cond_ids_input, cond_tensor),
-            (sd.initial_latent_input, latent_tensor),
-            (sd.timesteps_input, timesteps_tensor),
-            (sd.dt_input, dt_tensor),
-            (sd.sigmas_input, sigmas_tensor),
-            (sd.iteration_count_input, iter_count),
-            (sd.guidance_scale_input, guidance),
-        ]);
-        if let Some(neg_link) = sd.negative_cond_ids_input {
-            tensor_inputs.insert(neg_link, uncond_tensor);
-        }
 
         let token = server_request_manager.submit_supergraph_request(SuperGraphRequest {
             do_node_execution_reports: true,
@@ -335,39 +387,6 @@ pub(crate) fn tensor_to_egui_texture(
         egui::TextureOptions::NEAREST,
     );
     (texture, color_image)
-}
-
-/// Tokenize text for CLIP: encode with the real tokenizer, wrap with
-/// BOS/EOS special tokens, then truncate/pad to `seq_len`.
-///
-/// The tokenizer's post-processor may already add BOS/EOS; strip them
-/// so we always produce the canonical [BOS, tokens..., EOS, pad...] layout.
-pub(crate) fn clip_tokenize(tokenizer: &dyn Tokenizer, text: &str, seq_len: usize) -> Vec<i32> {
-    const CLIP_BOS: u32 = 49406;
-    const CLIP_EOS: u32 = 49407;
-
-    let mut raw_ids = tokenizer.encode(text);
-
-    // Strip BOS/EOS if the tokenizer's post-processor already added them
-    if raw_ids.first() == Some(&CLIP_BOS) {
-        raw_ids.remove(0);
-    }
-    if raw_ids.last() == Some(&CLIP_EOS) {
-        raw_ids.pop();
-    }
-
-    let mut ids = vec![0i32; seq_len];
-    ids[0] = CLIP_BOS as i32;
-
-    // Copy token IDs, leaving room for BOS at start and EOS
-    let max_content = seq_len.saturating_sub(2);
-    let content_len = raw_ids.len().min(max_content);
-    for i in 0..content_len {
-        ids[1 + i] = raw_ids[i] as i32;
-    }
-    ids[1 + content_len] = CLIP_EOS as i32;
-
-    ids
 }
 
 /// Generate normally distributed noise using Box-Muller transform.

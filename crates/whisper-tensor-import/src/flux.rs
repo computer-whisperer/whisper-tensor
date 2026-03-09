@@ -3,7 +3,9 @@ use crate::onnx_graph::operators::{
     Add, Concat, Constant, Gather, LayerNormalization, MatMul, Mul, RMSNormalization,
     RotaryEmbedding, Slice, Softmax, Transpose,
 };
-use crate::onnx_graph::pytorch::{cast, div_scalar, gelu, layer_norm, linear, reshape, silu, unsqueeze};
+use crate::onnx_graph::pytorch::{
+    cast, div_scalar, gelu, layer_norm, linear, reshape, silu, unsqueeze,
+};
 use crate::onnx_graph::tensor::{
     DType, Dimension, InputTensor, InputTensorInitialized, Shape, Tensor, TensorData,
     TensorDataValue,
@@ -174,19 +176,11 @@ fn ones_constant(size: usize, dtype: DType) -> Arc<dyn Tensor> {
         ),
         DType::BF16 => Constant::new(
             None,
-            TensorData::new(
-                TensorDataValue::BF16(vec![half::bf16::ONE; size]),
-                shape,
-            )
-            .unwrap(),
+            TensorData::new(TensorDataValue::BF16(vec![half::bf16::ONE; size]), shape).unwrap(),
         ),
         DType::F16 => Constant::new(
             None,
-            TensorData::new(
-                TensorDataValue::F16(vec![half::f16::ONE; size]),
-                shape,
-            )
-            .unwrap(),
+            TensorData::new(TensorDataValue::F16(vec![half::f16::ONE; size]), shape).unwrap(),
         ),
         _ => panic!("unsupported dtype for ones_constant: {:?}", dtype),
     }
@@ -343,26 +337,30 @@ fn flux_double_block(
 
     // Split into 6 modulation params each: shift_attn, scale_attn, gate_attn, shift_mlp, scale_mlp, gate_mlp
     let img_mods: Vec<Arc<dyn Tensor>> = (0..6)
-        .map(|i| slice_axis(img_mod_out.clone(), -1, (i * h) as i64, ((i + 1) * h) as i64))
+        .map(|i| {
+            slice_axis(
+                img_mod_out.clone(),
+                -1,
+                (i * h) as i64,
+                ((i + 1) * h) as i64,
+            )
+        })
         .collect::<Result<_, _>>()?;
     let txt_mods: Vec<Arc<dyn Tensor>> = (0..6)
-        .map(|i| slice_axis(txt_mod_out.clone(), -1, (i * h) as i64, ((i + 1) * h) as i64))
+        .map(|i| {
+            slice_axis(
+                txt_mod_out.clone(),
+                -1,
+                (i * h) as i64,
+                ((i + 1) * h) as i64,
+            )
+        })
         .collect::<Result<_, _>>()?;
 
     // --- Self-attention ---
     // AdaLN modulate
-    let img_modulated = adaln_modulate(
-        img.clone(),
-        img_mods[0].clone(),
-        img_mods[1].clone(),
-        h,
-    )?;
-    let txt_modulated = adaln_modulate(
-        txt.clone(),
-        txt_mods[0].clone(),
-        txt_mods[1].clone(),
-        h,
-    )?;
+    let img_modulated = adaln_modulate(img.clone(), img_mods[0].clone(), img_mods[1].clone(), h)?;
+    let txt_modulated = adaln_modulate(txt.clone(), txt_mods[0].clone(), txt_mods[1].clone(), h)?;
 
     // QKV projections
     let img_qkv = linear(&wm.prefix("img_attn.qkv"), img_modulated)?;
@@ -377,12 +375,36 @@ fn flux_double_block(
     let txt_v = slice_axis(txt_qkv, -1, 2 * h as i64, 3 * h as i64)?;
 
     // Reshape to [B, seq, num_heads, head_dim] and transpose to [B, num_heads, seq, head_dim]
-    let img_q = Transpose::new(None, reshape(img_q, vec![0, 0, nh, hd])?, Some(vec![0, 2, 1, 3]));
-    let img_k = Transpose::new(None, reshape(img_k, vec![0, 0, nh, hd])?, Some(vec![0, 2, 1, 3]));
-    let img_v = Transpose::new(None, reshape(img_v, vec![0, 0, nh, hd])?, Some(vec![0, 2, 1, 3]));
-    let txt_q = Transpose::new(None, reshape(txt_q, vec![0, 0, nh, hd])?, Some(vec![0, 2, 1, 3]));
-    let txt_k = Transpose::new(None, reshape(txt_k, vec![0, 0, nh, hd])?, Some(vec![0, 2, 1, 3]));
-    let txt_v = Transpose::new(None, reshape(txt_v, vec![0, 0, nh, hd])?, Some(vec![0, 2, 1, 3]));
+    let img_q = Transpose::new(
+        None,
+        reshape(img_q, vec![0, 0, nh, hd])?,
+        Some(vec![0, 2, 1, 3]),
+    );
+    let img_k = Transpose::new(
+        None,
+        reshape(img_k, vec![0, 0, nh, hd])?,
+        Some(vec![0, 2, 1, 3]),
+    );
+    let img_v = Transpose::new(
+        None,
+        reshape(img_v, vec![0, 0, nh, hd])?,
+        Some(vec![0, 2, 1, 3]),
+    );
+    let txt_q = Transpose::new(
+        None,
+        reshape(txt_q, vec![0, 0, nh, hd])?,
+        Some(vec![0, 2, 1, 3]),
+    );
+    let txt_k = Transpose::new(
+        None,
+        reshape(txt_k, vec![0, 0, nh, hd])?,
+        Some(vec![0, 2, 1, 3]),
+    );
+    let txt_v = Transpose::new(
+        None,
+        reshape(txt_v, vec![0, 0, nh, hd])?,
+        Some(vec![0, 2, 1, 3]),
+    );
 
     // QK-norm
     let img_qn_scale = wm.get_tensor("img_attn.norm.query_norm.scale")?;
@@ -421,11 +443,7 @@ fn flux_double_block(
 
     // Scaled dot-product attention
     let scale = (config.head_dim as f32).sqrt();
-    let scores = MatMul::new(
-        None,
-        q,
-        Transpose::new(None, k, Some(vec![0, 1, 3, 2])),
-    )?;
+    let scores = MatMul::new(None, q, Transpose::new(None, k, Some(vec![0, 1, 3, 2])))?;
     let scores = div_scalar(scores, scale)?;
     let attn_weights = Softmax::new(None, scores, Some(-1));
     let attn_out = MatMul::new(None, attn_weights, v)?;
@@ -454,18 +472,8 @@ fn flux_double_block(
     let txt = Add::new(None, txt, Mul::new(None, txt_mods[2].clone(), txt_attn)?)?;
 
     // --- MLP ---
-    let img_mlp_in = adaln_modulate(
-        img.clone(),
-        img_mods[3].clone(),
-        img_mods[4].clone(),
-        h,
-    )?;
-    let txt_mlp_in = adaln_modulate(
-        txt.clone(),
-        txt_mods[3].clone(),
-        txt_mods[4].clone(),
-        h,
-    )?;
+    let img_mlp_in = adaln_modulate(img.clone(), img_mods[3].clone(), img_mods[4].clone(), h)?;
+    let txt_mlp_in = adaln_modulate(txt.clone(), txt_mods[3].clone(), txt_mods[4].clone(), h)?;
 
     // MLP: linear → GELU → linear
     let img_mlp = linear(&wm.prefix("img_mlp.0"), img_mlp_in)?;
@@ -523,9 +531,21 @@ fn flux_single_block(
     let v = slice_axis(qkv, -1, 2 * h as i64, 3 * h as i64)?;
 
     // Reshape to [B, seq, H, D] → [B, H, seq, D]
-    let q = Transpose::new(None, reshape(q, vec![0, 0, nh, hd])?, Some(vec![0, 2, 1, 3]));
-    let k = Transpose::new(None, reshape(k, vec![0, 0, nh, hd])?, Some(vec![0, 2, 1, 3]));
-    let v = Transpose::new(None, reshape(v, vec![0, 0, nh, hd])?, Some(vec![0, 2, 1, 3]));
+    let q = Transpose::new(
+        None,
+        reshape(q, vec![0, 0, nh, hd])?,
+        Some(vec![0, 2, 1, 3]),
+    );
+    let k = Transpose::new(
+        None,
+        reshape(k, vec![0, 0, nh, hd])?,
+        Some(vec![0, 2, 1, 3]),
+    );
+    let v = Transpose::new(
+        None,
+        reshape(v, vec![0, 0, nh, hd])?,
+        Some(vec![0, 2, 1, 3]),
+    );
 
     // QK-norm
     let q_scale = wm.get_tensor("norm.query_norm.scale")?;
@@ -533,16 +553,21 @@ fn flux_single_block(
     let (q, k) = qk_norm(q, k, q_scale, k_scale)?;
 
     // RoPE
-    let q = RotaryEmbedding::new(None, q, cos_cache.clone(), sin_cache.clone(), None, Some(1), None, None)?;
+    let q = RotaryEmbedding::new(
+        None,
+        q,
+        cos_cache.clone(),
+        sin_cache.clone(),
+        None,
+        Some(1),
+        None,
+        None,
+    )?;
     let k = RotaryEmbedding::new(None, k, cos_cache, sin_cache, None, Some(1), None, None)?;
 
     // Attention
     let scale_val = (config.head_dim as f32).sqrt();
-    let scores = MatMul::new(
-        None,
-        q,
-        Transpose::new(None, k, Some(vec![0, 1, 3, 2])),
-    )?;
+    let scores = MatMul::new(None, q, Transpose::new(None, k, Some(vec![0, 1, 3, 2])))?;
     let scores = div_scalar(scores, scale_val)?;
     let attn_weights = Softmax::new(None, scores, Some(-1));
     let attn_out = MatMul::new(None, attn_weights, v)?;
@@ -603,10 +628,7 @@ pub fn load_flux_dit_with_origin(
     let timestep_input = InputTensor::new(
         "timestep".to_string(),
         DType::F32,
-        Shape::new(vec![
-            batch_dim.clone(),
-            Dimension::new(Some(1), None, None),
-        ]),
+        Shape::new(vec![batch_dim.clone(), Dimension::new(Some(1), None, None)]),
     );
     let clip_pooled_input = InputTensor::new(
         "clip_pooled".to_string(),
@@ -669,15 +691,20 @@ pub fn load_flux_dit_with_origin(
     )?;
 
     // CLIP pooled embedding
-    let vec_emb = linear(&weight_manager.prefix("vector_in.in_layer"), clip_pooled_input.clone())?;
+    let vec_emb = linear(
+        &weight_manager.prefix("vector_in.in_layer"),
+        clip_pooled_input.clone(),
+    )?;
     let vec_emb = silu(vec_emb)?;
     let vec_emb = linear(&weight_manager.prefix("vector_in.out_layer"), vec_emb)?;
 
     // Conditioning vector
     let vec_cond = Add::new(None, t_emb, vec_emb)?;
 
-    println!("Building Flux DiT: {} double + {} single blocks...",
-        config.num_double_blocks, config.num_single_blocks);
+    println!(
+        "Building Flux DiT: {} double + {} single blocks...",
+        config.num_double_blocks, config.num_single_blocks
+    );
 
     // --- Double blocks ---
     let mut img: Arc<dyn Tensor> = img;
@@ -730,15 +757,19 @@ pub fn load_flux_dit_with_origin(
     let final_mod = linear(&final_wm.prefix("adaLN_modulation.1"), vec_act)?;
     let final_mod = unsqueeze(final_mod, 1)?; // [B, 1, 2*hidden]
     let final_shift = slice_axis(final_mod.clone(), -1, 0, config.hidden_dim as i64)?;
-    let final_scale = slice_axis(final_mod, -1, config.hidden_dim as i64, 2 * config.hidden_dim as i64)?;
+    let final_scale = slice_axis(
+        final_mod,
+        -1,
+        config.hidden_dim as i64,
+        2 * config.hidden_dim as i64,
+    )?;
     let img_out = adaln_modulate(img_out, final_shift, final_scale, config.hidden_dim)?;
     let img_out = linear(&final_wm.prefix("linear"), img_out)?;
 
     // --- Unpatchify ---
     let output = unpatchify(img_out, &config)?;
 
-    let output_tensors: Vec<(String, Arc<dyn Tensor>)> =
-        vec![("out_sample".to_string(), output)];
+    let output_tensors: Vec<(String, Arc<dyn Tensor>)> = vec![("out_sample".to_string(), output)];
 
     println!("Built Flux DiT graph, exporting...");
     let onnx_model = if let Some(origin) = origin_path {
@@ -774,10 +805,7 @@ pub fn build_clip_l_pooled(
     output_method: WeightStorageStrategy,
     origin_path: Option<&std::path::Path>,
 ) -> Result<Vec<u8>, anyhow::Error> {
-    let wm = CastingWeightManager::new(
-        weight_manager.prefix("text_model"),
-        DType::F32,
-    );
+    let wm = CastingWeightManager::new(weight_manager.prefix("text_model"), DType::F32);
     let emb_wm = wm.prefix("embeddings");
 
     let batch_dim = Dimension::new(Some(1), Some("batch_size".to_string()), None);

@@ -105,11 +105,8 @@ pub fn load_t5_encoder_with_origin(
         Some("batch_size".to_string()),
         Some("DATA_BATCH".to_string()),
     );
-    let sequence_dimension = Dimension::new(
-        Some(config.max_seq_len),
-        Some("seq_len".to_string()),
-        None,
-    );
+    let sequence_dimension =
+        Dimension::new(Some(config.max_seq_len), Some("seq_len".to_string()), None);
 
     let input_shape = Shape::new(vec![batch_dimension.clone(), sequence_dimension.clone()]);
     let token_input = InputTensor::new("input_ids".to_string(), DType::I32, input_shape);
@@ -134,9 +131,8 @@ pub fn load_t5_encoder_with_origin(
     // Gather bucket_indices from bias_weight → [max_seq, max_seq, num_heads]
     // Transpose to [num_heads, max_seq, max_seq], unsqueeze batch → [1, num_heads, max_seq, max_seq]
     let position_bias: Arc<dyn Tensor> = {
-        let bias_weight = encoder_wm.get_tensor(
-            "block.0.layer.0.SelfAttention.relative_attention_bias.weight",
-        )?;
+        let bias_weight = encoder_wm
+            .get_tensor("block.0.layer.0.SelfAttention.relative_attention_bias.weight")?;
 
         let bucket_indices = compute_relative_position_buckets(
             config.max_seq_len,
@@ -148,8 +144,7 @@ pub fn load_t5_encoder_with_origin(
             Dimension::new(Some(config.max_seq_len), None, None),
         ]);
         let bucket_data = TensorData::new(TensorDataValue::I32(bucket_indices), bucket_shape)?;
-        let bucket_const =
-            InputTensorInitialized::new("position_buckets".to_string(), bucket_data);
+        let bucket_const = InputTensorInitialized::new("position_buckets".to_string(), bucket_data);
 
         // Gather: [num_buckets, num_heads] with [max_seq, max_seq] indices at axis=0
         // → [max_seq, max_seq, num_heads]
@@ -180,26 +175,17 @@ pub fn load_t5_encoder_with_origin(
         // Reshape to [batch, seq, num_heads, head_dim] then transpose to [batch, num_heads, seq, head_dim]
         let q = Transpose::new(
             None,
-            reshape(
-                q,
-                vec![0, 0, config.num_heads as i64, head_dim as i64],
-            )?,
+            reshape(q, vec![0, 0, config.num_heads as i64, head_dim as i64])?,
             Some(vec![0, 2, 1, 3]),
         );
         let k = Transpose::new(
             None,
-            reshape(
-                k,
-                vec![0, 0, config.num_heads as i64, head_dim as i64],
-            )?,
+            reshape(k, vec![0, 0, config.num_heads as i64, head_dim as i64])?,
             Some(vec![0, 2, 1, 3]),
         );
         let v = Transpose::new(
             None,
-            reshape(
-                v,
-                vec![0, 0, config.num_heads as i64, head_dim as i64],
-            )?,
+            reshape(v, vec![0, 0, config.num_heads as i64, head_dim as i64])?,
             Some(vec![0, 2, 1, 3]),
         );
 

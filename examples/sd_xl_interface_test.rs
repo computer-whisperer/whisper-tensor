@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;
 use whisper_tensor::backends::eval_backend::EvalBackend;
@@ -5,7 +6,7 @@ use whisper_tensor::interfaces::AnyInterface;
 use whisper_tensor::loader::{ConfigValue, ConfigValues, Loader};
 use whisper_tensor::numeric_tensor::NumericTensor;
 use whisper_tensor::tensor_rank::DynRank;
-use whisper_tensor::tokenizer::{AnyTokenizer, Tokenizer};
+use whisper_tensor::tokenizer::AnyTokenizer;
 use whisper_tensor_import::loaders::SDXLLoader;
 
 const CHECKPOINT: &str = "/mnt/secondary/neural_networks/sd_xl_base_1.0.safetensors";
@@ -25,7 +26,12 @@ fn main() {
     println!("  Loaded in {:.2?}", start.elapsed());
     println!(
         "  Models: {} ({} total), Interfaces: {}",
-        output.models.iter().map(|m| m.name.as_str()).collect::<Vec<_>>().join(", "),
+        output
+            .models
+            .iter()
+            .map(|m| m.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
         output.models.len(),
         output.interfaces.len(),
     );
@@ -41,16 +47,26 @@ fn main() {
         })
         .expect("No ImageGeneration interface");
 
-    // Tokenize
-    let tokenizer = AnyTokenizer::from_tokenizer_info(&interface.tokenizer);
-    let seq_len = 77;
+    // Tokenize using generic prompt inputs
+    let prompt = "a photo of a cat";
+    let negative_prompt = "";
 
-    let cond_ids = tokenize_clip(&tokenizer, "a photo of a cat", seq_len);
-    let uncond_ids = tokenize_clip(&tokenizer, "", seq_len);
-
-    let cond_input = NumericTensor::<DynRank>::from_vec_shape(cond_ids, vec![1, seq_len]).unwrap();
-    let uncond_input =
-        NumericTensor::<DynRank>::from_vec_shape(uncond_ids, vec![1, seq_len]).unwrap();
+    let mut prompt_tokens = HashMap::new();
+    for pi in &interface.positive_prompts {
+        let tokenizer = AnyTokenizer::from_tokenizer_info(&pi.tokenizer);
+        let ids = pi.tokenize(&tokenizer, prompt);
+        let tensor = NumericTensor::<DynRank>::from_vec_shape(ids, vec![1, pi.seq_len]).unwrap();
+        prompt_tokens.insert(pi.link, tensor);
+    }
+    if let Some(neg_prompts) = &interface.negative_prompts {
+        for pi in neg_prompts {
+            let tokenizer = AnyTokenizer::from_tokenizer_info(&pi.tokenizer);
+            let ids = pi.tokenize(&tokenizer, negative_prompt);
+            let tensor =
+                NumericTensor::<DynRank>::from_vec_shape(ids, vec![1, pi.seq_len]).unwrap();
+            prompt_tokens.insert(pi.link, tensor);
+        }
+    }
 
     // Tiny latent for fast test
     let latent_h = 8;
@@ -59,7 +75,8 @@ fn main() {
     let guidance_scale = 7.5f32;
     let seed = 42u64;
 
-    let latent_n = 4 * latent_h * latent_w;
+    let channels = interface.latent_channels;
+    let latent_n = channels * latent_h * latent_w;
     let initial_noise = generate_gaussian_noise(latent_n, seed);
 
     println!(
@@ -73,10 +90,9 @@ fn main() {
     let image_tensor = interface
         .run(
             &models,
-            cond_input,
-            Some(uncond_input),
+            prompt_tokens,
             initial_noise,
-            vec![1, 4, latent_h, latent_w],
+            vec![1, channels, latent_h, latent_w],
             steps,
             guidance_scale,
             &mut backend,
@@ -100,20 +116,6 @@ fn main() {
     let max_val = flat.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
     println!("  Image: min={min_val:.4}, max={max_val:.4}, nan={nan_count}");
     println!("\n=== Complete in {:.2?} ===", total_start.elapsed());
-}
-
-fn tokenize_clip(tokenizer: &dyn Tokenizer, text: &str, seq_len: usize) -> Vec<i32> {
-    let bos: u32 = 49406;
-    let eos: u32 = 49407;
-    let encoded = tokenizer.encode(text);
-    let mut ids = Vec::with_capacity(seq_len);
-    ids.push(bos as i32);
-    for &id in encoded.iter().take(seq_len - 2) {
-        ids.push(id as i32);
-    }
-    ids.push(eos as i32);
-    ids.resize(seq_len, 0);
-    ids
 }
 
 fn generate_gaussian_noise(n: usize, seed: u64) -> Vec<f32> {

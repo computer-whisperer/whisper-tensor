@@ -58,21 +58,16 @@ fn test_dit() {
 
     let timestep = NumericTensor::<DynRank>::from_vec_shape(vec![0.5f32], vec![1, 1]).unwrap();
 
-    let clip_pooled = NumericTensor::<DynRank>::from_vec_shape(
-        vec![0.0f32; 768],
-        vec![1, 768],
-    )
-    .unwrap()
-    .cast(DType::BF16, &mut backend)
-    .unwrap();
+    let clip_pooled = NumericTensor::<DynRank>::from_vec_shape(vec![0.0f32; 768], vec![1, 768])
+        .unwrap()
+        .cast(DType::BF16, &mut backend)
+        .unwrap();
 
-    let t5_hidden = NumericTensor::<DynRank>::from_vec_shape(
-        vec![0.0f32; 256 * 4096],
-        vec![1, 256, 4096],
-    )
-    .unwrap()
-    .cast(DType::BF16, &mut backend)
-    .unwrap();
+    let t5_hidden =
+        NumericTensor::<DynRank>::from_vec_shape(vec![0.0f32; 256 * 4096], vec![1, 256, 4096])
+            .unwrap()
+            .cast(DType::BF16, &mut backend)
+            .unwrap();
 
     println!("\n=== Running Flux DiT ===");
     let start = Instant::now();
@@ -106,9 +101,7 @@ fn test_dit() {
     let inf_count = flat.iter().filter(|v| v.is_infinite()).count();
     let min_val = flat.iter().cloned().fold(f32::INFINITY, f32::min);
     let max_val = flat.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    println!(
-        "  out_sample: min={min_val:.4}, max={max_val:.4}, nan={nan_count}, inf={inf_count}"
-    );
+    println!("  out_sample: min={min_val:.4}, max={max_val:.4}, nan={nan_count}, inf={inf_count}");
 
     println!("\n=== DiT complete in {:.2?} ===", total_start.elapsed());
 }
@@ -147,11 +140,9 @@ fn test_vae() {
     let mut backend = EvalBackend::NDArray;
 
     // Small latent input: [1, 16, 8, 8] → [1, 3, 64, 64]
-    let latent = NumericTensor::<DynRank>::from_vec_shape(
-        vec![0.0f32; 1 * 16 * 8 * 8],
-        vec![1, 16, 8, 8],
-    )
-    .unwrap();
+    let latent =
+        NumericTensor::<DynRank>::from_vec_shape(vec![0.0f32; 1 * 16 * 8 * 8], vec![1, 16, 8, 8])
+            .unwrap();
 
     println!("\n=== Running Flux VAE decoder ===");
     let start = Instant::now();

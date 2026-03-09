@@ -122,8 +122,7 @@ fn main() {
         let input = NumericTensor::<DynRank>::from_vec_shape(cond_ids, vec![1, seq_len]).unwrap();
 
         // EOS index = 6 (position of the EOS token)
-        let eos_indices =
-            NumericTensor::<DynRank>::from_vec_shape(vec![6i64], vec![1]).unwrap();
+        let eos_indices = NumericTensor::<DynRank>::from_vec_shape(vec![6i64], vec![1]).unwrap();
 
         let start = Instant::now();
         let out = te2
@@ -176,22 +175,17 @@ fn main() {
             .expect("cast timestep");
 
         // Context in model_dtype (interface casts text encoder F32 output to model_dtype)
-        let context = NumericTensor::<DynRank>::from_vec_shape(
-            vec![0.0f32; 77 * 2048],
-            vec![1, 77, 2048],
-        )
-        .unwrap()
-        .cast(model_dtype, &mut backend)
-        .expect("cast context");
+        let context =
+            NumericTensor::<DynRank>::from_vec_shape(vec![0.0f32; 77 * 2048], vec![1, 77, 2048])
+                .unwrap()
+                .cast(model_dtype, &mut backend)
+                .expect("cast context");
 
         // ADM conditioning in model_dtype
-        let y = NumericTensor::<DynRank>::from_vec_shape(
-            vec![0.0f32; 2816],
-            vec![1, 2816],
-        )
-        .unwrap()
-        .cast(model_dtype, &mut backend)
-        .expect("cast y");
+        let y = NumericTensor::<DynRank>::from_vec_shape(vec![0.0f32; 2816], vec![1, 2816])
+            .unwrap()
+            .cast(model_dtype, &mut backend)
+            .expect("cast y");
 
         let start = Instant::now();
         let out = unet

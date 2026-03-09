@@ -98,15 +98,12 @@ fn main() {
         .unwrap();
 
         // Dummy timestep
-        let timestep =
-            NumericTensor::<DynRank>::from_vec_shape(vec![999.0f32], vec![1]).unwrap();
+        let timestep = NumericTensor::<DynRank>::from_vec_shape(vec![999.0f32], vec![1]).unwrap();
 
         // Dummy context (1024-dim for SD 2)
-        let context = NumericTensor::<DynRank>::from_vec_shape(
-            vec![0.0f32; 77 * 1024],
-            vec![1, 77, 1024],
-        )
-        .unwrap();
+        let context =
+            NumericTensor::<DynRank>::from_vec_shape(vec![0.0f32; 77 * 1024], vec![1, 77, 1024])
+                .unwrap();
 
         let start = Instant::now();
         let out = unet
