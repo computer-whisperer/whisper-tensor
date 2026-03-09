@@ -718,18 +718,19 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_constant_pad_negative_axes);*/
 
         /*do_test!($runner_fn, $runner_name, test_convinteger_without_padding);
-        do_test!($runner_fn, $runner_name, test_convinteger_with_padding);
-        do_test!($runner_fn, $runner_name, test_convtranspose);
+        do_test!($runner_fn, $runner_name, test_convinteger_with_padding);*/
+        // ConvTranspose: only 1D supported so far (sufficient for Kokoro)
+        //do_test!($runner_fn, $runner_name, test_convtranspose); // 2D
         do_test!($runner_fn, $runner_name, test_convtranspose_1d);
-        do_test!($runner_fn, $runner_name, test_convtranspose_3d);
-        do_test!($runner_fn, $runner_name, test_convtranspose_autopad_same);
-        do_test!($runner_fn, $runner_name, test_convtranspose_dilations);
-        do_test!($runner_fn, $runner_name, test_convtranspose_group_2);
-        do_test!($runner_fn, $runner_name, test_convtranspose_group_2_image_3);
-        do_test!($runner_fn, $runner_name, test_convtranspose_kernel_shape);
-        do_test!($runner_fn, $runner_name, test_convtranspose_output_shape);
-        do_test!($runner_fn, $runner_name, test_convtranspose_pad);
-        do_test!($runner_fn, $runner_name, test_convtranspose_pads);*/
+        //do_test!($runner_fn, $runner_name, test_convtranspose_3d);
+        //do_test!($runner_fn, $runner_name, test_convtranspose_autopad_same); // 2D
+        //do_test!($runner_fn, $runner_name, test_convtranspose_dilations); // 2D
+        //do_test!($runner_fn, $runner_name, test_convtranspose_group_2); // 2D
+        //do_test!($runner_fn, $runner_name, test_convtranspose_group_2_image_3); // 2D
+        //do_test!($runner_fn, $runner_name, test_convtranspose_kernel_shape); // 2D
+        //do_test!($runner_fn, $runner_name, test_convtranspose_output_shape); // 2D
+        //do_test!($runner_fn, $runner_name, test_convtranspose_pad); // 2D
+        //do_test!($runner_fn, $runner_name, test_convtranspose_pads); // 2D
         do_test!($runner_fn, $runner_name, test_conv_with_autopad_same);
         do_test!($runner_fn, $runner_name, test_conv_with_strides_and_asymmetric_padding);
         do_test!($runner_fn, $runner_name, test_conv_with_strides_no_padding);
@@ -1048,10 +1049,10 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_layer_normalization_default_axis_expanded_ver18);
 
 
-        //do_test!($runner_fn, $runner_name, test_leakyrelu);
-        //do_test!($runner_fn, $runner_name, test_leakyrelu_default);
+        do_test!($runner_fn, $runner_name, test_leakyrelu);
+        do_test!($runner_fn, $runner_name, test_leakyrelu_default);
         do_test!($runner_fn, $runner_name, test_leakyrelu_default_expanded);
-        //do_test!($runner_fn, $runner_name, test_leakyrelu_example);
+        do_test!($runner_fn, $runner_name, test_leakyrelu_example);
         do_test!($runner_fn, $runner_name, test_leakyrelu_example_expanded);
 
         do_test!($runner_fn, $runner_name, test_leakyrelu_expanded);
@@ -1105,11 +1106,10 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_lrn);
         do_test!($runner_fn, $runner_name, test_lrn_default);*/
 
-        /*
         do_test!($runner_fn, $runner_name, test_lstm_batchwise);
         do_test!($runner_fn, $runner_name, test_lstm_defaults);
         do_test!($runner_fn, $runner_name, test_lstm_with_initial_bias);
-        do_test!($runner_fn, $runner_name, test_lstm_with_peepholes);*/
+        do_test!($runner_fn, $runner_name, test_lstm_with_peepholes);
 
         do_test!($runner_fn, $runner_name, test_matmul_2d);
         do_test!($runner_fn, $runner_name, test_matmul_3d);
@@ -1638,13 +1638,12 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_scatter_elements_with_reduction_max);
         do_test!($runner_fn, $runner_name, test_scatter_elements_with_reduction_min);*/
 
-        /*
         do_test!($runner_fn, $runner_name, test_scatternd);
         do_test!($runner_fn, $runner_name, test_scatternd_add);
         do_test!($runner_fn, $runner_name, test_scatternd_max);
         do_test!($runner_fn, $runner_name, test_scatternd_min);
         do_test!($runner_fn, $runner_name, test_scatternd_multiply);
-        do_test!($runner_fn, $runner_name, test_scatter_with_axis);
+        /*do_test!($runner_fn, $runner_name, test_scatter_with_axis);
         do_test!($runner_fn, $runner_name, test_scatter_without_axis);*/
 
         /*
@@ -1845,9 +1844,8 @@ macro_rules! do_tests {
         do_test!($runner_fn, $runner_name, test_squeeze);
         do_test!($runner_fn, $runner_name, test_squeeze_negative_axes);
 
-        /*
         do_test!($runner_fn, $runner_name, test_stft);
-        do_test!($runner_fn, $runner_name, test_stft_with_window);*/
+        do_test!($runner_fn, $runner_name, test_stft_with_window);
 
         /*
         do_test!($runner_fn, $runner_name, test_string_concat);

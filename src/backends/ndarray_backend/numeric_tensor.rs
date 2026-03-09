@@ -743,6 +743,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                 DType::U16 => Ok(NDArrayNumericTensor::U16(x.map(|x| *x as u16).to_shared())),
                 DType::I8 => Ok(NDArrayNumericTensor::I8(x.map(|x| *x as i8).to_shared())),
                 DType::U8 => Ok(NDArrayNumericTensor::U8(x.map(|x| *x as u8).to_shared())),
+                DType::BOOL => Ok(NDArrayNumericTensor::BOOL(x.map(|x| *x != 0.0).to_shared())),
                 _ => Err(NDArrayNumericTensorError::InvalidCastOperation(
                     self.dtype(),
                     dtype,
@@ -771,6 +772,7 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                 DType::I16 => Ok(NDArrayNumericTensor::I16(x.map(|x| *x as i16).to_shared())),
                 DType::I8 => Ok(NDArrayNumericTensor::I8(x.map(|x| *x as i8).to_shared())),
                 DType::U8 => Ok(NDArrayNumericTensor::U8(x.map(|x| *x as u8).to_shared())),
+                DType::BOOL => Ok(NDArrayNumericTensor::BOOL(x.map(|x| *x != 0.0).to_shared())),
                 _ => Err(NDArrayNumericTensorError::InvalidCastOperation(
                     self.dtype(),
                     dtype,
@@ -813,6 +815,9 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                 DType::U8 => Ok(NDArrayNumericTensor::U8(
                     x.map(|x| x.to_f32() as u8).to_shared(),
                 )),
+                DType::BOOL => Ok(NDArrayNumericTensor::BOOL(
+                    x.map(|x| x.to_f32() != 0.0).to_shared(),
+                )),
                 _ => Err(NDArrayNumericTensorError::InvalidCastOperation(
                     self.dtype(),
                     dtype,
@@ -854,6 +859,9 @@ impl<R: Rank> NDArrayNumericTensor<R> {
                 )),
                 DType::U8 => Ok(NDArrayNumericTensor::U8(
                     x.map(|x| x.to_f32() as u8).to_shared(),
+                )),
+                DType::BOOL => Ok(NDArrayNumericTensor::BOOL(
+                    x.map(|x| x.to_f32() != 0.0).to_shared(),
                 )),
                 _ => Err(NDArrayNumericTensorError::InvalidCastOperation(
                     self.dtype(),

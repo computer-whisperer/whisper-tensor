@@ -32,6 +32,7 @@ use std::sync::Arc;
 pub enum AnyInterface {
     TextInferenceTokensInLogitOutInterface(TextInferenceTokensInLogitOutInterface),
     ImageGenerationInterface(ImageGenerationInterface),
+    TextToSpeechInterface(TextToSpeechInterface),
 }
 
 impl AnyInterface {
@@ -41,6 +42,7 @@ impl AnyInterface {
                 "TextInferenceTokensInLogitsOut".to_string()
             }
             AnyInterface::ImageGenerationInterface(_) => "ImageGeneration".to_string(),
+            AnyInterface::TextToSpeechInterface(_) => "TextToSpeech".to_string(),
         }
     }
 
@@ -48,6 +50,7 @@ impl AnyInterface {
         match self {
             AnyInterface::TextInferenceTokensInLogitOutInterface(x) => &x.super_graph,
             AnyInterface::ImageGenerationInterface(x) => &x.super_graph,
+            AnyInterface::TextToSpeechInterface(x) => &x.super_graph,
         }
     }
 }
@@ -1501,5 +1504,67 @@ impl ImageGenerationInterface {
 
     pub fn to_any(self) -> AnyInterface {
         AnyInterface::ImageGenerationInterface(self)
+    }
+}
+
+// ============================================================================
+// Text-to-Speech Interface
+// ============================================================================
+
+/// Model-specific input configuration for TTS.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum TTSInputConfig {
+    /// Kokoro-style: phoneme IDs + style embedding + speed scalar.
+    /// Tokenizer points to tokenizer.json with char→id vocab.
+    Kokoro {
+        style_link: SuperGraphLinkTensor,
+        speed_link: SuperGraphLinkTensor,
+        tokenizer: TokenizerInfo,
+    },
+    /// Piper VITS: phoneme IDs + input_lengths + scales + optional speaker ID.
+    Piper {
+        input_lengths_link: SuperGraphLinkTensor,
+        scales_link: SuperGraphLinkTensor,
+        speaker_id_link: Option<SuperGraphLinkTensor>,
+        num_speakers: u32,
+        /// IPA character → list of token IDs (JSON-serialized).
+        phoneme_id_map_json: String,
+        /// eSpeak voice code (e.g. "en-us").
+        espeak_voice: String,
+    },
+    /// F5-TTS: text IDs + reference audio + max_duration.
+    /// 3-model pipeline with ODE loop baked into SuperGraph.
+    F5 {
+        ref_audio_link: SuperGraphLinkTensor,
+        max_duration_link: SuperGraphLinkTensor,
+        /// Character-level vocab: line number = token ID.
+        vocab: String,
+    },
+}
+
+/// Unified interface for all text-to-speech models.
+///
+/// Each model family builds a different SuperGraph that hides its internal
+/// complexity (single model, multi-model pipelines, ODE loops, etc.).
+/// The caller provides tokenized text IDs and model-specific conditioning
+/// inputs described by `input_config`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TextToSpeechInterface {
+    pub super_graph: SuperGraph,
+    /// Tokenized text/phoneme IDs input [1, seq_len].
+    pub text_ids_link: SuperGraphLinkTensor,
+    /// Model weights (one per model in the pipeline).
+    pub model_weights: Vec<SuperGraphLinkTensorMap>,
+    /// Output audio waveform.
+    pub audio_output_link: SuperGraphLinkTensor,
+    /// Sample rate of the output audio in Hz.
+    pub sample_rate: u32,
+    /// Model-specific input configuration and tokenization metadata.
+    pub input_config: TTSInputConfig,
+}
+
+impl TextToSpeechInterface {
+    pub fn to_any(self) -> AnyInterface {
+        AnyInterface::TextToSpeechInterface(self)
     }
 }

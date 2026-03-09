@@ -2,7 +2,7 @@ use crate::dtype::DType;
 use crate::graph::{GlobalId, Node, Property, PropertyValue};
 use crate::milli_graph::MilliOpGraph;
 use crate::symbolic_graph::ops::Operation;
-use crate::symbolic_graph::{ONNXDecodingError, query_attribute_int};
+use crate::symbolic_graph::{ONNXDecodingError, query_attribute_float, query_attribute_int};
 use crate::{TrigOp, milli_graph, onnx};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -487,6 +487,208 @@ impl Operation for IdentityOperation {
         let input = input_map[&self.input];
         let mut output_map = HashMap::new();
         output_map.insert(input, self.output);
+        graph.set_output_map(output_map);
+        graph
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LeakyReluOperation {
+    global_id: GlobalId,
+    input: GlobalId,
+    output: GlobalId,
+    alpha: f32,
+}
+
+impl LeakyReluOperation {
+    pub(crate) fn from_onnx(
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
+        attributes: &[onnx::AttributeProto],
+        rng: &mut impl Rng,
+    ) -> Result<Self, ONNXDecodingError> {
+        if inputs.len() != 1 {
+            return Err(ONNXDecodingError::InvalidOperatorInputs("LeakyRelu"));
+        }
+        if outputs.len() != 1 {
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("LeakyRelu"));
+        }
+
+        Ok(Self {
+            global_id: GlobalId::new(rng),
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("LeakyRelu"))?,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("LeakyRelu"))?,
+            alpha: query_attribute_float(attributes, "alpha").unwrap_or(0.01),
+        })
+    }
+}
+
+impl Node for LeakyReluOperation {
+    type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
+    fn op_kind(&self) -> Self::OpKind {
+        "LeakyRelu".to_string()
+    }
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        Box::new(std::iter::once(self.input))
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        Box::new(std::iter::once(self.output))
+    }
+}
+
+impl Operation for LeakyReluOperation {
+    fn parameters(&self) -> Vec<Property> {
+        vec![Property::new("alpha", PropertyValue::Float(self.alpha.into()))]
+    }
+
+    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
+        // LeakyRelu(x) = max(x, alpha * x)
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
+        let a = input_map[&self.input];
+        let alpha = milli_graph::ops::Constant::new_scalar(&mut graph, self.alpha, rng);
+        let alpha = milli_graph::ops::CastLike::push_new(&mut graph, alpha, a, rng);
+        let alpha_x = milli_graph::ops::SimpleBinary::mul(&mut graph, alpha, a, rng);
+        let out_tid = milli_graph::ops::SimpleBinary::max(&mut graph, a, alpha_x, rng);
+        let mut output_map = HashMap::new();
+        output_map.insert(out_tid, self.output);
+        graph.set_output_map(output_map);
+        graph
+    }
+}
+
+/// ONNX Gelu operator.
+/// Gelu(x) = x * 0.5 * (1 + erf(x / sqrt(2)))
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GeluOperation {
+    global_id: GlobalId,
+    input: GlobalId,
+    output: GlobalId,
+}
+
+impl GeluOperation {
+    pub(crate) fn from_onnx(
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
+        _attributes: &[onnx::AttributeProto],
+        rng: &mut impl Rng,
+    ) -> Result<Self, ONNXDecodingError> {
+        if inputs.len() != 1 {
+            return Err(ONNXDecodingError::InvalidOperatorInputs("Gelu"));
+        }
+        if outputs.len() != 1 {
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("Gelu"));
+        }
+        Ok(Self {
+            global_id: GlobalId::new(rng),
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Gelu"))?,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Gelu"))?,
+        })
+    }
+}
+
+impl Node for GeluOperation {
+    type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
+    fn op_kind(&self) -> Self::OpKind {
+        "Gelu".to_string()
+    }
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        Box::new(std::iter::once(self.input))
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        Box::new(std::iter::once(self.output))
+    }
+}
+
+impl Operation for GeluOperation {
+    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
+        let x = input_map[&self.input];
+        let out_tid = push_gelu(&mut graph, x, rng);
+        let mut output_map = HashMap::new();
+        output_map.insert(out_tid, self.output);
+        graph.set_output_map(output_map);
+        graph
+    }
+}
+
+/// Build GELU(x) = x * 0.5 * (1 + erf(x / sqrt(2))) in a milli graph.
+fn push_gelu(graph: &mut MilliOpGraph, x: GlobalId, rng: &mut impl Rng) -> GlobalId {
+    let sqrt2 = milli_graph::ops::Constant::new_scalar(graph, std::f32::consts::SQRT_2, rng);
+    let sqrt2 = milli_graph::ops::CastLike::push_new(graph, sqrt2, x, rng);
+    let half = milli_graph::ops::Constant::new_scalar(graph, 0.5f32, rng);
+    let half = milli_graph::ops::CastLike::push_new(graph, half, x, rng);
+    let one = milli_graph::ops::Constant::new_scalar(graph, 1.0f32, rng);
+    let one = milli_graph::ops::CastLike::push_new(graph, one, x, rng);
+
+    let x_div_sqrt2 = milli_graph::ops::SimpleBinary::div(graph, x, sqrt2, rng);
+    let erf_val = milli_graph::ops::SimpleUnaryOp::erf(graph, x_div_sqrt2, rng);
+    let one_plus_erf = milli_graph::ops::SimpleBinary::add(graph, one, erf_val, rng);
+    let half_x = milli_graph::ops::SimpleBinary::mul(graph, x, half, rng);
+    milli_graph::ops::SimpleBinary::mul(graph, half_x, one_plus_erf, rng)
+}
+
+/// ONNX Runtime contrib op: BiasGelu(x, bias) = Gelu(x + bias).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BiasGeluOperation {
+    global_id: GlobalId,
+    input: GlobalId,
+    bias: GlobalId,
+    output: GlobalId,
+}
+
+impl BiasGeluOperation {
+    pub(crate) fn from_onnx(
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
+        _attributes: &[onnx::AttributeProto],
+        rng: &mut impl Rng,
+    ) -> Result<Self, ONNXDecodingError> {
+        if inputs.len() != 2 {
+            return Err(ONNXDecodingError::InvalidOperatorInputs("BiasGelu"));
+        }
+        if outputs.len() != 1 {
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("BiasGelu"));
+        }
+        Ok(Self {
+            global_id: GlobalId::new(rng),
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("BiasGelu"))?,
+            bias: inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs("BiasGelu"))?,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("BiasGelu"))?,
+        })
+    }
+}
+
+impl Node for BiasGeluOperation {
+    type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
+    fn op_kind(&self) -> Self::OpKind {
+        "BiasGelu".to_string()
+    }
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        Box::new([self.input, self.bias].into_iter())
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        Box::new(std::iter::once(self.output))
+    }
+}
+
+impl Operation for BiasGeluOperation {
+    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
+        let x = input_map[&self.input];
+        let bias = input_map[&self.bias];
+        let biased = milli_graph::ops::SimpleBinary::add(&mut graph, x, bias, rng);
+        let out_tid = push_gelu(&mut graph, biased, rng);
+        let mut output_map = HashMap::new();
+        output_map.insert(out_tid, self.output);
         graph.set_output_map(output_map);
         graph
     }

@@ -3,7 +3,10 @@ mod cast;
 mod concat;
 mod constant;
 mod conv;
+mod conv_transpose;
 mod gather;
+mod gather_elements;
+mod lstm;
 mod misc;
 mod normalization;
 mod quant_matmul;
@@ -12,7 +15,9 @@ mod reshape;
 mod resize;
 mod rotary_embedding;
 mod scan;
+mod scatter_nd;
 mod shape;
+mod stft;
 mod slice;
 mod split;
 mod transpose;
@@ -26,7 +31,10 @@ pub use cast::{CastLikeOperation, CastOperation};
 pub use concat::ConcatOperation;
 pub use constant::{ConstantOfShapeOperation, ConstantOperation};
 pub use conv::ConvOperation;
+pub use conv_transpose::ConvTransposeOperation;
 pub use gather::GatherOperation;
+pub use gather_elements::{GatherElementsOperation, GatherNDOperation};
+pub use lstm::LstmOperation;
 pub use misc::{
     ClipOperation, ExpandOperation, IfOperation, PadOperation, RandomNormalLikeOperation,
     RangeOperation, WhereOperation,
@@ -37,20 +45,22 @@ pub use normalization::{
 };
 pub use quant_matmul::QuantMatMulOperation;
 pub use reduce::{
-    CumSumOperation, ReduceMaxOperation, ReduceMeanOperation, ReduceMinOperation,
-    ReduceProdOperation, ReduceSumOperation,
+    CumSumOperation, ReduceL2Operation, ReduceMaxOperation, ReduceMeanOperation,
+    ReduceMinOperation, ReduceProdOperation, ReduceSumOperation,
 };
 pub use reshape::{FlattenOperation, ReshapeOperation, SqueezeOperation, UnsqueezeOperation};
 pub use resize::ResizeOperation;
 pub use rotary_embedding::RotaryEmbeddingOperation;
 pub use scan::ScanOperation;
+pub use scatter_nd::ScatterNDOperation;
 pub use shape::{ShapeOperation, SizeOperation};
 pub use slice::SliceOperation;
 pub use split::SplitOperation;
+pub use stft::StftOperation;
 pub use transpose::TransposeOperation;
 pub use unary::{
-    IdentityOperation, IsInfOperation, LogSoftmaxOperation, SoftmaxOperation, UnaryOperation,
-    WhichUnaryOperation,
+    BiasGeluOperation, GeluOperation, IdentityOperation, IsInfOperation, LeakyReluOperation,
+    LogSoftmaxOperation, SoftmaxOperation, UnaryOperation, WhichUnaryOperation,
 };
 
 use crate::backends::eval_backend::EvalBackend;
@@ -256,6 +266,16 @@ pub enum AnyOperation {
     Scan(ScanOperation),
     RotaryEmbedding(RotaryEmbeddingOperation),
     QuantMatMul(QuantMatMulOperation),
+    LeakyRelu(LeakyReluOperation),
+    Lstm(LstmOperation),
+    ConvTranspose(ConvTransposeOperation),
+    Stft(StftOperation),
+    ScatterND(ScatterNDOperation),
+    GatherElements(GatherElementsOperation),
+    GatherND(GatherNDOperation),
+    Gelu(GeluOperation),
+    BiasGelu(BiasGeluOperation),
+    ReduceL2(ReduceL2Operation),
 }
 
 macro_rules! delegate {
@@ -312,7 +332,17 @@ macro_rules! delegate {
             AnyOperation::If(x) => x.$name($($arg),*),
             AnyOperation::Scan(x) => x.$name($($arg),*),
             AnyOperation::RotaryEmbedding(x) => x.$name($($arg),*),
-            AnyOperation::QuantMatMul(x) => x.$name($($arg),*)
+            AnyOperation::QuantMatMul(x) => x.$name($($arg),*),
+            AnyOperation::LeakyRelu(x) => x.$name($($arg),*),
+            AnyOperation::Lstm(x) => x.$name($($arg),*),
+            AnyOperation::ConvTranspose(x) => x.$name($($arg),*),
+            AnyOperation::Stft(x) => x.$name($($arg),*),
+            AnyOperation::ScatterND(x) => x.$name($($arg),*),
+            AnyOperation::GatherElements(x) => x.$name($($arg),*),
+            AnyOperation::GatherND(x) => x.$name($($arg),*),
+            AnyOperation::Gelu(x) => x.$name($($arg),*),
+            AnyOperation::BiasGelu(x) => x.$name($($arg),*),
+            AnyOperation::ReduceL2(x) => x.$name($($arg),*)
                     }
         }
     }

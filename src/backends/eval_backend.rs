@@ -226,9 +226,16 @@ pub fn run<T: SymbolicGraphObserver>(
             }
 
             let start_instant = Instant::now();
-            let outputs = op
-                .eval(eval_backend, &input_values)
-                .map_err(|x| EvalRuntimeError::EvalError(name.clone(), x))?;
+            let input_shapes: Vec<_> = input_values.iter().map(|(_, v)| v.shape()).collect();
+            let outputs = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                op.eval(eval_backend, &input_values)
+            }))
+            .unwrap_or_else(|e| {
+                eprintln!("Panic in op: {:?} ({:?})", name, op.op_kind());
+                eprintln!("  Input shapes: {:?}", input_shapes);
+                std::panic::resume_unwind(e);
+            })
+            .map_err(|x| EvalRuntimeError::EvalError(name.clone(), x))?;
             let end_instant = Instant::now();
             observer.on_op_executed(&[op.global_id()], start_instant, end_instant, eval_backend);
             let mut new_tensors = vec![];
