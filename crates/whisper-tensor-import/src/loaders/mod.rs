@@ -1,4 +1,5 @@
 mod auto;
+mod f5_tts;
 mod flux;
 mod gguf;
 mod kokoro;
@@ -11,6 +12,7 @@ mod sd_xl;
 mod transformers;
 
 pub use self::auto::AutoLoader;
+pub use self::f5_tts::F5TtsLoader;
 pub use self::flux::FluxLoader;
 pub use self::gguf::GgufLoader;
 pub use self::kokoro::KokoroLoader;

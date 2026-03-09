@@ -1537,6 +1537,11 @@ pub enum TTSInputConfig {
     F5 {
         ref_audio_link: SuperGraphLinkTensor,
         max_duration_link: SuperGraphLinkTensor,
+        /// Scan inputs for the ODE denoising loop.
+        time_steps_link: SuperGraphLinkTensor,
+        iteration_count_link: SuperGraphLinkTensor,
+        /// Number of function evaluations (default 32).
+        nfe_steps: u32,
         /// Character-level vocab: line number = token ID.
         vocab: String,
     },

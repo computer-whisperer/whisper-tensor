@@ -116,6 +116,14 @@ enum Command {
         /// Output WAV path
         #[arg(long, short, default_value = "output.wav")]
         output: PathBuf,
+
+        /// Reference audio file for F5-TTS (WAV, 24kHz)
+        #[arg(long)]
+        ref_audio: Option<PathBuf>,
+
+        /// Transcript of the reference audio (for F5-TTS duration estimation)
+        #[arg(long)]
+        ref_text: Option<String>,
     },
 }
 
@@ -131,6 +139,7 @@ enum LoaderChoice {
     Flux,
     Kokoro,
     Piper,
+    F5Tts,
 }
 
 // ============================================================================
@@ -186,6 +195,7 @@ fn load_model(loader: &LoaderChoice, config: ConfigValues) -> LoaderOutput {
         LoaderChoice::Flux => FluxLoader.load(config),
         LoaderChoice::Kokoro => KokoroLoader.load(config),
         LoaderChoice::Piper => PiperLoader.load(config),
+        LoaderChoice::F5Tts => F5TtsLoader.load(config),
     };
 
     result.unwrap_or_else(|e| {
@@ -251,12 +261,14 @@ fn main() {
             voice,
             speed,
             output,
+            ref_audio,
+            ref_text,
         } => {
             let model_dir = model.clone().unwrap_or_else(|| PathBuf::from("."));
             let config = build_config(model, &configs);
             eprintln!("Loading model...");
             let loaded = load_model(&loader, config);
-            cmd_tts(loaded, model_dir, prompt, voice, speed, output);
+            cmd_tts(loaded, model_dir, prompt, voice, speed, output, ref_audio, ref_text);
         }
     }
 }
@@ -413,7 +425,7 @@ fn cmd_image(
 // Text-to-speech
 // ============================================================================
 
-fn cmd_tts(output: LoaderOutput, model_dir: PathBuf, text: String, voice_name: String, speed: f32, output_path: PathBuf) {
+fn cmd_tts(output: LoaderOutput, model_dir: PathBuf, text: String, voice_name: String, speed: f32, output_path: PathBuf, ref_audio: Option<PathBuf>, ref_text: Option<String>) {
     use whisper_tensor::interfaces::TTSInputConfig;
     use whisper_tensor::super_graph::cache::SuperGraphTensorCache;
     use whisper_tensor::super_graph::data::SuperGraphData;
@@ -524,9 +536,89 @@ fn cmd_tts(output: LoaderOutput, model_dir: PathBuf, text: String, voice_name: S
                 );
             }
         }
-        TTSInputConfig::F5 { .. } => {
-            eprintln!("F5-TTS inference not yet implemented");
-            std::process::exit(1);
+        TTSInputConfig::F5 {
+            ref_audio_link,
+            max_duration_link,
+            time_steps_link,
+            iteration_count_link,
+            nfe_steps,
+            vocab,
+        } => {
+            // Load reference audio
+            let ref_audio_path = ref_audio.unwrap_or_else(|| {
+                eprintln!("F5-TTS requires --ref-audio <path.wav>");
+                std::process::exit(1);
+            });
+            let ref_samples = load_wav_f16(&ref_audio_path, 24000);
+            let ref_audio_len = ref_samples.len();
+            eprintln!("Reference audio: {} samples ({:.2}s)", ref_audio_len, ref_audio_len as f64 / 24000.0);
+
+            // Tokenize text using F5 character-level vocab
+            let ref_text_str = ref_text.as_deref().unwrap_or("");
+            let gen_text = &text;
+            let combined_text = if ref_text_str.is_empty() {
+                gen_text.clone()
+            } else {
+                format!("{ref_text_str} {gen_text}")
+            };
+            let vocab_map = build_f5_vocab(vocab);
+            let mut token_ids: Vec<i32> = Vec::new();
+            for ch in combined_text.chars() {
+                if let Some(&id) = vocab_map.get(&ch) {
+                    token_ids.push(id);
+                }
+            }
+            let num_tokens = token_ids.len();
+            eprintln!("Text tokens: {num_tokens}");
+
+            // Compute max_duration
+            let hop_length: usize = 256;
+            let ref_audio_frames = ref_audio_len / hop_length + 1;
+            let gen_text_len = gen_text.chars().count().max(1);
+            let gen_duration_estimate = if !ref_text_str.is_empty() {
+                let ref_text_len = ref_text_str.chars().count().max(1);
+                (ref_audio_frames as f64 / ref_text_len as f64 * gen_text_len as f64 / speed as f64) as usize
+            } else {
+                // No ref text: estimate ~4 chars/sec at 24kHz/256hop = ~94 frames/sec
+                (gen_text_len as f64 * 94.0 / 4.0 / speed as f64) as usize
+            };
+            let max_duration = (ref_audio_frames + gen_duration_estimate).min(2048);
+            eprintln!("Max duration: {max_duration} frames ({:.2}s)", max_duration as f64 * hop_length as f64 / 24000.0);
+
+            // Build input tensors
+            let ref_audio_tensor = NumericTensor::<DynRank>::from_vec_shape(
+                ref_samples,
+                vec![1, 1, ref_audio_len],
+            ).unwrap();
+
+            let text_ids_tensor = NumericTensor::<DynRank>::from_vec_shape(
+                token_ids,
+                vec![1, num_tokens],
+            ).unwrap();
+
+            let max_duration_tensor = NumericTensor::<DynRank>::from_vec_shape(
+                vec![max_duration as i64],
+                vec![],
+            ).unwrap();
+
+            // Build ODE loop inputs
+            let nfe = *nfe_steps;
+            let iterations = nfe - 1; // 31 iterations for nfe=32
+            let time_steps: Vec<i32> = (0..iterations as i32).collect();
+            let time_steps_tensor = NumericTensor::<DynRank>::from_vec_shape(
+                time_steps,
+                vec![iterations as usize],
+            ).unwrap();
+            let iteration_count_tensor = NumericTensor::<DynRank>::from_vec_shape(
+                vec![iterations as i64],
+                vec![],
+            ).unwrap();
+
+            data.tensors.insert(interface.text_ids_link, text_ids_tensor);
+            data.tensors.insert(*ref_audio_link, ref_audio_tensor);
+            data.tensors.insert(*max_duration_link, max_duration_tensor);
+            data.tensors.insert(*time_steps_link, time_steps_tensor);
+            data.tensors.insert(*iteration_count_link, iteration_count_tensor);
         }
     }
 
@@ -675,6 +767,75 @@ fn save_wav(samples: &[f32], sample_rate: u32, path: &std::path::Path) {
         writer.write_sample(sample).expect("Failed to write sample");
     }
     writer.finalize().expect("Failed to finalize WAV");
+}
+
+// ============================================================================
+// F5-TTS helpers
+// ============================================================================
+
+/// Load a WAV file and return f16 samples (resampled to target_sr if needed).
+fn load_wav_f16(path: &std::path::Path, target_sr: u32) -> Vec<half::f16> {
+    let mut reader = hound::WavReader::open(path).unwrap_or_else(|e| {
+        eprintln!("Failed to open WAV file {}: {e}", path.display());
+        std::process::exit(1);
+    });
+    let spec = reader.spec();
+    let samples_f32: Vec<f32> = match spec.sample_format {
+        hound::SampleFormat::Int => {
+            let max_val = (1i64 << (spec.bits_per_sample - 1)) as f32;
+            reader
+                .samples::<i32>()
+                .map(|s| s.expect("WAV read error") as f32 / max_val)
+                .collect()
+        }
+        hound::SampleFormat::Float => {
+            reader.samples::<f32>().map(|s| s.expect("WAV read error")).collect()
+        }
+    };
+
+    // If stereo, take first channel
+    let mono: Vec<f32> = if spec.channels > 1 {
+        samples_f32
+            .chunks(spec.channels as usize)
+            .map(|c| c[0])
+            .collect()
+    } else {
+        samples_f32
+    };
+
+    // Simple resample if needed (linear interpolation)
+    let resampled = if spec.sample_rate != target_sr {
+        let ratio = spec.sample_rate as f64 / target_sr as f64;
+        let out_len = (mono.len() as f64 / ratio) as usize;
+        (0..out_len)
+            .map(|i| {
+                let pos = i as f64 * ratio;
+                let idx = pos as usize;
+                let frac = pos - idx as f64;
+                let a = mono[idx.min(mono.len() - 1)];
+                let b = mono[(idx + 1).min(mono.len() - 1)];
+                a + (b - a) * frac as f32
+            })
+            .collect()
+    } else {
+        mono
+    };
+
+    resampled.iter().map(|&s| half::f16::from_f32(s)).collect()
+}
+
+/// Build F5-TTS vocab: char → token ID from vocab.txt (one token per line).
+fn build_f5_vocab(vocab_text: &str) -> HashMap<char, i32> {
+    let mut map = HashMap::new();
+    for (id, line) in vocab_text.lines().enumerate() {
+        if line.chars().count() == 1 {
+            map.insert(line.chars().next().unwrap(), id as i32);
+        } else if line.is_empty() {
+            // Line 0 is space in F5 vocab
+            map.insert(' ', id as i32);
+        }
+    }
+    map
 }
 
 // ============================================================================
