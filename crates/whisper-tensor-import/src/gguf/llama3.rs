@@ -4,9 +4,10 @@ use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::dtype::DType;
 use whisper_tensor::graph::GlobalId;
 use whisper_tensor::model::Model;
+use whisper_tensor::scalar_info::ScalarInfoTyped;
 use whisper_tensor::symbolic_graph::ops::*;
 use whisper_tensor::symbolic_graph::tensor_store::StoredTensor;
-use whisper_tensor::symbolic_graph::{SymbolicGraph, SymbolicGraphMutator, TensorType};
+use whisper_tensor::symbolic_graph::{SymbolicGraphMutator, TensorType};
 use whisper_tensor::tensor_rank::DynRank;
 
 /// Configuration extracted from GGUF metadata.
@@ -69,10 +70,21 @@ impl GgufLlama3Config {
     }
 }
 
-/// Build a Llama3 Model directly from a GGUF file, bypassing the ONNX intermediary.
-pub fn load_llama3_gguf(gguf_path: &Path) -> Result<Model, anyhow::Error> {
-    let gguf = GgufFile::open(gguf_path)?;
-    let config = GgufLlama3Config::from_gguf(&gguf)?;
+/// Information returned by the GGUF loader alongside the Model,
+/// so the caller can build the SuperGraph / interface.
+pub struct GgufModelInfo {
+    pub model: Model,
+    /// (input_name, output_name) pairs for KV cache state tensors.
+    pub state_pairs: Vec<(String, String)>,
+    /// Name of the token input tensor in the graph.
+    pub token_input_name: String,
+    /// Name of the logit output tensor in the graph.
+    pub logit_output_name: String,
+}
+
+/// Build a Llama3 Model from a pre-parsed GGUF file.
+pub fn load_llama3_gguf(gguf: &GgufFile, gguf_path: &Path) -> Result<GgufModelInfo, anyhow::Error> {
+    let config = GgufLlama3Config::from_gguf(gguf)?;
     let gguf_path_str = gguf_path
         .canonicalize()
         .unwrap_or_else(|_| gguf_path.to_path_buf())
@@ -81,9 +93,10 @@ pub fn load_llama3_gguf(gguf_path: &Path) -> Result<Model, anyhow::Error> {
 
     let mut rng = rand::rng();
     let mut mutator = SymbolicGraphMutator::new(&mut rng);
+    let build_info;
     {
-        let mut b = GraphBuilder::new(&mut mutator, &gguf, &gguf_path_str, &config);
-        b.build(&mut rng)?;
+        let mut b = GraphBuilder::new(&mut mutator, gguf, &gguf_path_str, &config);
+        build_info = b.build(&mut rng)?;
     }
     let (graph, tensor_store) = mutator.get_inner();
 
@@ -92,7 +105,19 @@ pub fn load_llama3_gguf(gguf_path: &Path) -> Result<Model, anyhow::Error> {
         .unwrap_or_default()
         .to_string_lossy()
         .to_string();
-    Ok(Model::new_from_graph(model_name, graph, tensor_store))
+    Ok(GgufModelInfo {
+        model: Model::new_from_graph(model_name, graph, tensor_store),
+        state_pairs: build_info.state_pairs,
+        token_input_name: build_info.token_input_name,
+        logit_output_name: build_info.logit_output_name,
+    })
+}
+
+/// Internal build result returned by GraphBuilder::build().
+struct BuildInfo {
+    state_pairs: Vec<(String, String)>,
+    token_input_name: String,
+    logit_output_name: String,
 }
 
 /// Helper that holds a mutable reference to the mutator during construction.
@@ -171,9 +196,21 @@ impl<'a> GraphBuilder<'a> {
         rng: &mut impl rand::Rng,
     ) -> GlobalId {
         let out = self.intermediate(&format!("{name}_out"), rng);
+        self.matmul_into(name, a, b, out, rng);
+        out
+    }
+
+    /// MatMul into a pre-existing output tensor.
+    fn matmul_into(
+        &mut self,
+        name: &str,
+        a: GlobalId,
+        b: GlobalId,
+        out: GlobalId,
+        rng: &mut impl rand::Rng,
+    ) {
         let op = BinaryOperation::new(a, b, out, WhichBinaryOperation::MatMul, rng);
         self.add_op(Some(name.to_string()), AnyOperation::Binary(op), rng);
-        out
     }
 
     /// Add: output = a + b
@@ -350,9 +387,21 @@ impl<'a> GraphBuilder<'a> {
         rng: &mut impl rand::Rng,
     ) -> GlobalId {
         let out = self.intermediate(&format!("{name}_out"), rng);
+        self.concat_into(name, inputs, axis, out, rng);
+        out
+    }
+
+    /// Concat into a pre-existing output tensor.
+    fn concat_into(
+        &mut self,
+        name: &str,
+        inputs: Vec<GlobalId>,
+        axis: i64,
+        out: GlobalId,
+        rng: &mut impl rand::Rng,
+    ) {
         let op = ConcatOperation::new(inputs, out, axis, rng);
         self.add_op(Some(name.to_string()), AnyOperation::Concat(op), rng);
-        out
     }
 
     /// RotaryEmbedding
@@ -407,27 +456,50 @@ impl<'a> GraphBuilder<'a> {
         weight: GlobalId,
         rng: &mut impl rand::Rng,
     ) -> GlobalId {
+        let out = self.intermediate(&format!("{name}_out"), rng);
+        self.linear_into(name, input, weight, out, rng);
+        out
+    }
+
+    /// Linear into a pre-existing output tensor.
+    fn linear_into(
+        &mut self,
+        name: &str,
+        input: GlobalId,
+        weight: GlobalId,
+        out: GlobalId,
+        rng: &mut impl rand::Rng,
+    ) {
         // GGUF stores weights as [out_features, in_features], same as PyTorch.
         // We need input @ weight^T.
         let wt = self.transpose(
             &format!("{name}_wt"),
             weight,
-            // Weight is 2D [out, in], transpose to [in, out]
             vec![1, 0],
             rng,
         );
-        self.matmul(name, input, wt, rng)
+        self.matmul_into(name, input, wt, out, rng);
     }
 
-    /// Create an input tensor node.
+    /// Create an input tensor node with dtype and shape info.
     fn input_tensor(
         &mut self,
         name: &str,
-        _dtype: DType,
-        _shape: Vec<Option<u64>>,
+        dtype: DType,
+        shape: Vec<Option<u64>>,
         rng: &mut impl rand::Rng,
     ) -> GlobalId {
-        let id = self.m.push_unknown_tensor(name, TensorType::Input(None), rng);
+        let shape_info: Vec<ScalarInfoTyped<u64>> = shape
+            .iter()
+            .map(|x| ScalarInfoTyped::Numeric(x.unwrap_or(0)))
+            .collect();
+        let id = self.m.push_typed_tensor(
+            name,
+            TensorType::Input(None),
+            Some(dtype),
+            Some(shape_info),
+            rng,
+        );
         self.m.push_input(id);
         id
     }
@@ -438,13 +510,14 @@ impl<'a> GraphBuilder<'a> {
     }
 
     /// Build the full Llama3 graph.
-    fn build(&mut self, rng: &mut impl rand::Rng) -> Result<(), anyhow::Error> {
+    fn build(&mut self, rng: &mut impl rand::Rng) -> Result<BuildInfo, anyhow::Error> {
         let config = self.config;
         let head_dim = config.embedding_length / config.num_attention_heads;
         let half_head_dim = head_dim / 2;
+        let mut state_pairs = Vec::new();
 
         // -- Input --
-        let input_ids = self.input_tensor("input_ids", DType::I32, vec![Some(1), None], rng);
+        let input_ids = self.input_tensor("input_ids", DType::I64, vec![Some(1), None], rng);
 
         // -- Embedding --
         let embed_weight = self.load_weight("token_embd.weight", rng)?;
@@ -610,26 +683,23 @@ impl<'a> GraphBuilder<'a> {
                 rng,
             );
 
-            // Concat with KV cache
-            let k = self.concat(
-                &format!("blk.{i}.k_concat"),
-                vec![kv_cache_k, k],
-                2,
-                rng,
-            );
-            let v = self.concat(
-                &format!("blk.{i}.v_concat"),
-                vec![kv_cache_v, v],
-                2,
-                rng,
-            );
+            // Concat with KV cache — output tensors have explicit names
+            // matching the convention used by the Transformers loader.
+            let k_out_name = format!("kv_cache_output_k_{i}");
+            let v_out_name = format!("kv_cache_output_v_{i}");
+            let k_out = self.m.push_unknown_tensor(&k_out_name, TensorType::Intermediate, rng);
+            let v_out = self.m.push_unknown_tensor(&v_out_name, TensorType::Intermediate, rng);
+            self.concat_into(&format!("blk.{i}.k_concat"), vec![kv_cache_k, k], 2, k_out, rng);
+            self.concat_into(&format!("blk.{i}.v_concat"), vec![kv_cache_v, v], 2, v_out, rng);
 
-            // Register KV cache outputs (the concat results serve as both
-            // attention inputs and cache outputs)
-            self.output_tensor(k);
-            self.output_tensor(v);
+            self.output_tensor(k_out);
+            self.output_tensor(v_out);
+
+            state_pairs.push((format!("kv_cache_input_k_{i}"), k_out_name));
+            state_pairs.push((format!("kv_cache_input_v_{i}"), v_out_name));
 
             // GQA: repeat K/V if num_kv_heads != num_attention_heads
+            let (k, v) = (k_out, v_out);
             let (k, v) = if config.num_key_value_heads != config.num_attention_heads {
                 let n_rep = config.num_attention_heads / config.num_key_value_heads;
 
@@ -723,14 +793,32 @@ impl<'a> GraphBuilder<'a> {
         let output_norm_w = self.load_weight("output_norm.weight", rng)?;
         let h = self.rms_norm("output_norm", layer_output, output_norm_w, rng);
 
-        // LM head
+        // LM head — create output tensor with explicit name and shape info
         let output_w = self.load_weight("output.weight", rng)?;
-        let logits = self.linear("output", h, output_w, rng);
-
-        // Register output
+        let vocab_size = self
+            .gguf
+            .get_tensor("output.weight")
+            .map(|t| t.dimensions[0])
+            .unwrap_or(0);
+        let logits = self.m.push_typed_tensor(
+            "logits",
+            TensorType::Intermediate,
+            Some(DType::F32),
+            Some(vec![
+                ScalarInfoTyped::Numeric(1),
+                ScalarInfoTyped::Numeric(0),
+                ScalarInfoTyped::Numeric(vocab_size),
+            ]),
+            rng,
+        );
+        self.linear_into("output", h, output_w, logits, rng);
         self.output_tensor(logits);
 
-        Ok(())
+        Ok(BuildInfo {
+            state_pairs,
+            token_input_name: "input_ids".to_string(),
+            logit_output_name: "logits".to_string(),
+        })
     }
 }
 
@@ -746,8 +834,9 @@ mod tests {
             return;
         }
 
-        let model = load_llama3_gguf(path).expect("Failed to build Llama3 from GGUF");
-        let graph = model.get_symbolic_graph();
+        let gguf = GgufFile::open(path).unwrap();
+        let info = load_llama3_gguf(&gguf, path).expect("Failed to build Llama3 from GGUF");
+        let graph = info.model.get_symbolic_graph();
 
         // Should have input_ids + 32 layers * 2 KV cache inputs = 65 inputs
         let inputs = graph.get_inputs();
@@ -761,11 +850,17 @@ mod tests {
         let ops = graph.get_operations();
         assert!(ops.len() > 100, "Expected many operations, got {}", ops.len());
 
+        // State pairs should match layer count
+        assert_eq!(info.state_pairs.len(), 64, "Expected 32*2 state pairs");
+        assert_eq!(info.token_input_name, "input_ids");
+        assert_eq!(info.logit_output_name, "logits");
+
         println!(
-            "Llama3 Q4_0 GGUF graph: {} inputs, {} outputs, {} operations",
+            "Llama3 Q4_0 GGUF graph: {} inputs, {} outputs, {} operations, {} state pairs",
             inputs.len(),
             outputs.len(),
-            ops.len()
+            ops.len(),
+            info.state_pairs.len(),
         );
     }
 
@@ -777,8 +872,9 @@ mod tests {
             return;
         }
 
-        let model = load_llama3_gguf(path).expect("Failed to build Llama3 from GGUF");
-        let graph = model.get_symbolic_graph();
+        let gguf = GgufFile::open(path).unwrap();
+        let info = load_llama3_gguf(&gguf, path).expect("Failed to build Llama3 from GGUF");
+        let graph = info.model.get_symbolic_graph();
         let inputs = graph.get_inputs();
         let outputs = graph.get_outputs();
         let ops = graph.get_operations();

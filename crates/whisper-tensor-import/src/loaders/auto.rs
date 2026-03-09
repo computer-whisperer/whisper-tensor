@@ -1,5 +1,6 @@
 use super::{
-    FluxLoader, OnnxLoader, Rwkv7Loader, SD2Loader, SD15Loader, SDXLLoader, TransformersLoader,
+    FluxLoader, GgufLoader, OnnxLoader, Rwkv7Loader, SD2Loader, SD15Loader, SDXLLoader,
+    TransformersLoader,
 };
 use crate::onnx_graph::weights::SafetensorsWeightManager;
 use memmap2::Mmap;
@@ -48,6 +49,7 @@ impl Loader for AutoLoader {
         if let Some(ext) = path.extension() {
             match ext.to_str().unwrap_or("") {
                 "onnx" => return OnnxLoader.load(config),
+                "gguf" => return GgufLoader.load(config),
                 "pth" => return Rwkv7Loader.load(config),
                 "safetensors" => {
                     // Probe safetensors checkpoints for known formats

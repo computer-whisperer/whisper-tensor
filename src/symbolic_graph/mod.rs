@@ -1482,6 +1482,29 @@ impl SymbolicGraphMutator {
         }
     }
 
+    /// Create a tensor with known dtype and shape.
+    pub fn push_typed_tensor(
+        &mut self,
+        name: &str,
+        tensor_type: TensorType,
+        dtype: Option<DType>,
+        shape: Option<Vec<ScalarInfoTyped<u64>>>,
+        rng: &mut impl Rng,
+    ) -> GlobalId {
+        let g = self.graph.as_mut().unwrap();
+        let global_id = GlobalId::new(rng);
+        let tensor = ONNXTensorInfo {
+            onnx_name: Some(name.to_string()),
+            tensor_type,
+            dtype,
+            shape,
+            global_id,
+        };
+        g.tensors.insert(global_id, tensor);
+        self.tensors_by_name.insert(name.to_string(), global_id);
+        global_id
+    }
+
     pub(crate) fn new_node_from_onnx_node(
         &mut self,
         inner_graph: &mut SymbolicGraph,
