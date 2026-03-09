@@ -558,3 +558,138 @@ impl Operation for LeakyReluOperation {
         graph
     }
 }
+
+/// ONNX Gelu operator.
+/// Gelu(x) = x * 0.5 * (1 + erf(x / sqrt(2)))
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GeluOperation {
+    global_id: GlobalId,
+    input: GlobalId,
+    output: GlobalId,
+}
+
+impl GeluOperation {
+    pub(crate) fn from_onnx(
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
+        _attributes: &[onnx::AttributeProto],
+        rng: &mut impl Rng,
+    ) -> Result<Self, ONNXDecodingError> {
+        if inputs.len() != 1 {
+            return Err(ONNXDecodingError::InvalidOperatorInputs("Gelu"));
+        }
+        if outputs.len() != 1 {
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("Gelu"));
+        }
+        Ok(Self {
+            global_id: GlobalId::new(rng),
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Gelu"))?,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Gelu"))?,
+        })
+    }
+}
+
+impl Node for GeluOperation {
+    type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
+    fn op_kind(&self) -> Self::OpKind {
+        "Gelu".to_string()
+    }
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        Box::new(std::iter::once(self.input))
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        Box::new(std::iter::once(self.output))
+    }
+}
+
+impl Operation for GeluOperation {
+    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
+        let x = input_map[&self.input];
+        let out_tid = push_gelu(&mut graph, x, rng);
+        let mut output_map = HashMap::new();
+        output_map.insert(out_tid, self.output);
+        graph.set_output_map(output_map);
+        graph
+    }
+}
+
+/// Build GELU(x) = x * 0.5 * (1 + erf(x / sqrt(2))) in a milli graph.
+fn push_gelu(graph: &mut MilliOpGraph, x: GlobalId, rng: &mut impl Rng) -> GlobalId {
+    let sqrt2 = milli_graph::ops::Constant::new_scalar(graph, std::f32::consts::SQRT_2, rng);
+    let sqrt2 = milli_graph::ops::CastLike::push_new(graph, sqrt2, x, rng);
+    let half = milli_graph::ops::Constant::new_scalar(graph, 0.5f32, rng);
+    let half = milli_graph::ops::CastLike::push_new(graph, half, x, rng);
+    let one = milli_graph::ops::Constant::new_scalar(graph, 1.0f32, rng);
+    let one = milli_graph::ops::CastLike::push_new(graph, one, x, rng);
+
+    let x_div_sqrt2 = milli_graph::ops::SimpleBinary::div(graph, x, sqrt2, rng);
+    let erf_val = milli_graph::ops::SimpleUnaryOp::erf(graph, x_div_sqrt2, rng);
+    let one_plus_erf = milli_graph::ops::SimpleBinary::add(graph, one, erf_val, rng);
+    let half_x = milli_graph::ops::SimpleBinary::mul(graph, x, half, rng);
+    milli_graph::ops::SimpleBinary::mul(graph, half_x, one_plus_erf, rng)
+}
+
+/// ONNX Runtime contrib op: BiasGelu(x, bias) = Gelu(x + bias).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BiasGeluOperation {
+    global_id: GlobalId,
+    input: GlobalId,
+    bias: GlobalId,
+    output: GlobalId,
+}
+
+impl BiasGeluOperation {
+    pub(crate) fn from_onnx(
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
+        _attributes: &[onnx::AttributeProto],
+        rng: &mut impl Rng,
+    ) -> Result<Self, ONNXDecodingError> {
+        if inputs.len() != 2 {
+            return Err(ONNXDecodingError::InvalidOperatorInputs("BiasGelu"));
+        }
+        if outputs.len() != 1 {
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("BiasGelu"));
+        }
+        Ok(Self {
+            global_id: GlobalId::new(rng),
+            input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("BiasGelu"))?,
+            bias: inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs("BiasGelu"))?,
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("BiasGelu"))?,
+        })
+    }
+}
+
+impl Node for BiasGeluOperation {
+    type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
+    fn op_kind(&self) -> Self::OpKind {
+        "BiasGelu".to_string()
+    }
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        Box::new([self.input, self.bias].into_iter())
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        Box::new(std::iter::once(self.output))
+    }
+}
+
+impl Operation for BiasGeluOperation {
+    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
+        let x = input_map[&self.input];
+        let bias = input_map[&self.bias];
+        let biased = milli_graph::ops::SimpleBinary::add(&mut graph, x, bias, rng);
+        let out_tid = push_gelu(&mut graph, biased, rng);
+        let mut output_map = HashMap::new();
+        output_map.insert(out_tid, self.output);
+        graph.set_output_map(output_map);
+        graph
+    }
+}

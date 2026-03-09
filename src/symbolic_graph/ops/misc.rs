@@ -252,16 +252,8 @@ impl PadOperation {
         Ok(Self {
             input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Pad"))?,
             pads: inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs("Pad"))?,
-            constant_value: if inputs.len() > 2 {
-                Some(inputs[2].ok_or(ONNXDecodingError::InvalidOperatorInputs("Pad"))?)
-            } else {
-                None
-            },
-            axes: if inputs.len() > 3 {
-                Some(inputs[3].ok_or(ONNXDecodingError::InvalidOperatorInputs("Pad"))?)
-            } else {
-                None
-            },
+            constant_value: inputs.get(2).and_then(|x| *x),
+            axes: inputs.get(3).and_then(|x| *x),
             mode: pad_mode,
             output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Pad"))?,
             global_id: GlobalId::new(rng),

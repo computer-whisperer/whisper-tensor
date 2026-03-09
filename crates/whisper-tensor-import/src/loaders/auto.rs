@@ -1,6 +1,6 @@
 use super::{
-    FluxLoader, GgufLoader, KokoroLoader, OnnxLoader, Rwkv7Loader, SD2Loader, SD15Loader,
-    SDXLLoader, TransformersLoader,
+    FluxLoader, GgufLoader, KokoroLoader, OnnxLoader, PiperLoader, Rwkv7Loader,
+    SD2Loader, SD15Loader, SDXLLoader, TransformersLoader,
 };
 use crate::onnx_graph::weights::SafetensorsWeightManager;
 use memmap2::Mmap;
@@ -38,6 +38,10 @@ impl Loader for AutoLoader {
             if path.join("onnx").is_dir() && path.join("tokenizer.json").exists() {
                 return KokoroLoader.load(config);
             }
+            // Check for Piper TTS (directory with .onnx + .onnx.json)
+            if super::piper::is_piper_model(&path) {
+                return PiperLoader.load(config);
+            }
             let config_path = path.join("config.json");
             if config_path.exists() {
                 return TransformersLoader.load(config);
@@ -52,7 +56,13 @@ impl Loader for AutoLoader {
 
         if let Some(ext) = path.extension() {
             match ext.to_str().unwrap_or("") {
-                "onnx" => return OnnxLoader.load(config),
+                "onnx" => {
+                    // Check for Piper (.onnx.json alongside)
+                    if super::piper::is_piper_model(&path) {
+                        return PiperLoader.load(config);
+                    }
+                    return OnnxLoader.load(config);
+                }
                 "gguf" => return GgufLoader.load(config),
                 "pth" => return Rwkv7Loader.load(config),
                 "safetensors" => {

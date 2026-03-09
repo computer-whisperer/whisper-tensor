@@ -655,8 +655,12 @@ impl NativeNumericTensorBinaryOperation {
             + std::ops::Rem<Output = T>,
     {
         let out_shape = broadcast_shape(a.shape(), b.shape());
-        let a = a.broadcast(IxDyn(&out_shape)).unwrap();
-        let b = b.broadcast(IxDyn(&out_shape)).unwrap();
+        let a = a.broadcast(IxDyn(&out_shape)).unwrap_or_else(|| {
+            panic!("{:?}: cannot broadcast a {:?} to {:?}", self, a.shape(), out_shape)
+        });
+        let b = b.broadcast(IxDyn(&out_shape)).unwrap_or_else(|| {
+            panic!("{:?}: cannot broadcast b {:?} to {:?}", self, b.shape(), out_shape)
+        });
 
         let o: Array<T, IxDyn> = match self {
             Self::Add => &a + &b,

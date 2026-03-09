@@ -87,26 +87,28 @@ impl MilliOp for Unsqueeze {
             inputs[&self.axes].cast(DType::I64, backend)?,
         )?;
         let axes = Vec::<i64>::try_from(axes_ndarray.try_to_rank::<P1>()?)?;
+        let input_shape = inputs[&self.data].shape();
+        let output_rank = input_shape.len() + axes.len();
         if axes.len() == 1 {
             let axis = axes[0];
-            let input_shape = inputs[&self.data].shape();
+            // ONNX: negative axes refer to the output rank, not the input rank
             let axis = if axis >= 0 {
                 axis as usize
             } else {
-                (input_shape.len() as i64 + axis) as usize
+                (output_rank as i64 + axis) as usize
             };
             let output = inputs[&self.data].unsqueeze(axis)?;
             Ok(Box::new([(self.output, output)].into_iter()))
         } else {
             // Multiple axes (use reshape)
-            let input_shape = inputs[&self.data].shape();
+            // ONNX: negative axes refer to the output rank
             let mut output_shape = Vec::new();
             let mut input_index = 0;
-            for i in 0..(input_shape.len() + axes.len()) {
+            for i in 0..output_rank {
                 let mut is_selected = false;
                 for axis in &axes {
                     let axis = if *axis < 0 {
-                        input_shape.len() as i64 + *axis
+                        output_rank as i64 + *axis
                     } else {
                         *axis
                     };

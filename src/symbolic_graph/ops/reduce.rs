@@ -629,3 +629,119 @@ impl Operation for ReduceProdOperation {
         graph
     }
 }
+
+/// ONNX ReduceL2 operator.
+/// Computes sqrt(sum(x^2, axes)) with optional keepdims.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ReduceL2Operation {
+    global_id: GlobalId,
+    keepdims: Option<bool>,
+    noop_with_empty_axes: Option<bool>,
+    input_data: GlobalId,
+    input_axes: Option<GlobalId>,
+    axes_attr: Option<Vec<i64>>,
+    output: GlobalId,
+}
+
+impl ReduceL2Operation {
+    pub(crate) fn from_onnx(
+        inputs: &[Option<GlobalId>],
+        outputs: &[Option<GlobalId>],
+        attributes: &[onnx::AttributeProto],
+        rng: &mut impl Rng,
+    ) -> Result<Self, ONNXDecodingError> {
+        if inputs.is_empty() || inputs.len() > 2 {
+            return Err(ONNXDecodingError::InvalidOperatorInputs("ReduceL2"));
+        }
+        if outputs.len() != 1 {
+            return Err(ONNXDecodingError::InvalidOperatorOutputs("ReduceL2"));
+        }
+
+        let axes_attr = query_attribute_ints(attributes, "axes");
+        let keepdims = query_attribute_int(attributes, "keepdims").map(|x| x != 0);
+        let noop_with_empty_axes =
+            query_attribute_int(attributes, "noop_with_empty_axes").map(|x| x != 0);
+
+        Ok(Self {
+            global_id: GlobalId::new(rng),
+            keepdims,
+            noop_with_empty_axes,
+            input_data: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("ReduceL2"))?,
+            input_axes: if inputs.len() > 1 {
+                Some(inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs("ReduceL2"))?)
+            } else {
+                None
+            },
+            output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("ReduceL2"))?,
+            axes_attr,
+        })
+    }
+}
+
+impl Node for ReduceL2Operation {
+    type OpKind = String;
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
+    fn op_kind(&self) -> Self::OpKind {
+        "ReduceL2".to_string()
+    }
+    fn inputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        if let Some(input_axes) = self.input_axes {
+            Box::new([self.input_data, input_axes].into_iter())
+        } else {
+            Box::new(std::iter::once(self.input_data))
+        }
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId>> {
+        Box::new(std::iter::once(self.output))
+    }
+}
+
+impl Operation for ReduceL2Operation {
+    fn parameters(&self) -> Vec<Property> {
+        let mut params = Vec::new();
+        if let Some(keepdims) = self.keepdims {
+            params.push(Property::new("keepdims", PropertyValue::Bool(keepdims)));
+        }
+        if let Some(axes) = &self.axes_attr {
+            params.push(Property::new("axes", PropertyValue::IntList(axes.clone())));
+        }
+        if let Some(noop) = self.noop_with_empty_axes {
+            params.push(Property::new(
+                "noop_with_empty_axes",
+                PropertyValue::Bool(noop),
+            ));
+        }
+        params
+    }
+
+    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
+        // ReduceL2(x) = sqrt(ReduceSum(x^2))
+        let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
+        let x = input_map[&self.input_data];
+        let x_sq = milli_graph::ops::SimpleBinary::mul(&mut graph, x, x, rng);
+        let axes = if let Some(input_axes) = &self.input_axes {
+            Some(input_map[input_axes])
+        } else if let Some(axes) = &self.axes_attr {
+            let tensor = NDArrayNumericTensor::from(axes.clone());
+            let tid = milli_graph::ops::Constant::push_new(&mut graph, tensor.to_dyn(), rng);
+            Some(tid)
+        } else {
+            None
+        };
+        let sum = milli_graph::ops::ReduceSum::push_new(
+            &mut graph,
+            x_sq,
+            axes,
+            self.keepdims.unwrap_or(true),
+            self.noop_with_empty_axes.unwrap_or(false),
+            rng,
+        );
+        let out = milli_graph::ops::SimpleUnaryOp::sqrt(&mut graph, sum, rng);
+        let mut output_map = HashMap::new();
+        output_map.insert(out, self.output);
+        graph.set_output_map(output_map);
+        graph
+    }
+}

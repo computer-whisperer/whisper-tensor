@@ -33,6 +33,7 @@ pub enum AnyInterface {
     TextInferenceTokensInLogitOutInterface(TextInferenceTokensInLogitOutInterface),
     ImageGenerationInterface(ImageGenerationInterface),
     TextToSpeechInterface(TextToSpeechInterface),
+    PiperInterface(PiperInterface),
 }
 
 impl AnyInterface {
@@ -43,6 +44,7 @@ impl AnyInterface {
             }
             AnyInterface::ImageGenerationInterface(_) => "ImageGeneration".to_string(),
             AnyInterface::TextToSpeechInterface(_) => "TextToSpeech".to_string(),
+            AnyInterface::PiperInterface(_) => "Piper".to_string(),
         }
     }
 
@@ -51,6 +53,7 @@ impl AnyInterface {
             AnyInterface::TextInferenceTokensInLogitOutInterface(x) => &x.super_graph,
             AnyInterface::ImageGenerationInterface(x) => &x.super_graph,
             AnyInterface::TextToSpeechInterface(x) => &x.super_graph,
+            AnyInterface::PiperInterface(x) => &x.super_graph,
         }
     }
 }
@@ -1537,5 +1540,41 @@ pub struct TextToSpeechInterface {
 impl TextToSpeechInterface {
     pub fn to_any(self) -> AnyInterface {
         AnyInterface::TextToSpeechInterface(self)
+    }
+}
+
+/// Interface for Piper VITS TTS models.
+///
+/// Piper models take phoneme IDs, input lengths, and scale parameters,
+/// with an optional speaker ID for multi-speaker models.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PiperInterface {
+    pub super_graph: SuperGraph,
+    /// Phoneme ID sequence input [1, phoneme_count] i64.
+    pub input_link: SuperGraphLinkTensor,
+    /// Input sequence length [1] i64.
+    pub input_lengths_link: SuperGraphLinkTensor,
+    /// Scale parameters [3] f32: [noise_scale, length_scale, noise_scale_w].
+    pub scales_link: SuperGraphLinkTensor,
+    /// Speaker ID [1] i64 (only used for multi-speaker models).
+    pub speaker_id_link: Option<SuperGraphLinkTensor>,
+    /// Model weights.
+    pub model_weights_link: SuperGraphLinkTensorMap,
+    /// Output audio waveform [1, 1, time] f32.
+    pub audio_output_link: SuperGraphLinkTensor,
+    /// Sample rate of the output audio in Hz (from config).
+    pub sample_rate: u32,
+    /// Number of speakers (1 = single-speaker).
+    pub num_speakers: u32,
+    /// Phoneme ID map: IPA character → list of token IDs (from config).
+    /// Stored as JSON string for serialization.
+    pub phoneme_id_map_json: String,
+    /// eSpeak voice code (e.g. "en-us") for phonemization.
+    pub espeak_voice: String,
+}
+
+impl PiperInterface {
+    pub fn to_any(self) -> AnyInterface {
+        AnyInterface::PiperInterface(self)
     }
 }

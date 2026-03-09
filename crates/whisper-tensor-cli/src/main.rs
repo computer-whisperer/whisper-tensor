@@ -130,6 +130,7 @@ enum LoaderChoice {
     Sdxl,
     Flux,
     Kokoro,
+    Piper,
 }
 
 // ============================================================================
@@ -184,6 +185,7 @@ fn load_model(loader: &LoaderChoice, config: ConfigValues) -> LoaderOutput {
         LoaderChoice::Sdxl => SDXLLoader.load(config),
         LoaderChoice::Flux => FluxLoader.load(config),
         LoaderChoice::Kokoro => KokoroLoader.load(config),
+        LoaderChoice::Piper => PiperLoader.load(config),
     };
 
     result.unwrap_or_else(|e| {
@@ -412,44 +414,53 @@ fn cmd_image(
 // ============================================================================
 
 fn cmd_tts(output: LoaderOutput, model_dir: PathBuf, text: String, voice_name: String, speed: f32, output_path: PathBuf) {
+    let model = &output.models[0].model;
+
+    // Dispatch based on which interface the loader produced
+    if let Some(interface) = output.interfaces.iter().find_map(|i| match &i.interface {
+        AnyInterface::TextToSpeechInterface(x) => Some(x),
+        _ => None,
+    }) {
+        cmd_tts_kokoro_style(model, interface, &model_dir, &text, &voice_name, speed, &output_path);
+    } else if let Some(interface) = output.interfaces.iter().find_map(|i| match &i.interface {
+        AnyInterface::PiperInterface(x) => Some(x),
+        _ => None,
+    }) {
+        cmd_tts_piper(model, interface, &text, speed, &output_path);
+    } else {
+        eprintln!("No TTS interface found in loaded model");
+        std::process::exit(1);
+    }
+}
+
+/// Run TTS with Kokoro-style interface (input_ids + style + speed).
+fn cmd_tts_kokoro_style(
+    model: &std::sync::Arc<whisper_tensor::model::Model>,
+    interface: &whisper_tensor::interfaces::TextToSpeechInterface,
+    model_dir: &std::path::Path,
+    text: &str,
+    voice_name: &str,
+    speed: f32,
+    output_path: &std::path::Path,
+) {
     use whisper_tensor::super_graph::cache::SuperGraphTensorCache;
     use whisper_tensor::super_graph::data::SuperGraphData;
     use whisper_tensor::super_graph::SuperGraphContext;
 
-    let model = &output.models[0].model;
-
-    let interface = output
-        .interfaces
-        .iter()
-        .find_map(|i| match &i.interface {
-            AnyInterface::TextToSpeechInterface(x) => Some(x),
-            _ => None,
-        })
-        .unwrap_or_else(|| {
-            eprintln!("No TextToSpeech interface found");
-            std::process::exit(1);
-        });
-
-    // Convert text to phonemes via espeak-ng, then apply E2M conversion
-    let phonemes = text_to_kokoro_phonemes(&text);
-    eprintln!("Phonemes: {phonemes}");
-
-    // Tokenize phonemes using the vocab from tokenizer.json.
-    // Kokoro's tokenizer is character-level with a simple vocab lookup.
-    // We wrap with $ (token 0) as BOS/EOS.
-    let vocab = load_kokoro_vocab(&interface.tokenizer);
+    // Phonemize and tokenize: espeak-ng IPA → E2M conversion → char-level vocab lookup
+    let phonemes = text_to_kokoro_phonemes(text);
+    let vocab = load_tts_vocab(&interface.tokenizer);
     let token_ids: Vec<i64> = {
-        let mut ids = Vec::new();
-        ids.push(0i64); // BOS ($)
+        let mut ids = vec![0i64]; // BOS ($)
         for ch in phonemes.chars() {
             if let Some(&id) = vocab.get(&ch) {
                 ids.push(id as i64);
             }
-            // Characters not in vocab are silently dropped (matches tokenizer normalizer behavior)
         }
         ids.push(0i64); // EOS ($)
         ids
     };
+    eprintln!("Phonemes: {phonemes}");
     let num_tokens = token_ids.len();
     eprintln!("Tokens: {num_tokens}");
 
@@ -457,25 +468,14 @@ fn cmd_tts(output: LoaderOutput, model_dir: PathBuf, text: String, voice_name: S
         NumericTensor::<DynRank>::from_vec_shape(token_ids, vec![1, num_tokens]).unwrap();
 
     // Load voice embedding
-    let voice_path = model_dir.join("voices").join(format!("{voice_name}.bin"));
-    if !voice_path.exists() {
-        eprintln!("Voice file not found: {}", voice_path.display());
-        let voices_dir = model_dir.join("voices");
-        if voices_dir.is_dir() {
-            let mut available: Vec<String> = std::fs::read_dir(&voices_dir)
-                .unwrap()
-                .filter_map(|e| {
-                    let name = e.ok()?.file_name().to_string_lossy().to_string();
-                    name.strip_suffix(".bin").map(|s| s.to_string())
-                })
-                .collect();
-            available.sort();
-            eprintln!("Available voices: {}", available.join(", "));
-        }
+    let voice_bin = model_dir.join("voices").join(format!("{voice_name}.bin"));
+    let style_tensor = if voice_bin.exists() {
+        load_voice_style_bin(&voice_bin, num_tokens)
+    } else {
+        eprintln!("No voice file found: {}", voice_bin.display());
+        list_available_voices(model_dir);
         std::process::exit(1);
-    }
-
-    let style_tensor = load_voice_style(&voice_path, num_tokens);
+    };
     let speed_tensor = NumericTensor::<DynRank>::from_vec_shape(vec![speed], vec![1]).unwrap();
 
     // Run inference
@@ -521,14 +521,8 @@ fn cmd_tts(output: LoaderOutput, model_dir: PathBuf, text: String, voice_name: S
 
     eprintln!("Generated in {:.2?}", start.elapsed());
 
-    // Write WAV
-    let audio_f32 = audio
-        .cast(whisper_tensor::dtype::DType::F32, &mut backend)
-        .expect("cast to f32 failed");
-    let audio_ndarray = audio_f32.to_ndarray().expect("to_ndarray failed");
-    let samples: Vec<f32> = audio_ndarray.flatten().try_into().expect("flatten failed");
-
-    save_wav(&samples, interface.sample_rate, &output_path);
+    let samples = audio_tensor_to_samples(audio, &mut backend);
+    save_wav(&samples, interface.sample_rate, output_path);
     eprintln!(
         "Saved {:.1}s of audio to {}",
         samples.len() as f64 / interface.sample_rate as f64,
@@ -536,35 +530,167 @@ fn cmd_tts(output: LoaderOutput, model_dir: PathBuf, text: String, voice_name: S
     );
 }
 
-/// Load Kokoro's phoneme vocab from tokenizer.json as a char -> token_id map.
-fn load_kokoro_vocab(info: &whisper_tensor::metadata::TokenizerInfo) -> HashMap<char, u32> {
-    let path = match info {
-        whisper_tensor::metadata::TokenizerInfo::HFTokenizerLocal(p) => p.clone(),
-        _ => panic!("Expected HFTokenizerLocal for Kokoro tokenizer"),
+/// Run TTS with Piper VITS interface (input + input_lengths + scales).
+fn cmd_tts_piper(
+    model: &std::sync::Arc<whisper_tensor::model::Model>,
+    interface: &whisper_tensor::interfaces::PiperInterface,
+    text: &str,
+    speed: f32,
+    output_path: &std::path::Path,
+) {
+    use whisper_tensor::super_graph::cache::SuperGraphTensorCache;
+    use whisper_tensor::super_graph::data::SuperGraphData;
+    use whisper_tensor::super_graph::SuperGraphContext;
+
+    // Phonemize text via espeak-ng using the voice code from config
+    let sentences = espeak_rs::text_to_phonemes(text, &interface.espeak_voice, None, true, false)
+        .expect("espeak-ng phonemization failed");
+    let ipa = sentences.join(" ");
+    eprintln!("Phonemes: {ipa}");
+
+    // Build phoneme ID map from the stored JSON
+    let phoneme_id_map = parse_piper_phoneme_id_map(&interface.phoneme_id_map_json);
+
+    // Tokenize: BOS + (phoneme_ids interleaved with PAD) + EOS
+    let mut token_ids: Vec<i64> = Vec::new();
+    token_ids.push(1); // BOS (^)
+    token_ids.push(0); // PAD (_)
+    for ch in ipa.chars() {
+        if let Some(ids) = phoneme_id_map.get(&ch) {
+            for &id in ids {
+                token_ids.push(id);
+            }
+        }
+        token_ids.push(0); // PAD interspersed
+    }
+    token_ids.push(2); // EOS ($)
+
+    let num_tokens = token_ids.len();
+    eprintln!("Tokens: {num_tokens}");
+
+    let input_tensor =
+        NumericTensor::<DynRank>::from_vec_shape(token_ids, vec![1, num_tokens]).unwrap();
+    let input_lengths_tensor =
+        NumericTensor::<DynRank>::from_vec_shape(vec![num_tokens as i64], vec![1]).unwrap();
+
+    // Scales: [noise_scale, length_scale, noise_scale_w]
+    // length_scale is 1/speed (higher speed = shorter durations)
+    let length_scale = 1.0 / speed;
+    let scales_tensor =
+        NumericTensor::<DynRank>::from_vec_shape(vec![0.667f32, length_scale, 0.8], vec![3]).unwrap();
+
+    eprintln!("Running inference...");
+    let mut backend = EvalBackend::NDArray;
+    let start = std::time::Instant::now();
+
+    let super_graph_data = {
+        let mut data = SuperGraphData::new();
+        data.tensor_maps
+            .insert(interface.model_weights_link, model.get_tensor_store());
+        data.tensors.insert(interface.input_link, input_tensor);
+        data.tensors.insert(interface.input_lengths_link, input_lengths_tensor);
+        data.tensors.insert(interface.scales_link, scales_tensor);
+        if let Some(sid_link) = interface.speaker_id_link {
+            let sid_tensor =
+                NumericTensor::<DynRank>::from_vec_shape(vec![0i64], vec![1]).unwrap();
+            data.tensors.insert(sid_link, sid_tensor);
+        }
+        data
     };
-    let json = std::fs::read_to_string(&path).expect("Failed to read tokenizer.json");
-    let value: serde_json::Value = serde_json::from_str(&json).expect("Invalid JSON");
-    let vocab = value["model"]["vocab"]
-        .as_object()
-        .expect("No vocab in tokenizer.json");
+
+    let super_graph_output = {
+        let mut observer = ();
+        let mut super_graph_tensor_cache = SuperGraphTensorCache::new();
+        let mut context = SuperGraphContext {
+            observer: &mut observer,
+            eval_backend: &mut backend,
+            super_graph_tensor_cache: &mut super_graph_tensor_cache,
+            caches: None,
+            symbolic_graphs: vec![model.get_symbolic_graph()],
+            use_compiled_models: false,
+            compiled_models: None,
+        };
+        interface
+            .super_graph
+            .run(super_graph_data, &mut context)
+            .unwrap_or_else(|e| {
+                eprintln!("Inference error: {e}");
+                std::process::exit(1);
+            })
+    };
+
+    let audio = super_graph_output
+        .tensors
+        .get(&interface.audio_output_link)
+        .expect("No audio output tensor");
+
+    eprintln!("Generated in {:.2?}", start.elapsed());
+
+    let samples = audio_tensor_to_samples(audio, &mut backend);
+    save_wav(&samples, interface.sample_rate, output_path);
+    eprintln!(
+        "Saved {:.1}s of audio to {}",
+        samples.len() as f64 / interface.sample_rate as f64,
+        output_path.display()
+    );
+}
+
+/// Extract f32 samples from an audio output tensor.
+fn audio_tensor_to_samples(audio: &NumericTensor<DynRank>, backend: &mut EvalBackend) -> Vec<f32> {
+    let audio_f32 = audio
+        .cast(whisper_tensor::dtype::DType::F32, backend)
+        .expect("cast to f32 failed");
+    let audio_ndarray = audio_f32.to_ndarray().expect("to_ndarray failed");
+    audio_ndarray.flatten().try_into().expect("flatten failed")
+}
+
+/// Parse Piper's phoneme_id_map JSON into a char → Vec<i64> lookup.
+fn parse_piper_phoneme_id_map(json: &str) -> HashMap<char, Vec<i64>> {
+    let value: serde_json::Value = serde_json::from_str(json).expect("Invalid phoneme_id_map JSON");
+    let obj = value.as_object().expect("phoneme_id_map is not an object");
     let mut map = HashMap::new();
-    for (key, val) in vocab {
-        let id = val.as_u64().expect("vocab id not u64") as u32;
-        // Each key should be a single character
+    for (key, val) in obj {
         if let Some(ch) = key.chars().next() {
             if key.chars().count() == 1 {
-                map.insert(ch, id);
+                let ids: Vec<i64> = val
+                    .as_array()
+                    .expect("phoneme IDs not an array")
+                    .iter()
+                    .map(|v| v.as_i64().expect("phoneme ID not i64"))
+                    .collect();
+                map.insert(ch, ids);
             }
         }
     }
     map
 }
 
-/// Load a voice style vector from a .bin file, indexed by token count.
+/// Load phoneme vocab from tokenizer.json (Kokoro) or config.json (Kitten TTS).
 ///
-/// Voice files contain (N, 1, 256) f32 vectors. We index by token count
-/// (clamped to the file's range) and return a (1, 256) tensor.
-fn load_voice_style(path: &std::path::Path, num_tokens: usize) -> NumericTensor<DynRank> {
+/// Load Kokoro tokenizer vocab (character → token ID) from tokenizer.json.
+fn load_tts_vocab(info: &whisper_tensor::metadata::TokenizerInfo) -> HashMap<char, u32> {
+    let path = match info {
+        whisper_tensor::metadata::TokenizerInfo::HFTokenizerLocal(p) => p.clone(),
+        _ => panic!("Expected HFTokenizerLocal for TTS tokenizer"),
+    };
+    let json = std::fs::read_to_string(&path).expect("Failed to read tokenizer file");
+    let value: serde_json::Value = serde_json::from_str(&json).expect("Invalid JSON");
+
+    let vocab = value["model"]["vocab"]
+        .as_object()
+        .expect("Cannot find model.vocab in tokenizer file");
+    let mut map = HashMap::new();
+    for (key, val) in vocab {
+        let id = val.as_u64().expect("vocab id not u64") as u32;
+        if key.chars().count() == 1 {
+            map.insert(key.chars().next().unwrap(), id);
+        }
+    }
+    map
+}
+
+/// Load a voice style vector from a .bin file (Kokoro format), indexed by token count.
+fn load_voice_style_bin(path: &std::path::Path, num_tokens: usize) -> NumericTensor<DynRank> {
     let data = std::fs::read(path).expect("Failed to read voice file");
     let floats: Vec<f32> = data
         .chunks_exact(4)
@@ -577,6 +703,24 @@ fn load_voice_style(path: &std::path::Path, num_tokens: usize) -> NumericTensor<
     let style: Vec<f32> = floats[start..start + 256].to_vec();
 
     NumericTensor::<DynRank>::from_vec_shape(style, vec![1, 256]).unwrap()
+}
+
+/// List available voices in a model directory.
+fn list_available_voices(model_dir: &std::path::Path) {
+    let voices_dir = model_dir.join("voices");
+    if voices_dir.is_dir() {
+        let mut available: Vec<String> = std::fs::read_dir(&voices_dir)
+            .unwrap()
+            .filter_map(|e| {
+                let name = e.ok()?.file_name().to_string_lossy().to_string();
+                name.strip_suffix(".bin").map(|s| s.to_string())
+            })
+            .collect();
+        available.sort();
+        if !available.is_empty() {
+            eprintln!("Available voices: {}", available.join(", "));
+        }
+    }
 }
 
 /// Save f32 samples as a WAV file.

@@ -197,17 +197,12 @@ pub fn check_tensor_matches(
     tensor: &NumericTensor<DynRank>,
     tensor_info: &ONNXTensorInfo,
 ) -> Result<(), EvalError> {
+    // Note: shape validation is intentionally lenient. Many ONNX models have
+    // incorrect shape annotations (e.g. static 1 for what should be dynamic).
+    // We only validate rank (number of dims) and dtype, not individual dim values.
     if let Some(shape) = tensor_info.shape() {
         if shape.len() != tensor.shape().len() {
             Err(EvalError::UnexpectedRank(shape.len(), tensor.shape().len()))?;
-        }
-        for (a, b) in shape.iter().zip(tensor.shape()) {
-            if let ScalarInfoTyped::Numeric(a) = a
-                && *a != 0  // 0 means dynamic/any
-                && *a != b
-            {
-                Err(EvalError::UnexpectedDimension(*a, b, tensor.shape()))?
-            }
         }
     }
     if let Some(dtype) = tensor_info.dtype() {
@@ -2164,6 +2159,20 @@ impl SymbolicGraphMutator {
                 &onnx_node.attribute,
                 rng,
             )?)),
+            "GatherElements" => Some(AnyOperation::GatherElements(
+                ops::GatherElementsOperation::from_onnx(
+                    &input_tensors,
+                    &output_tensors,
+                    &onnx_node.attribute,
+                    rng,
+                )?,
+            )),
+            "GatherND" => Some(AnyOperation::GatherND(ops::GatherNDOperation::from_onnx(
+                &input_tensors,
+                &output_tensors,
+                &onnx_node.attribute,
+                rng,
+            )?)),
             "STFT" => Some(AnyOperation::Stft(ops::StftOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
@@ -2172,6 +2181,28 @@ impl SymbolicGraphMutator {
             )?)),
             "ConvTranspose" => Some(AnyOperation::ConvTranspose(
                 ops::ConvTransposeOperation::from_onnx(
+                    &input_tensors,
+                    &output_tensors,
+                    &onnx_node.attribute,
+                    rng,
+                )?,
+            )),
+            "Gelu" => Some(AnyOperation::Gelu(ops::GeluOperation::from_onnx(
+                &input_tensors,
+                &output_tensors,
+                &onnx_node.attribute,
+                rng,
+            )?)),
+            "BiasGelu" => Some(AnyOperation::BiasGelu(
+                ops::BiasGeluOperation::from_onnx(
+                    &input_tensors,
+                    &output_tensors,
+                    &onnx_node.attribute,
+                    rng,
+                )?,
+            )),
+            "ReduceL2" => Some(AnyOperation::ReduceL2(
+                ops::ReduceL2Operation::from_onnx(
                     &input_tensors,
                     &output_tensors,
                     &onnx_node.attribute,
