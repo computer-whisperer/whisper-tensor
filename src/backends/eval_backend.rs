@@ -68,6 +68,10 @@ impl<'a> EvalBackend<'a> {
     }
 
     pub fn to_native_type(&mut self, tensor: &NumericTensor<DynRank>) -> NumericTensor<DynRank> {
+        // Packed tensors stay packed — operations that consume them handle dequantization.
+        if matches!(tensor, NumericTensor::Packed(_)) {
+            return tensor.clone();
+        }
         match self {
             #[cfg(feature = "candle")]
             EvalBackend::Candle(x) => tensor.to_candle(x).unwrap().into(),

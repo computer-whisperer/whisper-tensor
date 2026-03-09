@@ -5,10 +5,8 @@ use whisper_tensor::dtype::DType;
 use whisper_tensor::graph::GlobalId;
 use whisper_tensor::model::Model;
 use whisper_tensor::scalar_info::ScalarInfoTyped;
-use whisper_tensor::symbolic_graph::ops::*;
 use whisper_tensor::symbolic_graph::tensor_store::StoredTensor;
 use whisper_tensor::symbolic_graph::{SymbolicGraphMutator, TensorType};
-use whisper_tensor::tensor_rank::DynRank;
 
 /// Configuration extracted from GGUF metadata.
 pub struct GgufLlama3Config {
@@ -162,325 +160,6 @@ impl<'a> GraphBuilder<'a> {
         Ok(self.m.push_stored_tensor(store_id, Some(name.to_string()), rng))
     }
 
-    /// Create an intermediate tensor (no shape/dtype info, used for operation outputs).
-    fn intermediate(&mut self, name: &str, rng: &mut impl rand::Rng) -> GlobalId {
-        self.m.push_unknown_tensor(name, TensorType::Intermediate, rng)
-    }
-
-    /// Create a constant tensor from an NDArray value.
-    fn constant(
-        &mut self,
-        name: Option<String>,
-        value: NDArrayNumericTensor<DynRank>,
-        rng: &mut impl rand::Rng,
-    ) -> GlobalId {
-        self.m.push_constant_tensor(value, name, rng)
-    }
-
-    /// Add an operation and return its output tensor id.
-    fn add_op(
-        &mut self,
-        name: Option<String>,
-        op: AnyOperation,
-        rng: &mut impl rand::Rng,
-    ) -> GlobalId {
-        self.m.push_operation(name, op, rng)
-    }
-
-    /// MatMul: output = a @ b
-    fn matmul(
-        &mut self,
-        name: &str,
-        a: GlobalId,
-        b: GlobalId,
-        rng: &mut impl rand::Rng,
-    ) -> GlobalId {
-        let out = self.intermediate(&format!("{name}_out"), rng);
-        self.matmul_into(name, a, b, out, rng);
-        out
-    }
-
-    /// MatMul into a pre-existing output tensor.
-    fn matmul_into(
-        &mut self,
-        name: &str,
-        a: GlobalId,
-        b: GlobalId,
-        out: GlobalId,
-        rng: &mut impl rand::Rng,
-    ) {
-        let op = BinaryOperation::new(a, b, out, WhichBinaryOperation::MatMul, rng);
-        self.add_op(Some(name.to_string()), AnyOperation::Binary(op), rng);
-    }
-
-    /// Add: output = a + b
-    fn add(
-        &mut self,
-        name: &str,
-        a: GlobalId,
-        b: GlobalId,
-        rng: &mut impl rand::Rng,
-    ) -> GlobalId {
-        let out = self.intermediate(&format!("{name}_out"), rng);
-        let op = BinaryOperation::new(a, b, out, WhichBinaryOperation::Add, rng);
-        self.add_op(Some(name.to_string()), AnyOperation::Binary(op), rng);
-        out
-    }
-
-    /// Mul: output = a * b
-    fn mul(
-        &mut self,
-        name: &str,
-        a: GlobalId,
-        b: GlobalId,
-        rng: &mut impl rand::Rng,
-    ) -> GlobalId {
-        let out = self.intermediate(&format!("{name}_out"), rng);
-        let op = BinaryOperation::new(a, b, out, WhichBinaryOperation::Mul, rng);
-        self.add_op(Some(name.to_string()), AnyOperation::Binary(op), rng);
-        out
-    }
-
-    /// Div: output = a / b
-    fn div(
-        &mut self,
-        name: &str,
-        a: GlobalId,
-        b: GlobalId,
-        rng: &mut impl rand::Rng,
-    ) -> GlobalId {
-        let out = self.intermediate(&format!("{name}_out"), rng);
-        let op = BinaryOperation::new(a, b, out, WhichBinaryOperation::Div, rng);
-        self.add_op(Some(name.to_string()), AnyOperation::Binary(op), rng);
-        out
-    }
-
-    /// Sigmoid
-    fn sigmoid(
-        &mut self,
-        name: &str,
-        input: GlobalId,
-        rng: &mut impl rand::Rng,
-    ) -> GlobalId {
-        let out = self.intermediate(&format!("{name}_out"), rng);
-        let op = UnaryOperation::new(input, out, WhichUnaryOperation::Sigmoid, rng);
-        self.add_op(Some(name.to_string()), AnyOperation::Unary(op), rng);
-        out
-    }
-
-    /// SiLU: output = x * sigmoid(x)
-    fn silu(
-        &mut self,
-        name: &str,
-        input: GlobalId,
-        rng: &mut impl rand::Rng,
-    ) -> GlobalId {
-        let sig = self.sigmoid(&format!("{name}_sigmoid"), input, rng);
-        self.mul(name, input, sig, rng)
-    }
-
-    /// RMS Normalization
-    fn rms_norm(
-        &mut self,
-        name: &str,
-        input: GlobalId,
-        scale: GlobalId,
-        rng: &mut impl rand::Rng,
-    ) -> GlobalId {
-        let out = self.intermediate(&format!("{name}_out"), rng);
-        let op = RMSNormalizationOperation::new(
-            input,
-            scale,
-            None,
-            out,
-            self.config.rms_norm_eps,
-            rng,
-        );
-        self.add_op(
-            Some(name.to_string()),
-            AnyOperation::RMSNormalization(op),
-            rng,
-        );
-        out
-    }
-
-    /// Reshape
-    fn reshape(
-        &mut self,
-        name: &str,
-        input: GlobalId,
-        shape_values: Vec<i64>,
-        rng: &mut impl rand::Rng,
-    ) -> GlobalId {
-        let shape_tensor = self.constant(
-            None,
-            NDArrayNumericTensor::from_vec_shape(shape_values.clone(), &vec![shape_values.len() as u64])
-                .unwrap(),
-            rng,
-        );
-        let out = self.intermediate(&format!("{name}_out"), rng);
-        let op = ReshapeOperation::new(input, shape_tensor, out, rng);
-        self.add_op(Some(name.to_string()), AnyOperation::Reshape(op), rng);
-        out
-    }
-
-    /// Transpose with explicit permutation
-    fn transpose(
-        &mut self,
-        name: &str,
-        input: GlobalId,
-        perm: Vec<i64>,
-        rng: &mut impl rand::Rng,
-    ) -> GlobalId {
-        let out = self.intermediate(&format!("{name}_out"), rng);
-        let op = TransposeOperation::new(input, out, Some(perm), rng);
-        self.add_op(Some(name.to_string()), AnyOperation::Transpose(op), rng);
-        out
-    }
-
-    /// Transpose (reverse all dims — for the last-two-dims transpose of K)
-    fn transpose_last2(
-        &mut self,
-        name: &str,
-        input: GlobalId,
-        rng: &mut impl rand::Rng,
-    ) -> GlobalId {
-        // [B, H, S, D] -> [B, H, D, S]
-        self.transpose(name, input, vec![0, 1, 3, 2], rng)
-    }
-
-    /// Softmax on a given axis
-    fn softmax(
-        &mut self,
-        name: &str,
-        input: GlobalId,
-        axis: i64,
-        rng: &mut impl rand::Rng,
-    ) -> GlobalId {
-        let out = self.intermediate(&format!("{name}_out"), rng);
-        let op = SoftmaxOperation::new(input, out, Some(axis), rng);
-        self.add_op(Some(name.to_string()), AnyOperation::Softmax(op), rng);
-        out
-    }
-
-    /// Gather (embedding lookup)
-    fn gather(
-        &mut self,
-        name: &str,
-        data: GlobalId,
-        indices: GlobalId,
-        axis: i64,
-        rng: &mut impl rand::Rng,
-    ) -> GlobalId {
-        let out = self.intermediate(&format!("{name}_out"), rng);
-        let op = GatherOperation::new(data, indices, out, axis, rng);
-        self.add_op(Some(name.to_string()), AnyOperation::Gather(op), rng);
-        out
-    }
-
-    /// Concat along an axis
-    fn concat(
-        &mut self,
-        name: &str,
-        inputs: Vec<GlobalId>,
-        axis: i64,
-        rng: &mut impl rand::Rng,
-    ) -> GlobalId {
-        let out = self.intermediate(&format!("{name}_out"), rng);
-        self.concat_into(name, inputs, axis, out, rng);
-        out
-    }
-
-    /// Concat into a pre-existing output tensor.
-    fn concat_into(
-        &mut self,
-        name: &str,
-        inputs: Vec<GlobalId>,
-        axis: i64,
-        out: GlobalId,
-        rng: &mut impl rand::Rng,
-    ) {
-        let op = ConcatOperation::new(inputs, out, axis, rng);
-        self.add_op(Some(name.to_string()), AnyOperation::Concat(op), rng);
-    }
-
-    /// RotaryEmbedding
-    fn rotary_embedding(
-        &mut self,
-        name: &str,
-        data: GlobalId,
-        cos_cache: GlobalId,
-        sin_cache: GlobalId,
-        rng: &mut impl rand::Rng,
-    ) -> GlobalId {
-        let out = self.intermediate(&format!("{name}_out"), rng);
-        let op = RotaryEmbeddingOperation::new(
-            data,
-            cos_cache,
-            sin_cache,
-            None, // no position_ids — we handle indexing externally
-            out,
-            false, // not interleaved
-            None,
-            0, // full head rotation
-            rng,
-        );
-        self.add_op(
-            Some(name.to_string()),
-            AnyOperation::RotaryEmbedding(op),
-            rng,
-        );
-        out
-    }
-
-    /// Shape operation: extract shape[start..end] as a 1D i64 tensor
-    fn shape_op(
-        &mut self,
-        name: &str,
-        input: GlobalId,
-        start: Option<i64>,
-        end: Option<i64>,
-        rng: &mut impl rand::Rng,
-    ) -> GlobalId {
-        let out = self.intermediate(&format!("{name}_out"), rng);
-        let op = ShapeOperation::new(input, out, start, end, rng);
-        self.add_op(Some(name.to_string()), AnyOperation::Shape(op), rng);
-        out
-    }
-
-    /// Linear layer: output = input @ weight^T (GGUF weights are [out_features, in_features])
-    fn linear(
-        &mut self,
-        name: &str,
-        input: GlobalId,
-        weight: GlobalId,
-        rng: &mut impl rand::Rng,
-    ) -> GlobalId {
-        let out = self.intermediate(&format!("{name}_out"), rng);
-        self.linear_into(name, input, weight, out, rng);
-        out
-    }
-
-    /// Linear into a pre-existing output tensor.
-    fn linear_into(
-        &mut self,
-        name: &str,
-        input: GlobalId,
-        weight: GlobalId,
-        out: GlobalId,
-        rng: &mut impl rand::Rng,
-    ) {
-        // GGUF stores weights as [out_features, in_features], same as PyTorch.
-        // We need input @ weight^T.
-        let wt = self.transpose(
-            &format!("{name}_wt"),
-            weight,
-            vec![1, 0],
-            rng,
-        );
-        self.matmul_into(name, input, wt, out, rng);
-    }
-
     /// Create an input tensor node with dtype and shape info.
     fn input_tensor(
         &mut self,
@@ -514,14 +193,16 @@ impl<'a> GraphBuilder<'a> {
         let config = self.config;
         let head_dim = config.embedding_length / config.num_attention_heads;
         let half_head_dim = head_dim / 2;
+        let eps = config.rms_norm_eps;
         let mut state_pairs = Vec::new();
 
         // -- Input --
         let input_ids = self.input_tensor("input_ids", DType::I64, vec![Some(1), None], rng);
 
-        // -- Embedding --
+        // -- Embedding (dequantize packed weight, then gather) --
         let embed_weight = self.load_weight("token_embd.weight", rng)?;
-        let x = self.gather("embed_tokens", embed_weight, input_ids, 0, rng);
+        let embed_weight = self.m.push_cast("embed_tokens/cast", embed_weight, DType::F32, rng);
+        let x = self.m.push_gather("embed_tokens", embed_weight, input_ids, 0, rng);
 
         // -- Precompute RoPE cos/sin caches --
         let max_len = config.max_position_embeddings;
@@ -534,26 +215,23 @@ impl<'a> GraphBuilder<'a> {
             for pos in 0..max_len {
                 for &freq in &inv_freq {
                     let angle = pos as f64 * freq;
-                    cos_vals.push(half::bf16::from_f64(angle.cos()));
-                    sin_vals.push(half::bf16::from_f64(angle.sin()));
+                    cos_vals.push(angle.cos() as f32);
+                    sin_vals.push(angle.sin() as f32);
                 }
             }
             let shape = vec![max_len as u64, half_head_dim as u64];
             let cos_nd = NDArrayNumericTensor::from_vec_shape(cos_vals, &shape).unwrap();
             let sin_nd = NDArrayNumericTensor::from_vec_shape(sin_vals, &shape).unwrap();
-            let cos_id = self.constant(Some("cos_cache".to_string()), cos_nd, rng);
-            let sin_id = self.constant(Some("sin_cache".to_string()), sin_nd, rng);
+            let cos_id = self.m.push_constant_tensor(cos_nd, Some("cos_cache".to_string()), rng);
+            let sin_id = self.m.push_constant_tensor(sin_nd, Some("sin_cache".to_string()), rng);
             (cos_id, sin_id)
         };
 
-        // -- KV cache dtype: use the embedding output dtype (BF16 after dequant, or F32) --
-        // For now we don't set explicit dtype/shape on intermediate tensors.
-
         // -- Scale constant for attention --
         let scale_val = (head_dim as f32).sqrt();
-        let scale_const = self.constant(
-            None,
+        let scale_const = self.m.push_constant_tensor(
             NDArrayNumericTensor::from_vec(vec![scale_val]).to_dyn(),
+            None,
             rng,
         );
 
@@ -564,10 +242,11 @@ impl<'a> GraphBuilder<'a> {
 
             // Attention norm
             let attn_norm_w = self.load_weight(&format!("blk.{i}.attn_norm.weight"), rng)?;
-            let att_normed = self.rms_norm(
+            let att_normed = self.m.push_rms_norm(
                 &format!("blk.{i}.attn_norm"),
                 layer_input,
                 attn_norm_w,
+                eps,
                 rng,
             );
 
@@ -576,106 +255,106 @@ impl<'a> GraphBuilder<'a> {
             let k_w = self.load_weight(&format!("blk.{i}.attn_k.weight"), rng)?;
             let v_w = self.load_weight(&format!("blk.{i}.attn_v.weight"), rng)?;
 
-            let q = self.linear(&format!("blk.{i}.attn_q"), att_normed, q_w, rng);
-            let k = self.linear(&format!("blk.{i}.attn_k"), att_normed, k_w, rng);
-            let v = self.linear(&format!("blk.{i}.attn_v"), att_normed, v_w, rng);
+            let q = self.m.push_quant_linear(&format!("blk.{i}.attn_q"), att_normed, q_w, rng);
+            let k = self.m.push_quant_linear(&format!("blk.{i}.attn_k"), att_normed, k_w, rng);
+            let v = self.m.push_quant_linear(&format!("blk.{i}.attn_v"), att_normed, v_w, rng);
 
             // Reshape to [B, S, H, D] then transpose to [B, H, S, D]
-            let q = self.reshape(
+            let q = self.m.push_reshape(
                 &format!("blk.{i}.q_reshape"),
                 q,
-                vec![0, 0, config.num_attention_heads as i64, head_dim as i64],
+                &[0, 0, config.num_attention_heads as i64, head_dim as i64],
                 rng,
             );
-            let q = self.transpose(
+            let q = self.m.push_transpose(
                 &format!("blk.{i}.q_transpose"),
                 q,
-                vec![0, 2, 1, 3],
+                &[0, 2, 1, 3],
                 rng,
             );
-            let k = self.reshape(
+            let k = self.m.push_reshape(
                 &format!("blk.{i}.k_reshape"),
                 k,
-                vec![0, 0, config.num_key_value_heads as i64, head_dim as i64],
+                &[0, 0, config.num_key_value_heads as i64, head_dim as i64],
                 rng,
             );
-            let k = self.transpose(
+            let k = self.m.push_transpose(
                 &format!("blk.{i}.k_transpose"),
                 k,
-                vec![0, 2, 1, 3],
+                &[0, 2, 1, 3],
                 rng,
             );
-            let v = self.reshape(
+            let v = self.m.push_reshape(
                 &format!("blk.{i}.v_reshape"),
                 v,
-                vec![0, 0, config.num_key_value_heads as i64, head_dim as i64],
+                &[0, 0, config.num_key_value_heads as i64, head_dim as i64],
                 rng,
             );
-            let v = self.transpose(
+            let v = self.m.push_transpose(
                 &format!("blk.{i}.v_transpose"),
                 v,
-                vec![0, 2, 1, 3],
+                &[0, 2, 1, 3],
                 rng,
             );
 
             // KV cache inputs
             let kv_cache_k = self.input_tensor(
                 &format!("kv_cache_input_k_{i}"),
-                DType::BF16,
+                DType::F32,
                 vec![Some(1), Some(config.num_key_value_heads as u64), None, Some(head_dim as u64)],
                 rng,
             );
             let kv_cache_v = self.input_tensor(
                 &format!("kv_cache_input_v_{i}"),
-                DType::BF16,
+                DType::F32,
                 vec![Some(1), Some(config.num_key_value_heads as u64), None, Some(head_dim as u64)],
                 rng,
             );
 
             // RoPE position from KV cache length
-            let rope_pos = self.shape_op(
+            let rope_pos = self.m.push_shape(
                 &format!("blk.{i}.rope_pos"),
                 kv_cache_k,
                 Some(2),
                 Some(3),
                 rng,
             );
-            let cos_at_pos = self.gather(
+            let cos_at_pos = self.m.push_gather(
                 &format!("blk.{i}.cos_gather"),
                 cos_cache_id,
                 rope_pos,
                 0,
                 rng,
             );
-            let sin_at_pos = self.gather(
+            let sin_at_pos = self.m.push_gather(
                 &format!("blk.{i}.sin_gather"),
                 sin_cache_id,
                 rope_pos,
                 0,
                 rng,
             );
-            let cos_at_pos = self.reshape(
+            let cos_at_pos = self.m.push_reshape(
                 &format!("blk.{i}.cos_reshape"),
                 cos_at_pos,
-                vec![1, 1, half_head_dim as i64],
+                &[1, 1, half_head_dim as i64],
                 rng,
             );
-            let sin_at_pos = self.reshape(
+            let sin_at_pos = self.m.push_reshape(
                 &format!("blk.{i}.sin_reshape"),
                 sin_at_pos,
-                vec![1, 1, half_head_dim as i64],
+                &[1, 1, half_head_dim as i64],
                 rng,
             );
 
             // Apply RoPE
-            let q = self.rotary_embedding(
+            let q = self.m.push_rotary_embedding(
                 &format!("blk.{i}.rope_q"),
                 q,
                 cos_at_pos,
                 sin_at_pos,
                 rng,
             );
-            let k = self.rotary_embedding(
+            let k = self.m.push_rotary_embedding(
                 &format!("blk.{i}.rope_k"),
                 k,
                 cos_at_pos,
@@ -684,13 +363,12 @@ impl<'a> GraphBuilder<'a> {
             );
 
             // Concat with KV cache — output tensors have explicit names
-            // matching the convention used by the Transformers loader.
             let k_out_name = format!("kv_cache_output_k_{i}");
             let v_out_name = format!("kv_cache_output_v_{i}");
             let k_out = self.m.push_unknown_tensor(&k_out_name, TensorType::Intermediate, rng);
             let v_out = self.m.push_unknown_tensor(&v_out_name, TensorType::Intermediate, rng);
-            self.concat_into(&format!("blk.{i}.k_concat"), vec![kv_cache_k, k], 2, k_out, rng);
-            self.concat_into(&format!("blk.{i}.v_concat"), vec![kv_cache_v, v], 2, v_out, rng);
+            self.m.push_concat_into(&format!("blk.{i}.k_concat"), vec![kv_cache_k, k], 2, k_out, rng);
+            self.m.push_concat_into(&format!("blk.{i}.v_concat"), vec![kv_cache_v, v], 2, v_out, rng);
 
             self.output_tensor(k_out);
             self.output_tensor(v_out);
@@ -704,34 +382,34 @@ impl<'a> GraphBuilder<'a> {
                 let n_rep = config.num_attention_heads / config.num_key_value_heads;
 
                 // Repeat K: [B, kv_heads, seq, D] -> [B, num_heads, seq, D]
-                let k_unsq = self.reshape(
+                let k_unsq = self.m.push_reshape(
                     &format!("blk.{i}.k_gqa_unsqueeze"),
                     k,
-                    vec![0, config.num_key_value_heads as i64, 1, -1, head_dim as i64],
+                    &[0, config.num_key_value_heads as i64, 1, -1, head_dim as i64],
                     rng,
                 );
                 let k_copies: Vec<GlobalId> = vec![k_unsq; n_rep];
-                let k_repeated = self.concat(&format!("blk.{i}.k_gqa_repeat"), k_copies, 2, rng);
-                let k = self.reshape(
+                let k_repeated = self.m.push_concat(&format!("blk.{i}.k_gqa_repeat"), k_copies, 2, rng);
+                let k = self.m.push_reshape(
                     &format!("blk.{i}.k_gqa_merge"),
                     k_repeated,
-                    vec![0, config.num_attention_heads as i64, -1, head_dim as i64],
+                    &[0, config.num_attention_heads as i64, -1, head_dim as i64],
                     rng,
                 );
 
                 // Repeat V: same pattern
-                let v_unsq = self.reshape(
+                let v_unsq = self.m.push_reshape(
                     &format!("blk.{i}.v_gqa_unsqueeze"),
                     v,
-                    vec![0, config.num_key_value_heads as i64, 1, -1, head_dim as i64],
+                    &[0, config.num_key_value_heads as i64, 1, -1, head_dim as i64],
                     rng,
                 );
                 let v_copies: Vec<GlobalId> = vec![v_unsq; n_rep];
-                let v_repeated = self.concat(&format!("blk.{i}.v_gqa_repeat"), v_copies, 2, rng);
-                let v = self.reshape(
+                let v_repeated = self.m.push_concat(&format!("blk.{i}.v_gqa_repeat"), v_copies, 2, rng);
+                let v = self.m.push_reshape(
                     &format!("blk.{i}.v_gqa_merge"),
                     v_repeated,
-                    vec![0, config.num_attention_heads as i64, -1, head_dim as i64],
+                    &[0, config.num_attention_heads as i64, -1, head_dim as i64],
                     rng,
                 );
 
@@ -741,57 +419,57 @@ impl<'a> GraphBuilder<'a> {
             };
 
             // Attention: scores = Q @ K^T / sqrt(d)
-            let kt = self.transpose_last2(&format!("blk.{i}.kt"), k, rng);
-            let scores = self.matmul(&format!("blk.{i}.attn_scores"), q, kt, rng);
-            let scores = self.div(&format!("blk.{i}.attn_scale"), scores, scale_const, rng);
-            let scores = self.softmax(&format!("blk.{i}.attn_softmax"), scores, 3, rng);
+            let kt = self.m.push_transpose(&format!("blk.{i}.kt"), k, &[0, 1, 3, 2], rng);
+            let scores = self.m.push_matmul(&format!("blk.{i}.attn_scores"), q, kt, rng);
+            let scores = self.m.push_div(&format!("blk.{i}.attn_scale"), scores, scale_const, rng);
+            let scores = self.m.push_softmax(&format!("blk.{i}.attn_softmax"), scores, 3, rng);
 
             // Weighted sum: output = scores @ V
-            let attn_out = self.matmul(&format!("blk.{i}.attn_weighted"), scores, v, rng);
+            let attn_out = self.m.push_matmul(&format!("blk.{i}.attn_weighted"), scores, v, rng);
 
             // Transpose back [B, H, S, D] -> [B, S, H, D] and reshape to [B, S, H*D]
-            let attn_out = self.transpose(
+            let attn_out = self.m.push_transpose(
                 &format!("blk.{i}.attn_out_transpose"),
                 attn_out,
-                vec![0, 2, 1, 3],
+                &[0, 2, 1, 3],
                 rng,
             );
-            let attn_out = self.reshape(
+            let attn_out = self.m.push_reshape(
                 &format!("blk.{i}.attn_out_reshape"),
                 attn_out,
-                vec![0, 0, -1],
+                &[0, 0, -1],
                 rng,
             );
 
             // Output projection
             let o_w = self.load_weight(&format!("blk.{i}.attn_output.weight"), rng)?;
-            let attn_proj = self.linear(&format!("blk.{i}.attn_output"), attn_out, o_w, rng);
+            let attn_proj = self.m.push_quant_linear(&format!("blk.{i}.attn_output"), attn_out, o_w, rng);
 
             // Residual
-            let h = self.add(&format!("blk.{i}.attn_residual"), layer_input, attn_proj, rng);
+            let h = self.m.push_add(&format!("blk.{i}.attn_residual"), layer_input, attn_proj, rng);
 
             // FFN norm
             let ffn_norm_w = self.load_weight(&format!("blk.{i}.ffn_norm.weight"), rng)?;
-            let ffn_normed = self.rms_norm(&format!("blk.{i}.ffn_norm"), h, ffn_norm_w, rng);
+            let ffn_normed = self.m.push_rms_norm(&format!("blk.{i}.ffn_norm"), h, ffn_norm_w, eps, rng);
 
             // FFN: SwiGLU
             let gate_w = self.load_weight(&format!("blk.{i}.ffn_gate.weight"), rng)?;
             let up_w = self.load_weight(&format!("blk.{i}.ffn_up.weight"), rng)?;
             let down_w = self.load_weight(&format!("blk.{i}.ffn_down.weight"), rng)?;
 
-            let gate = self.linear(&format!("blk.{i}.ffn_gate"), ffn_normed, gate_w, rng);
-            let gate = self.silu(&format!("blk.{i}.ffn_silu"), gate, rng);
-            let up = self.linear(&format!("blk.{i}.ffn_up"), ffn_normed, up_w, rng);
-            let hidden = self.mul(&format!("blk.{i}.ffn_mul"), gate, up, rng);
-            let down = self.linear(&format!("blk.{i}.ffn_down"), hidden, down_w, rng);
+            let gate = self.m.push_quant_linear(&format!("blk.{i}.ffn_gate"), ffn_normed, gate_w, rng);
+            let gate = self.m.push_silu(&format!("blk.{i}.ffn_silu"), gate, rng);
+            let up = self.m.push_quant_linear(&format!("blk.{i}.ffn_up"), ffn_normed, up_w, rng);
+            let hidden = self.m.push_mul(&format!("blk.{i}.ffn_mul"), gate, up, rng);
+            let down = self.m.push_quant_linear(&format!("blk.{i}.ffn_down"), hidden, down_w, rng);
 
             // Residual
-            layer_output = self.add(&format!("blk.{i}.ffn_residual"), h, down, rng);
+            layer_output = self.m.push_add(&format!("blk.{i}.ffn_residual"), h, down, rng);
         }
 
         // Final norm
         let output_norm_w = self.load_weight("output_norm.weight", rng)?;
-        let h = self.rms_norm("output_norm", layer_output, output_norm_w, rng);
+        let h = self.m.push_rms_norm("output_norm", layer_output, output_norm_w, eps, rng);
 
         // LM head — create output tensor with explicit name and shape info
         let output_w = self.load_weight("output.weight", rng)?;
@@ -811,7 +489,7 @@ impl<'a> GraphBuilder<'a> {
             ]),
             rng,
         );
-        self.linear_into("output", h, output_w, logits, rng);
+        self.m.push_quant_linear_into("output", h, output_w, logits, rng);
         self.output_tensor(logits);
 
         Ok(BuildInfo {

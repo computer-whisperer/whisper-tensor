@@ -1,3 +1,4 @@
+pub mod helpers;
 pub mod observer;
 pub mod ops;
 pub mod tensor_store;
@@ -202,6 +203,7 @@ pub fn check_tensor_matches(
         }
         for (a, b) in shape.iter().zip(tensor.shape()) {
             if let ScalarInfoTyped::Numeric(a) = a
+                && *a != 0  // 0 means dynamic/any
                 && *a != b
             {
                 Err(EvalError::UnexpectedDimension(*a, b, tensor.shape()))?

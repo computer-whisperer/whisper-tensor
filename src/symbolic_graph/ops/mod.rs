@@ -6,6 +6,7 @@ mod conv;
 mod gather;
 mod misc;
 mod normalization;
+mod quant_matmul;
 mod reduce;
 mod reshape;
 mod resize;
@@ -34,6 +35,7 @@ pub use normalization::{
     GroupNormalizationOperation, InstanceNormalizationOperation, LayerNormalizationOperation,
     LpNormalizationOperation, RMSNormalizationOperation,
 };
+pub use quant_matmul::QuantMatMulOperation;
 pub use reduce::{
     CumSumOperation, ReduceMaxOperation, ReduceMeanOperation, ReduceMinOperation,
     ReduceProdOperation, ReduceSumOperation,
@@ -253,6 +255,7 @@ pub enum AnyOperation {
     If(IfOperation),
     Scan(ScanOperation),
     RotaryEmbedding(RotaryEmbeddingOperation),
+    QuantMatMul(QuantMatMulOperation),
 }
 
 macro_rules! delegate {
@@ -308,7 +311,8 @@ macro_rules! delegate {
             AnyOperation::Min(x) => x.$name($($arg),*),
             AnyOperation::If(x) => x.$name($($arg),*),
             AnyOperation::Scan(x) => x.$name($($arg),*),
-            AnyOperation::RotaryEmbedding(x) => x.$name($($arg),*)
+            AnyOperation::RotaryEmbedding(x) => x.$name($($arg),*),
+            AnyOperation::QuantMatMul(x) => x.$name($($arg),*)
                     }
         }
     }

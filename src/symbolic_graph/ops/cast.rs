@@ -140,6 +140,35 @@ impl Operation for CastOperation {
         vec![Property::new("to", PropertyValue::DType(self.to))]
     }
 
+    fn eval(
+        &self,
+        backend: &mut crate::backends::eval_backend::EvalBackend,
+        inputs: &HashMap<GlobalId, crate::numeric_tensor::NumericTensor<crate::tensor_rank::DynRank>>,
+    ) -> super::OperationEvalRet {
+        let input = inputs
+            .get(&self.input)
+            .ok_or_else(|| super::EvalError::InvalidInput("Cast: missing input".into()))?;
+
+        // Handle packed (quantized) inputs: dequantize to F32, then cast if needed
+        if let crate::numeric_tensor::NumericTensor::Packed(p) = input {
+            let f32_tensor =
+                crate::numeric_tensor::NumericTensor::NDArray(p.dequantize());
+            let result = if self.to == crate::dtype::DType::F32 {
+                f32_tensor
+            } else {
+                f32_tensor
+                    .cast(self.to, backend)
+                    .map_err(super::EvalError::from)?
+            };
+            return Ok(Box::new(std::iter::once((self.output, result))));
+        }
+
+        // Default: delegate to milli graph
+        let mut rng = wyrand::WyRand::new(Default::default());
+        let milli_graph = self.get_milli_op_graph(&mut rng);
+        Ok(milli_graph.eval(inputs, &mut (), backend)?)
+    }
+
     fn get_milli_op_graph(&self, rng: &mut impl rand::Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let out =
