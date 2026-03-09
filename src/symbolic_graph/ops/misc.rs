@@ -533,16 +533,8 @@ impl ClipOperation {
         Ok(Self {
             global_id: GlobalId::new(rng),
             input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("Clip"))?,
-            min: if inputs.len() > 1 {
-                Some(inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs("Clip"))?)
-            } else {
-                None
-            },
-            max: if inputs.len() > 2 {
-                Some(inputs[2].ok_or(ONNXDecodingError::InvalidOperatorInputs("Clip"))?)
-            } else {
-                None
-            },
+            min: inputs.get(1).and_then(|x| *x),
+            max: inputs.get(2).and_then(|x| *x),
             output: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("Clip"))?,
         })
     }

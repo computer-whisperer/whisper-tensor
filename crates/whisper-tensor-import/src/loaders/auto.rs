@@ -1,6 +1,6 @@
 use super::{
-    FluxLoader, GgufLoader, OnnxLoader, Rwkv7Loader, SD2Loader, SD15Loader, SDXLLoader,
-    TransformersLoader,
+    FluxLoader, GgufLoader, KokoroLoader, OnnxLoader, Rwkv7Loader, SD2Loader, SD15Loader,
+    SDXLLoader, TransformersLoader,
 };
 use crate::onnx_graph::weights::SafetensorsWeightManager;
 use memmap2::Mmap;
@@ -34,6 +34,10 @@ impl Loader for AutoLoader {
         let path = require_path(&config, "path")?;
 
         if path.is_dir() {
+            // Check for Kokoro TTS (has onnx/ subdirectory + tokenizer.json)
+            if path.join("onnx").is_dir() && path.join("tokenizer.json").exists() {
+                return KokoroLoader.load(config);
+            }
             let config_path = path.join("config.json");
             if config_path.exists() {
                 return TransformersLoader.load(config);

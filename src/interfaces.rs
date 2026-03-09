@@ -32,6 +32,7 @@ use std::sync::Arc;
 pub enum AnyInterface {
     TextInferenceTokensInLogitOutInterface(TextInferenceTokensInLogitOutInterface),
     ImageGenerationInterface(ImageGenerationInterface),
+    TextToSpeechInterface(TextToSpeechInterface),
 }
 
 impl AnyInterface {
@@ -41,6 +42,7 @@ impl AnyInterface {
                 "TextInferenceTokensInLogitsOut".to_string()
             }
             AnyInterface::ImageGenerationInterface(_) => "ImageGeneration".to_string(),
+            AnyInterface::TextToSpeechInterface(_) => "TextToSpeech".to_string(),
         }
     }
 
@@ -48,6 +50,7 @@ impl AnyInterface {
         match self {
             AnyInterface::TextInferenceTokensInLogitOutInterface(x) => &x.super_graph,
             AnyInterface::ImageGenerationInterface(x) => &x.super_graph,
+            AnyInterface::TextToSpeechInterface(x) => &x.super_graph,
         }
     }
 }
@@ -1501,5 +1504,38 @@ impl ImageGenerationInterface {
 
     pub fn to_any(self) -> AnyInterface {
         AnyInterface::ImageGenerationInterface(self)
+    }
+}
+
+// ============================================================================
+// Text-to-Speech Interface
+// ============================================================================
+
+/// Interface for text-to-speech models (e.g. Kokoro).
+///
+/// The model takes phoneme token IDs, a style embedding, and a speed scalar,
+/// and produces an audio waveform.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TextToSpeechInterface {
+    pub super_graph: SuperGraph,
+    /// Phoneme token IDs input (shape depends on model; Kokoro uses [1, seq_len]).
+    pub input_ids_link: SuperGraphLinkTensor,
+    /// Style/voice embedding input (e.g. [1, 1, 256] for Kokoro).
+    pub style_link: SuperGraphLinkTensor,
+    /// Speed control scalar input (e.g. [1]).
+    pub speed_link: SuperGraphLinkTensor,
+    /// Model weights.
+    pub model_weights_link: SuperGraphLinkTensorMap,
+    /// Output audio waveform (e.g. [1, audio_length]).
+    pub audio_output_link: SuperGraphLinkTensor,
+    /// Sample rate of the output audio in Hz.
+    pub sample_rate: u32,
+    /// Tokenizer for phoneme encoding.
+    pub tokenizer: TokenizerInfo,
+}
+
+impl TextToSpeechInterface {
+    pub fn to_any(self) -> AnyInterface {
+        AnyInterface::TextToSpeechInterface(self)
     }
 }

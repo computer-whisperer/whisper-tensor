@@ -1,6 +1,7 @@
 mod auto;
 mod flux;
 mod gguf;
+mod kokoro;
 mod onnx;
 mod rwkv7;
 mod sd15;
@@ -11,6 +12,7 @@ mod transformers;
 pub use self::auto::AutoLoader;
 pub use self::flux::FluxLoader;
 pub use self::gguf::GgufLoader;
+pub use self::kokoro::KokoroLoader;
 pub use self::onnx::OnnxLoader;
 pub use self::rwkv7::Rwkv7Loader;
 pub use self::sd_xl::SDXLLoader;

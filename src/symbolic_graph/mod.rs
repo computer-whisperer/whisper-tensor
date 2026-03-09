@@ -384,6 +384,19 @@ impl SymbolicGraph {
             self.ordered_outputs.push(tensor_id);
         }
         for t in onnx_graph.value_info.iter() {
+            // Skip value_info entries without shape information — these are
+            // intermediate tensors whose shapes aren't statically known.
+            let has_shape = t
+                .r#type
+                .as_ref()
+                .and_then(|tp| tp.value.as_ref())
+                .is_some_and(|v| match v {
+                    onnx::type_proto::Value::TensorType(tt) => tt.shape.is_some(),
+                    _ => false,
+                });
+            if !has_shape {
+                continue;
+            }
             graph_mutator.new_tensor_from_tensor_info(self, t, TensorType::Intermediate, rng)?;
         }
 
@@ -1663,6 +1676,14 @@ impl SymbolicGraphMutator {
                 ops::WhichUnaryOperation::Relu,
                 rng,
             )?)),
+            "LeakyRelu" => Some(AnyOperation::LeakyRelu(
+                ops::LeakyReluOperation::from_onnx(
+                    &input_tensors,
+                    &output_tensors,
+                    &onnx_node.attribute,
+                    rng,
+                )?,
+            )),
             "Sigmoid" => Some(AnyOperation::Unary(ops::UnaryOperation::from_onnx(
                 &input_tensors,
                 &output_tensors,
@@ -2131,6 +2152,32 @@ impl SymbolicGraphMutator {
                 core_opset_version,
                 rng,
             )?)),
+            "LSTM" => Some(AnyOperation::Lstm(ops::LstmOperation::from_onnx(
+                &input_tensors,
+                &output_tensors,
+                &onnx_node.attribute,
+                rng,
+            )?)),
+            "ScatterND" => Some(AnyOperation::ScatterND(ops::ScatterNDOperation::from_onnx(
+                &input_tensors,
+                &output_tensors,
+                &onnx_node.attribute,
+                rng,
+            )?)),
+            "STFT" => Some(AnyOperation::Stft(ops::StftOperation::from_onnx(
+                &input_tensors,
+                &output_tensors,
+                &onnx_node.attribute,
+                rng,
+            )?)),
+            "ConvTranspose" => Some(AnyOperation::ConvTranspose(
+                ops::ConvTransposeOperation::from_onnx(
+                    &input_tensors,
+                    &output_tensors,
+                    &onnx_node.attribute,
+                    rng,
+                )?,
+            )),
             x => Err(ONNXDecodingError::UnsupportedONNXType(x.to_string()))?,
         };
 
