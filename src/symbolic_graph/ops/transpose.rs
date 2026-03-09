@@ -17,6 +17,20 @@ pub struct TransposeOperation {
 }
 
 impl TransposeOperation {
+    pub fn new(
+        input: GlobalId,
+        output: GlobalId,
+        perm: Option<Vec<i64>>,
+        rng: &mut impl Rng,
+    ) -> Self {
+        Self {
+            global_id: GlobalId::new(rng),
+            input,
+            output,
+            perm,
+        }
+    }
+
     pub fn from_onnx(
         inputs: &[Option<GlobalId>],
         outputs: &[Option<GlobalId>],

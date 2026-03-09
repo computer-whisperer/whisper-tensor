@@ -78,6 +78,15 @@ pub struct CastOperation {
 }
 
 impl CastOperation {
+    pub fn new(input: GlobalId, output: GlobalId, to: DType, rng: &mut impl rand::Rng) -> Self {
+        Self {
+            global_id: GlobalId::new(rng),
+            input,
+            output,
+            to,
+        }
+    }
+
     pub fn from_onnx(
         inputs: &[Option<GlobalId>],
         outputs: &[Option<GlobalId>],

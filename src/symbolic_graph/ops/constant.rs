@@ -103,6 +103,14 @@ pub struct ConstantOperation {
 }
 
 impl ConstantOperation {
+    pub fn new(value: NDArrayNumericTensor<DynRank>, output: GlobalId, rng: &mut impl Rng) -> Self {
+        Self {
+            global_id: GlobalId::new(rng),
+            value,
+            output,
+        }
+    }
+
     pub(crate) fn from_onnx(
         inputs: &[Option<GlobalId>],
         outputs: &[Option<GlobalId>],

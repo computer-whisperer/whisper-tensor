@@ -18,6 +18,22 @@ pub struct GatherOperation {
 }
 
 impl GatherOperation {
+    pub fn new(
+        input: GlobalId,
+        indices: GlobalId,
+        output: GlobalId,
+        axis: i64,
+        rng: &mut impl Rng,
+    ) -> Self {
+        Self {
+            global_id: GlobalId::new(rng),
+            input,
+            indices,
+            output,
+            axis,
+        }
+    }
+
     pub(crate) fn from_onnx(
         inputs: &[Option<GlobalId>],
         outputs: &[Option<GlobalId>],

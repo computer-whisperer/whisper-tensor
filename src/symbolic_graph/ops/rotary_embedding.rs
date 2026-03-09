@@ -22,6 +22,30 @@ pub struct RotaryEmbeddingOperation {
 }
 
 impl RotaryEmbeddingOperation {
+    pub fn new(
+        data_input: GlobalId,
+        cos_cache: GlobalId,
+        sin_cache: GlobalId,
+        position_ids: Option<GlobalId>,
+        data_output: GlobalId,
+        interleaved: bool,
+        num_heads: Option<i64>,
+        rotary_embedding_dim: i64,
+        rng: &mut impl Rng,
+    ) -> Self {
+        Self {
+            global_id: GlobalId::new(rng),
+            data_input,
+            cos_cache,
+            sin_cache,
+            position_ids,
+            data_output,
+            interleaved,
+            num_heads,
+            rotary_embedding_dim,
+        }
+    }
+
     pub(crate) fn from_onnx(
         inputs: &[Option<GlobalId>],
         outputs: &[Option<GlobalId>],

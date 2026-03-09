@@ -17,6 +17,15 @@ pub struct ConcatOperation {
 }
 
 impl ConcatOperation {
+    pub fn new(inputs: Vec<GlobalId>, output: GlobalId, axis: i64, rng: &mut impl Rng) -> Self {
+        Self {
+            global_id: GlobalId::new(rng),
+            axis,
+            inputs,
+            output,
+        }
+    }
+
     pub(crate) fn from_onnx(
         inputs: &[Option<GlobalId>],
         outputs: &[Option<GlobalId>],

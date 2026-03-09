@@ -107,6 +107,22 @@ pub struct UnsqueezeOperation {
 }
 
 impl UnsqueezeOperation {
+    pub fn new(
+        input: GlobalId,
+        axes: Option<GlobalId>,
+        axes_attribute: Option<Vec<i64>>,
+        output: GlobalId,
+        rng: &mut impl Rng,
+    ) -> Self {
+        Self {
+            global_id: GlobalId::new(rng),
+            input,
+            axes,
+            axes_attribute,
+            output,
+        }
+    }
+
     pub fn from_onnx(
         inputs: &[Option<GlobalId>],
         outputs: &[Option<GlobalId>],
@@ -195,6 +211,15 @@ pub struct ReshapeOperation {
 }
 
 impl ReshapeOperation {
+    pub fn new(input: GlobalId, shape: GlobalId, output: GlobalId, rng: &mut impl Rng) -> Self {
+        Self {
+            global_id: GlobalId::new(rng),
+            input,
+            shape,
+            output,
+        }
+    }
+
     pub fn from_onnx(
         inputs: &[Option<GlobalId>],
         outputs: &[Option<GlobalId>],

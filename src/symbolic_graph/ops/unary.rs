@@ -40,6 +40,20 @@ pub struct UnaryOperation {
 }
 
 impl UnaryOperation {
+    pub fn new(
+        input: GlobalId,
+        output: GlobalId,
+        which: WhichUnaryOperation,
+        rng: &mut impl Rng,
+    ) -> Self {
+        Self {
+            global_id: GlobalId::new(rng),
+            input,
+            output,
+            which,
+        }
+    }
+
     pub(crate) fn from_onnx(
         inputs: &[Option<GlobalId>],
         outputs: &[Option<GlobalId>],
@@ -164,6 +178,15 @@ pub struct SoftmaxOperation {
 }
 
 impl SoftmaxOperation {
+    pub fn new(input: GlobalId, output: GlobalId, axis: Option<i64>, rng: &mut impl Rng) -> Self {
+        Self {
+            global_id: GlobalId::new(rng),
+            axis,
+            input,
+            output,
+        }
+    }
+
     pub(crate) fn from_onnx(
         inputs: &[Option<GlobalId>],
         outputs: &[Option<GlobalId>],

@@ -17,6 +17,22 @@ pub struct ShapeOperation {
 }
 
 impl ShapeOperation {
+    pub fn new(
+        input: GlobalId,
+        output: GlobalId,
+        start: Option<i64>,
+        end: Option<i64>,
+        rng: &mut impl Rng,
+    ) -> Self {
+        Self {
+            global_id: GlobalId::new(rng),
+            input,
+            output,
+            start,
+            end,
+        }
+    }
+
     pub(crate) fn from_onnx(
         inputs: &[Option<GlobalId>],
         outputs: &[Option<GlobalId>],

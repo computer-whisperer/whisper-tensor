@@ -39,6 +39,22 @@ pub struct BinaryOperation {
 }
 
 impl BinaryOperation {
+    pub fn new(
+        a: GlobalId,
+        b: GlobalId,
+        output: GlobalId,
+        which: WhichBinaryOperation,
+        rng: &mut impl Rng,
+    ) -> Self {
+        Self {
+            global_id: GlobalId::new(rng),
+            a,
+            b,
+            output,
+            which,
+        }
+    }
+
     pub(crate) fn from_onnx(
         inputs: &[Option<GlobalId>],
         outputs: &[Option<GlobalId>],

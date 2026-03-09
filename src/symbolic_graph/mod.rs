@@ -1154,6 +1154,11 @@ impl SymbolicGraphMutator {
         (self.graph.unwrap(), self.tensor_store)
     }
 
+    /// Borrow the inner graph mutably for direct construction.
+    pub fn graph_mut(&mut self) -> &mut SymbolicGraph {
+        self.graph.as_mut().unwrap()
+    }
+
     pub fn from_graph(graph: SymbolicGraph, tensor_store: TensorStore) -> Self {
         let mut dimension_resolver = SymbolicResolver::new();
         for dim in graph.unknown_dimensions.values() {
@@ -1368,6 +1373,113 @@ impl SymbolicGraphMutator {
     /// Direct access to the tensor store, for adding stored tensors.
     pub fn tensor_store_mut(&mut self) -> &mut TensorStore {
         &mut self.tensor_store
+    }
+
+    // -- Self-graph convenience wrappers --
+    // These operate on the mutator's own internal graph, avoiding the need
+    // to pass a separate `&mut SymbolicGraph` reference.
+
+    pub fn push_unknown_tensor(
+        &mut self,
+        name: &str,
+        tensor_type: TensorType,
+        rng: &mut impl Rng,
+    ) -> GlobalId {
+        let g = self.graph.as_mut().unwrap();
+        let global_id = GlobalId::new(rng);
+        let tensor = ONNXTensorInfo {
+            onnx_name: Some(name.to_string()),
+            tensor_type,
+            dtype: None,
+            shape: None,
+            global_id,
+        };
+        g.tensors.insert(global_id, tensor);
+        self.tensors_by_name.insert(name.to_string(), global_id);
+        global_id
+    }
+
+    pub fn push_constant_tensor(
+        &mut self,
+        value: NDArrayNumericTensor<DynRank>,
+        name: Option<String>,
+        rng: &mut impl Rng,
+    ) -> GlobalId {
+        let mut shape = Vec::new();
+        for s in value.shape() {
+            shape.push(ScalarInfoTyped::Numeric(s))
+        }
+        let global_id = GlobalId::new(rng);
+        let g = self.graph.as_mut().unwrap();
+        g.tensors.insert(
+            global_id,
+            ONNXTensorInfo {
+                onnx_name: name.clone(),
+                dtype: Some(value.dtype()),
+                shape: Some(shape),
+                tensor_type: TensorType::Constant(StoredOrNotTensor::NotStored(value)),
+                global_id,
+            },
+        );
+        if let Some(name) = name {
+            self.tensors_by_name.insert(name, global_id);
+        }
+        global_id
+    }
+
+    pub fn push_stored_tensor(
+        &mut self,
+        id: TensorStoreTensorId,
+        name: Option<String>,
+        rng: &mut impl Rng,
+    ) -> GlobalId {
+        let tensor_ref = self.tensor_store.get_tensor(id).unwrap();
+        let mut shape = Vec::new();
+        for s in tensor_ref.shape() {
+            shape.push(ScalarInfoTyped::Numeric(s))
+        }
+        let dtype = tensor_ref.dtype();
+        let global_id = GlobalId::new(rng);
+        let g = self.graph.as_mut().unwrap();
+        g.tensors.insert(
+            global_id,
+            ONNXTensorInfo {
+                onnx_name: name.clone(),
+                dtype: Some(dtype),
+                shape: Some(shape),
+                tensor_type: TensorType::Constant(StoredOrNotTensor::Stored(id)),
+                global_id,
+            },
+        );
+        if let Some(name) = name {
+            self.tensors_by_name.insert(name, global_id);
+        }
+        global_id
+    }
+
+    pub fn push_operation(
+        &mut self,
+        name: Option<String>,
+        op: AnyOperation,
+        rng: &mut impl Rng,
+    ) -> GlobalId {
+        let op_id = GlobalId::new(rng);
+        let g = self.graph.as_mut().unwrap();
+        g.operations.insert(op_id, GraphOperation { name, op });
+        op_id
+    }
+
+    pub fn push_input(&mut self, tensor_id: GlobalId) {
+        let g = self.graph.as_mut().unwrap();
+        g.ordered_inputs.push(tensor_id);
+    }
+
+    pub fn push_output(&mut self, tensor_id: GlobalId) {
+        let g = self.graph.as_mut().unwrap();
+        g.ordered_outputs.push(tensor_id);
+        if let Some(info) = g.tensors.get_mut(&tensor_id) {
+            info.tensor_type = TensorType::Output;
+        }
     }
 
     pub(crate) fn new_node_from_onnx_node(
