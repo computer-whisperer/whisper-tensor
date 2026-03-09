@@ -60,8 +60,9 @@ impl Loader for GgufLoader {
                 .map_err(LoaderError::LoadFailed)?,
             "qwen3" => crate::gguf::qwen3::load_qwen3_gguf(&gguf, &path)
                 .map_err(LoaderError::LoadFailed)?,
-            "phi3" => crate::gguf::phi3::load_phi3_gguf(&gguf, &path)
-                .map_err(LoaderError::LoadFailed)?,
+            "phi3" => {
+                crate::gguf::phi3::load_phi3_gguf(&gguf, &path).map_err(LoaderError::LoadFailed)?
+            }
             _ => {
                 return Err(LoaderError::LoadFailed(anyhow::anyhow!(
                     "Unsupported GGUF architecture: {arch}"

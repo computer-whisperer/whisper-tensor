@@ -46,11 +46,10 @@ impl GgufQwen3Config {
         let feed_forward_length = get_u64(&format!("{prefix}.feed_forward_length"))? as usize;
 
         // Qwen3 provides explicit head_dim; fall back to embedding_length / num_heads
-        let head_dim = gguf
-            .get_metadata(&format!("{prefix}.attention.key_length"))
-            .and_then(|v| v.as_u64_coerce())
-            .unwrap_or((embedding_length / num_attention_heads) as u64)
-            as usize;
+        let head_dim =
+            gguf.get_metadata(&format!("{prefix}.attention.key_length"))
+                .and_then(|v| v.as_u64_coerce())
+                .unwrap_or((embedding_length / num_attention_heads) as u64) as usize;
 
         let rope_theta = gguf
             .get_metadata(&format!("{prefix}.rope.freq_base"))
@@ -289,20 +288,12 @@ impl<'a> GraphBuilder<'a> {
             // QK-norm: per-head RMS norm on Q and K (applied on last dim = head_dim)
             let q_norm_w = self.load_weight(&format!("blk.{i}.attn_q_norm.weight"), rng)?;
             let k_norm_w = self.load_weight(&format!("blk.{i}.attn_k_norm.weight"), rng)?;
-            let q = self.m.push_rms_norm(
-                &format!("blk.{i}.attn_q_norm"),
-                q,
-                q_norm_w,
-                eps,
-                rng,
-            );
-            let k = self.m.push_rms_norm(
-                &format!("blk.{i}.attn_k_norm"),
-                k,
-                k_norm_w,
-                eps,
-                rng,
-            );
+            let q = self
+                .m
+                .push_rms_norm(&format!("blk.{i}.attn_q_norm"), q, q_norm_w, eps, rng);
+            let k = self
+                .m
+                .push_rms_norm(&format!("blk.{i}.attn_k_norm"), k, k_norm_w, eps, rng);
 
             // Transpose to [B, H, S, D]
             let q = self

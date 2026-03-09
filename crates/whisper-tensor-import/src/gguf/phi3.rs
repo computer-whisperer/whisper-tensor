@@ -49,11 +49,10 @@ impl GgufPhi3Config {
             .get_metadata(&format!("{prefix}.rope.freq_base"))
             .and_then(|v| v.as_f32_coerce())
             .unwrap_or(10000.0);
-        let rope_dimension_count = gguf
-            .get_metadata(&format!("{prefix}.rope.dimension_count"))
-            .and_then(|v| v.as_u64_coerce())
-            .unwrap_or((embedding_length / num_attention_heads) as u64)
-            as usize;
+        let rope_dimension_count =
+            gguf.get_metadata(&format!("{prefix}.rope.dimension_count"))
+                .and_then(|v| v.as_u64_coerce())
+                .unwrap_or((embedding_length / num_attention_heads) as u64) as usize;
         let max_position_embeddings = gguf
             .get_metadata(&format!("{prefix}.context_length"))
             .and_then(|v| v.as_u64_coerce())
@@ -246,9 +245,7 @@ impl<'a> GraphBuilder<'a> {
 
         let (cos_cache_id, sin_cache_id) = {
             let base_inv_freq: Vec<f64> = (0..half_head_dim)
-                .map(|i| {
-                    1.0 / (config.rope_theta as f64).powf(i as f64 * 2.0 / head_dim as f64)
-                })
+                .map(|i| 1.0 / (config.rope_theta as f64).powf(i as f64 * 2.0 / head_dim as f64))
                 .collect();
 
             // Apply SU scaling factors if present
@@ -308,22 +305,14 @@ impl<'a> GraphBuilder<'a> {
 
             // Fused QKV projection: attn_qkv.weight [hidden, q_dim + 2*kv_dim]
             let qkv_w = self.load_weight(&format!("blk.{i}.attn_qkv.weight"), rng)?;
-            let qkv = self.m.push_quant_linear(
-                &format!("blk.{i}.attn_qkv"),
-                att_normed,
-                qkv_w,
-                rng,
-            );
+            let qkv =
+                self.m
+                    .push_quant_linear(&format!("blk.{i}.attn_qkv"), att_normed, qkv_w, rng);
 
             // Split Q, K, V from fused output along last axis
-            let q = self.m.push_slice(
-                &format!("blk.{i}.q_slice"),
-                qkv,
-                -1,
-                0,
-                q_dim as i64,
-                rng,
-            );
+            let q = self
+                .m
+                .push_slice(&format!("blk.{i}.q_slice"), qkv, -1, 0, q_dim as i64, rng);
             let k = self.m.push_slice(
                 &format!("blk.{i}.k_slice"),
                 qkv,
