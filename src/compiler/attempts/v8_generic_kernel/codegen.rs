@@ -54,19 +54,58 @@ pub enum V8Error {
 
 // ---- Compiled graph ----
 
+/// A single JIT-compiled kernel function.
+///
+/// Each kernel takes `(ptr_table, i_start, i_end)` where i_start..i_end
+/// bounds the outermost parallelizable axis.  Calling with (0, parallel_extent)
+/// executes the full range.
+pub struct CompiledKernel {
+    func_ptr: *const u8,
+    /// Extent of the parallelizable axis (the outermost non-blocked output axis
+    /// for reductions, axis 0 for pointwise).  A tile covers [i_start, i_end)
+    /// within 0..parallel_extent.
+    pub parallel_extent: usize,
+    /// Output tensor this kernel writes.
+    pub output_tensor: GlobalId,
+    /// Input tensors this kernel reads (deduplicated).
+    pub input_tensors: Vec<GlobalId>,
+}
+
+impl CompiledKernel {
+    /// Execute this kernel for the given row range.
+    ///
+    /// # Safety
+    /// `buffers` must contain valid pointers for all tensors in the layout.
+    pub unsafe fn execute_range(&self, buffers: *const *mut f32, i_start: usize, i_end: usize) {
+        let func: unsafe extern "C" fn(*const *mut f32, i64, i64) =
+            unsafe { std::mem::transmute(self.func_ptr) };
+        unsafe { func(buffers, i_start as i64, i_end as i64) };
+    }
+}
+
 pub struct NativeCompiledGraph {
     _module: JITModule,
-    func_ptr: *const u8,
     pub layout: TensorLayout,
+    pub kernels: Vec<CompiledKernel>,
     /// Scratch buffer for B-panel packing.  The raw pointer is embedded in
     /// the JIT'd code as an iconst, so this Vec must live as long as the
     /// compiled graph.
     _scratch: Vec<f32>,
 }
 
+// Safety: JIT function pointers and scratch buffer are valid for the
+// lifetime of NativeCompiledGraph.  Concurrent calls with non-overlapping
+// tile ranges are safe (each writes to disjoint output rows).
+unsafe impl Send for CompiledKernel {}
+unsafe impl Sync for CompiledKernel {}
 unsafe impl Send for NativeCompiledGraph {}
+unsafe impl Sync for NativeCompiledGraph {}
 
 impl NativeCompiledGraph {
+    /// Execute all kernels serially, each with its full range.
+    ///
+    /// # Safety
+    /// `buffers` must contain valid pointers for all tensors in the layout.
     pub unsafe fn execute(&self, buffers: &mut [*mut f32]) {
         assert!(
             buffers.len() >= self.layout.num_buffers,
@@ -74,9 +113,10 @@ impl NativeCompiledGraph {
             self.layout.num_buffers,
             buffers.len()
         );
-        let func: unsafe extern "C" fn(*const *mut f32) =
-            unsafe { std::mem::transmute(self.func_ptr) };
-        unsafe { func(buffers.as_ptr()) };
+        let ptr = buffers.as_ptr();
+        for kernel in &self.kernels {
+            unsafe { kernel.execute_range(ptr, 0, kernel.parallel_extent) };
+        }
     }
 }
 
@@ -587,6 +627,22 @@ fn term_has_transcendentals(term: &ReductionTermPattern) -> bool {
 
 // ---- Kernel compilation ----
 
+/// Determine the parallelizable axis for a reduction kernel.
+///
+/// Returns `Some(axis)` if there's a non-blocked output axis that can be
+/// partitioned across threads, or `None` for single-tile kernels.
+fn reduction_parallel_axis(spec: &ReductionKernelSpec) -> Option<usize> {
+    // The outermost non-blocked axis is axis_order[0], but only if there's
+    // more than one axis (otherwise axis_order[0] is the blocked axis itself).
+    if spec.axis_order.len() > 1 {
+        let axis = spec.axis_order[0];
+        if Some(axis) != spec.blocking.block_axis {
+            return Some(axis);
+        }
+    }
+    None
+}
+
 fn compile_kernels(
     specs: &[KernelSpec],
     layout: &TensorLayout,
@@ -616,60 +672,67 @@ fn compile_kernels(
     let (mut module, math_func_ids) = setup_jit_module()?;
     let ptr_type = module.isa().pointer_type();
 
-    let mut sig = module.make_signature();
-    sig.params.push(AbiParam::new(ptr_type));
-    let func_id = module
-        .declare_function("wt_v8_kernel", Linkage::Local, &sig)
-        .map_err(CodegenError::from)?;
-
-    let mut ctx = module.make_context();
-    ctx.func.signature = sig;
-    let math_refs: HashMap<&str, cranelift_codegen::ir::FuncRef> = math_func_ids
-        .iter()
-        .map(|(name, fid)| {
-            let fref = module.declare_func_in_func(*fid, &mut ctx.func);
-            (*name, fref)
-        })
-        .collect();
+    // Declare one function per kernel, each with signature:
+    //   fn(ptr_table: ptr, i_start: i64, i_end: i64)
+    let mut func_ids = Vec::with_capacity(specs.len());
+    for idx in 0..specs.len() {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(ptr_type)); // ptr_table
+        sig.params.push(AbiParam::new(types::I64)); // i_start
+        sig.params.push(AbiParam::new(types::I64)); // i_end
+        let name = format!("wt_v8_k{idx}");
+        let func_id = module
+            .declare_function(&name, Linkage::Local, &sig)
+            .map_err(CodegenError::from)?;
+        func_ids.push((func_id, sig));
+    }
 
     let mut fn_builder_ctx = FunctionBuilderContext::new();
-    let mut builder = FunctionBuilder::new(&mut ctx.func, &mut fn_builder_ctx);
 
-    let entry = builder.create_block();
-    builder.append_block_params_for_function_params(entry);
-    builder.switch_to_block(entry);
-    builder.seal_block(entry);
-    let ptr_table = builder.block_params(entry)[0];
+    // Compile each kernel into its own function.
+    for (idx, spec) in specs.iter().enumerate() {
+        let (fid, ref sig) = func_ids[idx];
+        let mut ctx = module.make_context();
+        ctx.func.signature = sig.clone();
 
-    // Embed scratch buffer pointer as a constant in the JIT'd code.
-    let scratch_ptr_val = if max_panel_elements > 0 {
-        Some(builder.ins().iconst(ptr_type, scratch_raw_ptr))
-    } else {
-        None
-    };
+        let math_refs: HashMap<&str, cranelift_codegen::ir::FuncRef> = math_func_ids
+            .iter()
+            .map(|(name, mid)| {
+                let fref = module.declare_func_in_func(*mid, &mut ctx.func);
+                (*name, fref)
+            })
+            .collect();
 
-    let mut next_var = 0u32;
+        let mut builder = FunctionBuilder::new(&mut ctx.func, &mut fn_builder_ctx);
+        let entry = builder.create_block();
+        builder.append_block_params_for_function_params(entry);
+        builder.switch_to_block(entry);
+        builder.seal_block(entry);
 
-    for spec in specs {
+        let params = builder.block_params(entry);
+        let ptr_table = params[0];
+        let par_start = params[1];
+        let par_end = params[2];
+
+        let scratch_ptr_val = if max_panel_elements > 0 {
+            Some(builder.ins().iconst(ptr_type, scratch_raw_ptr))
+        } else {
+            None
+        };
+
+        let mut next_var = 0u32;
+
         match spec {
             KernelSpec::Reduction(rspec) => {
                 let output_ptr = load_tensor_base_ptr(
-                    &mut builder,
-                    layout,
-                    ptr_table,
-                    ptr_type,
-                    rspec.output_tensor,
+                    &mut builder, layout, ptr_table, ptr_type, rspec.output_tensor,
                 )?;
                 let mut tensor_ptrs: HashMap<GlobalId, cranelift_codegen::ir::Value> =
                     HashMap::new();
                 for access in &rspec.accesses {
                     if !tensor_ptrs.contains_key(&access.tensor) {
                         let ptr = load_tensor_base_ptr(
-                            &mut builder,
-                            layout,
-                            ptr_table,
-                            ptr_type,
-                            access.tensor,
+                            &mut builder, layout, ptr_table, ptr_type, access.tensor,
                         )?;
                         tensor_ptrs.insert(access.tensor, ptr);
                     }
@@ -682,37 +745,23 @@ fn compile_kernels(
 
                 let order = rspec.axis_order.clone();
                 let mut axis_vals = vec![None; rspec.output_shape.len()];
+                let par_axis = reduction_parallel_axis(rspec);
                 emit_reduction_output_loops(
-                    &mut builder,
-                    &mut next_var,
-                    rspec,
-                    &order,
-                    0,
-                    &mut axis_vals,
-                    output_ptr,
-                    &input_ptrs,
-                    &math_refs,
-                    scratch_ptr_val,
+                    &mut builder, &mut next_var, rspec, &order, &mut axis_vals,
+                    output_ptr, &input_ptrs, &math_refs, scratch_ptr_val,
+                    par_axis, par_start, par_end,
                 )?;
             }
             KernelSpec::Pointwise(pspec) => {
                 let output_ptr = load_tensor_base_ptr(
-                    &mut builder,
-                    layout,
-                    ptr_table,
-                    ptr_type,
-                    pspec.output_tensor,
+                    &mut builder, layout, ptr_table, ptr_type, pspec.output_tensor,
                 )?;
                 let mut tensor_ptrs: HashMap<GlobalId, cranelift_codegen::ir::Value> =
                     HashMap::new();
                 for access in &pspec.accesses {
                     if !tensor_ptrs.contains_key(&access.tensor) {
                         let ptr = load_tensor_base_ptr(
-                            &mut builder,
-                            layout,
-                            ptr_table,
-                            ptr_type,
-                            access.tensor,
+                            &mut builder, layout, ptr_table, ptr_type, access.tensor,
                         )?;
                         tensor_ptrs.insert(access.tensor, ptr);
                     }
@@ -723,35 +772,71 @@ fn compile_kernels(
                     .map(|a| tensor_ptrs[&a.tensor])
                     .collect();
 
+                let par_axis = if !pspec.output_shape.is_empty() { Some(0) } else { None };
                 let mut axis_vals = vec![None; pspec.output_shape.len()];
                 emit_pointwise_loops(
-                    &mut builder,
-                    &mut next_var,
-                    pspec,
-                    0,
-                    &mut axis_vals,
-                    output_ptr,
-                    &input_ptrs,
-                    &math_refs,
+                    &mut builder, &mut next_var, pspec, 0, &mut axis_vals,
+                    output_ptr, &input_ptrs, &math_refs,
+                    par_axis, par_start, par_end,
                 )?;
             }
         }
+
+        builder.ins().return_(&[]);
+        builder.finalize();
+
+        module
+            .define_function(fid, &mut ctx)
+            .map_err(CodegenError::from)?;
+        module.clear_context(&mut ctx);
     }
 
-    builder.ins().return_(&[]);
-    builder.finalize();
-
-    module
-        .define_function(func_id, &mut ctx)
-        .map_err(CodegenError::from)?;
-    module.clear_context(&mut ctx);
     module.finalize_definitions().expect("finalize JIT");
-    let code_ptr = module.get_finalized_function(func_id);
+
+    // Resolve function pointers and build CompiledKernel metadata.
+    let mut compiled_kernels = Vec::with_capacity(specs.len());
+    for (idx, spec) in specs.iter().enumerate() {
+        let (fid, _) = func_ids[idx];
+        let func_ptr = module.get_finalized_function(fid);
+        let (parallel_extent, output_tensor, input_tensors) = match spec {
+            KernelSpec::Reduction(r) => {
+                let par_axis = reduction_parallel_axis(r);
+                let extent = par_axis.map(|a| r.output_shape[a]).unwrap_or(1);
+                let mut inputs: Vec<GlobalId> = r
+                    .accesses
+                    .iter()
+                    .map(|a| a.tensor)
+                    .collect::<HashSet<_>>()
+                    .into_iter()
+                    .collect();
+                inputs.sort();
+                (extent, r.output_tensor, inputs)
+            }
+            KernelSpec::Pointwise(p) => {
+                let extent = p.output_shape.first().copied().unwrap_or(1);
+                let mut inputs: Vec<GlobalId> = p
+                    .accesses
+                    .iter()
+                    .map(|a| a.tensor)
+                    .collect::<HashSet<_>>()
+                    .into_iter()
+                    .collect();
+                inputs.sort();
+                (extent, p.output_tensor, inputs)
+            }
+        };
+        compiled_kernels.push(CompiledKernel {
+            func_ptr,
+            parallel_extent,
+            output_tensor,
+            input_tensors,
+        });
+    }
 
     Ok(NativeCompiledGraph {
         _module: module,
-        func_ptr: code_ptr,
         layout: layout.clone(),
+        kernels: compiled_kernels,
         _scratch: scratch,
     })
 }
@@ -775,12 +860,14 @@ fn emit_reduction_output_loops(
     next_var: &mut u32,
     spec: &ReductionKernelSpec,
     axis_order: &[usize],
-    _depth: usize,
     axis_vals: &mut [Option<cranelift_codegen::ir::Value>],
     output_ptr: cranelift_codegen::ir::Value,
     input_ptrs: &[cranelift_codegen::ir::Value],
     math_refs: &HashMap<&str, cranelift_codegen::ir::FuncRef>,
     scratch_ptr: Option<cranelift_codegen::ir::Value>,
+    par_axis: Option<usize>,
+    par_start: cranelift_codegen::ir::Value,
+    par_end: cranelift_codegen::ir::Value,
 ) -> Result<(), V8Error> {
     let k_total = spec.reduction_terms as i64;
     let kc_size = spec.tiling.kc.map(|v| v as i64);
@@ -806,6 +893,7 @@ fn emit_reduction_output_loops(
                     builder, next_var, spec, axis_order, axis_vals,
                     output_ptr, input_ptrs, math_refs,
                     k_total, kc_size, Some(jc_val), Some(jc_end), scratch_ptr,
+                    par_axis, par_start, par_end,
                 )
             },
         )
@@ -814,6 +902,7 @@ fn emit_reduction_output_loops(
             builder, next_var, spec, axis_order, axis_vals,
             output_ptr, input_ptrs, math_refs,
             k_total, kc_size, None, None, scratch_ptr,
+            par_axis, par_start, par_end,
         )
     }
 }
@@ -834,6 +923,9 @@ fn emit_kc_and_inner_axes(
     jc_start: Option<cranelift_codegen::ir::Value>,
     jc_end: Option<cranelift_codegen::ir::Value>,
     scratch_ptr: Option<cranelift_codegen::ir::Value>,
+    par_axis: Option<usize>,
+    par_start: cranelift_codegen::ir::Value,
+    par_end: cranelift_codegen::ir::Value,
 ) -> Result<(), V8Error> {
     let do_packing = !spec.packable.is_empty()
         && scratch_ptr.is_some()
@@ -877,6 +969,7 @@ fn emit_kc_and_inner_axes(
                 builder, next_var, spec, axis_order, 0, axis_vals,
                 output_ptr, input_ptrs, math_refs,
                 kc_val, k_end, is_first, jc_start, jc_end, packing.as_ref(),
+                par_axis, par_start, par_end,
             )
         })
     } else {
@@ -888,6 +981,7 @@ fn emit_kc_and_inner_axes(
             builder, next_var, spec, axis_order, 0, axis_vals,
             output_ptr, input_ptrs, math_refs,
             k_start, k_end, is_first, jc_start, jc_end, None,
+            par_axis, par_start, par_end,
         )
     }
 }
@@ -988,6 +1082,9 @@ fn emit_reduction_inner_axes(
     jc_start: Option<cranelift_codegen::ir::Value>,
     jc_end: Option<cranelift_codegen::ir::Value>,
     packing: Option<&TilePackingCtx>,
+    par_axis: Option<usize>,
+    par_start: cranelift_codegen::ir::Value,
+    par_end: cranelift_codegen::ir::Value,
 ) -> Result<(), V8Error> {
     if depth == axis_order.len() {
         return emit_scalar_reduction(
@@ -999,6 +1096,7 @@ fn emit_reduction_inner_axes(
     let axis = axis_order[depth];
     let full_extent = spec.output_shape[axis] as i64;
     let is_blocked = spec.blocking.block_axis == Some(axis) && spec.blocking.nr > 1;
+    let is_parallel = par_axis == Some(axis);
 
     if is_blocked {
         let nr = spec.blocking.nr;
@@ -1060,6 +1158,17 @@ fn emit_reduction_inner_axes(
         }
 
         Ok(())
+    } else if is_parallel {
+        // Use the function's par_start..par_end range for this axis.
+        let iv = alloc_loop_var(next_var);
+        emit_for_loop_dynamic(builder, iv, par_start, par_end, 1, |builder, val| {
+            axis_vals[axis] = Some(val);
+            emit_reduction_inner_axes(
+                builder, next_var, spec, axis_order, depth + 1, axis_vals, output_ptr,
+                input_ptrs, math_refs, k_start, k_end, is_first_kc, jc_start, jc_end,
+                packing, par_axis, par_start, par_end,
+            )
+        })
     } else {
         let iv = alloc_loop_var(next_var);
         emit_for_loop(builder, iv, 0, full_extent, 1, |builder, val| {
@@ -1067,7 +1176,7 @@ fn emit_reduction_inner_axes(
             emit_reduction_inner_axes(
                 builder, next_var, spec, axis_order, depth + 1, axis_vals, output_ptr,
                 input_ptrs, math_refs, k_start, k_end, is_first_kc, jc_start, jc_end,
-                packing,
+                packing, par_axis, par_start, par_end,
             )
         })
     }
@@ -1429,6 +1538,9 @@ fn emit_pointwise_loops(
     output_ptr: cranelift_codegen::ir::Value,
     input_ptrs: &[cranelift_codegen::ir::Value],
     math_refs: &HashMap<&str, cranelift_codegen::ir::FuncRef>,
+    par_axis: Option<usize>,
+    par_start: cranelift_codegen::ir::Value,
+    par_end: cranelift_codegen::ir::Value,
 ) -> Result<(), V8Error> {
     if depth == spec.output_shape.len() {
         let mut load_vals = Vec::with_capacity(spec.accesses.len());
@@ -1443,14 +1555,25 @@ fn emit_pointwise_loops(
     }
 
     let extent = spec.output_shape[depth] as i64;
+    let is_parallel = par_axis == Some(depth);
     let iv = alloc_loop_var(next_var);
-    emit_for_loop(builder, iv, 0, extent, 1, |builder, val| {
-        axis_vals[depth] = Some(val);
-        emit_pointwise_loops(
-            builder, next_var, spec, depth + 1, axis_vals, output_ptr, input_ptrs,
-            math_refs,
-        )
-    })
+    if is_parallel {
+        emit_for_loop_dynamic(builder, iv, par_start, par_end, 1, |builder, val| {
+            axis_vals[depth] = Some(val);
+            emit_pointwise_loops(
+                builder, next_var, spec, depth + 1, axis_vals, output_ptr, input_ptrs,
+                math_refs, par_axis, par_start, par_end,
+            )
+        })
+    } else {
+        emit_for_loop(builder, iv, 0, extent, 1, |builder, val| {
+            axis_vals[depth] = Some(val);
+            emit_pointwise_loops(
+                builder, next_var, spec, depth + 1, axis_vals, output_ptr, input_ptrs,
+                math_refs, par_axis, par_start, par_end,
+            )
+        })
+    }
 }
 
 // ---- Term expression emission ----

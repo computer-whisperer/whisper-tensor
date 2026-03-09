@@ -22,6 +22,7 @@ use whisper_tensor::compiler::attempts::v7_parallel_crystal::codegen as v7_codeg
 use whisper_tensor::compiler::attempts::v7_parallel_crystal::executor as v7_exec;
 use whisper_tensor::compiler::attempts::v7_parallel_crystal::planner as v7_planner;
 use whisper_tensor::compiler::attempts::v8_generic_kernel::codegen as v8_codegen;
+use whisper_tensor::compiler::attempts::v8_generic_kernel::executor as v8_executor;
 
 use whisper_tensor::dtype::DType;
 use whisper_tensor::graph::GlobalId;
@@ -1495,11 +1496,48 @@ fn main() {
 
                 print_timing("Interpreter:", interp_avg, iters);
                 println!();
-                print_timing("v8 generic:", v8_avg, iters);
+                print_timing("v8 serial:", v8_avg, iters);
                 println!(
                     "  {:.2}x",
                     interp_avg.as_nanos() as f64 / v8_avg.as_nanos() as f64
                 );
+
+                // Parallel execution benchmark.
+                let n_threads = std::thread::available_parallelism()
+                    .map(|x| x.get())
+                    .unwrap_or(1);
+                if n_threads > 1 {
+                    let mut par_bufs: Vec<Vec<f32>> =
+                        (0..v8_compiled.layout.num_buffers).map(|_| Vec::new()).collect();
+                    for (&id, &sz) in &v8_compiled.layout.tensor_sizes {
+                        let idx = v8_compiled.layout.tensor_index[&id];
+                        par_bufs[idx] = vec![0.0f32; sz];
+                    }
+                    for (id, data) in &compiled_inputs {
+                        if let Some(&idx) = v8_compiled.layout.tensor_index.get(id) {
+                            par_bufs[idx][..data.len()].copy_from_slice(data);
+                        }
+                    }
+                    let par_ptrs: Vec<*mut f32> =
+                        par_bufs.iter_mut().map(|b| b.as_mut_ptr()).collect();
+                    let t = Instant::now();
+                    for _ in 0..iters {
+                        unsafe {
+                            v8_executor::execute_parallel(&v8_compiled, &par_ptrs, n_threads);
+                        }
+                    }
+                    let par_avg = t.elapsed() / iters;
+                    print_timing(
+                        &format!("v8 parallel({n_threads}t):"),
+                        par_avg,
+                        iters,
+                    );
+                    println!(
+                        "  {:.2}x  ({:.1}x vs serial)",
+                        interp_avg.as_nanos() as f64 / par_avg.as_nanos() as f64,
+                        v8_avg.as_nanos() as f64 / par_avg.as_nanos() as f64,
+                    );
+                }
                 println!("  PASS\n");
             }
         }
