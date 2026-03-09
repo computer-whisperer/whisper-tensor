@@ -920,6 +920,14 @@ impl SymbolicGraph {
                 );
             }
 
+            // Build external-space param update mapping
+            for &sym_param in &backward_opts.trainable_params {
+                let combined_param = sym_to_combined[&sym_param];
+                if let Some(&new_param) = training_meta.param_to_new_param.get(&combined_param) {
+                    training_meta.param_updates.insert(sym_param, new_param);
+                }
+            }
+
             combined.training_metadata = Some(training_meta.clone());
 
             // Set outputs: loss + forward outputs + updated params + optimizer state

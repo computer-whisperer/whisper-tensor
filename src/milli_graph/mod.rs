@@ -87,6 +87,22 @@ pub struct TrainingMetadata {
     /// Global optimizer state outputs
     pub global_state_outputs: HashMap<String, GlobalId>,
     pub external_inputs: Vec<GlobalId>,
+
+    /// Maps external (symbolic-space) parameter IDs to updated-parameter output IDs.
+    ///
+    /// This is the caller-facing version of `param_to_new_param` (which uses
+    /// combined-space IDs). Use this in the training loop to feed updated
+    /// parameters back:
+    ///
+    /// ```ignore
+    /// for (&ext_param, &new_param_output) in &meta.param_updates {
+    ///     params.insert(ext_param, results[&new_param_output].clone());
+    /// }
+    /// ```
+    ///
+    /// Only populated when the graph was generated via
+    /// `SymbolicGraph::generate_milli_graph_with_options`.
+    pub param_updates: HashMap<GlobalId, GlobalId>,
 }
 
 /// Semantic role of a tensor within the training graph.

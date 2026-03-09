@@ -273,24 +273,7 @@ fn main() {
     // 5. Initialize weights
     let mut params = init_weights(&mut rng, &param_ids);
 
-    // 6. Pre-compute the mapping from combined-space param IDs back to
-    //    symbolic-space (external) input IDs, so we can feed updated
-    //    parameters back into the graph each step.
-    let combined_to_external: HashMap<GlobalId, GlobalId> = meta
-        .param_to_new_param
-        .keys()
-        .map(|&combined_param| {
-            let ext = training_graph
-                .input_map
-                .iter()
-                .find(|&(_, internal)| *internal == combined_param)
-                .map(|(ext, _)| *ext)
-                .expect("param not found in input_map");
-            (combined_param, ext)
-        })
-        .collect();
-
-    // 7. Training loop
+    // 6. Training loop
     let mut backend = EvalBackend::NDArray;
     let batch_size = 64;
     let num_epochs = 5;
@@ -331,9 +314,8 @@ fn main() {
             num_batches += 1;
 
             // Feed updated parameters back
-            for (&combined_param, &new_param) in &meta.param_to_new_param {
-                let ext_key = combined_to_external[&combined_param];
-                params.insert(ext_key, results[&new_param].clone());
+            for (&ext_param, &new_param_output) in &meta.param_updates {
+                params.insert(ext_param, results[&new_param_output].clone());
             }
 
             batch_start += batch_size;
