@@ -533,6 +533,7 @@ pub mod jit {
         // SIMD eligibility: NR must be multiple of 4, all varying loads
         // must be packable, body must not contain function calls, and
         // block_axis must be innermost (for contiguous stores).
+        // Note: Cranelift 0.116 x86-64 only supports 128-bit (F32X4) vectors.
         const SIMD_WIDTH: usize = 4;
         let use_simd = nr % SIMD_WIDTH == 0
             && block_axis + 1 == ndim
@@ -542,8 +543,8 @@ pub mod jit {
             && !body_has_func_calls(body_pattern);
 
         // Allocate stack slots for pack panels (before any loops).
-        // Use 16-byte alignment when SIMD is active for aligned vector loads.
-        let panel_align = if use_simd { 16 } else { 0 };
+        // align_shift 4 → 16-byte alignment for F32X4 aligned vector loads.
+        let panel_align: u8 = if use_simd { 4 } else { 0 };
         let panel_ptrs: Vec<Option<Value>> = if any_packable {
             red.accesses
                 .iter()
@@ -620,40 +621,84 @@ pub mod jit {
                 let slot = layout.tensor_index[&access.tensor];
                 let src_buf = buf_ptrs[&slot];
 
-                // Unroll NR lanes in packing
-                for lane in 0..nr {
-                    // src_flat = base + block_coeff * (j0 + lane) + red_coeff * pk
-                    let j_lane = builder.ins().iadd_imm(j0_pack, lane as i64);
-                    let mut src_flat = builder.ins().iconst(types::I64, access.base);
-                    if block_coeff == 1 {
-                        src_flat = builder.ins().iadd(src_flat, j_lane);
-                    } else if block_coeff != 0 {
-                        let c = builder.ins().iconst(types::I64, block_coeff);
-                        let contrib = builder.ins().imul(c, j_lane);
-                        src_flat = builder.ins().iadd(src_flat, contrib);
-                    }
+                // Vectorized packing: when block_coeff == 1 and SIMD is
+                // active, consecutive lanes are contiguous in source memory.
+                // Use F32X4 loads/stores to pack 4 lanes at a time.
+                let vec_pack = use_simd && block_coeff == 1;
+
+                if vec_pack {
+                    // Compute source base for this k:
+                    //   src_flat0 = base + j0 + red_coeff * pk
+                    let mut src_flat0 = builder.ins().iconst(types::I64, access.base);
+                    src_flat0 = builder.ins().iadd(src_flat0, j0_pack);
                     if red_coeff == 1 {
-                        src_flat = builder.ins().iadd(src_flat, pk);
+                        src_flat0 = builder.ins().iadd(src_flat0, pk);
                     } else {
                         let c = builder.ins().iconst(types::I64, red_coeff);
                         let contrib = builder.ins().imul(c, pk);
-                        src_flat = builder.ins().iadd(src_flat, contrib);
+                        src_flat0 = builder.ins().iadd(src_flat0, contrib);
                     }
+                    let src_base_byte = builder.ins().ishl_imm(src_flat0, 2);
+                    let src_base_ptr = builder.ins().iadd(src_buf, src_base_byte);
 
-                    let src_byte = builder.ins().ishl_imm(src_flat, 2);
-                    let src_ptr = builder.ins().iadd(src_buf, src_byte);
-                    let val =
-                        builder
-                            .ins()
-                            .load(types::F32, MemFlags::trusted(), src_ptr, 0);
-
-                    // dst_idx = pk * NR + lane
+                    // Panel destination base: panel[pk * NR]
                     let nr_val = builder.ins().iconst(types::I64, nr as i64);
                     let pk_times_nr = builder.ins().imul(pk, nr_val);
-                    let dst_idx = builder.ins().iadd_imm(pk_times_nr, lane as i64);
-                    let dst_byte = builder.ins().ishl_imm(dst_idx, 2);
-                    let dst_ptr = builder.ins().iadd(panel_ptr, dst_byte);
-                    builder.ins().store(MemFlags::trusted(), val, dst_ptr, 0);
+                    let dst_base_byte = builder.ins().ishl_imm(pk_times_nr, 2);
+                    let dst_base_ptr = builder.ins().iadd(panel_ptr, dst_base_byte);
+
+                    // Vector copy in groups of 4
+                    for vi in 0..(nr / SIMD_WIDTH) {
+                        let byte_off = (vi * SIMD_WIDTH * 4) as i32;
+                        let vec = builder.ins().load(
+                            types::F32X4,
+                            MemFlags::trusted(),
+                            src_base_ptr,
+                            byte_off,
+                        );
+                        builder.ins().store(
+                            MemFlags::trusted(),
+                            vec,
+                            dst_base_ptr,
+                            byte_off,
+                        );
+                    }
+                } else {
+                    // Scalar packing fallback
+                    for lane in 0..nr {
+                        // src_flat = base + block_coeff * (j0 + lane) + red_coeff * pk
+                        let j_lane = builder.ins().iadd_imm(j0_pack, lane as i64);
+                        let mut src_flat = builder.ins().iconst(types::I64, access.base);
+                        if block_coeff == 1 {
+                            src_flat = builder.ins().iadd(src_flat, j_lane);
+                        } else if block_coeff != 0 {
+                            let c = builder.ins().iconst(types::I64, block_coeff);
+                            let contrib = builder.ins().imul(c, j_lane);
+                            src_flat = builder.ins().iadd(src_flat, contrib);
+                        }
+                        if red_coeff == 1 {
+                            src_flat = builder.ins().iadd(src_flat, pk);
+                        } else {
+                            let c = builder.ins().iconst(types::I64, red_coeff);
+                            let contrib = builder.ins().imul(c, pk);
+                            src_flat = builder.ins().iadd(src_flat, contrib);
+                        }
+
+                        let src_byte = builder.ins().ishl_imm(src_flat, 2);
+                        let src_ptr = builder.ins().iadd(src_buf, src_byte);
+                        let val =
+                            builder
+                                .ins()
+                                .load(types::F32, MemFlags::trusted(), src_ptr, 0);
+
+                        // dst_idx = pk * NR + lane
+                        let nr_val = builder.ins().iconst(types::I64, nr as i64);
+                        let pk_times_nr = builder.ins().imul(pk, nr_val);
+                        let dst_idx = builder.ins().iadd_imm(pk_times_nr, lane as i64);
+                        let dst_byte = builder.ins().ishl_imm(dst_idx, 2);
+                        let dst_ptr = builder.ins().iadd(panel_ptr, dst_byte);
+                        builder.ins().store(MemFlags::trusted(), val, dst_ptr, 0);
+                    }
                 }
 
                 // pk++
@@ -780,11 +825,11 @@ pub mod jit {
                     })
                     .collect();
 
-                let term = eval_body_expr_vec(
-                    builder, module, body_pattern, &body_vals, math_funcs,
-                )?;
                 let acc = builder.use_var(vec_acc_vars[vi]);
-                let new_acc = emit_binop(builder, accum_op, acc, term);
+                let new_acc = emit_accum_vec(
+                    builder, module, body_pattern, &body_vals, math_funcs,
+                    accum_op, acc,
+                )?;
                 builder.def_var(vec_acc_vars[vi], new_acc);
             }
 
@@ -912,10 +957,11 @@ pub mod jit {
                     })
                     .collect();
 
-                let term =
-                    eval_body_expr(builder, module, body_pattern, &body_vals, math_funcs)?;
                 let acc = builder.use_var(acc_vars[lane]);
-                let new_acc = emit_binop(builder, accum_op, acc, term);
+                let new_acc = emit_accum_scalar(
+                    builder, module, body_pattern, &body_vals, math_funcs,
+                    accum_op, acc,
+                )?;
                 builder.def_var(acc_vars[lane], new_acc);
             }
 
@@ -1483,6 +1529,51 @@ pub mod jit {
             ScalarBinOp::Max => builder.ins().fmax(a, b),
             ScalarBinOp::Min => builder.ins().fmin(a, b),
         }
+    }
+
+    /// Accumulate body expression into acc: `acc = accum_op(acc, body)`.
+    /// Fuses Add + Mul into FMA when possible (works on F32X4 vectors).
+    fn emit_accum_vec(
+        builder: &mut FunctionBuilder,
+        module: &mut JITModule,
+        body: &PatternExpr,
+        load_vals: &[Value],
+        math_funcs: &MathFuncs,
+        accum_op: ScalarBinOp,
+        acc: Value,
+    ) -> Result<Value, V9Error> {
+        // FMA: acc += a * b → fma(a, b, acc)
+        if accum_op == ScalarBinOp::Add {
+            if let PatternExpr::Binary { op: ScalarBinOp::Mul, a, b } = body {
+                let va = eval_body_expr_vec(builder, module, a, load_vals, math_funcs)?;
+                let vb = eval_body_expr_vec(builder, module, b, load_vals, math_funcs)?;
+                return Ok(builder.ins().fma(va, vb, acc));
+            }
+        }
+        let term = eval_body_expr_vec(builder, module, body, load_vals, math_funcs)?;
+        Ok(emit_binop(builder, accum_op, acc, term))
+    }
+
+    /// Scalar version of emit_accum_vec.
+    fn emit_accum_scalar(
+        builder: &mut FunctionBuilder,
+        module: &mut JITModule,
+        body: &PatternExpr,
+        load_vals: &[Value],
+        math_funcs: &MathFuncs,
+        accum_op: ScalarBinOp,
+        acc: Value,
+    ) -> Result<Value, V9Error> {
+        // FMA: acc += a * b → fma(a, b, acc)
+        if accum_op == ScalarBinOp::Add {
+            if let PatternExpr::Binary { op: ScalarBinOp::Mul, a, b } = body {
+                let va = eval_body_expr(builder, module, a, load_vals, math_funcs)?;
+                let vb = eval_body_expr(builder, module, b, load_vals, math_funcs)?;
+                return Ok(builder.ins().fma(va, vb, acc));
+            }
+        }
+        let term = eval_body_expr(builder, module, body, load_vals, math_funcs)?;
+        Ok(emit_binop(builder, accum_op, acc, term))
     }
 
     fn emit_unaryop(

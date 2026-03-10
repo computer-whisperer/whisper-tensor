@@ -37,9 +37,25 @@ pub mod pipeline {
         final_output_ids: &HashSet<GlobalId>,
         max_samples: usize,
     ) -> Result<CompiledGraph, V9Error> {
-        // Phase 1: v2 frontend — produce expression trees
+        // Phase 1: v2 frontend — produce expression trees.
+        // For ops with reductions (matmul), each element's expression tree has
+        // depth K, giving O(N²·K) total work. Sample to avoid blowup.
+        // For pointwise ops, expressions are O(1) per element — safe to expand.
+        // Estimate: max output element count × max reduction depth.
+        let max_output_elements: usize = shapes
+            .values()
+            .map(|s| s.iter().product::<usize>())
+            .max()
+            .unwrap_or(0);
+        // Heuristic: sample when any single tensor exceeds 10K elements.
+        // This catches matmul at 100×100+ while allowing pointwise at 256×256.
+        // For matmul, the v2 frontend generates M*N bindings each with K-depth
+        // fold expressions. With sampling, we only generate ~64 bindings.
+        const SAMPLE_THRESHOLD: usize = 100_000;
         let expander = if max_samples > 0 {
             ExprExpander::new_sampled(shapes.clone(), max_samples)
+        } else if max_output_elements > SAMPLE_THRESHOLD {
+            ExprExpander::new_sampled(shapes.clone(), 64)
         } else {
             ExprExpander::new(shapes.clone())
         };
