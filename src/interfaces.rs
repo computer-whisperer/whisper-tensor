@@ -33,6 +33,7 @@ pub enum AnyInterface {
     TextInferenceTokensInLogitOutInterface(TextInferenceTokensInLogitOutInterface),
     ImageGenerationInterface(ImageGenerationInterface),
     TextToSpeechInterface(TextToSpeechInterface),
+    SpeechToTextInterface(SpeechToTextInterface),
 }
 
 impl AnyInterface {
@@ -43,6 +44,7 @@ impl AnyInterface {
             }
             AnyInterface::ImageGenerationInterface(_) => "ImageGeneration".to_string(),
             AnyInterface::TextToSpeechInterface(_) => "TextToSpeech".to_string(),
+            AnyInterface::SpeechToTextInterface(_) => "SpeechToText".to_string(),
         }
     }
 
@@ -51,6 +53,7 @@ impl AnyInterface {
             AnyInterface::TextInferenceTokensInLogitOutInterface(x) => &x.super_graph,
             AnyInterface::ImageGenerationInterface(x) => &x.super_graph,
             AnyInterface::TextToSpeechInterface(x) => &x.super_graph,
+            AnyInterface::SpeechToTextInterface(x) => &x.encoder_super_graph,
         }
     }
 }
@@ -1571,5 +1574,53 @@ pub struct TextToSpeechInterface {
 impl TextToSpeechInterface {
     pub fn to_any(self) -> AnyInterface {
         AnyInterface::TextToSpeechInterface(self)
+    }
+}
+
+/// Interface for speech-to-text models (e.g. Whisper).
+///
+/// Two-phase architecture:
+/// 1. Encoder SuperGraph: audio features → encoder hidden states (run once)
+/// 2. Decoder uses the existing RNN SuperGraph pattern for autoregressive
+///    token generation, with encoder hidden states as a fixed input.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SpeechToTextInterface {
+    /// Encoder SuperGraph: mel spectrogram → encoder hidden states.
+    pub encoder_super_graph: SuperGraph,
+    /// Mel spectrogram input link [1, num_mel_bins, seq_len].
+    pub mel_input_link: SuperGraphLinkTensor,
+    /// Encoder model weights.
+    pub encoder_weights_link: SuperGraphLinkTensorMap,
+    /// Encoder hidden states output link.
+    pub encoder_output_link: SuperGraphLinkTensor,
+
+    /// Decoder SuperGraph (RNN-style with cache).
+    pub decoder_super_graph: SuperGraph,
+    /// Decoder token context input link.
+    pub decoder_token_link: SuperGraphLinkTensor,
+    /// Decoder model weights.
+    pub decoder_weights_link: SuperGraphLinkTensorMap,
+    /// Encoder hidden states input to decoder (fixed across steps).
+    pub decoder_encoder_hidden_link: SuperGraphLinkTensor,
+    /// Decoder logit output link.
+    pub decoder_logit_link: SuperGraphLinkTensor,
+    /// Cache key for RNN-style autoregressive decoding.
+    pub decoder_cache_key_link: SuperGraphLinkHash,
+
+    /// Tokenizer for decoding output tokens to text.
+    pub tokenizer: TokenizerInfo,
+    /// Audio sample rate expected by the model (e.g. 16000).
+    pub sample_rate: u32,
+    /// Number of mel bins.
+    pub num_mel_bins: u32,
+    /// Decoder start token ID.
+    pub decoder_start_token_id: u32,
+    /// End-of-text token ID.
+    pub eos_token_id: u32,
+}
+
+impl SpeechToTextInterface {
+    pub fn to_any(self) -> AnyInterface {
+        AnyInterface::SpeechToTextInterface(self)
     }
 }

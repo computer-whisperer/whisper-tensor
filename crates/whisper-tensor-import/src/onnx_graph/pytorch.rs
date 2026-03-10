@@ -204,6 +204,29 @@ pub fn expand(input: Arc<dyn Tensor>, dims: Vec<i64>) -> Result<Arc<Expand>, Err
     Expand::new(None, input, c)
 }
 
+pub fn conv1d(
+    weight_manager: &impl WeightManager,
+    input: Arc<dyn Tensor>,
+    kernel_size: i64,
+    stride: i64,
+    padding: i64,
+) -> Result<Arc<dyn Tensor>, Error> {
+    let weight = weight_manager.get_tensor("weight")?;
+    let bias = weight_manager.get_tensor("bias").ok();
+    let conv = Conv::new(
+        weight_manager.get_prefix().map(|x| x.to_string()),
+        input,
+        weight,
+        bias,
+        vec![kernel_size],
+        vec![stride],
+        vec![padding, padding],
+        vec![1],
+        1,
+    )?;
+    Ok(conv)
+}
+
 pub fn conv2d(
     weight_manager: &impl WeightManager,
     input: Arc<dyn Tensor>,
