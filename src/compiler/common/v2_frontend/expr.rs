@@ -26,6 +26,9 @@ pub enum ScalarUnaryOp {
     Floor,
     Ceil,
     Erf,
+    /// Round F32 value to BF16 precision in-register.
+    /// Inserted by the inlining pass when fusing across BF16 intermediate boundaries.
+    RoundBf16,
 }
 
 /// A pure scalar ALU expression tree.

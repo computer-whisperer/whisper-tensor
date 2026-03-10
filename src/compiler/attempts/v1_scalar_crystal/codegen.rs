@@ -24,6 +24,10 @@ pub struct TensorLayout {
     pub tensor_sizes: HashMap<GlobalId, usize>,
     /// Total number of buffer slots.
     pub num_buffers: usize,
+    /// DType per tensor. If absent, defaults to F32.
+    pub tensor_dtypes: HashMap<GlobalId, crate::dtype::DType>,
+    /// Shape per tensor. Needed for interpreted ops to reconstruct typed tensors.
+    pub tensor_shapes: Option<HashMap<GlobalId, Vec<usize>>>,
 }
 
 impl TensorLayout {
@@ -41,7 +45,27 @@ impl TensorLayout {
             num_buffers: sorted.len(),
             tensor_index,
             tensor_sizes,
+            tensor_dtypes: HashMap::new(),
+            tensor_shapes: Some(shapes.clone()),
         }
+    }
+
+    /// Build a tensor layout from shapes and dtypes.
+    pub fn from_shapes_and_dtypes(
+        shapes: &HashMap<GlobalId, Vec<usize>>,
+        dtypes: &HashMap<GlobalId, crate::dtype::DType>,
+    ) -> Self {
+        let mut layout = Self::from_shapes(shapes);
+        layout.tensor_dtypes = dtypes.clone();
+        layout
+    }
+
+    /// Get the dtype for a tensor, defaulting to F32.
+    pub fn dtype_of(&self, tensor: &GlobalId) -> crate::dtype::DType {
+        self.tensor_dtypes
+            .get(tensor)
+            .copied()
+            .unwrap_or(crate::dtype::DType::F32)
     }
 }
 
@@ -232,6 +256,7 @@ pub fn compile(
                         let call = builder.ins().call(fref, &[vin]);
                         builder.inst_results(call)[0]
                     }
+                    _ => panic!("unsupported unary op {:?} in v1 codegen", op),
                 };
                 value_map.insert(dst.0, result);
             }
@@ -588,6 +613,7 @@ fn emit_unary_op(
             let call = builder.ins().call(fref, &[vin]);
             builder.inst_results(call)[0]
         }
+        _ => panic!("unsupported unary op {:?} in v1 emit_scalar_unary", op),
     }
 }
 

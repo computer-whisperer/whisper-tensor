@@ -265,6 +265,10 @@ pub struct ClampMin {
 }
 
 impl ClampMin {
+    pub(crate) fn min_val(&self) -> f32 {
+        self.value
+    }
+
     pub fn push_new(
         graph: &mut MilliOpGraph,
         a: GlobalId,

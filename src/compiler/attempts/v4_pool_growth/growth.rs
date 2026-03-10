@@ -156,6 +156,7 @@ impl From<ScalarUnaryOp> for UnaryTag {
             ScalarUnaryOp::Tanh => UnaryTag::Tanh,
             ScalarUnaryOp::Floor => UnaryTag::Floor,
             ScalarUnaryOp::Ceil => UnaryTag::Ceil,
+            _ => panic!("unsupported unary op {:?} in v4 pool growth", value),
         }
     }
 }

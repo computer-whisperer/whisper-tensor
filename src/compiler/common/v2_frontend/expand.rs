@@ -24,6 +24,8 @@ pub struct ExprExpander {
     tensor_shapes: HashMap<GlobalId, Vec<usize>>,
     /// Max output elements to sample per op (0 = all).
     max_output_samples: usize,
+    /// When true, unsupported ops are silently skipped (outputs become leaves).
+    skip_unsupported: bool,
 }
 
 impl ExprExpander {
@@ -31,6 +33,7 @@ impl ExprExpander {
         Self {
             tensor_shapes,
             max_output_samples: 0,
+            skip_unsupported: false,
         }
     }
 
@@ -41,7 +44,15 @@ impl ExprExpander {
         Self {
             tensor_shapes,
             max_output_samples,
+            skip_unsupported: false,
         }
+    }
+
+    /// Enable skip-unsupported mode: unsupported ops are silently ignored,
+    /// their outputs become leaf tensors that must be pre-filled by the caller.
+    pub fn with_skip_unsupported(mut self, skip: bool) -> Self {
+        self.skip_unsupported = skip;
+        self
     }
 
     fn get_shape(&self, tensor: &GlobalId) -> Result<&[usize], ExpandError> {
@@ -62,7 +73,7 @@ impl ExprExpander {
     }
 
     /// Expand a single milli op, appending bindings to `out`.
-    fn expand_op(
+    pub(crate) fn expand_op(
         &self,
         op: &AnyMilliOp,
         out: &mut Vec<OutputBinding>,
@@ -83,6 +94,9 @@ impl ExprExpander {
                     WhichSimpleBinaryOp::Max => ScalarBinOp::Max,
                     WhichSimpleBinaryOp::Min => ScalarBinOp::Min,
                     other => {
+                        if self.skip_unsupported {
+                            return Ok(());
+                        }
                         return Err(ExpandError::UnsupportedOp(format!(
                             "SimpleBinary variant {:?}",
                             other
@@ -108,6 +122,9 @@ impl ExprExpander {
                     WhichSimpleUnaryOp::Ceil => ScalarUnaryOp::Ceil,
                     WhichSimpleUnaryOp::Erf => ScalarUnaryOp::Erf,
                     other => {
+                        if self.skip_unsupported {
+                            return Ok(());
+                        }
                         return Err(ExpandError::UnsupportedOp(format!(
                             "SimpleUnary variant {:?}",
                             other
@@ -155,9 +172,25 @@ impl ExprExpander {
                 self.emit_transpose(inputs[0], outputs[0], t.perm(), out)
             }
 
+            // Cast / CastLike: dtype conversion — identity in the expression tree.
+            // The actual load/store dtype difference is handled by codegen.
+            AnyMilliOp::Cast(_) => {
+                let inputs: Vec<GlobalId> = op.inputs().collect();
+                let outputs: Vec<GlobalId> = op.outputs().collect();
+                self.emit_identity_view(inputs[0], outputs[0], out)
+            }
+            AnyMilliOp::CastLike(_) => {
+                let inputs: Vec<GlobalId> = op.inputs().collect();
+                let outputs: Vec<GlobalId> = op.outputs().collect();
+                // CastLike has two inputs: data and target_type. Only data flows through.
+                self.emit_identity_view(inputs[0], outputs[0], out)
+            }
+
             // ClampMin: max(input, threshold)
-            AnyMilliOp::ClampMin(_) => {
-                Err(ExpandError::UnsupportedOp("ClampMin".to_string()))
+            AnyMilliOp::ClampMin(c) => {
+                let inputs: Vec<GlobalId> = op.inputs().collect();
+                let outputs: Vec<GlobalId> = op.outputs().collect();
+                self.emit_clamp_min(inputs[0], outputs[0], c.min_val(), out)
             }
 
             // Reductions
@@ -179,7 +212,13 @@ impl ExprExpander {
                 self.emit_reduce_mean(inputs[0], outputs[0], r.axes_tensor(), r.keepdims(), out)
             }
 
-            _ => Err(ExpandError::UnsupportedOp(op.op_kind())),
+            _ => {
+                if self.skip_unsupported {
+                    Ok(()) // Output tensors become leaves
+                } else {
+                    Err(ExpandError::UnsupportedOp(op.op_kind()))
+                }
+            }
         }
     }
 
@@ -203,7 +242,7 @@ impl ExprExpander {
         let total: usize = out_shape.iter().product();
         let out_shape_owned = out_shape.to_vec();
 
-        for flat_out in self.sample_indices(total) {
+        for flat_out in self.sample_indices_nd(&out_shape_owned) {
             let multi = flat_to_multi(flat_out, &out_shape_owned);
             let flat_a = multi_to_flat(&multi, &a_strides);
             let flat_b = multi_to_flat(&multi, &b_strides);
@@ -235,10 +274,9 @@ impl ExprExpander {
         op: ScalarUnaryOp,
         out: &mut Vec<OutputBinding>,
     ) -> Result<(), ExpandError> {
-        let out_shape = self.get_shape(&out_id)?;
-        let total: usize = out_shape.iter().product();
+        let out_shape = self.get_shape(&out_id)?.to_vec();
 
-        for flat_idx in self.sample_indices(total) {
+        for flat_idx in self.sample_indices_nd(&out_shape) {
             let expr = ScalarExpr::Unary {
                 op,
                 input: Box::new(ScalarExpr::Element {
@@ -266,17 +304,43 @@ impl ExprExpander {
         let b_shape = self.get_shape(&b_id)?;
         let out_shape = self.get_shape(&out_id)?;
 
-        if a_shape.len() != 2 || b_shape.len() != 2 || out_shape.len() != 2 {
+        // ONNX MatMul broadcasting: batch dims broadcast, last 2 dims do the matmul.
+        // A[..., M, K] × B[..., K, N] = Out[..., M, N]
+        if a_shape.len() < 2 || b_shape.len() < 2 || out_shape.len() < 2 {
+            if self.skip_unsupported {
+                return Ok(());
+            }
             return Err(ExpandError::UnsupportedOp(format!(
-                "MatMul rank-2 only; got A{:?}, B{:?}, Out{:?}",
+                "MatMul needs rank >= 2; got A{:?}, B{:?}, Out{:?}",
                 a_shape, b_shape, out_shape
             )));
         }
 
-        let (m, k) = (a_shape[0], a_shape[1]);
-        let n = b_shape[1];
+        let a_rank = a_shape.len();
+        let b_rank = b_shape.len();
+        let out_rank = out_shape.len();
 
-        // Sampling: pick ~sqrt(max_samples) per axis
+        let m = a_shape[a_rank - 2];
+        let k = a_shape[a_rank - 1];
+        let n = b_shape[b_rank - 1];
+
+        // Batch dimensions: everything except the last 2 dims of the output
+        let batch_shape = &out_shape[..out_rank - 2];
+        let batch_total: usize = batch_shape.iter().product::<usize>().max(1);
+
+        // Strides for the batch dims of A, B, and Out in flat layout
+        let a_mat_size = m * k;
+        let b_mat_size = k * n;
+        let out_mat_size = m * n;
+
+        // Broadcast strides for batch dims: if A or B has fewer batch dims,
+        // the missing leading dims are broadcast (stride 0).
+        let a_batch = &a_shape[..a_rank - 2];
+        let b_batch = &b_shape[..b_rank - 2];
+        let a_batch_strides = broadcast_strides(a_batch, batch_shape);
+        let b_batch_strides = broadcast_strides(b_batch, batch_shape);
+
+        // Sampling: pick ~sqrt(max_samples) per axis (for the matmul dims)
         let (row_stride, col_stride) = if self.max_output_samples > 0 {
             let per_axis = (self.max_output_samples as f64).sqrt().ceil() as usize;
             let rs = if m > per_axis { m / per_axis } else { 1 };
@@ -286,43 +350,56 @@ impl ExprExpander {
             (1, 1)
         };
 
-        let mut row = 0;
-        while row < m {
-            let mut col = 0;
-            while col < n {
-                // Build: sum_{kk=0..k} A[row,kk] * B[kk,col]
-                let mut expr = ScalarExpr::Literal { value: 0.0 };
-                for kk in 0..k {
-                    let a_elem = ScalarExpr::Element {
-                        tensor: a_id,
-                        flat_index: row * k + kk,
-                    };
-                    let b_elem = ScalarExpr::Element {
-                        tensor: b_id,
-                        flat_index: kk * n + col,
-                    };
-                    let prod = ScalarExpr::Binary {
-                        op: ScalarBinOp::Mul,
-                        a: Box::new(a_elem),
-                        b: Box::new(b_elem),
-                    };
-                    expr = ScalarExpr::Binary {
-                        op: ScalarBinOp::Add,
-                        a: Box::new(expr),
-                        b: Box::new(prod),
-                    };
+
+        for batch_idx in 0..batch_total {
+            // Compute batch multi-index
+            let batch_multi = flat_to_multi(batch_idx, batch_shape);
+
+            // Flat offset into A and B for this batch
+            let a_batch_off: usize = batch_multi.iter().zip(a_batch_strides.iter())
+                .map(|(&mi, &s)| mi * s).sum();
+            let b_batch_off: usize = batch_multi.iter().zip(b_batch_strides.iter())
+                .map(|(&mi, &s)| mi * s).sum();
+            let out_batch_off = batch_idx * out_mat_size;
+
+            let mut row = 0;
+            while row < m {
+                let mut col = 0;
+                while col < n {
+                    let mut expr = ScalarExpr::Literal { value: 0.0 };
+                    for kk in 0..k {
+                        let a_elem = ScalarExpr::Element {
+                            tensor: a_id,
+                            flat_index: a_batch_off + row * k + kk,
+                        };
+                        let b_elem = ScalarExpr::Element {
+                            tensor: b_id,
+                            flat_index: b_batch_off + kk * n + col,
+                        };
+                        let prod = ScalarExpr::Binary {
+                            op: ScalarBinOp::Mul,
+                            a: Box::new(a_elem),
+                            b: Box::new(b_elem),
+                        };
+                        expr = ScalarExpr::Binary {
+                            op: ScalarBinOp::Add,
+                            a: Box::new(expr),
+                            b: Box::new(prod),
+                        };
+                    }
+                    out.push(OutputBinding {
+                        output_tensor: out_id,
+                        flat_index: out_batch_off + row * n + col,
+                        expr,
+                    });
+                    col += col_stride;
                 }
-                out.push(OutputBinding {
-                    output_tensor: out_id,
-                    flat_index: row * n + col,
-                    expr,
-                });
-                col += col_stride;
+                row += row_stride;
             }
-            row += row_stride;
         }
         Ok(())
     }
+
 
     /// Identity view: output[flat_i] = input[flat_i].
     /// Used for Reshape, Squeeze, Unsqueeze where the flat layout is preserved.
@@ -332,10 +409,9 @@ impl ExprExpander {
         out_id: GlobalId,
         out: &mut Vec<OutputBinding>,
     ) -> Result<(), ExpandError> {
-        let out_shape = self.get_shape(&out_id)?;
-        let total: usize = out_shape.iter().product();
+        let out_shape = self.get_shape(&out_id)?.to_vec();
 
-        for flat_idx in self.sample_indices(total) {
+        for flat_idx in self.sample_indices_nd(&out_shape) {
             out.push(OutputBinding {
                 output_tensor: out_id,
                 flat_index: flat_idx,
@@ -343,6 +419,36 @@ impl ExprExpander {
                     tensor: input_id,
                     flat_index: flat_idx,
                 },
+            });
+        }
+        Ok(())
+    }
+
+    /// ClampMin: output[i] = max(input[i], min_val)
+    fn emit_clamp_min(
+        &self,
+        input_id: GlobalId,
+        out_id: GlobalId,
+        min_val: f32,
+        out: &mut Vec<OutputBinding>,
+    ) -> Result<(), ExpandError> {
+        let out_shape = self.get_shape(&out_id)?.to_vec();
+
+        for flat_idx in self.sample_indices_nd(&out_shape) {
+            let expr = ScalarExpr::Binary {
+                op: ScalarBinOp::Max,
+                a: Box::new(ScalarExpr::Element {
+                    tensor: input_id,
+                    flat_index: flat_idx,
+                }),
+                b: Box::new(ScalarExpr::Literal {
+                    value: min_val as f64,
+                }),
+            };
+            out.push(OutputBinding {
+                output_tensor: out_id,
+                flat_index: flat_idx,
+                expr,
             });
         }
         Ok(())
@@ -395,7 +501,7 @@ impl ExprExpander {
         // Compute input strides (row-major)
         let input_strides = row_major_strides(input_shape);
 
-        for flat_out in self.sample_indices(total) {
+        for flat_out in self.sample_indices_nd(&out_shape_owned) {
             let out_multi = flat_to_multi(flat_out, &out_shape_owned);
             // Inverse: input_multi[perm[i]] = out_multi[i]
             let mut input_multi = vec![0usize; rank];
@@ -440,19 +546,27 @@ impl ExprExpander {
 
         let total_out: usize = out_shape.iter().product();
 
-        for flat_out in self.sample_indices(total_out) {
+        for flat_out in self.sample_indices_nd(&out_shape_owned) {
             let out_multi = flat_to_multi(flat_out, &out_shape_owned);
 
-            // Map output multi-index back to data multi-index template
+            // Map output multi-index back to data multi-index template.
             // Non-reduced dims come from the output index; reduced dims iterate.
             let mut data_multi_template = vec![0usize; data_rank];
-            let mut out_dim = 0;
-            for d in 0..data_rank {
-                if reduced_axes.contains(&d) {
-                    // Will iterate over this dim
-                } else {
-                    data_multi_template[d] = out_multi[out_dim];
-                    out_dim += 1;
+            if keepdims {
+                // keepdims=true: output has same rank as data, reduced dims are size 1
+                for d in 0..data_rank {
+                    if !reduced_axes.contains(&d) {
+                        data_multi_template[d] = out_multi[d];
+                    }
+                }
+            } else {
+                // keepdims=false: reduced dims are removed, output has fewer dims
+                let mut out_dim = 0;
+                for d in 0..data_rank {
+                    if !reduced_axes.contains(&d) {
+                        data_multi_template[d] = out_multi[out_dim];
+                        out_dim += 1;
+                    }
                 }
             }
 
@@ -533,36 +647,69 @@ impl ExprExpander {
     // ------------------------------------------------------------------
 
     /// Returns an iterator over the flat indices to sample from `0..total`.
-    fn sample_indices(&self, total: usize) -> SampleIter {
-        let stride = if self.max_output_samples > 0 && total > self.max_output_samples {
-            (total / self.max_output_samples).max(1)
-        } else {
-            1
-        };
-        SampleIter {
-            current: 0,
-            total,
-            stride,
+    /// Generate sampled flat indices with guaranteed per-axis variation.
+    ///
+    /// Unlike flat-stride sampling, this ensures that for an N-dimensional
+    /// tensor, sampled indices vary along every axis. This is critical for
+    /// the affine coefficient solver which needs at least two samples with
+    /// different values on each axis.
+    fn sample_indices_nd(&self, shape: &[usize]) -> Vec<usize> {
+        let total: usize = shape.iter().product::<usize>().max(1);
+        if self.max_output_samples == 0 || total <= self.max_output_samples {
+            return (0..total).collect();
         }
-    }
-}
 
-struct SampleIter {
-    current: usize,
-    total: usize,
-    stride: usize,
-}
-
-impl Iterator for SampleIter {
-    type Item = usize;
-    fn next(&mut self) -> Option<usize> {
-        if self.current >= self.total {
-            return None;
+        let ndim = shape.len();
+        if ndim == 0 {
+            return vec![0];
         }
-        let val = self.current;
-        self.current += self.stride;
-        Some(val)
+
+        // Compute per-axis sample count: nth root of max_output_samples
+        let per_axis = (self.max_output_samples as f64)
+            .powf(1.0 / ndim as f64)
+            .ceil() as usize;
+        let per_axis = per_axis.max(2); // minimum 2 per axis for affine recovery
+
+        // Per-axis strides
+        let axis_strides: Vec<usize> = shape
+            .iter()
+            .map(|&s| if s > per_axis { s / per_axis } else { 1 })
+            .collect();
+
+        let row_strides = row_major_strides(shape);
+        let mut indices = Vec::new();
+
+        // Generate multi-dimensional grid of samples
+        fn recurse(
+            dim: usize,
+            shape: &[usize],
+            axis_strides: &[usize],
+            row_strides: &[usize],
+            current_flat: usize,
+            indices: &mut Vec<usize>,
+        ) {
+            if dim == shape.len() {
+                indices.push(current_flat);
+                return;
+            }
+            let mut idx = 0;
+            while idx < shape[dim] {
+                recurse(
+                    dim + 1,
+                    shape,
+                    axis_strides,
+                    row_strides,
+                    current_flat + idx * row_strides[dim],
+                    indices,
+                );
+                idx += axis_strides[dim];
+            }
+        }
+
+        recurse(0, shape, &axis_strides, &row_strides, 0, &mut indices);
+        indices
     }
+
 }
 
 // ---------------------------------------------------------------------------
@@ -799,6 +946,41 @@ mod tests {
         let bindings = expander.expand(&graph).unwrap();
         assert!(bindings.len() <= 11); // ~10 samples
         assert!(bindings.len() >= 5);
+    }
+
+    #[test]
+    fn test_sampled_nd_covers_all_axes() {
+        // Regression test: flat-stride sampling of a [768, 768] tensor with
+        // 64 samples produced stride=9216=12*768, placing ALL samples at
+        // column 0. The affine solver could never recover the j-axis
+        // coefficient. Multi-dimensional sampling must avoid this.
+        let mut rng = wyrand::WyRand::new(42);
+        let ext_a = make_id(&mut rng);
+        let ext_b = make_id(&mut rng);
+        let (mut graph, input_map) = MilliOpGraph::new([ext_a, ext_b], &mut rng);
+        let int_a = input_map[&ext_a];
+        let int_b = input_map[&ext_b];
+        let int_out = SimpleBinary::add(&mut graph, int_a, int_b, &mut rng);
+
+        let mut shapes = HashMap::new();
+        shapes.insert(int_a, vec![768, 768]);
+        shapes.insert(int_b, vec![768, 768]);
+        shapes.insert(int_out, vec![768, 768]);
+
+        let expander = ExprExpander::new_sampled(shapes, 64);
+        let bindings = expander.expand(&graph).unwrap();
+        assert!(bindings.len() >= 4, "need at least 4 bindings, got {}", bindings.len());
+
+        // Verify: sampled positions must vary along BOTH axes
+        let out_shape = vec![768usize, 768];
+        let coords: Vec<Vec<usize>> = bindings.iter()
+            .map(|b| flat_to_multi(b.flat_index, &out_shape))
+            .collect();
+
+        let rows: std::collections::HashSet<usize> = coords.iter().map(|c| c[0]).collect();
+        let cols: std::collections::HashSet<usize> = coords.iter().map(|c| c[1]).collect();
+        assert!(rows.len() >= 2, "samples must vary along axis 0, got {} unique rows", rows.len());
+        assert!(cols.len() >= 2, "samples must vary along axis 1, got {} unique cols", cols.len());
     }
 
     #[test]

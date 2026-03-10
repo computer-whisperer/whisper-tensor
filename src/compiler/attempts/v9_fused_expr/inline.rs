@@ -11,7 +11,8 @@
 //! 3. For remaining intermediates, substitutes the producing expression
 //!    inline at every point of use.
 
-use crate::compiler::common::v2_frontend::{OutputBinding, ScalarExpr};
+use crate::compiler::common::v2_frontend::{OutputBinding, ScalarExpr, ScalarUnaryOp};
+use crate::dtype::DType;
 use crate::graph::GlobalId;
 use std::collections::{HashMap, HashSet};
 
@@ -32,6 +33,7 @@ pub struct InlinedGraph {
 pub fn inline_intermediates(
     bindings: &[OutputBinding],
     final_outputs: &HashSet<GlobalId>,
+    dtypes: &HashMap<GlobalId, DType>,
 ) -> InlinedGraph {
     let produced_tensors: HashSet<GlobalId> = bindings.iter().map(|b| b.output_tensor).collect();
 
@@ -61,7 +63,7 @@ pub fn inline_intermediates(
         if !materialize.contains(&b.output_tensor) {
             continue;
         }
-        let expanded = inline_expr(&b.expr, &expr_map, &produced_tensors, &materialize);
+        let expanded = inline_expr(&b.expr, &expr_map, &produced_tensors, &materialize, dtypes);
         result_bindings.push(OutputBinding {
             output_tensor: b.output_tensor,
             flat_index: b.flat_index,
@@ -87,6 +89,7 @@ fn inline_expr(
     expr_map: &HashMap<(GlobalId, usize), &ScalarExpr>,
     produced: &HashSet<GlobalId>,
     materialize: &HashSet<GlobalId>,
+    dtypes: &HashMap<GlobalId, DType>,
 ) -> ScalarExpr {
     match expr {
         ScalarExpr::Element {
@@ -95,7 +98,16 @@ fn inline_expr(
             // If this tensor is produced and NOT materialized, inline it.
             if produced.contains(tensor) && !materialize.contains(tensor) {
                 if let Some(producing_expr) = expr_map.get(&(*tensor, *flat_index)) {
-                    return inline_expr(producing_expr, expr_map, produced, materialize);
+                    let inlined = inline_expr(producing_expr, expr_map, produced, materialize, dtypes);
+                    // If the inlined tensor is BF16, wrap with RoundBf16 to preserve
+                    // the dtype boundary that would otherwise be lost during fusion.
+                    if dtypes.get(tensor) == Some(&DType::BF16) {
+                        return ScalarExpr::Unary {
+                            op: ScalarUnaryOp::RoundBf16,
+                            input: Box::new(inlined),
+                        };
+                    }
+                    return inlined;
                 }
             }
             expr.clone()
@@ -103,12 +115,12 @@ fn inline_expr(
         ScalarExpr::Literal { .. } => expr.clone(),
         ScalarExpr::Binary { op, a, b } => ScalarExpr::Binary {
             op: *op,
-            a: Box::new(inline_expr(a, expr_map, produced, materialize)),
-            b: Box::new(inline_expr(b, expr_map, produced, materialize)),
+            a: Box::new(inline_expr(a, expr_map, produced, materialize, dtypes)),
+            b: Box::new(inline_expr(b, expr_map, produced, materialize, dtypes)),
         },
         ScalarExpr::Unary { op, input } => ScalarExpr::Unary {
             op: *op,
-            input: Box::new(inline_expr(input, expr_map, produced, materialize)),
+            input: Box::new(inline_expr(input, expr_map, produced, materialize, dtypes)),
         },
     }
 }
@@ -249,7 +261,7 @@ mod tests {
         }
 
         let final_outputs: HashSet<GlobalId> = [neg_out].into_iter().collect();
-        let result = inline_intermediates(&bindings, &final_outputs);
+        let result = inline_intermediates(&bindings, &final_outputs, &HashMap::new());
 
         assert_eq!(result.bindings.len(), 4);
         for rb in &result.bindings {
@@ -316,7 +328,7 @@ mod tests {
         }
 
         let final_outputs: HashSet<GlobalId> = [mul_out, neg_out].into_iter().collect();
-        let result = inline_intermediates(&bindings, &final_outputs);
+        let result = inline_intermediates(&bindings, &final_outputs, &HashMap::new());
 
         assert_eq!(result.bindings.len(), 4);
         let neg_bindings: Vec<_> = result
@@ -437,7 +449,7 @@ mod tests {
         }
 
         let final_outputs: HashSet<GlobalId> = [out].into_iter().collect();
-        let result = inline_intermediates(&bindings, &final_outputs);
+        let result = inline_intermediates(&bindings, &final_outputs, &HashMap::new());
 
         // act1 should be materialized (referenced by mm2, which is a fold)
         let materialized_tensors: HashSet<GlobalId> =

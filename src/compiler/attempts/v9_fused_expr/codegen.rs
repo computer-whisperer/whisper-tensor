@@ -10,6 +10,7 @@ pub mod jit {
     use crate::compiler::attempts::v1_scalar_crystal::codegen::{CodegenError, TensorLayout};
     use crate::compiler::attempts::v9_fused_expr::pattern::*;
     use crate::compiler::common::v2_frontend::{ScalarBinOp, ScalarUnaryOp};
+    use crate::dtype::DType;
     use crate::graph::GlobalId;
     use std::collections::HashMap;
     use cranelift_codegen::ir::types;
@@ -403,7 +404,7 @@ pub mod jit {
 
     /// Evaluate a pattern expression, but substitute a pre-computed value for
     /// the Reduce node with the given index. Used in the post-reduction phase
-    /// of register-blocked emission.
+    /// of register-blocked emission. Applies BF16 rounding at op boundaries.
     fn eval_expr_with_reduce_override(
         builder: &mut FunctionBuilder,
         module: &mut JITModule,
@@ -412,6 +413,7 @@ pub mod jit {
         math_funcs: &MathFuncs,
         target_reduce_idx: usize,
         reduce_value: Value,
+        layout: &TensorLayout,
     ) -> Result<Value, V9Error> {
         match pattern {
             PatternExpr::Load { load_ordinal, .. } => Ok(outer_load_vals[*load_ordinal]),
@@ -422,20 +424,20 @@ pub mod jit {
             PatternExpr::Binary { op, a, b } => {
                 let va = eval_expr_with_reduce_override(
                     builder, module, a, outer_load_vals, math_funcs,
-                    target_reduce_idx, reduce_value,
+                    target_reduce_idx, reduce_value, layout,
                 )?;
                 let vb = eval_expr_with_reduce_override(
                     builder, module, b, outer_load_vals, math_funcs,
-                    target_reduce_idx, reduce_value,
+                    target_reduce_idx, reduce_value, layout,
                 )?;
                 Ok(emit_binop(builder, *op, va, vb))
             }
             PatternExpr::Unary { op, input } => {
                 let vi = eval_expr_with_reduce_override(
                     builder, module, input, outer_load_vals, math_funcs,
-                    target_reduce_idx, reduce_value,
+                    target_reduce_idx, reduce_value, layout,
                 )?;
-                emit_unaryop(builder, module, *op, vi, math_funcs)
+                Ok(emit_unaryop(builder, module, *op, vi, math_funcs)?)
             }
             PatternExpr::Reduce { reduce_idx, .. } => {
                 if *reduce_idx == target_reduce_idx {
@@ -474,7 +476,7 @@ pub mod jit {
     fn body_has_func_calls(pattern: &PatternExpr) -> bool {
         match pattern {
             PatternExpr::Unary { op, input } => match op {
-                ScalarUnaryOp::Neg => body_has_func_calls(input),
+                ScalarUnaryOp::Neg | ScalarUnaryOp::RoundBf16 => body_has_func_calls(input),
                 _ => true,
             },
             PatternExpr::Binary { a, b, .. } => body_has_func_calls(a) || body_has_func_calls(b),
@@ -531,8 +533,8 @@ pub mod jit {
         let any_packable = packable.iter().any(|&p| p);
 
         // SIMD eligibility: NR must be multiple of 4, all varying loads
-        // must be packable, body must not contain function calls, and
-        // block_axis must be innermost (for contiguous stores).
+        // must be packable, body must not contain function calls, block_axis
+        // must be innermost (for contiguous stores), and body must not produce
         // Note: Cranelift 0.116 x86-64 only supports 128-bit (F32X4) vectors.
         const SIMD_WIDTH: usize = 4;
         let use_simd = nr % SIMD_WIDTH == 0
@@ -620,11 +622,16 @@ pub mod jit {
 
                 let slot = layout.tensor_index[&access.tensor];
                 let src_buf = buf_ptrs[&slot];
+                let src_dtype = layout.dtype_of(&access.tensor);
+                let src_is_bf16 = matches!(src_dtype, DType::BF16);
+                // Element byte shift: 1 for bf16 (2 bytes), 2 for f32 (4 bytes)
+                let src_elem_shift: i64 = if src_is_bf16 { 1 } else { 2 };
 
                 // Vectorized packing: when block_coeff == 1 and SIMD is
                 // active, consecutive lanes are contiguous in source memory.
-                // Use F32X4 loads/stores to pack 4 lanes at a time.
-                let vec_pack = use_simd && block_coeff == 1;
+                // For f32 sources, use F32X4 loads. For bf16, use scalar
+                // conversion (4 × bf16→f32) since there's no bf16x4 type.
+                let vec_pack = use_simd && block_coeff == 1 && !src_is_bf16;
 
                 if vec_pack {
                     // Compute source base for this k:
@@ -638,16 +645,16 @@ pub mod jit {
                         let contrib = builder.ins().imul(c, pk);
                         src_flat0 = builder.ins().iadd(src_flat0, contrib);
                     }
-                    let src_base_byte = builder.ins().ishl_imm(src_flat0, 2);
+                    let src_base_byte = builder.ins().ishl_imm(src_flat0, src_elem_shift);
                     let src_base_ptr = builder.ins().iadd(src_buf, src_base_byte);
 
                     // Panel destination base: panel[pk * NR]
                     let nr_val = builder.ins().iconst(types::I64, nr as i64);
                     let pk_times_nr = builder.ins().imul(pk, nr_val);
-                    let dst_base_byte = builder.ins().ishl_imm(pk_times_nr, 2);
+                    let dst_base_byte = builder.ins().ishl_imm(pk_times_nr, 2); // panel is always f32
                     let dst_base_ptr = builder.ins().iadd(panel_ptr, dst_base_byte);
 
-                    // Vector copy in groups of 4
+                    // Vector copy in groups of 4 (f32 source only)
                     for vi in 0..(nr / SIMD_WIDTH) {
                         let byte_off = (vi * SIMD_WIDTH * 4) as i32;
                         let vec = builder.ins().load(
@@ -664,7 +671,7 @@ pub mod jit {
                         );
                     }
                 } else {
-                    // Scalar packing fallback
+                    // Scalar packing: works for both f32 and bf16 sources.
                     for lane in 0..nr {
                         // src_flat = base + block_coeff * (j0 + lane) + red_coeff * pk
                         let j_lane = builder.ins().iadd_imm(j0_pack, lane as i64);
@@ -684,14 +691,19 @@ pub mod jit {
                             src_flat = builder.ins().iadd(src_flat, contrib);
                         }
 
-                        let src_byte = builder.ins().ishl_imm(src_flat, 2);
+                        let src_byte = builder.ins().ishl_imm(src_flat, src_elem_shift);
                         let src_ptr = builder.ins().iadd(src_buf, src_byte);
-                        let val =
-                            builder
-                                .ins()
-                                .load(types::F32, MemFlags::trusted(), src_ptr, 0);
+                        let val = if src_is_bf16 {
+                            // BF16→F32 conversion: load i16, zero-extend, shift left 16
+                            let raw16 = builder.ins().load(types::I16, MemFlags::trusted(), src_ptr, 0);
+                            let raw32 = builder.ins().uextend(types::I32, raw16);
+                            let shifted = builder.ins().ishl_imm(raw32, 16);
+                            builder.ins().bitcast(types::F32, MemFlags::new(), shifted)
+                        } else {
+                            builder.ins().load(types::F32, MemFlags::trusted(), src_ptr, 0)
+                        };
 
-                        // dst_idx = pk * NR + lane
+                        // dst_idx = pk * NR + lane (panel is always f32)
                         let nr_val = builder.ins().iconst(types::I64, nr as i64);
                         let pk_times_nr = builder.ins().imul(pk, nr_val);
                         let dst_idx = builder.ins().iadd_imm(pk_times_nr, lane as i64);
@@ -860,7 +872,7 @@ pub mod jit {
 
                     let result = eval_expr_with_reduce_override(
                         builder, module, &pattern.pattern, &outer_vals, math_funcs,
-                        blocking.reduce_idx, scalar,
+                        blocking.reduce_idx, scalar, layout,
                     )?;
 
                     let flat_out = compute_flat_index(builder, &axis_vars, &out_strides);
@@ -991,7 +1003,7 @@ pub mod jit {
                 let acc_val = builder.use_var(acc_vars[lane]);
                 let result = eval_expr_with_reduce_override(
                     builder, module, &pattern.pattern, &outer_vals, math_funcs,
-                    blocking.reduce_idx, acc_val,
+                    blocking.reduce_idx, acc_val, layout,
                 )?;
 
                 let flat_out = compute_flat_index(builder, &axis_vars, &out_strides);
@@ -1306,11 +1318,24 @@ pub mod jit {
             }
         }
 
-        let byte_offset = builder.ins().ishl_imm(flat_idx, 2);
-        let elem_ptr = builder.ins().iadd(buf_ptr, byte_offset);
-        builder
-            .ins()
-            .load(types::F32, MemFlags::trusted(), elem_ptr, 0)
+        let dtype = layout.dtype_of(&access.tensor);
+        match dtype {
+            DType::BF16 => {
+                // BF16: 2 bytes per element. Load i16, zero-extend to i32, shift left 16, bitcast to f32.
+                let byte_offset = builder.ins().ishl_imm(flat_idx, 1); // *2
+                let elem_ptr = builder.ins().iadd(buf_ptr, byte_offset);
+                let raw16 = builder.ins().load(types::I16, MemFlags::trusted(), elem_ptr, 0);
+                let raw32 = builder.ins().uextend(types::I32, raw16);
+                let shifted = builder.ins().ishl_imm(raw32, 16);
+                builder.ins().bitcast(types::F32, MemFlags::new(), shifted)
+            }
+            _ => {
+                // F32 (default): 4 bytes per element
+                let byte_offset = builder.ins().ishl_imm(flat_idx, 2); // *4
+                let elem_ptr = builder.ins().iadd(buf_ptr, byte_offset);
+                builder.ins().load(types::F32, MemFlags::trusted(), elem_ptr, 0)
+            }
+        }
     }
 
     fn store_result(
@@ -1323,11 +1348,29 @@ pub mod jit {
     ) {
         let slot = layout.tensor_index[&tensor];
         let ptr = buf_ptrs[&slot];
-        let byte_offset = builder.ins().ishl_imm(flat_out, 2);
-        let elem_ptr = builder.ins().iadd(ptr, byte_offset);
-        builder
-            .ins()
-            .store(MemFlags::trusted(), value, elem_ptr, 0);
+        let dtype = layout.dtype_of(&tensor);
+        match dtype {
+            DType::BF16 => {
+                // F32→BF16: bitcast to i32, add rounding bias, shift right 16, truncate to i16, store.
+                let byte_offset = builder.ins().ishl_imm(flat_out, 1); // *2
+                let elem_ptr = builder.ins().iadd(ptr, byte_offset);
+                let bits32 = builder.ins().bitcast(types::I32, MemFlags::new(), value);
+                // Round-to-nearest-even: add 0x7FFF + ((bits >> 16) & 1)
+                let lsb = builder.ins().ushr_imm(bits32, 16);
+                let lsb_bit = builder.ins().band_imm(lsb, 1);
+                let bias = builder.ins().iadd_imm(lsb_bit, 0x7FFF);
+                let rounded = builder.ins().iadd(bits32, bias);
+                let shifted = builder.ins().ushr_imm(rounded, 16);
+                let raw16 = builder.ins().ireduce(types::I16, shifted);
+                builder.ins().store(MemFlags::trusted(), raw16, elem_ptr, 0);
+            }
+            _ => {
+                // F32: 4 bytes per element
+                let byte_offset = builder.ins().ishl_imm(flat_out, 2); // *4
+                let elem_ptr = builder.ins().iadd(ptr, byte_offset);
+                builder.ins().store(MemFlags::trusted(), value, elem_ptr, 0);
+            }
+        }
     }
 
     fn row_major_strides(shape: &[usize]) -> Vec<usize> {
@@ -1377,7 +1420,7 @@ pub mod jit {
                     builder, module, input, outer_load_vals, axis_vars, recovered,
                     layout, ptr_table, math_funcs, vars, buf_ptrs,
                 )?;
-                emit_unaryop(builder, module, *op, vi, math_funcs)
+                Ok(emit_unaryop(builder, module, *op, vi, math_funcs)?)
             }
             PatternExpr::Reduce {
                 accum_op,
@@ -1431,10 +1474,10 @@ pub mod jit {
                     buf_ptrs,
                 );
 
-                // Evaluate body (no Reduce nodes expected in body for now)
+                // Evaluate body — RoundBf16 nodes handle tensor boundaries
                 let term = eval_body_expr(builder, module, body, &body_vals, math_funcs)?;
 
-                // Accumulate
+                // Accumulate (in F32 — matches milli graph's F32 accumulation for BF16)
                 let acc = builder.use_var(acc_var);
                 let new_acc = emit_binop(builder, *accum_op, acc, term);
                 builder.def_var(acc_var, new_acc);
@@ -1449,12 +1492,18 @@ pub mod jit {
                 builder.seal_block(k_header);
                 builder.seal_block(k_exit);
 
+                // No in-register BF16 rounding on the accumulator — the store
+                // handles BF16 truncation. RoundBf16 nodes from inlining handle
+                // explicit tensor boundaries within the expression tree.
                 Ok(builder.use_var(acc_var))
             }
         }
     }
 
     /// Evaluate a reduction body expression (no Reduce node support).
+    /// BF16 rounding is handled by explicit RoundBf16 nodes from inlining,
+    /// not by per-op inference. Within a fused kernel, operations compute
+    /// in full F32 precision — matching the milli graph's accumulation behavior.
     fn eval_body_expr(
         builder: &mut FunctionBuilder,
         module: &mut JITModule,
@@ -1475,7 +1524,7 @@ pub mod jit {
             }
             PatternExpr::Unary { op, input } => {
                 let vi = eval_body_expr(builder, module, input, load_vals, math_funcs)?;
-                emit_unaryop(builder, module, *op, vi, math_funcs)
+                Ok(emit_unaryop(builder, module, *op, vi, math_funcs)?)
             }
             PatternExpr::Reduce { .. } => {
                 Err(V9Error::Other("Nested reductions not yet supported".into()))
@@ -1484,7 +1533,7 @@ pub mod jit {
     }
 
     /// Vector version of `eval_body_expr`. All load values are F32X4.
-    /// Literals are splatted to F32X4. Only Neg is supported as a unary op
+    /// Literals are splatted to F32X4. Supports Neg and RoundBf16 as unary ops
     /// (callers must verify with `body_has_func_calls` before using this).
     fn eval_body_expr_vec(
         builder: &mut FunctionBuilder,
@@ -1509,6 +1558,22 @@ pub mod jit {
                 let vi = eval_body_expr_vec(builder, module, input, load_vals, math_funcs)?;
                 match op {
                     ScalarUnaryOp::Neg => Ok(builder.ins().fneg(vi)),
+                    ScalarUnaryOp::RoundBf16 => {
+                        // Vector BF16 rounding: operate on each lane via bitcast to I32X4
+                        let bits = builder.ins().bitcast(types::I32X4, MemFlags::new(), vi);
+                        let ones = builder.ins().iconst(types::I32, 1);
+                        let ones_v = builder.ins().splat(types::I32X4, ones);
+                        let lsb = builder.ins().ushr_imm(bits, 16);
+                        let lsb_bits = builder.ins().band(lsb, ones_v);
+                        let bias_base = builder.ins().iconst(types::I32, 0x7FFF);
+                        let bias_v = builder.ins().splat(types::I32X4, bias_base);
+                        let bias = builder.ins().iadd(lsb_bits, bias_v);
+                        let rounded = builder.ins().iadd(bits, bias);
+                        let mask = builder.ins().iconst(types::I32, 0xFFFF_0000u32 as i32 as i64);
+                        let mask_v = builder.ins().splat(types::I32X4, mask);
+                        let masked = builder.ins().band(rounded, mask_v);
+                        Ok(builder.ins().bitcast(types::F32X4, MemFlags::new(), masked))
+                    }
                     _ => Err(V9Error::Other(
                         "SIMD body contains unsupported unary op".into(),
                     )),
@@ -1532,7 +1597,7 @@ pub mod jit {
     }
 
     /// Accumulate body expression into acc: `acc = accum_op(acc, body)`.
-    /// Fuses Add + Mul into FMA when possible (works on F32X4 vectors).
+    /// Uses FMA for Add + Mul patterns to reduce latency and improve throughput.
     fn emit_accum_vec(
         builder: &mut FunctionBuilder,
         module: &mut JITModule,
@@ -1603,7 +1668,28 @@ pub mod jit {
             ScalarUnaryOp::Floor => call_math(builder, math_funcs.floorf),
             ScalarUnaryOp::Ceil => call_math(builder, math_funcs.ceilf),
             ScalarUnaryOp::Erf => call_math(builder, math_funcs.erff),
+            ScalarUnaryOp::RoundBf16 => emit_bf16_round(builder, input),
         })
+    }
+
+    // ------------------------------------------------------------------
+    // BF16 precision rounding for fused expressions
+    // ------------------------------------------------------------------
+
+    /// Round an F32 value to BF16 precision in-register (round-to-nearest-even).
+    /// The result is an F32 whose lower 16 mantissa bits are zero, equivalent
+    /// to a bf16→f32 round-trip. This faithfully reproduces what a real BF16
+    /// ALU would produce for each intermediate operation.
+    fn emit_bf16_round(builder: &mut FunctionBuilder, value: Value) -> Value {
+        let bits = builder.ins().bitcast(types::I32, MemFlags::new(), value);
+        // Round-to-nearest-even: add 0x7FFF + ((bits >> 16) & 1)
+        let lsb = builder.ins().ushr_imm(bits, 16);
+        let lsb_bit = builder.ins().band_imm(lsb, 1);
+        let bias = builder.ins().iadd_imm(lsb_bit, 0x7FFF);
+        let rounded = builder.ins().iadd(bits, bias);
+        // Zero lower 16 bits to get BF16-precision F32
+        let masked = builder.ins().band_imm(rounded, 0xFFFF_0000u32 as i64);
+        builder.ins().bitcast(types::F32, MemFlags::new(), masked)
     }
 
     // ------------------------------------------------------------------

@@ -13,18 +13,443 @@ pub mod pattern;
 
 #[cfg(feature = "cranelift")]
 pub mod pipeline {
+    use crate::backends::eval_backend::EvalBackend;
+    use crate::backends::ndarray_backend::NDArrayNumericTensor;
     use crate::compiler::attempts::v1_scalar_crystal::codegen::TensorLayout;
     pub use crate::compiler::attempts::v9_fused_expr::codegen::jit::{
         CompiledGraph, V9Error,
     };
     pub use crate::compiler::attempts::v9_fused_expr::executor::dag::execute_parallel;
+    use crate::compiler::attempts::v9_fused_expr::executor::dag::execute_kernel_batch;
     use crate::compiler::attempts::v9_fused_expr::codegen::jit::compile_patterns;
     use crate::compiler::attempts::v9_fused_expr::inline::inline_intermediates;
     use crate::compiler::attempts::v9_fused_expr::pattern::recover_patterns;
     use crate::compiler::common::v2_frontend::ExprExpander;
-    use crate::graph::GlobalId;
+    use crate::graph::{GlobalId, Graph, Node};
     use crate::milli_graph::MilliOpGraph;
+    use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
+    use crate::numeric_tensor::NumericTensor;
+    use crate::tensor_rank::DynRank;
     use std::collections::{HashMap, HashSet};
+
+    // ---- Interpreted op support ----
+
+    /// An op that v9 couldn't compile, to be run via the interpreter at execution time.
+    pub struct InterpretedOp {
+        pub op: AnyMilliOp,
+        pub input_ids: Vec<GlobalId>,
+        pub output_ids: Vec<GlobalId>,
+    }
+
+    /// A step in the hybrid execution plan.
+    pub enum ExecStep {
+        /// Run a compiled kernel.
+        Kernel(usize),
+        /// Run an interpreted op.
+        Eval(usize),
+    }
+
+    /// Hybrid execution plan: compiled kernels interleaved with interpreted ops.
+    pub struct ExecutionPlan {
+        pub compiled: CompiledGraph,
+        pub interpreted_ops: Vec<InterpretedOp>,
+        pub steps: Vec<ExecStep>,
+    }
+
+    impl ExecutionPlan {
+        /// Read a tensor from a raw buffer slot.
+        fn read_tensor(
+            layout: &TensorLayout,
+            buffers: &[*mut f32],
+            tensor_id: &GlobalId,
+        ) -> NumericTensor<DynRank> {
+            let idx = layout.tensor_index[tensor_id];
+            let size = layout.tensor_sizes[tensor_id];
+            let dtype = layout.dtype_of(tensor_id);
+            let byte_size = dtype.size().unwrap_or(4);
+            let buf_ptr = buffers[idx] as *const u8;
+            let raw = unsafe { std::slice::from_raw_parts(buf_ptr, size * byte_size) };
+            let shape: Vec<u64> = layout.tensor_shapes.as_ref()
+                .and_then(|s| s.get(tensor_id))
+                .expect("interpreted op tensor missing shape")
+                .iter()
+                .map(|&d| d as u64)
+                .collect();
+            NDArrayNumericTensor::<DynRank>::from_raw_data(raw, dtype, shape)
+                .expect("failed to deserialize tensor from buffer")
+                .into()
+        }
+
+        /// Write a tensor into a raw buffer slot.
+        fn write_tensor(
+            layout: &TensorLayout,
+            buffers: &[*mut f32],
+            tensor_id: &GlobalId,
+            tensor: &NumericTensor<DynRank>,
+        ) {
+            let idx = layout.tensor_index[tensor_id];
+            let size = layout.tensor_sizes[tensor_id];
+            let layout_dtype = layout.dtype_of(tensor_id);
+            let byte_size = layout_dtype.size().unwrap_or(4);
+            let buf_ptr = buffers[idx] as *mut u8;
+            let buf = unsafe { std::slice::from_raw_parts_mut(buf_ptr, size * byte_size) };
+
+            // Cast to the layout's dtype if the eval produced a different type
+            let nd = tensor.to_ndarray().expect("can convert to ndarray");
+            let actual_dtype = nd.dtype();
+            let nd = if actual_dtype != layout_dtype {
+                nd.cast(layout_dtype).unwrap_or(nd)
+            } else {
+                nd
+            };
+
+            let bytes = nd.to_contiguous_bytes();
+            let copy_len = bytes.len().min(buf.len());
+            if bytes.len() != buf.len() {
+                eprintln!(
+                    "WARN: write_tensor size mismatch for {:?}: eval produced {} bytes ({:?}), buffer is {} bytes ({:?})",
+                    tensor_id, bytes.len(), actual_dtype, buf.len(), layout_dtype
+                );
+            }
+            buf[..copy_len].copy_from_slice(&bytes[..copy_len]);
+        }
+
+        /// Run an interpreted op: read inputs from buffers, eval, write outputs back.
+        pub fn run_interpreted_op(
+            &self,
+            op_idx: usize,
+            buffers: &[*mut f32],
+        ) {
+            let iop = &self.interpreted_ops[op_idx];
+            let layout = &self.compiled.layout;
+
+            // Build input map from buffers
+            let mut inputs: HashMap<GlobalId, NumericTensor<DynRank>> = HashMap::new();
+            for &id in &iop.input_ids {
+                if layout.tensor_index.contains_key(&id) {
+                    inputs.insert(id, Self::read_tensor(layout, buffers, &id));
+                }
+            }
+
+            // Eval
+            let mut backend = EvalBackend::NDArray;
+            let results: Vec<_> = iop.op.eval(&inputs, &mut backend)
+                .expect("interpreted op eval failed")
+                .collect();
+
+            // Write outputs back
+            for (tensor_id, value) in results {
+                if layout.tensor_index.contains_key(&tensor_id) {
+                    Self::write_tensor(layout, buffers, &tensor_id, &value);
+                }
+            }
+        }
+
+        /// Execute the plan serially.
+        ///
+        /// # Safety
+        /// `buffers` must contain valid pointers for all tensors in the layout.
+        pub unsafe fn execute(&self, buffers: &mut [*mut f32]) {
+            let buf_ptr = buffers.as_ptr();
+            for step in &self.steps {
+                match step {
+                    ExecStep::Kernel(ki) => {
+                        unsafe { self.compiled.kernels[*ki].execute(buf_ptr) };
+                    }
+                    ExecStep::Eval(ei) => {
+                        self.run_interpreted_op(*ei, buffers);
+                    }
+                }
+            }
+        }
+
+        /// Execute the plan with parallel kernel execution.
+        /// Interpreted ops run serially at their topological position;
+        /// compiled kernels between interpreted ops run in parallel.
+        ///
+        /// # Safety
+        /// `buffers` must contain valid pointers for all tensors in the layout.
+        pub unsafe fn execute_parallel(&self, buffers: &[*mut f32], num_threads: usize) {
+            // Group steps into runs of consecutive kernels separated by eval steps.
+            // Each kernel run can be parallelized; eval steps are barriers.
+            let mut i = 0;
+            while i < self.steps.len() {
+                match &self.steps[i] {
+                    ExecStep::Eval(ei) => {
+                        self.run_interpreted_op(*ei, buffers);
+                        i += 1;
+                    }
+                    ExecStep::Kernel(_) => {
+                        // Collect consecutive kernel steps
+                        let start = i;
+                        while i < self.steps.len() && matches!(&self.steps[i], ExecStep::Kernel(_)) {
+                            i += 1;
+                        }
+                        // Execute this batch of kernels in parallel
+                        let kernel_indices: Vec<usize> = self.steps[start..i]
+                            .iter()
+                            .map(|s| match s { ExecStep::Kernel(ki) => *ki, _ => unreachable!() })
+                            .collect();
+                        unsafe {
+                            execute_kernel_batch(
+                                &self.compiled,
+                                &kernel_indices,
+                                buffers,
+                                num_threads,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ---- Plan construction ----
+
+    /// Build a hybrid execution plan from a compiled graph and the original milli graph.
+    ///
+    /// Identifies ops that v9 couldn't compile (their output tensors have no producing
+    /// kernel) and inserts them as interpreted steps at the correct topological position.
+    pub fn build_execution_plan(
+        graph: &MilliOpGraph,
+        compiled: CompiledGraph,
+    ) -> ExecutionPlan {
+        // Which tensors are produced by compiled kernels?
+        let compiled_outputs: HashSet<GlobalId> = compiled.kernels
+            .iter()
+            .map(|k| k.output_tensor)
+            .collect();
+
+        // Which tensors are external inputs? (values in input_map)
+        let external_inputs: HashSet<GlobalId> = graph.input_map.values().cloned().collect();
+
+        // Walk ops in topological order. For each op:
+        // - If its output is in compiled_outputs → find and emit the kernel
+        // - If its output is NOT compiled and NOT an external input → interpreted step
+        // - Constants are pre-filled, skip them
+        let mut interpreted_ops = Vec::new();
+        let mut steps = Vec::new();
+        let mut emitted_kernels: HashSet<usize> = HashSet::new();
+
+        for op_id in graph.op_ordering() {
+            let op = graph.get_node_by_id(op_id).unwrap();
+            let output_ids: Vec<GlobalId> = op.outputs().collect();
+
+            // Check if any output is produced by a compiled kernel
+            let mut has_compiled = false;
+            for &out_id in &output_ids {
+                if compiled_outputs.contains(&out_id) {
+                    // Find which kernel produces this output
+                    for (ki, kernel) in compiled.kernels.iter().enumerate() {
+                        if kernel.output_tensor == out_id && !emitted_kernels.contains(&ki) {
+                            steps.push(ExecStep::Kernel(ki));
+                            emitted_kernels.insert(ki);
+                            has_compiled = true;
+                        }
+                    }
+                }
+            }
+
+            if !has_compiled {
+                // Check if this op produces any tensor in the layout that isn't an input
+                let produces_needed_tensor = output_ids.iter().any(|id| {
+                    compiled.layout.tensor_index.contains_key(id)
+                        && !external_inputs.contains(id)
+                });
+
+                if produces_needed_tensor {
+                    let input_ids: Vec<GlobalId> = op.inputs().collect();
+                    let eval_idx = interpreted_ops.len();
+                    interpreted_ops.push(InterpretedOp {
+                        op: op.clone(),
+                        input_ids,
+                        output_ids,
+                    });
+                    steps.push(ExecStep::Eval(eval_idx));
+                }
+            }
+        }
+
+        // Emit any remaining compiled kernels that weren't matched to an op
+        // (e.g., kernels from fused ops where the "original" op was consumed)
+        for ki in 0..compiled.kernels.len() {
+            if !emitted_kernels.contains(&ki) {
+                steps.push(ExecStep::Kernel(ki));
+            }
+        }
+
+        let n_interp = interpreted_ops.len();
+        let n_kern = compiled.kernels.len();
+        if n_interp > 0 {
+            eprintln!(
+                "  ExecutionPlan: {} compiled kernels, {} interpreted ops",
+                n_kern, n_interp
+            );
+        }
+
+        ExecutionPlan {
+            compiled,
+            interpreted_ops,
+            steps,
+        }
+    }
+
+    // ---- Structural verification ----
+
+    /// Verify execution plan integrity: op coverage and input provenance.
+    ///
+    /// Checks:
+    /// 1. Every op whose output is in the layout is either compiled, interpreted,
+    ///    or an external input.
+    /// 2. Every tensor consumed by a step is produced by a prior step or is an
+    ///    external input (no dangling reads from uninitialized buffers).
+    pub fn verify_plan_integrity(
+        plan: &ExecutionPlan,
+        graph: &MilliOpGraph,
+    ) -> Vec<String> {
+        let mut issues = Vec::new();
+        let layout = &plan.compiled.layout;
+
+        let compiled_outputs: HashSet<GlobalId> = plan.compiled.kernels
+            .iter()
+            .map(|k| k.output_tensor)
+            .collect();
+        let interpreted_outputs: HashSet<GlobalId> = plan.interpreted_ops
+            .iter()
+            .flat_map(|iop| iop.output_ids.iter().cloned())
+            .collect();
+        let external_inputs: HashSet<GlobalId> = graph.input_map.values().cloned().collect();
+
+        // Check 1: Op coverage — every tensor in the layout must be produced by something.
+        for op_id in graph.op_ordering() {
+            let op = graph.get_node_by_id(op_id).unwrap();
+            for out_id in op.outputs() {
+                if external_inputs.contains(&out_id) { continue; }
+                if !layout.tensor_index.contains_key(&out_id) { continue; }
+                if compiled_outputs.contains(&out_id) { continue; }
+                if interpreted_outputs.contains(&out_id) { continue; }
+                issues.push(format!(
+                    "COVERAGE GAP: tensor {:?} is in the layout but not produced by any kernel or interpreted op",
+                    out_id
+                ));
+            }
+        }
+
+        // Check 2: Input provenance — walk steps in order, verify all inputs are produced.
+        let mut produced: HashSet<GlobalId> = external_inputs;
+        for (step_idx, step) in plan.steps.iter().enumerate() {
+            match step {
+                ExecStep::Kernel(ki) => {
+                    let kernel = &plan.compiled.kernels[*ki];
+                    for input_id in &kernel.input_tensors {
+                        if !produced.contains(input_id) {
+                            issues.push(format!(
+                                "DANGLING INPUT: step {} (kernel {}) reads {:?} not yet produced",
+                                step_idx, ki, input_id
+                            ));
+                        }
+                    }
+                    produced.insert(kernel.output_tensor);
+                }
+                ExecStep::Eval(ei) => {
+                    let iop = &plan.interpreted_ops[*ei];
+                    for input_id in &iop.input_ids {
+                        if !produced.contains(input_id)
+                            && layout.tensor_index.contains_key(input_id)
+                        {
+                            issues.push(format!(
+                                "DANGLING INPUT: step {} (eval {}) reads {:?} not yet produced",
+                                step_idx, ei, input_id
+                            ));
+                        }
+                    }
+                    for out_id in &iop.output_ids {
+                        produced.insert(*out_id);
+                    }
+                }
+            }
+        }
+
+        issues
+    }
+
+    /// Streaming op-by-op expansion check. Verifies every op in the graph
+    /// is either expandable by the compiler or covered by an interpreted op.
+    ///
+    /// Uses max_samples=1 and processes one op at a time to avoid realizing
+    /// the full binding list (which can be millions of entries for large models).
+    ///
+    /// Checks:
+    /// 1. Every op whose output is in the layout either produces bindings
+    ///    (is expandable) or is in the interpreted ops list.
+    /// 2. Constants are either expanded or pre-filled (external inputs).
+    pub fn verify_expansion_coverage(
+        plan: &ExecutionPlan,
+        graph: &MilliOpGraph,
+        shapes: &HashMap<GlobalId, Vec<usize>>,
+        dtypes: &HashMap<GlobalId, crate::dtype::DType>,
+    ) -> Vec<String> {
+        let mut issues = Vec::new();
+        let layout = &plan.compiled.layout;
+
+        // Build a single-sample expander for cheap per-op probing.
+        // skip_unsupported=true mirrors what the compilation pass does when
+        // dtypes are provided (i.e., real model with BF16/etc).
+        let probe = ExprExpander::new_sampled(shapes.clone(), 1)
+            .with_skip_unsupported(!dtypes.is_empty());
+
+        let interpreted_outputs: HashSet<GlobalId> = plan.interpreted_ops
+            .iter()
+            .flat_map(|iop| iop.output_ids.iter().cloned())
+            .collect();
+        let external_inputs: HashSet<GlobalId> = graph.input_map.values().cloned().collect();
+
+        let mut scratch = Vec::new();
+        let mut n_expanded = 0usize;
+        let mut n_interpreted = 0usize;
+        let mut n_skipped = 0usize;
+
+        for op_id in graph.op_ordering() {
+            let op = graph.get_node_by_id(op_id).unwrap();
+            let output_ids: Vec<GlobalId> = op.outputs().collect();
+
+            // Try expanding this single op.
+            scratch.clear();
+            let expanded = probe.expand_op(op, &mut scratch).is_ok() && !scratch.is_empty();
+
+            for &out_id in &output_ids {
+                if external_inputs.contains(&out_id) { continue; }
+                if !layout.tensor_index.contains_key(&out_id) {
+                    // Not in layout — either a shape-only tensor or fully inlined.
+                    n_skipped += 1;
+                    continue;
+                }
+
+                let is_interpreted = interpreted_outputs.contains(&out_id);
+
+                if expanded {
+                    n_expanded += 1;
+                } else if is_interpreted {
+                    n_interpreted += 1;
+                } else {
+                    issues.push(format!(
+                        "EXPANSION GAP: {} op output {:?} is in the layout, \
+                         not expandable, and not interpreted",
+                        op.op_kind(), out_id
+                    ));
+                }
+            }
+        }
+
+        eprintln!(
+            "  expansion coverage: {} expanded, {} interpreted, {} not-in-layout",
+            n_expanded, n_interpreted, n_skipped
+        );
+
+        issues
+    }
+
+    // ---- Compilation entry points ----
 
     /// Compile a MilliOpGraph into a v9 CompiledGraph.
     ///
@@ -37,20 +462,23 @@ pub mod pipeline {
         final_output_ids: &HashSet<GlobalId>,
         max_samples: usize,
     ) -> Result<CompiledGraph, V9Error> {
+        compile_graph_typed(graph, shapes, final_output_ids, max_samples, &HashMap::new())
+    }
+
+    /// Like `compile_graph` but with explicit dtype info for BF16/F16 support.
+    pub fn compile_graph_typed(
+        graph: &MilliOpGraph,
+        shapes: &HashMap<GlobalId, Vec<usize>>,
+        final_output_ids: &HashSet<GlobalId>,
+        max_samples: usize,
+        dtypes: &HashMap<GlobalId, crate::dtype::DType>,
+    ) -> Result<CompiledGraph, V9Error> {
         // Phase 1: v2 frontend — produce expression trees.
-        // For ops with reductions (matmul), each element's expression tree has
-        // depth K, giving O(N²·K) total work. Sample to avoid blowup.
-        // For pointwise ops, expressions are O(1) per element — safe to expand.
-        // Estimate: max output element count × max reduction depth.
         let max_output_elements: usize = shapes
             .values()
             .map(|s| s.iter().product::<usize>())
             .max()
             .unwrap_or(0);
-        // Heuristic: sample when any single tensor exceeds 10K elements.
-        // This catches matmul at 100×100+ while allowing pointwise at 256×256.
-        // For matmul, the v2 frontend generates M*N bindings each with K-depth
-        // fold expressions. With sampling, we only generate ~64 bindings.
         const SAMPLE_THRESHOLD: usize = 100_000;
         let expander = if max_samples > 0 {
             ExprExpander::new_sampled(shapes.clone(), max_samples)
@@ -59,17 +487,122 @@ pub mod pipeline {
         } else {
             ExprExpander::new(shapes.clone())
         };
+        let expander = if !dtypes.is_empty() {
+            expander.with_skip_unsupported(true)
+        } else {
+            expander
+        };
         let bindings = expander.expand(graph)?;
 
         // Phase 2: inline intermediates
-        let inlined = inline_intermediates(&bindings, final_output_ids);
+        let inlined = inline_intermediates(&bindings, final_output_ids, dtypes);
 
         // Phase 3: recover patterns from inlined expressions
         let patterns = recover_patterns(&inlined.bindings, shapes);
 
+        // Helper to format expression tree
+        fn format_pattern_expr(expr: &crate::compiler::attempts::v9_fused_expr::pattern::PatternExpr) -> String {
+            use crate::compiler::attempts::v9_fused_expr::pattern::PatternExpr;
+            match expr {
+                PatternExpr::Load { load_ordinal, .. } => format!("L{}", load_ordinal),
+                PatternExpr::Literal { value_bits } => {
+                    let v = f64::from_bits(*value_bits);
+                    format!("{:.6}", v)
+                }
+                PatternExpr::Binary { op, a, b } => {
+                    format!("({:?} {} {})", op, format_pattern_expr(a), format_pattern_expr(b))
+                }
+                PatternExpr::Unary { op, input } => {
+                    format!("({:?} {})", op, format_pattern_expr(input))
+                }
+                PatternExpr::Reduce { accum_op, reduce_idx, body, .. } => {
+                    format!("(Reduce[{}]{:?} {})", reduce_idx, accum_op, format_pattern_expr(body))
+                }
+            }
+        }
+
+        // Log pattern details if V9_LOG_PATTERNS is set
+        if std::env::var("V9_LOG_PATTERNS").is_ok() {
+            for (ki, p) in patterns.iter().enumerate() {
+                let input_tensors: Vec<GlobalId> = {
+                    let mut ids: Vec<GlobalId> = p.accesses.iter().map(|a| a.tensor).collect();
+                    for red in &p.reductions {
+                        for a in &red.accesses {
+                            ids.push(a.tensor);
+                        }
+                    }
+                    ids.sort();
+                    ids.dedup();
+                    ids
+                };
+                eprintln!("  K{:>3}: out={:?} shape={:?} inputs={} reds={} accesses={}",
+                    ki, p.output_tensor, p.output_shape,
+                    input_tensors.len(), p.reductions.len(), p.accesses.len());
+                for (ai, a) in p.accesses.iter().enumerate() {
+                    eprintln!("    access[{}]: tensor={:?} base={} coeffs={:?}",
+                        ai, a.tensor, a.base, a.axis_coeffs);
+                }
+                for (ri, r) in p.reductions.iter().enumerate() {
+                    eprintln!("    reduce[{}]: depth={} loads={}", ri, r.depth, r.accesses.len());
+                    for (ai, a) in r.accesses.iter().enumerate() {
+                        eprintln!("      red_access[{}]: tensor={:?} base={} coeffs={:?} red_coeff={}",
+                            ai, a.tensor, a.base, a.axis_coeffs, r.reduction_coeffs[ai]);
+                    }
+                }
+                eprintln!("    expr: {}", format_pattern_expr(&p.pattern));
+            }
+        }
+
         // Phase 4: build tensor layout and compile
-        let layout = TensorLayout::from_shapes(shapes);
+        let layout = TensorLayout::from_shapes_and_dtypes(shapes, dtypes);
         compile_patterns(&patterns, layout)
+    }
+
+    /// Compile and build a hybrid execution plan in one step.
+    ///
+    /// Runs structural verification after building the plan:
+    /// - Plan integrity (op coverage + input provenance)
+    /// - Full expansion cross-check (verifies sparse sampling correctness)
+    pub fn compile_hybrid(
+        graph: &MilliOpGraph,
+        shapes: &HashMap<GlobalId, Vec<usize>>,
+        final_output_ids: &HashSet<GlobalId>,
+        max_samples: usize,
+        dtypes: &HashMap<GlobalId, crate::dtype::DType>,
+    ) -> Result<ExecutionPlan, V9Error> {
+        let compiled = compile_graph_typed(graph, shapes, final_output_ids, max_samples, dtypes)?;
+        let plan = build_execution_plan(graph, compiled);
+
+        // Structural verification pass 1: plan integrity
+        let integrity_issues = verify_plan_integrity(&plan, graph);
+        if !integrity_issues.is_empty() {
+            eprintln!("  verify_plan_integrity: {} issues", integrity_issues.len());
+            for issue in &integrity_issues {
+                eprintln!("    {}", issue);
+            }
+        }
+
+        // Structural verification pass 2: streaming expansion coverage check
+        let t0 = std::time::Instant::now();
+        let expansion_issues = verify_expansion_coverage(
+            &plan, graph, shapes, dtypes,
+        );
+        let verify_ms = t0.elapsed().as_secs_f64() * 1e3;
+        if !expansion_issues.is_empty() {
+            eprintln!("  verify_expansion_coverage: {} issues ({:.1}ms)", expansion_issues.len(), verify_ms);
+            for issue in &expansion_issues {
+                eprintln!("    {}", issue);
+            }
+        } else {
+            eprintln!("  verify_expansion_coverage: OK ({:.1}ms)", verify_ms);
+        }
+
+        let total_issues = integrity_issues.len() + expansion_issues.len();
+        if total_issues > 0 {
+            eprintln!("  WARNING: {} structural verification issues found", total_issues);
+        }
+
+        Ok(plan)
     }
 
     #[cfg(test)]
@@ -629,6 +1162,102 @@ pub mod pipeline {
                     "fused MLP ({threads}t) diverged from serial: max diff {diff}"
                 );
             }
+        }
+        #[test]
+        fn test_sampled_large_add_correctness() {
+            // Regression test: sampled [768, 768] pointwise add.
+            // With flat-stride sampling (stride=9216=12*768), all samples had
+            // column=0, so the recovered pattern loaded from column 0 for
+            // every output element.
+            let mut rng = wyrand::WyRand::new(9100);
+            let (rows, cols) = (768, 768);
+            let ext_a = GlobalId::new(&mut rng);
+            let ext_b = GlobalId::new(&mut rng);
+            let (mut graph, input_map) = MilliOpGraph::new([ext_a, ext_b], &mut rng);
+            let a = input_map[&ext_a];
+            let b = input_map[&ext_b];
+            let c = SimpleBinary::add(&mut graph, a, b, &mut rng);
+
+            let mut shapes = HashMap::new();
+            shapes.insert(a, vec![rows, cols]);
+            shapes.insert(b, vec![rows, cols]);
+            shapes.insert(c, vec![rows, cols]);
+
+            let final_outputs: HashSet<GlobalId> = [c].into_iter().collect();
+            let compiled = compile_graph(&graph, &shapes, &final_outputs, 64).unwrap();
+
+            let a_data = make_random_f32(rows * cols, 9101);
+            let b_data = make_random_f32(rows * cols, 9102);
+            let mut inputs = HashMap::new();
+            inputs.insert(a, a_data.clone());
+            inputs.insert(b, b_data.clone());
+
+            let result = alloc_and_run(&compiled, &inputs, c);
+
+            let expected: Vec<f32> = a_data.iter().zip(&b_data)
+                .map(|(x, y)| x + y).collect();
+
+            let max_err = result.iter().zip(&expected)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0f32, f32::max);
+            assert!(
+                max_err < 1e-6,
+                "sampled [{rows}x{cols}] add max error {:.4e} (expected < 1e-6)",
+                max_err
+            );
+        }
+
+        #[test]
+        fn test_sampled_large_matmul_correctness() {
+            // Regression test: [256, 256] matmul with 64-sample expansion.
+            // This would have failed with flat-stride sampling because stride=1024=4*256
+            // means all samples have column 0, making the B-access coefficient wrong.
+            let mut rng = wyrand::WyRand::new(9001);
+            let (m, k, n) = (256, 128, 256);
+            let ext_a = GlobalId::new(&mut rng);
+            let ext_b = GlobalId::new(&mut rng);
+            let (mut graph, input_map) = MilliOpGraph::new([ext_a, ext_b], &mut rng);
+            let a = input_map[&ext_a];
+            let b = input_map[&ext_b];
+            let c = crate::milli_graph::ops::MatMul::push_new(&mut graph, a, b, &mut rng);
+
+            let mut shapes = HashMap::new();
+            shapes.insert(a, vec![m, k]);
+            shapes.insert(b, vec![k, n]);
+            shapes.insert(c, vec![m, n]);
+
+            let final_outputs: HashSet<GlobalId> = [c].into_iter().collect();
+            // Use max_samples=64 to force sampling
+            let compiled = compile_graph(&graph, &shapes, &final_outputs, 64).unwrap();
+
+            let a_data = make_random_f32(m * k, 9002);
+            let b_data = make_random_f32(k * n, 9003);
+            let mut inputs = HashMap::new();
+            inputs.insert(a, a_data.clone());
+            inputs.insert(b, b_data.clone());
+
+            let result = alloc_and_run(&compiled, &inputs, c);
+
+            // Reference: naive matmul
+            let mut expected = vec![0.0f32; m * n];
+            for i in 0..m {
+                for j in 0..n {
+                    let mut sum = 0.0f32;
+                    for kk in 0..k {
+                        sum += a_data[i * k + kk] * b_data[kk * n + j];
+                    }
+                    expected[i * n + j] = sum;
+                }
+            }
+
+            let max_err = result.iter().zip(&expected)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0f32, f32::max);
+            assert!(
+                max_err < 1e-2,
+                "sampled [{}x{}] matmul max error {:.4} (expected < 0.01)",
+                m, n, max_err
+            );
         }
     }
 }

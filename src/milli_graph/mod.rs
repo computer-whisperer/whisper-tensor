@@ -798,6 +798,58 @@ impl MilliOpGraph {
 
         Ok(shapes)
     }
+
+    /// Like `collect_all_shapes` but also returns the DType of every tensor.
+    pub fn collect_all_shapes_and_dtypes(
+        &self,
+        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
+    ) -> Result<(HashMap<GlobalId, Vec<usize>>, HashMap<GlobalId, crate::dtype::DType>), MilliOpGraphError> {
+        let mut backend = EvalBackend::NDArray;
+        let mut shapes = HashMap::new();
+        let mut dtypes = HashMap::new();
+
+        let mut intermediate_values = HashMap::new();
+        for (ext_id, tensor_value) in inputs {
+            let int_id = self.input_map[ext_id];
+            shapes.insert(int_id, tensor_value.shape().iter().map(|&d| d as usize).collect());
+            dtypes.insert(int_id, tensor_value.dtype());
+            intermediate_values.insert(int_id, tensor_value.clone());
+        }
+
+        for op_id in &self.op_ordering {
+            let op = &self.ops[op_id];
+            let out_vec: Vec<_> = op.eval(&intermediate_values, &mut backend)?.collect();
+            for (tensor_id, value) in out_vec {
+                shapes.insert(tensor_id, value.shape().iter().map(|&d| d as usize).collect());
+                dtypes.insert(tensor_id, value.dtype());
+                intermediate_values.insert(tensor_id, value);
+            }
+        }
+
+        Ok((shapes, dtypes))
+    }
+
+    /// Like collect_all_shapes_and_dtypes, but also returns all intermediate tensor values.
+    /// The returned values map uses internal (milli graph) GlobalIds.
+    pub fn collect_all_intermediate_values(
+        &self,
+        inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
+    ) -> Result<HashMap<GlobalId, NumericTensor<DynRank>>, MilliOpGraphError> {
+        let mut backend = EvalBackend::NDArray;
+        let mut intermediate_values = HashMap::new();
+        for (ext_id, tensor_value) in inputs {
+            let int_id = self.input_map[ext_id];
+            intermediate_values.insert(int_id, tensor_value.clone());
+        }
+        for op_id in &self.op_ordering {
+            let op = &self.ops[op_id];
+            let out_vec: Vec<_> = op.eval(&intermediate_values, &mut backend)?.collect();
+            for (tensor_id, value) in out_vec {
+                intermediate_values.insert(tensor_id, value);
+            }
+        }
+        Ok(intermediate_values)
+    }
 }
 
 impl Graph for MilliOpGraph {

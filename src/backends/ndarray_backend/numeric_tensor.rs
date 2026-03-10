@@ -2529,6 +2529,46 @@ impl NDArrayNumericTensor<DynRank> {
         }
     }
 
+    /// Serialize tensor data to contiguous bytes (native layout, via zerocopy).
+    pub fn to_contiguous_bytes(&self) -> Vec<u8> {
+        use zerocopy::IntoBytes;
+        macro_rules! as_raw {
+            ($arr:expr) => {{
+                let owned = $arr.as_standard_layout();
+                let slice = owned.as_slice().expect("standard_layout guarantees contiguous");
+                slice.as_bytes().to_vec()
+            }};
+        }
+        match self {
+            NDArrayNumericTensor::F64(x) => as_raw!(x),
+            NDArrayNumericTensor::F32(x) => as_raw!(x),
+            NDArrayNumericTensor::BF16(x) => as_raw!(x),
+            NDArrayNumericTensor::F16(x) => as_raw!(x),
+            NDArrayNumericTensor::F8E4M3(x) => {
+                let owned = x.as_standard_layout();
+                let slice = owned.as_slice().expect("contiguous");
+                slice.iter().map(|v| v.to_bits()).collect()
+            }
+            NDArrayNumericTensor::F8E5M2(x) => {
+                let owned = x.as_standard_layout();
+                let slice = owned.as_slice().expect("contiguous");
+                slice.iter().map(|v| v.to_bits()).collect()
+            }
+            NDArrayNumericTensor::U64(x) => as_raw!(x),
+            NDArrayNumericTensor::I64(x) => as_raw!(x),
+            NDArrayNumericTensor::U32(x) => as_raw!(x),
+            NDArrayNumericTensor::I32(x) => as_raw!(x),
+            NDArrayNumericTensor::U16(x) => as_raw!(x),
+            NDArrayNumericTensor::I16(x) => as_raw!(x),
+            NDArrayNumericTensor::U8(x) => as_raw!(x),
+            NDArrayNumericTensor::I8(x) => as_raw!(x),
+            NDArrayNumericTensor::BOOL(x) => as_raw!(x),
+            NDArrayNumericTensor::STRING(_) => {
+                panic!("Cannot serialize STRING tensor to bytes")
+            }
+        }
+    }
+
     pub fn from_raw_data(
         data: &[u8],
         dtype: DType,
@@ -2974,16 +3014,28 @@ impl NDArrayNumericTensor<DynRank> {
                 NDArrayNumericTensor::F64(op.apply(x.clone(), axes, keepdims)?)
             }
             NDArrayNumericTensor::F16(x) => {
-                NDArrayNumericTensor::F16(op.apply(x.clone(), axes, keepdims)?)
+                // Accumulate in F32 (matching PyTorch and v9 codegen), cast back
+                let f32_arr = x.map(|v| v.to_f32()).to_shared();
+                let reduced = op.apply(f32_arr, axes, keepdims)?;
+                NDArrayNumericTensor::F16(reduced.map(|v| f16::from_f32(*v)).to_shared())
             }
             NDArrayNumericTensor::BF16(x) => {
-                NDArrayNumericTensor::BF16(op.apply(x.clone(), axes, keepdims)?)
+                // Accumulate in F32 (matching PyTorch and v9 codegen), cast back
+                let f32_arr = x.map(|v| v.to_f32()).to_shared();
+                let reduced = op.apply(f32_arr, axes, keepdims)?;
+                NDArrayNumericTensor::BF16(reduced.map(|v| bf16::from_f32(*v)).to_shared())
             }
             NDArrayNumericTensor::F8E4M3(x) => {
-                NDArrayNumericTensor::F8E4M3(op.apply(x.clone(), axes, keepdims)?)
+                // Accumulate in F32 (matching PyTorch and v9 codegen), cast back
+                let f32_arr = x.map(|v| v.to_f32()).to_shared();
+                let reduced = op.apply(f32_arr, axes, keepdims)?;
+                NDArrayNumericTensor::F8E4M3(reduced.map(|v| F8E4M3::from_f32(*v)).to_shared())
             }
             NDArrayNumericTensor::F8E5M2(x) => {
-                NDArrayNumericTensor::F8E5M2(op.apply(x.clone(), axes, keepdims)?)
+                // Accumulate in F32 (matching PyTorch and v9 codegen), cast back
+                let f32_arr = x.map(|v| v.to_f32()).to_shared();
+                let reduced = op.apply(f32_arr, axes, keepdims)?;
+                NDArrayNumericTensor::F8E5M2(reduced.map(|v| F8E5M2::from_f32(*v)).to_shared())
             }
             NDArrayNumericTensor::U32(x) => {
                 NDArrayNumericTensor::U32(op.apply(x.clone(), axes, keepdims)?)

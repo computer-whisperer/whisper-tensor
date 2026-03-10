@@ -188,6 +188,144 @@ pub mod dag {
         tasks_remaining: AtomicUsize,
     }
 
+    /// Execute a subset of kernels from a compiled graph using `num_threads` worker threads.
+    /// `kernel_indices` specifies which kernels to run (must be in dependency order).
+    ///
+    /// # Safety
+    /// `buffers` must contain valid pointers for all tensors in the layout.
+    pub unsafe fn execute_kernel_batch(
+        graph: &CompiledGraph,
+        kernel_indices: &[usize],
+        buffers: &[*mut f32],
+        num_threads: usize,
+    ) {
+        if kernel_indices.is_empty() {
+            return;
+        }
+        if kernel_indices.len() == 1 || num_threads <= 1 {
+            let ptr = buffers.as_ptr();
+            for &ki in kernel_indices {
+                unsafe { graph.kernels[ki].execute(ptr) };
+            }
+            return;
+        }
+
+        // Build a sub-graph with only the selected kernels.
+        // Map output tensor → index within kernel_indices.
+        let mut output_to_batch_idx = std::collections::HashMap::new();
+        for (bi, &ki) in kernel_indices.iter().enumerate() {
+            output_to_batch_idx.insert(graph.kernels[ki].output_tensor, bi);
+        }
+
+        let n_batch = kernel_indices.len();
+
+        // Determine tiles per kernel.
+        struct KernelTiles {
+            tile_ranges: Vec<(usize, usize)>,
+            first_node: usize,
+        }
+        let mut kernel_tiles = Vec::with_capacity(n_batch);
+        let mut total_nodes = 0usize;
+        for &ki in kernel_indices {
+            let kernel = &graph.kernels[ki];
+            let extent = kernel.parallel_extent;
+            let step = kernel.parallel_step;
+            let n_tiles = compute_tile_count(extent, step, num_threads);
+            let tile_size = align_up(extent.div_ceil(n_tiles), step);
+            let mut ranges = Vec::with_capacity(n_tiles);
+            let mut start = 0;
+            while start < extent {
+                let end = (start + tile_size).min(extent);
+                ranges.push((start, end));
+                start = end;
+            }
+            kernel_tiles.push(KernelTiles {
+                tile_ranges: ranges,
+                first_node: total_nodes,
+            });
+            total_nodes += kernel_tiles.last().unwrap().tile_ranges.len();
+        }
+
+        // Build task nodes.
+        let mut nodes: Vec<TaskNode> = Vec::with_capacity(total_nodes);
+        for (bi, kt) in kernel_tiles.iter().enumerate() {
+            for &(start, end) in &kt.tile_ranges {
+                nodes.push(TaskNode {
+                    task: TileTask {
+                        kernel_idx: kernel_indices[bi],
+                        start,
+                        end,
+                    },
+                    remaining_deps: AtomicUsize::new(0),
+                    dependents: Vec::new(),
+                });
+            }
+        }
+
+        // Wire dependencies within the batch.
+        for (consumer_bi, &consumer_ki) in kernel_indices.iter().enumerate() {
+            let consumer_kernel = &graph.kernels[consumer_ki];
+            let consumer_kt = &kernel_tiles[consumer_bi];
+            for input_tensor in &consumer_kernel.input_tensors {
+                let producer_bi = match output_to_batch_idx.get(input_tensor) {
+                    Some(&bi) => bi,
+                    None => continue, // input produced outside this batch
+                };
+                let producer_kernel = &graph.kernels[kernel_indices[producer_bi]];
+                let producer_kt = &kernel_tiles[producer_bi];
+
+                let one_to_one = producer_kernel.parallel_extent
+                    == consumer_kernel.parallel_extent
+                    && producer_kt.tile_ranges.len() == consumer_kt.tile_ranges.len()
+                    && producer_kt
+                        .tile_ranges
+                        .iter()
+                        .zip(consumer_kt.tile_ranges.iter())
+                        .all(|(p, c)| p.0 == c.0 && p.1 == c.1);
+
+                if one_to_one {
+                    for ti in 0..consumer_kt.tile_ranges.len() {
+                        let producer_node = producer_kt.first_node + ti;
+                        let consumer_node = consumer_kt.first_node + ti;
+                        nodes[consumer_node]
+                            .remaining_deps
+                            .fetch_add(1, Ordering::Relaxed);
+                        nodes[producer_node].dependents.push(consumer_node);
+                    }
+                } else {
+                    for cti in 0..consumer_kt.tile_ranges.len() {
+                        let consumer_node = consumer_kt.first_node + cti;
+                        nodes[consumer_node]
+                            .remaining_deps
+                            .fetch_add(producer_kt.tile_ranges.len(), Ordering::Relaxed);
+                    }
+                    for pti in 0..producer_kt.tile_ranges.len() {
+                        let producer_node = producer_kt.first_node + pti;
+                        for cti in 0..consumer_kt.tile_ranges.len() {
+                            let consumer_node = consumer_kt.first_node + cti;
+                            nodes[producer_node].dependents.push(consumer_node);
+                        }
+                    }
+                }
+            }
+        }
+
+        let initial_ready: Vec<usize> = nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.remaining_deps.load(Ordering::Relaxed) == 0)
+            .map(|(i, _)| i)
+            .collect();
+
+        let task_graph = TaskGraph {
+            nodes,
+            initial_ready,
+        };
+
+        // Run with the shared executor logic.
+        run_task_graph(&task_graph, graph, buffers, num_threads);
+    }
+
     /// Execute the compiled graph using `num_threads` worker threads.
     ///
     /// # Safety
@@ -206,19 +344,39 @@ pub mod dag {
         }
 
         let task_graph = build_task_graph(graph, num_threads);
-        let total_tasks = task_graph.nodes.len();
+        run_task_graph(&task_graph, graph, buffers, num_threads);
+    }
 
+    /// Shared work-stealing executor for a task graph.
+    unsafe fn run_task_graph(
+        task_graph: &TaskGraph,
+        graph: &CompiledGraph,
+        buffers: &[*mut f32],
+        num_threads: usize,
+    ) {
+        let total_tasks = task_graph.nodes.len();
         if total_tasks == 0 {
             return;
         }
 
-        // Cap thread count: never spawn more threads than tasks, and fall
-        // back to serial if there aren't enough tasks to justify overhead.
         let effective_threads = total_tasks.min(num_threads);
         if effective_threads <= 1 {
+            // Serial fallback
             let ptr = buffers.as_ptr();
-            for kernel in &graph.kernels {
-                unsafe { kernel.execute(ptr) };
+            // Execute tasks in dependency order
+            let mut ready: VecDeque<usize> = task_graph.initial_ready.iter().cloned().collect();
+            while let Some(task_idx) = ready.pop_front() {
+                let node = &task_graph.nodes[task_idx];
+                let kernel = &graph.kernels[node.task.kernel_idx];
+                unsafe { kernel.execute_range(ptr, node.task.start, node.task.end) };
+                for &dep_idx in &node.dependents {
+                    let prev = task_graph.nodes[dep_idx]
+                        .remaining_deps
+                        .fetch_sub(1, Ordering::AcqRel);
+                    if prev == 1 {
+                        ready.push_back(dep_idx);
+                    }
+                }
             }
             return;
         }

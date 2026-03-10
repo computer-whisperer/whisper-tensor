@@ -628,6 +628,7 @@ fn emit_unary_op(
             builder.inst_results(call)[0]
         }
         ScalarUnaryOp::Tanh => emit_inline_tanh(builder, vin),
+        _ => panic!("unsupported unary op {:?} in v2 fusion codegen", op),
     }
 }
 
