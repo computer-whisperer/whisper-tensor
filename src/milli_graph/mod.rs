@@ -109,6 +109,20 @@ pub struct TrainingMetadata {
     ///
     /// Only populated via `SymbolicGraph::generate_milli_graph_with_options`.
     pub state_updates: HashMap<(GlobalId, String), StateUpdate>,
+
+    /// Maps forward output IDs (symbolic-space) to the external input IDs
+    /// where upstream gradients should be provided.
+    ///
+    /// Used for BPTT: the backward scan provides state gradients from the
+    /// next timestep via these inputs.
+    pub external_gradient_inputs: HashMap<GlobalId, GlobalId>,
+
+    /// Maps forward input IDs (symbolic-space) to their computed gradient
+    /// output IDs in the training graph.
+    ///
+    /// Used for BPTT: the backward scan threads these state gradients to
+    /// the previous timestep's `external_gradient_inputs`.
+    pub input_gradients: HashMap<GlobalId, GlobalId>,
 }
 
 /// Per-parameter optimizer state entry for the external-facing API.
@@ -177,6 +191,20 @@ pub struct BackwardGenOptions {
     pub trainable_params: Vec<GlobalId>,
     /// Ops where gradient flow stops (e.g., for freezing layers).
     pub stop_gradients: HashSet<GlobalId>,
+    /// Additional upstream gradients provided externally (e.g., for BPTT
+    /// where a downstream scan provides gradients for state outputs).
+    /// Each entry adds an external input to the training graph that seeds
+    /// the backward pass at the specified forward output.
+    pub external_gradients: Vec<ExternalGradient>,
+}
+
+/// An externally-provided upstream gradient for a forward output.
+///
+/// Used for BPTT: the backward scan at step T receives the state gradient
+/// from step T+1 as an external input, seeding backward at the state output.
+pub struct ExternalGradient {
+    /// Which forward output (in SymbolicGraph space) this gradient corresponds to.
+    pub forward_output: GlobalId,
 }
 
 /// Specifies how a loss graph input gets wired.

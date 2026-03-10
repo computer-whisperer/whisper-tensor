@@ -416,6 +416,7 @@ fn main() {
             loss_output: loss_info.loss_output,
             trainable_params: ids.trainable.clone(),
             stop_gradients: std::collections::HashSet::new(),
+            external_gradients: vec![],
         }),
         optimizer: Some(OptimizerGenOptions {
             kind: OptimizerKind::SGD {
