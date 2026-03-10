@@ -230,5 +230,86 @@ pub mod pipeline {
             let out_slot = compiled.layout.tensor_index[&mm_out];
             assert_eq!(&buffers[out_slot][..4], &expected);
         }
+
+        #[test]
+        fn test_fused_matmul_bias_tanh() {
+            // out = tanh(A @ W + bias), 2x3 * 3x2 + [1,2] broadcast = 2x2
+            // Tests the embedded-reduction architecture: reduction (matmul)
+            // fused inside pointwise ops (add + tanh).
+            let mut rng = wyrand::WyRand::new(42);
+            let ext_a = GlobalId::new(&mut rng);
+            let ext_w = GlobalId::new(&mut rng);
+            let ext_bias = GlobalId::new(&mut rng);
+            let (mut graph, input_map) =
+                MilliOpGraph::new([ext_a, ext_w, ext_bias], &mut rng);
+            let int_a = input_map[&ext_a];
+            let int_w = input_map[&ext_w];
+            let int_bias = input_map[&ext_bias];
+
+            let mm_out =
+                crate::milli_graph::ops::MatMul::push_new(&mut graph, int_a, int_w, &mut rng);
+            let add_out = SimpleBinary::add(&mut graph, mm_out, int_bias, &mut rng);
+            let tanh_out = SimpleUnaryOp::trig(
+                &mut graph,
+                add_out,
+                crate::TrigOp::Tanh,
+                &mut rng,
+            );
+
+            let mut shapes = HashMap::new();
+            shapes.insert(int_a, vec![2, 3]);
+            shapes.insert(int_w, vec![3, 2]);
+            shapes.insert(int_bias, vec![1, 2]); // broadcast bias
+            shapes.insert(mm_out, vec![2, 2]);
+            shapes.insert(add_out, vec![2, 2]);
+            shapes.insert(tanh_out, vec![2, 2]);
+
+            // Only tanh_out is a final output — mm_out and add_out are intermediates
+            let final_outputs: HashSet<GlobalId> = [tanh_out].into_iter().collect();
+            let compiled = compile_graph(&graph, &shapes, &final_outputs, 0).unwrap();
+
+            // Should fuse into 1 kernel (matmul + bias + tanh all fused)
+            assert_eq!(compiled.kernels.len(), 1, "Expected 1 fused kernel");
+
+            // A = [[1,2,3],[4,5,6]], W = [[1,0],[0,1],[1,1]], bias = [10, 20]
+            // A@W = [[4,5],[10,11]]
+            // A@W + bias = [[14,25],[20,31]]
+            // tanh(A@W + bias) ≈ [[1.0, 1.0],[1.0, 1.0]] (saturated)
+            let a_data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0f32];
+            let w_data = vec![1.0, 0.0, 0.0, 1.0, 1.0, 1.0f32];
+            let bias_data = vec![10.0, 20.0f32];
+
+            let mut buffers: Vec<Vec<f32>> = (0..compiled.layout.num_buffers)
+                .map(|_| vec![0.0f32; 8])
+                .collect();
+            buffers[compiled.layout.tensor_index[&int_a]][..6].copy_from_slice(&a_data);
+            buffers[compiled.layout.tensor_index[&int_w]][..6].copy_from_slice(&w_data);
+            buffers[compiled.layout.tensor_index[&int_bias]][..2].copy_from_slice(&bias_data);
+
+            let mut ptrs: Vec<*mut f32> = buffers.iter_mut().map(|b| b.as_mut_ptr()).collect();
+            unsafe { compiled.execute(&mut ptrs) };
+
+            let out_slot = compiled.layout.tensor_index[&tanh_out];
+            let result = &buffers[out_slot][..4];
+
+            // Compute expected: tanh(mm + bias) for each element
+            let mm = [4.0f32, 5.0, 10.0, 11.0];
+            let biases = [10.0f32, 20.0, 10.0, 20.0]; // broadcast [10,20] to 2x2
+            let expected: Vec<f32> = mm
+                .iter()
+                .zip(biases.iter())
+                .map(|(m, b)| (m + b).tanh())
+                .collect();
+
+            for i in 0..4 {
+                assert!(
+                    (result[i] - expected[i]).abs() < 1e-6,
+                    "element {}: got {}, expected {}",
+                    i,
+                    result[i],
+                    expected[i]
+                );
+            }
+        }
     }
 }

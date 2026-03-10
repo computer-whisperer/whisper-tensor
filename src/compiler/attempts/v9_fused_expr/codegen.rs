@@ -1,7 +1,7 @@
 //! v9 codegen: single-threaded Cranelift JIT from recovered patterns.
 //!
-//! Emits nested loops matching the output shape, computing affine indices
-//! per axis. No SIMD, no tiling, no parallelism — correctness first.
+//! Emits nested loops matching the output shape. Reduce nodes in the pattern
+//! tree emit their own inner loops inline. No SIMD, no tiling — correctness first.
 
 #[cfg(feature = "cranelift")]
 pub mod jit {
@@ -112,7 +112,14 @@ pub mod jit {
 
             let ptr_table = builder.block_params(entry_block)[0];
 
-            emit_pattern(&mut builder, &mut module, pattern, &layout, ptr_table, &math_funcs)?;
+            emit_pattern(
+                &mut builder,
+                &mut module,
+                pattern,
+                &layout,
+                ptr_table,
+                &math_funcs,
+            )?;
 
             builder.ins().return_(&[]);
             builder.finalize();
@@ -124,6 +131,11 @@ pub mod jit {
 
             let mut input_tensors: Vec<GlobalId> =
                 pattern.accesses.iter().map(|a| a.tensor).collect();
+            for red in &pattern.reductions {
+                for a in &red.accesses {
+                    input_tensors.push(a.tensor);
+                }
+            }
             input_tensors.sort();
             input_tensors.dedup();
 
@@ -159,10 +171,11 @@ pub mod jit {
     // Nested loop emission
     // ------------------------------------------------------------------
 
-    /// Variable allocation counter for Cranelift
     struct VarAlloc(u32);
     impl VarAlloc {
-        fn new() -> Self { VarAlloc(0) }
+        fn new() -> Self {
+            VarAlloc(0)
+        }
         fn next(&mut self) -> Variable {
             let v = Variable::from_u32(self.0);
             self.0 += 1;
@@ -189,124 +202,55 @@ pub mod jit {
             axis_vars.push(v);
         }
 
-        // For reductions, allocate acc and k vars
-        let (acc_var, k_var) = match &pattern.kind {
-            PatternKind::Reduction { .. } => {
-                let acc = vars.next();
-                builder.declare_var(acc, types::F32);
-                let k = vars.next();
-                builder.declare_var(k, types::I64);
-                (Some(acc), Some(k))
-            }
-            _ => (None, None),
-        };
-
-        // Build nested loops from outermost to innermost axis
+        // Build nested loops
         let loop_blocks = build_nested_loops(builder, &axis_vars, &pattern.output_shape);
 
-        // We're now in the innermost loop body.
-        // Compute the flat output index = sum(axis_var[d] * output_stride[d])
+        // Compute flat output index
         let out_strides = row_major_strides(&pattern.output_shape);
         let flat_out = compute_flat_index(builder, &axis_vars, &out_strides);
 
-        match &pattern.kind {
-            PatternKind::Pointwise => {
-                // Load values
-                let load_vals = load_affine_values(
-                    builder, pattern, layout, ptr_table, &axis_vars, &[], None,
-                );
+        // Load outer (pointwise) values
+        let outer_vals = load_outer_values(builder, pattern, layout, ptr_table, &axis_vars);
 
-                // Evaluate expression tree
-                let result = eval_pattern_expr(builder, module, &pattern.pattern, &load_vals, math_funcs)?;
+        // Evaluate expression tree (Reduce nodes emit their own inner loops)
+        let result = eval_pattern_expr(
+            builder,
+            module,
+            &pattern.pattern,
+            &outer_vals,
+            &axis_vars,
+            pattern,
+            layout,
+            ptr_table,
+            math_funcs,
+            &mut vars,
+        )?;
 
-                // Store
-                store_result(builder, layout, ptr_table, pattern.output_tensor, flat_out, result);
-            }
+        // Store result
+        store_result(
+            builder,
+            layout,
+            ptr_table,
+            pattern.output_tensor,
+            flat_out,
+            result,
+        );
 
-            PatternKind::Reduction {
-                accum_op,
-                identity,
-                depth,
-                reduction_coeffs,
-            } => {
-                let acc_var = acc_var.unwrap();
-                let k_var = k_var.unwrap();
-
-                // Initialize accumulator
-                let id_val = builder.ins().f32const(*identity as f32);
-                builder.def_var(acc_var, id_val);
-
-                // Inner reduction loop: for k in 0..depth
-                let zero_k = builder.ins().iconst(types::I64, 0);
-                builder.def_var(k_var, zero_k);
-
-                let k_header = builder.create_block();
-                let k_body = builder.create_block();
-                let k_exit = builder.create_block();
-
-                builder.ins().jump(k_header, &[]);
-                builder.switch_to_block(k_header);
-
-                let k = builder.use_var(k_var);
-                let k_limit = builder.ins().iconst(types::I64, *depth as i64);
-                let k_cmp = builder.ins().icmp(
-                    cranelift_codegen::ir::condcodes::IntCC::SignedLessThan,
-                    k,
-                    k_limit,
-                );
-                builder.ins().brif(k_cmp, k_body, &[], k_exit, &[]);
-
-                builder.switch_to_block(k_body);
-                builder.seal_block(k_body);
-
-                // Load values for (axis_vars, k)
-                let load_vals = load_affine_values(
-                    builder,
-                    pattern,
-                    layout,
-                    ptr_table,
-                    &axis_vars,
-                    reduction_coeffs,
-                    Some(k_var),
-                );
-
-                // Evaluate reduction term
-                let term = eval_reduction_term(builder, module, &pattern.pattern, &load_vals, math_funcs)?;
-
-                // Accumulate
-                let acc = builder.use_var(acc_var);
-                let new_acc = emit_binop(builder, *accum_op, acc, term);
-                builder.def_var(acc_var, new_acc);
-
-                // k++
-                let k = builder.use_var(k_var);
-                let k_next = builder.ins().iadd_imm(k, 1);
-                builder.def_var(k_var, k_next);
-                builder.ins().jump(k_header, &[]);
-
-                builder.switch_to_block(k_exit);
-                builder.seal_block(k_header);
-                builder.seal_block(k_exit);
-
-                // Store accumulator
-                let acc = builder.use_var(acc_var);
-                store_result(builder, layout, ptr_table, pattern.output_tensor, flat_out, acc);
-            }
-        }
-
-        // Close nested loops (innermost to outermost)
+        // Close nested loops
         close_nested_loops(builder, &axis_vars, &loop_blocks);
 
         Ok(())
     }
 
-    /// Build nested for-loops for each output axis.
-    /// Returns the block triples (header, body, exit) for closing later.
     fn build_nested_loops(
         builder: &mut FunctionBuilder,
         axis_vars: &[Variable],
         output_shape: &[usize],
-    ) -> Vec<(cranelift_codegen::ir::Block, cranelift_codegen::ir::Block, cranelift_codegen::ir::Block)> {
+    ) -> Vec<(
+        cranelift_codegen::ir::Block,
+        cranelift_codegen::ir::Block,
+        cranelift_codegen::ir::Block,
+    )> {
         let mut blocks = Vec::new();
 
         for (d, &extent) in output_shape.iter().enumerate() {
@@ -338,13 +282,15 @@ pub mod jit {
         blocks
     }
 
-    /// Close nested loops: increment variables and jump back, seal blocks.
     fn close_nested_loops(
         builder: &mut FunctionBuilder,
         axis_vars: &[Variable],
-        blocks: &[(cranelift_codegen::ir::Block, cranelift_codegen::ir::Block, cranelift_codegen::ir::Block)],
+        blocks: &[(
+            cranelift_codegen::ir::Block,
+            cranelift_codegen::ir::Block,
+            cranelift_codegen::ir::Block,
+        )],
     ) {
-        // Close innermost first
         for d in (0..blocks.len()).rev() {
             let (header, _body, exit) = blocks[d];
             let iv = builder.use_var(axis_vars[d]);
@@ -373,53 +319,86 @@ pub mod jit {
         flat
     }
 
-    fn load_affine_values(
+    fn load_outer_values(
         builder: &mut FunctionBuilder,
         pattern: &RecoveredPattern,
         layout: &TensorLayout,
         ptr_table: Value,
         axis_vars: &[Variable],
-        reduction_coeffs: &[i64],
-        k_var: Option<Variable>,
     ) -> Vec<Value> {
-        let mut vals = Vec::new();
-        for (pos, access) in pattern.accesses.iter().enumerate() {
-            let slot = layout.tensor_index[&access.tensor];
-            let slot_offset = builder.ins().iconst(types::I64, (slot * 8) as i64);
-            let buf_ptr_ptr = builder.ins().iadd(ptr_table, slot_offset);
-            let buf_ptr =
-                builder
-                    .ins()
-                    .load(types::I64, MemFlags::trusted(), buf_ptr_ptr, 0);
+        pattern
+            .accesses
+            .iter()
+            .map(|access| load_affine_value(builder, access, layout, ptr_table, axis_vars, None, 0))
+            .collect()
+    }
 
-            // flat_index = base + sum(axis_coeffs[d] * axis_var[d]) [+ red_coeff * k]
-            let mut flat_idx = builder.ins().iconst(types::I64, access.base);
-            for (d, &coeff) in access.axis_coeffs.iter().enumerate() {
-                if coeff != 0 {
-                    let iv = builder.use_var(axis_vars[d]);
-                    let c = builder.ins().iconst(types::I64, coeff);
-                    let contrib = builder.ins().imul(c, iv);
-                    flat_idx = builder.ins().iadd(flat_idx, contrib);
-                }
-            }
-            if let Some(kv) = k_var {
-                if pos < reduction_coeffs.len() && reduction_coeffs[pos] != 0 {
-                    let k = builder.use_var(kv);
-                    let rc = builder.ins().iconst(types::I64, reduction_coeffs[pos]);
-                    let contrib = builder.ins().imul(rc, k);
-                    flat_idx = builder.ins().iadd(flat_idx, contrib);
-                }
-            }
+    fn load_reduction_values(
+        builder: &mut FunctionBuilder,
+        accesses: &[AffineAccess],
+        reduction_coeffs: &[i64],
+        layout: &TensorLayout,
+        ptr_table: Value,
+        axis_vars: &[Variable],
+        k_var: Variable,
+    ) -> Vec<Value> {
+        accesses
+            .iter()
+            .enumerate()
+            .map(|(pos, access)| {
+                load_affine_value(
+                    builder,
+                    access,
+                    layout,
+                    ptr_table,
+                    axis_vars,
+                    Some(k_var),
+                    reduction_coeffs[pos],
+                )
+            })
+            .collect()
+    }
 
-            let byte_offset = builder.ins().ishl_imm(flat_idx, 2);
-            let elem_ptr = builder.ins().iadd(buf_ptr, byte_offset);
-            let val =
-                builder
-                    .ins()
-                    .load(types::F32, MemFlags::trusted(), elem_ptr, 0);
-            vals.push(val);
+    fn load_affine_value(
+        builder: &mut FunctionBuilder,
+        access: &AffineAccess,
+        layout: &TensorLayout,
+        ptr_table: Value,
+        axis_vars: &[Variable],
+        k_var: Option<Variable>,
+        red_coeff: i64,
+    ) -> Value {
+        let slot = layout.tensor_index[&access.tensor];
+        let slot_offset = builder.ins().iconst(types::I64, (slot * 8) as i64);
+        let buf_ptr_ptr = builder.ins().iadd(ptr_table, slot_offset);
+        let buf_ptr =
+            builder
+                .ins()
+                .load(types::I64, MemFlags::trusted(), buf_ptr_ptr, 0);
+
+        let mut flat_idx = builder.ins().iconst(types::I64, access.base);
+        for (d, &coeff) in access.axis_coeffs.iter().enumerate() {
+            if coeff != 0 {
+                let iv = builder.use_var(axis_vars[d]);
+                let c = builder.ins().iconst(types::I64, coeff);
+                let contrib = builder.ins().imul(c, iv);
+                flat_idx = builder.ins().iadd(flat_idx, contrib);
+            }
         }
-        vals
+        if let Some(kv) = k_var {
+            if red_coeff != 0 {
+                let k = builder.use_var(kv);
+                let rc = builder.ins().iconst(types::I64, red_coeff);
+                let contrib = builder.ins().imul(rc, k);
+                flat_idx = builder.ins().iadd(flat_idx, contrib);
+            }
+        }
+
+        let byte_offset = builder.ins().ishl_imm(flat_idx, 2);
+        let elem_ptr = builder.ins().iadd(buf_ptr, byte_offset);
+        builder
+            .ins()
+            .load(types::F32, MemFlags::trusted(), elem_ptr, 0)
     }
 
     fn store_result(
@@ -459,6 +438,142 @@ pub mod jit {
         builder: &mut FunctionBuilder,
         module: &mut JITModule,
         pattern: &PatternExpr,
+        outer_load_vals: &[Value],
+        axis_vars: &[Variable],
+        recovered: &RecoveredPattern,
+        layout: &TensorLayout,
+        ptr_table: Value,
+        math_funcs: &MathFuncs,
+        vars: &mut VarAlloc,
+    ) -> Result<Value, V9Error> {
+        match pattern {
+            PatternExpr::Load { load_ordinal, .. } => Ok(outer_load_vals[*load_ordinal]),
+            PatternExpr::Literal { value_bits } => {
+                let val = f64::from_bits(*value_bits) as f32;
+                Ok(builder.ins().f32const(val))
+            }
+            PatternExpr::Binary { op, a, b } => {
+                let va = eval_pattern_expr(
+                    builder,
+                    module,
+                    a,
+                    outer_load_vals,
+                    axis_vars,
+                    recovered,
+                    layout,
+                    ptr_table,
+                    math_funcs,
+                    vars,
+                )?;
+                let vb = eval_pattern_expr(
+                    builder,
+                    module,
+                    b,
+                    outer_load_vals,
+                    axis_vars,
+                    recovered,
+                    layout,
+                    ptr_table,
+                    math_funcs,
+                    vars,
+                )?;
+                Ok(emit_binop(builder, *op, va, vb))
+            }
+            PatternExpr::Unary { op, input } => {
+                let vi = eval_pattern_expr(
+                    builder,
+                    module,
+                    input,
+                    outer_load_vals,
+                    axis_vars,
+                    recovered,
+                    layout,
+                    ptr_table,
+                    math_funcs,
+                    vars,
+                )?;
+                emit_unaryop(builder, module, *op, vi, math_funcs)
+            }
+            PatternExpr::Reduce {
+                accum_op,
+                identity_bits,
+                body,
+                reduce_idx,
+            } => {
+                let red = &recovered.reductions[*reduce_idx];
+
+                let acc_var = vars.next();
+                builder.declare_var(acc_var, types::F32);
+                let k_var = vars.next();
+                builder.declare_var(k_var, types::I64);
+
+                // Initialize accumulator
+                let identity = f64::from_bits(*identity_bits) as f32;
+                let id_val = builder.ins().f32const(identity);
+                builder.def_var(acc_var, id_val);
+
+                // k = 0
+                let zero_k = builder.ins().iconst(types::I64, 0);
+                builder.def_var(k_var, zero_k);
+
+                let k_header = builder.create_block();
+                let k_body = builder.create_block();
+                let k_exit = builder.create_block();
+
+                builder.ins().jump(k_header, &[]);
+                builder.switch_to_block(k_header);
+
+                let k = builder.use_var(k_var);
+                let k_limit = builder.ins().iconst(types::I64, red.depth as i64);
+                let k_cmp = builder.ins().icmp(
+                    cranelift_codegen::ir::condcodes::IntCC::SignedLessThan,
+                    k,
+                    k_limit,
+                );
+                builder.ins().brif(k_cmp, k_body, &[], k_exit, &[]);
+
+                builder.switch_to_block(k_body);
+                builder.seal_block(k_body);
+
+                // Load reduction values for this k
+                let body_vals = load_reduction_values(
+                    builder,
+                    &red.accesses,
+                    &red.reduction_coeffs,
+                    layout,
+                    ptr_table,
+                    axis_vars,
+                    k_var,
+                );
+
+                // Evaluate body (no Reduce nodes expected in body for now)
+                let term = eval_body_expr(builder, module, body, &body_vals, math_funcs)?;
+
+                // Accumulate
+                let acc = builder.use_var(acc_var);
+                let new_acc = emit_binop(builder, *accum_op, acc, term);
+                builder.def_var(acc_var, new_acc);
+
+                // k++
+                let k = builder.use_var(k_var);
+                let k_next = builder.ins().iadd_imm(k, 1);
+                builder.def_var(k_var, k_next);
+                builder.ins().jump(k_header, &[]);
+
+                builder.switch_to_block(k_exit);
+                builder.seal_block(k_header);
+                builder.seal_block(k_exit);
+
+                Ok(builder.use_var(acc_var))
+            }
+        }
+    }
+
+    /// Evaluate a reduction body expression (no Reduce node support).
+    fn eval_body_expr(
+        builder: &mut FunctionBuilder,
+        module: &mut JITModule,
+        pattern: &PatternExpr,
         load_vals: &[Value],
         math_funcs: &MathFuncs,
     ) -> Result<Value, V9Error> {
@@ -469,84 +584,17 @@ pub mod jit {
                 Ok(builder.ins().f32const(val))
             }
             PatternExpr::Binary { op, a, b } => {
-                let va = eval_pattern_expr(builder, module, a, load_vals, math_funcs)?;
-                let vb = eval_pattern_expr(builder, module, b, load_vals, math_funcs)?;
+                let va = eval_body_expr(builder, module, a, load_vals, math_funcs)?;
+                let vb = eval_body_expr(builder, module, b, load_vals, math_funcs)?;
                 Ok(emit_binop(builder, *op, va, vb))
             }
             PatternExpr::Unary { op, input } => {
-                let vi = eval_pattern_expr(builder, module, input, load_vals, math_funcs)?;
+                let vi = eval_body_expr(builder, module, input, load_vals, math_funcs)?;
                 emit_unaryop(builder, module, *op, vi, math_funcs)
             }
-        }
-    }
-
-    /// Extract and evaluate the reduction term (the `b` branch of the
-    /// outermost accumulator Binary node), remapping its load ordinals
-    /// to use the per-k load_vals.
-    fn eval_reduction_term(
-        builder: &mut FunctionBuilder,
-        module: &mut JITModule,
-        pattern: &PatternExpr,
-        load_vals: &[Value],
-        math_funcs: &MathFuncs,
-    ) -> Result<Value, V9Error> {
-        match pattern {
-            PatternExpr::Binary { b, .. } => {
-                let remapped = remap_term_ordinals(b);
-                let mut local_loads = Vec::new();
-                collect_term_load_values(b, load_vals, &mut local_loads);
-                eval_pattern_expr(builder, module, &remapped, &local_loads, math_funcs)
+            PatternExpr::Reduce { .. } => {
+                Err(V9Error::Other("Nested reductions not yet supported".into()))
             }
-            _ => Err(V9Error::Other("Reduction root is not Binary".into())),
-        }
-    }
-
-    fn collect_term_load_values(pattern: &PatternExpr, load_vals: &[Value], out: &mut Vec<Value>) {
-        match pattern {
-            PatternExpr::Load { .. } => {
-                let pos = out.len();
-                if pos < load_vals.len() {
-                    out.push(load_vals[pos]);
-                }
-            }
-            PatternExpr::Binary { a, b, .. } => {
-                collect_term_load_values(a, load_vals, out);
-                collect_term_load_values(b, load_vals, out);
-            }
-            PatternExpr::Unary { input, .. } => {
-                collect_term_load_values(input, load_vals, out);
-            }
-            PatternExpr::Literal { .. } => {}
-        }
-    }
-
-    fn remap_term_ordinals(pattern: &PatternExpr) -> PatternExpr {
-        let mut counter = 0;
-        remap_inner(pattern, &mut counter)
-    }
-
-    fn remap_inner(pattern: &PatternExpr, counter: &mut usize) -> PatternExpr {
-        match pattern {
-            PatternExpr::Load { tensor, .. } => {
-                let ordinal = *counter;
-                *counter += 1;
-                PatternExpr::Load {
-                    tensor: *tensor,
-                    load_ordinal: ordinal,
-                }
-            }
-            PatternExpr::Literal { value_bits } => PatternExpr::Literal {
-                value_bits: *value_bits,
-            },
-            PatternExpr::Binary { op, a, b } => PatternExpr::Binary {
-                op: *op,
-                a: Box::new(remap_inner(a, counter)),
-                b: Box::new(remap_inner(b, counter)),
-            },
-            PatternExpr::Unary { op, input } => PatternExpr::Unary {
-                op: *op,
-                input: Box::new(remap_inner(input, counter)),
-            },
         }
     }
 
@@ -632,13 +680,27 @@ pub mod jit {
         })
     }
 
-    extern "C" fn wt9_expf(x: f32) -> f32 { x.exp() }
-    extern "C" fn wt9_sqrtf(x: f32) -> f32 { x.sqrt() }
-    extern "C" fn wt9_tanhf(x: f32) -> f32 { x.tanh() }
-    extern "C" fn wt9_logf(x: f32) -> f32 { x.ln() }
-    extern "C" fn wt9_floorf(x: f32) -> f32 { x.floor() }
-    extern "C" fn wt9_ceilf(x: f32) -> f32 { x.ceil() }
-    extern "C" fn wt9_fabsf(x: f32) -> f32 { x.abs() }
+    extern "C" fn wt9_expf(x: f32) -> f32 {
+        x.exp()
+    }
+    extern "C" fn wt9_sqrtf(x: f32) -> f32 {
+        x.sqrt()
+    }
+    extern "C" fn wt9_tanhf(x: f32) -> f32 {
+        x.tanh()
+    }
+    extern "C" fn wt9_logf(x: f32) -> f32 {
+        x.ln()
+    }
+    extern "C" fn wt9_floorf(x: f32) -> f32 {
+        x.floor()
+    }
+    extern "C" fn wt9_ceilf(x: f32) -> f32 {
+        x.ceil()
+    }
+    extern "C" fn wt9_fabsf(x: f32) -> f32 {
+        x.abs()
+    }
     extern "C" fn wt9_erff(x: f32) -> f32 {
         let a1: f32 = 0.254829592;
         let a2: f32 = -0.284496736;
