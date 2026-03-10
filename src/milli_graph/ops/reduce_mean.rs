@@ -19,6 +19,16 @@ pub struct ReduceMean {
 }
 
 impl ReduceMean {
+    pub(crate) fn keepdims(&self) -> bool {
+        self.keepdims
+    }
+    pub(crate) fn axes_tensor(&self) -> Option<GlobalId> {
+        self.axes
+    }
+    pub(crate) fn noop_with_empty_axes(&self) -> bool {
+        self.noop_with_empty_axes
+    }
+
     pub fn push_new(
         graph: &mut MilliOpGraph,
         data: GlobalId,

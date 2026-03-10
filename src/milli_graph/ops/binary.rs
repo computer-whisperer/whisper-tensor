@@ -44,6 +44,10 @@ use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::ops::AnyMilliOp;
 
 impl SimpleBinary {
+    pub(crate) fn which_op(&self) -> &WhichSimpleBinaryOp {
+        &self.which_op
+    }
+
     fn push_new(
         graph: &mut MilliOpGraph,
         a: GlobalId,

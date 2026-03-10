@@ -39,6 +39,10 @@ pub struct SimpleUnaryOp {
 }
 
 impl SimpleUnaryOp {
+    pub(crate) fn which_op(&self) -> &WhichSimpleUnaryOp {
+        &self.op
+    }
+
     fn new_internal(
         graph: &mut MilliOpGraph,
         input: GlobalId,
@@ -261,6 +265,10 @@ pub struct ClampMin {
 }
 
 impl ClampMin {
+    pub(crate) fn min_val(&self) -> f32 {
+        self.value
+    }
+
     pub fn push_new(
         graph: &mut MilliOpGraph,
         a: GlobalId,
