@@ -410,6 +410,7 @@ impl eframe::App for WebUIApp {
                                         }
                                     }
                                     AnyInterface::TextToSpeechInterface(_) => {}
+                                    AnyInterface::SpeechToTextInterface(_) => {}
                                 }
                             }
                             for tokenizer_info in needed_tokenizers {

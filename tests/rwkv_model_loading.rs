@@ -126,6 +126,8 @@ fn rwkv01b_single_step_runs_shape_sanity() {
             DType::U8 | DType::I8 | DType::BOOL => vec![0u8; numel],
             DType::F64 => vec![0u8; numel * 8],
             DType::STRING => panic!("string input not supported in test"),
+            DType::F8E4M3 | DType::F8E5M2 => vec![0u8; numel],
+            DType::Packed(_) => panic!("packed dtype not supported in test"),
         };
         let nd = NDArrayNumericTensor::from_raw_data(&zeros, dtype, shape.clone())
             .expect("build zero tensor");
