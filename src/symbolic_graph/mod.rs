@@ -812,6 +812,27 @@ impl SymbolicGraph {
             let loss_grads = generate_milli_backward(&mut combined, loss_group, &grad_map, rng);
             grad_map.extend(loss_grads);
 
+            // 4a'. Seed external upstream gradients (e.g., BPTT state gradients)
+            let mut external_grad_inputs: Vec<(GlobalId, GlobalId)> = Vec::new();
+            for ext_grad in &backward_opts.external_gradients {
+                let combined_output = sym_to_combined[&ext_grad.forward_output];
+                let grad_input = combined.add_input(rng);
+                external_inputs.push(grad_input);
+                external_grad_inputs.push((ext_grad.forward_output, grad_input));
+                grad_map
+                    .entry(combined_output)
+                    .and_modify(|existing| {
+                        let sum = crate::milli_graph::ops::SimpleBinary::add(
+                            &mut combined,
+                            *existing,
+                            grad_input,
+                            rng,
+                        );
+                        *existing = sum;
+                    })
+                    .or_insert(grad_input);
+            }
+
             // 4b. Backward through SymbolicGraph ops (Operation-level)
             for &op_id in topo_order.iter().rev() {
                 let graph_op = &self.operations[&op_id];
@@ -918,6 +939,21 @@ impl SymbolicGraph {
                 }
             }
 
+            // Record external gradient input mappings
+            for (sym_output, grad_input) in &external_grad_inputs {
+                training_meta
+                    .external_gradient_inputs
+                    .insert(*sym_output, *grad_input);
+            }
+
+            // Record input gradients (for BPTT state gradient threading)
+            for &sym_input in &self.ordered_inputs {
+                let combined_input = sym_to_combined[&sym_input];
+                if let Some(&grad) = grad_map.get(&combined_input) {
+                    training_meta.input_gradients.insert(sym_input, grad);
+                }
+            }
+
             // 5. Generate optimizer (if requested)
             if let Some(ref optim_opts) = options.optimizer {
                 crate::milli_graph::generate_optimizer_ops(
@@ -976,6 +1012,10 @@ impl SymbolicGraph {
             // Include global state outputs (e.g., updated timestep)
             for &global_out in training_meta.global_state_outputs.values() {
                 output_ids.push((global_out, global_out));
+            }
+            // Include input gradients (for BPTT state gradient threading)
+            for &input_grad in training_meta.input_gradients.values() {
+                output_ids.push((input_grad, input_grad));
             }
             combined.set_output_map(output_ids);
         } else {
@@ -1190,6 +1230,11 @@ impl SymbolicGraphMutator {
         self.graph.as_mut().unwrap()
     }
 
+    /// Borrow the inner graph immutably.
+    pub fn graph_ref(&self) -> &SymbolicGraph {
+        self.graph.as_ref().unwrap()
+    }
+
     pub fn from_graph(graph: SymbolicGraph, tensor_store: TensorStore) -> Self {
         let mut dimension_resolver = SymbolicResolver::new();
         for dim in graph.unknown_dimensions.values() {
@@ -1203,6 +1248,130 @@ impl SymbolicGraphMutator {
             tensor_store,
         }
     }
+
+    // --- Graph surgery API ---
+
+    /// Look up a tensor by its ONNX name.
+    pub fn tensor_by_name(&self, name: &str) -> Option<GlobalId> {
+        self.tensors_by_name.get(name).copied()
+    }
+
+    /// Find operations whose name contains the given pattern.
+    pub fn find_ops_by_name(&self, pattern: &str) -> Vec<(GlobalId, String)> {
+        let g = self.graph.as_ref().unwrap();
+        g.operations
+            .iter()
+            .filter_map(|(op_id, graph_op)| {
+                graph_op
+                    .name
+                    .as_ref()
+                    .filter(|name| name.contains(pattern))
+                    .map(|name| (*op_id, name.clone()))
+            })
+            .collect()
+    }
+
+    /// Find the operation that produces a given tensor (i.e., has it as an output).
+    pub fn producer_of(&self, tensor_id: GlobalId) -> Option<GlobalId> {
+        use crate::graph::Node;
+        let g = self.graph.as_ref().unwrap();
+        for (op_id, graph_op) in &g.operations {
+            if graph_op.op.outputs().any(|o| o == tensor_id) {
+                return Some(*op_id);
+            }
+        }
+        None
+    }
+
+    /// Find operations that consume a given tensor as input.
+    pub fn consumers_of(&self, tensor_id: GlobalId) -> Vec<GlobalId> {
+        use crate::graph::Node;
+        let g = self.graph.as_ref().unwrap();
+        g.operations
+            .iter()
+            .filter(|(_, graph_op)| graph_op.op.inputs().any(|i| i == tensor_id))
+            .map(|(op_id, _)| *op_id)
+            .collect()
+    }
+
+    /// Get the input tensor IDs of an operation.
+    pub fn op_inputs(&self, op_id: GlobalId) -> Vec<GlobalId> {
+        use crate::graph::Node;
+        let g = self.graph.as_ref().unwrap();
+        g.operations[&op_id].op.inputs().collect()
+    }
+
+    /// Get the output tensor IDs of an operation.
+    pub fn op_outputs(&self, op_id: GlobalId) -> Vec<GlobalId> {
+        use crate::graph::Node;
+        let g = self.graph.as_ref().unwrap();
+        g.operations[&op_id].op.outputs().collect()
+    }
+
+    /// Get the name of an operation.
+    pub fn op_name(&self, op_id: GlobalId) -> Option<&str> {
+        let g = self.graph.as_ref().unwrap();
+        g.operations[&op_id].name.as_deref()
+    }
+
+    /// Replace all uses of `old_tensor` as an operation input with `new_tensor`.
+    /// Also replaces in ordered_outputs (if the old tensor was a graph output).
+    /// Skips the operation that produces `new_tensor` to avoid creating cycles.
+    /// Does NOT modify ordered_inputs — use `remove_input`/`push_input` for that.
+    pub fn replace_tensor(&mut self, old_tensor: GlobalId, new_tensor: GlobalId) {
+        use crate::graph::Node;
+        let g = self.graph.as_mut().unwrap();
+
+        // Find producer of new_tensor to skip it
+        let producer_of_new: Option<GlobalId> = g
+            .operations
+            .iter()
+            .find(|(_, op)| op.op.outputs().any(|o| o == new_tensor))
+            .map(|(id, _)| *id);
+
+        let map = HashMap::from([(old_tensor, new_tensor)]);
+
+        let op_ids: Vec<GlobalId> = g.operations.keys().copied().collect();
+        for op_id in op_ids {
+            if Some(op_id) == producer_of_new {
+                continue;
+            }
+            let graph_op = &g.operations[&op_id];
+            if graph_op.op.inputs().any(|id| id == old_tensor) {
+                let new_op = graph_op.op.remap_inputs(&map);
+                let name = graph_op.name.clone();
+                g.operations
+                    .insert(op_id, GraphOperation { name, op: new_op });
+            }
+        }
+
+        // Update ordered_outputs
+        for out in &mut g.ordered_outputs {
+            if *out == old_tensor {
+                *out = new_tensor;
+            }
+        }
+    }
+
+    /// Remove a tensor from the graph's ordered inputs.
+    pub fn remove_input(&mut self, tensor_id: GlobalId) {
+        let g = self.graph.as_mut().unwrap();
+        g.ordered_inputs.retain(|id| *id != tensor_id);
+    }
+
+    /// Remove a tensor from the graph's ordered outputs.
+    pub fn remove_output(&mut self, tensor_id: GlobalId) {
+        let g = self.graph.as_mut().unwrap();
+        g.ordered_outputs.retain(|id| *id != tensor_id);
+    }
+
+    /// Remove an operation from the graph.
+    pub fn remove_operation(&mut self, op_id: GlobalId) {
+        let g = self.graph.as_mut().unwrap();
+        g.operations.remove(&op_id);
+    }
+
+    // --- End graph surgery API ---
 
     pub fn from_onnx_bytes(
         onnx_bytes: &[u8],
@@ -2625,6 +2794,7 @@ mod tests {
                 loss_output: loss_info.loss_output,
                 trainable_params: graph.ordered_inputs.clone(),
                 stop_gradients: std::collections::HashSet::new(),
+                external_gradients: vec![],
             }),
             optimizer: None,
         };
@@ -2647,5 +2817,284 @@ mod tests {
             meta.param_to_grad.len(),
             graph.ordered_inputs.len(),
         );
+    }
+
+    #[test]
+    fn test_external_gradients_bptt() {
+        // Test that external_gradients seeds backward correctly.
+        // Build a simple y = x @ W graph. Provide an external upstream gradient
+        // for y. Verify that W gets a gradient and x gets an input_gradient.
+        use crate::backends::eval_backend::EvalBackend;
+        use crate::dtype::DType;
+        use crate::milli_graph::{
+            BackwardGenOptions, ExternalGradient, LossInputSource, LossWiring,
+            MilliGraphGenOptions, MilliOpGraph,
+        };
+        use crate::numeric_tensor::NumericTensor;
+        use crate::scalar_info::ScalarInfoTyped;
+        use crate::tensor_rank::DynRank;
+
+        let rng = &mut rand::rng();
+        let mut m = SymbolicGraphMutator::new(rng);
+        let s = |v: u64| ScalarInfoTyped::Numeric(v);
+
+        // x: [2, 3] input, W: [3, 4] param
+        let x = m.push_typed_tensor(
+            "x",
+            TensorType::Input(None),
+            Some(DType::F32),
+            Some(vec![s(2), s(3)]),
+            rng,
+        );
+        m.push_input(x);
+        let w = m.push_typed_tensor(
+            "W",
+            TensorType::Input(None),
+            Some(DType::F32),
+            Some(vec![s(3), s(4)]),
+            rng,
+        );
+        m.push_input(w);
+
+        // y = x @ W  →  [2, 4]
+        let y = m.push_matmul("matmul", x, w, rng);
+        m.push_output(y);
+
+        let (graph, _store) = m.get_inner();
+
+        // Build training graph with:
+        //   - A dummy loss (MSE against zeros, just to satisfy the API)
+        //   - An external gradient on y (simulating BPTT upstream)
+        let (loss_graph, loss_info) = MilliOpGraph::mse_loss(rng);
+        let options = MilliGraphGenOptions {
+            backward: Some(BackwardGenOptions {
+                loss_graph,
+                loss_wiring: vec![
+                    LossWiring {
+                        loss_input: loss_info.predictions_input,
+                        source: LossInputSource::ForwardOutput(y),
+                    },
+                    LossWiring {
+                        loss_input: loss_info.targets_input,
+                        source: LossInputSource::ExternalInput {
+                            name: "targets".into(),
+                        },
+                    },
+                ],
+                loss_output: loss_info.loss_output,
+                trainable_params: vec![w],
+                stop_gradients: std::collections::HashSet::new(),
+                external_gradients: vec![ExternalGradient { forward_output: y }],
+            }),
+            optimizer: None,
+        };
+
+        let combined = graph
+            .generate_milli_graph_with_options(&options, rng)
+            .unwrap();
+        let meta = combined.training_metadata.as_ref().unwrap();
+
+        // External gradient for y should be an input
+        assert_eq!(meta.external_gradient_inputs.len(), 1);
+        assert!(meta.external_gradient_inputs.contains_key(&y));
+        let ext_grad_input = meta.external_gradient_inputs[&y];
+
+        // x should have an input_gradient output (for BPTT state threading)
+        assert!(
+            meta.input_gradients.contains_key(&x),
+            "Expected input gradient for x"
+        );
+        let x_grad_output = meta.input_gradients[&x];
+
+        // W should have a param gradient
+        assert_eq!(meta.param_to_grad.len(), 1);
+
+        // Eval: x = ones, W = ones, targets = zeros, ext_grad = ones
+        let mut inputs = std::collections::HashMap::new();
+        inputs.insert(
+            x,
+            NumericTensor::<DynRank>::from_vec_shape(vec![1.0f32; 6], vec![2, 3]).unwrap(),
+        );
+        inputs.insert(
+            w,
+            NumericTensor::<DynRank>::from_vec_shape(vec![1.0f32; 12], vec![3, 4]).unwrap(),
+        );
+        // targets = zeros [2, 4]
+        inputs.insert(
+            meta.external_inputs[0],
+            NumericTensor::<DynRank>::from_vec_shape(vec![0.0f32; 8], vec![2, 4]).unwrap(),
+        );
+        // external upstream gradient = ones [2, 4]
+        inputs.insert(
+            ext_grad_input,
+            NumericTensor::<DynRank>::from_vec_shape(vec![1.0f32; 8], vec![2, 4]).unwrap(),
+        );
+
+        let mut backend = EvalBackend::NDArray;
+        let results: std::collections::HashMap<_, _> = combined
+            .eval(&inputs, &mut (), &mut backend)
+            .unwrap()
+            .collect();
+
+        // Verify loss exists
+        assert!(results.contains_key(&meta.loss.unwrap()));
+
+        // Verify x gradient exists and is non-zero
+        let x_grad = &results[&x_grad_output];
+        let x_grad_data: Vec<f32> = x_grad
+            .cast(DType::F32, &mut backend)
+            .unwrap()
+            .to_ndarray()
+            .unwrap()
+            .flatten()
+            .try_into()
+            .unwrap();
+        assert!(
+            x_grad_data.iter().any(|v| *v != 0.0),
+            "x gradient should be non-zero"
+        );
+
+        // The x gradient should include contribution from both the loss AND
+        // the external gradient. With x=1, W=1: y = [3,3,3,3; 3,3,3,3].
+        // Loss gradient at y: 2*(y-0)/8 = [0.75, ...]. External gradient: [1, ...].
+        // Combined gradient at y: [1.75, ...].
+        // dL/dx = grad_y @ W^T, each row of grad_y is [1.75]*4, W^T is [4,3] of ones.
+        // So each element of dL/dx = 1.75 * 4 = 7.0
+        for v in &x_grad_data {
+            assert!((*v - 7.0).abs() < 0.01, "Expected x_grad ≈ 7.0, got {v}");
+        }
+    }
+
+    #[test]
+    fn test_graph_surgery_replace_tensor() {
+        // Build: x [2,3] -> MatMul(x, W) -> y [2,4] -> Relu -> z [2,4]
+        // Surgery: interpose Add(y, lora_out) = combined, redirect Relu to use combined
+        // This simulates LoRA adapter injection.
+        use crate::backends::eval_backend::EvalBackend;
+        use crate::dtype::DType;
+        use crate::numeric_tensor::NumericTensor;
+        use crate::scalar_info::ScalarInfoTyped;
+        use crate::tensor_rank::DynRank;
+
+        let rng = &mut rand::rng();
+        let s = |v: u64| ScalarInfoTyped::Numeric(v);
+
+        // Build original graph: y = relu(x @ W)
+        let mut m = SymbolicGraphMutator::new(rng);
+        let x = m.push_typed_tensor(
+            "x",
+            TensorType::Input(None),
+            Some(DType::F32),
+            Some(vec![s(2), s(3)]),
+            rng,
+        );
+        m.push_input(x);
+        let w = m.push_typed_tensor(
+            "W",
+            TensorType::Input(None),
+            Some(DType::F32),
+            Some(vec![s(3), s(4)]),
+            rng,
+        );
+        m.push_input(w);
+
+        let y = m.push_matmul("matmul", x, w, rng);
+        let z = m.push_relu("relu", y, rng);
+        m.push_output(z);
+
+        // Verify query methods before surgery
+        let matmul_ops = m.find_ops_by_name("matmul");
+        assert_eq!(matmul_ops.len(), 1);
+        let matmul_op_id = matmul_ops[0].0;
+        assert_eq!(m.op_inputs(matmul_op_id), vec![x, w]);
+
+        let y_consumers = m.consumers_of(y);
+        assert_eq!(y_consumers.len(), 1); // only relu
+
+        let y_producer = m.producer_of(y);
+        assert!(y_producer.is_some());
+
+        // --- Surgery: inject LoRA adapter ---
+        // LoRA branch: h = x @ A, lora_out = h @ B
+        let a = m.push_typed_tensor(
+            "lora_A",
+            TensorType::Input(None),
+            Some(DType::F32),
+            Some(vec![s(3), s(2)]),
+            rng,
+        );
+        m.push_input(a);
+        let b = m.push_typed_tensor(
+            "lora_B",
+            TensorType::Input(None),
+            Some(DType::F32),
+            Some(vec![s(2), s(4)]),
+            rng,
+        );
+        m.push_input(b);
+
+        let h = m.push_matmul("lora_down", x, a, rng);
+        let lora_out = m.push_matmul("lora_up", h, b, rng);
+        let combined = m.push_add("lora_residual", y, lora_out, rng);
+
+        // Replace downstream uses of y with combined
+        m.replace_tensor(y, combined);
+
+        // Verify: relu should now consume combined, not y
+        let relu_ops = m.find_ops_by_name("relu");
+        assert_eq!(relu_ops.len(), 1);
+        let relu_inputs = m.op_inputs(relu_ops[0].0);
+        assert_eq!(
+            relu_inputs,
+            vec![combined],
+            "Relu should now consume combined"
+        );
+
+        // Verify: matmul still produces y, lora_residual still consumes y
+        let matmul_outputs = m.op_outputs(matmul_op_id);
+        assert!(matmul_outputs.contains(&y), "MatMul should still produce y");
+
+        let add_ops = m.find_ops_by_name("lora_residual");
+        let add_inputs = m.op_inputs(add_ops[0].0);
+        assert!(add_inputs.contains(&y), "Add should still consume y");
+
+        // Eval the modified graph
+        let (graph, _store) = m.get_inner();
+        let milli = graph.generate_milli_graph(rng);
+
+        let mut inputs = HashMap::new();
+        inputs.insert(
+            x,
+            NumericTensor::<DynRank>::from_vec_shape(vec![1.0f32; 6], vec![2, 3]).unwrap(),
+        );
+        inputs.insert(
+            w,
+            NumericTensor::<DynRank>::from_vec_shape(vec![1.0f32; 12], vec![3, 4]).unwrap(),
+        );
+        // A = ones [3,2], B = 0.1 * ones [2,4]
+        inputs.insert(
+            a,
+            NumericTensor::<DynRank>::from_vec_shape(vec![1.0f32; 6], vec![3, 2]).unwrap(),
+        );
+        inputs.insert(
+            b,
+            NumericTensor::<DynRank>::from_vec_shape(vec![0.1f32; 8], vec![2, 4]).unwrap(),
+        );
+
+        let mut backend = EvalBackend::NDArray;
+        let results: HashMap<_, _> = milli
+            .eval(&inputs, &mut (), &mut backend)
+            .unwrap()
+            .collect();
+        let output = &results[&z];
+        let values: Vec<f32> = output.flatten().unwrap().try_into().unwrap();
+
+        // x @ W = [[3,3,3,3],[3,3,3,3]]
+        // x @ A = [[3,3],[3,3]], (x@A) @ B = [[0.6,0.6,0.6,0.6],[0.6,0.6,0.6,0.6]]
+        // combined = [[3.6,3.6,3.6,3.6],[3.6,3.6,3.6,3.6]]
+        // relu(combined) = same (all positive)
+        for v in &values {
+            assert!((*v - 3.6).abs() < 0.01, "Expected output ≈ 3.6, got {v}");
+        }
     }
 }

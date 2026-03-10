@@ -572,6 +572,14 @@ pub struct GeluOperation {
 }
 
 impl GeluOperation {
+    pub fn new(input: GlobalId, output: GlobalId, rng: &mut impl Rng) -> Self {
+        Self {
+            global_id: GlobalId::new(rng),
+            input,
+            output,
+        }
+    }
+
     pub(crate) fn from_onnx(
         inputs: &[Option<GlobalId>],
         outputs: &[Option<GlobalId>],

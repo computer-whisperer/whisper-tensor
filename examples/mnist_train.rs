@@ -280,6 +280,7 @@ fn main() {
             loss_output: loss_info.loss_output,
             trainable_params: param_ids.clone(),
             stop_gradients: std::collections::HashSet::new(),
+            external_gradients: vec![],
         }),
         optimizer: Some(OptimizerGenOptions {
             kind: OptimizerKind::SGD { lr: 0.1 },

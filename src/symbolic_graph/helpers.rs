@@ -128,6 +128,13 @@ impl SymbolicGraphMutator {
         self.push_unary(name, input, WhichUnaryOperation::Sigmoid, rng)
     }
 
+    pub fn push_gelu(&mut self, name: &str, input: GlobalId, rng: &mut impl Rng) -> GlobalId {
+        let out = self.push_intermediate(name, rng);
+        let op = GeluOperation::new(input, out, rng);
+        self.push_op(name, AnyOperation::Gelu(op), rng);
+        out
+    }
+
     pub fn push_softmax(
         &mut self,
         name: &str,
@@ -243,6 +250,21 @@ impl SymbolicGraphMutator {
     }
 
     // ── normalization ────────────────────────────────────────────────
+
+    pub fn push_layer_norm(
+        &mut self,
+        name: &str,
+        input: GlobalId,
+        scale: GlobalId,
+        bias: Option<GlobalId>,
+        epsilon: f32,
+        rng: &mut impl Rng,
+    ) -> GlobalId {
+        let out = self.push_intermediate(name, rng);
+        let op = LayerNormalizationOperation::new(input, scale, bias, out, epsilon, rng);
+        self.push_op(name, AnyOperation::LayerNormalization(op), rng);
+        out
+    }
 
     pub fn push_rms_norm(
         &mut self,

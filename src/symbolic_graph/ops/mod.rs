@@ -377,3 +377,49 @@ impl Operation for AnyOperation {
 
     delegate!(is_differentiable() -> bool);
 }
+
+impl AnyOperation {
+    /// Return a clone with input tensor GlobalIds remapped according to the provided map.
+    /// Only values that are actual inputs of this operation are remapped; outputs,
+    /// the operation's own ID, and non-GlobalId fields remain unchanged.
+    ///
+    /// Uses serde round-trip. Safe because GlobalIds are random u64 values that won't
+    /// collide with small integer parameters (axis, epsilon, etc.).
+    pub fn remap_inputs(&self, map: &HashMap<GlobalId, GlobalId>) -> Self {
+        // Build replacement map restricted to actual inputs of this operation
+        let input_remaps: HashMap<u64, u64> = self
+            .inputs()
+            .filter_map(|id| map.get(&id).map(|new| (id.0, new.0)))
+            .collect();
+        if input_remaps.is_empty() {
+            return self.clone();
+        }
+        let mut json = serde_json::to_value(self).unwrap();
+        remap_u64s_in_json(&mut json, &input_remaps);
+        serde_json::from_value(json).unwrap()
+    }
+}
+
+/// Recursively walk a JSON value tree, replacing u64 values found in the map.
+fn remap_u64s_in_json(value: &mut serde_json::Value, map: &HashMap<u64, u64>) {
+    match value {
+        serde_json::Value::Number(n) => {
+            if let Some(v) = n.as_u64()
+                && let Some(&new) = map.get(&v)
+            {
+                *value = serde_json::Value::Number(new.into());
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for item in arr {
+                remap_u64s_in_json(item, map);
+            }
+        }
+        serde_json::Value::Object(obj) => {
+            for (_, v) in obj {
+                remap_u64s_in_json(v, map);
+            }
+        }
+        _ => {}
+    }
+}

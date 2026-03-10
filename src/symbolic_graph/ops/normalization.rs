@@ -533,6 +533,28 @@ pub struct LayerNormalizationOperation {
 }
 
 impl LayerNormalizationOperation {
+    pub fn new(
+        input: GlobalId,
+        scale: GlobalId,
+        bias: Option<GlobalId>,
+        output: GlobalId,
+        epsilon: f32,
+        rng: &mut impl Rng,
+    ) -> Self {
+        Self {
+            global_id: GlobalId::new(rng),
+            input,
+            scale,
+            bias,
+            output,
+            mean_output: None,
+            inv_std_dev_output: None,
+            axis: -1,
+            epsilon,
+            stash_type: DType::F32,
+        }
+    }
+
     pub(crate) fn from_onnx(
         inputs: &[Option<GlobalId>],
         outputs: &[Option<GlobalId>],

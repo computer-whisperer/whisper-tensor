@@ -109,6 +109,20 @@ pub struct TrainingMetadata {
     ///
     /// Only populated via `SymbolicGraph::generate_milli_graph_with_options`.
     pub state_updates: HashMap<(GlobalId, String), StateUpdate>,
+
+    /// Maps forward output IDs (symbolic-space) to the external input IDs
+    /// where upstream gradients should be provided.
+    ///
+    /// Used for BPTT: the backward scan provides state gradients from the
+    /// next timestep via these inputs.
+    pub external_gradient_inputs: HashMap<GlobalId, GlobalId>,
+
+    /// Maps forward input IDs (symbolic-space) to their computed gradient
+    /// output IDs in the training graph.
+    ///
+    /// Used for BPTT: the backward scan threads these state gradients to
+    /// the previous timestep's `external_gradient_inputs`.
+    pub input_gradients: HashMap<GlobalId, GlobalId>,
 }
 
 /// Per-parameter optimizer state entry for the external-facing API.
@@ -177,6 +191,20 @@ pub struct BackwardGenOptions {
     pub trainable_params: Vec<GlobalId>,
     /// Ops where gradient flow stops (e.g., for freezing layers).
     pub stop_gradients: HashSet<GlobalId>,
+    /// Additional upstream gradients provided externally (e.g., for BPTT
+    /// where a downstream scan provides gradients for state outputs).
+    /// Each entry adds an external input to the training graph that seeds
+    /// the backward pass at the specified forward output.
+    pub external_gradients: Vec<ExternalGradient>,
+}
+
+/// An externally-provided upstream gradient for a forward output.
+///
+/// Used for BPTT: the backward scan at step T receives the state gradient
+/// from step T+1 as an external input, seeding backward at the state output.
+pub struct ExternalGradient {
+    /// Which forward output (in SymbolicGraph space) this gradient corresponds to.
+    pub forward_output: GlobalId,
 }
 
 /// Specifies how a loss graph input gets wired.
@@ -2678,6 +2706,139 @@ mod tests {
             1e-3,
             1e-2,
         );
+    }
+
+    #[test]
+    fn test_backward_gather_axis0() {
+        // Embedding lookup: data=[4,3] (4 embeddings of dim 3), indices=[2] (look up 2 rows)
+        // f(data) = sum(gather(data, indices, axis=0))
+        // Only rows selected by indices get gradient = 1
+        let data: Vec<f32> = (1..=12).map(|x| x as f32 * 0.1).collect();
+        // indices are not differentiable, but check_general_backward requires all
+        // inputs to be f32. We'll use a custom test instead.
+        let rng = &mut wyrand::WyRand::new(42);
+        let mut graph = MilliOpGraph::new_empty(rng);
+
+        let data_ext = GlobalId::new(rng);
+        let data_int = graph.add_input_with_id(data_ext, rng);
+
+        // Create indices as a constant (not a differentiable input)
+        let idx_tensor =
+            NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![1i64, 3], &vec![2u64]).unwrap();
+        let idx_id = ops::Constant::push_new(&mut graph, idx_tensor, rng);
+
+        let group = graph.create_group(MilliOpGroup {
+            id: GlobalId::new(rng),
+            phase: MilliOpPhase::Forward,
+            ..Default::default()
+        });
+        graph.set_default_group(Some(group));
+
+        let gathered = ops::Gather::push_new(&mut graph, data_int, idx_id, 0, rng);
+
+        graph.set_default_group(None);
+        let scalar = ReduceSum::push_new(&mut graph, gathered, None, false, false, rng);
+        let out_ext = GlobalId::new(rng);
+        graph.add_output(scalar, out_ext);
+
+        // Shape of gathered output: [2, 3]
+        let ones_data =
+            NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![1.0f32; 6], &vec![2u64, 3])
+                .unwrap();
+        let ones = ops::Constant::push_new(&mut graph, ones_data, rng);
+        let mut grad_map = HashMap::new();
+        grad_map.insert(gathered, ones);
+        let grads = generate_milli_backward(&mut graph, group, &grad_map, rng);
+
+        let grad_data_id = grads[&data_int];
+        let grad_ext = GlobalId::new(rng);
+        graph.add_output(grad_data_id, grad_ext);
+
+        let mut inputs = HashMap::new();
+        inputs.insert(
+            data_ext,
+            NumericTensor::<DynRank>::from_vec_shape(data.clone(), vec![4, 3]).unwrap(),
+        );
+
+        let mut backend = EvalBackend::NDArray;
+        let results: HashMap<_, _> = graph
+            .eval(&inputs, &mut (), &mut backend)
+            .unwrap()
+            .collect();
+
+        let grad: Vec<f32> = results[&grad_ext].flatten().unwrap().try_into().unwrap();
+        // Rows 1 and 3 were gathered, so they get gradient 1.0. Rows 0 and 2 get 0.
+        assert_eq!(grad.len(), 12);
+        // Row 0: [0, 0, 0]
+        assert_eq!(&grad[0..3], &[0.0, 0.0, 0.0]);
+        // Row 1: [1, 1, 1]
+        assert_eq!(&grad[3..6], &[1.0, 1.0, 1.0]);
+        // Row 2: [0, 0, 0]
+        assert_eq!(&grad[6..9], &[0.0, 0.0, 0.0]);
+        // Row 3: [1, 1, 1]
+        assert_eq!(&grad[9..12], &[1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn test_backward_gather_duplicate_indices() {
+        // Same index gathered twice → gradients should accumulate
+        let data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]; // [2,3]
+        let rng = &mut wyrand::WyRand::new(42);
+        let mut graph = MilliOpGraph::new_empty(rng);
+
+        let data_ext = GlobalId::new(rng);
+        let data_int = graph.add_input_with_id(data_ext, rng);
+
+        // indices = [0, 0, 1, 0] — row 0 gathered 3 times, row 1 once
+        let idx_tensor =
+            NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![0i64, 0, 1, 0], &vec![4u64])
+                .unwrap();
+        let idx_id = ops::Constant::push_new(&mut graph, idx_tensor, rng);
+
+        let group = graph.create_group(MilliOpGroup {
+            id: GlobalId::new(rng),
+            phase: MilliOpPhase::Forward,
+            ..Default::default()
+        });
+        graph.set_default_group(Some(group));
+
+        let gathered = ops::Gather::push_new(&mut graph, data_int, idx_id, 0, rng);
+
+        graph.set_default_group(None);
+        let scalar = ReduceSum::push_new(&mut graph, gathered, None, false, false, rng);
+        let out_ext = GlobalId::new(rng);
+        graph.add_output(scalar, out_ext);
+
+        // gathered shape: [4, 3]
+        let ones_data =
+            NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![1.0f32; 12], &vec![4u64, 3])
+                .unwrap();
+        let ones = ops::Constant::push_new(&mut graph, ones_data, rng);
+        let mut grad_map = HashMap::new();
+        grad_map.insert(gathered, ones);
+        let grads = generate_milli_backward(&mut graph, group, &grad_map, rng);
+
+        let grad_data_id = grads[&data_int];
+        let grad_ext = GlobalId::new(rng);
+        graph.add_output(grad_data_id, grad_ext);
+
+        let mut inputs = HashMap::new();
+        inputs.insert(
+            data_ext,
+            NumericTensor::<DynRank>::from_vec_shape(data, vec![2, 3]).unwrap(),
+        );
+
+        let mut backend = EvalBackend::NDArray;
+        let results: HashMap<_, _> = graph
+            .eval(&inputs, &mut (), &mut backend)
+            .unwrap()
+            .collect();
+
+        let grad: Vec<f32> = results[&grad_ext].flatten().unwrap().try_into().unwrap();
+        // Row 0 gathered 3 times → gradient 3.0 per element
+        // Row 1 gathered 1 time → gradient 1.0 per element
+        assert_eq!(&grad[0..3], &[3.0, 3.0, 3.0]);
+        assert_eq!(&grad[3..6], &[1.0, 1.0, 1.0]);
     }
 
     // ---- Phase 8: Optimizer tests ----
