@@ -311,5 +311,132 @@ pub mod pipeline {
                 );
             }
         }
+
+        #[test]
+        fn test_two_layer_matmul_mlp() {
+            // Two-layer MLP: out = tanh(tanh(x @ W1 + b1) @ W2 + b2)
+            // x: 2x3, W1: 3x4, b1: 1x4, W2: 4x2, b2: 1x2 → out: 2x2
+            // Tests materialization boundaries: act1 must be materialized
+            // between the two matmul reductions.
+            let mut rng = wyrand::WyRand::new(99);
+            let ext_x = GlobalId::new(&mut rng);
+            let ext_w1 = GlobalId::new(&mut rng);
+            let ext_b1 = GlobalId::new(&mut rng);
+            let ext_w2 = GlobalId::new(&mut rng);
+            let ext_b2 = GlobalId::new(&mut rng);
+            let (mut graph, input_map) =
+                MilliOpGraph::new([ext_x, ext_w1, ext_b1, ext_w2, ext_b2], &mut rng);
+            let x = input_map[&ext_x];
+            let w1 = input_map[&ext_w1];
+            let b1 = input_map[&ext_b1];
+            let w2 = input_map[&ext_w2];
+            let b2 = input_map[&ext_b2];
+
+            // Layer 1: act1 = tanh(x @ W1 + b1)
+            let mm1 = crate::milli_graph::ops::MatMul::push_new(&mut graph, x, w1, &mut rng);
+            let add1 = SimpleBinary::add(&mut graph, mm1, b1, &mut rng);
+            let act1 = SimpleUnaryOp::trig(&mut graph, add1, crate::TrigOp::Tanh, &mut rng);
+
+            // Layer 2: out = tanh(act1 @ W2 + b2)
+            let mm2 = crate::milli_graph::ops::MatMul::push_new(&mut graph, act1, w2, &mut rng);
+            let add2 = SimpleBinary::add(&mut graph, mm2, b2, &mut rng);
+            let out = SimpleUnaryOp::trig(&mut graph, add2, crate::TrigOp::Tanh, &mut rng);
+
+            let mut shapes = HashMap::new();
+            shapes.insert(x, vec![2, 3]);
+            shapes.insert(w1, vec![3, 4]);
+            shapes.insert(b1, vec![1, 4]);
+            shapes.insert(mm1, vec![2, 4]);
+            shapes.insert(add1, vec![2, 4]);
+            shapes.insert(act1, vec![2, 4]);
+            shapes.insert(w2, vec![4, 2]);
+            shapes.insert(b2, vec![1, 2]);
+            shapes.insert(mm2, vec![2, 2]);
+            shapes.insert(add2, vec![2, 2]);
+            shapes.insert(out, vec![2, 2]);
+
+            let final_outputs: HashSet<GlobalId> = [out].into_iter().collect();
+            let compiled = compile_graph(&graph, &shapes, &final_outputs, 0).unwrap();
+
+            // Should produce multiple kernels (materialization boundary at act1)
+            assert!(
+                compiled.kernels.len() >= 2,
+                "Expected >= 2 kernels (materialization boundary), got {}",
+                compiled.kernels.len()
+            );
+
+            // Fill with simple data and verify against reference computation
+            let x_data: Vec<f32> = (0..6).map(|i| (i + 1) as f32 * 0.1).collect();
+            let w1_data: Vec<f32> = (0..12).map(|i| (i as f32 - 6.0) * 0.1).collect();
+            let b1_data: Vec<f32> = vec![0.1, -0.1, 0.2, -0.2];
+            let w2_data: Vec<f32> = (0..8).map(|i| (i as f32 - 4.0) * 0.1).collect();
+            let b2_data: Vec<f32> = vec![0.05, -0.05];
+
+            // Reference computation
+            // mm1 = x @ W1 (2x3 * 3x4 = 2x4)
+            let mut mm1_ref = vec![0.0f32; 8];
+            for i in 0..2 {
+                for j in 0..4 {
+                    let mut sum = 0.0f32;
+                    for k in 0..3 {
+                        sum += x_data[i * 3 + k] * w1_data[k * 4 + j];
+                    }
+                    mm1_ref[i * 4 + j] = sum;
+                }
+            }
+            // act1 = tanh(mm1 + b1)
+            let mut act1_ref = vec![0.0f32; 8];
+            for i in 0..2 {
+                for j in 0..4 {
+                    act1_ref[i * 4 + j] = (mm1_ref[i * 4 + j] + b1_data[j]).tanh();
+                }
+            }
+            // mm2 = act1 @ W2 (2x4 * 4x2 = 2x2)
+            let mut mm2_ref = vec![0.0f32; 4];
+            for i in 0..2 {
+                for j in 0..2 {
+                    let mut sum = 0.0f32;
+                    for k in 0..4 {
+                        sum += act1_ref[i * 4 + k] * w2_data[k * 2 + j];
+                    }
+                    mm2_ref[i * 2 + j] = sum;
+                }
+            }
+            // out = tanh(mm2 + b2)
+            let expected: Vec<f32> = (0..4)
+                .map(|idx| {
+                    let i = idx / 2;
+                    let j = idx % 2;
+                    (mm2_ref[i * 2 + j] + b2_data[j]).tanh()
+                })
+                .collect();
+
+            // Allocate buffers
+            let max_size = 12; // largest tensor is 3x4=12
+            let mut buffers: Vec<Vec<f32>> = (0..compiled.layout.num_buffers)
+                .map(|_| vec![0.0f32; max_size])
+                .collect();
+            buffers[compiled.layout.tensor_index[&x]][..6].copy_from_slice(&x_data);
+            buffers[compiled.layout.tensor_index[&w1]][..12].copy_from_slice(&w1_data);
+            buffers[compiled.layout.tensor_index[&b1]][..4].copy_from_slice(&b1_data);
+            buffers[compiled.layout.tensor_index[&w2]][..8].copy_from_slice(&w2_data);
+            buffers[compiled.layout.tensor_index[&b2]][..2].copy_from_slice(&b2_data);
+
+            let mut ptrs: Vec<*mut f32> = buffers.iter_mut().map(|b| b.as_mut_ptr()).collect();
+            unsafe { compiled.execute(&mut ptrs) };
+
+            let out_slot = compiled.layout.tensor_index[&out];
+            let result = &buffers[out_slot][..4];
+
+            for i in 0..4 {
+                assert!(
+                    (result[i] - expected[i]).abs() < 1e-5,
+                    "element {}: got {}, expected {}",
+                    i,
+                    result[i],
+                    expected[i]
+                );
+            }
+        }
     }
 }

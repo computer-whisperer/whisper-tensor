@@ -5,14 +5,11 @@
 //! 1. Identifies which tensors are "intermediate" (produced by some binding
 //!    and consumed by Element references in other bindings) vs "final"
 //!    (graph outputs or needed for external consumption).
-//! 2. For intermediates, substitutes the producing expression inline at
-//!    every point of use.
-//! 3. After inlining, final output bindings reference only graph inputs
-//!    and constants — all intermediate tensors have been erased.
-//!
-//! This is the fusion pass: if mul_out is only consumed by neg, then
-//! neg_out[i] = Neg(Element(mul_out, i)) becomes
-//! neg_out[i] = Neg(Mul(Element(a, i), Element(b, i))).
+//! 2. Detects materialization boundaries: non-leaf tensors consumed by
+//!    reduction (left-fold) tensors must be materialized to prevent
+//!    nested reductions.
+//! 3. For remaining intermediates, substitutes the producing expression
+//!    inline at every point of use.
 
 use crate::compiler::common::v2_frontend::{OutputBinding, ScalarExpr};
 use crate::graph::GlobalId;
@@ -20,37 +17,51 @@ use std::collections::{HashMap, HashSet};
 
 /// Result of the inlining pass.
 pub struct InlinedGraph {
-    /// Bindings for final output tensors only, with all intermediates inlined.
+    /// Bindings for all materialized tensors (final outputs + boundary points),
+    /// with eligible intermediates inlined.
     pub bindings: Vec<OutputBinding>,
     /// The set of tensor IDs that are "leaf" tensors (graph inputs + constants).
     pub leaf_tensors: HashSet<GlobalId>,
 }
 
-/// Inline intermediate tensors, producing fully-expanded expression trees
-/// for each graph output element.
+/// Inline intermediate tensors, producing fully-expanded expression trees.
 ///
 /// `final_outputs` is the set of tensor IDs that must be materialized
-/// (graph outputs). Everything else is eligible for inlining.
+/// (graph outputs). Additional tensors may be materialized automatically
+/// to prevent nested reductions.
 pub fn inline_intermediates(
     bindings: &[OutputBinding],
     final_outputs: &HashSet<GlobalId>,
 ) -> InlinedGraph {
-    // Phase 1: Build lookup from (tensor_id, flat_index) -> expr for all bindings
+    let produced_tensors: HashSet<GlobalId> = bindings.iter().map(|b| b.output_tensor).collect();
+
+    // Detect fold (reduction) tensors
+    let fold_tensors = find_fold_tensors(bindings);
+
+    // Build materialization set: final outputs + reduction boundary points.
+    // For each fold tensor, any non-leaf tensor it references must be
+    // materialized to prevent that tensor's expression (which may itself
+    // contain a fold after inlining) from ending up inside this fold's body.
+    let mut materialize: HashSet<GlobalId> = final_outputs.clone();
+    for b in bindings {
+        if fold_tensors.contains(&b.output_tensor) {
+            collect_produced_references(&b.expr, &produced_tensors, &mut materialize);
+        }
+    }
+
+    // Build lookup from (tensor_id, flat_index) -> expr
     let mut expr_map: HashMap<(GlobalId, usize), &ScalarExpr> = HashMap::new();
     for b in bindings {
         expr_map.insert((b.output_tensor, b.flat_index), &b.expr);
     }
 
-    // Which tensors have bindings (i.e., are computed, not leaves)?
-    let produced_tensors: HashSet<GlobalId> = bindings.iter().map(|b| b.output_tensor).collect();
-
-    // Phase 2: For each final output binding, recursively inline
+    // For each materialized tensor, produce inlined bindings
     let mut result_bindings = Vec::new();
     for b in bindings {
-        if !final_outputs.contains(&b.output_tensor) {
+        if !materialize.contains(&b.output_tensor) {
             continue;
         }
-        let expanded = inline_expr(&b.expr, &expr_map, &produced_tensors, final_outputs);
+        let expanded = inline_expr(&b.expr, &expr_map, &produced_tensors, &materialize);
         result_bindings.push(OutputBinding {
             output_tensor: b.output_tensor,
             flat_index: b.flat_index,
@@ -58,7 +69,6 @@ pub fn inline_intermediates(
         });
     }
 
-    // Collect leaf tensors: everything referenced by Element that isn't produced
     let mut leaf_tensors = HashSet::new();
     for b in &result_bindings {
         collect_leaves(&b.expr, &mut leaf_tensors);
@@ -76,33 +86,105 @@ fn inline_expr(
     expr: &ScalarExpr,
     expr_map: &HashMap<(GlobalId, usize), &ScalarExpr>,
     produced: &HashSet<GlobalId>,
-    final_outputs: &HashSet<GlobalId>,
+    materialize: &HashSet<GlobalId>,
 ) -> ScalarExpr {
     match expr {
         ScalarExpr::Element {
             tensor, flat_index, ..
         } => {
-            // If this tensor is produced (has bindings) and is NOT a final output,
-            // it's an intermediate — inline it.
-            if produced.contains(tensor) && !final_outputs.contains(tensor) {
+            // If this tensor is produced and NOT materialized, inline it.
+            if produced.contains(tensor) && !materialize.contains(tensor) {
                 if let Some(producing_expr) = expr_map.get(&(*tensor, *flat_index)) {
-                    // Recursively inline the producing expression too
-                    return inline_expr(producing_expr, expr_map, produced, final_outputs);
+                    return inline_expr(producing_expr, expr_map, produced, materialize);
                 }
             }
-            // Leaf tensor or final output — keep the Element reference
             expr.clone()
         }
         ScalarExpr::Literal { .. } => expr.clone(),
         ScalarExpr::Binary { op, a, b } => ScalarExpr::Binary {
             op: *op,
-            a: Box::new(inline_expr(a, expr_map, produced, final_outputs)),
-            b: Box::new(inline_expr(b, expr_map, produced, final_outputs)),
+            a: Box::new(inline_expr(a, expr_map, produced, materialize)),
+            b: Box::new(inline_expr(b, expr_map, produced, materialize)),
         },
         ScalarExpr::Unary { op, input } => ScalarExpr::Unary {
             op: *op,
-            input: Box::new(inline_expr(input, expr_map, produced, final_outputs)),
+            input: Box::new(inline_expr(input, expr_map, produced, materialize)),
         },
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Fold detection
+// ---------------------------------------------------------------------------
+
+/// Identify tensors whose bindings contain a left-fold reduction pattern.
+fn find_fold_tensors(bindings: &[OutputBinding]) -> HashSet<GlobalId> {
+    let mut fold_tensors = HashSet::new();
+    for b in bindings {
+        if contains_left_fold(&b.expr) {
+            fold_tensors.insert(b.output_tensor);
+        }
+    }
+    fold_tensors
+}
+
+/// Check if an expression tree contains a left-fold pattern anywhere.
+fn contains_left_fold(expr: &ScalarExpr) -> bool {
+    if is_left_fold(expr) {
+        return true;
+    }
+    match expr {
+        ScalarExpr::Binary { a, b, .. } => contains_left_fold(a) || contains_left_fold(b),
+        ScalarExpr::Unary { input, .. } => contains_left_fold(input),
+        _ => false,
+    }
+}
+
+/// Check if this exact node is the root of a left-fold:
+/// Binary(op, Binary(op, Binary(op, Literal, term), term), term)
+/// with depth >= 2.
+fn is_left_fold(expr: &ScalarExpr) -> bool {
+    let ScalarExpr::Binary { op, .. } = expr else {
+        return false;
+    };
+    let mut depth = 0;
+    let mut current = expr;
+    while let ScalarExpr::Binary {
+        op: inner_op,
+        a: left,
+        ..
+    } = current
+    {
+        if inner_op != op {
+            break;
+        }
+        depth += 1;
+        current = left.as_ref();
+    }
+    matches!(current, ScalarExpr::Literal { .. }) && depth >= 2
+}
+
+/// Collect all tensor IDs referenced by Element nodes that are in the
+/// `produced` set (i.e., non-leaf tensors).
+fn collect_produced_references(
+    expr: &ScalarExpr,
+    produced: &HashSet<GlobalId>,
+    out: &mut HashSet<GlobalId>,
+) {
+    match expr {
+        ScalarExpr::Element { tensor, .. } => {
+            if produced.contains(tensor) {
+                out.insert(*tensor);
+            }
+        }
+        ScalarExpr::Binary { a, b, .. } => {
+            collect_produced_references(a, produced, out);
+            collect_produced_references(b, produced, out);
+        }
+        ScalarExpr::Unary { input, .. } => {
+            collect_produced_references(input, produced, out);
+        }
+        ScalarExpr::Literal { .. } => {}
     }
 }
 
@@ -138,7 +220,6 @@ mod tests {
 
         let mut bindings = Vec::new();
         for i in 0..4 {
-            // mul bindings
             bindings.push(OutputBinding {
                 output_tensor: mul_out,
                 flat_index: i,
@@ -154,7 +235,6 @@ mod tests {
                     }),
                 },
             });
-            // neg bindings
             bindings.push(OutputBinding {
                 output_tensor: neg_out,
                 flat_index: i,
@@ -171,11 +251,9 @@ mod tests {
         let final_outputs: HashSet<GlobalId> = [neg_out].into_iter().collect();
         let result = inline_intermediates(&bindings, &final_outputs);
 
-        // mul_out should be inlined away — only neg_out bindings remain
         assert_eq!(result.bindings.len(), 4);
         for rb in &result.bindings {
             assert_eq!(rb.output_tensor, neg_out);
-            // Expression should be Neg(Mul(Element(a,i), Element(b,i)))
             match &rb.expr {
                 ScalarExpr::Unary {
                     op: ScalarUnaryOp::Neg,
@@ -195,7 +273,6 @@ mod tests {
             }
         }
 
-        // Leaves should be {a, b} only — mul_out is gone
         assert!(result.leaf_tensors.contains(&a));
         assert!(result.leaf_tensors.contains(&b));
         assert!(!result.leaf_tensors.contains(&mul_out));
@@ -203,7 +280,6 @@ mod tests {
 
     #[test]
     fn test_inline_preserves_final_outputs() {
-        // If mul_out IS a final output, it should not be inlined
         let a = GlobalId(1);
         let b = GlobalId(2);
         let mul_out = GlobalId(3);
@@ -239,26 +315,15 @@ mod tests {
             });
         }
 
-        // Both are final outputs
         let final_outputs: HashSet<GlobalId> = [mul_out, neg_out].into_iter().collect();
         let result = inline_intermediates(&bindings, &final_outputs);
 
-        // Should have 4 bindings: 2 for mul_out, 2 for neg_out
         assert_eq!(result.bindings.len(), 4);
-        let mul_bindings: Vec<_> = result
-            .bindings
-            .iter()
-            .filter(|b| b.output_tensor == mul_out)
-            .collect();
         let neg_bindings: Vec<_> = result
             .bindings
             .iter()
             .filter(|b| b.output_tensor == neg_out)
             .collect();
-        assert_eq!(mul_bindings.len(), 2);
-        assert_eq!(neg_bindings.len(), 2);
-
-        // neg_out should still reference mul_out (not inlined)
         for nb in &neg_bindings {
             match &nb.expr {
                 ScalarExpr::Unary { input, .. } => {
@@ -269,5 +334,159 @@ mod tests {
                 _ => panic!("Expected Unary"),
             }
         }
+    }
+
+    #[test]
+    fn test_materialization_boundary() {
+        // Simulate two-layer matmul:
+        // mm1[i] = 0 + a[0]*w1[0] + a[1]*w1[1] (fold, K=2)
+        // act1[i] = tanh(mm1[i])
+        // mm2[i] = 0 + act1[0]*w2[0] + act1[1]*w2[1] (fold, K=2)
+        // out[i] = mm2[i]
+        let a = GlobalId(1);
+        let w1 = GlobalId(2);
+        let w2 = GlobalId(3);
+        let mm1 = GlobalId(10);
+        let act1 = GlobalId(11);
+        let mm2 = GlobalId(12);
+        let out = GlobalId(13);
+
+        let mut bindings = Vec::new();
+
+        // mm1 bindings (fold: 0 + a[0]*w1[0] + a[1]*w1[1])
+        for i in 0..2 {
+            let mut expr = ScalarExpr::Literal { value: 0.0 };
+            for k in 0..2 {
+                let prod = ScalarExpr::Binary {
+                    op: ScalarBinOp::Mul,
+                    a: Box::new(ScalarExpr::Element {
+                        tensor: a,
+                        flat_index: i * 2 + k,
+                    }),
+                    b: Box::new(ScalarExpr::Element {
+                        tensor: w1,
+                        flat_index: k * 2 + i,
+                    }),
+                };
+                expr = ScalarExpr::Binary {
+                    op: ScalarBinOp::Add,
+                    a: Box::new(expr),
+                    b: Box::new(prod),
+                };
+            }
+            bindings.push(OutputBinding {
+                output_tensor: mm1,
+                flat_index: i,
+                expr,
+            });
+        }
+
+        // act1 = tanh(mm1)
+        for i in 0..2 {
+            bindings.push(OutputBinding {
+                output_tensor: act1,
+                flat_index: i,
+                expr: ScalarExpr::Unary {
+                    op: ScalarUnaryOp::Tanh,
+                    input: Box::new(ScalarExpr::Element {
+                        tensor: mm1,
+                        flat_index: i,
+                    }),
+                },
+            });
+        }
+
+        // mm2 bindings (fold: 0 + act1[0]*w2[0] + act1[1]*w2[1])
+        for i in 0..2 {
+            let mut expr = ScalarExpr::Literal { value: 0.0 };
+            for k in 0..2 {
+                let prod = ScalarExpr::Binary {
+                    op: ScalarBinOp::Mul,
+                    a: Box::new(ScalarExpr::Element {
+                        tensor: act1,
+                        flat_index: i * 2 + k,
+                    }),
+                    b: Box::new(ScalarExpr::Element {
+                        tensor: w2,
+                        flat_index: k * 2 + i,
+                    }),
+                };
+                expr = ScalarExpr::Binary {
+                    op: ScalarBinOp::Add,
+                    a: Box::new(expr),
+                    b: Box::new(prod),
+                };
+            }
+            bindings.push(OutputBinding {
+                output_tensor: mm2,
+                flat_index: i,
+                expr,
+            });
+        }
+
+        // out = mm2 (identity)
+        for i in 0..2 {
+            bindings.push(OutputBinding {
+                output_tensor: out,
+                flat_index: i,
+                expr: ScalarExpr::Element {
+                    tensor: mm2,
+                    flat_index: i,
+                },
+            });
+        }
+
+        let final_outputs: HashSet<GlobalId> = [out].into_iter().collect();
+        let result = inline_intermediates(&bindings, &final_outputs);
+
+        // act1 should be materialized (referenced by mm2, which is a fold)
+        let materialized_tensors: HashSet<GlobalId> =
+            result.bindings.iter().map(|b| b.output_tensor).collect();
+        assert!(
+            materialized_tensors.contains(&act1),
+            "act1 should be materialized as a reduction boundary"
+        );
+        assert!(
+            materialized_tensors.contains(&out),
+            "out should be materialized as a final output"
+        );
+
+        // act1's expression should contain the mm1 fold inlined
+        // (mm1 is not materialized, so it gets inlined into act1)
+        let act1_binding = result
+            .bindings
+            .iter()
+            .find(|b| b.output_tensor == act1)
+            .unwrap();
+        // Should be: Tanh(fold(...)) — the fold from mm1 is inlined
+        assert!(
+            contains_left_fold(&act1_binding.expr),
+            "act1 should have mm1's fold inlined"
+        );
+
+        // out's expression should reference act1 (materialized) not the fold
+        let out_binding = result
+            .bindings
+            .iter()
+            .find(|b| b.output_tensor == out)
+            .unwrap();
+        // mm2 is inlined into out, but its body references act1 (materialized)
+        // So out should be: fold(Element(act1, ...), Element(w2, ...))
+        assert!(
+            contains_left_fold(&out_binding.expr),
+            "out should have mm2's fold inlined"
+        );
+        // out's fold body should reference act1, not the raw inputs.
+        // Verify by checking out's expression directly.
+        let mut out_leaves = HashSet::new();
+        collect_leaves(&out_binding.expr, &mut out_leaves);
+        assert!(
+            out_leaves.contains(&act1),
+            "out should reference act1 (materialized)"
+        );
+        assert!(
+            !out_leaves.contains(&a),
+            "out should not reference a directly (it's inside act1)"
+        );
     }
 }

@@ -14,7 +14,7 @@ use crate::compiler::common::v2_frontend::{
     OutputBinding, ScalarBinOp, ScalarExpr, ScalarUnaryOp,
 };
 use crate::graph::GlobalId;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 // ---------------------------------------------------------------------------
 // Pattern expression tree
@@ -301,8 +301,63 @@ pub fn recover_patterns(
         }
     }
 
-    patterns.sort_by_key(|p| p.output_tensor);
+    topological_sort_patterns(&mut patterns);
     patterns
+}
+
+/// Sort patterns so that producers come before consumers.
+/// A pattern depends on another if its input tensors (outer or reduction)
+/// include that other pattern's output tensor.
+pub fn topological_sort_patterns(patterns: &mut Vec<RecoveredPattern>) {
+    let n = patterns.len();
+    if n <= 1 {
+        return;
+    }
+
+    let mut sorted: Vec<RecoveredPattern> = Vec::with_capacity(n);
+    let mut remaining: Vec<RecoveredPattern> = std::mem::take(patterns);
+    let mut emitted: HashSet<GlobalId> = HashSet::new();
+
+    for _ in 0..n {
+        let pos = remaining.iter().position(|p| {
+            input_tensors_of(p).iter().all(|t| {
+                // Either this input isn't produced by any remaining pattern,
+                // or it's already been emitted.
+                !remaining
+                    .iter()
+                    .any(|other| other.output_tensor == *t && other.output_tensor != p.output_tensor)
+                    || emitted.contains(t)
+            })
+        });
+
+        match pos {
+            Some(idx) => {
+                let p = remaining.remove(idx);
+                emitted.insert(p.output_tensor);
+                sorted.push(p);
+            }
+            None => {
+                // Cycle or unresolvable — append remaining
+                sorted.extend(remaining.drain(..));
+                break;
+            }
+        }
+    }
+
+    *patterns = sorted;
+}
+
+fn input_tensors_of(p: &RecoveredPattern) -> HashSet<GlobalId> {
+    let mut inputs = HashSet::new();
+    for a in &p.accesses {
+        inputs.insert(a.tensor);
+    }
+    for r in &p.reductions {
+        for a in &r.accesses {
+            inputs.insert(a.tensor);
+        }
+    }
+    inputs
 }
 
 fn recover_one_group(
