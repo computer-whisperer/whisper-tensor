@@ -61,6 +61,20 @@ impl crate::graph::Node for CastLike {
 }
 
 impl MilliOp for CastLike {
+    fn backward(
+        &self,
+        output_grads: &HashMap<GlobalId, GlobalId>,
+        graph: &mut MilliOpGraph,
+        rng: &mut impl Rng,
+    ) -> Option<HashMap<GlobalId, GlobalId>> {
+        let grad_output = *output_grads.get(&self.output)?;
+        // Cast gradient back to match the original data input dtype
+        let grad_input = CastLike::push_new(graph, grad_output, self.data, rng);
+        let mut result = HashMap::new();
+        result.insert(self.data, grad_input);
+        Some(result)
+    }
+
     fn eval(
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
