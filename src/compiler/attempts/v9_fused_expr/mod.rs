@@ -13,9 +13,10 @@ pub mod pattern;
 #[cfg(feature = "cranelift")]
 pub mod pipeline {
     use crate::compiler::attempts::v1_scalar_crystal::codegen::TensorLayout;
-    use crate::compiler::attempts::v9_fused_expr::codegen::jit::{
-        compile_patterns, CompiledGraph, V9Error,
+    pub use crate::compiler::attempts::v9_fused_expr::codegen::jit::{
+        CompiledGraph, V9Error,
     };
+    use crate::compiler::attempts::v9_fused_expr::codegen::jit::compile_patterns;
     use crate::compiler::attempts::v9_fused_expr::inline::inline_intermediates;
     use crate::compiler::attempts::v9_fused_expr::pattern::recover_patterns;
     use crate::compiler::common::v2_frontend::ExprExpander;

@@ -23,6 +23,7 @@ use whisper_tensor::compiler::attempts::v7_parallel_crystal::executor as v7_exec
 use whisper_tensor::compiler::attempts::v7_parallel_crystal::planner as v7_planner;
 use whisper_tensor::compiler::attempts::v8_generic_kernel::codegen as v8_codegen;
 use whisper_tensor::compiler::attempts::v8_generic_kernel::executor as v8_executor;
+use whisper_tensor::compiler::attempts::v9_fused_expr::pipeline as v9_pipeline;
 
 use whisper_tensor::dtype::DType;
 use whisper_tensor::graph::GlobalId;
@@ -384,6 +385,40 @@ fn run_v8_compiled(
     bufs[layout.tensor_index[&output_id]][..output_size].to_vec()
 }
 
+fn compile_v9(
+    graph: &MilliOpGraph,
+    shapes: &HashMap<GlobalId, Vec<usize>>,
+    int_out: GlobalId,
+) -> v9_pipeline::CompiledGraph {
+    use std::collections::HashSet;
+    let final_outputs: HashSet<GlobalId> = [int_out].into_iter().collect();
+    v9_pipeline::compile_graph(graph, shapes, &final_outputs, 0).expect("v9 compile")
+}
+
+fn run_v9_compiled(
+    compiled: &v9_pipeline::CompiledGraph,
+    inputs: &HashMap<GlobalId, Vec<f32>>,
+    output_id: GlobalId,
+    output_size: usize,
+) -> Vec<f32> {
+    let layout = &compiled.layout;
+    let mut bufs: Vec<Vec<f32>> = (0..layout.num_buffers).map(|_| Vec::new()).collect();
+    for (id, data) in inputs {
+        if let Some(&idx) = layout.tensor_index.get(id) {
+            bufs[idx] = data.clone();
+        }
+    }
+    for (id, &size) in &layout.tensor_sizes {
+        let idx = layout.tensor_index[id];
+        if bufs[idx].is_empty() {
+            bufs[idx] = vec![0.0f32; size];
+        }
+    }
+    let mut ptrs: Vec<*mut f32> = bufs.iter_mut().map(|v| v.as_mut_ptr()).collect();
+    unsafe { compiled.execute(&mut ptrs) };
+    bufs[layout.tensor_index[&output_id]][..output_size].to_vec()
+}
+
 fn make_random_f32(n: usize, seed: u64) -> Vec<f32> {
     let mut rng = wyrand::WyRand::new(seed);
     (0..n)
@@ -503,6 +538,9 @@ fn main() {
         let (v4_compiled, v4_artifacts) = v4_codegen::compile_graph(&graph, &shapes).unwrap();
         let v4_result = run_v4_compiled(&v4_compiled, &compiled_inputs, int_out, total);
 
+        let v9_compiled = compile_v9(&graph, &shapes, int_out);
+        let v9_result = run_v9_compiled(&v9_compiled, &compiled_inputs, int_out, total);
+
         println!(
             "  v2: {} kernels, {} fused ops",
             v2_stats.num_kernels, v2_stats.total_fused_ops
@@ -513,6 +551,10 @@ fn main() {
             v3_fused_crystals.len(),
             v3_stats.fused_pairs,
             v3_stats.eliminated_loads,
+        );
+        println!(
+            "  v9: {} kernels",
+            v9_compiled.kernels.len()
         );
         println!(
             "  v1 crystal diff: {:.2e}",
@@ -536,10 +578,15 @@ fn main() {
             "  v4 pool diff:    {:.2e}",
             max_abs_diff(&interp_result, &v4_result)
         );
+        println!(
+            "  v9 fused diff:   {:.2e}",
+            max_abs_diff(&interp_result, &v9_result)
+        );
         assert!(max_abs_diff(&interp_result, &v1_result) < 1e-5);
         assert!(max_abs_diff(&interp_result, &v2_result) < 1e-5);
         assert!(max_abs_diff(&interp_result, &v3_result) < 1e-5);
         assert!(max_abs_diff(&interp_result, &v4_result) < 1e-5);
+        assert!(max_abs_diff(&interp_result, &v9_result) < 1e-5);
         println!("  PASS\n");
     }
 
@@ -610,6 +657,11 @@ fn main() {
         assert!(max_abs_diff(&interp_result, &v1_result) < 1e-5);
         assert!(max_abs_diff(&interp_result, &v2_result) < 1e-5);
 
+        let v9_compiled = compile_v9(&graph, &shapes, int_out);
+        let v9_result = run_v9_compiled(&v9_compiled, &compiled_inputs, int_out, total);
+        println!("  v9: {} kernels", v9_compiled.kernels.len());
+        assert!(max_abs_diff(&interp_result, &v9_result) < 1e-5);
+
         let n = 100;
         let t = Instant::now();
         for _ in 0..n {
@@ -629,6 +681,12 @@ fn main() {
         }
         let v2_avg = t.elapsed() / n;
 
+        let t = Instant::now();
+        for _ in 0..n {
+            let _ = run_v9_compiled(&v9_compiled, &compiled_inputs, int_out, total);
+        }
+        let v9_avg = t.elapsed() / n;
+
         print_timing("Interpreter:", interp_avg, n);
         println!();
         print_timing("v1 crystal:", v1_avg, n);
@@ -640,6 +698,11 @@ fn main() {
         println!(
             "  {:.2}x",
             interp_avg.as_nanos() as f64 / v2_avg.as_nanos() as f64
+        );
+        print_timing("v9 fused:", v9_avg, n);
+        println!(
+            "  {:.2}x",
+            interp_avg.as_nanos() as f64 / v9_avg.as_nanos() as f64
         );
         println!("  PASS\n");
     }
@@ -732,6 +795,11 @@ fn main() {
         assert!(max_abs_diff(&interp_result, &v3_result) < 1e-5);
         assert!(max_abs_diff(&interp_result, &v4_result) < 1e-5);
 
+        let v9_compiled = compile_v9(&graph, &shapes, int_out);
+        let v9_result = run_v9_compiled(&v9_compiled, &compiled_inputs, int_out, total);
+        println!("  v9: {} kernels", v9_compiled.kernels.len());
+        assert!(max_abs_diff(&interp_result, &v9_result) < 1e-5);
+
         let n = 500;
         let t = Instant::now();
         for _ in 0..n {
@@ -762,6 +830,12 @@ fn main() {
         }
         let v4_avg = t.elapsed() / n;
 
+        let t = Instant::now();
+        for _ in 0..n {
+            let _ = run_v9_compiled(&v9_compiled, &compiled_inputs, int_out, total);
+        }
+        let v9_avg = t.elapsed() / n;
+
         print_timing("Interpreter:", interp_avg, n);
         println!();
         print_timing("v1 crystal:", v1_avg, n);
@@ -791,6 +865,15 @@ fn main() {
         println!(
             "  v4 vs v2: {:.2}x",
             v2_avg.as_nanos() as f64 / v4_avg.as_nanos() as f64
+        );
+        print_timing("v9 fused:", v9_avg, n);
+        println!(
+            "  {:.2}x",
+            interp_avg.as_nanos() as f64 / v9_avg.as_nanos() as f64
+        );
+        println!(
+            "  v9 vs v2: {:.2}x",
+            v2_avg.as_nanos() as f64 / v9_avg.as_nanos() as f64
         );
         println!("  PASS\n");
     }
@@ -864,6 +947,11 @@ fn main() {
         assert!(max_abs_diff(&interp_result, &v1_result) < 1e-4);
         assert!(max_abs_diff(&interp_result, &v2_result) < 1e-4);
 
+        let v9_compiled = compile_v9(&graph, &shapes, int_out);
+        let v9_result = run_v9_compiled(&v9_compiled, &compiled_inputs, int_out, total);
+        println!("  v9: {} kernels", v9_compiled.kernels.len());
+        assert!(max_abs_diff(&interp_result, &v9_result) < 1e-4);
+
         let n = 20;
         let t = Instant::now();
         for _ in 0..n {
@@ -883,6 +971,12 @@ fn main() {
         }
         let v2_avg = t.elapsed() / n;
 
+        let t = Instant::now();
+        for _ in 0..n {
+            let _ = run_v9_compiled(&v9_compiled, &compiled_inputs, int_out, total);
+        }
+        let v9_avg = t.elapsed() / n;
+
         print_timing("Interpreter:", interp_avg, n);
         println!();
         print_timing("v1 crystal:", v1_avg, n);
@@ -895,6 +989,11 @@ fn main() {
             "  {:.2}x",
             interp_avg.as_nanos() as f64 / v2_avg.as_nanos() as f64
         );
+        print_timing("v9 fused:", v9_avg, n);
+        println!(
+            "  {:.2}x",
+            interp_avg.as_nanos() as f64 / v9_avg.as_nanos() as f64
+        );
         println!("  PASS\n");
     }
 
@@ -902,7 +1001,7 @@ fn main() {
     // Test 3: Simple matmul — correctness (v2 only)
     // -----------------------------------------------------------------------
     {
-        println!("Test 3: MatMul [4,8] x [8,3] (v2 only)");
+        println!("Test 3: MatMul [4,8] x [8,3]");
         let mut rng2 = wyrand::WyRand::new(999);
         let ext_a = GlobalId::new(&mut rng2);
         let ext_b = GlobalId::new(&mut rng2);
@@ -937,9 +1036,14 @@ fn main() {
         let compiled_inputs = build_compiled_inputs(&graph, &interp_inputs);
         let v2_result = run_v2_compiled(&compiled, &compiled_inputs, c, 12);
 
+        let v9_compiled = compile_v9(&graph, &shapes, c);
+        let v9_result = run_v9_compiled(&v9_compiled, &compiled_inputs, c, 12);
+
         let diff = max_abs_diff(&interp_result, &v2_result);
-        println!("  Max abs diff: {:.2e}", diff);
-        assert!(diff < 1e-4, "MatMul diverged: {diff}");
+        let v9_diff = max_abs_diff(&interp_result, &v9_result);
+        println!("  v2 diff: {:.2e}, v9 diff: {:.2e}", diff, v9_diff);
+        assert!(diff < 1e-4, "v2 MatMul diverged: {diff}");
+        assert!(v9_diff < 1e-4, "v9 MatMul diverged: {v9_diff}");
         println!("  PASS\n");
     }
 
@@ -995,6 +1099,9 @@ fn main() {
         let compiled = v2_codegen::compile(&kernels, &layout).unwrap();
         let v2_result = run_v2_compiled(&compiled, &compiled_inputs, int_out, out_size);
 
+        let v9_compiled = compile_v9(&graph, &shapes, int_out);
+        let v9_result = run_v9_compiled(&v9_compiled, &compiled_inputs, int_out, out_size);
+
         println!(
             "  v2: {} kernels ({} gemm, {} elementwise, {} fused ops)",
             v2_stats.num_kernels,
@@ -1002,10 +1109,13 @@ fn main() {
             v2_stats.num_elementwise,
             v2_stats.total_fused_ops
         );
+        println!("  v9: {} kernels", v9_compiled.kernels.len());
 
         let diff = max_abs_diff(&interp_result, &v2_result);
-        println!("  Max abs diff: {:.2e}", diff);
-        assert!(diff < 1e-4, "MatMul MLP diverged: {diff}");
+        let v9_diff = max_abs_diff(&interp_result, &v9_result);
+        println!("  v2 diff: {:.2e}, v9 diff: {:.2e}", diff, v9_diff);
+        assert!(diff < 1e-4, "v2 MatMul MLP diverged: {diff}");
+        assert!(v9_diff < 1e-4, "v9 MatMul MLP diverged: {v9_diff}");
 
         let n = 200;
         let t = Instant::now();
@@ -1020,12 +1130,27 @@ fn main() {
         }
         let v2_avg = t.elapsed() / n;
 
+        let t = Instant::now();
+        for _ in 0..n {
+            let _ = run_v9_compiled(&v9_compiled, &compiled_inputs, int_out, out_size);
+        }
+        let v9_avg = t.elapsed() / n;
+
         print_timing("Interpreter:", interp_avg, n);
         println!();
         print_timing("v2 fusion:", v2_avg, n);
         println!(
             "  {:.2}x",
             interp_avg.as_nanos() as f64 / v2_avg.as_nanos() as f64
+        );
+        print_timing("v9 fused:", v9_avg, n);
+        println!(
+            "  {:.2}x",
+            interp_avg.as_nanos() as f64 / v9_avg.as_nanos() as f64
+        );
+        println!(
+            "  v9 vs v2: {:.2}x",
+            v2_avg.as_nanos() as f64 / v9_avg.as_nanos() as f64
         );
         println!("  PASS\n");
     }
@@ -1085,6 +1210,9 @@ fn main() {
         let compiled = v2_codegen::compile(&kernels, &layout).unwrap();
         let v2_result = run_v2_compiled(&compiled, &compiled_inputs, int_out, out_size);
 
+        let v9_compiled = compile_v9(&graph, &shapes, int_out);
+        let v9_result = run_v9_compiled(&v9_compiled, &compiled_inputs, int_out, out_size);
+
         println!(
             "  v2: {} kernels ({} gemm, {} elementwise, {} fused ops)",
             v2_stats.num_kernels,
@@ -1092,10 +1220,13 @@ fn main() {
             v2_stats.num_elementwise,
             v2_stats.total_fused_ops
         );
+        println!("  v9: {} kernels", v9_compiled.kernels.len());
 
         let diff = max_abs_diff(&interp_result, &v2_result);
-        println!("  Max abs diff: {:.2e}", diff);
-        assert!(diff < 1e-3, "MatMul MLP stress diverged: {diff}");
+        let v9_diff = max_abs_diff(&interp_result, &v9_result);
+        println!("  v2 diff: {:.2e}, v9 diff: {:.2e}", diff, v9_diff);
+        assert!(diff < 1e-3, "v2 MatMul MLP stress diverged: {diff}");
+        assert!(v9_diff < 1e-3, "v9 MatMul MLP stress diverged: {v9_diff}");
 
         let n = 100;
         let t = Instant::now();
@@ -1110,12 +1241,27 @@ fn main() {
         }
         let v2_avg = t.elapsed() / n;
 
+        let t = Instant::now();
+        for _ in 0..n {
+            let _ = run_v9_compiled(&v9_compiled, &compiled_inputs, int_out, out_size);
+        }
+        let v9_avg = t.elapsed() / n;
+
         print_timing("Interpreter:", interp_avg, n);
         println!();
         print_timing("v2 fusion:", v2_avg, n);
         println!(
             "  {:.2}x",
             interp_avg.as_nanos() as f64 / v2_avg.as_nanos() as f64
+        );
+        print_timing("v9 fused:", v9_avg, n);
+        println!(
+            "  {:.2}x",
+            interp_avg.as_nanos() as f64 / v9_avg.as_nanos() as f64
+        );
+        println!(
+            "  v9 vs v2: {:.2}x",
+            v2_avg.as_nanos() as f64 / v9_avg.as_nanos() as f64
         );
         println!("  PASS\n");
     }
@@ -1330,6 +1476,16 @@ fn main() {
         let v2_diff = max_abs_diff(&interp_result, &v2_result);
         assert!(v2_diff < 2e-3, "v2 matmul diverged: {v2_diff}");
 
+        let v9_compiled = compile_v9(&graph, &shapes, c);
+        let v9_result = run_v9_compiled(&v9_compiled, &compiled_inputs, c, out_size);
+        let v9_diff = max_abs_diff(&interp_result, &v9_result);
+        println!(
+            "  v9 diff: {:.2e}, {} kernels",
+            v9_diff,
+            v9_compiled.kernels.len()
+        );
+        assert!(v9_diff < 2e-3, "v9 matmul diverged: {v9_diff}");
+
         let iters = if m >= 512 || n >= 512 || k >= 512 {
             4
         } else {
@@ -1380,6 +1536,12 @@ fn main() {
         }
         let v7_cl_avg = t.elapsed() / iters;
 
+        let t = Instant::now();
+        for _ in 0..iters {
+            let _ = run_v9_compiled(&v9_compiled, &compiled_inputs, c, out_size);
+        }
+        let v9_avg = t.elapsed() / iters;
+
         print_timing("Interpreter:", interp_avg, iters);
         println!();
         print_timing("v2 fusion:", v2_avg, iters);
@@ -1392,27 +1554,23 @@ fn main() {
             "  {:.2}x",
             interp_avg.as_nanos() as f64 / v7_avg.as_nanos() as f64
         );
-        print_timing("v7 tasks mt:", v7_mt_avg, iters);
-        println!(
-            "  {:.2}x",
-            interp_avg.as_nanos() as f64 / v7_mt_avg.as_nanos() as f64
-        );
         print_timing("v7 cranelift:", v7_cl_avg, iters);
         println!(
             "  {:.2}x",
             interp_avg.as_nanos() as f64 / v7_cl_avg.as_nanos() as f64
+        );
+        print_timing("v9 fused:", v9_avg, iters);
+        println!(
+            "  {:.2}x",
+            interp_avg.as_nanos() as f64 / v9_avg.as_nanos() as f64
         );
         println!(
             "  v7 vs v2: {:.2}x",
             v2_avg.as_nanos() as f64 / v7_avg.as_nanos() as f64
         );
         println!(
-            "  v7 mt vs v7: {:.2}x",
-            v7_avg.as_nanos() as f64 / v7_mt_avg.as_nanos() as f64
-        );
-        println!(
-            "  v7 cranelift vs v2: {:.2}x",
-            v2_avg.as_nanos() as f64 / v7_cl_avg.as_nanos() as f64
+            "  v9 vs v7: {:.2}x",
+            v7_avg.as_nanos() as f64 / v9_avg.as_nanos() as f64
         );
         println!("  PASS\n");
     }
