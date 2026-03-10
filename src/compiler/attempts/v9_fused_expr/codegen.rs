@@ -1,7 +1,9 @@
 //! v9 codegen: single-threaded Cranelift JIT from recovered patterns.
 //!
 //! Emits nested loops matching the output shape. Reduce nodes in the pattern
-//! tree emit their own inner loops inline. No SIMD, no tiling — correctness first.
+//! tree emit their own inner loops inline. Register-blocked reductions use
+//! F32X4 SIMD when the block axis is innermost and all varying loads are
+//! contiguous. No tiling yet.
 
 #[cfg(feature = "cranelift")]
 pub mod jit {
@@ -420,6 +422,20 @@ pub mod jit {
         true
     }
 
+    /// Check if a pattern expression body contains function calls (unary ops
+    /// other than Neg, which is a native instruction). Used to gate SIMD:
+    /// transcendentals like exp/tanh require scalar function calls.
+    fn body_has_func_calls(pattern: &PatternExpr) -> bool {
+        match pattern {
+            PatternExpr::Unary { op, input } => match op {
+                ScalarUnaryOp::Neg => body_has_func_calls(input),
+                _ => true,
+            },
+            PatternExpr::Binary { a, b, .. } => body_has_func_calls(a) || body_has_func_calls(b),
+            _ => false,
+        }
+    }
+
     fn emit_pattern_blocked(
         builder: &mut FunctionBuilder,
         module: &mut JITModule,
@@ -467,7 +483,20 @@ pub mod jit {
             .collect();
         let any_packable = packable.iter().any(|&p| p);
 
-        // Allocate stack slots for pack panels (before any loops)
+        // SIMD eligibility: NR must be multiple of 4, all varying loads
+        // must be packable, body must not contain function calls, and
+        // block_axis must be innermost (for contiguous stores).
+        const SIMD_WIDTH: usize = 4;
+        let use_simd = nr % SIMD_WIDTH == 0
+            && block_axis + 1 == ndim
+            && red.accesses.iter().enumerate().all(|(pos, _)| {
+                blocking.invariant[pos] || packable[pos]
+            })
+            && !body_has_func_calls(body_pattern);
+
+        // Allocate stack slots for pack panels (before any loops).
+        // Use 16-byte alignment when SIMD is active for aligned vector loads.
+        let panel_align = if use_simd { 16 } else { 0 };
         let panel_ptrs: Vec<Option<Value>> = if any_packable {
             red.accesses
                 .iter()
@@ -478,7 +507,7 @@ pub mod jit {
                         let slot = builder.create_sized_stack_slot(StackSlotData::new(
                             StackSlotKind::ExplicitSlot,
                             panel_bytes,
-                            0,
+                            panel_align,
                         ));
                         Some(builder.ins().stack_addr(types::I64, slot, 0))
                     } else {
@@ -621,133 +650,266 @@ pub mod jit {
             inner_loop_blocks.push((header, body, exit, d));
         }
 
-        // --- NR accumulators ---
-        let acc_vars: Vec<Variable> = (0..nr)
-            .map(|_| {
-                let v = vars.next();
-                builder.declare_var(v, types::F32);
-                v
-            })
-            .collect();
-
         let identity = f64::from_bits(identity_bits) as f32;
-        let id_val = builder.ins().f32const(identity);
-        for &acc in &acc_vars {
-            builder.def_var(acc, id_val);
-        }
 
-        // --- K-loop ---
-        let k_var = vars.next();
-        builder.declare_var(k_var, types::I64);
-        let zero_k = builder.ins().iconst(types::I64, 0);
-        builder.def_var(k_var, zero_k);
+        if use_simd {
+            // ===== SIMD path: F32X4 vector accumulators =====
+            let vty = types::F32X4;
+            let num_vec = nr / SIMD_WIDTH;
 
-        let k_header = builder.create_block();
-        let k_body = builder.create_block();
-        let k_exit = builder.create_block();
+            let vec_acc_vars: Vec<Variable> = (0..num_vec)
+                .map(|_| {
+                    let v = vars.next();
+                    builder.declare_var(v, vty);
+                    v
+                })
+                .collect();
 
-        builder.ins().jump(k_header, &[]);
-        builder.switch_to_block(k_header);
+            let id_scalar = builder.ins().f32const(identity);
+            let id_vec = builder.ins().splat(vty, id_scalar);
+            for &acc in &vec_acc_vars {
+                builder.def_var(acc, id_vec);
+            }
 
-        let k = builder.use_var(k_var);
-        let k_limit = builder.ins().iconst(types::I64, red.depth as i64);
-        let k_cmp = builder.ins().icmp(IntCC::SignedLessThan, k, k_limit);
-        builder.ins().brif(k_cmp, k_body, &[], k_exit, &[]);
+            // K-loop
+            let k_var = vars.next();
+            builder.declare_var(k_var, types::I64);
+            let zero_k = builder.ins().iconst(types::I64, 0);
+            builder.def_var(k_var, zero_k);
 
-        builder.switch_to_block(k_body);
-        builder.seal_block(k_body);
+            let k_header = builder.create_block();
+            let k_body = builder.create_block();
+            let k_exit = builder.create_block();
 
-        // Load invariant values once per k
-        let j0_k = builder.use_var(axis_vars[block_axis]);
-        let invariant_vals: Vec<Option<Value>> = red
-            .accesses
-            .iter()
-            .enumerate()
-            .map(|(pos, access)| {
-                if blocking.invariant[pos] {
-                    Some(load_affine_value(
-                        builder, access, layout, &axis_vars, Some(k_var),
-                        red.reduction_coeffs[pos], &buf_ptrs,
-                    ))
-                } else {
-                    None
-                }
-            })
-            .collect();
+            builder.ins().jump(k_header, &[]);
+            builder.switch_to_block(k_header);
 
-        // Unrolled lane loop
-        for lane in 0..nr {
-            let j_lane = builder.ins().iadd_imm(j0_k, lane as i64);
-            builder.def_var(axis_vars[block_axis], j_lane);
+            let k = builder.use_var(k_var);
+            let k_limit = builder.ins().iconst(types::I64, red.depth as i64);
+            let k_cmp = builder.ins().icmp(IntCC::SignedLessThan, k, k_limit);
+            builder.ins().brif(k_cmp, k_body, &[], k_exit, &[]);
 
-            let body_vals: Vec<Value> = red
+            builder.switch_to_block(k_body);
+            builder.seal_block(k_body);
+
+            // Load invariant values (scalar) and splat to F32X4
+            let invariant_vecs: Vec<Option<Value>> = red
                 .accesses
                 .iter()
                 .enumerate()
                 .map(|(pos, access)| {
-                    if let Some(inv_val) = invariant_vals[pos] {
-                        inv_val
-                    } else if packable[pos] {
-                        // Load from panel[k * NR + lane]
-                        let panel_ptr = panel_ptrs[pos].unwrap();
-                        let k_val = builder.use_var(k_var);
-                        let nr_val = builder.ins().iconst(types::I64, nr as i64);
-                        let k_times_nr = builder.ins().imul(k_val, nr_val);
-                        let idx = builder.ins().iadd_imm(k_times_nr, lane as i64);
-                        let byte_off = builder.ins().ishl_imm(idx, 2);
-                        let ptr = builder.ins().iadd(panel_ptr, byte_off);
-                        builder
-                            .ins()
-                            .load(types::F32, MemFlags::trusted(), ptr, 0)
-                    } else {
-                        load_affine_value(
+                    if blocking.invariant[pos] {
+                        let scalar = load_affine_value(
                             builder, access, layout, &axis_vars, Some(k_var),
                             red.reduction_coeffs[pos], &buf_ptrs,
-                        )
+                        );
+                        Some(builder.ins().splat(vty, scalar))
+                    } else {
+                        None
                     }
                 })
                 .collect();
 
-            let term = eval_body_expr(builder, module, body_pattern, &body_vals, math_funcs)?;
-            let acc = builder.use_var(acc_vars[lane]);
-            let new_acc = emit_binop(builder, accum_op, acc, term);
-            builder.def_var(acc_vars[lane], new_acc);
+            // Process num_vec groups of 4 lanes
+            for vi in 0..num_vec {
+                let lane_base = vi * SIMD_WIDTH;
+
+                let body_vals: Vec<Value> = red
+                    .accesses
+                    .iter()
+                    .enumerate()
+                    .map(|(pos, _)| {
+                        if let Some(inv_vec) = invariant_vecs[pos] {
+                            inv_vec
+                        } else {
+                            // Packed panel: vector load 4 contiguous f32
+                            let panel_ptr = panel_ptrs[pos].unwrap();
+                            let k_val = builder.use_var(k_var);
+                            let nr_val = builder.ins().iconst(types::I64, nr as i64);
+                            let k_times_nr = builder.ins().imul(k_val, nr_val);
+                            let idx = builder.ins().iadd_imm(k_times_nr, lane_base as i64);
+                            let byte_off = builder.ins().ishl_imm(idx, 2);
+                            let ptr = builder.ins().iadd(panel_ptr, byte_off);
+                            builder.ins().load(vty, MemFlags::trusted(), ptr, 0)
+                        }
+                    })
+                    .collect();
+
+                let term = eval_body_expr_vec(
+                    builder, module, body_pattern, &body_vals, math_funcs,
+                )?;
+                let acc = builder.use_var(vec_acc_vars[vi]);
+                let new_acc = emit_binop(builder, accum_op, acc, term);
+                builder.def_var(vec_acc_vars[vi], new_acc);
+            }
+
+            // k++
+            let k = builder.use_var(k_var);
+            let k_next = builder.ins().iadd_imm(k, 1);
+            builder.def_var(k_var, k_next);
+            builder.ins().jump(k_header, &[]);
+
+            builder.switch_to_block(k_exit);
+            builder.seal_block(k_header);
+            builder.seal_block(k_exit);
+
+            // Post-reduction: extract scalar lanes, evaluate outer expression
+            let out_strides = row_major_strides(&pattern.output_shape);
+            let j0_post = builder.use_var(axis_vars[block_axis]);
+            for vi in 0..num_vec {
+                let acc_vec = builder.use_var(vec_acc_vars[vi]);
+                for si in 0..SIMD_WIDTH {
+                    let lane = vi * SIMD_WIDTH + si;
+                    let scalar = builder.ins().extractlane(acc_vec, si as u8);
+
+                    let j_lane = builder.ins().iadd_imm(j0_post, lane as i64);
+                    builder.def_var(axis_vars[block_axis], j_lane);
+
+                    let outer_vals =
+                        load_outer_values(builder, pattern, layout, &axis_vars, &buf_ptrs);
+
+                    let result = eval_expr_with_reduce_override(
+                        builder, module, &pattern.pattern, &outer_vals, math_funcs,
+                        blocking.reduce_idx, scalar,
+                    )?;
+
+                    let flat_out = compute_flat_index(builder, &axis_vars, &out_strides);
+                    store_result(
+                        builder, layout, pattern.output_tensor, flat_out, result, &buf_ptrs,
+                    );
+                }
+            }
+            builder.def_var(axis_vars[block_axis], j0_post);
+        } else {
+            // ===== Scalar path: NR individual accumulators =====
+            let acc_vars: Vec<Variable> = (0..nr)
+                .map(|_| {
+                    let v = vars.next();
+                    builder.declare_var(v, types::F32);
+                    v
+                })
+                .collect();
+
+            let id_val = builder.ins().f32const(identity);
+            for &acc in &acc_vars {
+                builder.def_var(acc, id_val);
+            }
+
+            // K-loop
+            let k_var = vars.next();
+            builder.declare_var(k_var, types::I64);
+            let zero_k = builder.ins().iconst(types::I64, 0);
+            builder.def_var(k_var, zero_k);
+
+            let k_header = builder.create_block();
+            let k_body = builder.create_block();
+            let k_exit = builder.create_block();
+
+            builder.ins().jump(k_header, &[]);
+            builder.switch_to_block(k_header);
+
+            let k = builder.use_var(k_var);
+            let k_limit = builder.ins().iconst(types::I64, red.depth as i64);
+            let k_cmp = builder.ins().icmp(IntCC::SignedLessThan, k, k_limit);
+            builder.ins().brif(k_cmp, k_body, &[], k_exit, &[]);
+
+            builder.switch_to_block(k_body);
+            builder.seal_block(k_body);
+
+            // Load invariant values once per k
+            let j0_k = builder.use_var(axis_vars[block_axis]);
+            let invariant_vals: Vec<Option<Value>> = red
+                .accesses
+                .iter()
+                .enumerate()
+                .map(|(pos, access)| {
+                    if blocking.invariant[pos] {
+                        Some(load_affine_value(
+                            builder, access, layout, &axis_vars, Some(k_var),
+                            red.reduction_coeffs[pos], &buf_ptrs,
+                        ))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            // Unrolled lane loop
+            for lane in 0..nr {
+                let j_lane = builder.ins().iadd_imm(j0_k, lane as i64);
+                builder.def_var(axis_vars[block_axis], j_lane);
+
+                let body_vals: Vec<Value> = red
+                    .accesses
+                    .iter()
+                    .enumerate()
+                    .map(|(pos, access)| {
+                        if let Some(inv_val) = invariant_vals[pos] {
+                            inv_val
+                        } else if packable[pos] {
+                            // Load from panel[k * NR + lane]
+                            let panel_ptr = panel_ptrs[pos].unwrap();
+                            let k_val = builder.use_var(k_var);
+                            let nr_val = builder.ins().iconst(types::I64, nr as i64);
+                            let k_times_nr = builder.ins().imul(k_val, nr_val);
+                            let idx = builder.ins().iadd_imm(k_times_nr, lane as i64);
+                            let byte_off = builder.ins().ishl_imm(idx, 2);
+                            let ptr = builder.ins().iadd(panel_ptr, byte_off);
+                            builder
+                                .ins()
+                                .load(types::F32, MemFlags::trusted(), ptr, 0)
+                        } else {
+                            load_affine_value(
+                                builder, access, layout, &axis_vars, Some(k_var),
+                                red.reduction_coeffs[pos], &buf_ptrs,
+                            )
+                        }
+                    })
+                    .collect();
+
+                let term =
+                    eval_body_expr(builder, module, body_pattern, &body_vals, math_funcs)?;
+                let acc = builder.use_var(acc_vars[lane]);
+                let new_acc = emit_binop(builder, accum_op, acc, term);
+                builder.def_var(acc_vars[lane], new_acc);
+            }
+
+            // Restore block axis var
+            builder.def_var(axis_vars[block_axis], j0_k);
+
+            // k++
+            let k = builder.use_var(k_var);
+            let k_next = builder.ins().iadd_imm(k, 1);
+            builder.def_var(k_var, k_next);
+            builder.ins().jump(k_header, &[]);
+
+            builder.switch_to_block(k_exit);
+            builder.seal_block(k_header);
+            builder.seal_block(k_exit);
+
+            // Post-reduction: evaluate outer expression for each lane
+            let out_strides = row_major_strides(&pattern.output_shape);
+            let j0_post = builder.use_var(axis_vars[block_axis]);
+            for lane in 0..nr {
+                let j_lane = builder.ins().iadd_imm(j0_post, lane as i64);
+                builder.def_var(axis_vars[block_axis], j_lane);
+
+                let outer_vals =
+                    load_outer_values(builder, pattern, layout, &axis_vars, &buf_ptrs);
+
+                let acc_val = builder.use_var(acc_vars[lane]);
+                let result = eval_expr_with_reduce_override(
+                    builder, module, &pattern.pattern, &outer_vals, math_funcs,
+                    blocking.reduce_idx, acc_val,
+                )?;
+
+                let flat_out = compute_flat_index(builder, &axis_vars, &out_strides);
+                store_result(
+                    builder, layout, pattern.output_tensor, flat_out, result, &buf_ptrs,
+                );
+            }
+            builder.def_var(axis_vars[block_axis], j0_post);
         }
-
-        // Restore block axis var
-        builder.def_var(axis_vars[block_axis], j0_k);
-
-        // k++
-        let k = builder.use_var(k_var);
-        let k_next = builder.ins().iadd_imm(k, 1);
-        builder.def_var(k_var, k_next);
-        builder.ins().jump(k_header, &[]);
-
-        builder.switch_to_block(k_exit);
-        builder.seal_block(k_header);
-        builder.seal_block(k_exit);
-
-        // --- Post-reduction: evaluate outer expression for each lane ---
-        let out_strides = row_major_strides(&pattern.output_shape);
-        let j0_post = builder.use_var(axis_vars[block_axis]);
-        for lane in 0..nr {
-            let j_lane = builder.ins().iadd_imm(j0_post, lane as i64);
-            builder.def_var(axis_vars[block_axis], j_lane);
-
-            let outer_vals =
-                load_outer_values(builder, pattern, layout, &axis_vars, &buf_ptrs);
-
-            let acc_val = builder.use_var(acc_vars[lane]);
-            let result = eval_expr_with_reduce_override(
-                builder, module, &pattern.pattern, &outer_vals, math_funcs,
-                blocking.reduce_idx, acc_val,
-            )?;
-
-            let flat_out = compute_flat_index(builder, &axis_vars, &out_strides);
-            store_result(builder, layout, pattern.output_tensor, flat_out, result, &buf_ptrs);
-        }
-
-        builder.def_var(axis_vars[block_axis], j0_post);
 
         // --- Close non-block axis loops ---
         for &(header, _body, exit, d) in inner_loop_blocks.iter().rev() {
@@ -1215,6 +1377,43 @@ pub mod jit {
             PatternExpr::Unary { op, input } => {
                 let vi = eval_body_expr(builder, module, input, load_vals, math_funcs)?;
                 emit_unaryop(builder, module, *op, vi, math_funcs)
+            }
+            PatternExpr::Reduce { .. } => {
+                Err(V9Error::Other("Nested reductions not yet supported".into()))
+            }
+        }
+    }
+
+    /// Vector version of `eval_body_expr`. All load values are F32X4.
+    /// Literals are splatted to F32X4. Only Neg is supported as a unary op
+    /// (callers must verify with `body_has_func_calls` before using this).
+    fn eval_body_expr_vec(
+        builder: &mut FunctionBuilder,
+        module: &mut JITModule,
+        pattern: &PatternExpr,
+        load_vals: &[Value],
+        math_funcs: &MathFuncs,
+    ) -> Result<Value, V9Error> {
+        match pattern {
+            PatternExpr::Load { load_ordinal, .. } => Ok(load_vals[*load_ordinal]),
+            PatternExpr::Literal { value_bits } => {
+                let val = f64::from_bits(*value_bits) as f32;
+                let scalar = builder.ins().f32const(val);
+                Ok(builder.ins().splat(types::F32X4, scalar))
+            }
+            PatternExpr::Binary { op, a, b } => {
+                let va = eval_body_expr_vec(builder, module, a, load_vals, math_funcs)?;
+                let vb = eval_body_expr_vec(builder, module, b, load_vals, math_funcs)?;
+                Ok(emit_binop(builder, *op, va, vb))
+            }
+            PatternExpr::Unary { op, input } => {
+                let vi = eval_body_expr_vec(builder, module, input, load_vals, math_funcs)?;
+                match op {
+                    ScalarUnaryOp::Neg => Ok(builder.ins().fneg(vi)),
+                    _ => Err(V9Error::Other(
+                        "SIMD body contains unsupported unary op".into(),
+                    )),
+                }
             }
             PatternExpr::Reduce { .. } => {
                 Err(V9Error::Other("Nested reductions not yet supported".into()))
