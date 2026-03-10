@@ -34,14 +34,29 @@ pub mod jit {
         pub output_tensor: GlobalId,
         pub input_tensors: Vec<GlobalId>,
         pub count: usize,
+        /// Extent of the outermost (parallelizable) axis.
+        pub parallel_extent: usize,
+        /// Step size of the outermost axis (NR for blocked, 1 for unblocked).
+        /// Tile boundaries must be multiples of this value.
+        pub parallel_step: usize,
     }
 
     impl CompiledKernel {
+        /// Execute the kernel over the full output range.
+        ///
         /// # Safety
         pub unsafe fn execute(&self, buffers: *const *mut f32) {
-            let func: unsafe extern "C" fn(*const *mut f32) =
+            unsafe { self.execute_range(buffers, 0, self.parallel_extent) };
+        }
+
+        /// Execute the kernel over a sub-range of the parallel axis.
+        /// `start` and `end` must be multiples of `parallel_step`.
+        ///
+        /// # Safety
+        pub unsafe fn execute_range(&self, buffers: *const *mut f32, start: usize, end: usize) {
+            let func: unsafe extern "C" fn(*const *mut f32, i64, i64) =
                 unsafe { std::mem::transmute(self.func_ptr) };
-            unsafe { func(buffers) };
+            unsafe { func(buffers, start as i64, end as i64) };
         }
     }
 
@@ -99,7 +114,9 @@ pub mod jit {
         for (ki, pattern) in patterns.iter().enumerate() {
             let func_name = format!("v9_kernel_{}", ki);
 
-            ctx.func.signature.params.push(AbiParam::new(types::I64));
+            ctx.func.signature.params.push(AbiParam::new(types::I64)); // ptr_table
+            ctx.func.signature.params.push(AbiParam::new(types::I64)); // axis_start
+            ctx.func.signature.params.push(AbiParam::new(types::I64)); // axis_end
 
             let func_id = module
                 .declare_function(&func_name, Linkage::Local, &ctx.func.signature)
@@ -114,6 +131,8 @@ pub mod jit {
             builder.seal_block(entry_block);
 
             let ptr_table = builder.block_params(entry_block)[0];
+            let axis_start = builder.block_params(entry_block)[1];
+            let axis_end = builder.block_params(entry_block)[2];
 
             emit_pattern(
                 &mut builder,
@@ -122,6 +141,8 @@ pub mod jit {
                 &layout,
                 ptr_table,
                 &math_funcs,
+                axis_start,
+                axis_end,
             )?;
 
             builder.ins().return_(&[]);
@@ -143,7 +164,23 @@ pub mod jit {
             input_tensors.dedup();
 
             let count: usize = pattern.output_shape.iter().product();
-            kernels.push((func_id, pattern.output_tensor, input_tensors, count));
+
+            // Determine parallel axis metadata
+            let (parallel_extent, parallel_step) =
+                if let Some(blocking) = analyze_blocking(pattern) {
+                    (pattern.output_shape[blocking.block_axis], blocking.nr)
+                } else {
+                    (pattern.output_shape[0], 1)
+                };
+
+            kernels.push((
+                func_id,
+                pattern.output_tensor,
+                input_tensors,
+                count,
+                parallel_extent,
+                parallel_step,
+            ));
         }
 
         module
@@ -152,15 +189,19 @@ pub mod jit {
 
         let compiled_kernels: Vec<CompiledKernel> = kernels
             .into_iter()
-            .map(|(func_id, output_tensor, input_tensors, count)| {
-                let func_ptr = module.get_finalized_function(func_id);
-                CompiledKernel {
-                    func_ptr,
-                    output_tensor,
-                    input_tensors,
-                    count,
-                }
-            })
+            .map(
+                |(func_id, output_tensor, input_tensors, count, parallel_extent, parallel_step)| {
+                    let func_ptr = module.get_finalized_function(func_id);
+                    CompiledKernel {
+                        func_ptr,
+                        output_tensor,
+                        input_tensors,
+                        count,
+                        parallel_extent,
+                        parallel_step,
+                    }
+                },
+            )
             .collect();
 
         Ok(CompiledGraph {
@@ -193,11 +234,14 @@ pub mod jit {
         layout: &TensorLayout,
         ptr_table: Value,
         math_funcs: &MathFuncs,
+        axis_start: Value,
+        axis_end: Value,
     ) -> Result<(), V9Error> {
         // Try register blocking for patterns with reductions
         if let Some(blocking) = analyze_blocking(pattern) {
             return emit_pattern_blocked(
                 builder, module, pattern, layout, ptr_table, math_funcs, &blocking,
+                axis_start, axis_end,
             );
         }
 
@@ -218,8 +262,10 @@ pub mod jit {
             axis_vars.push(v);
         }
 
-        // Build nested loops
-        let loop_blocks = build_nested_loops(builder, &axis_vars, &pattern.output_shape);
+        // Build nested loops — outermost axis uses axis_start..axis_end
+        let loop_blocks = build_nested_loops_ranged(
+            builder, &axis_vars, &pattern.output_shape, axis_start, axis_end,
+        );
 
         // Compute flat output index
         let out_strides = row_major_strides(&pattern.output_shape);
@@ -444,6 +490,8 @@ pub mod jit {
         ptr_table: Value,
         math_funcs: &MathFuncs,
         blocking: &BlockingInfo,
+        axis_start: Value,
+        axis_end: Value,
     ) -> Result<(), V9Error> {
         use cranelift_codegen::ir::condcodes::IntCC;
         use cranelift_codegen::ir::{StackSlotData, StackSlotKind};
@@ -452,7 +500,6 @@ pub mod jit {
         let block_axis = blocking.block_axis;
         let nr = blocking.nr;
         let block_extent = pattern.output_shape[block_axis];
-        let block_main_limit = block_extent - block_extent % nr;
         let mut vars = VarAlloc::new();
 
         // Pre-load buffer pointers
@@ -521,9 +568,8 @@ pub mod jit {
 
         // ===== Loop order: block_axis (step NR) → pack → non-block axes → k =====
 
-        // --- Block axis loop (outermost) ---
-        let zero_ba = builder.ins().iconst(types::I64, 0);
-        builder.def_var(axis_vars[block_axis], zero_ba);
+        // --- Block axis loop (outermost, parallelizable) ---
+        builder.def_var(axis_vars[block_axis], axis_start);
 
         let ba_header = builder.create_block();
         let ba_body = builder.create_block();
@@ -533,8 +579,7 @@ pub mod jit {
         builder.switch_to_block(ba_header);
 
         let ba_iv = builder.use_var(axis_vars[block_axis]);
-        let ba_limit = builder.ins().iconst(types::I64, block_main_limit as i64);
-        let ba_cmp = builder.ins().icmp(IntCC::SignedLessThan, ba_iv, ba_limit);
+        let ba_cmp = builder.ins().icmp(IntCC::SignedLessThan, ba_iv, axis_end);
         builder.ins().brif(ba_cmp, ba_body, &[], ba_exit, &[]);
 
         builder.switch_to_block(ba_body);
@@ -1026,10 +1071,14 @@ pub mod jit {
         Ok(())
     }
 
-    fn build_nested_loops(
+    /// Build nested loops where the outermost axis uses axis_start..axis_end
+    /// and all inner axes use 0..extent.
+    fn build_nested_loops_ranged(
         builder: &mut FunctionBuilder,
         axis_vars: &[Variable],
         output_shape: &[usize],
+        axis_start: Value,
+        axis_end: Value,
     ) -> Vec<(
         cranelift_codegen::ir::Block,
         cranelift_codegen::ir::Block,
@@ -1038,8 +1087,10 @@ pub mod jit {
         let mut blocks = Vec::new();
 
         for (d, &extent) in output_shape.iter().enumerate() {
-            let zero = builder.ins().iconst(types::I64, 0);
-            builder.def_var(axis_vars[d], zero);
+            let start = if d == 0 { axis_start } else {
+                builder.ins().iconst(types::I64, 0)
+            };
+            builder.def_var(axis_vars[d], start);
 
             let header = builder.create_block();
             let body = builder.create_block();
@@ -1049,7 +1100,9 @@ pub mod jit {
             builder.switch_to_block(header);
 
             let iv = builder.use_var(axis_vars[d]);
-            let limit = builder.ins().iconst(types::I64, extent as i64);
+            let limit = if d == 0 { axis_end } else {
+                builder.ins().iconst(types::I64, extent as i64)
+            };
             let cmp = builder.ins().icmp(
                 cranelift_codegen::ir::condcodes::IntCC::SignedLessThan,
                 iv,

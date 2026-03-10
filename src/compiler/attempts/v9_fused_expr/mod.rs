@@ -7,6 +7,7 @@
 //! - Single-threaded, no tiling — correctness first
 
 pub mod codegen;
+pub mod executor;
 pub mod inline;
 pub mod pattern;
 
@@ -16,6 +17,7 @@ pub mod pipeline {
     pub use crate::compiler::attempts::v9_fused_expr::codegen::jit::{
         CompiledGraph, V9Error,
     };
+    pub use crate::compiler::attempts::v9_fused_expr::executor::dag::execute_parallel;
     use crate::compiler::attempts::v9_fused_expr::codegen::jit::compile_patterns;
     use crate::compiler::attempts::v9_fused_expr::inline::inline_intermediates;
     use crate::compiler::attempts::v9_fused_expr::pattern::recover_patterns;
@@ -436,6 +438,179 @@ pub mod pipeline {
                     i,
                     result[i],
                     expected[i]
+                );
+            }
+        }
+
+        fn make_random_f32(n: usize, seed: u64) -> Vec<f32> {
+            let mut state = seed | 1;
+            (0..n)
+                .map(|_| {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    (state as u32 as f32 / u32::MAX as f32) * 2.0 - 1.0
+                })
+                .collect()
+        }
+
+        fn max_diff(a: &[f32], b: &[f32]) -> f32 {
+            a.iter()
+                .zip(b.iter())
+                .map(|(x, y)| (x - y).abs())
+                .fold(0.0f32, f32::max)
+        }
+
+        fn alloc_and_run(
+            compiled: &CompiledGraph,
+            inputs: &HashMap<GlobalId, Vec<f32>>,
+            output_id: GlobalId,
+        ) -> Vec<f32> {
+            let layout = &compiled.layout;
+            let mut bufs: Vec<Vec<f32>> = (0..layout.num_buffers)
+                .map(|i| vec![0.0f32; layout.tensor_sizes.values()
+                    .filter(|&&s| layout.tensor_index.values().any(|&idx| idx == i && s > 0))
+                    .copied().next().unwrap_or(64)])
+                .collect();
+            // Properly size buffers
+            for (id, &size) in &layout.tensor_sizes {
+                let idx = layout.tensor_index[id];
+                if bufs[idx].len() < size {
+                    bufs[idx].resize(size, 0.0);
+                }
+            }
+            for (id, data) in inputs {
+                if let Some(&idx) = layout.tensor_index.get(id) {
+                    bufs[idx][..data.len()].copy_from_slice(data);
+                }
+            }
+            let mut ptrs: Vec<*mut f32> = bufs.iter_mut().map(|b| b.as_mut_ptr()).collect();
+            unsafe { compiled.execute(&mut ptrs) };
+            let out_idx = layout.tensor_index[&output_id];
+            bufs[out_idx].clone()
+        }
+
+        fn alloc_and_run_parallel(
+            compiled: &CompiledGraph,
+            inputs: &HashMap<GlobalId, Vec<f32>>,
+            output_id: GlobalId,
+            num_threads: usize,
+        ) -> Vec<f32> {
+            let layout = &compiled.layout;
+            let mut bufs: Vec<Vec<f32>> = (0..layout.num_buffers)
+                .map(|_| vec![0.0f32; 64])
+                .collect();
+            for (id, &size) in &layout.tensor_sizes {
+                let idx = layout.tensor_index[id];
+                if bufs[idx].len() < size {
+                    bufs[idx].resize(size, 0.0);
+                }
+            }
+            for (id, data) in inputs {
+                if let Some(&idx) = layout.tensor_index.get(id) {
+                    bufs[idx][..data.len()].copy_from_slice(data);
+                }
+            }
+            let ptrs: Vec<*mut f32> = bufs.iter_mut().map(|b| b.as_mut_ptr()).collect();
+            unsafe { execute_parallel(compiled, &ptrs, num_threads) };
+            let out_idx = layout.tensor_index[&output_id];
+            bufs[out_idx].clone()
+        }
+
+        #[test]
+        fn test_parallel_matmul() {
+            let mut rng = wyrand::WyRand::new(7001);
+            let (m, k, n) = (64, 96, 80);
+            let ext_a = GlobalId::new(&mut rng);
+            let ext_b = GlobalId::new(&mut rng);
+            let (mut graph, input_map) = MilliOpGraph::new([ext_a, ext_b], &mut rng);
+            let a = input_map[&ext_a];
+            let b = input_map[&ext_b];
+            let c = crate::milli_graph::ops::MatMul::push_new(&mut graph, a, b, &mut rng);
+
+            let mut shapes = HashMap::new();
+            shapes.insert(a, vec![m, k]);
+            shapes.insert(b, vec![k, n]);
+            shapes.insert(c, vec![m, n]);
+
+            let final_outputs: HashSet<GlobalId> = [c].into_iter().collect();
+            let compiled = compile_graph(&graph, &shapes, &final_outputs, 0).unwrap();
+
+            let a_data = make_random_f32(m * k, 7002);
+            let b_data = make_random_f32(k * n, 7003);
+            let mut inputs = HashMap::new();
+            inputs.insert(a, a_data);
+            inputs.insert(b, b_data);
+
+            let serial = alloc_and_run(&compiled, &inputs, c);
+
+            for threads in [2, 4, 8] {
+                let parallel = alloc_and_run_parallel(&compiled, &inputs, c, threads);
+                let diff = max_diff(&serial, &parallel);
+                assert!(
+                    diff < 1e-5,
+                    "parallel ({threads}t) diverged from serial: max diff {diff}"
+                );
+            }
+        }
+
+        #[test]
+        fn test_parallel_fused_mlp() {
+            // Two-layer MLP: out = tanh(tanh(x @ W1 + b1) @ W2 + b2)
+            // Tests inter-op parallelism (two kernels with dependency)
+            let mut rng = wyrand::WyRand::new(8001);
+            let (m, k1, k2, n) = (32, 128, 64, 32);
+            let ext_x = GlobalId::new(&mut rng);
+            let ext_w1 = GlobalId::new(&mut rng);
+            let ext_b1 = GlobalId::new(&mut rng);
+            let ext_w2 = GlobalId::new(&mut rng);
+            let ext_b2 = GlobalId::new(&mut rng);
+            let (mut graph, input_map) =
+                MilliOpGraph::new([ext_x, ext_w1, ext_b1, ext_w2, ext_b2], &mut rng);
+            let x = input_map[&ext_x];
+            let w1 = input_map[&ext_w1];
+            let b1 = input_map[&ext_b1];
+            let w2 = input_map[&ext_w2];
+            let b2 = input_map[&ext_b2];
+
+            let mm1 = crate::milli_graph::ops::MatMul::push_new(&mut graph, x, w1, &mut rng);
+            let add1 = SimpleBinary::add(&mut graph, mm1, b1, &mut rng);
+            let act1 = SimpleUnaryOp::trig(&mut graph, add1, crate::TrigOp::Tanh, &mut rng);
+            let mm2 = crate::milli_graph::ops::MatMul::push_new(&mut graph, act1, w2, &mut rng);
+            let add2 = SimpleBinary::add(&mut graph, mm2, b2, &mut rng);
+            let out = SimpleUnaryOp::trig(&mut graph, add2, crate::TrigOp::Tanh, &mut rng);
+
+            let mut shapes = HashMap::new();
+            shapes.insert(x, vec![m, k1]);
+            shapes.insert(w1, vec![k1, k2]);
+            shapes.insert(b1, vec![1, k2]);
+            shapes.insert(mm1, vec![m, k2]);
+            shapes.insert(add1, vec![m, k2]);
+            shapes.insert(act1, vec![m, k2]);
+            shapes.insert(w2, vec![k2, n]);
+            shapes.insert(b2, vec![1, n]);
+            shapes.insert(mm2, vec![m, n]);
+            shapes.insert(add2, vec![m, n]);
+            shapes.insert(out, vec![m, n]);
+
+            let final_outputs: HashSet<GlobalId> = [out].into_iter().collect();
+            let compiled = compile_graph(&graph, &shapes, &final_outputs, 0).unwrap();
+
+            let mut inputs = HashMap::new();
+            inputs.insert(x, make_random_f32(m * k1, 8002));
+            inputs.insert(w1, make_random_f32(k1 * k2, 8003));
+            inputs.insert(b1, make_random_f32(k2, 8004));
+            inputs.insert(w2, make_random_f32(k2 * n, 8005));
+            inputs.insert(b2, make_random_f32(n, 8006));
+
+            let serial = alloc_and_run(&compiled, &inputs, out);
+
+            for threads in [2, 4, 8] {
+                let parallel = alloc_and_run_parallel(&compiled, &inputs, out, threads);
+                let diff = max_diff(&serial, &parallel);
+                assert!(
+                    diff < 1e-4,
+                    "fused MLP ({threads}t) diverged from serial: max diff {diff}"
                 );
             }
         }

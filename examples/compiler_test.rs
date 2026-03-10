@@ -419,6 +419,31 @@ fn run_v9_compiled(
     bufs[layout.tensor_index[&output_id]][..output_size].to_vec()
 }
 
+fn run_v9_parallel(
+    compiled: &v9_pipeline::CompiledGraph,
+    inputs: &HashMap<GlobalId, Vec<f32>>,
+    output_id: GlobalId,
+    output_size: usize,
+    num_threads: usize,
+) -> Vec<f32> {
+    let layout = &compiled.layout;
+    let mut bufs: Vec<Vec<f32>> = (0..layout.num_buffers).map(|_| Vec::new()).collect();
+    for (id, data) in inputs {
+        if let Some(&idx) = layout.tensor_index.get(id) {
+            bufs[idx] = data.clone();
+        }
+    }
+    for (id, &size) in &layout.tensor_sizes {
+        let idx = layout.tensor_index[id];
+        if bufs[idx].is_empty() {
+            bufs[idx] = vec![0.0f32; size];
+        }
+    }
+    let ptrs: Vec<*mut f32> = bufs.iter_mut().map(|v| v.as_mut_ptr()).collect();
+    unsafe { v9_pipeline::execute_parallel(compiled, &ptrs, num_threads) };
+    bufs[layout.tensor_index[&output_id]][..output_size].to_vec()
+}
+
 fn make_random_f32(n: usize, seed: u64) -> Vec<f32> {
     let mut rng = wyrand::WyRand::new(seed);
     (0..n)
@@ -1247,6 +1272,17 @@ fn main() {
         }
         let v9_avg = t.elapsed() / n;
 
+        let num_threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        let t = Instant::now();
+        for _ in 0..n {
+            let _ = run_v9_parallel(
+                &v9_compiled, &compiled_inputs, int_out, out_size, num_threads,
+            );
+        }
+        let v9_mt_avg = t.elapsed() / n;
+
         print_timing("Interpreter:", interp_avg, n);
         println!();
         print_timing("v2 fusion:", v2_avg, n);
@@ -1258,6 +1294,16 @@ fn main() {
         println!(
             "  {:.2}x",
             interp_avg.as_nanos() as f64 / v9_avg.as_nanos() as f64
+        );
+        print_timing(
+            &format!("v9 parallel({}t):", num_threads),
+            v9_mt_avg,
+            n,
+        );
+        println!(
+            "  {:.2}x  ({:.1}x vs serial)",
+            interp_avg.as_nanos() as f64 / v9_mt_avg.as_nanos() as f64,
+            v9_avg.as_nanos() as f64 / v9_mt_avg.as_nanos() as f64,
         );
         println!(
             "  v9 vs v2: {:.2}x",
@@ -1542,6 +1588,26 @@ fn main() {
         }
         let v9_avg = t.elapsed() / iters;
 
+        let num_threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        // Verify parallel correctness
+        let v9_par_result =
+            run_v9_parallel(&v9_compiled, &compiled_inputs, c, out_size, num_threads);
+        let v9_par_diff = max_abs_diff(&v9_result, &v9_par_result);
+        println!(
+            "  v9 mt diff: {:.2e} ({}t)",
+            v9_par_diff, num_threads,
+        );
+        assert!(v9_par_diff < 1e-5, "v9 parallel diverged: {}", v9_par_diff);
+
+        let t = Instant::now();
+        for _ in 0..iters {
+            let _ =
+                run_v9_parallel(&v9_compiled, &compiled_inputs, c, out_size, num_threads);
+        }
+        let v9_mt_avg = t.elapsed() / iters;
+
         print_timing("Interpreter:", interp_avg, iters);
         println!();
         print_timing("v2 fusion:", v2_avg, iters);
@@ -1563,6 +1629,16 @@ fn main() {
         println!(
             "  {:.2}x",
             interp_avg.as_nanos() as f64 / v9_avg.as_nanos() as f64
+        );
+        print_timing(
+            &format!("v9 parallel({}t):", num_threads),
+            v9_mt_avg,
+            iters,
+        );
+        println!(
+            "  {:.2}x  ({:.1}x vs serial)",
+            interp_avg.as_nanos() as f64 / v9_mt_avg.as_nanos() as f64,
+            v9_avg.as_nanos() as f64 / v9_mt_avg.as_nanos() as f64,
         );
         println!(
             "  v7 vs v2: {:.2}x",
