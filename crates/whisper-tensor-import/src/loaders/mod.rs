@@ -1,4 +1,5 @@
 mod auto;
+mod f5_tts;
 mod flux;
 mod gguf;
 mod kokoro;
@@ -9,8 +10,10 @@ mod sd15;
 mod sd2;
 mod sd_xl;
 mod transformers;
+mod whisper;
 
 pub use self::auto::AutoLoader;
+pub use self::f5_tts::F5TtsLoader;
 pub use self::flux::FluxLoader;
 pub use self::gguf::GgufLoader;
 pub use self::kokoro::KokoroLoader;
@@ -21,6 +24,7 @@ pub use self::sd_xl::SDXLLoader;
 pub use self::sd2::SD2Loader;
 pub use self::sd15::SD15Loader;
 pub use self::transformers::TransformersLoader;
+pub use self::whisper::WhisperLoader;
 
 use crate::onnx_graph::WeightStorageStrategy;
 use std::collections::HashMap;

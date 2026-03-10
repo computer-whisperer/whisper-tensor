@@ -20,6 +20,7 @@ pub mod sd2;
 pub mod sd_common;
 pub mod sd_xl;
 pub mod t5;
+pub mod whisper;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

@@ -765,7 +765,18 @@ impl Concat {
                         Err(_) => None,
                     };
                 }
-                output_dims.push(Dimension::new(v, None, None));
+                // If concrete, use the value. If symbolic, derive a dim_param name
+                // from the first input's name (or synthesize one).
+                let dim_name = if v.is_none() {
+                    let base = inputs[0].shape()[i]
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| format!("concat_axis{i}"));
+                    Some(format!("{base}_cat"))
+                } else {
+                    None
+                };
+                output_dims.push(Dimension::new(v, dim_name, None));
             } else {
                 // For non-concat axes, prefer a concrete dimension if available.
                 // Skip strict equality checks when either dim is symbolic — runtime

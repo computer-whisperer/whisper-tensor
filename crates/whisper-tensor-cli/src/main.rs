@@ -9,7 +9,7 @@ use whisper_tensor::loader::{ConfigValue, ConfigValues, Loader, LoaderOutput};
 use whisper_tensor::numeric_tensor::NumericTensor;
 use whisper_tensor::super_graph::cache::SuperGraphCache;
 use whisper_tensor::tensor_rank::DynRank;
-use whisper_tensor::tokenizer::AnyTokenizer;
+use whisper_tensor::tokenizer::{AnyTokenizer, Tokenizer};
 
 #[derive(Parser)]
 #[command(name = "wt", about = "Whisper Tensor CLI")]
@@ -116,6 +116,32 @@ enum Command {
         /// Output WAV path
         #[arg(long, short, default_value = "output.wav")]
         output: PathBuf,
+
+        /// Reference audio file for F5-TTS (WAV, 24kHz)
+        #[arg(long)]
+        ref_audio: Option<PathBuf>,
+
+        /// Transcript of the reference audio (for F5-TTS duration estimation)
+        #[arg(long)]
+        ref_text: Option<String>,
+    },
+
+    /// Transcribe speech to text
+    Stt {
+        /// Path to the model directory
+        model: Option<PathBuf>,
+
+        /// Loader to use
+        #[arg(long, value_enum, default_value = "whisper")]
+        loader: LoaderChoice,
+
+        /// Extra loader config (key=value, repeatable)
+        #[arg(long = "config", value_name = "KEY=VALUE")]
+        configs: Vec<String>,
+
+        /// Input audio file (WAV)
+        #[arg(long, short)]
+        audio: PathBuf,
     },
 }
 
@@ -132,6 +158,8 @@ enum LoaderChoice {
     Flux,
     Kokoro,
     Piper,
+    F5Tts,
+    Whisper,
 }
 
 // ============================================================================
@@ -188,6 +216,8 @@ fn load_model(loader: &LoaderChoice, config: ConfigValues) -> LoaderOutput {
         LoaderChoice::Flux => FluxLoader.load(config),
         LoaderChoice::Kokoro => KokoroLoader.load(config),
         LoaderChoice::Piper => PiperLoader.load(config),
+        LoaderChoice::F5Tts => F5TtsLoader.load(config),
+        LoaderChoice::Whisper => WhisperLoader.load(config),
     };
 
     result.unwrap_or_else(|e| {
@@ -253,12 +283,25 @@ fn main() {
             voice,
             speed,
             output,
+            ref_audio,
+            ref_text,
         } => {
             let model_dir = model.clone().unwrap_or_else(|| PathBuf::from("."));
             let config = build_config(model, &configs);
             eprintln!("Loading model...");
             let loaded = load_model(&loader, config);
-            cmd_tts(loaded, model_dir, prompt, voice, speed, output);
+            cmd_tts(loaded, model_dir, prompt, voice, speed, output, ref_audio, ref_text);
+        }
+        Command::Stt {
+            model,
+            loader,
+            configs,
+            audio,
+        } => {
+            let config = build_config(model.clone(), &configs);
+            eprintln!("Loading model...");
+            let loaded = load_model(&loader, config);
+            cmd_stt(loaded, audio, model);
         }
     }
 }
@@ -422,6 +465,8 @@ fn cmd_tts(
     voice_name: String,
     speed: f32,
     output_path: PathBuf,
+    ref_audio: Option<PathBuf>,
+    ref_text: Option<String>,
 ) {
     use whisper_tensor::interfaces::TTSInputConfig;
     use whisper_tensor::super_graph::SuperGraphContext;
@@ -543,9 +588,89 @@ fn cmd_tts(
                 );
             }
         }
-        TTSInputConfig::F5 { .. } => {
-            eprintln!("F5-TTS inference not yet implemented");
-            std::process::exit(1);
+        TTSInputConfig::F5 {
+            ref_audio_link,
+            max_duration_link,
+            time_steps_link,
+            iteration_count_link,
+            nfe_steps,
+            vocab,
+        } => {
+            // Load reference audio
+            let ref_audio_path = ref_audio.unwrap_or_else(|| {
+                eprintln!("F5-TTS requires --ref-audio <path.wav>");
+                std::process::exit(1);
+            });
+            let ref_samples = load_wav_f16(&ref_audio_path, 24000);
+            let ref_audio_len = ref_samples.len();
+            eprintln!("Reference audio: {} samples ({:.2}s)", ref_audio_len, ref_audio_len as f64 / 24000.0);
+
+            // Tokenize text using F5 character-level vocab
+            let ref_text_str = ref_text.as_deref().unwrap_or("");
+            let gen_text = &text;
+            let combined_text = if ref_text_str.is_empty() {
+                gen_text.clone()
+            } else {
+                format!("{ref_text_str} {gen_text}")
+            };
+            let vocab_map = build_f5_vocab(vocab);
+            let mut token_ids: Vec<i32> = Vec::new();
+            for ch in combined_text.chars() {
+                if let Some(&id) = vocab_map.get(&ch) {
+                    token_ids.push(id);
+                }
+            }
+            let num_tokens = token_ids.len();
+            eprintln!("Text tokens: {num_tokens}");
+
+            // Compute max_duration
+            let hop_length: usize = 256;
+            let ref_audio_frames = ref_audio_len / hop_length + 1;
+            let gen_text_len = gen_text.chars().count().max(1);
+            let gen_duration_estimate = if !ref_text_str.is_empty() {
+                let ref_text_len = ref_text_str.chars().count().max(1);
+                (ref_audio_frames as f64 / ref_text_len as f64 * gen_text_len as f64 / speed as f64) as usize
+            } else {
+                // No ref text: estimate ~4 chars/sec at 24kHz/256hop = ~94 frames/sec
+                (gen_text_len as f64 * 94.0 / 4.0 / speed as f64) as usize
+            };
+            let max_duration = (ref_audio_frames + gen_duration_estimate).min(2048);
+            eprintln!("Max duration: {max_duration} frames ({:.2}s)", max_duration as f64 * hop_length as f64 / 24000.0);
+
+            // Build input tensors
+            let ref_audio_tensor = NumericTensor::<DynRank>::from_vec_shape(
+                ref_samples,
+                vec![1, 1, ref_audio_len],
+            ).unwrap();
+
+            let text_ids_tensor = NumericTensor::<DynRank>::from_vec_shape(
+                token_ids,
+                vec![1, num_tokens],
+            ).unwrap();
+
+            let max_duration_tensor = NumericTensor::<DynRank>::from_vec_shape(
+                vec![max_duration as i64],
+                vec![],
+            ).unwrap();
+
+            // Build ODE loop inputs
+            let nfe = *nfe_steps;
+            let iterations = nfe - 1; // 31 iterations for nfe=32
+            let time_steps: Vec<i32> = (0..iterations as i32).collect();
+            let time_steps_tensor = NumericTensor::<DynRank>::from_vec_shape(
+                time_steps,
+                vec![iterations as usize],
+            ).unwrap();
+            let iteration_count_tensor = NumericTensor::<DynRank>::from_vec_shape(
+                vec![iterations as i64],
+                vec![],
+            ).unwrap();
+
+            data.tensors.insert(interface.text_ids_link, text_ids_tensor);
+            data.tensors.insert(*ref_audio_link, ref_audio_tensor);
+            data.tensors.insert(*max_duration_link, max_duration_tensor);
+            data.tensors.insert(*time_steps_link, time_steps_tensor);
+            data.tensors.insert(*iteration_count_link, iteration_count_tensor);
         }
     }
 
@@ -698,6 +823,423 @@ fn save_wav(samples: &[f32], sample_rate: u32, path: &std::path::Path) {
         writer.write_sample(sample).expect("Failed to write sample");
     }
     writer.finalize().expect("Failed to finalize WAV");
+}
+
+// ============================================================================
+// Speech-to-text (Whisper)
+// ============================================================================
+
+fn cmd_stt(output: LoaderOutput, audio_path: PathBuf, model_dir: Option<PathBuf>) {
+    use whisper_tensor::super_graph::cache::SuperGraphTensorCache;
+    use whisper_tensor::super_graph::data::SuperGraphData;
+    use whisper_tensor::super_graph::SuperGraphContext;
+
+    let interface = output
+        .interfaces
+        .iter()
+        .find_map(|i| match &i.interface {
+            AnyInterface::SpeechToTextInterface(x) => Some(x),
+            _ => None,
+        })
+        .unwrap_or_else(|| {
+            eprintln!("No STT interface found in loaded model");
+            std::process::exit(1);
+        });
+
+    // Load and preprocess audio → mel spectrogram
+    eprintln!("Loading audio: {}", audio_path.display());
+    let samples = load_wav_f32(&audio_path, interface.sample_rate);
+    let audio_duration = samples.len() as f64 / interface.sample_rate as f64;
+    eprintln!("Audio: {:.2}s ({} samples at {}Hz)", audio_duration, samples.len(), interface.sample_rate);
+
+    // Load mel filterbank from preprocessor_config.json
+    let mel_filters = load_mel_filters(model_dir.as_deref(), interface.num_mel_bins as usize);
+    let mel = compute_mel_spectrogram(&samples, interface.num_mel_bins as usize, &mel_filters);
+    let mel_len = mel.len() / interface.num_mel_bins as usize;
+    eprintln!("Mel spectrogram: {} bins x {} frames", interface.num_mel_bins, mel_len);
+
+    let mel_tensor = NumericTensor::<DynRank>::from_vec_shape(
+        mel,
+        vec![1, interface.num_mel_bins as usize, mel_len],
+    )
+    .unwrap();
+
+    // Run encoder
+    eprintln!("Running encoder...");
+    let mut backend = EvalBackend::NDArray;
+    let start = std::time::Instant::now();
+
+    let encoder_output = {
+        let mut data = SuperGraphData::new();
+        data.tensors.insert(interface.mel_input_link, mel_tensor);
+        data.tensor_maps.insert(
+            interface.encoder_weights_link,
+            output.models[0].model.get_tensor_store(),
+        );
+        let symbolic_graphs = vec![output.models[0].model.get_symbolic_graph()];
+        let mut observer = ();
+        let mut tensor_cache = SuperGraphTensorCache::new();
+        let mut context = SuperGraphContext {
+            observer: &mut observer,
+            eval_backend: &mut backend,
+            super_graph_tensor_cache: &mut tensor_cache,
+            caches: None,
+            symbolic_graphs,
+            use_compiled_models: false,
+            compiled_models: None,
+        };
+        interface
+            .encoder_super_graph
+            .run(data, &mut context)
+            .unwrap_or_else(|e| {
+                eprintln!("Encoder error: {e}");
+                std::process::exit(1);
+            })
+    };
+
+    let encoder_hidden = encoder_output
+        .tensors
+        .get(&interface.encoder_output_link)
+        .expect("No encoder output tensor")
+        .clone();
+    eprintln!("Encoder done in {:.2?}", start.elapsed());
+
+    // Run decoder autoregressively
+    eprintln!("Running decoder...");
+    let decode_start = std::time::Instant::now();
+
+    let mut super_graph_caches = SuperGraphCache::new();
+
+    let decoder_sg = &interface.decoder_super_graph;
+    let decoder_symbolic_graphs = vec![
+        output.models[0].model.get_symbolic_graph(), // dummy for index 0
+        output.models[1].model.get_symbolic_graph(), // decoder at index 1
+    ];
+
+    // Start with decoder_start_token_id + forced decoder IDs from generation_config
+    // For English-only Whisper: [50257(<|startoftranscript|>), 50362(<|notimestamps|>)]
+    let forced_ids = load_forced_decoder_ids(model_dir.as_deref(), interface.decoder_start_token_id);
+    let mut token_ids: Vec<u32> = forced_ids;
+    let max_tokens = 448;
+
+    let mut step_start = std::time::Instant::now();
+    for _step in 0..max_tokens {
+        let mut data = SuperGraphData::new();
+        data.tensor_maps.insert(
+            interface.decoder_weights_link,
+            output.models[1].model.get_tensor_store(),
+        );
+        data.tensors.insert(
+            interface.decoder_encoder_hidden_link,
+            encoder_hidden.clone(),
+        );
+
+        let token_tensor = NumericTensor::<DynRank>::from_vec_shape(
+            token_ids.clone(),
+            vec![token_ids.len()],
+        )
+        .unwrap();
+        data.tensors.insert(interface.decoder_token_link, token_tensor);
+        data.hashes.insert(interface.decoder_cache_key_link, 0);
+
+        let mut observer = ();
+        let mut tensor_cache = SuperGraphTensorCache::new();
+        let mut context = SuperGraphContext {
+            observer: &mut observer,
+            eval_backend: &mut backend,
+            super_graph_tensor_cache: &mut tensor_cache,
+            caches: Some(&mut super_graph_caches),
+            symbolic_graphs: decoder_symbolic_graphs.clone(),
+            use_compiled_models: false,
+            compiled_models: None,
+        };
+
+        let result = decoder_sg.run(data, &mut context).unwrap_or_else(|e| {
+            eprintln!("Decoder error at step {_step}: {e}");
+            std::process::exit(1);
+        });
+
+        // Get logits and pick next token (greedy argmax)
+        let logits = result
+            .tensors
+            .get(&interface.decoder_logit_link)
+            .expect("No decoder logit output");
+
+        let logits_f32 = logits
+            .cast(whisper_tensor::dtype::DType::F32, &mut backend)
+            .expect("cast failed");
+        let logits_shape = logits_f32.shape();
+        let logits_ndarray = logits_f32.to_ndarray().expect("to_ndarray failed");
+        let logits_flat: Vec<f32> = logits_ndarray.flatten().try_into().expect("flatten failed");
+
+        // Take last token's logits — vocab_size is the last dimension
+        let vocab_size = *logits_shape.last().unwrap_or(&(logits_flat.len() as u64)) as usize;
+        let last_logits = &logits_flat[logits_flat.len() - vocab_size..];
+
+        let next_token = last_logits
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .map(|(i, _)| i as u32)
+            .unwrap();
+
+        let step_elapsed = step_start.elapsed();
+        eprint!("\rDecoder step {_step}: token {next_token} ({step_elapsed:.1?})  ");
+
+        if next_token == interface.eos_token_id {
+            eprintln!();
+            break;
+        }
+
+        token_ids.push(next_token);
+        step_start = std::time::Instant::now();
+    }
+
+    eprintln!("Decoder done in {:.2?} ({} tokens)", decode_start.elapsed(), token_ids.len());
+
+    // Decode tokens to text
+    let tokenizer = whisper_tensor::tokenizer::AnyTokenizer::from_tokenizer_info(
+        &interface.tokenizer,
+    );
+
+    let text = tokenizer
+        .decode(&token_ids)
+        .unwrap_or_else(|e| format!("<decode error: {e}>"));
+
+    eprintln!("Total: {:.2?}", start.elapsed());
+    println!("{text}");
+}
+
+/// Load a WAV file as f32 samples, resampled to target_sr.
+fn load_wav_f32(path: &std::path::Path, target_sr: u32) -> Vec<f32> {
+    let mut reader = hound::WavReader::open(path).unwrap_or_else(|e| {
+        eprintln!("Failed to open WAV file {}: {e}", path.display());
+        std::process::exit(1);
+    });
+    let spec = reader.spec();
+    let samples: Vec<f32> = match spec.sample_format {
+        hound::SampleFormat::Int => {
+            let max_val = (1i64 << (spec.bits_per_sample - 1)) as f32;
+            reader
+                .samples::<i32>()
+                .map(|s| s.expect("WAV read error") as f32 / max_val)
+                .collect()
+        }
+        hound::SampleFormat::Float => {
+            reader.samples::<f32>().map(|s| s.expect("WAV read error")).collect()
+        }
+    };
+
+    let mono: Vec<f32> = if spec.channels > 1 {
+        samples.chunks(spec.channels as usize).map(|c| c[0]).collect()
+    } else {
+        samples
+    };
+
+    if spec.sample_rate != target_sr {
+        let ratio = spec.sample_rate as f64 / target_sr as f64;
+        let out_len = (mono.len() as f64 / ratio) as usize;
+        (0..out_len)
+            .map(|i| {
+                let pos = i as f64 * ratio;
+                let idx = pos as usize;
+                let frac = pos - idx as f64;
+                let a = mono[idx.min(mono.len() - 1)];
+                let b = mono[(idx + 1).min(mono.len() - 1)];
+                a + (b - a) * frac as f32
+            })
+            .collect()
+    } else {
+        mono
+    }
+}
+
+/// Load forced decoder IDs from generation_config.json.
+/// Returns the initial token sequence: [start_token, forced_id_1, forced_id_2, ...]
+fn load_forced_decoder_ids(model_dir: Option<&std::path::Path>, start_token: u32) -> Vec<u32> {
+    let mut ids = vec![start_token];
+    if let Some(dir) = model_dir {
+        let config_path = dir.join("generation_config.json");
+        if let Ok(data) = std::fs::read_to_string(&config_path) {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&data) {
+                if let Some(forced) = json["forced_decoder_ids"].as_array() {
+                    // forced_decoder_ids: [[position, token_id], ...]
+                    let mut pairs: Vec<(u64, u32)> = forced.iter().filter_map(|pair| {
+                        let arr = pair.as_array()?;
+                        Some((arr[0].as_u64()?, arr[1].as_u64()? as u32))
+                    }).collect();
+                    pairs.sort_by_key(|p| p.0);
+                    for (_, tok) in pairs {
+                        ids.push(tok);
+                    }
+                    eprintln!("Forced decoder IDs: {:?}", ids);
+                }
+            }
+        }
+    }
+    ids
+}
+
+/// Load mel filterbank from the model's preprocessor_config.json.
+/// Falls back to a simple triangular filterbank if the file is not found.
+fn load_mel_filters(model_dir: Option<&std::path::Path>, num_mel_bins: usize) -> Vec<f32> {
+    let n_freqs = 201; // n_fft/2 + 1 where n_fft=400
+    if let Some(dir) = model_dir {
+        let config_path = dir.join("preprocessor_config.json");
+        if config_path.exists() {
+            if let Ok(data) = std::fs::read_to_string(&config_path) {
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&data) {
+                    if let Some(filters) = json["mel_filters"].as_array() {
+                        let mut flat = Vec::with_capacity(num_mel_bins * n_freqs);
+                        for row in filters {
+                            if let Some(arr) = row.as_array() {
+                                for v in arr {
+                                    flat.push(v.as_f64().unwrap_or(0.0) as f32);
+                                }
+                            }
+                        }
+                        if flat.len() == num_mel_bins * n_freqs {
+                            eprintln!("Loaded mel filterbank from {}", config_path.display());
+                            return flat;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    eprintln!("Using built-in mel filterbank");
+    build_mel_filterbank(num_mel_bins, n_freqs, 16000, 400)
+}
+
+/// Compute log-mel spectrogram from audio samples.
+///
+/// Uses n_fft=400, hop_length=160 (Whisper defaults).
+/// Returns flattened [num_mel_bins, num_frames] in row-major order.
+fn compute_mel_spectrogram(samples: &[f32], num_mel_bins: usize, mel_filters: &[f32]) -> Vec<f32> {
+    let n_fft = 400;
+    let hop_length = 160;
+    let n_freqs = n_fft / 2 + 1; // 201
+    assert_eq!(mel_filters.len(), num_mel_bins * n_freqs);
+
+    // Pad to 30 seconds + extra for STFT centering (Whisper expects 3000 frames)
+    let target_len = 480000; // 30s * 16000Hz
+    let pad = n_fft / 2;
+    let total_len = target_len + 2 * pad;
+    let mut padded = vec![0.0f32; total_len];
+    let copy_len = samples.len().min(target_len);
+    padded[pad..pad + copy_len].copy_from_slice(&samples[..copy_len]);
+
+    // Hann window
+    let window: Vec<f32> = (0..n_fft)
+        .map(|i| 0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / n_fft as f32).cos()))
+        .collect();
+
+    // STFT — drop last frame to match Whisper's `stft[..., :-1]`
+    let num_frames = (padded.len() - n_fft) / hop_length; // stft_frames - 1
+    let mut magnitudes = vec![0.0f32; n_freqs * num_frames];
+
+    for frame in 0..num_frames {
+        let start = frame * hop_length;
+        let mut real = vec![0.0f32; n_fft];
+
+        for i in 0..n_fft {
+            real[i] = padded[start + i] * window[i];
+        }
+
+        for k in 0..n_freqs {
+            let mut re = 0.0f32;
+            let mut im = 0.0f32;
+            for n in 0..n_fft {
+                let angle = -2.0 * std::f32::consts::PI * k as f32 * n as f32 / n_fft as f32;
+                re += real[n] * angle.cos();
+                im += real[n] * angle.sin();
+            }
+            magnitudes[k * num_frames + frame] = re * re + im * im;
+        }
+    }
+
+    // Apply mel filterbank
+    let mut mel_spec = vec![0.0f32; num_mel_bins * num_frames];
+    for mel in 0..num_mel_bins {
+        for frame in 0..num_frames {
+            let mut sum = 0.0f32;
+            for freq in 0..n_freqs {
+                sum += mel_filters[mel * n_freqs + freq] * magnitudes[freq * num_frames + frame];
+            }
+            mel_spec[mel * num_frames + frame] = sum;
+        }
+    }
+
+    // Log mel spectrogram
+    let log_spec: Vec<f32> = mel_spec
+        .iter()
+        .map(|&x| (x.max(1e-10)).log10())
+        .collect();
+
+    // Normalize: clamp to max - 8, then (x + 4) / 4
+    let max_val = log_spec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    log_spec
+        .iter()
+        .map(|&x| (x.max(max_val - 8.0) + 4.0) / 4.0)
+        .collect()
+}
+
+/// Build a mel filterbank matrix [num_mel_bins, n_freqs].
+fn build_mel_filterbank(
+    num_mel_bins: usize,
+    n_freqs: usize,
+    sample_rate: u32,
+    n_fft: usize,
+) -> Vec<f32> {
+    let hz_to_mel = |hz: f32| -> f32 { 2595.0 * (1.0 + hz / 700.0).log10() };
+    let mel_to_hz = |mel: f32| -> f32 { 700.0 * (10.0f32.powf(mel / 2595.0) - 1.0) };
+
+    let mel_low = hz_to_mel(0.0);
+    let mel_high = hz_to_mel(sample_rate as f32 / 2.0);
+    let mel_points: Vec<f32> = (0..num_mel_bins + 2)
+        .map(|i| mel_to_hz(mel_low + (mel_high - mel_low) * i as f32 / (num_mel_bins + 1) as f32))
+        .collect();
+
+    let freq_bins: Vec<f32> = (0..n_freqs)
+        .map(|i| i as f32 * sample_rate as f32 / n_fft as f32)
+        .collect();
+
+    let mut filters = vec![0.0f32; num_mel_bins * n_freqs];
+    for m in 0..num_mel_bins {
+        let (f_low, f_center, f_high) = (mel_points[m], mel_points[m + 1], mel_points[m + 2]);
+        for k in 0..n_freqs {
+            let freq = freq_bins[k];
+            if freq >= f_low && freq <= f_center {
+                filters[m * n_freqs + k] = (freq - f_low) / (f_center - f_low);
+            } else if freq > f_center && freq <= f_high {
+                filters[m * n_freqs + k] = (f_high - freq) / (f_high - f_center);
+            }
+        }
+    }
+    filters
+}
+
+// ============================================================================
+// F5-TTS helpers
+// ============================================================================
+
+/// Load a WAV file and return f16 samples (resampled to target_sr if needed).
+fn load_wav_f16(path: &std::path::Path, target_sr: u32) -> Vec<half::f16> {
+    load_wav_f32(path, target_sr).iter().map(|&s| half::f16::from_f32(s)).collect()
+}
+
+/// Build F5-TTS vocab: char → token ID from vocab.txt (one token per line).
+fn build_f5_vocab(vocab_text: &str) -> HashMap<char, i32> {
+    let mut map = HashMap::new();
+    for (id, line) in vocab_text.lines().enumerate() {
+        if line.chars().count() == 1 {
+            map.insert(line.chars().next().unwrap(), id as i32);
+        } else if line.is_empty() {
+            // Line 0 is space in F5 vocab
+            map.insert(' ', id as i32);
+        }
+    }
+    map
 }
 
 // ============================================================================
