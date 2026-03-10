@@ -1327,6 +1327,27 @@ impl NumericTensor<DynRank> {
         ))
     }
 
+    pub fn topk(
+        data: &Self,
+        k: &Self,
+        axis: i64,
+        largest: bool,
+        sorted: bool,
+        _backend: &mut EvalBackend,
+    ) -> Result<(Self, Self), NumericTensorError> {
+        let (values, indices) = NDArrayNumericTensor::<DynRank>::topk(
+            &data.try_into()?,
+            &k.try_into()?,
+            axis,
+            largest,
+            sorted,
+        )?;
+        Ok((
+            NumericTensor::NDArray(values),
+            NumericTensor::NDArray(indices),
+        ))
+    }
+
     /// Mean-reduction over the specified axes. Returns a tensor of the same dtype as the input unless a wider accumulation type is explicitly requested by the operation.
     pub fn reduce_mean(
         &self,

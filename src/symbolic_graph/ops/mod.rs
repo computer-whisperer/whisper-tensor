@@ -20,6 +20,7 @@ mod shape;
 mod slice;
 mod split;
 mod stft;
+mod topk;
 mod transpose;
 mod unary;
 
@@ -57,6 +58,7 @@ pub use shape::{ShapeOperation, SizeOperation};
 pub use slice::SliceOperation;
 pub use split::SplitOperation;
 pub use stft::StftOperation;
+pub use topk::TopKOperation;
 pub use transpose::TransposeOperation;
 pub use unary::{
     BiasGeluOperation, GeluOperation, IdentityOperation, IsInfOperation, LeakyReluOperation,
@@ -276,6 +278,7 @@ pub enum AnyOperation {
     Gelu(GeluOperation),
     BiasGelu(BiasGeluOperation),
     ReduceL2(ReduceL2Operation),
+    TopK(TopKOperation),
 }
 
 macro_rules! delegate {
@@ -342,7 +345,8 @@ macro_rules! delegate {
             AnyOperation::GatherND(x) => x.$name($($arg),*),
             AnyOperation::Gelu(x) => x.$name($($arg),*),
             AnyOperation::BiasGelu(x) => x.$name($($arg),*),
-            AnyOperation::ReduceL2(x) => x.$name($($arg),*)
+            AnyOperation::ReduceL2(x) => x.$name($($arg),*),
+            AnyOperation::TopK(x) => x.$name($($arg),*)
                     }
         }
     }

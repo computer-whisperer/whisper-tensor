@@ -25,6 +25,7 @@ mod slice;
 mod split;
 mod squeeze;
 mod sum_to;
+mod topk;
 mod transpose;
 mod unary;
 mod unsqueeze;
@@ -57,6 +58,7 @@ pub use slice::*;
 pub use split::*;
 pub use squeeze::*;
 pub use sum_to::*;
+pub use topk::*;
 pub use transpose::*;
 pub use unary::*;
 pub use unsqueeze::*;
@@ -300,6 +302,7 @@ pub enum AnyMilliOp {
     ConvWeightGrad(ConvWeightGrad),
     ConvBiasGrad(ConvBiasGrad),
     Pad(Pad),
+    TopK(TopK),
     RandomNormalLike(RandomNormalLike),
 }
 
@@ -344,6 +347,7 @@ impl AnyMilliOp {
             AnyMilliOp::ConvWeightGrad(x) => x.remap_tensors(map, rng),
             AnyMilliOp::ConvBiasGrad(x) => x.remap_tensors(map, rng),
             AnyMilliOp::Pad(x) => x.remap_tensors(map, rng),
+            AnyMilliOp::TopK(x) => x.remap_tensors(map, rng),
             AnyMilliOp::RandomNormalLike(x) => x.remap_tensors(map, rng),
         }
     }
@@ -391,6 +395,7 @@ macro_rules! delegate {
                 AnyMilliOp::ConvWeightGrad(x) => x.$name($($arg),*),
                 AnyMilliOp::ConvBiasGrad(x) => x.$name($($arg),*),
                 AnyMilliOp::Pad(x) => x.$name($($arg),*),
+                AnyMilliOp::TopK(x) => x.$name($($arg),*),
                 AnyMilliOp::RandomNormalLike(x) => x.$name($($arg),*),
             }
         }
@@ -452,6 +457,7 @@ impl MilliOp for AnyMilliOp {
             AnyMilliOp::ConvBiasGrad(x) => x.backward(output_grads, graph, rng),
             AnyMilliOp::Pad(x) => x.backward(output_grads, graph, rng),
             AnyMilliOp::RandomNormalLike(x) => x.backward(output_grads, graph, rng),
+            AnyMilliOp::TopK(x) => x.backward(output_grads, graph, rng),
         }
     }
 }
