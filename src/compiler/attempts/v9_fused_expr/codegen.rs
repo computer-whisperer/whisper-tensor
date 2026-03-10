@@ -312,7 +312,7 @@ pub mod jit {
 
     fn choose_nr(extent: usize) -> usize {
         // Pick largest divisor of extent that's <= MAX_NR
-        const MAX_NR: usize = 8;
+        const MAX_NR: usize = 16;
         for nr in (2..=MAX_NR).rev() {
             if extent % nr == 0 {
                 return nr;
