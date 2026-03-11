@@ -77,7 +77,7 @@ jobs:
       - name: Install Mesa Vulkan (lavapipe) + tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y mesa-vulkan-drivers libvulkan-dev vulkan-tools vulkan-validationlayers jq
+          sudo apt-get install -y mesa-vulkan-drivers libvulkan-dev vulkan-tools vulkan-validationlayers jq libopenblas-dev
 
       - name: Select lavapipe ICD
         shell: bash
