@@ -48,7 +48,10 @@ fn rwkv01b_model_loads() {
         return;
     };
     if !is_real_model_file(&pth_path) {
-        eprintln!("Skipping: {} is a Git LFS pointer, not the real model", pth_path.display());
+        eprintln!(
+            "Skipping: {} is a Git LFS pointer, not the real model",
+            pth_path.display()
+        );
         return;
     }
     // Use EmbeddedData output method to avoid external file dependencies
@@ -86,7 +89,10 @@ fn rwkv01b_single_step_runs_shape_sanity() {
         return;
     };
     if !is_real_model_file(&pth_path) {
-        eprintln!("Skipping: {} is a Git LFS pointer, not the real model", pth_path.display());
+        eprintln!(
+            "Skipping: {} is a Git LFS pointer, not the real model",
+            pth_path.display()
+        );
         return;
     }
     let onnx_bytes = whisper_tensor_import::identify_and_load(
@@ -150,7 +156,10 @@ fn rwkv01b_model_loads_with_binfile() {
         return;
     };
     if !is_real_model_file(&pth_path) {
-        eprintln!("Skipping: {} is a Git LFS pointer, not the real model", pth_path.display());
+        eprintln!(
+            "Skipping: {} is a Git LFS pointer, not the real model",
+            pth_path.display()
+        );
         return;
     }
 
@@ -197,7 +206,10 @@ fn rwkv01b_model_loads_with_origin_reference() {
         return;
     };
     if !is_real_model_file(&pth_path) {
-        eprintln!("Skipping: {} is a Git LFS pointer, not the real model", pth_path.display());
+        eprintln!(
+            "Skipping: {} is a Git LFS pointer, not the real model",
+            pth_path.display()
+        );
         return;
     }
 
