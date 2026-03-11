@@ -128,12 +128,11 @@ impl Operation for RotaryEmbeddingOperation {
         let pos_ids = self.position_ids.map(|x| input_map[&x]);
 
         // Prepare input to shape [B, S, H, D]
-        let prepared = if self.num_heads.is_some() {
+        let prepared = if let Some(num_heads) = self.num_heads {
             // 3D path: [B, S, hidden] -> [B, S, num_heads, head_size]
             let new_shape = milli_graph::ops::Constant::push_new(
                 &mut graph,
-                NDArrayNumericTensor::from(vec![0i64, 0i64, self.num_heads.unwrap(), -1i64])
-                    .to_dyn(),
+                NDArrayNumericTensor::from(vec![0i64, 0i64, num_heads, -1i64]).to_dyn(),
                 rng,
             );
             milli_graph::ops::Reshape::push_new(&mut graph, data, new_shape, false, rng)
