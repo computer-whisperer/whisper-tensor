@@ -1,3 +1,4 @@
+#![allow(clippy::all, dead_code, unreachable_patterns)]
 //! Typed schedule synthesis and software bf16 matmul execution.
 //!
 //! This module is intentionally BLAS-independent. It consumes recovered

@@ -1,3 +1,4 @@
+#![allow(clippy::all, dead_code, unreachable_patterns)]
 //! Cranelift JIT codegen for v2 fusion kernels.
 
 use super::kernel::*;

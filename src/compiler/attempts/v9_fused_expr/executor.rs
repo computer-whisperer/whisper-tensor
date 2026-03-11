@@ -1,3 +1,4 @@
+#![allow(clippy::all, dead_code, unreachable_patterns)]
 //! Tile-task DAG executor for v9 fused expression compiler.
 //!
 //! Decomposes compiled kernels into tiles and wires up dependencies
@@ -321,7 +322,7 @@ pub mod dag {
         };
 
         // Run with the shared executor logic.
-        run_task_graph(&task_graph, graph, buffers, num_threads);
+        unsafe { run_task_graph(&task_graph, graph, buffers, num_threads) };
     }
 
     /// Execute the compiled graph using `num_threads` worker threads.
@@ -342,7 +343,7 @@ pub mod dag {
         }
 
         let task_graph = build_task_graph(graph, num_threads);
-        run_task_graph(&task_graph, graph, buffers, num_threads);
+        unsafe { run_task_graph(&task_graph, graph, buffers, num_threads) };
     }
 
     /// Shared work-stealing executor for a task graph.

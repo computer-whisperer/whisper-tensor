@@ -1,3 +1,4 @@
+#![allow(clippy::all, dead_code, unreachable_patterns)]
 //! Cranelift codegen for v7 planned loop tasks.
 //!
 //! Current scope:

@@ -1,3 +1,4 @@
+#![allow(clippy::all, dead_code, unreachable_patterns)]
 //! Cranelift JIT compilation from nano ops.
 //!
 //! Takes a stream of NanoOps and compiles them into native machine code

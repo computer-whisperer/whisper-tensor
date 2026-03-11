@@ -1,3 +1,4 @@
+#![allow(clippy::all, dead_code, unreachable_patterns)]
 //! v8 generic kernel codegen.
 //!
 //! Derives register blocking and loop ordering from v6's recovered access

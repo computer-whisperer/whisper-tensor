@@ -1,3 +1,4 @@
+#![allow(clippy::all, dead_code, unreachable_patterns)]
 //! Cranelift codegen for v6 recovered schedules.
 //!
 //! Current implementation focuses on additive-reduction loops recovered from

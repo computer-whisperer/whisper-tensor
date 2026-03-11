@@ -1,3 +1,4 @@
+#![allow(clippy::all, dead_code, unreachable_patterns)]
 //! Cranelift codegen entrypoints for v3 nano-fusion.
 //!
 //! v3 keeps the v1 nano-op frontend and v1 crystallized codegen backend,

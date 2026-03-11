@@ -1,3 +1,4 @@
+#![allow(clippy::all, dead_code, unreachable_patterns)]
 //! Tile-task DAG executor for v8 generic kernel.
 //!
 //! Decomposes compiled kernels into row-tiles and wires up dependencies

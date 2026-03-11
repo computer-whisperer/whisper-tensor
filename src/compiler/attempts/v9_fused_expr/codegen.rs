@@ -1,3 +1,4 @@
+#![allow(clippy::all, dead_code, unreachable_patterns)]
 //! v9 codegen: single-threaded Cranelift JIT from recovered patterns.
 //!
 //! Emits nested loops matching the output shape. Reduce nodes in the pattern

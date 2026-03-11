@@ -1,3 +1,4 @@
+#![allow(clippy::all, dead_code, unreachable_patterns)]
 //! v9 fused expression compiler.
 //!
 //! First attempt consuming the v2 frontend's boundaryless expression trees.

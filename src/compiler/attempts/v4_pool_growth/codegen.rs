@@ -1,3 +1,4 @@
+#![allow(clippy::all, dead_code, unreachable_patterns)]
 //! Cranelift pipeline wrapper for v4 pool growth.
 //!
 //! This wrapper intentionally whitewashes nano-op order before recovery.
