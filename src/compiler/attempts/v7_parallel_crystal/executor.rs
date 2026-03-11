@@ -951,6 +951,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // ~60s on CI — run with `cargo test -- --ignored`
     fn test_execute_plan_parallel_matches_single_thread() {
         let (graph, shapes, a, b, c) = build_matmul(112, 128, 112, 4103);
         let (artifacts, plan) = plan_from_graph(

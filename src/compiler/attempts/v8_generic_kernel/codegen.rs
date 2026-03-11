@@ -2303,6 +2303,7 @@ mod tests {
     // -- Large matmul (would blow up without sampled synthesis) --
 
     #[test]
+    #[ignore] // ~20s on CI — run with `cargo test -- --ignored`
     fn test_matmul_1024() {
         // 1024^3 = 1 billion nano-ops in the full expansion.
         // Sampled synthesis emits ~256 output elements × 4K reduction steps = ~1M nano-ops.
@@ -2315,6 +2316,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // ~6min on CI — run with `cargo test -- --ignored`
     fn test_matmul_realistic_ffn() {
         // Approximate a real model FFN: [256, 4096] × [4096, 8192]
         // Full expansion: 256 × 4096 × 8192 ≈ 8.6 billion nano-ops.
