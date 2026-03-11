@@ -103,6 +103,21 @@ path = "examples/v8_model_test.rs"
 required-features = ["cranelift"]
 
 [[example]]
+name = "v9_model_test"
+path = "examples/v9_model_test.rs"
+required-features = ["cranelift"]
+
+[[example]]
+name = "v9_scaling"
+path = "examples/v9_scaling.rs"
+required-features = ["cranelift"]
+
+[[example]]
+name = "compiler_residual_block_bench"
+path = "examples/compiler_residual_block_bench.rs"
+required-features = ["cranelift"]
+
+[[example]]
 name = "matmul_perf_test"
 path = "examples/matmul_perf_test.rs"
 required-features = ["vulkan"]

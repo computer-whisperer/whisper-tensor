@@ -4,5 +4,6 @@
 //! expression families, then classifies schedule intent using generic pattern
 //! and dependence-style signals.
 
+#[cfg(feature = "cranelift")]
 pub mod codegen;
 pub mod synthesis;

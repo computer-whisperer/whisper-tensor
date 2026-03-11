@@ -3,4 +3,5 @@
 //! v5 builds on v4 pool recovery and adds dtype-aware schedule synthesis
 //! with a software bf16->fp32 matmul path (no BLAS dependency).
 
+#[cfg(feature = "cranelift")]
 pub mod synth;

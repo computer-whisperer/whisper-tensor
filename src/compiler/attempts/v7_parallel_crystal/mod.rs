@@ -4,6 +4,7 @@
 //! we convert recovered additive-reduction loops into explicit tile tasks
 //! and execute them with either serial or loop-parallel CPU dispatch.
 
+#[cfg(feature = "cranelift")]
 pub mod codegen;
 pub mod executor;
 pub mod planner;
