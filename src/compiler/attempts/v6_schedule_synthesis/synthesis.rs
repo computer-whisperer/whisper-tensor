@@ -551,7 +551,7 @@ fn analyze_from_graph_streaming(
     finalize_grouped_schedule(raw_groups, total_nano_ops, total_stores, shapes)
 }
 
-fn count_nano_value_uses<'a, I>(iter: I) -> Result<(Vec<usize>, usize), PipelineError>
+fn count_nano_value_uses<I>(iter: I) -> Result<(Vec<usize>, usize), PipelineError>
 where
     I: IntoIterator<Item = Result<NanoOp, NanoExpandError>>,
 {
@@ -985,7 +985,6 @@ impl From<ScalarUnaryOp> for UnaryTag {
             ScalarUnaryOp::Tanh => UnaryTag::Tanh,
             ScalarUnaryOp::Floor => UnaryTag::Floor,
             ScalarUnaryOp::Ceil => UnaryTag::Ceil,
-            _ => panic!("unsupported unary op {:?} in v6 synthesis", value),
         }
     }
 }
@@ -1262,11 +1261,11 @@ fn try_classify_pointwise(
             vec![AccessDimRole::Unknown; tensor_shape.len()]
         } else {
             let mut roles = Vec::with_capacity(tensor_shape.len());
-            for dim in 0..tensor_shape.len() {
+            for dim_values in sample_dim_values.iter().take(tensor_shape.len()) {
                 let role = infer_affine_dim_role_pointwise(
                     &sample_vars_flat,
                     var_count,
-                    &sample_dim_values[dim],
+                    dim_values,
                     output_rank,
                 );
                 roles.push(role);
@@ -1558,9 +1557,9 @@ fn synthesize_additive_reduction_candidates(
         }
 
         let mut output_tiles = vec![1usize; output_rank];
-        output_tiles[0] = output_shape[0].min(8).max(1);
+        output_tiles[0] = output_shape[0].clamp(1, 8);
         if output_rank > 1 {
-            output_tiles[1] = output_shape[1].min(8).max(1);
+            output_tiles[1] = output_shape[1].clamp(1, 8);
         }
         if let Some(v) = vectorize.clone() {
             output_tiles[v.axis] = (v.width * 4).min(output_shape[v.axis].max(1));
@@ -1607,10 +1606,10 @@ fn dedup_candidates(candidates: Vec<LoopScheduleCandidate>) -> Vec<LoopScheduleC
 
 fn default_output_tiles(output_shape: &[usize], vectorize: Option<VectorizePlan>) -> Vec<usize> {
     let mut tiles = vec![1usize; output_shape.len()];
-    if let Some(v) = vectorize {
-        if let Some(extent) = output_shape.get(v.axis) {
-            tiles[v.axis] = (v.width * 4).min((*extent).max(1));
-        }
+    if let Some(v) = vectorize
+        && let Some(extent) = output_shape.get(v.axis)
+    {
+        tiles[v.axis] = (v.width * 4).min((*extent).max(1));
     }
     tiles
 }
@@ -1626,16 +1625,11 @@ fn choose_reduction_tile(terms: usize) -> usize {
 
 fn choose_vector_width(extent: usize) -> Option<usize> {
     for width in [16usize, 8, 4, 2] {
-        if extent >= width && extent % width == 0 {
+        if extent >= width && extent.is_multiple_of(width) {
             return Some(width);
         }
     }
-    for width in [8usize, 4, 2] {
-        if extent >= width {
-            return Some(width);
-        }
-    }
-    None
+    [8usize, 4, 2].into_iter().find(|&width| extent >= width)
 }
 
 fn pick_vector_axis(
@@ -1736,12 +1730,12 @@ fn is_contraction_like(reduction: &ReductionIntent, output_rank: usize) -> bool 
         for j in i + 1..dependent.len() {
             let mut disjoint = true;
             let mut covered = 0usize;
-            for axis in 0..output_rank {
-                if dependent[i][axis] && dependent[j][axis] {
+            for (&di, &dj) in dependent[i].iter().zip(&dependent[j]).take(output_rank) {
+                if di && dj {
                     disjoint = false;
                     break;
                 }
-                if dependent[i][axis] || dependent[j][axis] {
+                if di || dj {
                     covered += 1;
                 }
             }
@@ -1889,11 +1883,11 @@ fn infer_reduction_accesses(
             vec![AccessDimRole::Unknown; tensor_shape.len()]
         } else {
             let mut roles = Vec::with_capacity(tensor_shape.len());
-            for dim in 0..tensor_shape.len() {
+            for dim_values in sample_dim_values.iter().take(tensor_shape.len()) {
                 let role = infer_affine_dim_role(
                     &sample_vars_flat,
                     var_count,
-                    &sample_dim_values[dim],
+                    dim_values,
                     output_rank,
                 );
                 roles.push(role);

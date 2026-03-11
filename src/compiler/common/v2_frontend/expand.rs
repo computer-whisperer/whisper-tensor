@@ -239,7 +239,7 @@ impl ExprExpander {
         let b_shape = self.get_shape(&b_id)?;
         let a_strides = broadcast_strides(a_shape, out_shape);
         let b_strides = broadcast_strides(b_shape, out_shape);
-        let total: usize = out_shape.iter().product();
+        let _total: usize = out_shape.iter().product();
         let out_shape_owned = out_shape.to_vec();
 
         for flat_out in self.sample_indices_nd(&out_shape_owned) {
@@ -329,8 +329,8 @@ impl ExprExpander {
         let batch_total: usize = batch_shape.iter().product::<usize>().max(1);
 
         // Strides for the batch dims of A, B, and Out in flat layout
-        let a_mat_size = m * k;
-        let b_mat_size = k * n;
+        let _a_mat_size = m * k;
+        let _b_mat_size = k * n;
         let out_mat_size = m * n;
 
         // Broadcast strides for batch dims: if A or B has fewer batch dims,
@@ -465,7 +465,7 @@ impl ExprExpander {
         let input_shape = self.get_shape(&input_id)?;
         let out_shape = self.get_shape(&out_id)?;
         let rank = input_shape.len();
-        let total: usize = out_shape.iter().product();
+        let _total: usize = out_shape.iter().product();
         let out_shape_owned = out_shape.to_vec();
 
         // Build full permutation
@@ -523,6 +523,7 @@ impl ExprExpander {
     }
 
     /// Reduction with a binary accumulator op (Add for sum, Max for max, etc.)
+    #[allow(clippy::too_many_arguments)]
     fn emit_reduce(
         &self,
         data_id: GlobalId,
@@ -544,7 +545,7 @@ impl ExprExpander {
         let data_shape_owned = data_shape.to_vec();
         let out_shape_owned = out_shape.to_vec();
 
-        let total_out: usize = out_shape.iter().product();
+        let _total_out: usize = out_shape.iter().product();
 
         for flat_out in self.sample_indices_nd(&out_shape_owned) {
             let out_multi = flat_to_multi(flat_out, &out_shape_owned);
@@ -562,9 +563,9 @@ impl ExprExpander {
             } else {
                 // keepdims=false: reduced dims are removed, output has fewer dims
                 let mut out_dim = 0;
-                for d in 0..data_rank {
+                for (d, slot) in data_multi_template.iter_mut().enumerate().take(data_rank) {
                     if !reduced_axes.contains(&d) {
-                        data_multi_template[d] = out_multi[out_dim];
+                        *slot = out_multi[out_dim];
                         out_dim += 1;
                     }
                 }
@@ -780,8 +781,8 @@ fn infer_reduced_axes(data_shape: &[usize], out_shape: &[usize], keepdims: bool)
         // Walk data dims, match against output dims in order.
         let mut reduced = Vec::new();
         let mut out_dim = 0;
-        for d in 0..data_shape.len() {
-            if out_dim < out_shape.len() && data_shape[d] == out_shape[out_dim] {
+        for (d, &ds) in data_shape.iter().enumerate() {
+            if out_dim < out_shape.len() && ds == out_shape[out_dim] {
                 out_dim += 1;
             } else {
                 reduced.push(d);

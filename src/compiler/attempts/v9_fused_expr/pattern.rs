@@ -338,7 +338,7 @@ pub fn topological_sort_patterns(patterns: &mut Vec<RecoveredPattern>) {
             }
             None => {
                 // Cycle or unresolvable — append remaining
-                sorted.extend(remaining.drain(..));
+                sorted.append(&mut remaining);
                 break;
             }
         }

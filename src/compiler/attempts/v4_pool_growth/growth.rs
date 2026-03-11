@@ -156,7 +156,6 @@ impl From<ScalarUnaryOp> for UnaryTag {
             ScalarUnaryOp::Tanh => UnaryTag::Tanh,
             ScalarUnaryOp::Floor => UnaryTag::Floor,
             ScalarUnaryOp::Ceil => UnaryTag::Ceil,
-            _ => panic!("unsupported unary op {:?} in v4 pool growth", value),
         }
     }
 }
@@ -670,12 +669,11 @@ fn topo_order_loops(crystal_ops: &[CrystalOp]) -> Vec<CrystalOp> {
 
     for (consumer_idx, loop_op) in loops.iter().enumerate() {
         for body_op in &loop_op.body {
-            if let LoopBodyOp::Load { tensor, .. } = body_op {
-                if let Some(&prod_idx) = producer.get(tensor) {
-                    if prod_idx != consumer_idx && out_edges[prod_idx].insert(consumer_idx) {
-                        indeg[consumer_idx] += 1;
-                    }
-                }
+            if let LoopBodyOp::Load { tensor, .. } = body_op
+                && let Some(&prod_idx) = producer.get(tensor)
+                && prod_idx != consumer_idx && out_edges[prod_idx].insert(consumer_idx)
+            {
+                indeg[consumer_idx] += 1;
             }
         }
     }

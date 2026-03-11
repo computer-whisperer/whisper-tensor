@@ -279,9 +279,9 @@ fn direct_rank2_matmul_schedule(m: usize, n: usize, k: usize) -> LoopScheduleCan
     } else {
         1
     };
-    let vector_width = if n % 8 == 0 {
+    let vector_width = if n.is_multiple_of(8) {
         8
-    } else if n % 4 == 0 {
+    } else if n.is_multiple_of(4) {
         4
     } else {
         1
@@ -544,11 +544,11 @@ fn choose_tile_shape(
 
     while tile_elems > config.max_tile_elements {
         let mut shrunk = false;
-        for axis in 0..tile.len() {
-            if tile[axis] > 1 {
-                let next = tile[axis].div_ceil(2);
-                tile_elems = tile_elems / tile[axis] * next;
-                tile[axis] = next;
+        for t in &mut tile {
+            if *t > 1 {
+                let next = t.div_ceil(2);
+                tile_elems = tile_elems / *t * next;
+                *t = next;
                 shrunk = true;
                 if tile_elems <= config.max_tile_elements {
                     break;

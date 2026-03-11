@@ -244,6 +244,7 @@ fn whisper_encoder_layer(
 // Decoder layer
 // ============================================================================
 
+#[allow(clippy::type_complexity)]
 fn whisper_decoder_layer(
     wm: &impl WeightManager,
     input: Arc<dyn Tensor>,
@@ -300,6 +301,7 @@ fn self_attention(
 }
 
 /// Self-attention with KV cache append (decoder).
+#[allow(clippy::type_complexity)]
 fn self_attention_with_cache(
     wm: &impl WeightManager,
     input: Arc<dyn Tensor>,

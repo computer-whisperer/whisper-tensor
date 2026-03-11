@@ -828,6 +828,7 @@ impl MilliOpGraph {
     }
 
     /// Like `collect_all_shapes` but also returns the DType of every tensor.
+    #[allow(clippy::type_complexity)]
     pub fn collect_all_shapes_and_dtypes(
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
@@ -1279,6 +1280,16 @@ struct AdamShared {
     one_minus_beta2_t: GlobalId,
 }
 
+impl crate::graph::LinkMetadata for MilliOpGraphTensor {
+    // MilliOpGraph tensors don't have rich metadata like dtype/shape at this level
+}
+
+impl crate::graph::Link for MilliOpGraphTensor {
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1677,7 +1688,6 @@ mod tests {
         // Prepare inputs
         let mut inputs = HashMap::new();
         for (i, ext) in ext_ids.iter().enumerate() {
-            let shape_u64: Vec<u64> = input_shapes[i].iter().map(|&s| s as u64).collect();
             let t = NumericTensor::<DynRank>::from_vec_shape(
                 input_values[i].clone(),
                 input_shapes[i].clone(),
@@ -1750,7 +1760,6 @@ mod tests {
         graph.add_output(*grad_tensor_id, ext_grad);
 
         // Evaluate to get analytic gradient
-        let shape_u64: Vec<u64> = input_shape.iter().map(|&s| s as u64).collect();
         let input_tensor =
             NumericTensor::<DynRank>::from_vec_shape(input_values.clone(), input_shape.clone())
                 .unwrap();
@@ -1773,19 +1782,17 @@ mod tests {
 
             let f_plus = eval_scalar_graph(
                 &|g, ids, r| {
-                    let out = build_fn(g, ids[0], r);
-                    out
+                    build_fn(g, ids[0], r)
                 },
                 &[plus],
-                &[input_shape.clone()],
+                std::slice::from_ref(&input_shape),
             );
             let f_minus = eval_scalar_graph(
                 &|g, ids, r| {
-                    let out = build_fn(g, ids[0], r);
-                    out
+                    build_fn(g, ids[0], r)
                 },
                 &[minus],
-                &[input_shape.clone()],
+                std::slice::from_ref(&input_shape),
             );
 
             let numerical_grad = (f_plus - f_minus) / (2.0 * eps);
@@ -2130,8 +2137,8 @@ mod tests {
         // Expose gradients as outputs
         let mut ext_grad_ids = Vec::new();
         let mut already_output: HashMap<GlobalId, GlobalId> = HashMap::new();
-        for i in 0..n {
-            if let Some(&grad_id) = grads.get(&int_ids[i]) {
+        for int_id in int_ids.iter().take(n) {
+            if let Some(&grad_id) = grads.get(int_id) {
                 // Handle same gradient tensor mapped to multiple outputs
                 let ext = if let Some(&existing_ext) = already_output.get(&grad_id) {
                     existing_ext
@@ -2968,8 +2975,7 @@ mod tests {
         grad_map.insert(scaled, ones);
         let grads = generate_milli_backward(&mut graph, group, &grad_map, rng);
 
-        let mut training_meta = TrainingMetadata::default();
-        training_meta.loss = Some(loss);
+        let mut training_meta = TrainingMetadata { loss: Some(loss), ..Default::default() };
         training_meta.param_to_grad.insert(param, grads[&param]);
 
         (graph, param_ext, param, loss, training_meta)
@@ -3525,8 +3531,7 @@ mod tests {
         grad_map.extend(fwd_grads);
 
         // Training metadata
-        let mut training_meta = TrainingMetadata::default();
-        training_meta.loss = Some(loss);
+        let mut training_meta = TrainingMetadata { loss: Some(loss), ..Default::default() };
         training_meta.param_to_grad.insert(w, grad_map[&w]);
 
         // Optimizer
@@ -3667,8 +3672,7 @@ mod tests {
         let fwd_grads = generate_milli_backward(&mut graph, fwd_group, &grad_map, rng);
         grad_map.extend(fwd_grads);
 
-        let mut training_meta = TrainingMetadata::default();
-        training_meta.loss = Some(loss);
+        let mut training_meta = TrainingMetadata { loss: Some(loss), ..Default::default() };
         training_meta.param_to_grad.insert(w, grad_map[&w]);
 
         generate_optimizer_ops(
@@ -3829,8 +3833,7 @@ mod tests {
         let fwd_grads = generate_milli_backward(&mut graph, fwd_group, &grad_map, rng);
         grad_map.extend(fwd_grads);
 
-        let mut training_meta = TrainingMetadata::default();
-        training_meta.loss = Some(loss);
+        let mut training_meta = TrainingMetadata { loss: Some(loss), ..Default::default() };
         training_meta.param_to_grad.insert(w1, grad_map[&w1]);
         training_meta.param_to_grad.insert(w2, grad_map[&w2]);
 
@@ -3984,14 +3987,4 @@ mod tests {
             final_loss,
         );
     }
-}
-
-impl crate::graph::Link for MilliOpGraphTensor {
-    fn global_id(&self) -> GlobalId {
-        self.global_id
-    }
-}
-
-impl crate::graph::LinkMetadata for MilliOpGraphTensor {
-    // MilliOpGraph tensors don't have rich metadata like dtype/shape at this level
 }

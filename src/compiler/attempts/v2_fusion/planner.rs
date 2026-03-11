@@ -251,15 +251,15 @@ fn finalize_group(
     let produced: Vec<(GlobalId, usize)> = group
         .produced_tensors
         .iter()
-        .filter_map(|tid| {
+        .map(|tid| {
             let ref_idx = group.value_map[tid];
-            Some((*tid, ref_idx))
+            (*tid, ref_idx)
         })
         .collect();
 
     for (tensor_id, value_ref) in produced {
         let needs_store = output_tensors.contains(&tensor_id)
-            || consumer_ops.get(&tensor_id).map_or(false, |consumers| {
+            || consumer_ops.get(&tensor_id).is_some_and(|consumers| {
                 consumers.iter().any(|c| !group.op_ids.contains(c))
             });
 

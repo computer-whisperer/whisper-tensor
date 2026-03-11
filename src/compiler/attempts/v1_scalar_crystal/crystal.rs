@@ -443,10 +443,10 @@ mod tests {
         if let CrystalOp::Loop(l) = &crystal_ops[0] {
             assert_eq!(l.count, 8);
             // Check that b has stride 0 (broadcast)
-            if let LoopBodyOp::Load { step, tensor, .. } = &l.body[1] {
-                if *tensor == int_b {
-                    assert_eq!(*step, 0, "broadcast load should have step=0");
-                }
+            if let LoopBodyOp::Load { step, tensor, .. } = &l.body[1]
+                && *tensor == int_b
+            {
+                assert_eq!(*step, 0, "broadcast load should have step=0");
             }
         }
     }

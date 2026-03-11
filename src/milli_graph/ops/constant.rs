@@ -21,6 +21,7 @@ pub struct Constant {
 }
 
 impl Constant {
+    #[allow(dead_code)] // used by compiler (cranelift feature)
     pub(crate) fn data(&self) -> &NDArrayNumericTensor<DynRank> {
         &self.data
     }

@@ -9,17 +9,16 @@ fn ensure_not_lfs_pointer(path: &std::path::Path) {
         return;
     };
     // LFS pointer files are tiny (typically < 200 bytes) and start with a known header
-    if md.len() < 1024 {
-        if let Ok(bytes) = fs::read(path) {
-            if bytes.starts_with(b"version https://git-lfs.github.com/spec/v1") {
-                panic!(
-                    "{} looks like a Git LFS pointer and not the real model file.\n\
-                     Please ensure Git LFS fetched this path. In CI, fetch just the RWKV pth via:\n\
-                     git lfs fetch --include=\"test_models/*.pth\" --exclude=\"*\" && git lfs checkout -- test_models/*.pth",
-                    path.display()
-                );
-            }
-        }
+    if md.len() < 1024
+        && let Ok(bytes) = fs::read(path)
+        && bytes.starts_with(b"version https://git-lfs.github.com/spec/v1")
+    {
+        panic!(
+            "{} looks like a Git LFS pointer and not the real model file.\n\
+             Please ensure Git LFS fetched this path. In CI, fetch just the RWKV pth via:\n\
+             git lfs fetch --include=\"test_models/*.pth\" --exclude=\"*\" && git lfs checkout -- test_models/*.pth",
+            path.display()
+        );
     }
 }
 
@@ -29,18 +28,16 @@ fn find_rwkv_pth() -> Option<PathBuf> {
     let rd = std::fs::read_dir(&dir).ok()?;
     for entry in rd.flatten() {
         let p = entry.path();
-        if p.is_file() {
-            if let Some(ext) = p.extension() {
-                if ext == "pth"
-                    && p.file_name()
-                        .and_then(|s| s.to_str())
-                        .map(|s| s.to_lowercase())
-                        .map(|s| s.contains("rwkv") || s.contains("rwkv7") || s.contains("world"))
-                        .unwrap_or(false)
-                {
-                    return Some(p);
-                }
-            }
+        if p.is_file()
+            && let Some(ext) = p.extension()
+            && ext == "pth"
+            && p.file_name()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_lowercase())
+                .map(|s| s.contains("rwkv") || s.contains("rwkv7") || s.contains("world"))
+                .unwrap_or(false)
+        {
+            return Some(p);
         }
     }
     None
@@ -55,31 +52,29 @@ fn rwkv01b_model_loads() {
     };
     ensure_not_lfs_pointer(&pth_path);
     // Use EmbeddedData output method to avoid external file dependencies
-    for strategy in [whisper_tensor_import::onnx_graph::WeightStorageStrategy::EmbeddedData] {
-        let onnx_bytes = whisper_tensor_import::identify_and_load(&pth_path, strategy)
-            .expect("import rwkv7 to onnx");
-        let mut rng = rand::rng();
-        let model = Model::new_from_onnx(&onnx_bytes, &mut rng, None).expect("model loads");
+    let strategy = whisper_tensor_import::onnx_graph::WeightStorageStrategy::EmbeddedData;
+    let onnx_bytes = whisper_tensor_import::identify_and_load(&pth_path, strategy)
+        .expect("import rwkv7 to onnx");
+    let mut rng = rand::rng();
+    let model = Model::new_from_onnx(&onnx_bytes, &mut rng, None).expect("model loads");
 
-        // Ensure we can construct Eval backend and load constant tensors (which should trigger
-        // lazy external loading for any external_data entries)
-        let mut eval = EvalBackend::NDArray;
-        let mut cache = whisper_tensor::backends::ModelLoadedTensorCache::default();
-        model
-            .load_tensors(&mut cache, &mut eval)
-            .expect("tensors load");
+    // Ensure we can construct Eval backend and load constant tensors (which should trigger
+    // lazy external loading for any external_data entries)
+    let mut eval = EvalBackend::NDArray;
+    let mut cache = whisper_tensor::backends::ModelLoadedTensorCache::default();
+    model
+        .load_tensors(&mut cache, &mut eval)
+        .expect("tensors load");
 
-        // Check graph has at least one input and one output
-        assert!(
-            !model.get_symbolic_graph().get_inputs().is_empty(),
-            "model has inputs"
-        );
-        assert!(
-            !model.get_symbolic_graph().get_outputs().is_empty(),
-            "model has outputs"
-        );
-    }
-    return;
+    // Check graph has at least one input and one output
+    assert!(
+        !model.get_symbolic_graph().get_inputs().is_empty(),
+        "model has inputs"
+    );
+    assert!(
+        !model.get_symbolic_graph().get_outputs().is_empty(),
+        "model has outputs"
+    );
 }
 
 #[test]

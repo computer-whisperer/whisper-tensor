@@ -101,7 +101,7 @@ pub fn test_transpose_reshape_fp32(backend: &mut EvalBackend) {
         .reshape(vec![1, 2, 4, 8], backend)
         .unwrap();
     let correct = tensor_a
-        .transpose(Some(vec![0, 2, 1, 3]), &mut EvalBackend::NDArray)
+        .transpose(Some(vec![0, 2, 1, 3]), &EvalBackend::NDArray)
         .unwrap()
         .reshape(vec![1, 2, 4, 8], &mut EvalBackend::NDArray)
         .unwrap();

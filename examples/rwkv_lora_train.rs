@@ -166,15 +166,15 @@ fn compute_lora_shapes(
         let base_name = a_name.strip_suffix(".lora_a").unwrap();
         let weight_name = format!("{base_name}.weight");
 
-        if let Some(&weight_id) = tensors_by_name.get(&weight_name) {
-            if let Some(weight_tensor) = initialized.get(&weight_id) {
-                let s = weight_tensor.shape();
-                // PyTorch weight shape [out, in]; linear() transposes before matmul
-                // LoRA: activation @ A @ B, so A=[in, rank], B=[rank, out]
-                shapes.insert(lora_a_id, (s[1] as usize, LORA_RANK));
-                shapes.insert(lora_b_id, (LORA_RANK, s[0] as usize));
-                continue;
-            }
+        if let Some(&weight_id) = tensors_by_name.get(&weight_name)
+            && let Some(weight_tensor) = initialized.get(&weight_id)
+        {
+            let s = weight_tensor.shape();
+            // PyTorch weight shape [out, in]; linear() transposes before matmul
+            // LoRA: activation @ A @ B, so A=[in, rank], B=[rank, out]
+            shapes.insert(lora_a_id, (s[1] as usize, LORA_RANK));
+            shapes.insert(lora_b_id, (LORA_RANK, s[0] as usize));
+            continue;
         }
         eprintln!("  Warning: no shape info for {base_name}");
     }

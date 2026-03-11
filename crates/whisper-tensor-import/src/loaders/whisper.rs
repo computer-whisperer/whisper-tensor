@@ -108,7 +108,7 @@ impl Loader for WhisperLoader {
             storage.clone(),
             &origin_path,
         )
-        .map_err(|e| LoaderError::LoadFailed(e))?;
+        .map_err(LoaderError::LoadFailed)?;
 
         // Build decoder ONNX model
         eprintln!("Building Whisper decoder...");
@@ -118,7 +118,7 @@ impl Loader for WhisperLoader {
             storage,
             &origin_path,
         )
-        .map_err(|e| LoaderError::LoadFailed(e))?;
+        .map_err(LoaderError::LoadFailed)?;
 
         let base_dir = dir.as_path();
 

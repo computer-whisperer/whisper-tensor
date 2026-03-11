@@ -110,7 +110,7 @@ pub fn test_ln_f16(backend: &mut EvalBackend) {
 
 // abs
 pub fn test_abs_fp32(backend: &mut EvalBackend) {
-    let x = NumericTensor::from_vec(vec![-1.25f32, 0.0, 3.14159, -2.0]).to_dyn_rank();
+    let x = NumericTensor::from_vec(vec![-1.25f32, 0.0, std::f32::consts::PI, -2.0]).to_dyn_rank();
     let y = x.abs(backend).unwrap();
     let correct = abs_correct(&x);
     test_eq_f32(y, correct);
@@ -120,7 +120,7 @@ pub fn test_abs_bf16(backend: &mut EvalBackend) {
     let x = NumericTensor::from_vec(vec![
         bf16::from_f32(-1.25),
         bf16::from_f32(0.0),
-        bf16::from_f32(3.14159),
+        bf16::from_f32(std::f32::consts::PI),
         bf16::from_f32(-2.0),
     ])
     .to_dyn_rank();
@@ -133,7 +133,7 @@ pub fn test_abs_f16(backend: &mut EvalBackend) {
     let x = NumericTensor::from_vec(vec![
         f16::from_f32(-1.25),
         f16::from_f32(0.0),
-        f16::from_f32(3.14159),
+        f16::from_f32(std::f32::consts::PI),
         f16::from_f32(-2.0),
     ])
     .to_dyn_rank();

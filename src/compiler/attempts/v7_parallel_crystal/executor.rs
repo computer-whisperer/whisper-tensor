@@ -444,10 +444,10 @@ fn execute_task(
     {
         return Err(V7ExecuteError::TaskRankMismatch { loop_index });
     }
-    for axis in 0..output_shape.len() {
+    for (axis, &extent) in output_shape.iter().enumerate() {
         let start = task.output_start[axis];
         let end = task.output_end[axis];
-        if start >= end || end > output_shape[axis] {
+        if start >= end || end > extent {
             return Err(V7ExecuteError::InvalidTaskRange { loop_index, axis });
         }
     }
@@ -455,22 +455,21 @@ fn execute_task(
     validate_task_affine_ranges(task, compiled_accesses, loop_index)?;
     let output_elem_offset = output_row_offset.saturating_mul(shape_elements(&output_shape[1..]));
 
-    if let Some(FastTermPattern::Mul2 { a_slot, b_slot }) = fast_term {
-        if output_shape.len() == 2
-            && a_slot < compiled_accesses.len()
-            && b_slot < compiled_accesses.len()
-        {
-            return execute_task_fast_mul2_rank2(
-                task,
-                output_shape,
-                output_buffer,
-                output_row_offset,
-                &compiled_accesses[a_slot],
-                &compiled_accesses[b_slot],
-                access_slices[a_slot],
-                access_slices[b_slot],
-            );
-        }
+    if let Some(FastTermPattern::Mul2 { a_slot, b_slot }) = fast_term
+        && output_shape.len() == 2
+        && a_slot < compiled_accesses.len()
+        && b_slot < compiled_accesses.len()
+    {
+        return execute_task_fast_mul2_rank2(
+            task,
+            output_shape,
+            output_buffer,
+            output_row_offset,
+            &compiled_accesses[a_slot],
+            &compiled_accesses[b_slot],
+            access_slices[a_slot],
+            access_slices[b_slot],
+        );
     }
 
     let mut coords = task.output_start.clone();

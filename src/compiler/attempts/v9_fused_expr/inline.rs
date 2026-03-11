@@ -96,19 +96,19 @@ fn inline_expr(
             tensor, flat_index, ..
         } => {
             // If this tensor is produced and NOT materialized, inline it.
-            if produced.contains(tensor) && !materialize.contains(tensor) {
-                if let Some(producing_expr) = expr_map.get(&(*tensor, *flat_index)) {
-                    let inlined = inline_expr(producing_expr, expr_map, produced, materialize, dtypes);
-                    // If the inlined tensor is BF16, wrap with RoundBf16 to preserve
-                    // the dtype boundary that would otherwise be lost during fusion.
-                    if dtypes.get(tensor) == Some(&DType::BF16) {
-                        return ScalarExpr::Unary {
-                            op: ScalarUnaryOp::RoundBf16,
-                            input: Box::new(inlined),
-                        };
-                    }
-                    return inlined;
+            if produced.contains(tensor) && !materialize.contains(tensor)
+                && let Some(producing_expr) = expr_map.get(&(*tensor, *flat_index))
+            {
+                let inlined = inline_expr(producing_expr, expr_map, produced, materialize, dtypes);
+                // If the inlined tensor is BF16, wrap with RoundBf16 to preserve
+                // the dtype boundary that would otherwise be lost during fusion.
+                if dtypes.get(tensor) == Some(&DType::BF16) {
+                    return ScalarExpr::Unary {
+                        op: ScalarUnaryOp::RoundBf16,
+                        input: Box::new(inlined),
+                    };
                 }
+                return inlined;
             }
             expr.clone()
         }

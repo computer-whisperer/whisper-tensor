@@ -571,12 +571,11 @@ mod tests {
         dequantize_q8_0(&block, &mut output);
 
         let d = half::f16::from_f32(0.1).to_f32();
-        for j in 0..32 {
+        for (j, &val) in output.iter().enumerate() {
             let expected = (j as i32 - 16) as f32 * d;
             assert!(
-                (output[j] - expected).abs() < 1e-6,
-                "mismatch at {j}: got {}, expected {expected}",
-                output[j]
+                (val - expected).abs() < 1e-6,
+                "mismatch at {j}: got {val}, expected {expected}",
             );
         }
     }
@@ -596,11 +595,10 @@ mod tests {
         let mut output = vec![0.0f32; 32];
         dequantize_q4_0(&block, &mut output);
 
-        for j in 0..32 {
+        for (j, &val) in output.iter().enumerate() {
             assert!(
-                output[j].abs() < 1e-6,
-                "expected ~0 at {j}, got {}",
-                output[j]
+                val.abs() < 1e-6,
+                "expected ~0 at {j}, got {val}",
             );
         }
     }

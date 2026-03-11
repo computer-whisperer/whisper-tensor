@@ -49,7 +49,7 @@ fn test_dit() {
 
     // Create dummy inputs
     let latent = NumericTensor::<DynRank>::from_vec_shape(
-        vec![0.0f32; 1 * 16 * 128 * 128],
+        vec![0.0f32; 16 * 128 * 128],
         vec![1, 16, 128, 128],
     )
     .unwrap()
@@ -141,7 +141,7 @@ fn test_vae() {
 
     // Small latent input: [1, 16, 8, 8] → [1, 3, 64, 64]
     let latent =
-        NumericTensor::<DynRank>::from_vec_shape(vec![0.0f32; 1 * 16 * 8 * 8], vec![1, 16, 8, 8])
+        NumericTensor::<DynRank>::from_vec_shape(vec![0.0f32; 16 * 8 * 8], vec![1, 16, 8, 8])
             .unwrap();
 
     println!("\n=== Running Flux VAE decoder ===");

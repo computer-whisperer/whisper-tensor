@@ -18,6 +18,7 @@ pub struct Cast {
 }
 
 impl Cast {
+    #[allow(dead_code)] // used by compiler (cranelift feature)
     pub(crate) fn target_dtype(&self) -> DType {
         self.dtype
     }
