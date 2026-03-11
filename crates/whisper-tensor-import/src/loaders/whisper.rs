@@ -61,12 +61,10 @@ impl Loader for WhisperLoader {
                 .unwrap_or(12) as usize,
             decoder_ffn_dim: config_json["decoder_ffn_dim"].as_u64().unwrap_or(3072) as usize,
             num_mel_bins: config_json["num_mel_bins"].as_u64().unwrap_or(80) as usize,
-            max_source_positions: config_json["max_source_positions"]
-                .as_u64()
-                .unwrap_or(1500) as usize,
-            max_target_positions: config_json["max_target_positions"]
-                .as_u64()
-                .unwrap_or(448) as usize,
+            max_source_positions: config_json["max_source_positions"].as_u64().unwrap_or(1500)
+                as usize,
+            max_target_positions: config_json["max_target_positions"].as_u64().unwrap_or(448)
+                as usize,
             vocab_size: config_json["vocab_size"].as_u64().unwrap_or(51864) as usize,
         };
 
@@ -84,8 +82,8 @@ impl Loader for WhisperLoader {
             )));
         }
 
-        let origin_path = std::fs::canonicalize(&safetensors_path)
-            .unwrap_or_else(|_| safetensors_path.clone());
+        let origin_path =
+            std::fs::canonicalize(&safetensors_path).unwrap_or_else(|_| safetensors_path.clone());
 
         use crate::onnx_graph::WeightStorageStrategy;
         use crate::onnx_graph::weights::SafetensorsWeightManager;
@@ -93,8 +91,7 @@ impl Loader for WhisperLoader {
 
         let file = std::fs::File::open(&safetensors_path)
             .map_err(|e| LoaderError::LoadFailed(e.into()))?;
-        let mmap =
-            unsafe { Mmap::map(&file) }.map_err(|e| LoaderError::LoadFailed(e.into()))?;
+        let mmap = unsafe { Mmap::map(&file) }.map_err(|e| LoaderError::LoadFailed(e.into()))?;
         let wm = SafetensorsWeightManager::new(vec![Arc::new(mmap)])
             .map_err(|e| LoaderError::LoadFailed(e.into()))?;
 
@@ -102,23 +99,15 @@ impl Loader for WhisperLoader {
 
         // Build encoder ONNX model
         eprintln!("Building Whisper encoder...");
-        let encoder_onnx = crate::whisper::build_encoder(
-            &wm,
-            &whisper_config,
-            storage.clone(),
-            &origin_path,
-        )
-        .map_err(LoaderError::LoadFailed)?;
+        let encoder_onnx =
+            crate::whisper::build_encoder(&wm, &whisper_config, storage.clone(), &origin_path)
+                .map_err(LoaderError::LoadFailed)?;
 
         // Build decoder ONNX model
         eprintln!("Building Whisper decoder...");
-        let decoder_onnx = crate::whisper::build_decoder(
-            &wm,
-            &whisper_config,
-            storage,
-            &origin_path,
-        )
-        .map_err(LoaderError::LoadFailed)?;
+        let decoder_onnx =
+            crate::whisper::build_decoder(&wm, &whisper_config, storage, &origin_path)
+                .map_err(LoaderError::LoadFailed)?;
 
         let base_dir = dir.as_path();
 
@@ -143,14 +132,10 @@ impl Loader for WhisperLoader {
         };
 
         // Build encoder SuperGraph (simple: mel input → model execution → encoder output)
-        let (encoder_sg, mel_link, enc_weights, enc_output) =
-            build_encoder_supergraph(&mut rng);
+        let (encoder_sg, mel_link, enc_weights, enc_output) = build_encoder_supergraph(&mut rng);
 
         // Build decoder SuperGraph with RNN cache
-        let decoder_sg_result = build_decoder_supergraph(
-            &whisper_config,
-            &mut rng,
-        );
+        let decoder_sg_result = build_decoder_supergraph(&whisper_config, &mut rng);
 
         let interface = SpeechToTextInterface {
             encoder_super_graph: encoder_sg,
@@ -241,18 +226,16 @@ fn build_decoder_supergraph(
     config: &WhisperConfig,
     rng: &mut impl rand::Rng,
 ) -> DecoderSuperGraphResult {
-    use whisper_tensor::super_graph::links::{
-        SuperGraphLinkDouble, SuperGraphLinkTriple,
-    };
-    use whisper_tensor::super_graph::nodes::{
-        SuperGraphNodeMilliOpGraph, SuperGraphNodeRNNCacheRead,
-        SuperGraphNodeRNNCacheWrite, SuperGraphNodeScan,
-    };
+    use std::collections::HashMap;
     use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
     use whisper_tensor::dtype::DType;
     use whisper_tensor::milli_graph::MilliOpGraph;
     use whisper_tensor::milli_graph::ops::{Cast, Constant, Shape, Squeeze, Unsqueeze};
-    use std::collections::HashMap;
+    use whisper_tensor::super_graph::links::{SuperGraphLinkDouble, SuperGraphLinkTriple};
+    use whisper_tensor::super_graph::nodes::{
+        SuperGraphNodeMilliOpGraph, SuperGraphNodeRNNCacheRead, SuperGraphNodeRNNCacheWrite,
+        SuperGraphNodeScan,
+    };
 
     let mut builder = SuperGraphBuilder::new();
     let token_context_link = builder.new_tensor_link(rng);
@@ -275,11 +258,13 @@ fn build_decoder_supergraph(
     };
 
     // State init links (before cache read)
-    let state_init_links: Vec<(usize, whisper_tensor::super_graph::links::SuperGraphLinkTensor)> =
-        state_ids
-            .iter()
-            .map(|&id| (id, builder.new_tensor_link(rng)))
-            .collect();
+    let state_init_links: Vec<(
+        usize,
+        whisper_tensor::super_graph::links::SuperGraphLinkTensor,
+    )> = state_ids
+        .iter()
+        .map(|&id| (id, builder.new_tensor_link(rng)))
+        .collect();
 
     // Cache read node
     let post_cache_tokens = builder.new_tensor_link(rng);
@@ -333,7 +318,12 @@ fn build_decoder_supergraph(
                 &mut mg,
                 NDArrayNumericTensor::from_vec_shape(
                     Vec::<f32>::new(),
-                    &vec![1u64, config.decoder_attention_heads as u64, 0, head_dim as u64],
+                    &vec![
+                        1u64,
+                        config.decoder_attention_heads as u64,
+                        0,
+                        head_dim as u64,
+                    ],
                 )
                 .unwrap(),
                 rng,
@@ -404,8 +394,14 @@ fn build_decoder_supergraph(
         }
 
         sub_builder.add_node(
-            SuperGraphNodeModelExecution::new(rng, sub_model_link, 1, tensor_inputs, tensor_outputs)
-                .to_any(),
+            SuperGraphNodeModelExecution::new(
+                rng,
+                sub_model_link,
+                1,
+                tensor_inputs,
+                tensor_outputs,
+            )
+            .to_any(),
         );
     }
 
@@ -461,9 +457,7 @@ fn build_decoder_supergraph(
 
     let final_state_outputs: Vec<SuperGraphLinkDouble> = final_state_links
         .iter()
-        .map(|(id, link)| {
-            SuperGraphLinkDouble::Tensor(*sub_state_out.get(id).unwrap(), *link)
-        })
+        .map(|(id, link)| SuperGraphLinkDouble::Tensor(*sub_state_out.get(id).unwrap(), *link))
         .collect();
 
     let scan_node = SuperGraphNodeScan::new(

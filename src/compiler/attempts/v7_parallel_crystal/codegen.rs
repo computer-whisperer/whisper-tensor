@@ -186,7 +186,9 @@ fn build_full_kernel_specs(
         })?;
         match &recovered.intent {
             LoopIntent::AdditiveReduction(_) => {
-                let loop_tasks = grouped_reduction_tasks.remove(&loop_index).unwrap_or_default();
+                let loop_tasks = grouped_reduction_tasks
+                    .remove(&loop_index)
+                    .unwrap_or_default();
                 if loop_tasks.is_empty() {
                     return Err(V7CodegenError::Unsupported(format!(
                         "missing planned tasks for additive-reduction loop {loop_index}"
@@ -217,9 +219,7 @@ fn build_full_kernel_specs(
     Ok(specs)
 }
 
-fn group_reduction_tasks_by_loop(
-    plan: &TaskPlan,
-) -> HashMap<usize, Vec<&ReductionTileTask>> {
+fn group_reduction_tasks_by_loop(plan: &TaskPlan) -> HashMap<usize, Vec<&ReductionTileTask>> {
     let mut by_loop = HashMap::<usize, Vec<&ReductionTileTask>>::new();
     for task in &plan.tasks {
         by_loop.entry(task.loop_index).or_default().push(task);
@@ -718,17 +718,16 @@ fn compile_kernel(
                         "v7 reduction task has empty reduction span".to_string(),
                     ));
                 }
-                let panel_elems = max_k_span
-                    .checked_mul(REDUCTION_NR as usize)
-                    .ok_or_else(|| {
-                        CodegenError::CodegenError(
-                            "v7 packed panel element count overflow".to_string(),
-                        )
-                    })?;
+                let panel_elems =
+                    max_k_span
+                        .checked_mul(REDUCTION_NR as usize)
+                        .ok_or_else(|| {
+                            CodegenError::CodegenError(
+                                "v7 packed panel element count overflow".to_string(),
+                            )
+                        })?;
                 let panel_bytes = panel_elems.checked_mul(4).ok_or_else(|| {
-                    CodegenError::CodegenError(
-                        "v7 packed panel byte count overflow".to_string(),
-                    )
+                    CodegenError::CodegenError("v7 packed panel byte count overflow".to_string())
                 })?;
                 let panel_bytes_u32 = u32::try_from(panel_bytes).map_err(|_| {
                     CodegenError::CodegenError(format!(
@@ -852,55 +851,21 @@ fn emit_reduction_task(
             NR,
             |builder, col_j0| {
                 // Pack B[k_start..k_end, col_j0..col_j0+NR) into a contiguous panel.
-                emit_for_loop(builder, iv_pack_k, k_start, task.k_end, 1, |builder, red_k| {
-                    let b_base_const = builder.ins().iconst(types::I64, spec.access_b.base);
-                    let b_k_base = add_scaled_i64(
-                        builder,
-                        b_base_const,
-                        red_k,
-                        spec.access_b.reduction_coeff,
-                    );
-                    let b_base = builder.ins().iadd(b_k_base, col_j0);
-                    let panel_k = builder.ins().iadd_imm(red_k, -k_start);
-                    let panel_base = if NR == 1 {
-                        panel_k
-                    } else {
-                        builder.ins().imul_imm(panel_k, NR)
-                    };
-
-                    for lane in 0..NR {
-                        let b_idx = if lane == 0 {
-                            b_base
-                        } else {
-                            builder.ins().iadd_imm(b_base, lane)
-                        };
-                        let bv = load_f32_at_flat(builder, b_ptr, b_idx);
-                        let panel_idx = if lane == 0 {
-                            panel_base
-                        } else {
-                            builder.ins().iadd_imm(panel_base, lane)
-                        };
-                        store_f32_at_flat(builder, b_panel_ptr, panel_idx, bv);
-                    }
-                    Ok(())
-                })?;
-
-                emit_for_loop(builder, iv_i, task.i_start, task.i_end, 1, |builder, row_i| {
-                    let mut a_row_base = builder.ins().iconst(types::I64, spec.access_a.base);
-                    a_row_base = add_scaled_i64(builder, a_row_base, row_i, a_row);
-                    let zero = builder.ins().f32const(0.0);
-                    for &var in &acc_vars {
-                        builder.def_var(var, zero);
-                    }
-
-                    emit_for_loop(builder, iv_k_main, k_start, task.k_end, 1, |builder, red_k| {
-                        let idx_a = add_scaled_i64(
+                emit_for_loop(
+                    builder,
+                    iv_pack_k,
+                    k_start,
+                    task.k_end,
+                    1,
+                    |builder, red_k| {
+                        let b_base_const = builder.ins().iconst(types::I64, spec.access_b.base);
+                        let b_k_base = add_scaled_i64(
                             builder,
-                            a_row_base,
+                            b_base_const,
                             red_k,
-                            spec.access_a.reduction_coeff,
+                            spec.access_b.reduction_coeff,
                         );
-                        let av = load_f32_at_flat(builder, a_ptr, idx_a);
+                        let b_base = builder.ins().iadd(b_k_base, col_j0);
                         let panel_k = builder.ins().iadd_imm(red_k, -k_start);
                         let panel_base = if NR == 1 {
                             panel_k
@@ -908,33 +873,88 @@ fn emit_reduction_task(
                             builder.ins().imul_imm(panel_k, NR)
                         };
 
-                        for (lane, &var) in acc_vars.iter().enumerate() {
+                        for lane in 0..NR {
+                            let b_idx = if lane == 0 {
+                                b_base
+                            } else {
+                                builder.ins().iadd_imm(b_base, lane)
+                            };
+                            let bv = load_f32_at_flat(builder, b_ptr, b_idx);
                             let panel_idx = if lane == 0 {
                                 panel_base
                             } else {
-                                builder.ins().iadd_imm(panel_base, lane as i64)
+                                builder.ins().iadd_imm(panel_base, lane)
                             };
-                            let bv = load_f32_at_flat(builder, b_panel_ptr, panel_idx);
-                            let cur = builder.use_var(var);
-                            let prod = builder.ins().fmul(av, bv);
-                            let next = builder.ins().fadd(cur, prod);
-                            builder.def_var(var, next);
+                            store_f32_at_flat(builder, b_panel_ptr, panel_idx, bv);
                         }
                         Ok(())
-                    })?;
+                    },
+                )?;
 
-                    for (lane, &var) in acc_vars.iter().enumerate() {
-                        let col_j = if lane == 0 {
-                            col_j0
-                        } else {
-                            builder.ins().iadd_imm(col_j0, lane as i64)
-                        };
-                        let out_flat = output_flat_2d(builder, row_i, col_j, n);
-                        let acc = builder.use_var(var);
-                        store_f32_at_flat(builder, output_ptr, out_flat, acc);
-                    }
-                    Ok(())
-                })?;
+                emit_for_loop(
+                    builder,
+                    iv_i,
+                    task.i_start,
+                    task.i_end,
+                    1,
+                    |builder, row_i| {
+                        let mut a_row_base = builder.ins().iconst(types::I64, spec.access_a.base);
+                        a_row_base = add_scaled_i64(builder, a_row_base, row_i, a_row);
+                        let zero = builder.ins().f32const(0.0);
+                        for &var in &acc_vars {
+                            builder.def_var(var, zero);
+                        }
+
+                        emit_for_loop(
+                            builder,
+                            iv_k_main,
+                            k_start,
+                            task.k_end,
+                            1,
+                            |builder, red_k| {
+                                let idx_a = add_scaled_i64(
+                                    builder,
+                                    a_row_base,
+                                    red_k,
+                                    spec.access_a.reduction_coeff,
+                                );
+                                let av = load_f32_at_flat(builder, a_ptr, idx_a);
+                                let panel_k = builder.ins().iadd_imm(red_k, -k_start);
+                                let panel_base = if NR == 1 {
+                                    panel_k
+                                } else {
+                                    builder.ins().imul_imm(panel_k, NR)
+                                };
+
+                                for (lane, &var) in acc_vars.iter().enumerate() {
+                                    let panel_idx = if lane == 0 {
+                                        panel_base
+                                    } else {
+                                        builder.ins().iadd_imm(panel_base, lane as i64)
+                                    };
+                                    let bv = load_f32_at_flat(builder, b_panel_ptr, panel_idx);
+                                    let cur = builder.use_var(var);
+                                    let prod = builder.ins().fmul(av, bv);
+                                    let next = builder.ins().fadd(cur, prod);
+                                    builder.def_var(var, next);
+                                }
+                                Ok(())
+                            },
+                        )?;
+
+                        for (lane, &var) in acc_vars.iter().enumerate() {
+                            let col_j = if lane == 0 {
+                                col_j0
+                            } else {
+                                builder.ins().iadd_imm(col_j0, lane as i64)
+                            };
+                            let out_flat = output_flat_2d(builder, row_i, col_j, n);
+                            let acc = builder.use_var(var);
+                            store_f32_at_flat(builder, output_ptr, out_flat, acc);
+                        }
+                        Ok(())
+                    },
+                )?;
                 Ok(())
             },
         )?;
@@ -1539,7 +1559,8 @@ mod tests {
         let ext_b = GlobalId::new(&mut rng);
         let ext_bias = GlobalId::new(&mut rng);
         let ext_ones = GlobalId::new(&mut rng);
-        let (mut graph, input_map) = MilliOpGraph::new([ext_a, ext_b, ext_bias, ext_ones], &mut rng);
+        let (mut graph, input_map) =
+            MilliOpGraph::new([ext_a, ext_b, ext_bias, ext_ones], &mut rng);
         let a = input_map[&ext_a];
         let b = input_map[&ext_b];
         let bias = input_map[&ext_bias];

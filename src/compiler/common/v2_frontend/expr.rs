@@ -42,10 +42,7 @@ pub enum ScalarUnaryOp {
 #[derive(Debug, Clone)]
 pub enum ScalarExpr {
     /// Reference to element `flat_index` of tensor `tensor`.
-    Element {
-        tensor: GlobalId,
-        flat_index: usize,
-    },
+    Element { tensor: GlobalId, flat_index: usize },
     /// Compile-time constant (stored as f64 bits for exact representation).
     Literal { value: f64 },
     /// Binary scalar operation.

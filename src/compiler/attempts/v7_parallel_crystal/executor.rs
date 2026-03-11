@@ -292,7 +292,10 @@ fn try_execute_loop_parallel_rank2(
 
     let mut grouped = BTreeMap::<(usize, usize), RowTaskBlock<'_>>::new();
     for task in loop_tasks {
-        if task.output_shape != output_shape || task.output_start.len() != 2 || task.output_end.len() != 2 {
+        if task.output_shape != output_shape
+            || task.output_start.len() != 2
+            || task.output_end.len() != 2
+        {
             return Ok(false);
         }
         let row_start = task.output_start[0];
@@ -490,7 +493,8 @@ fn execute_task(
                 acc += eval_reduction_term_f32(&reduction.canonical_term, &load_vals)?;
             }
             let out_flat = flatten_index(output_shape, coord);
-            if out_flat < output_elem_offset || out_flat >= output_elem_offset + output_buffer.len() {
+            if out_flat < output_elem_offset || out_flat >= output_elem_offset + output_buffer.len()
+            {
                 return Err(V7ExecuteError::TaskRankMismatch { loop_index });
             }
             output_buffer[out_flat - output_elem_offset] = acc;
@@ -737,7 +741,9 @@ fn execute_task_fast_mul2_rank2(
                 idx_b += b_k;
             }
             if i < output_row_offset {
-                return Err(V7ExecuteError::TaskRankMismatch { loop_index: task.loop_index });
+                return Err(V7ExecuteError::TaskRankMismatch {
+                    loop_index: task.loop_index,
+                });
             }
             output_buffer[(i - output_row_offset) * n + j] = acc;
         }
@@ -768,7 +774,9 @@ fn execute_task_fast_mul2_rank2_row_accum(
 
     for i in task.output_start[0]..task.output_end[0] {
         if i < output_row_offset {
-            return Err(V7ExecuteError::TaskRankMismatch { loop_index: task.loop_index });
+            return Err(V7ExecuteError::TaskRankMismatch {
+                loop_index: task.loop_index,
+            });
         }
         let i64_i = i as i64;
         let out_start = (i - output_row_offset) * n + j_start;

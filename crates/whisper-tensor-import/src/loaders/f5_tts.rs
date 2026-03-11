@@ -70,13 +70,14 @@ impl Loader for F5TtsLoader {
 
         let base_dir = Some(dir.as_path());
 
-        let preprocess_data =
-            crate::load_onnx_file(&preprocess_path).map_err(|e| LoaderError::LoadFailed(e.into()))?;
+        let preprocess_data = crate::load_onnx_file(&preprocess_path)
+            .map_err(|e| LoaderError::LoadFailed(e.into()))?;
         let (_, preprocess_out) = onnx_bytes_to_model(&preprocess_data, "f5-preprocess", base_dir)?;
 
-        let transformer_data =
-            crate::load_onnx_file(&transformer_path).map_err(|e| LoaderError::LoadFailed(e.into()))?;
-        let (_, transformer_out) = onnx_bytes_to_model(&transformer_data, "f5-transformer", base_dir)?;
+        let transformer_data = crate::load_onnx_file(&transformer_path)
+            .map_err(|e| LoaderError::LoadFailed(e.into()))?;
+        let (_, transformer_out) =
+            onnx_bytes_to_model(&transformer_data, "f5-transformer", base_dir)?;
 
         let decode_data =
             crate::load_onnx_file(&decode_path).map_err(|e| LoaderError::LoadFailed(e.into()))?;
@@ -85,8 +86,7 @@ impl Loader for F5TtsLoader {
         // Load vocab
         let vocab_path = dir.join("vocab.txt");
         let vocab = if vocab_path.exists() {
-            std::fs::read_to_string(&vocab_path)
-                .map_err(|e| LoaderError::LoadFailed(e.into()))?
+            std::fs::read_to_string(&vocab_path).map_err(|e| LoaderError::LoadFailed(e.into()))?
         } else {
             return Err(LoaderError::LoadFailed(anyhow::anyhow!(
                 "vocab.txt not found in {}",
@@ -100,9 +100,9 @@ impl Loader for F5TtsLoader {
 
         // Combine all models into one output
         let mut models = Vec::new();
-        models.extend(preprocess_out.models);    // model index 0
-        models.extend(transformer_out.models);   // model index 1
-        models.extend(decode_out.models);        // model index 2
+        models.extend(preprocess_out.models); // model index 0
+        models.extend(transformer_out.models); // model index 1
+        models.extend(decode_out.models); // model index 2
 
         let output = LoaderOutput {
             models,
@@ -122,10 +122,7 @@ impl Loader for F5TtsLoader {
 /// 1. Preprocess (model 0): audio + text_ids + max_duration → noise, rope, conditioning, ref_signal_len
 /// 2. Scan loop (model 1): 31 iterations of Transformer + Euler step
 /// 3. Decode (model 2): final denoised + ref_signal_len → audio waveform
-fn build_f5_supergraph(
-    vocab: &str,
-    rng: &mut impl rand::Rng,
-) -> TextToSpeechInterface {
+fn build_f5_supergraph(vocab: &str, rng: &mut impl rand::Rng) -> TextToSpeechInterface {
     let mut builder = SuperGraphBuilder::new();
 
     // External input links
@@ -295,10 +292,8 @@ fn build_f5_denoising_loop(
     //            = (1 - dt) * noise + dt * denoised
     // where dt = 1.0 / NFE_STEPS
     {
-        let (mut mg, input_map) = MilliOpGraph::new(
-            [inner_noise_in.global_id(), raw_denoised.global_id()],
-            rng,
-        );
+        let (mut mg, input_map) =
+            MilliOpGraph::new([inner_noise_in.global_id(), raw_denoised.global_id()], rng);
         let noise_in = *input_map.get(&inner_noise_in.global_id()).unwrap();
         let denoised_in = *input_map.get(&raw_denoised.global_id()).unwrap();
 

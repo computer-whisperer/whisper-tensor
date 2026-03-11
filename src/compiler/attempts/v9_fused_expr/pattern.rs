@@ -10,9 +10,7 @@
 //! classification. This enables patterns like `tanh(matmul + bias)` where a
 //! reduction is embedded inside pointwise operations.
 
-use crate::compiler::common::v2_frontend::{
-    OutputBinding, ScalarBinOp, ScalarExpr, ScalarUnaryOp,
-};
+use crate::compiler::common::v2_frontend::{OutputBinding, ScalarBinOp, ScalarExpr, ScalarUnaryOp};
 use crate::graph::GlobalId;
 use std::collections::{HashMap, HashSet};
 
@@ -207,10 +205,7 @@ fn extract_inner(
 }
 
 /// Extract pattern for a reduction body term (no fold detection).
-fn extract_body_inner(
-    expr: &ScalarExpr,
-    loads: &mut Vec<(GlobalId, usize)>,
-) -> PatternExpr {
+fn extract_body_inner(expr: &ScalarExpr, loads: &mut Vec<(GlobalId, usize)>) -> PatternExpr {
     match expr {
         ScalarExpr::Element {
             tensor, flat_index, ..
@@ -323,10 +318,9 @@ pub fn topological_sort_patterns(patterns: &mut Vec<RecoveredPattern>) {
             input_tensors_of(p).iter().all(|t| {
                 // Either this input isn't produced by any remaining pattern,
                 // or it's already been emitted.
-                !remaining
-                    .iter()
-                    .any(|other| other.output_tensor == *t && other.output_tensor != p.output_tensor)
-                    || emitted.contains(t)
+                !remaining.iter().any(|other| {
+                    other.output_tensor == *t && other.output_tensor != p.output_tensor
+                }) || emitted.contains(t)
             })
         });
 
@@ -479,8 +473,7 @@ fn solve_affine_coeffs(
                 let load_delta = load_flats[i] - ref_load;
                 let mut other_contribution = 0i64;
                 for d2 in 0..d {
-                    other_contribution +=
-                        coeffs[d2] * (multi[d2] as i64 - ref_multi[d2] as i64);
+                    other_contribution += coeffs[d2] * (multi[d2] as i64 - ref_multi[d2] as i64);
                 }
                 coeffs[d] = (load_delta - other_contribution) / axis_delta;
                 break;

@@ -259,9 +259,9 @@ fn finalize_group(
 
     for (tensor_id, value_ref) in produced {
         let needs_store = output_tensors.contains(&tensor_id)
-            || consumer_ops.get(&tensor_id).is_some_and(|consumers| {
-                consumers.iter().any(|c| !group.op_ids.contains(c))
-            });
+            || consumer_ops
+                .get(&tensor_id)
+                .is_some_and(|consumers| consumers.iter().any(|c| !group.op_ids.contains(c)));
 
         if needs_store {
             // Store with same strides as if we loaded (it's the output shape).

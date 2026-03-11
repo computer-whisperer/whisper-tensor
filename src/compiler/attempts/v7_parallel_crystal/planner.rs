@@ -328,7 +328,9 @@ fn estimate_op_nano_count(
     let inputs: Vec<GlobalId> = op.inputs().collect();
 
     let scalar_elems = |tensor: GlobalId| -> Result<usize, V7PlanError> {
-        let shape = shapes.get(&tensor).ok_or(PipelineError::MissingShape(tensor))?;
+        let shape = shapes
+            .get(&tensor)
+            .ok_or(PipelineError::MissingShape(tensor))?;
         shape.iter().try_fold(1usize, |acc, &dim| {
             checked_mul_usize(
                 acc,
@@ -341,16 +343,18 @@ fn estimate_op_nano_count(
     match kind.as_str() {
         "Constant" | "ConstantOfShape" => Ok(0),
         "Add" | "Sub" | "Mul" | "Div" | "Max" | "Min" => {
-            let out = outputs.first().copied().ok_or_else(|| {
-                V7PlanError::Planner(format!("missing output for op {kind}"))
-            })?;
+            let out = outputs
+                .first()
+                .copied()
+                .ok_or_else(|| V7PlanError::Planner(format!("missing output for op {kind}")))?;
             let elems = scalar_elems(out)?;
             checked_mul_usize(elems, 4, &format!("binary op count for {kind}"))
         }
         "Neg" | "Abs" | "Exp" | "Ln" | "Sqrt" | "Reciprocal" | "Floor" | "Ceil" | "Tanh" => {
-            let out = outputs.first().copied().ok_or_else(|| {
-                V7PlanError::Planner(format!("missing output for op {kind}"))
-            })?;
+            let out = outputs
+                .first()
+                .copied()
+                .ok_or_else(|| V7PlanError::Planner(format!("missing output for op {kind}")))?;
             let elems = scalar_elems(out)?;
             checked_mul_usize(elems, 3, &format!("unary op count for {kind}"))
         }

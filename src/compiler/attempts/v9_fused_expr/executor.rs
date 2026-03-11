@@ -108,8 +108,7 @@ pub mod dag {
                 let producer_kt = &kernel_tiles[producer_ki];
 
                 // 1:1 tile mapping when extents and tile counts match
-                let one_to_one = producer_kernel.parallel_extent
-                    == consumer_kernel.parallel_extent
+                let one_to_one = producer_kernel.parallel_extent == consumer_kernel.parallel_extent
                     && producer_kt.tile_ranges.len() == consumer_kt.tile_ranges.len()
                     && producer_kt
                         .tile_ranges
@@ -274,8 +273,7 @@ pub mod dag {
                 let producer_kernel = &graph.kernels[kernel_indices[producer_bi]];
                 let producer_kt = &kernel_tiles[producer_bi];
 
-                let one_to_one = producer_kernel.parallel_extent
-                    == consumer_kernel.parallel_extent
+                let one_to_one = producer_kernel.parallel_extent == consumer_kernel.parallel_extent
                     && producer_kt.tile_ranges.len() == consumer_kt.tile_ranges.len()
                     && producer_kt
                         .tile_ranges
@@ -425,16 +423,13 @@ pub mod dag {
 
                         let mut newly_ready = Vec::new();
                         for &dep_idx in &node.dependents {
-                            let prev = nodes[dep_idx]
-                                .remaining_deps
-                                .fetch_sub(1, Ordering::AcqRel);
+                            let prev = nodes[dep_idx].remaining_deps.fetch_sub(1, Ordering::AcqRel);
                             if prev == 1 {
                                 newly_ready.push(dep_idx);
                             }
                         }
 
-                        let prev_remaining =
-                            wq_ref.tasks_remaining.fetch_sub(1, Ordering::AcqRel);
+                        let prev_remaining = wq_ref.tasks_remaining.fetch_sub(1, Ordering::AcqRel);
 
                         if !newly_ready.is_empty() {
                             let mut q = wq_ref.queue.lock().unwrap();

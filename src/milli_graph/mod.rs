@@ -811,7 +811,10 @@ impl MilliOpGraph {
         let mut intermediate_values = HashMap::new();
         for (ext_id, tensor_value) in inputs {
             let int_id = self.input_map[ext_id];
-            shapes.insert(int_id, tensor_value.shape().iter().map(|&d| d as usize).collect());
+            shapes.insert(
+                int_id,
+                tensor_value.shape().iter().map(|&d| d as usize).collect(),
+            );
             intermediate_values.insert(int_id, tensor_value.clone());
         }
 
@@ -819,7 +822,10 @@ impl MilliOpGraph {
             let op = &self.ops[op_id];
             let out_vec: Vec<_> = op.eval(&intermediate_values, &mut backend)?.collect();
             for (tensor_id, value) in out_vec {
-                shapes.insert(tensor_id, value.shape().iter().map(|&d| d as usize).collect());
+                shapes.insert(
+                    tensor_id,
+                    value.shape().iter().map(|&d| d as usize).collect(),
+                );
                 intermediate_values.insert(tensor_id, value);
             }
         }
@@ -832,7 +838,13 @@ impl MilliOpGraph {
     pub fn collect_all_shapes_and_dtypes(
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
-    ) -> Result<(HashMap<GlobalId, Vec<usize>>, HashMap<GlobalId, crate::dtype::DType>), MilliOpGraphError> {
+    ) -> Result<
+        (
+            HashMap<GlobalId, Vec<usize>>,
+            HashMap<GlobalId, crate::dtype::DType>,
+        ),
+        MilliOpGraphError,
+    > {
         let mut backend = EvalBackend::NDArray;
         let mut shapes = HashMap::new();
         let mut dtypes = HashMap::new();
@@ -840,7 +852,10 @@ impl MilliOpGraph {
         let mut intermediate_values = HashMap::new();
         for (ext_id, tensor_value) in inputs {
             let int_id = self.input_map[ext_id];
-            shapes.insert(int_id, tensor_value.shape().iter().map(|&d| d as usize).collect());
+            shapes.insert(
+                int_id,
+                tensor_value.shape().iter().map(|&d| d as usize).collect(),
+            );
             dtypes.insert(int_id, tensor_value.dtype());
             intermediate_values.insert(int_id, tensor_value.clone());
         }
@@ -849,7 +864,10 @@ impl MilliOpGraph {
             let op = &self.ops[op_id];
             let out_vec: Vec<_> = op.eval(&intermediate_values, &mut backend)?.collect();
             for (tensor_id, value) in out_vec {
-                shapes.insert(tensor_id, value.shape().iter().map(|&d| d as usize).collect());
+                shapes.insert(
+                    tensor_id,
+                    value.shape().iter().map(|&d| d as usize).collect(),
+                );
                 dtypes.insert(tensor_id, value.dtype());
                 intermediate_values.insert(tensor_id, value);
             }
@@ -1781,16 +1799,12 @@ mod tests {
             minus[i] -= eps;
 
             let f_plus = eval_scalar_graph(
-                &|g, ids, r| {
-                    build_fn(g, ids[0], r)
-                },
+                &|g, ids, r| build_fn(g, ids[0], r),
                 &[plus],
                 std::slice::from_ref(&input_shape),
             );
             let f_minus = eval_scalar_graph(
-                &|g, ids, r| {
-                    build_fn(g, ids[0], r)
-                },
+                &|g, ids, r| build_fn(g, ids[0], r),
                 &[minus],
                 std::slice::from_ref(&input_shape),
             );
@@ -2975,7 +2989,10 @@ mod tests {
         grad_map.insert(scaled, ones);
         let grads = generate_milli_backward(&mut graph, group, &grad_map, rng);
 
-        let mut training_meta = TrainingMetadata { loss: Some(loss), ..Default::default() };
+        let mut training_meta = TrainingMetadata {
+            loss: Some(loss),
+            ..Default::default()
+        };
         training_meta.param_to_grad.insert(param, grads[&param]);
 
         (graph, param_ext, param, loss, training_meta)
@@ -3531,7 +3548,10 @@ mod tests {
         grad_map.extend(fwd_grads);
 
         // Training metadata
-        let mut training_meta = TrainingMetadata { loss: Some(loss), ..Default::default() };
+        let mut training_meta = TrainingMetadata {
+            loss: Some(loss),
+            ..Default::default()
+        };
         training_meta.param_to_grad.insert(w, grad_map[&w]);
 
         // Optimizer
@@ -3672,7 +3692,10 @@ mod tests {
         let fwd_grads = generate_milli_backward(&mut graph, fwd_group, &grad_map, rng);
         grad_map.extend(fwd_grads);
 
-        let mut training_meta = TrainingMetadata { loss: Some(loss), ..Default::default() };
+        let mut training_meta = TrainingMetadata {
+            loss: Some(loss),
+            ..Default::default()
+        };
         training_meta.param_to_grad.insert(w, grad_map[&w]);
 
         generate_optimizer_ops(
@@ -3833,7 +3856,10 @@ mod tests {
         let fwd_grads = generate_milli_backward(&mut graph, fwd_group, &grad_map, rng);
         grad_map.extend(fwd_grads);
 
-        let mut training_meta = TrainingMetadata { loss: Some(loss), ..Default::default() };
+        let mut training_meta = TrainingMetadata {
+            loss: Some(loss),
+            ..Default::default()
+        };
         training_meta.param_to_grad.insert(w1, grad_map[&w1]);
         training_meta.param_to_grad.insert(w2, grad_map[&w2]);
 

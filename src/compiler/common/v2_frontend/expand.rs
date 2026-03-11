@@ -197,13 +197,29 @@ impl ExprExpander {
             AnyMilliOp::ReduceSum(r) => {
                 let inputs: Vec<GlobalId> = op.inputs().collect();
                 let outputs: Vec<GlobalId> = op.outputs().collect();
-                self.emit_reduce(inputs[0], outputs[0], r.axes_tensor(), r.keepdims(), ScalarBinOp::Add, 0.0, out)
+                self.emit_reduce(
+                    inputs[0],
+                    outputs[0],
+                    r.axes_tensor(),
+                    r.keepdims(),
+                    ScalarBinOp::Add,
+                    0.0,
+                    out,
+                )
             }
 
             AnyMilliOp::ReduceMax(r) => {
                 let inputs: Vec<GlobalId> = op.inputs().collect();
                 let outputs: Vec<GlobalId> = op.outputs().collect();
-                self.emit_reduce(inputs[0], outputs[0], r.axes_tensor(), r.keepdims(), ScalarBinOp::Max, f64::NEG_INFINITY, out)
+                self.emit_reduce(
+                    inputs[0],
+                    outputs[0],
+                    r.axes_tensor(),
+                    r.keepdims(),
+                    ScalarBinOp::Max,
+                    f64::NEG_INFINITY,
+                    out,
+                )
             }
 
             AnyMilliOp::ReduceMean(r) => {
@@ -350,16 +366,21 @@ impl ExprExpander {
             (1, 1)
         };
 
-
         for batch_idx in 0..batch_total {
             // Compute batch multi-index
             let batch_multi = flat_to_multi(batch_idx, batch_shape);
 
             // Flat offset into A and B for this batch
-            let a_batch_off: usize = batch_multi.iter().zip(a_batch_strides.iter())
-                .map(|(&mi, &s)| mi * s).sum();
-            let b_batch_off: usize = batch_multi.iter().zip(b_batch_strides.iter())
-                .map(|(&mi, &s)| mi * s).sum();
+            let a_batch_off: usize = batch_multi
+                .iter()
+                .zip(a_batch_strides.iter())
+                .map(|(&mi, &s)| mi * s)
+                .sum();
+            let b_batch_off: usize = batch_multi
+                .iter()
+                .zip(b_batch_strides.iter())
+                .map(|(&mi, &s)| mi * s)
+                .sum();
             let out_batch_off = batch_idx * out_mat_size;
 
             let mut row = 0;
@@ -399,7 +420,6 @@ impl ExprExpander {
         }
         Ok(())
     }
-
 
     /// Identity view: output[flat_i] = input[flat_i].
     /// Used for Reshape, Squeeze, Unsqueeze where the flat layout is preserved.
@@ -576,7 +596,8 @@ impl ExprExpander {
             let mut expr = ScalarExpr::Literal { value: identity };
 
             // Iterate over all combinations of reduced dims
-            let reduced_dims: Vec<usize> = reduced_axes.iter().map(|&d| data_shape_owned[d]).collect();
+            let reduced_dims: Vec<usize> =
+                reduced_axes.iter().map(|&d| data_shape_owned[d]).collect();
             let reduced_total: usize = reduced_dims.iter().product();
 
             for ri in 0..reduced_total {
@@ -625,7 +646,15 @@ impl ExprExpander {
 
         // First emit sum bindings into a temporary vec
         let start = out.len();
-        self.emit_reduce(data_id, out_id, axes_tensor, keepdims, ScalarBinOp::Add, 0.0, out)?;
+        self.emit_reduce(
+            data_id,
+            out_id,
+            axes_tensor,
+            keepdims,
+            ScalarBinOp::Add,
+            0.0,
+            out,
+        )?;
 
         // Wrap each sum expression with / count
         let count_f64 = count as f64;
@@ -710,7 +739,6 @@ impl ExprExpander {
         recurse(0, shape, &axis_strides, &row_strides, 0, &mut indices);
         indices
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -904,7 +932,13 @@ mod tests {
         assert_eq!(bindings.len(), 4);
         for (i, b) in bindings.iter().enumerate() {
             assert_eq!(b.flat_index, i);
-            assert!(matches!(&b.expr, ScalarExpr::Unary { op: ScalarUnaryOp::Neg, .. }));
+            assert!(matches!(
+                &b.expr,
+                ScalarExpr::Unary {
+                    op: ScalarUnaryOp::Neg,
+                    ..
+                }
+            ));
         }
     }
 
@@ -970,18 +1004,31 @@ mod tests {
 
         let expander = ExprExpander::new_sampled(shapes, 64);
         let bindings = expander.expand(&graph).unwrap();
-        assert!(bindings.len() >= 4, "need at least 4 bindings, got {}", bindings.len());
+        assert!(
+            bindings.len() >= 4,
+            "need at least 4 bindings, got {}",
+            bindings.len()
+        );
 
         // Verify: sampled positions must vary along BOTH axes
         let out_shape = vec![768usize, 768];
-        let coords: Vec<Vec<usize>> = bindings.iter()
+        let coords: Vec<Vec<usize>> = bindings
+            .iter()
             .map(|b| flat_to_multi(b.flat_index, &out_shape))
             .collect();
 
         let rows: std::collections::HashSet<usize> = coords.iter().map(|c| c[0]).collect();
         let cols: std::collections::HashSet<usize> = coords.iter().map(|c| c[1]).collect();
-        assert!(rows.len() >= 2, "samples must vary along axis 0, got {} unique rows", rows.len());
-        assert!(cols.len() >= 2, "samples must vary along axis 1, got {} unique cols", cols.len());
+        assert!(
+            rows.len() >= 2,
+            "samples must vary along axis 0, got {} unique rows",
+            rows.len()
+        );
+        assert!(
+            cols.len() >= 2,
+            "samples must vary along axis 1, got {} unique cols",
+            cols.len()
+        );
     }
 
     #[test]

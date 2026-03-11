@@ -120,8 +120,14 @@ fn slice_axis(
     end: i64,
 ) -> Result<Arc<Slice>, crate::onnx_graph::Error> {
     let const_shape = Shape::new(vec![Dimension::new(Some(1), None, None)]);
-    let start_const = Constant::new(None, TensorData::new(vec![start].into(), const_shape.clone())?);
-    let end_const = Constant::new(None, TensorData::new(vec![end].into(), const_shape.clone())?);
+    let start_const = Constant::new(
+        None,
+        TensorData::new(vec![start].into(), const_shape.clone())?,
+    );
+    let end_const = Constant::new(
+        None,
+        TensorData::new(vec![end].into(), const_shape.clone())?,
+    );
     let axis_const = Constant::new(None, TensorData::new(vec![axis].into(), const_shape)?);
     Slice::new(None, input, start_const, end_const, Some(axis_const), None)
 }
@@ -256,19 +262,14 @@ pub fn load_deepseek_v2(
             None,
             reshape(
                 q,
-                vec![
-                    0,
-                    0,
-                    config.num_attention_heads as i64,
-                    qk_head_dim as i64,
-                ],
+                vec![0, 0, config.num_attention_heads as i64, qk_head_dim as i64],
             )?,
             Some(vec![0, 2, 1, 3]),
         );
         // Split Q into nope and rope portions
-        let q_nope: Arc<dyn Tensor> =
-            slice_axis(q.clone(), 3, 0, config.qk_nope_head_dim as i64)?;
-        let q_rope: Arc<dyn Tensor> = slice_axis(q, 3, config.qk_nope_head_dim as i64, qk_head_dim as i64)?;
+        let q_nope: Arc<dyn Tensor> = slice_axis(q.clone(), 3, 0, config.qk_nope_head_dim as i64)?;
+        let q_rope: Arc<dyn Tensor> =
+            slice_axis(q, 3, config.qk_nope_head_dim as i64, qk_head_dim as i64)?;
 
         // KV path: compress then decompress
         // kv_a_proj_with_mqa: [B, S, hidden] → [B, S, kv_lora_rank + qk_rope_head_dim]
@@ -293,33 +294,21 @@ pub fn load_deepseek_v2(
         )?;
 
         // Decompress: kv_b_proj: [B, S, kv_lora_rank] → [B, S, nH * (qk_nope_head_dim + v_head_dim)]
-        let kv_b = linear(
-            &layer_weight_manager.prefix("self_attn.kv_b_proj"),
-            c_kv,
-        )?;
+        let kv_b = linear(&layer_weight_manager.prefix("self_attn.kv_b_proj"), c_kv)?;
         let nope_plus_v = config.qk_nope_head_dim + config.v_head_dim;
         // kv_b: [B, S, nH * (nope + v)] → [B, nH, S, nope + v]
         let kv_b = Transpose::new(
             None,
             reshape(
                 kv_b,
-                vec![
-                    0,
-                    0,
-                    config.num_attention_heads as i64,
-                    nope_plus_v as i64,
-                ],
+                vec![0, 0, config.num_attention_heads as i64, nope_plus_v as i64],
             )?,
             Some(vec![0, 2, 1, 3]),
         );
         let k_nope: Arc<dyn Tensor> =
             slice_axis(kv_b.clone(), 3, 0, config.qk_nope_head_dim as i64)?;
-        let v: Arc<dyn Tensor> = slice_axis(
-            kv_b,
-            3,
-            config.qk_nope_head_dim as i64,
-            nope_plus_v as i64,
-        )?;
+        let v: Arc<dyn Tensor> =
+            slice_axis(kv_b, 3, config.qk_nope_head_dim as i64, nope_plus_v as i64)?;
 
         // k_rope_shared: [B, S, rope_dim] → [B, 1, S, rope_dim]
         let k_rope_shared = unsqueeze(k_rope_shared, 1)?;
@@ -389,18 +378,10 @@ pub fn load_deepseek_v2(
             new_seq_len_dim,
             v.shape()[3].clone(),
         ]);
-        let k = Concat::new_with_output_shape(
-            None,
-            vec![kv_cache_input_k.clone(), k],
-            2,
-            k_new_shape,
-        )?;
-        let v = Concat::new_with_output_shape(
-            None,
-            vec![kv_cache_input_v.clone(), v],
-            2,
-            v_new_shape,
-        )?;
+        let k =
+            Concat::new_with_output_shape(None, vec![kv_cache_input_k.clone(), k], 2, k_new_shape)?;
+        let v =
+            Concat::new_with_output_shape(None, vec![kv_cache_input_v.clone(), v], 2, v_new_shape)?;
 
         input_tensors.push(kv_cache_input_k);
         output_tensors.push((format!("kv_cache_output_k_{i}"), k.clone()));
@@ -417,7 +398,11 @@ pub fn load_deepseek_v2(
         let output = Transpose::new(None, output, Some(vec![0, 2, 1, 3]));
         let output = reshape(
             output,
-            vec![0, 0, (config.num_attention_heads * config.v_head_dim) as i64],
+            vec![
+                0,
+                0,
+                (config.num_attention_heads * config.v_head_dim) as i64,
+            ],
         )?;
         let hidden_layer = linear(&layer_weight_manager.prefix("self_attn.o_proj"), output)?;
 
@@ -438,10 +423,7 @@ pub fn load_deepseek_v2(
                 ffn_norm.clone(),
             )?;
             let gate = silu(gate)?;
-            let up = linear(
-                &layer_weight_manager.prefix("mlp.up_proj"),
-                ffn_norm,
-            )?;
+            let up = linear(&layer_weight_manager.prefix("mlp.up_proj"), ffn_norm)?;
             let hidden = Mul::new(None, gate, up)?;
             linear(&layer_weight_manager.prefix("mlp.down_proj"), hidden)?
         } else {
@@ -490,26 +472,14 @@ pub fn load_deepseek_v2(
             let mut down_weights: Vec<Arc<dyn Tensor>> = Vec::with_capacity(n_experts);
             for e in 0..n_experts {
                 let expert_wm = mlp_wm.prefix(&format!("experts.{e}"));
-                gate_weights.push(unsqueeze(
-                    expert_wm.get_tensor("gate_proj.weight")?,
-                    0,
-                )?);
-                up_weights.push(unsqueeze(
-                    expert_wm.get_tensor("up_proj.weight")?,
-                    0,
-                )?);
-                down_weights.push(unsqueeze(
-                    expert_wm.get_tensor("down_proj.weight")?,
-                    0,
-                )?);
+                gate_weights.push(unsqueeze(expert_wm.get_tensor("gate_proj.weight")?, 0)?);
+                up_weights.push(unsqueeze(expert_wm.get_tensor("up_proj.weight")?, 0)?);
+                down_weights.push(unsqueeze(expert_wm.get_tensor("down_proj.weight")?, 0)?);
             }
             // Each: [n_experts, out_features, in_features]
-            let stacked_gate: Arc<dyn Tensor> =
-                Concat::new(None, gate_weights, 0)?;
-            let stacked_up: Arc<dyn Tensor> =
-                Concat::new(None, up_weights, 0)?;
-            let stacked_down: Arc<dyn Tensor> =
-                Concat::new(None, down_weights, 0)?;
+            let stacked_gate: Arc<dyn Tensor> = Concat::new(None, gate_weights, 0)?;
+            let stacked_up: Arc<dyn Tensor> = Concat::new(None, up_weights, 0)?;
+            let stacked_down: Arc<dyn Tensor> = Concat::new(None, down_weights, 0)?;
 
             // Flatten indices from [1, 1, k] to [k] for Gather
             let indices_flat: Arc<dyn Tensor> =
@@ -534,8 +504,7 @@ pub fn load_deepseek_v2(
 
             // Weighted sum by routing weights
             // topk_values: [1, 1, k] → reshape to [k, 1, 1] for broadcasting
-            let routing_weights: Arc<dyn Tensor> =
-                reshape(topk_values, vec![k as i64, 1, 1])?;
+            let routing_weights: Arc<dyn Tensor> = reshape(topk_values, vec![k as i64, 1, 1])?;
             let weighted = Mul::new(None, expert_out, routing_weights)?;
             // Sum over expert dim (axis 0) → [1, 1, hidden]
             let routed_output = sum_dim(weighted, 0, Some(true))?;

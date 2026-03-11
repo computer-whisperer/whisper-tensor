@@ -141,7 +141,10 @@ fn main() {
                     .into()
             }
             _ => {
-                println!("  Skipping input '{}' with unsupported dtype {:?}", name, dtype);
+                println!(
+                    "  Skipping input '{}' with unsupported dtype {:?}",
+                    name, dtype
+                );
                 continue;
             }
         };
@@ -167,7 +170,12 @@ fn main() {
                 t0.elapsed().as_secs_f64() * 1e3
             );
             for (name, tensor) in outputs {
-                println!("    output '{}': {:?} {:?}", name, tensor.dtype(), tensor.shape());
+                println!(
+                    "    output '{}': {:?} {:?}",
+                    name,
+                    tensor.dtype(),
+                    tensor.shape()
+                );
             }
         }
         Err(e) => {
@@ -181,9 +189,7 @@ fn main() {
     let tensors_by_name = sym_graph.get_tensors_by_name();
     let milli_inputs: HashMap<GlobalId, NumericTensor<DynRank>> = inputs_by_name
         .into_iter()
-        .filter_map(|(name, tensor)| {
-            tensors_by_name.get(&name).map(|id| (*id, tensor))
-        })
+        .filter_map(|(name, tensor)| tensors_by_name.get(&name).map(|id| (*id, tensor)))
         .collect();
 
     // Also add initialized tensors (weights)
@@ -193,7 +199,10 @@ fn main() {
         all_inputs.insert(id, tensor);
     }
 
-    println!("\n  Collecting shapes from MilliOpGraph ({} input tensors)...", all_inputs.len());
+    println!(
+        "\n  Collecting shapes from MilliOpGraph ({} input tensors)...",
+        all_inputs.len()
+    );
     let t0 = Instant::now();
     let shapes_result = milli_graph.collect_all_shapes(&all_inputs);
     match shapes_result {

@@ -2265,9 +2265,11 @@ impl NDArrayNumericTensor<DynRank> {
                     .collect();
 
                 if largest {
-                    pairs.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                    pairs
+                        .sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
                 } else {
-                    pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+                    pairs
+                        .sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
                 }
 
                 for (ki, &(val, orig_idx)) in pairs.iter().take(k).enumerate() {
@@ -2278,16 +2280,10 @@ impl NDArrayNumericTensor<DynRank> {
             }
         }
 
-        let values_arr = ndarray::ArrayD::from_shape_vec(
-            ndarray::IxDyn(&out_shape),
-            values_buf,
-        )
-        .map_err(NDArrayNumericTensorError::ShapeError)?;
-        let indices_arr = ndarray::ArrayD::from_shape_vec(
-            ndarray::IxDyn(&out_shape),
-            indices_buf,
-        )
-        .map_err(NDArrayNumericTensorError::ShapeError)?;
+        let values_arr = ndarray::ArrayD::from_shape_vec(ndarray::IxDyn(&out_shape), values_buf)
+            .map_err(NDArrayNumericTensorError::ShapeError)?;
+        let indices_arr = ndarray::ArrayD::from_shape_vec(ndarray::IxDyn(&out_shape), indices_buf)
+            .map_err(NDArrayNumericTensorError::ShapeError)?;
 
         // Cast values back to original dtype
         let values = NDArrayNumericTensor::F32(values_arr.into_shared()).cast(data.dtype())?;
@@ -2622,7 +2618,9 @@ impl NDArrayNumericTensor<DynRank> {
         macro_rules! as_raw {
             ($arr:expr) => {{
                 let owned = $arr.as_standard_layout();
-                let slice = owned.as_slice().expect("standard_layout guarantees contiguous");
+                let slice = owned
+                    .as_slice()
+                    .expect("standard_layout guarantees contiguous");
                 slice.as_bytes().to_vec()
             }};
         }

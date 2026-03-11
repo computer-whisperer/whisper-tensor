@@ -25,10 +25,7 @@ use whisper_tensor_import::identify_and_load;
 use whisper_tensor_import::onnx_graph::WeightStorageStrategy;
 
 /// Copy a NumericTensor's raw bytes into a buffer slot.
-fn load_tensor_into_buffer(
-    tensor: &NumericTensor<DynRank>,
-    buf: &mut [u8],
-) {
+fn load_tensor_into_buffer(tensor: &NumericTensor<DynRank>, buf: &mut [u8]) {
     let nd = tensor.to_ndarray().expect("can convert to ndarray");
     let bytes = nd.to_contiguous_bytes();
     let copy_len = bytes.len().min(buf.len());
@@ -102,12 +99,10 @@ fn load_model(path: &Path) -> Arc<Model> {
 fn main() {
     tracing_subscriber::fmt::init();
 
-    let model_path = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| {
-            eprintln!("Usage: v9_model_test <model_path>");
-            std::process::exit(1);
-        });
+    let model_path = std::env::args().nth(1).unwrap_or_else(|| {
+        eprintln!("Usage: v9_model_test <model_path>");
+        std::process::exit(1);
+    });
     let path = Path::new(&model_path);
 
     if !path.exists() {
@@ -177,7 +172,10 @@ fn main() {
     );
     let interp_outputs = match sym_result {
         Ok(outputs) => {
-            println!("  Interpreter finished in {:.1}ms", t0.elapsed().as_secs_f64() * 1e3);
+            println!(
+                "  Interpreter finished in {:.1}ms",
+                t0.elapsed().as_secs_f64() * 1e3
+            );
             println!("  {} outputs", outputs.len());
             outputs
         }
@@ -191,9 +189,7 @@ fn main() {
     let tensors_by_name = sym_graph.get_tensors_by_name();
     let milli_inputs: HashMap<GlobalId, NumericTensor<DynRank>> = inputs_by_name
         .into_iter()
-        .filter_map(|(name, tensor)| {
-            tensors_by_name.get(&name).map(|id| (*id, tensor))
-        })
+        .filter_map(|(name, tensor)| tensors_by_name.get(&name).map(|id| (*id, tensor)))
         .collect();
 
     let initialized = sym_graph.get_initialized_tensors(tensor_store);
@@ -206,16 +202,23 @@ fn main() {
     let all_inputs_internal: HashMap<GlobalId, &NumericTensor<DynRank>> = all_inputs
         .iter()
         .filter_map(|(ext_id, tensor)| {
-            milli_graph.input_map.get(ext_id).map(|&int_id| (int_id, tensor))
+            milli_graph
+                .input_map
+                .get(ext_id)
+                .map(|&int_id| (int_id, tensor))
         })
         .collect();
 
     // ---- Cross-check: milli graph vs symbolic graph (no buffer round-trip) ----
     println!("\n  Running milli graph interpreter (no buffers)...");
     let t0 = Instant::now();
-    let milli_intermediates = milli_graph.collect_all_intermediate_values(&all_inputs)
+    let milli_intermediates = milli_graph
+        .collect_all_intermediate_values(&all_inputs)
         .expect("milli graph eval failed");
-    println!("  Milli eval finished in {:.1}ms", t0.elapsed().as_secs_f64() * 1e3);
+    println!(
+        "  Milli eval finished in {:.1}ms",
+        t0.elapsed().as_secs_f64() * 1e3
+    );
 
     // Compare milli outputs vs symbolic outputs
     let output_map_ref = milli_graph.output_map.as_ref().unwrap();
@@ -234,8 +237,13 @@ fn main() {
             let milli_nd = milli_tensor.to_ndarray().unwrap();
             let (max_err, mean_err, _n) = compare_tensors(&interp_nd, &milli_nd);
             if max_err > 1e-4 {
-                println!("  MILLI≠SYM: {:40} max_err={:.2e} mean={:.2e} {:?}",
-                    name, max_err, mean_err, milli_nd.dtype());
+                println!(
+                    "  MILLI≠SYM: {:40} max_err={:.2e} mean={:.2e} {:?}",
+                    name,
+                    max_err,
+                    mean_err,
+                    milli_nd.dtype()
+                );
                 milli_vs_sym_fails += 1;
             }
         }
@@ -243,10 +251,16 @@ fn main() {
     if milli_vs_sym_fails == 0 {
         println!("  Milli graph matches symbolic graph for all outputs.");
     } else {
-        println!("  {} outputs differ between milli and symbolic graph!", milli_vs_sym_fails);
+        println!(
+            "  {} outputs differ between milli and symbolic graph!",
+            milli_vs_sym_fails
+        );
     }
 
-    println!("\n  Collecting shapes and dtypes ({} input tensors)...", all_inputs.len());
+    println!(
+        "\n  Collecting shapes and dtypes ({} input tensors)...",
+        all_inputs.len()
+    );
     let t0 = Instant::now();
     let (shapes, dtypes) = match milli_graph.collect_all_shapes_and_dtypes(&all_inputs) {
         Ok(x) => x,
@@ -267,7 +281,10 @@ fn main() {
         let n_f32 = dtypes.values().filter(|&&dt| dt == DType::F32).count();
         let n_other = dtypes.len() - n_bf16 - n_f32;
         let n_missing = shapes.len() - dtypes.len();
-        eprintln!("  dtypes: {} BF16, {} F32, {} other, {} missing (default to F32)", n_bf16, n_f32, n_other, n_missing);
+        eprintln!(
+            "  dtypes: {} BF16, {} F32, {} other, {} missing (default to F32)",
+            n_bf16, n_f32, n_other, n_missing
+        );
     }
 
     // Get internal output IDs for v9
@@ -294,26 +311,27 @@ fn main() {
     // ---- Compile hybrid execution plan ----
     println!("\nAttempting v9 hybrid compilation...");
     let t0 = Instant::now();
-    let plan = match v9_pipeline::compile_hybrid(&milli_graph, &shapes, &final_output_ids, 0, &dtypes) {
-        Ok(p) => {
-            println!(
-                "  SUCCESS! Compiled in {:.1}ms, {} kernels, {} interpreted ops, {} steps",
-                t0.elapsed().as_secs_f64() * 1e3,
-                p.compiled.kernels.len(),
-                p.interpreted_ops.len(),
-                p.steps.len(),
-            );
-            p
-        }
-        Err(e) => {
-            println!(
-                "  FAILED after {:.1}ms: {}",
-                t0.elapsed().as_secs_f64() * 1e3,
-                e
-            );
-            return;
-        }
-    };
+    let plan =
+        match v9_pipeline::compile_hybrid(&milli_graph, &shapes, &final_output_ids, 0, &dtypes) {
+            Ok(p) => {
+                println!(
+                    "  SUCCESS! Compiled in {:.1}ms, {} kernels, {} interpreted ops, {} steps",
+                    t0.elapsed().as_secs_f64() * 1e3,
+                    p.compiled.kernels.len(),
+                    p.interpreted_ops.len(),
+                    p.steps.len(),
+                );
+                p
+            }
+            Err(e) => {
+                println!(
+                    "  FAILED after {:.1}ms: {}",
+                    t0.elapsed().as_secs_f64() * 1e3,
+                    e
+                );
+                return;
+            }
+        };
 
     // Determinism check: fingerprint kernel ordering and step sequence
     {
@@ -326,7 +344,11 @@ fn main() {
                 inp.hash(&mut h);
             }
         }
-        println!("  kernel fingerprint: {:016x} ({} kernels)", h.finish(), plan.compiled.kernels.len());
+        println!(
+            "  kernel fingerprint: {:016x} ({} kernels)",
+            h.finish(),
+            plan.compiled.kernels.len()
+        );
     }
 
     let layout = &plan.compiled.layout;
@@ -334,9 +356,7 @@ fn main() {
     // ---- Allocate and fill v9 buffers (external inputs only) ----
     println!("\nLoading tensor data into v9 buffers...");
     let t0 = Instant::now();
-    let mut bufs: Vec<Vec<u8>> = (0..layout.num_buffers)
-        .map(|_| Vec::new())
-        .collect();
+    let mut bufs: Vec<Vec<u8>> = (0..layout.num_buffers).map(|_| Vec::new()).collect();
 
     // Allocate all buffers
     for (id, &size) in &layout.tensor_sizes {
@@ -368,7 +388,10 @@ fn main() {
 
     // ---- Execute v9 hybrid plan ----
     let interp_only = std::env::var("V9_INTERP_ONLY").is_ok();
-    eprint!("\nExecuting v9 hybrid plan ({})...", if interp_only { "interp-only" } else { "serial" });
+    eprint!(
+        "\nExecuting v9 hybrid plan ({})...",
+        if interp_only { "interp-only" } else { "serial" }
+    );
     let mut ptrs: Vec<*mut f32> = bufs
         .iter_mut()
         .map(|v| v.as_mut_ptr() as *mut f32)
@@ -400,16 +423,21 @@ fn main() {
                             let mut max_inp_err: f64 = 0.0;
                             let mut num_reds = 0;
                             for inp_id in &kernel.input_tensors {
-                                if let (Some(&inp_idx), Some(inp_shape)) = (
-                                    layout.tensor_index.get(inp_id),
-                                    shapes.get(inp_id),
-                                ) {
+                                if let (Some(&inp_idx), Some(inp_shape)) =
+                                    (layout.tensor_index.get(inp_id), shapes.get(inp_id))
+                                {
                                     let inp_dtype = layout.dtype_of(inp_id);
                                     if let Some(milli_inp) = milli_intermediates.get(inp_id) {
-                                        let inp_buf = read_buffer_as_tensor(&bufs[inp_idx], inp_shape, inp_dtype);
+                                        let inp_buf = read_buffer_as_tensor(
+                                            &bufs[inp_idx],
+                                            inp_shape,
+                                            inp_dtype,
+                                        );
                                         let milli_inp_nd = milli_inp.to_ndarray().unwrap();
-                                        let milli_inp_nd = milli_inp_nd.cast(inp_dtype).unwrap_or(milli_inp_nd);
-                                        let (inp_err, _, _) = compare_tensors(&milli_inp_nd, &inp_buf);
+                                        let milli_inp_nd =
+                                            milli_inp_nd.cast(inp_dtype).unwrap_or(milli_inp_nd);
+                                        let (inp_err, _, _) =
+                                            compare_tensors(&milli_inp_nd, &inp_buf);
                                         max_inp_err = max_inp_err.max(inp_err);
                                     }
                                 }
@@ -417,16 +445,30 @@ fn main() {
                             // Count reductions from the pattern log (approximate via input count)
                             let is_fresh = max_inp_err < 1e-6;
                             if is_fresh {
-                                let inp_dtypes: Vec<_> = kernel.input_tensors.iter()
+                                let inp_dtypes: Vec<_> = kernel
+                                    .input_tensors
+                                    .iter()
                                     .map(|id| format!("{:?}={:?}", id, layout.dtype_of(id)))
                                     .collect();
-                                eprintln!("  FRESH ERROR step {} K{}: {:?} {} elems {:?} shape={:?} max_err={:.2e} mean={:.2e} inputs=[{}]",
-                                    si, ki, out_id, n, dtype, shape, max_err, mean_err, inp_dtypes.join(", "));
+                                eprintln!(
+                                    "  FRESH ERROR step {} K{}: {:?} {} elems {:?} shape={:?} max_err={:.2e} mean={:.2e} inputs=[{}]",
+                                    si,
+                                    ki,
+                                    out_id,
+                                    n,
+                                    dtype,
+                                    shape,
+                                    max_err,
+                                    mean_err,
+                                    inp_dtypes.join(", ")
+                                );
                                 // Print first few differing elements
                                 let milli_f32 = milli_nd.cast(dtype).unwrap_or(milli_nd.clone());
                                 let buf_f32 = buf_tensor.cast(dtype).unwrap_or(buf_tensor.clone());
-                                if let (NDArrayNumericTensor::F32(m), NDArrayNumericTensor::F32(b)) =
-                                    (&milli_f32, &buf_f32)
+                                if let (
+                                    NDArrayNumericTensor::F32(m),
+                                    NDArrayNumericTensor::F32(b),
+                                ) = (&milli_f32, &buf_f32)
                                 {
                                     let ms = m.as_standard_layout();
                                     let bs = b.as_standard_layout();
@@ -436,8 +478,10 @@ fn main() {
                                     for i in 0..ms.len().min(bs.len()) {
                                         let diff = (ms[i] as f64 - bs[i] as f64).abs();
                                         if diff > 1e-6 && printed < 5 {
-                                            eprintln!("    elem[{}]: milli={:.8e} v9={:.8e} diff={:.2e}",
-                                                i, ms[i], bs[i], diff);
+                                            eprintln!(
+                                                "    elem[{}]: milli={:.8e} v9={:.8e} diff={:.2e}",
+                                                i, ms[i], bs[i], diff
+                                            );
                                             printed += 1;
                                         }
                                     }
@@ -466,8 +510,10 @@ fn main() {
                             let milli_nd = milli_nd.cast(dtype).unwrap_or(milli_nd);
                             let (max_err, _, n) = compare_tensors(&milli_nd, &buf_tensor);
                             if max_err > 1e-4 {
-                                eprintln!("  FIRST ERROR at step {} (Eval {}): {:?} {} elems {:?} shape={:?} max_err={:.2e}",
-                                    si, ei, out_id, n, dtype, shape, max_err);
+                                eprintln!(
+                                    "  FIRST ERROR at step {} (Eval {}): {:?} {} elems {:?} shape={:?} max_err={:.2e}",
+                                    si, ei, out_id, n, dtype, shape, max_err
+                                );
                                 first_error_step = Some(si);
                             }
                         }
@@ -499,14 +545,20 @@ fn main() {
                     total_mismatches += 1;
                     if first_mismatch || total_mismatches <= 10 {
                         let actual_dtype = milli_tensor.to_ndarray().unwrap().dtype();
-                        println!("  MISMATCH {:?}: {} elems, max_err={:.2e}, mean={:.2e}, layout={:?} actual={:?} shape={:?}",
-                            int_id, n, max_err, mean_err, dtype, actual_dtype, shape);
+                        println!(
+                            "  MISMATCH {:?}: {} elems, max_err={:.2e}, mean={:.2e}, layout={:?} actual={:?} shape={:?}",
+                            int_id, n, max_err, mean_err, dtype, actual_dtype, shape
+                        );
                         first_mismatch = false;
                     }
                 }
             }
         }
-        println!("  {} / {} tensors differ", total_mismatches, milli_intermediates.len());
+        println!(
+            "  {} / {} tensors differ",
+            total_mismatches,
+            milli_intermediates.len()
+        );
     }
 
     // ---- Compare outputs ----
@@ -570,7 +622,11 @@ fn main() {
         }
     }
 
-    println!("\n  {}/{} outputs checked", total_checked, interp_outputs.len());
+    println!(
+        "\n  {}/{} outputs checked",
+        total_checked,
+        interp_outputs.len()
+    );
     println!("  {}/{} within 1e-4 tolerance", total_exact, total_checked);
     println!("  Worst: '{}' max_err={:.2e}", worst_name, worst_max_err);
 
@@ -593,9 +649,7 @@ fn main() {
 
         // Re-load buffers fresh for benchmark
         let reload = || -> Vec<Vec<u8>> {
-            let mut fresh: Vec<Vec<u8>> = (0..layout.num_buffers)
-                .map(|_| Vec::new())
-                .collect();
+            let mut fresh: Vec<Vec<u8>> = (0..layout.num_buffers).map(|_| Vec::new()).collect();
             for (id, &size) in &layout.tensor_sizes {
                 let idx = layout.tensor_index[id];
                 let dt = layout.dtype_of(id);
@@ -617,24 +671,35 @@ fn main() {
         {
             // Warmup
             let mut warm_bufs = reload();
-            let mut warm_ptrs: Vec<*mut f32> = warm_bufs.iter_mut().map(|v| v.as_mut_ptr() as *mut f32).collect();
+            let mut warm_ptrs: Vec<*mut f32> = warm_bufs
+                .iter_mut()
+                .map(|v| v.as_mut_ptr() as *mut f32)
+                .collect();
             unsafe { plan.execute(&mut warm_ptrs) };
 
             let t = Instant::now();
             for _ in 0..iters {
                 let mut b = reload();
-                let mut p: Vec<*mut f32> = b.iter_mut().map(|v| v.as_mut_ptr() as *mut f32).collect();
+                let mut p: Vec<*mut f32> =
+                    b.iter_mut().map(|v| v.as_mut_ptr() as *mut f32).collect();
                 unsafe { plan.execute(&mut p) };
             }
             let serial_avg = t.elapsed() / iters;
-            println!("  serial:       {:>10.1}ms avg ({} iters)", serial_avg.as_secs_f64() * 1e3, iters);
+            println!(
+                "  serial:       {:>10.1}ms avg ({} iters)",
+                serial_avg.as_secs_f64() * 1e3,
+                iters
+            );
         }
 
         // Parallel benchmark
         {
             // Warmup
             let mut warm_bufs = reload();
-            let warm_ptrs: Vec<*mut f32> = warm_bufs.iter_mut().map(|v| v.as_mut_ptr() as *mut f32).collect();
+            let warm_ptrs: Vec<*mut f32> = warm_bufs
+                .iter_mut()
+                .map(|v| v.as_mut_ptr() as *mut f32)
+                .collect();
             unsafe { plan.execute_parallel(&warm_ptrs, num_threads) };
 
             let t = Instant::now();
@@ -644,7 +709,12 @@ fn main() {
                 unsafe { plan.execute_parallel(&p, num_threads) };
             }
             let par_avg = t.elapsed() / iters;
-            println!("  parallel({}t): {:>10.1}ms avg ({} iters)", num_threads, par_avg.as_secs_f64() * 1e3, iters);
+            println!(
+                "  parallel({}t): {:>10.1}ms avg ({} iters)",
+                num_threads,
+                par_avg.as_secs_f64() * 1e3,
+                iters
+            );
         }
     }
 }

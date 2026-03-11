@@ -9,8 +9,8 @@ use std::time::Instant;
 
 use whisper_tensor::compiler::attempts::v9_fused_expr::pipeline as v9_pipeline;
 use whisper_tensor::graph::GlobalId;
-use whisper_tensor::milli_graph::ops::MatMul;
 use whisper_tensor::milli_graph::MilliOpGraph;
+use whisper_tensor::milli_graph::ops::MatMul;
 use whisper_tensor::numeric_tensor::NumericTensor;
 use whisper_tensor::tensor_rank::DynRank;
 
@@ -159,15 +159,10 @@ fn bench_matmul(m: usize, k: usize, n: usize) {
     let num_threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
-    let v9_par_result =
-        run_v9_parallel(&v9_compiled, &compiled_inputs, c, out_size, num_threads);
+    let v9_par_result = run_v9_parallel(&v9_compiled, &compiled_inputs, c, out_size, num_threads);
     let v9_par_diff = max_abs_diff(&v9_result, &v9_par_result);
     println!("    v9 parallel diff: {:.2e} ({num_threads}t)", v9_par_diff);
-    assert!(
-        v9_par_diff < 1e-5,
-        "v9 parallel diverged: {}",
-        v9_par_diff
-    );
+    assert!(v9_par_diff < 1e-5, "v9 parallel diverged: {}", v9_par_diff);
 
     // Benchmark iterations — WT_ITERS overrides default
     let total_flops = 2.0 * m as f64 * n as f64 * k as f64;
@@ -175,7 +170,13 @@ fn bench_matmul(m: usize, k: usize, n: usize) {
         .ok()
         .and_then(|s| s.trim().parse().ok())
         .unwrap_or_else(|| {
-            if m * n * k > 512 * 512 * 512 { 3 } else if m * n * k > 128 * 128 * 128 { 10 } else { 50 }
+            if m * n * k > 512 * 512 * 512 {
+                3
+            } else if m * n * k > 128 * 128 * 128 {
+                10
+            } else {
+                50
+            }
         });
 
     // V9 parallel only — warmup + measure
@@ -219,11 +220,7 @@ fn main() {
 
     let sizes: Vec<usize> = std::env::var("WT_SIZES")
         .ok()
-        .map(|s| {
-            s.split(',')
-                .filter_map(|v| v.trim().parse().ok())
-                .collect()
-        })
+        .map(|s| s.split(',').filter_map(|v| v.trim().parse().ok()).collect())
         .unwrap_or_else(|| vec![64, 128, 256, 512, 1024]);
 
     for &d in &sizes {

@@ -48,10 +48,8 @@ impl TopKOperation {
             global_id: GlobalId::new(rng),
             input: inputs[0].ok_or(ONNXDecodingError::InvalidOperatorInputs("TopK"))?,
             k: inputs[1].ok_or(ONNXDecodingError::InvalidOperatorInputs("TopK"))?,
-            output_values: outputs[0]
-                .ok_or(ONNXDecodingError::InvalidOperatorOutputs("TopK"))?,
-            output_indices: outputs[1]
-                .ok_or(ONNXDecodingError::InvalidOperatorOutputs("TopK"))?,
+            output_values: outputs[0].ok_or(ONNXDecodingError::InvalidOperatorOutputs("TopK"))?,
+            output_indices: outputs[1].ok_or(ONNXDecodingError::InvalidOperatorOutputs("TopK"))?,
             axis,
             largest,
             sorted,

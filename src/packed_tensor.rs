@@ -596,10 +596,7 @@ mod tests {
         dequantize_q4_0(&block, &mut output);
 
         for (j, &val) in output.iter().enumerate() {
-            assert!(
-                val.abs() < 1e-6,
-                "expected ~0 at {j}, got {val}",
-            );
+            assert!(val.abs() < 1e-6, "expected ~0 at {j}, got {val}",);
         }
     }
 }

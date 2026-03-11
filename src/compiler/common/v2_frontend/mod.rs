@@ -13,8 +13,8 @@
 //! - Leaves kernel boundary decisions to downstream passes (enabling fusion)
 //! - Is the natural input for affine access pattern recovery and codegen
 
-mod expr;
 mod expand;
+mod expr;
 
-pub use expr::*;
 pub use expand::*;
+pub use expr::*;

@@ -577,10 +577,7 @@ fn main() {
             v3_stats.fused_pairs,
             v3_stats.eliminated_loads,
         );
-        println!(
-            "  v9: {} kernels",
-            v9_compiled.kernels.len()
-        );
+        println!("  v9: {} kernels", v9_compiled.kernels.len());
         println!(
             "  v1 crystal diff: {:.2e}",
             max_abs_diff(&interp_result, &v1_result)
@@ -1278,7 +1275,11 @@ fn main() {
         let t = Instant::now();
         for _ in 0..n {
             let _ = run_v9_parallel(
-                &v9_compiled, &compiled_inputs, int_out, out_size, num_threads,
+                &v9_compiled,
+                &compiled_inputs,
+                int_out,
+                out_size,
+                num_threads,
             );
         }
         let v9_mt_avg = t.elapsed() / n;
@@ -1295,11 +1296,7 @@ fn main() {
             "  {:.2}x",
             interp_avg.as_nanos() as f64 / v9_avg.as_nanos() as f64
         );
-        print_timing(
-            &format!("v9 parallel({}t):", num_threads),
-            v9_mt_avg,
-            n,
-        );
+        print_timing(&format!("v9 parallel({}t):", num_threads), v9_mt_avg, n);
         println!(
             "  {:.2}x  ({:.1}x vs serial)",
             interp_avg.as_nanos() as f64 / v9_mt_avg.as_nanos() as f64,
@@ -1595,16 +1592,12 @@ fn main() {
         let v9_par_result =
             run_v9_parallel(&v9_compiled, &compiled_inputs, c, out_size, num_threads);
         let v9_par_diff = max_abs_diff(&v9_result, &v9_par_result);
-        println!(
-            "  v9 mt diff: {:.2e} ({}t)",
-            v9_par_diff, num_threads,
-        );
+        println!("  v9 mt diff: {:.2e} ({}t)", v9_par_diff, num_threads,);
         assert!(v9_par_diff < 1e-5, "v9 parallel diverged: {}", v9_par_diff);
 
         let t = Instant::now();
         for _ in 0..iters {
-            let _ =
-                run_v9_parallel(&v9_compiled, &compiled_inputs, c, out_size, num_threads);
+            let _ = run_v9_parallel(&v9_compiled, &compiled_inputs, c, out_size, num_threads);
         }
         let v9_mt_avg = t.elapsed() / iters;
 
@@ -1630,11 +1623,7 @@ fn main() {
             "  {:.2}x",
             interp_avg.as_nanos() as f64 / v9_avg.as_nanos() as f64
         );
-        print_timing(
-            &format!("v9 parallel({}t):", num_threads),
-            v9_mt_avg,
-            iters,
-        );
+        print_timing(&format!("v9 parallel({}t):", num_threads), v9_mt_avg, iters);
         println!(
             "  {:.2}x  ({:.1}x vs serial)",
             interp_avg.as_nanos() as f64 / v9_mt_avg.as_nanos() as f64,
@@ -1665,10 +1654,7 @@ fn main() {
         } else {
             (64usize, 80usize, 96usize)
         };
-        println!(
-            "Test 8: v8 generic kernel [{}x{}] x [{}x{}]",
-            m, k, k, n
-        );
+        println!("Test 8: v8 generic kernel [{}x{}] x [{}x{}]", m, k, k, n);
 
         let mut rng2 = wyrand::WyRand::new(3008);
         let ext_a = GlobalId::new(&mut rng2);
@@ -1741,8 +1727,9 @@ fn main() {
                     .map(|x| x.get())
                     .unwrap_or(1);
                 if n_threads > 1 {
-                    let mut par_bufs: Vec<Vec<f32>> =
-                        (0..v8_compiled.layout.num_buffers).map(|_| Vec::new()).collect();
+                    let mut par_bufs: Vec<Vec<f32>> = (0..v8_compiled.layout.num_buffers)
+                        .map(|_| Vec::new())
+                        .collect();
                     for (&id, &sz) in &v8_compiled.layout.tensor_sizes {
                         let idx = v8_compiled.layout.tensor_index[&id];
                         par_bufs[idx] = vec![0.0f32; sz];
@@ -1761,11 +1748,7 @@ fn main() {
                         }
                     }
                     let par_avg = t.elapsed() / iters;
-                    print_timing(
-                        &format!("v8 parallel({n_threads}t):"),
-                        par_avg,
-                        iters,
-                    );
+                    print_timing(&format!("v8 parallel({n_threads}t):"), par_avg, iters);
                     println!(
                         "  {:.2}x  ({:.1}x vs serial)",
                         interp_avg.as_nanos() as f64 / par_avg.as_nanos() as f64,

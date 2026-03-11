@@ -20,7 +20,6 @@ use std::sync::{Condvar, Mutex};
 /// more scheduling overhead than they save from parallelism.
 const MIN_TILE_ROWS: usize = 16;
 
-
 // ---- Task graph types ----
 
 struct TileTask {
@@ -262,19 +261,13 @@ pub unsafe fn execute_parallel(
                     let node = &nodes[task_idx];
                     let kernel = &kernels[node.task.kernel_idx];
                     unsafe {
-                        kernel.execute_range(
-                            buf_ptr,
-                            node.task.i_start,
-                            node.task.i_end,
-                        );
+                        kernel.execute_range(buf_ptr, node.task.i_start, node.task.i_end);
                     }
 
                     // Decrement dependents and enqueue newly ready.
                     let mut newly_ready = Vec::new();
                     for &dep_idx in &node.dependents {
-                        let prev = nodes[dep_idx]
-                            .remaining_deps
-                            .fetch_sub(1, Ordering::AcqRel);
+                        let prev = nodes[dep_idx].remaining_deps.fetch_sub(1, Ordering::AcqRel);
                         if prev == 1 {
                             newly_ready.push(dep_idx);
                         }
@@ -311,12 +304,14 @@ mod tests {
     fn make_random_f32(n: usize, seed: u64) -> Vec<f32> {
         // Simple xorshift for test determinism — no external trait needed.
         let mut state = seed | 1;
-        (0..n).map(|_| {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            (state as u32 as f32 / u32::MAX as f32) * 2.0 - 1.0
-        }).collect()
+        (0..n)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state as u32 as f32 / u32::MAX as f32) * 2.0 - 1.0
+            })
+            .collect()
     }
 
     fn max_diff(a: &[f32], b: &[f32]) -> f32 {
@@ -326,7 +321,10 @@ mod tests {
             .fold(0.0f32, f32::max)
     }
 
-    fn alloc_buffers(compiled: &NativeCompiledGraph, inputs: &HashMap<GlobalId, Vec<f32>>) -> Vec<Vec<f32>> {
+    fn alloc_buffers(
+        compiled: &NativeCompiledGraph,
+        inputs: &HashMap<GlobalId, Vec<f32>>,
+    ) -> Vec<Vec<f32>> {
         let layout = &compiled.layout;
         let mut bufs: Vec<Vec<f32>> = (0..layout.num_buffers).map(|_| Vec::new()).collect();
         // Allocate all tensors to their required sizes.

@@ -144,7 +144,12 @@ pub fn build_decoder(
     // Gather(pos_emb_weight, past_len, axis=0) → [1, d_model]
     let cache_seq_len = ShapeOp::new(None, self_k_cache_0.clone(), Some(2), Some(3))?;
     let pos_emb_weight = dec_wm.get_tensor("embed_positions.weight")?;
-    let pos_emb = Gather::new(Some("dec_pos_gather".to_string()), pos_emb_weight, cache_seq_len, 0)?;
+    let pos_emb = Gather::new(
+        Some("dec_pos_gather".to_string()),
+        pos_emb_weight,
+        cache_seq_len,
+        0,
+    )?;
     let x: Arc<dyn Tensor> = Add::new(Some("dec_pos_embed".to_string()), token_emb, pos_emb)?;
 
     // Decoder transformer layers
@@ -181,15 +186,14 @@ pub fn build_decoder(
         state_inputs.push(self_k_in.clone());
         state_inputs.push(self_v_in.clone());
 
-        let (layer_out, self_k_out, self_v_out) =
-            whisper_decoder_layer(
-                &layer_wm,
-                hidden,
-                encoder_hidden_states.clone(),
-                self_k_in,
-                self_v_in,
-                config,
-            )?;
+        let (layer_out, self_k_out, self_v_out) = whisper_decoder_layer(
+            &layer_wm,
+            hidden,
+            encoder_hidden_states.clone(),
+            self_k_in,
+            self_v_in,
+            config,
+        )?;
 
         hidden = layer_out;
 
@@ -256,19 +260,19 @@ fn whisper_decoder_layer(
     // Self-attention with KV cache
     let normed: Arc<dyn Tensor> =
         layer_norm(&wm.prefix("self_attn_layer_norm"), input.clone(), 1e-5)?;
-    let (attn_out, self_k_out, self_v_out) =
-        self_attention_with_cache(&wm.prefix("self_attn"), normed, self_k_cache, self_v_cache, config)?;
+    let (attn_out, self_k_out, self_v_out) = self_attention_with_cache(
+        &wm.prefix("self_attn"),
+        normed,
+        self_k_cache,
+        self_v_cache,
+        config,
+    )?;
     let x: Arc<dyn Tensor> = Add::new(None, input, attn_out)?;
 
     // Cross-attention (no cache — K/V from encoder are constant)
     let normed: Arc<dyn Tensor> =
         layer_norm(&wm.prefix("encoder_attn_layer_norm"), x.clone(), 1e-5)?;
-    let cross_out = cross_attention(
-        &wm.prefix("encoder_attn"),
-        normed,
-        encoder_hidden,
-        config,
-    )?;
+    let cross_out = cross_attention(&wm.prefix("encoder_attn"), normed, encoder_hidden, config)?;
     let x: Arc<dyn Tensor> = Add::new(None, x, cross_out)?;
 
     // FFN
@@ -321,16 +325,8 @@ fn self_attention_with_cache(
     let v_new = reshape_heads(v_new, num_heads, head_dim)?;
 
     // Concat with cache: [B, num_heads, past+new, head_dim]
-    let k_full = crate::onnx_graph::operators::Concat::new(
-        None,
-        vec![k_cache, k_new.clone()],
-        2,
-    )?;
-    let v_full = crate::onnx_graph::operators::Concat::new(
-        None,
-        vec![v_cache, v_new.clone()],
-        2,
-    )?;
+    let k_full = crate::onnx_graph::operators::Concat::new(None, vec![k_cache, k_new.clone()], 2)?;
+    let v_full = crate::onnx_graph::operators::Concat::new(None, vec![v_cache, v_new.clone()], 2)?;
 
     // Q: reshape to heads
     let q = reshape_heads(q, num_heads, head_dim)?;
@@ -420,10 +416,7 @@ fn sdpa_from_heads(
 }
 
 /// FFN: fc1 + gelu + fc2
-fn whisper_ffn(
-    wm: &impl WeightManager,
-    input: Arc<dyn Tensor>,
-) -> Result<Arc<dyn Tensor>, Error> {
+fn whisper_ffn(wm: &impl WeightManager, input: Arc<dyn Tensor>) -> Result<Arc<dyn Tensor>, Error> {
     let x = linear(&wm.prefix("fc1"), input)?;
     let x = gelu(x)?;
     linear(&wm.prefix("fc2"), x)

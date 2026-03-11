@@ -118,7 +118,10 @@ impl NanoOpExpander {
     /// so that every output axis has varied coordinates — enough for affine
     /// coefficient inference.  The full reduction depth (K) is always
     /// preserved; only the number of output positions is bounded.
-    pub fn new_sampled(tensor_shapes: HashMap<GlobalId, Vec<usize>>, max_output_samples: usize) -> Self {
+    pub fn new_sampled(
+        tensor_shapes: HashMap<GlobalId, Vec<usize>>,
+        max_output_samples: usize,
+    ) -> Self {
         Self {
             next_value: 0,
             tensor_shapes,

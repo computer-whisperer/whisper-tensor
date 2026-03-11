@@ -96,7 +96,8 @@ fn inline_expr(
             tensor, flat_index, ..
         } => {
             // If this tensor is produced and NOT materialized, inline it.
-            if produced.contains(tensor) && !materialize.contains(tensor)
+            if produced.contains(tensor)
+                && !materialize.contains(tensor)
                 && let Some(producing_expr) = expr_map.get(&(*tensor, *flat_index))
             {
                 let inlined = inline_expr(producing_expr, expr_map, produced, materialize, dtypes);
@@ -276,8 +277,12 @@ mod tests {
                         a: ea,
                         b: eb,
                     } => {
-                        assert!(matches!(ea.as_ref(), ScalarExpr::Element { tensor, .. } if *tensor == a));
-                        assert!(matches!(eb.as_ref(), ScalarExpr::Element { tensor, .. } if *tensor == b));
+                        assert!(
+                            matches!(ea.as_ref(), ScalarExpr::Element { tensor, .. } if *tensor == a)
+                        );
+                        assert!(
+                            matches!(eb.as_ref(), ScalarExpr::Element { tensor, .. } if *tensor == b)
+                        );
                     }
                     other => panic!("Expected Binary::Mul, got {:?}", other),
                 },

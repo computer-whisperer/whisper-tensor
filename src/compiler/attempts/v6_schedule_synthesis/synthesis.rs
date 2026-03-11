@@ -358,14 +358,16 @@ fn absorb_store_expr_reservoir(
         load_indices,
     };
 
-    let entry = raw_groups.entry(key).or_insert_with(|| ReservoirStoreGroup {
-        output_tensor,
-        pattern: pattern.clone(),
-        load_tensors: load_tensors.clone(),
-        reservoir: Vec::with_capacity(RESERVOIR_SIZE),
-        total_count: 0,
-        rng_state: 0xDEAD_BEEF_CAFE_BABEu64,
-    });
+    let entry = raw_groups
+        .entry(key)
+        .or_insert_with(|| ReservoirStoreGroup {
+            output_tensor,
+            pattern: pattern.clone(),
+            load_tensors: load_tensors.clone(),
+            reservoir: Vec::with_capacity(RESERVOIR_SIZE),
+            total_count: 0,
+            rng_state: 0xDEAD_BEEF_CAFE_BABEu64,
+        });
 
     // Hash collision fallback.
     if entry.pattern != pattern || entry.load_tensors != load_tensors {
@@ -1148,7 +1150,9 @@ fn classify_group(
             term_load_tensors: reduction_match.term_load_tensors,
             accesses,
         })
-    } else if let Some(pointwise) = try_classify_pointwise(group, &output_shape, output_elements, shapes)? {
+    } else if let Some(pointwise) =
+        try_classify_pointwise(group, &output_shape, output_elements, shapes)?
+    {
         LoopIntent::Pointwise(pointwise)
     } else {
         LoopIntent::Unknown
@@ -1178,7 +1182,10 @@ fn try_classify_pointwise(
         return Ok(None);
     }
     inst.sort_by_key(|i| i.out_flat_index);
-    if inst.windows(2).any(|w| w[0].out_flat_index == w[1].out_flat_index) {
+    if inst
+        .windows(2)
+        .any(|w| w[0].out_flat_index == w[1].out_flat_index)
+    {
         return Ok(None);
     }
     let contiguous_output = is_contiguous_output(&inst, output_elements);
@@ -1272,7 +1279,10 @@ fn try_classify_pointwise(
             }
             roles
         };
-        if dim_roles.iter().any(|r| matches!(r, AccessDimRole::Unknown)) {
+        if dim_roles
+            .iter()
+            .any(|r| matches!(r, AccessDimRole::Unknown))
+        {
             return Ok(None);
         }
 
@@ -1884,12 +1894,8 @@ fn infer_reduction_accesses(
         } else {
             let mut roles = Vec::with_capacity(tensor_shape.len());
             for dim_values in sample_dim_values.iter().take(tensor_shape.len()) {
-                let role = infer_affine_dim_role(
-                    &sample_vars_flat,
-                    var_count,
-                    dim_values,
-                    output_rank,
-                );
+                let role =
+                    infer_affine_dim_role(&sample_vars_flat, var_count, dim_values, output_rank);
                 roles.push(role);
             }
             roles

@@ -290,7 +290,9 @@ fn main() {
             let config = build_config(model, &configs);
             eprintln!("Loading model...");
             let loaded = load_model(&loader, config);
-            cmd_tts(loaded, model_dir, prompt, voice, speed, output, ref_audio, ref_text);
+            cmd_tts(
+                loaded, model_dir, prompt, voice, speed, output, ref_audio, ref_text,
+            );
         }
         Command::Stt {
             model,
@@ -603,7 +605,11 @@ fn cmd_tts(
             });
             let ref_samples = load_wav_f16(&ref_audio_path, 24000);
             let ref_audio_len = ref_samples.len();
-            eprintln!("Reference audio: {} samples ({:.2}s)", ref_audio_len, ref_audio_len as f64 / 24000.0);
+            eprintln!(
+                "Reference audio: {} samples ({:.2}s)",
+                ref_audio_len,
+                ref_audio_len as f64 / 24000.0
+            );
 
             // Tokenize text using F5 character-level vocab
             let ref_text_str = ref_text.as_deref().unwrap_or("");
@@ -629,48 +635,47 @@ fn cmd_tts(
             let gen_text_len = gen_text.chars().count().max(1);
             let gen_duration_estimate = if !ref_text_str.is_empty() {
                 let ref_text_len = ref_text_str.chars().count().max(1);
-                (ref_audio_frames as f64 / ref_text_len as f64 * gen_text_len as f64 / speed as f64) as usize
+                (ref_audio_frames as f64 / ref_text_len as f64 * gen_text_len as f64 / speed as f64)
+                    as usize
             } else {
                 // No ref text: estimate ~4 chars/sec at 24kHz/256hop = ~94 frames/sec
                 (gen_text_len as f64 * 94.0 / 4.0 / speed as f64) as usize
             };
             let max_duration = (ref_audio_frames + gen_duration_estimate).min(2048);
-            eprintln!("Max duration: {max_duration} frames ({:.2}s)", max_duration as f64 * hop_length as f64 / 24000.0);
+            eprintln!(
+                "Max duration: {max_duration} frames ({:.2}s)",
+                max_duration as f64 * hop_length as f64 / 24000.0
+            );
 
             // Build input tensors
-            let ref_audio_tensor = NumericTensor::<DynRank>::from_vec_shape(
-                ref_samples,
-                vec![1, 1, ref_audio_len],
-            ).unwrap();
+            let ref_audio_tensor =
+                NumericTensor::<DynRank>::from_vec_shape(ref_samples, vec![1, 1, ref_audio_len])
+                    .unwrap();
 
-            let text_ids_tensor = NumericTensor::<DynRank>::from_vec_shape(
-                token_ids,
-                vec![1, num_tokens],
-            ).unwrap();
+            let text_ids_tensor =
+                NumericTensor::<DynRank>::from_vec_shape(token_ids, vec![1, num_tokens]).unwrap();
 
-            let max_duration_tensor = NumericTensor::<DynRank>::from_vec_shape(
-                vec![max_duration as i64],
-                vec![],
-            ).unwrap();
+            let max_duration_tensor =
+                NumericTensor::<DynRank>::from_vec_shape(vec![max_duration as i64], vec![])
+                    .unwrap();
 
             // Build ODE loop inputs
             let nfe = *nfe_steps;
             let iterations = nfe - 1; // 31 iterations for nfe=32
             let time_steps: Vec<i32> = (0..iterations as i32).collect();
-            let time_steps_tensor = NumericTensor::<DynRank>::from_vec_shape(
-                time_steps,
-                vec![iterations as usize],
-            ).unwrap();
-            let iteration_count_tensor = NumericTensor::<DynRank>::from_vec_shape(
-                vec![iterations as i64],
-                vec![],
-            ).unwrap();
+            let time_steps_tensor =
+                NumericTensor::<DynRank>::from_vec_shape(time_steps, vec![iterations as usize])
+                    .unwrap();
+            let iteration_count_tensor =
+                NumericTensor::<DynRank>::from_vec_shape(vec![iterations as i64], vec![]).unwrap();
 
-            data.tensors.insert(interface.text_ids_link, text_ids_tensor);
+            data.tensors
+                .insert(interface.text_ids_link, text_ids_tensor);
             data.tensors.insert(*ref_audio_link, ref_audio_tensor);
             data.tensors.insert(*max_duration_link, max_duration_tensor);
             data.tensors.insert(*time_steps_link, time_steps_tensor);
-            data.tensors.insert(*iteration_count_link, iteration_count_tensor);
+            data.tensors
+                .insert(*iteration_count_link, iteration_count_tensor);
         }
     }
 
@@ -830,9 +835,9 @@ fn save_wav(samples: &[f32], sample_rate: u32, path: &std::path::Path) {
 // ============================================================================
 
 fn cmd_stt(output: LoaderOutput, audio_path: PathBuf, model_dir: Option<PathBuf>) {
+    use whisper_tensor::super_graph::SuperGraphContext;
     use whisper_tensor::super_graph::cache::SuperGraphTensorCache;
     use whisper_tensor::super_graph::data::SuperGraphData;
-    use whisper_tensor::super_graph::SuperGraphContext;
 
     let interface = output
         .interfaces
@@ -850,13 +855,21 @@ fn cmd_stt(output: LoaderOutput, audio_path: PathBuf, model_dir: Option<PathBuf>
     eprintln!("Loading audio: {}", audio_path.display());
     let samples = load_wav_f32(&audio_path, interface.sample_rate);
     let audio_duration = samples.len() as f64 / interface.sample_rate as f64;
-    eprintln!("Audio: {:.2}s ({} samples at {}Hz)", audio_duration, samples.len(), interface.sample_rate);
+    eprintln!(
+        "Audio: {:.2}s ({} samples at {}Hz)",
+        audio_duration,
+        samples.len(),
+        interface.sample_rate
+    );
 
     // Load mel filterbank from preprocessor_config.json
     let mel_filters = load_mel_filters(model_dir.as_deref(), interface.num_mel_bins as usize);
     let mel = compute_mel_spectrogram(&samples, interface.num_mel_bins as usize, &mel_filters);
     let mel_len = mel.len() / interface.num_mel_bins as usize;
-    eprintln!("Mel spectrogram: {} bins x {} frames", interface.num_mel_bins, mel_len);
+    eprintln!(
+        "Mel spectrogram: {} bins x {} frames",
+        interface.num_mel_bins, mel_len
+    );
 
     let mel_tensor = NumericTensor::<DynRank>::from_vec_shape(
         mel,
@@ -918,7 +931,8 @@ fn cmd_stt(output: LoaderOutput, audio_path: PathBuf, model_dir: Option<PathBuf>
 
     // Start with decoder_start_token_id + forced decoder IDs from generation_config
     // For English-only Whisper: [50257(<|startoftranscript|>), 50362(<|notimestamps|>)]
-    let forced_ids = load_forced_decoder_ids(model_dir.as_deref(), interface.decoder_start_token_id);
+    let forced_ids =
+        load_forced_decoder_ids(model_dir.as_deref(), interface.decoder_start_token_id);
     let mut token_ids: Vec<u32> = forced_ids;
     let max_tokens = 448;
 
@@ -934,12 +948,11 @@ fn cmd_stt(output: LoaderOutput, audio_path: PathBuf, model_dir: Option<PathBuf>
             encoder_hidden.clone(),
         );
 
-        let token_tensor = NumericTensor::<DynRank>::from_vec_shape(
-            token_ids.clone(),
-            vec![token_ids.len()],
-        )
-        .unwrap();
-        data.tensors.insert(interface.decoder_token_link, token_tensor);
+        let token_tensor =
+            NumericTensor::<DynRank>::from_vec_shape(token_ids.clone(), vec![token_ids.len()])
+                .unwrap();
+        data.tensors
+            .insert(interface.decoder_token_link, token_tensor);
         data.hashes.insert(interface.decoder_cache_key_link, 0);
 
         let mut observer = ();
@@ -995,12 +1008,15 @@ fn cmd_stt(output: LoaderOutput, audio_path: PathBuf, model_dir: Option<PathBuf>
         step_start = std::time::Instant::now();
     }
 
-    eprintln!("Decoder done in {:.2?} ({} tokens)", decode_start.elapsed(), token_ids.len());
+    eprintln!(
+        "Decoder done in {:.2?} ({} tokens)",
+        decode_start.elapsed(),
+        token_ids.len()
+    );
 
     // Decode tokens to text
-    let tokenizer = whisper_tensor::tokenizer::AnyTokenizer::from_tokenizer_info(
-        &interface.tokenizer,
-    );
+    let tokenizer =
+        whisper_tensor::tokenizer::AnyTokenizer::from_tokenizer_info(&interface.tokenizer);
 
     let text = tokenizer
         .decode(&token_ids)
@@ -1025,13 +1041,17 @@ fn load_wav_f32(path: &std::path::Path, target_sr: u32) -> Vec<f32> {
                 .map(|s| s.expect("WAV read error") as f32 / max_val)
                 .collect()
         }
-        hound::SampleFormat::Float => {
-            reader.samples::<f32>().map(|s| s.expect("WAV read error")).collect()
-        }
+        hound::SampleFormat::Float => reader
+            .samples::<f32>()
+            .map(|s| s.expect("WAV read error"))
+            .collect(),
     };
 
     let mono: Vec<f32> = if spec.channels > 1 {
-        samples.chunks(spec.channels as usize).map(|c| c[0]).collect()
+        samples
+            .chunks(spec.channels as usize)
+            .map(|c| c[0])
+            .collect()
     } else {
         samples
     };
@@ -1064,10 +1084,13 @@ fn load_forced_decoder_ids(model_dir: Option<&std::path::Path>, start_token: u32
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&data) {
                 if let Some(forced) = json["forced_decoder_ids"].as_array() {
                     // forced_decoder_ids: [[position, token_id], ...]
-                    let mut pairs: Vec<(u64, u32)> = forced.iter().filter_map(|pair| {
-                        let arr = pair.as_array()?;
-                        Some((arr[0].as_u64()?, arr[1].as_u64()? as u32))
-                    }).collect();
+                    let mut pairs: Vec<(u64, u32)> = forced
+                        .iter()
+                        .filter_map(|pair| {
+                            let arr = pair.as_array()?;
+                            Some((arr[0].as_u64()?, arr[1].as_u64()? as u32))
+                        })
+                        .collect();
                     pairs.sort_by_key(|p| p.0);
                     for (_, tok) in pairs {
                         ids.push(tok);
@@ -1171,10 +1194,7 @@ fn compute_mel_spectrogram(samples: &[f32], num_mel_bins: usize, mel_filters: &[
     }
 
     // Log mel spectrogram
-    let log_spec: Vec<f32> = mel_spec
-        .iter()
-        .map(|&x| (x.max(1e-10)).log10())
-        .collect();
+    let log_spec: Vec<f32> = mel_spec.iter().map(|&x| (x.max(1e-10)).log10()).collect();
 
     // Normalize: clamp to max - 8, then (x + 4) / 4
     let max_val = log_spec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
@@ -1225,7 +1245,10 @@ fn build_mel_filterbank(
 
 /// Load a WAV file and return f16 samples (resampled to target_sr if needed).
 fn load_wav_f16(path: &std::path::Path, target_sr: u32) -> Vec<half::f16> {
-    load_wav_f32(path, target_sr).iter().map(|&s| half::f16::from_f32(s)).collect()
+    load_wav_f32(path, target_sr)
+        .iter()
+        .map(|&s| half::f16::from_f32(s))
+        .collect()
 }
 
 /// Build F5-TTS vocab: char → token ID from vocab.txt (one token per line).

@@ -671,7 +671,8 @@ fn topo_order_loops(crystal_ops: &[CrystalOp]) -> Vec<CrystalOp> {
         for body_op in &loop_op.body {
             if let LoopBodyOp::Load { tensor, .. } = body_op
                 && let Some(&prod_idx) = producer.get(tensor)
-                && prod_idx != consumer_idx && out_edges[prod_idx].insert(consumer_idx)
+                && prod_idx != consumer_idx
+                && out_edges[prod_idx].insert(consumer_idx)
             {
                 indeg[consumer_idx] += 1;
             }

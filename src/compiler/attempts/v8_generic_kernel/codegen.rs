@@ -15,8 +15,8 @@
 use crate::compiler::attempts::v1_scalar_crystal::codegen::{CodegenError, TensorLayout};
 use crate::compiler::attempts::v6_schedule_synthesis::synthesis::{
     AccessDimRole, LoopIntent, PipelineArtifacts, PointwiseIntent, RecoveredLoop,
-    RecoveredTensorAccess, ReductionBinOp, ReductionIntent, ReductionTermPattern,
-    ReductionUnaryOp, build_from_graph_sampled,
+    RecoveredTensorAccess, ReductionBinOp, ReductionIntent, ReductionTermPattern, ReductionUnaryOp,
+    build_from_graph_sampled,
 };
 use crate::graph::GlobalId;
 use crate::milli_graph::MilliOpGraph;
@@ -43,9 +43,7 @@ const SIMD_F32_LANES: usize = 4;
 #[derive(Debug, thiserror::Error)]
 pub enum V8Error {
     #[error(transparent)]
-    Synthesis(
-        #[from] crate::compiler::attempts::v6_schedule_synthesis::synthesis::PipelineError,
-    ),
+    Synthesis(#[from] crate::compiler::attempts::v6_schedule_synthesis::synthesis::PipelineError),
     #[error(transparent)]
     Codegen(#[from] CodegenError),
     #[error("v8: {0}")]
@@ -265,7 +263,10 @@ fn build_reduction_spec(
     let axis_order = compute_axis_order(output_rank, blocking.block_axis);
     let packable = find_packable_accesses(&accesses, &blocking);
     let tiling = compute_tiling(
-        &recovered.output_shape, reduction.terms, &blocking, !packable.is_empty(),
+        &recovered.output_shape,
+        reduction.terms,
+        &blocking,
+        !packable.is_empty(),
     );
 
     Ok(ReductionKernelSpec {
@@ -431,10 +432,7 @@ fn compile_access(
 ///   A has output_coeffs = [K, 0] → invariant on axis 1
 ///   B has output_coeffs = [0, 1] → varies on axis 1
 /// So we block on axis 1: A[i,k] is loaded once, broadcast across NR j-lanes.
-fn analyze_blocking(
-    output_shape: &[usize],
-    accesses: &[CompiledAccess],
-) -> BlockingStrategy {
+fn analyze_blocking(output_shape: &[usize], accesses: &[CompiledAccess]) -> BlockingStrategy {
     if accesses.is_empty() {
         return BlockingStrategy {
             block_axis: None,
@@ -474,10 +472,7 @@ fn analyze_blocking(
 /// 2. Its only output dependency is on block_axis (so packing is done once
 ///    per KC×NC tile, not per outer-axis iteration)
 /// 3. Its reduction_coeff is > 1 (strided k-access; stride=1 is already sequential)
-fn find_packable_accesses(
-    accesses: &[CompiledAccess],
-    blocking: &BlockingStrategy,
-) -> Vec<usize> {
+fn find_packable_accesses(accesses: &[CompiledAccess], blocking: &BlockingStrategy) -> Vec<usize> {
     let block_axis = match blocking.block_axis {
         Some(a) => a,
         None => return Vec::new(),
@@ -725,14 +720,22 @@ fn compile_kernels(
         match spec {
             KernelSpec::Reduction(rspec) => {
                 let output_ptr = load_tensor_base_ptr(
-                    &mut builder, layout, ptr_table, ptr_type, rspec.output_tensor,
+                    &mut builder,
+                    layout,
+                    ptr_table,
+                    ptr_type,
+                    rspec.output_tensor,
                 )?;
                 let mut tensor_ptrs: HashMap<GlobalId, cranelift_codegen::ir::Value> =
                     HashMap::new();
                 for access in &rspec.accesses {
                     if !tensor_ptrs.contains_key(&access.tensor) {
                         let ptr = load_tensor_base_ptr(
-                            &mut builder, layout, ptr_table, ptr_type, access.tensor,
+                            &mut builder,
+                            layout,
+                            ptr_table,
+                            ptr_type,
+                            access.tensor,
                         )?;
                         tensor_ptrs.insert(access.tensor, ptr);
                     }
@@ -747,21 +750,38 @@ fn compile_kernels(
                 let mut axis_vals = vec![None; rspec.output_shape.len()];
                 let par_axis = reduction_parallel_axis(rspec);
                 emit_reduction_output_loops(
-                    &mut builder, &mut next_var, rspec, &order, &mut axis_vals,
-                    output_ptr, &input_ptrs, &math_refs, scratch_ptr_val,
-                    par_axis, par_start, par_end,
+                    &mut builder,
+                    &mut next_var,
+                    rspec,
+                    &order,
+                    &mut axis_vals,
+                    output_ptr,
+                    &input_ptrs,
+                    &math_refs,
+                    scratch_ptr_val,
+                    par_axis,
+                    par_start,
+                    par_end,
                 )?;
             }
             KernelSpec::Pointwise(pspec) => {
                 let output_ptr = load_tensor_base_ptr(
-                    &mut builder, layout, ptr_table, ptr_type, pspec.output_tensor,
+                    &mut builder,
+                    layout,
+                    ptr_table,
+                    ptr_type,
+                    pspec.output_tensor,
                 )?;
                 let mut tensor_ptrs: HashMap<GlobalId, cranelift_codegen::ir::Value> =
                     HashMap::new();
                 for access in &pspec.accesses {
                     if !tensor_ptrs.contains_key(&access.tensor) {
                         let ptr = load_tensor_base_ptr(
-                            &mut builder, layout, ptr_table, ptr_type, access.tensor,
+                            &mut builder,
+                            layout,
+                            ptr_table,
+                            ptr_type,
+                            access.tensor,
                         )?;
                         tensor_ptrs.insert(access.tensor, ptr);
                     }
@@ -772,12 +792,24 @@ fn compile_kernels(
                     .map(|a| tensor_ptrs[&a.tensor])
                     .collect();
 
-                let par_axis = if !pspec.output_shape.is_empty() { Some(0) } else { None };
+                let par_axis = if !pspec.output_shape.is_empty() {
+                    Some(0)
+                } else {
+                    None
+                };
                 let mut axis_vals = vec![None; pspec.output_shape.len()];
                 emit_pointwise_loops(
-                    &mut builder, &mut next_var, pspec, 0, &mut axis_vals,
-                    output_ptr, &input_ptrs, &math_refs,
-                    par_axis, par_start, par_end,
+                    &mut builder,
+                    &mut next_var,
+                    pspec,
+                    0,
+                    &mut axis_vals,
+                    output_ptr,
+                    &input_ptrs,
+                    &math_refs,
+                    par_axis,
+                    par_start,
+                    par_end,
                 )?;
             }
         }
@@ -873,9 +905,7 @@ fn emit_reduction_output_loops(
     let kc_size = spec.tiling.kc.map(|v| v as i64);
     let block_axis = spec.blocking.block_axis;
     let nc_size = spec.tiling.nc.map(|v| v as i64);
-    let blocked_extent = block_axis
-        .map(|a| spec.output_shape[a] as i64)
-        .unwrap_or(0);
+    let blocked_extent = block_axis.map(|a| spec.output_shape[a] as i64).unwrap_or(0);
 
     let use_nc_tiling = matches!((nc_size, block_axis), (Some(nc), Some(_)) if nc < blocked_extent);
 
@@ -883,26 +913,54 @@ fn emit_reduction_output_loops(
         let nc_step = nc_size.unwrap();
         let jc_iv = alloc_loop_var(next_var);
         emit_for_loop(
-            builder, jc_iv, 0, blocked_extent, nc_step,
+            builder,
+            jc_iv,
+            0,
+            blocked_extent,
+            nc_step,
             |builder, jc_val| {
                 let jc_end_raw = builder.ins().iadd_imm(jc_val, nc_step);
                 let ext_v = builder.ins().iconst(types::I64, blocked_extent);
                 let cmp = builder.ins().icmp(IntCC::SignedLessThan, jc_end_raw, ext_v);
                 let jc_end = builder.ins().select(cmp, jc_end_raw, ext_v);
                 emit_kc_and_inner_axes(
-                    builder, next_var, spec, axis_order, axis_vals,
-                    output_ptr, input_ptrs, math_refs,
-                    k_total, kc_size, Some(jc_val), Some(jc_end), scratch_ptr,
-                    par_axis, par_start, par_end,
+                    builder,
+                    next_var,
+                    spec,
+                    axis_order,
+                    axis_vals,
+                    output_ptr,
+                    input_ptrs,
+                    math_refs,
+                    k_total,
+                    kc_size,
+                    Some(jc_val),
+                    Some(jc_end),
+                    scratch_ptr,
+                    par_axis,
+                    par_start,
+                    par_end,
                 )
             },
         )
     } else {
         emit_kc_and_inner_axes(
-            builder, next_var, spec, axis_order, axis_vals,
-            output_ptr, input_ptrs, math_refs,
-            k_total, kc_size, None, None, scratch_ptr,
-            par_axis, par_start, par_end,
+            builder,
+            next_var,
+            spec,
+            axis_order,
+            axis_vals,
+            output_ptr,
+            input_ptrs,
+            math_refs,
+            k_total,
+            kc_size,
+            None,
+            None,
+            scratch_ptr,
+            par_axis,
+            par_start,
+            par_end,
         )
     }
 }
@@ -937,7 +995,9 @@ fn emit_kc_and_inner_axes(
         emit_for_loop(builder, kc_iv, 0, k_total, kc_step, |builder, kc_val| {
             let k_end_raw = builder.ins().iadd_imm(kc_val, kc_step);
             let k_total_v = builder.ins().iconst(types::I64, k_total);
-            let cmp = builder.ins().icmp(IntCC::SignedLessThan, k_end_raw, k_total_v);
+            let cmp = builder
+                .ins()
+                .icmp(IntCC::SignedLessThan, k_end_raw, k_total_v);
             let k_end = builder.ins().select(cmp, k_end_raw, k_total_v);
             let is_first = builder.ins().icmp_imm(IntCC::Equal, kc_val, 0);
 
@@ -947,8 +1007,15 @@ fn emit_kc_and_inner_axes(
                 let je = jc_end.unwrap();
                 let nc_ext = builder.ins().isub(je, js);
                 emit_packing_loops(
-                    builder, next_var, spec, input_ptrs,
-                    scratch_ptr.unwrap(), kc_val, k_end, js, nc_ext,
+                    builder,
+                    next_var,
+                    spec,
+                    input_ptrs,
+                    scratch_ptr.unwrap(),
+                    kc_val,
+                    k_end,
+                    js,
+                    nc_ext,
                 )?;
                 let mut is_packed = vec![false; spec.accesses.len()];
                 for &idx in &spec.packable {
@@ -966,10 +1033,24 @@ fn emit_kc_and_inner_axes(
             };
 
             emit_reduction_inner_axes(
-                builder, next_var, spec, axis_order, 0, axis_vals,
-                output_ptr, input_ptrs, math_refs,
-                kc_val, k_end, is_first, jc_start, jc_end, packing.as_ref(),
-                par_axis, par_start, par_end,
+                builder,
+                next_var,
+                spec,
+                axis_order,
+                0,
+                axis_vals,
+                output_ptr,
+                input_ptrs,
+                math_refs,
+                kc_val,
+                k_end,
+                is_first,
+                jc_start,
+                jc_end,
+                packing.as_ref(),
+                par_axis,
+                par_start,
+                par_end,
             )
         })
     } else {
@@ -978,10 +1059,8 @@ fn emit_kc_and_inner_axes(
         let k_end = builder.ins().iconst(types::I64, k_total);
         let is_first = builder.ins().iconst(types::I8, 1);
         emit_reduction_inner_axes(
-            builder, next_var, spec, axis_order, 0, axis_vals,
-            output_ptr, input_ptrs, math_refs,
-            k_start, k_end, is_first, jc_start, jc_end, None,
-            par_axis, par_start, par_end,
+            builder, next_var, spec, axis_order, 0, axis_vals, output_ptr, input_ptrs, math_refs,
+            k_start, k_end, is_first, jc_start, jc_end, None, par_axis, par_start, par_end,
         )
     }
 }
@@ -1016,7 +1095,10 @@ fn emit_packing_loops(
             // For simplicity, use the max tile size (from spec.tiling).
             let kc_max = spec.tiling.kc.unwrap_or(spec.reduction_terms) as i64;
             let nc_max = spec.tiling.nc.unwrap_or(
-                spec.blocking.block_axis.map(|a| spec.output_shape[a]).unwrap_or(1),
+                spec.blocking
+                    .block_axis
+                    .map(|a| spec.output_shape[a])
+                    .unwrap_or(1),
             ) as i64;
             (pack_idx as i64) * kc_max * nc_max
         };
@@ -1088,8 +1170,17 @@ fn emit_reduction_inner_axes(
 ) -> Result<(), V8Error> {
     if depth == axis_order.len() {
         return emit_scalar_reduction(
-            builder, next_var, spec, axis_vals, output_ptr, input_ptrs, math_refs,
-            k_start, k_end, is_first_kc, packing,
+            builder,
+            next_var,
+            spec,
+            axis_vals,
+            output_ptr,
+            input_ptrs,
+            math_refs,
+            k_start,
+            k_end,
+            is_first_kc,
+            packing,
         );
     }
 
@@ -1116,8 +1207,19 @@ fn emit_reduction_inner_axes(
                 let iv = alloc_loop_var(next_var);
                 emit_for_loop(builder, iv, 0, main_end, nr as i64, |builder, j0| {
                     emit_blocked_reduction(
-                        builder, next_var, spec, axis, j0, axis_vals, output_ptr,
-                        input_ptrs, math_refs, k_start, k_end, is_first_kc, packing,
+                        builder,
+                        next_var,
+                        spec,
+                        axis,
+                        j0,
+                        axis_vals,
+                        output_ptr,
+                        input_ptrs,
+                        math_refs,
+                        k_start,
+                        k_end,
+                        is_first_kc,
+                        packing,
                     )
                 })?;
             }
@@ -1127,8 +1229,17 @@ fn emit_reduction_inner_axes(
                 emit_for_loop(builder, iv, main_end, full_extent, 1, |builder, j| {
                     axis_vals[axis] = Some(j);
                     emit_scalar_reduction(
-                        builder, next_var, spec, axis_vals, output_ptr, input_ptrs,
-                        math_refs, k_start, k_end, is_first_kc, packing,
+                        builder,
+                        next_var,
+                        spec,
+                        axis_vals,
+                        output_ptr,
+                        input_ptrs,
+                        math_refs,
+                        k_start,
+                        k_end,
+                        is_first_kc,
+                        packing,
                     )
                 })?;
             }
@@ -1140,19 +1251,46 @@ fn emit_reduction_inner_axes(
             let main_end = builder.ins().iadd(loop_start, main_count);
 
             let iv = alloc_loop_var(next_var);
-            emit_for_loop_dynamic(builder, iv, loop_start, main_end, nr as i64, |builder, j0| {
-                emit_blocked_reduction(
-                    builder, next_var, spec, axis, j0, axis_vals, output_ptr,
-                    input_ptrs, math_refs, k_start, k_end, is_first_kc, packing,
-                )
-            })?;
+            emit_for_loop_dynamic(
+                builder,
+                iv,
+                loop_start,
+                main_end,
+                nr as i64,
+                |builder, j0| {
+                    emit_blocked_reduction(
+                        builder,
+                        next_var,
+                        spec,
+                        axis,
+                        j0,
+                        axis_vals,
+                        output_ptr,
+                        input_ptrs,
+                        math_refs,
+                        k_start,
+                        k_end,
+                        is_first_kc,
+                        packing,
+                    )
+                },
+            )?;
 
             let iv = alloc_loop_var(next_var);
             emit_for_loop_dynamic(builder, iv, main_end, loop_end_val, 1, |builder, j| {
                 axis_vals[axis] = Some(j);
                 emit_scalar_reduction(
-                    builder, next_var, spec, axis_vals, output_ptr, input_ptrs,
-                    math_refs, k_start, k_end, is_first_kc, packing,
+                    builder,
+                    next_var,
+                    spec,
+                    axis_vals,
+                    output_ptr,
+                    input_ptrs,
+                    math_refs,
+                    k_start,
+                    k_end,
+                    is_first_kc,
+                    packing,
                 )
             })?;
         }
@@ -1164,9 +1302,24 @@ fn emit_reduction_inner_axes(
         emit_for_loop_dynamic(builder, iv, par_start, par_end, 1, |builder, val| {
             axis_vals[axis] = Some(val);
             emit_reduction_inner_axes(
-                builder, next_var, spec, axis_order, depth + 1, axis_vals, output_ptr,
-                input_ptrs, math_refs, k_start, k_end, is_first_kc, jc_start, jc_end,
-                packing, par_axis, par_start, par_end,
+                builder,
+                next_var,
+                spec,
+                axis_order,
+                depth + 1,
+                axis_vals,
+                output_ptr,
+                input_ptrs,
+                math_refs,
+                k_start,
+                k_end,
+                is_first_kc,
+                jc_start,
+                jc_end,
+                packing,
+                par_axis,
+                par_start,
+                par_end,
             )
         })
     } else {
@@ -1174,9 +1327,24 @@ fn emit_reduction_inner_axes(
         emit_for_loop(builder, iv, 0, full_extent, 1, |builder, val| {
             axis_vals[axis] = Some(val);
             emit_reduction_inner_axes(
-                builder, next_var, spec, axis_order, depth + 1, axis_vals, output_ptr,
-                input_ptrs, math_refs, k_start, k_end, is_first_kc, jc_start, jc_end,
-                packing, par_axis, par_start, par_end,
+                builder,
+                next_var,
+                spec,
+                axis_order,
+                depth + 1,
+                axis_vals,
+                output_ptr,
+                input_ptrs,
+                math_refs,
+                k_start,
+                k_end,
+                is_first_kc,
+                jc_start,
+                jc_end,
+                packing,
+                par_axis,
+                par_start,
+                par_end,
             )
         })
     }
@@ -1212,8 +1380,19 @@ fn emit_blocked_reduction(
 ) -> Result<(), V8Error> {
     if can_use_simd(spec) {
         return emit_blocked_reduction_simd(
-            builder, next_var, spec, block_axis, j0, axis_vals, output_ptr,
-            input_ptrs, math_refs, k_start, k_end, is_first_kc, packing,
+            builder,
+            next_var,
+            spec,
+            block_axis,
+            j0,
+            axis_vals,
+            output_ptr,
+            input_ptrs,
+            math_refs,
+            k_start,
+            k_end,
+            is_first_kc,
+            packing,
         );
     }
 
@@ -1246,59 +1425,51 @@ fn emit_blocked_reduction(
 
     // Reduction loop over k_start..k_end.
     let k_iv = alloc_loop_var(next_var);
-    emit_for_loop_dynamic(
-        builder,
-        k_iv,
-        k_start,
-        k_end,
-        1,
-        |builder, k_val| {
-            // Load invariant accesses once (they don't depend on block_axis).
-            let mut invariant_vals: Vec<Option<cranelift_codegen::ir::Value>> =
-                vec![None; spec.accesses.len()];
+    emit_for_loop_dynamic(builder, k_iv, k_start, k_end, 1, |builder, k_val| {
+        // Load invariant accesses once (they don't depend on block_axis).
+        let mut invariant_vals: Vec<Option<cranelift_codegen::ir::Value>> =
+            vec![None; spec.accesses.len()];
+        for (idx, access) in spec.accesses.iter().enumerate() {
+            if spec.blocking.invariant[idx] {
+                // block_axis coeff is 0, so the value we set here is irrelevant.
+                axis_vals[block_axis] = Some(j0);
+                let flat = emit_access_index(builder, access, axis_vals, Some(k_val));
+                invariant_vals[idx] = Some(load_f32_at_flat(builder, input_ptrs[idx], flat));
+            }
+        }
+
+        // Unrolled lane loop (NR iterations at Cranelift-emit time).
+        for lane in 0..nr {
+            let j_lane = if lane == 0 {
+                j0
+            } else {
+                builder.ins().iadd_imm(j0, lane as i64)
+            };
+            axis_vals[block_axis] = Some(j_lane);
+
+            // Build load_vals for this lane.
+            let mut load_vals = Vec::with_capacity(spec.accesses.len());
             for (idx, access) in spec.accesses.iter().enumerate() {
                 if spec.blocking.invariant[idx] {
-                    // block_axis coeff is 0, so the value we set here is irrelevant.
-                    axis_vals[block_axis] = Some(j0);
-                    let flat = emit_access_index(builder, access, axis_vals, Some(k_val));
-                    invariant_vals[idx] = Some(load_f32_at_flat(builder, input_ptrs[idx], flat));
-                }
-            }
-
-            // Unrolled lane loop (NR iterations at Cranelift-emit time).
-            for lane in 0..nr {
-                let j_lane = if lane == 0 {
-                    j0
+                    load_vals.push(invariant_vals[idx].unwrap());
                 } else {
-                    builder.ins().iadd_imm(j0, lane as i64)
-                };
-                axis_vals[block_axis] = Some(j_lane);
-
-                // Build load_vals for this lane.
-                let mut load_vals = Vec::with_capacity(spec.accesses.len());
-                for (idx, access) in spec.accesses.iter().enumerate() {
-                    if spec.blocking.invariant[idx] {
-                        load_vals.push(invariant_vals[idx].unwrap());
-                    } else {
-                        let flat =
-                            emit_access_index(builder, access, axis_vals, Some(k_val));
-                        load_vals.push(load_f32_at_flat(builder, input_ptrs[idx], flat));
-                    }
+                    let flat = emit_access_index(builder, access, axis_vals, Some(k_val));
+                    load_vals.push(load_f32_at_flat(builder, input_ptrs[idx], flat));
                 }
-
-                // Evaluate canonical term generically.
-                let result =
-                    emit_term_expr(builder, &spec.canonical_term, &load_vals, math_refs, None)?;
-
-                // Accumulate.
-                let cur = builder.use_var(acc_vars[lane]);
-                let next = builder.ins().fadd(cur, result);
-                builder.def_var(acc_vars[lane], next);
             }
 
-            Ok::<(), V8Error>(())
-        },
-    )?;
+            // Evaluate canonical term generically.
+            let result =
+                emit_term_expr(builder, &spec.canonical_term, &load_vals, math_refs, None)?;
+
+            // Accumulate.
+            let cur = builder.use_var(acc_vars[lane]);
+            let next = builder.ins().fadd(cur, result);
+            builder.def_var(acc_vars[lane], next);
+        }
+
+        Ok::<(), V8Error>(())
+    })?;
 
     // Store NR results.
     for lane in 0..nr {
@@ -1374,72 +1545,69 @@ fn emit_blocked_reduction_simd(
 
     // Reduction loop over k_start..k_end.
     let k_iv = alloc_loop_var(next_var);
-    emit_for_loop_dynamic(
-        builder,
-        k_iv,
-        k_start,
-        k_end,
-        1,
-        |builder, k_val| {
-            // Load invariant accesses (scalar) and splat to vector.
-            let mut invariant_vecs: Vec<Option<cranelift_codegen::ir::Value>> =
-                vec![None; spec.accesses.len()];
+    emit_for_loop_dynamic(builder, k_iv, k_start, k_end, 1, |builder, k_val| {
+        // Load invariant accesses (scalar) and splat to vector.
+        let mut invariant_vecs: Vec<Option<cranelift_codegen::ir::Value>> =
+            vec![None; spec.accesses.len()];
+        for (idx, access) in spec.accesses.iter().enumerate() {
+            if spec.blocking.invariant[idx] {
+                axis_vals[block_axis] = Some(j0);
+                let flat = emit_access_index(builder, access, axis_vals, Some(k_val));
+                let scalar = load_f32_at_flat(builder, input_ptrs[idx], flat);
+                invariant_vecs[idx] = Some(builder.ins().splat(vty, scalar));
+            }
+        }
+
+        // Process nvec vector groups.
+        for vi in 0..nvec {
+            let j_group = if vi == 0 {
+                j0
+            } else {
+                builder.ins().iadd_imm(j0, (vi * vlen) as i64)
+            };
+            axis_vals[block_axis] = Some(j_group);
+
+            // Build vector load_vals.
+            let mut load_vals = Vec::with_capacity(spec.accesses.len());
             for (idx, access) in spec.accesses.iter().enumerate() {
                 if spec.blocking.invariant[idx] {
-                    axis_vals[block_axis] = Some(j0);
-                    let flat = emit_access_index(builder, access, axis_vals, Some(k_val));
-                    let scalar = load_f32_at_flat(builder, input_ptrs[idx], flat);
-                    invariant_vecs[idx] = Some(builder.ins().splat(vty, scalar));
-                }
-            }
-
-            // Process nvec vector groups.
-            for vi in 0..nvec {
-                let j_group = if vi == 0 {
-                    j0
+                    load_vals.push(invariant_vecs[idx].unwrap());
+                } else if let Some(pack) = packing.filter(|p| p.is_packed[idx]) {
+                    // Packed vector load: 4 contiguous elements from packed buffer.
+                    // packed_flat = (k - k_start) * nc_extent + (j - jc_start)
+                    let k_off = builder.ins().isub(k_val, pack.k_start);
+                    let j_off = builder.ins().isub(j_group, pack.jc_start);
+                    let packed_flat = builder.ins().imul(k_off, pack.nc_extent);
+                    let packed_flat = builder.ins().iadd(packed_flat, j_off);
+                    let byte_off = builder.ins().ishl_imm(packed_flat, 2);
+                    let addr = builder.ins().iadd(pack.packed_ptr, byte_off);
+                    load_vals.push(builder.ins().load(vty, simd_flags, addr, 0));
                 } else {
-                    builder.ins().iadd_imm(j0, (vi * vlen) as i64)
-                };
-                axis_vals[block_axis] = Some(j_group);
-
-                // Build vector load_vals.
-                let mut load_vals = Vec::with_capacity(spec.accesses.len());
-                for (idx, access) in spec.accesses.iter().enumerate() {
-                    if spec.blocking.invariant[idx] {
-                        load_vals.push(invariant_vecs[idx].unwrap());
-                    } else if let Some(pack) = packing.filter(|p| p.is_packed[idx]) {
-                        // Packed vector load: 4 contiguous elements from packed buffer.
-                        // packed_flat = (k - k_start) * nc_extent + (j - jc_start)
-                        let k_off = builder.ins().isub(k_val, pack.k_start);
-                        let j_off = builder.ins().isub(j_group, pack.jc_start);
-                        let packed_flat = builder.ins().imul(k_off, pack.nc_extent);
-                        let packed_flat = builder.ins().iadd(packed_flat, j_off);
-                        let byte_off = builder.ins().ishl_imm(packed_flat, 2);
-                        let addr = builder.ins().iadd(pack.packed_ptr, byte_off);
-                        load_vals.push(builder.ins().load(vty, simd_flags, addr, 0));
-                    } else {
-                        // Unpacked vector load: 4 contiguous elements from original.
-                        let flat = emit_access_index(builder, access, axis_vals, Some(k_val));
-                        let byte_off = builder.ins().ishl_imm(flat, 2);
-                        let addr = builder.ins().iadd(input_ptrs[idx], byte_off);
-                        load_vals.push(builder.ins().load(vty, simd_flags, addr, 0));
-                    }
+                    // Unpacked vector load: 4 contiguous elements from original.
+                    let flat = emit_access_index(builder, access, axis_vals, Some(k_val));
+                    let byte_off = builder.ins().ishl_imm(flat, 2);
+                    let addr = builder.ins().iadd(input_ptrs[idx], byte_off);
+                    load_vals.push(builder.ins().load(vty, simd_flags, addr, 0));
                 }
-
-                // Evaluate canonical term on vector values.
-                let result = emit_term_expr(
-                    builder, &spec.canonical_term, &load_vals, math_refs, Some(vty),
-                )?;
-
-                // Accumulate.
-                let cur = builder.use_var(acc_vars[vi]);
-                let next = builder.ins().fadd(cur, result);
-                builder.def_var(acc_vars[vi], next);
             }
 
-            Ok::<(), V8Error>(())
-        },
-    )?;
+            // Evaluate canonical term on vector values.
+            let result = emit_term_expr(
+                builder,
+                &spec.canonical_term,
+                &load_vals,
+                math_refs,
+                Some(vty),
+            )?;
+
+            // Accumulate.
+            let cur = builder.use_var(acc_vars[vi]);
+            let next = builder.ins().fadd(cur, result);
+            builder.def_var(acc_vars[vi], next);
+        }
+
+        Ok::<(), V8Error>(())
+    })?;
 
     // Vector-store results.
     for (vi, &acc_v) in acc_vars.iter().enumerate() {
@@ -1489,38 +1657,30 @@ fn emit_scalar_reduction(
     let block_axis = spec.blocking.block_axis;
 
     let k_iv = alloc_loop_var(next_var);
-    emit_for_loop_dynamic(
-        builder,
-        k_iv,
-        k_start,
-        k_end,
-        1,
-        |builder, k_val| {
-            let mut load_vals = Vec::with_capacity(spec.accesses.len());
-            for (idx, access) in spec.accesses.iter().enumerate() {
-                if let Some(pack) = packing.filter(|p| p.is_packed[idx]) {
-                    // Packed scalar load.
-                    let k_off = builder.ins().isub(k_val, pack.k_start);
-                    let j_val = block_axis.and_then(|a| axis_vals[a]).unwrap_or_else(|| {
-                        builder.ins().iconst(types::I64, 0)
-                    });
-                    let j_off = builder.ins().isub(j_val, pack.jc_start);
-                    let packed_flat = builder.ins().imul(k_off, pack.nc_extent);
-                    let packed_flat = builder.ins().iadd(packed_flat, j_off);
-                    load_vals.push(load_f32_at_flat(builder, pack.packed_ptr, packed_flat));
-                } else {
-                    let flat = emit_access_index(builder, access, axis_vals, Some(k_val));
-                    load_vals.push(load_f32_at_flat(builder, input_ptrs[idx], flat));
-                }
+    emit_for_loop_dynamic(builder, k_iv, k_start, k_end, 1, |builder, k_val| {
+        let mut load_vals = Vec::with_capacity(spec.accesses.len());
+        for (idx, access) in spec.accesses.iter().enumerate() {
+            if let Some(pack) = packing.filter(|p| p.is_packed[idx]) {
+                // Packed scalar load.
+                let k_off = builder.ins().isub(k_val, pack.k_start);
+                let j_val = block_axis
+                    .and_then(|a| axis_vals[a])
+                    .unwrap_or_else(|| builder.ins().iconst(types::I64, 0));
+                let j_off = builder.ins().isub(j_val, pack.jc_start);
+                let packed_flat = builder.ins().imul(k_off, pack.nc_extent);
+                let packed_flat = builder.ins().iadd(packed_flat, j_off);
+                load_vals.push(load_f32_at_flat(builder, pack.packed_ptr, packed_flat));
+            } else {
+                let flat = emit_access_index(builder, access, axis_vals, Some(k_val));
+                load_vals.push(load_f32_at_flat(builder, input_ptrs[idx], flat));
             }
-            let result =
-                emit_term_expr(builder, &spec.canonical_term, &load_vals, math_refs, None)?;
-            let cur = builder.use_var(acc_var);
-            let next = builder.ins().fadd(cur, result);
-            builder.def_var(acc_var, next);
-            Ok::<(), V8Error>(())
-        },
-    )?;
+        }
+        let result = emit_term_expr(builder, &spec.canonical_term, &load_vals, math_refs, None)?;
+        let cur = builder.use_var(acc_var);
+        let next = builder.ins().fadd(cur, result);
+        builder.def_var(acc_var, next);
+        Ok::<(), V8Error>(())
+    })?;
 
     let acc = builder.use_var(acc_var);
     store_f32_at_flat(builder, output_ptr, out_flat, acc);
@@ -1561,16 +1721,34 @@ fn emit_pointwise_loops(
         emit_for_loop_dynamic(builder, iv, par_start, par_end, 1, |builder, val| {
             axis_vals[depth] = Some(val);
             emit_pointwise_loops(
-                builder, next_var, spec, depth + 1, axis_vals, output_ptr, input_ptrs,
-                math_refs, par_axis, par_start, par_end,
+                builder,
+                next_var,
+                spec,
+                depth + 1,
+                axis_vals,
+                output_ptr,
+                input_ptrs,
+                math_refs,
+                par_axis,
+                par_start,
+                par_end,
             )
         })
     } else {
         emit_for_loop(builder, iv, 0, extent, 1, |builder, val| {
             axis_vals[depth] = Some(val);
             emit_pointwise_loops(
-                builder, next_var, spec, depth + 1, axis_vals, output_ptr, input_ptrs,
-                math_refs, par_axis, par_start, par_end,
+                builder,
+                next_var,
+                spec,
+                depth + 1,
+                axis_vals,
+                output_ptr,
+                input_ptrs,
+                math_refs,
+                par_axis,
+                par_start,
+                par_end,
             )
         })
     }
@@ -1592,9 +1770,9 @@ fn emit_term_expr(
     vector_type: Option<cranelift_codegen::ir::Type>,
 ) -> Result<cranelift_codegen::ir::Value, V8Error> {
     Ok(match term {
-        ReductionTermPattern::Load(i) => *load_vals.get(*i).ok_or_else(|| {
-            V8Error::Unsupported(format!("term load index {i} out of range"))
-        })?,
+        ReductionTermPattern::Load(i) => *load_vals
+            .get(*i)
+            .ok_or_else(|| V8Error::Unsupported(format!("term load index {i} out of range")))?,
         ReductionTermPattern::Literal(bits) => {
             let v = f64::from_bits(*bits) as f32;
             let scalar = builder.ins().f32const(v);
@@ -1817,9 +1995,7 @@ fn load_tensor_base_ptr(
         .ok_or(V8Error::Codegen(CodegenError::UnknownTensor(tensor)))?;
     let ptr_offset = (*tidx as i64) * (ptr_type.bytes() as i64);
     let addr = builder.ins().iadd_imm(ptr_table, ptr_offset);
-    Ok(builder
-        .ins()
-        .load(ptr_type, MemFlags::trusted(), addr, 0))
+    Ok(builder.ins().load(ptr_type, MemFlags::trusted(), addr, 0))
 }
 
 fn load_f32_at_flat(
@@ -2030,7 +2206,11 @@ mod tests {
         unsafe { compiled.execute(&mut ptrs) };
         let got = bufs[layout.tensor_index[&c]].clone();
 
-        let expected: Vec<f32> = a_data.iter().zip(b_data.iter()).map(|(x, y)| x + y).collect();
+        let expected: Vec<f32> = a_data
+            .iter()
+            .zip(b_data.iter())
+            .map(|(x, y)| x + y)
+            .collect();
         assert!(max_diff(&got, &expected) < 1e-6, "max diff too large");
     }
 

@@ -12,13 +12,13 @@ pub mod jit {
     use crate::compiler::common::v2_frontend::{ScalarBinOp, ScalarUnaryOp};
     use crate::dtype::DType;
     use crate::graph::GlobalId;
-    use std::collections::HashMap;
     use cranelift_codegen::ir::types;
     use cranelift_codegen::ir::{AbiParam, InstBuilder, MemFlags, Value};
     use cranelift_codegen::settings::{self, Configurable};
     use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
     use cranelift_jit::{JITBuilder, JITModule};
     use cranelift_module::{Linkage, Module};
+    use std::collections::HashMap;
 
     #[derive(Debug, thiserror::Error)]
     pub enum V9Error {
@@ -94,8 +94,7 @@ pub mod jit {
             .finish(settings::Flags::new(flag_builder))
             .map_err(|e| V9Error::Other(format!("ISA finish: {}", e)))?;
 
-        let mut jit_builder =
-            JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        let mut jit_builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
 
         jit_builder.symbol("wt9_expf", wt9_expf as *const u8);
         jit_builder.symbol("wt9_sqrtf", wt9_sqrtf as *const u8);
@@ -167,12 +166,12 @@ pub mod jit {
             let count: usize = pattern.output_shape.iter().product();
 
             // Determine parallel axis metadata
-            let (parallel_extent, parallel_step) =
-                if let Some(blocking) = analyze_blocking(pattern) {
-                    (pattern.output_shape[blocking.block_axis], blocking.nr)
-                } else {
-                    (pattern.output_shape[0], 1)
-                };
+            let (parallel_extent, parallel_step) = if let Some(blocking) = analyze_blocking(pattern)
+            {
+                (pattern.output_shape[blocking.block_axis], blocking.nr)
+            } else {
+                (pattern.output_shape[0], 1)
+            };
 
             kernels.push((
                 func_id,
@@ -241,8 +240,8 @@ pub mod jit {
         // Try register blocking for patterns with reductions
         if let Some(blocking) = analyze_blocking(pattern) {
             return emit_pattern_blocked(
-                builder, module, pattern, layout, ptr_table, math_funcs, &blocking,
-                axis_start, axis_end,
+                builder, module, pattern, layout, ptr_table, math_funcs, &blocking, axis_start,
+                axis_end,
             );
         }
 
@@ -265,7 +264,11 @@ pub mod jit {
 
         // Build nested loops — outermost axis uses axis_start..axis_end
         let loop_blocks = build_nested_loops_ranged(
-            builder, &axis_vars, &pattern.output_shape, axis_start, axis_end,
+            builder,
+            &axis_vars,
+            &pattern.output_shape,
+            axis_start,
+            axis_end,
         );
 
         // Compute flat output index
@@ -291,7 +294,14 @@ pub mod jit {
         )?;
 
         // Store result
-        store_result(builder, layout, pattern.output_tensor, flat_out, result, &buf_ptrs);
+        store_result(
+            builder,
+            layout,
+            pattern.output_tensor,
+            flat_out,
+            result,
+            &buf_ptrs,
+        );
 
         // Close nested loops
         close_nested_loops(builder, &axis_vars, &loop_blocks);
@@ -423,19 +433,37 @@ pub mod jit {
             }
             PatternExpr::Binary { op, a, b } => {
                 let va = eval_expr_with_reduce_override(
-                    builder, module, a, outer_load_vals, math_funcs,
-                    target_reduce_idx, reduce_value, layout,
+                    builder,
+                    module,
+                    a,
+                    outer_load_vals,
+                    math_funcs,
+                    target_reduce_idx,
+                    reduce_value,
+                    layout,
                 )?;
                 let vb = eval_expr_with_reduce_override(
-                    builder, module, b, outer_load_vals, math_funcs,
-                    target_reduce_idx, reduce_value, layout,
+                    builder,
+                    module,
+                    b,
+                    outer_load_vals,
+                    math_funcs,
+                    target_reduce_idx,
+                    reduce_value,
+                    layout,
                 )?;
                 Ok(emit_binop(builder, *op, va, vb))
             }
             PatternExpr::Unary { op, input } => {
                 let vi = eval_expr_with_reduce_override(
-                    builder, module, input, outer_load_vals, math_funcs,
-                    target_reduce_idx, reduce_value, layout,
+                    builder,
+                    module,
+                    input,
+                    outer_load_vals,
+                    math_funcs,
+                    target_reduce_idx,
+                    reduce_value,
+                    layout,
                 )?;
                 Ok(emit_unaryop(builder, module, *op, vi, math_funcs)?)
             }
@@ -457,7 +485,12 @@ pub mod jit {
 
     /// Check if a varying reduction load can be packed: it must only depend
     /// on the block axis and k, not on any non-block output axis.
-    fn is_packable(access: &AffineAccess, block_axis: usize, is_invariant: bool, red_coeff: i64) -> bool {
+    fn is_packable(
+        access: &AffineAccess,
+        block_axis: usize,
+        is_invariant: bool,
+        red_coeff: i64,
+    ) -> bool {
         if is_invariant || red_coeff == 0 {
             return false;
         }
@@ -527,7 +560,12 @@ pub mod jit {
             .iter()
             .enumerate()
             .map(|(pos, access)| {
-                is_packable(access, block_axis, blocking.invariant[pos], red.reduction_coeffs[pos])
+                is_packable(
+                    access,
+                    block_axis,
+                    blocking.invariant[pos],
+                    red.reduction_coeffs[pos],
+                )
             })
             .collect();
         let any_packable = packable.iter().any(|&p| p);
@@ -539,9 +577,11 @@ pub mod jit {
         const SIMD_WIDTH: usize = 4;
         let use_simd = nr % SIMD_WIDTH == 0
             && block_axis + 1 == ndim
-            && red.accesses.iter().enumerate().all(|(pos, _)| {
-                blocking.invariant[pos] || packable[pos]
-            })
+            && red
+                .accesses
+                .iter()
+                .enumerate()
+                .all(|(pos, _)| blocking.invariant[pos] || packable[pos])
             && !body_has_func_calls(body_pattern);
 
         // Allocate stack slots for pack panels (before any loops).
@@ -663,12 +703,9 @@ pub mod jit {
                             src_base_ptr,
                             byte_off,
                         );
-                        builder.ins().store(
-                            MemFlags::trusted(),
-                            vec,
-                            dst_base_ptr,
-                            byte_off,
-                        );
+                        builder
+                            .ins()
+                            .store(MemFlags::trusted(), vec, dst_base_ptr, byte_off);
                     }
                 } else {
                     // Scalar packing: works for both f32 and bf16 sources.
@@ -695,12 +732,17 @@ pub mod jit {
                         let src_ptr = builder.ins().iadd(src_buf, src_byte);
                         let val = if src_is_bf16 {
                             // BF16→F32 conversion: load i16, zero-extend, shift left 16
-                            let raw16 = builder.ins().load(types::I16, MemFlags::trusted(), src_ptr, 0);
+                            let raw16 =
+                                builder
+                                    .ins()
+                                    .load(types::I16, MemFlags::trusted(), src_ptr, 0);
                             let raw32 = builder.ins().uextend(types::I32, raw16);
                             let shifted = builder.ins().ishl_imm(raw32, 16);
                             builder.ins().bitcast(types::F32, MemFlags::new(), shifted)
                         } else {
-                            builder.ins().load(types::F32, MemFlags::trusted(), src_ptr, 0)
+                            builder
+                                .ins()
+                                .load(types::F32, MemFlags::trusted(), src_ptr, 0)
                         };
 
                         // dst_idx = pk * NR + lane (panel is always f32)
@@ -802,8 +844,13 @@ pub mod jit {
                 .map(|(pos, access)| {
                     if blocking.invariant[pos] {
                         let scalar = load_affine_value(
-                            builder, access, layout, &axis_vars, Some(k_var),
-                            red.reduction_coeffs[pos], &buf_ptrs,
+                            builder,
+                            access,
+                            layout,
+                            &axis_vars,
+                            Some(k_var),
+                            red.reduction_coeffs[pos],
+                            &buf_ptrs,
                         );
                         Some(builder.ins().splat(vty, scalar))
                     } else {
@@ -839,8 +886,13 @@ pub mod jit {
 
                 let acc = builder.use_var(vec_acc_vars[vi]);
                 let new_acc = emit_accum_vec(
-                    builder, module, body_pattern, &body_vals, math_funcs,
-                    accum_op, acc,
+                    builder,
+                    module,
+                    body_pattern,
+                    &body_vals,
+                    math_funcs,
+                    accum_op,
+                    acc,
                 )?;
                 builder.def_var(vec_acc_vars[vi], new_acc);
             }
@@ -871,13 +923,24 @@ pub mod jit {
                         load_outer_values(builder, pattern, layout, &axis_vars, &buf_ptrs);
 
                     let result = eval_expr_with_reduce_override(
-                        builder, module, &pattern.pattern, &outer_vals, math_funcs,
-                        blocking.reduce_idx, scalar, layout,
+                        builder,
+                        module,
+                        &pattern.pattern,
+                        &outer_vals,
+                        math_funcs,
+                        blocking.reduce_idx,
+                        scalar,
+                        layout,
                     )?;
 
                     let flat_out = compute_flat_index(builder, &axis_vars, &out_strides);
                     store_result(
-                        builder, layout, pattern.output_tensor, flat_out, result, &buf_ptrs,
+                        builder,
+                        layout,
+                        pattern.output_tensor,
+                        flat_out,
+                        result,
+                        &buf_ptrs,
                     );
                 }
             }
@@ -927,8 +990,13 @@ pub mod jit {
                 .map(|(pos, access)| {
                     if blocking.invariant[pos] {
                         Some(load_affine_value(
-                            builder, access, layout, &axis_vars, Some(k_var),
-                            red.reduction_coeffs[pos], &buf_ptrs,
+                            builder,
+                            access,
+                            layout,
+                            &axis_vars,
+                            Some(k_var),
+                            red.reduction_coeffs[pos],
+                            &buf_ptrs,
                         ))
                     } else {
                         None
@@ -957,13 +1025,16 @@ pub mod jit {
                             let idx = builder.ins().iadd_imm(k_times_nr, lane as i64);
                             let byte_off = builder.ins().ishl_imm(idx, 2);
                             let ptr = builder.ins().iadd(panel_ptr, byte_off);
-                            builder
-                                .ins()
-                                .load(types::F32, MemFlags::trusted(), ptr, 0)
+                            builder.ins().load(types::F32, MemFlags::trusted(), ptr, 0)
                         } else {
                             load_affine_value(
-                                builder, access, layout, &axis_vars, Some(k_var),
-                                red.reduction_coeffs[pos], &buf_ptrs,
+                                builder,
+                                access,
+                                layout,
+                                &axis_vars,
+                                Some(k_var),
+                                red.reduction_coeffs[pos],
+                                &buf_ptrs,
                             )
                         }
                     })
@@ -971,8 +1042,13 @@ pub mod jit {
 
                 let acc = builder.use_var(acc_vars[lane]);
                 let new_acc = emit_accum_scalar(
-                    builder, module, body_pattern, &body_vals, math_funcs,
-                    accum_op, acc,
+                    builder,
+                    module,
+                    body_pattern,
+                    &body_vals,
+                    math_funcs,
+                    accum_op,
+                    acc,
                 )?;
                 builder.def_var(acc_vars[lane], new_acc);
             }
@@ -997,18 +1073,28 @@ pub mod jit {
                 let j_lane = builder.ins().iadd_imm(j0_post, lane as i64);
                 builder.def_var(axis_vars[block_axis], j_lane);
 
-                let outer_vals =
-                    load_outer_values(builder, pattern, layout, &axis_vars, &buf_ptrs);
+                let outer_vals = load_outer_values(builder, pattern, layout, &axis_vars, &buf_ptrs);
 
                 let acc_val = builder.use_var(acc_vars[lane]);
                 let result = eval_expr_with_reduce_override(
-                    builder, module, &pattern.pattern, &outer_vals, math_funcs,
-                    blocking.reduce_idx, acc_val, layout,
+                    builder,
+                    module,
+                    &pattern.pattern,
+                    &outer_vals,
+                    math_funcs,
+                    blocking.reduce_idx,
+                    acc_val,
+                    layout,
                 )?;
 
                 let flat_out = compute_flat_index(builder, &axis_vars, &out_strides);
                 store_result(
-                    builder, layout, pattern.output_tensor, flat_out, result, &buf_ptrs,
+                    builder,
+                    layout,
+                    pattern.output_tensor,
+                    flat_out,
+                    result,
+                    &buf_ptrs,
                 );
             }
             builder.def_var(axis_vars[block_axis], j0_post);
@@ -1039,8 +1125,8 @@ pub mod jit {
         // --- Scalar tail ---
         if block_extent % nr != 0 {
             emit_scalar_tail(
-                builder, module, pattern, layout, ptr_table, math_funcs,
-                &axis_vars, &buf_ptrs, &mut vars, block_axis,
+                builder, module, pattern, layout, ptr_table, math_funcs, &axis_vars, &buf_ptrs,
+                &mut vars, block_axis,
             )?;
         }
 
@@ -1108,10 +1194,26 @@ pub mod jit {
         // ptr_table won't actually be dereferenced. Pass a dummy value.
         let dummy_ptr_table = builder.ins().iconst(types::I64, 0);
         let result = eval_pattern_expr(
-            builder, module, &pattern.pattern, &outer_vals, axis_vars, pattern, layout,
-            dummy_ptr_table, math_funcs, vars, buf_ptrs,
+            builder,
+            module,
+            &pattern.pattern,
+            &outer_vals,
+            axis_vars,
+            pattern,
+            layout,
+            dummy_ptr_table,
+            math_funcs,
+            vars,
+            buf_ptrs,
         )?;
-        store_result(builder, layout, pattern.output_tensor, flat_out, result, buf_ptrs);
+        store_result(
+            builder,
+            layout,
+            pattern.output_tensor,
+            flat_out,
+            result,
+            buf_ptrs,
+        );
 
         // Close tail loops (all step by 1)
         for d in (0..loop_blocks.len()).rev() {
@@ -1145,7 +1247,9 @@ pub mod jit {
         let mut blocks = Vec::new();
 
         for (d, &extent) in output_shape.iter().enumerate() {
-            let start = if d == 0 { axis_start } else {
+            let start = if d == 0 {
+                axis_start
+            } else {
                 builder.ins().iconst(types::I64, 0)
             };
             builder.def_var(axis_vars[d], start);
@@ -1158,7 +1262,9 @@ pub mod jit {
             builder.switch_to_block(header);
 
             let iv = builder.use_var(axis_vars[d]);
-            let limit = if d == 0 { axis_end } else {
+            let limit = if d == 0 {
+                axis_end
+            } else {
                 builder.ins().iconst(types::I64, extent as i64)
             };
             let cmp = builder.ins().icmp(
@@ -1231,10 +1337,9 @@ pub mod jit {
             }
             let slot_offset = builder.ins().iconst(types::I64, (slot * 8) as i64);
             let buf_ptr_ptr = builder.ins().iadd(ptr_table, slot_offset);
-            let buf_ptr =
-                builder
-                    .ins()
-                    .load(types::I64, MemFlags::trusted(), buf_ptr_ptr, 0);
+            let buf_ptr = builder
+                .ins()
+                .load(types::I64, MemFlags::trusted(), buf_ptr_ptr, 0);
             ptrs.insert(slot, buf_ptr);
         }
         ptrs
@@ -1324,7 +1429,9 @@ pub mod jit {
                 // BF16: 2 bytes per element. Load i16, zero-extend to i32, shift left 16, bitcast to f32.
                 let byte_offset = builder.ins().ishl_imm(flat_idx, 1); // *2
                 let elem_ptr = builder.ins().iadd(buf_ptr, byte_offset);
-                let raw16 = builder.ins().load(types::I16, MemFlags::trusted(), elem_ptr, 0);
+                let raw16 = builder
+                    .ins()
+                    .load(types::I16, MemFlags::trusted(), elem_ptr, 0);
                 let raw32 = builder.ins().uextend(types::I32, raw16);
                 let shifted = builder.ins().ishl_imm(raw32, 16);
                 builder.ins().bitcast(types::F32, MemFlags::new(), shifted)
@@ -1333,7 +1440,9 @@ pub mod jit {
                 // F32 (default): 4 bytes per element
                 let byte_offset = builder.ins().ishl_imm(flat_idx, 2); // *4
                 let elem_ptr = builder.ins().iadd(buf_ptr, byte_offset);
-                builder.ins().load(types::F32, MemFlags::trusted(), elem_ptr, 0)
+                builder
+                    .ins()
+                    .load(types::F32, MemFlags::trusted(), elem_ptr, 0)
             }
         }
     }
@@ -1406,19 +1515,46 @@ pub mod jit {
             }
             PatternExpr::Binary { op, a, b } => {
                 let va = eval_pattern_expr(
-                    builder, module, a, outer_load_vals, axis_vars, recovered,
-                    layout, ptr_table, math_funcs, vars, buf_ptrs,
+                    builder,
+                    module,
+                    a,
+                    outer_load_vals,
+                    axis_vars,
+                    recovered,
+                    layout,
+                    ptr_table,
+                    math_funcs,
+                    vars,
+                    buf_ptrs,
                 )?;
                 let vb = eval_pattern_expr(
-                    builder, module, b, outer_load_vals, axis_vars, recovered,
-                    layout, ptr_table, math_funcs, vars, buf_ptrs,
+                    builder,
+                    module,
+                    b,
+                    outer_load_vals,
+                    axis_vars,
+                    recovered,
+                    layout,
+                    ptr_table,
+                    math_funcs,
+                    vars,
+                    buf_ptrs,
                 )?;
                 Ok(emit_binop(builder, *op, va, vb))
             }
             PatternExpr::Unary { op, input } => {
                 let vi = eval_pattern_expr(
-                    builder, module, input, outer_load_vals, axis_vars, recovered,
-                    layout, ptr_table, math_funcs, vars, buf_ptrs,
+                    builder,
+                    module,
+                    input,
+                    outer_load_vals,
+                    axis_vars,
+                    recovered,
+                    layout,
+                    ptr_table,
+                    math_funcs,
+                    vars,
+                    buf_ptrs,
                 )?;
                 Ok(emit_unaryop(builder, module, *op, vi, math_funcs)?)
             }
@@ -1569,7 +1705,9 @@ pub mod jit {
                         let bias_v = builder.ins().splat(types::I32X4, bias_base);
                         let bias = builder.ins().iadd(lsb_bits, bias_v);
                         let rounded = builder.ins().iadd(bits, bias);
-                        let mask = builder.ins().iconst(types::I32, 0xFFFF_0000u32 as i32 as i64);
+                        let mask = builder
+                            .ins()
+                            .iconst(types::I32, 0xFFFF_0000u32 as i32 as i64);
                         let mask_v = builder.ins().splat(types::I32X4, mask);
                         let masked = builder.ins().band(rounded, mask_v);
                         Ok(builder.ins().bitcast(types::F32X4, MemFlags::new(), masked))
@@ -1609,7 +1747,12 @@ pub mod jit {
     ) -> Result<Value, V9Error> {
         // FMA: acc += a * b → fma(a, b, acc)
         if accum_op == ScalarBinOp::Add {
-            if let PatternExpr::Binary { op: ScalarBinOp::Mul, a, b } = body {
+            if let PatternExpr::Binary {
+                op: ScalarBinOp::Mul,
+                a,
+                b,
+            } = body
+            {
                 let va = eval_body_expr_vec(builder, module, a, load_vals, math_funcs)?;
                 let vb = eval_body_expr_vec(builder, module, b, load_vals, math_funcs)?;
                 return Ok(builder.ins().fma(va, vb, acc));
@@ -1631,7 +1774,12 @@ pub mod jit {
     ) -> Result<Value, V9Error> {
         // FMA: acc += a * b → fma(a, b, acc)
         if accum_op == ScalarBinOp::Add {
-            if let PatternExpr::Binary { op: ScalarBinOp::Mul, a, b } = body {
+            if let PatternExpr::Binary {
+                op: ScalarBinOp::Mul,
+                a,
+                b,
+            } = body
+            {
                 let va = eval_body_expr(builder, module, a, load_vals, math_funcs)?;
                 let vb = eval_body_expr(builder, module, b, load_vals, math_funcs)?;
                 return Ok(builder.ins().fma(va, vb, acc));
