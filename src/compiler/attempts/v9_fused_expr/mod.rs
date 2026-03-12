@@ -809,7 +809,7 @@ pub mod pipeline {
             let int_a = input_map[&ext_a];
             let int_b = input_map[&ext_b];
             let mm_out =
-                crate::milli_graph::ops::MatMul::push_new(&mut graph, int_a, int_b, &mut rng);
+                crate::milli_graph::ops::MatMul::push_new_default_precision(&mut graph, int_a, int_b, crate::dtype::DType::F32, &mut rng);
 
             let mut shapes = HashMap::new();
             shapes.insert(int_a, vec![2, 3]);
@@ -853,7 +853,7 @@ pub mod pipeline {
             let int_bias = input_map[&ext_bias];
 
             let mm_out =
-                crate::milli_graph::ops::MatMul::push_new(&mut graph, int_a, int_w, &mut rng);
+                crate::milli_graph::ops::MatMul::push_new_default_precision(&mut graph, int_a, int_w, crate::dtype::DType::F32, &mut rng);
             let add_out = SimpleBinary::add(&mut graph, mm_out, int_bias, &mut rng);
             let tanh_out = SimpleUnaryOp::trig(&mut graph, add_out, crate::TrigOp::Tanh, &mut rng);
 
@@ -934,12 +934,12 @@ pub mod pipeline {
             let b2 = input_map[&ext_b2];
 
             // Layer 1: act1 = tanh(x @ W1 + b1)
-            let mm1 = crate::milli_graph::ops::MatMul::push_new(&mut graph, x, w1, &mut rng);
+            let mm1 = crate::milli_graph::ops::MatMul::push_new_default_precision(&mut graph, x, w1, crate::dtype::DType::F32, &mut rng);
             let add1 = SimpleBinary::add(&mut graph, mm1, b1, &mut rng);
             let act1 = SimpleUnaryOp::trig(&mut graph, add1, crate::TrigOp::Tanh, &mut rng);
 
             // Layer 2: out = tanh(act1 @ W2 + b2)
-            let mm2 = crate::milli_graph::ops::MatMul::push_new(&mut graph, act1, w2, &mut rng);
+            let mm2 = crate::milli_graph::ops::MatMul::push_new_default_precision(&mut graph, act1, w2, crate::dtype::DType::F32, &mut rng);
             let add2 = SimpleBinary::add(&mut graph, mm2, b2, &mut rng);
             let out = SimpleUnaryOp::trig(&mut graph, add2, crate::TrigOp::Tanh, &mut rng);
 
@@ -1135,7 +1135,7 @@ pub mod pipeline {
             let (mut graph, input_map) = MilliOpGraph::new([ext_a, ext_b], &mut rng);
             let a = input_map[&ext_a];
             let b = input_map[&ext_b];
-            let c = crate::milli_graph::ops::MatMul::push_new(&mut graph, a, b, &mut rng);
+            let c = crate::milli_graph::ops::MatMul::push_new_default_precision(&mut graph, a, b, crate::dtype::DType::F32, &mut rng);
 
             let mut shapes = HashMap::new();
             shapes.insert(a, vec![m, k]);
@@ -1182,10 +1182,10 @@ pub mod pipeline {
             let w2 = input_map[&ext_w2];
             let b2 = input_map[&ext_b2];
 
-            let mm1 = crate::milli_graph::ops::MatMul::push_new(&mut graph, x, w1, &mut rng);
+            let mm1 = crate::milli_graph::ops::MatMul::push_new_default_precision(&mut graph, x, w1, crate::dtype::DType::F32, &mut rng);
             let add1 = SimpleBinary::add(&mut graph, mm1, b1, &mut rng);
             let act1 = SimpleUnaryOp::trig(&mut graph, add1, crate::TrigOp::Tanh, &mut rng);
-            let mm2 = crate::milli_graph::ops::MatMul::push_new(&mut graph, act1, w2, &mut rng);
+            let mm2 = crate::milli_graph::ops::MatMul::push_new_default_precision(&mut graph, act1, w2, crate::dtype::DType::F32, &mut rng);
             let add2 = SimpleBinary::add(&mut graph, mm2, b2, &mut rng);
             let out = SimpleUnaryOp::trig(&mut graph, add2, crate::TrigOp::Tanh, &mut rng);
 
@@ -1280,7 +1280,7 @@ pub mod pipeline {
             let (mut graph, input_map) = MilliOpGraph::new([ext_a, ext_b], &mut rng);
             let a = input_map[&ext_a];
             let b = input_map[&ext_b];
-            let c = crate::milli_graph::ops::MatMul::push_new(&mut graph, a, b, &mut rng);
+            let c = crate::milli_graph::ops::MatMul::push_new_default_precision(&mut graph, a, b, crate::dtype::DType::F32, &mut rng);
 
             let mut shapes = HashMap::new();
             shapes.insert(a, vec![m, k]);

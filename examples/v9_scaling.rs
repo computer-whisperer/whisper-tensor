@@ -10,6 +10,7 @@ use std::time::Instant;
 use whisper_tensor::compiler::attempts::v9_fused_expr::pipeline as v9_pipeline;
 use whisper_tensor::graph::GlobalId;
 use whisper_tensor::milli_graph::MilliOpGraph;
+use whisper_tensor::dtype::DType;
 use whisper_tensor::milli_graph::ops::MatMul;
 use whisper_tensor::numeric_tensor::NumericTensor;
 use whisper_tensor::tensor_rank::DynRank;
@@ -105,7 +106,7 @@ fn bench_matmul(m: usize, k: usize, n: usize) {
     let (mut graph, input_map) = MilliOpGraph::new([ext_a, ext_b], &mut rng);
     let a = input_map[&ext_a];
     let b = input_map[&ext_b];
-    let c = MatMul::push_new(&mut graph, a, b, &mut rng);
+    let c = MatMul::push_new_default_precision(&mut graph, a, b, DType::F32, &mut rng);
     let ext_out = GlobalId::new(&mut rng);
     graph.set_output_map([(c, ext_out)]);
 

@@ -69,7 +69,7 @@ use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::NDArrayNumericTensorError;
 use crate::dtype::{DType, DTypeError};
 use crate::graph::{GlobalId, Node, Property};
-use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
+use crate::milli_graph::{MilliLoweringContext, MilliOpGraph, MilliOpGraphError};
 use crate::numeric_tensor::{NumericTensor, NumericTensorError};
 use crate::symbolic_graph::SymbolicGraph;
 use crate::tensor_rank::DynRank;
@@ -110,11 +110,16 @@ pub trait Operation: Node {
         backend: &mut EvalBackend,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
     ) -> OperationEvalRet {
+        let tensor_dtypes: HashMap<GlobalId, DType> = inputs
+            .iter()
+            .map(|(id, t)| (*id, t.dtype()))
+            .collect();
+        let ctx = MilliLoweringContext::new(tensor_dtypes);
         let mut rng = WyRand::new(Default::default());
-        let milli_graph = self.get_milli_op_graph(&mut rng);
+        let milli_graph = self.get_milli_op_graph(&ctx, &mut rng);
         Ok(milli_graph.eval(inputs, &mut (), backend)?)
     }
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph;
+    fn get_milli_op_graph(&self, ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph;
     fn get_sub_graphs(&self) -> Vec<&SymbolicGraph> {
         vec![]
     }
@@ -139,7 +144,8 @@ pub trait Operation: Node {
             BackwardGenResult, MilliOpGraph, MilliOpGroup, MilliOpPhase, generate_milli_backward,
         };
 
-        let fwd = self.get_milli_op_graph(rng);
+        let lowering_ctx = MilliLoweringContext::empty();
+        let fwd = self.get_milli_op_graph(&lowering_ctx, rng);
         let sym_inputs: Vec<GlobalId> = self.inputs().collect();
         let sym_outputs: Vec<GlobalId> = self.outputs().collect();
 
@@ -370,7 +376,7 @@ impl Operation for AnyOperation {
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>
     ) -> Result<Box<dyn Iterator<Item=(GlobalId, NumericTensor<DynRank>)>>, EvalError>);
 
-    delegate!(get_milli_op_graph(rng: &mut impl Rng) -> MilliOpGraph);
+    delegate!(get_milli_op_graph(ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph);
 
     delegate!(parameters() -> Vec<Property>);
 

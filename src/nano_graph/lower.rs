@@ -66,6 +66,22 @@ pub struct LowerResult {
     pub unsupported: Vec<(GlobalId, String)>,
     /// Human-readable detail for each unsupported op (input/output shapes).
     pub unsupported_details: Vec<String>,
+    /// Mapping from milli tensor GlobalId to nano atom group.
+    pub tensor_map: HashMap<GlobalId, TensorAtomMapInfo>,
+    /// Pre-built overrides for all Numeric (constant) tensors.
+    /// Maps atom index → NumericScalar value. Covers model weights,
+    /// constant-folded ops, and any other tensor whose value is known at
+    /// lowering time. User inputs (Shaped tensors) are NOT included — the
+    /// caller must add those separately before passing to NanoEval.
+    pub numeric_overrides: HashMap<u32, crate::numeric_scalar::NumericScalar>,
+}
+
+/// Public view of how a milli tensor maps to nano atoms.
+#[derive(Debug, Clone)]
+pub struct TensorAtomMapInfo {
+    pub base_id: AtomId,
+    pub count: u32,
+    pub sym_dims: Vec<SymDim>,
 }
 
 /// How a milli tensor maps to atoms in the nano graph.
@@ -165,10 +181,41 @@ pub fn lower_with_info(
     // If still no outputs, register all mapped tensors from the last ops.
     // This is a fallback — proper output mapping will be fixed later.
 
+    let tensor_map: HashMap<GlobalId, TensorAtomMapInfo> = ctx.tensor_map.iter().map(|(id, tam)| {
+        (*id, TensorAtomMapInfo {
+            base_id: tam.base_id,
+            count: tam.count,
+            sym_dims: tam.sym_dims.clone(),
+        })
+    }).collect();
+
+    // Build overrides for all Numeric (constant-valued) tensors.
+    use crate::numeric_scalar::NumericScalar;
+    let mut numeric_overrides: HashMap<u32, NumericScalar> = HashMap::new();
+    let mut backend = crate::backends::eval_backend::EvalBackend::NDArray;
+    for (id, info) in &all_infos {
+        let Some(numeric) = info.as_numeric() else { continue };
+        let Some(tam) = ctx.tensor_map.get(id) else { continue };
+        let tensor_dtype = numeric.dtype();
+        // Extract values via f32 (exact for BF16/F16/F32, sufficient for most cases),
+        // then cast to the tensor's actual dtype to preserve rounding semantics.
+        let Ok(f32_tensor) = numeric.cast(DType::F32, &mut backend) else { continue };
+        let Ok(flat) = f32_tensor.flatten() else { continue };
+        let Ok(nd) = flat.to_ndarray() else { continue };
+        let Ok(v): Result<Vec<f32>, _> = nd.try_into() else { continue };
+        if v.len() != tam.count as usize { continue }
+        for (i, &val) in v.iter().enumerate() {
+            let scalar = NumericScalar::F32(val).cast_to(tensor_dtype);
+            numeric_overrides.insert(tam.base_id.0 + i as u32, scalar);
+        }
+    }
+
     Ok(LowerResult {
         graph: ctx.nano,
         unsupported: ctx.unsupported,
         unsupported_details: ctx.unsupported_details,
+        tensor_map,
+        numeric_overrides,
     })
 }
 
@@ -1358,13 +1405,18 @@ impl LowerCtx {
             return;
         }
 
+        // Determine accumulation dtype: BF16/F16 inputs accumulate in F32,
+        // matching the milli MatMul eval semantics.
+        let out_dtype = out_info.dtype();
+        let input_dtype = all_infos.get(&a_id).map(|i| i.dtype()).unwrap_or(out_dtype);
+        let compute_dtype = match input_dtype {
+            DType::BF16 | DType::F16 => DType::F32,
+            _ => out_dtype,
+        };
+
         // Create bounded sym dim for the contraction dimension K.
         let k_sym = self.nano.bounded_sym_dim(&format!("matmul_k_{}", self.next_anon_sym), k);
         self.next_anon_sym += 1;
-
-        // Sym dims for multiply groups: output's sym dims + k_sym.
-        let mut mul_sym_dims = out_sym_dims.clone();
-        mul_sym_dims.push(k_sym);
 
         // Compute A's known-dim strides (for addressing within A's atoms).
         let a_known_dims: Vec<u64> = a_layout.iter()
@@ -1397,6 +1449,10 @@ impl LowerCtx {
             None
         };
 
+        // Expand the K contraction dimension into K concrete mul groups per row.
+        // Each mul group has N atoms computing A[...,m,k] * B[...,k,n] for a fixed k.
+        // This allows the flat eval to correctly evaluate each atom independently,
+        // and the ReduceSum uses stride_k=N to hop between k layers.
         let mut mul_base_id = None;
 
         for g in 0..num_row_groups {
@@ -1405,22 +1461,18 @@ impl LowerCtx {
 
             // Compute A's base offset: set batch indices + m_idx, K=0.
             let mut a_offset = 0u64;
-            // Decompose batch_idx into batch known dim indices.
             let mut batch_rem = batch_idx;
             let a_batch_strides = TensorAtomMap::compute_strides(&a_batch_known);
             for (i, &stride) in a_batch_strides.iter().enumerate() {
                 if stride > 0 {
                     let idx = batch_rem / stride;
                     batch_rem %= stride;
-                    // Find which a_known_dim this corresponds to.
-                    // a_batch_known[i] maps to the i-th known dim from a_batch_layout.
                     a_offset += idx * a_strides[i];
                 }
             }
             if let Some(m_ki) = a_m_known_idx {
                 a_offset += m_idx * a_strides[m_ki];
             }
-            // K=0, so no K contribution to base.
 
             // Compute B's base offset: set batch indices, K=0, N=0.
             let mut b_offset = 0u64;
@@ -1435,44 +1487,62 @@ impl LowerCtx {
                     }
                 }
             }
-            // K=0, N=0 → no additional offset.
 
-            let input_a = InputRef::SymAffine {
-                base: a_map.base_id.offset(a_offset as u32),
-                stride_i: 0,                         // all N atoms read same A element
-                stride_k: a_strides[a_k_known_idx] as i32, // advance along K in A
-            };
-            let input_b = InputRef::SymAffine {
-                base: b_map.base_id.offset(b_offset as u32),
-                stride_i: 1,                         // atom n reads B[..., k, n]
-                stride_k: b_strides[b_k_known_idx] as i32, // advance along K in B
-            };
+            // Create K mul groups for this row, one per contraction index.
+            for ki in 0..k {
+                let a_atom = a_map.base_id.offset(
+                    (a_offset + ki * a_strides[a_k_known_idx]) as u32,
+                );
+                let b_atom = b_map.base_id.offset(
+                    (b_offset + ki * b_strides[b_k_known_idx]) as u32,
+                );
 
-            let base = self.nano.push_group(
-                n_u32,
-                ScalarOp::Binary(ScalarBinOp::Mul),
-                out_info.dtype(),
-                mul_sym_dims.clone(),
-                vec![],
-                vec![input_a, input_b],
-            );
+                let input_a = InputRef::Broadcast(a_atom);
+                let input_b = InputRef::Affine { base: b_atom, stride: 1 };
 
-            if mul_base_id.is_none() {
-                mul_base_id = Some(base);
+                let base = self.nano.push_group(
+                    n_u32,
+                    ScalarOp::Binary(ScalarBinOp::Mul),
+                    compute_dtype,
+                    out_sym_dims.clone(),
+                    vec![],
+                    vec![input_a, input_b],
+                );
+
+                if mul_base_id.is_none() {
+                    mul_base_id = Some(base);
+                }
             }
         }
 
         let mul_base = mul_base_id.unwrap();
 
-        // ReduceSum group: collapses k_sym.
-        let base_id = self.nano.push_group(
-            out_count,
-            ScalarOp::ReduceSum,
-            out_info.dtype(),
-            out_sym_dims.clone(),
-            vec![k_sym],
-            vec![InputRef::Affine { base: mul_base, stride: 1 }],
-        );
+        // ReduceSum: one group per row, each with N atoms.
+        // stride_k = N so that stepping k hops between the K mul groups for this row.
+        let mut reduce_base_id = None;
+
+        for g in 0..num_row_groups {
+            let row_mul_base = AtomId(mul_base.0 + (g as u32) * (k as u32) * n_u32);
+
+            let base = self.nano.push_group(
+                n_u32,
+                ScalarOp::ReduceSum,
+                out_info.dtype(),
+                out_sym_dims.clone(),
+                vec![k_sym],
+                vec![InputRef::SymAffine {
+                    base: row_mul_base,
+                    stride_i: 1,
+                    stride_k: n_u32 as i32,
+                }],
+            );
+
+            if reduce_base_id.is_none() {
+                reduce_base_id = Some(base);
+            }
+        }
+
+        let base_id = reduce_base_id.unwrap();
 
         self.tensor_map.insert(out_id, TensorAtomMap {
             base_id, count: out_count, layout: out_layout,
@@ -1832,5 +1902,200 @@ impl LowerCtx {
         self.tensor_map.insert(id, TensorAtomMap {
             base_id, count: 1, layout: vec![], known_strides: vec![], sym_dims: vec![],
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::DynRank;
+    use crate::backends::eval_backend::EvalBackend;
+    use crate::graph::Graph;
+    use crate::milli_graph::MilliOpGraph;
+    use crate::milli_graph::ops::MilliOp;
+    use crate::numeric_tensor::NumericTensor;
+    use crate::nano_graph::eval::NanoEval;
+    use crate::numeric_scalar::NumericScalar;
+
+    /// Extract flat f32 values from a NumericTensor, returned as f64.
+    fn tensor_to_f64(t: &NumericTensor<DynRank>) -> Vec<f64> {
+        let mut backend = EvalBackend::NDArray;
+        let f32_tensor = t.cast(crate::dtype::DType::F32, &mut backend).unwrap();
+        let flat = f32_tensor.flatten().unwrap();
+        let v: Vec<f32> = flat.to_ndarray().unwrap().try_into().unwrap();
+        v.into_iter().map(|x| x as f64).collect()
+    }
+
+    /// Extract flat values from a NumericTensor as NumericScalar in the tensor's dtype.
+    fn tensor_to_scalars(t: &NumericTensor<DynRank>) -> Vec<NumericScalar> {
+        let mut backend = EvalBackend::NDArray;
+        let dtype = t.dtype();
+        let f32_tensor = t.cast(crate::dtype::DType::F32, &mut backend).unwrap();
+        let flat = f32_tensor.flatten().unwrap();
+        let v: Vec<f32> = flat.to_ndarray().unwrap().try_into().unwrap();
+        v.into_iter().map(|x| NumericScalar::F32(x).cast_to(dtype)).collect()
+    }
+
+    /// Build a milli graph, eval through both milli and nano, compare results.
+    fn check_integrity(
+        build_graph: impl FnOnce(&mut MilliOpGraph, &mut rand::rngs::ThreadRng) -> (Vec<GlobalId>, Vec<GlobalId>),
+        inputs: Vec<NumericTensor<DynRank>>,
+    ) {
+        let mut rng = rand::rng();
+        let (mut milli, _ext_map) = MilliOpGraph::new(std::iter::empty(), &mut rng);
+
+        let (input_ids, output_ids) = build_graph(&mut milli, &mut rng);
+        assert_eq!(input_ids.len(), inputs.len());
+
+        // Prepare inputs: add_input makes ext==int, so id maps to itself.
+        let mut info_inputs: HashMap<GlobalId, TensorInfo> = HashMap::new();
+        let mut intermediates: HashMap<GlobalId, NumericTensor<DynRank>> = HashMap::new();
+        for (id, tensor) in input_ids.iter().zip(inputs.iter()) {
+            info_inputs.insert(*id, TensorInfo::from(tensor.clone()));
+            intermediates.insert(*id, tensor.clone());
+        }
+
+        // Eval through MilliOpGraph (walk ops manually).
+        let mut backend = EvalBackend::NDArray;
+        for &op_id in milli.op_ordering() {
+            let op = milli.get_node_by_id(&op_id).unwrap();
+            for (tid, val) in op.eval(&intermediates, &mut backend).unwrap() {
+                intermediates.insert(tid, val);
+            }
+        }
+
+        // Lower to NanoGraph.
+        let result = lower_with_info(&milli, &info_inputs).unwrap();
+        assert!(result.unsupported.is_empty(),
+            "Unsupported ops: {:?}", result.unsupported_details);
+
+        // Start with numeric overrides from lowering, add input values on top.
+        let mut overrides = result.numeric_overrides;
+        for (&id, tensor) in input_ids.iter().zip(inputs.iter()) {
+            if let Some(tam) = result.tensor_map.get(&id) {
+                let scalars = tensor_to_scalars(tensor);
+                assert_eq!(scalars.len(), tam.count as usize);
+                for (i, val) in scalars.into_iter().enumerate() {
+                    overrides.insert(tam.base_id.0 + i as u32, val);
+                }
+            }
+        }
+
+        // Eval NanoGraph.
+        let nano_eval = NanoEval::eval(&result.graph, &overrides);
+
+        // Compare outputs.
+        for out_id in &output_ids {
+            let milli_tensor = &intermediates[out_id];
+            let milli_flat = tensor_to_f64(milli_tensor);
+
+            let Some(tam) = result.tensor_map.get(out_id) else {
+                panic!("Output tensor {:?} not in tensor_map", out_id);
+            };
+            assert!(tam.sym_dims.is_empty(), "Sym dims not yet supported in test");
+
+            let nano_flat: Vec<f64> = (0..tam.count)
+                .map(|i| nano_eval.get(tam.base_id.offset(i)))
+                .collect();
+
+            assert_eq!(milli_flat.len(), nano_flat.len(),
+                "Output {:?}: milli has {} elements, nano has {}",
+                out_id, milli_flat.len(), nano_flat.len());
+
+            for (i, (m, n)) in milli_flat.iter().zip(nano_flat.iter()).enumerate() {
+                let diff = (m - n).abs();
+                let tol = 1e-4 * m.abs().max(1.0);
+                assert!(diff < tol,
+                    "Output {:?} element {}: milli={} nano={} diff={}",
+                    out_id, i, m, n, diff);
+            }
+        }
+    }
+
+    #[test]
+    fn test_add_two_vectors() {
+        check_integrity(
+            |graph, rng| {
+                let a = graph.add_input(rng);
+                let b = graph.add_input(rng);
+                let c = crate::milli_graph::ops::SimpleBinary::add(graph, a, b, rng);
+                (vec![a, b], vec![c])
+            },
+            vec![
+                NumericTensor::from_vec_shape(vec![1.0f32, 2.0, 3.0, 4.0], vec![4]).unwrap(),
+                NumericTensor::from_vec_shape(vec![10.0f32, 20.0, 30.0, 40.0], vec![4]).unwrap(),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_mul_add_chain() {
+        check_integrity(
+            |graph, rng| {
+                let a = graph.add_input(rng);
+                let b = graph.add_input(rng);
+                let c = graph.add_input(rng);
+                let ab = crate::milli_graph::ops::SimpleBinary::mul(graph, a, b, rng);
+                let abc = crate::milli_graph::ops::SimpleBinary::add(graph, ab, c, rng);
+                (vec![a, b, c], vec![abc])
+            },
+            vec![
+                NumericTensor::from_vec_shape(vec![1.0f32, 2.0, 3.0], vec![3]).unwrap(),
+                NumericTensor::from_vec_shape(vec![4.0f32, 5.0, 6.0], vec![3]).unwrap(),
+                NumericTensor::from_vec_shape(vec![0.1f32, 0.2, 0.3], vec![3]).unwrap(),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_broadcast_add() {
+        // [2,3] + [3] → [2,3]
+        check_integrity(
+            |graph, rng| {
+                let a = graph.add_input(rng);
+                let b = graph.add_input(rng);
+                let c = crate::milli_graph::ops::SimpleBinary::add(graph, a, b, rng);
+                (vec![a, b], vec![c])
+            },
+            vec![
+                NumericTensor::from_vec_shape(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]).unwrap(),
+                NumericTensor::from_vec_shape(vec![10.0f32, 20.0, 30.0], vec![3]).unwrap(),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_unary_exp() {
+        check_integrity(
+            |graph, rng| {
+                let a = graph.add_input(rng);
+                let b = crate::milli_graph::ops::SimpleUnaryOp::exp(graph, a, rng);
+                (vec![a], vec![b])
+            },
+            vec![
+                NumericTensor::from_vec_shape(vec![0.0f32, 1.0, -1.0, 0.5], vec![4]).unwrap(),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_matmul_2d() {
+        // [2,3] @ [3,2] → [2,2]
+        check_integrity(
+            |graph, rng| {
+                let a = graph.add_input(rng);
+                let b = graph.add_input(rng);
+                let c = crate::milli_graph::ops::MatMul::push_new_default_precision(graph, a, b, crate::dtype::DType::F32, rng);
+                (vec![a, b], vec![c])
+            },
+            vec![
+                NumericTensor::from_vec_shape(
+                    vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3],
+                ).unwrap(),
+                NumericTensor::from_vec_shape(
+                    vec![1.0f32, 0.0, 0.0, 1.0, 1.0, 1.0], vec![3, 2],
+                ).unwrap(),
+            ],
+        );
     }
 }

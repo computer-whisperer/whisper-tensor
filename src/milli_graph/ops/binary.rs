@@ -485,19 +485,45 @@ impl MilliOp for Pow {
     }
 }
 
+fn default_f32() -> DType {
+    DType::F32
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MatMul {
     global_id: GlobalId,
     output: GlobalId,
     a: GlobalId,
     b: GlobalId,
+    /// Precision for element-wise A[m,k] * B[k,n] products.
+    #[serde(default = "default_f32")]
+    multiply_dtype: DType,
+    /// Precision for accumulating (summing) the products across K.
+    #[serde(default = "default_f32")]
+    accumulate_dtype: DType,
+    /// Dtype of the output tensor.
+    #[serde(default = "default_f32")]
+    output_dtype: DType,
 }
 
 impl MatMul {
+    pub fn multiply_dtype(&self) -> DType {
+        self.multiply_dtype
+    }
+    pub fn accumulate_dtype(&self) -> DType {
+        self.accumulate_dtype
+    }
+    pub fn output_dtype(&self) -> DType {
+        self.output_dtype
+    }
+
     pub fn push_new(
         graph: &mut MilliOpGraph,
         a: GlobalId,
         b: GlobalId,
+        multiply_dtype: DType,
+        accumulate_dtype: DType,
+        output_dtype: DType,
         rng: &mut impl Rng,
     ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
@@ -505,10 +531,35 @@ impl MatMul {
             output,
             a,
             b,
+            multiply_dtype,
+            accumulate_dtype,
+            output_dtype,
             global_id: GlobalId::new(rng),
         };
         graph.push_op(AnyMilliOp::MatMul(node));
         output
+    }
+
+    /// Standard precision convention: BF16/F16 inputs multiply and accumulate
+    /// in F32, output matches input dtype. All other types use native precision.
+    pub fn push_new_default_precision(
+        graph: &mut MilliOpGraph,
+        a: GlobalId,
+        b: GlobalId,
+        input_dtype: DType,
+        rng: &mut impl Rng,
+    ) -> GlobalId {
+        let (mul_dt, acc_dt, out_dt) = Self::default_precision_for(input_dtype);
+        Self::push_new(graph, a, b, mul_dt, acc_dt, out_dt, rng)
+    }
+
+    /// Returns (multiply_dtype, accumulate_dtype, output_dtype) for the standard
+    /// precision convention given an input dtype.
+    pub fn default_precision_for(input_dtype: DType) -> (DType, DType, DType) {
+        match input_dtype {
+            DType::BF16 | DType::F16 => (DType::F32, DType::F32, input_dtype),
+            _ => (input_dtype, input_dtype, input_dtype),
+        }
     }
 }
 
@@ -518,6 +569,7 @@ impl MatMul {
         super::remap(&mut self.output, map);
         super::remap(&mut self.a, map);
         super::remap(&mut self.b, map);
+        // multiply_dtype, accumulate_dtype, output_dtype are preserved as-is
     }
 }
 
@@ -552,8 +604,8 @@ impl MilliOp for MatMul {
             return Ok(Box::new(collected.into_iter()));
         }
 
-        // MatMul output dtype matches input dtype.
-        let out_dtype = a_info.dtype();
+        // MatMul output dtype comes from the struct's explicit field.
+        let out_dtype = self.output_dtype;
 
         // Try per-dim shape inference: A[...,M,K] @ B[...,K,N] -> [...,M,N]
         // Batch dims are broadcast, last two follow matmul rules.
@@ -637,9 +689,12 @@ impl MilliOp for MatMul {
     {
         let a_input = &inputs[&self.a];
         let b_input = &inputs[&self.b];
-        let accumulate_dtype = match a_input.dtype() {
-            DType::BF16 | DType::F16 => Some(DType::F32),
-            _ => None,
+        // Use the explicitly stored accumulate_dtype.
+        // None means "use native" — only pass Some when accumulate differs from input.
+        let accumulate_dtype = if self.accumulate_dtype != a_input.dtype() {
+            Some(self.accumulate_dtype)
+        } else {
+            None
         };
         let out = NumericTensor::<DynRank>::matmul(a_input, b_input, accumulate_dtype, backend)?;
         Ok(Box::new([(self.output, out)].into_iter()))
@@ -654,10 +709,16 @@ impl MilliOp for MatMul {
         let grad_output = *output_grads.get(&self.output)?;
         // d/dA (A @ B) = grad @ B^T
         let b_t = super::Transpose::push_new(graph, self.b, Some(vec![-1, -2]), rng);
-        let grad_a = MatMul::push_new(graph, grad_output, b_t, rng);
+        let grad_a = MatMul::push_new(
+            graph, grad_output, b_t,
+            self.multiply_dtype, self.accumulate_dtype, self.output_dtype, rng,
+        );
         // d/dB (A @ B) = A^T @ grad
         let a_t = super::Transpose::push_new(graph, self.a, Some(vec![-1, -2]), rng);
-        let grad_b = MatMul::push_new(graph, a_t, grad_output, rng);
+        let grad_b = MatMul::push_new(
+            graph, a_t, grad_output,
+            self.multiply_dtype, self.accumulate_dtype, self.output_dtype, rng,
+        );
 
         // Reduce gradients to match input shapes (un-broadcast batch dims)
         // and accumulate if self.a == self.b (self-matmul)

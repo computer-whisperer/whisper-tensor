@@ -1,7 +1,7 @@
 use crate::backends::eval_backend::EvalBackend;
 use crate::dtype::DType;
 use crate::graph::{GlobalId, Node, Property, PropertyValue};
-use crate::milli_graph::MilliOpGraph;
+use crate::milli_graph::{MilliLoweringContext, MilliOpGraph};
 use crate::milli_graph::ops::*;
 use crate::numeric_tensor::NumericTensor;
 use crate::symbolic_graph::ops::{EvalError, Operation};
@@ -64,7 +64,7 @@ impl Node for WhereOperation {
 }
 
 impl Operation for WhereOperation {
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let out = Where::push_new(
             &mut graph,
@@ -202,7 +202,7 @@ impl Operation for IfOperation {
         Ok(Box::new(outputs.into_iter()))
     }
 
-    fn get_milli_op_graph(&self, _rng: &mut impl Rng) -> MilliOpGraph {
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, _rng: &mut impl Rng) -> MilliOpGraph {
         todo!()
     }
 }
@@ -302,7 +302,7 @@ impl Operation for PadOperation {
         )]
     }
 
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let mode = match &self.mode {
             PadMode::Constant => crate::milli_graph::ops::PadMode::Constant,
@@ -416,7 +416,7 @@ impl Operation for RandomNormalLikeOperation {
         params
     }
 
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let out = crate::milli_graph::ops::RandomNormalLike::push_new(
             &mut graph,
@@ -482,7 +482,7 @@ impl Node for ExpandOperation {
 }
 
 impl Operation for ExpandOperation {
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
 
         let x = Expand::push_new(
@@ -555,7 +555,7 @@ impl Node for ClipOperation {
     }
 }
 impl Operation for ClipOperation {
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let mut x = input_map[&self.input];
         if let Some(min) = self.min {
@@ -625,7 +625,7 @@ impl Node for RangeOperation {
 }
 
 impl Operation for RangeOperation {
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
 
         let out = Range::push_new(

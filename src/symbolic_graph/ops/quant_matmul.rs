@@ -1,5 +1,6 @@
+use crate::dtype::DType;
 use crate::graph::{GlobalId, Node, Property, PropertyValue};
-use crate::milli_graph::{self, MilliOpGraph};
+use crate::milli_graph::{self, MilliLoweringContext, MilliOpGraph};
 use crate::numeric_tensor::NumericTensor;
 use crate::symbolic_graph::ops::{EvalError, Operation, OperationEvalRet};
 use crate::tensor_rank::DynRank;
@@ -75,20 +76,25 @@ impl Operation for QuantMatMulOperation {
         let mut patched = inputs.clone();
         patched.insert(self.weight, weight_f32);
 
+        let tensor_dtypes: HashMap<GlobalId, DType> = patched
+            .iter()
+            .map(|(id, t)| (*id, t.dtype()))
+            .collect();
+        let ctx = MilliLoweringContext::new(tensor_dtypes);
         let mut rng = wyrand::WyRand::new(Default::default());
-        let milli_graph = self.get_milli_op_graph(&mut rng);
+        let milli_graph = self.get_milli_op_graph(&ctx, &mut rng);
         Ok(milli_graph.eval(&patched, &mut (), backend)?)
     }
 
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
         let input_ids = vec![self.input, self.weight];
         let (mut graph, input_map) = MilliOpGraph::new(input_ids, rng);
         let a = input_map[&self.input];
         let b = input_map[&self.weight];
         // Transpose weight [N, K] -> [K, N]
         let bt = milli_graph::ops::Transpose::push_new(&mut graph, b, Some(vec![1, 0]), rng);
-        // MatMul: input @ weight^T
-        let out = milli_graph::ops::MatMul::push_new(&mut graph, a, bt, rng);
+        // MatMul: input @ weight^T — weight is dequantized to F32
+        let out = milli_graph::ops::MatMul::push_new_default_precision(&mut graph, a, bt, DType::F32, rng);
         graph.set_output_map(std::iter::once((out, self.output)));
         graph
     }

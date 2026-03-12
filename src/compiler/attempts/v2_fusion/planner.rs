@@ -475,6 +475,7 @@ fn build_consumer_map(graph: &MilliOpGraph) -> HashMap<GlobalId, Vec<GlobalId>> 
 mod tests {
     use super::*;
     use crate::milli_graph::ops::{MatMul, SimpleBinary, SimpleUnaryOp};
+    use crate::dtype::DType;
 
     #[test]
     fn test_plan_fused_chain() {
@@ -518,7 +519,7 @@ mod tests {
         let (mut graph, input_map) = MilliOpGraph::new([ext_a, ext_b], &mut rng);
         let a = input_map[&ext_a];
         let b = input_map[&ext_b];
-        let c = MatMul::push_new(&mut graph, a, b, &mut rng);
+        let c = MatMul::push_new_default_precision(&mut graph, a, b, DType::F32, &mut rng);
 
         let ext_out = GlobalId::new(&mut rng);
         graph.set_output_map([(c, ext_out)]);
@@ -552,7 +553,7 @@ mod tests {
         let w = input_map[&ext_w];
         let b = input_map[&ext_b];
 
-        let mm = MatMul::push_new(&mut graph, x, w, &mut rng);
+        let mm = MatMul::push_new_default_precision(&mut graph, x, w, DType::F32, &mut rng);
         let add = SimpleBinary::add(&mut graph, mm, b, &mut rng);
         let tanh = SimpleUnaryOp::trig(&mut graph, add, crate::TrigOp::Tanh, &mut rng);
 

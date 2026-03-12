@@ -2071,6 +2071,7 @@ mod tests {
     use crate::compiler::common::v1_frontend::nano_op::NanoOpExpander;
     use crate::graph::GlobalId;
     use crate::milli_graph::ops::{MatMul, SimpleBinary};
+    use crate::dtype::DType;
 
     #[test]
     fn test_classifies_pointwise_add_as_pointwise() {
@@ -2116,7 +2117,7 @@ mod tests {
         let (mut graph, input_map) = MilliOpGraph::new([ext_a, ext_b], &mut rng);
         let a = input_map[&ext_a];
         let b = input_map[&ext_b];
-        let c = MatMul::push_new(&mut graph, a, b, &mut rng);
+        let c = MatMul::push_new_default_precision(&mut graph, a, b, DType::F32, &mut rng);
 
         let mut shapes = HashMap::new();
         shapes.insert(a, vec![4, 8]);
@@ -2192,7 +2193,7 @@ mod tests {
         let (mut graph, input_map) = MilliOpGraph::new([ext_a, ext_b], &mut rng);
         let a = input_map[&ext_a];
         let b = input_map[&ext_b];
-        let c = MatMul::push_new(&mut graph, a, b, &mut rng);
+        let c = MatMul::push_new_default_precision(&mut graph, a, b, DType::F32, &mut rng);
 
         let mut shapes = HashMap::new();
         shapes.insert(a, vec![256, 384]);
@@ -2222,7 +2223,7 @@ mod tests {
         let (mut graph, input_map) = MilliOpGraph::new([ext_a, ext_b], &mut rng);
         let a = input_map[&ext_a];
         let b = input_map[&ext_b];
-        let c = MatMul::push_new(&mut graph, a, b, &mut rng);
+        let c = MatMul::push_new_default_precision(&mut graph, a, b, DType::F32, &mut rng);
 
         let mut shapes = HashMap::new();
         shapes.insert(a, vec![8, 16]);

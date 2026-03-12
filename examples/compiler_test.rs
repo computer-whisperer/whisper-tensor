@@ -202,7 +202,7 @@ fn build_matmul_mlp(
         shapes.insert(w, vec![current_cols, out_dim]);
         shapes.insert(b, vec![1, out_dim]);
 
-        let mm = MatMul::push_new(&mut graph, current, w, rng);
+        let mm = MatMul::push_new_default_precision(&mut graph, current, w, DType::F32, rng);
         shapes.insert(mm, vec![batch, out_dim]);
         let add = SimpleBinary::add(&mut graph, mm, b, rng);
         shapes.insert(add, vec![batch, out_dim]);
@@ -1030,7 +1030,7 @@ fn main() {
         let (mut graph, input_map) = MilliOpGraph::new([ext_a, ext_b], &mut rng2);
         let a = input_map[&ext_a];
         let b = input_map[&ext_b];
-        let c = MatMul::push_new(&mut graph, a, b, &mut rng2);
+        let c = MatMul::push_new_default_precision(&mut graph, a, b, DType::F32, &mut rng2);
         let ext_out = GlobalId::new(&mut rng2);
         graph.set_output_map([(c, ext_out)]);
 
@@ -1325,7 +1325,7 @@ fn main() {
         let (mut graph, input_map) = MilliOpGraph::new([ext_a, ext_b], &mut rng2);
         let a = input_map[&ext_a];
         let b = input_map[&ext_b];
-        let c = MatMul::push_new(&mut graph, a, b, &mut rng2);
+        let c = MatMul::push_new_default_precision(&mut graph, a, b, DType::F32, &mut rng2);
         let ext_out = GlobalId::new(&mut rng2);
         graph.set_output_map([(c, ext_out)]);
 
@@ -1418,7 +1418,7 @@ fn main() {
         let (mut graph, input_map) = MilliOpGraph::new([ext_a, ext_b], &mut rng2);
         let a = input_map[&ext_a];
         let b = input_map[&ext_b];
-        let c = MatMul::push_new(&mut graph, a, b, &mut rng2);
+        let c = MatMul::push_new_default_precision(&mut graph, a, b, DType::F32, &mut rng2);
         let ext_out = GlobalId::new(&mut rng2);
         graph.set_output_map([(c, ext_out)]);
 
@@ -1662,7 +1662,7 @@ fn main() {
         let (mut graph, input_map) = MilliOpGraph::new([ext_a, ext_b], &mut rng2);
         let a = input_map[&ext_a];
         let b = input_map[&ext_b];
-        let c = MatMul::push_new(&mut graph, a, b, &mut rng2);
+        let c = MatMul::push_new_default_precision(&mut graph, a, b, DType::F32, &mut rng2);
         let ext_out = GlobalId::new(&mut rng2);
         graph.set_output_map([(c, ext_out)]);
 

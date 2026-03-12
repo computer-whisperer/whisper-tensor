@@ -300,6 +300,7 @@ mod tests {
     use crate::graph::GlobalId;
     use crate::milli_graph::MilliOpGraph;
     use crate::milli_graph::ops::{MatMul, SimpleBinary, SimpleUnaryOp};
+    use crate::dtype::DType;
     use std::collections::HashMap;
 
     fn make_random_f32(n: usize, seed: u64) -> Vec<f32> {
@@ -378,7 +379,7 @@ mod tests {
         let (mut graph, input_map) = MilliOpGraph::new([ext_a, ext_b], &mut rng);
         let a = input_map[&ext_a];
         let b = input_map[&ext_b];
-        let c = MatMul::push_new(&mut graph, a, b, &mut rng);
+        let c = MatMul::push_new_default_precision(&mut graph, a, b, DType::F32, &mut rng);
 
         let mut shapes = HashMap::new();
         shapes.insert(a, vec![m, k]);
@@ -420,7 +421,7 @@ mod tests {
         let b = input_map[&ext_b];
         let bias = input_map[&ext_bias];
         let ones = input_map[&ext_ones];
-        let mm = MatMul::push_new(&mut graph, a, b, &mut rng);
+        let mm = MatMul::push_new_default_precision(&mut graph, a, b, DType::F32, &mut rng);
         let bias_add = SimpleBinary::add(&mut graph, mm, bias, &mut rng);
         let neg = SimpleUnaryOp::neg(&mut graph, bias_add, &mut rng);
         let exp = SimpleUnaryOp::exp(&mut graph, neg, &mut rng);

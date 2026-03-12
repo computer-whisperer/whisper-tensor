@@ -1391,6 +1391,7 @@ fn declare_math_functions(
 mod tests {
     use super::*;
     use crate::milli_graph::ops::{MatMul, SimpleBinary, SimpleUnaryOp};
+    use crate::dtype::DType;
     use rand::RngCore;
 
     fn run_compiled_rank2_matmul(
@@ -1404,7 +1405,7 @@ mod tests {
         let (mut graph, input_map) = MilliOpGraph::new([ext_a, ext_b], &mut rng);
         let a = input_map[&ext_a];
         let b = input_map[&ext_b];
-        let c = MatMul::push_new(&mut graph, a, b, &mut rng);
+        let c = MatMul::push_new_default_precision(&mut graph, a, b, DType::F32, &mut rng);
 
         let mut shapes = HashMap::new();
         shapes.insert(a, vec![m, k]);
@@ -1476,8 +1477,8 @@ mod tests {
         let a = input_map[&ext_a];
         let b1 = input_map[&ext_b1];
         let b2 = input_map[&ext_b2];
-        let c1 = MatMul::push_new(&mut graph, a, b1, &mut rng);
-        let c2 = MatMul::push_new(&mut graph, a, b2, &mut rng);
+        let c1 = MatMul::push_new_default_precision(&mut graph, a, b1, DType::F32, &mut rng);
+        let c2 = MatMul::push_new_default_precision(&mut graph, a, b2, DType::F32, &mut rng);
         let ext_out = GlobalId::new(&mut rng);
         graph.set_output_map([(c2, ext_out)]);
 
@@ -1566,7 +1567,7 @@ mod tests {
         let b = input_map[&ext_b];
         let bias = input_map[&ext_bias];
         let ones = input_map[&ext_ones];
-        let mm = MatMul::push_new(&mut graph, a, b, &mut rng);
+        let mm = MatMul::push_new_default_precision(&mut graph, a, b, DType::F32, &mut rng);
         let bias_add = SimpleBinary::add(&mut graph, mm, bias, &mut rng);
         let neg = SimpleUnaryOp::neg(&mut graph, bias_add, &mut rng);
         let exp = SimpleUnaryOp::exp(&mut graph, neg, &mut rng);

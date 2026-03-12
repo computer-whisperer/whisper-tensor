@@ -1,6 +1,6 @@
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::graph::{GlobalId, Node, Property, PropertyValue};
-use crate::milli_graph::MilliOpGraph;
+use crate::milli_graph::{MilliLoweringContext, MilliOpGraph};
 use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{ONNXDecodingError, query_attribute_int};
 use crate::{milli_graph, onnx};
@@ -119,7 +119,7 @@ impl Operation for RotaryEmbeddingOperation {
         params
     }
 
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
 
         let data = input_map[&self.data_input];

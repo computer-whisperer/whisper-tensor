@@ -20,6 +20,7 @@ use whisper_tensor::compiler::attempts::v7_parallel_crystal::planner as v7_plann
 
 use whisper_tensor::graph::GlobalId;
 use whisper_tensor::milli_graph::MilliOpGraph;
+use whisper_tensor::dtype::DType;
 use whisper_tensor::milli_graph::ops::{MatMul, SimpleBinary, SimpleUnaryOp};
 use whisper_tensor::numeric_tensor::NumericTensor;
 use whisper_tensor::tensor_rank::DynRank;
@@ -102,12 +103,12 @@ fn build_residual_gated_block(
     shapes.insert(out_scale, vec![1, d_model]);
     shapes.insert(out_bias, vec![1, d_model]);
 
-    let up_mm = MatMul::push_new(&mut graph, x, w_up, rng);
+    let up_mm = MatMul::push_new_default_precision(&mut graph, x, w_up, DType::F32, rng);
     shapes.insert(up_mm, vec![batch, d_ff]);
     let up = SimpleBinary::add(&mut graph, up_mm, b_up, rng);
     shapes.insert(up, vec![batch, d_ff]);
 
-    let gate_mm = MatMul::push_new(&mut graph, x, w_gate, rng);
+    let gate_mm = MatMul::push_new_default_precision(&mut graph, x, w_gate, DType::F32, rng);
     shapes.insert(gate_mm, vec![batch, d_ff]);
     let gate_bias = SimpleBinary::add(&mut graph, gate_mm, b_gate, rng);
     shapes.insert(gate_bias, vec![batch, d_ff]);
@@ -122,7 +123,7 @@ fn build_residual_gated_block(
 
     let ff = SimpleBinary::mul(&mut graph, up, gate, rng);
     shapes.insert(ff, vec![batch, d_ff]);
-    let down_mm = MatMul::push_new(&mut graph, ff, w_down, rng);
+    let down_mm = MatMul::push_new_default_precision(&mut graph, ff, w_down, DType::F32, rng);
     shapes.insert(down_mm, vec![batch, d_model]);
     let down = SimpleBinary::add(&mut graph, down_mm, b_down, rng);
     shapes.insert(down, vec![batch, d_model]);

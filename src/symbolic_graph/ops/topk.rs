@@ -1,5 +1,5 @@
 use crate::graph::{GlobalId, Node, Property, PropertyValue};
-use crate::milli_graph::MilliOpGraph;
+use crate::milli_graph::{MilliLoweringContext, MilliOpGraph};
 use crate::milli_graph::ops::*;
 use crate::onnx;
 use crate::symbolic_graph::ONNXDecodingError;
@@ -82,7 +82,7 @@ impl Operation for TopKOperation {
         ]
     }
 
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let (out_values, out_indices) = TopK::push_new(
             &mut graph,

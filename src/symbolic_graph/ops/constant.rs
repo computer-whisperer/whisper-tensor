@@ -1,6 +1,6 @@
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::graph::{GlobalId, Graph, Node, Property, PropertyValue};
-use crate::milli_graph::MilliOpGraph;
+use crate::milli_graph::{MilliLoweringContext, MilliOpGraph};
 use crate::milli_graph::ops::*;
 use crate::numeric_scalar::NumericScalar;
 use crate::symbolic_graph::ops::Operation;
@@ -80,7 +80,7 @@ impl Operation for ConstantOfShapeOperation {
         vec![Property::new("value", PropertyValue::String(value_str))]
     }
 
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let node =
             ConstantOfShape::push_new(&mut graph, self.value.clone(), input_map[&self.input], rng);
@@ -194,7 +194,7 @@ impl Operation for ConstantOperation {
         params
     }
 
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, _input_map) = MilliOpGraph::new(self.inputs(), rng);
 
         let out = Constant::push_new(&mut graph, self.value.clone(), rng);

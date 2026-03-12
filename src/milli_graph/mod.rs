@@ -19,6 +19,25 @@ pub mod ops;
 pub(crate) mod ops_helpers;
 pub mod validate_infer;
 
+/// Context passed during symbolic → milli op graph lowering.
+/// Carries tensor metadata that individual ops can use to set
+/// precision-sensitive fields (e.g. MatMul accumulation dtype).
+pub struct MilliLoweringContext {
+    pub tensor_dtypes: HashMap<GlobalId, DType>,
+}
+
+impl MilliLoweringContext {
+    pub fn new(tensor_dtypes: HashMap<GlobalId, DType>) -> Self {
+        Self { tensor_dtypes }
+    }
+
+    pub fn empty() -> Self {
+        Self {
+            tensor_dtypes: HashMap::new(),
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum MilliOpGraphError {
     #[error(transparent)]
@@ -2380,7 +2399,7 @@ mod tests {
     fn test_backward_matmul() {
         // f(A, B) = sum(A @ B), A=[2,3], B=[3,2]
         check_general_backward(
-            |g, ids, r| MatMul::push_new(g, ids[0], ids[1], r),
+            |g, ids, r| MatMul::push_new_default_precision(g, ids[0], ids[1], DType::F32, r),
             &[
                 vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], // A [2,3]
                 vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], // B [3,2]
@@ -2756,7 +2775,7 @@ mod tests {
     fn test_backward_matmul_broadcast_batch() {
         // A=[2,3,4] @ B=[4,2] → output=[2,3,2], grad_B must sum out batch dim
         check_general_backward(
-            |graph, inputs, rng| ops::MatMul::push_new(graph, inputs[0], inputs[1], rng),
+            |graph, inputs, rng| ops::MatMul::push_new_default_precision(graph, inputs[0], inputs[1], DType::F32, rng),
             &[
                 (1..=24).map(|x| x as f32 * 0.1).collect(),
                 vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
@@ -3577,7 +3596,7 @@ mod tests {
             ..Default::default()
         });
         graph.set_default_group(Some(fwd_group));
-        let y = ops::MatMul::push_new(&mut graph, x, w, rng);
+        let y = ops::MatMul::push_new_default_precision(&mut graph, x, w, DType::F32, rng);
         graph.set_default_group(None);
 
         // Loss group: mse = mean((y - targets)^2)
@@ -3729,7 +3748,7 @@ mod tests {
             ..Default::default()
         });
         graph.set_default_group(Some(fwd_group));
-        let y = ops::MatMul::push_new(&mut graph, x, w, rng);
+        let y = ops::MatMul::push_new_default_precision(&mut graph, x, w, DType::F32, rng);
         graph.set_default_group(None);
 
         let loss_group = graph.create_group(MilliOpGroup {
@@ -3889,9 +3908,9 @@ mod tests {
             ..Default::default()
         });
         graph.set_default_group(Some(fwd_group));
-        let h_pre = ops::MatMul::push_new(&mut graph, x, w1, rng);
+        let h_pre = ops::MatMul::push_new_default_precision(&mut graph, x, w1, DType::F32, rng);
         let h = ops::ClampMin::push_new(&mut graph, h_pre, 0.0, rng);
-        let y = ops::MatMul::push_new(&mut graph, h, w2, rng);
+        let y = ops::MatMul::push_new_default_precision(&mut graph, h, w2, DType::F32, rng);
         graph.set_default_group(None);
 
         // Loss: MSE

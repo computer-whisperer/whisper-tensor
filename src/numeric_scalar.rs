@@ -364,6 +364,175 @@ impl NumericScalar {
         }
     }
 
+    pub fn tanh(&self) -> Self {
+        self.trig(TrigOp::Tanh)
+    }
+
+    /// Convert to f64, for comparisons and diagnostics.
+    pub fn to_f64(&self) -> f64 {
+        f64::cast_from_numeric_scalar(self)
+    }
+
+    /// Cast this scalar to a target DType, applying the appropriate
+    /// rounding/truncation for the target format.
+    pub fn cast_to(&self, dtype: DType) -> Self {
+        match dtype {
+            DType::F64 => NumericScalar::F64(self.to_f64()),
+            DType::F32 => NumericScalar::F32(f32::cast_from_numeric_scalar(self)),
+            DType::BF16 => NumericScalar::BF16(bf16::cast_from_numeric_scalar(self)),
+            DType::F16 => NumericScalar::F16(f16::cast_from_numeric_scalar(self)),
+            DType::F8E4M3 => NumericScalar::F8E4M3(F8E4M3::cast_from_numeric_scalar(self)),
+            DType::F8E5M2 => NumericScalar::F8E5M2(F8E5M2::cast_from_numeric_scalar(self)),
+            DType::U64 => NumericScalar::U64(u64::cast_from_numeric_scalar(self)),
+            DType::I64 => NumericScalar::I64(i64::cast_from_numeric_scalar(self)),
+            DType::U32 => NumericScalar::U32(u32::cast_from_numeric_scalar(self)),
+            DType::I32 => NumericScalar::I32(i32::cast_from_numeric_scalar(self)),
+            DType::U16 => NumericScalar::U16(u16::cast_from_numeric_scalar(self)),
+            DType::I16 => NumericScalar::I16(i16::cast_from_numeric_scalar(self)),
+            DType::U8 => NumericScalar::U8(u8::cast_from_numeric_scalar(self)),
+            DType::I8 => NumericScalar::I8(i8::cast_from_numeric_scalar(self)),
+            DType::BOOL => NumericScalar::BOOL(bool::cast_from_numeric_scalar(self)),
+            _ => panic!("Cannot cast to {:?}", dtype),
+        }
+    }
+
+    /// Negative infinity for the given floating-point dtype.
+    pub fn neg_infinity_of(dtype: DType) -> Self {
+        match dtype {
+            DType::F64 => NumericScalar::F64(f64::NEG_INFINITY),
+            DType::F32 => NumericScalar::F32(f32::NEG_INFINITY),
+            DType::BF16 => NumericScalar::BF16(bf16::NEG_INFINITY),
+            DType::F16 => NumericScalar::F16(f16::NEG_INFINITY),
+            _ => panic!("neg_infinity_of not supported for {:?}", dtype),
+        }
+    }
+
+    /// Check whether this scalar is non-zero (for Select conditions).
+    pub fn is_nonzero(&self) -> bool {
+        match self {
+            NumericScalar::F64(x) => *x != 0.0,
+            NumericScalar::F32(x) => *x != 0.0,
+            NumericScalar::BF16(x) => *x != bf16::ZERO,
+            NumericScalar::F16(x) => *x != f16::ZERO,
+            NumericScalar::I64(x) => *x != 0,
+            NumericScalar::I32(x) => *x != 0,
+            NumericScalar::U64(x) => *x != 0,
+            NumericScalar::U32(x) => *x != 0,
+            NumericScalar::U8(x) => *x != 0,
+            NumericScalar::BOOL(x) => *x,
+            _ => panic!("is_nonzero not supported for {:?}", self.dtype()),
+        }
+    }
+
+    // ---- Binary arithmetic ops ----
+    // Both operands must be the same dtype variant.
+
+    pub fn add(&self, other: &Self) -> Self {
+        match (self, other) {
+            (Self::F64(a), Self::F64(b)) => Self::F64(a + b),
+            (Self::F32(a), Self::F32(b)) => Self::F32(a + b),
+            (Self::BF16(a), Self::BF16(b)) => Self::BF16(*a + *b),
+            (Self::F16(a), Self::F16(b)) => Self::F16(*a + *b),
+            (Self::I64(a), Self::I64(b)) => Self::I64(a + b),
+            (Self::I32(a), Self::I32(b)) => Self::I32(a + b),
+            (Self::U64(a), Self::U64(b)) => Self::U64(a + b),
+            (Self::U32(a), Self::U32(b)) => Self::U32(a + b),
+            _ => panic!("Cannot add {:?} + {:?}", self.dtype(), other.dtype()),
+        }
+    }
+
+    pub fn sub(&self, other: &Self) -> Self {
+        match (self, other) {
+            (Self::F64(a), Self::F64(b)) => Self::F64(a - b),
+            (Self::F32(a), Self::F32(b)) => Self::F32(a - b),
+            (Self::BF16(a), Self::BF16(b)) => Self::BF16(*a - *b),
+            (Self::F16(a), Self::F16(b)) => Self::F16(*a - *b),
+            (Self::I64(a), Self::I64(b)) => Self::I64(a - b),
+            (Self::I32(a), Self::I32(b)) => Self::I32(a - b),
+            (Self::U64(a), Self::U64(b)) => Self::U64(a - b),
+            (Self::U32(a), Self::U32(b)) => Self::U32(a - b),
+            _ => panic!("Cannot sub {:?} - {:?}", self.dtype(), other.dtype()),
+        }
+    }
+
+    pub fn mul(&self, other: &Self) -> Self {
+        match (self, other) {
+            (Self::F64(a), Self::F64(b)) => Self::F64(a * b),
+            (Self::F32(a), Self::F32(b)) => Self::F32(a * b),
+            (Self::BF16(a), Self::BF16(b)) => Self::BF16(*a * *b),
+            (Self::F16(a), Self::F16(b)) => Self::F16(*a * *b),
+            (Self::I64(a), Self::I64(b)) => Self::I64(a * b),
+            (Self::I32(a), Self::I32(b)) => Self::I32(a * b),
+            (Self::U64(a), Self::U64(b)) => Self::U64(a * b),
+            (Self::U32(a), Self::U32(b)) => Self::U32(a * b),
+            _ => panic!("Cannot mul {:?} * {:?}", self.dtype(), other.dtype()),
+        }
+    }
+
+    pub fn div(&self, other: &Self) -> Self {
+        match (self, other) {
+            (Self::F64(a), Self::F64(b)) => Self::F64(a / b),
+            (Self::F32(a), Self::F32(b)) => Self::F32(a / b),
+            (Self::BF16(a), Self::BF16(b)) => Self::BF16(*a / *b),
+            (Self::F16(a), Self::F16(b)) => Self::F16(*a / *b),
+            (Self::I64(a), Self::I64(b)) => Self::I64(a / b),
+            (Self::I32(a), Self::I32(b)) => Self::I32(a / b),
+            (Self::U64(a), Self::U64(b)) => Self::U64(a / b),
+            (Self::U32(a), Self::U32(b)) => Self::U32(a / b),
+            _ => panic!("Cannot div {:?} / {:?}", self.dtype(), other.dtype()),
+        }
+    }
+
+    pub fn modulo(&self, other: &Self) -> Self {
+        match (self, other) {
+            (Self::F64(a), Self::F64(b)) => Self::F64(a % b),
+            (Self::F32(a), Self::F32(b)) => Self::F32(a % b),
+            (Self::I64(a), Self::I64(b)) => Self::I64(a % b),
+            (Self::I32(a), Self::I32(b)) => Self::I32(a % b),
+            (Self::U64(a), Self::U64(b)) => Self::U64(a % b),
+            (Self::U32(a), Self::U32(b)) => Self::U32(a % b),
+            _ => panic!("Cannot mod {:?} % {:?}", self.dtype(), other.dtype()),
+        }
+    }
+
+    pub fn pow(&self, other: &Self) -> Self {
+        match (self, other) {
+            (Self::F64(a), Self::F64(b)) => Self::F64(a.powf(*b)),
+            (Self::F32(a), Self::F32(b)) => Self::F32(a.powf(*b)),
+            (Self::BF16(a), Self::BF16(b)) => Self::BF16(bf16::from_f32(a.to_f32().powf(b.to_f32()))),
+            (Self::F16(a), Self::F16(b)) => Self::F16(f16::from_f32(a.to_f32().powf(b.to_f32()))),
+            _ => panic!("Cannot pow {:?} ^ {:?}", self.dtype(), other.dtype()),
+        }
+    }
+
+    pub fn scalar_max(&self, other: &Self) -> Self {
+        match (self, other) {
+            (Self::F64(a), Self::F64(b)) => Self::F64(a.max(*b)),
+            (Self::F32(a), Self::F32(b)) => Self::F32(a.max(*b)),
+            (Self::BF16(a), Self::BF16(b)) => Self::BF16(a.max(*b)),
+            (Self::F16(a), Self::F16(b)) => Self::F16(a.max(*b)),
+            (Self::I64(a), Self::I64(b)) => Self::I64(*a.max(b)),
+            (Self::I32(a), Self::I32(b)) => Self::I32(*a.max(b)),
+            (Self::U64(a), Self::U64(b)) => Self::U64(*a.max(b)),
+            (Self::U32(a), Self::U32(b)) => Self::U32(*a.max(b)),
+            _ => panic!("Cannot max {:?} vs {:?}", self.dtype(), other.dtype()),
+        }
+    }
+
+    pub fn scalar_min(&self, other: &Self) -> Self {
+        match (self, other) {
+            (Self::F64(a), Self::F64(b)) => Self::F64(a.min(*b)),
+            (Self::F32(a), Self::F32(b)) => Self::F32(a.min(*b)),
+            (Self::BF16(a), Self::BF16(b)) => Self::BF16(a.min(*b)),
+            (Self::F16(a), Self::F16(b)) => Self::F16(a.min(*b)),
+            (Self::I64(a), Self::I64(b)) => Self::I64(*a.min(b)),
+            (Self::I32(a), Self::I32(b)) => Self::I32(*a.min(b)),
+            (Self::U64(a), Self::U64(b)) => Self::U64(*a.min(b)),
+            (Self::U32(a), Self::U32(b)) => Self::U32(*a.min(b)),
+            _ => panic!("Cannot min {:?} vs {:?}", self.dtype(), other.dtype()),
+        }
+    }
+
     pub fn to_bytes(&self) -> Vec<u8> {
         match self {
             NumericScalar::F64(x) => x.to_le_bytes().to_vec(),

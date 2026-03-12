@@ -853,6 +853,7 @@ fn eval_reduction_term_f32(
 mod tests {
     use super::*;
     use crate::milli_graph::ops::MatMul;
+    use crate::dtype::DType;
     use rand::RngCore;
 
     fn build_matmul(
@@ -873,7 +874,7 @@ mod tests {
         let (mut graph, input_map) = MilliOpGraph::new([ext_a, ext_b], &mut rng);
         let a = input_map[&ext_a];
         let b = input_map[&ext_b];
-        let c = MatMul::push_new(&mut graph, a, b, &mut rng);
+        let c = MatMul::push_new_default_precision(&mut graph, a, b, DType::F32, &mut rng);
         let mut shapes = HashMap::new();
         shapes.insert(a, vec![m, k]);
         shapes.insert(b, vec![k, n]);

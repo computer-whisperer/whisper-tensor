@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use whisper_tensor::backends::eval_backend::EvalBackend;
@@ -241,4 +242,309 @@ fn rwkv01b_model_loads_with_origin_reference() {
         !model.get_symbolic_graph().get_outputs().is_empty(),
         "model has outputs"
     );
+}
+
+/// Full end-to-end integrity check: evaluate the RWKV 0.1B model through
+/// both the MilliOpGraph interpreter and the NanoGraph scalar eval, then
+/// compare every output element.
+#[test]
+#[ignore]
+fn rwkv01b_nano_graph_integrity() {
+    use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
+    use whisper_tensor::graph::GlobalId;
+    use whisper_tensor::nano_graph::{eval::NanoEval, lower};
+    use whisper_tensor::numeric_tensor::NumericTensor;
+    use whisper_tensor::tensor_info::TensorInfo;
+    use whisper_tensor::{DynRank, dtype::DType};
+
+    let Some(pth_path) = find_rwkv_pth() else {
+        eprintln!("Skipping: no RWKV .pth found under test_models/");
+        return;
+    };
+    if !is_real_model_file(&pth_path) {
+        eprintln!("Skipping: {} is a Git LFS pointer", pth_path.display());
+        return;
+    }
+
+    // ---- Load model ----
+    let t0 = std::time::Instant::now();
+    let onnx_bytes = whisper_tensor_import::identify_and_load(
+        &pth_path,
+        whisper_tensor_import::onnx_graph::WeightStorageStrategy::EmbeddedData,
+    )
+    .expect("import rwkv7 to onnx");
+    let mut rng = rand::rng();
+    let model = Model::new_from_onnx(&onnx_bytes, &mut rng, None).expect("model loads");
+    eprintln!("  Model loaded in {:.1}s", t0.elapsed().as_secs_f64());
+
+    // ---- Generate MilliOpGraph ----
+    let t0 = std::time::Instant::now();
+    let milli = model.get_symbolic_graph().generate_milli_graph(&mut rng);
+    eprintln!("  Milli graph generated in {:.1}ms", t0.elapsed().as_secs_f64() * 1e3);
+
+    // ---- Create input tensors ----
+    let input_info = model.get_input_tensor_info().expect("introspect inputs");
+    let sym_graph = model.get_symbolic_graph();
+    let tensor_store = model.get_tensor_store();
+    let tensors_by_name = sym_graph.get_tensors_by_name();
+
+    // User inputs: small random tensors (avoid degenerate zeros).
+    let mut input_tensors: HashMap<GlobalId, NumericTensor<DynRank>> = HashMap::new();
+    for (name, (dtype, shape_desc)) in &input_info {
+        let shape: Vec<u64> = shape_desc.iter().map(|d| d.unwrap_or(1)).collect();
+        let numel: usize = shape.iter().product::<u64>().max(1) as usize;
+        eprintln!("  Input '{}': {:?} {:?} ({} elements)", name, dtype, shape, numel);
+        // Use small non-zero values: 0.01 for floats, 1 for ints.
+        let data: Vec<u8> = match dtype {
+            DType::F32 => {
+                let v: Vec<f32> = (0..numel).map(|i| 0.01 * (i as f32 + 1.0)).collect();
+                v.iter().flat_map(|x| x.to_le_bytes()).collect()
+            }
+            DType::I64 => {
+                let v: Vec<i64> = (0..numel).map(|i| (i as i64) + 1).collect();
+                v.iter().flat_map(|x| x.to_le_bytes()).collect()
+            }
+            DType::I32 => {
+                let v: Vec<i32> = (0..numel).map(|i| (i as i32) + 1).collect();
+                v.iter().flat_map(|x| x.to_le_bytes()).collect()
+            }
+            _ => {
+                // Fallback: use small non-zero bytes.
+                let elem_size = match dtype {
+                    DType::BF16 | DType::F16 => 2,
+                    DType::U64 => 8,
+                    DType::U32 | DType::U16 | DType::I16 => 4,
+                    DType::U8 | DType::I8 | DType::BOOL => 1,
+                    DType::F64 => 8,
+                    _ => panic!("unsupported dtype {:?}", dtype),
+                };
+                vec![1u8; numel * elem_size]
+            }
+        };
+        let nd = NDArrayNumericTensor::from_raw_data(&data, *dtype, shape)
+            .expect("build input tensor");
+        if let Some(&id) = tensors_by_name.get(name) {
+            input_tensors.insert(id, NumericTensor::NDArray(nd));
+        }
+    }
+
+    // Model weights (Numeric).
+    let weight_tensors = sym_graph.get_initialized_tensors(tensor_store);
+
+    // ---- Eval through MilliOpGraph (capturing all intermediates) ----
+    use whisper_tensor::milli_graph::observer::MilliOpGraphObserver;
+    use std::time::Instant;
+
+    struct CapturingObserver {
+        intermediates: HashMap<GlobalId, NumericTensor<DynRank>>,
+    }
+    impl MilliOpGraphObserver for CapturingObserver {
+        fn on_tensor_assigned(
+            &mut self,
+            tensor_path: &[GlobalId],
+            tensor: &NumericTensor<DynRank>,
+            _backend: &mut EvalBackend,
+        ) {
+            self.intermediates.insert(tensor_path[0], tensor.clone());
+        }
+        fn on_node_executed(
+            &mut self, _: &[GlobalId], _: Instant, _: Instant, _: &mut EvalBackend,
+        ) {}
+    }
+
+    let t0 = Instant::now();
+    let mut backend = EvalBackend::NDArray;
+    let mut observer = CapturingObserver { intermediates: HashMap::new() };
+
+    // milli.eval() wants external IDs.
+    let mut milli_inputs: HashMap<GlobalId, NumericTensor<DynRank>> = HashMap::new();
+    for (id, t) in &input_tensors {
+        milli_inputs.insert(*id, t.clone());
+    }
+    for (id, t) in &weight_tensors {
+        milli_inputs.insert(*id, t.clone());
+    }
+
+    let milli_outputs: HashMap<GlobalId, NumericTensor<DynRank>> = milli
+        .eval(&milli_inputs, &mut observer, &mut backend)
+        .expect("milli eval")
+        .collect();
+    let milli_intermediates = observer.intermediates;
+    eprintln!(
+        "  Milli eval done in {:.1}s ({} outputs, {} intermediates)",
+        t0.elapsed().as_secs_f64(),
+        milli_outputs.len(),
+        milli_intermediates.len()
+    );
+
+    // ---- Lower to NanoGraph ----
+    // lower_with_info wants external IDs (it maps ext→int internally).
+    let mut lower_infos: HashMap<GlobalId, TensorInfo> = HashMap::new();
+    for (id, t) in &input_tensors {
+        lower_infos.insert(*id, TensorInfo::from(t.clone()));
+    }
+    for (id, t) in &weight_tensors {
+        lower_infos.insert(*id, TensorInfo::from(t.clone()));
+    }
+
+    let t0 = std::time::Instant::now();
+    let result = lower::lower_with_info(&milli, &lower_infos).expect("lower");
+    eprintln!(
+        "  Lowered in {:.1}ms  (atoms: {}, unsupported: {})",
+        t0.elapsed().as_secs_f64() * 1e3,
+        result.graph.num_atoms(),
+        result.unsupported.len()
+    );
+    if !result.unsupported.is_empty() {
+        eprintln!("  Unsupported ops: {:?}", result.unsupported_details);
+    }
+
+    // ---- Build NanoGraph overrides ----
+    // Start with the numeric overrides from lowering (weights + constant-folded values).
+    let t0 = std::time::Instant::now();
+    let mut overrides = result.numeric_overrides;
+    eprintln!(
+        "  {} numeric overrides from lowering",
+        overrides.len()
+    );
+
+    // Add user input values on top (these are Shaped, not Numeric, so not in numeric_overrides).
+    use whisper_tensor::numeric_scalar::NumericScalar;
+    let tensor_to_scalars = |t: &NumericTensor<DynRank>| -> Vec<NumericScalar> {
+        let mut be = EvalBackend::NDArray;
+        let dtype = t.dtype();
+        let f32t = t.cast(DType::F32, &mut be).unwrap();
+        let flat = f32t.flatten().unwrap();
+        let v: Vec<f32> = flat.to_ndarray().unwrap().try_into().unwrap();
+        v.into_iter().map(|x| NumericScalar::F32(x).cast_to(dtype)).collect()
+    };
+
+    for (ext_id, tensor) in &input_tensors {
+        let Some(&int_id) = milli.input_map.get(ext_id) else { continue };
+        let Some(tam) = result.tensor_map.get(&int_id) else { continue };
+        let scalars = tensor_to_scalars(tensor);
+        assert_eq!(scalars.len(), tam.count as usize,
+            "Input {:?} count mismatch: {} vs {}", ext_id, scalars.len(), tam.count);
+        for (i, val) in scalars.into_iter().enumerate() {
+            overrides.insert(tam.base_id.0 + i as u32, val);
+        }
+    }
+    eprintln!(
+        "  Total {} overrides in {:.1}ms",
+        overrides.len(),
+        t0.elapsed().as_secs_f64() * 1e3
+    );
+
+    // ---- Eval NanoGraph ----
+    let t0 = std::time::Instant::now();
+    let nano_eval = NanoEval::eval_debug(&result.graph, &overrides);
+    eprintln!("  Nano eval done in {:.1}s", t0.elapsed().as_secs_f64());
+
+    // ---- Compare ALL intermediate tensors ----
+    // The observer captured intermediates keyed by internal GlobalId.
+    // tensor_map also uses internal GlobalIds.
+    // Walk milli op ordering to compare tensors in topological order.
+    let tensor_to_f64 = |t: &NumericTensor<DynRank>| -> Vec<f64> {
+        let mut be = EvalBackend::NDArray;
+        let f32t = t.cast(DType::F32, &mut be).unwrap();
+        let flat = f32t.flatten().unwrap();
+        let v: Vec<f32> = flat.to_ndarray().unwrap().try_into().unwrap();
+        v.into_iter().map(|x| x as f64).collect()
+    };
+
+    let mut total_tensors = 0usize;
+    let mut total_elements = 0usize;
+    let mut max_rel_err = 0.0f64;
+    let mut first_divergent: Option<(GlobalId, usize, f64, f64)> = None;
+
+    // Iterate tensor_map entries, comparing each against milli intermediates.
+    for (int_id, tam) in &result.tensor_map {
+        if !tam.sym_dims.is_empty() {
+            continue; // Skip symbolic-dim tensors
+        }
+        let Some(milli_tensor) = milli_intermediates.get(int_id) else {
+            continue; // Input tensor or not captured
+        };
+
+        let milli_flat = tensor_to_f64(milli_tensor);
+        if milli_flat.len() != tam.count as usize {
+            eprintln!(
+                "  SIZE MISMATCH: {:?} milli={} nano={}",
+                int_id, milli_flat.len(), tam.count
+            );
+            continue;
+        }
+
+        total_tensors += 1;
+        for (i, &m) in milli_flat.iter().enumerate() {
+            let n = nano_eval.get(tam.base_id.offset(i as u32));
+            let diff = (m - n).abs();
+            let rel = diff / m.abs().max(1e-10);
+            if rel > max_rel_err {
+                max_rel_err = rel;
+            }
+            total_elements += 1;
+
+            // Report first significant divergence.
+            let tol = 1e-2 * m.abs().max(1.0);
+            if first_divergent.is_none() && diff > tol {
+                first_divergent = Some((*int_id, i, m, n));
+                eprintln!(
+                    "  FIRST DIVERGENCE: tensor {:?} element {}: milli={} nano={} diff={:.6} rel={:.6}",
+                    int_id, i, m, n, diff, rel
+                );
+                // Also print surrounding elements for context.
+                let start = i.saturating_sub(3);
+                let end = (i + 4).min(milli_flat.len());
+                for j in start..end {
+                    let nv = nano_eval.get(tam.base_id.offset(j as u32));
+                    let marker = if j == i { " <--" } else { "" };
+                    eprintln!(
+                        "    [{:4}] milli={:12.6} nano={:12.6}{}",
+                        j, milli_flat[j], nv, marker
+                    );
+                }
+            }
+        }
+    }
+
+    eprintln!(
+        "  Compared {} tensors ({} elements), max rel error: {:.2e}",
+        total_tensors, total_elements, max_rel_err
+    );
+
+    if let Some((id, elem, m, n)) = first_divergent {
+        panic!(
+            "Intermediate divergence: tensor {:?} element {}: milli={} nano={}",
+            id, elem, m, n
+        );
+    }
+
+    // Also check final outputs.
+    let output_map_rev: HashMap<GlobalId, GlobalId> = milli
+        .output_map
+        .as_ref()
+        .expect("milli has output_map")
+        .iter()
+        .map(|(&int, &ext)| (ext, int))
+        .collect();
+    for (ext_id, milli_tensor) in &milli_outputs {
+        let Some(&int_id) = output_map_rev.get(ext_id) else { continue };
+        let Some(tam) = result.tensor_map.get(&int_id) else { continue };
+        if !tam.sym_dims.is_empty() { continue; }
+
+        let milli_flat = tensor_to_f64(milli_tensor);
+        for (i, &m) in milli_flat.iter().enumerate() {
+            let n = nano_eval.get(tam.base_id.offset(i as u32));
+            let diff = (m - n).abs();
+            let tol = 1e-3 * m.abs().max(1.0);
+            assert!(
+                diff < tol,
+                "Output {:?} element {}: milli={} nano={} diff={} rel={}",
+                ext_id, i, m, n, diff, diff / m.abs().max(1e-10)
+            );
+        }
+    }
+
+    eprintln!("  INTEGRITY CHECK PASSED");
 }

@@ -1,6 +1,6 @@
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::graph::{GlobalId, Node, Property, PropertyValue};
-use crate::milli_graph::{self, MilliOpGraph};
+use crate::milli_graph::{self, MilliLoweringContext, MilliOpGraph};
 use crate::onnx;
 use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{ONNXDecodingError, query_attribute_int, query_attribute_ints};
@@ -61,7 +61,7 @@ impl Node for CumSumOperation {
 }
 
 impl Operation for CumSumOperation {
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let a = input_map[&self.input];
         let b = input_map[&self.axis];
@@ -149,7 +149,7 @@ impl Node for ReduceMeanOperation {
     }
 }
 impl Operation for ReduceMeanOperation {
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let axes = if let Some(input_axes) = &self.input_axes {
             Some(input_map[input_axes])
@@ -275,7 +275,7 @@ impl Operation for ReduceSumOperation {
         params
     }
 
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let axes = if let Some(input_axes) = &self.input_axes {
             Some(input_map[input_axes])
@@ -384,7 +384,7 @@ impl Operation for ReduceMaxOperation {
         params
     }
 
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let axes = if let Some(input_axes) = &self.input_axes {
             Some(input_map[input_axes])
@@ -494,7 +494,7 @@ impl Operation for ReduceMinOperation {
         params
     }
 
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let axes = if let Some(input_axes) = &self.input_axes {
             Some(input_map[input_axes])
@@ -604,7 +604,7 @@ impl Operation for ReduceProdOperation {
         params
     }
 
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let axes = if let Some(input_axes) = &self.input_axes {
             Some(input_map[input_axes])
@@ -716,7 +716,7 @@ impl Operation for ReduceL2Operation {
         params
     }
 
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
         // ReduceL2(x) = sqrt(ReduceSum(x^2))
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let x = input_map[&self.input_data];

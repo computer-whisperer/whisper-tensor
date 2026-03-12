@@ -1,7 +1,7 @@
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::dtype::DType;
 use crate::graph::{GlobalId, Node, Property, PropertyValue};
-use crate::milli_graph::{MilliOpGraph, ops_helpers};
+use crate::milli_graph::{MilliLoweringContext, MilliOpGraph, ops_helpers};
 use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{ONNXDecodingError, query_attribute_float, query_attribute_int};
 use crate::{milli_graph, onnx};
@@ -72,7 +72,7 @@ impl Node for LpNormalizationOperation {
     }
 }
 impl Operation for LpNormalizationOperation {
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let input = input_map[&self.input];
 
@@ -200,7 +200,7 @@ impl Node for GroupNormalizationOperation {
 }
 
 impl Operation for GroupNormalizationOperation {
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let original_input = input_map[&self.input];
         let input_cast =
@@ -447,7 +447,7 @@ impl Node for RMSNormalizationOperation {
 }
 
 impl Operation for RMSNormalizationOperation {
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let input_data = input_map[&self.input];
         let input_scale = input_map[&self.scale];
@@ -655,7 +655,7 @@ impl Node for LayerNormalizationOperation {
     }
 }
 impl Operation for LayerNormalizationOperation {
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let input_data = input_map[&self.input];
         let input_scale = input_map[&self.scale];
@@ -803,7 +803,7 @@ impl Node for InstanceNormalizationOperation {
 }
 
 impl Operation for InstanceNormalizationOperation {
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
         // InstanceNorm: for each (N, C), normalize over spatial dims.
         // Same structure as GroupNorm with num_groups = C.
         // Input: [N, C, D1, D2, ...] → reshape to [N, C, -1] → normalize axis 2

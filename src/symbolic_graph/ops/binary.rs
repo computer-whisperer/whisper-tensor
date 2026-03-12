@@ -1,5 +1,6 @@
+use crate::dtype::DType;
 use crate::graph::{GlobalId, Node, Property, PropertyValue};
-use crate::milli_graph::MilliOpGraph;
+use crate::milli_graph::{MilliLoweringContext, MilliOpGraph};
 use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{
     ONNXDecodingError, query_attribute_bool, query_attribute_float, query_attribute_int,
@@ -101,7 +102,7 @@ impl Operation for BinaryOperation {
         )]
     }
 
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
+    fn get_milli_op_graph(&self, ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
         let input_ids: Vec<_> = self.inputs().collect();
         let (mut graph, input_map) = MilliOpGraph::new(input_ids, rng);
         let a = input_map[&self.a];
@@ -112,7 +113,8 @@ impl Operation for BinaryOperation {
             WhichBinaryOperation::Mul => milli_graph::ops::SimpleBinary::mul(&mut graph, a, b, rng),
             WhichBinaryOperation::Div => milli_graph::ops::SimpleBinary::div(&mut graph, a, b, rng),
             WhichBinaryOperation::MatMul => {
-                milli_graph::ops::MatMul::push_new(&mut graph, a, b, rng)
+                let input_dtype = ctx.tensor_dtypes.get(&self.a).copied().unwrap_or(DType::F32);
+                milli_graph::ops::MatMul::push_new_default_precision(&mut graph, a, b, input_dtype, rng)
             }
             WhichBinaryOperation::And => milli_graph::ops::SimpleBinary::and(&mut graph, a, b, rng),
             WhichBinaryOperation::Or => milli_graph::ops::SimpleBinary::or(&mut graph, a, b, rng),
@@ -196,7 +198,7 @@ impl Node for PowOperation {
 }
 
 impl Operation for PowOperation {
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
         let input_ids: Vec<_> = self.inputs().collect();
         let (mut graph, input_map) = MilliOpGraph::new(input_ids, rng);
         let out = milli_graph::ops::Pow::push_new(
@@ -301,7 +303,7 @@ impl Operation for GemmOperation {
         params
     }
 
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
+    fn get_milli_op_graph(&self, ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
 
         let a = input_map[&self.input_a];
@@ -327,7 +329,8 @@ impl Operation for GemmOperation {
             b
         };
 
-        let x = milli_graph::ops::MatMul::push_new(&mut graph, a, b, rng);
+        let input_dtype = ctx.tensor_dtypes.get(&self.input_a).copied().unwrap_or(DType::F32);
+        let x = milli_graph::ops::MatMul::push_new_default_precision(&mut graph, a, b, input_dtype, rng);
 
         let x = if let Some(alpha) = self.alpha {
             let alpha_tid = milli_graph::ops::Constant::new_scalar(&mut graph, alpha, rng);
@@ -426,7 +429,7 @@ impl Operation for ArgMaxOperation {
         ]
     }
 
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
 
         let x = milli_graph::ops::ArgMax::push_new(
@@ -513,7 +516,7 @@ impl Operation for ArgMinOperation {
         ]
     }
 
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
 
         let x = milli_graph::ops::ArgMin::push_new(
@@ -588,7 +591,7 @@ impl Operation for MaxOperation {
         )]
     }
 
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let mut x = input_map[&self.inputs[0]];
         for input in &self.inputs[1..] {
@@ -658,7 +661,7 @@ impl Operation for MinOperation {
         )]
     }
 
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let mut x = input_map[&self.inputs[0]];
         for input in &self.inputs[1..] {
@@ -732,7 +735,7 @@ impl Operation for ModuloOperation {
         params
     }
 
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let a = input_map[&self.a];
         let b = input_map[&self.b];

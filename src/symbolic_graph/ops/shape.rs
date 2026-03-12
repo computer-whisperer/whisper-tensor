@@ -1,5 +1,5 @@
 use crate::graph::{GlobalId, Node, Property, PropertyValue};
-use crate::milli_graph::{self, MilliOpGraph, ops_helpers};
+use crate::milli_graph::{self, MilliLoweringContext, MilliOpGraph, ops_helpers};
 use crate::onnx;
 use crate::symbolic_graph::ONNXDecodingError;
 use crate::symbolic_graph::ops::Operation;
@@ -95,7 +95,7 @@ impl Operation for ShapeOperation {
         params
     }
 
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let out = milli_graph::ops::Shape::push_new(&mut graph, input_map[&self.input], rng);
         let out = if self.start.is_some() || self.end.is_some() {
@@ -160,7 +160,7 @@ impl Node for SizeOperation {
 }
 
 impl Operation for SizeOperation {
-    fn get_milli_op_graph(&self, rng: &mut impl Rng) -> MilliOpGraph {
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl Rng) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
 
         let shape_tid = milli_graph::ops::Shape::push_new(&mut graph, input_map[&self.input], rng);

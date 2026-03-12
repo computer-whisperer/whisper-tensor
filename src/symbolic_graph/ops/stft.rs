@@ -2,7 +2,7 @@ use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::dtype::DType;
 use crate::graph::{GlobalId, Node, Property, PropertyValue};
-use crate::milli_graph::MilliOpGraph;
+use crate::milli_graph::{MilliLoweringContext, MilliOpGraph};
 use crate::numeric_tensor::NumericTensor;
 use crate::onnx;
 use crate::symbolic_graph::ops::{EvalError, Operation};
@@ -185,7 +185,7 @@ impl Operation for StftOperation {
         Ok(Box::new(result.into_iter()))
     }
 
-    fn get_milli_op_graph(&self, _rng: &mut impl Rng) -> MilliOpGraph {
+    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, _rng: &mut impl Rng) -> MilliOpGraph {
         panic!("STFT uses custom eval")
     }
 }

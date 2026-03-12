@@ -667,7 +667,15 @@ impl SymbolicGraph {
     /// Flatten this SymbolicGraph into a single combined MilliOpGraph.
     pub fn generate_milli_graph(&self, rng: &mut impl Rng) -> crate::milli_graph::MilliOpGraph {
         use crate::graph::{Graph, Node};
-        use crate::milli_graph::{MilliOpGraph, MilliOpGroup, MilliOpPhase};
+        use crate::milli_graph::{MilliLoweringContext, MilliOpGraph, MilliOpGroup, MilliOpPhase};
+
+        // Build dtype context for milli lowering.
+        let tensor_dtypes: HashMap<GlobalId, DType> = self
+            .tensors
+            .iter()
+            .filter_map(|(id, info)| info.dtype().map(|dt| (*id, dt)))
+            .collect();
+        let lowering_ctx = MilliLoweringContext::new(tensor_dtypes);
 
         let mut combined = MilliOpGraph::new_empty(rng);
         let mut sym_to_combined: HashMap<GlobalId, GlobalId> = HashMap::new();
@@ -701,7 +709,7 @@ impl SymbolicGraph {
             };
             let group_id = combined.create_group(group);
 
-            let op_graph = graph_op.op.get_milli_op_graph(rng);
+            let op_graph = graph_op.op.get_milli_op_graph(&lowering_ctx, rng);
             combined.merge_graph(op_graph, &mut sym_to_combined, rng, Some(group_id));
         }
 
@@ -725,14 +733,22 @@ impl SymbolicGraph {
     ) -> Result<crate::milli_graph::MilliOpGraph, crate::milli_graph::MilliGraphGenError> {
         use crate::graph::{Graph, Node};
         use crate::milli_graph::{
-            BackwardGenContext, LossInputSource, MilliGraphGenError, MilliOpGraph, MilliOpGroup,
-            MilliOpPhase, TrainingMetadata, generate_milli_backward,
+            BackwardGenContext, LossInputSource, MilliGraphGenError, MilliLoweringContext,
+            MilliOpGraph, MilliOpGroup, MilliOpPhase, TrainingMetadata, generate_milli_backward,
         };
         use crate::tensor_info::TensorInfo;
 
         if options.optimizer.is_some() && options.backward.is_none() {
             return Err(MilliGraphGenError::OptimizerWithoutBackward);
         }
+
+        // Build dtype context for milli lowering.
+        let tensor_dtypes: HashMap<GlobalId, DType> = self
+            .tensors
+            .iter()
+            .filter_map(|(id, info)| info.dtype().map(|dt| (*id, dt)))
+            .collect();
+        let lowering_ctx = MilliLoweringContext::new(tensor_dtypes);
 
         let mut combined = MilliOpGraph::new_empty(rng);
         let mut sym_to_combined: HashMap<GlobalId, GlobalId> = HashMap::new();
@@ -767,7 +783,7 @@ impl SymbolicGraph {
             };
             let group_id = combined.create_group(group);
 
-            let op_graph = graph_op.op.get_milli_op_graph(rng);
+            let op_graph = graph_op.op.get_milli_op_graph(&lowering_ctx, rng);
             combined.merge_graph(op_graph, &mut sym_to_combined, rng, Some(group_id));
         }
 
