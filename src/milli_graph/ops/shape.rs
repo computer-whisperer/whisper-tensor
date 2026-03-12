@@ -42,6 +42,50 @@ impl Shape {
 }
 
 impl MilliOp for Shape {
+    fn infer(
+        &self,
+        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo>,
+        symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        backend: &mut EvalBackend,
+    ) -> Result<
+        Box<dyn Iterator<Item = (GlobalId, crate::tensor_info::TensorInfo)>>,
+        crate::milli_graph::MilliOpGraphError,
+    > {
+        use crate::tensor_info::TensorInfo;
+
+        let input_info = known_inputs
+            .get(&self.input)
+            .ok_or(crate::milli_graph::MilliOpGraphError::UnableToInfer)?;
+
+        // If input is concrete, fall back to eval for exact shape.
+        if input_info.as_numeric().is_some() {
+            let mut resolved = HashMap::new();
+            resolved.insert(self.input, input_info.as_numeric().unwrap().clone());
+            let collected: Vec<(GlobalId, TensorInfo)> = self
+                .eval(&resolved, backend)?
+                .map(|(a, b)| (a, TensorInfo::from(b)))
+                .collect();
+            return Ok(Box::new(collected.into_iter()));
+        }
+
+        // Shape op returns a 1-D i64 tensor whose values are the input shape dims.
+        // Use the TensorInfo::shape() method which returns the shape as a
+        // TensorInfoTypedRanked<u64, P1> — that *is* the output of Shape.
+        let shape_info = input_info.shape(symbolic_resolver);
+
+        // Convert the u64 shape info into an i64 TensorInfo for the output.
+        // The shape is a rank-1 tensor of dim values.
+        let out_info = TensorInfo::new_from_first_element_and_shape(
+            crate::scalar_info::ScalarInfo::Symbolic(
+                crate::symbolic_scalar::SymbolicScalar::new(crate::dtype::DType::I64, symbolic_resolver),
+            ),
+            shape_info,
+            symbolic_resolver,
+        );
+
+        Ok(Box::new([(self.output, out_info)].into_iter()))
+    }
+
     fn eval(
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,

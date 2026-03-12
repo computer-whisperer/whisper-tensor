@@ -194,6 +194,65 @@ impl SimpleBinary {
 }
 
 impl MilliOp for SimpleBinary {
+    fn infer(
+        &self,
+        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo>,
+        symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        backend: &mut EvalBackend,
+    ) -> Result<
+        Box<dyn Iterator<Item = (GlobalId, crate::tensor_info::TensorInfo)>>,
+        MilliOpGraphError,
+    > {
+        use crate::tensor_info::TensorInfo;
+
+        let a_info = known_inputs
+            .get(&self.a)
+            .ok_or(MilliOpGraphError::UnableToInfer)?;
+        let b_info = known_inputs
+            .get(&self.b)
+            .ok_or(MilliOpGraphError::UnableToInfer)?;
+
+        // If both inputs are concrete, fall back to eval.
+        if a_info.as_numeric().is_some() && b_info.as_numeric().is_some() {
+            let mut resolved = HashMap::new();
+            resolved.insert(self.a, a_info.as_numeric().unwrap().clone());
+            resolved.insert(self.b, b_info.as_numeric().unwrap().clone());
+            let collected: Vec<(GlobalId, TensorInfo)> = self
+                .eval(&resolved, backend)?
+                .map(|(a, b)| (a, TensorInfo::from(b)))
+                .collect();
+            return Ok(Box::new(collected.into_iter()));
+        }
+
+        // Use broadcast shape inference from the existing helpers.
+        let a_shape = a_info.shape(symbolic_resolver);
+        let b_shape = b_info.shape(symbolic_resolver);
+
+        let out_rank =
+            super::infer_multidirectional_broadcasting_rank(&[a_shape, b_shape], symbolic_resolver)?;
+
+        // Determine output dtype: comparison ops produce Bool, others match input.
+        let out_dtype = match self.which_op {
+            WhichSimpleBinaryOp::Equal
+            | WhichSimpleBinaryOp::Greater
+            | WhichSimpleBinaryOp::GreaterOrEqual
+            | WhichSimpleBinaryOp::Less
+            | WhichSimpleBinaryOp::LessOrEqual
+            | WhichSimpleBinaryOp::And
+            | WhichSimpleBinaryOp::Or
+            | WhichSimpleBinaryOp::Xor => DType::BOOL,
+            _ => a_info.dtype(),
+        };
+
+        let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
+            crate::symbolic_scalar::SymbolicScalar::new(out_dtype, symbolic_resolver),
+        );
+        let out_info =
+            TensorInfo::new_from_first_element_and_rank(first_elem, out_rank, symbolic_resolver);
+
+        Ok(Box::new([(self.output, out_info)].into_iter()))
+    }
+
     fn eval(
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,

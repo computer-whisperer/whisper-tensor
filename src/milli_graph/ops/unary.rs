@@ -3,6 +3,7 @@ use crate::graph::{GlobalId, Node};
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::milli_graph::{MilliOpGraph, MilliOpGraphError};
 use crate::numeric_tensor::NumericTensor;
+use crate::tensor_info::TensorInfo;
 use crate::{DynRank, TrigOp};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -180,6 +181,49 @@ impl Node for SimpleUnaryOp {
 }
 
 impl MilliOp for SimpleUnaryOp {
+    fn infer(
+        &self,
+        known_inputs: &HashMap<GlobalId, TensorInfo>,
+        symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        backend: &mut EvalBackend,
+    ) -> Result<Box<dyn Iterator<Item = (GlobalId, TensorInfo)>>, MilliOpGraphError> {
+        let input_info = known_inputs
+            .get(&self.input)
+            .ok_or(MilliOpGraphError::UnableToInfer)?;
+
+        // If input is concrete, fall back to eval.
+        if input_info.as_numeric().is_some() {
+            let mut resolved = HashMap::new();
+            resolved.insert(self.input, input_info.as_numeric().unwrap().clone());
+            let collected: Vec<(GlobalId, TensorInfo)> = self
+                .eval(&resolved, backend)?
+                .map(|(a, b)| (a, TensorInfo::from(b)))
+                .collect();
+            return Ok(Box::new(collected.into_iter()));
+        }
+
+        // Unary ops preserve shape and dtype (except IsNan/IsInf which produce Bool).
+        let out_info = match self.op {
+            WhichSimpleUnaryOp::IsNan | WhichSimpleUnaryOp::IsInf { .. } => {
+                // Output is Bool with same shape. Build new TensorInfo with Bool dtype.
+                use crate::scalar_info::ScalarInfo;
+                use crate::symbolic_scalar::SymbolicScalar;
+                let first_elem =
+                    ScalarInfo::Symbolic(SymbolicScalar::new(crate::dtype::DType::BOOL, symbolic_resolver));
+                TensorInfo::new_from_first_element_and_rank(
+                    first_elem,
+                    input_info.rank(),
+                    symbolic_resolver,
+                )
+            }
+            _ => {
+                // Same dtype, same shape — clone the input info.
+                input_info.clone()
+            }
+        };
+        Ok(Box::new([(self.output, out_info)].into_iter()))
+    }
+
     fn eval(
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,

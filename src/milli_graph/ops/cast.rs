@@ -66,6 +66,44 @@ impl crate::graph::Node for Cast {
 }
 
 impl MilliOp for Cast {
+    fn infer(
+        &self,
+        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo>,
+        symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        backend: &mut EvalBackend,
+    ) -> Result<
+        Box<dyn Iterator<Item = (GlobalId, crate::tensor_info::TensorInfo)>>,
+        MilliOpGraphError,
+    > {
+        use crate::tensor_info::TensorInfo;
+
+        let input_info = known_inputs
+            .get(&self.data)
+            .ok_or(MilliOpGraphError::UnableToInfer)?;
+
+        // If input is concrete, fall back to eval.
+        if input_info.as_numeric().is_some() {
+            let mut resolved = HashMap::new();
+            resolved.insert(self.data, input_info.as_numeric().unwrap().clone());
+            let collected: Vec<(GlobalId, TensorInfo)> = self
+                .eval(&resolved, backend)?
+                .map(|(a, b)| (a, TensorInfo::from(b)))
+                .collect();
+            return Ok(Box::new(collected.into_iter()));
+        }
+
+        // Same shape, new dtype.
+        let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
+            crate::symbolic_scalar::SymbolicScalar::new(self.dtype, symbolic_resolver),
+        );
+        let out_info = TensorInfo::new_from_first_element_and_rank(
+            first_elem,
+            input_info.rank(),
+            symbolic_resolver,
+        );
+        Ok(Box::new([(self.output, out_info)].into_iter()))
+    }
+
     fn backward(
         &self,
         output_grads: &HashMap<GlobalId, GlobalId>,

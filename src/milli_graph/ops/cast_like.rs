@@ -61,6 +61,49 @@ impl crate::graph::Node for CastLike {
 }
 
 impl MilliOp for CastLike {
+    fn infer(
+        &self,
+        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo>,
+        symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        backend: &mut EvalBackend,
+    ) -> Result<
+        Box<dyn Iterator<Item = (GlobalId, crate::tensor_info::TensorInfo)>>,
+        MilliOpGraphError,
+    > {
+        use crate::tensor_info::TensorInfo;
+
+        let data_info = known_inputs
+            .get(&self.data)
+            .ok_or(MilliOpGraphError::UnableToInfer)?;
+        let target_info = known_inputs
+            .get(&self.target_type)
+            .ok_or(MilliOpGraphError::UnableToInfer)?;
+
+        // If data is concrete and we know target dtype, fall back to eval.
+        if data_info.as_numeric().is_some() && target_info.as_numeric().is_some() {
+            let mut resolved = HashMap::new();
+            resolved.insert(self.data, data_info.as_numeric().unwrap().clone());
+            resolved.insert(self.target_type, target_info.as_numeric().unwrap().clone());
+            let collected: Vec<(GlobalId, TensorInfo)> = self
+                .eval(&resolved, backend)?
+                .map(|(a, b)| (a, TensorInfo::from(b)))
+                .collect();
+            return Ok(Box::new(collected.into_iter()));
+        }
+
+        // Same shape as data, dtype from target.
+        let out_dtype = target_info.dtype();
+        let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
+            crate::symbolic_scalar::SymbolicScalar::new(out_dtype, symbolic_resolver),
+        );
+        let out_info = TensorInfo::new_from_first_element_and_rank(
+            first_elem,
+            data_info.rank(),
+            symbolic_resolver,
+        );
+        Ok(Box::new([(self.output, out_info)].into_iter()))
+    }
+
     fn backward(
         &self,
         output_grads: &HashMap<GlobalId, GlobalId>,

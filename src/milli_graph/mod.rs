@@ -1,11 +1,13 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
-use crate::dtype::DTypeError;
+use crate::dtype::{DType, DTypeError};
 use crate::graph::{GlobalId, Graph, Link, Node};
 use crate::milli_graph::observer::MilliOpGraphObserver;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::numeric_tensor::NumericTensor;
-use crate::tensor_info::{TensorInfo, TensorInfoError};
+use crate::scalar_info::ScalarInfo;
+use crate::symbolic_scalar::{SymbolicResolver, SymbolicScalar, SymbolicScalarTyped};
+use crate::tensor_info::{MinimalTensor, TensorInfo, TensorInfoError};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -896,6 +898,64 @@ impl MilliOpGraph {
             }
         }
         Ok(intermediate_values)
+    }
+
+    /// Propagate shape/dtype/value information through the graph using `infer()`.
+    ///
+    /// Unlike `collect_all_intermediate_values`, this does not require concrete
+    /// values for all inputs. Inputs can be `TensorInfo` at any knowledge level:
+    /// - Numeric: concrete tensor (constants, weights)
+    /// - Shaped/Symbolic: known shape but unknown values
+    /// - Ranked: known rank + partially-known dims
+    /// - Minimal: only dtype known
+    ///
+    /// The default `infer()` implementation falls back to `eval()` when all
+    /// inputs are concrete, so constants and weight-dependent metadata ops
+    /// resolve automatically. Ops with custom `infer()` overrides can
+    /// propagate shapes through symbolic inputs.
+    pub fn infer_all(
+        &self,
+        inputs: &HashMap<GlobalId, TensorInfo>,
+    ) -> Result<HashMap<GlobalId, TensorInfo>, MilliOpGraphError> {
+        let mut backend = EvalBackend::NDArray;
+        let mut resolver = SymbolicResolver::new();
+        let mut known: HashMap<GlobalId, TensorInfo> = HashMap::new();
+
+        // Map external input IDs to internal IDs.
+        for (ext_id, info) in inputs {
+            let int_id = self.input_map[ext_id];
+            known.insert(int_id, info.clone());
+        }
+
+        // Walk ops in topological order.
+        for op_id in &self.op_ordering {
+            let op = &self.ops[op_id];
+            match op.infer(&known, &mut resolver, &mut backend) {
+                Ok(outputs) => {
+                    for (tensor_id, info) in outputs {
+                        known.insert(tensor_id, info);
+                    }
+                }
+                Err(MilliOpGraphError::UnableToInfer) => {
+                    // Op couldn't infer — insert Minimal entries for outputs
+                    // so downstream ops at least know the dtype.
+                    for out_id in op.outputs() {
+                        known.entry(out_id).or_insert_with(|| {
+                            TensorInfo::Minimal(MinimalTensor::new(
+                                ScalarInfo::Symbolic(SymbolicScalar::new(
+                                    DType::F32,
+                                    &mut resolver,
+                                )),
+                                SymbolicScalarTyped::new(&mut resolver),
+                            ))
+                        });
+                    }
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        Ok(known)
     }
 }
 
@@ -4012,5 +4072,120 @@ mod tests {
             losses[0],
             final_loss,
         );
+    }
+
+    #[test]
+    fn test_infer_all_concrete_inputs() {
+        // Build a graph: add(x, const(10)) → output
+        // Provide concrete TensorInfo for x, verify output shape/dtype propagate.
+        use crate::tensor_info::TensorInfo;
+
+        let rng = &mut rand::rng();
+        let ext_x = GlobalId::new(rng);
+        let ext_out = GlobalId::new(rng);
+
+        let (mut graph, input_map) = MilliOpGraph::new([ext_x], rng);
+        let x = input_map[&ext_x];
+        let c = Constant::push_new(
+            &mut graph,
+            NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![10.0f32], &vec![1]).unwrap(),
+            rng,
+        );
+        let out = SimpleBinary::add(&mut graph, x, c, rng);
+        let mut output_map = HashMap::new();
+        output_map.insert(out, ext_out);
+        graph.set_output_map(output_map);
+
+        // Provide a concrete tensor as TensorInfo for input x.
+        let x_tensor =
+            NumericTensor::<DynRank>::from_vec_shape(vec![3.0f32], vec![1]).unwrap();
+        let mut inputs = HashMap::new();
+        inputs.insert(ext_x, TensorInfo::from(x_tensor));
+
+        let result = graph.infer_all(&inputs).unwrap();
+
+        // The output tensor should be inferred as Numeric (concrete).
+        let out_info = &result[&out];
+        assert!(
+            out_info.as_numeric().is_some(),
+            "Expected concrete output, got {:?}",
+            out_info
+        );
+        let out_tensor = out_info.as_numeric().unwrap();
+        let values: Vec<f32> = out_tensor.flatten().unwrap().try_into().unwrap();
+        assert_eq!(values, vec![13.0f32]);
+    }
+
+    #[test]
+    fn test_infer_all_symbolic_propagation() {
+        // Build: neg(add(x, y)) where x and y are symbolic (non-concrete).
+        // Verify dtype and rank propagate through even without concrete values.
+        use crate::scalar_info::ScalarInfo;
+        use crate::symbolic_scalar::{SymbolicResolver, SymbolicScalar, SymbolicScalarTyped};
+        use crate::tensor_info::{MinimalTensor, TensorInfo};
+
+        let rng = &mut rand::rng();
+        let mut resolver = SymbolicResolver::new();
+
+        let ext_x = GlobalId::new(rng);
+        let ext_y = GlobalId::new(rng);
+
+        let (mut graph, input_map) = MilliOpGraph::new([ext_x, ext_y], rng);
+        let x = input_map[&ext_x];
+        let y = input_map[&ext_y];
+        let sum = SimpleBinary::add(&mut graph, x, y, rng);
+        let neg = crate::milli_graph::ops::SimpleUnaryOp::neg(&mut graph, sum, rng);
+
+        // Provide symbolic (Minimal) TensorInfo for inputs — dtype F32, unknown rank.
+        let mut inputs = HashMap::new();
+        for ext_id in [ext_x, ext_y] {
+            inputs.insert(
+                ext_id,
+                TensorInfo::Minimal(MinimalTensor::new(
+                    ScalarInfo::Symbolic(SymbolicScalar::new(
+                        crate::dtype::DType::F32,
+                        &mut resolver,
+                    )),
+                    SymbolicScalarTyped::new(&mut resolver),
+                )),
+            );
+        }
+
+        let result = graph.infer_all(&inputs).unwrap();
+
+        // Output should exist and have F32 dtype.
+        let neg_info = &result[&neg];
+        assert_eq!(neg_info.dtype(), crate::dtype::DType::F32);
+
+        // It won't be concrete (no numeric values), so as_numeric should be None.
+        assert!(neg_info.as_numeric().is_none());
+    }
+
+    #[test]
+    fn test_infer_all_shape_op_concrete() {
+        // Build: shape(x) where x has a known concrete shape [2, 3].
+        // Verify Shape op produces concrete i64 tensor [2, 3].
+        use crate::tensor_info::TensorInfo;
+
+        let rng = &mut rand::rng();
+        let ext_x = GlobalId::new(rng);
+
+        let (mut graph, input_map) = MilliOpGraph::new([ext_x], rng);
+        let x = input_map[&ext_x];
+        let shape_out = crate::milli_graph::ops::Shape::push_new(&mut graph, x, rng);
+
+        // Provide a concrete 2x3 tensor.
+        let x_tensor =
+            NumericTensor::<DynRank>::from_vec_shape(vec![1.0f32; 6], vec![2, 3]).unwrap();
+        let mut inputs = HashMap::new();
+        inputs.insert(ext_x, TensorInfo::from(x_tensor));
+
+        let result = graph.infer_all(&inputs).unwrap();
+
+        let shape_info = &result[&shape_out];
+        assert!(shape_info.as_numeric().is_some());
+        let shape_tensor = shape_info.as_numeric().unwrap();
+        let values: Vec<i64> = shape_tensor.flatten().unwrap().try_into().unwrap();
+        assert_eq!(values, vec![2, 3]);
     }
 }

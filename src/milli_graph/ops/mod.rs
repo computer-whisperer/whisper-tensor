@@ -411,6 +411,15 @@ impl MilliOp for AnyMilliOp {
         MilliOpGraphError,
     > );
 
+    delegate!(infer(
+        known_inputs: &HashMap<GlobalId, TensorInfo>,
+        symbolic_resolver: &mut SymbolicResolver,
+        backend: &mut EvalBackend
+    ) -> Result<
+        Box<dyn Iterator<Item = (GlobalId, TensorInfo)>>,
+        MilliOpGraphError,
+    > );
+
     fn backward(
         &self,
         output_grads: &HashMap<GlobalId, GlobalId>,
