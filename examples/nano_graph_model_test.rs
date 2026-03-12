@@ -99,6 +99,9 @@ fn main() {
         for (kind, count) in sorted {
             println!("  {:>4}x  {}", count, kind);
         }
+        for detail in &result.unsupported_details {
+            println!("    {}", detail);
+        }
     }
 
     println!("\n  Output atoms: {}", result.graph.outputs.len());

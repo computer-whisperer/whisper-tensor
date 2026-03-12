@@ -64,6 +64,8 @@ pub struct LowerResult {
     pub graph: NanoGraph,
     /// Ops that could not be lowered (treated as boundary).
     pub unsupported: Vec<(GlobalId, String)>,
+    /// Human-readable detail for each unsupported op (input/output shapes).
+    pub unsupported_details: Vec<String>,
 }
 
 /// How a milli tensor maps to atoms in the nano graph.
@@ -166,6 +168,7 @@ pub fn lower_with_info(
     Ok(LowerResult {
         graph: ctx.nano,
         unsupported: ctx.unsupported,
+        unsupported_details: ctx.unsupported_details,
     })
 }
 
@@ -174,6 +177,7 @@ struct LowerCtx {
     tensor_map: HashMap<GlobalId, TensorAtomMap>,
     next_anon_sym: usize,
     unsupported: Vec<(GlobalId, String)>,
+    unsupported_details: Vec<String>,
 }
 
 impl LowerCtx {
@@ -183,11 +187,12 @@ impl LowerCtx {
             tensor_map: HashMap::new(),
             next_anon_sym: 0,
             unsupported: Vec::new(),
+            unsupported_details: Vec::new(),
         }
     }
 
     /// Classify tensor dims and return layout info.
-    /// Returns None if rank is unknown or atom count exceeds limit.
+    /// Returns None if rank is unknown or atom count overflows u32.
     fn classify_dims(&mut self, info: &TensorInfo) -> Option<(Vec<DimKind>, Vec<u64>, Vec<SymDim>, u32)> {
         let rank = info.rank_if_known()?;
         let mut layout = Vec::with_capacity(rank);
@@ -206,12 +211,9 @@ impl LowerCtx {
         }
 
         let count: u64 = known_dims.iter().product();
-        // Cap at 64M atoms per tensor to avoid OOM.
-        if count > 64_000_000 {
-            return None;
-        }
+        let count: u32 = count.try_into().ok()?;
 
-        Some((layout, known_dims, sym_dims, count as u32))
+        Some((layout, known_dims, sym_dims, count))
     }
 
     fn alloc_sym_dim(&mut self) -> SymDim {
@@ -476,7 +478,7 @@ impl LowerCtx {
                     }
                 }
                 if !all_numeric {
-                    self.unsupported.push((op_id, op_kind));
+                    self.push_unsupported(other, all_infos, &op_kind);
                 }
             }
         }
@@ -693,7 +695,8 @@ impl LowerCtx {
             });
         } else {
             self.register_boundary(out_id, out_info, "ViewOp");
-            self.unsupported.push((op.global_id(), format!("ViewOp(count {} → {})", in_map.count, count)));
+            let name = format!("ViewOp(count {} → {})", in_map.count, count);
+            self.push_unsupported(op, all_infos, &name);
         }
     }
 
@@ -1796,7 +1799,25 @@ impl LowerCtx {
                 self.register_opaque(out_id);
             }
         }
-        self.unsupported.push((op_id, name.to_string()));
+        self.push_unsupported(op, all_infos, name);
+    }
+
+    fn push_unsupported<T: Node>(&mut self, op: &T, all_infos: &HashMap<GlobalId, TensorInfo>, name: &str) {
+        let in_shapes: Vec<String> = op.inputs().map(|id| Self::fmt_info(all_infos.get(&id))).collect();
+        let out_shapes: Vec<String> = op.outputs().map(|id| Self::fmt_info(all_infos.get(&id))).collect();
+        let detail = format!("{} : ({}) → ({})", name, in_shapes.join(", "), out_shapes.join(", "));
+        self.unsupported.push((op.global_id(), name.to_string()));
+        self.unsupported_details.push(detail);
+    }
+
+    fn fmt_info(info: Option<&TensorInfo>) -> String {
+        let Some(info) = info else { return "?".to_string() };
+        let r = info.rank_if_known().unwrap_or(0);
+        let prefix = if info.as_numeric().is_some() { "N" } else { "R" };
+        let dims: Vec<String> = (0..r).map(|i| {
+            info.dim_if_known(i).map(|d| d.to_string()).unwrap_or("?".to_string())
+        }).collect();
+        format!("{}[{}]", prefix, dims.join(","))
     }
 
     /// Register a tensor with no shape info as a single opaque atom.
