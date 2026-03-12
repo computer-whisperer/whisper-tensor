@@ -98,9 +98,12 @@ impl InputRef {
 
 /// A group of structurally identical scalar atoms.
 ///
-/// All atoms in a group share the same op, dtype, symbolic dimensions,
+/// All atoms in a group share the same op, symbolic dimensions,
 /// and input addressing pattern. The group stores `count` atoms with
 /// contiguous `AtomId`s starting at `base_id`.
+///
+/// Dtype precision semantics (compute_dtype, output_dtype) live on the
+/// ScalarOp itself, so each op variant can carry its own behavioral config.
 ///
 /// A group of count=1 is a standalone atom — this is the degenerate case
 /// for ops that don't compress (e.g., Gather boundary atoms).
@@ -110,10 +113,8 @@ pub struct AtomGroup {
     pub base_id: AtomId,
     /// Number of atoms in the group.
     pub count: u32,
-    /// The scalar operation each atom performs.
+    /// The scalar operation each atom performs, including dtype precision.
     pub op: ScalarOp,
-    /// The dtype produced by each atom.
-    pub dtype: DType,
     /// Symbolic dimensions this group iterates over.
     /// Each atom in the group independently iterates over these dims.
     /// E.g., `[batch, seq_len]` means each atom produces a 2D tile of values.
@@ -208,7 +209,6 @@ impl NanoGraph {
         &mut self,
         count: u32,
         op: ScalarOp,
-        dtype: DType,
         sym_dims: Vec<SymDim>,
         reduce_dims: Vec<SymDim>,
         inputs: Vec<InputRef>,
@@ -218,7 +218,6 @@ impl NanoGraph {
             base_id,
             count,
             op,
-            dtype,
             sym_dims,
             reduce_dims,
             inputs,
@@ -230,12 +229,11 @@ impl NanoGraph {
     pub fn push_atom(
         &mut self,
         op: ScalarOp,
-        dtype: DType,
         sym_dims: Vec<SymDim>,
         reduce_dims: Vec<SymDim>,
         inputs: Vec<InputRef>,
     ) -> AtomId {
-        self.push_group(1, op, dtype, sym_dims, reduce_dims, inputs)
+        self.push_group(1, op, sym_dims, reduce_dims, inputs)
     }
 
     /// Find the group index for an AtomId via binary search on group ranges.
@@ -303,8 +301,8 @@ impl NanoGraph {
             if !group.sym_dims.is_empty() {
                 symbolic_groups += 1;
             }
-            let op_name = match group.op {
-                ScalarOp::Binary(b) => match b {
+            let op_name = match &group.op {
+                ScalarOp::Binary { op, .. } => match op {
                     crate::nano_graph::ScalarBinOp::Add => "Add",
                     crate::nano_graph::ScalarBinOp::Sub => "Sub",
                     crate::nano_graph::ScalarBinOp::Mul => "Mul",
@@ -314,7 +312,7 @@ impl NanoGraph {
                     crate::nano_graph::ScalarBinOp::Mod => "Mod",
                     crate::nano_graph::ScalarBinOp::Pow => "Pow",
                 },
-                ScalarOp::Unary(u) => match u {
+                ScalarOp::Unary { op, .. } => match op {
                     crate::nano_graph::ScalarUnaryOp::Neg => "Neg",
                     crate::nano_graph::ScalarUnaryOp::Abs => "Abs",
                     crate::nano_graph::ScalarUnaryOp::Exp => "Exp",
@@ -325,11 +323,11 @@ impl NanoGraph {
                     crate::nano_graph::ScalarUnaryOp::Floor => "Floor",
                     crate::nano_graph::ScalarUnaryOp::Ceil => "Ceil",
                 },
-                ScalarOp::Identity => "Identity",
+                ScalarOp::Identity { .. } => "Identity",
                 ScalarOp::Literal(_) => "Literal",
-                ScalarOp::Select => "Select",
-                ScalarOp::ReduceSum => "ReduceSum",
-                ScalarOp::ReduceMax => "ReduceMax",
+                ScalarOp::Select { .. } => "Select",
+                ScalarOp::ReduceSum { .. } => "ReduceSum",
+                ScalarOp::ReduceMax { .. } => "ReduceMax",
             };
             *groups_by_op.entry(op_name).or_default() += 1;
         }
@@ -391,12 +389,12 @@ impl NanoGraph {
             }
 
             // Input count check.
-            let expected_inputs = match group.op {
+            let expected_inputs = match &group.op {
                 ScalarOp::Literal(_) => 0,
-                ScalarOp::Unary(_) | ScalarOp::Identity => 1,
-                ScalarOp::Binary(_) => 2,
-                ScalarOp::Select => 3,
-                ScalarOp::ReduceSum | ScalarOp::ReduceMax => 1,
+                ScalarOp::Unary { .. } | ScalarOp::Identity { .. } => 1,
+                ScalarOp::Binary { .. } => 2,
+                ScalarOp::Select { .. } => 3,
+                ScalarOp::ReduceSum { .. } | ScalarOp::ReduceMax { .. } => 1,
             };
             if group.inputs.len() != expected_inputs {
                 errors.push(format!(
@@ -443,7 +441,8 @@ impl std::fmt::Display for NanoGraphStats {
 mod tests {
     use super::*;
     use crate::dtype::DType;
-    use crate::nano_graph::ops::{LiteralBits, ScalarBinOp, ScalarOp, ScalarUnaryOp};
+    use crate::nano_graph::ops::{ScalarBinOp, ScalarOp, ScalarUnaryOp};
+    use crate::numeric_scalar::NumericScalar;
 
     /// Build a tiny graph: c = a + b, elementwise over 1024 atoms.
     #[test]
@@ -452,16 +451,14 @@ mod tests {
 
         let a = g.push_group(
             1024,
-            ScalarOp::Literal(LiteralBits::f32(0.0)),
-            DType::F32,
+            ScalarOp::Literal(NumericScalar::F32(0.0)),
             vec![],
             vec![],
             vec![],
         );
         let b = g.push_group(
             1024,
-            ScalarOp::Literal(LiteralBits::f32(0.0)),
-            DType::F32,
+            ScalarOp::Literal(NumericScalar::F32(0.0)),
             vec![],
             vec![],
             vec![],
@@ -469,8 +466,7 @@ mod tests {
 
         let c = g.push_group(
             1024,
-            ScalarOp::Binary(ScalarBinOp::Add),
-            DType::F32,
+            ScalarOp::Binary { op: ScalarBinOp::Add, compute_dtype: DType::F32, output_dtype: DType::F32 },
             vec![],
             vec![],
             vec![
@@ -495,15 +491,13 @@ mod tests {
 
         let a = g.push_group(
             1024,
-            ScalarOp::Literal(LiteralBits::f32(1.0)),
-            DType::F32,
+            ScalarOp::Literal(NumericScalar::F32(1.0)),
             vec![],
             vec![],
             vec![],
         );
         let b = g.push_atom(
-            ScalarOp::Literal(LiteralBits::f32(2.0)),
-            DType::F32,
+            ScalarOp::Literal(NumericScalar::F32(2.0)),
             vec![],
             vec![],
             vec![],
@@ -511,8 +505,7 @@ mod tests {
 
         let _c = g.push_group(
             1024,
-            ScalarOp::Binary(ScalarBinOp::Add),
-            DType::F32,
+            ScalarOp::Binary { op: ScalarBinOp::Add, compute_dtype: DType::F32, output_dtype: DType::F32 },
             vec![],
             vec![],
             vec![
@@ -533,24 +526,21 @@ mod tests {
 
         let a = g.push_group(
             1024,
-            ScalarOp::Literal(LiteralBits::f32(0.0)),
-            DType::F32,
+            ScalarOp::Literal(NumericScalar::F32(0.0)),
             vec![batch],
             vec![],
             vec![],
         );
         let b = g.push_group(
             1024,
-            ScalarOp::Literal(LiteralBits::f32(0.0)),
-            DType::F32,
+            ScalarOp::Literal(NumericScalar::F32(0.0)),
             vec![batch],
             vec![],
             vec![],
         );
         let _c = g.push_group(
             1024,
-            ScalarOp::Binary(ScalarBinOp::Add),
-            DType::F32,
+            ScalarOp::Binary { op: ScalarBinOp::Add, compute_dtype: DType::F32, output_dtype: DType::F32 },
             vec![batch],
             vec![],
             vec![
@@ -572,8 +562,7 @@ mod tests {
 
         let input = g.push_group(
             768,
-            ScalarOp::Literal(LiteralBits::f32(1.0)),
-            DType::F32,
+            ScalarOp::Literal(NumericScalar::F32(1.0)),
             vec![seq],
             vec![],
             vec![],
@@ -582,8 +571,7 @@ mod tests {
         // Reduce over seq_len: each of 768 hidden atoms accumulates over seq.
         let _reduced = g.push_group(
             768,
-            ScalarOp::ReduceSum,
-            DType::F32,
+            ScalarOp::ReduceSum { compute_dtype: DType::F32, output_dtype: DType::F32 },
             vec![], // seq is reduced away
             vec![seq],
             vec![InputRef::Affine { base: input, stride: 1 }],
@@ -602,8 +590,7 @@ mod tests {
 
         // A Gather boundary: single atom, runtime-variable dims.
         let _gather = g.push_atom(
-            ScalarOp::Identity, // placeholder op
-            DType::F32,
+            ScalarOp::Identity { compute_dtype: DType::F32, output_dtype: DType::F32 },
             vec![batch, seq],
             vec![],
             vec![], // no inputs tracked (boundary)
@@ -623,8 +610,7 @@ mod tests {
         // 4 source atoms.
         let src = g.push_group(
             4,
-            ScalarOp::Literal(LiteralBits::f32(0.0)),
-            DType::F32,
+            ScalarOp::Literal(NumericScalar::F32(0.0)),
             vec![],
             vec![],
             vec![],
@@ -633,8 +619,7 @@ mod tests {
         // 3 consumer atoms that pick from source irregularly: [2, 0, 3].
         let _consumer = g.push_group(
             3,
-            ScalarOp::Unary(ScalarUnaryOp::Neg),
-            DType::F32,
+            ScalarOp::Unary { op: ScalarUnaryOp::Neg, compute_dtype: DType::F32, output_dtype: DType::F32 },
             vec![],
             vec![],
             vec![InputRef::Explicit(vec![

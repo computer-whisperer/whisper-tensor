@@ -5,8 +5,9 @@
 //! verify that the lowered NanoGraph produces the same values as the
 //! original MilliOpGraph.
 //!
-//! All arithmetic is performed in the group's declared dtype, matching
-//! the precision semantics of the MilliOpGraph interpreter.
+//! Precision semantics come from each ScalarOp variant's compute_dtype
+//! and output_dtype fields. Inputs are cast to compute_dtype, the op
+//! executes at that precision, then the result is cast to output_dtype.
 
 use std::collections::HashMap;
 
@@ -41,13 +42,11 @@ impl NanoEval {
         debug_nan: bool,
     ) -> Self {
         let num_atoms = graph.num_atoms() as usize;
-        // Initialize all atoms to F32 zero; actual dtype comes from the group.
         let mut values: Vec<NumericScalar> = vec![NumericScalar::F32(0.0); num_atoms];
         let mut nan_reported = false;
 
         for (group_idx, group) in graph.groups().iter().enumerate() {
-            let is_reduce = matches!(group.op, ScalarOp::ReduceSum | ScalarOp::ReduceMax);
-            let dtype = group.dtype;
+            let is_reduce = group.op.is_reduce();
 
             for i in 0..group.count {
                 let atom_idx = group.base_id.0 + i;
@@ -65,51 +64,55 @@ impl NanoEval {
                         .copied()
                         .expect("Reduce dim must have a bound");
 
-                    let mut acc = match group.op {
-                        ScalarOp::ReduceSum => NumericScalar::zero_of(dtype),
-                        ScalarOp::ReduceMax => NumericScalar::neg_infinity_of(dtype),
+                    let (compute_dtype, output_dtype) = match &group.op {
+                        ScalarOp::ReduceSum { compute_dtype, output_dtype } => (*compute_dtype, *output_dtype),
+                        ScalarOp::ReduceMax { compute_dtype, output_dtype } => (*compute_dtype, *output_dtype),
+                        _ => unreachable!(),
+                    };
+
+                    let mut acc = match &group.op {
+                        ScalarOp::ReduceSum { .. } => NumericScalar::zero_of(compute_dtype),
+                        ScalarOp::ReduceMax { .. } => NumericScalar::neg_infinity_of(compute_dtype),
                         _ => unreachable!(),
                     };
 
                     for k in 0..bound as u32 {
                         let src = group.inputs[0].resolve(i, k);
-                        let val = &values[src.0 as usize];
-                        // Cast input to this group's dtype before accumulating.
-                        let val = val.cast_to(dtype);
-                        acc = match group.op {
-                            ScalarOp::ReduceSum => acc.add(&val),
-                            ScalarOp::ReduceMax => acc.scalar_max(&val),
+                        let val = values[src.0 as usize].cast_to(compute_dtype);
+                        acc = match &group.op {
+                            ScalarOp::ReduceSum { .. } => acc.add(&val),
+                            ScalarOp::ReduceMax { .. } => acc.scalar_max(&val),
                             _ => unreachable!(),
                         };
                     }
                     if debug_nan && !nan_reported && !acc.to_f64().is_finite() {
                         eprintln!(
-                            "[NaN-debug] group {} (reduce {:?}, {:?}): atom {} = {:?}",
-                            group_idx, group.op, dtype, atom_idx, acc
+                            "[NaN-debug] group {} (reduce {:?}): atom {} = {:?}",
+                            group_idx, group.op, atom_idx, acc
                         );
                         nan_reported = true;
                     }
-                    values[atom_idx as usize] = acc;
+                    // Cast accumulated result to output dtype before storing.
+                    values[atom_idx as usize] = acc.cast_to(output_dtype);
                 } else {
-                    let resolve_input = |inp: &super::pattern::InputRef| -> NumericScalar {
-                        let src = inp.resolve(i, 0);
-                        values[src.0 as usize].cast_to(dtype)
-                    };
-
                     let val = match &group.op {
-                        ScalarOp::Literal(lit) => {
+                        ScalarOp::Literal(scalar) => {
                             if let Some(ov) = overrides.get(&atom_idx) {
-                                ov.cast_to(dtype)
+                                // Override: cast to the literal's dtype.
+                                ov.cast_to(scalar.dtype())
                             } else {
-                                // Interpret the literal bits in this group's dtype.
-                                NumericScalar::F64(lit.as_f64()).cast_to(dtype)
+                                scalar.clone()
                             }
                         }
-                        ScalarOp::Identity => resolve_input(&group.inputs[0]),
-                        ScalarOp::Binary(bin) => {
-                            let a = resolve_input(&group.inputs[0]);
-                            let b = resolve_input(&group.inputs[1]);
-                            match bin {
+                        ScalarOp::Identity { compute_dtype, output_dtype } => {
+                            let src = group.inputs[0].resolve(i, 0);
+                            let x = values[src.0 as usize].cast_to(*compute_dtype);
+                            x.cast_to(*output_dtype)
+                        }
+                        ScalarOp::Binary { op, compute_dtype, output_dtype } => {
+                            let a = values[group.inputs[0].resolve(i, 0).0 as usize].cast_to(*compute_dtype);
+                            let b = values[group.inputs[1].resolve(i, 0).0 as usize].cast_to(*compute_dtype);
+                            let result = match op {
                                 ScalarBinOp::Add => a.add(&b),
                                 ScalarBinOp::Sub => a.sub(&b),
                                 ScalarBinOp::Mul => a.mul(&b),
@@ -118,11 +121,12 @@ impl NanoEval {
                                 ScalarBinOp::Min => a.scalar_min(&b),
                                 ScalarBinOp::Mod => a.modulo(&b),
                                 ScalarBinOp::Pow => a.pow(&b),
-                            }
+                            };
+                            result.cast_to(*output_dtype)
                         }
-                        ScalarOp::Unary(un) => {
-                            let x = resolve_input(&group.inputs[0]);
-                            match un {
+                        ScalarOp::Unary { op, compute_dtype, output_dtype } => {
+                            let x = values[group.inputs[0].resolve(i, 0).0 as usize].cast_to(*compute_dtype);
+                            let result = match op {
                                 ScalarUnaryOp::Neg => x.neg(),
                                 ScalarUnaryOp::Abs => x.abs(),
                                 ScalarUnaryOp::Exp => x.exp(),
@@ -132,17 +136,19 @@ impl NanoEval {
                                 ScalarUnaryOp::Tanh => x.tanh(),
                                 ScalarUnaryOp::Floor => x.floor(),
                                 ScalarUnaryOp::Ceil => x.ceil(),
-                            }
+                            };
+                            result.cast_to(*output_dtype)
                         }
-                        ScalarOp::Select => {
-                            let cond = resolve_input(&group.inputs[0]);
-                            if cond.is_nonzero() {
-                                resolve_input(&group.inputs[1])
+                        ScalarOp::Select { compute_dtype, output_dtype } => {
+                            let cond = values[group.inputs[0].resolve(i, 0).0 as usize].cast_to(*compute_dtype);
+                            let result = if cond.is_nonzero() {
+                                values[group.inputs[1].resolve(i, 0).0 as usize].cast_to(*compute_dtype)
                             } else {
-                                resolve_input(&group.inputs[2])
-                            }
+                                values[group.inputs[2].resolve(i, 0).0 as usize].cast_to(*compute_dtype)
+                            };
+                            result.cast_to(*output_dtype)
                         }
-                        ScalarOp::ReduceSum | ScalarOp::ReduceMax => unreachable!(),
+                        ScalarOp::ReduceSum { .. } | ScalarOp::ReduceMax { .. } => unreachable!(),
                     };
                     if debug_nan && !nan_reported && !val.to_f64().is_finite() {
                         let input_detail: Vec<String> = group
@@ -160,10 +166,9 @@ impl NanoEval {
                             })
                             .collect();
                         eprintln!(
-                            "[NaN-debug] group {} ({:?}, {:?}): atom {} = {:?} inputs: {}",
+                            "[NaN-debug] group {} ({:?}): atom {} = {:?} inputs: {}",
                             group_idx,
                             group.op,
-                            dtype,
                             atom_idx,
                             val,
                             input_detail.join(", ")

@@ -12,5 +12,5 @@ mod ops;
 pub mod optimize;
 mod pattern;
 
-pub use ops::{LiteralBits, ScalarBinOp, ScalarOp, ScalarUnaryOp};
+pub use ops::{ScalarBinOp, ScalarOp, ScalarUnaryOp};
 pub use pattern::{AtomGroup, AtomId, InputRef, NanoGraph, NanoGraphStats, SymDim};

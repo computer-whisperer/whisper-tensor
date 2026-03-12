@@ -11,7 +11,8 @@ use crate::dtype::DType;
 use crate::graph::{GlobalId, Graph, Node};
 use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::ops::AnyMilliOp;
-use crate::nano_graph::ops::{LiteralBits, ScalarBinOp, ScalarOp, ScalarUnaryOp};
+use crate::nano_graph::ops::{ScalarBinOp, ScalarOp, ScalarUnaryOp};
+use crate::numeric_scalar::NumericScalar;
 use crate::nano_graph::pattern::{AtomId, InputRef, NanoGraph, SymDim};
 use crate::numeric_tensor::NumericTensor;
 use crate::tensor_info::TensorInfo;
@@ -273,8 +274,7 @@ impl LowerCtx {
     fn register_input(&mut self, id: GlobalId, info: &TensorInfo) {
         let Some((layout, known_dims, sym_dims, count)) = self.classify_dims(info) else {
             let base_id = self.nano.push_atom(
-                ScalarOp::Literal(LiteralBits::f32(0.0)),
-                info.dtype(),
+                ScalarOp::Literal(NumericScalar::F32(0.0)),
                 vec![],
                 vec![],
                 vec![],
@@ -290,8 +290,7 @@ impl LowerCtx {
 
         let base_id = self.nano.push_group(
             count,
-            ScalarOp::Literal(LiteralBits::f32(0.0)),
-            info.dtype(),
+            ScalarOp::Literal(NumericScalar::F32(0.0)),
             sym_dims.clone(),
             vec![],
             vec![],
@@ -307,8 +306,8 @@ impl LowerCtx {
     fn register_boundary(&mut self, output_id: GlobalId, info: &TensorInfo, _op_kind: &str) {
         let Some((layout, known_dims, sym_dims, count)) = self.classify_dims(info) else {
             let base_id = self.nano.push_atom(
-                ScalarOp::Literal(LiteralBits::f32(0.0)),
-                info.dtype(), vec![], vec![], vec![],
+                ScalarOp::Literal(NumericScalar::F32(0.0)),
+                vec![], vec![], vec![],
             );
             self.tensor_map.insert(output_id, TensorAtomMap {
                 base_id, count: 1, layout: vec![], known_strides: vec![], sym_dims: vec![],
@@ -320,7 +319,7 @@ impl LowerCtx {
         let count = count.max(1);
 
         let base_id = self.nano.push_group(
-            count, ScalarOp::Literal(LiteralBits::f32(0.0)), info.dtype(),
+            count, ScalarOp::Literal(NumericScalar::F32(0.0)),
             sym_dims.clone(), vec![], vec![],
         );
 
@@ -500,8 +499,10 @@ impl LowerCtx {
             AnyMilliOp::Split(s) => self.lower_split(s, all_infos),
             AnyMilliOp::Slice(s) => self.lower_slice(s, all_infos),
             AnyMilliOp::MatMul(m) => self.lower_matmul(m, all_infos),
-            AnyMilliOp::ReduceSum(r) => self.lower_reduce(r, all_infos, ScalarOp::ReduceSum),
-            AnyMilliOp::ReduceMax(r) => self.lower_reduce(r, all_infos, ScalarOp::ReduceMax),
+            AnyMilliOp::ReduceSum(r) => self.lower_reduce(r, all_infos,
+                |dt| ScalarOp::ReduceSum { compute_dtype: dt, output_dtype: dt }),
+            AnyMilliOp::ReduceMax(r) => self.lower_reduce(r, all_infos,
+                |dt| ScalarOp::ReduceMax { compute_dtype: dt, output_dtype: dt }),
             AnyMilliOp::ReduceMean(r) => self.lower_reduce_mean(r, all_infos),
             // Everything else: check if outputs are fully concrete (constant-folded),
             // otherwise register as boundary.
@@ -555,16 +556,17 @@ impl LowerCtx {
             return;
         };
 
+        let dt = out_info.dtype();
         let scalar_op = match bin.which_op() {
-            WhichSimpleBinaryOp::Add => ScalarOp::Binary(ScalarBinOp::Add),
-            WhichSimpleBinaryOp::Sub => ScalarOp::Binary(ScalarBinOp::Sub),
-            WhichSimpleBinaryOp::Mul => ScalarOp::Binary(ScalarBinOp::Mul),
-            WhichSimpleBinaryOp::Div => ScalarOp::Binary(ScalarBinOp::Div),
-            WhichSimpleBinaryOp::Max => ScalarOp::Binary(ScalarBinOp::Max),
-            WhichSimpleBinaryOp::Min => ScalarOp::Binary(ScalarBinOp::Min),
-            WhichSimpleBinaryOp::Modulo(_) => ScalarOp::Binary(ScalarBinOp::Mod),
+            WhichSimpleBinaryOp::Add => ScalarOp::Binary { op: ScalarBinOp::Add, compute_dtype: dt, output_dtype: dt },
+            WhichSimpleBinaryOp::Sub => ScalarOp::Binary { op: ScalarBinOp::Sub, compute_dtype: dt, output_dtype: dt },
+            WhichSimpleBinaryOp::Mul => ScalarOp::Binary { op: ScalarBinOp::Mul, compute_dtype: dt, output_dtype: dt },
+            WhichSimpleBinaryOp::Div => ScalarOp::Binary { op: ScalarBinOp::Div, compute_dtype: dt, output_dtype: dt },
+            WhichSimpleBinaryOp::Max => ScalarOp::Binary { op: ScalarBinOp::Max, compute_dtype: dt, output_dtype: dt },
+            WhichSimpleBinaryOp::Min => ScalarOp::Binary { op: ScalarBinOp::Min, compute_dtype: dt, output_dtype: dt },
+            WhichSimpleBinaryOp::Modulo(_) => ScalarOp::Binary { op: ScalarBinOp::Mod, compute_dtype: dt, output_dtype: dt },
             // Comparison/logical ops: opaque binary, but shape is known.
-            _ => ScalarOp::Binary(ScalarBinOp::Max), // placeholder
+            _ => ScalarOp::Binary { op: ScalarBinOp::Max, compute_dtype: dt, output_dtype: dt }, // placeholder
         };
 
         let Some((layout, known_dims, sym_dims, count)) = self.classify_dims(out_info) else {
@@ -585,7 +587,7 @@ impl LowerCtx {
         let input_b = self.compute_input_ref(&out_tmp, &b_map, out_info, b_info.unwrap_or(out_info));
 
         let base_id = self.nano.push_group(
-            count, scalar_op, out_info.dtype(), sym_dims.clone(), vec![],
+            count, scalar_op, sym_dims.clone(), vec![],
             vec![input_a, input_b],
         );
 
@@ -613,16 +615,17 @@ impl LowerCtx {
             return;
         };
 
+        let dt = out_info.dtype();
         let scalar_op = match un.which_op() {
-            WhichSimpleUnaryOp::Neg => ScalarOp::Unary(ScalarUnaryOp::Neg),
-            WhichSimpleUnaryOp::Abs => ScalarOp::Unary(ScalarUnaryOp::Abs),
-            WhichSimpleUnaryOp::Exp => ScalarOp::Unary(ScalarUnaryOp::Exp),
-            WhichSimpleUnaryOp::Ln => ScalarOp::Unary(ScalarUnaryOp::Ln),
-            WhichSimpleUnaryOp::Sqrt => ScalarOp::Unary(ScalarUnaryOp::Sqrt),
-            WhichSimpleUnaryOp::Reciprocal => ScalarOp::Unary(ScalarUnaryOp::Reciprocal),
-            WhichSimpleUnaryOp::Trig(crate::TrigOp::Tanh) => ScalarOp::Unary(ScalarUnaryOp::Tanh),
-            WhichSimpleUnaryOp::Floor => ScalarOp::Unary(ScalarUnaryOp::Floor),
-            WhichSimpleUnaryOp::Ceil => ScalarOp::Unary(ScalarUnaryOp::Ceil),
+            WhichSimpleUnaryOp::Neg => ScalarOp::Unary { op: ScalarUnaryOp::Neg, compute_dtype: dt, output_dtype: dt },
+            WhichSimpleUnaryOp::Abs => ScalarOp::Unary { op: ScalarUnaryOp::Abs, compute_dtype: dt, output_dtype: dt },
+            WhichSimpleUnaryOp::Exp => ScalarOp::Unary { op: ScalarUnaryOp::Exp, compute_dtype: dt, output_dtype: dt },
+            WhichSimpleUnaryOp::Ln => ScalarOp::Unary { op: ScalarUnaryOp::Ln, compute_dtype: dt, output_dtype: dt },
+            WhichSimpleUnaryOp::Sqrt => ScalarOp::Unary { op: ScalarUnaryOp::Sqrt, compute_dtype: dt, output_dtype: dt },
+            WhichSimpleUnaryOp::Reciprocal => ScalarOp::Unary { op: ScalarUnaryOp::Reciprocal, compute_dtype: dt, output_dtype: dt },
+            WhichSimpleUnaryOp::Trig(crate::TrigOp::Tanh) => ScalarOp::Unary { op: ScalarUnaryOp::Tanh, compute_dtype: dt, output_dtype: dt },
+            WhichSimpleUnaryOp::Floor => ScalarOp::Unary { op: ScalarUnaryOp::Floor, compute_dtype: dt, output_dtype: dt },
+            WhichSimpleUnaryOp::Ceil => ScalarOp::Unary { op: ScalarUnaryOp::Ceil, compute_dtype: dt, output_dtype: dt },
             _ => {
                 self.lower_as_boundary_named(un, all_infos, "SimpleUnary");
                 return;
@@ -630,7 +633,7 @@ impl LowerCtx {
         };
 
         let base_id = self.nano.push_group(
-            in_map.count, scalar_op, out_info.dtype(), in_map.sym_dims.clone(), vec![],
+            in_map.count, scalar_op, in_map.sym_dims.clone(), vec![],
             vec![InputRef::Affine { base: in_map.base_id, stride: 1 }],
         );
 
@@ -660,13 +663,14 @@ impl LowerCtx {
         };
 
         let min_val = clamp.min_val();
+        let dt = out_info.dtype();
         let min_id = self.nano.push_atom(
-            ScalarOp::Literal(LiteralBits::f32(min_val)),
-            out_info.dtype(), vec![], vec![], vec![],
+            ScalarOp::Literal(NumericScalar::F32(min_val)),
+            vec![], vec![], vec![],
         );
 
         let base_id = self.nano.push_group(
-            in_map.count, ScalarOp::Binary(ScalarBinOp::Max), out_info.dtype(),
+            in_map.count, ScalarOp::Binary { op: ScalarBinOp::Max, compute_dtype: dt, output_dtype: dt },
             in_map.sym_dims.clone(), vec![],
             vec![
                 InputRef::Affine { base: in_map.base_id, stride: 1 },
@@ -700,8 +704,9 @@ impl LowerCtx {
             return;
         };
 
+        let dt = out_info.dtype();
         let base_id = self.nano.push_group(
-            in_map.count, ScalarOp::Identity, out_info.dtype(),
+            in_map.count, ScalarOp::Identity { compute_dtype: dt, output_dtype: dt },
             in_map.sym_dims.clone(), vec![],
             vec![InputRef::Affine { base: in_map.base_id, stride: 1 }],
         );
@@ -787,8 +792,9 @@ impl LowerCtx {
                 &out_tmp, &in_map, out_info, in_info.unwrap_or(out_info),
             );
 
+            let dt = out_info.dtype();
             let base_id = self.nano.push_group(
-                count, ScalarOp::Identity, out_info.dtype(),
+                count, ScalarOp::Identity { compute_dtype: dt, output_dtype: dt },
                 sym_dims.clone(), vec![], vec![input_ref],
             );
 
@@ -838,8 +844,9 @@ impl LowerCtx {
         let input_a = self.compute_input_ref(&out_tmp, &a_map, out_info, a_info.unwrap_or(out_info));
         let input_b = self.compute_input_ref(&out_tmp, &b_map, out_info, b_info.unwrap_or(out_info));
 
+        let dt = out_info.dtype();
         let base_id = self.nano.push_group(
-            count, ScalarOp::Binary(ScalarBinOp::Pow), out_info.dtype(), sym_dims.clone(), vec![],
+            count, ScalarOp::Binary { op: ScalarBinOp::Pow, compute_dtype: dt, output_dtype: dt }, sym_dims.clone(), vec![],
             vec![input_a, input_b],
         );
 
@@ -891,8 +898,9 @@ impl LowerCtx {
         let input_x = self.compute_input_ref(&out_tmp, &x_map, out_info, x_info.unwrap_or(out_info));
         let input_y = self.compute_input_ref(&out_tmp, &y_map, out_info, y_info.unwrap_or(out_info));
 
+        let dt = out_info.dtype();
         let base_id = self.nano.push_group(
-            count, ScalarOp::Select, out_info.dtype(), sym_dims.clone(), vec![],
+            count, ScalarOp::Select { compute_dtype: dt, output_dtype: dt }, sym_dims.clone(), vec![],
             vec![input_cond, input_x, input_y],
         );
 
@@ -1000,8 +1008,9 @@ impl LowerCtx {
             ids.push(inp_map.base_id.offset(inp_flat as u32));
         }
 
+        let dt = out_info.dtype();
         let base_id = self.nano.push_group(
-            out_count, ScalarOp::Identity, out_info.dtype(),
+            out_count, ScalarOp::Identity { compute_dtype: dt, output_dtype: dt },
             out_sym_dims.clone(), vec![],
             vec![InputRef::Explicit(ids)],
         );
@@ -1112,8 +1121,9 @@ impl LowerCtx {
             ids.push(in_map.base_id.offset(inp_flat as u32));
         }
 
+        let dt = out_info.dtype();
         let base_id = self.nano.push_group(
-            out_count, ScalarOp::Identity, out_info.dtype(),
+            out_count, ScalarOp::Identity { compute_dtype: dt, output_dtype: dt },
             out_sym_dims.clone(), vec![],
             vec![InputRef::Explicit(ids)],
         );
@@ -1292,8 +1302,9 @@ impl LowerCtx {
             ids.push(in_map.base_id.offset(in_flat as u32));
         }
 
+        let dt = out_info.dtype();
         let base_id = self.nano.push_group(
-            out_count, ScalarOp::Identity, out_info.dtype(),
+            out_count, ScalarOp::Identity { compute_dtype: dt, output_dtype: dt },
             out_sym_dims.clone(), vec![],
             vec![InputRef::Explicit(ids)],
         );
@@ -1405,14 +1416,13 @@ impl LowerCtx {
             return;
         }
 
-        // Determine accumulation dtype: BF16/F16 inputs accumulate in F32,
-        // matching the milli MatMul eval semantics.
-        let out_dtype = out_info.dtype();
-        let input_dtype = all_infos.get(&a_id).map(|i| i.dtype()).unwrap_or(out_dtype);
-        let compute_dtype = match input_dtype {
-            DType::BF16 | DType::F16 => DType::F32,
-            _ => out_dtype,
-        };
+        // Use the MatMul's explicit dtype fields for nano group precision.
+        // product_dtype: precision of A*B products (Mul groups).
+        // accumulate_dtype: precision for summing products (ReduceSum groups).
+        // output_dtype: final output precision (Identity cast-back if needed).
+        let product_dtype = matmul.product_dtype();
+        let accumulate_dtype = matmul.accumulate_dtype();
+        let out_dtype = matmul.output_dtype();
 
         // Create bounded sym dim for the contraction dimension K.
         let k_sym = self.nano.bounded_sym_dim(&format!("matmul_k_{}", self.next_anon_sym), k);
@@ -1502,8 +1512,7 @@ impl LowerCtx {
 
                 let base = self.nano.push_group(
                     n_u32,
-                    ScalarOp::Binary(ScalarBinOp::Mul),
-                    compute_dtype,
+                    ScalarOp::Binary { op: ScalarBinOp::Mul, compute_dtype: product_dtype, output_dtype: product_dtype },
                     out_sym_dims.clone(),
                     vec![],
                     vec![input_a, input_b],
@@ -1526,8 +1535,7 @@ impl LowerCtx {
 
             let base = self.nano.push_group(
                 n_u32,
-                ScalarOp::ReduceSum,
-                out_info.dtype(),
+                ScalarOp::ReduceSum { compute_dtype: accumulate_dtype, output_dtype: out_dtype },
                 out_sym_dims.clone(),
                 vec![k_sym],
                 vec![InputRef::SymAffine {
@@ -1551,15 +1559,16 @@ impl LowerCtx {
     }
 
     /// Lower ReduceSum or ReduceMax over known axes.
-    fn lower_reduce<R>(
+    fn lower_reduce<R, F>(
         &mut self,
         reduce: &R,
         all_infos: &HashMap<GlobalId, TensorInfo>,
-        reduce_op: ScalarOp,
+        make_reduce_op: F,
     )
     where
         R: Node,
         R: ReduceAccessors,
+        F: Fn(DType) -> ScalarOp,
     {
         let in_id = Node::inputs(reduce).next().unwrap();
         let out_id = Node::outputs(reduce).next().unwrap();
@@ -1587,8 +1596,9 @@ impl LowerCtx {
                 return;
             };
             let count = count.max(1);
+            let dt = out_info.dtype();
             let base_id = self.nano.push_group(
-                count, ScalarOp::Identity, out_info.dtype(), sym_dims.clone(), vec![],
+                count, ScalarOp::Identity { compute_dtype: dt, output_dtype: dt }, sym_dims.clone(), vec![],
                 vec![InputRef::Affine { base: in_map.base_id, stride: 1 }],
             );
             self.tensor_map.insert(out_id, TensorAtomMap {
@@ -1748,10 +1758,10 @@ impl LowerCtx {
         };
 
         // Intermediate: identity with sym_dim for the reduction.
+        let dt = out_info.dtype();
         let mul_base = self.nano.push_group(
             out_count,
-            ScalarOp::Identity,
-            out_info.dtype(),
+            ScalarOp::Identity { compute_dtype: dt, output_dtype: dt },
             mul_sym_dims,
             vec![],
             vec![input_ref],
@@ -1767,8 +1777,7 @@ impl LowerCtx {
         // ReduceSum/ReduceMax group.
         let base_id = self.nano.push_group(
             out_count,
-            reduce_op,
-            out_info.dtype(),
+            make_reduce_op(dt),
             out_sym_dims.clone(),
             vec![reduce_sym],
             vec![InputRef::Affine { base: mul_base, stride: 1 }],
@@ -1816,7 +1825,8 @@ impl LowerCtx {
         };
 
         // Lower as ReduceSum first.
-        self.lower_reduce(reduce, all_infos, ScalarOp::ReduceSum);
+        self.lower_reduce(reduce, all_infos,
+            |dt| ScalarOp::ReduceSum { compute_dtype: dt, output_dtype: dt });
 
         // If ReduceSum succeeded (output is in tensor_map), divide by extent.
         let Some(sum_map) = self.tensor_map.get(&out_id).cloned() else {
@@ -1827,15 +1837,15 @@ impl LowerCtx {
         // Create literal for 1/extent.
         let recip = 1.0 / extent as f64;
         let lit_id = self.nano.push_atom(
-            ScalarOp::Literal(LiteralBits::f32(recip as f32)),
-            out_info.dtype(), vec![], vec![], vec![],
+            ScalarOp::Literal(NumericScalar::F32(recip as f32)),
+            vec![], vec![], vec![],
         );
 
         // Multiply by 1/extent.
+        let dt = out_info.dtype();
         let base_id = self.nano.push_group(
             sum_map.count,
-            ScalarOp::Binary(ScalarBinOp::Mul),
-            out_info.dtype(),
+            ScalarOp::Binary { op: ScalarBinOp::Mul, compute_dtype: dt, output_dtype: dt },
             sum_map.sym_dims.clone(),
             vec![],
             vec![
@@ -1896,8 +1906,8 @@ impl LowerCtx {
             return;
         }
         let base_id = self.nano.push_atom(
-            ScalarOp::Literal(LiteralBits::f32(0.0)),
-            DType::F32, vec![], vec![], vec![],
+            ScalarOp::Literal(NumericScalar::F32(0.0)),
+            vec![], vec![], vec![],
         );
         self.tensor_map.insert(id, TensorAtomMap {
             base_id, count: 1, layout: vec![], known_strides: vec![], sym_dims: vec![],

@@ -1,6 +1,7 @@
 //! Scalar operations for the nano graph.
 
 use crate::dtype::DType;
+use crate::numeric_scalar::NumericScalar;
 
 /// Binary scalar operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -29,76 +30,65 @@ pub enum ScalarUnaryOp {
     Ceil,
 }
 
-/// A scalar operation — the computation performed by a pattern block.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// A scalar operation with its precision semantics.
+///
+/// Each variant carries the dtype configuration for how it executes:
+/// - `compute_dtype`: precision inputs are cast to and the operation executes at.
+/// - `output_dtype`: precision the result is stored at (cast after computation).
+///
+/// This allows each op to independently describe its numeric behavior,
+/// and ops like ReduceSum can later grow op-specific knobs (e.g. accumulation
+/// ordering) without affecting other variants.
+#[derive(Debug, Clone)]
 pub enum ScalarOp {
+    /// Produce a constant value. No inputs. The NumericScalar carries
+    /// the exact typed value (BF16, F32, etc.).
+    Literal(NumericScalar),
+    /// Identity pass-through. One input, output = cast(input).
+    /// Used for index-remapping ops (Slice, strided views) and dtype casts.
+    Identity { compute_dtype: DType, output_dtype: DType },
     /// Binary operation on two inputs.
-    Binary(ScalarBinOp),
+    Binary { op: ScalarBinOp, compute_dtype: DType, output_dtype: DType },
     /// Unary operation on one input.
-    Unary(ScalarUnaryOp),
-    /// Identity pass-through. One input, output = input.
-    /// Used for index-remapping ops (Slice, strided views) where the
-    /// computation is trivial but the affine map changes.
-    Identity,
-    /// Produce a constant value. No inputs.
-    Literal(LiteralBits),
+    Unary { op: ScalarUnaryOp, compute_dtype: DType, output_dtype: DType },
     /// Ternary select: condition ? x : y. Three inputs: [condition, x, y].
-    Select,
+    Select { compute_dtype: DType, output_dtype: DType },
     /// Reduce a dimension by summation. One input; the block iterates over the
     /// reduction dimension and accumulates.
-    ReduceSum,
+    ReduceSum { compute_dtype: DType, output_dtype: DType },
     /// Reduce a dimension by max.
-    ReduceMax,
+    ReduceMax { compute_dtype: DType, output_dtype: DType },
 }
 
-/// A floating-point literal stored as raw bits so it can be Eq + Hash.
-#[derive(Clone, Copy)]
-pub struct LiteralBits {
-    pub bits: u64,
-    pub dtype: DType,
-}
-
-impl LiteralBits {
-    pub fn f64(value: f64) -> Self {
-        Self {
-            bits: value.to_bits(),
-            dtype: DType::F64,
+impl ScalarOp {
+    /// Returns the compute dtype for this op (None for Literal, which is self-typed).
+    pub fn compute_dtype(&self) -> Option<DType> {
+        match self {
+            ScalarOp::Literal(_) => None,
+            ScalarOp::Identity { compute_dtype, .. }
+            | ScalarOp::Binary { compute_dtype, .. }
+            | ScalarOp::Unary { compute_dtype, .. }
+            | ScalarOp::Select { compute_dtype, .. }
+            | ScalarOp::ReduceSum { compute_dtype, .. }
+            | ScalarOp::ReduceMax { compute_dtype, .. } => Some(*compute_dtype),
         }
     }
 
-    pub fn f32(value: f32) -> Self {
-        Self {
-            bits: value.to_bits() as u64,
-            dtype: DType::F32,
+    /// Returns the output dtype for this op.
+    pub fn output_dtype(&self) -> DType {
+        match self {
+            ScalarOp::Literal(s) => s.dtype(),
+            ScalarOp::Identity { output_dtype, .. }
+            | ScalarOp::Binary { output_dtype, .. }
+            | ScalarOp::Unary { output_dtype, .. }
+            | ScalarOp::Select { output_dtype, .. }
+            | ScalarOp::ReduceSum { output_dtype, .. }
+            | ScalarOp::ReduceMax { output_dtype, .. } => *output_dtype,
         }
     }
 
-    pub fn as_f64(&self) -> f64 {
-        match self.dtype {
-            DType::F64 => f64::from_bits(self.bits),
-            DType::F32 => f32::from_bits(self.bits as u32) as f64,
-            _ => panic!("LiteralBits::as_f64 on non-float dtype {:?}", self.dtype),
-        }
-    }
-}
-
-impl std::fmt::Debug for LiteralBits {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Literal({}, {:?})", self.as_f64(), self.dtype)
-    }
-}
-
-impl PartialEq for LiteralBits {
-    fn eq(&self, other: &Self) -> bool {
-        self.bits == other.bits && self.dtype == other.dtype
-    }
-}
-
-impl Eq for LiteralBits {}
-
-impl std::hash::Hash for LiteralBits {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.bits.hash(state);
-        self.dtype.hash(state);
+    /// Returns true if this is a reduce operation.
+    pub fn is_reduce(&self) -> bool {
+        matches!(self, ScalarOp::ReduceSum { .. } | ScalarOp::ReduceMax { .. })
     }
 }
