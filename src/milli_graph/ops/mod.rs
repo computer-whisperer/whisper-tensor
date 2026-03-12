@@ -156,7 +156,7 @@ fn infer_multidirectional_broadcasting_rank(
             TensorInfoTypedRanked::Shaped(x) => {
                 let this_rank = x.shape()[0] as usize;
                 if let Some(o) = output_rank {
-                    output_rank = Some(o.min(this_rank));
+                    output_rank = Some(o.max(this_rank));
                 } else {
                     output_rank = Some(this_rank)
                 }

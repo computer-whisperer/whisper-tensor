@@ -68,18 +68,14 @@ impl MilliOp for Shape {
             return Ok(Box::new(collected.into_iter()));
         }
 
-        // Shape op returns a 1-D i64 tensor whose values are the input shape dims.
-        // Use the TensorInfo::shape() method which returns the shape as a
-        // TensorInfoTypedRanked<u64, P1> — that *is* the output of Shape.
-        let shape_info = input_info.shape(symbolic_resolver);
-
-        // Convert the u64 shape info into an i64 TensorInfo for the output.
-        // The shape is a rank-1 tensor of dim values.
-        let out_info = TensorInfo::new_from_first_element_and_shape(
-            crate::scalar_info::ScalarInfo::Symbolic(
-                crate::symbolic_scalar::SymbolicScalar::new(crate::dtype::DType::I64, symbolic_resolver),
-            ),
-            shape_info,
+        // Shape op always returns a 1-D i64 tensor of length = input_rank.
+        // Output rank is always 1.
+        let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
+            crate::symbolic_scalar::SymbolicScalar::new(crate::dtype::DType::I64, symbolic_resolver),
+        );
+        let out_info = TensorInfo::new_from_first_element_and_rank(
+            first_elem,
+            crate::scalar_info::ScalarInfoTyped::Numeric(1),
             symbolic_resolver,
         );
 

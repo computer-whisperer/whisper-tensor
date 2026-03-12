@@ -51,6 +51,104 @@ impl ReduceMin {
 }
 
 impl MilliOp for ReduceMin {
+    fn infer(
+        &self,
+        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo>,
+        symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        backend: &mut EvalBackend,
+    ) -> Result<
+        Box<dyn Iterator<Item = (GlobalId, crate::tensor_info::TensorInfo)>>,
+        MilliOpGraphError,
+    > {
+        use crate::scalar_info::ScalarInfoTyped;
+        use crate::tensor_info::TensorInfo;
+
+        let data_info = known_inputs
+            .get(&self.data)
+            .ok_or(MilliOpGraphError::UnableToInfer)?;
+
+        // Check if all inputs are concrete; if so, fall back to eval.
+        let axes_concrete = self.axes.map(|ax_id| {
+            known_inputs
+                .get(&ax_id)
+                .and_then(|info| info.as_numeric().cloned())
+        });
+        if data_info.as_numeric().is_some() {
+            let axes_ok = match axes_concrete {
+                Some(Some(_)) | None => true,
+                Some(None) => false,
+            };
+            if axes_ok {
+                let mut resolved = HashMap::new();
+                resolved.insert(self.data, data_info.as_numeric().unwrap().clone());
+                if let Some(ax_id) = self.axes {
+                    resolved.insert(ax_id, axes_concrete.unwrap().unwrap());
+                }
+                let collected: Vec<(GlobalId, TensorInfo)> = self
+                    .eval(&resolved, backend)?
+                    .map(|(a, b)| (a, TensorInfo::from(b)))
+                    .collect();
+                return Ok(Box::new(collected.into_iter()));
+            }
+        }
+
+        let out_dtype = data_info.dtype();
+
+        let num_axes: Option<usize> = if let Some(ax_id) = self.axes {
+            if let Some(ax_info) = known_inputs.get(&ax_id) {
+                ax_info.rank_if_known().and_then(|_| {
+                    ax_info.dim_if_known(0).map(|n| n as usize)
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let out_rank: ScalarInfoTyped<u32> = match data_info.rank() {
+            ScalarInfoTyped::Numeric(input_rank) => {
+                if self.axes.is_none() {
+                    if self.keepdims {
+                        ScalarInfoTyped::Numeric(input_rank)
+                    } else {
+                        ScalarInfoTyped::Numeric(0)
+                    }
+                } else if let Some(n) = num_axes {
+                    if n == 0 && self.noop_with_empty_axes {
+                        ScalarInfoTyped::Numeric(input_rank)
+                    } else if n == 0 {
+                        if self.keepdims {
+                            ScalarInfoTyped::Numeric(input_rank)
+                        } else {
+                            ScalarInfoTyped::Numeric(0)
+                        }
+                    } else if self.keepdims {
+                        ScalarInfoTyped::Numeric(input_rank)
+                    } else {
+                        ScalarInfoTyped::Numeric(input_rank.saturating_sub(n as u32))
+                    }
+                } else if self.keepdims {
+                    ScalarInfoTyped::Numeric(input_rank)
+                } else {
+                    ScalarInfoTyped::Symbolic(
+                        crate::symbolic_scalar::SymbolicScalarTyped::new(symbolic_resolver),
+                    )
+                }
+            }
+            _ => ScalarInfoTyped::Symbolic(
+                crate::symbolic_scalar::SymbolicScalarTyped::new(symbolic_resolver),
+            ),
+        };
+
+        let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
+            crate::symbolic_scalar::SymbolicScalar::new(out_dtype, symbolic_resolver),
+        );
+        let out_info =
+            TensorInfo::new_from_first_element_and_rank(first_elem, out_rank, symbolic_resolver);
+        Ok(Box::new([(self.output, out_info)].into_iter()))
+    }
+
     fn eval(
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,

@@ -62,6 +62,52 @@ impl crate::graph::Node for Concat {
 }
 
 impl MilliOp for Concat {
+    fn infer(
+        &self,
+        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo>,
+        symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        backend: &mut EvalBackend,
+    ) -> Result<
+        Box<dyn Iterator<Item = (GlobalId, crate::tensor_info::TensorInfo)>>,
+        MilliOpGraphError,
+    > {
+        use crate::tensor_info::TensorInfo;
+
+        // Collect input infos.
+        let mut input_infos = Vec::new();
+        for id in &self.inputs {
+            let info = known_inputs
+                .get(id)
+                .ok_or(MilliOpGraphError::UnableToInfer)?;
+            input_infos.push(info);
+        }
+
+        // If all inputs are concrete, fall back to eval.
+        if input_infos.iter().all(|info| info.as_numeric().is_some()) {
+            let mut resolved = HashMap::new();
+            for (id, info) in self.inputs.iter().zip(input_infos.iter()) {
+                resolved.insert(*id, info.as_numeric().unwrap().clone());
+            }
+            let collected: Vec<(GlobalId, TensorInfo)> = self
+                .eval(&resolved, backend)?
+                .map(|(a, b)| (a, TensorInfo::from(b)))
+                .collect();
+            return Ok(Box::new(collected.into_iter()));
+        }
+
+        // Concat: output rank = input rank, output dtype = first input dtype.
+        let first = input_infos[0];
+        let out_dtype = first.dtype();
+        let out_rank = first.rank();
+
+        let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
+            crate::symbolic_scalar::SymbolicScalar::new(out_dtype, symbolic_resolver),
+        );
+        let out_info =
+            TensorInfo::new_from_first_element_and_rank(first_elem, out_rank, symbolic_resolver);
+        Ok(Box::new([(self.output, out_info)].into_iter()))
+    }
+
     fn backward(
         &self,
         output_grads: &HashMap<GlobalId, GlobalId>,

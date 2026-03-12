@@ -63,6 +63,109 @@ impl Node for Squeeze {
 }
 
 impl MilliOp for Squeeze {
+    fn infer(
+        &self,
+        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo>,
+        symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        backend: &mut EvalBackend,
+    ) -> Result<
+        Box<dyn Iterator<Item = (GlobalId, crate::tensor_info::TensorInfo)>>,
+        MilliOpGraphError,
+    > {
+        use crate::scalar_info::ScalarInfoTyped;
+        use crate::symbolic_scalar::SymbolicScalarTyped;
+        use crate::tensor_info::TensorInfo;
+
+        let data_info = known_inputs
+            .get(&self.data)
+            .ok_or(MilliOpGraphError::UnableToInfer)?;
+        let axes_info = known_inputs
+            .get(&self.axes)
+            .ok_or(MilliOpGraphError::UnableToInfer)?;
+
+        // If both inputs are concrete, delegate to eval
+        if let (Some(data_num), Some(axes_num)) =
+            (data_info.as_numeric(), axes_info.as_numeric())
+        {
+            let inputs = HashMap::from([
+                (self.data, data_num.clone()),
+                (self.axes, axes_num.clone()),
+            ]);
+            let out: Vec<_> = self
+                .eval(&inputs, backend)?
+                .map(|(id, t)| (id, TensorInfo::from(t)))
+                .collect();
+            return Ok(Box::new(out.into_iter()));
+        }
+
+        let first_elem = data_info.first_element();
+
+        // If we know the input shape and the axes are concrete, compute output shape
+        if let (Some(data_ranked), Some(axes_num)) =
+            (data_info.as_ranked(), axes_info.as_numeric())
+        {
+            let axes_values: Vec<i64> = axes_num
+                .cast(DType::I64, backend)?
+                .try_to_rank::<P1>()?
+                .try_into()?;
+
+            let input_shape = data_ranked.shape();
+            let input_rank = input_shape.len();
+
+            let normalized_axes: Vec<usize> = axes_values
+                .iter()
+                .map(|&a| {
+                    if a < 0 {
+                        (input_rank as i64 + a) as usize
+                    } else {
+                        a as usize
+                    }
+                })
+                .collect();
+
+            let output_shape: Vec<ScalarInfoTyped<u64>> = input_shape
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| !normalized_axes.contains(i))
+                .map(|(_, d)| d.clone())
+                .collect();
+
+            let out = TensorInfo::Ranked(crate::tensor_info::TensorInfoRanked::new(
+                first_elem,
+                output_shape,
+                symbolic_resolver,
+            ));
+            return Ok(Box::new([(self.output, out)].into_iter()));
+        }
+
+        // If axes are concrete, we can at least compute output rank
+        if let Some(axes_num) = axes_info.as_numeric() {
+            let axes_values: Vec<i64> = axes_num
+                .cast(DType::I64, backend)?
+                .try_to_rank::<P1>()?
+                .try_into()?;
+            let num_axes = axes_values.len() as u32;
+
+            if let ScalarInfoTyped::Numeric(input_rank) = data_info.rank() {
+                let output_rank = input_rank - num_axes;
+                let out = TensorInfo::new_from_first_element_and_rank(
+                    first_elem,
+                    ScalarInfoTyped::Numeric(output_rank),
+                    symbolic_resolver,
+                );
+                return Ok(Box::new([(self.output, out)].into_iter()));
+            }
+        }
+
+        // Fallback: propagate dtype only
+        let out = TensorInfo::new_from_first_element_and_rank(
+            first_elem,
+            ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(symbolic_resolver)),
+            symbolic_resolver,
+        );
+        Ok(Box::new([(self.output, out)].into_iter()))
+    }
+
     fn backward(
         &self,
         output_grads: &HashMap<GlobalId, GlobalId>,

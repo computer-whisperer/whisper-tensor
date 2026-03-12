@@ -63,6 +63,86 @@ impl Node for Transpose {
 }
 
 impl MilliOp for Transpose {
+    fn infer(
+        &self,
+        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo>,
+        symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        backend: &mut EvalBackend,
+    ) -> Result<
+        Box<dyn Iterator<Item = (GlobalId, crate::tensor_info::TensorInfo)>>,
+        MilliOpGraphError,
+    > {
+        use crate::tensor_info::TensorInfo;
+
+        let input_info = known_inputs
+            .get(&self.data)
+            .ok_or(MilliOpGraphError::UnableToInfer)?;
+
+        // If input is concrete, delegate to eval
+        if let Some(numeric) = input_info.as_numeric() {
+            let inputs = HashMap::from([(self.data, numeric.clone())]);
+            let out: Vec<_> = self
+                .eval(&inputs, backend)?
+                .map(|(id, t)| (id, TensorInfo::from(t)))
+                .collect();
+            return Ok(Box::new(out.into_iter()));
+        }
+
+        let first_elem = input_info.first_element();
+
+        // Try to propagate shape when rank is known
+        if let Some(ranked) = input_info.as_ranked() {
+            let input_shape = ranked.shape();
+            let input_rank = input_shape.len();
+
+            let output_shape = match &self.perm {
+                Some(perm) => {
+                    // Expand partial perm (like [-1, -2]) to full perm
+                    let full_perm = if perm.len() < input_rank {
+                        let prefix_len = input_rank - perm.len();
+                        let mut fp: Vec<i64> = (0..prefix_len as i64).collect();
+                        fp.extend(
+                            perm.iter()
+                                .map(|&x| if x < 0 { x + input_rank as i64 } else { x }),
+                        );
+                        fp
+                    } else {
+                        perm.clone()
+                    };
+                    // Output shape = input_shape[perm[i]] for each i
+                    full_perm
+                        .iter()
+                        .map(|&p| {
+                            let idx = if p < 0 {
+                                (p + input_rank as i64) as usize
+                            } else {
+                                p as usize
+                            };
+                            input_shape[idx].clone()
+                        })
+                        .collect()
+                }
+                None => {
+                    // Reverse the dimensions
+                    let mut s = input_shape;
+                    s.reverse();
+                    s
+                }
+            };
+            let out = TensorInfo::Ranked(crate::tensor_info::TensorInfoRanked::new(
+                first_elem,
+                output_shape,
+                symbolic_resolver,
+            ));
+            return Ok(Box::new([(self.output, out)].into_iter()));
+        }
+
+        // At minimum: same rank, same dtype
+        let rank = input_info.rank();
+        let out = TensorInfo::new_from_first_element_and_rank(first_elem, rank, symbolic_resolver);
+        Ok(Box::new([(self.output, out)].into_iter()))
+    }
+
     fn backward(
         &self,
         output_grads: &HashMap<GlobalId, GlobalId>,

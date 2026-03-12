@@ -398,6 +398,55 @@ impl Pow {
 }
 
 impl MilliOp for Pow {
+    fn infer(
+        &self,
+        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo>,
+        symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        backend: &mut EvalBackend,
+    ) -> Result<
+        Box<dyn Iterator<Item = (GlobalId, crate::tensor_info::TensorInfo)>>,
+        MilliOpGraphError,
+    > {
+        use crate::tensor_info::TensorInfo;
+
+        let a_info = known_inputs
+            .get(&self.a)
+            .ok_or(MilliOpGraphError::UnableToInfer)?;
+        let b_info = known_inputs
+            .get(&self.b)
+            .ok_or(MilliOpGraphError::UnableToInfer)?;
+
+        // If both inputs are concrete, fall back to eval.
+        if a_info.as_numeric().is_some() && b_info.as_numeric().is_some() {
+            let mut resolved = HashMap::new();
+            resolved.insert(self.a, a_info.as_numeric().unwrap().clone());
+            resolved.insert(self.b, b_info.as_numeric().unwrap().clone());
+            let collected: Vec<(GlobalId, TensorInfo)> = self
+                .eval(&resolved, backend)?
+                .map(|(a, b)| (a, TensorInfo::from(b)))
+                .collect();
+            return Ok(Box::new(collected.into_iter()));
+        }
+
+        // Pow follows binary broadcast rules, same as SimpleBinary.
+        let a_shape = a_info.shape(symbolic_resolver);
+        let b_shape = b_info.shape(symbolic_resolver);
+
+        let out_rank =
+            super::infer_multidirectional_broadcasting_rank(&[a_shape, b_shape], symbolic_resolver)?;
+
+        // Output dtype = input dtype.
+        let out_dtype = a_info.dtype();
+
+        let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
+            crate::symbolic_scalar::SymbolicScalar::new(out_dtype, symbolic_resolver),
+        );
+        let out_info =
+            TensorInfo::new_from_first_element_and_rank(first_elem, out_rank, symbolic_resolver);
+
+        Ok(Box::new([(self.output, out_info)].into_iter()))
+    }
+
     fn eval(
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
@@ -446,6 +495,75 @@ impl MatMul {
 }
 
 impl MilliOp for MatMul {
+    fn infer(
+        &self,
+        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo>,
+        symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        backend: &mut EvalBackend,
+    ) -> Result<
+        Box<dyn Iterator<Item = (GlobalId, crate::tensor_info::TensorInfo)>>,
+        MilliOpGraphError,
+    > {
+        use crate::tensor_info::TensorInfo;
+
+        let a_info = known_inputs
+            .get(&self.a)
+            .ok_or(MilliOpGraphError::UnableToInfer)?;
+        let b_info = known_inputs
+            .get(&self.b)
+            .ok_or(MilliOpGraphError::UnableToInfer)?;
+
+        // If both inputs are concrete, fall back to eval.
+        if a_info.as_numeric().is_some() && b_info.as_numeric().is_some() {
+            let mut resolved = HashMap::new();
+            resolved.insert(self.a, a_info.as_numeric().unwrap().clone());
+            resolved.insert(self.b, b_info.as_numeric().unwrap().clone());
+            let collected: Vec<(GlobalId, TensorInfo)> = self
+                .eval(&resolved, backend)?
+                .map(|(a, b)| (a, TensorInfo::from(b)))
+                .collect();
+            return Ok(Box::new(collected.into_iter()));
+        }
+
+        // MatMul output dtype matches input dtype.
+        let out_dtype = a_info.dtype();
+
+        // Compute output rank from input ranks.
+        // numpy matmul: for rank >= 2, output rank = max(a_rank, b_rank).
+        // Batch dims are broadcast, last two dims follow [M,K]@[K,N]->[M,N].
+        let out_rank = match (a_info.rank(), b_info.rank()) {
+            (
+                crate::scalar_info::ScalarInfoTyped::Numeric(a_rank),
+                crate::scalar_info::ScalarInfoTyped::Numeric(b_rank),
+            ) => {
+                let out_r = if a_rank >= 2 && b_rank >= 2 {
+                    a_rank.max(b_rank)
+                } else if a_rank == 1 && b_rank >= 2 {
+                    // vector @ matrix: result drops the prepended dim
+                    b_rank - 1
+                } else if a_rank >= 2 && b_rank == 1 {
+                    // matrix @ vector: result drops the appended dim
+                    a_rank - 1
+                } else {
+                    // both rank 1: dot product -> scalar
+                    0
+                };
+                crate::scalar_info::ScalarInfoTyped::Numeric(out_r)
+            }
+            _ => crate::scalar_info::ScalarInfoTyped::Symbolic(
+                crate::symbolic_scalar::SymbolicScalarTyped::new(symbolic_resolver),
+            ),
+        };
+
+        let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
+            crate::symbolic_scalar::SymbolicScalar::new(out_dtype, symbolic_resolver),
+        );
+        let out_info =
+            TensorInfo::new_from_first_element_and_rank(first_elem, out_rank, symbolic_resolver);
+
+        Ok(Box::new([(self.output, out_info)].into_iter()))
+    }
+
     fn eval(
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,

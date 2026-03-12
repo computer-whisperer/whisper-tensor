@@ -17,6 +17,7 @@ use std::time::Instant;
 pub mod observer;
 pub mod ops;
 pub(crate) mod ops_helpers;
+pub mod validate_infer;
 
 #[derive(Debug, thiserror::Error)]
 pub enum MilliOpGraphError {
