@@ -2,6 +2,9 @@
 //!
 //! Usage:
 //!   cargo run --example nano_graph_model_test -- test_models/gpt2-lm-head-10.onnx
+//!
+//! NOTE: The v2 lowering is not yet implemented. This example currently
+//! loads the model and runs inference but produces an empty NanoGraph.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -11,7 +14,6 @@ use whisper_tensor::compiler::op_census;
 use whisper_tensor::graph::GlobalId;
 use whisper_tensor::model::Model;
 use whisper_tensor::nano_graph::lower;
-use whisper_tensor::nano_graph::optimize;
 use whisper_tensor::tensor_info::TensorInfo;
 use whisper_tensor_import::identify_and_load;
 use whisper_tensor_import::onnx_graph::WeightStorageStrategy;
@@ -50,8 +52,6 @@ fn main() {
     }
 
     // ---- Create inputs ----
-    // User inputs: shape+dtype only (values unknown at compile time).
-    // Model weights: full Numeric (values known at compile time).
     let input_info = model.get_input_tensor_info().unwrap();
     let sym_graph = model.get_symbolic_graph();
     let tensor_store = model.get_tensor_store();
@@ -61,10 +61,7 @@ fn main() {
 
     // User inputs — Shaped (dtype + shape, no data).
     for (name, (dtype, shape_dims)) in &input_info {
-        let shape: Vec<u64> = shape_dims
-            .iter()
-            .map(|d| d.unwrap_or(4))
-            .collect();
+        let shape: Vec<u64> = shape_dims.iter().map(|d| d.unwrap_or(4)).collect();
         let info = TensorInfo::from_dtype_and_shape(*dtype, &shape);
         println!("  Input '{}': {:?} {:?}", name, dtype, shape);
         if let Some(id) = tensors_by_name.get(name) {
@@ -104,30 +101,7 @@ fn main() {
         }
     }
 
-    // Report compression ratio.
-    let block_count = result.graph.len();
-    let concrete = stats.total_concrete_ops;
-    if concrete > 0 {
-        let block_bytes = block_count * std::mem::size_of::<whisper_tensor::nano_graph::PatternBlock>();
-        println!(
-            "\n=== Compression ===");
-        println!(
-            "  {} blocks representing {} scalar ops",
-            block_count, concrete
-        );
-        println!(
-            "  Approx block storage: {} bytes ({:.1} KB)",
-            block_bytes,
-            block_bytes as f64 / 1024.0
-        );
-        println!(
-            "  Compression ratio: {:.0}x (vs naive {} bytes/op)",
-            concrete as f64 / block_count as f64,
-            std::mem::size_of::<u64>() * 4 // rough: op + 2 inputs + output
-        );
-    }
-
-    println!("\n  Output blocks: {}", result.graph.output_blocks.len());
+    println!("\n  Output atoms: {}", result.graph.outputs.len());
 
     let errors = result.graph.validate();
     if errors.is_empty() {
@@ -135,51 +109,6 @@ fn main() {
     } else {
         println!("  Validation: {} ERRORS", errors.len());
         for e in errors.iter().take(10) {
-            println!("    {}", e);
-        }
-    }
-
-    // ---- Optimization passes ----
-    println!("\n=== Optimization Passes ===");
-    let mut graph = result.graph;
-
-    let t0 = Instant::now();
-    let sr = optimize::strength_reduce(graph);
-    println!(
-        "  Strength reduction: {} blocks simplified in {:.1}ms",
-        sr.eliminated,
-        t0.elapsed().as_secs_f64() * 1e3
-    );
-    graph = sr.graph;
-
-    let t0 = Instant::now();
-    let cse_result = optimize::cse(graph);
-    println!(
-        "  CSE: {} blocks deduplicated in {:.1}ms",
-        cse_result.eliminated,
-        t0.elapsed().as_secs_f64() * 1e3
-    );
-    graph = cse_result.graph;
-
-    let t0 = Instant::now();
-    let dce_result = optimize::dce(graph);
-    println!(
-        "  DCE: {} dead blocks removed in {:.1}ms",
-        dce_result.eliminated,
-        t0.elapsed().as_secs_f64() * 1e3
-    );
-    graph = dce_result.graph;
-
-    let opt_stats = graph.stats();
-    println!("\n=== After Optimization ===");
-    println!("  {}", opt_stats);
-
-    let opt_errors = graph.validate();
-    if opt_errors.is_empty() {
-        println!("  Validation: PASSED");
-    } else {
-        println!("  Validation: {} ERRORS", opt_errors.len());
-        for e in opt_errors.iter().take(10) {
             println!("    {}", e);
         }
     }

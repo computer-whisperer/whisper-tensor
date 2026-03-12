@@ -179,9 +179,15 @@ impl MilliOp for Slice {
                     crate::symbolic_scalar::SymbolicScalarTyped::new(_symbolic_resolver),
                 );
             }
+        } else {
+            // We don't know the axes — any dim could be sliced.
+            // Make all dims symbolic to avoid claiming incorrect concrete sizes.
+            for dim in out_dims.iter_mut() {
+                *dim = ScalarInfoTyped::Symbolic(
+                    crate::symbolic_scalar::SymbolicScalarTyped::new(_symbolic_resolver),
+                );
+            }
         }
-        // If we don't even know the axes, all dims could be affected,
-        // but we still know the rank — keep existing dims (best effort).
 
         let out_dtype = data_info.dtype();
         let out_info = TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims);

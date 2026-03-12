@@ -1,6 +1,6 @@
 mod argmax;
 mod argmin;
-mod binary;
+pub(crate) mod binary;
 mod cast;
 mod cast_like;
 mod concat;
@@ -27,7 +27,7 @@ mod squeeze;
 mod sum_to;
 mod topk;
 mod transpose;
-mod unary;
+pub(crate) mod unary;
 mod unsqueeze;
 mod where_op;
 

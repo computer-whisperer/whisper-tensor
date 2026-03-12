@@ -48,6 +48,7 @@ where
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn symbol_idx(&self) -> usize {
         self.symbol_idx
     }
