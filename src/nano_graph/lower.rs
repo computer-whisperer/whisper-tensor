@@ -491,7 +491,7 @@ impl LowerCtx {
             AnyMilliOp::Reshape(r) => self.lower_view_op(r, all_infos),
             AnyMilliOp::Squeeze(s) => self.lower_view_op(s, all_infos),
             AnyMilliOp::Unsqueeze(u) => self.lower_view_op(u, all_infos),
-            AnyMilliOp::Transpose(t) => self.lower_view_op(t, all_infos),
+            AnyMilliOp::Transpose(t) => self.lower_transpose(t, all_infos),
             AnyMilliOp::Expand(e) => self.lower_expand(e, all_infos),
             AnyMilliOp::Pow(p) => self.lower_pow(p, all_infos),
             AnyMilliOp::Where(w) => self.lower_where(w, all_infos),
@@ -500,9 +500,9 @@ impl LowerCtx {
             AnyMilliOp::Slice(s) => self.lower_slice(s, all_infos),
             AnyMilliOp::MatMul(m) => self.lower_matmul(m, all_infos),
             AnyMilliOp::ReduceSum(r) => self.lower_reduce(r, all_infos,
-                |dt| ScalarOp::ReduceSum { compute_dtype: dt, output_dtype: dt }),
+                |compute_dt, out_dt| ScalarOp::ReduceSum { compute_dtype: compute_dt, output_dtype: out_dt }),
             AnyMilliOp::ReduceMax(r) => self.lower_reduce(r, all_infos,
-                |dt| ScalarOp::ReduceMax { compute_dtype: dt, output_dtype: dt }),
+                |compute_dt, out_dt| ScalarOp::ReduceMax { compute_dtype: compute_dt, output_dtype: out_dt }),
             AnyMilliOp::ReduceMean(r) => self.lower_reduce_mean(r, all_infos),
             // Everything else: check if outputs are fully concrete (constant-folded),
             // otherwise register as boundary.
@@ -717,6 +717,153 @@ impl LowerCtx {
             known_strides: in_map.known_strides.clone(),
             sym_dims: in_map.sym_dims.clone(),
         });
+    }
+
+    /// Transpose: permutes element order, requiring explicit reindexing.
+    ///
+    /// Unlike Reshape/Squeeze (which just relabel dims without changing element
+    /// order), Transpose changes the physical row-major order of elements.
+    /// We emit an Identity group with an Explicit InputRef that maps each output
+    /// atom to the correct input atom based on the permutation.
+    fn lower_transpose(
+        &mut self,
+        t: &crate::milli_graph::ops::Transpose,
+        all_infos: &HashMap<GlobalId, TensorInfo>,
+    ) {
+        let in_id = Node::inputs(t).next().unwrap();
+        let out_id = Node::outputs(t).next().unwrap();
+
+        let Some(in_map) = self.tensor_map.get(&in_id).cloned() else {
+            self.lower_as_boundary_named(t, all_infos, "Transpose");
+            return;
+        };
+        let Some(out_info) = all_infos.get(&out_id) else {
+            self.register_opaque(out_id);
+            return;
+        };
+        let Some(in_info) = all_infos.get(&in_id) else {
+            self.lower_as_boundary_named(t, all_infos, "Transpose");
+            return;
+        };
+
+        let in_rank = match in_info.rank_if_known() {
+            Some(r) => r,
+            None => {
+                self.lower_as_boundary_named(t, all_infos, "Transpose");
+                return;
+            }
+        };
+
+        let Some((out_layout, out_known_dims, out_sym_dims, out_count)) =
+            self.classify_dims(out_info)
+        else {
+            self.lower_as_boundary_named(t, all_infos, "Transpose");
+            return;
+        };
+        let out_count = out_count.max(1);
+
+        // Build full permutation (handling None=reverse, partial perms, negative indices).
+        let full_perm: Vec<usize> = match t.perm() {
+            None => (0..in_rank).rev().collect(),
+            Some(perm) => {
+                let expanded = if perm.len() < in_rank {
+                    let prefix_len = in_rank - perm.len();
+                    let mut fp: Vec<i64> = (0..prefix_len as i64).collect();
+                    fp.extend(
+                        perm.iter()
+                            .map(|&x| if x < 0 { x + in_rank as i64 } else { x }),
+                    );
+                    fp
+                } else {
+                    perm.to_vec()
+                };
+                expanded
+                    .iter()
+                    .map(|&x| {
+                        if x < 0 {
+                            (x + in_rank as i64) as usize
+                        } else {
+                            x as usize
+                        }
+                    })
+                    .collect()
+            }
+        };
+
+        // Get input known dim sizes (only the Known dims, in original order).
+        let in_known_sizes: Vec<u64> = in_map
+            .layout
+            .iter()
+            .filter_map(|d| if let DimKind::Known(s) = d { Some(*s) } else { None })
+            .collect();
+        let in_strides = TensorAtomMap::compute_strides(&in_known_sizes);
+        let out_strides = TensorAtomMap::compute_strides(&out_known_dims);
+
+        // We need to map between original dim indices and known-dim indices.
+        // For now, assume all dims are known (symbolic dims in transpose would
+        // be unusual). If any dim is symbolic, fall back to boundary.
+        if in_map.layout.iter().any(|d| matches!(d, DimKind::Symbolic(_)))
+            || out_layout.iter().any(|d| matches!(d, DimKind::Symbolic(_)))
+        {
+            self.register_boundary(out_id, out_info, "Transpose");
+            self.push_unsupported(t, all_infos, "Transpose(symbolic dims)");
+            return;
+        }
+
+        // All dims are known. Build Explicit mapping.
+        // For each output flat index, decompose into output dim indices,
+        // apply inverse permutation to get input dim indices, then flatten.
+        let mut ids = Vec::with_capacity(out_count as usize);
+        for flat_out in 0..out_count as u64 {
+            // Decompose flat_out into output dim indices.
+            let mut out_indices = vec![0u64; out_known_dims.len()];
+            let mut rem = flat_out;
+            for (i, &stride) in out_strides.iter().enumerate() {
+                if stride > 0 {
+                    out_indices[i] = rem / stride;
+                    rem %= stride;
+                }
+            }
+
+            // output[i0, i1, ..., iN] = input[perm[0], perm[1], ..., perm[N]]
+            // So output dim j corresponds to input dim perm[j].
+            // Therefore: input_indices[perm[j]] = out_indices[j]
+            let mut in_indices = vec![0u64; in_known_sizes.len()];
+            for (out_dim, &in_dim) in full_perm.iter().enumerate() {
+                in_indices[in_dim] = out_indices[out_dim];
+            }
+
+            // Flatten input indices.
+            let mut flat_in = 0u64;
+            for (i, &stride) in in_strides.iter().enumerate() {
+                flat_in += in_indices[i] * stride;
+            }
+
+            ids.push(in_map.base_id.offset(flat_in as u32));
+        }
+
+        let dt = out_info.dtype();
+        let base_id = self.nano.push_group(
+            out_count,
+            ScalarOp::Identity {
+                compute_dtype: dt,
+                output_dtype: dt,
+            },
+            out_sym_dims.clone(),
+            vec![],
+            vec![InputRef::Explicit(ids)],
+        );
+
+        self.tensor_map.insert(
+            out_id,
+            TensorAtomMap {
+                base_id,
+                count: out_count,
+                layout: out_layout,
+                known_strides: out_strides,
+                sym_dims: out_sym_dims,
+            },
+        );
     }
 
     /// View op: no compute, just re-register with the new shape.
@@ -1568,7 +1715,7 @@ impl LowerCtx {
     where
         R: Node,
         R: ReduceAccessors,
-        F: Fn(DType) -> ScalarOp,
+        F: Fn(DType, DType) -> ScalarOp,
     {
         let in_id = Node::inputs(reduce).next().unwrap();
         let out_id = Node::outputs(reduce).next().unwrap();
@@ -1699,9 +1846,6 @@ impl LowerCtx {
         // The output atom at flat index `f` maps to input indices where the
         // reduced dim is 0. We need to compute the input flat index with
         // the reduced dim set to 0.
-        let mut mul_sym_dims = in_map.sym_dims.clone();
-        mul_sym_dims.push(reduce_sym);
-
         // Build Explicit mapping: output flat → input flat (at k=0).
         // For each output atom, decompose into non-reduced dims, then compute
         // the input flat index (with reduced dim = 0).
@@ -1757,15 +1901,14 @@ impl LowerCtx {
             return;
         };
 
-        // Intermediate: identity with sym_dim for the reduction.
-        let dt = out_info.dtype();
-        let mul_base = self.nano.push_group(
-            out_count,
-            ScalarOp::Identity { compute_dtype: dt, output_dtype: dt },
-            mul_sym_dims,
-            vec![],
-            vec![input_ref],
-        );
+        // Determine compute dtype: ReduceSum upcasts BF16/F16 → F32 to match
+        // milli eval precision semantics (see reduce_sum.rs lines 193-196).
+        let out_dt = out_info.dtype();
+        let in_dt = all_infos.get(&in_id).map(|i| i.dtype()).unwrap_or(out_dt);
+        let compute_dt = match in_dt {
+            DType::BF16 | DType::F16 => DType::F32,
+            other => other,
+        };
 
         // Classify output for proper layout.
         let Some((out_layout, out_known_dims_full, out_sym_dims, _)) = self.classify_dims(out_info) else {
@@ -1774,13 +1917,16 @@ impl LowerCtx {
             return;
         };
 
-        // ReduceSum/ReduceMax group.
+        // ReduceSum/ReduceMax group: reads directly from input atoms via
+        // SymAffine. The compute_dtype handles casting inputs to the
+        // accumulation precision, and output_dtype casts the result.
+        let reduce_op = make_reduce_op(compute_dt, out_dt);
         let base_id = self.nano.push_group(
             out_count,
-            make_reduce_op(dt),
+            reduce_op,
             out_sym_dims.clone(),
             vec![reduce_sym],
-            vec![InputRef::Affine { base: mul_base, stride: 1 }],
+            vec![input_ref],
         );
 
         self.tensor_map.insert(out_id, TensorAtomMap {
@@ -1790,6 +1936,9 @@ impl LowerCtx {
     }
 
     /// Lower ReduceMean = ReduceSum / extent.
+    ///
+    /// Matches milli eval semantics: for BF16/F16, the entire mean computation
+    /// (sum + divide) happens in F32, with only the final result cast back.
     fn lower_reduce_mean(
         &mut self,
         reduce: &crate::milli_graph::ops::ReduceMean,
@@ -1824,15 +1973,28 @@ impl LowerCtx {
             return;
         };
 
-        // Lower as ReduceSum first.
+        let Some(out_info) = all_infos.get(&out_id) else {
+            self.lower_as_boundary_named(reduce, all_infos, "ReduceMean");
+            return;
+        };
+        let out_dt = out_info.dtype();
+        let in_dt = in_info.map(|i| i.dtype()).unwrap_or(out_dt);
+
+        // For BF16/F16: keep entire mean computation in F32, cast at the end.
+        // This matches milli eval where ndarray accumulates in F32.
+        let compute_dt = match in_dt {
+            DType::BF16 | DType::F16 => DType::F32,
+            other => other,
+        };
+
+        // Lower as ReduceSum, keeping output in compute_dt (not out_dt).
         self.lower_reduce(reduce, all_infos,
-            |dt| ScalarOp::ReduceSum { compute_dtype: dt, output_dtype: dt });
+            |cd, _od| ScalarOp::ReduceSum { compute_dtype: cd, output_dtype: cd });
 
         // If ReduceSum succeeded (output is in tensor_map), divide by extent.
         let Some(sum_map) = self.tensor_map.get(&out_id).cloned() else {
             return; // ReduceSum failed, already boundaried.
         };
-        let Some(out_info) = all_infos.get(&out_id) else { return; };
 
         // Create literal for 1/extent.
         let recip = 1.0 / extent as f64;
@@ -1841,11 +2003,10 @@ impl LowerCtx {
             vec![], vec![], vec![],
         );
 
-        // Multiply by 1/extent.
-        let dt = out_info.dtype();
+        // Multiply by 1/extent in compute_dt, then cast to output dtype.
         let base_id = self.nano.push_group(
             sum_map.count,
-            ScalarOp::Binary { op: ScalarBinOp::Mul, compute_dtype: dt, output_dtype: dt },
+            ScalarOp::Binary { op: ScalarBinOp::Mul, compute_dtype: compute_dt, output_dtype: out_dt },
             sum_map.sym_dims.clone(),
             vec![],
             vec![

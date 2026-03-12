@@ -457,8 +457,10 @@ fn rwkv01b_nano_graph_integrity() {
     let mut max_rel_err = 0.0f64;
     let mut first_divergent: Option<(GlobalId, usize, f64, f64)> = None;
 
-    // Iterate tensor_map entries, comparing each against milli intermediates.
-    for (int_id, tam) in &result.tensor_map {
+    // Sort tensor_map entries by base_id (topological order in nano graph).
+    let mut sorted_tensors: Vec<_> = result.tensor_map.iter().collect();
+    sorted_tensors.sort_by_key(|(_, tam)| tam.base_id.0);
+    for (int_id, tam) in &sorted_tensors {
         if !tam.sym_dims.is_empty() {
             continue; // Skip symbolic-dim tensors
         }
@@ -488,14 +490,145 @@ fn rwkv01b_nano_graph_integrity() {
             // Report first significant divergence.
             let tol = 1e-2 * m.abs().max(1.0);
             if first_divergent.is_none() && diff > tol {
-                first_divergent = Some((*int_id, i, m, n));
+                first_divergent = Some((**int_id, i, m, n));
+                // Find which milli op produced this tensor.
+                use whisper_tensor::graph::{Graph, Node};
+                let producing_op = milli.node_ids().find_map(|op_id| {
+                    let node = milli.get_node_by_id(&op_id).unwrap();
+                    if node.outputs().any(|o| o == **int_id) {
+                        Some((op_id, format!("{}", node.op_kind())))
+                    } else {
+                        None
+                    }
+                });
                 eprintln!(
-                    "  FIRST DIVERGENCE: tensor {:?} element {}: milli={} nano={} diff={:.6} rel={:.6}",
-                    int_id, i, m, n, diff, rel
+                    "  FIRST DIVERGENCE (after {} clean tensors): tensor {:?} (base_id={}) element {}",
+                    total_tensors - 1, int_id, tam.base_id.0, i
+                );
+                if let Some((op_id, op_kind)) = &producing_op {
+                    eprintln!("    produced by: {} (op {:?})", op_kind, op_id);
+                    // Check inputs to the producing op, and trace back one more level.
+                    let node = milli.get_node_by_id(op_id).unwrap();
+                    for inp_id in node.inputs() {
+                        if let Some(inp_tam) = result.tensor_map.get(&inp_id) {
+                            if !inp_tam.sym_dims.is_empty() {
+                                eprintln!("    input {:?}: {} atoms, sym_dims={:?} (skipped)",
+                                    inp_id, inp_tam.count, inp_tam.sym_dims);
+                                continue;
+                            }
+                            let Some(inp_milli) = milli_intermediates.get(&inp_id) else {
+                                eprintln!("    input {:?}: {} atoms (no milli intermediate)",
+                                    inp_id, inp_tam.count);
+                                continue;
+                            };
+                            {
+                                let inp_flat = tensor_to_f64(inp_milli);
+                                let mut inp_max_diff = 0.0f64;
+                                let mut inp_diverge_count = 0usize;
+                                let mut inp_max_diff_idx = 0usize;
+                                for (j, &mv) in inp_flat.iter().enumerate() {
+                                    if j >= inp_tam.count as usize { break; }
+                                    let nv = nano_eval.get(inp_tam.base_id.offset(j as u32));
+                                    let d = (mv - nv).abs();
+                                    let t = 1e-2 * mv.abs().max(1.0);
+                                    if d > t { inp_diverge_count += 1; }
+                                    if d > inp_max_diff { inp_max_diff = d; inp_max_diff_idx = j; }
+                                }
+                                eprintln!("    input {:?}: {} elements, max_diff={:.6} at [{}], divergent={}",
+                                    inp_id, inp_flat.len(), inp_max_diff, inp_max_diff_idx, inp_diverge_count);
+                                // Print values around max diff
+                                let start = inp_max_diff_idx.saturating_sub(1);
+                                let end = (inp_max_diff_idx + 4).min(inp_flat.len()).min(inp_tam.count as usize);
+                                for j in start..end {
+                                    let nv = nano_eval.get(inp_tam.base_id.offset(j as u32));
+                                    let marker = if j == inp_max_diff_idx { " <--" } else { "" };
+                                    eprintln!("      [{:4}] milli={:16.10} nano={:16.10}{}",
+                                        j, inp_flat[j], nv, marker);
+                                }
+                                // Trace back: what op produced this input?
+                                let inp_producing_op = milli.node_ids().find_map(|oid| {
+                                    let n = milli.get_node_by_id(&oid).unwrap();
+                                    if n.outputs().any(|o| o == inp_id) {
+                                        Some((oid, format!("{}", n.op_kind())))
+                                    } else {
+                                        None
+                                    }
+                                });
+                                if let Some((inp_op_id, inp_op_kind)) = &inp_producing_op {
+                                    eprintln!("      produced by: {} (op {:?})", inp_op_kind, inp_op_id);
+                                    // Iteratively trace back up to 5 levels
+                                    let mut trace_ops: Vec<GlobalId> = vec![*inp_op_id];
+                                    for depth in 0..5 {
+                                        let Some(&curr_op_id) = trace_ops.last() else { break };
+                                        let indent = "  ".repeat(depth + 4);
+                                        let curr_node = milli.get_node_by_id(&curr_op_id).unwrap();
+                                        let mut next_op: Option<GlobalId> = None;
+                                        for inp2_id in curr_node.inputs() {
+                                            if let (Some(inp2_tam), Some(inp2_milli)) = (result.tensor_map.get(&inp2_id), milli_intermediates.get(&inp2_id)) {
+                                                if inp2_tam.sym_dims.is_empty() {
+                                                    let inp2_flat = tensor_to_f64(inp2_milli);
+                                                    let mut d2_max = 0.0f64;
+                                                    let mut d2_cnt = 0usize;
+                                                    let mut d2_idx = 0usize;
+                                                    let count = inp2_flat.len().min(inp2_tam.count as usize);
+                                                    for (j, &mv) in inp2_flat.iter().enumerate() {
+                                                        if j >= count { break; }
+                                                        let nv = nano_eval.get(inp2_tam.base_id.offset(j as u32));
+                                                        let d = (mv - nv).abs();
+                                                        let t = 1e-2 * mv.abs().max(1.0);
+                                                        if d > t { d2_cnt += 1; }
+                                                        if d > d2_max { d2_max = d; d2_idx = j; }
+                                                    }
+                                                    let prod = milli.node_ids().find_map(|oid| {
+                                                        let n = milli.get_node_by_id(&oid).unwrap();
+                                                        if n.outputs().any(|o| o == inp2_id) {
+                                                            Some((oid, format!("{}", n.op_kind())))
+                                                        } else {
+                                                            None
+                                                        }
+                                                    });
+                                                    let prod_str = prod.as_ref().map(|(_, k)| k.as_str()).unwrap_or("input");
+                                                    if count <= 4 {
+                                                        for j in 0..count {
+                                                            let nv = nano_eval.get(inp2_tam.base_id.offset(j as u32));
+                                                            eprintln!("{}input {:?} (from {}): [{}/{}] milli={:.10} nano={:.10}",
+                                                                indent, inp2_id, prod_str, j, count, inp2_flat[j], nv);
+                                                        }
+                                                    } else {
+                                                        eprintln!("{}input {:?} (from {}): {} elems, max_diff={:.10} at [{}], divergent={}",
+                                                            indent, inp2_id, prod_str, count, d2_max, d2_idx, d2_cnt);
+                                                    }
+                                                    // Follow the input with largest diff for next trace level
+                                                    if let Some((ref pid, _)) = prod {
+                                                        if next_op.is_none() || d2_max > 0.0 {
+                                                            next_op = Some(*pid);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        if let Some(nop) = next_op {
+                                            let nop_kind = milli.get_node_by_id(&nop).map(|n| format!("{}", n.op_kind())).unwrap_or_default();
+                                            eprintln!("{}  ^-- produced by: {}", indent, nop_kind);
+                                            trace_ops.push(nop);
+                                        } else {
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    eprintln!("    produced by: input/unknown");
+                }
+                eprintln!(
+                    "    milli={} nano={} diff={:.6} rel={:.6}",
+                    m, n, diff, rel
                 );
                 // Also print surrounding elements for context.
-                let start = i.saturating_sub(3);
-                let end = (i + 4).min(milli_flat.len());
+                let start = i.saturating_sub(1);
+                let end = (i + 8).min(milli_flat.len());
                 for j in start..end {
                     let nv = nano_eval.get(tam.base_id.offset(j as u32));
                     let marker = if j == i { " <--" } else { "" };
