@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use crate::dtype::DType;
 use crate::graph::{GlobalId, Graph, Node};
 use crate::milli_graph::MilliOpGraph;
-use crate::milli_graph::ops::AnyMilliOp;
+use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::nano_graph::ops::{LiteralBits, ScalarBinOp, ScalarOp, ScalarUnaryOp};
 use crate::nano_graph::pattern::{BlockId, Dim, InputRef, NanoGraph, SourceDimMap};
 use crate::numeric_tensor::NumericTensor;
@@ -19,25 +19,19 @@ use crate::DynRank;
 
 /// Tracks how a MilliOp tensor maps to the NanoGraph.
 ///
-/// A tensor is either backed by a block (with an optional index permutation
-/// from view ops), or is a "meta" tensor (shape, axes) whose value we
-/// resolved at lowering time and don't need in the NanoGraph.
+/// Every tensor is backed by a block, with an optional index permutation
+/// from view ops. Metadata tensors (shape, axes) get constant literal blocks
+/// whose values are extracted from TensorInfo at lowering time.
 #[derive(Debug, Clone)]
-enum TensorRef {
-    /// This tensor is produced by a block in the NanoGraph.
-    Block {
-        block_id: BlockId,
-        /// The logical shape of the tensor as seen by consumers.
-        /// Dims may be Known (concrete) or Symbolic (unknown at graph-build time).
-        shape: Vec<Dim>,
-        /// Permutation from logical dims to source block dims.
-        /// If None, logical dims == block dims (identity).
-        /// perm[logical_dim] = block_dim
-        perm: Option<Vec<usize>>,
-    },
-    /// This tensor is metadata (shape tensor, axes tensor) — its value
-    /// was consumed at lowering time and it has no NanoGraph block.
-    Meta,
+struct TensorRef {
+    block_id: BlockId,
+    /// The logical shape of the tensor as seen by consumers.
+    /// Dims may be Known (concrete) or Symbolic (unknown at graph-build time).
+    shape: Vec<Dim>,
+    /// Permutation from logical dims to source block dims.
+    /// If None, logical dims == block dims (identity).
+    /// perm[logical_dim] = block_dim
+    perm: Option<Vec<usize>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -123,7 +117,9 @@ pub fn lower_with_info(
         if let Err(e) = ctx.lower_op(op) {
             let kind_str = match &e {
                 LowerError::UnsupportedOp(kind) => kind.clone(),
-                LowerError::MissingRef(id) => format!("{} (missing ref {:?})", op.op_kind(), id),
+                LowerError::MissingRef(id) => {
+                    format!("{} (missing ref {:?})", op.op_kind(), id)
+                }
                 LowerError::MissingValue(id, ctx_str) => {
                     format!("{} (missing value {:?} for {})", op.op_kind(), id, ctx_str)
                 }
@@ -141,7 +137,11 @@ pub fn lower_with_info(
             // Register outputs as opaque so downstream ops can still reference them.
             for out_id in op.outputs() {
                 if !ctx.refs.contains_key(&out_id) {
-                    ctx.register_input(out_id).ok();
+                    if ctx.register_input(out_id).is_err() {
+                        // Dims unknown (e.g., data-dependent output shape).
+                        // Register with whatever info we have from infer.
+                        ctx.register_input_best_effort(out_id);
+                    }
                 }
             }
         }
@@ -150,8 +150,8 @@ pub fn lower_with_info(
     // Mark graph outputs.
     if let Some(ref output_map) = graph.output_map {
         for int_id in output_map.keys() {
-            if let Some(TensorRef::Block { block_id, .. }) = ctx.refs.get(int_id) {
-                ctx.nano.output_blocks.push(*block_id);
+            if let Some(tref) = ctx.refs.get(int_id) {
+                ctx.nano.output_blocks.push(tref.block_id);
             }
         }
     }
@@ -159,10 +159,7 @@ pub fn lower_with_info(
     let tensor_to_block: HashMap<GlobalId, BlockId> = ctx
         .refs
         .iter()
-        .filter_map(|(gid, tref)| match tref {
-            TensorRef::Block { block_id, .. } => Some((*gid, *block_id)),
-            TensorRef::Meta => None,
-        })
+        .map(|(gid, tref)| (*gid, tref.block_id))
         .collect();
 
     Ok(LowerResult {
@@ -202,11 +199,36 @@ impl LowerCtx {
         self.refs.get(id).ok_or(LowerError::MissingRef(*id))
     }
 
+    /// Extract a concrete NumericTensor's values as Vec<i64>, casting if needed.
+    /// Works for I64, I32, U64, U32, and other integer-compatible dtypes.
+    fn tensor_to_i64_vec(
+        tensor: &NumericTensor<DynRank>,
+        id: GlobalId,
+        context: &'static str,
+    ) -> Result<Vec<i64>, LowerError> {
+        use crate::backends::eval_backend::EvalBackend;
+        use typenum::P1;
+        // Cast to I64 if not already, then extract.
+        let as_i64 = if tensor.dtype() == DType::I64 {
+            tensor.clone()
+        } else {
+            tensor
+                .cast(DType::I64, &mut EvalBackend::NDArray)
+                .map_err(|_| LowerError::MissingValue(id, context))?
+        };
+        let rank1 = as_i64
+            .try_to_rank::<P1>()
+            .map_err(|_| LowerError::MissingValue(id, context))?;
+        let ndarray = rank1
+            .to_ndarray()
+            .map_err(|_| LowerError::MissingValue(id, context))?;
+        Vec::<i64>::try_from(ndarray).map_err(|_| LowerError::MissingValue(id, context))
+    }
+
     /// Read a tensor's concrete value as a Vec<i64> (for axes, shape tensors).
     /// Only works if the tensor is Numeric (concrete). Returns MissingValue
     /// if the tensor is symbolic.
     fn read_i64_values(&self, id: &GlobalId, context: &'static str) -> Result<Vec<i64>, LowerError> {
-        use typenum::P1;
         let info = self
             .infos
             .get(id)
@@ -214,13 +236,56 @@ impl LowerCtx {
         let tensor = info
             .as_numeric()
             .ok_or(LowerError::MissingValue(*id, context))?;
-        let rank1 = tensor
-            .try_to_rank::<P1>()
-            .map_err(|_| LowerError::MissingValue(*id, context))?;
-        let ndarray = rank1
-            .to_ndarray()
-            .map_err(|_| LowerError::MissingValue(*id, context))?;
-        Vec::<i64>::try_from(ndarray).map_err(|_| LowerError::MissingValue(*id, context))
+        Self::tensor_to_i64_vec(tensor, *id, context)
+    }
+
+    /// Best-effort registration when dims/dtype are incomplete.
+    /// Uses symbolic dims if concrete dims are unavailable, or a
+    /// rank-1 symbolic placeholder if even the rank is unknown.
+    /// This prevents cascade failures where downstream ops fail with
+    /// MissingRef just because an upstream op couldn't be lowered.
+    fn register_input_best_effort(&mut self, tensor_id: GlobalId) {
+        let dtype = self
+            .dtypes
+            .get(&tensor_id)
+            .copied()
+            .or_else(|| self.infos.get(&tensor_id).map(|i| i.dtype()))
+            .unwrap_or(DType::F32); // last resort fallback
+
+        let dims = if let Some(d) = self.dims.get(&tensor_id) {
+            d.clone()
+        } else if let Some(info) = self.infos.get(&tensor_id) {
+            if let Some(rank) = info.rank_if_known() {
+                (0..rank)
+                    .map(|i| {
+                        info.dim_if_known(i)
+                            .map(Dim::Known)
+                            .unwrap_or(Dim::Symbolic(0xF000 | i as u16))
+                    })
+                    .collect()
+            } else {
+                // Unknown rank — use rank-1 symbolic placeholder.
+                vec![Dim::Symbolic(0xFFFF)]
+            }
+        } else {
+            vec![Dim::Symbolic(0xFFFF)]
+        };
+
+        let block_id = self.nano.push(
+            ScalarOp::Literal(LiteralBits::f32(0.0)),
+            dtype,
+            dims.clone(),
+            vec![],
+        );
+
+        self.refs.insert(
+            tensor_id,
+            TensorRef {
+                block_id,
+                shape: dims,
+                perm: None,
+            },
+        );
     }
 
     /// Register an external input or constant tensor.
@@ -237,13 +302,71 @@ impl LowerCtx {
 
         self.refs.insert(
             tensor_id,
-            TensorRef::Block {
+            TensorRef {
                 block_id,
                 shape: dims,
                 perm: None,
             },
         );
         Ok(block_id)
+    }
+
+    /// Register a tensor as a constant block using its TensorInfo.
+    /// Used for metadata tensors (shape outputs, axes, etc.) whose values
+    /// are known from infer() but don't come from a lowered op.
+    fn register_input_from_info(&mut self, tensor_id: GlobalId) -> Result<BlockId, LowerError> {
+        // If already registered, return the existing block.
+        if let Some(tref) = self.refs.get(&tensor_id) {
+            return Ok(tref.block_id);
+        }
+
+        let info = self
+            .infos
+            .get(&tensor_id)
+            .ok_or(LowerError::MissingValue(tensor_id, "register from info"))?;
+
+        if let Some(tensor) = info.as_numeric() {
+            use crate::backends::eval_backend::EvalBackend;
+            let dtype = tensor.dtype();
+            let dims: Vec<Dim> = tensor.shape().into_iter().map(Dim::Known).collect();
+
+            // Cast to F32 to extract scalar value, regardless of original dtype.
+            let as_f32 = tensor.cast(DType::F32, &mut EvalBackend::NDArray)
+                .map_err(|_| LowerError::MissingValue(tensor_id, "info cast"))?;
+            let flat = as_f32.flatten()
+                .map_err(|_| LowerError::MissingValue(tensor_id, "info flatten"))?;
+            let arr = flat.to_ndarray()
+                .map_err(|_| LowerError::MissingValue(tensor_id, "info ndarray"))?;
+            let vals: Vec<f32> = Vec::try_from(arr)
+                .map_err(|_| LowerError::MissingValue(tensor_id, "info extract"))?;
+
+            let literal = if vals.len() == 1 {
+                LiteralBits::f32(vals[0])
+            } else {
+                LiteralBits::f32(0.0) // multi-element — sentinel
+            };
+
+            let block_id = self.nano.push(
+                ScalarOp::Literal(literal),
+                dtype,
+                dims.clone(),
+                vec![],
+            );
+
+            self.refs.insert(
+                tensor_id,
+                TensorRef {
+                    block_id,
+                    shape: dims,
+                    perm: None,
+                },
+            );
+
+            Ok(block_id)
+        } else {
+            // Non-numeric info — fall back to register_input (uses dims/dtype maps).
+            self.register_input(tensor_id)
+        }
     }
 
     /// Build an InputRef for an elementwise op where consumer and source have
@@ -254,14 +377,8 @@ impl LowerCtx {
         output_shape: &[Dim],
     ) -> Result<InputRef, LowerError> {
         let tref = self.get_ref(source_id)?;
-        let (block_id, source_shape, perm) = match tref {
-            TensorRef::Block {
-                block_id,
-                shape,
-                perm,
-            } => (*block_id, shape.clone(), perm.clone()),
-            TensorRef::Meta => return Err(LowerError::MissingRef(*source_id)),
-        };
+        let (block_id, source_shape, perm) =
+            (tref.block_id, tref.shape.clone(), tref.perm.clone());
 
         let out_ndim = output_shape.len();
         let src_ndim = source_shape.len();
@@ -359,7 +476,7 @@ impl LowerCtx {
             "Concat" => self.lower_concat(op),
             "Slice" => self.lower_slice(op),
             "Split" => self.lower_split(op),
-            "Gather" => self.lower_gather_boundary(op),
+            "Gather" => self.lower_gather(op),
             "Shape" => self.lower_shape(op),
             "SumTo" => self.lower_reduce(op), // SumTo is effectively a reduce
             _ => Err(LowerError::UnsupportedOp(kind)),
@@ -406,7 +523,7 @@ impl LowerCtx {
 
         self.refs.insert(
             out_id,
-            TensorRef::Block {
+            TensorRef {
                 block_id,
                 shape: out_dims,
                 perm: None,
@@ -447,7 +564,7 @@ impl LowerCtx {
 
         self.refs.insert(
             out_id,
-            TensorRef::Block {
+            TensorRef {
                 block_id,
                 shape: out_dims,
                 perm: None,
@@ -543,7 +660,7 @@ impl LowerCtx {
 
         self.refs.insert(
             out_id,
-            TensorRef::Block {
+            TensorRef {
                 block_id: reduce_id,
                 shape: out_dims,
                 perm: None,
@@ -563,14 +680,8 @@ impl LowerCtx {
         is_b: bool, // false = A input, true = B input
     ) -> Result<InputRef, LowerError> {
         let tref = self.get_ref(tensor_id)?;
-        let (block_id, _source_shape, perm) = match tref {
-            TensorRef::Block {
-                block_id,
-                shape,
-                perm,
-            } => (*block_id, shape.clone(), perm.clone()),
-            TensorRef::Meta => return Err(LowerError::MissingRef(*tensor_id)),
-        };
+        let block_id = tref.block_id;
+        let perm = tref.perm.clone();
 
         let source_block = self.nano.get(block_id).unwrap();
         let block_ndim = source_block.ndim();
@@ -693,12 +804,8 @@ impl LowerCtx {
         let reduce_ndim = reduce_dims.len();
 
         let tref = self.get_ref(&data_id)?;
-        let (block_id, perm) = match tref {
-            TensorRef::Block {
-                block_id, perm, ..
-            } => (*block_id, perm.clone()),
-            TensorRef::Meta => return Err(LowerError::MissingRef(data_id)),
-        };
+        let block_id = tref.block_id;
+        let perm = tref.perm.clone();
 
         let source_block = self.nano.get(block_id).unwrap();
         let block_ndim = source_block.ndim();
@@ -786,7 +893,7 @@ impl LowerCtx {
 
         self.refs.insert(
             out_id,
-            TensorRef::Block {
+            TensorRef {
                 block_id: final_block,
                 shape: out_dims,
                 perm: None,
@@ -800,56 +907,46 @@ impl LowerCtx {
         let out_id = op.outputs().next().unwrap();
         let out_dims = self.get_dims(&out_id)?.to_vec();
 
+        // Register shape tensor as a constant block.
+        if inputs.len() > 1 {
+            self.register_input_from_info(inputs[1])?;
+        }
+
         // Reshape is a view op — no computation, just reindex.
-        // Point the output tensor ref at the same block with updated shape.
         let tref = self.get_ref(&inputs[0])?.clone();
-        match tref {
-            TensorRef::Block {
-                block_id,
-                shape: _old_shape,
-                perm: old_perm,
-            } => {
-                // Mark the shape tensor as meta.
-                if inputs.len() > 1 {
-                    self.refs.insert(inputs[1], TensorRef::Meta);
-                }
+        let block_id = tref.block_id;
+        let old_perm = tref.perm.clone();
 
-                // If there was a transpose before this reshape, we can't just
-                // pass through — the flat ordering changed. Create an identity block.
-                if old_perm.is_some() {
-                    let old_logical_dims = self.get_dims(&inputs[0])?.to_vec();
+        if old_perm.is_some() {
+            // Transpose before reshape — flat ordering changed. Create an identity block.
+            let old_logical_dims = self.get_dims(&inputs[0])?.to_vec();
 
-                    let inp = self.build_elementwise_input(&inputs[0], &old_logical_dims)?;
-                    let dtype = self.get_dtype(&out_id)?;
-                    let identity_block = self.nano.push(
-                        ScalarOp::Unary(ScalarUnaryOp::Neg), // TODO: Identity op
-                        dtype,
-                        old_logical_dims,
-                        vec![inp],
-                    );
-                    self.refs.insert(
-                        out_id,
-                        TensorRef::Block {
-                            block_id: identity_block,
-                            shape: out_dims,
-                            perm: None,
-                        },
-                    );
-                } else {
-                    // No perm — just update the shape.
-                    self.refs.insert(
-                        out_id,
-                        TensorRef::Block {
-                            block_id,
-                            shape: out_dims,
-                            perm: None,
-                        },
-                    );
-                }
-            }
-            TensorRef::Meta => {
-                self.refs.insert(out_id, TensorRef::Meta);
-            }
+            let inp = self.build_elementwise_input(&inputs[0], &old_logical_dims)?;
+            let dtype = self.get_dtype(&out_id)?;
+            let identity_block = self.nano.push(
+                ScalarOp::Unary(ScalarUnaryOp::Neg), // TODO: Identity op
+                dtype,
+                old_logical_dims,
+                vec![inp],
+            );
+            self.refs.insert(
+                out_id,
+                TensorRef {
+                    block_id: identity_block,
+                    shape: out_dims,
+                    perm: None,
+                },
+            );
+        } else {
+            // No perm — just update the shape.
+            self.refs.insert(
+                out_id,
+                TensorRef {
+                    block_id,
+                    shape: out_dims,
+                    perm: None,
+                },
+            );
         }
         Ok(())
     }
@@ -860,43 +957,30 @@ impl LowerCtx {
         let out_dims = self.get_dims(&out_id)?.to_vec();
 
         let tref = self.get_ref(&inputs[0])?.clone();
-        match tref {
-            TensorRef::Block {
-                block_id,
-                shape: in_shape,
-                perm: existing_perm,
-            } => {
-                // Get the transpose permutation.
-                let in_rank = in_shape.len();
-                let perm_i64: Vec<i64> = match op {
-                    AnyMilliOp::Transpose(t) => match t.perm() {
-                        Some(p) => p.to_vec(),
-                        None => (0..in_rank as i64).rev().collect(), // reverse all
-                    },
-                    _ => unreachable!(),
-                };
-                let new_perm: Vec<usize> = perm_i64.iter().map(|&p| p as usize).collect();
+        let in_rank = tref.shape.len();
+        let perm_i64: Vec<i64> = match op {
+            AnyMilliOp::Transpose(t) => match t.perm() {
+                Some(p) => p.to_vec(),
+                None => (0..in_rank as i64).rev().collect(),
+            },
+            _ => unreachable!(),
+        };
+        let new_perm: Vec<usize> = perm_i64.iter().map(|&p| p as usize).collect();
 
-                // Compose with existing permutation if any.
-                let composed = if let Some(ref ep) = existing_perm {
-                    new_perm.iter().map(|&np| ep[np]).collect()
-                } else {
-                    new_perm
-                };
+        let composed = if let Some(ref ep) = tref.perm {
+            new_perm.iter().map(|&np| ep[np]).collect()
+        } else {
+            new_perm
+        };
 
-                self.refs.insert(
-                    out_id,
-                    TensorRef::Block {
-                        block_id,
-                        shape: out_dims,
-                        perm: Some(composed),
-                    },
-                );
-            }
-            TensorRef::Meta => {
-                self.refs.insert(out_id, TensorRef::Meta);
-            }
-        }
+        self.refs.insert(
+            out_id,
+            TensorRef {
+                block_id: tref.block_id,
+                shape: out_dims,
+                perm: Some(composed),
+            },
+        );
         Ok(())
     }
 
@@ -905,33 +989,21 @@ impl LowerCtx {
         let out_id = op.outputs().next().unwrap();
         let out_dims = self.get_dims(&out_id)?.to_vec();
 
-        // Mark axes tensor as meta.
+        // Register axes tensor as constant block.
         if inputs.len() > 1 {
-            self.refs.insert(inputs[1], TensorRef::Meta);
+            self.register_input_from_info(inputs[1])?;
         }
 
         let tref = self.get_ref(&inputs[0])?.clone();
-        match tref {
-            TensorRef::Block {
-                block_id,
-                ..
-            } => {
-                // TODO: properly remap permutation through squeeze/unsqueeze.
-                let new_perm: Option<Vec<usize>> = None;
-
-                self.refs.insert(
-                    out_id,
-                    TensorRef::Block {
-                        block_id,
-                        shape: out_dims,
-                        perm: new_perm,
-                    },
-                );
-            }
-            TensorRef::Meta => {
-                self.refs.insert(out_id, TensorRef::Meta);
-            }
-        }
+        // TODO: properly remap permutation through squeeze/unsqueeze.
+        self.refs.insert(
+            out_id,
+            TensorRef {
+                block_id: tref.block_id,
+                shape: out_dims,
+                perm: None,
+            },
+        );
         Ok(())
     }
 
@@ -940,30 +1012,21 @@ impl LowerCtx {
         let out_id = op.outputs().next().unwrap();
         let out_dims = self.get_dims(&out_id)?.to_vec();
 
-        // Mark shape tensor as meta.
+        // Register shape tensor as constant block.
         if inputs.len() > 1 {
-            self.refs.insert(inputs[1], TensorRef::Meta);
+            self.register_input_from_info(inputs[1])?;
         }
 
         // Expand is broadcast — same block, bigger logical shape.
         let tref = self.get_ref(&inputs[0])?.clone();
-        match tref {
-            TensorRef::Block {
-                block_id, perm, ..
-            } => {
-                self.refs.insert(
-                    out_id,
-                    TensorRef::Block {
-                        block_id,
-                        shape: out_dims,
-                        perm,
-                    },
-                );
-            }
-            TensorRef::Meta => {
-                self.refs.insert(out_id, TensorRef::Meta);
-            }
-        }
+        self.refs.insert(
+            out_id,
+            TensorRef {
+                block_id: tref.block_id,
+                shape: out_dims,
+                perm: tref.perm,
+            },
+        );
         Ok(())
     }
 
@@ -972,27 +1035,17 @@ impl LowerCtx {
         let out_id = op.outputs().next().unwrap();
         let out_dims = self.get_dims(&out_id)?.to_vec();
 
-        // Cast is a dtype change. For the NanoGraph, just pass through the block
-        // with updated shape. Actual dtype conversion is tracked on the block dtype.
+        // Cast is a dtype change — pass through the block with updated shape.
         // TODO: proper Cast op for mixed-precision.
         let tref = self.get_ref(&inputs[0])?.clone();
-        match tref {
-            TensorRef::Block {
-                block_id, perm, ..
-            } => {
-                self.refs.insert(
-                    out_id,
-                    TensorRef::Block {
-                        block_id,
-                        shape: out_dims,
-                        perm,
-                    },
-                );
-            }
-            TensorRef::Meta => {
-                self.refs.insert(out_id, TensorRef::Meta);
-            }
-        }
+        self.refs.insert(
+            out_id,
+            TensorRef {
+                block_id: tref.block_id,
+                shape: out_dims,
+                perm: tref.perm,
+            },
+        );
         Ok(())
     }
 
@@ -1030,7 +1083,7 @@ impl LowerCtx {
 
         self.refs.insert(
             out_id,
-            TensorRef::Block {
+            TensorRef {
                 block_id,
                 shape: out_dims,
                 perm: None,
@@ -1059,7 +1112,7 @@ impl LowerCtx {
 
         self.refs.insert(
             out_id,
-            TensorRef::Block {
+            TensorRef {
                 block_id,
                 shape: out_dims,
                 perm: None,
@@ -1069,10 +1122,41 @@ impl LowerCtx {
     }
 
     fn lower_concat(&mut self, op: &AnyMilliOp) -> Result<(), LowerError> {
-        // Concat is tough to express as pure affine blocks because it's
-        // a piecewise function (different source depending on position along axis).
-        // For now, treat as a boundary — register output as opaque input.
+        let inputs: Vec<GlobalId> = op.inputs().collect();
         let out_id = op.outputs().next().unwrap();
+
+        // Check if all inputs are concrete — if so, constant-fold via eval.
+        let all_numeric = inputs.iter().all(|id| {
+            self.infos
+                .get(id)
+                .map(|info| info.as_numeric().is_some())
+                .unwrap_or(false)
+        });
+
+        if all_numeric {
+            use crate::backends::eval_backend::EvalBackend;
+            let mut eval_inputs: HashMap<GlobalId, NumericTensor<DynRank>> = HashMap::new();
+            for &id in &inputs {
+                if let Some(tensor) = self.infos.get(&id).and_then(|i| i.as_numeric()) {
+                    eval_inputs.insert(id, tensor.clone());
+                }
+            }
+            let mut backend = EvalBackend::NDArray;
+            if let Ok(results) = op.eval(&eval_inputs, &mut backend) {
+                for (tid, tensor) in results {
+                    let result_dims: Vec<Dim> =
+                        tensor.shape().into_iter().map(Dim::Known).collect::<Vec<Dim>>();
+                    let dtype = tensor.dtype();
+                    self.infos.insert(tid, TensorInfo::from(tensor));
+                    self.dims.insert(tid, result_dims.clone());
+                    self.dtypes.insert(tid, dtype);
+                    self.register_input(tid)?;
+                }
+                return Ok(());
+            }
+        }
+
+        // Concat can't be expressed as pure affine blocks — treat as boundary.
         self.register_input(out_id)?;
         self.unsupported
             .push((op.global_id(), "Concat (boundary)".to_string()));
@@ -1084,9 +1168,9 @@ impl LowerCtx {
         let out_id = op.outputs().next().unwrap();
         let data_id = inputs[0];
 
-        // Mark parameter tensors as meta.
+        // Register parameter tensors as constant blocks.
         for &inp in &inputs[1..] {
-            self.refs.insert(inp, TensorRef::Meta);
+            self.register_input_from_info(inp)?;
         }
 
         // Read starts, ends, steps, axes from constant tensors.
@@ -1141,10 +1225,8 @@ impl LowerCtx {
 
         // Build InputRef: for each source dim, output_idx → start + output_idx * step.
         let tref = self.get_ref(&data_id)?.clone();
-        let (block_id, perm) = match &tref {
-            TensorRef::Block { block_id, perm, .. } => (*block_id, perm.clone()),
-            TensorRef::Meta => return Err(LowerError::MissingRef(data_id)),
-        };
+        let block_id = tref.block_id;
+        let perm = tref.perm.clone();
 
         let source_block = self.nano.get(block_id).unwrap();
         let block_ndim = source_block.ndim();
@@ -1187,7 +1269,7 @@ impl LowerCtx {
 
         self.refs.insert(
             out_id,
-            TensorRef::Block {
+            TensorRef {
                 block_id,
                 shape: out_dims,
                 perm: None,
@@ -1205,9 +1287,9 @@ impl LowerCtx {
         let out_id = op.outputs().next().unwrap();
         let data_id = inputs[0];
 
-        // Mark the split-sizes tensor as meta if present.
+        // Register split-sizes tensor as constant block if present.
         if inputs.len() > 1 {
-            self.refs.insert(inputs[1], TensorRef::Meta);
+            self.register_input_from_info(inputs[1])?;
         }
 
         let data_dims = self.get_dims(&data_id)?.to_vec();
@@ -1265,10 +1347,8 @@ impl LowerCtx {
         let out_ndim = out_dims.len();
 
         let tref = self.get_ref(&data_id)?.clone();
-        let (block_id, perm) = match &tref {
-            TensorRef::Block { block_id, perm, .. } => (*block_id, perm.clone()),
-            TensorRef::Meta => return Err(LowerError::MissingRef(data_id)),
-        };
+        let block_id = tref.block_id;
+        let perm = tref.perm.clone();
 
         let source_block = self.nano.get(block_id).unwrap();
         let block_ndim = source_block.ndim();
@@ -1308,7 +1388,7 @@ impl LowerCtx {
 
         self.refs.insert(
             out_id,
-            TensorRef::Block {
+            TensorRef {
                 block_id: new_block_id,
                 shape: out_dims,
                 perm: None,
@@ -1317,8 +1397,174 @@ impl LowerCtx {
         Ok(())
     }
 
-    fn lower_gather_boundary(&mut self, op: &AnyMilliOp) -> Result<(), LowerError> {
-        // Gather has data-dependent indexing — treat as boundary.
+    fn lower_gather(&mut self, op: &AnyMilliOp) -> Result<(), LowerError> {
+        let AnyMilliOp::Gather(gather_op) = op else {
+            unreachable!()
+        };
+
+        let data_id = gather_op.data_id();
+        let indices_id = gather_op.indices_id();
+        let out_id = gather_op.output_id();
+
+        let indices_info = self.infos.get(&indices_id);
+
+        // Check if indices are concrete (Numeric).
+        let indices_numeric = indices_info.and_then(|info| info.as_numeric());
+
+        // Case 2: Indices are concrete — can express as structured indexing.
+        if let Some(indices_tensor) = indices_numeric {
+            let indices_i64: Vec<i64> = {
+                // Flatten indices to 1D for processing.
+                let flat = indices_tensor
+                    .flatten()
+                    .map_err(|_| LowerError::MissingValue(indices_id, "gather indices flatten"))?;
+                Self::tensor_to_i64_vec(&flat.to_dyn_rank(), indices_id, "gather indices")?
+            };
+
+            let data_dims = self.get_dims(&data_id)?.to_vec();
+            let data_rank = data_dims.len();
+            let axis_raw = gather_op.axis();
+            let axis = if axis_raw < 0 {
+                (axis_raw + data_rank as i64) as usize
+            } else {
+                axis_raw as usize
+            };
+
+            let axis_dim_size = data_dims[axis].as_known();
+
+            // Normalize negative indices.
+            let indices_normalized: Vec<i64> = indices_i64
+                .iter()
+                .map(|&idx| {
+                    if idx < 0 {
+                        if let Some(dim) = axis_dim_size {
+                            idx + dim as i64
+                        } else {
+                            idx // Can't normalize without known dim size
+                        }
+                    } else {
+                        idx
+                    }
+                })
+                .collect();
+
+            let indices_shape: Vec<u64> = indices_tensor.shape();
+            let out_dims = self.get_dims(&out_id)?.to_vec();
+            let out_dtype = self.get_dtype(&out_id)?;
+
+            // Scalar index (indices shape is [] or [1] with one element):
+            // Gather with a scalar index just selects a slice along the axis.
+            // Output shape = data_shape[..axis] ++ indices_shape ++ data_shape[axis+1..]
+            // For scalar index, this is data_shape[..axis] ++ data_shape[axis+1..].
+            if indices_normalized.len() == 1 {
+                let idx = indices_normalized[0];
+                let is_scalar_index = indices_shape.is_empty();
+
+                // This is a slice: data[..., idx, ...] along `axis`.
+                // We can express this as an Identity block with an offset on the gather axis.
+                let tref = self.get_ref(&data_id)?.clone();
+                let block_id = tref.block_id;
+                let perm = tref.perm.clone();
+
+                let source_block = self.nano.get(block_id).unwrap();
+                let block_ndim = source_block.ndim();
+                let out_ndim = out_dims.len();
+
+                // Build dim_map: for each block dim, map to the corresponding output dim.
+                // The gather axis gets a constant (the selected index), and other dims
+                // shift to account for the removed/kept axis.
+                let mut dim_map = Vec::with_capacity(block_ndim);
+
+                // Map from data logical dims to block dims.
+                for block_dim in 0..block_ndim {
+                    let logical_dim = if let Some(ref p) = perm {
+                        p.iter().position(|&d| d == block_dim).unwrap_or(block_dim)
+                    } else {
+                        block_dim
+                    };
+
+                    if logical_dim == axis {
+                        // This is the gather axis — fix to the selected index.
+                        dim_map.push(SourceDimMap::constant(idx));
+                    } else if logical_dim < data_rank {
+                        // Map to the corresponding output dim.
+                        // Output dims: data_shape[..axis] ++ indices_shape ++ data_shape[axis+1..]
+                        // For scalar index: dims before axis keep their position,
+                        // dims after axis shift left by 1 (if scalar) or stay (if indices_shape=[1]).
+                        let out_dim = if is_scalar_index {
+                            if logical_dim < axis {
+                                logical_dim
+                            } else {
+                                logical_dim - 1
+                            }
+                        } else {
+                            // indices_shape = [1], so it occupies one dim at position `axis`
+                            if logical_dim < axis {
+                                logical_dim
+                            } else {
+                                logical_dim // axis+1 in data maps to axis+1 in output
+                            }
+                        };
+
+                        if out_dim < out_ndim {
+                            dim_map.push(SourceDimMap::identity(out_dim, out_ndim));
+                        } else {
+                            dim_map.push(SourceDimMap::constant(0));
+                        }
+                    } else {
+                        dim_map.push(SourceDimMap::constant(0));
+                    }
+                }
+
+                let new_block = self.nano.push(
+                    ScalarOp::Identity,
+                    out_dtype,
+                    out_dims.clone(),
+                    vec![InputRef {
+                        source_block: block_id,
+                        dim_map,
+                    }],
+                );
+
+                self.refs.insert(
+                    out_id,
+                    TensorRef {
+                        block_id: new_block,
+                        shape: out_dims,
+                        perm: None,
+                    },
+                );
+                // Register indices as constant block.
+                self.register_input_from_info(indices_id)?;
+                return Ok(());
+            }
+
+            // Multi-element concrete indices: fall through to constant-fold path.
+            // If both data and indices are fully Numeric, we can eval the op.
+            if let Some(data_tensor) = self.infos.get(&data_id).and_then(|i| i.as_numeric()) {
+                use crate::backends::eval_backend::EvalBackend;
+                let mut eval_inputs: HashMap<GlobalId, NumericTensor<DynRank>> = HashMap::new();
+                eval_inputs.insert(data_id, data_tensor.clone());
+                eval_inputs.insert(indices_id, indices_tensor.clone());
+                let mut backend = EvalBackend::NDArray;
+                if let Ok(results) = op.eval(&eval_inputs, &mut backend) {
+                    for (tid, tensor) in results {
+                        let result_dims: Vec<Dim> =
+                            tensor.shape().into_iter().map(Dim::Known).collect::<Vec<Dim>>();
+                        let dtype = tensor.dtype();
+                        // Store the result as a TensorInfo for downstream ops.
+                        self.infos.insert(tid, TensorInfo::from(tensor));
+                        self.dims.insert(tid, result_dims.clone());
+                        self.dtypes.insert(tid, dtype);
+                        self.register_input(tid)?;
+                    }
+                    self.register_input_from_info(indices_id)?;
+                    return Ok(());
+                }
+            }
+        }
+
+        // Case 3: Indices are runtime/symbolic — treat as boundary.
         let out_id = op.outputs().next().unwrap();
         self.register_input(out_id)?;
         self.unsupported
@@ -1327,9 +1573,10 @@ impl LowerCtx {
     }
 
     fn lower_shape(&mut self, op: &AnyMilliOp) -> Result<(), LowerError> {
-        // Shape op outputs a 1D tensor of the input's dimensions — metadata only.
+        // Shape op outputs a 1D tensor of the input's dimensions.
+        // Register as a constant block from infer results.
         let out_id = op.outputs().next().unwrap();
-        self.refs.insert(out_id, TensorRef::Meta);
+        self.register_input_from_info(out_id)?;
         Ok(())
     }
 }

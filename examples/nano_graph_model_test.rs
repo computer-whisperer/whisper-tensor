@@ -7,15 +7,12 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::Instant;
 
-use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::compiler::op_census;
-use whisper_tensor::dtype::DType;
 use whisper_tensor::graph::GlobalId;
 use whisper_tensor::model::Model;
 use whisper_tensor::nano_graph::lower;
 use whisper_tensor::nano_graph::optimize;
-use whisper_tensor::numeric_tensor::NumericTensor;
-use whisper_tensor::tensor_rank::DynRank;
+use whisper_tensor::tensor_info::TensorInfo;
 use whisper_tensor_import::identify_and_load;
 use whisper_tensor_import::onnx_graph::WeightStorageStrategy;
 
@@ -52,83 +49,40 @@ fn main() {
         println!("  {:>4}x  {}", count, kind);
     }
 
-    // ---- Create dummy inputs ----
+    // ---- Create inputs ----
+    // User inputs: shape+dtype only (values unknown at compile time).
+    // Model weights: full Numeric (values known at compile time).
     let input_info = model.get_input_tensor_info().unwrap();
     let sym_graph = model.get_symbolic_graph();
     let tensor_store = model.get_tensor_store();
     let tensors_by_name = sym_graph.get_tensors_by_name();
 
-    let mut inputs_by_name: HashMap<String, NumericTensor<DynRank>> = HashMap::new();
+    let mut all_infos: HashMap<GlobalId, TensorInfo> = HashMap::new();
+
+    // User inputs — Shaped (dtype + shape, no data).
     for (name, (dtype, shape_dims)) in &input_info {
-        let concrete_shape: Vec<usize> = shape_dims
+        let shape: Vec<u64> = shape_dims
             .iter()
-            .map(|d| d.map(|v| v as usize).unwrap_or(4))
+            .map(|d| d.unwrap_or(4))
             .collect();
-        let numel: usize = concrete_shape.iter().product();
-        let shape_u64: Vec<u64> = concrete_shape.iter().map(|&d| d as u64).collect();
-        let tensor: NumericTensor<DynRank> = match dtype {
-            DType::I64 => {
-                let data: Vec<i64> = (0..numel as i64).collect();
-                NDArrayNumericTensor::<DynRank>::from_vec_shape(data, &shape_u64)
-                    .unwrap()
-                    .into()
-            }
-            DType::I32 => {
-                let data: Vec<i32> = (0..numel as i32).collect();
-                NDArrayNumericTensor::<DynRank>::from_vec_shape(data, &shape_u64)
-                    .unwrap()
-                    .into()
-            }
-            DType::F32 => {
-                let data: Vec<f32> = vec![0.0; numel];
-                NDArrayNumericTensor::<DynRank>::from_vec_shape(data, &shape_u64)
-                    .unwrap()
-                    .into()
-            }
-            DType::F64 => {
-                let data: Vec<f64> = vec![0.0; numel];
-                NDArrayNumericTensor::<DynRank>::from_vec_shape(data, &shape_u64)
-                    .unwrap()
-                    .into()
-            }
-            DType::BF16 => {
-                let data: Vec<half::bf16> = vec![half::bf16::ZERO; numel];
-                NDArrayNumericTensor::<DynRank>::from_vec_shape(data, &shape_u64)
-                    .unwrap()
-                    .into()
-            }
-            DType::F16 => {
-                let data: Vec<half::f16> = vec![half::f16::ZERO; numel];
-                NDArrayNumericTensor::<DynRank>::from_vec_shape(data, &shape_u64)
-                    .unwrap()
-                    .into()
-            }
-            _ => {
-                println!("  Skipping input '{}' with dtype {:?}", name, dtype);
-                continue;
-            }
-        };
-        println!("  Input '{}': {:?} {:?}", name, dtype, tensor.shape());
-        inputs_by_name.insert(name.clone(), tensor);
+        let info = TensorInfo::from_dtype_and_shape(*dtype, &shape);
+        println!("  Input '{}': {:?} {:?}", name, dtype, shape);
+        if let Some(id) = tensors_by_name.get(name) {
+            all_infos.insert(*id, info);
+        }
     }
 
-    // Map inputs to GlobalIds and add weights.
-    let milli_inputs: HashMap<GlobalId, NumericTensor<DynRank>> = inputs_by_name
-        .into_iter()
-        .filter_map(|(name, tensor)| tensors_by_name.get(&name).map(|id| (*id, tensor)))
-        .collect();
-
+    // Model weights — Numeric (full data).
     let initialized = sym_graph.get_initialized_tensors(tensor_store);
-    let mut all_inputs = milli_inputs;
     for (id, tensor) in initialized {
-        all_inputs.insert(id, tensor);
+        all_infos.insert(id, TensorInfo::from(tensor));
     }
-    println!("  Total input tensors: {}", all_inputs.len());
+    println!("  Total input tensors: {}", all_infos.len());
 
     // ---- Lower to NanoGraph ----
     println!("\nLowering to NanoGraph...");
     let t0 = Instant::now();
-    let result = lower::lower(&milli_graph, &all_inputs).unwrap();
+    let result = lower::lower_with_info(&milli_graph, &all_infos).unwrap();
     let elapsed = t0.elapsed();
     println!("  Lowered in {:.1}ms", elapsed.as_secs_f64() * 1e3);
 

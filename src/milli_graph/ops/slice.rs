@@ -81,6 +81,113 @@ impl crate::graph::Node for Slice {
 }
 
 impl MilliOp for Slice {
+    fn infer(
+        &self,
+        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo>,
+        _symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        backend: &mut EvalBackend,
+    ) -> Result<
+        Box<dyn Iterator<Item = (GlobalId, crate::tensor_info::TensorInfo)>>,
+        MilliOpGraphError,
+    > {
+        use crate::tensor_info::TensorInfo;
+        use crate::scalar_info::ScalarInfoTyped;
+
+        let data_info = known_inputs.get(&self.data).ok_or(MilliOpGraphError::UnableToInfer)?;
+
+        // If all inputs are concrete, fall back to eval.
+        let all_numeric = data_info.as_numeric().is_some()
+            && known_inputs.get(&self.starts).and_then(|i| i.as_numeric()).is_some()
+            && known_inputs.get(&self.ends).and_then(|i| i.as_numeric()).is_some()
+            && self.steps.map_or(true, |id| known_inputs.get(&id).and_then(|i| i.as_numeric()).is_some())
+            && self.axes.map_or(true, |id| known_inputs.get(&id).and_then(|i| i.as_numeric()).is_some());
+        if all_numeric {
+            use crate::graph::Node;
+            let mut resolved = HashMap::new();
+            for id in Node::inputs(self) {
+                let info = known_inputs.get(&id).ok_or(MilliOpGraphError::UnableToInfer)?;
+                resolved.insert(id, info.as_numeric().unwrap().clone());
+            }
+            let collected: Vec<(GlobalId, TensorInfo)> = self
+                .eval(&resolved, backend)?
+                .map(|(a, b)| (a, TensorInfo::from(b)))
+                .collect();
+            return Ok(Box::new(collected.into_iter()));
+        }
+
+        // Shape-only inference: compute output shape from data shape + slice params.
+        let data_ranked = data_info.as_ranked().ok_or(MilliOpGraphError::UnableToInfer)?;
+        let data_shape = data_ranked.shape();
+        let data_rank = data_shape.len();
+
+        // Try to extract concrete i64 values from a tensor.
+        let extract_i64 = |id: &GlobalId| -> Option<Vec<i64>> {
+            let info = known_inputs.get(id)?;
+            let tensor = info.as_numeric()?;
+            let as_i64 = tensor.cast(DType::I64, &mut EvalBackend::NDArray).ok()?;
+            let rank1 = as_i64.try_to_rank::<P1>().ok()?;
+            Vec::<i64>::try_from(rank1.to_ndarray().ok()?).ok()
+        };
+
+        let starts = extract_i64(&self.starts);
+        let ends = extract_i64(&self.ends);
+        let steps: Option<Vec<i64>> = if let Some(steps_id) = &self.steps {
+            extract_i64(steps_id)
+        } else {
+            starts.as_ref().map(|s| s.iter().map(|_| 1i64).collect())
+        };
+        let axes: Option<Vec<usize>> = if let Some(axes_id) = &self.axes {
+            extract_i64(axes_id).map(|a| {
+                a.iter().map(|&v| if v < 0 { (v + data_rank as i64) as usize } else { v as usize }).collect()
+            })
+        } else {
+            starts.as_ref().map(|s| (0..s.len()).collect())
+        };
+
+        let mut out_dims = data_shape.clone();
+
+        // If we have concrete slice params, compute exact output dims.
+        // Otherwise, make sliced axes symbolic (we know the rank but not the dim sizes).
+        if let (Some(starts), Some(ends), Some(steps), Some(axes)) = (&starts, &ends, &steps, &axes) {
+            for (i, &axis) in axes.iter().enumerate() {
+                if let ScalarInfoTyped::Numeric(dim_val) = &data_shape[axis] {
+                    let dim = *dim_val as i64;
+                    let step = steps[i];
+                    let (start, end) = if step > 0 {
+                        let s = starts[i].clamp(-dim, dim);
+                        let s = if s < 0 { s + dim } else { s };
+                        let e = ends[i].clamp(-dim, dim);
+                        let e = if e < 0 { e + dim } else { e };
+                        (s, e)
+                    } else {
+                        let s = starts[i].clamp(-dim, dim - 1);
+                        let s = if s < 0 { s + dim } else { s };
+                        let e = ends[i].clamp(-dim - 1, dim);
+                        let e = if e < 0 { e + dim } else { e };
+                        (s, e)
+                    };
+                    let sliced = ((end - start + (step - step.signum())) / step).max(0) as u64;
+                    out_dims[axis] = ScalarInfoTyped::Numeric(sliced);
+                }
+                // If dim is symbolic, leave it symbolic.
+            }
+        } else if let Some(axes) = &axes {
+            // We know which axes are sliced but not the exact values —
+            // make those dims symbolic.
+            for &axis in axes {
+                out_dims[axis] = ScalarInfoTyped::Symbolic(
+                    crate::symbolic_scalar::SymbolicScalarTyped::new(_symbolic_resolver),
+                );
+            }
+        }
+        // If we don't even know the axes, all dims could be affected,
+        // but we still know the rank — keep existing dims (best effort).
+
+        let out_dtype = data_info.dtype();
+        let out_info = TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims);
+        Ok(Box::new([(self.output, out_info)].into_iter()))
+    }
+
     fn eval(
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,

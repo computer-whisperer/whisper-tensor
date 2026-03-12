@@ -356,6 +356,30 @@ impl Node for ClampMin {
 }
 
 impl MilliOp for ClampMin {
+    fn infer(
+        &self,
+        known_inputs: &HashMap<GlobalId, TensorInfo>,
+        _symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        backend: &mut EvalBackend,
+    ) -> Result<Box<dyn Iterator<Item = (GlobalId, TensorInfo)>>, MilliOpGraphError> {
+        let input_info = known_inputs
+            .get(&self.input)
+            .ok_or(MilliOpGraphError::UnableToInfer)?;
+
+        if input_info.as_numeric().is_some() {
+            let mut resolved = HashMap::new();
+            resolved.insert(self.input, input_info.as_numeric().unwrap().clone());
+            let collected: Vec<(GlobalId, TensorInfo)> = self
+                .eval(&resolved, backend)?
+                .map(|(a, b)| (a, TensorInfo::from(b)))
+                .collect();
+            return Ok(Box::new(collected.into_iter()));
+        }
+
+        // ClampMin preserves shape and dtype.
+        Ok(Box::new([(self.output, input_info.clone())].into_iter()))
+    }
+
     fn eval(
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,

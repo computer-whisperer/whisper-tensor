@@ -64,6 +64,51 @@ impl Node for Where {
 }
 
 impl MilliOp for Where {
+    fn infer(
+        &self,
+        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo>,
+        symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        backend: &mut EvalBackend,
+    ) -> Result<
+        Box<dyn Iterator<Item = (GlobalId, crate::tensor_info::TensorInfo)>>,
+        MilliOpGraphError,
+    > {
+        use crate::tensor_info::TensorInfo;
+
+        let cond_info = known_inputs.get(&self.condition).ok_or(MilliOpGraphError::UnableToInfer)?;
+        let x_info = known_inputs.get(&self.x).ok_or(MilliOpGraphError::UnableToInfer)?;
+        let y_info = known_inputs.get(&self.y).ok_or(MilliOpGraphError::UnableToInfer)?;
+
+        // If all concrete, fall back to eval.
+        if cond_info.as_numeric().is_some() && x_info.as_numeric().is_some() && y_info.as_numeric().is_some() {
+            let mut resolved = HashMap::new();
+            resolved.insert(self.condition, cond_info.as_numeric().unwrap().clone());
+            resolved.insert(self.x, x_info.as_numeric().unwrap().clone());
+            resolved.insert(self.y, y_info.as_numeric().unwrap().clone());
+            let collected: Vec<(GlobalId, TensorInfo)> = self
+                .eval(&resolved, backend)?
+                .map(|(a, b)| (a, TensorInfo::from(b)))
+                .collect();
+            return Ok(Box::new(collected.into_iter()));
+        }
+
+        // Where output = broadcast(condition, x, y), dtype = x.dtype
+        let c_shape = cond_info.shape(symbolic_resolver);
+        let x_shape = x_info.shape(symbolic_resolver);
+        let y_shape = y_info.shape(symbolic_resolver);
+
+        let out_rank = super::infer_multidirectional_broadcasting_rank(
+            &[c_shape, x_shape, y_shape],
+            symbolic_resolver,
+        )?;
+        let out_dtype = x_info.dtype();
+        let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
+            crate::symbolic_scalar::SymbolicScalar::new(out_dtype, symbolic_resolver),
+        );
+        let out_info = TensorInfo::new_from_first_element_and_rank(first_elem, out_rank, symbolic_resolver);
+        Ok(Box::new([(self.output, out_info)].into_iter()))
+    }
+
     fn eval(
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,

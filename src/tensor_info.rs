@@ -1038,6 +1038,16 @@ impl TensorInfo {
         )))
     }
 
+    /// Create a TensorInfo with known dtype and ScalarInfoTyped dims (may be symbolic).
+    pub fn from_dtype_and_shape_scalars(dtype: DType, shape: &[ScalarInfoTyped<u64>]) -> Self {
+        use crate::numeric_scalar::NumericScalar;
+        let first_element = ScalarInfo::Numeric(NumericScalar::zero_of(dtype));
+        TensorInfo::Ranked(TensorInfoRanked::Ranked(RankedTensor::new(
+            first_element,
+            shape.to_vec(),
+        )))
+    }
+
     /// Create a TensorInfo with known shape from a u64 slice. Dtype defaults to F32.
     /// Useful for broadcast analysis and tests.
     pub fn from_shape_u64(shape: &[u64]) -> Self {
@@ -1045,6 +1055,18 @@ impl TensorInfo {
         let dims: Vec<ScalarInfoTyped<u64>> =
             shape.iter().map(|&v| ScalarInfoTyped::Numeric(v)).collect();
         let first_element = ScalarInfo::Numeric(NumericScalar::F32(0.0));
+        TensorInfo::Ranked(TensorInfoRanked::Ranked(RankedTensor::new(
+            first_element,
+            dims,
+        )))
+    }
+
+    /// Create a TensorInfo with known dtype and shape, but no concrete values.
+    pub fn from_dtype_and_shape(dtype: DType, shape: &[u64]) -> Self {
+        use crate::numeric_scalar::NumericScalar;
+        let dims: Vec<ScalarInfoTyped<u64>> =
+            shape.iter().map(|&v| ScalarInfoTyped::Numeric(v)).collect();
+        let first_element = ScalarInfo::Numeric(NumericScalar::zero_of(dtype));
         TensorInfo::Ranked(TensorInfoRanked::Ranked(RankedTensor::new(
             first_element,
             dims,

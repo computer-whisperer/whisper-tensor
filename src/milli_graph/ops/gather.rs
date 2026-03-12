@@ -40,6 +40,19 @@ impl Gather {
 }
 
 impl Gather {
+    pub fn axis(&self) -> i64 {
+        self.axis
+    }
+    pub fn data_id(&self) -> GlobalId {
+        self.data
+    }
+    pub fn indices_id(&self) -> GlobalId {
+        self.indices
+    }
+    pub fn output_id(&self) -> GlobalId {
+        self.output
+    }
+
     pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl rand::Rng) {
         self.global_id = GlobalId::new(rng);
         super::remap(&mut self.output, map);
@@ -65,6 +78,61 @@ impl Node for Gather {
 }
 
 impl MilliOp for Gather {
+    fn infer(
+        &self,
+        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo>,
+        _symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        backend: &mut EvalBackend,
+    ) -> Result<
+        Box<dyn Iterator<Item = (GlobalId, crate::tensor_info::TensorInfo)>>,
+        crate::milli_graph::MilliOpGraphError,
+    > {
+        use crate::tensor_info::TensorInfo;
+
+        let data_info = known_inputs
+            .get(&self.data)
+            .ok_or(MilliOpGraphError::UnableToInfer)?;
+        let indices_info = known_inputs
+            .get(&self.indices)
+            .ok_or(MilliOpGraphError::UnableToInfer)?;
+
+        // If both inputs are concrete, fall back to eval for full precision.
+        if data_info.as_numeric().is_some() && indices_info.as_numeric().is_some() {
+            let mut resolved = HashMap::new();
+            resolved.insert(self.data, data_info.as_numeric().unwrap().clone());
+            resolved.insert(self.indices, indices_info.as_numeric().unwrap().clone());
+            let collected: Vec<(GlobalId, TensorInfo)> = self
+                .eval(&resolved, backend)?
+                .map(|(a, b)| (a, TensorInfo::from(b)))
+                .collect();
+            return Ok(Box::new(collected.into_iter()));
+        }
+
+        // Shape-only inference: output_shape = data[:axis] + indices.shape + data[axis+1:]
+        let data_ranked = data_info.as_ranked().ok_or(MilliOpGraphError::UnableToInfer)?;
+        let indices_ranked = indices_info.as_ranked().ok_or(MilliOpGraphError::UnableToInfer)?;
+
+        let data_shape = data_ranked.shape();
+        let indices_shape = indices_ranked.shape();
+        let data_rank = data_shape.len();
+
+        let axis = if self.axis < 0 {
+            (self.axis + data_rank as i64) as usize
+        } else {
+            self.axis as usize
+        };
+
+        // Build output dims: data[:axis] + indices_shape + data[axis+1:]
+        let mut out_dims: Vec<crate::scalar_info::ScalarInfoTyped<u64>> = Vec::new();
+        out_dims.extend_from_slice(&data_shape[..axis]);
+        out_dims.extend_from_slice(&indices_shape);
+        out_dims.extend_from_slice(&data_shape[axis + 1..]);
+
+        let out_dtype = data_info.dtype();
+        let out_info = TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims);
+        Ok(Box::new([(self.output, out_info)].into_iter()))
+    }
+
     fn backward(
         &self,
         output_grads: &HashMap<GlobalId, GlobalId>,

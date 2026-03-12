@@ -92,6 +92,90 @@ impl Node for Split {
 }
 
 impl MilliOp for Split {
+    fn infer(
+        &self,
+        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo>,
+        _symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        backend: &mut EvalBackend,
+    ) -> Result<
+        Box<dyn Iterator<Item = (GlobalId, crate::tensor_info::TensorInfo)>>,
+        MilliOpGraphError,
+    > {
+        use crate::tensor_info::TensorInfo;
+        use crate::scalar_info::ScalarInfoTyped;
+
+        let data_info = known_inputs.get(&self.data).ok_or(MilliOpGraphError::UnableToInfer)?;
+
+        // If all inputs are concrete, fall back to eval.
+        let split_numeric = match &self.split {
+            Some(MilliOpTensorIDOrLiteral::TensorID(id)) => {
+                known_inputs.get(id).and_then(|i| i.as_numeric()).is_some()
+            }
+            Some(MilliOpTensorIDOrLiteral::Literal(_)) => true,
+            None => true,
+        };
+        if data_info.as_numeric().is_some() && split_numeric {
+            let mut resolved = HashMap::new();
+            for id in self.inputs() {
+                let info = known_inputs.get(&id).ok_or(MilliOpGraphError::UnableToInfer)?;
+                resolved.insert(id, info.as_numeric().ok_or(MilliOpGraphError::UnableToInfer)?.clone());
+            }
+            let collected: Vec<(GlobalId, TensorInfo)> = self
+                .eval(&resolved, backend)?
+                .map(|(a, b)| (a, TensorInfo::from(b)))
+                .collect();
+            return Ok(Box::new(collected.into_iter()));
+        }
+
+        // Shape-only inference.
+        let data_ranked = data_info.as_ranked().ok_or(MilliOpGraphError::UnableToInfer)?;
+        let data_shape = data_ranked.shape();
+        let data_rank = data_shape.len();
+        let axis = if self.axis < 0 {
+            (self.axis + data_rank as i64) as usize
+        } else {
+            self.axis as usize
+        };
+
+        // Determine the split size for this output_id.
+        let split_sizes: Vec<i64> = if let Some(split) = &self.split {
+            match split {
+                MilliOpTensorIDOrLiteral::TensorID(id) => {
+                    let info = known_inputs.get(id).ok_or(MilliOpGraphError::UnableToInfer)?;
+                    let tensor = info.as_numeric().ok_or(MilliOpGraphError::UnableToInfer)?;
+                    tensor.clone().try_to_rank::<P1>()?.try_into()?
+                }
+                MilliOpTensorIDOrLiteral::Literal(lit) => {
+                    lit.try_to_rank::<P1>()?.try_into()?
+                }
+            }
+        } else if let Some(num_outputs) = self.num_outputs {
+            // Compute from data shape along axis.
+            if let ScalarInfoTyped::Numeric(dim_val) = &data_shape[axis] {
+                let dim = *dim_val as usize;
+                let base = dim / num_outputs;
+                let remainder = dim % num_outputs;
+                (0..num_outputs).map(|i| (base + if i < remainder { 1 } else { 0 }) as i64).collect()
+            } else {
+                return Err(MilliOpGraphError::UnableToInfer);
+            }
+        } else {
+            return Err(MilliOpGraphError::UnableToInfer);
+        };
+
+        // Output shape: same as data, but axis dim = split_sizes[output_id].
+        let mut out_dims = data_shape.clone();
+        if self.output_id < split_sizes.len() {
+            out_dims[axis] = ScalarInfoTyped::Numeric(split_sizes[self.output_id] as u64);
+        } else {
+            return Err(MilliOpGraphError::UnableToInfer);
+        }
+
+        let out_dtype = data_info.dtype();
+        let out_info = TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims);
+        Ok(Box::new([(self.output, out_info)].into_iter()))
+    }
+
     fn eval(
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,

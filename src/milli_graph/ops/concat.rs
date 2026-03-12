@@ -95,17 +95,71 @@ impl MilliOp for Concat {
             return Ok(Box::new(collected.into_iter()));
         }
 
-        // Concat: output rank = input rank, output dtype = first input dtype.
-        let first = input_infos[0];
-        let out_dtype = first.dtype();
-        let out_rank = first.rank();
+        // Try to compute concrete output dims from input shapes.
+        let out_dtype = input_infos[0].dtype();
 
-        let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
-            crate::symbolic_scalar::SymbolicScalar::new(out_dtype, symbolic_resolver),
-        );
-        let out_info =
-            TensorInfo::new_from_first_element_and_rank(first_elem, out_rank, symbolic_resolver);
-        Ok(Box::new([(self.output, out_info)].into_iter()))
+        // Find the rank from any input that has a known rank.
+        let rank = input_infos.iter()
+            .filter_map(|info| info.rank_if_known())
+            .next();
+
+        if let Some(rank) = rank {
+            use crate::scalar_info::ScalarInfoTyped;
+            use crate::symbolic_scalar::SymbolicScalarTyped;
+
+            let axis = if self.axis < 0 {
+                (self.axis + rank as i64) as usize
+            } else {
+                self.axis as usize
+            };
+
+            // Build output dims: take from first input that has shape, sum along concat axis.
+            let mut out_dims: Vec<ScalarInfoTyped<u64>> = Vec::with_capacity(rank);
+            for d in 0..rank {
+                if d == axis {
+                    // Sum the concat axis dims across all inputs.
+                    let mut total: Option<u64> = Some(0);
+                    for info in &input_infos {
+                        if let Some(dim_val) = info.dim_if_known(d) {
+                            total = total.map(|t| t + dim_val);
+                        } else {
+                            total = None;
+                            break;
+                        }
+                    }
+                    match total {
+                        Some(v) => out_dims.push(ScalarInfoTyped::Numeric(v)),
+                        None => out_dims.push(ScalarInfoTyped::Symbolic(
+                            SymbolicScalarTyped::new(symbolic_resolver),
+                        )),
+                    }
+                } else {
+                    // Non-concat axis: take from any input that has a known dim.
+                    let known_dim = input_infos.iter()
+                        .filter_map(|info| info.dim_if_known(d))
+                        .next();
+                    match known_dim {
+                        Some(v) => out_dims.push(ScalarInfoTyped::Numeric(v)),
+                        None => out_dims.push(ScalarInfoTyped::Symbolic(
+                            SymbolicScalarTyped::new(symbolic_resolver),
+                        )),
+                    }
+                }
+            }
+
+            let out_info = TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims);
+            Ok(Box::new([(self.output, out_info)].into_iter()))
+        } else {
+            // No input has known rank — fall back to Minimal.
+            let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
+                crate::symbolic_scalar::SymbolicScalar::new(out_dtype, symbolic_resolver),
+            );
+            let out_rank = input_infos[0].rank();
+            let out_info = TensorInfo::new_from_first_element_and_rank(
+                first_elem, out_rank, symbolic_resolver,
+            );
+            Ok(Box::new([(self.output, out_info)].into_iter()))
+        }
     }
 
     fn backward(

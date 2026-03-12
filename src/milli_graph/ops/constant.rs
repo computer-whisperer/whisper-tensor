@@ -143,6 +143,88 @@ impl Node for ConstantOfShape {
 }
 
 impl MilliOp for ConstantOfShape {
+    fn infer(
+        &self,
+        known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo>,
+        _symbolic_resolver: &mut crate::symbolic_scalar::SymbolicResolver,
+        backend: &mut EvalBackend,
+    ) -> Result<
+        Box<dyn Iterator<Item = (GlobalId, crate::tensor_info::TensorInfo)>>,
+        MilliOpGraphError,
+    > {
+        use crate::tensor_info::TensorInfo;
+        use crate::scalar_info::ScalarInfoTyped;
+
+        let shape_info = known_inputs.get(&self.shape).ok_or(MilliOpGraphError::UnableToInfer)?;
+
+        // If shape is concrete, fall back to eval.
+        if shape_info.as_numeric().is_some() {
+            let mut resolved = HashMap::new();
+            resolved.insert(self.shape, shape_info.as_numeric().unwrap().clone());
+            let collected: Vec<(GlobalId, TensorInfo)> = self
+                .eval(&resolved, backend)?
+                .map(|(a, b)| (a, TensorInfo::from(b)))
+                .collect();
+            return Ok(Box::new(collected.into_iter()));
+        }
+
+        // Shape-only inference: the shape tensor's VALUES are the output dims.
+        // If shape tensor is Ranked with known dims, each dim value tells us
+        // the rank of the output but not the actual dim sizes.
+        // If shape tensor is Shaped (1D with known length), we at least know the output rank.
+        let out_dtype = self.value.dtype();
+        if let Some(rank) = shape_info.rank_if_known() {
+            // shape is 1D — its first dim tells us the output rank.
+            if rank == 1 {
+                if let Some(out_rank) = shape_info.dim_if_known(0) {
+                    // We know the output rank. Build dims from shape tensor's values.
+                    // The shape tensor is [d0, d1, ...] — extract concrete dim values if available.
+                    // For a Shaped tensor, individual values may be known from the scalar_info.
+                    let out_rank = out_rank as usize;
+                    let mut out_dims: Vec<ScalarInfoTyped<u64>> = Vec::with_capacity(out_rank);
+                    for i in 0..out_rank {
+                        // Try to read the i-th element of the shape tensor.
+                        if let Some(val) = shape_info.get(&vec![i as u64], _symbolic_resolver) {
+                            match val {
+                                crate::scalar_info::ScalarInfo::Numeric(n) => {
+                                    use crate::numeric_scalar::NumericScalar;
+                                    let v = match n {
+                                        NumericScalar::I64(x) => x as u64,
+                                        NumericScalar::I32(x) => x as u64,
+                                        NumericScalar::U64(x) => x,
+                                        NumericScalar::U32(x) => x as u64,
+                                        NumericScalar::F32(x) => x as u64,
+                                        NumericScalar::F64(x) => x as u64,
+                                        _ => {
+                                            out_dims.push(ScalarInfoTyped::Symbolic(
+                                                crate::symbolic_scalar::SymbolicScalarTyped::new(_symbolic_resolver),
+                                            ));
+                                            continue;
+                                        }
+                                    };
+                                    out_dims.push(ScalarInfoTyped::Numeric(v));
+                                }
+                                _ => {
+                                    out_dims.push(ScalarInfoTyped::Symbolic(
+                                        crate::symbolic_scalar::SymbolicScalarTyped::new(_symbolic_resolver),
+                                    ));
+                                }
+                            }
+                        } else {
+                            out_dims.push(ScalarInfoTyped::Symbolic(
+                                crate::symbolic_scalar::SymbolicScalarTyped::new(_symbolic_resolver),
+                            ));
+                        }
+                    }
+                    let out_info = TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims);
+                    return Ok(Box::new([(self.output, out_info)].into_iter()));
+                }
+            }
+        }
+
+        Err(MilliOpGraphError::UnableToInfer)
+    }
+
     fn eval(
         &self,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
