@@ -68,8 +68,29 @@ impl MilliOp for Shape {
             return Ok(Box::new(collected.into_iter()));
         }
 
-        // Shape op always returns a 1-D i64 tensor of length = input_rank.
-        // Output rank is always 1.
+        // Shape op returns a 1-D i64 tensor with the input's dim values.
+        // If input has known rank, try to extract concrete dim values.
+        if let Some(rank) = input_info.rank_if_known() {
+            let mut all_known = true;
+            let mut dim_vals = Vec::with_capacity(rank);
+            for i in 0..rank {
+                if let Some(v) = input_info.dim_if_known(i) {
+                    dim_vals.push(v as i64);
+                } else {
+                    all_known = false;
+                    break;
+                }
+            }
+            if all_known {
+                // All dims concrete — produce a Numeric tensor.
+                let out: NumericTensor<DynRank> = NDArrayNumericTensor::<P1>::from(dim_vals)
+                    .to_dyn()
+                    .into();
+                return Ok(Box::new([(self.output, TensorInfo::from(out))].into_iter()));
+            }
+        }
+
+        // Fallback: symbolic output with known rank=1.
         let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
             crate::symbolic_scalar::SymbolicScalar::new(crate::dtype::DType::I64, symbolic_resolver),
         );
