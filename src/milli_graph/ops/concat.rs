@@ -36,6 +36,14 @@ impl Concat {
 }
 
 impl Concat {
+    pub(crate) fn axis(&self) -> i64 {
+        self.axis
+    }
+
+    pub(crate) fn concat_inputs(&self) -> &[GlobalId] {
+        &self.inputs
+    }
+
     pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl rand::Rng) {
         self.global_id = GlobalId::new(rng);
         super::remap(&mut self.output, map);

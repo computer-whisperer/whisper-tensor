@@ -12,6 +12,7 @@ pub enum ScalarBinOp {
     Max,
     Min,
     Mod,
+    Pow,
 }
 
 /// Unary scalar operations.
@@ -41,6 +42,8 @@ pub enum ScalarOp {
     Identity,
     /// Produce a constant value. No inputs.
     Literal(LiteralBits),
+    /// Ternary select: condition ? x : y. Three inputs: [condition, x, y].
+    Select,
     /// Reduce a dimension by summation. One input; the block iterates over the
     /// reduction dimension and accumulates.
     ReduceSum,

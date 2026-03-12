@@ -224,13 +224,6 @@ impl MilliOp for SimpleBinary {
             return Ok(Box::new(collected.into_iter()));
         }
 
-        // Use broadcast shape inference from the existing helpers.
-        let a_shape = a_info.shape(symbolic_resolver);
-        let b_shape = b_info.shape(symbolic_resolver);
-
-        let out_rank =
-            super::infer_multidirectional_broadcasting_rank(&[a_shape, b_shape], symbolic_resolver)?;
-
         // Determine output dtype: comparison ops produce Bool, others match input.
         let out_dtype = match self.which_op {
             WhichSimpleBinaryOp::Equal
@@ -243,6 +236,26 @@ impl MilliOp for SimpleBinary {
             | WhichSimpleBinaryOp::Xor => DType::BOOL,
             _ => a_info.dtype(),
         };
+
+        // Try per-dim broadcast shape inference for better precision.
+        let a_ranked = a_info.as_ranked();
+        let b_ranked = b_info.as_ranked();
+        if let (Some(a_ranked), Some(b_ranked)) = (a_ranked, b_ranked) {
+            let a_dims = a_ranked.shape();
+            let b_dims = b_ranked.shape();
+            if let Ok(out_dims) = super::infer_multidirectional_broadcasting_shape(
+                &[a_dims.clone(), b_dims.clone()], symbolic_resolver,
+            ) {
+                let out_info = TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims);
+                return Ok(Box::new([(self.output, out_info)].into_iter()));
+            }
+        }
+
+        // Fallback: rank-only inference.
+        let a_shape = a_info.shape(symbolic_resolver);
+        let b_shape = b_info.shape(symbolic_resolver);
+        let out_rank =
+            super::infer_multidirectional_broadcasting_rank(&[a_shape, b_shape], symbolic_resolver)?;
 
         let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
             crate::symbolic_scalar::SymbolicScalar::new(out_dtype, symbolic_resolver),
@@ -428,15 +441,28 @@ impl MilliOp for Pow {
             return Ok(Box::new(collected.into_iter()));
         }
 
-        // Pow follows binary broadcast rules, same as SimpleBinary.
-        let a_shape = a_info.shape(symbolic_resolver);
-        let b_shape = b_info.shape(symbolic_resolver);
-
-        let out_rank =
-            super::infer_multidirectional_broadcasting_rank(&[a_shape, b_shape], symbolic_resolver)?;
-
         // Output dtype = input dtype.
         let out_dtype = a_info.dtype();
+
+        // Try per-dim broadcast shape inference.
+        let a_ranked = a_info.as_ranked();
+        let b_ranked = b_info.as_ranked();
+        if let (Some(a_ranked), Some(b_ranked)) = (a_ranked, b_ranked) {
+            let a_dims = a_ranked.shape();
+            let b_dims = b_ranked.shape();
+            if let Ok(out_dims) = super::infer_multidirectional_broadcasting_shape(
+                &[a_dims.clone(), b_dims.clone()], symbolic_resolver,
+            ) {
+                let out_info = TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims);
+                return Ok(Box::new([(self.output, out_info)].into_iter()));
+            }
+        }
+
+        // Fallback: rank-only inference.
+        let a_shape = a_info.shape(symbolic_resolver);
+        let b_shape = b_info.shape(symbolic_resolver);
+        let out_rank =
+            super::infer_multidirectional_broadcasting_rank(&[a_shape, b_shape], symbolic_resolver)?;
 
         let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
             crate::symbolic_scalar::SymbolicScalar::new(out_dtype, symbolic_resolver),

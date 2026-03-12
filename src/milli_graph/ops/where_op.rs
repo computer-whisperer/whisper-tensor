@@ -92,16 +92,29 @@ impl MilliOp for Where {
             return Ok(Box::new(collected.into_iter()));
         }
 
-        // Where output = broadcast(condition, x, y), dtype = x.dtype
+        let out_dtype = x_info.dtype();
+
+        // Try per-dim broadcast shape inference.
+        if let (Some(c_ranked), Some(x_ranked), Some(y_ranked)) =
+            (cond_info.as_ranked(), x_info.as_ranked(), y_info.as_ranked())
+        {
+            if let Ok(out_dims) = super::infer_multidirectional_broadcasting_shape(
+                &[c_ranked.shape(), x_ranked.shape(), y_ranked.shape()],
+                symbolic_resolver,
+            ) {
+                let out_info = TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims);
+                return Ok(Box::new([(self.output, out_info)].into_iter()));
+            }
+        }
+
+        // Fallback: rank-only inference.
         let c_shape = cond_info.shape(symbolic_resolver);
         let x_shape = x_info.shape(symbolic_resolver);
         let y_shape = y_info.shape(symbolic_resolver);
-
         let out_rank = super::infer_multidirectional_broadcasting_rank(
             &[c_shape, x_shape, y_shape],
             symbolic_resolver,
         )?;
-        let out_dtype = x_info.dtype();
         let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
             crate::symbolic_scalar::SymbolicScalar::new(out_dtype, symbolic_resolver),
         );

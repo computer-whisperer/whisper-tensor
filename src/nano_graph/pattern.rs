@@ -55,17 +55,28 @@ pub enum InputRef {
     /// (e.g., Gather with compile-time-known indices, irregular Concat).
     /// Length must equal the group's `count`.
     Explicit(Vec<AtomId>),
+    /// Source depends on both atom offset `i` and sym_dim iteration index `k`.
+    /// Resolves to `base + stride_i * i + stride_k * k`.
+    /// Used for contractions (MatMul) where each output atom's source
+    /// varies with the reduction iteration.
+    SymAffine { base: AtomId, stride_i: i32, stride_k: i32 },
 }
 
 impl InputRef {
-    /// Resolve the source atom for the `i`-th atom in the group.
-    pub fn resolve(&self, i: u32) -> AtomId {
+    /// Resolve the source atom for the `i`-th atom in the group,
+    /// at sym_dim iteration `k` (ignored for non-SymAffine variants).
+    pub fn resolve(&self, i: u32, k: u32) -> AtomId {
         match self {
             InputRef::Broadcast(id) => *id,
             InputRef::Affine { base, stride } => {
                 AtomId(base.0.wrapping_add((*stride as i64 * i as i64) as u32))
             }
             InputRef::Explicit(ids) => ids[i as usize],
+            InputRef::SymAffine { base, stride_i, stride_k } => {
+                AtomId(base.0.wrapping_add(
+                    (*stride_i as i64 * i as i64 + *stride_k as i64 * k as i64) as u32,
+                ))
+            }
         }
     }
 
@@ -80,6 +91,7 @@ impl InputRef {
                 seen.dedup();
                 seen.len()
             }
+            InputRef::SymAffine { .. } => count as usize, // lower bound; actual depends on k range
         }
     }
 }
@@ -143,6 +155,10 @@ pub struct NanoGraph {
     next_atom_id: u32,
     /// Named symbolic dimensions (e.g., "batch" → SymDim(0)).
     pub sym_dim_names: HashMap<String, SymDim>,
+    /// Known upper bounds for symbolic dimensions. A SymDim with a known bound
+    /// is used for contractions (e.g., MatMul's K dimension) where the extent
+    /// is compile-time known but the dim is iterated over during reduction.
+    pub sym_dim_bounds: HashMap<SymDim, u64>,
     next_sym_dim: u16,
     /// Which atoms are final outputs of the computation.
     pub outputs: Vec<AtomId>,
@@ -168,6 +184,14 @@ impl NanoGraph {
     /// Look up a sym dim by name without creating it.
     pub fn get_sym_dim(&self, name: &str) -> Option<SymDim> {
         self.sym_dim_names.get(name).copied()
+    }
+
+    /// Create a symbolic dimension with a known upper bound.
+    /// Used for contraction dimensions (MatMul K, reduction axes).
+    pub fn bounded_sym_dim(&mut self, name: &str, bound: u64) -> SymDim {
+        let sd = self.sym_dim(name);
+        self.sym_dim_bounds.insert(sd, bound);
+        sd
     }
 
     /// Allocate `count` contiguous AtomIds. Returns the base id.
@@ -288,6 +312,7 @@ impl NanoGraph {
                     crate::nano_graph::ScalarBinOp::Max => "Max",
                     crate::nano_graph::ScalarBinOp::Min => "Min",
                     crate::nano_graph::ScalarBinOp::Mod => "Mod",
+                    crate::nano_graph::ScalarBinOp::Pow => "Pow",
                 },
                 ScalarOp::Unary(u) => match u {
                     crate::nano_graph::ScalarUnaryOp::Neg => "Neg",
@@ -302,6 +327,7 @@ impl NanoGraph {
                 },
                 ScalarOp::Identity => "Identity",
                 ScalarOp::Literal(_) => "Literal",
+                ScalarOp::Select => "Select",
                 ScalarOp::ReduceSum => "ReduceSum",
                 ScalarOp::ReduceMax => "ReduceMax",
             };
@@ -324,14 +350,32 @@ impl NanoGraph {
         for (gi, group) in self.groups.iter().enumerate() {
             // Verify input refs resolve to existing atoms.
             for (inp_idx, input) in group.inputs.iter().enumerate() {
-                for i in 0..group.count {
-                    let source = input.resolve(i);
-                    if !self.contains_atom(source) {
-                        errors.push(format!(
-                            "Group {} (base={}) input {} atom offset {}: references nonexistent atom {}",
-                            gi, group.base_id, inp_idx, i, source
-                        ));
-                        break; // don't spam for every atom in the group
+                match input {
+                    InputRef::SymAffine { .. } => {
+                        // SymAffine depends on k — validate at k=0 only
+                        // (full validation would need sym_dim_bounds).
+                        for i in 0..group.count {
+                            let source = input.resolve(i, 0);
+                            if !self.contains_atom(source) {
+                                errors.push(format!(
+                                    "Group {} (base={}) input {} atom offset {} k=0: references nonexistent atom {}",
+                                    gi, group.base_id, inp_idx, i, source
+                                ));
+                                break;
+                            }
+                        }
+                    }
+                    _ => {
+                        for i in 0..group.count {
+                            let source = input.resolve(i, 0);
+                            if !self.contains_atom(source) {
+                                errors.push(format!(
+                                    "Group {} (base={}) input {} atom offset {}: references nonexistent atom {}",
+                                    gi, group.base_id, inp_idx, i, source
+                                ));
+                                break;
+                            }
+                        }
                     }
                 }
 
@@ -351,6 +395,7 @@ impl NanoGraph {
                 ScalarOp::Literal(_) => 0,
                 ScalarOp::Unary(_) | ScalarOp::Identity => 1,
                 ScalarOp::Binary(_) => 2,
+                ScalarOp::Select => 3,
                 ScalarOp::ReduceSum | ScalarOp::ReduceMax => 1,
             };
             if group.inputs.len() != expected_inputs {
@@ -607,17 +652,24 @@ mod tests {
     fn test_input_ref_resolve() {
         let base = AtomId(100);
         let broadcast = InputRef::Broadcast(AtomId(5));
-        assert_eq!(broadcast.resolve(0), AtomId(5));
-        assert_eq!(broadcast.resolve(99), AtomId(5));
+        assert_eq!(broadcast.resolve(0, 0), AtomId(5));
+        assert_eq!(broadcast.resolve(99, 0), AtomId(5));
 
         let affine = InputRef::Affine { base, stride: 2 };
-        assert_eq!(affine.resolve(0), AtomId(100));
-        assert_eq!(affine.resolve(1), AtomId(102));
-        assert_eq!(affine.resolve(3), AtomId(106));
+        assert_eq!(affine.resolve(0, 0), AtomId(100));
+        assert_eq!(affine.resolve(1, 0), AtomId(102));
+        assert_eq!(affine.resolve(3, 0), AtomId(106));
 
         let explicit = InputRef::Explicit(vec![AtomId(10), AtomId(20), AtomId(30)]);
-        assert_eq!(explicit.resolve(0), AtomId(10));
-        assert_eq!(explicit.resolve(1), AtomId(20));
-        assert_eq!(explicit.resolve(2), AtomId(30));
+        assert_eq!(explicit.resolve(0, 0), AtomId(10));
+        assert_eq!(explicit.resolve(1, 0), AtomId(20));
+        assert_eq!(explicit.resolve(2, 0), AtomId(30));
+
+        // SymAffine: base=100, stride_i=3, stride_k=10
+        let sym = InputRef::SymAffine { base: AtomId(100), stride_i: 3, stride_k: 10 };
+        assert_eq!(sym.resolve(0, 0), AtomId(100));
+        assert_eq!(sym.resolve(1, 0), AtomId(103));
+        assert_eq!(sym.resolve(0, 1), AtomId(110));
+        assert_eq!(sym.resolve(2, 3), AtomId(100 + 6 + 30)); // 136
     }
 }

@@ -122,39 +122,33 @@ impl MilliOp for ReduceMean {
             }
         }
 
-        // ReduceMean output dtype matches input dtype.
         let out_dtype = data_info.dtype();
 
-        // Try to determine number of reduced axes from the axes tensor.
+        // Try per-dim shape inference first.
+        if let Some(out_dims) = super::infer_reduce_output_shape(
+            data_info, self.axes, self.keepdims, self.noop_with_empty_axes,
+            known_inputs, symbolic_resolver,
+        ) {
+            let out_info = TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims);
+            return Ok(Box::new([(self.output, out_info)].into_iter()));
+        }
+
+        // Fallback: rank-only inference.
         let num_axes: Option<usize> = if let Some(ax_id) = self.axes {
-            if let Some(ax_info) = known_inputs.get(&ax_id) {
-                ax_info.rank_if_known().and_then(|_| {
-                    ax_info.dim_if_known(0).map(|n| n as usize)
-                })
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+            known_inputs.get(&ax_id).and_then(|ax_info| {
+                ax_info.rank_if_known().and_then(|_| ax_info.dim_if_known(0).map(|n| n as usize))
+            })
+        } else { None };
 
         let out_rank: ScalarInfoTyped<u32> = match data_info.rank() {
             ScalarInfoTyped::Numeric(input_rank) => {
                 if self.axes.is_none() {
-                    if self.keepdims {
-                        ScalarInfoTyped::Numeric(input_rank)
-                    } else {
-                        ScalarInfoTyped::Numeric(0)
-                    }
+                    ScalarInfoTyped::Numeric(if self.keepdims { input_rank } else { 0 })
                 } else if let Some(n) = num_axes {
                     if n == 0 && self.noop_with_empty_axes {
                         ScalarInfoTyped::Numeric(input_rank)
                     } else if n == 0 {
-                        if self.keepdims {
-                            ScalarInfoTyped::Numeric(input_rank)
-                        } else {
-                            ScalarInfoTyped::Numeric(0)
-                        }
+                        ScalarInfoTyped::Numeric(if self.keepdims { input_rank } else { 0 })
                     } else if self.keepdims {
                         ScalarInfoTyped::Numeric(input_rank)
                     } else {

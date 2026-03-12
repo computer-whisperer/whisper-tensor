@@ -46,6 +46,22 @@ impl Slice {
 }
 
 impl Slice {
+    pub(crate) fn data_id(&self) -> GlobalId {
+        self.data
+    }
+    pub(crate) fn starts_id(&self) -> GlobalId {
+        self.starts
+    }
+    pub(crate) fn ends_id(&self) -> GlobalId {
+        self.ends
+    }
+    pub(crate) fn steps_id(&self) -> Option<GlobalId> {
+        self.steps
+    }
+    pub(crate) fn axes_id(&self) -> Option<GlobalId> {
+        self.axes
+    }
+
     pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl rand::Rng) {
         self.global_id = GlobalId::new(rng);
         super::remap(&mut self.output, map);

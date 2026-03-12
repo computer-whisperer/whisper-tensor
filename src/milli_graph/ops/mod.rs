@@ -262,6 +262,71 @@ fn infer_multidirectional_broadcasting_shape(
     Ok(output_shape)
 }
 
+/// Compute per-dim output shape for a reduce op when input shape and axes are (partially) known.
+/// Returns None if we can't compute the shape (fall back to rank-only inference).
+fn infer_reduce_output_shape(
+    data_info: &crate::tensor_info::TensorInfo,
+    axes_id: Option<GlobalId>,
+    keepdims: bool,
+    noop_with_empty_axes: bool,
+    known_inputs: &HashMap<GlobalId, crate::tensor_info::TensorInfo>,
+    symbolic_resolver: &mut SymbolicResolver,
+) -> Option<Vec<ScalarInfoTyped<u64>>> {
+    use crate::dtype::DType;
+
+    // Need input with known per-dim shape.
+    let data_ranked = data_info.as_ranked()?;
+    let data_shape = data_ranked.shape();
+    let rank = data_shape.len();
+
+    // Get concrete axes values.
+    let axes: Vec<usize> = if let Some(ax_id) = axes_id {
+        let ax_info = known_inputs.get(&ax_id)?;
+        let tensor = ax_info.as_numeric()?;
+        let as_i64 = tensor.cast(DType::I64, &mut crate::backends::eval_backend::EvalBackend::NDArray).ok()?;
+        let rank1 = as_i64.try_to_rank::<typenum::P1>().ok()?;
+        let vals = Vec::<i64>::try_from(rank1.to_ndarray().ok()?).ok()?;
+        vals.iter().map(|&a| {
+            if a < 0 { (a + rank as i64) as usize } else { a as usize }
+        }).collect()
+    } else {
+        // No axes → reduce all.
+        (0..rank).collect()
+    };
+
+    if axes.is_empty() && noop_with_empty_axes {
+        return Some(data_shape.clone());
+    }
+    if axes.is_empty() {
+        // Empty axes, not noop → reduce all.
+        let axes: Vec<usize> = (0..rank).collect();
+        return infer_reduce_dims(&data_shape, &axes, keepdims, symbolic_resolver);
+    }
+
+    infer_reduce_dims(&data_shape, &axes, keepdims, symbolic_resolver)
+}
+
+fn infer_reduce_dims(
+    data_shape: &[ScalarInfoTyped<u64>],
+    axes: &[usize],
+    keepdims: bool,
+    _symbolic_resolver: &mut SymbolicResolver,
+) -> Option<Vec<ScalarInfoTyped<u64>>> {
+    let rank = data_shape.len();
+    let mut out_dims = Vec::new();
+    for i in 0..rank {
+        if axes.contains(&i) {
+            if keepdims {
+                out_dims.push(ScalarInfoTyped::Numeric(1));
+            }
+            // else: dim is removed
+        } else {
+            out_dims.push(data_shape[i].clone());
+        }
+    }
+    Some(out_dims)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AnyMilliOp {
     Constant(Constant),

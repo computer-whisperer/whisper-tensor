@@ -91,8 +91,15 @@ impl MilliOp for CastLike {
             return Ok(Box::new(collected.into_iter()));
         }
 
-        // Same shape as data, dtype from target.
+        // Same shape as data, dtype from target. Preserve per-dim shape info.
         let out_dtype = target_info.dtype();
+
+        if let Some(ranked) = data_info.as_ranked() {
+            let dims = ranked.shape();
+            let out_info = TensorInfo::from_dtype_and_shape_scalars(out_dtype, &dims);
+            return Ok(Box::new([(self.output, out_info)].into_iter()));
+        }
+
         let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
             crate::symbolic_scalar::SymbolicScalar::new(out_dtype, symbolic_resolver),
         );
