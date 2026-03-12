@@ -48,6 +48,10 @@ where
         }
     }
 
+    pub(crate) fn symbol_idx(&self) -> usize {
+        self.symbol_idx
+    }
+
     #[allow(dead_code)]
     pub(crate) fn try_eq(&self, other: &Self) -> Option<bool> {
         if self.symbol_idx == other.symbol_idx {

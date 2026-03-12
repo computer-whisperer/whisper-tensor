@@ -36,6 +36,26 @@ impl Dim {
             Dim::Symbolic(_) => None,
         }
     }
+
+    /// Returns true if this is known to be 1 (for broadcasting).
+    pub fn is_one(&self) -> bool {
+        matches!(self, Dim::Known(1))
+    }
+
+    /// Returns true if both dims are known and equal, or same symbolic variable.
+    pub fn matches(&self, other: &Dim) -> bool {
+        match (self, other) {
+            (Dim::Known(a), Dim::Known(b)) => a == b,
+            (Dim::Symbolic(a), Dim::Symbolic(b)) => a == b,
+            _ => false,
+        }
+    }
+
+    /// Convert to usize if known. Panics on symbolic — use only when you've
+    /// verified the dim is concrete.
+    pub fn as_usize(&self) -> Option<usize> {
+        self.as_known().map(|n| n as usize)
+    }
 }
 
 /// Describes how one input to a pattern block is sourced from another block's

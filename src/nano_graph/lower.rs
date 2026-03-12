@@ -14,6 +14,7 @@ use crate::milli_graph::ops::AnyMilliOp;
 use crate::nano_graph::ops::{LiteralBits, ScalarBinOp, ScalarOp, ScalarUnaryOp};
 use crate::nano_graph::pattern::{BlockId, Dim, InputRef, NanoGraph, SourceDimMap};
 use crate::numeric_tensor::NumericTensor;
+use crate::tensor_info::TensorInfo;
 use crate::DynRank;
 
 /// Tracks how a MilliOp tensor maps to the NanoGraph.
@@ -27,7 +28,8 @@ enum TensorRef {
     Block {
         block_id: BlockId,
         /// The logical shape of the tensor as seen by consumers.
-        shape: Vec<usize>,
+        /// Dims may be Known (concrete) or Symbolic (unknown at graph-build time).
+        shape: Vec<Dim>,
         /// Permutation from logical dims to source block dims.
         /// If None, logical dims == block dims (identity).
         /// perm[logical_dim] = block_dim
@@ -63,30 +65,49 @@ pub struct LowerResult {
     pub tensor_to_block: HashMap<GlobalId, BlockId>,
 }
 
-/// Lower a MilliOpGraph into a NanoGraph.
+/// Lower a MilliOpGraph into a NanoGraph using concrete inputs.
 ///
-/// Requires concrete inputs to resolve all tensor shapes, dtypes, and
-/// values (needed for constant folding and resolving shape/axes tensors).
+/// Convenience wrapper that converts NumericTensors to TensorInfo and
+/// calls `lower_with_info`.
 pub fn lower(
     graph: &MilliOpGraph,
     inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
 ) -> Result<LowerResult, LowerError> {
-    // Run the graph to collect all shapes, dtypes, and intermediate values.
-    let all_values = graph.collect_all_intermediate_values(inputs)?;
+    let info_inputs: HashMap<GlobalId, TensorInfo> = inputs
+        .iter()
+        .map(|(id, tensor)| (*id, TensorInfo::from(tensor.clone())))
+        .collect();
+    lower_with_info(graph, &info_inputs)
+}
 
-    let mut shapes: HashMap<GlobalId, Vec<usize>> = HashMap::new();
+/// Lower a MilliOpGraph into a NanoGraph using partial tensor information.
+///
+/// Accepts `TensorInfo` inputs which may be concrete (Numeric), shape-only
+/// (Shaped/Ranked), or dtype-only (Minimal). Uses `infer_all()` to propagate
+/// shapes and dtypes through the graph. Concrete values are extracted where
+/// available for meta tensors (axes, shape tensors for Reshape/Slice/etc).
+pub fn lower_with_info(
+    graph: &MilliOpGraph,
+    inputs: &HashMap<GlobalId, TensorInfo>,
+) -> Result<LowerResult, LowerError> {
+    // Use infer_all to propagate shape/dtype info through the graph.
+    let all_infos = graph.infer_all(inputs)?;
+
+    let mut dims_map: HashMap<GlobalId, Vec<Dim>> = HashMap::new();
     let mut dtypes: HashMap<GlobalId, DType> = HashMap::new();
-    for (id, tensor) in &all_values {
-        shapes.insert(*id, tensor.shape().iter().map(|&d| d as usize).collect());
-        dtypes.insert(*id, tensor.dtype());
+    for (id, info) in &all_infos {
+        dtypes.insert(*id, info.dtype());
+        if let Some(dims) = info.dims_for_nano() {
+            dims_map.insert(*id, dims);
+        }
     }
 
     let mut ctx = LowerCtx {
         nano: NanoGraph::new(),
         refs: HashMap::new(),
-        shapes,
+        dims: dims_map,
         dtypes,
-        values: all_values,
+        infos: all_infos,
         unsupported: Vec::new(),
     };
 
@@ -154,15 +175,17 @@ pub fn lower(
 struct LowerCtx {
     nano: NanoGraph,
     refs: HashMap<GlobalId, TensorRef>,
-    shapes: HashMap<GlobalId, Vec<usize>>,
+    dims: HashMap<GlobalId, Vec<Dim>>,
     dtypes: HashMap<GlobalId, DType>,
-    values: HashMap<GlobalId, NumericTensor<DynRank>>,
+    /// Full TensorInfo for each tensor — used to extract concrete values
+    /// from Numeric tensors (for meta tensors like axes, shape, etc).
+    infos: HashMap<GlobalId, TensorInfo>,
     unsupported: Vec<(GlobalId, String)>,
 }
 
 impl LowerCtx {
-    fn get_shape(&self, id: &GlobalId) -> Result<&[usize], LowerError> {
-        self.shapes
+    fn get_dims(&self, id: &GlobalId) -> Result<&[Dim], LowerError> {
+        self.dims
             .get(id)
             .map(|s| s.as_slice())
             .ok_or(LowerError::MissingShape(*id))
@@ -179,14 +202,18 @@ impl LowerCtx {
         self.refs.get(id).ok_or(LowerError::MissingRef(*id))
     }
 
-    /// Read a tensor's value as a Vec<i64> (for axes, shape tensors).
+    /// Read a tensor's concrete value as a Vec<i64> (for axes, shape tensors).
+    /// Only works if the tensor is Numeric (concrete). Returns MissingValue
+    /// if the tensor is symbolic.
     fn read_i64_values(&self, id: &GlobalId, context: &'static str) -> Result<Vec<i64>, LowerError> {
         use typenum::P1;
-        let tensor = self
-            .values
+        let info = self
+            .infos
             .get(id)
             .ok_or(LowerError::MissingValue(*id, context))?;
-        // Convert to rank-1 NDArray then to Vec<i64>.
+        let tensor = info
+            .as_numeric()
+            .ok_or(LowerError::MissingValue(*id, context))?;
         let rank1 = tensor
             .try_to_rank::<P1>()
             .map_err(|_| LowerError::MissingValue(*id, context))?;
@@ -198,14 +225,13 @@ impl LowerCtx {
 
     /// Register an external input or constant tensor.
     fn register_input(&mut self, tensor_id: GlobalId) -> Result<BlockId, LowerError> {
-        let shape = self.get_shape(&tensor_id)?.to_vec();
+        let dims = self.get_dims(&tensor_id)?.to_vec();
         let dtype = self.get_dtype(&tensor_id)?;
-        let dims: Vec<Dim> = shape.iter().map(|&s| Dim::Known(s as u64)).collect();
 
         let block_id = self.nano.push(
             ScalarOp::Literal(LiteralBits::f32(0.0)), // sentinel; runtime fills
             dtype,
-            dims,
+            dims.clone(),
             vec![],
         );
 
@@ -213,7 +239,7 @@ impl LowerCtx {
             tensor_id,
             TensorRef::Block {
                 block_id,
-                shape: shape.clone(),
+                shape: dims,
                 perm: None,
             },
         );
@@ -225,7 +251,7 @@ impl LowerCtx {
     fn build_elementwise_input(
         &self,
         source_id: &GlobalId,
-        output_shape: &[usize],
+        output_shape: &[Dim],
     ) -> Result<InputRef, LowerError> {
         let tref = self.get_ref(source_id)?;
         let (block_id, source_shape, perm) = match tref {
@@ -263,12 +289,10 @@ impl LowerCtx {
             for bd in 0..block_ndim {
                 let out_dim = bd + boffset;
                 if out_dim < out_ndim {
-                    let block_size = block_dims[bd].as_known().unwrap_or(1) as usize;
-                    if block_size == output_shape[out_dim] {
-                        dim_map[bd] = SourceDimMap::identity(out_dim, out_ndim);
-                    } else if block_size == 1 {
+                    if block_dims[bd].is_one() {
                         dim_map[bd] = SourceDimMap::constant(0);
                     } else {
+                        // Same size or symbolic — use identity mapping.
                         dim_map[bd] = SourceDimMap::identity(out_dim, out_ndim);
                     }
                 }
@@ -293,11 +317,11 @@ impl LowerCtx {
             };
 
             if block_dim < block_ndim {
-                if source_shape[src_logical] == output_shape[out_dim] {
-                    dim_map[block_dim] = SourceDimMap::identity(out_dim, out_ndim);
-                } else if source_shape[src_logical] == 1 {
+                if source_shape[src_logical].is_one() {
+                    // Broadcast: source dim is 1, output dim may be larger.
                     dim_map[block_dim] = SourceDimMap::constant(0);
                 } else {
+                    // Same size, symbolic, or non-broadcast — identity map.
                     dim_map[block_dim] = SourceDimMap::identity(out_dim, out_ndim);
                 }
             }
@@ -354,7 +378,7 @@ impl LowerCtx {
         let kind = op.op_kind();
         let inputs: Vec<GlobalId> = op.inputs().collect();
         let out_id = op.outputs().next().unwrap();
-        let out_shape = self.get_shape(&out_id)?.to_vec();
+        let out_dims = self.get_dims(&out_id)?.to_vec();
         let out_dtype = self.get_dtype(&out_id)?;
 
         let scalar_op = match kind.as_str() {
@@ -370,14 +394,13 @@ impl LowerCtx {
             _ => return Err(LowerError::UnsupportedOp(kind)),
         };
 
-        let dims: Vec<Dim> = out_shape.iter().map(|&s| Dim::Known(s as u64)).collect();
-        let inp_a = self.build_elementwise_input(&inputs[0], &out_shape)?;
-        let inp_b = self.build_elementwise_input(&inputs[1], &out_shape)?;
+        let inp_a = self.build_elementwise_input(&inputs[0], &out_dims)?;
+        let inp_b = self.build_elementwise_input(&inputs[1], &out_dims)?;
 
         let block_id = self.nano.push(
             ScalarOp::Binary(scalar_op),
             out_dtype,
-            dims,
+            out_dims.clone(),
             vec![inp_a, inp_b],
         );
 
@@ -385,7 +408,7 @@ impl LowerCtx {
             out_id,
             TensorRef::Block {
                 block_id,
-                shape: out_shape,
+                shape: out_dims,
                 perm: None,
             },
         );
@@ -396,7 +419,7 @@ impl LowerCtx {
         let kind = op.op_kind();
         let inputs: Vec<GlobalId> = op.inputs().collect();
         let out_id = op.outputs().next().unwrap();
-        let out_shape = self.get_shape(&out_id)?.to_vec();
+        let out_dims = self.get_dims(&out_id)?.to_vec();
         let out_dtype = self.get_dtype(&out_id)?;
 
         let scalar_op = match kind.as_str() {
@@ -413,13 +436,12 @@ impl LowerCtx {
             _ => return Err(LowerError::UnsupportedOp(kind)),
         };
 
-        let dims: Vec<Dim> = out_shape.iter().map(|&s| Dim::Known(s as u64)).collect();
-        let inp = self.build_elementwise_input(&inputs[0], &out_shape)?;
+        let inp = self.build_elementwise_input(&inputs[0], &out_dims)?;
 
         let block_id = self.nano.push(
             ScalarOp::Unary(scalar_op),
             out_dtype,
-            dims,
+            out_dims.clone(),
             vec![inp],
         );
 
@@ -427,7 +449,7 @@ impl LowerCtx {
             out_id,
             TensorRef::Block {
                 block_id,
-                shape: out_shape,
+                shape: out_dims,
                 perm: None,
             },
         );
@@ -438,41 +460,41 @@ impl LowerCtx {
         let inputs: Vec<GlobalId> = op.inputs().collect();
         let out_id = op.outputs().next().unwrap();
 
-        let a_shape = self.get_shape(&inputs[0])?.to_vec();
-        let b_shape = self.get_shape(&inputs[1])?.to_vec();
-        let out_shape = self.get_shape(&out_id)?.to_vec();
+        let a_dims = self.get_dims(&inputs[0])?.to_vec();
+        let b_dims = self.get_dims(&inputs[1])?.to_vec();
+        let out_dims = self.get_dims(&out_id)?.to_vec();
         let out_dtype = self.get_dtype(&out_id)?;
 
         // Handle batched matmul: (..., M, K) x (..., K, N) → (..., M, N)
-        let a_rank = a_shape.len();
-        let b_rank = b_shape.len();
+        let a_rank = a_dims.len();
+        let b_rank = b_dims.len();
 
         if a_rank < 2 || b_rank < 2 {
             return Err(LowerError::UnsupportedOp(format!(
                 "MatMul with rank < 2: A{:?} B{:?}",
-                a_shape, b_shape
+                a_dims, b_dims
             )));
         }
 
-        let m = a_shape[a_rank - 2];
-        let k = a_shape[a_rank - 1];
-        let n = b_shape[b_rank - 1];
+        let m = a_dims[a_rank - 2];
+        let k = a_dims[a_rank - 1];
+        let n = b_dims[b_rank - 1];
 
         // Batch dims from output.
-        let batch_dims: Vec<usize> = out_shape[..out_shape.len() - 2].to_vec();
+        let batch_dims: Vec<Dim> = out_dims[..out_dims.len() - 2].to_vec();
+        let batch_count = batch_dims.len();
 
         // product block dims: [...batch, M, N, K]
-        let mut product_dims: Vec<Dim> = batch_dims.iter().map(|&s| Dim::Known(s as u64)).collect();
-        product_dims.push(Dim::Known(m as u64));
-        product_dims.push(Dim::Known(n as u64));
-        product_dims.push(Dim::Known(k as u64));
+        let mut product_dims: Vec<Dim> = batch_dims.clone();
+        product_dims.push(m);
+        product_dims.push(n);
+        product_dims.push(k);
         let product_ndim = product_dims.len();
-        let batch_count = batch_dims.len();
 
         // Input A: source dims [..., M, K], consumer dims [...batch, M, N, K]
         let a_ref = self.build_matmul_input(
             &inputs[0],
-            &a_shape,
+            &a_dims,
             product_ndim,
             batch_count,
             false,
@@ -481,7 +503,7 @@ impl LowerCtx {
         // Input B: source dims [..., K, N], consumer dims [...batch, M, N, K]
         let b_ref = self.build_matmul_input(
             &inputs[1],
-            &b_shape,
+            &b_dims,
             product_ndim,
             batch_count,
             true,
@@ -495,9 +517,9 @@ impl LowerCtx {
         );
 
         // Reduce block dims: [...batch, M, N] (reduce K)
-        let mut reduce_dims: Vec<Dim> = batch_dims.iter().map(|&s| Dim::Known(s as u64)).collect();
-        reduce_dims.push(Dim::Known(m as u64));
-        reduce_dims.push(Dim::Known(n as u64));
+        let mut reduce_dims: Vec<Dim> = batch_dims;
+        reduce_dims.push(m);
+        reduce_dims.push(n);
         let reduce_ndim = reduce_dims.len();
 
         // Map product dims to reduce dims: batch → batch, M → M, N → N, K → Reduce
@@ -523,7 +545,7 @@ impl LowerCtx {
             out_id,
             TensorRef::Block {
                 block_id: reduce_id,
-                shape: out_shape,
+                shape: out_dims,
                 perm: None,
             },
         );
@@ -535,7 +557,7 @@ impl LowerCtx {
     fn build_matmul_input(
         &self,
         tensor_id: &GlobalId,
-        tensor_shape: &[usize],
+        tensor_dims: &[Dim],
         product_ndim: usize,
         batch_count: usize,
         is_b: bool, // false = A input, true = B input
@@ -552,7 +574,7 @@ impl LowerCtx {
 
         let source_block = self.nano.get(block_id).unwrap();
         let block_ndim = source_block.ndim();
-        let rank = tensor_shape.len();
+        let rank = tensor_dims.len();
 
         // Build logical_dim → consumer_dim mapping first.
         let mut logical_to_consumer = Vec::with_capacity(rank);
@@ -576,7 +598,7 @@ impl LowerCtx {
                 if src_logical < p.len() {
                     let block_dim = p[src_logical];
                     if block_dim < block_ndim {
-                        if tensor_shape[src_logical] == 1 && src_logical < rank - 2 {
+                        if tensor_dims[src_logical].is_one() && src_logical < rank - 2 {
                             dim_map[block_dim] = SourceDimMap::constant(0);
                         } else {
                             dim_map[block_dim] = SourceDimMap::identity(consumer_dim, product_ndim);
@@ -590,7 +612,7 @@ impl LowerCtx {
             for &(src_logical, consumer_dim) in &logical_to_consumer {
                 let block_dim = src_logical + offset;
                 if block_dim < block_ndim {
-                    if tensor_shape[src_logical] == 1 && src_logical < rank - 2 {
+                    if tensor_dims[src_logical].is_one() && src_logical < rank - 2 {
                         dim_map[block_dim] = SourceDimMap::constant(0);
                     } else {
                         dim_map[block_dim] = SourceDimMap::identity(consumer_dim, product_ndim);
@@ -611,32 +633,32 @@ impl LowerCtx {
         let out_id = op.outputs().next().unwrap();
 
         let data_id = inputs[0];
-        let data_shape = self.get_shape(&data_id)?.to_vec();
-        let out_shape = self.get_shape(&out_id)?.to_vec();
+        let data_dims = self.get_dims(&data_id)?.to_vec();
+        let out_dims = self.get_dims(&out_id)?.to_vec();
         let out_dtype = self.get_dtype(&out_id)?;
 
         // Determine reduce axes from the tensor value (if present) or from shape diff.
         let reduce_axes: Vec<usize> = if inputs.len() > 1 {
             // axes tensor provided
             let axes_vals = self.read_i64_values(&inputs[1], "reduce axes")?;
-            let rank = data_shape.len() as i64;
+            let rank = data_dims.len() as i64;
             axes_vals
                 .iter()
                 .map(|&a| if a < 0 { (a + rank) as usize } else { a as usize })
                 .collect()
         } else {
             // Reduce all axes or infer from shape difference.
-            // For SumTo: reduce axes where output dim is 1 and input dim > 1.
+            // For SumTo: reduce axes where output dim differs from input dim.
             if kind == "SumTo" {
                 let mut axes = Vec::new();
-                for (i, (&ds, &os)) in data_shape.iter().zip(out_shape.iter()).enumerate() {
-                    if ds != os {
+                for (i, (ds, os)) in data_dims.iter().zip(out_dims.iter()).enumerate() {
+                    if !ds.matches(os) {
                         axes.push(i);
                     }
                 }
                 axes
             } else {
-                (0..data_shape.len()).collect()
+                (0..data_dims.len()).collect()
             }
         };
 
@@ -655,22 +677,19 @@ impl LowerCtx {
         // Compute the "effective" output: squeeze out keepdim=1 dims that are reduce axes.
         let mut out_dim_idx = 0;
         let mut consumer_to_source = Vec::new();
-        let mut out_effective_shape = Vec::new();
+        let mut out_effective_dims = Vec::new();
 
-        for (data_dim, &ds) in data_shape.iter().enumerate() {
+        for (data_dim, &ds) in data_dims.iter().enumerate() {
             if reduce_axes.contains(&data_dim) {
                 consumer_to_source.push(None); // Reduce
             } else {
                 consumer_to_source.push(Some(out_dim_idx));
-                out_effective_shape.push(ds);
+                out_effective_dims.push(ds);
                 out_dim_idx += 1;
             }
         }
 
-        let reduce_dims: Vec<Dim> = out_effective_shape
-            .iter()
-            .map(|&s| Dim::Known(s as u64))
-            .collect();
+        let reduce_dims: Vec<Dim> = out_effective_dims.clone();
         let reduce_ndim = reduce_dims.len();
 
         let tref = self.get_ref(&data_id)?;
@@ -718,21 +737,32 @@ impl LowerCtx {
 
         // If ReduceMean, we need to divide by the reduction count.
         let final_block = if kind == "ReduceMean" {
-            let reduce_count: u64 = reduce_axes
+            // Try to compute reduce count from concrete dims.
+            // If any reduce axis has a symbolic dim, use a symbolic count.
+            let reduce_count: Option<u64> = reduce_axes
                 .iter()
-                .map(|&a| data_shape[a] as u64)
-                .product();
-            let count_lit = self.nano.push(
-                ScalarOp::Literal(LiteralBits::f32(reduce_count as f32)),
-                out_dtype,
-                vec![], // scalar
-                vec![],
-            );
-            // div_block dims = reduce block dims
-            let div_dims: Vec<Dim> = out_effective_shape
-                .iter()
-                .map(|&s| Dim::Known(s as u64))
-                .collect();
+                .map(|&a| data_dims[a].as_known())
+                .try_fold(1u64, |acc, d| d.map(|v| acc * v));
+
+            let count_lit = if let Some(count) = reduce_count {
+                self.nano.push(
+                    ScalarOp::Literal(LiteralBits::f32(count as f32)),
+                    out_dtype,
+                    vec![], // scalar
+                    vec![],
+                )
+            } else {
+                // Symbolic reduce count — emit a sentinel literal.
+                // TODO: proper symbolic reduce count handling.
+                self.nano.push(
+                    ScalarOp::Literal(LiteralBits::f32(1.0)),
+                    out_dtype,
+                    vec![],
+                    vec![],
+                )
+            };
+
+            let div_dims: Vec<Dim> = out_effective_dims;
             let div_ndim = div_dims.len();
             let sum_ref = InputRef {
                 source_block: block_id,
@@ -758,7 +788,7 @@ impl LowerCtx {
             out_id,
             TensorRef::Block {
                 block_id: final_block,
-                shape: out_shape,
+                shape: out_dims,
                 perm: None,
             },
         );
@@ -768,7 +798,7 @@ impl LowerCtx {
     fn lower_reshape(&mut self, op: &AnyMilliOp) -> Result<(), LowerError> {
         let inputs: Vec<GlobalId> = op.inputs().collect();
         let out_id = op.outputs().next().unwrap();
-        let out_shape = self.get_shape(&out_id)?.to_vec();
+        let out_dims = self.get_dims(&out_id)?.to_vec();
 
         // Reshape is a view op — no computation, just reindex.
         // Point the output tensor ref at the same block with updated shape.
@@ -779,9 +809,6 @@ impl LowerCtx {
                 shape: _old_shape,
                 perm: old_perm,
             } => {
-                // If the source had a permutation AND the reshape changes rank,
-                // we need to be careful. For now, reset perm on reshape (it's a
-                // full reindex).
                 // Mark the shape tensor as meta.
                 if inputs.len() > 1 {
                     self.refs.insert(inputs[1], TensorRef::Meta);
@@ -790,27 +817,21 @@ impl LowerCtx {
                 // If there was a transpose before this reshape, we can't just
                 // pass through — the flat ordering changed. Create an identity block.
                 if old_perm.is_some() {
-                    let source_block = self.nano.get(block_id).unwrap();
-                    let _old_block_ndim = source_block.ndim();
-                    let old_logical_shape = self.get_shape(&inputs[0])?.to_vec();
+                    let old_logical_dims = self.get_dims(&inputs[0])?.to_vec();
 
-                    // Identity block with old logical shape.
-                    let id_dims: Vec<Dim> =
-                        old_logical_shape.iter().map(|&s| Dim::Known(s as u64)).collect();
-                    let inp = self.build_elementwise_input(&inputs[0], &old_logical_shape)?;
+                    let inp = self.build_elementwise_input(&inputs[0], &old_logical_dims)?;
                     let dtype = self.get_dtype(&out_id)?;
                     let identity_block = self.nano.push(
                         ScalarOp::Unary(ScalarUnaryOp::Neg), // TODO: Identity op
                         dtype,
-                        id_dims,
+                        old_logical_dims,
                         vec![inp],
                     );
-                    // Now the identity block has no perm, same flat order.
                     self.refs.insert(
                         out_id,
                         TensorRef::Block {
                             block_id: identity_block,
-                            shape: out_shape,
+                            shape: out_dims,
                             perm: None,
                         },
                     );
@@ -820,14 +841,13 @@ impl LowerCtx {
                         out_id,
                         TensorRef::Block {
                             block_id,
-                            shape: out_shape,
+                            shape: out_dims,
                             perm: None,
                         },
                     );
                 }
             }
             TensorRef::Meta => {
-                // Reshaping a meta tensor — just register the output.
                 self.refs.insert(out_id, TensorRef::Meta);
             }
         }
@@ -837,7 +857,7 @@ impl LowerCtx {
     fn lower_transpose(&mut self, op: &AnyMilliOp) -> Result<(), LowerError> {
         let inputs: Vec<GlobalId> = op.inputs().collect();
         let out_id = op.outputs().next().unwrap();
-        let out_shape = self.get_shape(&out_id)?.to_vec();
+        let out_dims = self.get_dims(&out_id)?.to_vec();
 
         let tref = self.get_ref(&inputs[0])?.clone();
         match tref {
@@ -859,8 +879,6 @@ impl LowerCtx {
 
                 // Compose with existing permutation if any.
                 let composed = if let Some(ref ep) = existing_perm {
-                    // new_perm[out_dim] = logical_dim, ep[logical_dim] = block_dim
-                    // composed[out_dim] = ep[new_perm[out_dim]]
                     new_perm.iter().map(|&np| ep[np]).collect()
                 } else {
                     new_perm
@@ -870,7 +888,7 @@ impl LowerCtx {
                     out_id,
                     TensorRef::Block {
                         block_id,
-                        shape: out_shape,
+                        shape: out_dims,
                         perm: Some(composed),
                     },
                 );
@@ -885,15 +903,13 @@ impl LowerCtx {
     fn lower_squeeze_unsqueeze(&mut self, op: &AnyMilliOp) -> Result<(), LowerError> {
         let inputs: Vec<GlobalId> = op.inputs().collect();
         let out_id = op.outputs().next().unwrap();
-        let out_shape = self.get_shape(&out_id)?.to_vec();
+        let out_dims = self.get_dims(&out_id)?.to_vec();
 
         // Mark axes tensor as meta.
         if inputs.len() > 1 {
             self.refs.insert(inputs[1], TensorRef::Meta);
         }
 
-        // Squeeze/unsqueeze just changes shape (removes/adds size-1 dims).
-        // For NanoGraph, just update the TensorRef shape.
         let tref = self.get_ref(&inputs[0])?.clone();
         match tref {
             TensorRef::Block {
@@ -907,7 +923,7 @@ impl LowerCtx {
                     out_id,
                     TensorRef::Block {
                         block_id,
-                        shape: out_shape,
+                        shape: out_dims,
                         perm: new_perm,
                     },
                 );
@@ -922,7 +938,7 @@ impl LowerCtx {
     fn lower_expand(&mut self, op: &AnyMilliOp) -> Result<(), LowerError> {
         let inputs: Vec<GlobalId> = op.inputs().collect();
         let out_id = op.outputs().next().unwrap();
-        let out_shape = self.get_shape(&out_id)?.to_vec();
+        let out_dims = self.get_dims(&out_id)?.to_vec();
 
         // Mark shape tensor as meta.
         if inputs.len() > 1 {
@@ -939,7 +955,7 @@ impl LowerCtx {
                     out_id,
                     TensorRef::Block {
                         block_id,
-                        shape: out_shape,
+                        shape: out_dims,
                         perm,
                     },
                 );
@@ -954,7 +970,7 @@ impl LowerCtx {
     fn lower_cast(&mut self, op: &AnyMilliOp) -> Result<(), LowerError> {
         let inputs: Vec<GlobalId> = op.inputs().collect();
         let out_id = op.outputs().next().unwrap();
-        let out_shape = self.get_shape(&out_id)?.to_vec();
+        let out_dims = self.get_dims(&out_id)?.to_vec();
 
         // Cast is a dtype change. For the NanoGraph, just pass through the block
         // with updated shape. Actual dtype conversion is tracked on the block dtype.
@@ -968,7 +984,7 @@ impl LowerCtx {
                     out_id,
                     TensorRef::Block {
                         block_id,
-                        shape: out_shape,
+                        shape: out_dims,
                         perm,
                     },
                 );
@@ -983,11 +999,10 @@ impl LowerCtx {
     fn lower_clamp_min(&mut self, op: &AnyMilliOp) -> Result<(), LowerError> {
         let inputs: Vec<GlobalId> = op.inputs().collect();
         let out_id = op.outputs().next().unwrap();
-        let out_shape = self.get_shape(&out_id)?.to_vec();
+        let out_dims = self.get_dims(&out_id)?.to_vec();
         let out_dtype = self.get_dtype(&out_id)?;
 
         // ClampMin(x, val) = max(x, val).
-        // Create a literal block for the clamp value, then a Max binary block.
         let clamp_value: f32 = match op {
             AnyMilliOp::ClampMin(c) => c.min_val(),
             _ => unreachable!(),
@@ -1000,8 +1015,7 @@ impl LowerCtx {
             vec![],
         );
 
-        let dims: Vec<Dim> = out_shape.iter().map(|&s| Dim::Known(s as u64)).collect();
-        let inp = self.build_elementwise_input(&inputs[0], &out_shape)?;
+        let inp = self.build_elementwise_input(&inputs[0], &out_dims)?;
         let lit_ref = InputRef {
             source_block: lit_block,
             dim_map: vec![], // scalar broadcast
@@ -1010,7 +1024,7 @@ impl LowerCtx {
         let block_id = self.nano.push(
             ScalarOp::Binary(ScalarBinOp::Max),
             out_dtype,
-            dims,
+            out_dims.clone(),
             vec![inp, lit_ref],
         );
 
@@ -1018,7 +1032,7 @@ impl LowerCtx {
             out_id,
             TensorRef::Block {
                 block_id,
-                shape: out_shape,
+                shape: out_dims,
                 perm: None,
             },
         );
@@ -1030,19 +1044,16 @@ impl LowerCtx {
         // TODO: proper ternary op.
         let inputs: Vec<GlobalId> = op.inputs().collect();
         let out_id = op.outputs().next().unwrap();
-        let out_shape = self.get_shape(&out_id)?.to_vec();
+        let out_dims = self.get_dims(&out_id)?.to_vec();
         let out_dtype = self.get_dtype(&out_id)?;
 
-        let dims: Vec<Dim> = out_shape.iter().map(|&s| Dim::Known(s as u64)).collect();
-        let inp_x = self.build_elementwise_input(&inputs[1], &out_shape)?;
-        let inp_y = self.build_elementwise_input(&inputs[2], &out_shape)?;
+        let inp_x = self.build_elementwise_input(&inputs[1], &out_dims)?;
+        let inp_y = self.build_elementwise_input(&inputs[2], &out_dims)?;
 
-        // Approximate: just use x (ignoring condition). Obviously wrong for compute
-        // but structurally sound for testing the lowering.
         let block_id = self.nano.push(
             ScalarOp::Binary(ScalarBinOp::Add), // placeholder
             out_dtype,
-            dims,
+            out_dims.clone(),
             vec![inp_x, inp_y],
         );
 
@@ -1050,7 +1061,7 @@ impl LowerCtx {
             out_id,
             TensorRef::Block {
                 block_id,
-                shape: out_shape,
+                shape: out_dims,
                 perm: None,
             },
         );
@@ -1088,8 +1099,8 @@ impl LowerCtx {
             vec![1i64; starts.len()]
         };
 
-        let data_shape = self.get_shape(&data_id)?.to_vec();
-        let rank = data_shape.len();
+        let data_dims = self.get_dims(&data_id)?.to_vec();
+        let rank = data_dims.len();
 
         let axes: Vec<usize> = if inputs.len() > 4 {
             let raw = self.read_i64_values(&inputs[4], "slice axes")?;
@@ -1106,25 +1117,27 @@ impl LowerCtx {
         let mut axis_step = vec![1i64; rank];
 
         for (i, &axis) in axes.iter().enumerate() {
-            let dim = data_shape[axis] as i64;
             let mut s = starts[i];
             let step = steps[i];
 
-            // Clamp start per ONNX spec.
-            if s < 0 { s += dim; }
-            if step > 0 {
-                s = s.clamp(0, dim);
-            } else {
-                s = s.clamp(-1, dim - 1);
+            // Clamp start per ONNX spec — requires concrete dim size.
+            if let Some(dim_size) = data_dims[axis].as_known() {
+                let dim = dim_size as i64;
+                if s < 0 { s += dim; }
+                if step > 0 {
+                    s = s.clamp(0, dim);
+                } else {
+                    s = s.clamp(-1, dim - 1);
+                }
             }
 
             axis_start[axis] = s;
             axis_step[axis] = step;
         }
 
-        let out_shape = self.get_shape(&out_id)?.to_vec();
+        let out_dims = self.get_dims(&out_id)?.to_vec();
         let out_dtype = self.get_dtype(&out_id)?;
-        let out_ndim = out_shape.len();
+        let out_ndim = out_dims.len();
 
         // Build InputRef: for each source dim, output_idx → start + output_idx * step.
         let tref = self.get_ref(&data_id)?.clone();
@@ -1145,7 +1158,7 @@ impl LowerCtx {
             };
 
             if logical_dim < rank {
-                let consumer_dim = logical_dim; // identity mapping: output dim i → source dim i
+                let consumer_dim = logical_dim;
                 let base = axis_start[logical_dim];
                 let step = axis_step[logical_dim];
 
@@ -1162,11 +1175,10 @@ impl LowerCtx {
             }
         }
 
-        let dims: Vec<Dim> = out_shape.iter().map(|&s| Dim::Known(s as u64)).collect();
         let block_id = self.nano.push(
             ScalarOp::Identity,
             out_dtype,
-            dims,
+            out_dims.clone(),
             vec![InputRef {
                 source_block: block_id,
                 dim_map,
@@ -1177,7 +1189,7 @@ impl LowerCtx {
             out_id,
             TensorRef::Block {
                 block_id,
-                shape: out_shape,
+                shape: out_dims,
                 perm: None,
             },
         );
@@ -1185,8 +1197,6 @@ impl LowerCtx {
     }
 
     fn lower_split(&mut self, op: &AnyMilliOp) -> Result<(), LowerError> {
-        // Split is a Slice along one axis. We compute the cumulative offset
-        // for this output_id and emit an Identity block with base offset.
         let AnyMilliOp::Split(split_op) = op else {
             unreachable!()
         };
@@ -1200,8 +1210,8 @@ impl LowerCtx {
             self.refs.insert(inputs[1], TensorRef::Meta);
         }
 
-        let data_shape = self.get_shape(&data_id)?.to_vec();
-        let rank = data_shape.len();
+        let data_dims = self.get_dims(&data_id)?.to_vec();
+        let rank = data_dims.len();
         let axis_raw = split_op.axis();
         let axis = if axis_raw < 0 {
             (axis_raw + rank as i64) as usize
@@ -1233,7 +1243,10 @@ impl LowerCtx {
                 }
             }
         } else if let Some(num_outputs) = split_op.num_outputs() {
-            let dim = data_shape[axis];
+            // Need concrete dim size for even split.
+            let dim = data_dims[axis]
+                .as_usize()
+                .ok_or(LowerError::MissingShape(data_id))?;
             let base = dim / num_outputs;
             let remainder = dim % num_outputs;
             (0..num_outputs)
@@ -1247,9 +1260,9 @@ impl LowerCtx {
         let output_id = split_op.output_id();
         let start: usize = split_sizes[..output_id].iter().sum();
 
-        let out_shape = self.get_shape(&out_id)?.to_vec();
+        let out_dims = self.get_dims(&out_id)?.to_vec();
         let out_dtype = self.get_dtype(&out_id)?;
-        let out_ndim = out_shape.len();
+        let out_ndim = out_dims.len();
 
         let tref = self.get_ref(&data_id)?.clone();
         let (block_id, perm) = match &tref {
@@ -1283,11 +1296,10 @@ impl LowerCtx {
             }
         }
 
-        let dims: Vec<Dim> = out_shape.iter().map(|&s| Dim::Known(s as u64)).collect();
         let new_block_id = self.nano.push(
             ScalarOp::Identity,
             out_dtype,
-            dims,
+            out_dims.clone(),
             vec![InputRef {
                 source_block: block_id,
                 dim_map,
@@ -1298,7 +1310,7 @@ impl LowerCtx {
             out_id,
             TensorRef::Block {
                 block_id: new_block_id,
-                shape: out_shape,
+                shape: out_dims,
                 perm: None,
             },
         );
@@ -1413,5 +1425,93 @@ mod tests {
 
         let errors = result.graph.validate();
         assert!(errors.is_empty(), "Validation errors: {:?}", errors);
+    }
+
+    #[test]
+    fn test_lower_with_info_concrete() {
+        // Same as test_lower_add but using lower_with_info directly.
+        let mut rng = wyrand::WyRand::new(42);
+        let ext_a = make_id(&mut rng);
+        let ext_b = make_id(&mut rng);
+        let (mut graph, input_map) = MilliOpGraph::new([ext_a, ext_b], &mut rng);
+        let int_a = input_map[&ext_a];
+        let int_b = input_map[&ext_b];
+        let _int_out = SimpleBinary::add(&mut graph, int_a, int_b, &mut rng);
+
+        let mut inputs = HashMap::new();
+        inputs.insert(ext_a, TensorInfo::from(make_f32_tensor(&[2, 3], 1.0)));
+        inputs.insert(ext_b, TensorInfo::from(make_f32_tensor(&[2, 3], 2.0)));
+
+        let result = lower_with_info(&graph, &inputs).unwrap();
+        assert!(result.unsupported.is_empty());
+        assert_eq!(result.graph.len(), 3);
+
+        let errors = result.graph.validate();
+        assert!(errors.is_empty(), "Validation errors: {:?}", errors);
+    }
+
+    #[test]
+    fn test_lower_with_info_shaped() {
+        // Use Shaped (non-concrete) inputs — shape known but no data.
+        use crate::tensor_info::TensorInfo;
+
+        let mut rng = wyrand::WyRand::new(42);
+        let ext_a = make_id(&mut rng);
+        let ext_b = make_id(&mut rng);
+        let (mut graph, input_map) = MilliOpGraph::new([ext_a, ext_b], &mut rng);
+        let int_a = input_map[&ext_a];
+        let int_b = input_map[&ext_b];
+        let _int_out = SimpleBinary::add(&mut graph, int_a, int_b, &mut rng);
+
+        // Provide shape-only info (no concrete values).
+        let mut inputs = HashMap::new();
+        inputs.insert(ext_a, TensorInfo::from_shape_u64(&[2, 3]));
+        inputs.insert(ext_b, TensorInfo::from_shape_u64(&[2, 3]));
+
+        let result = lower_with_info(&graph, &inputs).unwrap();
+        assert!(result.unsupported.is_empty());
+        assert_eq!(result.graph.len(), 3);
+
+        let errors = result.graph.validate();
+        assert!(errors.is_empty(), "Validation errors: {:?}", errors);
+    }
+
+    #[test]
+    fn test_lower_with_info_symbolic_dims() {
+        // Use inputs with a mix of known and symbolic dims.
+        use crate::scalar_info::ScalarInfoTyped;
+        use crate::symbolic_scalar::SymbolicScalarTyped;
+        use crate::symbolic_scalar::SymbolicResolver;
+        use crate::tensor_info::TensorInfo;
+
+        let mut rng = wyrand::WyRand::new(42);
+        let ext_a = make_id(&mut rng);
+        let ext_b = make_id(&mut rng);
+        let (mut graph, input_map) = MilliOpGraph::new([ext_a, ext_b], &mut rng);
+        let int_a = input_map[&ext_a];
+        let int_b = input_map[&ext_b];
+        let _int_out = SimpleBinary::add(&mut graph, int_a, int_b, &mut rng);
+
+        // Create inputs with one symbolic dim (e.g., batch_size).
+        let mut resolver = SymbolicResolver::new();
+        let batch_sym: ScalarInfoTyped<u64> =
+            ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(&mut resolver));
+        let info_a = TensorInfo::from_shape_scalars(&[batch_sym.clone(), ScalarInfoTyped::Numeric(3)]);
+        let info_b = TensorInfo::from_shape_scalars(&[batch_sym, ScalarInfoTyped::Numeric(3)]);
+
+        let mut inputs = HashMap::new();
+        inputs.insert(ext_a, info_a);
+        inputs.insert(ext_b, info_b);
+
+        let result = lower_with_info(&graph, &inputs).unwrap();
+        assert!(result.unsupported.is_empty());
+        assert_eq!(result.graph.len(), 3);
+
+        // The add block should have 2 dims. The input blocks should carry
+        // the symbolic+concrete dims from the TensorInfo inputs.
+        let input_block_0 = result.graph.get(BlockId(0)).unwrap();
+        assert_eq!(input_block_0.dims.len(), 2);
+        assert!(matches!(input_block_0.dims[0], Dim::Symbolic(_)));
+        assert_eq!(input_block_0.dims[1], Dim::Known(3));
     }
 }

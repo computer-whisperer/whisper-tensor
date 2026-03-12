@@ -1051,6 +1051,28 @@ impl TensorInfo {
         )))
     }
 
+    /// Extract shape dimensions as nano_graph Dims.
+    /// Known concrete dims become `Dim::Known`, symbolic dims become `Dim::Symbolic`.
+    /// Returns `None` if rank is unknown (Minimal).
+    pub(crate) fn dims_for_nano(&self) -> Option<Vec<crate::nano_graph::Dim>> {
+        use crate::nano_graph::Dim;
+        match self {
+            TensorInfo::Ranked(ranked) => {
+                let shape = ranked.shape();
+                Some(
+                    shape
+                        .iter()
+                        .map(|d| match d {
+                            ScalarInfoTyped::Numeric(v) => Dim::Known(*v),
+                            ScalarInfoTyped::Symbolic(s) => Dim::Symbolic(s.symbol_idx() as u16),
+                        })
+                        .collect(),
+                )
+            }
+            TensorInfo::Minimal(_) => None,
+        }
+    }
+
     #[allow(dead_code)]
     pub(crate) fn try_to_rank<R: KnownRank>(
         &self,
