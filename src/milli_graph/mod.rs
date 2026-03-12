@@ -940,18 +940,8 @@ impl MilliOpGraph {
                 Err(MilliOpGraphError::UnableToInfer) => {
                     // Op couldn't infer — insert Minimal entries for outputs
                     // so downstream ops at least know the dtype.
-                    // Op couldn't infer — log for diagnostics.
-                    // (Uncomment eprintln below for debugging cascade issues.)
-                    // let input_states: Vec<String> = op.inputs().map(|id| {
-                    //     let state = if let Some(info) = known.get(&id) {
-                    //         if info.as_numeric().is_some() { "Numeric" }
-                    //         else if info.as_ranked().is_some() { "Ranked" }
-                    //         else { "Minimal" }
-                    //     } else { "MISSING" };
-                    //     format!("{:?}={}", id, state)
-                    // }).collect();
-                    // eprintln!("[infer_all] UnableToInfer: {} ({:?}) inputs: [{}]",
-                    //     op.op_kind(), op_id, input_states.join(", "));
+                    // (Uncomment for debugging cascade issues.)
+                    // eprintln!("[infer-fail] {} inputs=[...]", op.op_kind());
                     for out_id in op.outputs() {
                         known.entry(out_id).or_insert_with(|| {
                             TensorInfo::Minimal(MinimalTensor::new(

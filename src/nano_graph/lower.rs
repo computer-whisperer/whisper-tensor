@@ -454,18 +454,30 @@ impl LowerCtx {
             AnyMilliOp::ReduceSum(r) => self.lower_reduce(r, all_infos, ScalarOp::ReduceSum),
             AnyMilliOp::ReduceMax(r) => self.lower_reduce(r, all_infos, ScalarOp::ReduceMax),
             AnyMilliOp::ReduceMean(r) => self.lower_reduce_mean(r, all_infos),
-            // Everything else: boundary.
+            // Everything else: check if outputs are fully concrete (constant-folded),
+            // otherwise register as boundary.
             other => {
                 let op_kind = other.op_kind();
                 let op_id = other.global_id();
+                // If all outputs are Numeric (fully constant), treat like a Constant —
+                // the inference already computed the values, no need to lower the op.
+                let all_numeric = other.outputs().all(|out_id| {
+                    all_infos.get(&out_id).map_or(false, |i| i.as_numeric().is_some())
+                });
                 for out_id in other.outputs() {
                     if let Some(info) = all_infos.get(&out_id) {
-                        self.register_boundary(out_id, info, &op_kind);
+                        if all_numeric {
+                            self.register_input(out_id, info);
+                        } else {
+                            self.register_boundary(out_id, info, &op_kind);
+                        }
                     } else {
                         self.register_opaque(out_id);
                     }
                 }
-                self.unsupported.push((op_id, op_kind));
+                if !all_numeric {
+                    self.unsupported.push((op_id, op_kind));
+                }
             }
         }
     }

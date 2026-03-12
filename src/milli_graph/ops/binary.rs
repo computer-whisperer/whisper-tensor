@@ -4,6 +4,7 @@ use crate::dtype::DType;
 use crate::milli_graph::MilliOpGraphError;
 use crate::milli_graph::ops::MilliOp;
 use crate::numeric_tensor::NumericTensor;
+use crate::scalar_info::ScalarInfoTyped;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -554,9 +555,50 @@ impl MilliOp for MatMul {
         // MatMul output dtype matches input dtype.
         let out_dtype = a_info.dtype();
 
-        // Compute output rank from input ranks.
-        // numpy matmul: for rank >= 2, output rank = max(a_rank, b_rank).
-        // Batch dims are broadcast, last two dims follow [M,K]@[K,N]->[M,N].
+        // Try per-dim shape inference: A[...,M,K] @ B[...,K,N] -> [...,M,N]
+        // Batch dims are broadcast, last two follow matmul rules.
+        if let (Some(a_ranked), Some(b_ranked)) = (a_info.as_ranked(), b_info.as_ranked()) {
+            let a_dims = a_ranked.shape();
+            let b_dims = b_ranked.shape();
+            let a_rank = a_dims.len();
+            let b_rank = b_dims.len();
+
+            if a_rank >= 1 && b_rank >= 1 {
+                let out_dims: Option<Vec<ScalarInfoTyped<u64>>> = if a_rank >= 2 && b_rank >= 2 {
+                    // Standard case: batch broadcast + [M,K]@[K,N]->[M,N]
+                    let a_batch = &a_dims[..a_rank - 2];
+                    let b_batch = &b_dims[..b_rank - 2];
+                    let batch = super::infer_multidirectional_broadcasting_shape(
+                        &[a_batch.to_vec(), b_batch.to_vec()], symbolic_resolver,
+                    ).ok();
+                    batch.map(|mut out| {
+                        out.push(a_dims[a_rank - 2].clone()); // M
+                        out.push(b_dims[b_rank - 1].clone()); // N
+                        out
+                    })
+                } else if a_rank == 1 && b_rank >= 2 {
+                    // vector @ matrix: [K] @ [...,K,N] -> [...,N]
+                    let mut out = b_dims[..b_rank - 2].to_vec();
+                    out.push(b_dims[b_rank - 1].clone()); // N
+                    Some(out)
+                } else if a_rank >= 2 && b_rank == 1 {
+                    // matrix @ vector: [...,M,K] @ [K] -> [...,M]
+                    let mut out = a_dims[..a_rank - 2].to_vec();
+                    out.push(a_dims[a_rank - 2].clone()); // M
+                    Some(out)
+                } else {
+                    // both rank 1: dot product -> scalar []
+                    Some(vec![])
+                };
+
+                if let Some(out_dims) = out_dims {
+                    let out_info = TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims);
+                    return Ok(Box::new([(self.output, out_info)].into_iter()));
+                }
+            }
+        }
+
+        // Fallback: rank-only inference.
         let out_rank = match (a_info.rank(), b_info.rank()) {
             (
                 crate::scalar_info::ScalarInfoTyped::Numeric(a_rank),
@@ -565,13 +607,10 @@ impl MilliOp for MatMul {
                 let out_r = if a_rank >= 2 && b_rank >= 2 {
                     a_rank.max(b_rank)
                 } else if a_rank == 1 && b_rank >= 2 {
-                    // vector @ matrix: result drops the prepended dim
                     b_rank - 1
                 } else if a_rank >= 2 && b_rank == 1 {
-                    // matrix @ vector: result drops the appended dim
                     a_rank - 1
                 } else {
-                    // both rank 1: dot product -> scalar
                     0
                 };
                 crate::scalar_info::ScalarInfoTyped::Numeric(out_r)
