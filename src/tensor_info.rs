@@ -36,39 +36,119 @@ pub trait TensorInfoType:
     ) -> Result<&ShapedTensorTyped<Self, R>, TensorInfoError>;
 }
 
-#[macro_export]
-macro_rules! impl_type {
-    ($a:ident, $b:ident) => {
-        impl TensorInfoType for $a {
-            fn typed_shaped_tensor_into_shaped_tensor<R: Rank>(
-                value: ShapedTensorTyped<Self, R>,
-            ) -> ShapedTensor<R> {
-                ShapedTensor::$b(value)
+/// Defines the `ShapedTensor` enum, `TensorInfoType` impls, and all dispatch
+/// methods from a single variant list. Each entry is `(rust_type, Variant, DType)`.
+macro_rules! define_shaped_tensor {
+    ( $(($rust_ty:ident, $variant:ident, $dtype:ident)),+ $(,)? ) => {
+        // --- TensorInfoType impls ---
+        $(
+            impl TensorInfoType for $rust_ty {
+                fn typed_shaped_tensor_into_shaped_tensor<R: Rank>(
+                    value: ShapedTensorTyped<Self, R>,
+                ) -> ShapedTensor<R> {
+                    ShapedTensor::$variant(value)
+                }
+                fn try_shaped_tensor_into_typed_shaped_tensor<R: Rank>(
+                    value: &ShapedTensor<R>,
+                ) -> Result<&ShapedTensorTyped<Self, R>, TensorInfoError> {
+                    if let ShapedTensor::$variant(v) = value {
+                        Ok(v)
+                    } else {
+                        Err(TensorInfoError::CannotConvertToType)
+                    }
+                }
             }
-            fn try_shaped_tensor_into_typed_shaped_tensor<R: Rank>(
-                value: &ShapedTensor<R>,
-            ) -> Result<&ShapedTensorTyped<Self, R>, TensorInfoError> {
-                if let ShapedTensor::$b(v) = value {
-                    Ok(v)
-                } else {
-                    Err(TensorInfoError::CannotConvertToType)
+        )+
+
+        // --- Enum definition ---
+        #[derive(Clone, Debug)]
+        pub enum ShapedTensor<R: Rank> {
+            $( $variant(ShapedTensorTyped<$rust_ty, R>), )+
+        }
+
+        // --- Dispatch methods ---
+        impl<R: Rank> ShapedTensor<R> {
+            pub(crate) fn dtype(&self) -> DType {
+                match self {
+                    $( ShapedTensor::$variant(_) => DType::$dtype, )+
+                }
+            }
+            pub(crate) fn shape(&self) -> &R::KnownDims {
+                match self {
+                    $( ShapedTensor::$variant(x) => x.shape(), )+
+                }
+            }
+            pub(crate) fn rank(&self) -> usize {
+                match self {
+                    $( ShapedTensor::$variant(x) => x.rank(), )+
+                }
+            }
+            pub(crate) fn first_element(&self) -> ScalarInfo {
+                match self {
+                    $( ShapedTensor::$variant(x) => x.first_element().promote(), )+
+                }
+            }
+            #[allow(dead_code)]
+            pub(crate) fn get(&self, index: &R::KnownDims) -> Option<ScalarInfo> {
+                Some(match self {
+                    $( ShapedTensor::$variant(x) => x.get(index)?.promote(), )+
+                })
+            }
+            pub(crate) fn reshape(&self, new_shape: R::KnownDims) -> Self {
+                match self {
+                    $( ShapedTensor::$variant(x) => Self::$variant(x.reshape(new_shape)), )+
+                }
+            }
+            #[allow(dead_code)]
+            pub(crate) fn try_upgrade_as_numeric_tensor(&self) -> Option<NumericTensor<R>> {
+                match self {
+                    $( ShapedTensor::$variant(x) => x.try_upgrade_as_numeric_tensor(), )+
+                }
+            }
+            pub(crate) fn try_to_rank<R1: Rank>(&self) -> Result<ShapedTensor<R1>, TensorInfoError> {
+                Ok(match self {
+                    $( ShapedTensor::$variant(x) => ShapedTensor::<R1>::$variant(x.try_to_rank()?), )+
+                })
+            }
+            pub(crate) fn try_to_type<T: TensorInfoType>(
+                &self,
+            ) -> Result<ShapedTensorTyped<T, R>, TensorInfoError> {
+                Ok(T::try_shaped_tensor_into_typed_shaped_tensor(self)?.clone())
+            }
+            pub(crate) fn to_dyn_rank(&self) -> ShapedTensor<DynRank> {
+                self.try_to_rank().unwrap()
+            }
+            pub(crate) fn new_symbolic(
+                first_element: ScalarInfo,
+                shape: R::KnownDims,
+                symbolic_resolver: &mut SymbolicResolver,
+            ) -> Self {
+                match first_element.dtype() {
+                    $( DType::$dtype => ShapedTensor::$variant(ShapedTensorTyped::new_symbolic(
+                        first_element.cast(),
+                        shape,
+                        symbolic_resolver,
+                    )), )+
+                    other => panic!("Unsupported dtype for ShapedTensor: {:?}", other),
                 }
             }
         }
     };
 }
 
-impl_type!(f64, F64);
-impl_type!(f32, F32);
-impl_type!(u64, U64);
-impl_type!(i64, I64);
-impl_type!(bf16, BF16);
-impl_type!(f16, F16);
-impl_type!(i32, I32);
-impl_type!(u32, U32);
-impl_type!(i8, I8);
-impl_type!(u8, U8);
-impl_type!(bool, BOOL);
+define_shaped_tensor!(
+    (f64,  F64,  F64),
+    (f32,  F32,  F32),
+    (u64,  U64,  U64),
+    (i64,  I64,  I64),
+    (bf16, BF16, BF16),
+    (f16,  F16,  F16),
+    (i32,  I32,  I32),
+    (u32,  U32,  U32),
+    (i8,   I8,   I8),
+    (u8,   U8,   U8),
+    (bool, BOOL, BOOL),
+);
 
 #[derive(Clone, Debug)]
 pub struct ShapedTensorTyped<T, R: Rank>
@@ -168,222 +248,7 @@ where
     }
 }
 
-#[derive(Clone, Debug)]
-pub enum ShapedTensor<R: Rank> {
-    F64(ShapedTensorTyped<f64, R>),
-    F32(ShapedTensorTyped<f32, R>),
-    U64(ShapedTensorTyped<u64, R>),
-    I64(ShapedTensorTyped<i64, R>),
-    BF16(ShapedTensorTyped<bf16, R>),
-    F16(ShapedTensorTyped<f16, R>),
-    I32(ShapedTensorTyped<i32, R>),
-    U32(ShapedTensorTyped<u32, R>),
-    I8(ShapedTensorTyped<i8, R>),
-    U8(ShapedTensorTyped<u8, R>),
-    BOOL(ShapedTensorTyped<bool, R>),
-}
-
-impl<R: Rank> ShapedTensor<R> {
-    pub(crate) fn dtype(&self) -> DType {
-        match self {
-            ShapedTensor::F64(_) => DType::F64,
-            ShapedTensor::F32(_) => DType::F32,
-            ShapedTensor::I64(_) => DType::I64,
-            ShapedTensor::U64(_) => DType::U64,
-            ShapedTensor::BF16(_) => DType::BF16,
-            ShapedTensor::F16(_) => DType::F16,
-            ShapedTensor::I32(_) => DType::I32,
-            ShapedTensor::U32(_) => DType::U32,
-            ShapedTensor::I8(_) => DType::I8,
-            ShapedTensor::U8(_) => DType::U8,
-            ShapedTensor::BOOL(_) => DType::BOOL,
-        }
-    }
-    pub(crate) fn shape(&self) -> &R::KnownDims {
-        match self {
-            ShapedTensor::F64(t) => t.shape(),
-            ShapedTensor::F32(t) => t.shape(),
-            ShapedTensor::I64(t) => t.shape(),
-            ShapedTensor::U64(t) => t.shape(),
-            ShapedTensor::BF16(t) => t.shape(),
-            ShapedTensor::F16(t) => t.shape(),
-            ShapedTensor::I32(t) => t.shape(),
-            ShapedTensor::U32(t) => t.shape(),
-            ShapedTensor::I8(t) => t.shape(),
-            ShapedTensor::U8(t) => t.shape(),
-            ShapedTensor::BOOL(t) => t.shape(),
-        }
-    }
-    pub(crate) fn rank(&self) -> usize {
-        match self {
-            ShapedTensor::F64(x) => x.rank(),
-            ShapedTensor::F32(x) => x.rank(),
-            ShapedTensor::I64(x) => x.rank(),
-            ShapedTensor::U64(x) => x.rank(),
-            ShapedTensor::BF16(x) => x.rank(),
-            ShapedTensor::F16(x) => x.rank(),
-            ShapedTensor::I32(x) => x.rank(),
-            ShapedTensor::U32(x) => x.rank(),
-            ShapedTensor::I8(x) => x.rank(),
-            ShapedTensor::U8(x) => x.rank(),
-            ShapedTensor::BOOL(x) => x.rank(),
-        }
-    }
-    pub(crate) fn first_element(&self) -> ScalarInfo {
-        match self {
-            ShapedTensor::F64(x) => x.first_element().promote(),
-            ShapedTensor::F32(x) => x.first_element().promote(),
-            ShapedTensor::I64(x) => x.first_element().promote(),
-            ShapedTensor::U64(x) => x.first_element().promote(),
-            ShapedTensor::BF16(x) => x.first_element().promote(),
-            ShapedTensor::F16(x) => x.first_element().promote(),
-            ShapedTensor::I32(x) => x.first_element().promote(),
-            ShapedTensor::U32(x) => x.first_element().promote(),
-            ShapedTensor::I8(x) => x.first_element().promote(),
-            ShapedTensor::U8(x) => x.first_element().promote(),
-            ShapedTensor::BOOL(x) => x.first_element().promote(),
-        }
-    }
-    #[allow(dead_code)]
-    pub(crate) fn get(&self, index: &R::KnownDims) -> Option<ScalarInfo> {
-        Some(match self {
-            ShapedTensor::F64(x) => x.get(index)?.promote(),
-            ShapedTensor::F32(x) => x.get(index)?.promote(),
-            ShapedTensor::I64(x) => x.get(index)?.promote(),
-            ShapedTensor::U64(x) => x.get(index)?.promote(),
-            ShapedTensor::BF16(x) => x.get(index)?.promote(),
-            ShapedTensor::F16(x) => x.get(index)?.promote(),
-            ShapedTensor::I32(x) => x.get(index)?.promote(),
-            ShapedTensor::U32(x) => x.get(index)?.promote(),
-            ShapedTensor::I8(x) => x.get(index)?.promote(),
-            ShapedTensor::U8(x) => x.get(index)?.promote(),
-            ShapedTensor::BOOL(x) => x.get(index)?.promote(),
-        })
-    }
-    pub(crate) fn reshape(&self, new_shape: R::KnownDims) -> Self {
-        match self {
-            ShapedTensor::F64(x) => Self::F64(x.reshape(new_shape)),
-            ShapedTensor::F32(x) => Self::F32(x.reshape(new_shape)),
-            ShapedTensor::I64(x) => Self::I64(x.reshape(new_shape)),
-            ShapedTensor::U64(x) => Self::U64(x.reshape(new_shape)),
-            ShapedTensor::BF16(x) => Self::BF16(x.reshape(new_shape)),
-            ShapedTensor::F16(x) => Self::F16(x.reshape(new_shape)),
-            ShapedTensor::I32(x) => Self::I32(x.reshape(new_shape)),
-            ShapedTensor::U32(x) => Self::U32(x.reshape(new_shape)),
-            ShapedTensor::I8(x) => Self::I8(x.reshape(new_shape)),
-            ShapedTensor::U8(x) => Self::U8(x.reshape(new_shape)),
-            ShapedTensor::BOOL(x) => Self::BOOL(x.reshape(new_shape)),
-        }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn try_upgrade_as_numeric_tensor(&self) -> Option<NumericTensor<R>> {
-        match self {
-            ShapedTensor::F64(x) => x.try_upgrade_as_numeric_tensor(),
-            ShapedTensor::F32(x) => x.try_upgrade_as_numeric_tensor(),
-            ShapedTensor::I64(x) => x.try_upgrade_as_numeric_tensor(),
-            ShapedTensor::U64(x) => x.try_upgrade_as_numeric_tensor(),
-            ShapedTensor::BF16(x) => x.try_upgrade_as_numeric_tensor(),
-            ShapedTensor::F16(x) => x.try_upgrade_as_numeric_tensor(),
-            ShapedTensor::I32(x) => x.try_upgrade_as_numeric_tensor(),
-            ShapedTensor::U32(x) => x.try_upgrade_as_numeric_tensor(),
-            ShapedTensor::I8(x) => x.try_upgrade_as_numeric_tensor(),
-            ShapedTensor::U8(x) => x.try_upgrade_as_numeric_tensor(),
-            ShapedTensor::BOOL(x) => x.try_upgrade_as_numeric_tensor(),
-        }
-    }
-
-    pub(crate) fn try_to_rank<R1: Rank>(&self) -> Result<ShapedTensor<R1>, TensorInfoError> {
-        Ok(match self {
-            ShapedTensor::F64(x) => ShapedTensor::<R1>::F64(x.try_to_rank()?),
-            ShapedTensor::F32(x) => ShapedTensor::<R1>::F32(x.try_to_rank()?),
-            ShapedTensor::I64(x) => ShapedTensor::<R1>::I64(x.try_to_rank()?),
-            ShapedTensor::U64(x) => ShapedTensor::<R1>::U64(x.try_to_rank()?),
-            ShapedTensor::BF16(x) => ShapedTensor::<R1>::BF16(x.try_to_rank()?),
-            ShapedTensor::F16(x) => ShapedTensor::<R1>::F16(x.try_to_rank()?),
-            ShapedTensor::I32(x) => ShapedTensor::<R1>::I32(x.try_to_rank()?),
-            ShapedTensor::U32(x) => ShapedTensor::<R1>::U32(x.try_to_rank()?),
-            ShapedTensor::I8(x) => ShapedTensor::<R1>::I8(x.try_to_rank()?),
-            ShapedTensor::U8(x) => ShapedTensor::<R1>::U8(x.try_to_rank()?),
-            ShapedTensor::BOOL(x) => ShapedTensor::<R1>::BOOL(x.try_to_rank()?),
-        })
-    }
-
-    pub(crate) fn try_to_type<T: TensorInfoType>(
-        &self,
-    ) -> Result<ShapedTensorTyped<T, R>, TensorInfoError> {
-        Ok(T::try_shaped_tensor_into_typed_shaped_tensor(self)?.clone())
-    }
-
-    pub(crate) fn to_dyn_rank(&self) -> ShapedTensor<DynRank> {
-        self.try_to_rank().unwrap()
-    }
-
-    pub(crate) fn new_symbolic(
-        first_element: ScalarInfo,
-        shape: R::KnownDims,
-        symbolic_resolver: &mut SymbolicResolver,
-    ) -> Self {
-        match first_element.dtype() {
-            DType::F64 => ShapedTensor::F64(ShapedTensorTyped::new_symbolic(
-                first_element.cast(),
-                shape,
-                symbolic_resolver,
-            )),
-            DType::F32 => ShapedTensor::F32(ShapedTensorTyped::new_symbolic(
-                first_element.cast(),
-                shape,
-                symbolic_resolver,
-            )),
-            DType::U64 => ShapedTensor::U64(ShapedTensorTyped::new_symbolic(
-                first_element.cast(),
-                shape,
-                symbolic_resolver,
-            )),
-            DType::I64 => ShapedTensor::I64(ShapedTensorTyped::new_symbolic(
-                first_element.cast(),
-                shape,
-                symbolic_resolver,
-            )),
-            DType::BF16 => ShapedTensor::BF16(ShapedTensorTyped::new_symbolic(
-                first_element.cast(),
-                shape,
-                symbolic_resolver,
-            )),
-            DType::F16 => ShapedTensor::F16(ShapedTensorTyped::new_symbolic(
-                first_element.cast(),
-                shape,
-                symbolic_resolver,
-            )),
-            DType::I32 => ShapedTensor::I32(ShapedTensorTyped::new_symbolic(
-                first_element.cast(),
-                shape,
-                symbolic_resolver,
-            )),
-            DType::U32 => ShapedTensor::U32(ShapedTensorTyped::new_symbolic(
-                first_element.cast(),
-                shape,
-                symbolic_resolver,
-            )),
-            DType::I8 => ShapedTensor::I8(ShapedTensorTyped::new_symbolic(
-                first_element.cast(),
-                shape,
-                symbolic_resolver,
-            )),
-            DType::U8 => ShapedTensor::U8(ShapedTensorTyped::new_symbolic(
-                first_element.cast(),
-                shape,
-                symbolic_resolver,
-            )),
-            DType::BOOL => ShapedTensor::BOOL(ShapedTensorTyped::new_symbolic(
-                first_element.cast(),
-                shape,
-                symbolic_resolver,
-            )),
-            _ => panic!("Unsupported dtype for ShapedTensor: {:?}", first_element.dtype()),
-        }
-    }
-}
+// ShapedTensor enum and impl are generated by define_shaped_tensor! above.
 
 #[derive(Clone, Debug)]
 pub struct RankedTensorTyped<T, R: Rank>
