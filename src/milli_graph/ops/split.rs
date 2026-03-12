@@ -20,6 +20,22 @@ pub struct Split {
 }
 
 impl Split {
+    pub(crate) fn axis(&self) -> i64 {
+        self.axis
+    }
+
+    pub(crate) fn output_id(&self) -> usize {
+        self.output_id
+    }
+
+    pub(crate) fn num_outputs(&self) -> Option<usize> {
+        self.num_outputs
+    }
+
+    pub(crate) fn split_tensor(&self) -> Option<&MilliOpTensorIDOrLiteral> {
+        self.split.as_ref()
+    }
+
     pub fn push_new(
         graph: &mut MilliOpGraph,
         data: GlobalId,
