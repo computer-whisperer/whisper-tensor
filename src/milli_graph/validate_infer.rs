@@ -108,23 +108,18 @@ impl GroundTruth {
 
 /// Create a Shaped TensorInfo from a concrete NumericTensor.
 /// Keeps the concrete shape but replaces all element values with symbolic scalars.
-/// Returns None if the dtype isn't supported for shaped construction (e.g. Bool).
 fn numeric_to_shaped(
     tensor: &NumericTensor<DynRank>,
     resolver: &mut SymbolicResolver,
-) -> Option<TensorInfo> {
+) -> TensorInfo {
     let dtype = tensor.dtype();
-    // ShapedTensor::new_symbolic only supports F64, F32, U64, I64.
-    if !matches!(dtype, DType::F64 | DType::F32 | DType::U64 | DType::I64) {
-        return None;
-    }
     let shape: Vec<u64> = tensor.shape();
     let first_element = ScalarInfo::Symbolic(SymbolicScalar::new(dtype, resolver));
-    Some(TensorInfo::from(ShapedTensor::<DynRank>::new_symbolic(
+    TensorInfo::from(ShapedTensor::<DynRank>::new_symbolic(
         first_element,
         shape,
         resolver,
-    )))
+    ))
 }
 
 /// Create a Ranked TensorInfo from a concrete NumericTensor.
@@ -157,7 +152,6 @@ fn numeric_to_minimal(
 }
 
 /// Ablate a NumericTensor to the given level.
-/// Falls back to a lower ablation level if the dtype doesn't support the requested one.
 fn ablate_tensor(
     tensor: &NumericTensor<DynRank>,
     level: AblationLevel,
@@ -165,11 +159,7 @@ fn ablate_tensor(
 ) -> TensorInfo {
     match level {
         AblationLevel::Numeric => TensorInfo::from(tensor.clone()),
-        AblationLevel::Shaped => {
-            // Fall back to Ranked if dtype isn't supported for Shaped construction.
-            numeric_to_shaped(tensor, resolver)
-                .unwrap_or_else(|| numeric_to_ranked(tensor, resolver))
-        }
+        AblationLevel::Shaped => numeric_to_shaped(tensor, resolver),
         AblationLevel::Ranked => numeric_to_ranked(tensor, resolver),
         AblationLevel::Minimal => numeric_to_minimal(tensor, resolver),
     }
