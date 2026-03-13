@@ -8,6 +8,7 @@ variables:
   CARGO_INCREMENTAL: "0"
   RUST_BACKTRACE: "1"
   GIT_SUBMODULE_STRATEGY: recursive
+  GIT_SUBMODULE_FORCE_HTTPS: "true"
   # Features to test (everything except vulkan and tch which need
   # heavy system deps not yet available in the runner image)
   CI_FEATURES: "tokenizers,rwkv-tokenizer,http,blas,safetensors,cranelift"
