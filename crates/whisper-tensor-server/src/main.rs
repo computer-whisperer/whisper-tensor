@@ -11,213 +11,46 @@ use std::fs::File;
 use std::io::Read;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU32;
 use std::time;
 use std::time::{Duration, Instant};
-use tokio::sync::{Mutex, Notify, watch};
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{Mutex, Notify, mpsc};
 use tokio::time::sleep;
 use tower_http::{
     services::{ServeDir, ServeFile},
     trace::TraceLayer,
 };
-use whisper_tensor::DynRank;
 
-mod scheduler;
+use axum::extract::ws::Message;
+use crossbeam::queue::ArrayQueue;
+use hf_hub::api::tokio::ApiBuilder;
+use hf_hub::{Repo, RepoType};
+use tokenizers::FromPretrainedParameters;
+use whisper_tensor::loader::ConfigValue;
+use whisper_tensor_server::model_server::{ModelServer, default_loaders};
+use whisper_tensor_server::scheduler::{SchedulerJob, SchedulerReport, SchedulerReporter, scheduler};
+use whisper_tensor_server::{
+    ServerConfigReport, SuperGraphExecutionReport, WebsocketClientServerMessage,
+    WebsocketServerClientMessage,
+};
 
-struct ModelData {
-    model: Arc<Model>,
-    model_id: LoadedModelId,
-    model_name: String,
-    compiled_program: Option<Arc<CompiledProgram>>,
+const WEBUI_PKG_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../whisper-tensor-ui/pkg");
+const WEBUI_ASSETS_DIR: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../whisper-tensor-ui/assets"
+);
+const NOT_FOUND_HTML: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../whisper-tensor-ui/assets/404.html"
+));
+
+async fn send_message(socket: &mut WebSocket, message: WebsocketServerClientMessage) {
+    let mut data = Vec::<u8>::new();
+    ciborium::into_writer(&message, &mut data).unwrap();
+    socket.send(Message::Binary(data.into())).await.unwrap();
 }
 
-pub(crate) struct ModelServer {
-    models: RwLock<Vec<ModelData>>,
-    interfaces: RwLock<Vec<CurrentInterfacesReportEntry>>,
-    loaders: Vec<Box<dyn Loader>>,
-    loader_registry_report: LoaderRegistryReport,
-    next_model_id: AtomicU32,
-    models_report_watch_sender: watch::Sender<CurrentModelsAndInterfacesReport>,
-    models_report_watch_receiver: watch::Receiver<CurrentModelsAndInterfacesReport>,
-}
-
-impl ModelServer {
-    pub(crate) fn new(loaders: Vec<Box<dyn Loader>>) -> Self {
-        let (models_report_watch_sender, models_report_watch_receiver) =
-            watch::channel(CurrentModelsAndInterfacesReport::new());
-
-        let loader_registry_report = LoaderRegistryReport {
-            loaders: loaders
-                .iter()
-                .map(|l| LoaderRegistryEntry {
-                    name: l.name().to_string(),
-                    description: l.description().to_string(),
-                    config_schema: l.config_schema(),
-                })
-                .collect(),
-        };
-
-        Self {
-            models: RwLock::new(vec![]),
-            interfaces: RwLock::new(vec![]),
-            loaders,
-            loader_registry_report,
-            next_model_id: AtomicU32::new(0),
-            models_report_watch_sender,
-            models_report_watch_receiver,
-        }
-    }
-
-    pub(crate) fn get_loader_registry_report(&self) -> &LoaderRegistryReport {
-        &self.loader_registry_report
-    }
-
-    pub(crate) async fn generate_new_model_report(&self) {
-        let guard = self.models.read().await;
-        let mut new_report = CurrentModelsAndInterfacesReport::default();
-
-        for model in guard.iter() {
-            new_report.models.push(CurrentModelsReportEntry {
-                model_id: model.model_id,
-                model_name: model.model_name.clone(),
-                num_ops: model.model.get_symbolic_graph().get_operations().len() as u64,
-                model_compiled: model.compiled_program.is_some(),
-            });
-        }
-
-        let ifaces = self.interfaces.read().await;
-        for entry in ifaces.iter() {
-            new_report.interfaces.push(entry.clone());
-        }
-
-        self.models_report_watch_sender.send(new_report).unwrap()
-    }
-
-    pub(crate) async fn run_loader(
-        &self,
-        loader_index: usize,
-        config: ConfigValues,
-    ) -> Result<(), anyhow::Error> {
-        let loader = self
-            .loaders
-            .get(loader_index)
-            .ok_or_else(|| anyhow::anyhow!("Invalid loader index: {}", loader_index))?;
-
-        tracing::info!("Running loader: {}", loader.name());
-        let output = loader.load(config)?;
-
-        let mut model_ids = Vec::new();
-
-        // Register all models
-        {
-            let mut guard = self.models.write().await;
-            for loaded_model in output.models {
-                let model_id = LoadedModelId(
-                    self.next_model_id
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-                );
-                tracing::info!("Registered model '{}' as {}", loaded_model.name, model_id);
-                guard.push(ModelData {
-                    model: loaded_model.model,
-                    model_id,
-                    model_name: loaded_model.name,
-                    compiled_program: None,
-                });
-                model_ids.push(model_id);
-            }
-        }
-
-        // Register all interfaces
-        {
-            let mut ifaces = self.interfaces.write().await;
-            for loaded_interface in output.interfaces {
-                tracing::info!("Registered interface '{}'", loaded_interface.name);
-                ifaces.push(CurrentInterfacesReportEntry {
-                    model_ids: model_ids.clone(),
-                    interface_name: loaded_interface.name,
-                    interface: loaded_interface.interface,
-                });
-            }
-        }
-
-        self.generate_new_model_report().await;
-        Ok(())
-    }
-
-    pub(crate) async fn unload_model(&self, model_id: LoadedModelId) -> Result<(), anyhow::Error> {
-        let mut guard = self.models.write().await;
-        guard.retain(|model| model.model_id != model_id);
-        drop(guard);
-        let mut ifaces = self.interfaces.write().await;
-        ifaces.retain(|entry| !entry.model_ids.contains(&model_id));
-        drop(ifaces);
-        self.generate_new_model_report().await;
-        Ok(())
-    }
-
-    pub(crate) async fn get_model(&self, model_id: LoadedModelId) -> Option<Arc<Model>> {
-        let guard = self.models.read().await;
-        guard
-            .iter()
-            .find(|model| model.model_id == model_id)
-            .map(|model| model.model.clone())
-    }
-
-    pub(crate) async fn get_compiled_model(
-        &self,
-        model_id: LoadedModelId,
-    ) -> Option<Arc<CompiledProgram>> {
-        let guard = self.models.read().await;
-        guard
-            .iter()
-            .find(|model| model.model_id == model_id)
-            .and_then(|model| model.compiled_program.clone())
-    }
-
-    pub(crate) async fn set_compiled_model(
-        &self,
-        model_id: LoadedModelId,
-        compiled_program: Arc<CompiledProgram>,
-    ) {
-        let mut guard = self.models.write().await;
-        if let Some(model) = guard.iter_mut().find(|model| model.model_id == model_id) {
-            model.compiled_program = Some(compiled_program);
-        }
-        drop(guard);
-        self.generate_new_model_report().await;
-    }
-
-    pub(crate) async fn with_model<T>(
-        &self,
-        model_id: LoadedModelId,
-        f: impl FnOnce(&ModelData) -> T,
-    ) -> Result<T, String> {
-        let guard = self.models.read().await;
-        if let Some(model) = guard.iter().find(|model| model.model_id == model_id) {
-            Ok(f(model))
-        } else {
-            Err(format!("Model with id {model_id} not found"))
-        }
-    }
-
-    pub(crate) async fn get_stored_tensor_id(
-        &self,
-        model_id: LoadedModelId,
-        stored_tensor_id: TensorStoreTensorId,
-    ) -> Result<NumericTensor<DynRank>, String> {
-        let guard = self.models.read().await;
-        if let Some(model) = guard.iter().find(|model| model.model_id == model_id) {
-            model
-                .model
-                .get_tensor_store()
-                .get_tensor(stored_tensor_id)
-                .map(|x| x.to_numeric())
-                .ok_or("Tensor not found in Tensor Store".to_string())
-        } else {
-            Err(format!("Model with id {model_id} not found"))
-        }
-    }
+async fn not_found() -> impl IntoResponse {
+    (StatusCode::NOT_FOUND, Html(NOT_FOUND_HTML))
 }
 
 async fn websocket_handler(
@@ -236,43 +69,6 @@ async fn websocket_handler(
     })
 }
 
-use crate::scheduler::{SchedulerJob, SchedulerReport, SchedulerReporter, scheduler};
-use axum::extract::ws::Message;
-use crossbeam::queue::ArrayQueue;
-use hf_hub::api::tokio::ApiBuilder;
-use hf_hub::{Repo, RepoType};
-use tokenizers::FromPretrainedParameters;
-use whisper_tensor::compiler::CompiledProgram;
-use whisper_tensor::loader::{ConfigValue, ConfigValues, Loader};
-use whisper_tensor::model::Model;
-use whisper_tensor::numeric_tensor::NumericTensor;
-use whisper_tensor::symbolic_graph::tensor_store::TensorStoreTensorId;
-use whisper_tensor_server::{
-    CurrentInterfacesReportEntry, CurrentModelsAndInterfacesReport, CurrentModelsReportEntry,
-    LoadedModelId, LoaderRegistryEntry, LoaderRegistryReport, ServerConfigReport,
-    SuperGraphExecutionReport, WebsocketClientServerMessage, WebsocketServerClientMessage,
-};
-
-const WEBUI_PKG_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../whisper-tensor-webui/pkg");
-const WEBUI_ASSETS_DIR: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../whisper-tensor-webui/assets"
-);
-const NOT_FOUND_HTML: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../whisper-tensor-webui/assets/404.html"
-));
-
-async fn send_message(socket: &mut WebSocket, message: WebsocketServerClientMessage) {
-    let mut data = Vec::<u8>::new();
-    ciborium::into_writer(&message, &mut data).unwrap();
-    socket.send(Message::Binary(data.into())).await.unwrap();
-}
-
-async fn not_found() -> impl IntoResponse {
-    (StatusCode::NOT_FOUND, Html(NOT_FOUND_HTML))
-}
-
 pub async fn hf_from_pretrained<S: AsRef<str>>(
     identifier: S,
     params: Option<FromPretrainedParameters>,
@@ -289,7 +85,7 @@ pub async fn hf_from_pretrained<S: AsRef<str>>(
             buf.push(format!("'{x}'"));
             buf
         })
-        .join(", "); // "'/', '-', '_', '.'"
+        .join(", ");
     if !valid {
         return Err(format!(
             "Model \"{identifier}\" contains invalid characters, expected only alphanumeric or {valid_chars_stringified}"
@@ -322,7 +118,7 @@ async fn handle_socket(
     server_config_report: ServerConfigReport,
 ) {
     // Send opening state
-    let mut receiver = model_server.models_report_watch_receiver.clone();
+    let mut receiver = model_server.watch_models_report();
     let report_queue = Arc::new(ArrayQueue::new(1000));
     let report_notify = Arc::new(Notify::new());
     let initial_value = receiver.borrow_and_update().clone();
@@ -495,10 +291,6 @@ async fn handle_socket(
                                             let job = SchedulerJob::CompileModelRequest{model_id};
                                             scheduler_sender.send(job).await.unwrap();
                                         }
-                                        /*
-                                        _ => {
-                                            log::debug!("Unhandled message: {msg:?}")
-                                        }*/
                                     }
                                 }
                                 Err(err) => {
@@ -525,31 +317,11 @@ async fn handle_socket(
 
 #[tokio::main]
 async fn main() {
-    {} // initialize tracing
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .init();
 
-    #[cfg(feature = "import")]
-    let loaders: Vec<Box<dyn Loader>> = {
-        use whisper_tensor_import::loaders::{
-            AutoLoader, FluxLoader, KokoroLoader, OnnxLoader, PiperLoader, Rwkv7Loader, SD15Loader,
-            TransformersLoader,
-        };
-        vec![
-            Box::new(AutoLoader),
-            Box::new(OnnxLoader),
-            Box::new(TransformersLoader),
-            Box::new(Rwkv7Loader),
-            Box::new(SD15Loader),
-            Box::new(FluxLoader),
-            Box::new(KokoroLoader),
-            Box::new(PiperLoader),
-        ]
-    };
-    #[cfg(not(feature = "import"))]
-    let loaders: Vec<Box<dyn Loader>> = vec![];
-
+    let loaders = default_loaders();
     let model_server = Arc::new(ModelServer::new(loaders));
 
     // Load test models using the ONNX loader (index 1)
@@ -586,7 +358,7 @@ async fn main() {
         let model_server = model_server.clone();
         let not_found_file = ServeFile::new(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../whisper-tensor-webui/assets/404.html"
+            "/../whisper-tensor-ui/assets/404.html"
         ));
         let app = Router::new()
             .route("/health", get(|| async { "ok" }))
@@ -600,7 +372,7 @@ async fn main() {
                         server_config_report.clone(),
                     )
                 }),
-            ) // Add WebSocket endpoint
+            )
             .nest_service(
                 "/pkg",
                 ServeDir::new(WEBUI_PKG_DIR).not_found_service(not_found_file.clone()),
@@ -613,14 +385,14 @@ async fn main() {
                 "/index.html",
                 ServeFile::new(concat!(
                     env!("CARGO_MANIFEST_DIR"),
-                    "/../whisper-tensor-webui/assets/index.html"
+                    "/../whisper-tensor-ui/assets/index.html"
                 )),
             )
             .route_service(
                 "/",
                 ServeFile::new(concat!(
                     env!("CARGO_MANIFEST_DIR"),
-                    "/../whisper-tensor-webui/assets/index.html"
+                    "/../whisper-tensor-ui/assets/index.html"
                 )),
             )
             .fallback(not_found)

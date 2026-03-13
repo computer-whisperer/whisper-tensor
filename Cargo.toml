@@ -71,12 +71,12 @@ cranelift = ["dep:cranelift-codegen", "dep:cranelift-frontend", "dep:cranelift-m
 prost-build = "0.13.3"
 
 [workspace]
-members = [ "crates/whisper-tensor-cli", "crates/whisper-tensor-import", "crates/whisper-tensor-webui", "crates/whisper-tensor-server"]
+members = [ "crates/whisper-tensor-cli", "crates/whisper-tensor-import", "crates/whisper-tensor-ui", "crates/whisper-tensor-server"]
 
 [workspace.dependencies]
 rwkv-tokenizer = { path = "libs/rwkv-tokenizer/rwkv-tokenizer" }
 whisper-tensor = {path = "", default-features=false}
-whisper-tensor-webui = {path = "crates/whisper-tensor-webui"}
+whisper-tensor-ui = {path = "crates/whisper-tensor-ui"}
 whisper-tensor-import = {path = "crates/whisper-tensor-import"}
 whisper-tensor-server = {path = "crates/whisper-tensor-server", default-features=false}
 candle-core = {version="0.9.0", default-features=false}

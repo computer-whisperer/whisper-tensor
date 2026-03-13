@@ -4,7 +4,7 @@ on:
   push:
     branches: [ "main" ]
     paths:
-      - "crates/whisper-tensor-webui/**"
+      - "crates/whisper-tensor-ui/**"
       - "src/**"                   # root crate source used by the webui
       - "crates/**"                # any other workspace crates
       - "Cargo.toml"
@@ -14,7 +14,7 @@ on:
   pull_request:
     branches: [ "main" ]
     paths:
-      - "crates/whisper-tensor-webui/**"
+      - "crates/whisper-tensor-ui/**"
       - "src/**"
       - "crates/**"
       - "Cargo.toml"
@@ -74,13 +74,13 @@ jobs:
           version: 'latest'  # pin if you prefer
 
       - name: Check formatting (rustfmt)
-        run: cargo fmt -p whisper-tensor-webui -- --check
+        run: cargo fmt -p whisper-tensor-ui -- --check
 
       - name: Clippy (webui crate, wasm32)
-        run: cargo clippy -p whisper-tensor-webui --no-deps --target wasm32-unknown-unknown -- -D warnings
+        run: cargo clippy -p whisper-tensor-ui --no-deps --target wasm32-unknown-unknown -- -D warnings
 
       - name: Build webui crate (wasm)
-        working-directory: crates/whisper-tensor-webui
+        working-directory: crates/whisper-tensor-ui
         run: |
           wasm-pack build --target web --locked
           # If your workspace defaults pull in native-only features, use:

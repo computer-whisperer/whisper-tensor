@@ -83,15 +83,15 @@ fi
 
 if [[ "$RUN_WASM" -eq 1 ]]; then
   step "Check formatting (webui)"
-  run cargo fmt -p whisper-tensor-webui -- --check
+  run cargo fmt -p whisper-tensor-ui -- --check
 
   step "Clippy webui (wasm32, deny warnings)"
   run env RUSTFLAGS='--cfg getrandom_backend="wasm_js"' \
-    cargo clippy -p whisper-tensor-webui --no-deps --target wasm32-unknown-unknown -- -D warnings
+    cargo clippy -p whisper-tensor-ui --no-deps --target wasm32-unknown-unknown -- -D warnings
 
   if command -v wasm-pack &>/dev/null; then
     step "Build webui (wasm-pack)"
-    run wasm-pack build crates/whisper-tensor-webui --target web --locked
+    run wasm-pack build crates/whisper-tensor-ui --target web --locked
   else
     echo -e "\n${BOLD}── Skipping wasm-pack build (wasm-pack not installed)${RESET}"
   fi

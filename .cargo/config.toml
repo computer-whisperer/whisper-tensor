@@ -1,3 +1,4 @@
 [alias]
-fmt-nolibs = "fmt -p whisper-tensor -p whisper-tensor-import -p whisper-tensor-server -p whisper-tensor-webui"
-fmtcheck-nolibs = "fmt -p whisper-tensor -p whisper-tensor-import -p whisper-tensor-server -p whisper-tensor-webui -- --check"
+fmt-nolibs = "fmt -p whisper-tensor -p whisper-tensor-import -p whisper-tensor-server -p whisper-tensor-ui"
+fmtcheck-nolibs = "fmt -p whisper-tensor -p whisper-tensor-import -p whisper-tensor-server -p whisper-tensor-ui -- --check"
+native-ui = "run -p whisper-tensor-ui --bin whisper-tensor-ui --features native"

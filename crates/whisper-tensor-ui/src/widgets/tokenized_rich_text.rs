@@ -104,6 +104,7 @@ impl TokenizedRichText {
                             spacing_mut.item_spacing.y = 3.0;
                         }
                         if is_good
+                            && idx > 0
                             && let Some(logits) = logits
                             && idx - 1 < logits.len()
                         {

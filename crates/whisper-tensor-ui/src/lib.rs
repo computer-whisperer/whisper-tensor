@@ -1,18 +1,12 @@
-#[cfg(target_arch = "wasm32")]
 mod app;
-#[cfg(target_arch = "wasm32")]
 mod graph_explorer;
-#[cfg(target_arch = "wasm32")]
 mod llm_explorer;
-#[cfg(target_arch = "wasm32")]
 mod sd_explorer;
-#[cfg(target_arch = "wasm32")]
 mod websockets;
-#[cfg(target_arch = "wasm32")]
 mod widgets;
 
-#[cfg(target_arch = "wasm32")]
 pub use app::WebUIApp;
+
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
@@ -38,11 +32,31 @@ fn main() {
             .dyn_into::<web_sys::HtmlCanvasElement>()
             .expect("the_canvas_id was not a HtmlCanvasElement");
 
+        let (server_client_sender, server_client_receiver) =
+            tokio::sync::mpsc::unbounded_channel();
+        let (client_server_sender, client_server_receiver) =
+            tokio::sync::mpsc::unbounded_channel();
+
         let start_result = eframe::WebRunner::new()
             .start(
                 canvas,
                 web_options,
-                Box::new(|cc| Ok(Box::new(WebUIApp::new(cc)))),
+                Box::new(move |cc| {
+                    let ctx = cc.egui_ctx.clone();
+                    wasm_bindgen_futures::spawn_local(async move {
+                        websockets::websocket_task(
+                            server_client_sender,
+                            client_server_receiver,
+                            ctx,
+                        )
+                        .await;
+                    });
+                    Ok(Box::new(WebUIApp::new(
+                        cc,
+                        server_client_receiver,
+                        client_server_sender,
+                    )))
+                }),
             )
             .await;
 

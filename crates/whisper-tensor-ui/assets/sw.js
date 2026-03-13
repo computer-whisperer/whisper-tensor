@@ -2,8 +2,8 @@ var cacheName = 'egui-template-pwa';
 var filesToCache = [
   './',
   './index.html',
-  './pkg/whisper_tensor_webui.js',
-  './pkg/whisper_tensor_webui.wasm',
+  './pkg/whisper_tensor_ui.js',
+  './pkg/whisper_tensor_ui.wasm',
 ];
 
 /* Start the service worker and cache all of the app's content */

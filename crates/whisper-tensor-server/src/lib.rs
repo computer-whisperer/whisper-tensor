@@ -1,3 +1,10 @@
+#[cfg(not(target_arch = "wasm32"))]
+pub mod handler;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod model_server;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod scheduler;
+
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::time::Duration;
