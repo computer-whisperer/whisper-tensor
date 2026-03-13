@@ -154,8 +154,15 @@ pub fn load_transformers_format(
             phi3::load_phi3(weight_manager, config, output_method)
                 .map_err(Error::ModelBuildError)?
         }
-        "deepseek_v2" => {
-            println!("Loading as DeepSeek-V2");
+        "deepseek_v2" | "deepseek_v3" => {
+            println!(
+                "Loading as {}",
+                if model_type == "deepseek_v3" {
+                    "DeepSeek-V3"
+                } else {
+                    "DeepSeek-V2"
+                }
+            );
             let config =
                 deepseek_v2::DeepseekV2Config::from_huggingface_transformers_json(&config)?;
             deepseek_v2::load_deepseek_v2(weight_manager, config, output_method)
