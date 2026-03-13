@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 pub mod deepseek_v2;
 pub mod flux;
+pub mod gemma;
 pub mod gguf;
 pub mod llama3;
 pub mod loaders;
@@ -140,6 +141,12 @@ pub fn load_transformers_format(
             );
             let config = llama3::Llama3Config::from_huggingface_transformers_json(&config)?;
             llama3::load_llama3(weight_manager, config, output_method)
+                .map_err(Error::ModelBuildError)?
+        }
+        "gemma" => {
+            println!("Loading as Gemma");
+            let config = gemma::GemmaConfig::from_huggingface_transformers_json(&config)?;
+            gemma::load_gemma(weight_manager, config, output_method)
                 .map_err(Error::ModelBuildError)?
         }
         "qwen2" | "qwen3" => {
