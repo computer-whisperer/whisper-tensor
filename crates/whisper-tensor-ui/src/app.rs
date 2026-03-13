@@ -1,7 +1,6 @@
 use crate::graph_explorer::{GraphExplorerApp, GraphExplorerSettings, GraphRootSubjectSelection};
 use crate::llm_explorer::{LLMExplorerApp, LLMExplorerState};
 use crate::sd_explorer::{SDExplorerApp, SDExplorerState};
-use crate::websockets;
 use crate::websockets::ServerRequestManager;
 use crate::widgets::toggle::toggle_ui;
 use egui::Margin;
@@ -104,18 +103,15 @@ pub struct WebUIApp {
 
 impl WebUIApp {
     /// Called once before the first frame.
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        server_client_receiver: mpsc::UnboundedReceiver<WebsocketServerClientMessage>,
+        client_server_sender: mpsc::UnboundedSender<WebsocketClientServerMessage>,
+    ) -> Self {
         // This is also where you can customize the look and feel of egui using
         // `cc.egui_ctx.set_visuals` and `cc.egui_ctx.set_fonts`.
         cc.egui_ctx.set_zoom_factor(1.2);
 
-        let (server_client_sender, server_client_receiver) = mpsc::unbounded_channel();
-        let (client_server_sender, client_server_receiver) = mpsc::unbounded_channel();
-
-        let ctx = cc.egui_ctx.clone();
-        wasm_bindgen_futures::spawn_local(async {
-            websockets::websocket_task(server_client_sender, client_server_receiver, ctx).await;
-        });
         // Load previous app state (if any).
         // Note that you must enable the `persistence` feature for this to work.
         let app_state = if let Some(storage) = cc.storage {
@@ -235,7 +231,29 @@ impl WebUIApp {
                                     ui.label(label);
 
                                     match &field.field_type {
-                                        ConfigFieldType::FilePath | ConfigFieldType::String => {
+                                        ConfigFieldType::FilePath => {
+                                            ui.text_edit_singleline(value);
+                                            #[cfg(not(target_arch = "wasm32"))]
+                                            {
+                                                if ui.button("File…").clicked() {
+                                                    if let Some(path) =
+                                                        rfd::FileDialog::new().pick_file()
+                                                    {
+                                                        *value =
+                                                            path.to_string_lossy().to_string();
+                                                    }
+                                                }
+                                                if ui.button("Dir…").clicked() {
+                                                    if let Some(path) =
+                                                        rfd::FileDialog::new().pick_folder()
+                                                    {
+                                                        *value =
+                                                            path.to_string_lossy().to_string();
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        ConfigFieldType::String => {
                                             ui.text_edit_singleline(value);
                                         }
                                         ConfigFieldType::Integer { .. } => {

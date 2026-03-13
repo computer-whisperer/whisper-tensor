@@ -1,21 +1,25 @@
 [package]
-name = "whisper-tensor-webui"
+name = "whisper-tensor-ui"
 version = "0.1.0"
 edition = "2024"
 
 [lib]
 crate-type = ["cdylib", "lib"]
 
+[[bin]]
+name = "whisper-tensor-ui"
+path = "src/main.rs"
+
+[features]
+default = []
+native = ["import", "candle", "cranelift"]
+import = ["whisper-tensor-server/import"]
+vulkan = ["whisper-tensor-server/vulkan"]
+candle = ["whisper-tensor-server/candle"]
+cranelift = ["whisper-tensor-server/cranelift"]
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 tracing-subscriber = "0.3.22"
-egui = { version = "0.33.3" }
-egui_extras = { version = "0.33.3" }
-eframe = {version = "0.33.3", default-features = false, features = [
-    "default_fonts", # Embed the default egui fonts.
-    "glow",          # Use the glow rendering backend. Alternative: "wgpu".
-    "persistence",   # Enable restoring app state when restarting the app.
-]}
-log = "0.4.29"
 wasm-bindgen-futures = "0.4.58"
 web-sys = { version = "0.3.85", features = ['Document',
     'Element',
@@ -36,16 +40,31 @@ web-sys = { version = "0.3.85", features = ['Document',
     'HtmlCollection',
 ] }
 js-sys = "0.3"
-ciborium = { version="0.2.2"}
 wasm-bindgen = "0.2.108"
 getrandom = { version = "0.3", features = ["wasm_js"] }
 web-time = "1.1.0"
-tokio = {version = "1.49.0", default-features = false, features = ["sync"]}
 futures = {version = "0.3.31"}
-rwkv-tokenizer = { workspace = true }
 
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { version = "1.49.0", features = ["rt", "rt-multi-thread", "sync"] }
+tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt"] }
+tracing = "0.1"
+rfd = "0.15"
 
 [dependencies]
+egui = { version = "0.33.3" }
+egui_extras = { version = "0.33.3" }
+eframe = {version = "0.33.3", default-features = false, features = [
+    "default_fonts",
+    "glow",
+    "persistence",
+    "x11",
+    "wayland",
+]}
+log = "0.4.29"
+ciborium = { version="0.2.2"}
+tokio = {version = "1.49.0", default-features = false, features = ["sync"]}
+rwkv-tokenizer = { workspace = true }
 whisper-tensor = {workspace=true, default-features = false, features=["tokenizers", "rwkv-tokenizer"]}
 whisper-tensor-server = {workspace=true, default-features = false}
 strum = "0.27.1"

@@ -15,9 +15,12 @@ use egui::{
     Color32, ColorImage, Context, Label, Margin, Mesh, Pos2, Rect, Response, Sense, Shape, Stroke,
     StrokeKind, TextureHandle, Ui, UiBuilder, Vec2, vec2,
 };
+#[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
+#[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::wasm_bindgen;
 
+#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen(inline_js = "
 export function js_copy_image_to_clipboard(rgba_data, width, height) {
     const canvas = document.createElement('canvas');
@@ -44,7 +47,10 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tensor_swatch::build_tensor_swatch;
+#[cfg(target_arch = "wasm32")]
 use web_time::{Duration, Instant};
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::{Duration, Instant};
 use whisper_tensor::DynRank;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::graph::{GlobalId, Graph, GraphDyn};
@@ -1819,7 +1825,14 @@ impl GraphExplorerApp {
 fn save_image_to_download(color_image: &ColorImage) {
     let [w, h] = color_image.size;
     let bmp_data = encode_bmp(w, h, &color_image.pixels);
-    let _ = trigger_browser_download("generated_image.bmp", &bmp_data, "image/bmp");
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = trigger_browser_download("generated_image.bmp", &bmp_data, "image/bmp");
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = std::fs::write("generated_image.bmp", &bmp_data);
+    }
 }
 
 fn copy_image_to_clipboard(color_image: &ColorImage) {
@@ -1831,7 +1844,12 @@ fn copy_image_to_clipboard(color_image: &ColorImage) {
         rgba.push(pixel.b());
         rgba.push(pixel.a());
     }
+    #[cfg(target_arch = "wasm32")]
     js_copy_image_to_clipboard(&rgba, w as u32, h as u32);
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = (&rgba, w, h); // TODO: native clipboard support
+    }
 }
 
 fn encode_bmp(w: usize, h: usize, pixels: &[Color32]) -> Vec<u8> {
@@ -1877,6 +1895,7 @@ fn encode_bmp(w: usize, h: usize, pixels: &[Color32]) -> Vec<u8> {
     data
 }
 
+#[cfg(target_arch = "wasm32")]
 fn trigger_browser_download(
     filename: &str,
     data: &[u8],

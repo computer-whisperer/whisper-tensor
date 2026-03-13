@@ -1,14 +1,11 @@
 use std::collections::{HashMap, HashSet};
-use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::SendError;
-use wasm_bindgen::JsCast;
-use wasm_bindgen::prelude::Closure;
-use web_sys::{WebSocket, js_sys};
 use whisper_tensor_server::{
     SuperGraphExecutionReport, SuperGraphRequest, SuperGraphResponse, WebsocketClientServerMessage,
-    WebsocketServerClientMessage,
 };
+#[cfg(target_arch = "wasm32")]
+use whisper_tensor_server::WebsocketServerClientMessage;
 
 pub struct ServerRequestManager {
     client_server_sender: mpsc::UnboundedSender<WebsocketClientServerMessage>,
@@ -91,11 +88,17 @@ impl ServerRequestManager {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
 pub(crate) async fn websocket_task(
     server_client_sender: mpsc::UnboundedSender<WebsocketServerClientMessage>,
     mut client_server_receiver: mpsc::UnboundedReceiver<WebsocketClientServerMessage>,
     context: egui::Context,
 ) {
+    use std::time::Duration;
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::prelude::Closure;
+    use web_sys::{WebSocket, js_sys};
+
     let ws = WebSocket::new("/ws").unwrap();
 
     // Set up event handlers
@@ -119,14 +122,11 @@ pub(crate) async fn websocket_task(
                     Closure::<dyn FnMut(_)>::new(move |_e: web_sys::ProgressEvent| {
                         let array = js_sys::Uint8Array::new(&fr_c.result().unwrap());
                         let vec = array.to_vec();
-                        //log::info!("Blob received {} bytes: {:?}", vec.len(), vec);
-                        // here you can for example use the received image/png data
 
                         match ciborium::from_reader::<WebsocketServerClientMessage, _>(
                             vec.as_slice(),
                         ) {
                             Ok(msg) => {
-                                //log::debug!("Decoded message: {:?}", msg);
                                 sender_clone.send(msg).unwrap();
                                 context.request_repaint_after(Duration::from_millis(20));
                             }
@@ -166,7 +166,6 @@ pub(crate) async fn websocket_task(
     while let Some(message) = client_server_receiver.recv().await {
         let mut data = Vec::<u8>::new();
         ciborium::into_writer(&message, &mut data).unwrap();
-        //log::debug!("Sending message to server");
         ws_clone.send_with_u8_array(&data).unwrap();
     }
 }
