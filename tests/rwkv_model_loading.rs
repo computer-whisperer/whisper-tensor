@@ -838,3 +838,264 @@ fn rwkv01b_v10_compile_and_run() {
     eprintln!("[v10] V10 execution: {:.3}s vs NanoEval: reference", exec_time.as_secs_f64());
     eprintln!("[v10] TEST PASSED");
 }
+
+#[test]
+#[ignore]
+#[cfg(feature = "cranelift")]
+fn rwkv01b_v11_compile_and_run() {
+    use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
+    use whisper_tensor::compiler::attempts::v11_claude::pipeline::run::V11Executable;
+    use whisper_tensor::graph::GlobalId;
+    use whisper_tensor::nano_graph::{eval::NanoEval, lower};
+    use whisper_tensor::numeric_scalar::NumericScalar;
+    use whisper_tensor::numeric_tensor::NumericTensor;
+    use whisper_tensor::tensor_info::TensorInfo;
+    use whisper_tensor::{DynRank, dtype::DType};
+
+    let Some(pth_path) = find_rwkv_pth() else {
+        eprintln!("Skipping: no RWKV .pth found under test_models/");
+        return;
+    };
+    if !is_real_model_file(&pth_path) {
+        eprintln!("Skipping: {} is a Git LFS pointer", pth_path.display());
+        return;
+    }
+
+    // ---- Load model ----
+    let t0 = std::time::Instant::now();
+    let onnx_bytes = whisper_tensor_import::identify_and_load(
+        &pth_path,
+        whisper_tensor_import::onnx_graph::WeightStorageStrategy::EmbeddedData,
+    )
+    .expect("import rwkv7 to onnx");
+    let mut rng = rand::rng();
+    let model = Model::new_from_onnx(&onnx_bytes, &mut rng, None).expect("model loads");
+    eprintln!("[v11] Model loaded in {:.1}s", t0.elapsed().as_secs_f64());
+
+    // ---- Generate MilliOpGraph ----
+    let t0 = std::time::Instant::now();
+    let milli = model.get_symbolic_graph().generate_milli_graph(&mut rng);
+    eprintln!("[v11] Milli graph in {:.1}ms", t0.elapsed().as_secs_f64() * 1e3);
+
+    // ---- Create input tensors ----
+    let input_info = model.get_input_tensor_info().expect("introspect inputs");
+    let sym_graph = model.get_symbolic_graph();
+    let tensor_store = model.get_tensor_store();
+    let tensors_by_name = sym_graph.get_tensors_by_name();
+
+    let mut input_tensors: HashMap<GlobalId, NumericTensor<DynRank>> = HashMap::new();
+    for (name, (dtype, shape_desc)) in &input_info {
+        let shape: Vec<u64> = shape_desc.iter().map(|d| d.unwrap_or(1)).collect();
+        let numel: usize = shape.iter().product::<u64>().max(1) as usize;
+        let data: Vec<u8> = match dtype {
+            DType::F32 => {
+                let v: Vec<f32> = (0..numel).map(|i| 0.01 * (i as f32 + 1.0)).collect();
+                v.iter().flat_map(|x| x.to_le_bytes()).collect()
+            }
+            DType::I64 => {
+                let v: Vec<i64> = (0..numel).map(|i| (i as i64) + 1).collect();
+                v.iter().flat_map(|x| x.to_le_bytes()).collect()
+            }
+            DType::I32 => {
+                let v: Vec<i32> = (0..numel).map(|i| (i as i32) + 1).collect();
+                v.iter().flat_map(|x| x.to_le_bytes()).collect()
+            }
+            _ => {
+                let elem_size = match dtype {
+                    DType::BF16 | DType::F16 => 2,
+                    DType::U64 => 8,
+                    DType::U32 | DType::U16 | DType::I16 => 4,
+                    DType::U8 | DType::I8 | DType::BOOL => 1,
+                    DType::F64 => 8,
+                    _ => panic!("unsupported dtype {:?}", dtype),
+                };
+                vec![1u8; numel * elem_size]
+            }
+        };
+        let nd = NDArrayNumericTensor::from_raw_data(&data, *dtype, shape)
+            .expect("build input tensor");
+        if let Some(&id) = tensors_by_name.get(name) {
+            input_tensors.insert(id, NumericTensor::NDArray(nd));
+        }
+    }
+
+    let weight_tensors = sym_graph.get_initialized_tensors(tensor_store);
+
+    // ---- Lower to NanoGraph ----
+    let mut lower_infos: HashMap<GlobalId, TensorInfo> = HashMap::new();
+    for (id, t) in &weight_tensors {
+        lower_infos.insert(*id, TensorInfo::from(t.clone()));
+    }
+    for (id, t) in &input_tensors {
+        lower_infos.insert(*id, TensorInfo::from(t.clone()));
+    }
+
+    let t0 = std::time::Instant::now();
+    let result = lower::lower_with_info(&milli, &lower_infos).expect("lower");
+    eprintln!(
+        "[v11] Lowered in {:.1}s  (atoms: {}, groups: {}, unsupported: {})",
+        t0.elapsed().as_secs_f64(),
+        result.graph.num_atoms(),
+        result.graph.groups().len(),
+        result.unsupported.len()
+    );
+    if !result.unsupported.is_empty() {
+        eprintln!("[v11] Unsupported ops ({}):", result.unsupported.len());
+        for detail in &result.unsupported_details {
+            eprintln!("  {}", detail);
+        }
+    }
+
+    // ---- Build input/output ID lists ----
+    let mut input_ids: Vec<GlobalId> = Vec::new();
+    for (ext_id, _) in &input_tensors {
+        if let Some(&int_id) = milli.input_map.get(ext_id) {
+            if result.tensor_map.contains_key(&int_id) {
+                input_ids.push(int_id);
+            }
+        }
+    }
+
+    let output_map = milli.output_map.as_ref().expect("milli has output_map");
+    let output_ids: Vec<GlobalId> = output_map
+        .keys()
+        .filter(|int_id| result.tensor_map.contains_key(int_id))
+        .copied()
+        .collect();
+
+    eprintln!("[v11] {} input tensors, {} output tensors", input_ids.len(), output_ids.len());
+
+    // ---- V11 build ----
+    let t0 = std::time::Instant::now();
+    let mut exe = V11Executable::build(&result, &input_ids, &output_ids)
+        .expect("v11 build failed");
+    eprintln!(
+        "[v11] Compiled in {:.1}s  ({} buffers, {} kernels)",
+        t0.elapsed().as_secs_f64(),
+        exe.plan.buffers.len(),
+        exe.plan.kernels.len()
+    );
+
+    // ---- Set inputs ----
+    for (ext_id, tensor) in &input_tensors {
+        let Some(&int_id) = milli.input_map.get(ext_id) else { continue };
+        if !result.tensor_map.contains_key(&int_id) { continue; }
+        let mut backend = EvalBackend::NDArray;
+        let f32_t = tensor
+            .cast(DType::F32, &mut backend)
+            .unwrap();
+        let flat = f32_t.flatten().unwrap();
+        let v: Vec<f32> = flat.to_ndarray().unwrap().try_into().unwrap();
+        exe.set_input(&int_id, &v);
+    }
+
+    // ---- Execute ----
+    let t0 = std::time::Instant::now();
+    exe.execute();
+    let exec_time = t0.elapsed();
+    eprintln!("[v11] Executed {} kernels in {:.3}s", exe.compiled.kernels.len(), exec_time.as_secs_f64());
+
+    // ---- Compare against NanoEval reference ----
+    let mut overrides = result.numeric_overrides.clone();
+    let tensor_to_scalars = |t: &NumericTensor<DynRank>| -> Vec<NumericScalar> {
+        let mut be = EvalBackend::NDArray;
+        let dtype = t.dtype();
+        let f32t = t.cast(DType::F32, &mut be).unwrap();
+        let flat = f32t.flatten().unwrap();
+        let v: Vec<f32> = flat.to_ndarray().unwrap().try_into().unwrap();
+        v.into_iter().map(|x| NumericScalar::F32(x).cast_to(dtype)).collect()
+    };
+    for (ext_id, tensor) in &input_tensors {
+        let Some(&int_id) = milli.input_map.get(ext_id) else { continue };
+        let Some(tam) = result.tensor_map.get(&int_id) else { continue };
+        let scalars = tensor_to_scalars(tensor);
+        for (i, val) in scalars.into_iter().enumerate() {
+            overrides.insert(tam.base_id.0 + i as u32, val);
+        }
+    }
+
+    let t0_ref = std::time::Instant::now();
+    let nano_eval = NanoEval::eval(&result.graph, &overrides);
+    eprintln!("[v11] NanoEval reference in {:.1}s", t0_ref.elapsed().as_secs_f64());
+
+    // Compare output tensors.
+    let mut max_diff = 0.0f64;
+    let mut total_elements = 0usize;
+    let mut divergence_count = 0usize;
+    let mut divergent_outputs = 0usize;
+    let mut perfect_outputs = 0usize;
+    for &out_id in &output_ids {
+        let tam = result.tensor_map.get(&out_id).unwrap();
+        if !tam.sym_dims.is_empty() { continue; }
+
+        let nano_vals: Vec<f64> = (0..tam.count)
+            .map(|i| nano_eval.get(tam.base_id.offset(i)))
+            .collect();
+
+        let v11_vals = match exe.get_output(&out_id) {
+            Some(v) => v,
+            None => {
+                eprintln!("[v11] WARNING: output {:?} not found in v11", out_id);
+                continue;
+            }
+        };
+
+        if nano_vals.len() != v11_vals.len() {
+            eprintln!(
+                "[v11] SIZE MISMATCH: output {:?} nano={} v11={}",
+                out_id, nano_vals.len(), v11_vals.len()
+            );
+            continue;
+        }
+
+        let mut tensor_div = 0usize;
+        let mut tensor_max_diff = 0.0f64;
+        for (i, (&nano, &v11)) in nano_vals.iter().zip(v11_vals.iter()).enumerate() {
+            let diff = (nano - v11 as f64).abs();
+            let tol = 1e-2 * nano.abs().max(1.0);
+            if diff > max_diff {
+                max_diff = diff;
+            }
+            if diff > tensor_max_diff { tensor_max_diff = diff; }
+            total_elements += 1;
+            if diff > tol {
+                if tensor_div == 0 && divergent_outputs < 5 {
+                    eprintln!(
+                        "[v11] DIVERGENCE: output {:?} elem {}/{} nano={:.6} v11={:.6} diff={:.6}",
+                        out_id, i, nano_vals.len(), nano, v11, diff
+                    );
+                }
+                tensor_div += 1;
+                divergence_count += 1;
+            }
+        }
+        if tensor_div > 0 {
+            if divergent_outputs < 10 {
+                eprintln!("[v11]   ^ {}/{} elements diverge, max_diff={:.4}",
+                    tensor_div, nano_vals.len(), tensor_max_diff);
+            }
+            divergent_outputs += 1;
+        } else {
+            perfect_outputs += 1;
+        }
+    }
+
+    eprintln!(
+        "[v11] Compared {} output elements across {} outputs ({} perfect, {} divergent)",
+        total_elements, perfect_outputs + divergent_outputs, perfect_outputs, divergent_outputs
+    );
+    eprintln!(
+        "[v11] max abs diff: {:.2e}, divergences: {}/{}",
+        max_diff, divergence_count, total_elements
+    );
+    eprintln!("[v11] V11 execution: {:.3}s vs NanoEval: {:.1}s ({:.0}x speedup)",
+        exec_time.as_secs_f64(),
+        t0_ref.elapsed().as_secs_f64(),
+        t0_ref.elapsed().as_secs_f64() / exec_time.as_secs_f64().max(0.001),
+    );
+    if divergence_count == 0 {
+        eprintln!("[v11] TEST PASSED");
+    } else {
+        eprintln!("[v11] TEST FAILED: {} divergent elements in {} outputs", divergence_count, divergent_outputs);
+    }
+}

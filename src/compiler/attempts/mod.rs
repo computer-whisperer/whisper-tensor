@@ -14,3 +14,4 @@ pub mod v7_parallel_crystal;
 pub mod v8_generic_kernel;
 pub mod v9_fused_expr;
 pub mod v10_nano_kernel;
+pub mod v11_claude;
