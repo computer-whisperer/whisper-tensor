@@ -7,14 +7,20 @@ variables:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
   RUST_BACKTRACE: "1"
-  GIT_SUBMODULE_STRATEGY: recursive
-  GIT_SUBMODULE_FORCE_HTTPS: "true"
+  # Submodules are checked out manually in before_script because
+  # .gitmodules contains SSH URLs that fail in the runner container.
+  GIT_SUBMODULE_STRATEGY: none
   # Features to test (everything except vulkan and tch which need
   # heavy system deps not yet available in the runner image)
   CI_FEATURES: "tokenizers,rwkv-tokenizer,http,blas,safetensors,cranelift"
 
 default:
   image: docker.io/library/rust:latest
+  before_script:
+    # Rewrite SSH submodule URLs to HTTPS so the runner can clone without keys
+    - git config --global url."https://github.com/".insteadOf "git@github.com:"
+    - git submodule update --init --recursive
+    - apt-get update -qq && apt-get install -y -qq protobuf-compiler libopenblas-dev > /dev/null
 
 # ---------------------------------------------------------------------------
 # Lint stage
@@ -23,6 +29,8 @@ default:
 format:
   stage: lint
   before_script:
+    - git config --global url."https://github.com/".insteadOf "git@github.com:"
+    - git submodule update --init --recursive
     - rustup component add rustfmt
     - apt-get update -qq && apt-get install -y -qq protobuf-compiler jq > /dev/null
   script:
@@ -35,10 +43,8 @@ format:
 
 clippy:
   stage: lint
-  before_script:
-    - rustup component add clippy
-    - apt-get update -qq && apt-get install -y -qq protobuf-compiler libopenblas-dev > /dev/null
   script:
+    - rustup component add clippy
     - cargo clippy -p whisper-tensor --no-deps --features "$CI_FEATURES" -- -D warnings
     - cargo clippy -p whisper-tensor-server --no-deps --all-features -- -D warnings
     - cargo clippy -p whisper-tensor-import --no-deps --all-features -- -D warnings
@@ -49,8 +55,6 @@ clippy:
 
 build:
   stage: build
-  before_script:
-    - apt-get update -qq && apt-get install -y -qq protobuf-compiler libopenblas-dev > /dev/null
   script:
     - cargo build -p whisper-tensor --lib --locked --verbose
     - cargo build -p whisper-tensor --lib --locked --verbose --features "$CI_FEATURES"
@@ -62,7 +66,5 @@ build:
 
 test:
   stage: test
-  before_script:
-    - apt-get update -qq && apt-get install -y -qq protobuf-compiler libopenblas-dev > /dev/null
   script:
     - cargo test -p whisper-tensor --features "$CI_FEATURES" --locked --verbose
