@@ -152,10 +152,12 @@ impl MilliOp for ConstantOfShape {
         Box<dyn Iterator<Item = (GlobalId, crate::tensor_info::TensorInfo)>>,
         MilliOpGraphError,
     > {
-        use crate::tensor_info::TensorInfo;
         use crate::scalar_info::ScalarInfoTyped;
+        use crate::tensor_info::TensorInfo;
 
-        let shape_info = known_inputs.get(&self.shape).ok_or(MilliOpGraphError::UnableToInfer)?;
+        let shape_info = known_inputs
+            .get(&self.shape)
+            .ok_or(MilliOpGraphError::UnableToInfer)?;
 
         // If shape is concrete, fall back to eval.
         if shape_info.as_numeric().is_some() {
@@ -197,7 +199,9 @@ impl MilliOp for ConstantOfShape {
                                         NumericScalar::F64(x) => x as u64,
                                         _ => {
                                             out_dims.push(ScalarInfoTyped::Symbolic(
-                                                crate::symbolic_scalar::SymbolicScalarTyped::new(_symbolic_resolver),
+                                                crate::symbolic_scalar::SymbolicScalarTyped::new(
+                                                    _symbolic_resolver,
+                                                ),
                                             ));
                                             continue;
                                         }
@@ -206,13 +210,17 @@ impl MilliOp for ConstantOfShape {
                                 }
                                 _ => {
                                     out_dims.push(ScalarInfoTyped::Symbolic(
-                                        crate::symbolic_scalar::SymbolicScalarTyped::new(_symbolic_resolver),
+                                        crate::symbolic_scalar::SymbolicScalarTyped::new(
+                                            _symbolic_resolver,
+                                        ),
                                     ));
                                 }
                             }
                         } else {
                             out_dims.push(ScalarInfoTyped::Symbolic(
-                                crate::symbolic_scalar::SymbolicScalarTyped::new(_symbolic_resolver),
+                                crate::symbolic_scalar::SymbolicScalarTyped::new(
+                                    _symbolic_resolver,
+                                ),
                             ));
                         }
                     }

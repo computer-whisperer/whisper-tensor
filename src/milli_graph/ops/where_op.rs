@@ -75,12 +75,21 @@ impl MilliOp for Where {
     > {
         use crate::tensor_info::TensorInfo;
 
-        let cond_info = known_inputs.get(&self.condition).ok_or(MilliOpGraphError::UnableToInfer)?;
-        let x_info = known_inputs.get(&self.x).ok_or(MilliOpGraphError::UnableToInfer)?;
-        let y_info = known_inputs.get(&self.y).ok_or(MilliOpGraphError::UnableToInfer)?;
+        let cond_info = known_inputs
+            .get(&self.condition)
+            .ok_or(MilliOpGraphError::UnableToInfer)?;
+        let x_info = known_inputs
+            .get(&self.x)
+            .ok_or(MilliOpGraphError::UnableToInfer)?;
+        let y_info = known_inputs
+            .get(&self.y)
+            .ok_or(MilliOpGraphError::UnableToInfer)?;
 
         // If all concrete, fall back to eval.
-        if cond_info.as_numeric().is_some() && x_info.as_numeric().is_some() && y_info.as_numeric().is_some() {
+        if cond_info.as_numeric().is_some()
+            && x_info.as_numeric().is_some()
+            && y_info.as_numeric().is_some()
+        {
             let mut resolved = HashMap::new();
             resolved.insert(self.condition, cond_info.as_numeric().unwrap().clone());
             resolved.insert(self.x, x_info.as_numeric().unwrap().clone());
@@ -95,9 +104,11 @@ impl MilliOp for Where {
         let out_dtype = x_info.dtype();
 
         // Try per-dim broadcast shape inference.
-        if let (Some(c_ranked), Some(x_ranked), Some(y_ranked)) =
-            (cond_info.as_ranked(), x_info.as_ranked(), y_info.as_ranked())
-        {
+        if let (Some(c_ranked), Some(x_ranked), Some(y_ranked)) = (
+            cond_info.as_ranked(),
+            x_info.as_ranked(),
+            y_info.as_ranked(),
+        ) {
             if let Ok(out_dims) = super::infer_multidirectional_broadcasting_shape(
                 &[c_ranked.shape(), x_ranked.shape(), y_ranked.shape()],
                 symbolic_resolver,
@@ -118,7 +129,8 @@ impl MilliOp for Where {
         let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
             crate::symbolic_scalar::SymbolicScalar::new(out_dtype, symbolic_resolver),
         );
-        let out_info = TensorInfo::new_from_first_element_and_rank(first_elem, out_rank, symbolic_resolver);
+        let out_info =
+            TensorInfo::new_from_first_element_and_rank(first_elem, out_rank, symbolic_resolver);
         Ok(Box::new([(self.output, out_info)].into_iter()))
     }
 

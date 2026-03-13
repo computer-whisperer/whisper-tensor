@@ -1,12 +1,12 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
 use tokio::sync::{RwLock, watch};
+use whisper_tensor::DynRank;
 use whisper_tensor::compiler::CompiledProgram;
 use whisper_tensor::loader::{ConfigValues, Loader};
 use whisper_tensor::model::Model;
 use whisper_tensor::numeric_tensor::NumericTensor;
 use whisper_tensor::symbolic_graph::tensor_store::TensorStoreTensorId;
-use whisper_tensor::DynRank;
 
 use crate::{
     CurrentInterfacesReportEntry, CurrentModelsAndInterfacesReport, CurrentModelsReportEntry,

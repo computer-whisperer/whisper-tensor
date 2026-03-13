@@ -59,7 +59,11 @@ pub enum InputRef {
     /// Resolves to `base + stride_i * i + stride_k * k`.
     /// Used for contractions (MatMul) where each output atom's source
     /// varies with the reduction iteration.
-    SymAffine { base: AtomId, stride_i: i32, stride_k: i32 },
+    SymAffine {
+        base: AtomId,
+        stride_i: i32,
+        stride_k: i32,
+    },
 }
 
 impl InputRef {
@@ -72,7 +76,11 @@ impl InputRef {
                 AtomId(base.0.wrapping_add((*stride as i64 * i as i64) as u32))
             }
             InputRef::Explicit(ids) => ids[i as usize],
-            InputRef::SymAffine { base, stride_i, stride_k } => {
+            InputRef::SymAffine {
+                base,
+                stride_i,
+                stride_k,
+            } => {
                 AtomId(base.0.wrapping_add(
                     (*stride_i as i64 * i as i64 + *stride_k as i64 * k as i64) as u32,
                 ))
@@ -198,7 +206,8 @@ impl NanoGraph {
     /// Allocate `count` contiguous AtomIds. Returns the base id.
     fn alloc_ids(&mut self, count: u32) -> AtomId {
         let base = AtomId(self.next_atom_id);
-        self.next_atom_id = self.next_atom_id
+        self.next_atom_id = self
+            .next_atom_id
             .checked_add(count)
             .expect("AtomId overflow");
         base
@@ -246,11 +255,7 @@ impl NanoGraph {
         }
         let gi = idx - 1;
         let group = &self.groups[gi];
-        if group.contains(id) {
-            Some(gi)
-        } else {
-            None
-        }
+        if group.contains(id) { Some(gi) } else { None }
     }
 
     /// Look up which group an atom belongs to.
@@ -383,7 +388,10 @@ impl NanoGraph {
                 {
                     errors.push(format!(
                         "Group {} input {}: Explicit has {} entries but group has {} atoms",
-                        gi, inp_idx, ids.len(), group.count
+                        gi,
+                        inp_idx,
+                        ids.len(),
+                        group.count
                     ));
                 }
             }
@@ -399,7 +407,11 @@ impl NanoGraph {
             if group.inputs.len() != expected_inputs {
                 errors.push(format!(
                     "Group {} (base={}): op {:?} expects {} inputs but has {}",
-                    gi, group.base_id, group.op, expected_inputs, group.inputs.len()
+                    gi,
+                    group.base_id,
+                    group.op,
+                    expected_inputs,
+                    group.inputs.len()
                 ));
             }
         }
@@ -466,7 +478,11 @@ mod tests {
 
         let c = g.push_group(
             1024,
-            ScalarOp::Binary { op: ScalarBinOp::Add, compute_dtype: DType::F32, output_dtype: DType::F32 },
+            ScalarOp::Binary {
+                op: ScalarBinOp::Add,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
             vec![],
             vec![],
             vec![
@@ -505,7 +521,11 @@ mod tests {
 
         let _c = g.push_group(
             1024,
-            ScalarOp::Binary { op: ScalarBinOp::Add, compute_dtype: DType::F32, output_dtype: DType::F32 },
+            ScalarOp::Binary {
+                op: ScalarBinOp::Add,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
             vec![],
             vec![],
             vec![
@@ -540,7 +560,11 @@ mod tests {
         );
         let _c = g.push_group(
             1024,
-            ScalarOp::Binary { op: ScalarBinOp::Add, compute_dtype: DType::F32, output_dtype: DType::F32 },
+            ScalarOp::Binary {
+                op: ScalarBinOp::Add,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
             vec![batch],
             vec![],
             vec![
@@ -571,10 +595,16 @@ mod tests {
         // Reduce over seq_len: each of 768 hidden atoms accumulates over seq.
         let _reduced = g.push_group(
             768,
-            ScalarOp::ReduceSum { compute_dtype: DType::F32, output_dtype: DType::F32 },
+            ScalarOp::ReduceSum {
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
             vec![], // seq is reduced away
             vec![seq],
-            vec![InputRef::Affine { base: input, stride: 1 }],
+            vec![InputRef::Affine {
+                base: input,
+                stride: 1,
+            }],
         );
 
         assert!(g.validate().is_empty(), "{:?}", g.validate());
@@ -590,7 +620,10 @@ mod tests {
 
         // A Gather boundary: single atom, runtime-variable dims.
         let _gather = g.push_atom(
-            ScalarOp::Identity { compute_dtype: DType::F32, output_dtype: DType::F32 },
+            ScalarOp::Identity {
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
             vec![batch, seq],
             vec![],
             vec![], // no inputs tracked (boundary)
@@ -619,7 +652,11 @@ mod tests {
         // 3 consumer atoms that pick from source irregularly: [2, 0, 3].
         let _consumer = g.push_group(
             3,
-            ScalarOp::Unary { op: ScalarUnaryOp::Neg, compute_dtype: DType::F32, output_dtype: DType::F32 },
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Neg,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
             vec![],
             vec![],
             vec![InputRef::Explicit(vec![
@@ -651,7 +688,11 @@ mod tests {
         assert_eq!(explicit.resolve(2, 0), AtomId(30));
 
         // SymAffine: base=100, stride_i=3, stride_k=10
-        let sym = InputRef::SymAffine { base: AtomId(100), stride_i: 3, stride_k: 10 };
+        let sym = InputRef::SymAffine {
+            base: AtomId(100),
+            stride_i: 3,
+            stride_k: 10,
+        };
         assert_eq!(sym.resolve(0, 0), AtomId(100));
         assert_eq!(sym.resolve(1, 0), AtomId(103));
         assert_eq!(sym.resolve(0, 1), AtomId(110));

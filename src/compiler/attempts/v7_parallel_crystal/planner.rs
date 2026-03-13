@@ -591,9 +591,9 @@ fn emit_tile_starts(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dtype::DType;
     use crate::graph::GlobalId;
     use crate::milli_graph::ops::MatMul;
-    use crate::dtype::DType;
 
     fn build_rank2_matmul_graph(
         m: usize,

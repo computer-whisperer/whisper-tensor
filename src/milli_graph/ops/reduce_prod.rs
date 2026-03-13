@@ -125,9 +125,9 @@ impl MilliOp for ReduceProd {
 
         let num_axes: Option<usize> = if let Some(ax_id) = self.axes {
             if let Some(ax_info) = known_inputs.get(&ax_id) {
-                ax_info.rank_if_known().and_then(|_| {
-                    ax_info.dim_if_known(0).map(|n| n as usize)
-                })
+                ax_info
+                    .rank_if_known()
+                    .and_then(|_| ax_info.dim_if_known(0).map(|n| n as usize))
             } else {
                 None
             }
@@ -160,14 +160,14 @@ impl MilliOp for ReduceProd {
                 } else if self.keepdims {
                     ScalarInfoTyped::Numeric(input_rank)
                 } else {
-                    ScalarInfoTyped::Symbolic(
-                        crate::symbolic_scalar::SymbolicScalarTyped::new(symbolic_resolver),
-                    )
+                    ScalarInfoTyped::Symbolic(crate::symbolic_scalar::SymbolicScalarTyped::new(
+                        symbolic_resolver,
+                    ))
                 }
             }
-            _ => ScalarInfoTyped::Symbolic(
-                crate::symbolic_scalar::SymbolicScalarTyped::new(symbolic_resolver),
-            ),
+            _ => ScalarInfoTyped::Symbolic(crate::symbolic_scalar::SymbolicScalarTyped::new(
+                symbolic_resolver,
+            )),
         };
 
         let first_elem = crate::scalar_info::ScalarInfo::Symbolic(

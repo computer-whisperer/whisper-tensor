@@ -83,17 +83,18 @@ impl MilliOp for Shape {
             }
             if all_known {
                 // All dims concrete — produce a Numeric tensor.
-                let out: NumericTensor<DynRank> = NDArrayNumericTensor::<P1>::from(dim_vals)
-                    .to_dyn()
-                    .into();
+                let out: NumericTensor<DynRank> =
+                    NDArrayNumericTensor::<P1>::from(dim_vals).to_dyn().into();
                 return Ok(Box::new([(self.output, TensorInfo::from(out))].into_iter()));
             }
         }
 
         // Fallback: symbolic output with known rank=1.
-        let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
-            crate::symbolic_scalar::SymbolicScalar::new(crate::dtype::DType::I64, symbolic_resolver),
-        );
+        let first_elem =
+            crate::scalar_info::ScalarInfo::Symbolic(crate::symbolic_scalar::SymbolicScalar::new(
+                crate::dtype::DType::I64,
+                symbolic_resolver,
+            ));
         let out_info = TensorInfo::new_from_first_element_and_rank(
             first_elem,
             crate::scalar_info::ScalarInfoTyped::Numeric(1),

@@ -18,9 +18,9 @@ use whisper_tensor::compiler::attempts::v6_schedule_synthesis::synthesis as v6_s
 use whisper_tensor::compiler::attempts::v7_parallel_crystal::codegen as v7_codegen;
 use whisper_tensor::compiler::attempts::v7_parallel_crystal::planner as v7_planner;
 
+use whisper_tensor::dtype::DType;
 use whisper_tensor::graph::GlobalId;
 use whisper_tensor::milli_graph::MilliOpGraph;
-use whisper_tensor::dtype::DType;
 use whisper_tensor::milli_graph::ops::{MatMul, SimpleBinary, SimpleUnaryOp};
 use whisper_tensor::numeric_tensor::NumericTensor;
 use whisper_tensor::tensor_rank::DynRank;

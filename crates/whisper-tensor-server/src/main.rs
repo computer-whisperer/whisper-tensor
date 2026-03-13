@@ -27,17 +27,16 @@ use hf_hub::{Repo, RepoType};
 use tokenizers::FromPretrainedParameters;
 use whisper_tensor::loader::ConfigValue;
 use whisper_tensor_server::model_server::{ModelServer, default_loaders};
-use whisper_tensor_server::scheduler::{SchedulerJob, SchedulerReport, SchedulerReporter, scheduler};
+use whisper_tensor_server::scheduler::{
+    SchedulerJob, SchedulerReport, SchedulerReporter, scheduler,
+};
 use whisper_tensor_server::{
     ServerConfigReport, SuperGraphExecutionReport, WebsocketClientServerMessage,
     WebsocketServerClientMessage,
 };
 
 const WEBUI_PKG_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../whisper-tensor-ui/pkg");
-const WEBUI_ASSETS_DIR: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../whisper-tensor-ui/assets"
-);
+const WEBUI_ASSETS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../whisper-tensor-ui/assets");
 const NOT_FOUND_HTML: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../whisper-tensor-ui/assets/404.html"

@@ -315,12 +315,23 @@ fn infer_reduce_output_shape(
     let axes: Vec<usize> = if let Some(ax_id) = axes_id {
         let ax_info = known_inputs.get(&ax_id)?;
         let tensor = ax_info.as_numeric()?;
-        let as_i64 = tensor.cast(DType::I64, &mut crate::backends::eval_backend::EvalBackend::NDArray).ok()?;
+        let as_i64 = tensor
+            .cast(
+                DType::I64,
+                &mut crate::backends::eval_backend::EvalBackend::NDArray,
+            )
+            .ok()?;
         let rank1 = as_i64.try_to_rank::<typenum::P1>().ok()?;
         let vals = Vec::<i64>::try_from(rank1.to_ndarray().ok()?).ok()?;
-        vals.iter().map(|&a| {
-            if a < 0 { (a + rank as i64) as usize } else { a as usize }
-        }).collect()
+        vals.iter()
+            .map(|&a| {
+                if a < 0 {
+                    (a + rank as i64) as usize
+                } else {
+                    a as usize
+                }
+            })
+            .collect()
     } else {
         // No axes → reduce all.
         (0..rank).collect()

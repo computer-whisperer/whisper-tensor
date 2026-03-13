@@ -106,22 +106,36 @@ impl MilliOp for Slice {
         Box<dyn Iterator<Item = (GlobalId, crate::tensor_info::TensorInfo)>>,
         MilliOpGraphError,
     > {
-        use crate::tensor_info::TensorInfo;
         use crate::scalar_info::ScalarInfoTyped;
+        use crate::tensor_info::TensorInfo;
 
-        let data_info = known_inputs.get(&self.data).ok_or(MilliOpGraphError::UnableToInfer)?;
+        let data_info = known_inputs
+            .get(&self.data)
+            .ok_or(MilliOpGraphError::UnableToInfer)?;
 
         // If all inputs are concrete, fall back to eval.
         let all_numeric = data_info.as_numeric().is_some()
-            && known_inputs.get(&self.starts).and_then(|i| i.as_numeric()).is_some()
-            && known_inputs.get(&self.ends).and_then(|i| i.as_numeric()).is_some()
-            && self.steps.map_or(true, |id| known_inputs.get(&id).and_then(|i| i.as_numeric()).is_some())
-            && self.axes.map_or(true, |id| known_inputs.get(&id).and_then(|i| i.as_numeric()).is_some());
+            && known_inputs
+                .get(&self.starts)
+                .and_then(|i| i.as_numeric())
+                .is_some()
+            && known_inputs
+                .get(&self.ends)
+                .and_then(|i| i.as_numeric())
+                .is_some()
+            && self.steps.map_or(true, |id| {
+                known_inputs.get(&id).and_then(|i| i.as_numeric()).is_some()
+            })
+            && self.axes.map_or(true, |id| {
+                known_inputs.get(&id).and_then(|i| i.as_numeric()).is_some()
+            });
         if all_numeric {
             use crate::graph::Node;
             let mut resolved = HashMap::new();
             for id in Node::inputs(self) {
-                let info = known_inputs.get(&id).ok_or(MilliOpGraphError::UnableToInfer)?;
+                let info = known_inputs
+                    .get(&id)
+                    .ok_or(MilliOpGraphError::UnableToInfer)?;
                 resolved.insert(id, info.as_numeric().unwrap().clone());
             }
             let collected: Vec<(GlobalId, TensorInfo)> = self
@@ -132,7 +146,9 @@ impl MilliOp for Slice {
         }
 
         // Shape-only inference: compute output shape from data shape + slice params.
-        let data_ranked = data_info.as_ranked().ok_or(MilliOpGraphError::UnableToInfer)?;
+        let data_ranked = data_info
+            .as_ranked()
+            .ok_or(MilliOpGraphError::UnableToInfer)?;
         let data_shape = data_ranked.shape();
         let data_rank = data_shape.len();
 
@@ -154,7 +170,15 @@ impl MilliOp for Slice {
         };
         let axes: Option<Vec<usize>> = if let Some(axes_id) = &self.axes {
             extract_i64(axes_id).map(|a| {
-                a.iter().map(|&v| if v < 0 { (v + data_rank as i64) as usize } else { v as usize }).collect()
+                a.iter()
+                    .map(|&v| {
+                        if v < 0 {
+                            (v + data_rank as i64) as usize
+                        } else {
+                            v as usize
+                        }
+                    })
+                    .collect()
             })
         } else {
             starts.as_ref().map(|s| (0..s.len()).collect())
@@ -164,7 +188,8 @@ impl MilliOp for Slice {
 
         // If we have concrete slice params, compute exact output dims.
         // Otherwise, make sliced axes symbolic (we know the rank but not the dim sizes).
-        if let (Some(starts), Some(ends), Some(steps), Some(axes)) = (&starts, &ends, &steps, &axes) {
+        if let (Some(starts), Some(ends), Some(steps), Some(axes)) = (&starts, &ends, &steps, &axes)
+        {
             for (i, &axis) in axes.iter().enumerate() {
                 if let ScalarInfoTyped::Numeric(dim_val) = &data_shape[axis] {
                     let dim = *dim_val as i64;
@@ -199,9 +224,9 @@ impl MilliOp for Slice {
             // We don't know the axes — any dim could be sliced.
             // Make all dims symbolic to avoid claiming incorrect concrete sizes.
             for dim in out_dims.iter_mut() {
-                *dim = ScalarInfoTyped::Symbolic(
-                    crate::symbolic_scalar::SymbolicScalarTyped::new(_symbolic_resolver),
-                );
+                *dim = ScalarInfoTyped::Symbolic(crate::symbolic_scalar::SymbolicScalarTyped::new(
+                    _symbolic_resolver,
+                ));
             }
         }
 

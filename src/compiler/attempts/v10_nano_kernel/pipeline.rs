@@ -6,11 +6,9 @@ pub mod run {
     use std::collections::HashMap;
 
     use crate::compiler::attempts::v10_nano_kernel::codegen::jit::{
-        compile, CompiledGraph, CompiledKernel, V10Error,
+        CompiledGraph, CompiledKernel, V10Error, compile,
     };
-    use crate::compiler::attempts::v10_nano_kernel::plan::{
-        build_plan, BufferId, CompilationPlan,
-    };
+    use crate::compiler::attempts::v10_nano_kernel::plan::{BufferId, CompilationPlan, build_plan};
     use crate::graph::GlobalId;
     use crate::nano_graph::lower::LowerResult;
 
@@ -42,7 +40,9 @@ pub mod run {
                 plan.kernels.len(),
                 plan.output_buffers.len(),
             );
-            let total_fused = plan.kernels.iter()
+            let total_fused = plan
+                .kernels
+                .iter()
                 .filter(|k| k.reductions.len() > 0 || k.ops.len() > 2)
                 .count();
             eprintln!("[v10] {} kernels with fusion/reduction", total_fused);
@@ -155,15 +155,15 @@ pub mod run {
 mod tests {
     use std::collections::HashMap;
 
+    use crate::DynRank;
     use crate::backends::eval_backend::EvalBackend;
     use crate::graph::{GlobalId, Graph, Node};
     use crate::milli_graph::MilliOpGraph;
     use crate::nano_graph::eval::NanoEval;
-    use crate::nano_graph::lower::{lower_with_info, LowerResult};
+    use crate::nano_graph::lower::{LowerResult, lower_with_info};
     use crate::numeric_scalar::NumericScalar;
     use crate::numeric_tensor::NumericTensor;
     use crate::tensor_info::TensorInfo;
-    use crate::DynRank;
 
     use super::run::V10Executable;
 
@@ -200,16 +200,11 @@ mod tests {
         for (&id, tensor) in input_ids.iter().zip(inputs.iter()) {
             if let Some(tam) = result.tensor_map.get(&id) {
                 let mut backend = EvalBackend::NDArray;
-                let f32_t = tensor
-                    .cast(crate::dtype::DType::F32, &mut backend)
-                    .unwrap();
+                let f32_t = tensor.cast(crate::dtype::DType::F32, &mut backend).unwrap();
                 let flat = f32_t.flatten().unwrap();
                 let v: Vec<f32> = flat.to_ndarray().unwrap().try_into().unwrap();
                 for (i, &val) in v.iter().enumerate() {
-                    overrides.insert(
-                        tam.base_id.0 + i as u32,
-                        NumericScalar::F32(val),
-                    );
+                    overrides.insert(tam.base_id.0 + i as u32, NumericScalar::F32(val));
                 }
             }
         }
@@ -218,15 +213,13 @@ mod tests {
         let nano_eval = NanoEval::eval(&result.graph, &overrides);
 
         // V10 compile & execute.
-        let mut exe = V10Executable::build(&result, &input_ids, &output_ids)
-            .expect("v10 build failed");
+        let mut exe =
+            V10Executable::build(&result, &input_ids, &output_ids).expect("v10 build failed");
 
         // Set inputs.
         for (&id, tensor) in input_ids.iter().zip(inputs.iter()) {
             let mut backend = EvalBackend::NDArray;
-            let f32_t = tensor
-                .cast(crate::dtype::DType::F32, &mut backend)
-                .unwrap();
+            let f32_t = tensor.cast(crate::dtype::DType::F32, &mut backend).unwrap();
             let flat = f32_t.flatten().unwrap();
             let v: Vec<f32> = flat.to_ndarray().unwrap().try_into().unwrap();
             exe.set_input(&id, &v);
@@ -309,9 +302,7 @@ mod tests {
                 let b = crate::milli_graph::ops::SimpleUnaryOp::exp(graph, a, rng);
                 (vec![a], vec![b])
             },
-            vec![
-                NumericTensor::from_vec_shape(vec![0.0f32, 1.0, -1.0, 0.5], vec![4]).unwrap(),
-            ],
+            vec![NumericTensor::from_vec_shape(vec![0.0f32, 1.0, -1.0, 0.5], vec![4]).unwrap()],
         );
     }
 
@@ -331,16 +322,10 @@ mod tests {
                 (vec![a, b], vec![c])
             },
             vec![
-                NumericTensor::from_vec_shape(
-                    vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
-                    vec![2, 3],
-                )
-                .unwrap(),
-                NumericTensor::from_vec_shape(
-                    vec![1.0f32, 0.0, 0.0, 1.0, 1.0, 1.0],
-                    vec![3, 2],
-                )
-                .unwrap(),
+                NumericTensor::from_vec_shape(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3])
+                    .unwrap(),
+                NumericTensor::from_vec_shape(vec![1.0f32, 0.0, 0.0, 1.0, 1.0, 1.0], vec![3, 2])
+                    .unwrap(),
             ],
         );
     }
@@ -356,11 +341,8 @@ mod tests {
                 (vec![a, b], vec![c])
             },
             vec![
-                NumericTensor::from_vec_shape(
-                    vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
-                    vec![2, 3],
-                )
-                .unwrap(),
+                NumericTensor::from_vec_shape(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3])
+                    .unwrap(),
                 NumericTensor::from_vec_shape(vec![10.0f32, 20.0, 30.0], vec![3]).unwrap(),
             ],
         );
@@ -384,7 +366,9 @@ mod tests {
             },
             vec![
                 NumericTensor::from_vec_shape(
-                    vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
+                    vec![
+                        1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+                    ],
                     vec![3, 4],
                 )
                 .unwrap(),
@@ -405,9 +389,7 @@ mod tests {
                 let b = crate::milli_graph::ops::SimpleUnaryOp::neg(graph, a, rng);
                 (vec![a], vec![b])
             },
-            vec![
-                NumericTensor::from_vec_shape(vec![1.0f32, -2.0, 3.0, -4.0], vec![4]).unwrap(),
-            ],
+            vec![NumericTensor::from_vec_shape(vec![1.0f32, -2.0, 3.0, -4.0], vec![4]).unwrap()],
         );
     }
 

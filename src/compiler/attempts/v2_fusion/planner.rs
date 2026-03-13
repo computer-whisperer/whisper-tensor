@@ -474,8 +474,8 @@ fn build_consumer_map(graph: &MilliOpGraph) -> HashMap<GlobalId, Vec<GlobalId>> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::milli_graph::ops::{MatMul, SimpleBinary, SimpleUnaryOp};
     use crate::dtype::DType;
+    use crate::milli_graph::ops::{MatMul, SimpleBinary, SimpleUnaryOp};
 
     #[test]
     fn test_plan_fused_chain() {

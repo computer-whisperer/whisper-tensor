@@ -2775,7 +2775,15 @@ mod tests {
     fn test_backward_matmul_broadcast_batch() {
         // A=[2,3,4] @ B=[4,2] → output=[2,3,2], grad_B must sum out batch dim
         check_general_backward(
-            |graph, inputs, rng| ops::MatMul::push_new_default_precision(graph, inputs[0], inputs[1], DType::F32, rng),
+            |graph, inputs, rng| {
+                ops::MatMul::push_new_default_precision(
+                    graph,
+                    inputs[0],
+                    inputs[1],
+                    DType::F32,
+                    rng,
+                )
+            },
             &[
                 (1..=24).map(|x| x as f32 * 0.1).collect(),
                 vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
@@ -4119,8 +4127,7 @@ mod tests {
         graph.set_output_map(output_map);
 
         // Provide a concrete tensor as TensorInfo for input x.
-        let x_tensor =
-            NumericTensor::<DynRank>::from_vec_shape(vec![3.0f32], vec![1]).unwrap();
+        let x_tensor = NumericTensor::<DynRank>::from_vec_shape(vec![3.0f32], vec![1]).unwrap();
         let mut inputs = HashMap::new();
         inputs.insert(ext_x, TensorInfo::from(x_tensor));
 

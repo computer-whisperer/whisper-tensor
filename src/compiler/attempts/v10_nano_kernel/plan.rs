@@ -10,9 +10,9 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::dtype::DType;
-use crate::nano_graph::{ScalarBinOp, ScalarOp, ScalarUnaryOp};
-use crate::nano_graph::{AtomGroup, AtomId, InputRef, NanoGraph};
 use crate::nano_graph::lower::LowerResult;
+use crate::nano_graph::{AtomGroup, AtomId, InputRef, NanoGraph};
+use crate::nano_graph::{ScalarBinOp, ScalarOp, ScalarUnaryOp};
 use crate::numeric_scalar::NumericScalar;
 
 // ---------------------------------------------------------------------------
@@ -59,7 +59,11 @@ fn build_group_graph(graph: &NanoGraph) -> Vec<GroupInfo> {
             let mut source_groups_seen: HashSet<usize> = HashSet::new();
 
             match input_ref {
-                InputRef::SymAffine { base, stride_i, stride_k } => {
+                InputRef::SymAffine {
+                    base,
+                    stride_i,
+                    stride_k,
+                } => {
                     // Find all source groups by sampling across k values.
                     // The sym_dim bound tells us how many k values there are.
                     if !group.reduce_dims.is_empty() {
@@ -192,9 +196,10 @@ fn can_fuse_pointwise(
         InputRef::Explicit(ids) => {
             // Can fuse if the Explicit is effectively identity: ids[i] = producer.base_id + i
             ids.len() == producer.count as usize
-                && ids.iter().enumerate().all(|(i, id)| {
-                    *id == producer.base_id.offset(i as u32)
-                })
+                && ids
+                    .iter()
+                    .enumerate()
+                    .all(|(i, id)| *id == producer.base_id.offset(i as u32))
         }
         _ => false,
     }
@@ -258,20 +263,11 @@ pub enum KOp {
         stride: i32,
     },
     /// Broadcast load: buf[offset] (same value for all i)
-    BroadcastLoad {
-        buffer: BufferId,
-        offset: u32,
-    },
+    BroadcastLoad { buffer: BufferId, offset: u32 },
     /// Modular load: buf[i % modulus]. For broadcast/tiling patterns.
-    ModLoad {
-        buffer: BufferId,
-        modulus: u32,
-    },
+    ModLoad { buffer: BufferId, modulus: u32 },
     /// Index table load: buf[offsets[i]]. For irregular Explicit patterns.
-    TableLoad {
-        buffer: BufferId,
-        offsets: Vec<u32>,
-    },
+    TableLoad { buffer: BufferId, offsets: Vec<u32> },
     /// Literal constant.
     Literal(f32),
     /// Binary scalar op.
@@ -295,10 +291,7 @@ pub enum KOp {
         compute_dt: DType,
     },
     /// Identity / cast.
-    Cast {
-        x: VReg,
-        to: DType,
-    },
+    Cast { x: VReg, to: DType },
     /// Reduction result (references KernelReduction by index in the kernel).
     ReduceResult(usize),
 }
@@ -314,10 +307,7 @@ pub enum KReduceOp {
         stride_k: i32,
     },
     /// Broadcast load from buffer (k-invariant, i-invariant).
-    BroadcastLoad {
-        buffer: BufferId,
-        offset: u32,
-    },
+    BroadcastLoad { buffer: BufferId, offset: u32 },
     /// Load a value from the outer scope (computed before the reduction loop).
     OuterRef(VReg),
     /// Literal.
@@ -477,7 +467,11 @@ pub fn build_plan(lower: &LowerResult) -> CompilationPlan {
             };
             if !fusable {
                 infos[gi].must_materialize = true;
-                if consumer_is_reduce { mat_reason[5] += 1; } else { mat_reason[4] += 1; }
+                if consumer_is_reduce {
+                    mat_reason[5] += 1;
+                } else {
+                    mat_reason[4] += 1;
+                }
             } else {
                 fused_count += 1;
             }
@@ -490,7 +484,15 @@ pub fn build_plan(lower: &LowerResult) -> CompilationPlan {
 
     eprintln!(
         "[v10 plan] {} groups: {} fused, materialize reasons: literal={} output={} multi_consumer={} reduce={} unfusable_pw={} unfusable_red={} no_idx={}",
-        n, fused_count, mat_reason[0], mat_reason[1], mat_reason[2], mat_reason[3], mat_reason[4], mat_reason[5], mat_reason[6]
+        n,
+        fused_count,
+        mat_reason[0],
+        mat_reason[1],
+        mat_reason[2],
+        mat_reason[3],
+        mat_reason[4],
+        mat_reason[5],
+        mat_reason[6]
     );
 
     // Step 3: Identify groups that must share a contiguous buffer because
@@ -499,20 +501,33 @@ pub fn build_plan(lower: &LowerResult) -> CompilationPlan {
 
     fn uf_find(parent: &mut [usize], x: usize) -> usize {
         let mut r = x;
-        while parent[r] != r { r = parent[r]; }
+        while parent[r] != r {
+            r = parent[r];
+        }
         let mut c = x;
-        while parent[c] != r { let next = parent[c]; parent[c] = r; c = next; }
+        while parent[c] != r {
+            let next = parent[c];
+            parent[c] = r;
+            c = next;
+        }
         r
     }
     fn uf_union(parent: &mut [usize], a: usize, b: usize) {
         let ra = uf_find(parent, a);
         let rb = uf_find(parent, b);
-        if ra != rb { parent[rb] = ra; }
+        if ra != rb {
+            parent[rb] = ra;
+        }
     }
 
     for (gi, group) in groups.iter().enumerate() {
         for input_ref in &group.inputs {
-            if let InputRef::SymAffine { base, stride_i, stride_k } = input_ref {
+            if let InputRef::SymAffine {
+                base,
+                stride_i,
+                stride_k,
+            } = input_ref
+            {
                 // Find all groups this SymAffine spans.
                 if !group.reduce_dims.is_empty() {
                     let rd = group.reduce_dims[0];
@@ -547,7 +562,11 @@ pub fn build_plan(lower: &LowerResult) -> CompilationPlan {
             }
         }
         for i in 1..groups_in_tensor.len() {
-            uf_union(&mut shared_buf_parent, groups_in_tensor[0], groups_in_tensor[i]);
+            uf_union(
+                &mut shared_buf_parent,
+                groups_in_tensor[0],
+                groups_in_tensor[i],
+            );
         }
     }
 
@@ -752,10 +771,8 @@ struct KernelBuilder {
 
 impl KernelBuilder {
     fn new(kernel_root: usize, buffers: &[BufferInfo]) -> Self {
-        let buf_base_atoms: HashMap<BufferId, u32> = buffers
-            .iter()
-            .map(|b| (b.id, b.base_atom.0))
-            .collect();
+        let buf_base_atoms: HashMap<BufferId, u32> =
+            buffers.iter().map(|b| (b.id, b.base_atom.0)).collect();
         Self {
             ops: Vec::new(),
             reductions: Vec::new(),
@@ -803,7 +820,10 @@ fn emit_group_value(
     // handle the load with correct addressing. This path should not be hit
     // for materialized groups; see emit_group_input below.
     if gi != builder.kernel_root && group_to_buffer.contains_key(&gi) {
-        panic!("emit_group_value called on materialized group {} — use emit_group_input instead", gi);
+        panic!(
+            "emit_group_value called on materialized group {} — use emit_group_input instead",
+            gi
+        );
     }
 
     // This group is fused or is the kernel root — emit its inputs, then compute.
@@ -813,8 +833,8 @@ fn emit_group_value(
         .enumerate()
         .map(|(inp_idx, input_ref): (usize, &InputRef)| {
             let source_atom: AtomId = input_ref.resolve(0, 0);
-            let src_gi = find_group_idx(groups, source_atom)
-                .expect("input ref resolves to valid group");
+            let src_gi =
+                find_group_idx(groups, source_atom).expect("input ref resolves to valid group");
             emit_group_input(
                 builder,
                 graph,
@@ -904,11 +924,13 @@ fn emit_addressed_load_from_ref(
 
             // Check if it's a repeating pattern (broadcast tiling).
             let src_count = src_group.count as usize;
-            let is_repeat = ids.len() > src_count && ids.chunks(src_count).all(|chunk| {
-                chunk.iter().enumerate().all(|(i, id)| {
-                    *id == src_group.base_id.offset(i as u32)
-                })
-            });
+            let is_repeat = ids.len() > src_count
+                && ids.chunks(src_count).all(|chunk| {
+                    chunk
+                        .iter()
+                        .enumerate()
+                        .all(|(i, id)| *id == src_group.base_id.offset(i as u32))
+                });
             if is_repeat {
                 return builder.push_op(KOp::ModLoad {
                     buffer: buf_id,
@@ -927,9 +949,10 @@ fn emit_addressed_load_from_ref(
                 });
             }
             let stride = ids[1].0 as i64 - ids[0].0 as i64;
-            let is_affine = ids.iter().enumerate().all(|(i, id)| {
-                id.0 as i64 == ids[0].0 as i64 + stride * i as i64
-            });
+            let is_affine = ids
+                .iter()
+                .enumerate()
+                .all(|(i, id)| id.0 as i64 == ids[0].0 as i64 + stride * i as i64);
             if is_affine {
                 return builder.push_op(KOp::Load {
                     buffer: buf_id,
@@ -940,7 +963,8 @@ fn emit_addressed_load_from_ref(
 
             // Truly irregular: emit an index table load.
             // Convert each atom ID to a buffer-relative offset.
-            let offsets: Vec<u32> = ids.iter()
+            let offsets: Vec<u32> = ids
+                .iter()
                 .map(|id| (id.0 as i64 - buf_base as i64) as u32)
                 .collect();
             builder.push_op(KOp::TableLoad {
@@ -957,14 +981,24 @@ fn emit_addressed_load_from_ref(
 /// Emit a scalar op given its input VRegs.
 fn emit_scalar_op(builder: &mut KernelBuilder, op: &ScalarOp, inputs: &[VReg]) -> VReg {
     match op {
-        ScalarOp::Identity { compute_dtype, output_dtype } => {
+        ScalarOp::Identity {
+            compute_dtype,
+            output_dtype,
+        } => {
             let mut v = inputs[0];
             if compute_dtype != output_dtype {
-                v = builder.push_op(KOp::Cast { x: v, to: *output_dtype });
+                v = builder.push_op(KOp::Cast {
+                    x: v,
+                    to: *output_dtype,
+                });
             }
             v
         }
-        ScalarOp::Binary { op, compute_dtype, output_dtype } => {
+        ScalarOp::Binary {
+            op,
+            compute_dtype,
+            output_dtype,
+        } => {
             let v = builder.push_op(KOp::Binary {
                 op: *op,
                 a: inputs[0],
@@ -972,24 +1006,37 @@ fn emit_scalar_op(builder: &mut KernelBuilder, op: &ScalarOp, inputs: &[VReg]) -
                 compute_dt: *compute_dtype,
             });
             if compute_dtype != output_dtype {
-                builder.push_op(KOp::Cast { x: v, to: *output_dtype })
+                builder.push_op(KOp::Cast {
+                    x: v,
+                    to: *output_dtype,
+                })
             } else {
                 v
             }
         }
-        ScalarOp::Unary { op, compute_dtype, output_dtype } => {
+        ScalarOp::Unary {
+            op,
+            compute_dtype,
+            output_dtype,
+        } => {
             let v = builder.push_op(KOp::Unary {
                 op: *op,
                 x: inputs[0],
                 compute_dt: *compute_dtype,
             });
             if compute_dtype != output_dtype {
-                builder.push_op(KOp::Cast { x: v, to: *output_dtype })
+                builder.push_op(KOp::Cast {
+                    x: v,
+                    to: *output_dtype,
+                })
             } else {
                 v
             }
         }
-        ScalarOp::Select { compute_dtype, output_dtype } => {
+        ScalarOp::Select {
+            compute_dtype,
+            output_dtype,
+        } => {
             let v = builder.push_op(KOp::Select {
                 cond: inputs[0],
                 x: inputs[1],
@@ -997,14 +1044,15 @@ fn emit_scalar_op(builder: &mut KernelBuilder, op: &ScalarOp, inputs: &[VReg]) -
                 compute_dt: *compute_dtype,
             });
             if compute_dtype != output_dtype {
-                builder.push_op(KOp::Cast { x: v, to: *output_dtype })
+                builder.push_op(KOp::Cast {
+                    x: v,
+                    to: *output_dtype,
+                })
             } else {
                 v
             }
         }
-        ScalarOp::Literal(scalar) => {
-            builder.push_op(KOp::Literal(scalar.to_f64() as f32))
-        }
+        ScalarOp::Literal(scalar) => builder.push_op(KOp::Literal(scalar.to_f64() as f32)),
         ScalarOp::ReduceSum { .. } | ScalarOp::ReduceMax { .. } => {
             panic!("emit_scalar_op called with reduce op — use build_reduction_kernel");
         }
@@ -1026,14 +1074,27 @@ fn build_reduction_kernel(
 ) {
     let reduce_group = &groups[reduce_gi];
     let (compute_dt, output_dt, is_sum) = match &reduce_group.op {
-        ScalarOp::ReduceSum { compute_dtype, output_dtype } => (*compute_dtype, *output_dtype, true),
-        ScalarOp::ReduceMax { compute_dtype, output_dtype } => (*compute_dtype, *output_dtype, false),
+        ScalarOp::ReduceSum {
+            compute_dtype,
+            output_dtype,
+        } => (*compute_dtype, *output_dtype, true),
+        ScalarOp::ReduceMax {
+            compute_dtype,
+            output_dtype,
+        } => (*compute_dtype, *output_dtype, false),
         _ => panic!("not a reduce group"),
     };
 
-    assert_eq!(reduce_group.reduce_dims.len(), 1, "single reduce dim expected");
+    assert_eq!(
+        reduce_group.reduce_dims.len(),
+        1,
+        "single reduce dim expected"
+    );
     let rd = reduce_group.reduce_dims[0];
-    let bound = graph.sym_dim_bounds.get(&rd).copied()
+    let bound = graph
+        .sym_dim_bounds
+        .get(&rd)
+        .copied()
         .expect("reduce dim must have bound");
 
     // The reduction has one input. Check if we can fuse the source chain
@@ -1098,7 +1159,11 @@ fn build_simple_reduction_body(
     let input_ref = &reduce_group.inputs[0];
 
     let body_op = match input_ref {
-        InputRef::SymAffine { base, stride_i, stride_k } => {
+        InputRef::SymAffine {
+            base,
+            stride_i,
+            stride_k,
+        } => {
             let src_gi = find_group_idx(groups, *base).unwrap();
             let buf_id = group_to_buffer[&src_gi];
             let base_offset = builder.buf_offset(buf_id, *base);
@@ -1182,7 +1247,12 @@ fn build_fused_reduction_body(
     // We do this by tracing from the k=K source group along the same structural path.
     // For efficiency, we only sample k=0 and k=1 (to discover affine stride_k).
     let k0_to_k1_sibling = build_sibling_map(
-        groups, infos, &fused_chain, &chain_set, reduce_input_ref, bound,
+        groups,
+        infos,
+        &fused_chain,
+        &chain_set,
+        reduce_input_ref,
+        bound,
     );
 
     // Build the reduction body ops.
@@ -1205,7 +1275,10 @@ fn build_fused_reduction_body(
                 // Is the input another fused group in our chain?
                 if let Some(&bv) = chain_vreg.get(&inp_src_gi) {
                     let idx = body.len() as u16;
-                    body.push(KReduceOp::Cast { x: bv, to: compute_dt });
+                    body.push(KReduceOp::Cast {
+                        x: bv,
+                        to: compute_dt,
+                    });
                     return idx;
                 }
 
@@ -1225,7 +1298,8 @@ fn build_fused_reduction_body(
             .collect();
 
         // Emit the scalar op.
-        let result_idx = emit_reduce_body_op(&mut body, &chain_group.op, &input_body_vals, compute_dt);
+        let result_idx =
+            emit_reduce_body_op(&mut body, &chain_group.op, &input_body_vals, compute_dt);
         chain_vreg.insert(chain_gi, result_idx);
     }
 
@@ -1361,7 +1435,9 @@ fn emit_k_aware_reduce_load(
                 0
             }
         }
-        InputRef::SymAffine { stride_i, stride_k, .. } => {
+        InputRef::SymAffine {
+            stride_i, stride_k, ..
+        } => {
             // This input is itself a SymAffine — it already carries k-addressing.
             // Emit it directly using the SymAffine's own strides.
             let buf_id = group_to_buffer[&src_gi];
@@ -1466,11 +1542,7 @@ fn collect_reduction_chain(
 }
 
 /// Topologically sort a set of group indices based on their dependencies.
-fn toposort_chain(
-    groups: &[AtomGroup],
-    infos: &[GroupInfo],
-    chain: &[usize],
-) -> Vec<usize> {
+fn toposort_chain(groups: &[AtomGroup], infos: &[GroupInfo], chain: &[usize]) -> Vec<usize> {
     let chain_set: HashSet<usize> = chain.iter().copied().collect();
     let mut in_degree: HashMap<usize, usize> = HashMap::new();
     for &gi in chain {
@@ -1517,7 +1589,9 @@ fn emit_reduce_body_op(
 ) -> u16 {
     let idx = body.len() as u16;
     match op {
-        ScalarOp::Binary { op, compute_dtype, .. } => {
+        ScalarOp::Binary {
+            op, compute_dtype, ..
+        } => {
             body.push(KReduceOp::Binary {
                 op: *op,
                 a: inputs[0],
@@ -1525,7 +1599,9 @@ fn emit_reduce_body_op(
                 compute_dt: *compute_dtype,
             });
         }
-        ScalarOp::Unary { op, compute_dtype, .. } => {
+        ScalarOp::Unary {
+            op, compute_dtype, ..
+        } => {
             body.push(KReduceOp::Unary {
                 op: *op,
                 x: inputs[0],

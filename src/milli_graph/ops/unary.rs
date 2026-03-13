@@ -208,8 +208,10 @@ impl MilliOp for SimpleUnaryOp {
                 // Output is Bool with same shape. Build new TensorInfo with Bool dtype.
                 use crate::scalar_info::ScalarInfo;
                 use crate::symbolic_scalar::SymbolicScalar;
-                let first_elem =
-                    ScalarInfo::Symbolic(SymbolicScalar::new(crate::dtype::DType::BOOL, symbolic_resolver));
+                let first_elem = ScalarInfo::Symbolic(SymbolicScalar::new(
+                    crate::dtype::DType::BOOL,
+                    symbolic_resolver,
+                ));
                 TensorInfo::new_from_first_element_and_rank(
                     first_elem,
                     input_info.rank(),

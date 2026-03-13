@@ -20,15 +20,33 @@ pub mod jit {
     use cranelift_module::{Linkage, Module};
 
     // ---- Math function wrappers ----
-    extern "C" fn wt10_expf(x: f32) -> f32 { x.exp() }
-    extern "C" fn wt10_logf(x: f32) -> f32 { x.ln() }
-    extern "C" fn wt10_tanhf(x: f32) -> f32 { x.tanh() }
-    extern "C" fn wt10_sqrtf(x: f32) -> f32 { x.sqrt() }
-    extern "C" fn wt10_floorf(x: f32) -> f32 { x.floor() }
-    extern "C" fn wt10_ceilf(x: f32) -> f32 { x.ceil() }
-    extern "C" fn wt10_fabsf(x: f32) -> f32 { x.abs() }
-    extern "C" fn wt10_powf(x: f32, y: f32) -> f32 { x.powf(y) }
-    extern "C" fn wt10_fmodf(x: f32, y: f32) -> f32 { x % y }
+    extern "C" fn wt10_expf(x: f32) -> f32 {
+        x.exp()
+    }
+    extern "C" fn wt10_logf(x: f32) -> f32 {
+        x.ln()
+    }
+    extern "C" fn wt10_tanhf(x: f32) -> f32 {
+        x.tanh()
+    }
+    extern "C" fn wt10_sqrtf(x: f32) -> f32 {
+        x.sqrt()
+    }
+    extern "C" fn wt10_floorf(x: f32) -> f32 {
+        x.floor()
+    }
+    extern "C" fn wt10_ceilf(x: f32) -> f32 {
+        x.ceil()
+    }
+    extern "C" fn wt10_fabsf(x: f32) -> f32 {
+        x.abs()
+    }
+    extern "C" fn wt10_powf(x: f32, y: f32) -> f32 {
+        x.powf(y)
+    }
+    extern "C" fn wt10_fmodf(x: f32, y: f32) -> f32 {
+        x % y
+    }
 
     // ---- Error type ----
 
@@ -127,8 +145,7 @@ pub mod jit {
             .finish(settings::Flags::new(flag_builder))
             .map_err(|e| V10Error::Codegen(format!("ISA finish: {}", e)))?;
 
-        let mut jit_builder =
-            JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        let mut jit_builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
 
         jit_builder.symbol("wt10_expf", wt10_expf as *const u8);
         jit_builder.symbol("wt10_logf", wt10_logf as *const u8);
@@ -200,7 +217,12 @@ pub mod jit {
                 .map_err(|e| V10Error::Codegen(format!("define: {}", e)))?;
             ctx.clear();
 
-            kernel_infos.push((func_id, kplan.output, kplan.input_buffers.clone(), kplan.extent));
+            kernel_infos.push((
+                func_id,
+                kplan.output,
+                kplan.input_buffers.clone(),
+                kplan.extent,
+            ));
         }
 
         module
@@ -315,7 +337,11 @@ pub mod jit {
         table_counter: &mut usize,
     ) -> Result<Value, V10Error> {
         match op {
-            KOp::Load { buffer, base_offset, stride } => {
+            KOp::Load {
+                buffer,
+                base_offset,
+                stride,
+            } => {
                 let buf_ptr = load_buffer_ptr(builder, ptr_table, *buffer);
                 // addr = buf_ptr + (base_offset + stride * i) * 4
                 let idx = if *stride == 1 && *base_offset == 0 {
@@ -349,7 +375,12 @@ pub mod jit {
                 }
                 if offsets.len() == 1 {
                     let byte_off = offsets[0] as i64 * 4;
-                    return Ok(builder.ins().load(types::F32, MemFlags::new(), buf_ptr, byte_off as i32));
+                    return Ok(builder.ins().load(
+                        types::F32,
+                        MemFlags::new(),
+                        buf_ptr,
+                        byte_off as i32,
+                    ));
                 }
 
                 // Store offset table as a data section in the JIT module.
@@ -359,11 +390,13 @@ pub mod jit {
                     .declare_data(&data_name, Linkage::Local, false, false)
                     .map_err(|e| V10Error::Codegen(format!("declare table: {}", e)))?;
                 let mut data_desc = cranelift_module::DataDescription::new();
-                let bytes: Vec<u8> = offsets.iter()
+                let bytes: Vec<u8> = offsets
+                    .iter()
                     .flat_map(|&o| (o as u32).to_le_bytes())
                     .collect();
                 data_desc.define(bytes.into_boxed_slice());
-                module.define_data(data_id, &data_desc)
+                module
+                    .define_data(data_id, &data_desc)
                     .map_err(|e| V10Error::Codegen(format!("define table: {}", e)))?;
 
                 let gv = module.declare_data_in_func(data_id, builder.func);
@@ -378,23 +411,27 @@ pub mod jit {
                 // Load from data buffer at the offset.
                 let data_byte_off = builder.ins().imul_imm(offset_i64, 4);
                 let data_addr = builder.ins().iadd(buf_ptr, data_byte_off);
-                Ok(builder.ins().load(types::F32, MemFlags::new(), data_addr, 0))
+                Ok(builder
+                    .ins()
+                    .load(types::F32, MemFlags::new(), data_addr, 0))
             }
 
             KOp::BroadcastLoad { buffer, offset } => {
                 let buf_ptr = load_buffer_ptr(builder, ptr_table, *buffer);
                 let byte_offset = (*offset as i64) * 4;
-                Ok(builder.ins().load(
-                    types::F32,
-                    MemFlags::new(),
-                    buf_ptr,
-                    byte_offset as i32,
-                ))
+                Ok(builder
+                    .ins()
+                    .load(types::F32, MemFlags::new(), buf_ptr, byte_offset as i32))
             }
 
             KOp::Literal(val) => Ok(builder.ins().f32const(*val)),
 
-            KOp::Binary { op, a, b, compute_dt } => {
+            KOp::Binary {
+                op,
+                a,
+                b,
+                compute_dt,
+            } => {
                 let a_val = vreg_vals[a.0 as usize];
                 let b_val = vreg_vals[b.0 as usize];
                 emit_binop(builder, module, math, *op, a_val, b_val)
@@ -405,7 +442,12 @@ pub mod jit {
                 emit_unop(builder, module, math, *op, x_val)
             }
 
-            KOp::Select { cond, x, y, compute_dt } => {
+            KOp::Select {
+                cond,
+                x,
+                y,
+                compute_dt,
+            } => {
                 let c = vreg_vals[cond.0 as usize];
                 let xv = vreg_vals[x.0 as usize];
                 let yv = vreg_vals[y.0 as usize];
@@ -425,7 +467,9 @@ pub mod jit {
 
             KOp::ReduceResult(red_idx) => {
                 let reduction = &reductions[*red_idx];
-                emit_reduction_v2(builder, module, reduction, vreg_vals, ptr_table, i_val, math)
+                emit_reduction_v2(
+                    builder, module, reduction, vreg_vals, ptr_table, i_val, math,
+                )
             }
         }
     }
@@ -534,7 +578,12 @@ pub mod jit {
         math: &MathFuncs,
     ) -> Result<Value, V10Error> {
         match op {
-            KReduceOp::SymLoad { buffer, base_offset, stride_i, stride_k } => {
+            KReduceOp::SymLoad {
+                buffer,
+                base_offset,
+                stride_i,
+                stride_k,
+            } => {
                 let buf_ptr = load_buffer_ptr(builder, ptr_table, *buffer);
                 // idx = base_offset + stride_i * i + stride_k * k
                 let si = builder.ins().imul_imm(i_val, *stride_i as i64);
@@ -556,15 +605,16 @@ pub mod jit {
                 ))
             }
 
-            KReduceOp::OuterRef(vreg) => {
-                Ok(outer_vreg_vals[vreg.0 as usize])
-            }
+            KReduceOp::OuterRef(vreg) => Ok(outer_vreg_vals[vreg.0 as usize]),
 
-            KReduceOp::Literal(val) => {
-                Ok(builder.ins().f32const(*val))
-            }
+            KReduceOp::Literal(val) => Ok(builder.ins().f32const(*val)),
 
-            KReduceOp::Binary { op, a, b, compute_dt } => {
+            KReduceOp::Binary {
+                op,
+                a,
+                b,
+                compute_dt,
+            } => {
                 let a_val = body_vals[*a as usize];
                 let b_val = body_vals[*b as usize];
                 emit_binop(builder, module, math, *op, a_val, b_val)
@@ -606,11 +656,10 @@ pub mod jit {
                 builder.ins().select(cmp, a, b)
             }
             ScalarBinOp::Min => {
-                let cmp = builder.ins().fcmp(
-                    cranelift_codegen::ir::condcodes::FloatCC::LessThan,
-                    a,
-                    b,
-                );
+                let cmp =
+                    builder
+                        .ins()
+                        .fcmp(cranelift_codegen::ir::condcodes::FloatCC::LessThan, a, b);
                 builder.ins().select(cmp, a, b)
             }
             ScalarBinOp::Pow => {
@@ -679,17 +728,10 @@ pub mod jit {
 
     // ---- Helpers ----
 
-    fn load_buffer_ptr(
-        builder: &mut FunctionBuilder,
-        ptr_table: Value,
-        buffer: BufferId,
-    ) -> Value {
+    fn load_buffer_ptr(builder: &mut FunctionBuilder, ptr_table: Value, buffer: BufferId) -> Value {
         let offset = (buffer.0 as i64) * 8; // each pointer is 8 bytes
-        builder.ins().load(
-            types::I64,
-            MemFlags::new(),
-            ptr_table,
-            offset as i32,
-        )
+        builder
+            .ins()
+            .load(types::I64, MemFlags::new(), ptr_table, offset as i32)
     }
 }

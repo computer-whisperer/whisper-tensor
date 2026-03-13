@@ -16,9 +16,7 @@ fn main() {
     let (client_server_sender, client_server_receiver) = tokio::sync::mpsc::unbounded_channel();
 
     // Start the in-process server on the tokio runtime
-    let ctx_sender = std::sync::Arc::new(std::sync::Mutex::new(
-        None::<egui::Context>,
-    ));
+    let ctx_sender = std::sync::Arc::new(std::sync::Mutex::new(None::<egui::Context>));
     let ctx_for_handler = ctx_sender.clone();
 
     rt.spawn(async move {

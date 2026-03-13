@@ -297,10 +297,10 @@ pub unsafe fn execute_parallel(
 mod tests {
     use super::*;
     use crate::compiler::attempts::v8_generic_kernel::codegen;
+    use crate::dtype::DType;
     use crate::graph::GlobalId;
     use crate::milli_graph::MilliOpGraph;
     use crate::milli_graph::ops::{MatMul, SimpleBinary, SimpleUnaryOp};
-    use crate::dtype::DType;
     use std::collections::HashMap;
 
     fn make_random_f32(n: usize, seed: u64) -> Vec<f32> {

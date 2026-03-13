@@ -852,8 +852,8 @@ fn eval_reduction_term_f32(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::milli_graph::ops::MatMul;
     use crate::dtype::DType;
+    use crate::milli_graph::ops::MatMul;
     use rand::RngCore;
 
     fn build_matmul(

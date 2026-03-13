@@ -96,8 +96,12 @@ impl MilliOp for ReduceMin {
 
         // Try per-dim shape inference first.
         if let Some(out_dims) = super::infer_reduce_output_shape(
-            data_info, self.axes, self.keepdims, self.noop_with_empty_axes,
-            known_inputs, symbolic_resolver,
+            data_info,
+            self.axes,
+            self.keepdims,
+            self.noop_with_empty_axes,
+            known_inputs,
+            symbolic_resolver,
         ) {
             let out_info = TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims);
             return Ok(Box::new([(self.output, out_info)].into_iter()));
@@ -106,9 +110,13 @@ impl MilliOp for ReduceMin {
         // Fallback: rank-only inference.
         let num_axes: Option<usize> = if let Some(ax_id) = self.axes {
             known_inputs.get(&ax_id).and_then(|ax_info| {
-                ax_info.rank_if_known().and_then(|_| ax_info.dim_if_known(0).map(|n| n as usize))
+                ax_info
+                    .rank_if_known()
+                    .and_then(|_| ax_info.dim_if_known(0).map(|n| n as usize))
             })
-        } else { None };
+        } else {
+            None
+        };
 
         let out_rank: ScalarInfoTyped<u32> = match data_info.rank() {
             ScalarInfoTyped::Numeric(input_rank) => {
@@ -127,14 +135,14 @@ impl MilliOp for ReduceMin {
                 } else if self.keepdims {
                     ScalarInfoTyped::Numeric(input_rank)
                 } else {
-                    ScalarInfoTyped::Symbolic(
-                        crate::symbolic_scalar::SymbolicScalarTyped::new(symbolic_resolver),
-                    )
+                    ScalarInfoTyped::Symbolic(crate::symbolic_scalar::SymbolicScalarTyped::new(
+                        symbolic_resolver,
+                    ))
                 }
             }
-            _ => ScalarInfoTyped::Symbolic(
-                crate::symbolic_scalar::SymbolicScalarTyped::new(symbolic_resolver),
-            ),
+            _ => ScalarInfoTyped::Symbolic(crate::symbolic_scalar::SymbolicScalarTyped::new(
+                symbolic_resolver,
+            )),
         };
 
         let first_elem = crate::scalar_info::ScalarInfo::Symbolic(

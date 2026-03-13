@@ -7,16 +7,16 @@
 
 use std::collections::HashMap;
 
+use crate::DynRank;
 use crate::dtype::DType;
 use crate::graph::{GlobalId, Graph, Node};
 use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::ops::AnyMilliOp;
 use crate::nano_graph::ops::{ScalarBinOp, ScalarOp, ScalarUnaryOp};
-use crate::numeric_scalar::NumericScalar;
 use crate::nano_graph::pattern::{AtomId, InputRef, NanoGraph, SymDim};
+use crate::numeric_scalar::NumericScalar;
 use crate::numeric_tensor::NumericTensor;
 use crate::tensor_info::TensorInfo;
-use crate::DynRank;
 
 /// Common accessors for reduce ops (ReduceSum, ReduceMax, ReduceMean).
 trait ReduceAccessors {
@@ -27,21 +27,39 @@ trait ReduceAccessors {
 }
 
 impl ReduceAccessors for crate::milli_graph::ops::ReduceSum {
-    fn axes_tensor(&self) -> Option<GlobalId> { self.axes_tensor() }
-    fn noop_with_empty_axes(&self) -> bool { self.noop_with_empty_axes() }
-    fn keepdims(&self) -> bool { self.keepdims() }
+    fn axes_tensor(&self) -> Option<GlobalId> {
+        self.axes_tensor()
+    }
+    fn noop_with_empty_axes(&self) -> bool {
+        self.noop_with_empty_axes()
+    }
+    fn keepdims(&self) -> bool {
+        self.keepdims()
+    }
 }
 
 impl ReduceAccessors for crate::milli_graph::ops::ReduceMax {
-    fn axes_tensor(&self) -> Option<GlobalId> { self.axes_tensor() }
-    fn noop_with_empty_axes(&self) -> bool { self.noop_with_empty_axes() }
-    fn keepdims(&self) -> bool { self.keepdims() }
+    fn axes_tensor(&self) -> Option<GlobalId> {
+        self.axes_tensor()
+    }
+    fn noop_with_empty_axes(&self) -> bool {
+        self.noop_with_empty_axes()
+    }
+    fn keepdims(&self) -> bool {
+        self.keepdims()
+    }
 }
 
 impl ReduceAccessors for crate::milli_graph::ops::ReduceMean {
-    fn axes_tensor(&self) -> Option<GlobalId> { self.axes_tensor() }
-    fn noop_with_empty_axes(&self) -> bool { self.noop_with_empty_axes() }
-    fn keepdims(&self) -> bool { self.keepdims() }
+    fn axes_tensor(&self) -> Option<GlobalId> {
+        self.axes_tensor()
+    }
+    fn noop_with_empty_axes(&self) -> bool {
+        self.noop_with_empty_axes()
+    }
+    fn keepdims(&self) -> bool {
+        self.keepdims()
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -151,7 +169,9 @@ pub fn lower_with_info(
 
     // Register all tensors that exist before ops run (graph inputs + inferred
     // constants) and are NOT produced by any op.
-    let op_outputs: std::collections::HashSet<GlobalId> = graph.op_ordering().iter()
+    let op_outputs: std::collections::HashSet<GlobalId> = graph
+        .op_ordering()
+        .iter()
         .filter_map(|op_id| graph.get_node_by_id(op_id))
         .flat_map(|op| op.outputs().collect::<Vec<_>>())
         .collect();
@@ -163,7 +183,9 @@ pub fn lower_with_info(
 
     // Walk ops in topological order.
     for &op_id in graph.op_ordering() {
-        let Some(op) = graph.get_node_by_id(&op_id) else { continue };
+        let Some(op) = graph.get_node_by_id(&op_id) else {
+            continue;
+        };
         ctx.lower_op(op, &all_infos);
     }
 
@@ -182,29 +204,48 @@ pub fn lower_with_info(
     // If still no outputs, register all mapped tensors from the last ops.
     // This is a fallback — proper output mapping will be fixed later.
 
-    let tensor_map: HashMap<GlobalId, TensorAtomMapInfo> = ctx.tensor_map.iter().map(|(id, tam)| {
-        (*id, TensorAtomMapInfo {
-            base_id: tam.base_id,
-            count: tam.count,
-            sym_dims: tam.sym_dims.clone(),
+    let tensor_map: HashMap<GlobalId, TensorAtomMapInfo> = ctx
+        .tensor_map
+        .iter()
+        .map(|(id, tam)| {
+            (
+                *id,
+                TensorAtomMapInfo {
+                    base_id: tam.base_id,
+                    count: tam.count,
+                    sym_dims: tam.sym_dims.clone(),
+                },
+            )
         })
-    }).collect();
+        .collect();
 
     // Build overrides for all Numeric (constant-valued) tensors.
     use crate::numeric_scalar::NumericScalar;
     let mut numeric_overrides: HashMap<u32, NumericScalar> = HashMap::new();
     let mut backend = crate::backends::eval_backend::EvalBackend::NDArray;
     for (id, info) in &all_infos {
-        let Some(numeric) = info.as_numeric() else { continue };
-        let Some(tam) = ctx.tensor_map.get(id) else { continue };
+        let Some(numeric) = info.as_numeric() else {
+            continue;
+        };
+        let Some(tam) = ctx.tensor_map.get(id) else {
+            continue;
+        };
         let tensor_dtype = numeric.dtype();
         // Extract values via f32 (exact for BF16/F16/F32, sufficient for most cases),
         // then cast to the tensor's actual dtype to preserve rounding semantics.
-        let Ok(f32_tensor) = numeric.cast(DType::F32, &mut backend) else { continue };
-        let Ok(flat) = f32_tensor.flatten() else { continue };
+        let Ok(f32_tensor) = numeric.cast(DType::F32, &mut backend) else {
+            continue;
+        };
+        let Ok(flat) = f32_tensor.flatten() else {
+            continue;
+        };
         let Ok(nd) = flat.to_ndarray() else { continue };
-        let Ok(v): Result<Vec<f32>, _> = nd.try_into() else { continue };
-        if v.len() != tam.count as usize { continue }
+        let Ok(v): Result<Vec<f32>, _> = nd.try_into() else {
+            continue;
+        };
+        if v.len() != tam.count as usize {
+            continue;
+        }
         for (i, &val) in v.iter().enumerate() {
             let scalar = NumericScalar::F32(val).cast_to(tensor_dtype);
             numeric_overrides.insert(tam.base_id.0 + i as u32, scalar);
@@ -241,7 +282,10 @@ impl LowerCtx {
 
     /// Classify tensor dims and return layout info.
     /// Returns None if rank is unknown or atom count overflows u32.
-    fn classify_dims(&mut self, info: &TensorInfo) -> Option<(Vec<DimKind>, Vec<u64>, Vec<SymDim>, u32)> {
+    fn classify_dims(
+        &mut self,
+        info: &TensorInfo,
+    ) -> Option<(Vec<DimKind>, Vec<u64>, Vec<SymDim>, u32)> {
         let rank = info.rank_if_known()?;
         let mut layout = Vec::with_capacity(rank);
         let mut known_dims = Vec::new();
@@ -279,9 +323,16 @@ impl LowerCtx {
                 vec![],
                 vec![],
             );
-            self.tensor_map.insert(id, TensorAtomMap {
-                base_id, count: 1, layout: vec![], known_strides: vec![], sym_dims: vec![],
-            });
+            self.tensor_map.insert(
+                id,
+                TensorAtomMap {
+                    base_id,
+                    count: 1,
+                    layout: vec![],
+                    known_strides: vec![],
+                    sym_dims: vec![],
+                },
+            );
             return;
         };
 
@@ -296,9 +347,16 @@ impl LowerCtx {
             vec![],
         );
 
-        self.tensor_map.insert(id, TensorAtomMap {
-            base_id, count, layout, known_strides: strides, sym_dims,
-        });
+        self.tensor_map.insert(
+            id,
+            TensorAtomMap {
+                base_id,
+                count,
+                layout,
+                known_strides: strides,
+                sym_dims,
+            },
+        );
     }
 
     /// Register a tensor as a boundary (opaque) group.
@@ -307,11 +365,20 @@ impl LowerCtx {
         let Some((layout, known_dims, sym_dims, count)) = self.classify_dims(info) else {
             let base_id = self.nano.push_atom(
                 ScalarOp::Literal(NumericScalar::F32(0.0)),
-                vec![], vec![], vec![],
+                vec![],
+                vec![],
+                vec![],
             );
-            self.tensor_map.insert(output_id, TensorAtomMap {
-                base_id, count: 1, layout: vec![], known_strides: vec![], sym_dims: vec![],
-            });
+            self.tensor_map.insert(
+                output_id,
+                TensorAtomMap {
+                    base_id,
+                    count: 1,
+                    layout: vec![],
+                    known_strides: vec![],
+                    sym_dims: vec![],
+                },
+            );
             return;
         };
 
@@ -319,13 +386,23 @@ impl LowerCtx {
         let count = count.max(1);
 
         let base_id = self.nano.push_group(
-            count, ScalarOp::Literal(NumericScalar::F32(0.0)),
-            sym_dims.clone(), vec![], vec![],
+            count,
+            ScalarOp::Literal(NumericScalar::F32(0.0)),
+            sym_dims.clone(),
+            vec![],
+            vec![],
         );
 
-        self.tensor_map.insert(output_id, TensorAtomMap {
-            base_id, count, layout, known_strides: strides, sym_dims,
-        });
+        self.tensor_map.insert(
+            output_id,
+            TensorAtomMap {
+                base_id,
+                count,
+                layout,
+                known_strides: strides,
+                sym_dims,
+            },
+        );
     }
 
     /// Compute an InputRef mapping consumer atoms → producer atoms.
@@ -338,14 +415,33 @@ impl LowerCtx {
     ) -> InputRef {
         // Same count + same known shape → stride 1.
         if consumer.count == producer.count && consumer.count > 0 {
-            let c_known: Vec<u64> = consumer.layout.iter()
-                .filter_map(|d| if let DimKind::Known(s) = d { Some(*s) } else { None })
+            let c_known: Vec<u64> = consumer
+                .layout
+                .iter()
+                .filter_map(|d| {
+                    if let DimKind::Known(s) = d {
+                        Some(*s)
+                    } else {
+                        None
+                    }
+                })
                 .collect();
-            let p_known: Vec<u64> = producer.layout.iter()
-                .filter_map(|d| if let DimKind::Known(s) = d { Some(*s) } else { None })
+            let p_known: Vec<u64> = producer
+                .layout
+                .iter()
+                .filter_map(|d| {
+                    if let DimKind::Known(s) = d {
+                        Some(*s)
+                    } else {
+                        None
+                    }
+                })
                 .collect();
             if c_known == p_known {
-                return InputRef::Affine { base: producer.base_id, stride: 1 };
+                return InputRef::Affine {
+                    base: producer.base_id,
+                    stride: 1,
+                };
             }
         }
 
@@ -369,11 +465,27 @@ impl LowerCtx {
         let c_rank = consumer_info.rank_if_known().unwrap_or(0);
         let p_rank = producer_info.rank_if_known().unwrap_or(0);
 
-        let c_known_sizes: Vec<u64> = consumer.layout.iter()
-            .filter_map(|d| if let DimKind::Known(s) = d { Some(*s) } else { None })
+        let c_known_sizes: Vec<u64> = consumer
+            .layout
+            .iter()
+            .filter_map(|d| {
+                if let DimKind::Known(s) = d {
+                    Some(*s)
+                } else {
+                    None
+                }
+            })
             .collect();
-        let p_known_sizes: Vec<u64> = producer.layout.iter()
-            .filter_map(|d| if let DimKind::Known(s) = d { Some(*s) } else { None })
+        let p_known_sizes: Vec<u64> = producer
+            .layout
+            .iter()
+            .filter_map(|d| {
+                if let DimKind::Known(s) = d {
+                    Some(*s)
+                } else {
+                    None
+                }
+            })
             .collect();
         let p_strides = TensorAtomMap::compute_strides(&p_known_sizes);
 
@@ -384,36 +496,50 @@ impl LowerCtx {
         // For each original dim, track its known-dim index (if known).
         let c_known_indices: Vec<Option<usize>> = {
             let mut ki = 0;
-            consumer.layout.iter().map(|d| {
-                if matches!(d, DimKind::Known(_)) {
-                    let idx = ki;
-                    ki += 1;
-                    Some(idx)
-                } else {
-                    None
-                }
-            }).collect()
+            consumer
+                .layout
+                .iter()
+                .map(|d| {
+                    if matches!(d, DimKind::Known(_)) {
+                        let idx = ki;
+                        ki += 1;
+                        Some(idx)
+                    } else {
+                        None
+                    }
+                })
+                .collect()
         };
         let p_known_indices: Vec<Option<usize>> = {
             let mut ki = 0;
-            producer.layout.iter().map(|d| {
-                if matches!(d, DimKind::Known(_)) {
-                    let idx = ki;
-                    ki += 1;
-                    Some(idx)
-                } else {
-                    None
-                }
-            }).collect()
+            producer
+                .layout
+                .iter()
+                .map(|d| {
+                    if matches!(d, DimKind::Known(_)) {
+                        let idx = ki;
+                        ki += 1;
+                        Some(idx)
+                    } else {
+                        None
+                    }
+                })
+                .collect()
         };
 
         // Map: consumer_known_dim_idx → producer_known_dim_idx (or None if broadcast/mismatch).
         let mut c_to_p_known: Vec<Option<usize>> = vec![None; c_known_sizes.len()];
         for c_orig in 0..c_rank {
-            let Some(c_ki) = c_known_indices[c_orig] else { continue };
-            if c_orig < offset { continue }
+            let Some(c_ki) = c_known_indices[c_orig] else {
+                continue;
+            };
+            if c_orig < offset {
+                continue;
+            }
             let p_orig = c_orig - offset;
-            if p_orig >= p_rank { continue }
+            if p_orig >= p_rank {
+                continue;
+            }
             if let Some(p_ki) = p_known_indices[p_orig] {
                 c_to_p_known[c_ki] = Some(p_ki);
             }
@@ -499,10 +625,18 @@ impl LowerCtx {
             AnyMilliOp::Split(s) => self.lower_split(s, all_infos),
             AnyMilliOp::Slice(s) => self.lower_slice(s, all_infos),
             AnyMilliOp::MatMul(m) => self.lower_matmul(m, all_infos),
-            AnyMilliOp::ReduceSum(r) => self.lower_reduce(r, all_infos,
-                |compute_dt, out_dt| ScalarOp::ReduceSum { compute_dtype: compute_dt, output_dtype: out_dt }),
-            AnyMilliOp::ReduceMax(r) => self.lower_reduce(r, all_infos,
-                |compute_dt, out_dt| ScalarOp::ReduceMax { compute_dtype: compute_dt, output_dtype: out_dt }),
+            AnyMilliOp::ReduceSum(r) => {
+                self.lower_reduce(r, all_infos, |compute_dt, out_dt| ScalarOp::ReduceSum {
+                    compute_dtype: compute_dt,
+                    output_dtype: out_dt,
+                })
+            }
+            AnyMilliOp::ReduceMax(r) => {
+                self.lower_reduce(r, all_infos, |compute_dt, out_dt| ScalarOp::ReduceMax {
+                    compute_dtype: compute_dt,
+                    output_dtype: out_dt,
+                })
+            }
             AnyMilliOp::ReduceMean(r) => self.lower_reduce_mean(r, all_infos),
             // Everything else: check if outputs are fully concrete (constant-folded),
             // otherwise register as boundary.
@@ -512,7 +646,9 @@ impl LowerCtx {
                 // If all outputs are Numeric (fully constant), treat like a Constant —
                 // the inference already computed the values, no need to lower the op.
                 let all_numeric = other.outputs().all(|out_id| {
-                    all_infos.get(&out_id).map_or(false, |i| i.as_numeric().is_some())
+                    all_infos
+                        .get(&out_id)
+                        .map_or(false, |i| i.as_numeric().is_some())
                 });
                 for out_id in other.outputs() {
                     if let Some(info) = all_infos.get(&out_id) {
@@ -558,15 +694,47 @@ impl LowerCtx {
 
         let dt = out_info.dtype();
         let scalar_op = match bin.which_op() {
-            WhichSimpleBinaryOp::Add => ScalarOp::Binary { op: ScalarBinOp::Add, compute_dtype: dt, output_dtype: dt },
-            WhichSimpleBinaryOp::Sub => ScalarOp::Binary { op: ScalarBinOp::Sub, compute_dtype: dt, output_dtype: dt },
-            WhichSimpleBinaryOp::Mul => ScalarOp::Binary { op: ScalarBinOp::Mul, compute_dtype: dt, output_dtype: dt },
-            WhichSimpleBinaryOp::Div => ScalarOp::Binary { op: ScalarBinOp::Div, compute_dtype: dt, output_dtype: dt },
-            WhichSimpleBinaryOp::Max => ScalarOp::Binary { op: ScalarBinOp::Max, compute_dtype: dt, output_dtype: dt },
-            WhichSimpleBinaryOp::Min => ScalarOp::Binary { op: ScalarBinOp::Min, compute_dtype: dt, output_dtype: dt },
-            WhichSimpleBinaryOp::Modulo(_) => ScalarOp::Binary { op: ScalarBinOp::Mod, compute_dtype: dt, output_dtype: dt },
+            WhichSimpleBinaryOp::Add => ScalarOp::Binary {
+                op: ScalarBinOp::Add,
+                compute_dtype: dt,
+                output_dtype: dt,
+            },
+            WhichSimpleBinaryOp::Sub => ScalarOp::Binary {
+                op: ScalarBinOp::Sub,
+                compute_dtype: dt,
+                output_dtype: dt,
+            },
+            WhichSimpleBinaryOp::Mul => ScalarOp::Binary {
+                op: ScalarBinOp::Mul,
+                compute_dtype: dt,
+                output_dtype: dt,
+            },
+            WhichSimpleBinaryOp::Div => ScalarOp::Binary {
+                op: ScalarBinOp::Div,
+                compute_dtype: dt,
+                output_dtype: dt,
+            },
+            WhichSimpleBinaryOp::Max => ScalarOp::Binary {
+                op: ScalarBinOp::Max,
+                compute_dtype: dt,
+                output_dtype: dt,
+            },
+            WhichSimpleBinaryOp::Min => ScalarOp::Binary {
+                op: ScalarBinOp::Min,
+                compute_dtype: dt,
+                output_dtype: dt,
+            },
+            WhichSimpleBinaryOp::Modulo(_) => ScalarOp::Binary {
+                op: ScalarBinOp::Mod,
+                compute_dtype: dt,
+                output_dtype: dt,
+            },
             // Comparison/logical ops: opaque binary, but shape is known.
-            _ => ScalarOp::Binary { op: ScalarBinOp::Max, compute_dtype: dt, output_dtype: dt }, // placeholder
+            _ => ScalarOp::Binary {
+                op: ScalarBinOp::Max,
+                compute_dtype: dt,
+                output_dtype: dt,
+            }, // placeholder
         };
 
         let Some((layout, known_dims, sym_dims, count)) = self.classify_dims(out_info) else {
@@ -577,23 +745,38 @@ impl LowerCtx {
         let strides = TensorAtomMap::compute_strides(&known_dims);
 
         let out_tmp = TensorAtomMap {
-            base_id: AtomId(0), count,
-            layout: layout.clone(), known_strides: strides.clone(), sym_dims: sym_dims.clone(),
+            base_id: AtomId(0),
+            count,
+            layout: layout.clone(),
+            known_strides: strides.clone(),
+            sym_dims: sym_dims.clone(),
         };
 
         let a_info = all_infos.get(&a_id);
         let b_info = all_infos.get(&b_id);
-        let input_a = self.compute_input_ref(&out_tmp, &a_map, out_info, a_info.unwrap_or(out_info));
-        let input_b = self.compute_input_ref(&out_tmp, &b_map, out_info, b_info.unwrap_or(out_info));
+        let input_a =
+            self.compute_input_ref(&out_tmp, &a_map, out_info, a_info.unwrap_or(out_info));
+        let input_b =
+            self.compute_input_ref(&out_tmp, &b_map, out_info, b_info.unwrap_or(out_info));
 
         let base_id = self.nano.push_group(
-            count, scalar_op, sym_dims.clone(), vec![],
+            count,
+            scalar_op,
+            sym_dims.clone(),
+            vec![],
             vec![input_a, input_b],
         );
 
-        self.tensor_map.insert(out_id, TensorAtomMap {
-            base_id, count, layout, known_strides: strides, sym_dims,
-        });
+        self.tensor_map.insert(
+            out_id,
+            TensorAtomMap {
+                base_id,
+                count,
+                layout,
+                known_strides: strides,
+                sym_dims,
+            },
+        );
     }
 
     fn lower_simple_unary(
@@ -617,15 +800,51 @@ impl LowerCtx {
 
         let dt = out_info.dtype();
         let scalar_op = match un.which_op() {
-            WhichSimpleUnaryOp::Neg => ScalarOp::Unary { op: ScalarUnaryOp::Neg, compute_dtype: dt, output_dtype: dt },
-            WhichSimpleUnaryOp::Abs => ScalarOp::Unary { op: ScalarUnaryOp::Abs, compute_dtype: dt, output_dtype: dt },
-            WhichSimpleUnaryOp::Exp => ScalarOp::Unary { op: ScalarUnaryOp::Exp, compute_dtype: dt, output_dtype: dt },
-            WhichSimpleUnaryOp::Ln => ScalarOp::Unary { op: ScalarUnaryOp::Ln, compute_dtype: dt, output_dtype: dt },
-            WhichSimpleUnaryOp::Sqrt => ScalarOp::Unary { op: ScalarUnaryOp::Sqrt, compute_dtype: dt, output_dtype: dt },
-            WhichSimpleUnaryOp::Reciprocal => ScalarOp::Unary { op: ScalarUnaryOp::Reciprocal, compute_dtype: dt, output_dtype: dt },
-            WhichSimpleUnaryOp::Trig(crate::TrigOp::Tanh) => ScalarOp::Unary { op: ScalarUnaryOp::Tanh, compute_dtype: dt, output_dtype: dt },
-            WhichSimpleUnaryOp::Floor => ScalarOp::Unary { op: ScalarUnaryOp::Floor, compute_dtype: dt, output_dtype: dt },
-            WhichSimpleUnaryOp::Ceil => ScalarOp::Unary { op: ScalarUnaryOp::Ceil, compute_dtype: dt, output_dtype: dt },
+            WhichSimpleUnaryOp::Neg => ScalarOp::Unary {
+                op: ScalarUnaryOp::Neg,
+                compute_dtype: dt,
+                output_dtype: dt,
+            },
+            WhichSimpleUnaryOp::Abs => ScalarOp::Unary {
+                op: ScalarUnaryOp::Abs,
+                compute_dtype: dt,
+                output_dtype: dt,
+            },
+            WhichSimpleUnaryOp::Exp => ScalarOp::Unary {
+                op: ScalarUnaryOp::Exp,
+                compute_dtype: dt,
+                output_dtype: dt,
+            },
+            WhichSimpleUnaryOp::Ln => ScalarOp::Unary {
+                op: ScalarUnaryOp::Ln,
+                compute_dtype: dt,
+                output_dtype: dt,
+            },
+            WhichSimpleUnaryOp::Sqrt => ScalarOp::Unary {
+                op: ScalarUnaryOp::Sqrt,
+                compute_dtype: dt,
+                output_dtype: dt,
+            },
+            WhichSimpleUnaryOp::Reciprocal => ScalarOp::Unary {
+                op: ScalarUnaryOp::Reciprocal,
+                compute_dtype: dt,
+                output_dtype: dt,
+            },
+            WhichSimpleUnaryOp::Trig(crate::TrigOp::Tanh) => ScalarOp::Unary {
+                op: ScalarUnaryOp::Tanh,
+                compute_dtype: dt,
+                output_dtype: dt,
+            },
+            WhichSimpleUnaryOp::Floor => ScalarOp::Unary {
+                op: ScalarUnaryOp::Floor,
+                compute_dtype: dt,
+                output_dtype: dt,
+            },
+            WhichSimpleUnaryOp::Ceil => ScalarOp::Unary {
+                op: ScalarUnaryOp::Ceil,
+                compute_dtype: dt,
+                output_dtype: dt,
+            },
             _ => {
                 self.lower_as_boundary_named(un, all_infos, "SimpleUnary");
                 return;
@@ -633,16 +852,26 @@ impl LowerCtx {
         };
 
         let base_id = self.nano.push_group(
-            in_map.count, scalar_op, in_map.sym_dims.clone(), vec![],
-            vec![InputRef::Affine { base: in_map.base_id, stride: 1 }],
+            in_map.count,
+            scalar_op,
+            in_map.sym_dims.clone(),
+            vec![],
+            vec![InputRef::Affine {
+                base: in_map.base_id,
+                stride: 1,
+            }],
         );
 
-        self.tensor_map.insert(out_id, TensorAtomMap {
-            base_id, count: in_map.count,
-            layout: in_map.layout.clone(),
-            known_strides: in_map.known_strides.clone(),
-            sym_dims: in_map.sym_dims.clone(),
-        });
+        self.tensor_map.insert(
+            out_id,
+            TensorAtomMap {
+                base_id,
+                count: in_map.count,
+                layout: in_map.layout.clone(),
+                known_strides: in_map.known_strides.clone(),
+                sym_dims: in_map.sym_dims.clone(),
+            },
+        );
     }
 
     fn lower_clamp_min(
@@ -666,24 +895,39 @@ impl LowerCtx {
         let dt = out_info.dtype();
         let min_id = self.nano.push_atom(
             ScalarOp::Literal(NumericScalar::F32(min_val)),
-            vec![], vec![], vec![],
+            vec![],
+            vec![],
+            vec![],
         );
 
         let base_id = self.nano.push_group(
-            in_map.count, ScalarOp::Binary { op: ScalarBinOp::Max, compute_dtype: dt, output_dtype: dt },
-            in_map.sym_dims.clone(), vec![],
+            in_map.count,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Max,
+                compute_dtype: dt,
+                output_dtype: dt,
+            },
+            in_map.sym_dims.clone(),
+            vec![],
             vec![
-                InputRef::Affine { base: in_map.base_id, stride: 1 },
+                InputRef::Affine {
+                    base: in_map.base_id,
+                    stride: 1,
+                },
                 InputRef::Broadcast(min_id),
             ],
         );
 
-        self.tensor_map.insert(out_id, TensorAtomMap {
-            base_id, count: in_map.count,
-            layout: in_map.layout.clone(),
-            known_strides: in_map.known_strides.clone(),
-            sym_dims: in_map.sym_dims.clone(),
-        });
+        self.tensor_map.insert(
+            out_id,
+            TensorAtomMap {
+                base_id,
+                count: in_map.count,
+                layout: in_map.layout.clone(),
+                known_strides: in_map.known_strides.clone(),
+                sym_dims: in_map.sym_dims.clone(),
+            },
+        );
     }
 
     /// Cast / CastLike / other shape-preserving identity ops.
@@ -706,17 +950,29 @@ impl LowerCtx {
 
         let dt = out_info.dtype();
         let base_id = self.nano.push_group(
-            in_map.count, ScalarOp::Identity { compute_dtype: dt, output_dtype: dt },
-            in_map.sym_dims.clone(), vec![],
-            vec![InputRef::Affine { base: in_map.base_id, stride: 1 }],
+            in_map.count,
+            ScalarOp::Identity {
+                compute_dtype: dt,
+                output_dtype: dt,
+            },
+            in_map.sym_dims.clone(),
+            vec![],
+            vec![InputRef::Affine {
+                base: in_map.base_id,
+                stride: 1,
+            }],
         );
 
-        self.tensor_map.insert(out_id, TensorAtomMap {
-            base_id, count: in_map.count,
-            layout: in_map.layout.clone(),
-            known_strides: in_map.known_strides.clone(),
-            sym_dims: in_map.sym_dims.clone(),
-        });
+        self.tensor_map.insert(
+            out_id,
+            TensorAtomMap {
+                base_id,
+                count: in_map.count,
+                layout: in_map.layout.clone(),
+                known_strides: in_map.known_strides.clone(),
+                sym_dims: in_map.sym_dims.clone(),
+            },
+        );
     }
 
     /// Transpose: permutes element order, requiring explicit reindexing.
@@ -794,7 +1050,13 @@ impl LowerCtx {
         let in_known_sizes: Vec<u64> = in_map
             .layout
             .iter()
-            .filter_map(|d| if let DimKind::Known(s) = d { Some(*s) } else { None })
+            .filter_map(|d| {
+                if let DimKind::Known(s) = d {
+                    Some(*s)
+                } else {
+                    None
+                }
+            })
             .collect();
         let in_strides = TensorAtomMap::compute_strides(&in_known_sizes);
         let out_strides = TensorAtomMap::compute_strides(&out_known_dims);
@@ -802,7 +1064,10 @@ impl LowerCtx {
         // We need to map between original dim indices and known-dim indices.
         // For now, assume all dims are known (symbolic dims in transpose would
         // be unusual). If any dim is symbolic, fall back to boundary.
-        if in_map.layout.iter().any(|d| matches!(d, DimKind::Symbolic(_)))
+        if in_map
+            .layout
+            .iter()
+            .any(|d| matches!(d, DimKind::Symbolic(_)))
             || out_layout.iter().any(|d| matches!(d, DimKind::Symbolic(_)))
         {
             self.register_boundary(out_id, out_info, "Transpose");
@@ -888,10 +1153,16 @@ impl LowerCtx {
 
         if count == in_map.count {
             // Atom-count preserving: just re-register with new layout.
-            self.tensor_map.insert(out_id, TensorAtomMap {
-                base_id: in_map.base_id, count,
-                layout, known_strides: TensorAtomMap::compute_strides(&known_dims), sym_dims,
-            });
+            self.tensor_map.insert(
+                out_id,
+                TensorAtomMap {
+                    base_id: in_map.base_id,
+                    count,
+                    layout,
+                    known_strides: TensorAtomMap::compute_strides(&known_dims),
+                    sym_dims,
+                },
+            );
         } else {
             self.register_boundary(out_id, out_info, "ViewOp");
             let name = format!("ViewOp(count {} → {})", in_map.count, count);
@@ -924,31 +1195,49 @@ impl LowerCtx {
         let count = count.max(1);
 
         if count == in_map.count {
-            self.tensor_map.insert(out_id, TensorAtomMap {
-                base_id: in_map.base_id, count,
-                layout, known_strides: TensorAtomMap::compute_strides(&known_dims), sym_dims,
-            });
+            self.tensor_map.insert(
+                out_id,
+                TensorAtomMap {
+                    base_id: in_map.base_id,
+                    count,
+                    layout,
+                    known_strides: TensorAtomMap::compute_strides(&known_dims),
+                    sym_dims,
+                },
+            );
         } else {
             let out_tmp = TensorAtomMap {
-                base_id: AtomId(0), count,
+                base_id: AtomId(0),
+                count,
                 layout: layout.clone(),
                 known_strides: TensorAtomMap::compute_strides(&known_dims),
                 sym_dims: sym_dims.clone(),
             };
-            let input_ref = self.compute_input_ref(
-                &out_tmp, &in_map, out_info, in_info.unwrap_or(out_info),
-            );
+            let input_ref =
+                self.compute_input_ref(&out_tmp, &in_map, out_info, in_info.unwrap_or(out_info));
 
             let dt = out_info.dtype();
             let base_id = self.nano.push_group(
-                count, ScalarOp::Identity { compute_dtype: dt, output_dtype: dt },
-                sym_dims.clone(), vec![], vec![input_ref],
+                count,
+                ScalarOp::Identity {
+                    compute_dtype: dt,
+                    output_dtype: dt,
+                },
+                sym_dims.clone(),
+                vec![],
+                vec![input_ref],
             );
 
-            self.tensor_map.insert(out_id, TensorAtomMap {
-                base_id, count, layout,
-                known_strides: TensorAtomMap::compute_strides(&known_dims), sym_dims,
-            });
+            self.tensor_map.insert(
+                out_id,
+                TensorAtomMap {
+                    base_id,
+                    count,
+                    layout,
+                    known_strides: TensorAtomMap::compute_strides(&known_dims),
+                    sym_dims,
+                },
+            );
         }
     }
 
@@ -982,24 +1271,43 @@ impl LowerCtx {
         let strides = TensorAtomMap::compute_strides(&known_dims);
 
         let out_tmp = TensorAtomMap {
-            base_id: AtomId(0), count,
-            layout: layout.clone(), known_strides: strides.clone(), sym_dims: sym_dims.clone(),
+            base_id: AtomId(0),
+            count,
+            layout: layout.clone(),
+            known_strides: strides.clone(),
+            sym_dims: sym_dims.clone(),
         };
 
         let a_info = all_infos.get(&a_id);
         let b_info = all_infos.get(&b_id);
-        let input_a = self.compute_input_ref(&out_tmp, &a_map, out_info, a_info.unwrap_or(out_info));
-        let input_b = self.compute_input_ref(&out_tmp, &b_map, out_info, b_info.unwrap_or(out_info));
+        let input_a =
+            self.compute_input_ref(&out_tmp, &a_map, out_info, a_info.unwrap_or(out_info));
+        let input_b =
+            self.compute_input_ref(&out_tmp, &b_map, out_info, b_info.unwrap_or(out_info));
 
         let dt = out_info.dtype();
         let base_id = self.nano.push_group(
-            count, ScalarOp::Binary { op: ScalarBinOp::Pow, compute_dtype: dt, output_dtype: dt }, sym_dims.clone(), vec![],
+            count,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Pow,
+                compute_dtype: dt,
+                output_dtype: dt,
+            },
+            sym_dims.clone(),
+            vec![],
             vec![input_a, input_b],
         );
 
-        self.tensor_map.insert(out_id, TensorAtomMap {
-            base_id, count, layout, known_strides: strides, sym_dims,
-        });
+        self.tensor_map.insert(
+            out_id,
+            TensorAtomMap {
+                base_id,
+                count,
+                layout,
+                known_strides: strides,
+                sym_dims,
+            },
+        );
     }
 
     fn lower_where(
@@ -1034,26 +1342,45 @@ impl LowerCtx {
         let strides = TensorAtomMap::compute_strides(&known_dims);
 
         let out_tmp = TensorAtomMap {
-            base_id: AtomId(0), count,
-            layout: layout.clone(), known_strides: strides.clone(), sym_dims: sym_dims.clone(),
+            base_id: AtomId(0),
+            count,
+            layout: layout.clone(),
+            known_strides: strides.clone(),
+            sym_dims: sym_dims.clone(),
         };
 
         let cond_info = all_infos.get(&cond_id);
         let x_info = all_infos.get(&x_id);
         let y_info = all_infos.get(&y_id);
-        let input_cond = self.compute_input_ref(&out_tmp, &cond_map, out_info, cond_info.unwrap_or(out_info));
-        let input_x = self.compute_input_ref(&out_tmp, &x_map, out_info, x_info.unwrap_or(out_info));
-        let input_y = self.compute_input_ref(&out_tmp, &y_map, out_info, y_info.unwrap_or(out_info));
+        let input_cond =
+            self.compute_input_ref(&out_tmp, &cond_map, out_info, cond_info.unwrap_or(out_info));
+        let input_x =
+            self.compute_input_ref(&out_tmp, &x_map, out_info, x_info.unwrap_or(out_info));
+        let input_y =
+            self.compute_input_ref(&out_tmp, &y_map, out_info, y_info.unwrap_or(out_info));
 
         let dt = out_info.dtype();
         let base_id = self.nano.push_group(
-            count, ScalarOp::Select { compute_dtype: dt, output_dtype: dt }, sym_dims.clone(), vec![],
+            count,
+            ScalarOp::Select {
+                compute_dtype: dt,
+                output_dtype: dt,
+            },
+            sym_dims.clone(),
+            vec![],
             vec![input_cond, input_x, input_y],
         );
 
-        self.tensor_map.insert(out_id, TensorAtomMap {
-            base_id, count, layout, known_strides: strides, sym_dims,
-        });
+        self.tensor_map.insert(
+            out_id,
+            TensorAtomMap {
+                base_id,
+                count,
+                layout,
+                known_strides: strides,
+                sym_dims,
+            },
+        );
     }
 
     fn lower_concat(
@@ -1070,7 +1397,9 @@ impl LowerCtx {
             return;
         };
 
-        let Some((out_layout, out_known_dims, out_sym_dims, out_count)) = self.classify_dims(out_info) else {
+        let Some((out_layout, out_known_dims, out_sym_dims, out_count)) =
+            self.classify_dims(out_info)
+        else {
             self.lower_as_boundary_named(concat, all_infos, "Concat");
             return;
         };
@@ -1078,7 +1407,11 @@ impl LowerCtx {
 
         // Normalize axis.
         let rank = out_layout.len();
-        let axis = if axis_raw < 0 { (axis_raw + rank as i64) as usize } else { axis_raw as usize };
+        let axis = if axis_raw < 0 {
+            (axis_raw + rank as i64) as usize
+        } else {
+            axis_raw as usize
+        };
 
         // Concat axis must be a known dim.
         if axis >= rank || !matches!(out_layout[axis], DimKind::Known(_)) {
@@ -1087,9 +1420,11 @@ impl LowerCtx {
         }
 
         // Known-dim index of the concat axis.
-        let concat_known_idx = out_layout[..=axis].iter()
+        let concat_known_idx = out_layout[..=axis]
+            .iter()
             .filter(|d| matches!(d, DimKind::Known(_)))
-            .count() - 1;
+            .count()
+            - 1;
 
         // Gather input maps and their concat-axis sizes.
         let mut input_maps = Vec::with_capacity(input_ids.len());
@@ -1099,8 +1434,16 @@ impl LowerCtx {
                 self.lower_as_boundary_named(concat, all_infos, "Concat");
                 return;
             };
-            let inp_known: Vec<u64> = inp_map.layout.iter()
-                .filter_map(|d| if let DimKind::Known(s) = d { Some(*s) } else { None })
+            let inp_known: Vec<u64> = inp_map
+                .layout
+                .iter()
+                .filter_map(|d| {
+                    if let DimKind::Known(s) = d {
+                        Some(*s)
+                    } else {
+                        None
+                    }
+                })
                 .collect();
             if inp_known.len() != out_known_dims.len() {
                 self.lower_as_boundary_named(concat, all_infos, "Concat");
@@ -1157,15 +1500,26 @@ impl LowerCtx {
 
         let dt = out_info.dtype();
         let base_id = self.nano.push_group(
-            out_count, ScalarOp::Identity { compute_dtype: dt, output_dtype: dt },
-            out_sym_dims.clone(), vec![],
+            out_count,
+            ScalarOp::Identity {
+                compute_dtype: dt,
+                output_dtype: dt,
+            },
+            out_sym_dims.clone(),
+            vec![],
             vec![InputRef::Explicit(ids)],
         );
 
-        self.tensor_map.insert(out_id, TensorAtomMap {
-            base_id, count: out_count, layout: out_layout,
-            known_strides: TensorAtomMap::compute_strides(&out_known_dims), sym_dims: out_sym_dims,
-        });
+        self.tensor_map.insert(
+            out_id,
+            TensorAtomMap {
+                base_id,
+                count: out_count,
+                layout: out_layout,
+                known_strides: TensorAtomMap::compute_strides(&out_known_dims),
+                sym_dims: out_sym_dims,
+            },
+        );
     }
 
     fn lower_split(
@@ -1189,7 +1543,9 @@ impl LowerCtx {
             return;
         };
 
-        let Some((out_layout, out_known_dims, out_sym_dims, out_count)) = self.classify_dims(out_info) else {
+        let Some((out_layout, out_known_dims, out_sym_dims, out_count)) =
+            self.classify_dims(out_info)
+        else {
             self.lower_as_boundary_named(split, all_infos, "Split");
             return;
         };
@@ -1198,7 +1554,11 @@ impl LowerCtx {
         // Normalize axis.
         let rank = in_map.layout.len();
         let axis_raw = split.axis();
-        let axis = if axis_raw < 0 { (axis_raw + rank as i64) as usize } else { axis_raw as usize };
+        let axis = if axis_raw < 0 {
+            (axis_raw + rank as i64) as usize
+        } else {
+            axis_raw as usize
+        };
 
         if axis >= rank || !matches!(in_map.layout[axis], DimKind::Known(_)) {
             self.lower_as_boundary_named(split, all_infos, "Split");
@@ -1208,13 +1568,23 @@ impl LowerCtx {
         // Determine the offset along the split axis for this output_id.
         // We need the split sizes. If all outputs have known dims, compute from the
         // input dim and output sizes. Otherwise use the output info directly.
-        let split_known_idx = in_map.layout[..=axis].iter()
+        let split_known_idx = in_map.layout[..=axis]
+            .iter()
             .filter(|d| matches!(d, DimKind::Known(_)))
-            .count() - 1;
+            .count()
+            - 1;
 
         // Get the input's full dim along split axis.
-        let in_known: Vec<u64> = in_map.layout.iter()
-            .filter_map(|d| if let DimKind::Known(s) = d { Some(*s) } else { None })
+        let in_known: Vec<u64> = in_map
+            .layout
+            .iter()
+            .filter_map(|d| {
+                if let DimKind::Known(s) = d {
+                    Some(*s)
+                } else {
+                    None
+                }
+            })
             .collect();
         let _in_split_size = in_known[split_known_idx];
 
@@ -1234,7 +1604,8 @@ impl LowerCtx {
         // Since we might not have the split tensor values, estimate from output_id * output_size.
         // This is only correct for equal splits. For unequal splits we need the actual sizes.
         // Try to get them from the split tensor.
-        let offset_along_axis = self.compute_split_offset(split, output_id_idx, out_split_size, all_infos);
+        let offset_along_axis =
+            self.compute_split_offset(split, output_id_idx, out_split_size, all_infos);
 
         if out_known_dims.len() != in_known.len() {
             self.lower_as_boundary_named(split, all_infos, "Split");
@@ -1270,15 +1641,26 @@ impl LowerCtx {
 
         let dt = out_info.dtype();
         let base_id = self.nano.push_group(
-            out_count, ScalarOp::Identity { compute_dtype: dt, output_dtype: dt },
-            out_sym_dims.clone(), vec![],
+            out_count,
+            ScalarOp::Identity {
+                compute_dtype: dt,
+                output_dtype: dt,
+            },
+            out_sym_dims.clone(),
+            vec![],
             vec![InputRef::Explicit(ids)],
         );
 
-        self.tensor_map.insert(out_id, TensorAtomMap {
-            base_id, count: out_count, layout: out_layout,
-            known_strides: TensorAtomMap::compute_strides(&out_known_dims), sym_dims: out_sym_dims,
-        });
+        self.tensor_map.insert(
+            out_id,
+            TensorAtomMap {
+                base_id,
+                count: out_count,
+                layout: out_layout,
+                known_strides: TensorAtomMap::compute_strides(&out_known_dims),
+                sym_dims: out_sym_dims,
+            },
+        );
     }
 
     /// Compute the cumulative offset along the split axis for output_id_idx.
@@ -1291,12 +1673,18 @@ impl LowerCtx {
     ) -> u64 {
         // Try to get concrete split sizes from the split tensor.
         if let Some(split_tensor_ref) = split.split_tensor() {
-            if let crate::milli_graph::ops::MilliOpTensorIDOrLiteral::TensorID(tensor_id) = split_tensor_ref {
+            if let crate::milli_graph::ops::MilliOpTensorIDOrLiteral::TensorID(tensor_id) =
+                split_tensor_ref
+            {
                 if let Some(info) = all_infos.get(tensor_id) {
                     if let Some(numeric) = info.as_numeric() {
-                        if let Ok(cast) = numeric.cast(DType::I64, &mut crate::backends::eval_backend::EvalBackend::NDArray) {
+                        if let Ok(cast) = numeric.cast(
+                            DType::I64,
+                            &mut crate::backends::eval_backend::EvalBackend::NDArray,
+                        ) {
                             if let Ok(rank1) = cast.try_to_rank::<typenum::P1>() {
-                                if let Ok(vals) = Vec::<i64>::try_from(rank1.to_ndarray().unwrap()) {
+                                if let Ok(vals) = Vec::<i64>::try_from(rank1.to_ndarray().unwrap())
+                                {
                                     let offset: i64 = vals[..output_id_idx].iter().sum();
                                     return offset as u64;
                                 }
@@ -1327,7 +1715,9 @@ impl LowerCtx {
             return;
         };
 
-        let Some((out_layout, out_known_dims, out_sym_dims, out_count)) = self.classify_dims(out_info) else {
+        let Some((out_layout, out_known_dims, out_sym_dims, out_count)) =
+            self.classify_dims(out_info)
+        else {
             self.lower_as_boundary_named(slice, all_infos, "Slice");
             return;
         };
@@ -1337,7 +1727,12 @@ impl LowerCtx {
         let extract_i64 = |id: &GlobalId| -> Option<Vec<i64>> {
             let info = all_infos.get(id)?;
             let tensor = info.as_numeric()?;
-            let as_i64 = tensor.cast(DType::I64, &mut crate::backends::eval_backend::EvalBackend::NDArray).ok()?;
+            let as_i64 = tensor
+                .cast(
+                    DType::I64,
+                    &mut crate::backends::eval_backend::EvalBackend::NDArray,
+                )
+                .ok()?;
             let rank1 = as_i64.try_to_rank::<typenum::P1>().ok()?;
             Vec::<i64>::try_from(rank1.to_ndarray().ok()?).ok()
         };
@@ -1353,35 +1748,56 @@ impl LowerCtx {
         let in_rank = in_map.layout.len();
         let axes: Option<Vec<usize>> = if let Some(axes_id) = slice.axes_id() {
             extract_i64(&axes_id).map(|a| {
-                a.iter().map(|&v| if v < 0 { (v + in_rank as i64) as usize } else { v as usize }).collect()
+                a.iter()
+                    .map(|&v| {
+                        if v < 0 {
+                            (v + in_rank as i64) as usize
+                        } else {
+                            v as usize
+                        }
+                    })
+                    .collect()
             })
         } else {
             starts.as_ref().map(|s| (0..s.len()).collect())
         };
 
-        let (Some(starts), Some(_ends), Some(steps), Some(axes)) = (starts, ends, steps, axes) else {
+        let (Some(starts), Some(_ends), Some(steps), Some(axes)) = (starts, ends, steps, axes)
+        else {
             self.lower_as_boundary_named(slice, all_infos, "Slice");
             return;
         };
 
         // Build per-axis (start, step) for known dims.
         // The input's known dims define the coordinate space.
-        let in_known: Vec<u64> = in_map.layout.iter()
-            .filter_map(|d| if let DimKind::Known(s) = d { Some(*s) } else { None })
+        let in_known: Vec<u64> = in_map
+            .layout
+            .iter()
+            .filter_map(|d| {
+                if let DimKind::Known(s) = d {
+                    Some(*s)
+                } else {
+                    None
+                }
+            })
             .collect();
 
         // Map tensor-axis → known-dim index (None if symbolic).
         let axis_to_known_idx: Vec<Option<usize>> = {
             let mut ki = 0;
-            in_map.layout.iter().map(|d| {
-                if matches!(d, DimKind::Known(_)) {
-                    let idx = ki;
-                    ki += 1;
-                    Some(idx)
-                } else {
-                    None
-                }
-            }).collect()
+            in_map
+                .layout
+                .iter()
+                .map(|d| {
+                    if matches!(d, DimKind::Known(_)) {
+                        let idx = ki;
+                        ki += 1;
+                        Some(idx)
+                    } else {
+                        None
+                    }
+                })
+                .collect()
         };
 
         // Build the start offset and step for each known dim.
@@ -1451,22 +1867,38 @@ impl LowerCtx {
 
         let dt = out_info.dtype();
         let base_id = self.nano.push_group(
-            out_count, ScalarOp::Identity { compute_dtype: dt, output_dtype: dt },
-            out_sym_dims.clone(), vec![],
+            out_count,
+            ScalarOp::Identity {
+                compute_dtype: dt,
+                output_dtype: dt,
+            },
+            out_sym_dims.clone(),
+            vec![],
             vec![InputRef::Explicit(ids)],
         );
 
-        self.tensor_map.insert(out_id, TensorAtomMap {
-            base_id, count: out_count, layout: out_layout,
-            known_strides: TensorAtomMap::compute_strides(&out_known_dims), sym_dims: out_sym_dims,
-        });
+        self.tensor_map.insert(
+            out_id,
+            TensorAtomMap {
+                base_id,
+                count: out_count,
+                layout: out_layout,
+                known_strides: TensorAtomMap::compute_strides(&out_known_dims),
+                sym_dims: out_sym_dims,
+            },
+        );
     }
 
     /// Extract concrete i64 values from a tensor in all_infos.
     fn extract_i64(all_infos: &HashMap<GlobalId, TensorInfo>, id: &GlobalId) -> Option<Vec<i64>> {
         let info = all_infos.get(id)?;
         let tensor = info.as_numeric()?;
-        let as_i64 = tensor.cast(DType::I64, &mut crate::backends::eval_backend::EvalBackend::NDArray).ok()?;
+        let as_i64 = tensor
+            .cast(
+                DType::I64,
+                &mut crate::backends::eval_backend::EvalBackend::NDArray,
+            )
+            .ok()?;
         let rank1 = as_i64.try_to_rank::<typenum::P1>().ok()?;
         Vec::<i64>::try_from(rank1.to_ndarray().ok()?).ok()
     }
@@ -1536,11 +1968,25 @@ impl LowerCtx {
         let a_batch_layout = &a_layout[..a_layout.len() - 2];
         let b_batch_layout = &b_layout[..b_layout.len() - 2];
 
-        let a_batch_known: Vec<u64> = a_batch_layout.iter()
-            .filter_map(|d| if let DimKind::Known(s) = d { Some(*s) } else { None })
+        let a_batch_known: Vec<u64> = a_batch_layout
+            .iter()
+            .filter_map(|d| {
+                if let DimKind::Known(s) = d {
+                    Some(*s)
+                } else {
+                    None
+                }
+            })
             .collect();
-        let b_batch_known: Vec<u64> = b_batch_layout.iter()
-            .filter_map(|d| if let DimKind::Known(s) = d { Some(*s) } else { None })
+        let b_batch_known: Vec<u64> = b_batch_layout
+            .iter()
+            .filter_map(|d| {
+                if let DimKind::Known(s) = d {
+                    Some(*s)
+                } else {
+                    None
+                }
+            })
             .collect();
 
         // B can have fewer batch dims (broadcasting). If B has batch dims, they must match.
@@ -1552,7 +1998,9 @@ impl LowerCtx {
         let batch_known_product: u64 = a_batch_known.iter().product::<u64>().max(1);
 
         // Classify output dims.
-        let Some((out_layout, out_known_dims, out_sym_dims, out_count)) = self.classify_dims(out_info) else {
+        let Some((out_layout, out_known_dims, out_sym_dims, out_count)) =
+            self.classify_dims(out_info)
+        else {
             self.lower_as_boundary_named(matmul, all_infos, "MatMul");
             return;
         };
@@ -1572,18 +2020,34 @@ impl LowerCtx {
         let out_dtype = matmul.output_dtype();
 
         // Create bounded sym dim for the contraction dimension K.
-        let k_sym = self.nano.bounded_sym_dim(&format!("matmul_k_{}", self.next_anon_sym), k);
+        let k_sym = self
+            .nano
+            .bounded_sym_dim(&format!("matmul_k_{}", self.next_anon_sym), k);
         self.next_anon_sym += 1;
 
         // Compute A's known-dim strides (for addressing within A's atoms).
-        let a_known_dims: Vec<u64> = a_layout.iter()
-            .filter_map(|d| if let DimKind::Known(s) = d { Some(*s) } else { None })
+        let a_known_dims: Vec<u64> = a_layout
+            .iter()
+            .filter_map(|d| {
+                if let DimKind::Known(s) = d {
+                    Some(*s)
+                } else {
+                    None
+                }
+            })
             .collect();
         let a_strides = TensorAtomMap::compute_strides(&a_known_dims);
 
         // Compute B's known-dim strides.
-        let b_known_dims: Vec<u64> = b_layout.iter()
-            .filter_map(|d| if let DimKind::Known(s) = d { Some(*s) } else { None })
+        let b_known_dims: Vec<u64> = b_layout
+            .iter()
+            .filter_map(|d| {
+                if let DimKind::Known(s) = d {
+                    Some(*s)
+                } else {
+                    None
+                }
+            })
             .collect();
         let b_strides = TensorAtomMap::compute_strides(&b_known_dims);
 
@@ -1613,8 +2077,16 @@ impl LowerCtx {
         let mut mul_base_id = None;
 
         for g in 0..num_row_groups {
-            let m_idx = if m_known.is_some() { g as u64 % m_groups } else { 0 };
-            let batch_idx = if m_known.is_some() { g as u64 / m_groups } else { g as u64 };
+            let m_idx = if m_known.is_some() {
+                g as u64 % m_groups
+            } else {
+                0
+            };
+            let batch_idx = if m_known.is_some() {
+                g as u64 / m_groups
+            } else {
+                g as u64
+            };
 
             // Compute A's base offset: set batch indices + m_idx, K=0.
             let mut a_offset = 0u64;
@@ -1647,19 +2119,26 @@ impl LowerCtx {
 
             // Create K mul groups for this row, one per contraction index.
             for ki in 0..k {
-                let a_atom = a_map.base_id.offset(
-                    (a_offset + ki * a_strides[a_k_known_idx]) as u32,
-                );
-                let b_atom = b_map.base_id.offset(
-                    (b_offset + ki * b_strides[b_k_known_idx]) as u32,
-                );
+                let a_atom = a_map
+                    .base_id
+                    .offset((a_offset + ki * a_strides[a_k_known_idx]) as u32);
+                let b_atom = b_map
+                    .base_id
+                    .offset((b_offset + ki * b_strides[b_k_known_idx]) as u32);
 
                 let input_a = InputRef::Broadcast(a_atom);
-                let input_b = InputRef::Affine { base: b_atom, stride: 1 };
+                let input_b = InputRef::Affine {
+                    base: b_atom,
+                    stride: 1,
+                };
 
                 let base = self.nano.push_group(
                     n_u32,
-                    ScalarOp::Binary { op: ScalarBinOp::Mul, compute_dtype: product_dtype, output_dtype: product_dtype },
+                    ScalarOp::Binary {
+                        op: ScalarBinOp::Mul,
+                        compute_dtype: product_dtype,
+                        output_dtype: product_dtype,
+                    },
                     out_sym_dims.clone(),
                     vec![],
                     vec![input_a, input_b],
@@ -1682,7 +2161,10 @@ impl LowerCtx {
 
             let base = self.nano.push_group(
                 n_u32,
-                ScalarOp::ReduceSum { compute_dtype: accumulate_dtype, output_dtype: out_dtype },
+                ScalarOp::ReduceSum {
+                    compute_dtype: accumulate_dtype,
+                    output_dtype: out_dtype,
+                },
                 out_sym_dims.clone(),
                 vec![k_sym],
                 vec![InputRef::SymAffine {
@@ -1699,10 +2181,16 @@ impl LowerCtx {
 
         let base_id = reduce_base_id.unwrap();
 
-        self.tensor_map.insert(out_id, TensorAtomMap {
-            base_id, count: out_count, layout: out_layout,
-            known_strides: TensorAtomMap::compute_strides(&out_known_dims), sym_dims: out_sym_dims,
-        });
+        self.tensor_map.insert(
+            out_id,
+            TensorAtomMap {
+                base_id,
+                count: out_count,
+                layout: out_layout,
+                known_strides: TensorAtomMap::compute_strides(&out_known_dims),
+                sym_dims: out_sym_dims,
+            },
+        );
     }
 
     /// Lower ReduceSum or ReduceMax over known axes.
@@ -1711,8 +2199,7 @@ impl LowerCtx {
         reduce: &R,
         all_infos: &HashMap<GlobalId, TensorInfo>,
         make_reduce_op: F,
-    )
-    where
+    ) where
         R: Node,
         R: ReduceAccessors,
         F: Fn(DType, DType) -> ScalarOp,
@@ -1745,13 +2232,28 @@ impl LowerCtx {
             let count = count.max(1);
             let dt = out_info.dtype();
             let base_id = self.nano.push_group(
-                count, ScalarOp::Identity { compute_dtype: dt, output_dtype: dt }, sym_dims.clone(), vec![],
-                vec![InputRef::Affine { base: in_map.base_id, stride: 1 }],
+                count,
+                ScalarOp::Identity {
+                    compute_dtype: dt,
+                    output_dtype: dt,
+                },
+                sym_dims.clone(),
+                vec![],
+                vec![InputRef::Affine {
+                    base: in_map.base_id,
+                    stride: 1,
+                }],
             );
-            self.tensor_map.insert(out_id, TensorAtomMap {
-                base_id, count, layout,
-                known_strides: TensorAtomMap::compute_strides(&known_dims), sym_dims,
-            });
+            self.tensor_map.insert(
+                out_id,
+                TensorAtomMap {
+                    base_id,
+                    count,
+                    layout,
+                    known_strides: TensorAtomMap::compute_strides(&known_dims),
+                    sym_dims,
+                },
+            );
             return;
         } else {
             // No axes = reduce all. Boundary for now.
@@ -1762,22 +2264,45 @@ impl LowerCtx {
         let in_rank = in_map.layout.len();
 
         // Normalize axes and check they're all known dims.
-        let norm_axes: Vec<usize> = axes.iter()
-            .map(|&a| if a < 0 { (a + in_rank as i64) as usize } else { a as usize })
+        let norm_axes: Vec<usize> = axes
+            .iter()
+            .map(|&a| {
+                if a < 0 {
+                    (a + in_rank as i64) as usize
+                } else {
+                    a as usize
+                }
+            })
             .collect();
 
         // Map tensor-axis → known-dim index.
         let axis_to_known_idx: Vec<Option<usize>> = {
             let mut ki = 0;
-            in_map.layout.iter().map(|d| {
-                if matches!(d, DimKind::Known(_)) {
-                    let idx = ki; ki += 1; Some(idx)
-                } else { None }
-            }).collect()
+            in_map
+                .layout
+                .iter()
+                .map(|d| {
+                    if matches!(d, DimKind::Known(_)) {
+                        let idx = ki;
+                        ki += 1;
+                        Some(idx)
+                    } else {
+                        None
+                    }
+                })
+                .collect()
         };
 
-        let in_known: Vec<u64> = in_map.layout.iter()
-            .filter_map(|d| if let DimKind::Known(s) = d { Some(*s) } else { None })
+        let in_known: Vec<u64> = in_map
+            .layout
+            .iter()
+            .filter_map(|d| {
+                if let DimKind::Known(s) = d {
+                    Some(*s)
+                } else {
+                    None
+                }
+            })
             .collect();
 
         // Check all reduction axes are known dims.
@@ -1797,23 +2322,28 @@ impl LowerCtx {
         }
 
         // Compute the reduction extent (product of reduced known dims).
-        let reduce_extent: u64 = reduce_known_indices.iter().map(|&ki| in_known[ki]).product();
+        let reduce_extent: u64 = reduce_known_indices
+            .iter()
+            .map(|&ki| in_known[ki])
+            .product();
         if reduce_extent == 0 {
             self.lower_as_boundary_named(reduce, all_infos, "Reduce");
             return;
         }
 
         // Output known dims = input known dims minus the reduced ones.
-        let out_known: Vec<u64> = in_known.iter().enumerate()
+        let out_known: Vec<u64> = in_known
+            .iter()
+            .enumerate()
             .filter(|(i, _)| !reduce_known_indices.contains(i))
             .map(|(_, &v)| v)
             .collect();
         let out_count = out_known.iter().product::<u64>().max(1) as u32;
 
         // Create bounded sym dim for the reduction.
-        let reduce_sym = self.nano.bounded_sym_dim(
-            &format!("reduce_{}", self.next_anon_sym), reduce_extent,
-        );
+        let reduce_sym = self
+            .nano
+            .bounded_sym_dim(&format!("reduce_{}", self.next_anon_sym), reduce_extent);
         self.next_anon_sym += 1;
 
         // Build the intermediate multiply group (identity * 1 for ReduceSum/Max,
@@ -1855,7 +2385,10 @@ impl LowerCtx {
             let mut out_indices = vec![0u64; out_known.len()];
             let mut rem = flat_out;
             for (i, &stride) in out_strides_local.iter().enumerate() {
-                if stride > 0 { out_indices[i] = rem / stride; rem %= stride; }
+                if stride > 0 {
+                    out_indices[i] = rem / stride;
+                    rem %= stride;
+                }
             }
 
             // Map back to input known-dim indices (insert 0 for reduced dim).
@@ -1882,13 +2415,19 @@ impl LowerCtx {
             true
         } else {
             let stride = base_ids[1] as i64 - base_ids[0] as i64;
-            base_ids.windows(2).all(|w| (w[1] as i64 - w[0] as i64) == stride)
+            base_ids
+                .windows(2)
+                .all(|w| (w[1] as i64 - w[0] as i64) == stride)
         };
 
         // Input group: out_count atoms with sym_dims including reduce_sym.
         // Uses SymAffine to index into the source, advancing by reduce_stride per k.
         let input_ref = if is_affine && out_count > 0 {
-            let stride_i = if out_count > 1 { base_ids[1] as i32 - base_ids[0] as i32 } else { 1 };
+            let stride_i = if out_count > 1 {
+                base_ids[1] as i32 - base_ids[0] as i32
+            } else {
+                1
+            };
             InputRef::SymAffine {
                 base: in_map.base_id.offset(base_ids[0]),
                 stride_i,
@@ -1911,7 +2450,8 @@ impl LowerCtx {
         };
 
         // Classify output for proper layout.
-        let Some((out_layout, out_known_dims_full, out_sym_dims, _)) = self.classify_dims(out_info) else {
+        let Some((out_layout, out_known_dims_full, out_sym_dims, _)) = self.classify_dims(out_info)
+        else {
             // This shouldn't happen since we computed out_count, but be safe.
             self.lower_as_boundary_named(reduce, all_infos, "Reduce");
             return;
@@ -1929,10 +2469,16 @@ impl LowerCtx {
             vec![input_ref],
         );
 
-        self.tensor_map.insert(out_id, TensorAtomMap {
-            base_id, count: out_count, layout: out_layout,
-            known_strides: TensorAtomMap::compute_strides(&out_known_dims_full), sym_dims: out_sym_dims,
-        });
+        self.tensor_map.insert(
+            out_id,
+            TensorAtomMap {
+                base_id,
+                count: out_count,
+                layout: out_layout,
+                known_strides: TensorAtomMap::compute_strides(&out_known_dims_full),
+                sym_dims: out_sym_dims,
+            },
+        );
     }
 
     /// Lower ReduceMean = ReduceSum / extent.
@@ -1948,7 +2494,8 @@ impl LowerCtx {
 
         // First try to lower as ReduceSum.
         // We need to know the reduction extent to divide.
-        let axes_vals: Option<Vec<i64>> = reduce.axes_tensor()
+        let axes_vals: Option<Vec<i64>> = reduce
+            .axes_tensor()
             .and_then(|id| Self::extract_i64(all_infos, &id));
 
         // Get input info for extent computation.
@@ -1962,7 +2509,11 @@ impl LowerCtx {
             let rank = info.rank_if_known()?;
             let mut product = 1u64;
             for &a in axes {
-                let ax = if a < 0 { (a + rank as i64) as usize } else { a as usize };
+                let ax = if a < 0 {
+                    (a + rank as i64) as usize
+                } else {
+                    a as usize
+                };
                 product *= info.dim_if_known(ax)?;
             }
             Some(product)
@@ -1988,8 +2539,10 @@ impl LowerCtx {
         };
 
         // Lower as ReduceSum, keeping output in compute_dt (not out_dt).
-        self.lower_reduce(reduce, all_infos,
-            |cd, _od| ScalarOp::ReduceSum { compute_dtype: cd, output_dtype: cd });
+        self.lower_reduce(reduce, all_infos, |cd, _od| ScalarOp::ReduceSum {
+            compute_dtype: cd,
+            output_dtype: cd,
+        });
 
         // If ReduceSum succeeded (output is in tensor_map), divide by extent.
         let Some(sum_map) = self.tensor_map.get(&out_id).cloned() else {
@@ -2000,26 +2553,41 @@ impl LowerCtx {
         let recip = 1.0 / extent as f64;
         let lit_id = self.nano.push_atom(
             ScalarOp::Literal(NumericScalar::F32(recip as f32)),
-            vec![], vec![], vec![],
+            vec![],
+            vec![],
+            vec![],
         );
 
         // Multiply by 1/extent in compute_dt, then cast to output dtype.
         let base_id = self.nano.push_group(
             sum_map.count,
-            ScalarOp::Binary { op: ScalarBinOp::Mul, compute_dtype: compute_dt, output_dtype: out_dt },
+            ScalarOp::Binary {
+                op: ScalarBinOp::Mul,
+                compute_dtype: compute_dt,
+                output_dtype: out_dt,
+            },
             sum_map.sym_dims.clone(),
             vec![],
             vec![
-                InputRef::Affine { base: sum_map.base_id, stride: 1 },
+                InputRef::Affine {
+                    base: sum_map.base_id,
+                    stride: 1,
+                },
                 InputRef::Broadcast(lit_id),
             ],
         );
 
         // Update tensor_map to point to the divided result.
-        self.tensor_map.insert(out_id, TensorAtomMap {
-            base_id, count: sum_map.count,
-            layout: sum_map.layout, known_strides: sum_map.known_strides, sym_dims: sum_map.sym_dims,
-        });
+        self.tensor_map.insert(
+            out_id,
+            TensorAtomMap {
+                base_id,
+                count: sum_map.count,
+                layout: sum_map.layout,
+                known_strides: sum_map.known_strides,
+                sym_dims: sum_map.sym_dims,
+            },
+        );
     }
 
     /// Generic boundary fallback. Always registers outputs in tensor_map
@@ -2043,21 +2611,47 @@ impl LowerCtx {
         self.push_unsupported(op, all_infos, name);
     }
 
-    fn push_unsupported<T: Node>(&mut self, op: &T, all_infos: &HashMap<GlobalId, TensorInfo>, name: &str) {
-        let in_shapes: Vec<String> = op.inputs().map(|id| Self::fmt_info(all_infos.get(&id))).collect();
-        let out_shapes: Vec<String> = op.outputs().map(|id| Self::fmt_info(all_infos.get(&id))).collect();
-        let detail = format!("{} : ({}) → ({})", name, in_shapes.join(", "), out_shapes.join(", "));
+    fn push_unsupported<T: Node>(
+        &mut self,
+        op: &T,
+        all_infos: &HashMap<GlobalId, TensorInfo>,
+        name: &str,
+    ) {
+        let in_shapes: Vec<String> = op
+            .inputs()
+            .map(|id| Self::fmt_info(all_infos.get(&id)))
+            .collect();
+        let out_shapes: Vec<String> = op
+            .outputs()
+            .map(|id| Self::fmt_info(all_infos.get(&id)))
+            .collect();
+        let detail = format!(
+            "{} : ({}) → ({})",
+            name,
+            in_shapes.join(", "),
+            out_shapes.join(", ")
+        );
         self.unsupported.push((op.global_id(), name.to_string()));
         self.unsupported_details.push(detail);
     }
 
     fn fmt_info(info: Option<&TensorInfo>) -> String {
-        let Some(info) = info else { return "?".to_string() };
+        let Some(info) = info else {
+            return "?".to_string();
+        };
         let r = info.rank_if_known().unwrap_or(0);
-        let prefix = if info.as_numeric().is_some() { "N" } else { "R" };
-        let dims: Vec<String> = (0..r).map(|i| {
-            info.dim_if_known(i).map(|d| d.to_string()).unwrap_or("?".to_string())
-        }).collect();
+        let prefix = if info.as_numeric().is_some() {
+            "N"
+        } else {
+            "R"
+        };
+        let dims: Vec<String> = (0..r)
+            .map(|i| {
+                info.dim_if_known(i)
+                    .map(|d| d.to_string())
+                    .unwrap_or("?".to_string())
+            })
+            .collect();
         format!("{}[{}]", prefix, dims.join(","))
     }
 
@@ -2068,11 +2662,20 @@ impl LowerCtx {
         }
         let base_id = self.nano.push_atom(
             ScalarOp::Literal(NumericScalar::F32(0.0)),
-            vec![], vec![], vec![],
+            vec![],
+            vec![],
+            vec![],
         );
-        self.tensor_map.insert(id, TensorAtomMap {
-            base_id, count: 1, layout: vec![], known_strides: vec![], sym_dims: vec![],
-        });
+        self.tensor_map.insert(
+            id,
+            TensorAtomMap {
+                base_id,
+                count: 1,
+                layout: vec![],
+                known_strides: vec![],
+                sym_dims: vec![],
+            },
+        );
     }
 }
 
@@ -2084,9 +2687,9 @@ mod tests {
     use crate::graph::Graph;
     use crate::milli_graph::MilliOpGraph;
     use crate::milli_graph::ops::MilliOp;
-    use crate::numeric_tensor::NumericTensor;
     use crate::nano_graph::eval::NanoEval;
     use crate::numeric_scalar::NumericScalar;
+    use crate::numeric_tensor::NumericTensor;
 
     /// Extract flat f32 values from a NumericTensor, returned as f64.
     fn tensor_to_f64(t: &NumericTensor<DynRank>) -> Vec<f64> {
@@ -2104,12 +2707,17 @@ mod tests {
         let f32_tensor = t.cast(crate::dtype::DType::F32, &mut backend).unwrap();
         let flat = f32_tensor.flatten().unwrap();
         let v: Vec<f32> = flat.to_ndarray().unwrap().try_into().unwrap();
-        v.into_iter().map(|x| NumericScalar::F32(x).cast_to(dtype)).collect()
+        v.into_iter()
+            .map(|x| NumericScalar::F32(x).cast_to(dtype))
+            .collect()
     }
 
     /// Build a milli graph, eval through both milli and nano, compare results.
     fn check_integrity(
-        build_graph: impl FnOnce(&mut MilliOpGraph, &mut rand::rngs::ThreadRng) -> (Vec<GlobalId>, Vec<GlobalId>),
+        build_graph: impl FnOnce(
+            &mut MilliOpGraph,
+            &mut rand::rngs::ThreadRng,
+        ) -> (Vec<GlobalId>, Vec<GlobalId>),
         inputs: Vec<NumericTensor<DynRank>>,
     ) {
         let mut rng = rand::rng();
@@ -2137,8 +2745,11 @@ mod tests {
 
         // Lower to NanoGraph.
         let result = lower_with_info(&milli, &info_inputs).unwrap();
-        assert!(result.unsupported.is_empty(),
-            "Unsupported ops: {:?}", result.unsupported_details);
+        assert!(
+            result.unsupported.is_empty(),
+            "Unsupported ops: {:?}",
+            result.unsupported_details
+        );
 
         // Start with numeric overrides from lowering, add input values on top.
         let mut overrides = result.numeric_overrides;
@@ -2163,22 +2774,36 @@ mod tests {
             let Some(tam) = result.tensor_map.get(out_id) else {
                 panic!("Output tensor {:?} not in tensor_map", out_id);
             };
-            assert!(tam.sym_dims.is_empty(), "Sym dims not yet supported in test");
+            assert!(
+                tam.sym_dims.is_empty(),
+                "Sym dims not yet supported in test"
+            );
 
             let nano_flat: Vec<f64> = (0..tam.count)
                 .map(|i| nano_eval.get(tam.base_id.offset(i)))
                 .collect();
 
-            assert_eq!(milli_flat.len(), nano_flat.len(),
+            assert_eq!(
+                milli_flat.len(),
+                nano_flat.len(),
                 "Output {:?}: milli has {} elements, nano has {}",
-                out_id, milli_flat.len(), nano_flat.len());
+                out_id,
+                milli_flat.len(),
+                nano_flat.len()
+            );
 
             for (i, (m, n)) in milli_flat.iter().zip(nano_flat.iter()).enumerate() {
                 let diff = (m - n).abs();
                 let tol = 1e-4 * m.abs().max(1.0);
-                assert!(diff < tol,
+                assert!(
+                    diff < tol,
                     "Output {:?} element {}: milli={} nano={} diff={}",
-                    out_id, i, m, n, diff);
+                    out_id,
+                    i,
+                    m,
+                    n,
+                    diff
+                );
             }
         }
     }
@@ -2229,7 +2854,8 @@ mod tests {
                 (vec![a, b], vec![c])
             },
             vec![
-                NumericTensor::from_vec_shape(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]).unwrap(),
+                NumericTensor::from_vec_shape(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3])
+                    .unwrap(),
                 NumericTensor::from_vec_shape(vec![10.0f32, 20.0, 30.0], vec![3]).unwrap(),
             ],
         );
@@ -2243,9 +2869,7 @@ mod tests {
                 let b = crate::milli_graph::ops::SimpleUnaryOp::exp(graph, a, rng);
                 (vec![a], vec![b])
             },
-            vec![
-                NumericTensor::from_vec_shape(vec![0.0f32, 1.0, -1.0, 0.5], vec![4]).unwrap(),
-            ],
+            vec![NumericTensor::from_vec_shape(vec![0.0f32, 1.0, -1.0, 0.5], vec![4]).unwrap()],
         );
     }
 
@@ -2256,16 +2880,20 @@ mod tests {
             |graph, rng| {
                 let a = graph.add_input(rng);
                 let b = graph.add_input(rng);
-                let c = crate::milli_graph::ops::MatMul::push_new_default_precision(graph, a, b, crate::dtype::DType::F32, rng);
+                let c = crate::milli_graph::ops::MatMul::push_new_default_precision(
+                    graph,
+                    a,
+                    b,
+                    crate::dtype::DType::F32,
+                    rng,
+                );
                 (vec![a, b], vec![c])
             },
             vec![
-                NumericTensor::from_vec_shape(
-                    vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3],
-                ).unwrap(),
-                NumericTensor::from_vec_shape(
-                    vec![1.0f32, 0.0, 0.0, 1.0, 1.0, 1.0], vec![3, 2],
-                ).unwrap(),
+                NumericTensor::from_vec_shape(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3])
+                    .unwrap(),
+                NumericTensor::from_vec_shape(vec![1.0f32, 0.0, 0.0, 1.0, 1.0, 1.0], vec![3, 2])
+                    .unwrap(),
             ],
         );
     }

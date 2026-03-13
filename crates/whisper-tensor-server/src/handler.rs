@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 use crossbeam::queue::ArrayQueue;
 use hf_hub::api::tokio::ApiBuilder;
 use hf_hub::{Repo, RepoType};
-use tokio::sync::{Mutex, Notify, mpsc};
 use tokenizers::FromPretrainedParameters;
+use tokio::sync::{Mutex, Notify, mpsc};
 
 use crate::model_server::ModelServer;
 use crate::scheduler::{SchedulerJob, SchedulerReport, SchedulerReporter};

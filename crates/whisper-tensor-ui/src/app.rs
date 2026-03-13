@@ -239,16 +239,14 @@ impl WebUIApp {
                                                     if let Some(path) =
                                                         rfd::FileDialog::new().pick_file()
                                                     {
-                                                        *value =
-                                                            path.to_string_lossy().to_string();
+                                                        *value = path.to_string_lossy().to_string();
                                                     }
                                                 }
                                                 if ui.button("Dir…").clicked() {
                                                     if let Some(path) =
                                                         rfd::FileDialog::new().pick_folder()
                                                     {
-                                                        *value =
-                                                            path.to_string_lossy().to_string();
+                                                        *value = path.to_string_lossy().to_string();
                                                     }
                                                 }
                                             }

@@ -779,10 +779,10 @@ fn declare_math_functions(
 mod tests {
     use super::*;
     use crate::compiler::attempts::v2_fusion::planner;
+    use crate::dtype::DType;
     use crate::graph::GlobalId;
     use crate::milli_graph::MilliOpGraph;
     use crate::milli_graph::ops::{MatMul, SimpleBinary, SimpleUnaryOp};
-    use crate::dtype::DType;
 
     /// Helper: build buffers, run compiled, return output.
     unsafe fn run_compiled_graph(

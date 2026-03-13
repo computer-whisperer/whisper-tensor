@@ -2069,9 +2069,9 @@ fn unflatten_index(flat_index: usize, shape: &[usize]) -> Option<Vec<usize>> {
 mod tests {
     use super::*;
     use crate::compiler::common::v1_frontend::nano_op::NanoOpExpander;
+    use crate::dtype::DType;
     use crate::graph::GlobalId;
     use crate::milli_graph::ops::{MatMul, SimpleBinary};
-    use crate::dtype::DType;
 
     #[test]
     fn test_classifies_pointwise_add_as_pointwise() {

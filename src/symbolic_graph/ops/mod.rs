@@ -110,10 +110,8 @@ pub trait Operation: Node {
         backend: &mut EvalBackend,
         inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
     ) -> OperationEvalRet {
-        let tensor_dtypes: HashMap<GlobalId, DType> = inputs
-            .iter()
-            .map(|(id, t)| (*id, t.dtype()))
-            .collect();
+        let tensor_dtypes: HashMap<GlobalId, DType> =
+            inputs.iter().map(|(id, t)| (*id, t.dtype())).collect();
         let ctx = MilliLoweringContext::new(tensor_dtypes);
         let mut rng = WyRand::new(Default::default());
         let milli_graph = self.get_milli_op_graph(&ctx, &mut rng);

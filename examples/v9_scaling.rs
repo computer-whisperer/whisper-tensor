@@ -8,9 +8,9 @@ use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use whisper_tensor::compiler::attempts::v9_fused_expr::pipeline as v9_pipeline;
+use whisper_tensor::dtype::DType;
 use whisper_tensor::graph::GlobalId;
 use whisper_tensor::milli_graph::MilliOpGraph;
-use whisper_tensor::dtype::DType;
 use whisper_tensor::milli_graph::ops::MatMul;
 use whisper_tensor::numeric_tensor::NumericTensor;
 use whisper_tensor::tensor_rank::DynRank;

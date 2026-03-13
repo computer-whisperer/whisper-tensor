@@ -46,18 +46,38 @@ pub enum ScalarOp {
     Literal(NumericScalar),
     /// Identity pass-through. One input, output = cast(input).
     /// Used for index-remapping ops (Slice, strided views) and dtype casts.
-    Identity { compute_dtype: DType, output_dtype: DType },
+    Identity {
+        compute_dtype: DType,
+        output_dtype: DType,
+    },
     /// Binary operation on two inputs.
-    Binary { op: ScalarBinOp, compute_dtype: DType, output_dtype: DType },
+    Binary {
+        op: ScalarBinOp,
+        compute_dtype: DType,
+        output_dtype: DType,
+    },
     /// Unary operation on one input.
-    Unary { op: ScalarUnaryOp, compute_dtype: DType, output_dtype: DType },
+    Unary {
+        op: ScalarUnaryOp,
+        compute_dtype: DType,
+        output_dtype: DType,
+    },
     /// Ternary select: condition ? x : y. Three inputs: [condition, x, y].
-    Select { compute_dtype: DType, output_dtype: DType },
+    Select {
+        compute_dtype: DType,
+        output_dtype: DType,
+    },
     /// Reduce a dimension by summation. One input; the block iterates over the
     /// reduction dimension and accumulates.
-    ReduceSum { compute_dtype: DType, output_dtype: DType },
+    ReduceSum {
+        compute_dtype: DType,
+        output_dtype: DType,
+    },
     /// Reduce a dimension by max.
-    ReduceMax { compute_dtype: DType, output_dtype: DType },
+    ReduceMax {
+        compute_dtype: DType,
+        output_dtype: DType,
+    },
 }
 
 impl ScalarOp {
@@ -89,6 +109,9 @@ impl ScalarOp {
 
     /// Returns true if this is a reduce operation.
     pub fn is_reduce(&self) -> bool {
-        matches!(self, ScalarOp::ReduceSum { .. } | ScalarOp::ReduceMax { .. })
+        matches!(
+            self,
+            ScalarOp::ReduceSum { .. } | ScalarOp::ReduceMax { .. }
+        )
     }
 }

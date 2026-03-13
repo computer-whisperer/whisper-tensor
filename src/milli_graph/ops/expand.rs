@@ -128,9 +128,10 @@ impl MilliOp for Expand {
                     };
 
                     let dim = match (target_dim, input_dim) {
-                        (Some(ScalarInfoTyped::Numeric(t)), Some(ScalarInfoTyped::Numeric(inp))) => {
-                            ScalarInfoTyped::Numeric(t.max(inp))
-                        }
+                        (
+                            Some(ScalarInfoTyped::Numeric(t)),
+                            Some(ScalarInfoTyped::Numeric(inp)),
+                        ) => ScalarInfoTyped::Numeric(t.max(inp)),
                         (Some(t), None) => t,
                         (None, Some(inp)) => inp,
                         (Some(ScalarInfoTyped::Numeric(t)), Some(_)) => {

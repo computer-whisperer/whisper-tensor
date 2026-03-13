@@ -84,13 +84,9 @@ impl MilliOp for Squeeze {
             .ok_or(MilliOpGraphError::UnableToInfer)?;
 
         // If both inputs are concrete, delegate to eval
-        if let (Some(data_num), Some(axes_num)) =
-            (data_info.as_numeric(), axes_info.as_numeric())
-        {
-            let inputs = HashMap::from([
-                (self.data, data_num.clone()),
-                (self.axes, axes_num.clone()),
-            ]);
+        if let (Some(data_num), Some(axes_num)) = (data_info.as_numeric(), axes_info.as_numeric()) {
+            let inputs =
+                HashMap::from([(self.data, data_num.clone()), (self.axes, axes_num.clone())]);
             let out: Vec<_> = self
                 .eval(&inputs, backend)?
                 .map(|(id, t)| (id, TensorInfo::from(t)))
@@ -101,8 +97,7 @@ impl MilliOp for Squeeze {
         let first_elem = data_info.first_element();
 
         // If we know the input shape and the axes are concrete, compute output shape
-        if let (Some(data_ranked), Some(axes_num)) =
-            (data_info.as_ranked(), axes_info.as_numeric())
+        if let (Some(data_ranked), Some(axes_num)) = (data_info.as_ranked(), axes_info.as_numeric())
         {
             let axes_values: Vec<i64> = axes_num
                 .cast(DType::I64, backend)?

@@ -107,7 +107,8 @@ impl MilliOp for Concat {
         let out_dtype = input_infos[0].dtype();
 
         // Find the rank from any input that has a known rank.
-        let rank = input_infos.iter()
+        let rank = input_infos
+            .iter()
             .filter_map(|info| info.rank_if_known())
             .next();
 
@@ -137,20 +138,21 @@ impl MilliOp for Concat {
                     }
                     match total {
                         Some(v) => out_dims.push(ScalarInfoTyped::Numeric(v)),
-                        None => out_dims.push(ScalarInfoTyped::Symbolic(
-                            SymbolicScalarTyped::new(symbolic_resolver),
-                        )),
+                        None => out_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(
+                            symbolic_resolver,
+                        ))),
                     }
                 } else {
                     // Non-concat axis: take from any input that has a known dim.
-                    let known_dim = input_infos.iter()
+                    let known_dim = input_infos
+                        .iter()
                         .filter_map(|info| info.dim_if_known(d))
                         .next();
                     match known_dim {
                         Some(v) => out_dims.push(ScalarInfoTyped::Numeric(v)),
-                        None => out_dims.push(ScalarInfoTyped::Symbolic(
-                            SymbolicScalarTyped::new(symbolic_resolver),
-                        )),
+                        None => out_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(
+                            symbolic_resolver,
+                        ))),
                     }
                 }
             }
@@ -164,7 +166,9 @@ impl MilliOp for Concat {
             );
             let out_rank = input_infos[0].rank();
             let out_info = TensorInfo::new_from_first_element_and_rank(
-                first_elem, out_rank, symbolic_resolver,
+                first_elem,
+                out_rank,
+                symbolic_resolver,
             );
             Ok(Box::new([(self.output, out_info)].into_iter()))
         }

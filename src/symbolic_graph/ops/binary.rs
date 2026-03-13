@@ -113,8 +113,18 @@ impl Operation for BinaryOperation {
             WhichBinaryOperation::Mul => milli_graph::ops::SimpleBinary::mul(&mut graph, a, b, rng),
             WhichBinaryOperation::Div => milli_graph::ops::SimpleBinary::div(&mut graph, a, b, rng),
             WhichBinaryOperation::MatMul => {
-                let input_dtype = ctx.tensor_dtypes.get(&self.a).copied().unwrap_or(DType::F32);
-                milli_graph::ops::MatMul::push_new_default_precision(&mut graph, a, b, input_dtype, rng)
+                let input_dtype = ctx
+                    .tensor_dtypes
+                    .get(&self.a)
+                    .copied()
+                    .unwrap_or(DType::F32);
+                milli_graph::ops::MatMul::push_new_default_precision(
+                    &mut graph,
+                    a,
+                    b,
+                    input_dtype,
+                    rng,
+                )
             }
             WhichBinaryOperation::And => milli_graph::ops::SimpleBinary::and(&mut graph, a, b, rng),
             WhichBinaryOperation::Or => milli_graph::ops::SimpleBinary::or(&mut graph, a, b, rng),
@@ -329,8 +339,18 @@ impl Operation for GemmOperation {
             b
         };
 
-        let input_dtype = ctx.tensor_dtypes.get(&self.input_a).copied().unwrap_or(DType::F32);
-        let x = milli_graph::ops::MatMul::push_new_default_precision(&mut graph, a, b, input_dtype, rng);
+        let input_dtype = ctx
+            .tensor_dtypes
+            .get(&self.input_a)
+            .copied()
+            .unwrap_or(DType::F32);
+        let x = milli_graph::ops::MatMul::push_new_default_precision(
+            &mut graph,
+            a,
+            b,
+            input_dtype,
+            rng,
+        );
 
         let x = if let Some(alpha) = self.alpha {
             let alpha_tid = milli_graph::ops::Constant::new_scalar(&mut graph, alpha, rng);

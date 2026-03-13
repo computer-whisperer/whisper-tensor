@@ -245,7 +245,8 @@ impl MilliOp for SimpleBinary {
             let a_dims = a_ranked.shape();
             let b_dims = b_ranked.shape();
             if let Ok(out_dims) = super::infer_multidirectional_broadcasting_shape(
-                &[a_dims.clone(), b_dims.clone()], symbolic_resolver,
+                &[a_dims.clone(), b_dims.clone()],
+                symbolic_resolver,
             ) {
                 let out_info = TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims);
                 return Ok(Box::new([(self.output, out_info)].into_iter()));
@@ -255,8 +256,10 @@ impl MilliOp for SimpleBinary {
         // Fallback: rank-only inference.
         let a_shape = a_info.shape(symbolic_resolver);
         let b_shape = b_info.shape(symbolic_resolver);
-        let out_rank =
-            super::infer_multidirectional_broadcasting_rank(&[a_shape, b_shape], symbolic_resolver)?;
+        let out_rank = super::infer_multidirectional_broadcasting_rank(
+            &[a_shape, b_shape],
+            symbolic_resolver,
+        )?;
 
         let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
             crate::symbolic_scalar::SymbolicScalar::new(out_dtype, symbolic_resolver),
@@ -452,7 +455,8 @@ impl MilliOp for Pow {
             let a_dims = a_ranked.shape();
             let b_dims = b_ranked.shape();
             if let Ok(out_dims) = super::infer_multidirectional_broadcasting_shape(
-                &[a_dims.clone(), b_dims.clone()], symbolic_resolver,
+                &[a_dims.clone(), b_dims.clone()],
+                symbolic_resolver,
             ) {
                 let out_info = TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims);
                 return Ok(Box::new([(self.output, out_info)].into_iter()));
@@ -462,8 +466,10 @@ impl MilliOp for Pow {
         // Fallback: rank-only inference.
         let a_shape = a_info.shape(symbolic_resolver);
         let b_shape = b_info.shape(symbolic_resolver);
-        let out_rank =
-            super::infer_multidirectional_broadcasting_rank(&[a_shape, b_shape], symbolic_resolver)?;
+        let out_rank = super::infer_multidirectional_broadcasting_rank(
+            &[a_shape, b_shape],
+            symbolic_resolver,
+        )?;
 
         let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
             crate::symbolic_scalar::SymbolicScalar::new(out_dtype, symbolic_resolver),
@@ -632,8 +638,10 @@ impl MilliOp for MatMul {
                     let a_batch = &a_dims[..a_rank - 2];
                     let b_batch = &b_dims[..b_rank - 2];
                     let batch = super::infer_multidirectional_broadcasting_shape(
-                        &[a_batch.to_vec(), b_batch.to_vec()], symbolic_resolver,
-                    ).ok();
+                        &[a_batch.to_vec(), b_batch.to_vec()],
+                        symbolic_resolver,
+                    )
+                    .ok();
                     batch.map(|mut out| {
                         out.push(a_dims[a_rank - 2].clone()); // M
                         out.push(b_dims[b_rank - 1].clone()); // N
@@ -722,14 +730,26 @@ impl MilliOp for MatMul {
         // d/dA (A @ B) = grad @ B^T
         let b_t = super::Transpose::push_new(graph, self.b, Some(vec![-1, -2]), rng);
         let grad_a = MatMul::push_new(
-            graph, grad_output, b_t,
-            self.input_dtype, self.product_dtype, self.accumulate_dtype, self.output_dtype, rng,
+            graph,
+            grad_output,
+            b_t,
+            self.input_dtype,
+            self.product_dtype,
+            self.accumulate_dtype,
+            self.output_dtype,
+            rng,
         );
         // d/dB (A @ B) = A^T @ grad
         let a_t = super::Transpose::push_new(graph, self.a, Some(vec![-1, -2]), rng);
         let grad_b = MatMul::push_new(
-            graph, a_t, grad_output,
-            self.input_dtype, self.product_dtype, self.accumulate_dtype, self.output_dtype, rng,
+            graph,
+            a_t,
+            grad_output,
+            self.input_dtype,
+            self.product_dtype,
+            self.accumulate_dtype,
+            self.output_dtype,
+            rng,
         );
 
         // Reduce gradients to match input shapes (un-broadcast batch dims)

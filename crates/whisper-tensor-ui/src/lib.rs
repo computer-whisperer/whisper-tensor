@@ -32,10 +32,8 @@ fn main() {
             .dyn_into::<web_sys::HtmlCanvasElement>()
             .expect("the_canvas_id was not a HtmlCanvasElement");
 
-        let (server_client_sender, server_client_receiver) =
-            tokio::sync::mpsc::unbounded_channel();
-        let (client_server_sender, client_server_receiver) =
-            tokio::sync::mpsc::unbounded_channel();
+        let (server_client_sender, server_client_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (client_server_sender, client_server_receiver) = tokio::sync::mpsc::unbounded_channel();
 
         let start_result = eframe::WebRunner::new()
             .start(

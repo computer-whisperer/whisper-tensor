@@ -1390,8 +1390,8 @@ fn declare_math_functions(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::milli_graph::ops::{MatMul, SimpleBinary, SimpleUnaryOp};
     use crate::dtype::DType;
+    use crate::milli_graph::ops::{MatMul, SimpleBinary, SimpleUnaryOp};
     use rand::RngCore;
 
     fn run_compiled_rank2_matmul(

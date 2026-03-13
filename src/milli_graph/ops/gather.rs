@@ -109,8 +109,12 @@ impl MilliOp for Gather {
         }
 
         // Shape-only inference: output_shape = data[:axis] + indices.shape + data[axis+1:]
-        let data_ranked = data_info.as_ranked().ok_or(MilliOpGraphError::UnableToInfer)?;
-        let indices_ranked = indices_info.as_ranked().ok_or(MilliOpGraphError::UnableToInfer)?;
+        let data_ranked = data_info
+            .as_ranked()
+            .ok_or(MilliOpGraphError::UnableToInfer)?;
+        let indices_ranked = indices_info
+            .as_ranked()
+            .ok_or(MilliOpGraphError::UnableToInfer)?;
 
         let data_shape = data_ranked.shape();
         let indices_shape = indices_ranked.shape();

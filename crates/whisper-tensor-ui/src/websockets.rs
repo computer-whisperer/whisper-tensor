@@ -1,11 +1,11 @@
 use std::collections::{HashMap, HashSet};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::SendError;
+#[cfg(target_arch = "wasm32")]
+use whisper_tensor_server::WebsocketServerClientMessage;
 use whisper_tensor_server::{
     SuperGraphExecutionReport, SuperGraphRequest, SuperGraphResponse, WebsocketClientServerMessage,
 };
-#[cfg(target_arch = "wasm32")]
-use whisper_tensor_server::WebsocketServerClientMessage;
 
 pub struct ServerRequestManager {
     client_server_sender: mpsc::UnboundedSender<WebsocketClientServerMessage>,

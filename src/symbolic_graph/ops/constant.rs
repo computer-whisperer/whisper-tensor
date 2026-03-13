@@ -1,7 +1,7 @@
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::graph::{GlobalId, Graph, Node, Property, PropertyValue};
-use crate::milli_graph::{MilliLoweringContext, MilliOpGraph};
 use crate::milli_graph::ops::*;
+use crate::milli_graph::{MilliLoweringContext, MilliOpGraph};
 use crate::numeric_scalar::NumericScalar;
 use crate::symbolic_graph::ops::Operation;
 use crate::symbolic_graph::{

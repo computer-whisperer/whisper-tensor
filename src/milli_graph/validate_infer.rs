@@ -169,10 +169,7 @@ fn ablate_tensor(
 ///
 /// Returns `Ok(())` if every concrete claim in `inferred` matches `truth`.
 /// Returns `Err(message)` if any concrete claim is wrong.
-fn validate_against_ground_truth(
-    inferred: &TensorInfo,
-    truth: &GroundTruth,
-) -> Result<(), String> {
+fn validate_against_ground_truth(inferred: &TensorInfo, truth: &GroundTruth) -> Result<(), String> {
     // Check dtype -- inferred dtype is always concrete in this type system
     let inferred_dtype = inferred.dtype();
     if inferred_dtype != truth.dtype {
@@ -322,10 +319,7 @@ impl MilliOpGraph {
                                             op_id: *op_id,
                                             op_kind: op_kind.clone(),
                                             level,
-                                            message: format!(
-                                                "output {:?}: {}",
-                                                out_id, msg
-                                            ),
+                                            message: format!("output {:?}: {}", out_id, msg),
                                         });
                                     }
                                 }
@@ -374,11 +368,7 @@ mod tests {
         inputs.insert(ext_y, y_tensor);
 
         let report = graph.validate_infer_against_eval(&inputs);
-        assert_eq!(
-            report.failure_count, 0,
-            "Validation failures:\n{}",
-            report
-        );
+        assert_eq!(report.failure_count, 0, "Validation failures:\n{}", report);
         // Should have at least one pass (Numeric level always works for add)
         assert!(report.pass_count > 0, "Expected at least one pass");
     }

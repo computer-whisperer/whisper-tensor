@@ -137,16 +137,16 @@ macro_rules! define_shaped_tensor {
 }
 
 define_shaped_tensor!(
-    (f64,  F64,  F64),
-    (f32,  F32,  F32),
-    (u64,  U64,  U64),
-    (i64,  I64,  I64),
+    (f64, F64, F64),
+    (f32, F32, F32),
+    (u64, U64, U64),
+    (i64, I64, I64),
     (bf16, BF16, BF16),
-    (f16,  F16,  F16),
-    (i32,  I32,  I32),
-    (u32,  U32,  U32),
-    (i8,   I8,   I8),
-    (u8,   U8,   U8),
+    (f16, F16, F16),
+    (i32, I32, I32),
+    (u32, U32, U32),
+    (i8, I8, I8),
+    (u8, U8, U8),
     (bool, BOOL, BOOL),
 );
 
@@ -1072,7 +1072,6 @@ impl TensorInfo {
             dims,
         )))
     }
-
 
     #[allow(dead_code)]
     pub(crate) fn try_to_rank<R: KnownRank>(

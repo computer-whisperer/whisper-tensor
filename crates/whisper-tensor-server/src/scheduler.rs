@@ -1,4 +1,8 @@
 use crate::model_server::ModelServer;
+use crate::{
+    AbbreviatedTensorReportSettings, AbbreviatedTensorValue, LoadedModelId, SuperGraphRequest,
+    SuperGraphRequestBackendMode, SuperGraphResponse, SuperGraphResponseData,
+};
 use crossbeam::queue::ArrayQueue;
 use log::error;
 use std::collections::{HashMap, HashSet};
@@ -17,10 +21,6 @@ use whisper_tensor::super_graph::cache::{SuperGraphCache, SuperGraphTensorCache}
 use whisper_tensor::super_graph::data::SuperGraphData;
 use whisper_tensor::super_graph::observer::SuperGraphObserver;
 use whisper_tensor::{DynRank, compiler};
-use crate::{
-    AbbreviatedTensorReportSettings, AbbreviatedTensorValue, LoadedModelId, SuperGraphRequest,
-    SuperGraphRequestBackendMode, SuperGraphResponse, SuperGraphResponseData,
-};
 
 #[derive(Debug)]
 pub struct SchedulerReportSuperGraphNodeExecuted {
