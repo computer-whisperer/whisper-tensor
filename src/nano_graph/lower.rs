@@ -128,8 +128,11 @@ struct TensorAtomMap {
 #[derive(Debug, Clone)]
 enum DimKind {
     Known(u64),
-    Symbolic(SymDim),
+    Symbolic(#[allow(dead_code)] SymDim),
 }
+
+/// (layout, known_dims, sym_dims, atom_count)
+type DimClassification = (Vec<DimKind>, Vec<u64>, Vec<SymDim>, u32);
 
 impl TensorAtomMap {
     /// Compute row-major strides from known dim sizes.
@@ -282,10 +285,7 @@ impl LowerCtx {
 
     /// Classify tensor dims and return layout info.
     /// Returns None if rank is unknown or atom count overflows u32.
-    fn classify_dims(
-        &mut self,
-        info: &TensorInfo,
-    ) -> Option<(Vec<DimKind>, Vec<u64>, Vec<SymDim>, u32)> {
+    fn classify_dims(&mut self, info: &TensorInfo) -> Option<DimClassification> {
         let rank = info.rank_if_known()?;
         let mut layout = Vec::with_capacity(rank);
         let mut known_dims = Vec::new();
@@ -529,8 +529,8 @@ impl LowerCtx {
 
         // Map: consumer_known_dim_idx → producer_known_dim_idx (or None if broadcast/mismatch).
         let mut c_to_p_known: Vec<Option<usize>> = vec![None; c_known_sizes.len()];
-        for c_orig in 0..c_rank {
-            let Some(c_ki) = c_known_indices[c_orig] else {
+        for (c_orig, c_known_idx) in c_known_indices.iter().enumerate() {
+            let Some(c_ki) = *c_known_idx else {
                 continue;
             };
             if c_orig < offset {
@@ -642,13 +642,13 @@ impl LowerCtx {
             // otherwise register as boundary.
             other => {
                 let op_kind = other.op_kind();
-                let op_id = other.global_id();
+                let _op_id = other.global_id();
                 // If all outputs are Numeric (fully constant), treat like a Constant —
                 // the inference already computed the values, no need to lower the op.
                 let all_numeric = other.outputs().all(|out_id| {
                     all_infos
                         .get(&out_id)
-                        .map_or(false, |i| i.as_numeric().is_some())
+                        .is_some_and(|i| i.as_numeric().is_some())
                 });
                 for out_id in other.outputs() {
                     if let Some(info) = all_infos.get(&out_id) {
@@ -1672,27 +1672,19 @@ impl LowerCtx {
         all_infos: &HashMap<GlobalId, TensorInfo>,
     ) -> u64 {
         // Try to get concrete split sizes from the split tensor.
-        if let Some(split_tensor_ref) = split.split_tensor() {
-            if let crate::milli_graph::ops::MilliOpTensorIDOrLiteral::TensorID(tensor_id) =
-                split_tensor_ref
-            {
-                if let Some(info) = all_infos.get(tensor_id) {
-                    if let Some(numeric) = info.as_numeric() {
-                        if let Ok(cast) = numeric.cast(
-                            DType::I64,
-                            &mut crate::backends::eval_backend::EvalBackend::NDArray,
-                        ) {
-                            if let Ok(rank1) = cast.try_to_rank::<typenum::P1>() {
-                                if let Ok(vals) = Vec::<i64>::try_from(rank1.to_ndarray().unwrap())
-                                {
-                                    let offset: i64 = vals[..output_id_idx].iter().sum();
-                                    return offset as u64;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+        if let Some(crate::milli_graph::ops::MilliOpTensorIDOrLiteral::TensorID(tensor_id)) =
+            split.split_tensor()
+            && let Some(info) = all_infos.get(tensor_id)
+            && let Some(numeric) = info.as_numeric()
+            && let Ok(cast) = numeric.cast(
+                DType::I64,
+                &mut crate::backends::eval_backend::EvalBackend::NDArray,
+            )
+            && let Ok(rank1) = cast.try_to_rank::<typenum::P1>()
+            && let Ok(vals) = Vec::<i64>::try_from(rank1.to_ndarray().unwrap())
+        {
+            let offset: i64 = vals[..output_id_idx].iter().sum();
+            return offset as u64;
         }
         // Fallback: assume equal splits.
         output_id_idx as u64 * out_split_size
@@ -2598,7 +2590,7 @@ impl LowerCtx {
         all_infos: &HashMap<GlobalId, TensorInfo>,
         name: &str,
     ) {
-        let op_id = op.global_id();
+        let _op_id = op.global_id();
         for out_id in op.outputs() {
             if let Some(info) = all_infos.get(&out_id) {
                 self.register_boundary(out_id, info, name);

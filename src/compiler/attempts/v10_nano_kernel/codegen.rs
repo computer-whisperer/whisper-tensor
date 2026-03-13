@@ -1,4 +1,4 @@
-#![allow(clippy::all, dead_code, unreachable_patterns)]
+#![allow(clippy::all, dead_code, unreachable_patterns, unused)]
 //! Cranelift JIT codegen for v10 kernel plans.
 //!
 //! Each KernelPlan becomes a native function:

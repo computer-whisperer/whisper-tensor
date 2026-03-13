@@ -28,10 +28,6 @@ impl Split {
         self.output_id
     }
 
-    pub(crate) fn num_outputs(&self) -> Option<usize> {
-        self.num_outputs
-    }
-
     pub(crate) fn split_tensor(&self) -> Option<&MilliOpTensorIDOrLiteral> {
         self.split.as_ref()
     }

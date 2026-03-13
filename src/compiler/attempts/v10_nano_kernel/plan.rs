@@ -1,4 +1,4 @@
-#![allow(clippy::all, dead_code, unreachable_patterns)]
+#![allow(clippy::all, dead_code, unreachable_patterns, unused)]
 //! NanoGraph analysis, fusion, and kernel planning.
 //!
 //! Pipeline:

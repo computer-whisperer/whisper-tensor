@@ -123,12 +123,12 @@ impl MilliOp for Slice {
                 .get(&self.ends)
                 .and_then(|i| i.as_numeric())
                 .is_some()
-            && self.steps.map_or(true, |id| {
-                known_inputs.get(&id).and_then(|i| i.as_numeric()).is_some()
-            })
-            && self.axes.map_or(true, |id| {
-                known_inputs.get(&id).and_then(|i| i.as_numeric()).is_some()
-            });
+            && self
+                .steps
+                .is_none_or(|id| known_inputs.get(&id).and_then(|i| i.as_numeric()).is_some())
+            && self
+                .axes
+                .is_none_or(|id| known_inputs.get(&id).and_then(|i| i.as_numeric()).is_some());
         if all_numeric {
             use crate::graph::Node;
             let mut resolved = HashMap::new();

@@ -97,10 +97,11 @@ pub(crate) fn remap_opt(id: &mut Option<GlobalId>, map: &HashMap<GlobalId, Globa
 /// same mode.  When lowering from the symbolic graph, all reduce ops default
 /// to `Sequential` — the simplest strategy and the one the nano scalar
 /// evaluator naturally implements.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AccumulationMode {
     /// Left-to-right sequential accumulation: `acc = init; for v in values { acc = op(acc, v); }`.
     /// Deterministic and portable — the reference semantics for correctness testing.
+    #[default]
     Sequential,
     /// Pairwise (recursive halving) accumulation.
     ///
@@ -114,12 +115,6 @@ pub enum AccumulationMode {
     /// - `n == 1` → `values[0]`
     /// - otherwise → `op(pairwise(values[0..n/2]), pairwise(values[n/2..n]))`
     Pairwise,
-}
-
-impl Default for AccumulationMode {
-    fn default() -> Self {
-        Self::Sequential
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -355,16 +350,15 @@ fn infer_reduce_dims(
     keepdims: bool,
     _symbolic_resolver: &mut SymbolicResolver,
 ) -> Option<Vec<ScalarInfoTyped<u64>>> {
-    let rank = data_shape.len();
     let mut out_dims = Vec::new();
-    for i in 0..rank {
+    for (i, dim) in data_shape.iter().enumerate() {
         if axes.contains(&i) {
             if keepdims {
                 out_dims.push(ScalarInfoTyped::Numeric(1));
             }
             // else: dim is removed
         } else {
-            out_dims.push(data_shape[i].clone());
+            out_dims.push(dim.clone());
         }
     }
     Some(out_dims)

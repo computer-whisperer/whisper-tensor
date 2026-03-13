@@ -1,4 +1,4 @@
-#![allow(clippy::all, dead_code, unreachable_patterns)]
+#![allow(clippy::all, dead_code, unreachable_patterns, unused)]
 //! v10 pipeline: NanoGraph → plan → compile → execute.
 
 #[cfg(feature = "cranelift")]

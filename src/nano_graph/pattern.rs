@@ -9,7 +9,6 @@
 //! `AtomGroup`s. Groups are a convenience — every atom could exist standalone
 //! without changing semantics. The grouping never limits what can be expressed.
 
-use crate::dtype::DType;
 use crate::nano_graph::ops::ScalarOp;
 use std::collections::HashMap;
 

@@ -108,14 +108,12 @@ impl MilliOp for Where {
             cond_info.as_ranked(),
             x_info.as_ranked(),
             y_info.as_ranked(),
+        ) && let Ok(out_dims) = super::infer_multidirectional_broadcasting_shape(
+            &[c_ranked.shape(), x_ranked.shape(), y_ranked.shape()],
+            symbolic_resolver,
         ) {
-            if let Ok(out_dims) = super::infer_multidirectional_broadcasting_shape(
-                &[c_ranked.shape(), x_ranked.shape(), y_ranked.shape()],
-                symbolic_resolver,
-            ) {
-                let out_info = TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims);
-                return Ok(Box::new([(self.output, out_info)].into_iter()));
-            }
+            let out_info = TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims);
+            return Ok(Box::new([(self.output, out_info)].into_iter()));
         }
 
         // Fallback: rank-only inference.

@@ -531,6 +531,7 @@ impl MatMul {
         self.output_dtype
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn push_new(
         graph: &mut MilliOpGraph,
         a: GlobalId,
