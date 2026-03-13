@@ -129,8 +129,15 @@ pub fn load_transformers_format(
         .as_str()
         .ok_or(Error::MissingConfigEntryError("model_type".to_string()))?;
     Ok(match model_type {
-        "llama" => {
-            println!("Loading as Llama3");
+        "llama" | "mistral" => {
+            println!(
+                "Loading as {}",
+                if model_type == "mistral" {
+                    "Mistral"
+                } else {
+                    "Llama3"
+                }
+            );
             let config = llama3::Llama3Config::from_huggingface_transformers_json(&config)?;
             llama3::load_llama3(weight_manager, config, output_method)
                 .map_err(Error::ModelBuildError)?
