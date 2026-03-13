@@ -1164,7 +1164,7 @@ impl MilliOp for ConvBiasGrad {
         for a in 2..rank {
             axes.push(a);
         }
-        let result = grad_f32.reduce_sum(axes, false, backend)?;
+        let result = grad_f32.reduce_sum(axes, false, super::AccumulationMode::default(), backend)?;
 
         Ok(Box::new(std::iter::once((self.output, result))))
     }

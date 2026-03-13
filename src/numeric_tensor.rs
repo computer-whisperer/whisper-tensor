@@ -1,6 +1,7 @@
 use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::{NDArrayNumericTensor, NDArrayNumericTensorError};
 use crate::dtype::{DType, DTypeError};
+use crate::milli_graph::ops::AccumulationMode;
 use std::fmt::{Debug, Formatter};
 use std::ops::{Neg, Range};
 use typenum::P1;
@@ -1353,10 +1354,11 @@ impl NumericTensor<DynRank> {
         &self,
         axes: Vec<usize>,
         keepdims: bool,
+        mode: AccumulationMode,
         _backend: &EvalBackend,
     ) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(
-            NDArrayNumericTensor::<DynRank>::try_from(self)?.reduce_mean(axes, keepdims)?,
+            NDArrayNumericTensor::<DynRank>::try_from(self)?.reduce_mean(axes, keepdims, mode)?,
         ))
     }
 
@@ -1369,10 +1371,11 @@ impl NumericTensor<DynRank> {
         &self,
         axes: Vec<usize>,
         keepdims: bool,
+        mode: AccumulationMode,
         _backend: &EvalBackend,
     ) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(
-            NDArrayNumericTensor::<DynRank>::try_from(self)?.reduce_sum(axes, keepdims)?,
+            NDArrayNumericTensor::<DynRank>::try_from(self)?.reduce_sum(axes, keepdims, mode)?,
         ))
     }
 
@@ -1405,10 +1408,11 @@ impl NumericTensor<DynRank> {
         &self,
         axes: Vec<usize>,
         keepdims: bool,
+        mode: AccumulationMode,
         _backend: &EvalBackend,
     ) -> Result<Self, NumericTensorError> {
         Ok(NumericTensor::NDArray(
-            NDArrayNumericTensor::<DynRank>::try_from(self)?.reduce_prod(axes, keepdims)?,
+            NDArrayNumericTensor::<DynRank>::try_from(self)?.reduce_prod(axes, keepdims, mode)?,
         ))
     }
 

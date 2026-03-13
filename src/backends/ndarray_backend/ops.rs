@@ -1,4 +1,5 @@
 use crate::TrigOp;
+use crate::milli_graph::ops::AccumulationMode;
 use ndarray::linalg::general_mat_mul;
 use ndarray::{
     ArcArray, Array, Array2, ArrayD, ArrayView2, ArrayViewD, ArrayViewMut2, Axis, Dimension, Ix1,
@@ -293,14 +294,16 @@ impl ReduceOp {
         tensor: ArcArray<T, IxDyn>,
         axes: Vec<usize>,
         keepdims: bool,
+        mode: AccumulationMode,
     ) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError>
     where
         T: Clone + Zero + NumCast + std::ops::Div<Output = T> + Copy + One + PartialOrd,
     {
         Ok(match self {
-            ReduceOp::Sum => reduce_sum(tensor, axes, keepdims)?,
-            ReduceOp::Mean => reduce_mean(tensor, axes, keepdims)?,
-            ReduceOp::Prod => reduce_prod(tensor, axes, keepdims)?,
+            ReduceOp::Sum => reduce_sum(tensor, axes, keepdims, mode)?,
+            ReduceOp::Mean => reduce_mean(tensor, axes, keepdims, mode)?,
+            ReduceOp::Prod => reduce_prod(tensor, axes, keepdims, mode)?,
+            // Min/Max are order-independent; mode doesn't affect the result.
             ReduceOp::Min => Err(NDArrayOperationError::UnimplementedOp(
                 "ReduceMin".to_string(),
             ))?,
@@ -324,9 +327,10 @@ pub fn reduce_mean<T>(
     tensor: ArcArray<T, IxDyn>,
     axes: Vec<usize>,
     keepdims: bool,
+    mode: AccumulationMode,
 ) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError>
 where
-    T: Clone + Zero + NumCast + std::ops::Div<Output = T> + Copy,
+    T: Clone + Zero + NumCast + std::ops::Div<Output = T> + std::ops::Add<Output = T> + Copy,
 {
     let input_shape = tensor.shape().to_vec();
 
@@ -348,16 +352,13 @@ where
     // 2) Start with an owned dynamic array
     let mut result: ArrayD<T> = tensor.view().to_owned().into_dyn();
 
-    // 3) For each axis, sum & divide, then optionally re-insert the dim
+    // 3) For each axis, sum & divide using the prescribed accumulation mode.
     for &axis in &ax {
-        // a) sum over this axis
-        let summed = result.sum_axis(Axis(axis));
-        // b) divide by the count along that axis
+        let summed = fold_axis(&result.view(), axis, T::zero(), |acc, v| acc + v, mode);
         let count = input_shape[axis];
         let divisor = T::from(count).unwrap();
         let meaned = summed.mapv(|v| v / divisor);
 
-        // c) keep or drop the reduced dim
         result = if keepdims {
             meaned.insert_axis(Axis(axis)).into_dyn()
         } else {
@@ -373,9 +374,10 @@ pub fn reduce_sum<T>(
     tensor: ArcArray<T, IxDyn>,
     axes: Vec<usize>,
     keepdims: bool,
+    mode: AccumulationMode,
 ) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError>
 where
-    T: Clone + Zero + NumCast + std::ops::Div<Output = T> + Copy,
+    T: Clone + Zero + NumCast + std::ops::Div<Output = T> + Copy + std::ops::Add<Output = T>,
 {
     let mut ax = axes;
 
@@ -394,12 +396,10 @@ where
     // 2) Start with an owned dynamic array
     let mut result: ArrayD<T> = tensor.view().to_owned().into_dyn();
 
-    // 3) For each axis, sum & divide, then optionally re-insert the dim
+    // 3) For each axis, accumulate using the prescribed mode.
     for &axis in &ax {
-        // a) sum over this axis
-        let summed = result.sum_axis(Axis(axis));
+        let summed = fold_axis(&result.view(), axis, T::zero(), |acc, v| acc + v, mode);
 
-        // c) keep or drop the reduced dim
         result = if keepdims {
             summed.insert_axis(Axis(axis)).into_dyn()
         } else {
@@ -411,13 +411,90 @@ where
     Ok(ArcArray::from(result))
 }
 
+/// Fold along `axis` using the specified `AccumulationMode`.
+///
+/// The result has the same shape as `arr` but with `axis` removed.
+/// Both milli-eval and nano-eval must use the same mode for bit-identical results.
+fn fold_axis<T, F>(
+    arr: &ndarray::ArrayViewD<T>,
+    axis: usize,
+    init: T,
+    f: F,
+    mode: AccumulationMode,
+) -> ArrayD<T>
+where
+    T: Clone + Copy,
+    F: Fn(T, T) -> T,
+{
+    use ndarray::Axis;
+
+    let axis_len = arr.shape()[axis];
+
+    // Build output shape: same as input but with `axis` removed.
+    let mut out_shape: Vec<usize> = arr.shape().to_vec();
+    out_shape.remove(axis);
+
+    match mode {
+        AccumulationMode::Sequential => {
+            let mut out = Array::from_elem(IxDyn(&out_shape), init);
+            for k in 0..axis_len {
+                let slice = arr.index_axis(Axis(axis), k);
+                ndarray::Zip::from(&mut out)
+                    .and(&slice)
+                    .for_each(|acc, &v| *acc = f(*acc, v));
+            }
+            out
+        }
+        AccumulationMode::Pairwise => {
+            // Recursive halving: split the axis range in half, reduce each half,
+            // then combine. Base cases: len 0 → init, len 1 → that slice.
+            fn pairwise_rec<T, F>(
+                arr: &ndarray::ArrayViewD<T>,
+                axis: usize,
+                lo: usize,
+                hi: usize,
+                init: T,
+                f: &F,
+                out_shape: &[usize],
+            ) -> ArrayD<T>
+            where
+                T: Clone + Copy,
+                F: Fn(T, T) -> T,
+            {
+                let len = hi - lo;
+                if len == 0 {
+                    return Array::from_elem(IxDyn(out_shape), init);
+                }
+                if len == 1 {
+                    return arr
+                        .index_axis(ndarray::Axis(axis), lo)
+                        .to_owned()
+                        .into_dimensionality()
+                        .unwrap();
+                }
+                let mid = lo + len / 2;
+                let left = pairwise_rec(arr, axis, lo, mid, init, f, out_shape);
+                let right = pairwise_rec(arr, axis, mid, hi, init, f, out_shape);
+                let mut result = left;
+                ndarray::Zip::from(&mut result)
+                    .and(&right)
+                    .for_each(|a, &b| *a = f(*a, b));
+                result
+            }
+
+            pairwise_rec(arr, axis, 0, axis_len, init, &f, &out_shape)
+        }
+    }
+}
+
 pub fn reduce_prod<T>(
     tensor: ArcArray<T, IxDyn>,
     axes: Vec<usize>,
     keepdims: bool,
+    mode: AccumulationMode,
 ) -> Result<ArcArray<T, IxDyn>, NDArrayOperationError>
 where
-    T: Clone + Zero + NumCast + std::ops::Div<Output = T> + Copy + One,
+    T: Clone + Zero + NumCast + std::ops::Div<Output = T> + std::ops::Mul<Output = T> + Copy + One,
 {
     // 1) Normalize axes list
     let mut ax = axes;
@@ -437,16 +514,14 @@ where
     // 2) Start with an owned dynamic array
     let mut result: ArrayD<T> = tensor.view().to_owned().into_dyn();
 
-    // 3) For each axis, sum & divide, then optionally re-insert the dim
+    // 3) For each axis, accumulate product using the prescribed mode.
     for &axis in &ax {
-        // a) sum over this axis
-        let summed = result.product_axis(Axis(axis));
+        let prod = fold_axis(&result.view(), axis, T::one(), |acc, v| acc * v, mode);
 
-        // c) keep or drop the reduced dim
         result = if keepdims {
-            summed.insert_axis(Axis(axis)).into_dyn()
+            prod.insert_axis(Axis(axis)).into_dyn()
         } else {
-            summed.into_dyn()
+            prod.into_dyn()
         };
     }
 

@@ -90,6 +90,38 @@ pub(crate) fn remap_opt(id: &mut Option<GlobalId>, map: &HashMap<GlobalId, Globa
     }
 }
 
+/// Prescribes the accumulation order for reduction operations (ReduceSum,
+/// ReduceMean, ReduceProd, and MatMul's internal contraction).
+///
+/// Both milli-eval and nano-eval must produce bit-identical results for the
+/// same mode.  When lowering from the symbolic graph, all reduce ops default
+/// to `Sequential` — the simplest strategy and the one the nano scalar
+/// evaluator naturally implements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AccumulationMode {
+    /// Left-to-right sequential accumulation: `acc = init; for v in values { acc = op(acc, v); }`.
+    /// Deterministic and portable — the reference semantics for correctness testing.
+    Sequential,
+    /// Pairwise (recursive halving) accumulation.
+    ///
+    /// Recursively splits the input in half and reduces each half, then combines.
+    /// Base case: length 0 returns init, length 1 returns that element.
+    /// This matches PyTorch's CPU reduction strategy and gives better numerical
+    /// accuracy than sequential for floating-point addition.
+    ///
+    /// Precisely: for `values[0..n]`:
+    /// - `n == 0` → `init`
+    /// - `n == 1` → `values[0]`
+    /// - otherwise → `op(pairwise(values[0..n/2]), pairwise(values[n/2..n]))`
+    Pairwise,
+}
+
+impl Default for AccumulationMode {
+    fn default() -> Self {
+        Self::Sequential
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MilliOpTensorIDOrLiteral {
     TensorID(GlobalId),

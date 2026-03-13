@@ -112,7 +112,7 @@ impl MilliOp for SumTo {
         // ReduceSum along broadcast axes with keepdims=true (preserves rank)
         let mut result = data.clone();
         if !reduce_axes.is_empty() {
-            result = result.reduce_sum(reduce_axes, true, backend)?;
+            result = result.reduce_sum(reduce_axes, true, super::AccumulationMode::default(), backend)?;
         }
 
         // Reshape to target shape (removes any rank-padded leading dims)

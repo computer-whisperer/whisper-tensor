@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use typenum::P1;
 
+use super::AccumulationMode;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReduceProd {
     global_id: GlobalId,
@@ -16,9 +18,16 @@ pub struct ReduceProd {
     axes: Option<GlobalId>,
     keepdims: bool,
     noop_with_empty_axes: bool,
+    /// Prescribes the order in which elements are accumulated.
+    /// Both milli-eval and nano-eval must follow this to produce identical results.
+    accumulation_mode: AccumulationMode,
 }
 
 impl ReduceProd {
+    pub fn accumulation_mode(&self) -> AccumulationMode {
+        self.accumulation_mode
+    }
+
     pub fn push_new(
         graph: &mut MilliOpGraph,
         data: GlobalId,
@@ -35,6 +44,7 @@ impl ReduceProd {
             axes,
             keepdims,
             noop_with_empty_axes,
+            accumulation_mode: AccumulationMode::default(),
         };
         graph.push_op(AnyMilliOp::ReduceProd(node));
         output
@@ -200,7 +210,7 @@ impl MilliOp for ReduceProd {
                 }) as usize
             })
             .collect::<Vec<_>>();
-        let out = data.reduce_prod(axes, self.keepdims, backend)?;
+        let out = data.reduce_prod(axes, self.keepdims, self.accumulation_mode, backend)?;
         Ok(Box::new([(self.output, out)].into_iter()))
     }
 }

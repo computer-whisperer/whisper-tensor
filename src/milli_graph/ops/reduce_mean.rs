@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use typenum::P1;
 
+use super::AccumulationMode;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReduceMean {
     global_id: GlobalId,
@@ -16,6 +18,9 @@ pub struct ReduceMean {
     axes: Option<GlobalId>,
     keepdims: bool,
     noop_with_empty_axes: bool,
+    /// Prescribes the order in which elements are accumulated.
+    /// Both milli-eval and nano-eval must follow this to produce identical results.
+    accumulation_mode: AccumulationMode,
 }
 
 impl ReduceMean {
@@ -28,6 +33,10 @@ impl ReduceMean {
     #[allow(dead_code)] // used by compiler (cranelift feature)
     pub(crate) fn noop_with_empty_axes(&self) -> bool {
         self.noop_with_empty_axes
+    }
+
+    pub fn accumulation_mode(&self) -> AccumulationMode {
+        self.accumulation_mode
     }
 
     pub fn push_new(
@@ -46,6 +55,7 @@ impl ReduceMean {
             axes,
             keepdims,
             noop_with_empty_axes,
+            accumulation_mode: AccumulationMode::default(),
         };
         graph.push_op(AnyMilliOp::ReduceMean(node));
         output
@@ -201,7 +211,7 @@ impl MilliOp for ReduceMean {
             .into_iter()
             .map(|x| (if x < 0 { x + data.rank() as i64 } else { x }) as usize)
             .collect::<Vec<_>>();
-        let out = data.reduce_mean(axes, self.keepdims, backend)?;
+        let out = data.reduce_mean(axes, self.keepdims, self.accumulation_mode, backend)?;
         Ok(Box::new([(self.output, out)].into_iter()))
     }
 

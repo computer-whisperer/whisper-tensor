@@ -1,6 +1,5 @@
 use half::{bf16, f16};
-use ndarray::linalg::general_mat_mul;
-use ndarray::{Array, Array3, ArrayView2, ArrayView3, ArrayViewMut2, Axis, Ix3, IxDyn, s};
+use ndarray::{Array, Array3, ArrayView3, Axis, Ix3, IxDyn, s};
 use num_traits::{FromPrimitive, One, ToPrimitive, Zero};
 
 use crate::backends::ndarray_backend::ops::NDArrayOperationError;
@@ -265,6 +264,15 @@ where
 
 // ===== Helpers ===================================================================
 
+/// Sequential left-to-right accumulation for batched matrix multiply.
+///
+/// Uses a simple triple loop (`for kk in 0..k { acc += a[r,kk]*b[kk,c]; }`)
+/// to match AccumulationMode::Sequential — the prescribed semantics for
+/// MatMul's internal contraction.  This produces bit-identical results to
+/// the nano scalar evaluator's ReduceSum over product groups.
+///
+/// Replaces the previous BLAS `general_mat_mul` path which could reorder
+/// the accumulation, giving different floating-point results.
 fn batched_gemm_in_type<S>(
     a3: ArrayView3<'_, S>,
     b3: ArrayView3<'_, S>,
@@ -272,19 +280,7 @@ fn batched_gemm_in_type<S>(
 where
     S: ndarray::LinalgScalar + One + Zero + Copy,
 {
-    let (batch, m, k) = a3.dim();
-    let (_, _k2, p) = b3.dim();
-    debug_assert_eq!(k, _k2);
-
-    let mut out = Array::<S, Ix3>::zeros((batch, m, p));
-    for i in 0..batch {
-        let a_mat: ArrayView2<'_, S> = a3.slice(s![i, .., ..]);
-        let b_mat: ArrayView2<'_, S> = b3.slice(s![i, .., ..]);
-        let mut c: ArrayViewMut2<'_, S> = out.slice_mut(s![i, .., ..]);
-        // C ← 1·A·B + 0·C
-        general_mat_mul(S::one(), &a_mat, &b_mat, S::zero(), &mut c);
-    }
-    Ok(out)
+    Ok(batched_naive(a3, b3))
 }
 
 #[allow(dead_code)]

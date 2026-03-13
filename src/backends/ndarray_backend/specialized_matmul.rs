@@ -5,7 +5,6 @@ use crate::backends::ndarray_backend::{
 };
 use crate::dtype::DType;
 use half::bf16;
-use ndarray::linalg::general_mat_mul;
 use ndarray::{
     ArcArray, Array, ArrayView2, ArrayViewD, ArrayViewMut2, Axis, IxDyn, LinalgScalar, s,
 };
@@ -190,8 +189,16 @@ pub fn matmul_bf16_fp32_accumulate(
             (a_b.slice(s![i, .., ..]), b_b.slice(s![i, .., ..]));
         let mut c: ArrayViewMut2<'_, _> = out.slice_mut(s![i, .., ..]);
 
-        // C ← 1·A·B + 0·C
-        general_mat_mul(f32::one(), &a_mat, &b_mat, f32::zero(), &mut c);
+        // Sequential left-to-right accumulation to match nano eval's k-loop.
+        for r in 0..m {
+            for col in 0..p {
+                let mut acc = 0.0f32;
+                for kk in 0..k_left {
+                    acc = acc + a_mat[(r, kk)] * b_mat[(kk, col)];
+                }
+                c[(r, col)] = acc;
+            }
+        }
     }
 
     // ---------- 5. Reshape back to the ONNX-style output shape ----------
@@ -315,15 +322,23 @@ where
         .to_shape((batch_shape.iter().product::<usize>(), k_left, p))
         .map_err(|_| NDArrayOperationError::Internal)?;
 
-    // ---------- 4. Batched multiply ----------
+    // ---------- 4. Batched multiply (sequential left-to-right accumulation) ----------
+    // Uses a simple triple loop to match AccumulationMode::Sequential.
     let mut out = Array::<T, _>::zeros((a_b.dim().0, m, p));
     for i in 0..a_b.dim().0 {
-        let (a_mat, b_mat): (ArrayView2<'_, T>, ArrayView2<'_, T>) =
-            (a_b.slice(s![i, .., ..]), b_b.slice(s![i, .., ..]));
-        let mut c: ArrayViewMut2<'_, T> = out.slice_mut(s![i, .., ..]);
+        let a_mat = a_b.slice(s![i, .., ..]);
+        let b_mat = b_b.slice(s![i, .., ..]);
+        let mut c = out.slice_mut(s![i, .., ..]);
 
-        // C ← 1·A·B + 0·C
-        general_mat_mul(T::one(), &a_mat, &b_mat, T::zero(), &mut c);
+        for r in 0..m {
+            for col in 0..p {
+                let mut acc = T::zero();
+                for kk in 0..k_left {
+                    acc = acc + a_mat[(r, kk)] * b_mat[(kk, col)];
+                }
+                c[(r, col)] = acc;
+            }
+        }
     }
 
     // ---------- 5. Reshape back to the ONNX-style output shape ----------

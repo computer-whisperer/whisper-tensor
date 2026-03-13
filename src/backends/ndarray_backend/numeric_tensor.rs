@@ -5,6 +5,7 @@ use super::ops::{
 };
 use crate::TrigOp;
 use crate::dtype::DType;
+use crate::milli_graph::ops::AccumulationMode;
 use crate::numeric_scalar::NumericScalar;
 use crate::tensor_rank::{DimContainer, DimProduct, DynRank, Rank, RankError};
 use float8::{F8E4M3, F8E5M2};
@@ -3090,64 +3091,65 @@ impl NDArrayNumericTensor<DynRank> {
         axes: Vec<usize>,
         keepdims: bool,
         op: ReduceOp,
+        mode: AccumulationMode,
     ) -> Result<Self, NDArrayNumericTensorError> {
         Ok(match self {
             NDArrayNumericTensor::F32(x) => {
-                NDArrayNumericTensor::F32(op.apply(x.clone(), axes, keepdims)?)
+                NDArrayNumericTensor::F32(op.apply(x.clone(), axes, keepdims, mode)?)
             }
             NDArrayNumericTensor::F64(x) => {
-                NDArrayNumericTensor::F64(op.apply(x.clone(), axes, keepdims)?)
+                NDArrayNumericTensor::F64(op.apply(x.clone(), axes, keepdims, mode)?)
             }
             NDArrayNumericTensor::F16(x) => {
                 // Accumulate in F32 (matching PyTorch and v9 codegen), cast back
                 let f32_arr = x.map(|v| v.to_f32()).to_shared();
-                let reduced = op.apply(f32_arr, axes, keepdims)?;
+                let reduced = op.apply(f32_arr, axes, keepdims, mode)?;
                 NDArrayNumericTensor::F16(reduced.map(|v| f16::from_f32(*v)).to_shared())
             }
             NDArrayNumericTensor::BF16(x) => {
                 // Accumulate in F32 (matching PyTorch and v9 codegen), cast back
                 let f32_arr = x.map(|v| v.to_f32()).to_shared();
-                let reduced = op.apply(f32_arr, axes, keepdims)?;
+                let reduced = op.apply(f32_arr, axes, keepdims, mode)?;
                 NDArrayNumericTensor::BF16(reduced.map(|v| bf16::from_f32(*v)).to_shared())
             }
             NDArrayNumericTensor::F8E4M3(x) => {
                 // Accumulate in F32 (matching PyTorch and v9 codegen), cast back
                 let f32_arr = x.map(|v| v.to_f32()).to_shared();
-                let reduced = op.apply(f32_arr, axes, keepdims)?;
+                let reduced = op.apply(f32_arr, axes, keepdims, mode)?;
                 NDArrayNumericTensor::F8E4M3(reduced.map(|v| F8E4M3::from_f32(*v)).to_shared())
             }
             NDArrayNumericTensor::F8E5M2(x) => {
                 // Accumulate in F32 (matching PyTorch and v9 codegen), cast back
                 let f32_arr = x.map(|v| v.to_f32()).to_shared();
-                let reduced = op.apply(f32_arr, axes, keepdims)?;
+                let reduced = op.apply(f32_arr, axes, keepdims, mode)?;
                 NDArrayNumericTensor::F8E5M2(reduced.map(|v| F8E5M2::from_f32(*v)).to_shared())
             }
             NDArrayNumericTensor::U32(x) => {
-                NDArrayNumericTensor::U32(op.apply(x.clone(), axes, keepdims)?)
+                NDArrayNumericTensor::U32(op.apply(x.clone(), axes, keepdims, mode)?)
             }
             NDArrayNumericTensor::I32(x) => {
-                NDArrayNumericTensor::I32(op.apply(x.clone(), axes, keepdims)?)
+                NDArrayNumericTensor::I32(op.apply(x.clone(), axes, keepdims, mode)?)
             }
             NDArrayNumericTensor::U64(x) => {
-                NDArrayNumericTensor::U64(op.apply(x.clone(), axes, keepdims)?)
+                NDArrayNumericTensor::U64(op.apply(x.clone(), axes, keepdims, mode)?)
             }
             NDArrayNumericTensor::I64(x) => {
-                NDArrayNumericTensor::I64(op.apply(x.clone(), axes, keepdims)?)
+                NDArrayNumericTensor::I64(op.apply(x.clone(), axes, keepdims, mode)?)
             }
             NDArrayNumericTensor::U16(x) => {
-                NDArrayNumericTensor::U16(op.apply(x.clone(), axes, keepdims)?)
+                NDArrayNumericTensor::U16(op.apply(x.clone(), axes, keepdims, mode)?)
             }
             NDArrayNumericTensor::I16(x) => {
-                NDArrayNumericTensor::I16(op.apply(x.clone(), axes, keepdims)?)
+                NDArrayNumericTensor::I16(op.apply(x.clone(), axes, keepdims, mode)?)
             }
             NDArrayNumericTensor::I8(x) => {
-                NDArrayNumericTensor::I8(op.apply(x.clone(), axes, keepdims)?)
+                NDArrayNumericTensor::I8(op.apply(x.clone(), axes, keepdims, mode)?)
             }
             NDArrayNumericTensor::U8(x) => {
-                NDArrayNumericTensor::U8(op.apply(x.clone(), axes, keepdims)?)
+                NDArrayNumericTensor::U8(op.apply(x.clone(), axes, keepdims, mode)?)
             }
             _ => Err(NDArrayNumericTensorError::UnsupportedOperationForDTypes(
-                "ReduceMean".to_string(),
+                "reduce".to_string(),
                 vec![self.dtype()],
             ))?,
         })
@@ -3157,16 +3159,18 @@ impl NDArrayNumericTensor<DynRank> {
         &self,
         axes: Vec<usize>,
         keepdims: bool,
+        mode: AccumulationMode,
     ) -> Result<Self, NDArrayNumericTensorError> {
-        self.reduce_op(axes, keepdims, ReduceOp::Mean)
+        self.reduce_op(axes, keepdims, ReduceOp::Mean, mode)
     }
 
     pub fn reduce_sum(
         &self,
         axes: Vec<usize>,
         keepdims: bool,
+        mode: AccumulationMode,
     ) -> Result<Self, NDArrayNumericTensorError> {
-        self.reduce_op(axes, keepdims, ReduceOp::Sum)
+        self.reduce_op(axes, keepdims, ReduceOp::Sum, mode)
     }
 
     pub fn reduce_min(
@@ -3174,7 +3178,8 @@ impl NDArrayNumericTensor<DynRank> {
         axes: Vec<usize>,
         keepdims: bool,
     ) -> Result<Self, NDArrayNumericTensorError> {
-        self.reduce_op(axes, keepdims, ReduceOp::Min)
+        // Min is order-independent; mode doesn't affect the result.
+        self.reduce_op(axes, keepdims, ReduceOp::Min, AccumulationMode::Sequential)
     }
 
     pub fn reduce_max(
@@ -3182,15 +3187,17 @@ impl NDArrayNumericTensor<DynRank> {
         axes: Vec<usize>,
         keepdims: bool,
     ) -> Result<Self, NDArrayNumericTensorError> {
-        self.reduce_op(axes, keepdims, ReduceOp::Max)
+        // Max is order-independent; mode doesn't affect the result.
+        self.reduce_op(axes, keepdims, ReduceOp::Max, AccumulationMode::Sequential)
     }
 
     pub fn reduce_prod(
         &self,
         axes: Vec<usize>,
         keepdims: bool,
+        mode: AccumulationMode,
     ) -> Result<Self, NDArrayNumericTensorError> {
-        self.reduce_op(axes, keepdims, ReduceOp::Prod)
+        self.reduce_op(axes, keepdims, ReduceOp::Prod, mode)
     }
 
     fn try_binary_op(
