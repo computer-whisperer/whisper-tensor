@@ -49,6 +49,7 @@ futures = {version = "0.3.31"}
 tokio = { version = "1.49.0", features = ["rt", "rt-multi-thread", "sync"] }
 tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt"] }
 tracing = "0.1"
+rfd = "0.15"
 
 [dependencies]
 egui = { version = "0.33.3" }

@@ -231,7 +231,29 @@ impl WebUIApp {
                                     ui.label(label);
 
                                     match &field.field_type {
-                                        ConfigFieldType::FilePath | ConfigFieldType::String => {
+                                        ConfigFieldType::FilePath => {
+                                            ui.text_edit_singleline(value);
+                                            #[cfg(not(target_arch = "wasm32"))]
+                                            {
+                                                if ui.button("File…").clicked() {
+                                                    if let Some(path) =
+                                                        rfd::FileDialog::new().pick_file()
+                                                    {
+                                                        *value =
+                                                            path.to_string_lossy().to_string();
+                                                    }
+                                                }
+                                                if ui.button("Dir…").clicked() {
+                                                    if let Some(path) =
+                                                        rfd::FileDialog::new().pick_folder()
+                                                    {
+                                                        *value =
+                                                            path.to_string_lossy().to_string();
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        ConfigFieldType::String => {
                                             ui.text_edit_singleline(value);
                                         }
                                         ConfigFieldType::Integer { .. } => {
