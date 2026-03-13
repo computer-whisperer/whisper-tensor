@@ -1,12 +1,10 @@
 use crate::Error;
 use crate::onnx_graph::WeightStorageStrategy;
 use crate::onnx_graph::operators::{
-    Add, Concat, Constant, Gather, MatMul, Mul, Reshape, RotaryEmbedding, ShapeOp, Softmax,
-    Transpose,
+    Add, Concat, Constant, Gather, MatMul, Mul, RMSNormalization, Reshape, RotaryEmbedding,
+    ShapeOp, Softmax, Transpose,
 };
-use crate::onnx_graph::pytorch::{
-    div_scalar, gelu, linear, reshape, rms_norm, transpose, unsqueeze,
-};
+use crate::onnx_graph::pytorch::{cast, div_scalar, gelu, linear, reshape, transpose, unsqueeze};
 use crate::onnx_graph::tensor::{
     DType, Dimension, InputTensor, InputTensorInitialized, Shape, Tensor, TensorData,
     TensorDataValue,
@@ -24,6 +22,7 @@ pub struct GemmaConfig {
     pub rope_theta: f64,
     pub max_position_embeddings: usize,
     pub tie_word_embeddings: bool,
+    pub rms_norm_eps: f32,
 }
 
 impl GemmaConfig {
@@ -56,6 +55,10 @@ impl GemmaConfig {
             .get("tie_word_embeddings")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        let rms_norm_eps = config
+            .get("rms_norm_eps")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(1e-6) as f32;
 
         Ok(Self {
             hidden_size,
@@ -66,8 +69,29 @@ impl GemmaConfig {
             rope_theta,
             max_position_embeddings,
             tie_word_embeddings,
+            rms_norm_eps,
         })
     }
+}
+
+fn gemma_rms_norm(
+    weight_manager: &impl WeightManager,
+    input: Arc<dyn Tensor>,
+    epsilon: f32,
+) -> Result<Arc<dyn Tensor>, crate::onnx_graph::Error> {
+    let weight = weight_manager.get_tensor("weight")?;
+    let one: Arc<dyn Tensor> =
+        Constant::new(None, TensorData::fill(Shape::from(&[1usize][..]), 1.0f32)?);
+    let one = cast(one, weight.dtype());
+    let scale = Add::new(None, weight, one)?;
+    let out = RMSNormalization::new(
+        weight_manager.get_prefix().map(|x| x.to_string()),
+        input,
+        scale,
+        Some(epsilon),
+        -1,
+    )?;
+    Ok(out as Arc<dyn Tensor>)
 }
 
 pub fn load_gemma(
@@ -99,6 +123,15 @@ pub fn load_gemma(
         token_input.clone(),
         0,
     )?;
+    let embed_scale: Arc<dyn Tensor> = Constant::new(
+        Some("embed_scale".to_string()),
+        TensorData::fill(
+            Shape::from(&[1usize][..]),
+            (config.hidden_size as f32).sqrt(),
+        )?,
+    );
+    let embed_scale = cast(embed_scale, x.dtype());
+    let x = Mul::new(Some("scale_embeddings".to_string()), x, embed_scale)?;
 
     let kv_cache_seq_dim = Dimension::new(None, Some("kv_cache_sequence".to_string()), None);
 
@@ -151,10 +184,10 @@ pub fn load_gemma(
     for i in 0..config.num_hidden_layers {
         let layer_weight_manager = model_weight_manager.prefix(&format!("layers.{i}"));
         let layer_input = layer_output.clone();
-        let att_norm = rms_norm(
+        let att_norm = gemma_rms_norm(
             &layer_weight_manager.prefix("input_layernorm"),
             layer_input.clone(),
-            None,
+            config.rms_norm_eps,
         )?;
 
         // Multi-head Attention
@@ -286,10 +319,10 @@ pub fn load_gemma(
         let hidden_layer = linear(&layer_weight_manager.prefix("self_attn.o_proj"), output)?;
         let attention_output = Add::new(None, layer_input, hidden_layer)?;
 
-        let ffn_norm = rms_norm(
+        let ffn_norm = gemma_rms_norm(
             &layer_weight_manager.prefix("post_attention_layernorm"),
             attention_output.clone(),
-            None,
+            config.rms_norm_eps,
         )?;
 
         // Gemma FFN uses GeGLU: gelu(gate_proj(x)) * up_proj(x), then down_proj.
@@ -305,7 +338,11 @@ pub fn load_gemma(
         layer_output = Add::new(None, attention_output, hidden_layer)?;
     }
 
-    let h = rms_norm(&model_weight_manager.prefix("norm"), layer_output, None)?;
+    let h = gemma_rms_norm(
+        &model_weight_manager.prefix("norm"),
+        layer_output,
+        config.rms_norm_eps,
+    )?;
 
     // Prefer explicit lm_head when present; fall back to tied embeddings.
     let out = if !config.tie_word_embeddings
