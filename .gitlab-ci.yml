@@ -1,0 +1,67 @@
+stages:
+  - lint
+  - build
+  - test
+
+variables:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+  GIT_SUBMODULE_STRATEGY: recursive
+  # Features to test (everything except vulkan and tch which need
+  # heavy system deps not yet available in the runner image)
+  CI_FEATURES: "tokenizers,rwkv-tokenizer,http,blas,safetensors,cranelift"
+
+default:
+  image: rust:latest
+
+# ---------------------------------------------------------------------------
+# Lint stage
+# ---------------------------------------------------------------------------
+
+format:
+  stage: lint
+  before_script:
+    - rustup component add rustfmt
+    - apt-get update -qq && apt-get install -y -qq protobuf-compiler jq > /dev/null
+  script:
+    - |
+      META=$(cargo metadata --no-deps --format-version 1)
+      PKGS=$(echo "$META" | jq -r '.packages[] | select(.manifest_path | test("/libs/") | not) | .name')
+      FMT_ARGS=""
+      for p in $PKGS; do FMT_ARGS="$FMT_ARGS -p $p"; done
+      cargo fmt $FMT_ARGS -- --check
+
+clippy:
+  stage: lint
+  before_script:
+    - rustup component add clippy
+    - apt-get update -qq && apt-get install -y -qq protobuf-compiler libopenblas-dev > /dev/null
+  script:
+    - cargo clippy -p whisper-tensor --no-deps --features "$CI_FEATURES" -- -D warnings
+    - cargo clippy -p whisper-tensor-server --no-deps --all-features -- -D warnings
+    - cargo clippy -p whisper-tensor-import --no-deps --all-features -- -D warnings
+
+# ---------------------------------------------------------------------------
+# Build stage
+# ---------------------------------------------------------------------------
+
+build:
+  stage: build
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq protobuf-compiler libopenblas-dev > /dev/null
+  script:
+    - cargo build -p whisper-tensor --lib --locked --verbose
+    - cargo build -p whisper-tensor --lib --locked --verbose --features "$CI_FEATURES"
+    - cargo build -p whisper-tensor-server --locked --verbose
+
+# ---------------------------------------------------------------------------
+# Test stage
+# ---------------------------------------------------------------------------
+
+test:
+  stage: test
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq protobuf-compiler libopenblas-dev > /dev/null
+  script:
+    - cargo test -p whisper-tensor --features "$CI_FEATURES" --locked --verbose
