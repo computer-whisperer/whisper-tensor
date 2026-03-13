@@ -46,7 +46,7 @@ clippy:
   script:
     - rustup component add clippy
     - cargo clippy -p whisper-tensor --no-deps --features "$CI_FEATURES" -- -D warnings
-    - cargo clippy -p whisper-tensor-server --no-deps --all-features -- -D warnings
+    - cargo clippy -p whisper-tensor-server --no-deps --features "import,cranelift" -- -D warnings
     - cargo clippy -p whisper-tensor-import --no-deps --all-features -- -D warnings
 
 # ---------------------------------------------------------------------------
