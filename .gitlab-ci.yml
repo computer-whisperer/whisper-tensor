@@ -13,7 +13,7 @@ variables:
   CI_FEATURES: "tokenizers,rwkv-tokenizer,http,blas,safetensors,cranelift"
 
 default:
-  image: rust:latest
+  image: docker.io/library/rust:latest
 
 # ---------------------------------------------------------------------------
 # Lint stage
