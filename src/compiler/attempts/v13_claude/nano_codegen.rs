@@ -839,6 +839,60 @@ fn emit_binop(
             let call = builder.ins().call(func_ref, &[a, b]);
             builder.inst_results(call)[0]
         }
+        ScalarBinOp::Equal => {
+            let cmp = builder.ins().fcmp(cranelift_codegen::ir::condcodes::FloatCC::Equal, a, b);
+            let one = builder.ins().f32const(1.0);
+            let zero = builder.ins().f32const(0.0);
+            builder.ins().select(cmp, one, zero)
+        }
+        ScalarBinOp::Greater => {
+            let cmp = builder.ins().fcmp(cranelift_codegen::ir::condcodes::FloatCC::GreaterThan, a, b);
+            let one = builder.ins().f32const(1.0);
+            let zero = builder.ins().f32const(0.0);
+            builder.ins().select(cmp, one, zero)
+        }
+        ScalarBinOp::GreaterOrEqual => {
+            let cmp = builder.ins().fcmp(cranelift_codegen::ir::condcodes::FloatCC::GreaterThanOrEqual, a, b);
+            let one = builder.ins().f32const(1.0);
+            let zero = builder.ins().f32const(0.0);
+            builder.ins().select(cmp, one, zero)
+        }
+        ScalarBinOp::Less => {
+            let cmp = builder.ins().fcmp(cranelift_codegen::ir::condcodes::FloatCC::LessThan, a, b);
+            let one = builder.ins().f32const(1.0);
+            let zero = builder.ins().f32const(0.0);
+            builder.ins().select(cmp, one, zero)
+        }
+        ScalarBinOp::LessOrEqual => {
+            let cmp = builder.ins().fcmp(cranelift_codegen::ir::condcodes::FloatCC::LessThanOrEqual, a, b);
+            let one = builder.ins().f32const(1.0);
+            let zero = builder.ins().f32const(0.0);
+            builder.ins().select(cmp, one, zero)
+        }
+        ScalarBinOp::And => {
+            let zero = builder.ins().f32const(0.0);
+            let a_nz = builder.ins().fcmp(cranelift_codegen::ir::condcodes::FloatCC::NotEqual, a, zero);
+            let b_nz = builder.ins().fcmp(cranelift_codegen::ir::condcodes::FloatCC::NotEqual, b, zero);
+            let both = builder.ins().band(a_nz, b_nz);
+            let one = builder.ins().f32const(1.0);
+            builder.ins().select(both, one, zero)
+        }
+        ScalarBinOp::Or => {
+            let zero = builder.ins().f32const(0.0);
+            let a_nz = builder.ins().fcmp(cranelift_codegen::ir::condcodes::FloatCC::NotEqual, a, zero);
+            let b_nz = builder.ins().fcmp(cranelift_codegen::ir::condcodes::FloatCC::NotEqual, b, zero);
+            let either = builder.ins().bor(a_nz, b_nz);
+            let one = builder.ins().f32const(1.0);
+            builder.ins().select(either, one, zero)
+        }
+        ScalarBinOp::Xor => {
+            let zero = builder.ins().f32const(0.0);
+            let a_nz = builder.ins().fcmp(cranelift_codegen::ir::condcodes::FloatCC::NotEqual, a, zero);
+            let b_nz = builder.ins().fcmp(cranelift_codegen::ir::condcodes::FloatCC::NotEqual, b, zero);
+            let x = builder.ins().bxor(a_nz, b_nz);
+            let one = builder.ins().f32const(1.0);
+            builder.ins().select(x, one, zero)
+        }
     })
 }
 

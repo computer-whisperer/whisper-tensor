@@ -623,6 +623,7 @@ pub fn print_partition_summary(graph: &NanoGraph, result: &NanoPartitionResult) 
                     crate::nano_graph::ScalarBinOp::Min => "Min",
                     crate::nano_graph::ScalarBinOp::Mod => "Mod",
                     crate::nano_graph::ScalarBinOp::Pow => "Pow",
+                    _ => "CmpLogic",
                 },
                 ScalarOp::Unary { op, .. } => match op {
                     crate::nano_graph::ScalarUnaryOp::Neg => "Neg",

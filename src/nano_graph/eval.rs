@@ -136,6 +136,14 @@ impl NanoEval {
                                 ScalarBinOp::Min => a.scalar_min(&b),
                                 ScalarBinOp::Mod => a.modulo(&b),
                                 ScalarBinOp::Pow => a.pow(&b),
+                                ScalarBinOp::Equal => if a.to_f64() == b.to_f64() { NumericScalar::F32(1.0) } else { NumericScalar::F32(0.0) },
+                                ScalarBinOp::Greater => if a.to_f64() > b.to_f64() { NumericScalar::F32(1.0) } else { NumericScalar::F32(0.0) },
+                                ScalarBinOp::GreaterOrEqual => if a.to_f64() >= b.to_f64() { NumericScalar::F32(1.0) } else { NumericScalar::F32(0.0) },
+                                ScalarBinOp::Less => if a.to_f64() < b.to_f64() { NumericScalar::F32(1.0) } else { NumericScalar::F32(0.0) },
+                                ScalarBinOp::LessOrEqual => if a.to_f64() <= b.to_f64() { NumericScalar::F32(1.0) } else { NumericScalar::F32(0.0) },
+                                ScalarBinOp::And => if a.to_f64() != 0.0 && b.to_f64() != 0.0 { NumericScalar::F32(1.0) } else { NumericScalar::F32(0.0) },
+                                ScalarBinOp::Or => if a.to_f64() != 0.0 || b.to_f64() != 0.0 { NumericScalar::F32(1.0) } else { NumericScalar::F32(0.0) },
+                                ScalarBinOp::Xor => if (a.to_f64() != 0.0) ^ (b.to_f64() != 0.0) { NumericScalar::F32(1.0) } else { NumericScalar::F32(0.0) },
                             };
                             result.cast_to(*output_dtype)
                         }

@@ -14,6 +14,16 @@ pub enum ScalarBinOp {
     Min,
     Mod,
     Pow,
+    // Comparison ops — return 1.0 for true, 0.0 for false (ONNX convention).
+    Equal,
+    Greater,
+    GreaterOrEqual,
+    Less,
+    LessOrEqual,
+    // Logical ops — treat nonzero as true, return 1.0/0.0.
+    And,
+    Or,
+    Xor,
 }
 
 /// Unary scalar operations.

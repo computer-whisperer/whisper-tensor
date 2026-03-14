@@ -739,12 +739,36 @@ impl LowerCtx {
                 compute_dtype: dt,
                 output_dtype: dt,
             },
-            // Comparison/logical ops: opaque binary, but shape is known.
-            _ => ScalarOp::Binary {
-                op: ScalarBinOp::Max,
-                compute_dtype: dt,
-                output_dtype: dt,
-            }, // placeholder
+            WhichSimpleBinaryOp::Equal => ScalarOp::Binary {
+                op: ScalarBinOp::Equal, compute_dtype: dt, output_dtype: dt,
+            },
+            WhichSimpleBinaryOp::Greater => ScalarOp::Binary {
+                op: ScalarBinOp::Greater, compute_dtype: dt, output_dtype: dt,
+            },
+            WhichSimpleBinaryOp::GreaterOrEqual => ScalarOp::Binary {
+                op: ScalarBinOp::GreaterOrEqual, compute_dtype: dt, output_dtype: dt,
+            },
+            WhichSimpleBinaryOp::Less => ScalarOp::Binary {
+                op: ScalarBinOp::Less, compute_dtype: dt, output_dtype: dt,
+            },
+            WhichSimpleBinaryOp::LessOrEqual => ScalarOp::Binary {
+                op: ScalarBinOp::LessOrEqual, compute_dtype: dt, output_dtype: dt,
+            },
+            WhichSimpleBinaryOp::And => ScalarOp::Binary {
+                op: ScalarBinOp::And, compute_dtype: dt, output_dtype: dt,
+            },
+            WhichSimpleBinaryOp::Or => ScalarOp::Binary {
+                op: ScalarBinOp::Or, compute_dtype: dt, output_dtype: dt,
+            },
+            WhichSimpleBinaryOp::Xor | WhichSimpleBinaryOp::BitwiseXor => ScalarOp::Binary {
+                op: ScalarBinOp::Xor, compute_dtype: dt, output_dtype: dt,
+            },
+            WhichSimpleBinaryOp::BitwiseAnd => ScalarOp::Binary {
+                op: ScalarBinOp::And, compute_dtype: dt, output_dtype: dt,
+            },
+            WhichSimpleBinaryOp::BitwiseOr => ScalarOp::Binary {
+                op: ScalarBinOp::Or, compute_dtype: dt, output_dtype: dt,
+            },
         };
 
         let Some((layout, known_dims, sym_dims, count)) = self.classify_dims(out_info) else {

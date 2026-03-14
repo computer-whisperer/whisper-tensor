@@ -209,6 +209,14 @@ fn eval_group(
                         ScalarBinOp::Min => a.min(b),
                         ScalarBinOp::Mod => a % b,
                         ScalarBinOp::Pow => a.powf(b),
+                        ScalarBinOp::Equal => if a == b { 1.0 } else { 0.0 },
+                        ScalarBinOp::Greater => if a > b { 1.0 } else { 0.0 },
+                        ScalarBinOp::GreaterOrEqual => if a >= b { 1.0 } else { 0.0 },
+                        ScalarBinOp::Less => if a < b { 1.0 } else { 0.0 },
+                        ScalarBinOp::LessOrEqual => if a <= b { 1.0 } else { 0.0 },
+                        ScalarBinOp::And => if a != 0.0 && b != 0.0 { 1.0 } else { 0.0 },
+                        ScalarBinOp::Or => if a != 0.0 || b != 0.0 { 1.0 } else { 0.0 },
+                        ScalarBinOp::Xor => if (a != 0.0) ^ (b != 0.0) { 1.0 } else { 0.0 },
                     }
                 }
                 ScalarOp::Unary { op, .. } => {
