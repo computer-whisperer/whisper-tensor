@@ -1332,6 +1332,279 @@ impl SuperGraphNode for SuperGraphNodeAudioClipToTensor {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SuperGraphNodeAudioToMelConfig {
+    pub expected_sample_rate_hz: Option<u32>,
+    pub n_fft: u32,
+    pub hop_length: u32,
+    pub center_padding: u32,
+    pub max_samples: Option<u32>,
+    pub drop_last_frame: bool,
+    pub num_mel_bins: u32,
+    pub mel_filters: Vec<f32>,
+    pub log_floor: f32,
+    pub clamp_dynamic_range: Option<f32>,
+    pub normalize_add: Option<f32>,
+    pub normalize_div: Option<f32>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SuperGraphNodeAudioClipToMelSpectrogram {
+    global_id: GlobalId,
+    audio_input: SuperGraphLink,
+    tensor_output: SuperGraphLink,
+    config: SuperGraphNodeAudioToMelConfig,
+}
+
+impl SuperGraphNodeAudioClipToMelSpectrogram {
+    pub fn new(
+        _builder: &mut SuperGraphBuilder,
+        audio_input: SuperGraphLink,
+        config: SuperGraphNodeAudioToMelConfig,
+        rng: &mut impl RngCore,
+    ) -> Self {
+        Self {
+            global_id: GlobalId::new(rng),
+            audio_input,
+            tensor_output: SuperGraphLink::new(SuperGraphLinkKind::Tensor, rng),
+            config,
+        }
+    }
+
+    pub fn new_and_add(
+        builder: &mut SuperGraphBuilder,
+        audio_input: SuperGraphLink,
+        config: SuperGraphNodeAudioToMelConfig,
+        rng: &mut impl RngCore,
+    ) -> SuperGraphLink {
+        let node = Self::new(builder, audio_input, config, rng);
+        let output = node.get_tensor_output();
+        builder.add_node(node.to_any());
+        output
+    }
+
+    pub fn get_tensor_output(&self) -> SuperGraphLink {
+        self.tensor_output
+    }
+}
+
+impl SuperGraphNode for SuperGraphNodeAudioClipToMelSpectrogram {
+    fn to_any(self) -> SuperGraphAnyNode {
+        SuperGraphAnyNode::AudioClipToMelSpectrogram(self)
+    }
+
+    fn eval<T: SuperGraphObserver>(
+        &self,
+        _node_path: &[GlobalId],
+        data: &mut SuperGraphData,
+        context: &mut SuperGraphContext<T>,
+    ) -> Result<(), SuperGraphError> {
+        let clip =
+            data.audio_clips
+                .get(&self.audio_input)
+                .ok_or(SuperGraphError::MissingLinkError(format!(
+                    ": missing audio input link {:?}",
+                    self.audio_input
+                )))?;
+        if let Some(expected) = self.config.expected_sample_rate_hz
+            && clip.sample_rate_hz != expected
+        {
+            return Err(SuperGraphError::InvalidInputError(format!(
+                "audio sample rate mismatch for {:?}: expected {}, got {}",
+                self.audio_input, expected, clip.sample_rate_hz
+            )));
+        }
+        if self.config.n_fft == 0 {
+            return Err(SuperGraphError::InvalidInputError(
+                "audio->mel n_fft must be > 0".to_string(),
+            ));
+        }
+        if self.config.hop_length == 0 {
+            return Err(SuperGraphError::InvalidInputError(
+                "audio->mel hop_length must be > 0".to_string(),
+            ));
+        }
+        if self.config.num_mel_bins == 0 {
+            return Err(SuperGraphError::InvalidInputError(
+                "audio->mel num_mel_bins must be > 0".to_string(),
+            ));
+        }
+        if self.config.log_floor <= 0.0 {
+            return Err(SuperGraphError::InvalidInputError(
+                "audio->mel log_floor must be > 0".to_string(),
+            ));
+        }
+        if let Some(dynamic) = self.config.clamp_dynamic_range
+            && dynamic <= 0.0
+        {
+            return Err(SuperGraphError::InvalidInputError(
+                "audio->mel clamp_dynamic_range must be > 0 when set".to_string(),
+            ));
+        }
+        if (self.config.normalize_add.is_some() && self.config.normalize_div.is_none())
+            || (self.config.normalize_add.is_none() && self.config.normalize_div.is_some())
+        {
+            return Err(SuperGraphError::InvalidInputError(
+                "audio->mel normalize_add and normalize_div must be set together".to_string(),
+            ));
+        }
+        if let Some(div) = self.config.normalize_div
+            && div == 0.0
+        {
+            return Err(SuperGraphError::InvalidInputError(
+                "audio->mel normalize_div must be non-zero".to_string(),
+            ));
+        }
+
+        let n_fft = self.config.n_fft as usize;
+        let hop_length = self.config.hop_length as usize;
+        let center_padding = self.config.center_padding as usize;
+        let num_mel_bins = self.config.num_mel_bins as usize;
+        let n_freqs = n_fft / 2 + 1;
+        if self.config.mel_filters.len() != num_mel_bins * n_freqs {
+            return Err(SuperGraphError::InvalidInputError(format!(
+                "audio->mel mel_filters length mismatch: expected {}, got {}",
+                num_mel_bins * n_freqs,
+                self.config.mel_filters.len()
+            )));
+        }
+
+        let audio_f32 = clip.samples.cast(DType::F32, context.eval_backend)?;
+        let audio_nd = audio_f32.to_ndarray()?;
+        let mut samples: Vec<f32> = audio_nd.flatten().try_into().map_err(|_| {
+            SuperGraphError::InvalidInputError(
+                "audio->mel failed to flatten audio tensor into f32 samples".to_string(),
+            )
+        })?;
+
+        if let Some(max_samples) = self.config.max_samples {
+            let max_samples = max_samples as usize;
+            if samples.len() > max_samples {
+                samples.truncate(max_samples);
+            } else if samples.len() < max_samples {
+                samples.resize(max_samples, 0.0);
+            }
+        }
+        if samples.is_empty() {
+            return Err(SuperGraphError::InvalidInputError(
+                "audio->mel input has no samples".to_string(),
+            ));
+        }
+
+        let mut padded = vec![0.0f32; center_padding + samples.len() + center_padding];
+        padded[center_padding..center_padding + samples.len()].copy_from_slice(&samples);
+
+        if padded.len() < n_fft {
+            return Err(SuperGraphError::InvalidInputError(format!(
+                "audio->mel padded input too short: len={} n_fft={}",
+                padded.len(),
+                n_fft
+            )));
+        }
+
+        let stft_frames = (padded.len() - n_fft) / hop_length + 1;
+        let num_frames = if self.config.drop_last_frame {
+            stft_frames.saturating_sub(1)
+        } else {
+            stft_frames
+        };
+        if num_frames == 0 {
+            return Err(SuperGraphError::InvalidInputError(
+                "audio->mel produced zero frames".to_string(),
+            ));
+        }
+
+        let window: Vec<f32> = (0..n_fft)
+            .map(|i| 0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / n_fft as f32).cos()))
+            .collect();
+
+        let mut cos_table = vec![0.0f32; n_freqs * n_fft];
+        let mut sin_table = vec![0.0f32; n_freqs * n_fft];
+        for k in 0..n_freqs {
+            for n in 0..n_fft {
+                let angle = -2.0 * std::f32::consts::PI * k as f32 * n as f32 / n_fft as f32;
+                let idx = k * n_fft + n;
+                cos_table[idx] = angle.cos();
+                sin_table[idx] = angle.sin();
+            }
+        }
+
+        let mut frame_buf = vec![0.0f32; n_fft];
+        let mut magnitudes = vec![0.0f32; n_freqs * num_frames];
+        for frame in 0..num_frames {
+            let start = frame * hop_length;
+            for i in 0..n_fft {
+                frame_buf[i] = padded[start + i] * window[i];
+            }
+            for k in 0..n_freqs {
+                let mut re = 0.0f32;
+                let mut im = 0.0f32;
+                let trig_base = k * n_fft;
+                for n in 0..n_fft {
+                    let x = frame_buf[n];
+                    re += x * cos_table[trig_base + n];
+                    im += x * sin_table[trig_base + n];
+                }
+                magnitudes[k * num_frames + frame] = re * re + im * im;
+            }
+        }
+
+        let mut mel_spec = vec![0.0f32; num_mel_bins * num_frames];
+        for mel_idx in 0..num_mel_bins {
+            let filter_row = &self.config.mel_filters[mel_idx * n_freqs..(mel_idx + 1) * n_freqs];
+            for frame in 0..num_frames {
+                let mut sum = 0.0f32;
+                for freq in 0..n_freqs {
+                    sum += filter_row[freq] * magnitudes[freq * num_frames + frame];
+                }
+                mel_spec[mel_idx * num_frames + frame] = sum;
+            }
+        }
+
+        let mut output = mel_spec
+            .into_iter()
+            .map(|x| x.max(self.config.log_floor).log10())
+            .collect::<Vec<_>>();
+
+        if let Some(dynamic) = self.config.clamp_dynamic_range {
+            let max_val = output.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let min_val = max_val - dynamic;
+            for x in &mut output {
+                if *x < min_val {
+                    *x = min_val;
+                }
+            }
+        }
+
+        if let (Some(add), Some(div)) = (self.config.normalize_add, self.config.normalize_div) {
+            for x in &mut output {
+                *x = (*x + add) / div;
+            }
+        }
+
+        let mel_tensor =
+            NumericTensor::<DynRank>::from_vec_shape(output, vec![1, num_mel_bins, num_frames])?;
+        data.tensors.insert(self.tensor_output, mel_tensor);
+        Ok(())
+    }
+
+    fn op_kind(&self) -> String {
+        "AudioClipToMelSpectrogram".to_string()
+    }
+
+    fn inputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new(std::iter::once(self.audio_input.to_any()))
+    }
+
+    fn outputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new(std::iter::once(self.tensor_output.to_any()))
+    }
+
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SuperGraphNodeMilliOpGraph {
     global_id: GlobalId,
     pub graph: MilliOpGraph,
@@ -2249,6 +2522,7 @@ pub enum SuperGraphAnyNode {
     TensorToImage(SuperGraphNodeTensorToImage),
     TensorToAudioClip(SuperGraphNodeTensorToAudioClip),
     AudioClipToTensor(SuperGraphNodeAudioClipToTensor),
+    AudioClipToMelSpectrogram(SuperGraphNodeAudioClipToMelSpectrogram),
     MilliOpGraph(SuperGraphNodeMilliOpGraph),
     Scan(SuperGraphNodeScan),
     RNNCacheWrite(SuperGraphNodeRNNCacheWrite),
@@ -2274,6 +2548,7 @@ macro_rules! delegate {
                 SuperGraphAnyNode::TensorToImage(x) => SuperGraphNode::$name(x,$($arg),*),
                 SuperGraphAnyNode::TensorToAudioClip(x) => SuperGraphNode::$name(x,$($arg),*),
                 SuperGraphAnyNode::AudioClipToTensor(x) => SuperGraphNode::$name(x,$($arg),*),
+                SuperGraphAnyNode::AudioClipToMelSpectrogram(x) => SuperGraphNode::$name(x,$($arg),*),
                 SuperGraphAnyNode::MilliOpGraph(x) => SuperGraphNode::$name(x,$($arg),*),
                 SuperGraphAnyNode::Scan(x) => SuperGraphNode::$name(x,$($arg),*),
                 SuperGraphAnyNode::RNNCacheRead(x) => SuperGraphNode::$name(x,$($arg),*),
@@ -2319,6 +2594,9 @@ impl SuperGraphNode for SuperGraphAnyNode {
             SuperGraphAnyNode::TensorToImage(node) => node.eval(node_path, data, context),
             SuperGraphAnyNode::TensorToAudioClip(node) => node.eval(node_path, data, context),
             SuperGraphAnyNode::AudioClipToTensor(node) => node.eval(node_path, data, context),
+            SuperGraphAnyNode::AudioClipToMelSpectrogram(node) => {
+                node.eval(node_path, data, context)
+            }
             SuperGraphAnyNode::MilliOpGraph(node) => node.eval(node_path, data, context),
             SuperGraphAnyNode::Scan(node) => node.eval(node_path, data, context),
             SuperGraphAnyNode::RNNCacheWrite(node) => node.eval(node_path, data, context),

@@ -734,7 +734,7 @@ fn save_wav(samples: &[f32], sample_rate: u32, path: &std::path::Path) {
 // Speech-to-text (Whisper)
 // ============================================================================
 
-fn cmd_stt(output: LoaderOutput, audio_path: PathBuf, model_dir: Option<PathBuf>) {
+fn cmd_stt(output: LoaderOutput, audio_path: PathBuf, _model_dir: Option<PathBuf>) {
     use whisper_tensor::super_graph::SuperGraphContext;
     use whisper_tensor::super_graph::cache::SuperGraphTensorCache;
     use whisper_tensor::super_graph::data::{SuperGraphAudioClip, SuperGraphData};
@@ -751,7 +751,7 @@ fn cmd_stt(output: LoaderOutput, audio_path: PathBuf, model_dir: Option<PathBuf>
             std::process::exit(1);
         });
 
-    // Load and preprocess audio → mel spectrogram
+    // Load audio at model sample rate.
     eprintln!("Loading audio: {}", audio_path.display());
     let samples = load_wav_f32(&audio_path, interface.sample_rate);
     let audio_duration = samples.len() as f64 / interface.sample_rate as f64;
@@ -762,20 +762,8 @@ fn cmd_stt(output: LoaderOutput, audio_path: PathBuf, model_dir: Option<PathBuf>
         interface.sample_rate
     );
 
-    // Load mel filterbank from preprocessor_config.json
-    let mel_filters = load_mel_filters(model_dir.as_deref(), interface.num_mel_bins as usize);
-    let mel = compute_mel_spectrogram(&samples, interface.num_mel_bins as usize, &mel_filters);
-    let mel_len = mel.len() / interface.num_mel_bins as usize;
-    eprintln!(
-        "Mel spectrogram: {} bins x {} frames",
-        interface.num_mel_bins, mel_len
-    );
-
-    let mel_tensor = NumericTensor::<DynRank>::from_vec_shape(
-        mel,
-        vec![1, interface.num_mel_bins as usize, mel_len],
-    )
-    .unwrap();
+    let audio_len = samples.len();
+    let audio_tensor = NumericTensor::<DynRank>::from_vec_shape(samples, vec![audio_len]).unwrap();
 
     // Run unified STT supergraph (encoder + fixed-step decoder generation)
     eprintln!("Running STT supergraph...");
@@ -786,7 +774,7 @@ fn cmd_stt(output: LoaderOutput, audio_path: PathBuf, model_dir: Option<PathBuf>
         let mut data = SuperGraphData::new();
         data.audio_clips.insert(
             interface.audio_input_link,
-            SuperGraphAudioClip::new(mel_tensor, interface.sample_rate),
+            SuperGraphAudioClip::new(audio_tensor, interface.sample_rate),
         );
         data.tensor_maps.insert(
             interface.encoder_weights_link,
@@ -888,142 +876,6 @@ fn load_wav_f32(path: &std::path::Path, target_sr: u32) -> Vec<f32> {
     } else {
         mono
     }
-}
-
-/// Load mel filterbank from the model's preprocessor_config.json.
-/// Falls back to a simple triangular filterbank if the file is not found.
-fn load_mel_filters(model_dir: Option<&std::path::Path>, num_mel_bins: usize) -> Vec<f32> {
-    let n_freqs = 201; // n_fft/2 + 1 where n_fft=400
-    if let Some(dir) = model_dir {
-        let config_path = dir.join("preprocessor_config.json");
-        if config_path.exists() {
-            if let Ok(data) = std::fs::read_to_string(&config_path) {
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&data) {
-                    if let Some(filters) = json["mel_filters"].as_array() {
-                        let mut flat = Vec::with_capacity(num_mel_bins * n_freqs);
-                        for row in filters {
-                            if let Some(arr) = row.as_array() {
-                                for v in arr {
-                                    flat.push(v.as_f64().unwrap_or(0.0) as f32);
-                                }
-                            }
-                        }
-                        if flat.len() == num_mel_bins * n_freqs {
-                            eprintln!("Loaded mel filterbank from {}", config_path.display());
-                            return flat;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    eprintln!("Using built-in mel filterbank");
-    build_mel_filterbank(num_mel_bins, n_freqs, 16000, 400)
-}
-
-/// Compute log-mel spectrogram from audio samples.
-///
-/// Uses n_fft=400, hop_length=160 (Whisper defaults).
-/// Returns flattened [num_mel_bins, num_frames] in row-major order.
-fn compute_mel_spectrogram(samples: &[f32], num_mel_bins: usize, mel_filters: &[f32]) -> Vec<f32> {
-    let n_fft = 400;
-    let hop_length = 160;
-    let n_freqs = n_fft / 2 + 1; // 201
-    assert_eq!(mel_filters.len(), num_mel_bins * n_freqs);
-
-    // Pad to 30 seconds + extra for STFT centering (Whisper expects 3000 frames)
-    let target_len = 480000; // 30s * 16000Hz
-    let pad = n_fft / 2;
-    let total_len = target_len + 2 * pad;
-    let mut padded = vec![0.0f32; total_len];
-    let copy_len = samples.len().min(target_len);
-    padded[pad..pad + copy_len].copy_from_slice(&samples[..copy_len]);
-
-    // Hann window
-    let window: Vec<f32> = (0..n_fft)
-        .map(|i| 0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / n_fft as f32).cos()))
-        .collect();
-
-    // STFT — drop last frame to match Whisper's `stft[..., :-1]`
-    let num_frames = (padded.len() - n_fft) / hop_length; // stft_frames - 1
-    let mut magnitudes = vec![0.0f32; n_freqs * num_frames];
-
-    for frame in 0..num_frames {
-        let start = frame * hop_length;
-        let mut real = vec![0.0f32; n_fft];
-
-        for i in 0..n_fft {
-            real[i] = padded[start + i] * window[i];
-        }
-
-        for k in 0..n_freqs {
-            let mut re = 0.0f32;
-            let mut im = 0.0f32;
-            for n in 0..n_fft {
-                let angle = -2.0 * std::f32::consts::PI * k as f32 * n as f32 / n_fft as f32;
-                re += real[n] * angle.cos();
-                im += real[n] * angle.sin();
-            }
-            magnitudes[k * num_frames + frame] = re * re + im * im;
-        }
-    }
-
-    // Apply mel filterbank
-    let mut mel_spec = vec![0.0f32; num_mel_bins * num_frames];
-    for mel in 0..num_mel_bins {
-        for frame in 0..num_frames {
-            let mut sum = 0.0f32;
-            for freq in 0..n_freqs {
-                sum += mel_filters[mel * n_freqs + freq] * magnitudes[freq * num_frames + frame];
-            }
-            mel_spec[mel * num_frames + frame] = sum;
-        }
-    }
-
-    // Log mel spectrogram
-    let log_spec: Vec<f32> = mel_spec.iter().map(|&x| (x.max(1e-10)).log10()).collect();
-
-    // Normalize: clamp to max - 8, then (x + 4) / 4
-    let max_val = log_spec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    log_spec
-        .iter()
-        .map(|&x| (x.max(max_val - 8.0) + 4.0) / 4.0)
-        .collect()
-}
-
-/// Build a mel filterbank matrix [num_mel_bins, n_freqs].
-fn build_mel_filterbank(
-    num_mel_bins: usize,
-    n_freqs: usize,
-    sample_rate: u32,
-    n_fft: usize,
-) -> Vec<f32> {
-    let hz_to_mel = |hz: f32| -> f32 { 2595.0 * (1.0 + hz / 700.0).log10() };
-    let mel_to_hz = |mel: f32| -> f32 { 700.0 * (10.0f32.powf(mel / 2595.0) - 1.0) };
-
-    let mel_low = hz_to_mel(0.0);
-    let mel_high = hz_to_mel(sample_rate as f32 / 2.0);
-    let mel_points: Vec<f32> = (0..num_mel_bins + 2)
-        .map(|i| mel_to_hz(mel_low + (mel_high - mel_low) * i as f32 / (num_mel_bins + 1) as f32))
-        .collect();
-
-    let freq_bins: Vec<f32> = (0..n_freqs)
-        .map(|i| i as f32 * sample_rate as f32 / n_fft as f32)
-        .collect();
-
-    let mut filters = vec![0.0f32; num_mel_bins * n_freqs];
-    for m in 0..num_mel_bins {
-        let (f_low, f_center, f_high) = (mel_points[m], mel_points[m + 1], mel_points[m + 2]);
-        for k in 0..n_freqs {
-            let freq = freq_bins[k];
-            if freq >= f_low && freq <= f_center {
-                filters[m * n_freqs + k] = (freq - f_low) / (f_center - f_low);
-            } else if freq > f_center && freq <= f_high {
-                filters[m * n_freqs + k] = (f_high - freq) / (f_high - f_center);
-            }
-        }
-    }
-    filters
 }
 
 // ============================================================================

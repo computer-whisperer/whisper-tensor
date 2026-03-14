@@ -15,8 +15,8 @@ use whisper_tensor::super_graph::links::{
     SuperGraphLink, SuperGraphLinkDouble, SuperGraphLinkTriple,
 };
 use whisper_tensor::super_graph::nodes::{
-    SuperGraphNode, SuperGraphNodeAudioClipToTensor, SuperGraphNodeMilliOpGraph,
-    SuperGraphNodeModelExecution, SuperGraphNodeScan,
+    SuperGraphNode, SuperGraphNodeAudioClipToMelSpectrogram, SuperGraphNodeAudioToMelConfig,
+    SuperGraphNodeMilliOpGraph, SuperGraphNodeModelExecution, SuperGraphNodeScan,
 };
 
 use crate::whisper::WhisperConfig;
@@ -86,6 +86,7 @@ impl Loader for WhisperLoader {
         let eos_token_id = config_json["eos_token_id"].as_u64().unwrap_or(50256) as u32;
         let decoder_prefix_token_ids = load_forced_decoder_ids(&dir, decoder_start_token_id);
         let max_decode_steps = whisper_config.max_target_positions.max(1) as u32;
+        let mel_filters = load_mel_filters(&dir, whisper_config.num_mel_bins);
 
         // Load safetensors weights
         let safetensors_path = dir.join("model.safetensors");
@@ -147,6 +148,7 @@ impl Loader for WhisperLoader {
 
         let whisper_sg = build_whisper_supergraph(
             &whisper_config,
+            mel_filters,
             decoder_prefix_token_ids.as_slice(),
             eos_token_id,
             max_decode_steps,
@@ -199,6 +201,7 @@ struct WhisperSuperGraphResult {
 
 fn build_whisper_supergraph(
     config: &WhisperConfig,
+    mel_filters: Vec<f32>,
     decoder_prefix_token_ids: &[u32],
     eos_token_id: u32,
     max_decode_steps: u32,
@@ -208,8 +211,25 @@ fn build_whisper_supergraph(
 
     // Inputs and encoder pass.
     let audio_link = builder.new_audio_clip_link(rng);
-    let mel_link =
-        SuperGraphNodeAudioClipToTensor::new_and_add(&mut builder, audio_link, Some(16000), rng);
+    let mel_link = SuperGraphNodeAudioClipToMelSpectrogram::new_and_add(
+        &mut builder,
+        audio_link,
+        SuperGraphNodeAudioToMelConfig {
+            expected_sample_rate_hz: Some(16000),
+            n_fft: 400,
+            hop_length: 160,
+            center_padding: 200,
+            max_samples: Some(16000 * 30),
+            drop_last_frame: true,
+            num_mel_bins: config.num_mel_bins as u32,
+            mel_filters,
+            log_floor: 1e-10,
+            clamp_dynamic_range: Some(8.0),
+            normalize_add: Some(4.0),
+            normalize_div: Some(4.0),
+        },
+        rng,
+    );
     let encoder_weights_link = builder.new_model_link(rng);
     let decoder_weights_link = builder.new_model_link(rng);
     let encoder_hidden_link = builder.new_tensor_link(rng);
@@ -694,4 +714,65 @@ fn load_forced_decoder_ids(model_dir: &std::path::Path, start_token: u32) -> Vec
         eprintln!("Forced decoder IDs: {:?}", ids);
     }
     ids
+}
+
+/// Load mel filterbank from preprocessor_config.json when available.
+/// Falls back to a generated triangular filterbank.
+fn load_mel_filters(model_dir: &std::path::Path, num_mel_bins: usize) -> Vec<f32> {
+    let n_freqs = 201; // n_fft/2 + 1 where n_fft=400
+    let config_path = model_dir.join("preprocessor_config.json");
+    if let Ok(data) = std::fs::read_to_string(&config_path)
+        && let Ok(json) = serde_json::from_str::<serde_json::Value>(&data)
+        && let Some(filters) = json["mel_filters"].as_array()
+    {
+        let mut flat = Vec::with_capacity(num_mel_bins * n_freqs);
+        for row in filters {
+            if let Some(arr) = row.as_array() {
+                for v in arr {
+                    flat.push(v.as_f64().unwrap_or(0.0) as f32);
+                }
+            }
+        }
+        if flat.len() == num_mel_bins * n_freqs {
+            eprintln!("Loaded mel filterbank from {}", config_path.display());
+            return flat;
+        }
+    }
+    eprintln!("Using built-in mel filterbank");
+    build_mel_filterbank(num_mel_bins, n_freqs, 16000, 400)
+}
+
+/// Build a mel filterbank matrix [num_mel_bins, n_freqs].
+fn build_mel_filterbank(
+    num_mel_bins: usize,
+    n_freqs: usize,
+    sample_rate: u32,
+    n_fft: usize,
+) -> Vec<f32> {
+    let hz_to_mel = |hz: f32| -> f32 { 2595.0 * (1.0 + hz / 700.0).log10() };
+    let mel_to_hz = |mel: f32| -> f32 { 700.0 * (10.0f32.powf(mel / 2595.0) - 1.0) };
+
+    let mel_low = hz_to_mel(0.0);
+    let mel_high = hz_to_mel(sample_rate as f32 / 2.0);
+    let mel_points: Vec<f32> = (0..num_mel_bins + 2)
+        .map(|i| mel_to_hz(mel_low + (mel_high - mel_low) * i as f32 / (num_mel_bins + 1) as f32))
+        .collect();
+
+    let freq_bins: Vec<f32> = (0..n_freqs)
+        .map(|i| i as f32 * sample_rate as f32 / n_fft as f32)
+        .collect();
+
+    let mut filters = vec![0.0f32; num_mel_bins * n_freqs];
+    for m in 0..num_mel_bins {
+        let (f_low, f_center, f_high) = (mel_points[m], mel_points[m + 1], mel_points[m + 2]);
+        for k in 0..n_freqs {
+            let freq = freq_bins[k];
+            if freq >= f_low && freq <= f_center {
+                filters[m * n_freqs + k] = (freq - f_low) / (f_center - f_low);
+            } else if freq > f_center && freq <= f_high {
+                filters[m * n_freqs + k] = (f_high - freq) / (f_high - f_center);
+            }
+        }
+    }
+    filters
 }

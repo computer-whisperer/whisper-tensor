@@ -1796,9 +1796,7 @@ pub struct SpeechToTextInterface {
     pub super_graph: SuperGraph,
 
     /// Input audio clip link.
-    ///
-    /// The clip payload currently carries precomputed encoder features in
-    /// `samples` for Whisper; this link type is a transitional API step.
+    /// The clip payload carries raw mono waveform samples.
     pub audio_input_link: SuperGraphLink,
 
     /// Encoder model weights.
