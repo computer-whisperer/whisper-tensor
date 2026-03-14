@@ -58,7 +58,7 @@ use whisper_tensor::interfaces::{AnyInterface, ImageGenerationInterface};
 use whisper_tensor::metadata::TokenizerInfo;
 use whisper_tensor::scalar_info::ScalarInfoTyped;
 use whisper_tensor::super_graph::nodes::SuperGraphAnyNode;
-use whisper_tensor::super_graph::{SuperGraph, SuperGraphLinkTensor};
+use whisper_tensor::super_graph::{SuperGraph, SuperGraphLink};
 use whisper_tensor::tokenizer::Tokenizer;
 use whisper_tensor_server::{
     AbbreviatedTensorReportSettings, AbbreviatedTensorValue, LoadedModelId, ServerConfigReport,
@@ -98,7 +98,7 @@ pub(crate) enum GraphRootSubjectSelection {
 pub(crate) struct TextInferenceData {
     tokens: Vec<u32>,
     logits: HashMap<Vec<u32>, Vec<(u32, f32)>>,
-    pending_request: Option<(u64, SuperGraphLinkTensor, Vec<u32>)>,
+    pending_request: Option<(u64, SuperGraphLink, Vec<u32>)>,
     use_cache: bool,
     selected_mode: SuperGraphRequestBackendMode,
 }
@@ -113,7 +113,7 @@ pub(crate) struct SDInferenceData {
     seed: u64,
     use_cache: bool,
     selected_mode: SuperGraphRequestBackendMode,
-    pending_request: Option<(u64, SuperGraphLinkTensor)>,
+    pending_request: Option<(u64, SuperGraphLink)>,
     generated_image: Option<(TextureHandle, ColorImage)>,
     status_message: Option<String>,
     show_image_window: bool,

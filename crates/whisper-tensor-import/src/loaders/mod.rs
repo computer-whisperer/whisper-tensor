@@ -40,7 +40,7 @@ use whisper_tensor::milli_graph::ops::{Cast, Constant, Shape, Squeeze, Unsqueeze
 use whisper_tensor::model::Model;
 use whisper_tensor::super_graph::SuperGraphBuilder;
 use whisper_tensor::super_graph::links::{
-    SuperGraphLink, SuperGraphLinkDouble, SuperGraphLinkTensor, SuperGraphLinkTriple,
+    SuperGraphLink, SuperGraphLinkDouble, SuperGraphLinkKind, SuperGraphLinkTriple,
 };
 use whisper_tensor::super_graph::nodes::{
     SuperGraphNode, SuperGraphNodeMilliOpGraph, SuperGraphNodeModelExecution,
@@ -95,14 +95,14 @@ pub(super) fn build_rnn_supergraph(
 
     let state_ids: Vec<usize> = (0..state_pairs.len()).collect();
 
-    let state_init_links: Vec<(usize, SuperGraphLinkTensor)> = state_ids
+    let state_init_links: Vec<(usize, SuperGraphLink)> = state_ids
         .iter()
         .map(|&id| (id, super_graph_builder.new_tensor_link(rng)))
         .collect();
 
     // Cache read
     let (post_cache_tokens_input, post_cache_state_init_links) = {
-        let post_cache_state_init_links: Vec<(usize, SuperGraphLinkTensor)> = state_ids
+        let post_cache_state_init_links: Vec<(usize, SuperGraphLink)> = state_ids
             .iter()
             .map(|&id| (id, super_graph_builder.new_tensor_link(rng)))
             .collect();
@@ -127,7 +127,7 @@ pub(super) fn build_rnn_supergraph(
 
     // Loop count from token sequence length
     let loop_count_link = {
-        let loop_count_link = SuperGraphLinkTensor::new(rng);
+        let loop_count_link = SuperGraphLink::new(SuperGraphLinkKind::Tensor, rng);
         let (mut milli_graph, input_map) =
             MilliOpGraph::new(std::iter::once(post_cache_tokens_input.global_id()), rng);
         let milli_op_graph_input = *input_map.get(&post_cache_tokens_input.global_id()).unwrap();
@@ -184,15 +184,15 @@ pub(super) fn build_rnn_supergraph(
     let sub_model_input_link = sub_builder.new_model_link(rng);
     let sub_token_input = sub_builder.new_tensor_link(rng);
 
-    let state_input_links: HashMap<usize, SuperGraphLinkTensor> = state_ids
+    let state_input_links: HashMap<usize, SuperGraphLink> = state_ids
         .iter()
         .map(|&id| (id, sub_builder.new_tensor_link(rng)))
         .collect();
-    let state_output_links: HashMap<usize, SuperGraphLinkTensor> = state_ids
+    let state_output_links: HashMap<usize, SuperGraphLink> = state_ids
         .iter()
         .map(|&id| (id, sub_builder.new_tensor_link(rng)))
         .collect();
-    let final_state_output_links: Vec<(usize, SuperGraphLinkTensor)> = state_ids
+    let final_state_output_links: Vec<(usize, SuperGraphLink)> = state_ids
         .iter()
         .map(|&id| (id, super_graph_builder.new_tensor_link(rng)))
         .collect();
@@ -306,7 +306,7 @@ pub(super) fn build_rnn_supergraph(
     let state_links: Vec<SuperGraphLinkTriple> = post_cache_state_init_links
         .iter()
         .map(|(id, init_link)| {
-            SuperGraphLinkTriple::Tensor(
+            SuperGraphLinkTriple::new(
                 *init_link,
                 *state_input_links.get(id).unwrap(),
                 *state_output_links.get(id).unwrap(),
@@ -329,13 +329,13 @@ pub(super) fn build_rnn_supergraph(
 
     let final_state_outputs: Vec<SuperGraphLinkDouble> = final_state_output_links
         .iter()
-        .map(|(id, link)| SuperGraphLinkDouble::Tensor(*state_output_links.get(id).unwrap(), *link))
+        .map(|(id, link)| SuperGraphLinkDouble::new(*state_output_links.get(id).unwrap(), *link))
         .collect();
 
     let scan_node = SuperGraphNodeScan::new(
         sub_graph_inner,
         loop_count_link,
-        vec![SuperGraphLinkDouble::TensorMap(
+        vec![SuperGraphLinkDouble::new(
             model_input_link,
             sub_model_input_link,
         )],

@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::interfaces::AnyInterface;
 use whisper_tensor::metadata::TokenizerInfo;
-use whisper_tensor::super_graph::links::SuperGraphLinkTensor;
+use whisper_tensor::super_graph::links::SuperGraphLink;
 use whisper_tensor::tokenizer::Tokenizer;
 use whisper_tensor_server::{SuperGraphRequest, SuperGraphRequestBackendMode};
 
@@ -52,7 +52,7 @@ type LogitData = (Vec<u32>, Result<Vec<Vec<(u32, f32)>>, String>);
 pub(crate) struct LLMExplorerApp {
     llm_explorer_selected_interface_id: Option<InterfaceId>,
     llm_explorer_cached_token_list: Option<Vec<u32>>,
-    pending_request: Option<(u64, SuperGraphLinkTensor, Vec<u32>)>,
+    pending_request: Option<(u64, SuperGraphLink, Vec<u32>)>,
     pub(crate) latest_logits: Option<LogitData>,
 }
 

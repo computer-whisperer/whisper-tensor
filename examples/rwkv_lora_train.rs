@@ -46,7 +46,7 @@ use whisper_tensor::super_graph::nodes::{
     SuperGraphNode, SuperGraphNodeMilliOpGraph, SuperGraphNodeScan,
 };
 use whisper_tensor::super_graph::{
-    SuperGraphAnyLink, SuperGraphBuilder, SuperGraphContext, SuperGraphLinkTensor,
+    SuperGraphAnyLink, SuperGraphBuilder, SuperGraphContext, SuperGraphLink, SuperGraphLinkKind,
 };
 use whisper_tensor::symbolic_graph::{SymbolicGraphMutator, TensorType};
 use whisper_tensor::tensor_rank::DynRank;
@@ -407,51 +407,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let inner_graph = inner_builder.build(&mut rng, &inner_input_links, &inner_output_links);
 
     // Outer links
-    let iter_count_link = SuperGraphLinkTensor::new(&mut rng);
-    let outer_tokens_link = SuperGraphLinkTensor::new(&mut rng);
-    let outer_targets_link = SuperGraphLinkTensor::new(&mut rng);
-    let collected_losses_link = SuperGraphLinkTensor::new(&mut rng);
+    let iter_count_link = SuperGraphLink::new(SuperGraphLinkKind::Tensor, &mut rng);
+    let outer_tokens_link = SuperGraphLink::new(SuperGraphLinkKind::Tensor, &mut rng);
+    let outer_targets_link = SuperGraphLink::new(SuperGraphLinkKind::Tensor, &mut rng);
+    let collected_losses_link = SuperGraphLink::new(SuperGraphLinkKind::Tensor, &mut rng);
 
     // Simple inputs: base constants (one outer link → inner id, per constant)
-    let constant_simple_inputs: Vec<(SuperGraphLinkTensor, GlobalId)> = constant_input_ids
+    let constant_simple_inputs: Vec<(SuperGraphLink, GlobalId)> = constant_input_ids
         .iter()
-        .map(|&id| (SuperGraphLinkTensor::new(&mut rng), id))
+        .map(|&id| {
+            (
+                SuperGraphLink::new(SuperGraphLinkKind::Tensor, &mut rng),
+                id,
+            )
+        })
         .collect();
 
     let simple_inputs: Vec<SuperGraphLinkDouble> = constant_simple_inputs
         .iter()
         .map(|&(outer, inner_id)| {
-            SuperGraphLinkDouble::Tensor(outer, SuperGraphLinkTensor(inner_id))
+            SuperGraphLinkDouble::new(outer, SuperGraphLink::tensor(inner_id))
         })
         .collect();
 
     // State: LoRA params
-    let outer_param_links: Vec<(GlobalId, SuperGraphLinkTensor, SuperGraphLinkTensor)> = meta
+    let outer_param_links: Vec<(GlobalId, SuperGraphLink, SuperGraphLink)> = meta
         .param_updates
         .keys()
         .map(|&ext| {
             (
                 ext,
-                SuperGraphLinkTensor::new(&mut rng),
-                SuperGraphLinkTensor::new(&mut rng),
+                SuperGraphLink::new(SuperGraphLinkKind::Tensor, &mut rng),
+                SuperGraphLink::new(SuperGraphLinkKind::Tensor, &mut rng),
             )
         })
         .collect();
 
     // State: RNN state
-    let outer_rnn_links: Vec<(
-        GlobalId,
-        GlobalId,
-        SuperGraphLinkTensor,
-        SuperGraphLinkTensor,
-    )> = state_pairs
+    let outer_rnn_links: Vec<(GlobalId, GlobalId, SuperGraphLink, SuperGraphLink)> = state_pairs
         .iter()
         .map(|&(si, so)| {
             (
                 si,
                 so,
-                SuperGraphLinkTensor::new(&mut rng),
-                SuperGraphLinkTensor::new(&mut rng),
+                SuperGraphLink::new(SuperGraphLinkKind::Tensor, &mut rng),
+                SuperGraphLink::new(SuperGraphLinkKind::Tensor, &mut rng),
             )
         })
         .collect();
@@ -460,17 +460,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut state_links: Vec<SuperGraphLinkTriple> = Vec::new();
     for &(ext_param, outer_init, _) in &outer_param_links {
         let new_param = meta.param_updates[&ext_param];
-        state_links.push(SuperGraphLinkTriple::Tensor(
+        state_links.push(SuperGraphLinkTriple::new(
             outer_init,
-            SuperGraphLinkTensor(ext_param),
-            SuperGraphLinkTensor(new_param),
+            SuperGraphLink::tensor(ext_param),
+            SuperGraphLink::tensor(new_param),
         ));
     }
     for &(si, so, outer_init, _) in &outer_rnn_links {
-        state_links.push(SuperGraphLinkTriple::Tensor(
+        state_links.push(SuperGraphLinkTriple::new(
             outer_init,
-            SuperGraphLinkTensor(si),
-            SuperGraphLinkTensor(so),
+            SuperGraphLink::tensor(si),
+            SuperGraphLink::tensor(so),
         ));
     }
 
@@ -478,28 +478,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let scan_inputs = vec![
         (
             outer_tokens_link,
-            SuperGraphLinkTensor(token_input_id),
+            SuperGraphLink::tensor(token_input_id),
             0u32,
         ),
-        (outer_targets_link, SuperGraphLinkTensor(targets_ext_id), 0),
+        (
+            outer_targets_link,
+            SuperGraphLink::tensor(targets_ext_id),
+            0,
+        ),
     ];
 
     // Scan outputs: per-token loss
-    let scan_outputs = vec![(SuperGraphLinkTensor(loss_id), collected_losses_link, 0u32)];
+    let scan_outputs = vec![(SuperGraphLink::tensor(loss_id), collected_losses_link, 0u32)];
 
     // Simple outputs: final param + state values
     let mut simple_outputs: Vec<SuperGraphLinkDouble> = outer_param_links
         .iter()
         .map(|&(ext, _, outer_final)| {
-            SuperGraphLinkDouble::Tensor(
-                SuperGraphLinkTensor(meta.param_updates[&ext]),
+            SuperGraphLinkDouble::new(
+                SuperGraphLink::tensor(meta.param_updates[&ext]),
                 outer_final,
             )
         })
         .collect();
     for &(_, so, _, outer_final) in &outer_rnn_links {
-        simple_outputs.push(SuperGraphLinkDouble::Tensor(
-            SuperGraphLinkTensor(so),
+        simple_outputs.push(SuperGraphLinkDouble::new(
+            SuperGraphLink::tensor(so),
             outer_final,
         ));
     }
@@ -519,28 +523,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     outer_builder.add_node(scan_node.to_any());
 
     // Outer inputs: iter_count, data, constants, param inits, state inits
-    let mut outer_input_links = vec![
-        SuperGraphAnyLink::Tensor(iter_count_link),
-        SuperGraphAnyLink::Tensor(outer_tokens_link),
-        SuperGraphAnyLink::Tensor(outer_targets_link),
-    ];
+    let mut outer_input_links = vec![iter_count_link, outer_tokens_link, outer_targets_link];
     for &(outer, _) in &constant_simple_inputs {
-        outer_input_links.push(SuperGraphAnyLink::Tensor(outer));
+        outer_input_links.push(outer);
     }
     for &(_, outer_init, _) in &outer_param_links {
-        outer_input_links.push(SuperGraphAnyLink::Tensor(outer_init));
+        outer_input_links.push(outer_init);
     }
     for &(_, _, outer_init, _) in &outer_rnn_links {
-        outer_input_links.push(SuperGraphAnyLink::Tensor(outer_init));
+        outer_input_links.push(outer_init);
     }
 
     // Outer outputs: losses, final params, final state
-    let mut outer_output_links = vec![SuperGraphAnyLink::Tensor(collected_losses_link)];
+    let mut outer_output_links = vec![collected_losses_link];
     for &(_, _, outer_final) in &outer_param_links {
-        outer_output_links.push(SuperGraphAnyLink::Tensor(outer_final));
+        outer_output_links.push(outer_final);
     }
     for &(_, _, _, outer_final) in &outer_rnn_links {
-        outer_output_links.push(SuperGraphAnyLink::Tensor(outer_final));
+        outer_output_links.push(outer_final);
     }
 
     let epoch_graph = outer_builder.build(&mut rng, &outer_input_links, &outer_output_links);

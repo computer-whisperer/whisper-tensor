@@ -7,8 +7,7 @@ use whisper_tensor::milli_graph::MilliOpGraph;
 use whisper_tensor::milli_graph::ops::{Cast, Constant, SimpleBinary};
 use whisper_tensor::super_graph::SuperGraphBuilder;
 use whisper_tensor::super_graph::links::{
-    SuperGraphLink, SuperGraphLinkDouble, SuperGraphLinkTensor, SuperGraphLinkTensorMap,
-    SuperGraphLinkTriple,
+    SuperGraphLink, SuperGraphLinkDouble, SuperGraphLinkTriple,
 };
 use whisper_tensor::super_graph::nodes::{
     SuperGraphNode, SuperGraphNodeMilliOpGraph, SuperGraphNodeModelExecution, SuperGraphNodeScan,
@@ -237,16 +236,16 @@ fn build_f5_supergraph(vocab: &str, rng: &mut impl rand::Rng) -> TextToSpeechInt
 fn build_f5_denoising_loop(
     builder: &mut SuperGraphBuilder,
     rng: &mut impl rand::Rng,
-    transformer_weights: SuperGraphLinkTensorMap,
-    initial_noise: SuperGraphLinkTensor,
-    rope_cos: SuperGraphLinkTensor,
-    rope_sin: SuperGraphLinkTensor,
-    cat_mel_text: SuperGraphLinkTensor,
-    cat_mel_text_drop: SuperGraphLinkTensor,
-    qk_rotated_empty: SuperGraphLinkTensor,
-    time_steps_input: SuperGraphLinkTensor,
-    iteration_count_input: SuperGraphLinkTensor,
-) -> SuperGraphLinkTensor {
+    transformer_weights: SuperGraphLink,
+    initial_noise: SuperGraphLink,
+    rope_cos: SuperGraphLink,
+    rope_sin: SuperGraphLink,
+    cat_mel_text: SuperGraphLink,
+    cat_mel_text_drop: SuperGraphLink,
+    qk_rotated_empty: SuperGraphLink,
+    time_steps_input: SuperGraphLink,
+    iteration_count_input: SuperGraphLink,
+) -> SuperGraphLink {
     let outer_final_denoised = builder.new_tensor_link(rng);
 
     let mut inner_builder = SuperGraphBuilder::new();
@@ -344,15 +343,15 @@ fn build_f5_denoising_loop(
         iteration_count_input,
         // simple_inputs: constant per iteration
         vec![
-            SuperGraphLinkDouble::TensorMap(transformer_weights, inner_transformer_weights),
-            SuperGraphLinkDouble::Tensor(rope_cos, inner_rope_cos),
-            SuperGraphLinkDouble::Tensor(rope_sin, inner_rope_sin),
-            SuperGraphLinkDouble::Tensor(cat_mel_text, inner_cat_mel_text),
-            SuperGraphLinkDouble::Tensor(cat_mel_text_drop, inner_cat_mel_text_drop),
-            SuperGraphLinkDouble::Tensor(qk_rotated_empty, inner_qk_rotated_empty),
+            SuperGraphLinkDouble::new(transformer_weights, inner_transformer_weights),
+            SuperGraphLinkDouble::new(rope_cos, inner_rope_cos),
+            SuperGraphLinkDouble::new(rope_sin, inner_rope_sin),
+            SuperGraphLinkDouble::new(cat_mel_text, inner_cat_mel_text),
+            SuperGraphLinkDouble::new(cat_mel_text_drop, inner_cat_mel_text_drop),
+            SuperGraphLinkDouble::new(qk_rotated_empty, inner_qk_rotated_empty),
         ],
         // state_links: noise carried between iterations
-        vec![SuperGraphLinkTriple::Tensor(
+        vec![SuperGraphLinkTriple::new(
             initial_noise,
             inner_noise_in,
             inner_noise_out,
@@ -362,7 +361,7 @@ fn build_f5_denoising_loop(
         // scan_outputs: none (we only care about final state)
         vec![],
         // simple_outputs: final noise state
-        vec![SuperGraphLinkDouble::Tensor(
+        vec![SuperGraphLinkDouble::new(
             inner_noise_out,
             outer_final_denoised,
         )],

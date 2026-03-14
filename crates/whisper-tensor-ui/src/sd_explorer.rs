@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::dtype::DType;
 use whisper_tensor::interfaces::{AnyInterface, ImageGenerationInterface};
-use whisper_tensor::super_graph::links::SuperGraphLinkTensor;
+use whisper_tensor::super_graph::links::SuperGraphLink;
 use whisper_tensor_server::{SuperGraphRequest, SuperGraphRequestBackendMode};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -33,7 +33,7 @@ impl Default for SDExplorerState {
 
 pub(crate) struct SDExplorerApp {
     selected_interface_id: Option<InterfaceId>,
-    pending_request: Option<(u64, SuperGraphLinkTensor)>,
+    pending_request: Option<(u64, SuperGraphLink)>,
     generated_image: Option<egui::TextureHandle>,
     status_message: Option<String>,
 }

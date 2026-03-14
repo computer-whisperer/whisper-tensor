@@ -13,10 +13,7 @@ use crate::model::Model;
 use crate::numeric_tensor::NumericTensor;
 use crate::super_graph::cache::{SuperGraphCache, SuperGraphTensorCache};
 use crate::super_graph::data::SuperGraphData;
-use crate::super_graph::links::{
-    SuperGraphLink, SuperGraphLinkDouble, SuperGraphLinkHash, SuperGraphLinkTensor,
-    SuperGraphLinkTensorMap, SuperGraphLinkTriple,
-};
+use crate::super_graph::links::{SuperGraphLink, SuperGraphLinkDouble, SuperGraphLinkTriple};
 use crate::super_graph::nodes::{
     SuperGraphNode, SuperGraphNodeMilliOpGraph, SuperGraphNodeModelExecution, SuperGraphNodeScan,
 };
@@ -63,10 +60,10 @@ impl AnyInterface {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TextInferenceTokensInLogitOutInterface {
-    pub cache_key_input_link: SuperGraphLinkHash,
-    pub token_context_input_link: SuperGraphLinkTensor,
-    pub model_input_link: SuperGraphLinkTensorMap,
-    pub logit_output_link: SuperGraphLinkTensor,
+    pub cache_key_input_link: SuperGraphLink,
+    pub token_context_input_link: SuperGraphLink,
+    pub model_input_link: SuperGraphLink,
+    pub logit_output_link: SuperGraphLink,
     pub super_graph: SuperGraph,
     pub tokenizer: TokenizerInfo,
 }
@@ -178,17 +175,17 @@ pub enum MultimodalTensorInputRole {
 pub struct MultimodalTensorInput {
     pub name: String,
     pub role: MultimodalTensorInputRole,
-    pub tensor_link: SuperGraphLinkTensor,
+    pub tensor_link: SuperGraphLink,
     pub required: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MultimodalLanguageInterface {
-    pub cache_key_input_link: SuperGraphLinkHash,
-    pub token_context_input_link: SuperGraphLinkTensor,
-    pub model_input_link: SuperGraphLinkTensorMap,
+    pub cache_key_input_link: SuperGraphLink,
+    pub token_context_input_link: SuperGraphLink,
+    pub model_input_link: SuperGraphLink,
     pub modality_inputs: Vec<MultimodalTensorInput>,
-    pub logit_output_link: SuperGraphLinkTensor,
+    pub logit_output_link: SuperGraphLink,
     pub super_graph: SuperGraph,
     pub tokenizer: TokenizerInfo,
 }
@@ -200,7 +197,7 @@ impl MultimodalLanguageInterface {
         model: &Model,
         compiled_model: Option<&CompiledProgram>,
         text_in: String,
-        modal_inputs: HashMap<SuperGraphLinkTensor, NumericTensor<DynRank>>,
+        modal_inputs: HashMap<SuperGraphLink, NumericTensor<DynRank>>,
         tokenizer_cache: &mut HashMap<TokenizerInfo, Arc<AnyTokenizer>>,
         tensor_cache: Option<&mut ModelLoadedTensorCache>,
         super_graph_caches: Option<&mut SuperGraphCache>,
@@ -337,7 +334,7 @@ pub enum PromptEncoding {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PromptInput {
     pub tokenizer: TokenizerInfo,
-    pub link: SuperGraphLinkTensor,
+    pub link: SuperGraphLink,
     pub seq_len: usize,
     pub encoding: PromptEncoding,
 }
@@ -386,16 +383,16 @@ pub struct ImageGenerationInterface {
     pub positive_prompts: Vec<PromptInput>,
     pub negative_prompts: Option<Vec<PromptInput>>,
     // Latent / scheduler inputs
-    pub initial_latent_input: SuperGraphLinkTensor,
-    pub timesteps_input: SuperGraphLinkTensor,
-    pub dt_input: SuperGraphLinkTensor,
-    pub sigmas_input: SuperGraphLinkTensor,
-    pub iteration_count_input: SuperGraphLinkTensor,
-    pub guidance_scale_input: Option<SuperGraphLinkTensor>,
+    pub initial_latent_input: SuperGraphLink,
+    pub timesteps_input: SuperGraphLink,
+    pub dt_input: SuperGraphLink,
+    pub sigmas_input: SuperGraphLink,
+    pub iteration_count_input: SuperGraphLink,
+    pub guidance_scale_input: Option<SuperGraphLink>,
     // Model weight maps (in order matching loader's model_ids)
-    pub model_weights: Vec<SuperGraphLinkTensorMap>,
+    pub model_weights: Vec<SuperGraphLink>,
     // Output
-    pub image_output: SuperGraphLinkTensor,
+    pub image_output: SuperGraphLink,
     /// Scheduler type for the denoising loop.
     pub scheduler: SchedulerType,
     /// Number of latent channels (4 for SD/SDXL, 16 for Flux).
@@ -406,9 +403,9 @@ pub struct ImageGenerationInterface {
 fn build_cast_node(
     builder: &mut SuperGraphBuilder,
     rng: &mut impl Rng,
-    input: SuperGraphLinkTensor,
+    input: SuperGraphLink,
     dtype: DType,
-) -> SuperGraphLinkTensor {
+) -> SuperGraphLink {
     let output = builder.new_tensor_link(rng);
     let (mut mg, input_map) = MilliOpGraph::new(std::iter::once(input.global_id()), rng);
     let inp = *input_map.get(&input.global_id()).unwrap();
@@ -425,20 +422,20 @@ fn build_cast_node(
 fn build_denoising_loop(
     builder: &mut SuperGraphBuilder,
     rng: &mut impl Rng,
-    unet_weights: SuperGraphLinkTensorMap,
-    cond_context: SuperGraphLinkTensor,
-    uncond_context: SuperGraphLinkTensor,
-    cond_y: Option<SuperGraphLinkTensor>,
-    uncond_y: Option<SuperGraphLinkTensor>,
-    guidance_scale_input: SuperGraphLinkTensor,
-    initial_latent_input: SuperGraphLinkTensor,
-    timesteps_input: SuperGraphLinkTensor,
-    dt_input: SuperGraphLinkTensor,
-    sigmas_input: SuperGraphLinkTensor,
-    iteration_count_input: SuperGraphLinkTensor,
+    unet_weights: SuperGraphLink,
+    cond_context: SuperGraphLink,
+    uncond_context: SuperGraphLink,
+    cond_y: Option<SuperGraphLink>,
+    uncond_y: Option<SuperGraphLink>,
+    guidance_scale_input: SuperGraphLink,
+    initial_latent_input: SuperGraphLink,
+    timesteps_input: SuperGraphLink,
+    dt_input: SuperGraphLink,
+    sigmas_input: SuperGraphLink,
+    iteration_count_input: SuperGraphLink,
     model_dtype: DType,
     unet_model_index: usize,
-) -> SuperGraphLinkTensor {
+) -> SuperGraphLink {
     let outer_final_latent = builder.new_tensor_link(rng);
 
     let mut inner_builder = SuperGraphBuilder::new();
@@ -607,16 +604,16 @@ fn build_denoising_loop(
 
     // Create scan node
     let mut simple_inputs = vec![
-        SuperGraphLinkDouble::TensorMap(unet_weights, inner_unet_weights),
-        SuperGraphLinkDouble::Tensor(cond_context, inner_cond_context),
-        SuperGraphLinkDouble::Tensor(uncond_context, inner_uncond_context),
-        SuperGraphLinkDouble::Tensor(guidance_scale_input, inner_guidance_scale),
+        SuperGraphLinkDouble::new(unet_weights, inner_unet_weights),
+        SuperGraphLinkDouble::new(cond_context, inner_cond_context),
+        SuperGraphLinkDouble::new(uncond_context, inner_uncond_context),
+        SuperGraphLinkDouble::new(guidance_scale_input, inner_guidance_scale),
     ];
     if let (Some(cy_outer), Some(cy_inner)) = (cond_y, inner_cond_y) {
-        simple_inputs.push(SuperGraphLinkDouble::Tensor(cy_outer, cy_inner));
+        simple_inputs.push(SuperGraphLinkDouble::new(cy_outer, cy_inner));
     }
     if let (Some(uy_outer), Some(uy_inner)) = (uncond_y, inner_uncond_y) {
-        simple_inputs.push(SuperGraphLinkDouble::Tensor(uy_outer, uy_inner));
+        simple_inputs.push(SuperGraphLinkDouble::new(uy_outer, uy_inner));
     }
 
     let scan_node = SuperGraphNodeScan::new(
@@ -624,7 +621,7 @@ fn build_denoising_loop(
         iteration_count_input,
         simple_inputs,
         // state_links: (initial, inner_in, inner_out)
-        vec![SuperGraphLinkTriple::Tensor(
+        vec![SuperGraphLinkTriple::new(
             initial_latent_input,
             inner_latent_in,
             inner_latent_out,
@@ -638,7 +635,7 @@ fn build_denoising_loop(
         // scan_outputs: none
         vec![],
         // simple_outputs: final latent
-        vec![SuperGraphLinkDouble::Tensor(
+        vec![SuperGraphLinkDouble::new(
             inner_latent_out,
             outer_final_latent,
         )],
@@ -653,12 +650,12 @@ fn build_denoising_loop(
 fn build_vae_decode(
     builder: &mut SuperGraphBuilder,
     rng: &mut impl Rng,
-    latent: SuperGraphLinkTensor,
-    vae_weights: SuperGraphLinkTensorMap,
+    latent: SuperGraphLink,
+    vae_weights: SuperGraphLink,
     vae_model_index: usize,
     vae_scale_factor: f32,
     model_dtype: DType,
-) -> SuperGraphLinkTensor {
+) -> SuperGraphLink {
     // Scale latent by 1/vae_scale_factor and cast to model_dtype
     let scaled_latent = builder.new_tensor_link(rng);
     {
@@ -698,8 +695,8 @@ fn build_vae_decode(
 fn build_eos_indices_node(
     builder: &mut SuperGraphBuilder,
     rng: &mut impl Rng,
-    input_ids: SuperGraphLinkTensor,
-) -> SuperGraphLinkTensor {
+    input_ids: SuperGraphLink,
+) -> SuperGraphLink {
     let eos_indices = builder.new_tensor_link(rng);
     let (mut mg, input_map) = MilliOpGraph::new(std::iter::once(input_ids.global_id()), rng);
     let ids_in = *input_map.get(&input_ids.global_id()).unwrap();
@@ -719,18 +716,18 @@ fn build_eos_indices_node(
 fn build_flux_denoising_loop(
     builder: &mut SuperGraphBuilder,
     rng: &mut impl Rng,
-    dit_weights: SuperGraphLinkTensorMap,
-    clip_pooled: SuperGraphLinkTensor,
-    t5_hidden: SuperGraphLinkTensor,
-    initial_latent_input: SuperGraphLinkTensor,
-    timesteps_input: SuperGraphLinkTensor,
-    dt_input: SuperGraphLinkTensor,
-    _sigmas_input: SuperGraphLinkTensor,
-    iteration_count_input: SuperGraphLinkTensor,
-    guidance_input: Option<SuperGraphLinkTensor>,
+    dit_weights: SuperGraphLink,
+    clip_pooled: SuperGraphLink,
+    t5_hidden: SuperGraphLink,
+    initial_latent_input: SuperGraphLink,
+    timesteps_input: SuperGraphLink,
+    dt_input: SuperGraphLink,
+    _sigmas_input: SuperGraphLink,
+    iteration_count_input: SuperGraphLink,
+    guidance_input: Option<SuperGraphLink>,
     model_dtype: DType,
     dit_model_index: usize,
-) -> SuperGraphLinkTensor {
+) -> SuperGraphLink {
     let outer_final_latent = builder.new_tensor_link(rng);
 
     let mut inner_builder = SuperGraphBuilder::new();
@@ -856,12 +853,12 @@ fn build_flux_denoising_loop(
 
     // Create scan node
     let mut simple_inputs = vec![
-        SuperGraphLinkDouble::TensorMap(dit_weights, inner_dit_weights),
-        SuperGraphLinkDouble::Tensor(clip_pooled, inner_clip_pooled),
-        SuperGraphLinkDouble::Tensor(t5_hidden, inner_t5_hidden),
+        SuperGraphLinkDouble::new(dit_weights, inner_dit_weights),
+        SuperGraphLinkDouble::new(clip_pooled, inner_clip_pooled),
+        SuperGraphLinkDouble::new(t5_hidden, inner_t5_hidden),
     ];
     if let (Some(outer_g), Some(ig)) = (guidance_input, inner_guidance) {
-        simple_inputs.push(SuperGraphLinkDouble::Tensor(outer_g, ig));
+        simple_inputs.push(SuperGraphLinkDouble::new(outer_g, ig));
     }
 
     let scan_node = SuperGraphNodeScan::new(
@@ -869,7 +866,7 @@ fn build_flux_denoising_loop(
         iteration_count_input,
         simple_inputs,
         // state_links: latent carried across iterations
-        vec![SuperGraphLinkTriple::Tensor(
+        vec![SuperGraphLinkTriple::new(
             initial_latent_input,
             inner_latent_in,
             inner_latent_out,
@@ -882,7 +879,7 @@ fn build_flux_denoising_loop(
         // scan_outputs: none
         vec![],
         // simple_outputs: final latent
-        vec![SuperGraphLinkDouble::Tensor(
+        vec![SuperGraphLinkDouble::new(
             inner_latent_out,
             outer_final_latent,
         )],
@@ -899,10 +896,10 @@ fn build_flux_denoising_loop(
 fn build_flux_vae_decode(
     builder: &mut SuperGraphBuilder,
     rng: &mut impl Rng,
-    latent: SuperGraphLinkTensor,
-    vae_weights: SuperGraphLinkTensorMap,
+    latent: SuperGraphLink,
+    vae_weights: SuperGraphLink,
     vae_model_index: usize,
-) -> SuperGraphLinkTensor {
+) -> SuperGraphLink {
     // Scale latent: x / 0.3611 + 0.1159, cast to F32 for VAE
     let scaled_latent = builder.new_tensor_link(rng);
     {
@@ -1564,13 +1561,13 @@ impl ImageGenerationInterface {
 
     /// Run the full image generation pipeline.
     ///
-    /// `prompt_tokens` contains pre-tokenized tensors keyed by SuperGraphLinkTensor,
+    /// `prompt_tokens` contains pre-tokenized tensors keyed by SuperGraphLink,
     /// one entry per prompt input slot (positive and negative).
     #[allow(clippy::too_many_arguments)]
     pub fn run(
         &self,
         models: &[&Model],
-        prompt_tokens: HashMap<SuperGraphLinkTensor, NumericTensor<DynRank>>,
+        prompt_tokens: HashMap<SuperGraphLink, NumericTensor<DynRank>>,
         initial_noise: Vec<f32>,
         latent_shape: Vec<usize>,
         num_inference_steps: usize,
@@ -1669,15 +1666,15 @@ pub enum TTSInputConfig {
     /// Kokoro-style: phoneme IDs + style embedding + speed scalar.
     /// Tokenizer points to tokenizer.json with char→id vocab.
     Kokoro {
-        style_link: SuperGraphLinkTensor,
-        speed_link: SuperGraphLinkTensor,
+        style_link: SuperGraphLink,
+        speed_link: SuperGraphLink,
         tokenizer: TokenizerInfo,
     },
     /// Piper VITS: phoneme IDs + input_lengths + scales + optional speaker ID.
     Piper {
-        input_lengths_link: SuperGraphLinkTensor,
-        scales_link: SuperGraphLinkTensor,
-        speaker_id_link: Option<SuperGraphLinkTensor>,
+        input_lengths_link: SuperGraphLink,
+        scales_link: SuperGraphLink,
+        speaker_id_link: Option<SuperGraphLink>,
         num_speakers: u32,
         /// IPA character → list of token IDs (JSON-serialized).
         phoneme_id_map_json: String,
@@ -1687,11 +1684,11 @@ pub enum TTSInputConfig {
     /// F5-TTS: text IDs + reference audio + max_duration.
     /// 3-model pipeline with ODE loop baked into SuperGraph.
     F5 {
-        ref_audio_link: SuperGraphLinkTensor,
-        max_duration_link: SuperGraphLinkTensor,
+        ref_audio_link: SuperGraphLink,
+        max_duration_link: SuperGraphLink,
         /// Scan inputs for the ODE denoising loop.
-        time_steps_link: SuperGraphLinkTensor,
-        iteration_count_link: SuperGraphLinkTensor,
+        time_steps_link: SuperGraphLink,
+        iteration_count_link: SuperGraphLink,
         /// Number of function evaluations (default 32).
         nfe_steps: u32,
         /// Character-level vocab: line number = token ID.
@@ -1709,11 +1706,11 @@ pub enum TTSInputConfig {
 pub struct TextToSpeechInterface {
     pub super_graph: SuperGraph,
     /// Tokenized text/phoneme IDs input [1, seq_len].
-    pub text_ids_link: SuperGraphLinkTensor,
+    pub text_ids_link: SuperGraphLink,
     /// Model weights (one per model in the pipeline).
-    pub model_weights: Vec<SuperGraphLinkTensorMap>,
+    pub model_weights: Vec<SuperGraphLink>,
     /// Output audio waveform.
-    pub audio_output_link: SuperGraphLinkTensor,
+    pub audio_output_link: SuperGraphLink,
     /// Sample rate of the output audio in Hz.
     pub sample_rate: u32,
     /// Model-specific input configuration and tokenization metadata.
@@ -1737,24 +1734,24 @@ pub struct SpeechToTextInterface {
     /// Encoder SuperGraph: mel spectrogram → encoder hidden states.
     pub encoder_super_graph: SuperGraph,
     /// Mel spectrogram input link [1, num_mel_bins, seq_len].
-    pub mel_input_link: SuperGraphLinkTensor,
+    pub mel_input_link: SuperGraphLink,
     /// Encoder model weights.
-    pub encoder_weights_link: SuperGraphLinkTensorMap,
+    pub encoder_weights_link: SuperGraphLink,
     /// Encoder hidden states output link.
-    pub encoder_output_link: SuperGraphLinkTensor,
+    pub encoder_output_link: SuperGraphLink,
 
     /// Decoder SuperGraph (RNN-style with cache).
     pub decoder_super_graph: SuperGraph,
     /// Decoder token context input link.
-    pub decoder_token_link: SuperGraphLinkTensor,
+    pub decoder_token_link: SuperGraphLink,
     /// Decoder model weights.
-    pub decoder_weights_link: SuperGraphLinkTensorMap,
+    pub decoder_weights_link: SuperGraphLink,
     /// Encoder hidden states input to decoder (fixed across steps).
-    pub decoder_encoder_hidden_link: SuperGraphLinkTensor,
+    pub decoder_encoder_hidden_link: SuperGraphLink,
     /// Decoder logit output link.
-    pub decoder_logit_link: SuperGraphLinkTensor,
+    pub decoder_logit_link: SuperGraphLink,
     /// Cache key for RNN-style autoregressive decoding.
-    pub decoder_cache_key_link: SuperGraphLinkHash,
+    pub decoder_cache_key_link: SuperGraphLink,
 
     /// Tokenizer for decoding output tokens to text.
     pub tokenizer: TokenizerInfo,

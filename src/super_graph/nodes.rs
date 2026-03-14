@@ -10,8 +10,7 @@ use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::observer::MilliOpGraphObserver;
 use crate::numeric_tensor::NumericTensor;
 use crate::super_graph::links::{
-    SuperGraphAnyLink, SuperGraphLink, SuperGraphLinkDouble, SuperGraphLinkHash,
-    SuperGraphLinkString, SuperGraphLinkTensor, SuperGraphLinkTensorMap, SuperGraphLinkTokenizer,
+    SuperGraphAnyLink, SuperGraphLink, SuperGraphLinkDouble, SuperGraphLinkKind,
     SuperGraphLinkTriple,
 };
 use crate::super_graph::observer::SuperGraphObserver;
@@ -97,19 +96,19 @@ pub struct ModelReference {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SuperGraphNodeModelExecution {
     global_id: GlobalId,
-    tensor_map: SuperGraphLinkTensorMap,
+    tensor_map: SuperGraphLink,
     pub symbolic_graph_id: usize, // Which graph (passed to
-    tensor_inputs: Vec<(SuperGraphLinkTensor, String)>,
-    tensor_outputs: Vec<(String, SuperGraphLinkTensor)>,
+    tensor_inputs: Vec<(SuperGraphLink, String)>,
+    tensor_outputs: Vec<(String, SuperGraphLink)>,
 }
 
 impl SuperGraphNodeModelExecution {
     pub fn new(
         rng: &mut impl RngCore,
-        tensor_map: SuperGraphLinkTensorMap,
+        tensor_map: SuperGraphLink,
         symbolic_graph_id: usize,
-        tensor_inputs: Vec<(SuperGraphLinkTensor, String)>,
-        tensor_outputs: Vec<(String, SuperGraphLinkTensor)>,
+        tensor_inputs: Vec<(SuperGraphLink, String)>,
+        tensor_outputs: Vec<(String, SuperGraphLink)>,
     ) -> Self {
         Self {
             global_id: GlobalId::new(rng),
@@ -318,7 +317,7 @@ impl SuperGraphNode for SuperGraphNodeModelExecution {
 pub struct SuperGraphNodeTokenizerLoad {
     global_id: GlobalId,
     info: TokenizerInfo,
-    output: SuperGraphLinkTokenizer,
+    output: SuperGraphLink,
 }
 
 impl SuperGraphNodeTokenizerLoad {
@@ -330,7 +329,7 @@ impl SuperGraphNodeTokenizerLoad {
         Self {
             global_id: GlobalId::new(rng),
             info,
-            output: SuperGraphLinkTokenizer::new(rng),
+            output: SuperGraphLink::new(SuperGraphLinkKind::Tokenizer, rng),
         }
     }
 
@@ -338,14 +337,14 @@ impl SuperGraphNodeTokenizerLoad {
         builder: &mut SuperGraphBuilder,
         info: TokenizerInfo,
         rng: &mut impl RngCore,
-    ) -> SuperGraphLinkTokenizer {
+    ) -> SuperGraphLink {
         let node = Self::new(builder, info, rng);
         let output = node.get_tokenizer_output();
         builder.add_node(node.to_any());
         output
     }
 
-    pub fn get_tokenizer_output(&self) -> SuperGraphLinkTokenizer {
+    pub fn get_tokenizer_output(&self) -> SuperGraphLink {
         self.output
     }
 }
@@ -382,39 +381,39 @@ impl SuperGraphNode for SuperGraphNodeTokenizerLoad {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SuperGraphNodeTokenizerEncode {
     global_id: GlobalId,
-    tokenizer: SuperGraphLinkTokenizer,
-    text_input: SuperGraphLinkString,
-    tensor_output: SuperGraphLinkTensor,
+    tokenizer: SuperGraphLink,
+    text_input: SuperGraphLink,
+    tensor_output: SuperGraphLink,
 }
 
 impl SuperGraphNodeTokenizerEncode {
     pub fn new(
         _builder: &mut SuperGraphBuilder,
-        tokenizer: SuperGraphLinkTokenizer,
-        text_input: SuperGraphLinkString,
+        tokenizer: SuperGraphLink,
+        text_input: SuperGraphLink,
         rng: &mut impl RngCore,
     ) -> Self {
         Self {
             global_id: GlobalId::new(rng),
             tokenizer,
             text_input,
-            tensor_output: SuperGraphLinkTensor::new(rng),
+            tensor_output: SuperGraphLink::new(SuperGraphLinkKind::Tensor, rng),
         }
     }
 
     pub fn new_and_add(
         builder: &mut SuperGraphBuilder,
-        tokenizer: SuperGraphLinkTokenizer,
-        text_input: SuperGraphLinkString,
+        tokenizer: SuperGraphLink,
+        text_input: SuperGraphLink,
         rng: &mut impl RngCore,
-    ) -> SuperGraphLinkTensor {
+    ) -> SuperGraphLink {
         let node = Self::new(builder, tokenizer, text_input, rng);
         let output = node.get_tensor_output();
         builder.add_node(node.to_any());
         output
     }
 
-    pub fn get_tensor_output(&self) -> SuperGraphLinkTensor {
+    pub fn get_tensor_output(&self) -> SuperGraphLink {
         self.tensor_output
     }
 }
@@ -466,34 +465,34 @@ impl SuperGraphNode for SuperGraphNodeTokenizerEncode {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SuperGraphNodeTokenizerDecode {
     global_id: GlobalId,
-    tokenizer: SuperGraphLinkTokenizer,
-    tensor_input: SuperGraphLinkTensor,
-    text_output: SuperGraphLinkString,
+    tokenizer: SuperGraphLink,
+    tensor_input: SuperGraphLink,
+    text_output: SuperGraphLink,
 }
 
 impl SuperGraphNodeTokenizerDecode {
     pub fn new(
         _builder: &mut SuperGraphBuilder,
-        tokenizer: SuperGraphLinkTokenizer,
-        tensor_input: SuperGraphLinkTensor,
+        tokenizer: SuperGraphLink,
+        tensor_input: SuperGraphLink,
         rng: &mut impl RngCore,
     ) -> Self {
         Self {
             global_id: GlobalId::new(rng),
             tokenizer,
             tensor_input,
-            text_output: SuperGraphLinkString::new(rng),
+            text_output: SuperGraphLink::new(SuperGraphLinkKind::String, rng),
         }
     }
-    pub fn get_string_output(&self) -> SuperGraphLinkString {
+    pub fn get_string_output(&self) -> SuperGraphLink {
         self.text_output
     }
     pub fn new_and_add(
         builder: &mut SuperGraphBuilder,
-        tokenizer: SuperGraphLinkTokenizer,
-        tensor_input: SuperGraphLinkTensor,
+        tokenizer: SuperGraphLink,
+        tensor_input: SuperGraphLink,
         rng: &mut impl RngCore,
-    ) -> SuperGraphLinkString {
+    ) -> SuperGraphLink {
         let node = Self::new(builder, tokenizer, tensor_input, rng);
         let output = node.get_string_output();
         builder.add_node(node.to_any());
@@ -621,7 +620,7 @@ impl SuperGraphNode for SuperGraphNodeMilliOpGraph {
                 inputs.insert(
                     input,
                     data.tensors
-                        .get(&SuperGraphLinkTensor(input))
+                        .get(&SuperGraphLink::tensor(input))
                         .unwrap()
                         .clone(),
                 );
@@ -638,7 +637,7 @@ impl SuperGraphNode for SuperGraphNodeMilliOpGraph {
             .graph
             .eval(&inputs, &mut observer, context.eval_backend)?;
         data.tensors
-            .extend(res.map(|(k, v)| (SuperGraphLinkTensor(k), v)));
+            .extend(res.map(|(k, v)| (SuperGraphLink::tensor(k), v)));
         Ok(())
     }
     fn op_kind(&self) -> String {
@@ -648,14 +647,14 @@ impl SuperGraphNode for SuperGraphNodeMilliOpGraph {
         Box::new(
             self.graph
                 .input_link_ids()
-                .map(|(a, _b)| SuperGraphLinkTensor(a).to_any()),
+                .map(|(a, _b)| SuperGraphLink::tensor(a).to_any()),
         )
     }
     fn outputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
         Box::new(
             self.graph
                 .output_link_ids()
-                .map(|(a, _b)| SuperGraphLinkTensor(a).to_any()),
+                .map(|(a, _b)| SuperGraphLink::tensor(a).to_any()),
         )
     }
     fn global_id(&self) -> GlobalId {
@@ -667,11 +666,11 @@ impl SuperGraphNode for SuperGraphNodeMilliOpGraph {
 pub struct SuperGraphNodeScan {
     global_id: GlobalId,
     inner_graph: SuperGraph,
-    iteration_count: SuperGraphLinkTensor,
+    iteration_count: SuperGraphLink,
     simple_inputs: Vec<SuperGraphLinkDouble>,
     state_links: Vec<SuperGraphLinkTriple>,
-    scan_inputs: Vec<(SuperGraphLinkTensor, SuperGraphLinkTensor, u32)>,
-    scan_outputs: Vec<(SuperGraphLinkTensor, SuperGraphLinkTensor, u32)>,
+    scan_inputs: Vec<(SuperGraphLink, SuperGraphLink, u32)>,
+    scan_outputs: Vec<(SuperGraphLink, SuperGraphLink, u32)>,
     simple_outputs: Vec<SuperGraphLinkDouble>,
 }
 
@@ -679,11 +678,11 @@ impl SuperGraphNodeScan {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         inner_graph: SuperGraph,
-        iteration_count: SuperGraphLinkTensor,
+        iteration_count: SuperGraphLink,
         simple_inputs: Vec<SuperGraphLinkDouble>,
         state_links: Vec<SuperGraphLinkTriple>,
-        scan_inputs: Vec<(SuperGraphLinkTensor, SuperGraphLinkTensor, u32)>,
-        scan_outputs: Vec<(SuperGraphLinkTensor, SuperGraphLinkTensor, u32)>,
+        scan_inputs: Vec<(SuperGraphLink, SuperGraphLink, u32)>,
+        scan_outputs: Vec<(SuperGraphLink, SuperGraphLink, u32)>,
         simple_outputs: Vec<SuperGraphLinkDouble>,
         rng: &mut impl RngCore,
     ) -> Self {
@@ -735,61 +734,7 @@ impl SuperGraphNode for SuperGraphNodeScan {
         let simple_inputs = {
             let mut simple_inputs = SuperGraphData::new();
             for link in &self.simple_inputs {
-                match link {
-                    SuperGraphLinkDouble::Tensor(input, output) => {
-                        simple_inputs.tensors.insert(
-                            *output,
-                            data.tensors
-                                .get(input)
-                                .ok_or(SuperGraphError::MissingLinkError(format!(
-                                    ": scan simple_input tensor {:?}",
-                                    input
-                                )))?
-                                .clone(),
-                        );
-                    }
-                    SuperGraphLinkDouble::String(input, output) => {
-                        simple_inputs.strings.insert(
-                            *output,
-                            data.strings
-                                .get(input)
-                                .ok_or(SuperGraphError::MissingLinkError(format!(
-                                    ": scan simple_input string {:?}",
-                                    input
-                                )))?
-                                .clone(),
-                        );
-                    }
-                    SuperGraphLinkDouble::TensorMap(input, output) => {
-                        simple_inputs.tensor_maps.insert(
-                            *output,
-                            *data.tensor_maps.get(input).ok_or(
-                                SuperGraphError::MissingLinkError(format!(
-                                    ": scan simple_input tensor_map {:?}",
-                                    input
-                                )),
-                            )?,
-                        );
-                    }
-                    SuperGraphLinkDouble::Tokenizer(input, output) => {
-                        simple_inputs.tokenizers.insert(
-                            *output,
-                            data.tokenizers
-                                .get(input)
-                                .ok_or(SuperGraphError::MissingLinkError(String::new()))?
-                                .clone(),
-                        );
-                    }
-                    SuperGraphLinkDouble::Hash(input, output) => {
-                        simple_inputs.hashes.insert(
-                            *output,
-                            *data
-                                .hashes
-                                .get(input)
-                                .ok_or(SuperGraphError::MissingLinkError(String::new()))?,
-                        );
-                    }
-                }
+                simple_inputs.copy_link_from(data, link.first(), link.second())?;
             }
             simple_inputs
         };
@@ -797,53 +742,7 @@ impl SuperGraphNode for SuperGraphNodeScan {
         let mut state_values = {
             let mut state_values = SuperGraphData::new();
             for link in &self.state_links {
-                match link {
-                    SuperGraphLinkTriple::Tensor(initial, inner_input, _inner_output) => {
-                        state_values.tensors.insert(
-                            *inner_input,
-                            data.tensors
-                                .get(initial)
-                                .ok_or(SuperGraphError::MissingLinkError(String::new()))?
-                                .clone(),
-                        );
-                    }
-                    SuperGraphLinkTriple::String(initial, inner_input, _inner_output) => {
-                        state_values.strings.insert(
-                            *inner_input,
-                            data.strings
-                                .get(initial)
-                                .ok_or(SuperGraphError::MissingLinkError(String::new()))?
-                                .clone(),
-                        );
-                    }
-                    SuperGraphLinkTriple::TensorMap(initial, inner_input, _inner_output) => {
-                        state_values.tensor_maps.insert(
-                            *inner_input,
-                            *data
-                                .tensor_maps
-                                .get(initial)
-                                .ok_or(SuperGraphError::MissingLinkError(String::new()))?,
-                        );
-                    }
-                    SuperGraphLinkTriple::Tokenizer(initial, inner_input, _inner_output) => {
-                        state_values.tokenizers.insert(
-                            *inner_input,
-                            data.tokenizers
-                                .get(initial)
-                                .ok_or(SuperGraphError::MissingLinkError(String::new()))?
-                                .clone(),
-                        );
-                    }
-                    SuperGraphLinkTriple::Hash(initial, inner_input, _inner_output) => {
-                        state_values.hashes.insert(
-                            *inner_input,
-                            *data
-                                .hashes
-                                .get(initial)
-                                .ok_or(SuperGraphError::MissingLinkError(String::new()))?,
-                        );
-                    }
-                }
+                state_values.copy_link_from(data, link.first(), link.second())?;
             }
             state_values
         };
@@ -902,56 +801,7 @@ impl SuperGraphNode for SuperGraphNodeScan {
             state_values = {
                 let mut state_values = SuperGraphData::new();
                 for link in &self.state_links {
-                    match link {
-                        SuperGraphLinkTriple::Tensor(_initial, inner_input, inner_output) => {
-                            state_values.tensors.insert(
-                                *inner_input,
-                                iter_outputs
-                                    .tensors
-                                    .get(inner_output)
-                                    .ok_or(SuperGraphError::MissingLinkError(String::new()))?
-                                    .clone(),
-                            );
-                        }
-                        SuperGraphLinkTriple::String(_initial, inner_input, inner_output) => {
-                            state_values.strings.insert(
-                                *inner_input,
-                                iter_outputs
-                                    .strings
-                                    .get(inner_output)
-                                    .ok_or(SuperGraphError::MissingLinkError(String::new()))?
-                                    .clone(),
-                            );
-                        }
-                        SuperGraphLinkTriple::Tokenizer(_initial, inner_input, inner_output) => {
-                            state_values.tokenizers.insert(
-                                *inner_input,
-                                iter_outputs
-                                    .tokenizers
-                                    .get(inner_output)
-                                    .ok_or(SuperGraphError::MissingLinkError(String::new()))?
-                                    .clone(),
-                            );
-                        }
-                        SuperGraphLinkTriple::TensorMap(_initial, inner_input, inner_output) => {
-                            state_values.tensor_maps.insert(
-                                *inner_input,
-                                *iter_outputs
-                                    .tensor_maps
-                                    .get(inner_output)
-                                    .ok_or(SuperGraphError::MissingLinkError(String::new()))?,
-                            );
-                        }
-                        SuperGraphLinkTriple::Hash(_initial, inner_input, inner_output) => {
-                            state_values.hashes.insert(
-                                *inner_input,
-                                *iter_outputs
-                                    .hashes
-                                    .get(inner_output)
-                                    .ok_or(SuperGraphError::MissingLinkError(String::new()))?,
-                            );
-                        }
-                    }
+                    state_values.copy_link_from(&iter_outputs, link.third(), link.second())?;
                 }
                 state_values
             };
@@ -973,76 +823,13 @@ impl SuperGraphNode for SuperGraphNodeScan {
         };
 
         for link in &self.simple_outputs {
-            match link {
-                SuperGraphLinkDouble::Tensor(input, output) => {
-                    output_data.tensors.insert(
-                        *output,
-                        prev_iter_outputs
-                            .ok_or(SuperGraphError::InvalidInputError(
-                                "scan simple_outputs are unavailable when iteration_count is 0"
-                                    .to_string(),
-                            ))?
-                            .tensors
-                            .get(input)
-                            .ok_or(SuperGraphError::MissingLinkError(String::new()))?
-                            .clone(),
-                    );
-                }
-                SuperGraphLinkDouble::String(input, output) => {
-                    output_data.strings.insert(
-                        *output,
-                        prev_iter_outputs
-                            .ok_or(SuperGraphError::InvalidInputError(
-                                "scan simple_outputs are unavailable when iteration_count is 0"
-                                    .to_string(),
-                            ))?
-                            .strings
-                            .get(input)
-                            .ok_or(SuperGraphError::MissingLinkError(String::new()))?
-                            .clone(),
-                    );
-                }
-                SuperGraphLinkDouble::Tokenizer(input, output) => {
-                    output_data.tokenizers.insert(
-                        *output,
-                        prev_iter_outputs
-                            .ok_or(SuperGraphError::InvalidInputError(
-                                "scan simple_outputs are unavailable when iteration_count is 0"
-                                    .to_string(),
-                            ))?
-                            .tokenizers
-                            .get(input)
-                            .ok_or(SuperGraphError::MissingLinkError(String::new()))?
-                            .clone(),
-                    );
-                }
-                SuperGraphLinkDouble::TensorMap(input, output) => {
-                    output_data.tensor_maps.insert(
-                        *output,
-                        *prev_iter_outputs
-                            .ok_or(SuperGraphError::InvalidInputError(
-                                "scan simple_outputs are unavailable when iteration_count is 0"
-                                    .to_string(),
-                            ))?
-                            .tensor_maps
-                            .get(input)
-                            .ok_or(SuperGraphError::MissingLinkError(String::new()))?,
-                    );
-                }
-                SuperGraphLinkDouble::Hash(input, output) => {
-                    output_data.hashes.insert(
-                        *output,
-                        *prev_iter_outputs
-                            .ok_or(SuperGraphError::InvalidInputError(
-                                "scan simple_outputs are unavailable when iteration_count is 0"
-                                    .to_string(),
-                            ))?
-                            .hashes
-                            .get(input)
-                            .ok_or(SuperGraphError::MissingLinkError(String::new()))?,
-                    );
-                }
-            }
+            output_data.copy_link_from(
+                prev_iter_outputs.ok_or(SuperGraphError::InvalidInputError(
+                    "scan simple_outputs are unavailable when iteration_count is 0".to_string(),
+                ))?,
+                link.first(),
+                link.second(),
+            )?;
         }
 
         for (link, (parts, axis)) in output_scan_tensor_parts {
@@ -1105,20 +892,20 @@ impl SuperGraphNode for SuperGraphNodeScan {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SuperGraphNodeRNNCacheRead {
     global_id: GlobalId,
-    key_input: SuperGraphLinkHash,
-    tokens_input: SuperGraphLinkTensor,
-    tokens_output: SuperGraphLinkTensor,
-    state_outputs: Vec<(String, SuperGraphLinkTensor)>,
-    default_state_inputs: Vec<(String, SuperGraphLinkTensor)>,
+    key_input: SuperGraphLink,
+    tokens_input: SuperGraphLink,
+    tokens_output: SuperGraphLink,
+    state_outputs: Vec<(String, SuperGraphLink)>,
+    default_state_inputs: Vec<(String, SuperGraphLink)>,
 }
 
 impl SuperGraphNodeRNNCacheRead {
     pub fn new(
-        key_input: SuperGraphLinkHash,
-        tokens_input: SuperGraphLinkTensor,
-        tokens_output: SuperGraphLinkTensor,
-        state_outputs: Vec<(String, SuperGraphLinkTensor)>,
-        default_state_inputs: Vec<(String, SuperGraphLinkTensor)>,
+        key_input: SuperGraphLink,
+        tokens_input: SuperGraphLink,
+        tokens_output: SuperGraphLink,
+        state_outputs: Vec<(String, SuperGraphLink)>,
+        default_state_inputs: Vec<(String, SuperGraphLink)>,
         rng: &mut impl RngCore,
     ) -> Self {
         Self {
@@ -1228,16 +1015,16 @@ impl SuperGraphNode for SuperGraphNodeRNNCacheRead {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SuperGraphNodeRNNCacheWrite {
     global_id: GlobalId,
-    key_input: SuperGraphLinkHash,
-    tokens_input: SuperGraphLinkTensor,
-    state_inputs: Vec<(String, SuperGraphLinkTensor)>,
+    key_input: SuperGraphLink,
+    tokens_input: SuperGraphLink,
+    state_inputs: Vec<(String, SuperGraphLink)>,
 }
 
 impl SuperGraphNodeRNNCacheWrite {
     pub fn new(
-        key_input: SuperGraphLinkHash,
-        tokens_input: SuperGraphLinkTensor,
-        state_inputs: Vec<(String, SuperGraphLinkTensor)>,
+        key_input: SuperGraphLink,
+        tokens_input: SuperGraphLink,
+        state_inputs: Vec<(String, SuperGraphLink)>,
         rng: &mut impl RngCore,
     ) -> Self {
         Self {
@@ -1311,18 +1098,18 @@ impl SuperGraphNode for SuperGraphNodeRNNCacheWrite {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SuperGraphNodeTensorCacheRead {
     global_id: GlobalId,
-    key_input: SuperGraphLinkHash,
-    default_input: SuperGraphLinkTensor,
-    value_output: SuperGraphLinkTensor,
-    hit_output: SuperGraphLinkTensor,
+    key_input: SuperGraphLink,
+    default_input: SuperGraphLink,
+    value_output: SuperGraphLink,
+    hit_output: SuperGraphLink,
 }
 
 impl SuperGraphNodeTensorCacheRead {
     pub fn new(
-        key_input: SuperGraphLinkHash,
-        default_input: SuperGraphLinkTensor,
-        value_output: SuperGraphLinkTensor,
-        hit_output: SuperGraphLinkTensor,
+        key_input: SuperGraphLink,
+        default_input: SuperGraphLink,
+        value_output: SuperGraphLink,
+        hit_output: SuperGraphLink,
         rng: &mut impl RngCore,
     ) -> Self {
         Self {
@@ -1386,16 +1173,16 @@ impl SuperGraphNode for SuperGraphNodeTensorCacheRead {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SuperGraphNodeTensorCacheWrite {
     global_id: GlobalId,
-    key_input: SuperGraphLinkHash,
-    value_input: SuperGraphLinkTensor,
-    write_enable_input: SuperGraphLinkTensor,
+    key_input: SuperGraphLink,
+    value_input: SuperGraphLink,
+    write_enable_input: SuperGraphLink,
 }
 
 impl SuperGraphNodeTensorCacheWrite {
     pub fn new(
-        key_input: SuperGraphLinkHash,
-        value_input: SuperGraphLinkTensor,
-        write_enable_input: SuperGraphLinkTensor,
+        key_input: SuperGraphLink,
+        value_input: SuperGraphLink,
+        write_enable_input: SuperGraphLink,
         rng: &mut impl RngCore,
     ) -> Self {
         Self {
@@ -1462,18 +1249,18 @@ impl SuperGraphNode for SuperGraphNodeTensorCacheWrite {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SuperGraphNodeTensorPackCacheRead {
     global_id: GlobalId,
-    key_input: SuperGraphLinkHash,
-    value_outputs: Vec<(String, SuperGraphLinkTensor)>,
-    default_value_inputs: Vec<(String, SuperGraphLinkTensor)>,
-    hit_output: SuperGraphLinkTensor,
+    key_input: SuperGraphLink,
+    value_outputs: Vec<(String, SuperGraphLink)>,
+    default_value_inputs: Vec<(String, SuperGraphLink)>,
+    hit_output: SuperGraphLink,
 }
 
 impl SuperGraphNodeTensorPackCacheRead {
     pub fn new(
-        key_input: SuperGraphLinkHash,
-        value_outputs: Vec<(String, SuperGraphLinkTensor)>,
-        default_value_inputs: Vec<(String, SuperGraphLinkTensor)>,
-        hit_output: SuperGraphLinkTensor,
+        key_input: SuperGraphLink,
+        value_outputs: Vec<(String, SuperGraphLink)>,
+        default_value_inputs: Vec<(String, SuperGraphLink)>,
+        hit_output: SuperGraphLink,
         rng: &mut impl RngCore,
     ) -> Self {
         Self {
@@ -1574,16 +1361,16 @@ impl SuperGraphNode for SuperGraphNodeTensorPackCacheRead {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SuperGraphNodeTensorPackCacheWrite {
     global_id: GlobalId,
-    key_input: SuperGraphLinkHash,
-    value_inputs: Vec<(String, SuperGraphLinkTensor)>,
-    write_enable_input: SuperGraphLinkTensor,
+    key_input: SuperGraphLink,
+    value_inputs: Vec<(String, SuperGraphLink)>,
+    write_enable_input: SuperGraphLink,
 }
 
 impl SuperGraphNodeTensorPackCacheWrite {
     pub fn new(
-        key_input: SuperGraphLinkHash,
-        value_inputs: Vec<(String, SuperGraphLinkTensor)>,
-        write_enable_input: SuperGraphLinkTensor,
+        key_input: SuperGraphLink,
+        value_inputs: Vec<(String, SuperGraphLink)>,
+        write_enable_input: SuperGraphLink,
         rng: &mut impl RngCore,
     ) -> Self {
         Self {

@@ -2,7 +2,6 @@ use super::onnx_bytes_to_model;
 use whisper_tensor::interfaces::{TTSInputConfig, TextToSpeechInterface};
 use whisper_tensor::loader::*;
 use whisper_tensor::super_graph::SuperGraphBuilder;
-use whisper_tensor::super_graph::links::SuperGraphLink;
 use whisper_tensor::super_graph::nodes::{SuperGraphNode, SuperGraphNodeModelExecution};
 
 /// Loader for Piper VITS TTS models (ONNX format).

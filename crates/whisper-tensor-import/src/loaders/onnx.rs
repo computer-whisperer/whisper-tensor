@@ -7,7 +7,6 @@ use whisper_tensor::metadata::TokenizerInfo;
 use whisper_tensor::milli_graph::MilliOpGraph;
 use whisper_tensor::milli_graph::ops::{Cast, Constant, Squeeze, Unsqueeze};
 use whisper_tensor::super_graph::SuperGraphBuilder;
-use whisper_tensor::super_graph::links::SuperGraphLink;
 use whisper_tensor::super_graph::nodes::{
     SuperGraphNode, SuperGraphNodeMilliOpGraph, SuperGraphNodeModelExecution,
 };

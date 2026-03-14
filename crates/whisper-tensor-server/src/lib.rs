@@ -16,9 +16,7 @@ use whisper_tensor::graph::GlobalId;
 use whisper_tensor::interfaces::AnyInterface;
 use whisper_tensor::loader::{ConfigField, ConfigValues};
 use whisper_tensor::numeric_tensor::NumericTensor;
-use whisper_tensor::super_graph::links::{
-    SuperGraphLinkHash, SuperGraphLinkString, SuperGraphLinkTensor, SuperGraphLinkTensorMap,
-};
+use whisper_tensor::super_graph::links::SuperGraphLink;
 use whisper_tensor::super_graph::{SuperGraph, SuperGraphHash};
 use whisper_tensor::symbolic_graph::tensor_store::TensorStoreTensorId;
 
@@ -62,10 +60,10 @@ pub struct SuperGraphRequest {
     pub super_graph: SuperGraph,
     pub use_cache: Option<u64>,
     pub backend_mode: SuperGraphRequestBackendMode,
-    pub string_inputs: HashMap<SuperGraphLinkString, String>,
-    pub hash_inputs: HashMap<SuperGraphLinkHash, SuperGraphHash>,
-    pub tensor_inputs: HashMap<SuperGraphLinkTensor, NDArrayNumericTensor<DynRank>>,
-    pub model_inputs: HashMap<SuperGraphLinkTensorMap, LoadedModelId>,
+    pub string_inputs: HashMap<SuperGraphLink, String>,
+    pub hash_inputs: HashMap<SuperGraphLink, SuperGraphHash>,
+    pub tensor_inputs: HashMap<SuperGraphLink, NDArrayNumericTensor<DynRank>>,
+    pub model_inputs: HashMap<SuperGraphLink, LoadedModelId>,
     pub symbolic_graph_ids: Vec<LoadedModelId>,
     pub subscribed_tensors: Vec<Vec<GlobalId>>,
     pub do_node_execution_reports: bool,
@@ -74,9 +72,9 @@ pub struct SuperGraphRequest {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SuperGraphResponseData {
-    pub string_outputs: HashMap<SuperGraphLinkString, String>,
-    pub hash_outputs: HashMap<SuperGraphLinkHash, SuperGraphHash>,
-    pub tensor_outputs: HashMap<SuperGraphLinkTensor, NDArrayNumericTensor<DynRank>>,
+    pub string_outputs: HashMap<SuperGraphLink, String>,
+    pub hash_outputs: HashMap<SuperGraphLink, SuperGraphHash>,
+    pub tensor_outputs: HashMap<SuperGraphLink, NDArrayNumericTensor<DynRank>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

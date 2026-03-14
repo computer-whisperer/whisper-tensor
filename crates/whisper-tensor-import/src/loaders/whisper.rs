@@ -4,7 +4,6 @@ use whisper_tensor::loader::*;
 use whisper_tensor::metadata::TokenizerInfo;
 use whisper_tensor::model::Model;
 use whisper_tensor::super_graph::SuperGraphBuilder;
-use whisper_tensor::super_graph::links::SuperGraphLink;
 use whisper_tensor::super_graph::nodes::{SuperGraphNode, SuperGraphNodeModelExecution};
 
 use crate::whisper::WhisperConfig;
@@ -181,9 +180,9 @@ fn build_encoder_supergraph(
     rng: &mut impl rand::Rng,
 ) -> (
     whisper_tensor::super_graph::SuperGraph,
-    whisper_tensor::super_graph::links::SuperGraphLinkTensor,
-    whisper_tensor::super_graph::links::SuperGraphLinkTensorMap,
-    whisper_tensor::super_graph::links::SuperGraphLinkTensor,
+    whisper_tensor::super_graph::links::SuperGraphLink,
+    whisper_tensor::super_graph::links::SuperGraphLink,
+    whisper_tensor::super_graph::links::SuperGraphLink,
 ) {
     let mut builder = SuperGraphBuilder::new();
 
@@ -211,11 +210,11 @@ fn build_encoder_supergraph(
 
 struct DecoderSuperGraphResult {
     super_graph: whisper_tensor::super_graph::SuperGraph,
-    token_link: whisper_tensor::super_graph::links::SuperGraphLinkTensor,
-    weights_link: whisper_tensor::super_graph::links::SuperGraphLinkTensorMap,
-    encoder_hidden_link: whisper_tensor::super_graph::links::SuperGraphLinkTensor,
-    logit_link: whisper_tensor::super_graph::links::SuperGraphLinkTensor,
-    cache_key_link: whisper_tensor::super_graph::links::SuperGraphLinkHash,
+    token_link: whisper_tensor::super_graph::links::SuperGraphLink,
+    weights_link: whisper_tensor::super_graph::links::SuperGraphLink,
+    encoder_hidden_link: whisper_tensor::super_graph::links::SuperGraphLink,
+    logit_link: whisper_tensor::super_graph::links::SuperGraphLink,
+    cache_key_link: whisper_tensor::super_graph::links::SuperGraphLink,
 }
 
 /// Build the decoder SuperGraph with RNN-style cache for autoregressive decoding.
@@ -258,23 +257,19 @@ fn build_decoder_supergraph(
     };
 
     // State init links (before cache read)
-    let state_init_links: Vec<(
-        usize,
-        whisper_tensor::super_graph::links::SuperGraphLinkTensor,
-    )> = state_ids
-        .iter()
-        .map(|&id| (id, builder.new_tensor_link(rng)))
-        .collect();
+    let state_init_links: Vec<(usize, whisper_tensor::super_graph::links::SuperGraphLink)> =
+        state_ids
+            .iter()
+            .map(|&id| (id, builder.new_tensor_link(rng)))
+            .collect();
 
     // Cache read node
     let post_cache_tokens = builder.new_tensor_link(rng);
-    let post_cache_state_links: Vec<(
-        usize,
-        whisper_tensor::super_graph::links::SuperGraphLinkTensor,
-    )> = state_ids
-        .iter()
-        .map(|&id| (id, builder.new_tensor_link(rng)))
-        .collect();
+    let post_cache_state_links: Vec<(usize, whisper_tensor::super_graph::links::SuperGraphLink)> =
+        state_ids
+            .iter()
+            .map(|&id| (id, builder.new_tensor_link(rng)))
+            .collect();
 
     {
         let node = SuperGraphNodeRNNCacheRead::new(
@@ -341,23 +336,21 @@ fn build_decoder_supergraph(
     let sub_token_input = sub_builder.new_tensor_link(rng);
     let sub_encoder_hidden = sub_builder.new_tensor_link(rng);
 
-    let sub_state_in: HashMap<usize, whisper_tensor::super_graph::links::SuperGraphLinkTensor> =
+    let sub_state_in: HashMap<usize, whisper_tensor::super_graph::links::SuperGraphLink> =
         state_ids
             .iter()
             .map(|&id| (id, sub_builder.new_tensor_link(rng)))
             .collect();
-    let sub_state_out: HashMap<usize, whisper_tensor::super_graph::links::SuperGraphLinkTensor> =
+    let sub_state_out: HashMap<usize, whisper_tensor::super_graph::links::SuperGraphLink> =
         state_ids
             .iter()
             .map(|&id| (id, sub_builder.new_tensor_link(rng)))
             .collect();
-    let final_state_links: Vec<(
-        usize,
-        whisper_tensor::super_graph::links::SuperGraphLinkTensor,
-    )> = state_ids
-        .iter()
-        .map(|&id| (id, builder.new_tensor_link(rng)))
-        .collect();
+    let final_state_links: Vec<(usize, whisper_tensor::super_graph::links::SuperGraphLink)> =
+        state_ids
+            .iter()
+            .map(|&id| (id, builder.new_tensor_link(rng)))
+            .collect();
 
     // Input processing: cast + unsqueeze token to [1, 1]
     let processed_token = {
@@ -447,7 +440,7 @@ fn build_decoder_supergraph(
     let state_links: Vec<SuperGraphLinkTriple> = post_cache_state_links
         .iter()
         .map(|(id, init_link)| {
-            SuperGraphLinkTriple::Tensor(
+            SuperGraphLinkTriple::new(
                 *init_link,
                 *sub_state_in.get(id).unwrap(),
                 *sub_state_out.get(id).unwrap(),
@@ -457,7 +450,7 @@ fn build_decoder_supergraph(
 
     let final_state_outputs: Vec<SuperGraphLinkDouble> = final_state_links
         .iter()
-        .map(|(id, link)| SuperGraphLinkDouble::Tensor(*sub_state_out.get(id).unwrap(), *link))
+        .map(|(id, link)| SuperGraphLinkDouble::new(*sub_state_out.get(id).unwrap(), *link))
         .collect();
 
     let scan_node = SuperGraphNodeScan::new(
@@ -465,8 +458,8 @@ fn build_decoder_supergraph(
         loop_count_link,
         // simple_inputs: model weights + encoder hidden states
         vec![
-            SuperGraphLinkDouble::TensorMap(model_weights_link, sub_model_link),
-            SuperGraphLinkDouble::Tensor(encoder_hidden_link, sub_encoder_hidden),
+            SuperGraphLinkDouble::new(model_weights_link, sub_model_link),
+            SuperGraphLinkDouble::new(encoder_hidden_link, sub_encoder_hidden),
         ],
         state_links,
         // scan_inputs: token sequence

@@ -10,9 +10,7 @@ use whisper_tensor::milli_graph::ops::{
 use whisper_tensor::model::Model;
 use whisper_tensor::super_graph::cache::SuperGraphTensorCache;
 use whisper_tensor::super_graph::data::SuperGraphData;
-use whisper_tensor::super_graph::links::{
-    SuperGraphLink, SuperGraphLinkString, SuperGraphLinkTensor, SuperGraphLinkTensorMap,
-};
+use whisper_tensor::super_graph::links::{SuperGraphLink, SuperGraphLinkKind};
 use whisper_tensor::super_graph::nodes::{
     SuperGraphNode, SuperGraphNodeMilliOpGraph, SuperGraphNodeModelExecution,
     SuperGraphNodeTokenizerDecode, SuperGraphNodeTokenizerEncode, SuperGraphNodeTokenizerLoad,
@@ -32,8 +30,8 @@ fn main() {
 
     let mut builder = SuperGraphBuilder::new();
 
-    let model_link = SuperGraphLinkTensorMap::new(&mut rng);
-    let text_input_link = SuperGraphLinkString::new(&mut rng);
+    let model_link = SuperGraphLink::new(SuperGraphLinkKind::TensorMap, &mut rng);
+    let text_input_link = SuperGraphLink::new(SuperGraphLinkKind::String, &mut rng);
 
     let tokenizer_link = SuperGraphNodeTokenizerLoad::new_and_add(
         &mut builder,
@@ -52,7 +50,7 @@ fn main() {
     let logit_output = {
         let inputs = vec![(tokens, "input1".to_string())];
         let (outputs, logit_output) = {
-            let tensor = SuperGraphLinkTensor::new(&mut rng);
+            let tensor = SuperGraphLink::new(SuperGraphLinkKind::Tensor, &mut rng);
             let outputs = vec![("output1".to_string(), tensor)];
             (outputs, tensor)
         };
@@ -103,7 +101,7 @@ fn main() {
         let output = Unsqueeze::push_new(&mut milli_graph, output, const_0, &mut rng);
         let mut output_map = HashMap::new();
 
-        let output_tensor = SuperGraphLinkTensor::new(&mut rng);
+        let output_tensor = SuperGraphLink::new(SuperGraphLinkKind::Tensor, &mut rng);
         output_map.insert(output, output_tensor.global_id());
         milli_graph.set_output_map(output_map);
 
