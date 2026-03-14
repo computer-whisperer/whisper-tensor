@@ -221,13 +221,14 @@ fn gemma_rms_norm(
     Ok(out as Arc<dyn Tensor>)
 }
 
+#[allow(clippy::type_complexity)]
 fn make_rope_cache(
     name_prefix: &str,
     theta: f64,
     linear_factor: Option<f64>,
     max_len: usize,
     head_dim: usize,
-) -> Result<(Arc<dyn Tensor>, Arc<dyn Tensor>), Error> {
+) -> Result<(Arc<dyn Tensor>, Arc<dyn Tensor>), crate::onnx_graph::Error> {
     let half_head_dim = head_dim / 2;
     let factor = linear_factor.unwrap_or(1.0);
     let inv_freq: Vec<f64> = (0..half_head_dim)
