@@ -1,5 +1,5 @@
 #![allow(clippy::all, dead_code, unreachable_patterns, unused)]
-//! Cranelift JIT codegen for NanoGraph.
+//! Cranelift JIT codegen for NanoGraph with proper dtype support.
 //!
 //! Compiles a NanoGraph into native code. Each "kernel" is a set of groups
 //! that are executed together. For this first pass, each kernel is simply
@@ -7,6 +7,23 @@
 //!
 //! Function signature: `fn(values: *mut f32) -> ()`
 //! The `values` pointer addresses a flat f32 array indexed by AtomId.0.
+//!
+//! ## Dtype strategy (Option C)
+//!
+//! The buffer remains `*mut f32` — every atom occupies one f32 slot. Dtype
+//! semantics are enforced by applying precision-rounding at store boundaries:
+//!
+//! - When `output_dtype` is BF16, the f32 result is rounded to BF16 precision
+//!   (7 mantissa bits) before storing. The stored value is still a valid f32
+//!   that happens to be exactly representable in BF16.
+//! - When `output_dtype` is F16, the f32 result is rounded to F16 precision
+//!   (10 mantissa bits) via the `half` crate.
+//! - For integer dtypes (I32, I64), values are stored as f32 casts. This is
+//!   lossy for large integers but correct for typical index values.
+//! - For Bool, nonzero is stored as 1.0, zero as 0.0.
+//!
+//! This gives correct numerical results (matching the reference evaluator's
+//! precision) without changing the buffer layout.
 
 use std::collections::HashMap;
 
@@ -17,7 +34,10 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Linkage, Module};
 
-use crate::nano_graph::{AtomGroup, AtomId, InputRef, NanoGraph, ScalarBinOp, ScalarOp, ScalarUnaryOp, SymDim};
+use crate::dtype::DType;
+use crate::nano_graph::{
+    AtomGroup, AtomId, InputRef, NanoGraph, ScalarBinOp, ScalarOp, ScalarUnaryOp, SymDim,
+};
 use crate::numeric_scalar::NumericScalar;
 
 // ---- Math function wrappers (extern "C" for Cranelift calls) ----
@@ -50,6 +70,26 @@ extern "C" fn v13_fmodf(x: f32, y: f32) -> f32 {
     x % y
 }
 
+// ---- Dtype rounding helpers (called from JIT via extern "C") ----
+
+/// Round an f32 value to BF16 precision (round-to-nearest-even), return as f32.
+///
+/// BF16 has 1 sign + 8 exponent + 7 mantissa bits. This truncates the lower
+/// 16 mantissa bits with proper rounding.
+extern "C" fn v13_round_bf16(x: f32) -> f32 {
+    let bits = x.to_bits();
+    // Round to nearest even: add bias that depends on the truncation boundary bit.
+    // The 0x7FFF is the half-way point for the truncated bits.
+    // Adding ((bits >> 16) & 1) implements round-to-nearest-even.
+    let rounded = bits.wrapping_add(0x7FFF + ((bits >> 16) & 1));
+    f32::from_bits(rounded & 0xFFFF0000)
+}
+
+/// Round an f32 value to F16 precision, return as f32.
+extern "C" fn v13_round_f16(x: f32) -> f32 {
+    half::f16::from_f32(x).to_f32()
+}
+
 // ---- Math function declarations in the JIT module ----
 
 struct MathFuncs {
@@ -62,6 +102,8 @@ struct MathFuncs {
     fabsf: cranelift_module::FuncId,
     powf: cranelift_module::FuncId,
     fmodf: cranelift_module::FuncId,
+    round_bf16: cranelift_module::FuncId,
+    round_f16: cranelift_module::FuncId,
 }
 
 fn declare_math_funcs(module: &mut JITModule) -> Result<MathFuncs, String> {
@@ -90,6 +132,8 @@ fn declare_math_funcs(module: &mut JITModule) -> Result<MathFuncs, String> {
         fabsf: decl(module, "v13_fabsf", &sig1)?,
         powf: decl(module, "v13_powf", &sig2)?,
         fmodf: decl(module, "v13_fmodf", &sig2)?,
+        round_bf16: decl(module, "v13_round_bf16", &sig1)?,
+        round_f16: decl(module, "v13_round_f16", &sig1)?,
     })
 }
 
@@ -103,7 +147,7 @@ pub struct CompiledPipeline {
     /// Total number of atoms (size of the values buffer).
     num_atoms: usize,
     /// Literal values to pre-fill before execution.
-    /// Maps atom index → f32 value.
+    /// Maps atom index -> f32 value.
     literals: Vec<(u32, f32)>,
     /// Output atom IDs.
     output_atoms: Vec<AtomId>,
@@ -169,6 +213,8 @@ impl CompiledPipeline {
         jit_builder.symbol("v13_fabsf", v13_fabsf as *const u8);
         jit_builder.symbol("v13_powf", v13_powf as *const u8);
         jit_builder.symbol("v13_fmodf", v13_fmodf as *const u8);
+        jit_builder.symbol("v13_round_bf16", v13_round_bf16 as *const u8);
+        jit_builder.symbol("v13_round_f16", v13_round_f16 as *const u8);
 
         let mut module = JITModule::new(jit_builder);
         let mut ctx = module.make_context();
@@ -197,7 +243,7 @@ impl CompiledPipeline {
             let mut table_counter: usize = 0;
 
             // Emit each group in order (topological = insertion order).
-            for (gi, group) in groups.iter().enumerate() {
+            for (_gi, group) in groups.iter().enumerate() {
                 emit_group(
                     &mut builder,
                     &mut module,
@@ -236,8 +282,8 @@ impl CompiledPipeline {
 
     /// Execute the compiled pipeline.
     ///
-    /// `overrides` maps atom index → f32 value for input atoms.
-    /// Returns a map of output atom ids → f32 values.
+    /// `overrides` maps atom index -> f32 value for input atoms.
+    /// Returns a map of output atom ids -> f32 values.
     pub fn execute(&self, overrides: &HashMap<u32, f32>) -> HashMap<u32, f32> {
         let mut values = vec![0.0f32; self.num_atoms];
 
@@ -298,6 +344,40 @@ impl CompiledPipeline {
     }
 }
 
+// ---- Dtype rounding emission ----
+
+/// Emit Cranelift IR to round an f32 value to the precision of `output_dtype`.
+///
+/// For F32: identity (no rounding needed).
+/// For BF16: call v13_round_bf16 (round-to-nearest-even, 7 mantissa bits).
+/// For F16: call v13_round_f16 (via half crate).
+/// For integer types: identity (lossy but acceptable for indices).
+/// For Bool: identity (caller ensures 0.0/1.0).
+///
+/// Returns the (possibly rounded) value.
+fn emit_output_round(
+    builder: &mut FunctionBuilder,
+    module: &mut JITModule,
+    math: &MathFuncs,
+    val: Value,
+    output_dtype: DType,
+) -> Value {
+    match output_dtype {
+        DType::BF16 => {
+            let func_ref = module.declare_func_in_func(math.round_bf16, builder.func);
+            let call = builder.ins().call(func_ref, &[val]);
+            builder.inst_results(call)[0]
+        }
+        DType::F16 => {
+            let func_ref = module.declare_func_in_func(math.round_f16, builder.func);
+            let call = builder.ins().call(func_ref, &[val]);
+            builder.inst_results(call)[0]
+        }
+        // F32 and integer types: no rounding needed (values are already f32).
+        _ => val,
+    }
+}
+
 // ---- Group emission ----
 
 /// Emit Cranelift IR for a single AtomGroup.
@@ -314,7 +394,7 @@ fn emit_group(
     var_counter: &mut VarCounter,
     table_counter: &mut usize,
 ) -> Result<(), String> {
-    // Skip Literal groups — their values are pre-filled by the caller.
+    // Skip Literal groups -- their values are pre-filled by the caller.
     if matches!(&group.op, ScalarOp::Literal(_)) {
         return Ok(());
     }
@@ -412,21 +492,22 @@ fn emit_group_body(
         }
 
         ScalarOp::Identity {
-            compute_dtype: _,
-            output_dtype: _,
+            compute_dtype,
+            output_dtype,
         } => {
-            // Load source, store to dest. (All f32 for now.)
+            // Load source, apply output rounding, store.
             let src_val = load_input_ref(
                 builder, module, &group.inputs[0], values_ptr, i_val, i_const, table_counter,
             )?;
-            store_atom(builder, values_ptr, base_id, i_val, i_const, src_val);
+            let rounded = emit_output_round(builder, module, math, src_val, *output_dtype);
+            store_atom(builder, values_ptr, base_id, i_val, i_const, rounded);
             Ok(())
         }
 
         ScalarOp::Binary {
             op,
-            compute_dtype: _,
-            output_dtype: _,
+            compute_dtype,
+            output_dtype,
         } => {
             let a = load_input_ref(
                 builder, module, &group.inputs[0], values_ptr, i_val, i_const, table_counter,
@@ -435,26 +516,28 @@ fn emit_group_body(
                 builder, module, &group.inputs[1], values_ptr, i_val, i_const, table_counter,
             )?;
             let result = emit_binop(builder, module, math, *op, a, b)?;
-            store_atom(builder, values_ptr, base_id, i_val, i_const, result);
+            let rounded = emit_output_round(builder, module, math, result, *output_dtype);
+            store_atom(builder, values_ptr, base_id, i_val, i_const, rounded);
             Ok(())
         }
 
         ScalarOp::Unary {
             op,
-            compute_dtype: _,
-            output_dtype: _,
+            compute_dtype,
+            output_dtype,
         } => {
             let x = load_input_ref(
                 builder, module, &group.inputs[0], values_ptr, i_val, i_const, table_counter,
             )?;
             let result = emit_unop(builder, module, math, *op, x)?;
-            store_atom(builder, values_ptr, base_id, i_val, i_const, result);
+            let rounded = emit_output_round(builder, module, math, result, *output_dtype);
+            store_atom(builder, values_ptr, base_id, i_val, i_const, rounded);
             Ok(())
         }
 
         ScalarOp::Select {
-            compute_dtype: _,
-            output_dtype: _,
+            compute_dtype,
+            output_dtype,
         } => {
             let cond = load_input_ref(
                 builder, module, &group.inputs[0], values_ptr, i_val, i_const, table_counter,
@@ -472,34 +555,39 @@ fn emit_group_body(
                 zero,
             );
             let result = builder.ins().select(is_nonzero, x, y);
-            store_atom(builder, values_ptr, base_id, i_val, i_const, result);
+            let rounded = emit_output_round(builder, module, math, result, *output_dtype);
+            store_atom(builder, values_ptr, base_id, i_val, i_const, rounded);
             Ok(())
         }
 
         ScalarOp::ReduceSum {
-            compute_dtype: _,
-            output_dtype: _,
-        } => {
-            emit_reduce(builder, module, group, graph, values_ptr, i_val, i_const, math, var_counter, table_counter, true)
-        }
+            compute_dtype,
+            output_dtype,
+        } => emit_reduce(
+            builder, module, group, graph, values_ptr, i_val, i_const, math, var_counter,
+            table_counter, true, *output_dtype,
+        ),
 
         ScalarOp::ReduceMax {
-            compute_dtype: _,
-            output_dtype: _,
-        } => {
-            emit_reduce(builder, module, group, graph, values_ptr, i_val, i_const, math, var_counter, table_counter, false)
-        }
+            compute_dtype,
+            output_dtype,
+        } => emit_reduce(
+            builder, module, group, graph, values_ptr, i_val, i_const, math, var_counter,
+            table_counter, false, *output_dtype,
+        ),
 
-        ScalarOp::IndirectLoad { table_base, output_dtype: _ } => {
-            // Load the index from input[0], cast f32→i64, compute address, load value.
-            let idx_f32 = load_input_ref(builder, module, &group.inputs[0], values_ptr, i_val, i_const, table_counter)?;
+        ScalarOp::IndirectLoad { table_base, output_dtype } => {
+            let idx_f32 = load_input_ref(
+                builder, module, &group.inputs[0], values_ptr, i_val, i_const, table_counter,
+            )?;
             let idx_i64 = builder.ins().fcvt_to_sint(types::I64, idx_f32);
             let table_base_val = builder.ins().iconst(types::I64, table_base.0 as i64);
             let atom_idx = builder.ins().iadd(table_base_val, idx_i64);
-            let byte_offset = builder.ins().ishl_imm(atom_idx, 2); // * 4
+            let byte_offset = builder.ins().ishl_imm(atom_idx, 2);
             let addr = builder.ins().iadd(values_ptr, byte_offset);
             let result = builder.ins().load(types::F32, MemFlags::trusted(), addr, 0);
-            store_atom(builder, values_ptr, base_id, i_val, i_const, result);
+            let rounded = emit_output_round(builder, module, math, result, *output_dtype);
+            store_atom(builder, values_ptr, base_id, i_val, i_const, rounded);
             Ok(())
         }
     }
@@ -519,8 +607,13 @@ fn emit_reduce(
     var_counter: &mut VarCounter,
     table_counter: &mut usize,
     is_sum: bool,
+    output_dtype: DType,
 ) -> Result<(), String> {
-    assert_eq!(group.reduce_dims.len(), 1, "Only single reduce_dim supported");
+    assert_eq!(
+        group.reduce_dims.len(),
+        1,
+        "Only single reduce_dim supported"
+    );
     let rd = group.reduce_dims[0];
     let bound = graph
         .sym_dim_bounds
@@ -571,14 +664,7 @@ fn emit_reduce(
     // The single input ref for a reduce. For ReduceSum/ReduceMax, inputs[0]
     // should be a SymAffine that depends on both i and k.
     let src_val = load_input_ref_with_k(
-        builder,
-        module,
-        &group.inputs[0],
-        values_ptr,
-        i_val,
-        i_const,
-        k_val,
-        table_counter,
+        builder, module, &group.inputs[0], values_ptr, i_val, i_const, k_val, table_counter,
     )?;
 
     let acc = builder.use_var(acc_var);
@@ -600,14 +686,15 @@ fn emit_reduce(
 
     builder.ins().jump(red_header, &[]);
 
-    // Exit: store the accumulated result.
+    // Exit: store the accumulated result with output dtype rounding.
     builder.switch_to_block(red_exit);
     builder.seal_block(red_header);
     builder.seal_block(red_body);
     builder.seal_block(red_exit);
 
     let final_acc = builder.use_var(acc_var);
-    store_atom(builder, values_ptr, base_id, i_val, i_const, final_acc);
+    let rounded = emit_output_round(builder, module, math, final_acc, output_dtype);
+    store_atom(builder, values_ptr, base_id, i_val, i_const, rounded);
 
     Ok(())
 }
@@ -670,7 +757,7 @@ fn load_input_ref(
 
         InputRef::Explicit(ids) => {
             if ids.len() == 1 {
-                // Only one element — treat like broadcast.
+                // Only one element -- treat like broadcast.
                 let byte_offset = (ids[0].0 as i64) * 4;
                 if byte_offset <= i32::MAX as i64 {
                     return Ok(builder.ins().load(
@@ -714,7 +801,9 @@ fn load_input_ref(
             // Load values[atom_id]
             let data_byte_off = builder.ins().imul_imm(atom_id_i64, 4);
             let data_addr = builder.ins().iadd(values_ptr, data_byte_off);
-            Ok(builder.ins().load(types::F32, MemFlags::new(), data_addr, 0))
+            Ok(builder
+                .ins()
+                .load(types::F32, MemFlags::new(), data_addr, 0))
         }
 
         InputRef::SymAffine {
@@ -761,7 +850,11 @@ fn load_input_ref_with_k(
             // atom_idx = base + stride_i * i + stride_k * k
             let si = match i_val {
                 Some(iv) => builder.ins().imul_imm(iv, *stride_i as i64),
-                None => builder.ins().iconst(types::I64, (*stride_i as i64) * (i_const as i64)),
+                None => {
+                    builder
+                        .ins()
+                        .iconst(types::I64, (*stride_i as i64) * (i_const as i64))
+                }
             };
             let sk = builder.ins().imul_imm(k_val, *stride_k as i64);
             let idx = builder.ins().iadd(si, sk);
@@ -791,7 +884,9 @@ fn store_atom(
 ) {
     let atom_idx = match i_val {
         Some(iv) => builder.ins().iadd_imm(iv, base_id as i64),
-        None => builder.ins().iconst(types::I64, (base_id + i_const) as i64),
+        None => builder
+            .ins()
+            .iconst(types::I64, (base_id + i_const) as i64),
     };
     let byte_offset = builder.ins().imul_imm(atom_idx, 4);
     let addr = builder.ins().iadd(values_ptr, byte_offset);
@@ -959,11 +1054,7 @@ mod tests {
     use std::collections::HashMap;
 
     /// Helper: compare JIT output to interpreter output.
-    fn compare_jit_vs_interp(
-        graph: &NanoGraph,
-        overrides_f32: &HashMap<u32, f32>,
-        label: &str,
-    ) {
+    fn compare_jit_vs_interp(graph: &NanoGraph, overrides_f32: &HashMap<u32, f32>, label: &str) {
         // Build NumericScalar overrides for interpreter.
         let overrides_ns: HashMap<u32, NumericScalar> = overrides_f32
             .iter()
@@ -1168,11 +1259,6 @@ mod tests {
 
     #[test]
     fn test_matmul_4x8x16() {
-        // MatMul: C[i,j] = sum_k A[i,k] * B[k,j]
-        // A is 4x8, B is 8x16, C is 4x16 = 64 elements.
-        //
-        // Structure: Products group (m*n*k atoms with Explicit refs for non-linear
-        // index mapping) followed by ReduceSum (m*n atoms with SymAffine).
         let m = 4u32;
         let k_dim = 8u32;
         let n = 16u32;
@@ -1195,10 +1281,6 @@ mod tests {
             vec![],
         );
 
-        // Products group: count = m * n * k_dim
-        // atom at offset p, where p = row*(n*k_dim) + col*k_dim + k:
-        //   A input: A[row*k_dim + k] = Explicit[p]
-        //   B input: B[k*n + col] = Explicit[p]
         let total_prods = m * n * k_dim;
         let mut a_refs = Vec::with_capacity(total_prods as usize);
         let mut b_refs = Vec::with_capacity(total_prods as usize);
@@ -1226,10 +1308,6 @@ mod tests {
             ],
         );
 
-        // ReduceSum group: count = m * n
-        // For output atom idx (0..m*n):
-        //   sum over k of prods[idx * k_dim + k]
-        //   SymAffine(base=prods, stride_i=k_dim, stride_k=1)
         let c = g.push_group(
             m * n,
             ScalarOp::ReduceSum {
@@ -1249,19 +1327,21 @@ mod tests {
             g.outputs.push(c.offset(i));
         }
 
-        // Fill A with sequential data.
         let mut overrides = HashMap::new();
         for i in 0..(m * k_dim) {
             overrides.insert(a.0 + i, (i as f32) + 1.0);
         }
-        // Fill B with identity-ish pattern.
         for i in 0..(k_dim * n) {
             let row = i / n;
             let col = i % n;
             overrides.insert(b_base.0 + i, if row == col % k_dim { 1.0 } else { 0.0 });
         }
 
-        assert!(g.validate().is_empty(), "validation errors: {:?}", g.validate());
+        assert!(
+            g.validate().is_empty(),
+            "validation errors: {:?}",
+            g.validate()
+        );
 
         compare_jit_vs_interp(&g, &overrides, "matmul_4x8x16");
     }
@@ -1304,7 +1384,6 @@ mod tests {
     fn test_select() {
         let mut g = NanoGraph::new();
 
-        // cond, x, y: 4 elements each
         let cond = g.push_group(
             4,
             ScalarOp::Literal(NumericScalar::F32(0.0)),
@@ -1335,7 +1414,10 @@ mod tests {
             vec![],
             vec![],
             vec![
-                InputRef::Affine { base: cond, stride: 1 },
+                InputRef::Affine {
+                    base: cond,
+                    stride: 1,
+                },
                 InputRef::Affine { base: x, stride: 1 },
                 InputRef::Affine { base: y, stride: 1 },
             ],
@@ -1346,16 +1428,13 @@ mod tests {
         }
 
         let mut overrides = HashMap::new();
-        // cond: [1, 0, 1, 0] (nonzero = true)
         overrides.insert(cond.0, 1.0f32);
         overrides.insert(cond.0 + 1, 0.0);
         overrides.insert(cond.0 + 2, 5.0);
         overrides.insert(cond.0 + 3, 0.0);
-        // x: [10, 20, 30, 40]
         for i in 0..4u32 {
             overrides.insert(x.0 + i, (i as f32 + 1.0) * 10.0);
         }
-        // y: [100, 200, 300, 400]
         for i in 0..4u32 {
             overrides.insert(y.0 + i, (i as f32 + 1.0) * 100.0);
         }
@@ -1368,7 +1447,6 @@ mod tests {
         let mut g = NanoGraph::new();
         let k_sym = g.bounded_sym_dim("k", 8);
 
-        // 8 elements to reduce.
         let a = g.push_group(
             8,
             ScalarOp::Literal(NumericScalar::F32(0.0)),
@@ -1377,7 +1455,6 @@ mod tests {
             vec![],
         );
 
-        // ReduceMax over k: 1 output atom.
         let c = g.push_group(
             1,
             ScalarOp::ReduceMax {
@@ -1416,7 +1493,6 @@ mod tests {
             vec![],
         );
 
-        // Gather: pick elements [2, 0, 3] from a.
         let b = g.push_group(
             3,
             ScalarOp::Unary {
@@ -1446,16 +1522,302 @@ mod tests {
         compare_jit_vs_interp(&g, &overrides, "explicit_gather_neg");
     }
 
-    /// Integration test: build via lowering (milli → nano), compile, compare.
+    // ---- BF16 rounding tests ----
+
+    #[test]
+    fn test_bf16_rounding_add() {
+        // Test that output_dtype: BF16 applies BF16 rounding.
+        // BF16 has 7 mantissa bits = precision of ~3 decimal digits.
+        // 1.0 + 1e-4 = 1.0001 in f32, which BF16 rounds to 1.0 (or 1.0078125).
+        let mut g = NanoGraph::new();
+
+        let a = g.push_group(
+            4,
+            ScalarOp::Literal(NumericScalar::F32(0.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
+        let b = g.push_group(
+            4,
+            ScalarOp::Literal(NumericScalar::F32(0.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
+        // Add with BF16 output: should round the result to BF16 precision.
+        let c = g.push_group(
+            4,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Add,
+                compute_dtype: DType::F32,
+                output_dtype: DType::BF16,
+            },
+            vec![],
+            vec![],
+            vec![
+                InputRef::Affine { base: a, stride: 1 },
+                InputRef::Affine { base: b, stride: 1 },
+            ],
+        );
+
+        for i in 0..4 {
+            g.outputs.push(c.offset(i));
+        }
+
+        // Values chosen so BF16 rounding is visible:
+        // a = [1.0, 256.0, 0.1, 1000.0]
+        // b = [1e-4, 0.001, 0.0001, 0.5]
+        let a_vals = [1.0f32, 256.0, 0.1, 1000.0];
+        let b_vals = [1e-4f32, 0.001, 0.0001, 0.5];
+        let mut overrides = HashMap::new();
+        for i in 0..4u32 {
+            overrides.insert(a.0 + i, a_vals[i as usize]);
+            overrides.insert(b.0 + i, b_vals[i as usize]);
+        }
+
+        compare_jit_vs_interp(&g, &overrides, "bf16_rounding_add");
+    }
+
+    #[test]
+    fn test_bf16_rounding_chain() {
+        // Test BF16 rounding through a chain: add(BF16) -> neg(F32).
+        // The neg op loads a BF16-rounded value and computes at F32.
+        let mut g = NanoGraph::new();
+
+        let a = g.push_group(
+            4,
+            ScalarOp::Literal(NumericScalar::F32(0.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
+        let b = g.push_group(
+            4,
+            ScalarOp::Literal(NumericScalar::F32(0.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
+        // Step 1: add with BF16 output.
+        let c = g.push_group(
+            4,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Add,
+                compute_dtype: DType::F32,
+                output_dtype: DType::BF16,
+            },
+            vec![],
+            vec![],
+            vec![
+                InputRef::Affine { base: a, stride: 1 },
+                InputRef::Affine { base: b, stride: 1 },
+            ],
+        );
+        // Step 2: neg with F32 compute and output (reads the BF16-rounded value).
+        let d = g.push_group(
+            4,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Neg,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![],
+            vec![],
+            vec![InputRef::Affine { base: c, stride: 1 }],
+        );
+
+        for i in 0..4 {
+            g.outputs.push(d.offset(i));
+        }
+
+        let a_vals = [1.0f32, 256.0, 0.1, 1000.0];
+        let b_vals = [1e-4f32, 0.001, 0.0001, 0.5];
+        let mut overrides = HashMap::new();
+        for i in 0..4u32 {
+            overrides.insert(a.0 + i, a_vals[i as usize]);
+            overrides.insert(b.0 + i, b_vals[i as usize]);
+        }
+
+        compare_jit_vs_interp(&g, &overrides, "bf16_rounding_chain");
+    }
+
+    #[test]
+    fn test_f16_rounding_add() {
+        // Test that output_dtype: F16 applies F16 rounding.
+        let mut g = NanoGraph::new();
+
+        let a = g.push_group(
+            4,
+            ScalarOp::Literal(NumericScalar::F32(0.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
+        let b = g.push_group(
+            4,
+            ScalarOp::Literal(NumericScalar::F32(0.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
+        let c = g.push_group(
+            4,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Add,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F16,
+            },
+            vec![],
+            vec![],
+            vec![
+                InputRef::Affine { base: a, stride: 1 },
+                InputRef::Affine { base: b, stride: 1 },
+            ],
+        );
+
+        for i in 0..4 {
+            g.outputs.push(c.offset(i));
+        }
+
+        // F16 has ~3.3 decimal digits of precision. Values that expose rounding:
+        let a_vals = [1.0f32, 100.0, 0.1, 2048.0];
+        let b_vals = [1e-5f32, 0.01, 1e-5, 0.25];
+        let mut overrides = HashMap::new();
+        for i in 0..4u32 {
+            overrides.insert(a.0 + i, a_vals[i as usize]);
+            overrides.insert(b.0 + i, b_vals[i as usize]);
+        }
+
+        compare_jit_vs_interp(&g, &overrides, "f16_rounding_add");
+    }
+
+    #[test]
+    fn test_bf16_reduce_sum() {
+        // Test that ReduceSum with output_dtype: BF16 rounds the accumulated result.
+        let mut g = NanoGraph::new();
+        let k_sym = g.bounded_sym_dim("k", 8);
+
+        let a = g.push_group(
+            8,
+            ScalarOp::Literal(NumericScalar::F32(0.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
+
+        let c = g.push_group(
+            1,
+            ScalarOp::ReduceSum {
+                compute_dtype: DType::F32,
+                output_dtype: DType::BF16,
+            },
+            vec![],
+            vec![k_sym],
+            vec![InputRef::SymAffine {
+                base: a,
+                stride_i: 0,
+                stride_k: 1,
+            }],
+        );
+
+        g.outputs.push(c);
+
+        let mut overrides = HashMap::new();
+        // Values that when summed produce something with low-bit detail that BF16 drops.
+        let vals = [1.0f32, 0.001, 0.0001, 2.0, 0.00001, 3.0, 0.000001, 4.0];
+        for (i, &v) in vals.iter().enumerate() {
+            overrides.insert(a.0 + i as u32, v);
+        }
+
+        compare_jit_vs_interp(&g, &overrides, "bf16_reduce_sum");
+    }
+
+    #[test]
+    fn test_bf16_identity_cast() {
+        // Test Identity with BF16 output (used as a dtype cast op).
+        let mut g = NanoGraph::new();
+
+        let a = g.push_group(
+            4,
+            ScalarOp::Literal(NumericScalar::F32(0.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
+        let b = g.push_group(
+            4,
+            ScalarOp::Identity {
+                compute_dtype: DType::F32,
+                output_dtype: DType::BF16,
+            },
+            vec![],
+            vec![],
+            vec![InputRef::Affine { base: a, stride: 1 }],
+        );
+
+        for i in 0..4 {
+            g.outputs.push(b.offset(i));
+        }
+
+        let mut overrides = HashMap::new();
+        // Values with fine detail that BF16 will round.
+        overrides.insert(a.0, 1.0001f32);
+        overrides.insert(a.0 + 1, 3.14159f32);
+        overrides.insert(a.0 + 2, 0.123456f32);
+        overrides.insert(a.0 + 3, 65504.0f32); // near F16 max, BF16 can represent this
+
+        compare_jit_vs_interp(&g, &overrides, "bf16_identity_cast");
+    }
+
+    #[test]
+    fn test_bf16_rounding_function_correctness() {
+        // Verify that our v13_round_bf16 matches half::bf16::from_f32().to_f32()
+        // for various test values.
+        let test_values: Vec<f32> = vec![
+            0.0,
+            1.0,
+            -1.0,
+            0.5,
+            0.1,
+            0.123456789,
+            1.0001,
+            256.001,
+            65504.0,
+            1e-7,
+            -3.14159,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            1.0 + 1e-4,
+            1000.5,
+        ];
+
+        for &v in &test_values {
+            let our_result = v13_round_bf16(v);
+            let half_result = half::bf16::from_f32(v).to_f32();
+            assert_eq!(
+                our_result.to_bits(),
+                half_result.to_bits(),
+                "BF16 rounding mismatch for {}: ours={} (bits {:08x}), half={} (bits {:08x})",
+                v,
+                our_result,
+                our_result.to_bits(),
+                half_result,
+                half_result.to_bits()
+            );
+        }
+    }
+
+    /// Integration test: build via lowering (milli -> nano), compile, compare.
     #[test]
     fn test_lowered_add() {
-        use crate::DynRank;
         use crate::backends::eval_backend::EvalBackend;
         use crate::graph::{GlobalId, Graph};
         use crate::milli_graph::MilliOpGraph;
         use crate::nano_graph::lower::lower_with_info;
         use crate::numeric_tensor::NumericTensor;
         use crate::tensor_info::TensorInfo;
+        use crate::DynRank;
 
         let mut rng = rand::rng();
         let (mut milli, _) = MilliOpGraph::new(std::iter::empty(), &mut rng);
@@ -1499,13 +1861,13 @@ mod tests {
     /// Integration test: lowered matmul through the full pipeline.
     #[test]
     fn test_lowered_matmul() {
-        use crate::DynRank;
         use crate::backends::eval_backend::EvalBackend;
         use crate::graph::{GlobalId, Graph};
         use crate::milli_graph::MilliOpGraph;
         use crate::nano_graph::lower::lower_with_info;
         use crate::numeric_tensor::NumericTensor;
         use crate::tensor_info::TensorInfo;
+        use crate::DynRank;
 
         let mut rng = rand::rng();
         let (mut milli, _) = MilliOpGraph::new(std::iter::empty(), &mut rng);

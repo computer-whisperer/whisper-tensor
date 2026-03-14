@@ -4,7 +4,12 @@
 //! Provides:
 //! - `execute_nanograph_naive`: reference executor (all groups in order)
 //! - `execute_nanograph_partitioned`: partitioned executor (kernels in dependency order)
-//! - `run_nano_pipeline`: end-to-end lower → partition → execute → verify
+//! - `run_nano_pipeline`: end-to-end lower -> partition -> execute -> verify
+//!
+//! Precision semantics: each ScalarOp carries compute_dtype and output_dtype.
+//! Inputs are cast to compute_dtype before the operation, and the result is
+//! cast to output_dtype before storing. This matches the reference evaluator
+//! in `src/nano_graph/eval.rs`.
 
 use std::collections::{HashMap, HashSet};
 
@@ -20,14 +25,14 @@ use super::nano_part_b::{partition_nanograph, NanoPartitionResult};
 /// Execute all groups sequentially in index order (topological order).
 /// No partitioning. This is the correctness reference.
 ///
-/// `inputs` maps AtomId.0 → f32 value for Literal overrides / external inputs.
-/// Returns AtomId.0 → computed f32 value for all atoms.
+/// `inputs` maps AtomId.0 -> NumericScalar value for Literal overrides / external inputs.
+/// Returns AtomId.0 -> computed NumericScalar value for all atoms.
 pub fn execute_nanograph_naive(
     graph: &NanoGraph,
-    inputs: &HashMap<u32, f32>,
-) -> HashMap<u32, f32> {
+    inputs: &HashMap<u32, NumericScalar>,
+) -> HashMap<u32, NumericScalar> {
     let num_atoms = graph.num_atoms() as usize;
-    let mut values: Vec<f32> = vec![0.0; num_atoms];
+    let mut values: Vec<NumericScalar> = vec![NumericScalar::F32(0.0); num_atoms];
 
     for group in graph.groups() {
         eval_group(graph, group, inputs, &mut values);
@@ -36,7 +41,7 @@ pub fn execute_nanograph_naive(
     // Collect all atom values into the output map.
     let mut result = HashMap::new();
     for i in 0..num_atoms {
-        result.insert(i as u32, values[i]);
+        result.insert(i as u32, values[i].clone());
     }
     result
 }
@@ -49,15 +54,15 @@ pub fn execute_nanograph_naive(
 /// dependency, then each kernel's groups are executed in topological order
 /// (by group index, since groups are already topologically ordered).
 ///
-/// `inputs` maps AtomId.0 → f32 value for Literal overrides / external inputs.
-/// Returns AtomId.0 → computed f32 value for all atoms.
+/// `inputs` maps AtomId.0 -> NumericScalar value for Literal overrides / external inputs.
+/// Returns AtomId.0 -> computed NumericScalar value for all atoms.
 pub fn execute_nanograph_partitioned(
     graph: &NanoGraph,
     partition: &NanoPartitionResult,
-    inputs: &HashMap<u32, f32>,
-) -> HashMap<u32, f32> {
+    inputs: &HashMap<u32, NumericScalar>,
+) -> HashMap<u32, NumericScalar> {
     let num_atoms = graph.num_atoms() as usize;
-    let mut values: Vec<f32> = vec![0.0; num_atoms];
+    let mut values: Vec<NumericScalar> = vec![NumericScalar::F32(0.0); num_atoms];
     let groups = graph.groups();
 
     // Verify partition covers all groups.
@@ -69,10 +74,6 @@ pub fn execute_nanograph_partitioned(
     all_groups.dedup();
 
     // Execute all groups in global topological order (by group index).
-    // NanoGraph groups are already in topological order, so sorting by index
-    // is correct. The partition assigns groups to kernels for parallelism,
-    // but for sequential correctness we must respect group dependencies
-    // which may cross kernel boundaries.
     for gi in &all_groups {
         let group = &groups[*gi];
         eval_group(graph, group, inputs, &mut values);
@@ -81,7 +82,7 @@ pub fn execute_nanograph_partitioned(
     // Collect all atom values into the output map.
     let mut result = HashMap::new();
     for i in 0..num_atoms {
-        result.insert(i as u32, values[i]);
+        result.insert(i as u32, values[i].clone());
     }
     result
 }
@@ -90,10 +91,10 @@ pub fn execute_nanograph_partitioned(
 // End-to-end pipeline
 // ---------------------------------------------------------------------------
 
-/// Result of the full nano pipeline: lower → partition → execute → verify.
+/// Result of the full nano pipeline: lower -> partition -> execute -> verify.
 pub struct NanoPipelineResult {
     /// Output atom values (from partitioned execution).
-    pub outputs: HashMap<u32, f32>,
+    pub outputs: HashMap<u32, NumericScalar>,
     /// Number of kernels in the partition.
     pub num_kernels: usize,
     /// Maximum absolute error between partitioned and naive execution.
@@ -102,10 +103,10 @@ pub struct NanoPipelineResult {
     pub kernel_sizes: Vec<usize>,
 }
 
-/// Run the full pipeline: partition → execute (partitioned + naive) → compare.
+/// Run the full pipeline: partition -> execute (partitioned + naive) -> compare.
 pub fn run_nano_pipeline(
     graph: &NanoGraph,
-    inputs: &HashMap<u32, f32>,
+    inputs: &HashMap<u32, NumericScalar>,
     parallelism: usize,
 ) -> NanoPipelineResult {
     // Step 1: Partition.
@@ -119,9 +120,9 @@ pub fn run_nano_pipeline(
 
     // Step 4: Compare outputs, compute max_abs_error.
     let mut max_abs_error: f32 = 0.0;
-    for (&atom_id, &naive_val) in &naive_outputs {
-        let part_val = partitioned_outputs.get(&atom_id).copied().unwrap_or(0.0);
-        let err = (naive_val - part_val).abs();
+    for (&atom_id, naive_val) in &naive_outputs {
+        let part_val = partitioned_outputs.get(&atom_id).unwrap_or(&NumericScalar::F32(0.0));
+        let err = (naive_val.to_f64() as f32 - part_val.to_f64() as f32).abs();
         if err > max_abs_error {
             max_abs_error = err;
         }
@@ -143,11 +144,17 @@ pub fn run_nano_pipeline(
 // ---------------------------------------------------------------------------
 
 /// Evaluate all atoms in a single group, storing results in `values`.
+///
+/// Follows the same precision semantics as `src/nano_graph/eval.rs`:
+/// - Inputs are cast to compute_dtype before the operation.
+/// - The result is cast to output_dtype before storing.
+/// - Literal ops store the NumericScalar directly (or override from inputs).
+/// - ReduceSum/ReduceMax accumulate at compute_dtype, then cast to output_dtype.
 fn eval_group(
     graph: &NanoGraph,
     group: &AtomGroup,
-    inputs: &HashMap<u32, f32>,
-    values: &mut [f32],
+    inputs: &HashMap<u32, NumericScalar>,
+    values: &mut [NumericScalar],
 ) {
     let is_reduce = group.op.is_reduce();
 
@@ -167,83 +174,101 @@ fn eval_group(
                 .copied()
                 .expect("Reduce dim must have a bound");
 
-            let mut acc: f32 = match &group.op {
-                ScalarOp::ReduceSum { .. } => 0.0,
-                ScalarOp::ReduceMax { .. } => f32::NEG_INFINITY,
+            let (compute_dtype, output_dtype) = match &group.op {
+                ScalarOp::ReduceSum { compute_dtype, output_dtype } => (*compute_dtype, *output_dtype),
+                ScalarOp::ReduceMax { compute_dtype, output_dtype } => (*compute_dtype, *output_dtype),
+                _ => unreachable!(),
+            };
+
+            let mut acc = match &group.op {
+                ScalarOp::ReduceSum { .. } => NumericScalar::zero_of(compute_dtype),
+                ScalarOp::ReduceMax { .. } => NumericScalar::neg_infinity_of(compute_dtype),
                 _ => unreachable!(),
             };
 
             for k in 0..bound as u32 {
                 let src = group.inputs[0].resolve(i, k);
-                let val = values[src.0 as usize];
+                let val = values[src.0 as usize].cast_to(compute_dtype);
                 acc = match &group.op {
-                    ScalarOp::ReduceSum { .. } => acc + val,
-                    ScalarOp::ReduceMax { .. } => acc.max(val),
+                    ScalarOp::ReduceSum { .. } => acc.add(&val),
+                    ScalarOp::ReduceMax { .. } => acc.scalar_max(&val),
                     _ => unreachable!(),
                 };
             }
 
-            values[atom_idx as usize] = acc;
+            // Cast accumulated result to output dtype before storing.
+            values[atom_idx as usize] = acc.cast_to(output_dtype);
         } else {
             let val = match &group.op {
                 ScalarOp::Literal(scalar) => {
-                    if let Some(&ov) = inputs.get(&atom_idx) {
-                        ov
+                    if let Some(ov) = inputs.get(&atom_idx) {
+                        // Override: cast to the literal's dtype.
+                        ov.cast_to(scalar.dtype())
                     } else {
-                        scalar.to_f64() as f32
+                        scalar.clone()
                     }
                 }
-                ScalarOp::Identity { .. } => {
+                ScalarOp::Identity { compute_dtype, output_dtype } => {
                     let src = group.inputs[0].resolve(i, 0);
-                    values[src.0 as usize]
+                    let x = values[src.0 as usize].cast_to(*compute_dtype);
+                    x.cast_to(*output_dtype)
                 }
-                ScalarOp::Binary { op, .. } => {
-                    let a = values[group.inputs[0].resolve(i, 0).0 as usize];
-                    let b = values[group.inputs[1].resolve(i, 0).0 as usize];
-                    match op {
-                        ScalarBinOp::Add => a + b,
-                        ScalarBinOp::Sub => a - b,
-                        ScalarBinOp::Mul => a * b,
-                        ScalarBinOp::Div => a / b,
-                        ScalarBinOp::Max => a.max(b),
-                        ScalarBinOp::Min => a.min(b),
-                        ScalarBinOp::Mod => a % b,
-                        ScalarBinOp::Pow => a.powf(b),
-                        ScalarBinOp::Equal => if a == b { 1.0 } else { 0.0 },
-                        ScalarBinOp::Greater => if a > b { 1.0 } else { 0.0 },
-                        ScalarBinOp::GreaterOrEqual => if a >= b { 1.0 } else { 0.0 },
-                        ScalarBinOp::Less => if a < b { 1.0 } else { 0.0 },
-                        ScalarBinOp::LessOrEqual => if a <= b { 1.0 } else { 0.0 },
-                        ScalarBinOp::And => if a != 0.0 && b != 0.0 { 1.0 } else { 0.0 },
-                        ScalarBinOp::Or => if a != 0.0 || b != 0.0 { 1.0 } else { 0.0 },
-                        ScalarBinOp::Xor => if (a != 0.0) ^ (b != 0.0) { 1.0 } else { 0.0 },
-                    }
+                ScalarOp::Binary { op, compute_dtype, output_dtype } => {
+                    let a = values[group.inputs[0].resolve(i, 0).0 as usize]
+                        .cast_to(*compute_dtype);
+                    let b = values[group.inputs[1].resolve(i, 0).0 as usize]
+                        .cast_to(*compute_dtype);
+                    let result = match op {
+                        ScalarBinOp::Add => a.add(&b),
+                        ScalarBinOp::Sub => a.sub(&b),
+                        ScalarBinOp::Mul => a.mul(&b),
+                        ScalarBinOp::Div => a.div(&b),
+                        ScalarBinOp::Max => a.scalar_max(&b),
+                        ScalarBinOp::Min => a.scalar_min(&b),
+                        ScalarBinOp::Mod => a.modulo(&b),
+                        ScalarBinOp::Pow => a.pow(&b),
+                        ScalarBinOp::Equal => if a.to_f64() == b.to_f64() { NumericScalar::F32(1.0) } else { NumericScalar::F32(0.0) },
+                        ScalarBinOp::Greater => if a.to_f64() > b.to_f64() { NumericScalar::F32(1.0) } else { NumericScalar::F32(0.0) },
+                        ScalarBinOp::GreaterOrEqual => if a.to_f64() >= b.to_f64() { NumericScalar::F32(1.0) } else { NumericScalar::F32(0.0) },
+                        ScalarBinOp::Less => if a.to_f64() < b.to_f64() { NumericScalar::F32(1.0) } else { NumericScalar::F32(0.0) },
+                        ScalarBinOp::LessOrEqual => if a.to_f64() <= b.to_f64() { NumericScalar::F32(1.0) } else { NumericScalar::F32(0.0) },
+                        ScalarBinOp::And => if a.to_f64() != 0.0 && b.to_f64() != 0.0 { NumericScalar::F32(1.0) } else { NumericScalar::F32(0.0) },
+                        ScalarBinOp::Or => if a.to_f64() != 0.0 || b.to_f64() != 0.0 { NumericScalar::F32(1.0) } else { NumericScalar::F32(0.0) },
+                        ScalarBinOp::Xor => if (a.to_f64() != 0.0) ^ (b.to_f64() != 0.0) { NumericScalar::F32(1.0) } else { NumericScalar::F32(0.0) },
+                    };
+                    result.cast_to(*output_dtype)
                 }
-                ScalarOp::Unary { op, .. } => {
-                    let x = values[group.inputs[0].resolve(i, 0).0 as usize];
-                    match op {
-                        ScalarUnaryOp::Neg => -x,
+                ScalarOp::Unary { op, compute_dtype, output_dtype } => {
+                    let x = values[group.inputs[0].resolve(i, 0).0 as usize]
+                        .cast_to(*compute_dtype);
+                    let result = match op {
+                        ScalarUnaryOp::Neg => x.neg(),
                         ScalarUnaryOp::Abs => x.abs(),
                         ScalarUnaryOp::Exp => x.exp(),
                         ScalarUnaryOp::Ln => x.ln(),
                         ScalarUnaryOp::Sqrt => x.sqrt(),
-                        ScalarUnaryOp::Reciprocal => 1.0 / x,
+                        ScalarUnaryOp::Reciprocal => x.recip(),
                         ScalarUnaryOp::Tanh => x.tanh(),
                         ScalarUnaryOp::Floor => x.floor(),
                         ScalarUnaryOp::Ceil => x.ceil(),
-                    }
+                    };
+                    result.cast_to(*output_dtype)
                 }
-                ScalarOp::Select { .. } => {
-                    let cond = values[group.inputs[0].resolve(i, 0).0 as usize];
-                    if cond != 0.0 {
+                ScalarOp::Select { compute_dtype, output_dtype } => {
+                    let cond = values[group.inputs[0].resolve(i, 0).0 as usize]
+                        .cast_to(*compute_dtype);
+                    let result = if cond.is_nonzero() {
                         values[group.inputs[1].resolve(i, 0).0 as usize]
+                            .cast_to(*compute_dtype)
                     } else {
                         values[group.inputs[2].resolve(i, 0).0 as usize]
-                    }
+                            .cast_to(*compute_dtype)
+                    };
+                    result.cast_to(*output_dtype)
                 }
-                ScalarOp::IndirectLoad { table_base, .. } => {
-                    let idx = values[group.inputs[0].resolve(i, 0).0 as usize];
-                    values[table_base.0 as usize + idx as usize]
+                ScalarOp::IndirectLoad { table_base, output_dtype } => {
+                    let idx = values[group.inputs[0].resolve(i, 0).0 as usize].to_f64() as usize;
+                    values[table_base.0 as usize + idx].cast_to(*output_dtype)
                 }
                 ScalarOp::ReduceSum { .. } | ScalarOp::ReduceMax { .. } => unreachable!(),
             };
@@ -275,8 +300,6 @@ fn find_group_idx_for_atom(
 }
 
 /// Collect representative source atom indices from an InputRef.
-/// For dependency analysis, we don't need ALL atoms, just enough to
-/// identify which groups are referenced.
 fn collect_source_atoms(
     input: &InputRef,
     count: u32,
@@ -294,7 +317,6 @@ fn collect_source_atoms(
             atoms
         }
         InputRef::Explicit(ids) => {
-            // Sample first, last, and a few middle ones to find all source groups.
             let mut atoms: HashSet<u32> = HashSet::new();
             for id in ids {
                 atoms.insert(id.0);
@@ -353,7 +375,6 @@ fn topo_sort_kernels(num_kernels: usize, deps: &[HashSet<usize>]) -> Vec<usize> 
         }
     }
 
-    // If there's a cycle (shouldn't happen), include remaining kernels.
     if order.len() < num_kernels {
         for ki in 0..num_kernels {
             if !order.contains(&ki) {
@@ -384,17 +405,14 @@ mod tests {
     use crate::tensor_info::TensorInfo;
     use crate::DynRank;
 
-    /// Build the inputs map from numeric_overrides (converting NumericScalar → f32).
-    fn overrides_to_f32(overrides: &HashMap<u32, NumericScalar>) -> HashMap<u32, f32> {
-        overrides
-            .iter()
-            .map(|(&k, v)| (k, v.to_f64() as f32))
-            .collect()
+    /// Build the inputs map from numeric_overrides (already NumericScalar).
+    fn overrides_to_ns(overrides: &HashMap<u32, NumericScalar>) -> HashMap<u32, NumericScalar> {
+        overrides.clone()
     }
 
     /// Add tensor values to inputs map for a specific tensor.
     fn add_tensor_inputs(
-        inputs: &mut HashMap<u32, f32>,
+        inputs: &mut HashMap<u32, NumericScalar>,
         tensor_map: &HashMap<GlobalId, crate::nano_graph::lower::TensorAtomMapInfo>,
         tensor_id: GlobalId,
         values: &[f32],
@@ -407,7 +425,7 @@ mod tests {
                 tensor_id
             );
             for (i, &val) in values.iter().enumerate() {
-                inputs.insert(tam.base_id.0 + i as u32, val);
+                inputs.insert(tam.base_id.0 + i as u32, NumericScalar::F32(val));
             }
         }
     }
@@ -445,7 +463,7 @@ mod tests {
         );
 
         // Build inputs: start with numeric_overrides, add tensor values.
-        let mut inputs = overrides_to_f32(&lower_result.numeric_overrides);
+        let mut inputs = overrides_to_ns(&lower_result.numeric_overrides);
         add_tensor_inputs(&mut inputs, &lower_result.tensor_map, a_id, &a_vals);
         add_tensor_inputs(&mut inputs, &lower_result.tensor_map, b_id, &b_vals);
 
@@ -467,7 +485,7 @@ mod tests {
         for i in 0..4u32 {
             let atom_id = c_tam.base_id.0 + i;
             let expected = a_vals[i as usize] + b_vals[i as usize];
-            let got = pipeline.outputs[&atom_id];
+            let got = pipeline.outputs[&atom_id].to_f64() as f32;
             assert!(
                 (expected - got).abs() < 1e-6,
                 "Element {}: expected {} got {}",
@@ -497,8 +515,6 @@ mod tests {
             &mut rng,
         );
 
-        // A=[4,8], B=[8,16] -> C=[4,16]
-        // Use pseudo-random-ish values for A and B.
         let a_vals: Vec<f32> = (0..4 * 8)
             .map(|i| ((i as f32 * 0.37 + 0.13).sin() * 2.0))
             .collect();
@@ -523,7 +539,7 @@ mod tests {
         );
 
         // Build inputs.
-        let mut inputs = overrides_to_f32(&lower_result.numeric_overrides);
+        let mut inputs = overrides_to_ns(&lower_result.numeric_overrides);
         add_tensor_inputs(&mut inputs, &lower_result.tensor_map, a_id, &a_vals);
         add_tensor_inputs(&mut inputs, &lower_result.tensor_map, b_id, &b_vals);
 
@@ -549,7 +565,7 @@ mod tests {
                     expected += a_vals[(row * 8 + k) as usize] * b_vals[(k * 16 + col) as usize];
                 }
                 let atom_id = c_tam.base_id.0 + row * 16 + col;
-                let got = pipeline.outputs[&atom_id];
+                let got = pipeline.outputs[&atom_id].to_f64() as f32;
                 let diff = (expected - got).abs();
                 assert!(
                     diff < 1e-3,
@@ -577,7 +593,6 @@ mod tests {
         let b_id = milli.add_input(&mut rng);
         let bias_id = milli.add_input(&mut rng);
 
-        // MatMul: A[2,3] @ B[3,4] -> C[2,4]
         let c_id = crate::milli_graph::ops::MatMul::push_new_default_precision(
             &mut milli,
             a_id,
@@ -585,7 +600,6 @@ mod tests {
             DType::F32,
             &mut rng,
         );
-        // Add bias: C[2,4] + bias[4] -> D[2,4]
         let d_id = crate::milli_graph::ops::SimpleBinary::add(&mut milli, c_id, bias_id, &mut rng);
 
         let a_vals: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
@@ -611,8 +625,7 @@ mod tests {
             lower_result.unsupported_details
         );
 
-        // Build inputs.
-        let mut inputs = overrides_to_f32(&lower_result.numeric_overrides);
+        let mut inputs = overrides_to_ns(&lower_result.numeric_overrides);
         add_tensor_inputs(&mut inputs, &lower_result.tensor_map, a_id, &a_vals);
         add_tensor_inputs(&mut inputs, &lower_result.tensor_map, b_id, &b_vals);
         add_tensor_inputs(
@@ -635,17 +648,6 @@ mod tests {
             pipeline.max_abs_error
         );
 
-        // Verify against manual computation.
-        // C = A @ B:
-        //   C[0,0] = 1*1 + 2*0 + 3*1 = 4
-        //   C[0,1] = 1*0 + 2*1 + 3*1 = 5
-        //   C[0,2] = 1*0 + 2*1 + 3*1 = 5
-        //   C[0,3] = 1*1 + 2*0 + 3*1 = 4
-        //   C[1,0] = 4*1 + 5*0 + 6*1 = 10
-        //   C[1,1] = 4*0 + 5*1 + 6*1 = 11
-        //   C[1,2] = 4*0 + 5*1 + 6*1 = 11
-        //   C[1,3] = 4*1 + 5*0 + 6*1 = 10
-        // D = C + bias:
         let expected_d: Vec<f32> = vec![
             4.0 + 0.1,
             5.0 + 0.2,
@@ -660,7 +662,7 @@ mod tests {
         let d_tam = lower_result.tensor_map.get(&d_id).unwrap();
         for (i, &exp) in expected_d.iter().enumerate() {
             let atom_id = d_tam.base_id.0 + i as u32;
-            let got = pipeline.outputs[&atom_id];
+            let got = pipeline.outputs[&atom_id].to_f64() as f32;
             let diff = (exp - got).abs();
             assert!(
                 diff < 1e-4,
@@ -710,7 +712,7 @@ mod tests {
 
         let lower_result = lower_with_info(&milli, &info_inputs).unwrap();
 
-        let mut inputs = overrides_to_f32(&lower_result.numeric_overrides);
+        let mut inputs = overrides_to_ns(&lower_result.numeric_overrides);
         add_tensor_inputs(&mut inputs, &lower_result.tensor_map, a_id, &a_vals);
         add_tensor_inputs(&mut inputs, &lower_result.tensor_map, b_id, &b_vals);
 
@@ -734,5 +736,143 @@ mod tests {
             "max_abs_error {} exceeds tolerance",
             pipeline.max_abs_error
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 5: BF16 dtype test
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_bf16_literal_and_compute() {
+        use half::bf16;
+
+        // Build a small graph with BF16 Literal atoms and F32 computation.
+        // This tests: BF16 literals -> cast to F32 for compute -> cast back to F32 output.
+        let mut g = NanoGraph::new();
+
+        // Two BF16 literal groups.
+        let a = g.push_group(
+            4,
+            ScalarOp::Literal(NumericScalar::BF16(bf16::from_f32(1.5))),
+            vec![],
+            vec![],
+            vec![],
+        );
+        let b = g.push_group(
+            4,
+            ScalarOp::Literal(NumericScalar::BF16(bf16::from_f32(2.5))),
+            vec![],
+            vec![],
+            vec![],
+        );
+
+        // Add: cast BF16 inputs to F32 for computation, output as F32.
+        let c = g.push_group(
+            4,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Add,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![],
+            vec![],
+            vec![
+                InputRef::Affine { base: a, stride: 1 },
+                InputRef::Affine { base: b, stride: 1 },
+            ],
+        );
+        g.outputs = vec![c];
+
+        assert!(g.validate().is_empty(), "{:?}", g.validate());
+
+        // No overrides needed -- literals provide the values.
+        let inputs: HashMap<u32, NumericScalar> = HashMap::new();
+
+        // Execute with naive executor.
+        let result = execute_nanograph_naive(&g, &inputs);
+
+        // BF16(1.5) + BF16(2.5) computed in F32 should give F32(4.0).
+        for i in 0..4u32 {
+            let atom_id = c.0 + i;
+            let got = result[&atom_id].to_f64();
+            let expected = 4.0;
+            assert!(
+                (got - expected).abs() < 1e-6,
+                "BF16 add element {}: expected {} got {}",
+                i,
+                expected,
+                got
+            );
+        }
+
+        // Also test with BF16 output dtype.
+        let mut g2 = NanoGraph::new();
+        let a2 = g2.push_group(
+            4,
+            ScalarOp::Literal(NumericScalar::BF16(bf16::from_f32(1.5))),
+            vec![],
+            vec![],
+            vec![],
+        );
+        let b2 = g2.push_group(
+            4,
+            ScalarOp::Literal(NumericScalar::BF16(bf16::from_f32(2.5))),
+            vec![],
+            vec![],
+            vec![],
+        );
+        let c2 = g2.push_group(
+            4,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Add,
+                compute_dtype: DType::F32,
+                output_dtype: DType::BF16,
+            },
+            vec![],
+            vec![],
+            vec![
+                InputRef::Affine { base: a2, stride: 1 },
+                InputRef::Affine { base: b2, stride: 1 },
+            ],
+        );
+        g2.outputs = vec![c2];
+
+        let result2 = execute_nanograph_naive(&g2, &inputs);
+
+        for i in 0..4u32 {
+            let atom_id = c2.0 + i;
+            let val = &result2[&atom_id];
+            // Output should be BF16.
+            assert!(
+                matches!(val, NumericScalar::BF16(_)),
+                "Expected BF16 output, got {:?}",
+                val.dtype()
+            );
+            let got = val.to_f64();
+            let expected = 4.0;
+            // BF16 has limited precision, but 4.0 is exactly representable.
+            assert!(
+                (got - expected).abs() < 0.01,
+                "BF16 output element {}: expected {} got {}",
+                i,
+                expected,
+                got
+            );
+        }
+
+        // Also verify that the NanoEval reference gives the same results.
+        let eval_result = NanoEval::eval(&g2, &inputs);
+        for i in 0..4u32 {
+            let atom_id = AtomId(c2.0 + i);
+            let eval_val = eval_result.get(atom_id);
+            let our_val = result2[&(c2.0 + i)].to_f64();
+            assert!(
+                (eval_val - our_val).abs() < 1e-6,
+                "Mismatch with NanoEval at atom {}: eval={} ours={}",
+                atom_id.0,
+                eval_val,
+                our_val
+            );
+        }
     }
 }
