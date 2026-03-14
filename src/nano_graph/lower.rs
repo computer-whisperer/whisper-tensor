@@ -1108,58 +1108,34 @@ impl LowerCtx {
             return;
         }
 
-        // All dims are known. Build Explicit mapping.
-        // For each output flat index, decompose into output dim indices,
-        // apply inverse permutation to get input dim indices, then flatten.
-        let mut ids = Vec::with_capacity(out_count as usize);
-        for flat_out in 0..out_count as u64 {
-            // Decompose flat_out into output dim indices.
-            let mut out_indices = vec![0u64; out_known_dims.len()];
-            let mut rem = flat_out;
-            for (i, &stride) in out_strides.iter().enumerate() {
-                if stride > 0 {
-                    out_indices[i] = rem / stride;
-                    rem %= stride;
-                }
-            }
-
-            // output[i0, i1, ..., iN] = input[perm[0], perm[1], ..., perm[N]]
-            // So output dim j corresponds to input dim perm[j].
-            // Therefore: input_indices[perm[j]] = out_indices[j]
-            let mut in_indices = vec![0u64; in_known_sizes.len()];
-            for (out_dim, &in_dim) in full_perm.iter().enumerate() {
-                in_indices[in_dim] = out_indices[out_dim];
-            }
-
-            // Flatten input indices.
-            let mut flat_in = 0u64;
-            for (i, &stride) in in_strides.iter().enumerate() {
-                flat_in += in_indices[i] * stride;
-            }
-
-            ids.push(in_map.base_id.offset(flat_in));
+        // Zero-cost transpose: reuse the input's atoms with permuted strides.
+        //
+        // The input atoms are laid out in row-major order with `in_strides`.
+        // After transposing with perm, output dim j corresponds to input dim perm[j].
+        // So the output's strides (into the SAME flat atom buffer) are:
+        //   output_stride[j] = input_stride[perm[j]]
+        //
+        // This means downstream ops will decompose their flat index using
+        // the output strides and arrive at the correct input atom.
+        let mut transposed_strides = vec![0u64; full_perm.len()];
+        for (out_dim, &in_dim) in full_perm.iter().enumerate() {
+            transposed_strides[out_dim] = in_strides[in_dim];
         }
 
-        let dt = out_info.dtype();
-        let base_id = self.nano.push_group(
-            out_count,
-            ScalarOp::Identity {
-                compute_dtype: dt,
-                output_dtype: dt,
-            },
-            out_sym_dims.clone(),
-            vec![],
-            vec![InputRef::Explicit(ids)],
-        );
+        // Permute the layout as well.
+        let mut transposed_layout = vec![DimKind::Known(0); full_perm.len()];
+        for (out_dim, &in_dim) in full_perm.iter().enumerate() {
+            transposed_layout[out_dim] = in_map.layout[in_dim].clone();
+        }
 
         self.tensor_map.insert(
             out_id,
             TensorAtomMap {
-                base_id,
-                count: out_count,
-                layout: out_layout,
-                known_strides: out_strides,
-                sym_dims: out_sym_dims,
+                base_id: in_map.base_id, // same atoms!
+                count: in_map.count,      // same count
+                layout: transposed_layout,
+                known_strides: transposed_strides,
+                sym_dims: in_map.sym_dims.clone(),
             },
         );
     }
