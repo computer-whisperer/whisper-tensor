@@ -166,6 +166,43 @@ fn main() {
         }
     }
 
+    // ---- Explicit InputRef diagnostic ----
+    {
+        use whisper_tensor::nano_graph::InputRef;
+        let groups = result.graph.groups();
+        let mut explicit_groups = 0u64;
+        let mut total_explicit_entries = 0u64;
+        let mut explicit_by_op: HashMap<String, (u64, u64)> = HashMap::new(); // op -> (groups, entries)
+        for group in groups {
+            let mut has_explicit = false;
+            let mut group_explicit_entries = 0u64;
+            for input in &group.inputs {
+                if let InputRef::Explicit(ids) = input {
+                    has_explicit = true;
+                    group_explicit_entries += ids.len() as u64;
+                }
+            }
+            if has_explicit {
+                explicit_groups += 1;
+                total_explicit_entries += group_explicit_entries;
+                let op_name = format!("{:?}", group.op).chars().take_while(|c| *c != ' ' && *c != '{').collect::<String>();
+                let entry = explicit_by_op.entry(op_name).or_default();
+                entry.0 += 1;
+                entry.1 += group_explicit_entries;
+            }
+        }
+        println!("\n=== Explicit InputRef Diagnostic ===");
+        println!("  Groups with Explicit: {} / {}", explicit_groups, groups.len());
+        println!("  Total Explicit entries: {} ({:.1} MB at 8 bytes each)",
+            total_explicit_entries, total_explicit_entries as f64 * 8.0 / (1024.0 * 1024.0));
+        let mut sorted: Vec<_> = explicit_by_op.into_iter().collect();
+        sorted.sort_by(|a, b| b.1.1.cmp(&a.1.1));
+        for (op, (groups, entries)) in &sorted {
+            println!("    {}: {} groups, {} entries ({:.1} MB)",
+                op, groups, entries, *entries as f64 * 8.0 / (1024.0 * 1024.0));
+        }
+    }
+
     // ---- Step 2: Check feasibility of nano execution ----
     let scalar_size = std::mem::size_of::<NumericScalar>();
     let num_atoms = result.graph.num_atoms();
