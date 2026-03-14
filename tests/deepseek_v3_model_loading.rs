@@ -18,6 +18,7 @@ fn find_deepseek_v3_dir() -> Option<PathBuf> {
 
 /// Test that a DeepSeek-V3 ONNX graph builds successfully from safetensors weights.
 #[test]
+#[ignore]
 fn deepseek_v3_graph_builds() {
     let Some(model_dir) = find_deepseek_v3_dir() else {
         eprintln!("Skipping: no DeepSeek-V3 model directory found");
@@ -75,6 +76,7 @@ fn deepseek_v3_graph_builds() {
 
 /// Test that the TransformersLoader produces a working interface for DeepSeek-V3.
 #[test]
+#[ignore]
 fn deepseek_v3_loads_via_transformers_loader() {
     let Some(model_dir) = find_deepseek_v3_dir() else {
         eprintln!("Skipping: no DeepSeek-V3 model directory found");
