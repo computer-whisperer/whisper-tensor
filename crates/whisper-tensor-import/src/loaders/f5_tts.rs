@@ -11,6 +11,7 @@ use whisper_tensor::super_graph::links::{
 };
 use whisper_tensor::super_graph::nodes::{
     SuperGraphNode, SuperGraphNodeMilliOpGraph, SuperGraphNodeModelExecution, SuperGraphNodeScan,
+    SuperGraphNodeTensorToAudioClip,
 };
 
 const NFE_STEPS: u32 = 32;
@@ -133,7 +134,7 @@ fn build_f5_supergraph(vocab: &str, rng: &mut impl rand::Rng) -> TextToSpeechInt
     let decode_weights = builder.new_model_link(rng);
     let time_steps_link = builder.new_tensor_link(rng);
     let iteration_count_link = builder.new_tensor_link(rng);
-    let audio_output_link = builder.new_tensor_link(rng);
+    let audio_tensor_output_link = builder.new_tensor_link(rng);
 
     // --- Node 1: Preprocess ---
     let noise_link = builder.new_tensor_link(rng);
@@ -192,9 +193,16 @@ fn build_f5_supergraph(vocab: &str, rng: &mut impl rand::Rng) -> TextToSpeechInt
                 (final_denoised_link, "denoised".to_string()),
                 (ref_signal_len_link, "ref_signal_len".to_string()),
             ],
-            vec![("output_audio".to_string(), audio_output_link)],
+            vec![("output_audio".to_string(), audio_tensor_output_link)],
         )
         .to_any(),
+    );
+
+    let audio_output_link = SuperGraphNodeTensorToAudioClip::new_and_add(
+        &mut builder,
+        audio_tensor_output_link,
+        SAMPLE_RATE,
+        rng,
     );
 
     // Build the top-level SuperGraph

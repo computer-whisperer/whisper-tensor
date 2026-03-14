@@ -9,7 +9,7 @@ use crate::metadata::TokenizerInfo;
 use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::observer::MilliOpGraphObserver;
 use crate::numeric_tensor::NumericTensor;
-use crate::super_graph::data::SuperGraphImage;
+use crate::super_graph::data::{SuperGraphAudioClip, SuperGraphImage};
 use crate::super_graph::links::{
     SuperGraphAnyLink, SuperGraphLink, SuperGraphLinkDouble, SuperGraphLinkKind,
     SuperGraphLinkTriple,
@@ -686,6 +686,177 @@ impl SuperGraphNode for SuperGraphNodeTensorToImage {
 
     fn outputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
         Box::new(std::iter::once(self.image_output.to_any()))
+    }
+
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SuperGraphNodeTensorToAudioClip {
+    global_id: GlobalId,
+    tensor_input: SuperGraphLink,
+    audio_output: SuperGraphLink,
+    sample_rate_hz: u32,
+}
+
+impl SuperGraphNodeTensorToAudioClip {
+    pub fn new(
+        _builder: &mut SuperGraphBuilder,
+        tensor_input: SuperGraphLink,
+        sample_rate_hz: u32,
+        rng: &mut impl RngCore,
+    ) -> Self {
+        Self {
+            global_id: GlobalId::new(rng),
+            tensor_input,
+            audio_output: SuperGraphLink::new(SuperGraphLinkKind::AudioClip, rng),
+            sample_rate_hz,
+        }
+    }
+
+    pub fn new_and_add(
+        builder: &mut SuperGraphBuilder,
+        tensor_input: SuperGraphLink,
+        sample_rate_hz: u32,
+        rng: &mut impl RngCore,
+    ) -> SuperGraphLink {
+        let node = Self::new(builder, tensor_input, sample_rate_hz, rng);
+        let output = node.get_audio_output();
+        builder.add_node(node.to_any());
+        output
+    }
+
+    pub fn get_audio_output(&self) -> SuperGraphLink {
+        self.audio_output
+    }
+}
+
+impl SuperGraphNode for SuperGraphNodeTensorToAudioClip {
+    fn to_any(self) -> SuperGraphAnyNode {
+        SuperGraphAnyNode::TensorToAudioClip(self)
+    }
+
+    fn eval<T: SuperGraphObserver>(
+        &self,
+        _node_path: &[GlobalId],
+        data: &mut SuperGraphData,
+        _context: &mut SuperGraphContext<T>,
+    ) -> Result<(), SuperGraphError> {
+        let tensor = data
+            .tensors
+            .get(&self.tensor_input)
+            .ok_or(SuperGraphError::MissingLinkError(format!(
+                ": missing tensor input link {:?}",
+                self.tensor_input
+            )))?
+            .clone();
+        data.audio_clips.insert(
+            self.audio_output,
+            SuperGraphAudioClip::new(tensor, self.sample_rate_hz),
+        );
+        Ok(())
+    }
+
+    fn op_kind(&self) -> String {
+        "TensorToAudioClip".to_string()
+    }
+
+    fn inputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new(std::iter::once(self.tensor_input.to_any()))
+    }
+
+    fn outputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new(std::iter::once(self.audio_output.to_any()))
+    }
+
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SuperGraphNodeAudioClipToTensor {
+    global_id: GlobalId,
+    audio_input: SuperGraphLink,
+    tensor_output: SuperGraphLink,
+    expected_sample_rate_hz: Option<u32>,
+}
+
+impl SuperGraphNodeAudioClipToTensor {
+    pub fn new(
+        _builder: &mut SuperGraphBuilder,
+        audio_input: SuperGraphLink,
+        expected_sample_rate_hz: Option<u32>,
+        rng: &mut impl RngCore,
+    ) -> Self {
+        Self {
+            global_id: GlobalId::new(rng),
+            audio_input,
+            tensor_output: SuperGraphLink::new(SuperGraphLinkKind::Tensor, rng),
+            expected_sample_rate_hz,
+        }
+    }
+
+    pub fn new_and_add(
+        builder: &mut SuperGraphBuilder,
+        audio_input: SuperGraphLink,
+        expected_sample_rate_hz: Option<u32>,
+        rng: &mut impl RngCore,
+    ) -> SuperGraphLink {
+        let node = Self::new(builder, audio_input, expected_sample_rate_hz, rng);
+        let output = node.get_tensor_output();
+        builder.add_node(node.to_any());
+        output
+    }
+
+    pub fn get_tensor_output(&self) -> SuperGraphLink {
+        self.tensor_output
+    }
+}
+
+impl SuperGraphNode for SuperGraphNodeAudioClipToTensor {
+    fn to_any(self) -> SuperGraphAnyNode {
+        SuperGraphAnyNode::AudioClipToTensor(self)
+    }
+
+    fn eval<T: SuperGraphObserver>(
+        &self,
+        _node_path: &[GlobalId],
+        data: &mut SuperGraphData,
+        _context: &mut SuperGraphContext<T>,
+    ) -> Result<(), SuperGraphError> {
+        let clip =
+            data.audio_clips
+                .get(&self.audio_input)
+                .ok_or(SuperGraphError::MissingLinkError(format!(
+                    ": missing audio input link {:?}",
+                    self.audio_input
+                )))?;
+        if let Some(expected) = self.expected_sample_rate_hz
+            && clip.sample_rate_hz != expected
+        {
+            return Err(SuperGraphError::InvalidInputError(format!(
+                "audio sample rate mismatch for {:?}: expected {}, got {}",
+                self.audio_input, expected, clip.sample_rate_hz
+            )));
+        }
+        data.tensors
+            .insert(self.tensor_output, clip.samples.clone());
+        Ok(())
+    }
+
+    fn op_kind(&self) -> String {
+        "AudioClipToTensor".to_string()
+    }
+
+    fn inputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new(std::iter::once(self.audio_input.to_any()))
+    }
+
+    fn outputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new(std::iter::once(self.tensor_output.to_any()))
     }
 
     fn global_id(&self) -> GlobalId {
@@ -1605,6 +1776,8 @@ pub enum SuperGraphAnyNode {
     TokenizerDecode(SuperGraphNodeTokenizerDecode),
     TokenizerLoad(SuperGraphNodeTokenizerLoad),
     TensorToImage(SuperGraphNodeTensorToImage),
+    TensorToAudioClip(SuperGraphNodeTensorToAudioClip),
+    AudioClipToTensor(SuperGraphNodeAudioClipToTensor),
     MilliOpGraph(SuperGraphNodeMilliOpGraph),
     Scan(SuperGraphNodeScan),
     RNNCacheWrite(SuperGraphNodeRNNCacheWrite),
@@ -1624,6 +1797,8 @@ macro_rules! delegate {
                 SuperGraphAnyNode::TokenizerDecode(x) => SuperGraphNode::$name(x,$($arg),*),
                 SuperGraphAnyNode::TokenizerLoad(x) => SuperGraphNode::$name(x,$($arg),*),
                 SuperGraphAnyNode::TensorToImage(x) => SuperGraphNode::$name(x,$($arg),*),
+                SuperGraphAnyNode::TensorToAudioClip(x) => SuperGraphNode::$name(x,$($arg),*),
+                SuperGraphAnyNode::AudioClipToTensor(x) => SuperGraphNode::$name(x,$($arg),*),
                 SuperGraphAnyNode::MilliOpGraph(x) => SuperGraphNode::$name(x,$($arg),*),
                 SuperGraphAnyNode::Scan(x) => SuperGraphNode::$name(x,$($arg),*),
                 SuperGraphAnyNode::RNNCacheRead(x) => SuperGraphNode::$name(x,$($arg),*),
@@ -1663,6 +1838,8 @@ impl SuperGraphNode for SuperGraphAnyNode {
             SuperGraphAnyNode::TokenizerDecode(node) => node.eval(node_path, data, context),
             SuperGraphAnyNode::TokenizerLoad(node) => node.eval(node_path, data, context),
             SuperGraphAnyNode::TensorToImage(node) => node.eval(node_path, data, context),
+            SuperGraphAnyNode::TensorToAudioClip(node) => node.eval(node_path, data, context),
+            SuperGraphAnyNode::AudioClipToTensor(node) => node.eval(node_path, data, context),
             SuperGraphAnyNode::MilliOpGraph(node) => node.eval(node_path, data, context),
             SuperGraphAnyNode::Scan(node) => node.eval(node_path, data, context),
             SuperGraphAnyNode::RNNCacheWrite(node) => node.eval(node_path, data, context),

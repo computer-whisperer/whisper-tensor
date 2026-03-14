@@ -4,7 +4,9 @@ use whisper_tensor::loader::*;
 use whisper_tensor::metadata::TokenizerInfo;
 use whisper_tensor::model::Model;
 use whisper_tensor::super_graph::SuperGraphBuilder;
-use whisper_tensor::super_graph::nodes::{SuperGraphNode, SuperGraphNodeModelExecution};
+use whisper_tensor::super_graph::nodes::{
+    SuperGraphNode, SuperGraphNodeAudioClipToTensor, SuperGraphNodeModelExecution,
+};
 
 use crate::whisper::WhisperConfig;
 
@@ -130,15 +132,15 @@ impl Loader for WhisperLoader {
             )));
         };
 
-        // Build encoder SuperGraph (simple: mel input → model execution → encoder output)
-        let (encoder_sg, mel_link, enc_weights, enc_output) = build_encoder_supergraph(&mut rng);
+        // Build encoder SuperGraph (audio clip features input → model execution → encoder output)
+        let (encoder_sg, audio_link, enc_weights, enc_output) = build_encoder_supergraph(&mut rng);
 
         // Build decoder SuperGraph with RNN cache
         let decoder_sg_result = build_decoder_supergraph(&whisper_config, &mut rng);
 
         let interface = SpeechToTextInterface {
             encoder_super_graph: encoder_sg,
-            mel_input_link: mel_link,
+            audio_input_link: audio_link,
             encoder_weights_link: enc_weights,
             encoder_output_link: enc_output,
             decoder_super_graph: decoder_sg_result.super_graph,
@@ -186,7 +188,9 @@ fn build_encoder_supergraph(
 ) {
     let mut builder = SuperGraphBuilder::new();
 
-    let mel_link = builder.new_tensor_link(rng);
+    let audio_link = builder.new_audio_clip_link(rng);
+    let mel_link =
+        SuperGraphNodeAudioClipToTensor::new_and_add(&mut builder, audio_link, Some(16000), rng);
     let enc_weights = builder.new_model_link(rng);
     let enc_output = builder.new_tensor_link(rng);
 
@@ -201,11 +205,11 @@ fn build_encoder_supergraph(
         .to_any(),
     );
 
-    let sg_inputs = vec![mel_link.to_any(), enc_weights.to_any()];
+    let sg_inputs = vec![audio_link.to_any(), enc_weights.to_any()];
     let sg_outputs = vec![enc_output.to_any()];
     let sg = builder.build(rng, &sg_inputs, &sg_outputs);
 
-    (sg, mel_link, enc_weights, enc_output)
+    (sg, audio_link, enc_weights, enc_output)
 }
 
 struct DecoderSuperGraphResult {

@@ -3,7 +3,9 @@ use whisper_tensor::interfaces::{TTSInputConfig, TextToSpeechInterface};
 use whisper_tensor::loader::*;
 use whisper_tensor::metadata::TokenizerInfo;
 use whisper_tensor::super_graph::SuperGraphBuilder;
-use whisper_tensor::super_graph::nodes::{SuperGraphNode, SuperGraphNodeModelExecution};
+use whisper_tensor::super_graph::nodes::{
+    SuperGraphNode, SuperGraphNodeModelExecution, SuperGraphNodeTensorToAudioClip,
+};
 
 /// Loader for Kokoro TTS models (ONNX format).
 ///
@@ -107,7 +109,7 @@ fn build_kokoro_supergraph(
     let style_link = builder.new_tensor_link(rng);
     let speed_link = builder.new_tensor_link(rng);
     let model_weights_link = builder.new_model_link(rng);
-    let audio_output_link = builder.new_tensor_link(rng);
+    let audio_tensor_output_link = builder.new_tensor_link(rng);
 
     // Model execution: wire named inputs/outputs to the ONNX graph
     let tensor_inputs = vec![
@@ -115,7 +117,7 @@ fn build_kokoro_supergraph(
         (style_link, "style".to_string()),
         (speed_link, "speed".to_string()),
     ];
-    let tensor_outputs = vec![("waveform".to_string(), audio_output_link)];
+    let tensor_outputs = vec![("waveform".to_string(), audio_tensor_output_link)];
 
     builder.add_node(
         SuperGraphNodeModelExecution::new(
@@ -126,6 +128,13 @@ fn build_kokoro_supergraph(
             tensor_outputs,
         )
         .to_any(),
+    );
+
+    let audio_output_link = SuperGraphNodeTensorToAudioClip::new_and_add(
+        &mut builder,
+        audio_tensor_output_link,
+        24000,
+        rng,
     );
 
     // Build the SuperGraph

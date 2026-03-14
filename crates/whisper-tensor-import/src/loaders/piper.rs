@@ -2,7 +2,9 @@ use super::onnx_bytes_to_model;
 use whisper_tensor::interfaces::{TTSInputConfig, TextToSpeechInterface};
 use whisper_tensor::loader::*;
 use whisper_tensor::super_graph::SuperGraphBuilder;
-use whisper_tensor::super_graph::nodes::{SuperGraphNode, SuperGraphNodeModelExecution};
+use whisper_tensor::super_graph::nodes::{
+    SuperGraphNode, SuperGraphNodeModelExecution, SuperGraphNodeTensorToAudioClip,
+};
 
 /// Loader for Piper VITS TTS models (ONNX format).
 ///
@@ -152,7 +154,7 @@ fn build_piper_supergraph(
     let input_lengths_link = builder.new_tensor_link(rng);
     let scales_link = builder.new_tensor_link(rng);
     let model_weights_link = builder.new_model_link(rng);
-    let audio_output_link = builder.new_tensor_link(rng);
+    let audio_tensor_output_link = builder.new_tensor_link(rng);
 
     let mut tensor_inputs = vec![
         (input_link, "input".to_string()),
@@ -168,7 +170,7 @@ fn build_piper_supergraph(
         None
     };
 
-    let tensor_outputs = vec![("output".to_string(), audio_output_link)];
+    let tensor_outputs = vec![("output".to_string(), audio_tensor_output_link)];
 
     builder.add_node(
         SuperGraphNodeModelExecution::new(
@@ -179,6 +181,13 @@ fn build_piper_supergraph(
             tensor_outputs,
         )
         .to_any(),
+    );
+
+    let audio_output_link = SuperGraphNodeTensorToAudioClip::new_and_add(
+        &mut builder,
+        audio_tensor_output_link,
+        sample_rate,
+        rng,
     );
 
     let mut sg_inputs = vec![

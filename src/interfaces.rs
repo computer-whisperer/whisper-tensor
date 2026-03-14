@@ -1695,7 +1695,7 @@ pub struct TextToSpeechInterface {
     pub text_ids_link: SuperGraphLink,
     /// Model weights (one per model in the pipeline).
     pub model_weights: Vec<SuperGraphLink>,
-    /// Output audio waveform.
+    /// Output audio clip.
     pub audio_output_link: SuperGraphLink,
     /// Sample rate of the output audio in Hz.
     pub sample_rate: u32,
@@ -1719,8 +1719,11 @@ impl TextToSpeechInterface {
 pub struct SpeechToTextInterface {
     /// Encoder SuperGraph: mel spectrogram → encoder hidden states.
     pub encoder_super_graph: SuperGraph,
-    /// Mel spectrogram input link [1, num_mel_bins, seq_len].
-    pub mel_input_link: SuperGraphLink,
+    /// Input audio clip link.
+    ///
+    /// The clip payload currently carries precomputed encoder features in
+    /// `samples` for Whisper; this link type is a transitional API step.
+    pub audio_input_link: SuperGraphLink,
     /// Encoder model weights.
     pub encoder_weights_link: SuperGraphLink,
     /// Encoder hidden states output link.

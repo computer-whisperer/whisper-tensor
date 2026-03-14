@@ -693,17 +693,17 @@ fn cmd_tts(
     };
 
     let audio = super_graph_output
-        .tensors
+        .audio_clips
         .get(&interface.audio_output_link)
-        .expect("No audio output tensor");
+        .expect("No audio output clip");
 
     eprintln!("Generated in {:.2?}", start.elapsed());
 
-    let samples = audio_tensor_to_samples(audio, &mut backend);
-    save_wav(&samples, interface.sample_rate, &output_path);
+    let samples = audio_tensor_to_samples(&audio.samples, &mut backend);
+    save_wav(&samples, audio.sample_rate_hz, &output_path);
     eprintln!(
         "Saved {:.1}s of audio to {}",
-        samples.len() as f64 / interface.sample_rate as f64,
+        samples.len() as f64 / audio.sample_rate_hz as f64,
         output_path.display()
     );
 }
@@ -819,7 +819,7 @@ fn save_wav(samples: &[f32], sample_rate: u32, path: &std::path::Path) {
 fn cmd_stt(output: LoaderOutput, audio_path: PathBuf, model_dir: Option<PathBuf>) {
     use whisper_tensor::super_graph::SuperGraphContext;
     use whisper_tensor::super_graph::cache::SuperGraphTensorCache;
-    use whisper_tensor::super_graph::data::SuperGraphData;
+    use whisper_tensor::super_graph::data::{SuperGraphAudioClip, SuperGraphData};
 
     let interface = output
         .interfaces
@@ -866,7 +866,10 @@ fn cmd_stt(output: LoaderOutput, audio_path: PathBuf, model_dir: Option<PathBuf>
 
     let encoder_output = {
         let mut data = SuperGraphData::new();
-        data.tensors.insert(interface.mel_input_link, mel_tensor);
+        data.audio_clips.insert(
+            interface.audio_input_link,
+            SuperGraphAudioClip::new(mel_tensor, interface.sample_rate),
+        );
         data.tensor_maps.insert(
             interface.encoder_weights_link,
             output.models[0].model.get_tensor_store(),
