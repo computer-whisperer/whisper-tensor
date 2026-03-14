@@ -171,6 +171,17 @@ fn collect_source_groups(
                 }
             }
         }
+        InputRef::StridedBroadcast { base, stride, repeat } => {
+            // Each block of `repeat` atoms shares one source.
+            let count = consumer.count;
+            let num_blocks = (count + repeat - 1) / repeat;
+            for block in 0..num_blocks {
+                let src = input_ref.resolve(block * repeat, 0);
+                if let Some(gi) = find_group_idx(groups, src) {
+                    seen.insert(gi);
+                }
+            }
+        }
         InputRef::SymAffine {
             base,
             stride_i,

@@ -63,6 +63,15 @@ pub enum InputRef {
         stride_i: i32,
         stride_k: i32,
     },
+    /// Strided broadcast: each block of `repeat` consecutive atoms shares one
+    /// source atom. Atom at offset `i` reads `base + stride * (i / repeat)`.
+    /// Used for merged matmul Mul groups where chunks of N atoms broadcast the
+    /// same A element.
+    StridedBroadcast {
+        base: AtomId,
+        stride: i64,
+        repeat: u64,
+    },
 }
 
 impl InputRef {
@@ -84,6 +93,14 @@ impl InputRef {
                     (*stride_i as i64 * i as i64 + *stride_k as i64 * k as i64) as u64,
                 ))
             }
+            InputRef::StridedBroadcast {
+                base,
+                stride,
+                repeat,
+            } => {
+                let block = i / repeat;
+                AtomId(base.0.wrapping_add((*stride * block as i64) as u64))
+            }
         }
     }
 
@@ -99,6 +116,10 @@ impl InputRef {
                 seen.len()
             }
             InputRef::SymAffine { .. } => count as usize, // lower bound; actual depends on k range
+            InputRef::StridedBroadcast { repeat, .. } => {
+                // Each block of `repeat` atoms shares one source.
+                ((count + repeat - 1) / repeat) as usize
+            }
         }
     }
 }
@@ -707,5 +728,19 @@ mod tests {
         assert_eq!(sym.resolve(1, 0), AtomId(103));
         assert_eq!(sym.resolve(0, 1), AtomId(110));
         assert_eq!(sym.resolve(2, 3), AtomId(100 + 6 + 30)); // 136
+
+        // StridedBroadcast: base=200, stride=1, repeat=4
+        // Blocks of 4 atoms share the same source.
+        let sb = InputRef::StridedBroadcast {
+            base: AtomId(200),
+            stride: 1,
+            repeat: 4,
+        };
+        assert_eq!(sb.resolve(0, 0), AtomId(200)); // block 0
+        assert_eq!(sb.resolve(1, 0), AtomId(200)); // block 0
+        assert_eq!(sb.resolve(3, 0), AtomId(200)); // block 0
+        assert_eq!(sb.resolve(4, 0), AtomId(201)); // block 1
+        assert_eq!(sb.resolve(7, 0), AtomId(201)); // block 1
+        assert_eq!(sb.resolve(8, 0), AtomId(202)); // block 2
     }
 }

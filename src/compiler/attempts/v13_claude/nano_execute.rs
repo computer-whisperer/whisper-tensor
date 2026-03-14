@@ -342,6 +342,15 @@ fn collect_source_atoms(
             }
             atoms.into_iter().collect()
         }
+        InputRef::StridedBroadcast { base, repeat, .. } => {
+            // Sample first and last block sources.
+            let mut atoms = vec![base.0];
+            if count > *repeat {
+                let last = input.resolve(count - 1, 0);
+                atoms.push(last.0);
+            }
+            atoms
+        }
     }
 }
 

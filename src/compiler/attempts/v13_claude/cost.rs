@@ -180,6 +180,21 @@ pub fn estimate_kernel_cost(
                         .collect::<HashSet<_>>()
                         .len() as u64;
                 }
+                InputRef::StridedBroadcast { repeat, .. } => {
+                    // Each block of `repeat` atoms shares one source.
+                    // The distinct sources are the block-boundary atoms.
+                    let num_blocks = (overlap.count + repeat - 1) / repeat;
+                    let mut ext_count = 0u64;
+                    for block in 0..num_blocks {
+                        let src = input_ref.resolve(block * repeat, 0);
+                        if !kernel_atoms.contains(src) {
+                            external_inputs.insert(src);
+                            ext_count += 1;
+                        }
+                    }
+                    // Treat like broadcast — each source stays live while its block executes.
+                    info.resident_inputs += ext_count;
+                }
             }
         }
 
@@ -430,6 +445,18 @@ fn count_external_outputs(graph: &NanoGraph, kernel_atoms: &KernelAtomSet) -> u6
                         continue;
                     }
                     for &src in ids {
+                        if kernel_atoms.contains(src) {
+                            output_atoms.insert(src);
+                        }
+                    }
+                }
+                InputRef::StridedBroadcast { repeat, .. } => {
+                    if is_group_in_kernel(g_start, g_end, kernel_atoms) {
+                        continue;
+                    }
+                    let num_blocks = (group.count + repeat - 1) / repeat;
+                    for block in 0..num_blocks {
+                        let src = input_ref.resolve(block * repeat, 0);
                         if kernel_atoms.contains(src) {
                             output_atoms.insert(src);
                         }

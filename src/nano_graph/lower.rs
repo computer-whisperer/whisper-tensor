@@ -2079,7 +2079,7 @@ impl LowerCtx {
         // A's K dim is the last known dim. B's K dim is second-to-last known dim.
         // B's N dim is the last known dim.
         let a_k_known_idx = a_known_dims.len() - 1;
-        let b_k_known_idx = b_known_dims.len() - 2;
+        let _b_k_known_idx = b_known_dims.len() - 2;
 
         // The number of row groups: batch_known_product * (M if known, else 1).
         let m_groups = m_known.unwrap_or(1);
@@ -2095,11 +2095,20 @@ impl LowerCtx {
             None
         };
 
-        // Expand the K contraction dimension into K concrete mul groups per row.
-        // Each mul group has N atoms computing A[...,m,k] * B[...,k,n] for a fixed k.
-        // This allows the flat eval to correctly evaluate each atom independently,
-        // and the ReduceSum uses stride_k=N to hop between k layers.
+        // Merged matmul Mul groups: one per row instead of K per row.
+        // Each merged group has K*N atoms. Atom j in the merged group computes:
+        //   A[m, j/N] * B[j/N, j%N]
+        //
+        // Input 0: StridedBroadcast { base: A[m,0], stride: 1, repeat: N }
+        //   → each block of N atoms broadcasts the same A element
+        // Input 1: Affine { base: B[0,0], stride: 1 }
+        //   → B is row-major, so B[k,n] = B_base + k*N + n = B_base + j
+        //
+        // The ReduceSum groups still have count=N and use SymAffine with
+        // stride_k = N to hop between k-blocks within the merged Mul group.
         let mut mul_base_id = None;
+        let k_u64 = k as u64;
+        let merged_mul_count = k_u64 * n_u64;
 
         for g in 0..num_row_groups {
             let m_idx = if m_known.is_some() {
@@ -2142,47 +2151,59 @@ impl LowerCtx {
                 }
             }
 
-            // Create K mul groups for this row, one per contraction index.
-            for ki in 0..k {
-                let a_atom = a_map
-                    .base_id
-                    .offset(a_offset + ki * a_strides[a_k_known_idx]);
-                let b_atom = b_map
-                    .base_id
-                    .offset(b_offset + ki * b_strides[b_k_known_idx]);
+            // A[m, 0] — base of this row's A elements
+            let a_row_base = a_map
+                .base_id
+                .offset(a_offset);
+            // B[0, 0] — base of B for this batch
+            let b_base = b_map
+                .base_id
+                .offset(b_offset);
 
-                let input_a = InputRef::Broadcast(a_atom);
-                let input_b = InputRef::Affine {
-                    base: b_atom,
-                    stride: 1,
-                };
+            // Input 0: StridedBroadcast over A elements, each repeated N times
+            // A atoms have stride = a_strides[a_k_known_idx] between successive k values
+            let a_k_stride = a_strides[a_k_known_idx] as i64;
+            let input_a = InputRef::StridedBroadcast {
+                base: a_row_base,
+                stride: a_k_stride,
+                repeat: n_u64,
+            };
 
-                let base = self.nano.push_group(
-                    n_u64,
-                    ScalarOp::Binary {
-                        op: ScalarBinOp::Mul,
-                        compute_dtype: product_dtype,
-                        output_dtype: product_dtype,
-                    },
-                    out_sym_dims.clone(),
-                    vec![],
-                    vec![input_a, input_b],
-                );
+            // Input 1: Affine over all K*N B elements (row-major layout)
+            // B[k,n] = b_base + k * b_strides[b_k_known_idx] + n
+            // Since B is contiguous (b_strides[b_k_known_idx] = N), this is just
+            // b_base + j for j in 0..K*N.
+            let input_b = InputRef::Affine {
+                base: b_base,
+                stride: 1,
+            };
 
-                if mul_base_id.is_none() {
-                    mul_base_id = Some(base);
-                }
+            let base = self.nano.push_group(
+                merged_mul_count,
+                ScalarOp::Binary {
+                    op: ScalarBinOp::Mul,
+                    compute_dtype: product_dtype,
+                    output_dtype: product_dtype,
+                },
+                out_sym_dims.clone(),
+                vec![],
+                vec![input_a, input_b],
+            );
+
+            if mul_base_id.is_none() {
+                mul_base_id = Some(base);
             }
         }
 
         let mul_base = mul_base_id.unwrap();
 
         // ReduceSum: one group per row, each with N atoms.
-        // stride_k = N so that stepping k hops between the K mul groups for this row.
+        // stride_k = N so that stepping k hops between k-blocks within the
+        // merged Mul group. stride_i = 1 for consecutive output atoms.
         let mut reduce_base_id = None;
 
         for g in 0..num_row_groups {
-            let row_mul_base = AtomId(mul_base.0 + (g as u64) * (k as u64) * n_u64);
+            let row_mul_base = AtomId(mul_base.0 + (g as u64) * merged_mul_count);
 
             let base = self.nano.push_group(
                 n_u64,
@@ -3322,6 +3343,105 @@ mod tests {
                     .unwrap(),
             ],
         );
+    }
+
+    #[test]
+    fn test_matmul_merged_mul_groups() {
+        // Verify that matmul lowering produces M Mul groups (not M*K).
+        // MatMul(4, 8, 16): A=[4,8], B=[8,16] -> C=[4,16]
+        // Old: 4*8 = 32 Mul groups of 16 atoms each
+        // New: 4 Mul groups of 8*16 = 128 atoms each (StridedBroadcast)
+        use crate::nano_graph::pattern::InputRef;
+        check_integrity(
+            |graph, rng| {
+                let a = graph.add_input(rng);
+                let b = graph.add_input(rng);
+                let c = crate::milli_graph::ops::MatMul::push_new_default_precision(
+                    graph,
+                    a,
+                    b,
+                    crate::dtype::DType::F32,
+                    rng,
+                );
+                (vec![a, b], vec![c])
+            },
+            vec![
+                NumericTensor::from_vec_shape(vec![1.0f32; 4 * 8], vec![4, 8]).unwrap(),
+                NumericTensor::from_vec_shape(vec![1.0f32; 8 * 16], vec![8, 16]).unwrap(),
+            ],
+        );
+
+        // Also verify group structure directly.
+        let mut rng = rand::rng();
+        let (mut milli, _ext_map) =
+            crate::milli_graph::MilliOpGraph::new(std::iter::empty(), &mut rng);
+        let a_id = milli.add_input(&mut rng);
+        let b_id = milli.add_input(&mut rng);
+        let _c_id = crate::milli_graph::ops::MatMul::push_new_default_precision(
+            &mut milli,
+            a_id,
+            b_id,
+            crate::dtype::DType::F32,
+            &mut rng,
+        );
+        let a_tensor: crate::numeric_tensor::NumericTensor<crate::DynRank> =
+            NumericTensor::from_vec_shape(vec![1.0f32; 4 * 8], vec![4, 8]).unwrap();
+        let b_tensor: crate::numeric_tensor::NumericTensor<crate::DynRank> =
+            NumericTensor::from_vec_shape(vec![1.0f32; 8 * 16], vec![8, 16]).unwrap();
+
+        let mut info = std::collections::HashMap::new();
+        info.insert(a_id, crate::tensor_info::TensorInfo::from(a_tensor));
+        info.insert(b_id, crate::tensor_info::TensorInfo::from(b_tensor));
+
+        let result = super::lower_with_info(&milli, &info).unwrap();
+        let graph = &result.graph;
+
+        // Count Mul groups — should be M=4, not M*K=32.
+        let mul_groups: Vec<_> = graph
+            .groups()
+            .iter()
+            .filter(|g| {
+                matches!(
+                    &g.op,
+                    crate::nano_graph::ops::ScalarOp::Binary {
+                        op: crate::nano_graph::ops::ScalarBinOp::Mul,
+                        ..
+                    }
+                )
+            })
+            .collect();
+        assert_eq!(
+            mul_groups.len(),
+            4,
+            "Expected M=4 merged Mul groups, got {}",
+            mul_groups.len()
+        );
+
+        // Each merged Mul group should have K*N = 8*16 = 128 atoms.
+        for (i, g) in mul_groups.iter().enumerate() {
+            assert_eq!(
+                g.count, 128,
+                "Merged Mul group {} should have K*N=128 atoms, got {}",
+                i, g.count
+            );
+            // Input 0 should be StridedBroadcast with repeat=N=16.
+            match &g.inputs[0] {
+                InputRef::StridedBroadcast { repeat, .. } => {
+                    assert_eq!(*repeat, 16, "StridedBroadcast repeat should be N=16");
+                }
+                other => panic!(
+                    "Expected StridedBroadcast for input 0, got {:?}",
+                    other
+                ),
+            }
+            // Input 1 should be Affine with stride=1.
+            match &g.inputs[1] {
+                InputRef::Affine { stride, .. } => {
+                    assert_eq!(*stride, 1, "Affine stride should be 1");
+                }
+                other => panic!("Expected Affine for input 1, got {:?}", other),
+            }
+        }
     }
 
     #[test]

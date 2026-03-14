@@ -188,6 +188,16 @@ fn resolve_producer_groups(
                     }
                 }
             }
+            InputRef::StridedBroadcast { repeat, .. } => {
+                // Each block of `repeat` atoms shares one source.
+                let num_blocks = (group.count + repeat - 1) / repeat;
+                for block in 0..num_blocks {
+                    let atom = input.resolve(block * repeat, 0);
+                    if let Some(gi) = find_group_for_atom(atom, atom_to_group) {
+                        producers.insert(gi);
+                    }
+                }
+            }
             InputRef::SymAffine { .. } => {
                 // Determine the K range from the group's reduce_dims.
                 // The reduce_dims tell us which symbolic dimensions this group
@@ -484,6 +494,9 @@ mod tests {
                             stride_i,
                             stride_k,
                         } => format!("SymAff({},si={},sk={})", base, stride_i, stride_k),
+                        InputRef::StridedBroadcast { base, stride, repeat } => {
+                            format!("SBcast({},s={},r={})", base, stride, repeat)
+                        }
                     })
                     .collect();
                 println!(

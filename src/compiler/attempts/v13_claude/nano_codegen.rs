@@ -825,6 +825,33 @@ fn load_input_ref(
             let addr = builder.ins().iadd(values_ptr, byte_offset);
             Ok(builder.ins().load(types::F32, MemFlags::new(), addr, 0))
         }
+
+        InputRef::StridedBroadcast { base, stride, repeat } => {
+            // atom_idx = base + stride * (i / repeat)
+            let atom_idx = match i_val {
+                Some(iv) => {
+                    // block_idx = i / repeat
+                    let block_idx = if repeat.is_power_of_two() {
+                        let shift = repeat.trailing_zeros() as i64;
+                        builder.ins().ushr_imm(iv, shift)
+                    } else {
+                        let rep = builder.ins().iconst(types::I64, *repeat as i64);
+                        builder.ins().udiv(iv, rep)
+                    };
+                    // atom_idx = base + stride * block_idx
+                    let offset = builder.ins().imul_imm(block_idx, *stride);
+                    builder.ins().iadd_imm(offset, base.0 as i64)
+                }
+                None => {
+                    let block = i_const / repeat;
+                    let idx = (base.0 as i64) + (*stride * block as i64);
+                    builder.ins().iconst(types::I64, idx)
+                }
+            };
+            let byte_offset = builder.ins().imul_imm(atom_idx, 4);
+            let addr = builder.ins().iadd(values_ptr, byte_offset);
+            Ok(builder.ins().load(types::F32, MemFlags::new(), addr, 0))
+        }
     }
 }
 
@@ -864,7 +891,7 @@ fn load_input_ref_with_k(
         }
 
         // For non-SymAffine inputs in a reduce context, k doesn't affect the address.
-        InputRef::Broadcast(_) | InputRef::Affine { .. } | InputRef::Explicit(_) => {
+        InputRef::Broadcast(_) | InputRef::Affine { .. } | InputRef::Explicit(_) | InputRef::StridedBroadcast { .. } => {
             load_input_ref(builder, module, input, values_ptr, i_val, i_const, table_counter)
         }
     }
