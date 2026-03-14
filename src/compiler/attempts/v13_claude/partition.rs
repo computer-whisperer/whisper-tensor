@@ -1,20 +1,26 @@
 //! Common data structures for kernel partitioning.
 //!
 //! A partition assigns atoms from a NanoGraph into kernels. Each kernel
-//! represents a chunk of work whose intermediates fit in a target cache.
-//! The quality of a partitioning is measured by total cross-kernel data
-//! movement — values that must be loaded from or stored to memory because
-//! their producer and consumer are in different kernels.
+//! represents a chunk of work whose cost is measured by estimated memory
+//! traffic. Cache is a cost, not a hard constraint — a kernel that exceeds
+//! cache pays a streaming penalty, but fragmenting into many tiny kernels
+//! can be worse due to forced materialization at boundaries.
+//!
+//! The quality of a partitioning is measured by total estimated memory
+//! traffic across all kernels.
 
 use std::collections::{HashMap, HashSet};
 
 use crate::nano_graph::{AtomId, NanoGraph};
 
+use super::cost::{self, KernelCost};
+
 /// Configuration for the target cache hierarchy.
 #[derive(Debug, Clone)]
 pub struct CacheConfig {
     /// Size of the tightest cache bucket in bytes (L1, warp cache, SRAM tile).
-    /// This is the primary constraint — each kernel's working set should fit here.
+    /// This determines the streaming penalty — a kernel whose peak liveness
+    /// exceeds this will pay extra traffic from cache evictions.
     pub l1_bytes: usize,
     /// Bytes per scalar value (typically 4 for f32).
     pub value_size: usize,
@@ -113,6 +119,71 @@ impl PartitionResult {
         }
 
         errors
+    }
+
+    /// Compute total estimated cost across all kernels.
+    pub fn total_cost(&self, graph: &NanoGraph) -> PartitionCost {
+        let mut kernel_costs = Vec::with_capacity(self.kernels.len());
+        let mut total_traffic: u64 = 0;
+        let mut total_compute: u64 = 0;
+
+        for kernel in &self.kernels {
+            let kc = cost::estimate_kernel_cost(graph, &kernel.atom_ranges, &self.config);
+            total_traffic += kc.estimated_traffic;
+            total_compute += kc.compute_ops;
+            kernel_costs.push(kc);
+        }
+
+        let overall_intensity = if total_traffic > 0 {
+            total_compute as f64 / total_traffic as f64
+        } else {
+            f64::INFINITY
+        };
+
+        PartitionCost {
+            num_kernels: self.kernels.len(),
+            total_traffic,
+            total_compute,
+            overall_intensity,
+            kernel_costs,
+        }
+    }
+}
+
+/// Aggregate cost for an entire partitioning.
+#[derive(Debug, Clone)]
+pub struct PartitionCost {
+    pub num_kernels: usize,
+    pub total_traffic: u64,
+    pub total_compute: u64,
+    /// Total compute ops / total memory traffic. Higher is better.
+    pub overall_intensity: f64,
+    pub kernel_costs: Vec<KernelCost>,
+}
+
+impl std::fmt::Display for PartitionCost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "Partition Cost:")?;
+        writeln!(f, "  {} kernels", self.num_kernels)?;
+        writeln!(f, "  total traffic: {} values", self.total_traffic)?;
+        writeln!(f, "  total compute: {} ops", self.total_compute)?;
+        writeln!(f, "  overall intensity: {:.2} ops/transfer", self.overall_intensity)?;
+
+        // Summarize kernel cost distribution.
+        if !self.kernel_costs.is_empty() {
+            let max_traffic = self.kernel_costs.iter().map(|k| k.estimated_traffic).max().unwrap();
+            let max_peak = self.kernel_costs.iter().map(|k| k.peak_liveness).max().unwrap();
+            let min_intensity = self.kernel_costs.iter()
+                .map(|k| k.arithmetic_intensity)
+                .filter(|i| i.is_finite())
+                .fold(f64::INFINITY, f64::min);
+            writeln!(f, "  max kernel traffic: {}", max_traffic)?;
+            writeln!(f, "  max kernel peak liveness: {}", max_peak)?;
+            if min_intensity.is_finite() {
+                writeln!(f, "  min kernel intensity: {:.2}", min_intensity)?;
+            }
+        }
+        Ok(())
     }
 }
 

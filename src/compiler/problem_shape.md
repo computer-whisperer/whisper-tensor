@@ -95,9 +95,31 @@ fundamental "bucket" of computation:
 - **GPU:** shared memory / L1 near a warp (~64-128 KB)
 - **Tenstorrent:** 1 MB SRAM per tensix core
 
-These buckets define how "wide" a subgraph the hardware can hold at once. Any
-working set that exceeds the bucket forces extra loads and stores — and that is
-the thing we are optimizing against.
+These buckets define how "wide" a subgraph the hardware can hold at once.
+
+### Cache as cost, not hard constraint
+
+The cache budget is NOT a hard constraint on kernel size. A kernel does not
+need all its values to fit in cache simultaneously — it executes ops over
+time, and values enter and leave the live set as they are produced and
+consumed. A chain A → B → C → D has peak liveness of ~2 values regardless
+of chain length, because each intermediate is consumed immediately.
+
+A kernel that temporarily exceeds cache simply pays a streaming cost — values
+are paged to/from the next memory tier. This is a cost to minimize, not a
+hard wall. The alternative (fragmenting large streaming workloads into many
+tiny kernels) would be worse due to kernel launch overhead and forced
+materialization at every boundary.
+
+What matters is **total memory traffic**: the sum of all loads and stores
+across cache boundaries during the kernel's execution. This depends on:
+1. The kernel's external I/O (inputs from other kernels + outputs to other
+   kernels) — this is the floor, unavoidable regardless of scheduling.
+2. The peak liveness during execution — if this exceeds cache, excess values
+   are evicted and potentially reloaded, adding penalty traffic.
+3. The execution order — a good schedule keeps producers near their consumers,
+   minimizing peak liveness. A bad schedule creates long live ranges that
+   thrash the cache.
 
 ## Three Separable Subproblems
 
@@ -114,8 +136,17 @@ overlapping inputs and contribute to related outputs belong in the same kernel,
 because co-scheduling them means loading shared data once and keeping
 intermediates cache-resident.
 
-The kernel's total working set (inputs from memory + intermediates + outputs to
-memory) must fit within the cache budget of the target hardware.
+The kernel boundary decision is cost-based: **does splitting here reduce
+total memory traffic enough to justify the overhead of a separate kernel?**
+A kernel that streams through a large dataset, temporarily exceeding cache,
+may be better than fragmenting into many small kernels that each force
+materialization at their boundaries.
+
+Evaluating candidate kernels requires a cheap cost heuristic — estimating
+memory traffic without fully scheduling the kernel. The structural properties
+of the addressing modes (Broadcast, Affine, SymAffine) enable this: they
+tell us which values are shared, which are streamed sequentially, and which
+dimensions are reduced (and therefore streamed one step at a time).
 
 ### 2. Intra-Kernel Organization (how ops are arranged within a kernel)
 
@@ -192,6 +223,48 @@ Prior compiler attempts (v10, v11, early v12) failed architecturally by:
    footprints and should be computed together," which is a more general
    framing that subsumes loop recovery.
 
+## Kernel Cost Estimation
+
+Evaluating partition quality requires estimating each kernel's memory traffic
+without fully scheduling it. The cost model uses structural analysis of the
+addressing modes:
+
+### Peak liveness by pattern
+
+The peak number of simultaneously live values during execution depends on
+the DAG structure within the kernel:
+
+- **Chain** (A → B → C → D): peak ≈ 2. Each value consumed immediately.
+- **Elementwise over N**: peak ≈ streamable. Process in chunks.
+- **Reduction fan-in** (K inputs → 1 accumulator): peak ≈ 2. Stream inputs
+  past the accumulator one at a time.
+- **Broadcast fan-out** (1 → N consumers): peak ≈ chunk_size + 1. Process
+  consumers in chunks while the broadcast source stays live.
+- **Matmul tile** (broadcast × affine → reduce): peak ≈ N_tile (accumulators)
+  + N_tile (affine input row) + 1 (broadcast value). Streams over K.
+
+### Streaming recognition
+
+The key to accurate estimation: **SymAffine inputs with reduce_dims indicate
+a streamed dimension.** The K values aren't all live simultaneously — they're
+processed one step at a time during reduction. Only one k-step's worth of
+intermediate values is live at any moment.
+
+Similarly, Affine stride-1 inputs can be processed in streaming chunks —
+the full range doesn't need to be resident, just the current chunk.
+
+### Cost formula
+
+For a candidate kernel:
+- `external_io`: count of external inputs + external outputs (floor cost)
+- `peak_liveness`: estimated peak simultaneously-live values
+- If `peak_liveness ≤ cache_capacity`: cost ≈ `external_io`
+- If `peak_liveness > cache_capacity`: cost ≈ `external_io + spill_penalty`
+  where spill_penalty grows with the excess (values evicted and reloaded)
+
+The ratio `total_compute_ops / total_memory_traffic` is the **arithmetic
+intensity** — higher is better. The partitioner should maximize this.
+
 ## Summary of Key Principles
 
 - **AtomGroups are compression, not semantics.** The compiler reads through
@@ -199,10 +272,14 @@ Prior compiler attempts (v10, v11, early v12) failed architecturally by:
 - **Tensor layouts are dissolved.** Intermediate data layout is a compiler
   output, not an input.
 - **Memory bandwidth dominates.** Minimize cache-boundary crossings.
-- **The cache bucket is the fundamental unit.** Partition work so each
-  partition's working set fits in the tightest cache level.
+- **Cache is a cost, not a hard constraint.** Exceeding cache incurs streaming
+  penalties but doesn't prohibit a kernel. Fragmentation into many tiny
+  kernels can be worse than moderate cache pressure.
 - **Shared data footprint drives grouping.** Atoms that share inputs/outputs
   belong together to amortize memory traffic.
+- **Streaming dimensions reduce liveness.** Reduction dims (SymAffine) and
+  sequential access (Affine) are processed one step/chunk at a time, not
+  materialized fully.
 - **Three separable problems:** kernel formation, intra-kernel organization,
   inter-kernel runtime scheduling.
 - **No tensor op pattern matching.** One general mechanism for discovering
