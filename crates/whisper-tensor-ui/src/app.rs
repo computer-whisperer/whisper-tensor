@@ -415,6 +415,9 @@ impl eframe::App for WebUIApp {
                                     AnyInterface::TextInferenceTokensInLogitOutInterface(iface) => {
                                         needed_tokenizers.push(iface.get_tokenizer().clone());
                                     }
+                                    AnyInterface::MultimodalLanguageInterface(iface) => {
+                                        needed_tokenizers.push(iface.get_tokenizer().clone());
+                                    }
                                     AnyInterface::ImageGenerationInterface(iface) => {
                                         for pi in &iface.positive_prompts {
                                             needed_tokenizers.push(pi.tokenizer.clone());
