@@ -1504,6 +1504,25 @@ impl GraphExplorerApp {
                             }
                         });
                     }
+                    AnyInterface::MultimodalLanguageInterface(mm_interface) => {
+                        ui.label("Multimodal language interface");
+                        ui.label(format!(
+                            "Modality input slots: {}",
+                            mm_interface.modality_inputs.len()
+                        ));
+                        let required = mm_interface
+                            .modality_inputs
+                            .iter()
+                            .filter(|x| x.required)
+                            .map(|x| x.name.clone())
+                            .collect::<Vec<_>>();
+                        if !required.is_empty() {
+                            ui.label(format!(
+                                "Required modalities are not yet editable in this panel: {}",
+                                required.join(", ")
+                            ));
+                        }
+                    }
                     AnyInterface::ImageGenerationInterface(sd_interface) => {
                         let sd_data = self
                             .sd_inference_data

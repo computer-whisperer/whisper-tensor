@@ -45,6 +45,8 @@ pub enum SuperGraphError {
     CompilerError(#[from] CompilerError),
     #[error("Missing link{0}")]
     MissingLinkError(String),
+    #[error("Invalid input: {0}")]
+    InvalidInputError(String),
     #[error(transparent)]
     EvalRuntimeError(#[from] EvalRuntimeError),
 }

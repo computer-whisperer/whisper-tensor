@@ -1,6 +1,7 @@
 use memmap2::Mmap;
 use onnx_graph::WeightStorageStrategy;
 use onnx_graph::weights::SafetensorsWeightManager;
+use onnx_graph::weights::WeightManager;
 use prost::DecodeError;
 use std::fs::File;
 use std::io::Read;
@@ -9,6 +10,9 @@ use std::sync::Arc;
 
 pub mod deepseek_v2;
 pub mod flux;
+pub mod gemma;
+pub mod gemma2;
+pub mod gemma3;
 pub mod gguf;
 pub mod llama3;
 pub mod loaders;
@@ -129,11 +133,50 @@ pub fn load_transformers_format(
         .as_str()
         .ok_or(Error::MissingConfigEntryError("model_type".to_string()))?;
     Ok(match model_type {
-        "llama" => {
-            println!("Loading as Llama3");
+        "llama" | "mistral" => {
+            println!(
+                "Loading as {}",
+                if model_type == "mistral" {
+                    "Mistral"
+                } else {
+                    "Llama3"
+                }
+            );
             let config = llama3::Llama3Config::from_huggingface_transformers_json(&config)?;
             llama3::load_llama3(weight_manager, config, output_method)
                 .map_err(Error::ModelBuildError)?
+        }
+        "gemma" => {
+            println!("Loading as Gemma");
+            let config = gemma::GemmaConfig::from_huggingface_transformers_json(&config)?;
+            gemma::load_gemma(weight_manager, config, output_method)
+                .map_err(Error::ModelBuildError)?
+        }
+        "gemma2" => {
+            println!("Loading as Gemma2");
+            let config = gemma2::Gemma2Config::from_huggingface_transformers_json(&config)?;
+            gemma2::load_gemma2(weight_manager, config, output_method)
+                .map_err(Error::ModelBuildError)?
+        }
+        "gemma3_text" => {
+            println!("Loading as Gemma3Text");
+            let config = gemma3::Gemma3TextConfig::from_huggingface_transformers_json(&config)?;
+            gemma3::load_gemma3_text(weight_manager, config, output_method)
+                .map_err(Error::ModelBuildError)?
+        }
+        "gemma3" => {
+            println!("Loading as Gemma3 (text-only)");
+            let text_config = config
+                .get("text_config")
+                .ok_or(Error::MissingConfigEntryError("text_config".to_string()))?;
+            let text_config =
+                gemma3::Gemma3TextConfig::from_huggingface_transformers_json(text_config)?;
+            gemma3::load_gemma3_text(
+                weight_manager.prefix("language_model"),
+                text_config,
+                output_method,
+            )
+            .map_err(Error::ModelBuildError)?
         }
         "qwen2" | "qwen3" => {
             println!("Loading as {model_type}");
@@ -147,8 +190,15 @@ pub fn load_transformers_format(
             phi3::load_phi3(weight_manager, config, output_method)
                 .map_err(Error::ModelBuildError)?
         }
-        "deepseek_v2" => {
-            println!("Loading as DeepSeek-V2");
+        "deepseek_v2" | "deepseek_v3" => {
+            println!(
+                "Loading as {}",
+                if model_type == "deepseek_v3" {
+                    "DeepSeek-V3"
+                } else {
+                    "DeepSeek-V2"
+                }
+            );
             let config =
                 deepseek_v2::DeepseekV2Config::from_huggingface_transformers_json(&config)?;
             deepseek_v2::load_deepseek_v2(weight_manager, config, output_method)

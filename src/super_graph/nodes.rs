@@ -3,6 +3,7 @@ use crate::backends::eval_backend;
 use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::compiler::CompiledProgramObserver;
+use crate::dtype::DType;
 use crate::graph::{GlobalId, Graph, Node, NodeMetadata, Property, PropertyValue};
 use crate::metadata::TokenizerInfo;
 use crate::milli_graph::MilliOpGraph;
@@ -60,6 +61,32 @@ impl<T: SuperGraphNode> Node for T {
     fn outputs(&self) -> Box<dyn Iterator<Item = GlobalId> + '_> {
         Box::new(<Self as SuperGraphNode>::outputs(self).map(|x| x.global_id()))
     }
+}
+
+fn tensor_bool_scalar(value: bool) -> Result<NumericTensor<DynRank>, SuperGraphError> {
+    Ok(NumericTensor::from_vec_shape(vec![value], vec![])?)
+}
+
+fn read_rank0_bool_tensor(
+    tensor: &NumericTensor<DynRank>,
+    input_name: &str,
+) -> Result<bool, SuperGraphError> {
+    if tensor.rank() != 0 {
+        return Err(SuperGraphError::InvalidInputError(format!(
+            "{} must be a rank-0 bool tensor, got rank={} shape={:?}",
+            input_name,
+            tensor.rank(),
+            tensor.shape()
+        )));
+    }
+    if tensor.dtype() != DType::BOOL {
+        return Err(SuperGraphError::InvalidInputError(format!(
+            "{} must have BOOL dtype, got {:?}",
+            input_name,
+            tensor.dtype()
+        )));
+    }
+    Ok(tensor.first_element().into())
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -692,6 +719,12 @@ impl SuperGraphNode for SuperGraphNodeScan {
                     self.iteration_count
                 )))?;
         let iteration_count: i64 = iteration_count_tensor.first_element().into();
+        if iteration_count < 0 {
+            return Err(SuperGraphError::InvalidInputError(format!(
+                "scan iteration_count must be non-negative, got {iteration_count}"
+            )));
+        }
+        let iteration_count = iteration_count as u64;
 
         let node_path = node_path
             .iter()
@@ -822,7 +855,7 @@ impl SuperGraphNode for SuperGraphNodeScan {
             output_scan_tensor_parts.insert(*outer, (Vec::new(), *scan_axis as usize));
         }
 
-        for i in 0..iteration_count as u64 {
+        for i in 0..iteration_count {
             let iter_inputs = {
                 let mut iter_inputs = simple_inputs.clone();
                 iter_inputs.extend(&state_values);
@@ -927,6 +960,17 @@ impl SuperGraphNode for SuperGraphNodeScan {
         }
 
         let mut output_data = SuperGraphData::new();
+        let prev_iter_outputs = if iteration_count == 0 {
+            None
+        } else {
+            Some(
+                prev_iter_outputs
+                    .as_ref()
+                    .ok_or(SuperGraphError::InvalidInputError(
+                        "scan had iterations but no outputs were produced".to_string(),
+                    ))?,
+            )
+        };
 
         for link in &self.simple_outputs {
             match link {
@@ -934,8 +978,10 @@ impl SuperGraphNode for SuperGraphNodeScan {
                     output_data.tensors.insert(
                         *output,
                         prev_iter_outputs
-                            .as_ref()
-                            .unwrap()
+                            .ok_or(SuperGraphError::InvalidInputError(
+                                "scan simple_outputs are unavailable when iteration_count is 0"
+                                    .to_string(),
+                            ))?
                             .tensors
                             .get(input)
                             .ok_or(SuperGraphError::MissingLinkError(String::new()))?
@@ -946,8 +992,10 @@ impl SuperGraphNode for SuperGraphNodeScan {
                     output_data.strings.insert(
                         *output,
                         prev_iter_outputs
-                            .as_ref()
-                            .unwrap()
+                            .ok_or(SuperGraphError::InvalidInputError(
+                                "scan simple_outputs are unavailable when iteration_count is 0"
+                                    .to_string(),
+                            ))?
                             .strings
                             .get(input)
                             .ok_or(SuperGraphError::MissingLinkError(String::new()))?
@@ -958,8 +1006,10 @@ impl SuperGraphNode for SuperGraphNodeScan {
                     output_data.tokenizers.insert(
                         *output,
                         prev_iter_outputs
-                            .as_ref()
-                            .unwrap()
+                            .ok_or(SuperGraphError::InvalidInputError(
+                                "scan simple_outputs are unavailable when iteration_count is 0"
+                                    .to_string(),
+                            ))?
                             .tokenizers
                             .get(input)
                             .ok_or(SuperGraphError::MissingLinkError(String::new()))?
@@ -970,8 +1020,10 @@ impl SuperGraphNode for SuperGraphNodeScan {
                     output_data.tensor_maps.insert(
                         *output,
                         *prev_iter_outputs
-                            .as_ref()
-                            .unwrap()
+                            .ok_or(SuperGraphError::InvalidInputError(
+                                "scan simple_outputs are unavailable when iteration_count is 0"
+                                    .to_string(),
+                            ))?
                             .tensor_maps
                             .get(input)
                             .ok_or(SuperGraphError::MissingLinkError(String::new()))?,
@@ -981,8 +1033,10 @@ impl SuperGraphNode for SuperGraphNodeScan {
                     output_data.hashes.insert(
                         *output,
                         *prev_iter_outputs
-                            .as_ref()
-                            .unwrap()
+                            .ok_or(SuperGraphError::InvalidInputError(
+                                "scan simple_outputs are unavailable when iteration_count is 0"
+                                    .to_string(),
+                            ))?
                             .hashes
                             .get(input)
                             .ok_or(SuperGraphError::MissingLinkError(String::new()))?,
@@ -992,6 +1046,12 @@ impl SuperGraphNode for SuperGraphNodeScan {
         }
 
         for (link, (parts, axis)) in output_scan_tensor_parts {
+            if parts.is_empty() {
+                return Err(SuperGraphError::InvalidInputError(format!(
+                    "scan output {:?} has no parts; iteration_count is likely 0",
+                    link
+                )));
+            }
             let unsqueezed = parts
                 .into_iter()
                 .map(|tensor| tensor.unsqueeze(axis))
@@ -1249,6 +1309,350 @@ impl SuperGraphNode for SuperGraphNodeRNNCacheWrite {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SuperGraphNodeTensorCacheRead {
+    global_id: GlobalId,
+    key_input: SuperGraphLinkHash,
+    default_input: SuperGraphLinkTensor,
+    value_output: SuperGraphLinkTensor,
+    hit_output: SuperGraphLinkTensor,
+}
+
+impl SuperGraphNodeTensorCacheRead {
+    pub fn new(
+        key_input: SuperGraphLinkHash,
+        default_input: SuperGraphLinkTensor,
+        value_output: SuperGraphLinkTensor,
+        hit_output: SuperGraphLinkTensor,
+        rng: &mut impl RngCore,
+    ) -> Self {
+        Self {
+            global_id: GlobalId::new(rng),
+            key_input,
+            default_input,
+            value_output,
+            hit_output,
+        }
+    }
+}
+
+impl SuperGraphNode for SuperGraphNodeTensorCacheRead {
+    fn to_any(self) -> SuperGraphAnyNode {
+        SuperGraphAnyNode::TensorCacheRead(self)
+    }
+
+    fn eval<T: SuperGraphObserver>(
+        &self,
+        _node_path: &[GlobalId],
+        data: &mut SuperGraphData,
+        context: &mut SuperGraphContext<T>,
+    ) -> Result<(), SuperGraphError> {
+        let key_input = *data
+            .hashes
+            .get(&self.key_input)
+            .ok_or(SuperGraphError::MissingLinkError(String::new()))?;
+        let default_input = data
+            .tensors
+            .get(&self.default_input)
+            .ok_or(SuperGraphError::MissingLinkError(String::new()))?
+            .clone();
+        let mut output = default_input;
+        let mut hit = false;
+        if let Some(caches) = &mut context.caches
+            && let Some(value) = caches.tensor_cache.get(&key_input)
+        {
+            output = value.clone();
+            hit = true;
+        }
+        data.tensors.insert(self.value_output, output);
+        data.tensors
+            .insert(self.hit_output, tensor_bool_scalar(hit)?);
+        Ok(())
+    }
+
+    fn op_kind(&self) -> String {
+        "TensorCacheRead".to_string()
+    }
+    fn inputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new([self.key_input.to_any(), self.default_input.to_any()].into_iter())
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new([self.value_output.to_any(), self.hit_output.to_any()].into_iter())
+    }
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SuperGraphNodeTensorCacheWrite {
+    global_id: GlobalId,
+    key_input: SuperGraphLinkHash,
+    value_input: SuperGraphLinkTensor,
+    write_enable_input: SuperGraphLinkTensor,
+}
+
+impl SuperGraphNodeTensorCacheWrite {
+    pub fn new(
+        key_input: SuperGraphLinkHash,
+        value_input: SuperGraphLinkTensor,
+        write_enable_input: SuperGraphLinkTensor,
+        rng: &mut impl RngCore,
+    ) -> Self {
+        Self {
+            global_id: GlobalId::new(rng),
+            key_input,
+            value_input,
+            write_enable_input,
+        }
+    }
+}
+
+impl SuperGraphNode for SuperGraphNodeTensorCacheWrite {
+    fn to_any(self) -> SuperGraphAnyNode {
+        SuperGraphAnyNode::TensorCacheWrite(self)
+    }
+
+    fn eval<T: SuperGraphObserver>(
+        &self,
+        _node_path: &[GlobalId],
+        data: &mut SuperGraphData,
+        context: &mut SuperGraphContext<T>,
+    ) -> Result<(), SuperGraphError> {
+        let write_enable = read_rank0_bool_tensor(
+            data.tensors
+                .get(&self.write_enable_input)
+                .ok_or(SuperGraphError::MissingLinkError(String::new()))?,
+            "TensorCacheWrite.write_enable_input",
+        )?;
+        if write_enable && let Some(caches) = &mut context.caches {
+            let key_input = *data
+                .hashes
+                .get(&self.key_input)
+                .ok_or(SuperGraphError::MissingLinkError(String::new()))?;
+            let value_input = data
+                .tensors
+                .get(&self.value_input)
+                .ok_or(SuperGraphError::MissingLinkError(String::new()))?
+                .clone();
+            caches.tensor_cache.insert(key_input, value_input);
+        }
+        Ok(())
+    }
+    fn op_kind(&self) -> String {
+        "TensorCacheWrite".to_string()
+    }
+    fn inputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new(
+            [
+                self.key_input.to_any(),
+                self.value_input.to_any(),
+                self.write_enable_input.to_any(),
+            ]
+            .into_iter(),
+        )
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new(std::iter::empty())
+    }
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SuperGraphNodeTensorPackCacheRead {
+    global_id: GlobalId,
+    key_input: SuperGraphLinkHash,
+    value_outputs: Vec<(String, SuperGraphLinkTensor)>,
+    default_value_inputs: Vec<(String, SuperGraphLinkTensor)>,
+    hit_output: SuperGraphLinkTensor,
+}
+
+impl SuperGraphNodeTensorPackCacheRead {
+    pub fn new(
+        key_input: SuperGraphLinkHash,
+        value_outputs: Vec<(String, SuperGraphLinkTensor)>,
+        default_value_inputs: Vec<(String, SuperGraphLinkTensor)>,
+        hit_output: SuperGraphLinkTensor,
+        rng: &mut impl RngCore,
+    ) -> Self {
+        Self {
+            global_id: GlobalId::new(rng),
+            key_input,
+            value_outputs,
+            default_value_inputs,
+            hit_output,
+        }
+    }
+}
+
+impl SuperGraphNode for SuperGraphNodeTensorPackCacheRead {
+    fn to_any(self) -> SuperGraphAnyNode {
+        SuperGraphAnyNode::TensorPackCacheRead(self)
+    }
+
+    fn eval<T: SuperGraphObserver>(
+        &self,
+        _node_path: &[GlobalId],
+        data: &mut SuperGraphData,
+        context: &mut SuperGraphContext<T>,
+    ) -> Result<(), SuperGraphError> {
+        let key_input = *data
+            .hashes
+            .get(&self.key_input)
+            .ok_or(SuperGraphError::MissingLinkError(String::new()))?;
+        let default_values_by_name: HashMap<String, NumericTensor<DynRank>> = self
+            .default_value_inputs
+            .iter()
+            .map(|(name, input)| {
+                Ok((
+                    name.clone(),
+                    data.tensors
+                        .get(input)
+                        .ok_or(SuperGraphError::MissingLinkError(String::new()))?
+                        .clone(),
+                ))
+            })
+            .collect::<Result<_, SuperGraphError>>()?;
+
+        let mut hit = false;
+        if let Some(caches) = &mut context.caches
+            && let Some(cached_values) = caches.tensor_pack_cache.get(&key_input)
+        {
+            let full_hit = self
+                .value_outputs
+                .iter()
+                .all(|(name, _)| cached_values.contains_key(name));
+            if full_hit {
+                for (name, output) in &self.value_outputs {
+                    data.tensors
+                        .insert(*output, cached_values.get(name).unwrap().clone());
+                }
+                hit = true;
+            }
+        }
+
+        if !hit {
+            for (name, output) in &self.value_outputs {
+                let default_value =
+                    default_values_by_name
+                        .get(name)
+                        .ok_or(SuperGraphError::InvalidInputError(format!(
+                            "TensorPackCacheRead missing default input for key '{name}'"
+                        )))?;
+                data.tensors.insert(*output, default_value.clone());
+            }
+        }
+
+        data.tensors
+            .insert(self.hit_output, tensor_bool_scalar(hit)?);
+        Ok(())
+    }
+
+    fn op_kind(&self) -> String {
+        "TensorPackCacheRead".to_string()
+    }
+    fn inputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new(
+            std::iter::once(self.key_input.to_any())
+                .chain(self.default_value_inputs.iter().map(|(_, x)| x.to_any())),
+        )
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new(
+            self.value_outputs
+                .iter()
+                .map(|(_, x)| x.to_any())
+                .chain(std::iter::once(self.hit_output.to_any())),
+        )
+    }
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SuperGraphNodeTensorPackCacheWrite {
+    global_id: GlobalId,
+    key_input: SuperGraphLinkHash,
+    value_inputs: Vec<(String, SuperGraphLinkTensor)>,
+    write_enable_input: SuperGraphLinkTensor,
+}
+
+impl SuperGraphNodeTensorPackCacheWrite {
+    pub fn new(
+        key_input: SuperGraphLinkHash,
+        value_inputs: Vec<(String, SuperGraphLinkTensor)>,
+        write_enable_input: SuperGraphLinkTensor,
+        rng: &mut impl RngCore,
+    ) -> Self {
+        Self {
+            global_id: GlobalId::new(rng),
+            key_input,
+            value_inputs,
+            write_enable_input,
+        }
+    }
+}
+
+impl SuperGraphNode for SuperGraphNodeTensorPackCacheWrite {
+    fn to_any(self) -> SuperGraphAnyNode {
+        SuperGraphAnyNode::TensorPackCacheWrite(self)
+    }
+
+    fn eval<T: SuperGraphObserver>(
+        &self,
+        _node_path: &[GlobalId],
+        data: &mut SuperGraphData,
+        context: &mut SuperGraphContext<T>,
+    ) -> Result<(), SuperGraphError> {
+        let write_enable = read_rank0_bool_tensor(
+            data.tensors
+                .get(&self.write_enable_input)
+                .ok_or(SuperGraphError::MissingLinkError(String::new()))?,
+            "TensorPackCacheWrite.write_enable_input",
+        )?;
+        if write_enable && let Some(caches) = &mut context.caches {
+            let key_input = *data
+                .hashes
+                .get(&self.key_input)
+                .ok_or(SuperGraphError::MissingLinkError(String::new()))?;
+            let values = self
+                .value_inputs
+                .iter()
+                .map(|(name, input)| {
+                    Ok((
+                        name.clone(),
+                        data.tensors
+                            .get(input)
+                            .ok_or(SuperGraphError::MissingLinkError(String::new()))?
+                            .clone(),
+                    ))
+                })
+                .collect::<Result<HashMap<String, NumericTensor<DynRank>>, SuperGraphError>>()?;
+            caches.tensor_pack_cache.insert(key_input, values);
+        }
+        Ok(())
+    }
+    fn op_kind(&self) -> String {
+        "TensorPackCacheWrite".to_string()
+    }
+    fn inputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new(
+            std::iter::once(self.key_input.to_any())
+                .chain(std::iter::once(self.write_enable_input.to_any()))
+                .chain(self.value_inputs.iter().map(|(_, x)| x.to_any())),
+        )
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new(std::iter::empty())
+    }
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[allow(clippy::large_enum_variant)]
 pub enum SuperGraphAnyNode {
     ModelExecution(SuperGraphNodeModelExecution),
@@ -1259,6 +1663,10 @@ pub enum SuperGraphAnyNode {
     Scan(SuperGraphNodeScan),
     RNNCacheWrite(SuperGraphNodeRNNCacheWrite),
     RNNCacheRead(SuperGraphNodeRNNCacheRead),
+    TensorCacheRead(SuperGraphNodeTensorCacheRead),
+    TensorCacheWrite(SuperGraphNodeTensorCacheWrite),
+    TensorPackCacheRead(SuperGraphNodeTensorPackCacheRead),
+    TensorPackCacheWrite(SuperGraphNodeTensorPackCacheWrite),
 }
 
 macro_rules! delegate {
@@ -1273,6 +1681,10 @@ macro_rules! delegate {
                 SuperGraphAnyNode::Scan(x) => SuperGraphNode::$name(x,$($arg),*),
                 SuperGraphAnyNode::RNNCacheRead(x) => SuperGraphNode::$name(x,$($arg),*),
                 SuperGraphAnyNode::RNNCacheWrite(x) => SuperGraphNode::$name(x,$($arg),*),
+                SuperGraphAnyNode::TensorCacheRead(x) => SuperGraphNode::$name(x,$($arg),*),
+                SuperGraphAnyNode::TensorCacheWrite(x) => SuperGraphNode::$name(x,$($arg),*),
+                SuperGraphAnyNode::TensorPackCacheRead(x) => SuperGraphNode::$name(x,$($arg),*),
+                SuperGraphAnyNode::TensorPackCacheWrite(x) => SuperGraphNode::$name(x,$($arg),*),
             }
         }
     }
@@ -1307,6 +1719,10 @@ impl SuperGraphNode for SuperGraphAnyNode {
             SuperGraphAnyNode::Scan(node) => node.eval(node_path, data, context),
             SuperGraphAnyNode::RNNCacheWrite(node) => node.eval(node_path, data, context),
             SuperGraphAnyNode::RNNCacheRead(node) => node.eval(node_path, data, context),
+            SuperGraphAnyNode::TensorCacheRead(node) => node.eval(node_path, data, context),
+            SuperGraphAnyNode::TensorCacheWrite(node) => node.eval(node_path, data, context),
+            SuperGraphAnyNode::TensorPackCacheRead(node) => node.eval(node_path, data, context),
+            SuperGraphAnyNode::TensorPackCacheWrite(node) => node.eval(node_path, data, context),
         }
     }
 

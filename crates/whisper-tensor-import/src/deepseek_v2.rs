@@ -12,6 +12,7 @@ use crate::onnx_graph::tensor::{
     TensorDataValue,
 };
 use crate::onnx_graph::weights::WeightManager;
+use crate::sd_common::CastingWeightManager;
 use prost::Message;
 use std::sync::Arc;
 
@@ -137,6 +138,9 @@ pub fn load_deepseek_v2(
     config: DeepseekV2Config,
     output_method: WeightStorageStrategy,
 ) -> Result<Vec<u8>, anyhow::Error> {
+    // DeepSeek-V3 checkpoints can store many projection weights in FP8.
+    // Cast all fetched weights to BF16 so matmul input/weight dtypes match.
+    let weight_manager = CastingWeightManager::new(weight_manager, DType::BF16);
     let model_weight_manager = weight_manager.prefix("model");
 
     let mut input_tensors: Vec<Arc<dyn Tensor>> = vec![];

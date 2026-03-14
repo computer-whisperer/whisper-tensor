@@ -31,6 +31,7 @@ use std::sync::Arc;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum AnyInterface {
     TextInferenceTokensInLogitOutInterface(TextInferenceTokensInLogitOutInterface),
+    MultimodalLanguageInterface(MultimodalLanguageInterface),
     ImageGenerationInterface(ImageGenerationInterface),
     TextToSpeechInterface(TextToSpeechInterface),
     SpeechToTextInterface(SpeechToTextInterface),
@@ -42,6 +43,7 @@ impl AnyInterface {
             AnyInterface::TextInferenceTokensInLogitOutInterface(_) => {
                 "TextInferenceTokensInLogitsOut".to_string()
             }
+            AnyInterface::MultimodalLanguageInterface(_) => "MultimodalLanguage".to_string(),
             AnyInterface::ImageGenerationInterface(_) => "ImageGeneration".to_string(),
             AnyInterface::TextToSpeechInterface(_) => "TextToSpeech".to_string(),
             AnyInterface::SpeechToTextInterface(_) => "SpeechToText".to_string(),
@@ -51,6 +53,7 @@ impl AnyInterface {
     pub fn get_super_graph(&self) -> &SuperGraph {
         match self {
             AnyInterface::TextInferenceTokensInLogitOutInterface(x) => &x.super_graph,
+            AnyInterface::MultimodalLanguageInterface(x) => &x.super_graph,
             AnyInterface::ImageGenerationInterface(x) => &x.super_graph,
             AnyInterface::TextToSpeechInterface(x) => &x.super_graph,
             AnyInterface::SpeechToTextInterface(x) => &x.encoder_super_graph,
@@ -157,6 +160,152 @@ impl TextInferenceTokensInLogitOutInterface {
 
     pub fn to_any(self) -> AnyInterface {
         AnyInterface::TextInferenceTokensInLogitOutInterface(self)
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum MultimodalTensorInputRole {
+    Embeddings,
+    AttentionMask,
+    PositionIds,
+    MediaTokenIds,
+    MediaGrid,
+    AudioFeatures,
+    Other(String),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MultimodalTensorInput {
+    pub name: String,
+    pub role: MultimodalTensorInputRole,
+    pub tensor_link: SuperGraphLinkTensor,
+    pub required: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MultimodalLanguageInterface {
+    pub cache_key_input_link: SuperGraphLinkHash,
+    pub token_context_input_link: SuperGraphLinkTensor,
+    pub model_input_link: SuperGraphLinkTensorMap,
+    pub modality_inputs: Vec<MultimodalTensorInput>,
+    pub logit_output_link: SuperGraphLinkTensor,
+    pub super_graph: SuperGraph,
+    pub tokenizer: TokenizerInfo,
+}
+
+impl MultimodalLanguageInterface {
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_string_with_modal_inputs_in_string_out(
+        &self,
+        model: &Model,
+        compiled_model: Option<&CompiledProgram>,
+        text_in: String,
+        modal_inputs: HashMap<SuperGraphLinkTensor, NumericTensor<DynRank>>,
+        tokenizer_cache: &mut HashMap<TokenizerInfo, Arc<AnyTokenizer>>,
+        tensor_cache: Option<&mut ModelLoadedTensorCache>,
+        super_graph_caches: Option<&mut SuperGraphCache>,
+        backend: &mut EvalBackend,
+    ) -> Result<String, SuperGraphError> {
+        let tokenizer = {
+            if let Some(x) = tokenizer_cache.get(&self.tokenizer) {
+                x.clone()
+            } else {
+                let x = Arc::new(AnyTokenizer::from_tokenizer_info(&self.tokenizer));
+                tokenizer_cache.insert(self.tokenizer.clone(), x.clone());
+                x
+            }
+        };
+        let tokens = tokenizer.encode(text_in.as_str());
+        let tokens_tensor = NumericTensor::from_vec(tokens).to_dyn_rank();
+
+        let super_graph_data = {
+            let mut super_graph_data = SuperGraphData::new();
+            super_graph_data
+                .tensor_maps
+                .insert(self.model_input_link, model.get_tensor_store());
+            super_graph_data.tensors.extend(modal_inputs);
+            super_graph_data
+                .tensors
+                .insert(self.token_context_input_link, tokens_tensor);
+            super_graph_data.hashes.insert(self.cache_key_input_link, 0);
+            super_graph_data
+        };
+        let super_graph_output = {
+            let mut observer = ();
+            let mut super_graph_tensor_cache = SuperGraphTensorCache::new();
+            if let Some(tensor_cache) = &tensor_cache {
+                super_graph_tensor_cache
+                    .caches
+                    .push((model.get_tensor_store(), (*tensor_cache).clone()))
+            }
+            let compiled_models = {
+                let mut compiled_models = Vec::new();
+                if let Some(compiled_model) = compiled_model {
+                    compiled_models.push((model, compiled_model));
+                }
+                compiled_models
+            };
+            let mut context = SuperGraphContext {
+                observer: &mut observer,
+                eval_backend: backend,
+                super_graph_tensor_cache: &mut super_graph_tensor_cache,
+                caches: super_graph_caches,
+                symbolic_graphs: vec![model.get_symbolic_graph()],
+                use_compiled_models: compiled_model.is_some(),
+                compiled_models: Some(compiled_models),
+            };
+            let res = self.super_graph.run(super_graph_data, &mut context)?;
+            if let Some(tensor_cache) = tensor_cache {
+                *tensor_cache = context.super_graph_tensor_cache.caches.remove(0).1
+            }
+            res
+        };
+        let logits = super_graph_output
+            .tensors
+            .get(&self.logit_output_link)
+            .unwrap();
+        let logits_shape = logits.shape();
+        let logits = logits.slice(
+            &[logits_shape[0] - 1..logits_shape[0], 0..logits_shape[1]],
+            backend,
+        )?;
+        let logits = logits.squeeze(0)?;
+        let token_id = logits.argmax(0, true, false, backend)?;
+
+        let token_id: u32 = token_id.first_element().into();
+        let token_str = tokenizer.decode(&[token_id])?;
+        Ok(token_str)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_string_in_string_out(
+        &self,
+        model: &Model,
+        compiled_model: Option<&CompiledProgram>,
+        text_in: String,
+        tokenizer_cache: &mut HashMap<TokenizerInfo, Arc<AnyTokenizer>>,
+        tensor_cache: Option<&mut ModelLoadedTensorCache>,
+        super_graph_caches: Option<&mut SuperGraphCache>,
+        backend: &mut EvalBackend,
+    ) -> Result<String, SuperGraphError> {
+        self.run_string_with_modal_inputs_in_string_out(
+            model,
+            compiled_model,
+            text_in,
+            HashMap::new(),
+            tokenizer_cache,
+            tensor_cache,
+            super_graph_caches,
+            backend,
+        )
+    }
+
+    pub fn get_tokenizer(&self) -> &TokenizerInfo {
+        &self.tokenizer
+    }
+
+    pub fn to_any(self) -> AnyInterface {
+        AnyInterface::MultimodalLanguageInterface(self)
     }
 }
 
