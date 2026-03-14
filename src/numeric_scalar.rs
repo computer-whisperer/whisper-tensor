@@ -917,7 +917,7 @@ impl NumericScalarType for bool {
     fn cast_from_numeric_scalar(value: &NumericScalar) -> Self {
         match value {
             NumericScalar::BOOL(v) => *v,
-            _ => panic!("Cannot cast from {value:?} to bool"),
+            _ => value.to_f64() != 0.0,
         }
     }
 }
