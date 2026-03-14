@@ -174,10 +174,9 @@ impl Gemma3TextConfig {
             if let Some(sliding_attention) = rope_parameters
                 .get("sliding_attention")
                 .and_then(|v| v.as_object())
+                && let Some(theta) = sliding_attention.get("rope_theta").and_then(|v| v.as_f64())
             {
-                if let Some(theta) = sliding_attention.get("rope_theta").and_then(|v| v.as_f64()) {
-                    sliding_rope_theta = theta;
-                }
+                sliding_rope_theta = theta;
             }
         }
 
@@ -228,7 +227,7 @@ fn make_rope_cache(
     linear_factor: Option<f64>,
     max_len: usize,
     head_dim: usize,
-) -> Result<(Arc<dyn Tensor>, Arc<dyn Tensor>), crate::onnx_graph::Error> {
+) -> Result<(Arc<dyn Tensor>, Arc<dyn Tensor>), Error> {
     let half_head_dim = head_dim / 2;
     let factor = linear_factor.unwrap_or(1.0);
     let inv_freq: Vec<f64> = (0..half_head_dim)
@@ -487,15 +486,15 @@ pub fn load_gemma3_text(
 
         let scores = MatMul::new(None, q, transpose(k.clone()))?;
         let mut scores: Arc<dyn Tensor> = div_scalar(scores, config.query_pre_attn_scalar.sqrt())?;
-        if let Some(softcap) = config.attn_logit_softcapping {
-            if softcap > 0.0 {
-                let s = div_scalar(scores, softcap)?;
-                let s = Tanh::new(None, s);
-                let scale: Arc<dyn Tensor> =
-                    Constant::new(None, TensorData::fill(Shape::from(&[1usize][..]), softcap)?);
-                let scale = cast(scale, s.dtype());
-                scores = Mul::new(None, s, scale)?;
-            }
+        if let Some(softcap) = config.attn_logit_softcapping
+            && softcap > 0.0
+        {
+            let s = div_scalar(scores, softcap)?;
+            let s = Tanh::new(None, s);
+            let scale: Arc<dyn Tensor> =
+                Constant::new(None, TensorData::fill(Shape::from(&[1usize][..]), softcap)?);
+            let scale = cast(scale, s.dtype());
+            scores = Mul::new(None, s, scale)?;
         }
 
         let scores = Softmax::new(None, scores, Some(3));
@@ -560,15 +559,15 @@ pub fn load_gemma3_text(
         let h_unsqueezed = unsqueeze(h, (h_rank as i64) - 1)?;
         MatMul::new(Some("lm_head".to_string()), h_unsqueezed, weight)?
     };
-    if let Some(softcap) = config.final_logit_softcapping {
-        if softcap > 0.0 {
-            let o = div_scalar(out, softcap)?;
-            let o = Tanh::new(None, o);
-            let scale: Arc<dyn Tensor> =
-                Constant::new(None, TensorData::fill(Shape::from(&[1usize][..]), softcap)?);
-            let scale = cast(scale, o.dtype());
-            out = Mul::new(None, o, scale)?;
-        }
+    if let Some(softcap) = config.final_logit_softcapping
+        && softcap > 0.0
+    {
+        let o = div_scalar(out, softcap)?;
+        let o = Tanh::new(None, o);
+        let scale: Arc<dyn Tensor> =
+            Constant::new(None, TensorData::fill(Shape::from(&[1usize][..]), softcap)?);
+        let scale = cast(scale, o.dtype());
+        out = Mul::new(None, o, scale)?;
     }
     output_tensors.push(("logits".to_string(), out));
 

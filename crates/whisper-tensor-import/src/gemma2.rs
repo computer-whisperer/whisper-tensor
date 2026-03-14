@@ -415,15 +415,15 @@ pub fn load_gemma2(
         let h_unsqueezed = unsqueeze(h, (h_rank as i64) - 1)?;
         MatMul::new(Some("lm_head".to_string()), h_unsqueezed, weight)?
     };
-    if let Some(softcap) = config.final_logit_softcapping {
-        if softcap > 0.0 {
-            let o = div_scalar(out, softcap)?;
-            let o = Tanh::new(None, o);
-            let scale: Arc<dyn Tensor> =
-                Constant::new(None, TensorData::fill(Shape::from(&[1usize][..]), softcap)?);
-            let scale = cast(scale, o.dtype());
-            out = Mul::new(None, o, scale)?;
-        }
+    if let Some(softcap) = config.final_logit_softcapping
+        && softcap > 0.0
+    {
+        let o = div_scalar(out, softcap)?;
+        let o = Tanh::new(None, o);
+        let scale: Arc<dyn Tensor> =
+            Constant::new(None, TensorData::fill(Shape::from(&[1usize][..]), softcap)?);
+        let scale = cast(scale, o.dtype());
+        out = Mul::new(None, o, scale)?;
     }
     output_tensors.push(("logits".to_string(), out));
 
