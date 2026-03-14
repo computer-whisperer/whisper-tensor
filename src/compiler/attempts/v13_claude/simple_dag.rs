@@ -362,6 +362,142 @@ pub fn build_matmul(m: u32, k: u32, n: u32) -> SimpleDag {
     dag
 }
 
+/// Build a matmul into an existing dag, using pre-existing ops as A and B inputs.
+/// Returns the output op indices (M*N outputs in row-major order).
+///
+/// `a_ops`: M*K op indices for A (row-major, A[m,k] = a_ops[m*k_dim + k])
+/// `b_ops`: K*N op indices for B (row-major, B[k,n] = b_ops[k*n_dim + n])
+pub fn build_matmul_into(
+    dag: &mut SimpleDag,
+    a_ops: &[u32],
+    b_ops: &[u32],
+    m: u32,
+    k: u32,
+    n: u32,
+) -> Vec<u32> {
+    assert_eq!(a_ops.len(), (m * k) as usize);
+    assert_eq!(b_ops.len(), (k * n) as usize);
+
+    let mut outputs = Vec::with_capacity((m * n) as usize);
+
+    for mi in 0..m {
+        for ni in 0..n {
+            let mut mul_ops = Vec::with_capacity(k as usize);
+            for ki in 0..k {
+                let a_idx = a_ops[(mi * k + ki) as usize];
+                let b_idx = b_ops[(ki * n + ni) as usize];
+                mul_ops.push(dag.push(OpKind::Mul, vec![a_idx, b_idx]));
+            }
+
+            let mut acc = mul_ops[0];
+            for ki in 1..k {
+                acc = dag.push(OpKind::Add, vec![acc, mul_ops[ki as usize]]);
+            }
+            outputs.push(acc);
+        }
+    }
+
+    outputs
+}
+
+/// Two independent matmuls with no shared inputs.
+/// C1[M, N1] = A1[M, K1] @ B1[K1, N1]
+/// C2[M, N2] = A2[M, K2] @ B2[K2, N2]
+///
+/// Tests whether the partitioner can identify two separate patterns
+/// and keep them appropriately separated.
+pub fn build_parallel_matmuls(
+    m: u32,
+    k1: u32, n1: u32,
+    k2: u32, n2: u32,
+) -> SimpleDag {
+    let mut dag = SimpleDag::new();
+
+    // A1, B1 inputs
+    let a1: Vec<u32> = (0..m * k1).map(|_| dag.push(OpKind::Input, vec![])).collect();
+    let b1: Vec<u32> = (0..k1 * n1).map(|_| dag.push(OpKind::Input, vec![])).collect();
+
+    // A2, B2 inputs
+    let a2: Vec<u32> = (0..m * k2).map(|_| dag.push(OpKind::Input, vec![])).collect();
+    let b2: Vec<u32> = (0..k2 * n2).map(|_| dag.push(OpKind::Input, vec![])).collect();
+
+    // Build both matmuls
+    let out1 = build_matmul_into(&mut dag, &a1, &b1, m, k1, n1);
+    let out2 = build_matmul_into(&mut dag, &a2, &b2, m, k2, n2);
+
+    dag.outputs.extend(out1);
+    dag.outputs.extend(out2);
+    dag
+}
+
+/// Two matmuls sharing the same A input (like Q and K projections in attention).
+/// Q[M, Dq] = X[M, D] @ Wq[D, Dq]
+/// K[M, Dk] = X[M, D] @ Wk[D, Dk]
+///
+/// Tests whether the partitioner recognizes shared input and tiles
+/// both matmuls to share loads of X.
+pub fn build_shared_input_matmuls(
+    m: u32,
+    d: u32,
+    dq: u32,
+    dk: u32,
+) -> SimpleDag {
+    let mut dag = SimpleDag::new();
+
+    // Shared input X[M, D]
+    let x: Vec<u32> = (0..m * d).map(|_| dag.push(OpKind::Input, vec![])).collect();
+
+    // Wq[D, Dq]
+    let wq: Vec<u32> = (0..d * dq).map(|_| dag.push(OpKind::Input, vec![])).collect();
+
+    // Wk[D, Dk]
+    let wk: Vec<u32> = (0..d * dk).map(|_| dag.push(OpKind::Input, vec![])).collect();
+
+    // Q = X @ Wq
+    let q = build_matmul_into(&mut dag, &x, &wq, m, d, dq);
+
+    // K = X @ Wk (same X!)
+    let k = build_matmul_into(&mut dag, &x, &wk, m, d, dk);
+
+    dag.outputs.extend(q);
+    dag.outputs.extend(k);
+    dag
+}
+
+/// Three matmuls sharing input (Q, K, V projections) followed by
+/// elementwise ops — a simplified attention-like pattern.
+/// Q = tanh(X @ Wq)
+/// K = tanh(X @ Wk)
+/// V = tanh(X @ Wv)
+pub fn build_qkv_projections(
+    m: u32,
+    d: u32,
+    d_head: u32,
+) -> SimpleDag {
+    let mut dag = SimpleDag::new();
+
+    // Shared input X[M, D]
+    let x: Vec<u32> = (0..m * d).map(|_| dag.push(OpKind::Input, vec![])).collect();
+
+    // Three weight matrices
+    let wq: Vec<u32> = (0..d * d_head).map(|_| dag.push(OpKind::Input, vec![])).collect();
+    let wk: Vec<u32> = (0..d * d_head).map(|_| dag.push(OpKind::Input, vec![])).collect();
+    let wv: Vec<u32> = (0..d * d_head).map(|_| dag.push(OpKind::Input, vec![])).collect();
+
+    // Q, K, V projections
+    let q = build_matmul_into(&mut dag, &x, &wq, m, d, d_head);
+    let k = build_matmul_into(&mut dag, &x, &wk, m, d, d_head);
+    let v = build_matmul_into(&mut dag, &x, &wv, m, d, d_head);
+
+    // Activation on each
+    for &out in q.iter().chain(k.iter()).chain(v.iter()) {
+        let act = dag.push(OpKind::Tanh, vec![out]);
+        dag.outputs.push(act);
+    }
+
+    dag
+}
+
 /// MatMul followed by elementwise activation.
 /// out[m, n] = activation(Σ_k A[m,k] * B[k,n])
 pub fn build_matmul_activation(m: u32, k: u32, n: u32, activation: OpKind) -> SimpleDag {
@@ -538,5 +674,58 @@ mod tests {
         let expected = 8 * 16 + 16 * 32 + 8 * 16 * 32 + 8 * 32 * 15;
         assert_eq!(dag.num_ops(), expected);
         println!("matmul 8x16x32: {} ops", dag.num_ops());
+    }
+
+    #[test]
+    fn test_parallel_matmuls_valid() {
+        let dag = build_parallel_matmuls(4, 8, 16, 8, 16);
+        let errors = dag.validate();
+        assert!(errors.is_empty(), "{:?}", errors);
+        // Two independent matmuls, each 4x16 outputs.
+        assert_eq!(dag.outputs.len(), (4 * 16 + 4 * 16) as usize);
+        println!("parallel matmuls: {} ops", dag.num_ops());
+    }
+
+    #[test]
+    fn test_parallel_matmuls_no_shared_inputs() {
+        let dag = build_parallel_matmuls(4, 8, 16, 8, 16);
+        let fan = dag.fan_out();
+        // A1[0,0] should have fan_out = N1 = 16 (not more — no sharing with matmul 2).
+        assert_eq!(fan[0], 16);
+    }
+
+    #[test]
+    fn test_shared_input_matmuls_valid() {
+        let dag = build_shared_input_matmuls(4, 8, 16, 16);
+        let errors = dag.validate();
+        assert!(errors.is_empty(), "{:?}", errors);
+        assert_eq!(dag.outputs.len(), (4 * 16 + 4 * 16) as usize);
+        println!("shared input matmuls: {} ops", dag.num_ops());
+    }
+
+    #[test]
+    fn test_shared_input_matmuls_fan_out() {
+        let dag = build_shared_input_matmuls(4, 8, 16, 16);
+        let fan = dag.fan_out();
+        // X[0,0] is used in BOTH matmuls — fan_out = Dq + Dk = 32.
+        assert_eq!(fan[0], 16 + 16);
+    }
+
+    #[test]
+    fn test_qkv_projections_valid() {
+        let dag = build_qkv_projections(4, 8, 16);
+        let errors = dag.validate();
+        assert!(errors.is_empty(), "{:?}", errors);
+        // 3 projections × 4*16 outputs, each with tanh.
+        assert_eq!(dag.outputs.len(), 3 * 4 * 16);
+        println!("qkv projections: {} ops", dag.num_ops());
+    }
+
+    #[test]
+    fn test_qkv_shared_input_fan_out() {
+        let dag = build_qkv_projections(4, 8, 16);
+        let fan = dag.fan_out();
+        // X[0,0] fans out to all three matmuls: 3 * D_head = 48.
+        assert_eq!(fan[0], 3 * 16);
     }
 }
