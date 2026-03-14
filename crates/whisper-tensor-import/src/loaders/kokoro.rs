@@ -1,5 +1,5 @@
 use super::onnx_bytes_to_model;
-use whisper_tensor::interfaces::{TTSInputConfig, TextToSpeechInterface};
+use whisper_tensor::interfaces::{KokoroVoiceEmbedding, TTSInputConfig, TextToSpeechInterface};
 use whisper_tensor::loader::*;
 use whisper_tensor::metadata::TokenizerInfo;
 use whisper_tensor::super_graph::SuperGraphBuilder;
@@ -85,7 +85,9 @@ impl Loader for KokoroLoader {
         };
 
         let mut rng = rand::rng();
-        let interface = build_kokoro_supergraph(tokenizer, &mut rng);
+        let voices = load_kokoro_voices(&dir)?;
+        let default_voice = pick_default_voice(&voices);
+        let interface = build_kokoro_supergraph(tokenizer, voices, default_voice, &mut rng);
 
         output.interfaces.push(LoadedInterface {
             name: "kokoro-TextToSpeech".to_string(),
@@ -102,6 +104,8 @@ impl Loader for KokoroLoader {
 /// with style and speed conditioning to produce the waveform output.
 fn build_kokoro_supergraph(
     tokenizer: TokenizerInfo,
+    voices: Vec<KokoroVoiceEmbedding>,
+    default_voice: Option<String>,
     rng: &mut impl rand::Rng,
 ) -> TextToSpeechInterface {
     let mut builder = SuperGraphBuilder::new();
@@ -173,6 +177,61 @@ fn build_kokoro_supergraph(
         input_config: TTSInputConfig::Kokoro {
             style_link,
             speed_link,
+            voices,
+            default_voice,
         },
     }
+}
+
+fn load_kokoro_voices(dir: &std::path::Path) -> Result<Vec<KokoroVoiceEmbedding>, LoaderError> {
+    let voices_dir = dir.join("voices");
+    if !voices_dir.is_dir() {
+        return Err(LoaderError::LoadFailed(anyhow::anyhow!(
+            "voices directory not found in {}",
+            dir.display()
+        )));
+    }
+
+    let mut voices = Vec::new();
+    let entries = std::fs::read_dir(&voices_dir).map_err(|e| LoaderError::LoadFailed(e.into()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| LoaderError::LoadFailed(e.into()))?;
+        let path = entry.path();
+        if !path.is_file() || path.extension().is_none_or(|ext| ext != "bin") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let bytes = std::fs::read(&path).map_err(|e| {
+            LoaderError::LoadFailed(anyhow::anyhow!(
+                "failed to read voice embedding {}: {}",
+                path.display(),
+                e
+            ))
+        })?;
+        voices.push(KokoroVoiceEmbedding {
+            name: stem.to_string(),
+            style_table_le_bytes: bytes,
+        });
+    }
+
+    voices.sort_by(|a, b| a.name.cmp(&b.name));
+    if voices.is_empty() {
+        return Err(LoaderError::LoadFailed(anyhow::anyhow!(
+            "no .bin voice embeddings found in {}",
+            voices_dir.display()
+        )));
+    }
+    Ok(voices)
+}
+
+fn pick_default_voice(voices: &[KokoroVoiceEmbedding]) -> Option<String> {
+    if voices.iter().any(|v| v.name == "af") {
+        return Some("af".to_string());
+    }
+    if voices.iter().any(|v| v.name == "af_heart") {
+        return Some("af_heart".to_string());
+    }
+    voices.first().map(|v| v.name.clone())
 }

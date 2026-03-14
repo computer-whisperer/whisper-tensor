@@ -483,18 +483,46 @@ fn cmd_tts(
         TTSInputConfig::Kokoro {
             style_link,
             speed_link,
+            voices,
+            default_voice,
         } => {
             // Kokoro voice style bins are indexed by token count; use a simple
             // text-length approximation here and let the graph handle tokenization.
             let approx_tokens = text.chars().count().saturating_add(2);
-            let voice_bin = model_dir.join("voices").join(format!("{voice_name}.bin"));
-            let style_tensor = if voice_bin.exists() {
-                load_voice_style_bin(&voice_bin, approx_tokens)
+            let style_tensor = if !voices.is_empty() {
+                let selected_voice = if voices.iter().any(|v| v.name == voice_name) {
+                    voice_name.clone()
+                } else if let Some(default_voice) = default_voice
+                    && voices.iter().any(|v| v.name == *default_voice)
+                {
+                    eprintln!(
+                        "Voice '{}' not found, using default '{}'",
+                        voice_name, default_voice
+                    );
+                    default_voice.clone()
+                } else {
+                    let fallback = voices.first().unwrap().name.clone();
+                    eprintln!("Voice '{}' not found, using '{}'", voice_name, fallback);
+                    fallback
+                };
+                let voice = voices.iter().find(|v| v.name == selected_voice).unwrap();
+                let style_values = voice
+                    .style_for_token_count(approx_tokens)
+                    .unwrap_or_else(|e| {
+                        eprintln!("Failed to decode embedded voice '{}': {}", voice.name, e);
+                        std::process::exit(1);
+                    });
+                NumericTensor::<DynRank>::from_vec_shape(style_values, vec![1, 256]).unwrap()
             } else {
-                eprintln!("No voice file found: {}", voice_bin.display());
-                list_available_voices(&model_dir);
-                std::process::exit(1);
+                let voice_bin = model_dir.join("voices").join(format!("{voice_name}.bin"));
+                if !voice_bin.exists() {
+                    eprintln!("No voice file found: {}", voice_bin.display());
+                    list_available_voices(&model_dir);
+                    std::process::exit(1);
+                }
+                load_voice_style_bin(&voice_bin, approx_tokens)
             };
+
             let speed_tensor =
                 NumericTensor::<DynRank>::from_vec_shape(vec![speed], vec![1]).unwrap();
 

@@ -1646,6 +1646,88 @@ impl ImageGenerationInterface {
 // Text-to-Speech Interface
 // ============================================================================
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct KokoroVoiceEmbedding {
+    pub name: String,
+    /// Raw little-endian f32 data laid out as [num_rows, 256].
+    pub style_table_le_bytes: Vec<u8>,
+}
+
+impl KokoroVoiceEmbedding {
+    pub const STYLE_DIM: usize = 256;
+
+    pub fn style_for_token_count(&self, num_tokens: usize) -> Result<Vec<f32>, String> {
+        let bytes_per_row = Self::STYLE_DIM * 4;
+        if self.style_table_le_bytes.len() < bytes_per_row {
+            return Err(format!(
+                "voice '{}' table is too small: {} bytes",
+                self.name,
+                self.style_table_le_bytes.len()
+            ));
+        }
+        if self.style_table_le_bytes.len() % bytes_per_row != 0 {
+            return Err(format!(
+                "voice '{}' table size {} is not divisible by row size {}",
+                self.name,
+                self.style_table_le_bytes.len(),
+                bytes_per_row
+            ));
+        }
+
+        let num_rows = self.style_table_le_bytes.len() / bytes_per_row;
+        let row_idx = num_tokens.min(num_rows.saturating_sub(1));
+        let start = row_idx * bytes_per_row;
+        let end = start + bytes_per_row;
+        let row_bytes = &self.style_table_le_bytes[start..end];
+
+        let mut style = Vec::with_capacity(Self::STYLE_DIM);
+        for chunk in row_bytes.chunks_exact(4) {
+            style.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+        }
+        Ok(style)
+    }
+}
+
+#[cfg(test)]
+mod kokoro_voice_embedding_tests {
+    use super::KokoroVoiceEmbedding;
+
+    fn row_bytes(v: f32) -> Vec<u8> {
+        let mut out = Vec::new();
+        for _ in 0..KokoroVoiceEmbedding::STYLE_DIM {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        out
+    }
+
+    #[test]
+    fn style_for_token_count_selects_and_clamps_rows() {
+        let mut bytes = row_bytes(0.25);
+        bytes.extend_from_slice(&row_bytes(0.75));
+        let voice = KokoroVoiceEmbedding {
+            name: "test".to_string(),
+            style_table_le_bytes: bytes,
+        };
+
+        let first = voice.style_for_token_count(0).unwrap();
+        assert_eq!(first.len(), KokoroVoiceEmbedding::STYLE_DIM);
+        assert!((first[0] - 0.25).abs() < 1e-6);
+
+        let clamped = voice.style_for_token_count(1234).unwrap();
+        assert_eq!(clamped.len(), KokoroVoiceEmbedding::STYLE_DIM);
+        assert!((clamped[0] - 0.75).abs() < 1e-6);
+    }
+
+    #[test]
+    fn style_for_token_count_rejects_invalid_size() {
+        let voice = KokoroVoiceEmbedding {
+            name: "bad".to_string(),
+            style_table_le_bytes: vec![0, 1, 2],
+        };
+        assert!(voice.style_for_token_count(0).is_err());
+    }
+}
+
 /// Model-specific input configuration for TTS.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum TTSInputConfig {
@@ -1653,6 +1735,8 @@ pub enum TTSInputConfig {
     Kokoro {
         style_link: SuperGraphLink,
         speed_link: SuperGraphLink,
+        voices: Vec<KokoroVoiceEmbedding>,
+        default_voice: Option<String>,
     },
     /// Piper VITS conditioning inputs.
     Piper {

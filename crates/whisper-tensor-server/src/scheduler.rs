@@ -420,6 +420,7 @@ pub async fn scheduler(mut input: mpsc::Receiver<SchedulerJob>, model_server: Ar
                                 let SuperGraphData {
                                     tensors,
                                     images,
+                                    audio_clips,
                                     strings,
                                     hashes,
                                     ..
@@ -431,6 +432,9 @@ pub async fn scheduler(mut input: mpsc::Receiver<SchedulerJob>, model_server: Ar
                                     .collect::<HashMap<_, _>>();
                                 for (link, image) in images {
                                     tensor_outputs.insert(link, image.tensor.to_ndarray().unwrap());
+                                }
+                                for (link, clip) in audio_clips {
+                                    tensor_outputs.insert(link, clip.samples.to_ndarray().unwrap());
                                 }
 
                                 Ok(SuperGraphResponseData {

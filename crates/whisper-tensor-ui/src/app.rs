@@ -1,6 +1,7 @@
 use crate::graph_explorer::{GraphExplorerApp, GraphExplorerSettings, GraphRootSubjectSelection};
 use crate::llm_explorer::{LLMExplorerApp, LLMExplorerState};
 use crate::sd_explorer::{SDExplorerApp, SDExplorerState};
+use crate::tts_explorer::{TTSExplorerApp, TTSExplorerState};
 use crate::websockets::ServerRequestManager;
 use crate::widgets::toggle::toggle_ui;
 use egui::Margin;
@@ -31,6 +32,7 @@ enum SelectedTab {
     GraphExplorer,
     LLMExplorer,
     SDExplorer,
+    TTSExplorer,
 }
 
 /// Persisted state for the loader dialog's config field values.
@@ -50,6 +52,7 @@ struct AppState {
     graph_explorer_settings: GraphExplorerSettings,
     llm_explorer_state: LLMExplorerState,
     sd_explorer_state: SDExplorerState,
+    tts_explorer_state: TTSExplorerState,
 }
 
 impl Default for AppState {
@@ -60,6 +63,7 @@ impl Default for AppState {
             graph_explorer_settings: GraphExplorerSettings::default(),
             llm_explorer_state: LLMExplorerState::default(),
             sd_explorer_state: SDExplorerState::default(),
+            tts_explorer_state: TTSExplorerState::default(),
         }
     }
 }
@@ -96,6 +100,7 @@ pub struct WebUIApp {
     graph_explorer_app: HashMap<GraphRootSubjectSelection, GraphExplorerApp>,
     llm_explorer_app: LLMExplorerApp,
     sd_explorer_app: SDExplorerApp,
+    tts_explorer_app: TTSExplorerApp,
     loaded_tokenizers: LoadedTokenizers,
     server_config_report: Option<ServerConfigReport>,
     loader_registry: Option<LoaderRegistryReport>,
@@ -137,6 +142,7 @@ impl WebUIApp {
             loaded_tokenizers: LoadedTokenizers::new(),
             llm_explorer_app: LLMExplorerApp::new(),
             sd_explorer_app: SDExplorerApp::new(),
+            tts_explorer_app: TTSExplorerApp::new(),
             server_config_report: None,
             loader_registry: None,
         }
@@ -579,6 +585,11 @@ impl eframe::App for WebUIApp {
                     SelectedTab::SDExplorer,
                     "SD Explorer",
                 );
+                ui.selectable_value(
+                    &mut self.app_state.selected_tab,
+                    SelectedTab::TTSExplorer,
+                    "TTS Explorer",
+                );
             });
         });
 
@@ -742,6 +753,15 @@ impl eframe::App for WebUIApp {
                 SelectedTab::SDExplorer => {
                     self.sd_explorer_app.update(
                         &mut self.app_state.sd_explorer_state,
+                        &mut self.loaded_models,
+                        &mut self.loaded_tokenizers,
+                        &mut self.server_request_manager,
+                        ui,
+                    );
+                }
+                SelectedTab::TTSExplorer => {
+                    self.tts_explorer_app.update(
+                        &mut self.app_state.tts_explorer_state,
                         &mut self.loaded_models,
                         &mut self.loaded_tokenizers,
                         &mut self.server_request_manager,
