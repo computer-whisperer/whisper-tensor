@@ -233,6 +233,10 @@ fn eval_group(
                         values[group.inputs[2].resolve(i, 0).0 as usize]
                     }
                 }
+                ScalarOp::IndirectLoad { table_base, .. } => {
+                    let idx = values[group.inputs[0].resolve(i, 0).0 as usize];
+                    values[table_base.0 as usize + idx as usize]
+                }
                 ScalarOp::ReduceSum { .. } | ScalarOp::ReduceMax { .. } => unreachable!(),
             };
 

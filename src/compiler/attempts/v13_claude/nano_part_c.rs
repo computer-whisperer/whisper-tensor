@@ -468,6 +468,7 @@ mod tests {
                     ScalarOp::ReduceSum { .. } => "ReduceSum".to_string(),
                     ScalarOp::ReduceMax { .. } => "ReduceMax".to_string(),
                     ScalarOp::Select { .. } => "Select".to_string(),
+                    ScalarOp::IndirectLoad { .. } => "IndirectLoad".to_string(),
                 };
                 let input_summary: Vec<String> = group
                     .inputs

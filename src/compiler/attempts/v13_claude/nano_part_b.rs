@@ -682,6 +682,7 @@ fn op_name(op: &ScalarOp) -> &'static str {
         ScalarOp::Select { .. } => "Select",
         ScalarOp::ReduceSum { .. } => "ReduceSum",
         ScalarOp::ReduceMax { .. } => "ReduceMax",
+        ScalarOp::IndirectLoad { .. } => "IndirectLoad",
     }
 }
 

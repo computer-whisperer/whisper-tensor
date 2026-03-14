@@ -489,6 +489,19 @@ fn emit_group_body(
         } => {
             emit_reduce(builder, module, group, graph, values_ptr, i_val, i_const, math, var_counter, table_counter, false)
         }
+
+        ScalarOp::IndirectLoad { table_base, output_dtype: _ } => {
+            // Load the index from input[0], cast f32→i64, compute address, load value.
+            let idx_f32 = load_input_ref(builder, module, &group.inputs[0], values_ptr, i_val, i_const, table_counter)?;
+            let idx_i64 = builder.ins().fcvt_to_sint(types::I64, idx_f32);
+            let table_base_val = builder.ins().iconst(types::I64, table_base.0 as i64);
+            let atom_idx = builder.ins().iadd(table_base_val, idx_i64);
+            let byte_offset = builder.ins().ishl_imm(atom_idx, 2); // * 4
+            let addr = builder.ins().iadd(values_ptr, byte_offset);
+            let result = builder.ins().load(types::F32, MemFlags::trusted(), addr, 0);
+            store_atom(builder, values_ptr, base_id, i_val, i_const, result);
+            Ok(())
+        }
     }
 }
 

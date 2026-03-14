@@ -638,6 +638,7 @@ pub fn print_partition_summary(graph: &NanoGraph, result: &NanoPartitionResult) 
                 ScalarOp::Select { .. } => "Select",
                 ScalarOp::ReduceSum { .. } => "ReduceSum",
                 ScalarOp::ReduceMax { .. } => "ReduceMax",
+                ScalarOp::IndirectLoad { .. } => "IndirectLoad",
             };
             *op_counts.entry(op_name).or_default() += 1;
         }

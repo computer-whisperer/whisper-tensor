@@ -24,7 +24,6 @@ trait ReduceAccessors {
     fn noop_with_empty_axes(&self) -> bool;
     #[allow(dead_code)]
     fn keepdims(&self) -> bool;
-    fn accumulation_mode(&self) -> crate::milli_graph::ops::AccumulationMode;
 }
 
 impl ReduceAccessors for crate::milli_graph::ops::ReduceSum {
@@ -36,9 +35,6 @@ impl ReduceAccessors for crate::milli_graph::ops::ReduceSum {
     }
     fn keepdims(&self) -> bool {
         self.keepdims()
-    }
-    fn accumulation_mode(&self) -> crate::milli_graph::ops::AccumulationMode {
-        self.accumulation_mode()
     }
 }
 
@@ -52,10 +48,6 @@ impl ReduceAccessors for crate::milli_graph::ops::ReduceMax {
     fn keepdims(&self) -> bool {
         self.keepdims()
     }
-    fn accumulation_mode(&self) -> crate::milli_graph::ops::AccumulationMode {
-        // ReduceMax doesn't have an accumulation_mode field; default to Sequential.
-        crate::milli_graph::ops::AccumulationMode::Sequential
-    }
 }
 
 impl ReduceAccessors for crate::milli_graph::ops::ReduceMean {
@@ -67,9 +59,6 @@ impl ReduceAccessors for crate::milli_graph::ops::ReduceMean {
     }
     fn keepdims(&self) -> bool {
         self.keepdims()
-    }
-    fn accumulation_mode(&self) -> crate::milli_graph::ops::AccumulationMode {
-        self.accumulation_mode()
     }
 }
 
@@ -266,6 +255,11 @@ pub fn lower_with_info(
         }
     }
 
+    // Merge synthetic overrides (e.g., column offsets from Gather lowering).
+    for (k, v) in ctx.synthetic_overrides {
+        numeric_overrides.entry(k).or_insert(v);
+    }
+
     Ok(LowerResult {
         graph: ctx.nano,
         unsupported: ctx.unsupported,
@@ -281,6 +275,9 @@ struct LowerCtx {
     next_anon_sym: usize,
     unsupported: Vec<(GlobalId, String)>,
     unsupported_details: Vec<String>,
+    /// Overrides for synthetic atoms created during lowering (e.g., column
+    /// offset literals for Gather). Merged into numeric_overrides in the result.
+    synthetic_overrides: HashMap<u32, NumericScalar>,
 }
 
 impl LowerCtx {
@@ -291,6 +288,7 @@ impl LowerCtx {
             next_anon_sym: 0,
             unsupported: Vec::new(),
             unsupported_details: Vec::new(),
+            synthetic_overrides: HashMap::new(),
         }
     }
 
@@ -649,6 +647,7 @@ impl LowerCtx {
                 })
             }
             AnyMilliOp::ReduceMean(r) => self.lower_reduce_mean(r, all_infos),
+            AnyMilliOp::Gather(g) => self.lower_gather(g, all_infos),
             // Everything else: check if outputs are fully concrete (constant-folded),
             // otherwise register as boundary.
             other => {
@@ -2016,11 +2015,17 @@ impl LowerCtx {
 
         // Use the MatMul's explicit dtype fields for nano group precision.
         // product_dtype: precision of A*B products (Mul groups).
-        // accumulate_dtype: precision for summing products (Add groups).
-        // output_dtype: final output precision.
+        // accumulate_dtype: precision for summing products (ReduceSum groups).
+        // output_dtype: final output precision (Identity cast-back if needed).
         let product_dtype = matmul.product_dtype();
         let accumulate_dtype = matmul.accumulate_dtype();
         let out_dtype = matmul.output_dtype();
+
+        // Create bounded sym dim for the contraction dimension K.
+        let k_sym = self
+            .nano
+            .bounded_sym_dim(&format!("matmul_k_{}", self.next_anon_sym), k);
+        self.next_anon_sym += 1;
 
         // Compute A's known-dim strides (for addressing within A's atoms).
         let a_known_dims: Vec<u64> = a_layout
@@ -2069,13 +2074,9 @@ impl LowerCtx {
 
         // Expand the K contraction dimension into K concrete mul groups per row.
         // Each mul group has N atoms computing A[...,m,k] * B[...,k,n] for a fixed k.
-        //
-        // Layout: for row g, contraction ki, the mul group base is at:
-        //   mul_groups[g][ki] = mul_base + (g * k + ki) * N
-        //
-        // After the mul groups, we create K-1 Binary::Add groups per row
-        // (sequential accumulation) to sum the products.
-        let mut mul_groups_by_row: Vec<Vec<AtomId>> = Vec::with_capacity(num_row_groups);
+        // This allows the flat eval to correctly evaluate each atom independently,
+        // and the ReduceSum uses stride_k=N to hop between k layers.
+        let mut mul_base_id = None;
 
         for g in 0..num_row_groups {
             let m_idx = if m_known.is_some() {
@@ -2119,7 +2120,6 @@ impl LowerCtx {
             }
 
             // Create K mul groups for this row, one per contraction index.
-            let mut row_mul_bases = Vec::with_capacity(k as usize);
             for ki in 0..k {
                 let a_atom = a_map
                     .base_id
@@ -2146,197 +2146,53 @@ impl LowerCtx {
                     vec![input_a, input_b],
                 );
 
-                row_mul_bases.push(base);
+                if mul_base_id.is_none() {
+                    mul_base_id = Some(base);
+                }
             }
-            mul_groups_by_row.push(row_mul_bases);
         }
 
-        // Accumulate: for each row, create K-1 Binary::Add groups of N atoms
-        // (sequential accumulation along the contraction dimension).
-        let mut final_acc_base: Option<AtomId> = None;
+        let mul_base = mul_base_id.unwrap();
+
+        // ReduceSum: one group per row, each with N atoms.
+        // stride_k = N so that stepping k hops between the K mul groups for this row.
+        let mut reduce_base_id = None;
 
         for g in 0..num_row_groups {
-            let row_muls = &mul_groups_by_row[g];
-            let k_u32 = k as u32;
+            let row_mul_base = AtomId(mul_base.0 + (g as u32) * (k as u32) * n_u32);
 
-            let row_final = if k_u32 == 1 {
-                // K=1: the single mul group IS the result, just cast to output dtype.
-                self.nano.push_group(
-                    n_u32,
-                    ScalarOp::Identity {
-                        compute_dtype: accumulate_dtype,
-                        output_dtype: out_dtype,
-                    },
-                    out_sym_dims.clone(),
-                    vec![],
-                    vec![InputRef::Affine {
-                        base: row_muls[0],
-                        stride: 1,
-                    }],
-                )
-            } else {
-                // k=0 + k=1 → first accumulator
-                let mut prev_base = self.nano.push_group(
-                    n_u32,
-                    ScalarOp::Binary {
-                        op: ScalarBinOp::Add,
-                        compute_dtype: accumulate_dtype,
-                        output_dtype: accumulate_dtype,
-                    },
-                    out_sym_dims.clone(),
-                    vec![],
-                    vec![
-                        InputRef::Affine {
-                            base: row_muls[0],
-                            stride: 1,
-                        },
-                        InputRef::Affine {
-                            base: row_muls[1],
-                            stride: 1,
-                        },
-                    ],
-                );
-
-                // k=2..K-1: acc = acc + mul[k]
-                for ki in 2..k_u32 {
-                    let is_last = ki == k_u32 - 1;
-                    let step_out_dt = if is_last { out_dtype } else { accumulate_dtype };
-                    prev_base = self.nano.push_group(
-                        n_u32,
-                        ScalarOp::Binary {
-                            op: ScalarBinOp::Add,
-                            compute_dtype: accumulate_dtype,
-                            output_dtype: step_out_dt,
-                        },
-                        out_sym_dims.clone(),
-                        vec![],
-                        vec![
-                            InputRef::Affine {
-                                base: prev_base,
-                                stride: 1,
-                            },
-                            InputRef::Affine {
-                                base: row_muls[ki as usize],
-                                stride: 1,
-                            },
-                        ],
-                    );
-                }
-                prev_base
-            };
-
-            if final_acc_base.is_none() {
-                final_acc_base = Some(row_final);
-            }
-        }
-
-        // The output tensor_map should cover all row groups contiguously.
-        // The final acc groups are created in order g=0..num_row_groups, each
-        // with N atoms. However, they may not be contiguous if K > 2 because
-        // intermediate acc groups are interleaved between rows.
-        //
-        // We need the output to be contiguous. Since each row's final acc
-        // group has N atoms, and there are num_row_groups of them, the total
-        // is out_count. But the groups may not be contiguous in atom-id space.
-        //
-        // Solution: Track each row's final base_id and check contiguity.
-        // If not contiguous, use Identity groups to copy into a contiguous block.
-        //
-        // Actually, let's rethink: we create all mul groups first (all rows),
-        // then all acc groups. So each row's acc chain is:
-        //   row 0: K-1 acc groups (or 1 identity for K=1)
-        //   row 1: K-1 acc groups
-        //   ...
-        // The final group of row g is the last in its chain. These final
-        // groups ARE contiguous because we process rows sequentially and each
-        // row emits K-1 groups of N atoms. Row g's final is at the same
-        // relative position in each row's chain.
-        //
-        // Actually wait -- the final group for row 0 is at position K-2 in
-        // the acc chain (0-indexed), and row 1's first acc group starts
-        // right after row 0's last acc group. So the final for row 0 is
-        // followed by row 1's intermediate acc groups, not row 1's final.
-        // They are NOT contiguous.
-        //
-        // We must gather the final acc bases into a contiguous output.
-        // Re-collect: we didn't track per-row finals above. Let me fix this.
-
-        // Re-do: collect per-row final bases. We need to re-process,
-        // but we already created the groups above. We need to track finals
-        // during creation. Let me restructure.
-
-        // The groups are already created. We need to find each row's final base.
-        // Since we process rows in order, and each row creates:
-        //   - K==1: 1 identity group of N atoms
-        //   - K>=2: K-1 add groups of N atoms
-        // The final group for row g is the last group pushed for that row.
-        // We can compute backwards from final_acc_base (which is row 0's final).
-        //
-        // Row 0's final: final_acc_base + (something)... Actually final_acc_base
-        // was set to row 0's final. Each subsequent row adds (K-1) or 1 groups.
-        // Row g's final = row g-1's final + groups_per_row * N.
-        //
-        // Wait, I set final_acc_base = Some(row_final) only when g==0.
-        // And row_final for each g is the final group of that row.
-        // Since groups are pushed sequentially, row 0's final base is at
-        // some AtomId F0, row 1's groups start at F0 + N, and row 1's
-        // final is at F0 + N + (groups_per_row - 1) * N = F0 + groups_per_row * N.
-        //
-        // So: row g's final = F0 + g * groups_per_row * N
-        // where groups_per_row = max(K-1, 1).
-        //
-        // These finals are separated by groups_per_row * N atoms, so they're
-        // only contiguous when groups_per_row == 1 (i.e., K <= 2).
-
-        let groups_per_row = if k <= 1 { 1 } else { k - 1 } as u32;
-        let f0 = final_acc_base.unwrap();
-
-        // Check if finals are already contiguous (groups_per_row == 1).
-        if groups_per_row == 1 {
-            // Finals are contiguous: row g's final base = f0 + g * N.
-            let base_id = f0;
-            self.tensor_map.insert(
-                out_id,
-                TensorAtomMap {
-                    base_id,
-                    count: out_count,
-                    layout: out_layout,
-                    known_strides: TensorAtomMap::compute_strides(&out_known_dims),
-                    sym_dims: out_sym_dims,
-                },
-            );
-        } else {
-            // Finals are NOT contiguous. Gather them with Explicit InputRef.
-            let mut final_ids = Vec::with_capacity(out_count as usize);
-            for g in 0..num_row_groups as u32 {
-                let row_final_base = AtomId(f0.0 + g * groups_per_row * n_u32);
-                for i in 0..n_u32 {
-                    final_ids.push(row_final_base.offset(i));
-                }
-            }
-
-            let base_id = self.nano.push_group(
-                out_count,
-                ScalarOp::Identity {
-                    compute_dtype: out_dtype,
+            let base = self.nano.push_group(
+                n_u32,
+                ScalarOp::ReduceSum {
+                    compute_dtype: accumulate_dtype,
                     output_dtype: out_dtype,
                 },
                 out_sym_dims.clone(),
-                vec![],
-                vec![InputRef::Explicit(final_ids)],
+                vec![k_sym],
+                vec![InputRef::SymAffine {
+                    base: row_mul_base,
+                    stride_i: 1,
+                    stride_k: n_u32 as i32,
+                }],
             );
 
-            self.tensor_map.insert(
-                out_id,
-                TensorAtomMap {
-                    base_id,
-                    count: out_count,
-                    layout: out_layout,
-                    known_strides: TensorAtomMap::compute_strides(&out_known_dims),
-                    sym_dims: out_sym_dims,
-                },
-            );
+            if reduce_base_id.is_none() {
+                reduce_base_id = Some(base);
+            }
         }
+
+        let base_id = reduce_base_id.unwrap();
+
+        self.tensor_map.insert(
+            out_id,
+            TensorAtomMap {
+                base_id,
+                count: out_count,
+                layout: out_layout,
+                known_strides: TensorAtomMap::compute_strides(&out_known_dims),
+                sym_dims: out_sym_dims,
+            },
+        );
     }
 
     /// Lower ReduceSum or ReduceMax over known axes.
@@ -2486,6 +2342,25 @@ impl LowerCtx {
             .collect();
         let out_count = out_known.iter().product::<u64>().max(1) as u32;
 
+        // Create bounded sym dim for the reduction.
+        let reduce_sym = self
+            .nano
+            .bounded_sym_dim(&format!("reduce_{}", self.next_anon_sym), reduce_extent);
+        self.next_anon_sym += 1;
+
+        // Build the intermediate multiply group (identity * 1 for ReduceSum/Max,
+        // actually we need a group with sym_dims=[reduce_sym] that reads from
+        // the input with SymAffine).
+        //
+        // For each output atom (indices over non-reduced known dims), we need to
+        // iterate over the reduced dims. The SymAffine stride_k encodes how the
+        // reduction iteration advances through the input's flat index.
+        //
+        // For a single reduced dim at known-dim index `rki` with stride `s`:
+        //   stride_k = s (input stride of the reduced dim)
+        //   stride_i = 1 for the output's flat index
+        //
+        // For multiple reduced dims, we'd need multiple sym dims.
         // For now, handle single-axis reduction (covers most cases).
         if reduce_known_indices.len() != 1 {
             self.lower_as_boundary_named(reduce, all_infos, "Reduce");
@@ -2494,16 +2369,21 @@ impl LowerCtx {
 
         let rki = reduce_known_indices[0];
         let in_strides = TensorAtomMap::compute_strides(&in_known);
-        let reduce_stride = in_strides[rki];
+        let reduce_stride = in_strides[rki] as i32;
 
         // Build output known strides.
         let out_strides_local = TensorAtomMap::compute_strides(&out_known);
 
-        // For each output atom, compute the base input atom offset (at k=0
-        // along the reduced dim). Decompose flat_out into non-reduced dims,
-        // then compute the input flat index with reduced dim = 0.
+        // For each output atom, compute the base input atom.
+        // The output atom at flat index `f` maps to input indices where the
+        // reduced dim is 0. We need to compute the input flat index with
+        // the reduced dim set to 0.
+        // Build Explicit mapping: output flat → input flat (at k=0).
+        // For each output atom, decompose into non-reduced dims, then compute
+        // the input flat index (with reduced dim = 0).
         let mut base_ids = Vec::with_capacity(out_count as usize);
         for flat_out in 0..out_count as u64 {
+            // Decompose flat_out into output known-dim indices.
             let mut out_indices = vec![0u64; out_known.len()];
             let mut rem = flat_out;
             for (i, &stride) in out_strides_local.iter().enumerate() {
@@ -2513,6 +2393,7 @@ impl LowerCtx {
                 }
             }
 
+            // Map back to input known-dim indices (insert 0 for reduced dim).
             let mut in_indices = Vec::with_capacity(in_known.len());
             let mut oi = 0;
             for ki in 0..in_known.len() {
@@ -2531,6 +2412,36 @@ impl LowerCtx {
             base_ids.push(in_flat as u32);
         }
 
+        // Check if the base_ids form a simple affine pattern.
+        let is_affine = if out_count <= 1 {
+            true
+        } else {
+            let stride = base_ids[1] as i64 - base_ids[0] as i64;
+            base_ids
+                .windows(2)
+                .all(|w| (w[1] as i64 - w[0] as i64) == stride)
+        };
+
+        // Input group: out_count atoms with sym_dims including reduce_sym.
+        // Uses SymAffine to index into the source, advancing by reduce_stride per k.
+        let input_ref = if is_affine && out_count > 0 {
+            let stride_i = if out_count > 1 {
+                base_ids[1] as i32 - base_ids[0] as i32
+            } else {
+                1
+            };
+            InputRef::SymAffine {
+                base: in_map.base_id.offset(base_ids[0]),
+                stride_i,
+                stride_k: reduce_stride,
+            }
+        } else {
+            // Need per-atom SymAffine, which we can't do with a single group.
+            // Fall back to boundary.
+            self.lower_as_boundary_named(reduce, all_infos, "Reduce");
+            return;
+        };
+
         // Determine compute dtype: ReduceSum upcasts BF16/F16 → F32 to match
         // milli eval precision semantics (see reduce_sum.rs lines 193-196).
         let out_dt = out_info.dtype();
@@ -2543,181 +2454,22 @@ impl LowerCtx {
         // Classify output for proper layout.
         let Some((out_layout, out_known_dims_full, out_sym_dims, _)) = self.classify_dims(out_info)
         else {
+            // This shouldn't happen since we computed out_count, but be safe.
             self.lower_as_boundary_named(reduce, all_infos, "Reduce");
             return;
         };
 
-        // Determine the binary op for expansion from the reduce op type.
-        let probe_op = make_reduce_op(compute_dt, out_dt);
-        let bin_op = match &probe_op {
-            ScalarOp::ReduceSum { .. } => ScalarBinOp::Add,
-            ScalarOp::ReduceMax { .. } => ScalarBinOp::Max,
-            _ => {
-                self.lower_as_boundary_named(reduce, all_infos, "Reduce");
-                return;
-            }
-        };
-
-        let k_extent = reduce_extent as u32;
-        let acc_mode = reduce.accumulation_mode();
-
-        // Expand the reduction into a chain/tree of Binary ops.
-        // For each output atom at flat index `f`, it reads from input atoms
-        // at base_ids[f] + k * reduce_stride for k in 0..k_extent.
-        //
-        // We build an InputRef that maps each output atom to the corresponding
-        // input atom for a given k value.
-        let make_input_ref_for_k = |base_ids: &[u32], k: u32, in_base: AtomId, reduce_stride: u64| -> InputRef {
-            // Check if the pattern is affine: base_ids[f] + k * reduce_stride
-            let is_affine = if base_ids.len() <= 1 {
-                true
-            } else {
-                let stride = base_ids[1] as i64 - base_ids[0] as i64;
-                base_ids
-                    .windows(2)
-                    .all(|w| (w[1] as i64 - w[0] as i64) == stride)
-            };
-
-            if is_affine && !base_ids.is_empty() {
-                let base_offset = base_ids[0] as u64 + k as u64 * reduce_stride;
-                let stride_i = if base_ids.len() > 1 {
-                    base_ids[1] as i32 - base_ids[0] as i32
-                } else {
-                    1
-                };
-                InputRef::Affine {
-                    base: in_base.offset(base_offset as u32),
-                    stride: stride_i,
-                }
-            } else {
-                let ids: Vec<AtomId> = base_ids
-                    .iter()
-                    .map(|&b| in_base.offset(b + k * reduce_stride as u32))
-                    .collect();
-                InputRef::Explicit(ids)
-            }
-        };
-
-        // Build the reduction tree/chain.
-        let base_id = match acc_mode {
-            crate::milli_graph::ops::AccumulationMode::Sequential => {
-                // Sequential: acc = v[0]; for k in 1..K { acc = op(acc, v[k]); }
-                // When K == 1, the result is just an identity/cast of v[0].
-                if k_extent == 1 {
-                    let input_ref = make_input_ref_for_k(&base_ids, 0, in_map.base_id, reduce_stride);
-                    self.nano.push_group(
-                        out_count,
-                        ScalarOp::Identity {
-                            compute_dtype: compute_dt,
-                            output_dtype: out_dt,
-                        },
-                        out_sym_dims.clone(),
-                        vec![],
-                        vec![input_ref],
-                    )
-                } else {
-                    // k=0 + k=1 → first accumulator (compute_dtype throughout)
-                    let ref_k0 = make_input_ref_for_k(&base_ids, 0, in_map.base_id, reduce_stride);
-                    let ref_k1 = make_input_ref_for_k(&base_ids, 1, in_map.base_id, reduce_stride);
-                    let mut prev_base = self.nano.push_group(
-                        out_count,
-                        ScalarOp::Binary {
-                            op: bin_op,
-                            compute_dtype: compute_dt,
-                            output_dtype: compute_dt,
-                        },
-                        out_sym_dims.clone(),
-                        vec![],
-                        vec![ref_k0, ref_k1],
-                    );
-
-                    // k=2..K-1: acc = op(prev_acc, v[k])
-                    for k in 2..k_extent {
-                        let ref_k = make_input_ref_for_k(&base_ids, k, in_map.base_id, reduce_stride);
-                        let is_last = k == k_extent - 1;
-                        let step_out_dt = if is_last { out_dt } else { compute_dt };
-                        prev_base = self.nano.push_group(
-                            out_count,
-                            ScalarOp::Binary {
-                                op: bin_op,
-                                compute_dtype: compute_dt,
-                                output_dtype: step_out_dt,
-                            },
-                            out_sym_dims.clone(),
-                            vec![],
-                            vec![
-                                InputRef::Affine {
-                                    base: prev_base,
-                                    stride: 1,
-                                },
-                                ref_k,
-                            ],
-                        );
-                    }
-                    prev_base
-                }
-            }
-            crate::milli_graph::ops::AccumulationMode::Pairwise => {
-                // Pairwise: recursive halving tree.
-                // Level 0: identity/cast groups for each k, reading from the input.
-                // Then pair them up level by level until one group remains.
-                //
-                // We build this iteratively: start with K "leaf" groups,
-                // then reduce pairwise until 1 remains.
-                let mut level: Vec<AtomId> = Vec::with_capacity(k_extent as usize);
-                for k in 0..k_extent {
-                    let ref_k = make_input_ref_for_k(&base_ids, k, in_map.base_id, reduce_stride);
-                    let base = self.nano.push_group(
-                        out_count,
-                        ScalarOp::Identity {
-                            compute_dtype: compute_dt,
-                            output_dtype: compute_dt,
-                        },
-                        out_sym_dims.clone(),
-                        vec![],
-                        vec![ref_k],
-                    );
-                    level.push(base);
-                }
-
-                while level.len() > 1 {
-                    let mut next_level = Vec::with_capacity((level.len() + 1) / 2);
-                    let mut i = 0;
-                    while i + 1 < level.len() {
-                        let is_final = level.len() == 2 && i == 0;
-                        let step_out_dt = if is_final { out_dt } else { compute_dt };
-                        let base = self.nano.push_group(
-                            out_count,
-                            ScalarOp::Binary {
-                                op: bin_op,
-                                compute_dtype: compute_dt,
-                                output_dtype: step_out_dt,
-                            },
-                            out_sym_dims.clone(),
-                            vec![],
-                            vec![
-                                InputRef::Affine {
-                                    base: level[i],
-                                    stride: 1,
-                                },
-                                InputRef::Affine {
-                                    base: level[i + 1],
-                                    stride: 1,
-                                },
-                            ],
-                        );
-                        next_level.push(base);
-                        i += 2;
-                    }
-                    // Odd element: carry forward.
-                    if i < level.len() {
-                        next_level.push(level[i]);
-                    }
-                    level = next_level;
-                }
-                level[0]
-            }
-        };
+        // ReduceSum/ReduceMax group: reads directly from input atoms via
+        // SymAffine. The compute_dtype handles casting inputs to the
+        // accumulation precision, and output_dtype casts the result.
+        let reduce_op = make_reduce_op(compute_dt, out_dt);
+        let base_id = self.nano.push_group(
+            out_count,
+            reduce_op,
+            out_sym_dims.clone(),
+            vec![reduce_sym],
+            vec![input_ref],
+        );
 
         self.tensor_map.insert(
             out_id,
@@ -2838,6 +2590,407 @@ impl LowerCtx {
                 sym_dims: sum_map.sym_dims,
             },
         );
+    }
+
+    /// Lower a Gather op.
+    ///
+    /// Handles the common embedding case: axis=0, 1D indices.
+    /// data=[V, D], indices=[N] → output=[N, D]
+    /// output[i, j] = data[indices[i], j]
+    ///
+    /// For other axis values or multi-dim indices, falls back to boundary.
+    fn lower_gather(
+        &mut self,
+        g: &crate::milli_graph::ops::Gather,
+        all_infos: &HashMap<GlobalId, TensorInfo>,
+    ) {
+        let data_id = g.data_id();
+        let indices_id = g.indices_id();
+        let out_id = g.output_id();
+
+        // If both inputs are fully numeric (constant-folded), treat as constant.
+        let all_numeric = [data_id, indices_id].iter().all(|id| {
+            all_infos
+                .get(id)
+                .is_some_and(|i| i.as_numeric().is_some())
+        });
+        if all_numeric {
+            if let Some(out_info) = all_infos.get(&out_id) {
+                self.register_input(out_id, out_info);
+                return;
+            }
+        }
+
+        let Some(data_map) = self.tensor_map.get(&data_id).cloned() else {
+            self.lower_as_boundary_named(g, all_infos, "Gather");
+            return;
+        };
+        let Some(indices_map) = self.tensor_map.get(&indices_id).cloned() else {
+            self.lower_as_boundary_named(g, all_infos, "Gather");
+            return;
+        };
+        let Some(out_info) = all_infos.get(&out_id) else {
+            self.lower_as_boundary_named(g, all_infos, "Gather");
+            return;
+        };
+        let Some(data_info) = all_infos.get(&data_id) else {
+            self.lower_as_boundary_named(g, all_infos, "Gather");
+            return;
+        };
+        let Some(indices_info) = all_infos.get(&indices_id) else {
+            self.lower_as_boundary_named(g, all_infos, "Gather");
+            return;
+        };
+
+        // Normalize axis.
+        let data_rank = match data_info.rank_if_known() {
+            Some(r) => r,
+            None => {
+                self.lower_as_boundary_named(g, all_infos, "Gather");
+                return;
+            }
+        };
+        let axis = if g.axis() < 0 {
+            (g.axis() + data_rank as i64) as usize
+        } else {
+            g.axis() as usize
+        };
+
+        // Only handle axis=0 for now.
+        if axis != 0 {
+            self.lower_as_boundary_named(g, all_infos, "Gather");
+            return;
+        }
+
+        // Only handle 1D indices (the embedding lookup case).
+        let indices_rank = match indices_info.rank_if_known() {
+            Some(r) => r,
+            None => {
+                self.lower_as_boundary_named(g, all_infos, "Gather");
+                return;
+            }
+        };
+        if indices_rank != 1 {
+            self.lower_as_boundary_named(g, all_infos, "Gather");
+            return;
+        }
+
+        // data shape must be fully known (it's an embedding table).
+        let data_known: Vec<u64> = data_map
+            .layout
+            .iter()
+            .filter_map(|d| {
+                if let DimKind::Known(s) = d {
+                    Some(*s)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if data_known.len() != data_rank {
+            // Some data dims are symbolic — can't lower.
+            self.lower_as_boundary_named(g, all_infos, "Gather");
+            return;
+        }
+
+        // For axis=0: data=[V, D, ...], D_total = product of data_known[1..]
+        let d_total: u64 = data_known[1..].iter().product();
+        let d_total = d_total.max(1); // handle scalar gather (data_rank == 1)
+
+        // Check if indices are symbolic (runtime) or known.
+        let indices_sym = !indices_map.sym_dims.is_empty();
+
+        // Output classification.
+        let Some((out_layout, out_known_dims, out_sym_dims, out_count)) =
+            self.classify_dims(out_info)
+        else {
+            self.lower_as_boundary_named(g, all_infos, "Gather");
+            return;
+        };
+        let out_count = out_count.max(1);
+
+        let out_dt = out_info.dtype();
+
+        // The output shape for axis=0, 1D indices is [N, D, ...] where N = indices count.
+        // N may be symbolic (runtime token IDs) or known.
+        //
+        // For each output element (i, j) where j indexes the D_total trailing dims:
+        //   flat_index_into_data = indices[i] * D_total + j
+        //   output[i, j] = data[flat_index_into_data]
+        //
+        // We emit:
+        //   1. A Literal group for the stride constant (D_total)
+        //   2. A Mul group: indices[i] * D_total
+        //   3. An Add group: (indices[i] * D_total) + j  (j is the column offset per atom)
+        //   4. An IndirectLoad group: load from data table at the computed index
+
+        // Step 1: stride literal (single atom)
+        let stride_lit = self.nano.push_atom(
+            ScalarOp::Literal(NumericScalar::F32(d_total as f32)),
+            vec![],
+            vec![],
+            vec![],
+        );
+
+        // Step 2: Mul group — indices[i] * D_total
+        // The Mul group has out_count atoms (one per output element).
+        // Each atom i reads indices[i / D_total] (integer division to get the row index).
+        // Since indices_map might be symbolic, we need to handle that.
+        //
+        // Actually, for axis=0 with 1D indices and data=[V, D_total]:
+        //   output shape = [indices_count, D_total]
+        //   out_count = indices_count * D_total (if indices_count is known)
+        //   For atom offset `flat` in output: row = flat / D_total, col = flat % D_total
+        //
+        // The indices input ref: for output atom `flat`, we read indices[row] = indices[flat / D_total]
+        // With Affine, stride would need to be 1/D_total which isn't integer.
+        // We need Explicit if D_total > 1, or Affine(stride=1) if D_total == 1.
+
+        if indices_sym {
+            // Indices are symbolic (runtime). The indices_map has N atoms with sym_dims.
+            // Output has N*D_total known atoms with the same sym_dims.
+            // For each output atom j (0..D_total), it reads indices[0] (the single atom
+            // in the indices group), since the sym dim handles the N dimension.
+            //
+            // Wait — if indices has sym_dims and count=1, then each "iteration" of the
+            // sym dim gives a different index value. We need D_total output atoms that
+            // all read from the same indices atom but with different column offsets.
+
+            // For now, handle only the case where indices has count matching,
+            // or fall back to boundary for complex symbolic cases.
+
+            // Simple case: indices_map.count == 1, sym_dims present
+            // Output should have count == D_total, same sym_dims
+            if indices_map.count != 1 || out_count as u64 != d_total {
+                self.lower_as_boundary_named(g, all_infos, "Gather");
+                return;
+            }
+
+            // Mul group: 1 atom * broadcast stride → 1 atom (sym_dims from indices)
+            // Then we need D_total atoms for the column offsets.
+            // Actually with sym indices_map.count==1, we have a single index atom
+            // iterated over the sym dim. The output needs D_total atoms with the same sym_dims.
+
+            let mul_id = self.nano.push_atom(
+                ScalarOp::Binary {
+                    op: ScalarBinOp::Mul,
+                    compute_dtype: DType::F32,
+                    output_dtype: DType::F32,
+                },
+                indices_map.sym_dims.clone(),
+                vec![],
+                vec![
+                    InputRef::Broadcast(indices_map.base_id),
+                    InputRef::Broadcast(stride_lit),
+                ],
+            );
+
+            // Step 3: Add group — D_total atoms, each adds its column offset j
+            // Column offsets: 0, 1, 2, ..., D_total-1
+            let col_offsets_base = self.nano.push_group(
+                d_total as u32,
+                ScalarOp::Literal(NumericScalar::F32(0.0)),
+                vec![],
+                vec![],
+                vec![],
+            );
+            // Fill in the column offset overrides (they'll go into numeric_overrides via
+            // the normal constant path, but since these are freshly created Literal atoms
+            // we can't rely on that — we need to set their literal values directly).
+            // Actually, Literal atoms carry their value in the ScalarOp itself. We need
+            // individual atoms with different literal values. Push them one by one.
+
+            // Ugh — push_group creates a single group with one shared Literal value.
+            // We need D_total atoms each with a different literal. Use Explicit + Identity
+            // or just push individual atoms. For efficiency, push individual Literal atoms.
+
+            // Actually, let me reconsider. We can create D_total Literal atoms by pushing
+            // them individually, but that's D_total groups of size 1. Let's do it differently:
+            // Create a single Literal(0.0) group of D_total atoms and rely on numeric_overrides
+            // to set their values. But numeric_overrides are populated from all_infos which
+            // only has the original tensors, not our synthetic ones.
+
+            // Better approach: For column offsets, we can use the Literal group and put the
+            // offsets into the overrides. But since these are synthesized atoms (not from
+            // any milli tensor), we need to add them to numeric_overrides manually.
+            // The LowerResult's numeric_overrides are built in the outer `lower_with_info`,
+            // which iterates all_infos. Our synthetic atoms won't be there.
+
+            // Simplest correct approach: push individual Literal atoms with the actual values.
+            // This is O(D_total) groups but correct.
+
+            // Actually wait — I already pushed a group above. Let me remove that and do it
+            // properly. I'll track a base AtomId for column offset literals, pushing them
+            // as one group. The NanoEval handles Literal by taking the ScalarOp's value,
+            // with overrides on top. So I need either:
+            //   a) One Literal atom per distinct offset value (D_total singleton groups), or
+            //   b) One Literal(0.0) group + numeric_overrides set by the lowering code
+
+            // Option (b) is cleaner. I pushed col_offsets_base above as Literal(0.0) group.
+            // I need to return those overrides somehow. The simplest way: store them in
+            // a side-channel on LowerCtx and merge them into numeric_overrides in the caller.
+
+            // Let me add a field `synthetic_overrides` to LowerCtx for this purpose.
+
+            // For now, let me just push individual atoms. D_total is typically 384/768/1024,
+            // which is fine.
+
+            // Remove the group we already pushed — actually we can't un-push.
+            // Let me just not use it and create the proper structure.
+            // The col_offsets_base group is already allocated. We'll put correct values
+            // in it via ctx synthetic overrides.
+
+            // I'll add a synthetic_overrides map to LowerCtx and merge at the end.
+            for j in 0..d_total as u32 {
+                self.synthetic_overrides.insert(
+                    col_offsets_base.0 + j,
+                    NumericScalar::F32(j as f32),
+                );
+            }
+
+            let add_id = self.nano.push_group(
+                d_total as u32,
+                ScalarOp::Binary {
+                    op: ScalarBinOp::Add,
+                    compute_dtype: DType::F32,
+                    output_dtype: DType::F32,
+                },
+                indices_map.sym_dims.clone(),
+                vec![],
+                vec![
+                    InputRef::Broadcast(mul_id),
+                    InputRef::Affine {
+                        base: col_offsets_base,
+                        stride: 1,
+                    },
+                ],
+            );
+
+            // Step 4: IndirectLoad group — D_total atoms, each loads from data table
+            let base_id = self.nano.push_group(
+                d_total as u32,
+                ScalarOp::IndirectLoad {
+                    table_base: data_map.base_id,
+                    output_dtype: out_dt,
+                },
+                indices_map.sym_dims.clone(),
+                vec![],
+                vec![InputRef::Affine {
+                    base: add_id,
+                    stride: 1,
+                }],
+            );
+
+            let out_strides = TensorAtomMap::compute_strides(&out_known_dims);
+            self.tensor_map.insert(
+                out_id,
+                TensorAtomMap {
+                    base_id,
+                    count: d_total as u32,
+                    layout: out_layout,
+                    known_strides: out_strides,
+                    sym_dims: out_sym_dims,
+                },
+            );
+        } else {
+            // Indices are fully known (constant). out_count = indices_count * D_total.
+            let _indices_count = indices_map.count as u64;
+
+            // Build the indices InputRef: for output atom `flat`, row = flat / D_total
+            let indices_ref = if d_total == 1 {
+                // 1:1 mapping
+                InputRef::Affine {
+                    base: indices_map.base_id,
+                    stride: 1,
+                }
+            } else {
+                // For each output flat index, the row is flat / D_total
+                let mut ids = Vec::with_capacity(out_count as usize);
+                for flat in 0..out_count as u64 {
+                    let row = flat / d_total;
+                    ids.push(indices_map.base_id.offset(row as u32));
+                }
+                InputRef::Explicit(ids)
+            };
+
+            // Mul group: out_count atoms, each computes indices[row] * D_total
+            let mul_base = self.nano.push_group(
+                out_count,
+                ScalarOp::Binary {
+                    op: ScalarBinOp::Mul,
+                    compute_dtype: DType::F32,
+                    output_dtype: DType::F32,
+                },
+                vec![],
+                vec![],
+                vec![indices_ref, InputRef::Broadcast(stride_lit)],
+            );
+
+            // Column offset literals — one group, values set via synthetic_overrides
+            let col_offsets_base = self.nano.push_group(
+                out_count,
+                ScalarOp::Literal(NumericScalar::F32(0.0)),
+                vec![],
+                vec![],
+                vec![],
+            );
+            for flat in 0..out_count {
+                let col = (flat as u64) % d_total;
+                self.synthetic_overrides.insert(
+                    col_offsets_base.0 + flat,
+                    NumericScalar::F32(col as f32),
+                );
+            }
+
+            // Add group: mul_result + column_offset
+            let add_base = self.nano.push_group(
+                out_count,
+                ScalarOp::Binary {
+                    op: ScalarBinOp::Add,
+                    compute_dtype: DType::F32,
+                    output_dtype: DType::F32,
+                },
+                vec![],
+                vec![],
+                vec![
+                    InputRef::Affine {
+                        base: mul_base,
+                        stride: 1,
+                    },
+                    InputRef::Affine {
+                        base: col_offsets_base,
+                        stride: 1,
+                    },
+                ],
+            );
+
+            // IndirectLoad group
+            let base_id = self.nano.push_group(
+                out_count,
+                ScalarOp::IndirectLoad {
+                    table_base: data_map.base_id,
+                    output_dtype: out_dt,
+                },
+                vec![],
+                vec![],
+                vec![InputRef::Affine {
+                    base: add_base,
+                    stride: 1,
+                }],
+            );
+
+            let out_strides = TensorAtomMap::compute_strides(&out_known_dims);
+            self.tensor_map.insert(
+                out_id,
+                TensorAtomMap {
+                    base_id,
+                    count: out_count,
+                    layout: out_layout,
+                    known_strides: out_strides,
+                    sym_dims: out_sym_dims,
+                },
+            );
+        }
     }
 
     /// Generic boundary fallback. Always registers outputs in tensor_map
@@ -3144,6 +3297,58 @@ mod tests {
                     .unwrap(),
                 NumericTensor::from_vec_shape(vec![1.0f32, 0.0, 0.0, 1.0, 1.0, 1.0], vec![3, 2])
                     .unwrap(),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_gather_axis0_embedding() {
+        // Gather(data=[4, 3], indices=[2], axis=0) → [2, 3]
+        // This is the common embedding lookup pattern.
+        // data = [[10, 20, 30], [40, 50, 60], [70, 80, 90], [100, 110, 120]]
+        // indices = [1, 3]
+        // expected output = [[40, 50, 60], [100, 110, 120]]
+        check_integrity(
+            |graph, rng| {
+                let data = graph.add_input(rng);
+                let indices = graph.add_input(rng);
+                let out =
+                    crate::milli_graph::ops::Gather::push_new(graph, data, indices, 0, rng);
+                (vec![data, indices], vec![out])
+            },
+            vec![
+                NumericTensor::from_vec_shape(
+                    vec![
+                        10.0f32, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0, 110.0,
+                        120.0,
+                    ],
+                    vec![4, 3],
+                )
+                .unwrap(),
+                NumericTensor::from_vec_shape(vec![1.0f32, 3.0], vec![2]).unwrap(),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_gather_axis0_single_column() {
+        // Gather(data=[4], indices=[3], axis=0) → [3]
+        // 1D data (d_total=1), 1D indices
+        // data = [100, 200, 300, 400]
+        // indices = [0, 2, 3]
+        // expected output = [100, 300, 400]
+        check_integrity(
+            |graph, rng| {
+                let data = graph.add_input(rng);
+                let indices = graph.add_input(rng);
+                let out =
+                    crate::milli_graph::ops::Gather::push_new(graph, data, indices, 0, rng);
+                (vec![data, indices], vec![out])
+            },
+            vec![
+                NumericTensor::from_vec_shape(vec![100.0f32, 200.0, 300.0, 400.0], vec![4])
+                    .unwrap(),
+                NumericTensor::from_vec_shape(vec![0.0f32, 2.0, 3.0], vec![3]).unwrap(),
             ],
         );
     }

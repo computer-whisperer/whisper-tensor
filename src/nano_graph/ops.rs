@@ -46,25 +46,52 @@ pub enum ScalarOp {
     Literal(NumericScalar),
     /// Identity pass-through. One input, output = cast(input).
     /// Used for index-remapping ops (Slice, strided views) and dtype casts.
-    Identity { compute_dtype: DType, output_dtype: DType },
+    Identity {
+        compute_dtype: DType,
+        output_dtype: DType,
+    },
     /// Binary operation on two inputs.
-    Binary { op: ScalarBinOp, compute_dtype: DType, output_dtype: DType },
+    Binary {
+        op: ScalarBinOp,
+        compute_dtype: DType,
+        output_dtype: DType,
+    },
     /// Unary operation on one input.
-    Unary { op: ScalarUnaryOp, compute_dtype: DType, output_dtype: DType },
+    Unary {
+        op: ScalarUnaryOp,
+        compute_dtype: DType,
+        output_dtype: DType,
+    },
     /// Ternary select: condition ? x : y. Three inputs: [condition, x, y].
-    Select { compute_dtype: DType, output_dtype: DType },
+    Select {
+        compute_dtype: DType,
+        output_dtype: DType,
+    },
     /// Reduce a dimension by summation. One input; the block iterates over the
     /// reduction dimension and accumulates.
-    ReduceSum { compute_dtype: DType, output_dtype: DType },
+    ReduceSum {
+        compute_dtype: DType,
+        output_dtype: DType,
+    },
     /// Reduce a dimension by max.
-    ReduceMax { compute_dtype: DType, output_dtype: DType },
+    ReduceMax {
+        compute_dtype: DType,
+        output_dtype: DType,
+    },
+    /// Indirect load: given a runtime-computed index (one input), read a value
+    /// from a known table of atoms at `table_base + index`. Used for Gather
+    /// (embedding lookups). No computation, just a runtime-dependent load.
+    IndirectLoad {
+        table_base: super::pattern::AtomId,
+        output_dtype: DType,
+    },
 }
 
 impl ScalarOp {
-    /// Returns the compute dtype for this op (None for Literal, which is self-typed).
+    /// Returns the compute dtype for this op (None for Literal and IndirectLoad, which have no computation).
     pub fn compute_dtype(&self) -> Option<DType> {
         match self {
-            ScalarOp::Literal(_) => None,
+            ScalarOp::Literal(_) | ScalarOp::IndirectLoad { .. } => None,
             ScalarOp::Identity { compute_dtype, .. }
             | ScalarOp::Binary { compute_dtype, .. }
             | ScalarOp::Unary { compute_dtype, .. }
@@ -83,12 +110,16 @@ impl ScalarOp {
             | ScalarOp::Unary { output_dtype, .. }
             | ScalarOp::Select { output_dtype, .. }
             | ScalarOp::ReduceSum { output_dtype, .. }
-            | ScalarOp::ReduceMax { output_dtype, .. } => *output_dtype,
+            | ScalarOp::ReduceMax { output_dtype, .. }
+            | ScalarOp::IndirectLoad { output_dtype, .. } => *output_dtype,
         }
     }
 
     /// Returns true if this is a reduce operation.
     pub fn is_reduce(&self) -> bool {
-        matches!(self, ScalarOp::ReduceSum { .. } | ScalarOp::ReduceMax { .. })
+        matches!(
+            self,
+            ScalarOp::ReduceSum { .. } | ScalarOp::ReduceMax { .. }
+        )
     }
 }

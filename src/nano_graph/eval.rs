@@ -65,8 +65,14 @@ impl NanoEval {
                         .expect("Reduce dim must have a bound");
 
                     let (compute_dtype, output_dtype) = match &group.op {
-                        ScalarOp::ReduceSum { compute_dtype, output_dtype } => (*compute_dtype, *output_dtype),
-                        ScalarOp::ReduceMax { compute_dtype, output_dtype } => (*compute_dtype, *output_dtype),
+                        ScalarOp::ReduceSum {
+                            compute_dtype,
+                            output_dtype,
+                        } => (*compute_dtype, *output_dtype),
+                        ScalarOp::ReduceMax {
+                            compute_dtype,
+                            output_dtype,
+                        } => (*compute_dtype, *output_dtype),
                         _ => unreachable!(),
                     };
 
@@ -104,14 +110,23 @@ impl NanoEval {
                                 scalar.clone()
                             }
                         }
-                        ScalarOp::Identity { compute_dtype, output_dtype } => {
+                        ScalarOp::Identity {
+                            compute_dtype,
+                            output_dtype,
+                        } => {
                             let src = group.inputs[0].resolve(i, 0);
                             let x = values[src.0 as usize].cast_to(*compute_dtype);
                             x.cast_to(*output_dtype)
                         }
-                        ScalarOp::Binary { op, compute_dtype, output_dtype } => {
-                            let a = values[group.inputs[0].resolve(i, 0).0 as usize].cast_to(*compute_dtype);
-                            let b = values[group.inputs[1].resolve(i, 0).0 as usize].cast_to(*compute_dtype);
+                        ScalarOp::Binary {
+                            op,
+                            compute_dtype,
+                            output_dtype,
+                        } => {
+                            let a = values[group.inputs[0].resolve(i, 0).0 as usize]
+                                .cast_to(*compute_dtype);
+                            let b = values[group.inputs[1].resolve(i, 0).0 as usize]
+                                .cast_to(*compute_dtype);
                             let result = match op {
                                 ScalarBinOp::Add => a.add(&b),
                                 ScalarBinOp::Sub => a.sub(&b),
@@ -124,8 +139,13 @@ impl NanoEval {
                             };
                             result.cast_to(*output_dtype)
                         }
-                        ScalarOp::Unary { op, compute_dtype, output_dtype } => {
-                            let x = values[group.inputs[0].resolve(i, 0).0 as usize].cast_to(*compute_dtype);
+                        ScalarOp::Unary {
+                            op,
+                            compute_dtype,
+                            output_dtype,
+                        } => {
+                            let x = values[group.inputs[0].resolve(i, 0).0 as usize]
+                                .cast_to(*compute_dtype);
                             let result = match op {
                                 ScalarUnaryOp::Neg => x.neg(),
                                 ScalarUnaryOp::Abs => x.abs(),
@@ -139,14 +159,29 @@ impl NanoEval {
                             };
                             result.cast_to(*output_dtype)
                         }
-                        ScalarOp::Select { compute_dtype, output_dtype } => {
-                            let cond = values[group.inputs[0].resolve(i, 0).0 as usize].cast_to(*compute_dtype);
+                        ScalarOp::Select {
+                            compute_dtype,
+                            output_dtype,
+                        } => {
+                            let cond = values[group.inputs[0].resolve(i, 0).0 as usize]
+                                .cast_to(*compute_dtype);
                             let result = if cond.is_nonzero() {
-                                values[group.inputs[1].resolve(i, 0).0 as usize].cast_to(*compute_dtype)
+                                values[group.inputs[1].resolve(i, 0).0 as usize]
+                                    .cast_to(*compute_dtype)
                             } else {
-                                values[group.inputs[2].resolve(i, 0).0 as usize].cast_to(*compute_dtype)
+                                values[group.inputs[2].resolve(i, 0).0 as usize]
+                                    .cast_to(*compute_dtype)
                             };
                             result.cast_to(*output_dtype)
+                        }
+                        ScalarOp::IndirectLoad {
+                            table_base,
+                            output_dtype,
+                        } => {
+                            let src = group.inputs[0].resolve(i, 0);
+                            let index = values[src.0 as usize].to_f64() as usize;
+                            let table_atom = table_base.0 as usize + index;
+                            values[table_atom].cast_to(*output_dtype)
                         }
                         ScalarOp::ReduceSum { .. } | ScalarOp::ReduceMax { .. } => unreachable!(),
                     };
@@ -157,12 +192,7 @@ impl NanoEval {
                             .enumerate()
                             .map(|(j, inp)| {
                                 let src = inp.resolve(i, 0);
-                                format!(
-                                    "inp[{}]=atom{}={:?}",
-                                    j,
-                                    src.0,
-                                    values[src.0 as usize]
-                                )
+                                format!("inp[{}]=atom{}={:?}", j, src.0, values[src.0 as usize])
                             })
                             .collect();
                         eprintln!(
