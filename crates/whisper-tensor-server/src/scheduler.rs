@@ -419,15 +419,19 @@ pub async fn scheduler(mut input: mpsc::Receiver<SchedulerJob>, model_server: Ar
 
                                 let SuperGraphData {
                                     tensors,
+                                    images,
                                     strings,
                                     hashes,
                                     ..
                                 } = res;
 
-                                let tensor_outputs = tensors
+                                let mut tensor_outputs = tensors
                                     .iter()
                                     .map(|(k, v)| (*k, v.to_ndarray().unwrap()))
-                                    .collect();
+                                    .collect::<HashMap<_, _>>();
+                                for (link, image) in images {
+                                    tensor_outputs.insert(link, image.tensor.to_ndarray().unwrap());
+                                }
 
                                 Ok(SuperGraphResponseData {
                                     tensor_outputs,

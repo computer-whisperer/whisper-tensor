@@ -1631,49 +1631,17 @@ impl GraphExplorerApp {
                                             });
                                         toggle_ui(ui, &mut sd_data.use_cache);
                                         ui.label("Cache");
-                                        // Check all tokenizers ready
-                                        let all_tok_infos: Vec<_> = sd_interface.positive_prompts.iter()
-                                            .chain(sd_interface.negative_prompts.iter().flatten())
-                                            .map(|pi| &pi.tokenizer)
-                                            .collect();
-                                        let can_generate = all_tok_infos.iter().all(|ti| {
-                                            matches!(
-                                                loaded_tokenizers.loaded_tokenizers.get(*ti).and_then(|v| v.as_ref()),
-                                                Some(Ok(_))
-                                            )
-                                        });
-                                        if !can_generate {
-                                            let has_error = all_tok_infos.iter().any(|ti| {
-                                                matches!(
-                                                    loaded_tokenizers.loaded_tokenizers.get(*ti).and_then(|v| v.as_ref()),
-                                                    Some(Err(_))
-                                                )
-                                            });
-                                            if has_error {
-                                                ui.label("Tokenizer error");
-                                            } else {
-                                                ui.spinner();
-                                            }
-                                        }
-                                        if can_generate && ui.button("Generate").clicked() {
-                                            // Tokenize positive prompts
+                                        if ui.button("Generate").clicked() {
                                             let mut tensor_inputs = HashMap::new();
-                                            for pi in &sd_interface.positive_prompts {
-                                                let tokenizer = loaded_tokenizers.loaded_tokenizers.get(&pi.tokenizer)
-                                                    .and_then(|v| v.as_ref()).and_then(|r| r.as_ref().ok()).unwrap();
-                                                let ids = pi.tokenize(tokenizer.as_ref(), &sd_data.prompt);
-                                                let tensor = NDArrayNumericTensor::from_vec_shape(ids, &vec![1, pi.seq_len as u64]).unwrap();
-                                                tensor_inputs.insert(pi.link, tensor);
-                                            }
-                                            // Tokenize negative prompts
-                                            if let Some(neg_prompts) = &sd_interface.negative_prompts {
-                                                for pi in neg_prompts {
-                                                    let tokenizer = loaded_tokenizers.loaded_tokenizers.get(&pi.tokenizer)
-                                                        .and_then(|v| v.as_ref()).and_then(|r| r.as_ref().ok()).unwrap();
-                                                    let ids = pi.tokenize(tokenizer.as_ref(), "");
-                                                    let tensor = NDArrayNumericTensor::from_vec_shape(ids, &vec![1, pi.seq_len as u64]).unwrap();
-                                                    tensor_inputs.insert(pi.link, tensor);
-                                                }
+                                            let mut string_inputs = HashMap::new();
+                                            string_inputs.insert(
+                                                sd_interface.positive_prompt_input,
+                                                sd_data.prompt.clone(),
+                                            );
+                                            if let Some(negative_link) =
+                                                sd_interface.negative_prompt_input
+                                            {
+                                                string_inputs.insert(negative_link, String::new());
                                             }
 
                                             let channels = sd_interface.latent_channels;
@@ -1751,7 +1719,7 @@ impl GraphExplorerApp {
                                                 attention_token: None,
                                                 super_graph: sd_interface.super_graph.clone(),
                                                 subscribed_tensors: self.inspect_window_tensor_subscriptions.iter().cloned().collect(),
-                                                string_inputs: HashMap::new(),
+                                                string_inputs,
                                                 use_cache: if sd_data.use_cache { Some(200 + interface_id as u64) } else { None },
                                                 backend_mode: sd_data.selected_mode,
                                                 symbolic_graph_ids,

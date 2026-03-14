@@ -52,7 +52,7 @@ impl SDExplorerApp {
         &mut self,
         state: &mut SDExplorerState,
         loaded_models: &mut LoadedModels,
-        loaded_tokenizers: &mut LoadedTokenizers,
+        _loaded_tokenizers: &mut LoadedTokenizers,
         server_request_manager: &mut ServerRequestManager,
         ui: &mut egui::Ui,
     ) {
@@ -147,52 +147,19 @@ impl SDExplorerApp {
 
                 let is_running = self.pending_request.is_some();
 
-                // Check all needed tokenizers are loaded
-                let all_tokenizer_infos: Vec<_> = sd
-                    .positive_prompts
-                    .iter()
-                    .chain(sd.negative_prompts.iter().flatten())
-                    .map(|pi| &pi.tokenizer)
-                    .collect();
-                let mut tokenizers_ready = true;
-                let mut tokenizer_error = None;
-                for tok_info in &all_tokenizer_infos {
-                    match loaded_tokenizers
-                        .loaded_tokenizers
-                        .get(*tok_info)
-                        .and_then(|v| v.as_ref())
-                    {
-                        Some(Ok(_)) => {}
-                        Some(Err(err)) => {
-                            tokenizer_error = Some(err.clone());
-                            break;
-                        }
-                        None => {
-                            tokenizers_ready = false;
-                            break;
-                        }
-                    }
-                }
-
                 ui.horizontal(|ui| {
                     if is_running {
                         ui.spinner();
                         ui.label("Generating...");
-                    } else if let Some(err) = &tokenizer_error {
-                        ui.label(format!("Tokenizer error: {err}"));
-                    } else if tokenizers_ready {
+                    } else {
                         if ui.button("Generate").clicked() {
                             self.run_generation(
                                 state,
                                 sd,
                                 interface.model_ids.clone(),
-                                loaded_tokenizers,
                                 server_request_manager,
                             );
                         }
-                    } else {
-                        ui.spinner();
-                        ui.label("Loading tokenizer...");
                     }
                 });
 
@@ -220,38 +187,13 @@ impl SDExplorerApp {
         state: &SDExplorerState,
         sd: &ImageGenerationInterface,
         model_ids: Vec<whisper_tensor_server::LoadedModelId>,
-        loaded_tokenizers: &LoadedTokenizers,
         server_request_manager: &mut ServerRequestManager,
     ) {
-        // Tokenize positive prompts
         let mut tensor_inputs = HashMap::new();
-        for pi in &sd.positive_prompts {
-            let tokenizer = loaded_tokenizers
-                .loaded_tokenizers
-                .get(&pi.tokenizer)
-                .and_then(|v| v.as_ref())
-                .and_then(|r| r.as_ref().ok())
-                .expect("tokenizer should be loaded");
-            let ids = pi.tokenize(tokenizer.as_ref(), &state.prompt_text);
-            let tensor =
-                NDArrayNumericTensor::from_vec_shape(ids, &vec![1, pi.seq_len as u64]).unwrap();
-            tensor_inputs.insert(pi.link, tensor);
-        }
-
-        // Tokenize negative prompts
-        if let Some(neg_prompts) = &sd.negative_prompts {
-            for pi in neg_prompts {
-                let tokenizer = loaded_tokenizers
-                    .loaded_tokenizers
-                    .get(&pi.tokenizer)
-                    .and_then(|v| v.as_ref())
-                    .and_then(|r| r.as_ref().ok())
-                    .expect("tokenizer should be loaded");
-                let ids = pi.tokenize(tokenizer.as_ref(), "");
-                let tensor =
-                    NDArrayNumericTensor::from_vec_shape(ids, &vec![1, pi.seq_len as u64]).unwrap();
-                tensor_inputs.insert(pi.link, tensor);
-            }
+        let mut string_inputs = HashMap::new();
+        string_inputs.insert(sd.positive_prompt_input, state.prompt_text.clone());
+        if let Some(negative_link) = sd.negative_prompt_input {
+            string_inputs.insert(negative_link, String::new());
         }
 
         // Compute scheduler params
@@ -320,7 +262,7 @@ impl SDExplorerApp {
             attention_token: None,
             super_graph: sd.super_graph.clone(),
             subscribed_tensors: Vec::new(),
-            string_inputs: HashMap::new(),
+            string_inputs,
             use_cache: None,
             backend_mode: SuperGraphRequestBackendMode::NDArray,
             symbolic_graph_ids,

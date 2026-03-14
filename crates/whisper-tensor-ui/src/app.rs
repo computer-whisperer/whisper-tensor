@@ -418,16 +418,7 @@ impl eframe::App for WebUIApp {
                                     AnyInterface::MultimodalLanguageInterface(iface) => {
                                         needed_tokenizers.push(iface.get_tokenizer().clone());
                                     }
-                                    AnyInterface::ImageGenerationInterface(iface) => {
-                                        for pi in &iface.positive_prompts {
-                                            needed_tokenizers.push(pi.tokenizer.clone());
-                                        }
-                                        if let Some(neg) = &iface.negative_prompts {
-                                            for pi in neg {
-                                                needed_tokenizers.push(pi.tokenizer.clone());
-                                            }
-                                        }
-                                    }
+                                    AnyInterface::ImageGenerationInterface(_) => {}
                                     AnyInterface::TextToSpeechInterface(_) => {}
                                     AnyInterface::SpeechToTextInterface(_) => {}
                                 }

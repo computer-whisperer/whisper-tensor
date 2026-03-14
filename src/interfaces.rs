@@ -12,10 +12,12 @@ use crate::milli_graph::ops::{
 use crate::model::Model;
 use crate::numeric_tensor::NumericTensor;
 use crate::super_graph::cache::{SuperGraphCache, SuperGraphTensorCache};
-use crate::super_graph::data::SuperGraphData;
+use crate::super_graph::data::{SuperGraphData, SuperGraphImage};
 use crate::super_graph::links::{SuperGraphLink, SuperGraphLinkDouble, SuperGraphLinkTriple};
 use crate::super_graph::nodes::{
     SuperGraphNode, SuperGraphNodeMilliOpGraph, SuperGraphNodeModelExecution, SuperGraphNodeScan,
+    SuperGraphNodeTensorToImage, SuperGraphNodeTokenizerEncode, SuperGraphNodeTokenizerEncodeMode,
+    SuperGraphNodeTokenizerLoad,
 };
 use crate::super_graph::{SuperGraph, SuperGraphBuilder, SuperGraphContext, SuperGraphError};
 use crate::tensor_rank::DynRank;
@@ -321,67 +323,12 @@ pub enum SchedulerType {
     RectifiedFlow,
 }
 
-/// How to encode a text prompt into token IDs for a specific input slot.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum PromptEncoding {
-    /// CLIP-style: prepend BOS, append EOS, pad to seq_len with pad token.
-    ClipStyle { bos: u32, eos: u32, pad: u32 },
-    /// Raw encode and pad to seq_len (e.g. T5 SentencePiece).
-    RawPad { pad: u32 },
-}
-
-/// A single prompt input slot: tokenizer, target link, sequence length, and encoding style.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PromptInput {
-    pub tokenizer: TokenizerInfo,
-    pub link: SuperGraphLink,
-    pub seq_len: usize,
-    pub encoding: PromptEncoding,
-}
-
-impl PromptInput {
-    /// Tokenize a text prompt according to this input's encoding style.
-    pub fn tokenize(&self, tokenizer: &dyn Tokenizer, text: &str) -> Vec<i32> {
-        match &self.encoding {
-            PromptEncoding::ClipStyle { bos, eos, pad } => {
-                let mut encoded = tokenizer.encode(text);
-                // Strip BOS/EOS if the tokenizer's post-processor already added them
-                if encoded.first() == Some(bos) {
-                    encoded.remove(0);
-                }
-                if encoded.last() == Some(eos) {
-                    encoded.pop();
-                }
-                let mut ids = Vec::with_capacity(self.seq_len);
-                ids.push(*bos as i32);
-                let max_text_tokens = self.seq_len.saturating_sub(2);
-                for &id in encoded.iter().take(max_text_tokens) {
-                    ids.push(id as i32);
-                }
-                ids.push(*eos as i32);
-                ids.resize(self.seq_len, *pad as i32);
-                ids
-            }
-            PromptEncoding::RawPad { pad } => {
-                let encoded = tokenizer.encode(text);
-                let mut ids: Vec<i32> = encoded
-                    .iter()
-                    .take(self.seq_len)
-                    .map(|&id| id as i32)
-                    .collect();
-                ids.resize(self.seq_len, *pad as i32);
-                ids
-            }
-        }
-    }
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ImageGenerationInterface {
     pub super_graph: SuperGraph,
     // Prompt inputs
-    pub positive_prompts: Vec<PromptInput>,
-    pub negative_prompts: Option<Vec<PromptInput>>,
+    pub positive_prompt_input: SuperGraphLink,
+    pub negative_prompt_input: Option<SuperGraphLink>,
     // Latent / scheduler inputs
     pub initial_latent_input: SuperGraphLink,
     pub timesteps_input: SuperGraphLink,
@@ -955,8 +902,8 @@ impl ImageGenerationInterface {
         let mut builder = SuperGraphBuilder::new();
 
         // Create input links
-        let cond_ids_input = builder.new_tensor_link(rng);
-        let negative_cond_ids_input = builder.new_tensor_link(rng);
+        let positive_prompt_input = builder.new_string_link(rng);
+        let negative_prompt_input = builder.new_string_link(rng);
         let initial_latent_input = builder.new_tensor_link(rng);
         let timesteps_input = builder.new_tensor_link(rng);
         let dt_input = builder.new_tensor_link(rng);
@@ -966,6 +913,34 @@ impl ImageGenerationInterface {
         let te_weights = builder.new_model_link(rng);
         let unet_weights = builder.new_model_link(rng);
         let vae_weights = builder.new_model_link(rng);
+
+        // Prompt tokenization inside the supergraph.
+        let tokenizer_link =
+            SuperGraphNodeTokenizerLoad::new_and_add(&mut builder, tokenizer.clone(), rng);
+        let cond_ids_input = SuperGraphNodeTokenizerEncode::new_with_mode_and_add(
+            &mut builder,
+            tokenizer_link,
+            positive_prompt_input,
+            SuperGraphNodeTokenizerEncodeMode::ClipStyle {
+                seq_len: 77,
+                bos: 49406,
+                eos: 49407,
+                pad: 0,
+            },
+            rng,
+        );
+        let negative_cond_ids_input = SuperGraphNodeTokenizerEncode::new_with_mode_and_add(
+            &mut builder,
+            tokenizer_link,
+            negative_prompt_input,
+            SuperGraphNodeTokenizerEncodeMode::ClipStyle {
+                seq_len: 77,
+                bos: 49406,
+                eos: 49407,
+                pad: 0,
+            },
+            rng,
+        );
 
         // Text encoder: conditional → F32, cast to model_dtype
         let cond_hidden_f32 = builder.new_tensor_link(rng);
@@ -1014,8 +989,8 @@ impl ImageGenerationInterface {
             1, // unet model index
         );
 
-        // VAE decode
-        let image_output = build_vae_decode(
+        // VAE decode + wrap tensor into Image
+        let decoded_image_tensor = build_vae_decode(
             &mut builder,
             rng,
             final_latent,
@@ -1024,12 +999,14 @@ impl ImageGenerationInterface {
             vae_scale_factor,
             model_dtype,
         );
+        let image_output =
+            SuperGraphNodeTensorToImage::new_and_add(&mut builder, decoded_image_tensor, rng);
 
         // Build outer graph
         let model_weights = vec![te_weights, unet_weights, vae_weights];
         let input_links: Vec<_> = vec![
-            cond_ids_input.to_any(),
-            negative_cond_ids_input.to_any(),
+            positive_prompt_input.to_any(),
+            negative_prompt_input.to_any(),
             initial_latent_input.to_any(),
             timesteps_input.to_any(),
             dt_input.to_any(),
@@ -1043,27 +1020,10 @@ impl ImageGenerationInterface {
         let output_links: Vec<_> = vec![image_output.to_any()];
         let super_graph = builder.build(rng, &input_links, &output_links);
 
-        let clip_prompt = PromptInput {
-            tokenizer,
-            link: cond_ids_input,
-            seq_len: 77,
-            encoding: PromptEncoding::ClipStyle {
-                bos: 49406,
-                eos: 49407,
-                pad: 0,
-            },
-        };
-        let clip_neg_prompt = PromptInput {
-            tokenizer: clip_prompt.tokenizer.clone(),
-            link: negative_cond_ids_input,
-            seq_len: 77,
-            encoding: clip_prompt.encoding.clone(),
-        };
-
         Self {
             super_graph,
-            positive_prompts: vec![clip_prompt],
-            negative_prompts: Some(vec![clip_neg_prompt]),
+            positive_prompt_input,
+            negative_prompt_input: Some(negative_prompt_input),
             initial_latent_input,
             timesteps_input,
             dt_input,
@@ -1084,8 +1044,8 @@ impl ImageGenerationInterface {
         let mut builder = SuperGraphBuilder::new();
 
         // Create input links
-        let cond_ids_input = builder.new_tensor_link(rng);
-        let negative_cond_ids_input = builder.new_tensor_link(rng);
+        let positive_prompt_input = builder.new_string_link(rng);
+        let negative_prompt_input = builder.new_string_link(rng);
         let initial_latent_input = builder.new_tensor_link(rng);
         let timesteps_input = builder.new_tensor_link(rng);
         let dt_input = builder.new_tensor_link(rng);
@@ -1096,6 +1056,34 @@ impl ImageGenerationInterface {
         let te2_weights = builder.new_model_link(rng);
         let unet_weights = builder.new_model_link(rng);
         let vae_weights = builder.new_model_link(rng);
+
+        // Prompt tokenization inside the supergraph.
+        let tokenizer_link =
+            SuperGraphNodeTokenizerLoad::new_and_add(&mut builder, tokenizer.clone(), rng);
+        let cond_ids_input = SuperGraphNodeTokenizerEncode::new_with_mode_and_add(
+            &mut builder,
+            tokenizer_link,
+            positive_prompt_input,
+            SuperGraphNodeTokenizerEncodeMode::ClipStyle {
+                seq_len: 77,
+                bos: 49406,
+                eos: 49407,
+                pad: 0,
+            },
+            rng,
+        );
+        let negative_cond_ids_input = SuperGraphNodeTokenizerEncode::new_with_mode_and_add(
+            &mut builder,
+            tokenizer_link,
+            negative_prompt_input,
+            SuperGraphNodeTokenizerEncodeMode::ClipStyle {
+                seq_len: 77,
+                bos: 49406,
+                eos: 49407,
+                pad: 0,
+            },
+            rng,
+        );
 
         // --- Conditional path ---
 
@@ -1263,8 +1251,8 @@ impl ImageGenerationInterface {
             2, // unet model index (te1=0, te2=1, unet=2)
         );
 
-        // VAE decode (SDXL uses 0.13025 scale factor)
-        let image_output = build_vae_decode(
+        // VAE decode (SDXL uses 0.13025 scale factor) + wrap tensor into Image
+        let decoded_image_tensor = build_vae_decode(
             &mut builder,
             rng,
             final_latent,
@@ -1273,12 +1261,14 @@ impl ImageGenerationInterface {
             0.13025,
             model_dtype,
         );
+        let image_output =
+            SuperGraphNodeTensorToImage::new_and_add(&mut builder, decoded_image_tensor, rng);
 
         // Build outer graph
         let model_weights = vec![te1_weights, te2_weights, unet_weights, vae_weights];
         let input_links: Vec<_> = vec![
-            cond_ids_input.to_any(),
-            negative_cond_ids_input.to_any(),
+            positive_prompt_input.to_any(),
+            negative_prompt_input.to_any(),
             initial_latent_input.to_any(),
             timesteps_input.to_any(),
             dt_input.to_any(),
@@ -1293,27 +1283,10 @@ impl ImageGenerationInterface {
         let output_links: Vec<_> = vec![image_output.to_any()];
         let super_graph = builder.build(rng, &input_links, &output_links);
 
-        let clip_prompt = PromptInput {
-            tokenizer,
-            link: cond_ids_input,
-            seq_len: 77,
-            encoding: PromptEncoding::ClipStyle {
-                bos: 49406,
-                eos: 49407,
-                pad: 0,
-            },
-        };
-        let clip_neg_prompt = PromptInput {
-            tokenizer: clip_prompt.tokenizer.clone(),
-            link: negative_cond_ids_input,
-            seq_len: 77,
-            encoding: clip_prompt.encoding.clone(),
-        };
-
         Self {
             super_graph,
-            positive_prompts: vec![clip_prompt],
-            negative_prompts: Some(vec![clip_neg_prompt]),
+            positive_prompt_input,
+            negative_prompt_input: Some(negative_prompt_input),
             initial_latent_input,
             timesteps_input,
             dt_input,
@@ -1432,8 +1405,7 @@ impl ImageGenerationInterface {
         let mut builder = SuperGraphBuilder::new();
 
         // Create input links
-        let cond_ids_input = builder.new_tensor_link(rng); // CLIP token IDs
-        let t5_ids_input = builder.new_tensor_link(rng); // T5 token IDs
+        let positive_prompt_input = builder.new_string_link(rng);
         let initial_latent_input = builder.new_tensor_link(rng);
         let timesteps_input = builder.new_tensor_link(rng);
         let dt_input = builder.new_tensor_link(rng);
@@ -1448,6 +1420,34 @@ impl ImageGenerationInterface {
         let t5_weights = builder.new_model_link(rng);
         let dit_weights = builder.new_model_link(rng);
         let vae_weights = builder.new_model_link(rng);
+
+        // Prompt tokenization inside the supergraph.
+        let clip_tokenizer_link =
+            SuperGraphNodeTokenizerLoad::new_and_add(&mut builder, clip_tokenizer, rng);
+        let t5_tokenizer_link =
+            SuperGraphNodeTokenizerLoad::new_and_add(&mut builder, t5_tokenizer, rng);
+        let cond_ids_input = SuperGraphNodeTokenizerEncode::new_with_mode_and_add(
+            &mut builder,
+            clip_tokenizer_link,
+            positive_prompt_input,
+            SuperGraphNodeTokenizerEncodeMode::ClipStyle {
+                seq_len: 77,
+                bos: 49406,
+                eos: 49407,
+                pad: 0,
+            },
+            rng,
+        );
+        let t5_ids_input = SuperGraphNodeTokenizerEncode::new_with_mode_and_add(
+            &mut builder,
+            t5_tokenizer_link,
+            positive_prompt_input,
+            SuperGraphNodeTokenizerEncodeMode::RawPad {
+                seq_len: 256,
+                pad: 0,
+            },
+            rng,
+        );
 
         // --- CLIP-L: input_ids + eos_indices → pooled_output [1, 768] ---
         let clip_pooled_f32 = builder.new_tensor_link(rng);
@@ -1499,14 +1499,16 @@ impl ImageGenerationInterface {
         );
 
         // --- VAE decode ---
-        // Flux VAE: latent / 0.3611 + 0.1159
-        let image_output = build_flux_vae_decode(&mut builder, rng, final_latent, vae_weights, 3);
+        // Flux VAE: latent / 0.3611 + 0.1159, then wrap tensor into Image
+        let decoded_image_tensor =
+            build_flux_vae_decode(&mut builder, rng, final_latent, vae_weights, 3);
+        let image_output =
+            SuperGraphNodeTensorToImage::new_and_add(&mut builder, decoded_image_tensor, rng);
 
         // Build outer graph
         let model_weights = vec![clip_weights, t5_weights, dit_weights, vae_weights];
         let mut input_links: Vec<_> = vec![
-            cond_ids_input.to_any(),
-            t5_ids_input.to_any(),
+            positive_prompt_input.to_any(),
             initial_latent_input.to_any(),
             timesteps_input.to_any(),
             dt_input.to_any(),
@@ -1525,27 +1527,10 @@ impl ImageGenerationInterface {
         let output_links: Vec<_> = vec![image_output.to_any()];
         let super_graph = builder.build(rng, &input_links, &output_links);
 
-        let clip_prompt = PromptInput {
-            tokenizer: clip_tokenizer,
-            link: cond_ids_input,
-            seq_len: 77,
-            encoding: PromptEncoding::ClipStyle {
-                bos: 49406,
-                eos: 49407,
-                pad: 0,
-            },
-        };
-        let t5_prompt = PromptInput {
-            tokenizer: t5_tokenizer,
-            link: t5_ids_input,
-            seq_len: 256,
-            encoding: PromptEncoding::RawPad { pad: 0 },
-        };
-
         Self {
             super_graph,
-            positive_prompts: vec![clip_prompt, t5_prompt],
-            negative_prompts: None,
+            positive_prompt_input,
+            negative_prompt_input: None,
             initial_latent_input,
             timesteps_input,
             dt_input,
@@ -1560,20 +1545,18 @@ impl ImageGenerationInterface {
     }
 
     /// Run the full image generation pipeline.
-    ///
-    /// `prompt_tokens` contains pre-tokenized tensors keyed by SuperGraphLink,
-    /// one entry per prompt input slot (positive and negative).
     #[allow(clippy::too_many_arguments)]
     pub fn run(
         &self,
         models: &[&Model],
-        prompt_tokens: HashMap<SuperGraphLink, NumericTensor<DynRank>>,
+        positive_prompt: String,
+        negative_prompt: Option<String>,
         initial_noise: Vec<f32>,
         latent_shape: Vec<usize>,
         num_inference_steps: usize,
         guidance_scale: f32,
         backend: &mut EvalBackend,
-    ) -> Result<NumericTensor<DynRank>, SuperGraphError> {
+    ) -> Result<SuperGraphImage, SuperGraphError> {
         assert_eq!(
             models.len(),
             self.model_weights.len(),
@@ -1613,8 +1596,11 @@ impl ImageGenerationInterface {
 
         // Pack data
         let mut data = SuperGraphData::new();
-        for (link, tensor) in prompt_tokens {
-            data.tensors.insert(link, tensor);
+        data.strings
+            .insert(self.positive_prompt_input, positive_prompt);
+        if let Some(negative_link) = self.negative_prompt_input {
+            data.strings
+                .insert(negative_link, negative_prompt.unwrap_or_default());
         }
         data.tensors
             .insert(self.initial_latent_input, latent_tensor);
@@ -1647,7 +1633,7 @@ impl ImageGenerationInterface {
         };
 
         let result = self.super_graph.run(data, &mut context)?;
-        let image = result.tensors.get(&self.image_output).unwrap().clone();
+        let image = result.images.get(&self.image_output).unwrap().clone();
         Ok(image)
     }
 

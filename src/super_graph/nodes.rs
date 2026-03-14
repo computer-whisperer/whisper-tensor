@@ -9,6 +9,7 @@ use crate::metadata::TokenizerInfo;
 use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::observer::MilliOpGraphObserver;
 use crate::numeric_tensor::NumericTensor;
+use crate::super_graph::data::SuperGraphImage;
 use crate::super_graph::links::{
     SuperGraphAnyLink, SuperGraphLink, SuperGraphLinkDouble, SuperGraphLinkKind,
     SuperGraphLinkTriple,
@@ -379,11 +380,27 @@ impl SuperGraphNode for SuperGraphNodeTokenizerLoad {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum SuperGraphNodeTokenizerEncodeMode {
+    Plain,
+    ClipStyle {
+        seq_len: usize,
+        bos: u32,
+        eos: u32,
+        pad: u32,
+    },
+    RawPad {
+        seq_len: usize,
+        pad: u32,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SuperGraphNodeTokenizerEncode {
     global_id: GlobalId,
     tokenizer: SuperGraphLink,
     text_input: SuperGraphLink,
     tensor_output: SuperGraphLink,
+    mode: SuperGraphNodeTokenizerEncodeMode,
 }
 
 impl SuperGraphNodeTokenizerEncode {
@@ -398,6 +415,23 @@ impl SuperGraphNodeTokenizerEncode {
             tokenizer,
             text_input,
             tensor_output: SuperGraphLink::new(SuperGraphLinkKind::Tensor, rng),
+            mode: SuperGraphNodeTokenizerEncodeMode::Plain,
+        }
+    }
+
+    pub fn new_with_mode(
+        _builder: &mut SuperGraphBuilder,
+        tokenizer: SuperGraphLink,
+        text_input: SuperGraphLink,
+        mode: SuperGraphNodeTokenizerEncodeMode,
+        rng: &mut impl RngCore,
+    ) -> Self {
+        Self {
+            global_id: GlobalId::new(rng),
+            tokenizer,
+            text_input,
+            tensor_output: SuperGraphLink::new(SuperGraphLinkKind::Tensor, rng),
+            mode,
         }
     }
 
@@ -408,6 +442,19 @@ impl SuperGraphNodeTokenizerEncode {
         rng: &mut impl RngCore,
     ) -> SuperGraphLink {
         let node = Self::new(builder, tokenizer, text_input, rng);
+        let output = node.get_tensor_output();
+        builder.add_node(node.to_any());
+        output
+    }
+
+    pub fn new_with_mode_and_add(
+        builder: &mut SuperGraphBuilder,
+        tokenizer: SuperGraphLink,
+        text_input: SuperGraphLink,
+        mode: SuperGraphNodeTokenizerEncodeMode,
+        rng: &mut impl RngCore,
+    ) -> SuperGraphLink {
+        let node = Self::new_with_mode(builder, tokenizer, text_input, mode, rng);
         let output = node.get_tensor_output();
         builder.add_node(node.to_any());
         output
@@ -430,17 +477,51 @@ impl SuperGraphNode for SuperGraphNodeTokenizerEncode {
     ) -> Result<(), SuperGraphError> {
         let text = data.strings.get(&self.text_input).unwrap();
         let tokenizer = data.tokenizers.get(&self.tokenizer).unwrap();
-        let tokens = tokenizer
-            .encode(text)
-            .iter()
-            .map(|x| *x as i64)
-            .collect::<Vec<_>>();
-        let input_tensor = NumericTensor::from_vec(tokens)
-            .to_dyn_rank()
-            .unsqueeze(0)
-            .unwrap()
-            .unsqueeze(0)
-            .unwrap();
+        let input_tensor = match &self.mode {
+            SuperGraphNodeTokenizerEncodeMode::Plain => {
+                let tokens = tokenizer
+                    .encode(text)
+                    .iter()
+                    .map(|x| *x as i64)
+                    .collect::<Vec<_>>();
+                NumericTensor::from_vec(tokens)
+                    .to_dyn_rank()
+                    .unsqueeze(0)
+                    .unwrap()
+                    .unsqueeze(0)
+                    .unwrap()
+            }
+            SuperGraphNodeTokenizerEncodeMode::ClipStyle {
+                seq_len,
+                bos,
+                eos,
+                pad,
+            } => {
+                let mut encoded = tokenizer.encode(text);
+                if encoded.first() == Some(bos) {
+                    encoded.remove(0);
+                }
+                if encoded.last() == Some(eos) {
+                    encoded.pop();
+                }
+                let max_text_tokens = seq_len.saturating_sub(2);
+                let mut ids: Vec<i32> = Vec::with_capacity(*seq_len);
+                ids.push(*bos as i32);
+                for &id in encoded.iter().take(max_text_tokens) {
+                    ids.push(id as i32);
+                }
+                ids.push(*eos as i32);
+                ids.resize(*seq_len, *pad as i32);
+                NumericTensor::from_vec_shape(ids, vec![1, *seq_len])?
+            }
+            SuperGraphNodeTokenizerEncodeMode::RawPad { seq_len, pad } => {
+                let encoded = tokenizer.encode(text);
+                let mut ids: Vec<i32> =
+                    encoded.iter().take(*seq_len).map(|&id| id as i32).collect();
+                ids.resize(*seq_len, *pad as i32);
+                NumericTensor::from_vec_shape(ids, vec![1, *seq_len])?
+            }
+        };
         data.tensors.insert(self.tensor_output, input_tensor);
         Ok(())
     }
@@ -530,6 +611,83 @@ impl SuperGraphNode for SuperGraphNodeTokenizerDecode {
     fn outputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
         Box::new(std::iter::once(self.text_output.to_any()))
     }
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SuperGraphNodeTensorToImage {
+    global_id: GlobalId,
+    tensor_input: SuperGraphLink,
+    image_output: SuperGraphLink,
+}
+
+impl SuperGraphNodeTensorToImage {
+    pub fn new(
+        _builder: &mut SuperGraphBuilder,
+        tensor_input: SuperGraphLink,
+        rng: &mut impl RngCore,
+    ) -> Self {
+        Self {
+            global_id: GlobalId::new(rng),
+            tensor_input,
+            image_output: SuperGraphLink::new(SuperGraphLinkKind::Image, rng),
+        }
+    }
+
+    pub fn new_and_add(
+        builder: &mut SuperGraphBuilder,
+        tensor_input: SuperGraphLink,
+        rng: &mut impl RngCore,
+    ) -> SuperGraphLink {
+        let node = Self::new(builder, tensor_input, rng);
+        let output = node.get_image_output();
+        builder.add_node(node.to_any());
+        output
+    }
+
+    pub fn get_image_output(&self) -> SuperGraphLink {
+        self.image_output
+    }
+}
+
+impl SuperGraphNode for SuperGraphNodeTensorToImage {
+    fn to_any(self) -> SuperGraphAnyNode {
+        SuperGraphAnyNode::TensorToImage(self)
+    }
+
+    fn eval<T: SuperGraphObserver>(
+        &self,
+        _node_path: &[GlobalId],
+        data: &mut SuperGraphData,
+        _context: &mut SuperGraphContext<T>,
+    ) -> Result<(), SuperGraphError> {
+        let tensor = data
+            .tensors
+            .get(&self.tensor_input)
+            .ok_or(SuperGraphError::MissingLinkError(format!(
+                ": missing tensor input link {:?}",
+                self.tensor_input
+            )))?
+            .clone();
+        data.images
+            .insert(self.image_output, SuperGraphImage::new(tensor));
+        Ok(())
+    }
+
+    fn op_kind(&self) -> String {
+        "TensorToImage".to_string()
+    }
+
+    fn inputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new(std::iter::once(self.tensor_input.to_any()))
+    }
+
+    fn outputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new(std::iter::once(self.image_output.to_any()))
+    }
+
     fn global_id(&self) -> GlobalId {
         self.global_id
     }
@@ -1446,6 +1604,7 @@ pub enum SuperGraphAnyNode {
     TokenizerEncode(SuperGraphNodeTokenizerEncode),
     TokenizerDecode(SuperGraphNodeTokenizerDecode),
     TokenizerLoad(SuperGraphNodeTokenizerLoad),
+    TensorToImage(SuperGraphNodeTensorToImage),
     MilliOpGraph(SuperGraphNodeMilliOpGraph),
     Scan(SuperGraphNodeScan),
     RNNCacheWrite(SuperGraphNodeRNNCacheWrite),
@@ -1464,6 +1623,7 @@ macro_rules! delegate {
                 SuperGraphAnyNode::TokenizerEncode(x) => SuperGraphNode::$name(x,$($arg),*),
                 SuperGraphAnyNode::TokenizerDecode(x) => SuperGraphNode::$name(x,$($arg),*),
                 SuperGraphAnyNode::TokenizerLoad(x) => SuperGraphNode::$name(x,$($arg),*),
+                SuperGraphAnyNode::TensorToImage(x) => SuperGraphNode::$name(x,$($arg),*),
                 SuperGraphAnyNode::MilliOpGraph(x) => SuperGraphNode::$name(x,$($arg),*),
                 SuperGraphAnyNode::Scan(x) => SuperGraphNode::$name(x,$($arg),*),
                 SuperGraphAnyNode::RNNCacheRead(x) => SuperGraphNode::$name(x,$($arg),*),
@@ -1502,6 +1662,7 @@ impl SuperGraphNode for SuperGraphAnyNode {
             SuperGraphAnyNode::TokenizerEncode(node) => node.eval(node_path, data, context),
             SuperGraphAnyNode::TokenizerDecode(node) => node.eval(node_path, data, context),
             SuperGraphAnyNode::TokenizerLoad(node) => node.eval(node_path, data, context),
+            SuperGraphAnyNode::TensorToImage(node) => node.eval(node_path, data, context),
             SuperGraphAnyNode::MilliOpGraph(node) => node.eval(node_path, data, context),
             SuperGraphAnyNode::Scan(node) => node.eval(node_path, data, context),
             SuperGraphAnyNode::RNNCacheWrite(node) => node.eval(node_path, data, context),

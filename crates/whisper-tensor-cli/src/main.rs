@@ -9,7 +9,7 @@ use whisper_tensor::loader::{ConfigValue, ConfigValues, Loader, LoaderOutput};
 use whisper_tensor::numeric_tensor::NumericTensor;
 use whisper_tensor::super_graph::cache::SuperGraphCache;
 use whisper_tensor::tensor_rank::DynRank;
-use whisper_tensor::tokenizer::{AnyTokenizer, Tokenizer};
+use whisper_tensor::tokenizer::Tokenizer;
 
 #[derive(Parser)]
 #[command(name = "wt", about = "Whisper Tensor CLI")]
@@ -401,26 +401,6 @@ fn cmd_image(
             std::process::exit(1);
         });
 
-    // Tokenize positive prompt for all input slots
-    let mut prompt_tokens = HashMap::new();
-    for pi in &interface.positive_prompts {
-        let tokenizer = AnyTokenizer::from_tokenizer_info(&pi.tokenizer);
-        let ids = pi.tokenize(&tokenizer, &prompt);
-        let tensor = NumericTensor::<DynRank>::from_vec_shape(ids, vec![1, pi.seq_len]).unwrap();
-        prompt_tokens.insert(pi.link, tensor);
-    }
-
-    // Tokenize negative prompt for all input slots (if CFG)
-    if let Some(neg_prompts) = &interface.negative_prompts {
-        for pi in neg_prompts {
-            let tokenizer = AnyTokenizer::from_tokenizer_info(&pi.tokenizer);
-            let ids = pi.tokenize(&tokenizer, &negative_prompt);
-            let tensor =
-                NumericTensor::<DynRank>::from_vec_shape(ids, vec![1, pi.seq_len]).unwrap();
-            prompt_tokens.insert(pi.link, tensor);
-        }
-    }
-
     // Generate initial noise
     let channels = interface.latent_channels;
     let latent_n = channels * latent_h * latent_w;
@@ -438,13 +418,15 @@ fn cmd_image(
     let image_tensor = interface
         .run(
             &models,
-            prompt_tokens,
+            prompt,
+            Some(negative_prompt),
             initial_noise,
             vec![1, channels, latent_h, latent_w],
             steps,
             guidance_scale,
             &mut backend,
         )
+        .map(|x| x.tensor)
         .unwrap_or_else(|e| {
             eprintln!("Inference error: {e}");
             std::process::exit(1);
