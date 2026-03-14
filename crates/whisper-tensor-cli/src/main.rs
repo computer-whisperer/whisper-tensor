@@ -777,12 +777,12 @@ fn cmd_stt(output: LoaderOutput, audio_path: PathBuf, model_dir: Option<PathBuf>
     )
     .unwrap();
 
-    // Run encoder
-    eprintln!("Running encoder...");
+    // Run unified STT supergraph (encoder + fixed-step decoder generation)
+    eprintln!("Running STT supergraph...");
     let mut backend = EvalBackend::NDArray;
     let start = std::time::Instant::now();
 
-    let encoder_output = {
+    let output_data = {
         let mut data = SuperGraphData::new();
         data.audio_clips.insert(
             interface.audio_input_link,
@@ -792,7 +792,14 @@ fn cmd_stt(output: LoaderOutput, audio_path: PathBuf, model_dir: Option<PathBuf>
             interface.encoder_weights_link,
             output.models[0].model.get_tensor_store(),
         );
-        let symbolic_graphs = vec![output.models[0].model.get_symbolic_graph()];
+        data.tensor_maps.insert(
+            interface.decoder_weights_link,
+            output.models[1].model.get_tensor_store(),
+        );
+        let symbolic_graphs = vec![
+            output.models[0].model.get_symbolic_graph(),
+            output.models[1].model.get_symbolic_graph(),
+        ];
         let mut observer = ();
         let mut tensor_cache = SuperGraphTensorCache::new();
         let mut context = SuperGraphContext {
@@ -805,117 +812,23 @@ fn cmd_stt(output: LoaderOutput, audio_path: PathBuf, model_dir: Option<PathBuf>
             compiled_models: None,
         };
         interface
-            .encoder_super_graph
+            .super_graph
             .run(data, &mut context)
             .unwrap_or_else(|e| {
-                eprintln!("Encoder error: {e}");
+                eprintln!("STT supergraph error: {e}");
                 std::process::exit(1);
             })
     };
 
-    let encoder_hidden = encoder_output
+    let token_tensor = output_data
         .tensors
-        .get(&interface.encoder_output_link)
-        .expect("No encoder output tensor")
-        .clone();
-    eprintln!("Encoder done in {:.2?}", start.elapsed());
-
-    // Run decoder autoregressively
-    eprintln!("Running decoder...");
-    let decode_start = std::time::Instant::now();
-
-    let mut super_graph_caches = SuperGraphCache::new();
-
-    let decoder_sg = &interface.decoder_super_graph;
-    let decoder_symbolic_graphs = vec![
-        output.models[0].model.get_symbolic_graph(), // dummy for index 0
-        output.models[1].model.get_symbolic_graph(), // decoder at index 1
-    ];
-
-    // Start with decoder_start_token_id + forced decoder IDs from generation_config
-    // For English-only Whisper: [50257(<|startoftranscript|>), 50362(<|notimestamps|>)]
-    let forced_ids =
-        load_forced_decoder_ids(model_dir.as_deref(), interface.decoder_start_token_id);
-    let mut token_ids: Vec<u32> = forced_ids;
-    let max_tokens = 448;
-
-    let mut step_start = std::time::Instant::now();
-    for _step in 0..max_tokens {
-        let mut data = SuperGraphData::new();
-        data.tensor_maps.insert(
-            interface.decoder_weights_link,
-            output.models[1].model.get_tensor_store(),
-        );
-        data.tensors.insert(
-            interface.decoder_encoder_hidden_link,
-            encoder_hidden.clone(),
-        );
-
-        let token_tensor =
-            NumericTensor::<DynRank>::from_vec_shape(token_ids.clone(), vec![token_ids.len()])
-                .unwrap();
-        data.tensors
-            .insert(interface.decoder_token_link, token_tensor);
-        data.hashes.insert(interface.decoder_cache_key_link, 0);
-
-        let mut observer = ();
-        let mut tensor_cache = SuperGraphTensorCache::new();
-        let mut context = SuperGraphContext {
-            observer: &mut observer,
-            eval_backend: &mut backend,
-            super_graph_tensor_cache: &mut tensor_cache,
-            caches: Some(&mut super_graph_caches),
-            symbolic_graphs: decoder_symbolic_graphs.clone(),
-            use_compiled_models: false,
-            compiled_models: None,
-        };
-
-        let result = decoder_sg.run(data, &mut context).unwrap_or_else(|e| {
-            eprintln!("Decoder error at step {_step}: {e}");
-            std::process::exit(1);
-        });
-
-        // Get logits and pick next token (greedy argmax)
-        let logits = result
-            .tensors
-            .get(&interface.decoder_logit_link)
-            .expect("No decoder logit output");
-
-        let logits_f32 = logits
-            .cast(whisper_tensor::dtype::DType::F32, &mut backend)
-            .expect("cast failed");
-        let logits_shape = logits_f32.shape();
-        let logits_ndarray = logits_f32.to_ndarray().expect("to_ndarray failed");
-        let logits_flat: Vec<f32> = logits_ndarray.flatten().try_into().expect("flatten failed");
-
-        // Take last token's logits — vocab_size is the last dimension
-        let vocab_size = *logits_shape.last().unwrap_or(&(logits_flat.len() as u64)) as usize;
-        let last_logits = &logits_flat[logits_flat.len() - vocab_size..];
-
-        let next_token = last_logits
-            .iter()
-            .enumerate()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
-            .map(|(i, _)| i as u32)
-            .unwrap();
-
-        let step_elapsed = step_start.elapsed();
-        eprint!("\rDecoder step {_step}: token {next_token} ({step_elapsed:.1?})  ");
-
-        if next_token == interface.eos_token_id {
-            eprintln!();
-            break;
-        }
-
-        token_ids.push(next_token);
-        step_start = std::time::Instant::now();
+        .get(&interface.output_token_link)
+        .expect("No STT output token tensor");
+    let token_nd = token_tensor.to_ndarray().expect("to_ndarray failed");
+    let mut token_ids: Vec<u32> = token_nd.flatten().try_into().expect("flatten failed");
+    if let Some(pos) = token_ids.iter().position(|&t| t == interface.eos_token_id) {
+        token_ids.truncate(pos);
     }
-
-    eprintln!(
-        "Decoder done in {:.2?} ({} tokens)",
-        decode_start.elapsed(),
-        token_ids.len()
-    );
 
     // Decode tokens to text
     let tokenizer =
@@ -975,35 +888,6 @@ fn load_wav_f32(path: &std::path::Path, target_sr: u32) -> Vec<f32> {
     } else {
         mono
     }
-}
-
-/// Load forced decoder IDs from generation_config.json.
-/// Returns the initial token sequence: [start_token, forced_id_1, forced_id_2, ...]
-fn load_forced_decoder_ids(model_dir: Option<&std::path::Path>, start_token: u32) -> Vec<u32> {
-    let mut ids = vec![start_token];
-    if let Some(dir) = model_dir {
-        let config_path = dir.join("generation_config.json");
-        if let Ok(data) = std::fs::read_to_string(&config_path) {
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&data) {
-                if let Some(forced) = json["forced_decoder_ids"].as_array() {
-                    // forced_decoder_ids: [[position, token_id], ...]
-                    let mut pairs: Vec<(u64, u32)> = forced
-                        .iter()
-                        .filter_map(|pair| {
-                            let arr = pair.as_array()?;
-                            Some((arr[0].as_u64()?, arr[1].as_u64()? as u32))
-                        })
-                        .collect();
-                    pairs.sort_by_key(|p| p.0);
-                    for (_, tok) in pairs {
-                        ids.push(tok);
-                    }
-                    eprintln!("Forced decoder IDs: {:?}", ids);
-                }
-            }
-        }
-    }
-    ids
 }
 
 /// Load mel filterbank from the model's preprocessor_config.json.

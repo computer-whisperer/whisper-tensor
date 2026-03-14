@@ -55,7 +55,7 @@ impl AnyInterface {
             AnyInterface::MultimodalLanguageInterface(x) => &x.super_graph,
             AnyInterface::ImageGenerationInterface(x) => &x.super_graph,
             AnyInterface::TextToSpeechInterface(x) => &x.super_graph,
-            AnyInterface::SpeechToTextInterface(x) => &x.encoder_super_graph,
+            AnyInterface::SpeechToTextInterface(x) => &x.super_graph,
         }
     }
 }
@@ -1786,36 +1786,28 @@ impl TextToSpeechInterface {
 
 /// Interface for speech-to-text models (e.g. Whisper).
 ///
-/// Two-phase architecture:
-/// 1. Encoder SuperGraph: audio features → encoder hidden states (run once)
-/// 2. Decoder uses the existing RNN SuperGraph pattern for autoregressive
-///    token generation, with encoder hidden states as a fixed input.
+/// Single-supergraph architecture:
+/// 1. Audio features → encoder hidden states
+/// 2. Fixed-step autoregressive decoder loop
+/// 3. Output token sequence (caller can trim at EOS and decode)
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SpeechToTextInterface {
-    /// Encoder SuperGraph: mel spectrogram → encoder hidden states.
-    pub encoder_super_graph: SuperGraph,
+    /// Unified STT supergraph.
+    pub super_graph: SuperGraph,
+
     /// Input audio clip link.
     ///
     /// The clip payload currently carries precomputed encoder features in
     /// `samples` for Whisper; this link type is a transitional API step.
     pub audio_input_link: SuperGraphLink,
+
     /// Encoder model weights.
     pub encoder_weights_link: SuperGraphLink,
-    /// Encoder hidden states output link.
-    pub encoder_output_link: SuperGraphLink,
-
-    /// Decoder SuperGraph (RNN-style with cache).
-    pub decoder_super_graph: SuperGraph,
-    /// Decoder token context input link.
-    pub decoder_token_link: SuperGraphLink,
     /// Decoder model weights.
     pub decoder_weights_link: SuperGraphLink,
-    /// Encoder hidden states input to decoder (fixed across steps).
-    pub decoder_encoder_hidden_link: SuperGraphLink,
-    /// Decoder logit output link.
-    pub decoder_logit_link: SuperGraphLink,
-    /// Cache key for RNN-style autoregressive decoding.
-    pub decoder_cache_key_link: SuperGraphLink,
+
+    /// Output token sequence: [forced_prefix..., generated...].
+    pub output_token_link: SuperGraphLink,
 
     /// Tokenizer for decoding output tokens to text.
     pub tokenizer: TokenizerInfo,
@@ -1827,6 +1819,12 @@ pub struct SpeechToTextInterface {
     pub decoder_start_token_id: u32,
     /// End-of-text token ID.
     pub eos_token_id: u32,
+
+    /// Prefix token IDs prepended before generation (start + forced tokens).
+    pub decoder_prefix_token_ids: Vec<u32>,
+
+    /// Number of fixed decode iterations executed in the supergraph.
+    pub max_decode_steps: u32,
 }
 
 impl SpeechToTextInterface {
