@@ -86,7 +86,7 @@ struct GroupDeps {
     /// Which groups are source groups (no inputs / literals).
     is_source: Vec<bool>,
     /// For each group: the broadcast inputs as (source_group_idx, atom_offset_within_source).
-    broadcast_inputs: Vec<Vec<(usize, u32)>>,
+    broadcast_inputs: Vec<Vec<(usize, u64)>>,
 }
 
 impl GroupDeps {
@@ -150,10 +150,10 @@ impl GroupDeps {
 
                         // For each k value, check the atom at (i=0, k) to find its group.
                         // Also check (i=count-1, k) for completeness.
-                        let mut seen_atoms: HashSet<u32> = HashSet::new();
+                        let mut seen_atoms: HashSet<u64> = HashSet::new();
                         for k_val in 0..k_max {
-                            for i_val in [0u32, group.count.saturating_sub(1)] {
-                                let atom = input.resolve(i_val, k_val as u32);
+                            for i_val in [0u64, group.count.saturating_sub(1)] {
+                                let atom = input.resolve(i_val, k_val);
                                 if seen_atoms.insert(atom.0) {
                                     if let Some(src_gi) =
                                         find_group_idx_for_atom(groups, atom)
@@ -287,7 +287,7 @@ fn detect_row_slices(graph: &NanoGraph, deps: &GroupDeps) -> Vec<RowSlice> {
 
     if remaining.len() >= 2 {
         // Group by broadcast source group.
-        let mut by_source: HashMap<usize, Vec<(usize, u32)>> = HashMap::new();
+        let mut by_source: HashMap<usize, Vec<(usize, u64)>> = HashMap::new();
         for &gi in &remaining {
             for &(src_gi, offset) in &deps.broadcast_inputs[gi] {
                 by_source.entry(src_gi).or_default().push((gi, offset));
@@ -308,7 +308,7 @@ fn detect_row_slices(graph: &NanoGraph, deps: &GroupDeps) -> Vec<RowSlice> {
                 let start_offset = sorted[run_start].1;
                 let mut run_end = run_start + 1;
                 while run_end < sorted.len() {
-                    let expected = start_offset + (run_end - run_start) as u32;
+                    let expected = start_offset + (run_end - run_start) as u64;
                     if sorted[run_end].1 == expected {
                         run_end += 1;
                     } else {
@@ -415,7 +415,7 @@ fn build_compute_clusters(
 
         let total_atoms: u64 = cluster_groups
             .iter()
-            .map(|&gi| groups[gi].count as u64)
+            .map(|&gi| groups[gi].count)
             .sum();
 
         clusters.push(ComputeCluster {
@@ -736,7 +736,7 @@ mod tests {
             for &gi in kg {
                 let g = &groups[gi];
                 *op_counts.entry(op_name(&g.op)).or_default() += 1;
-                total_atoms += g.count as u64;
+                total_atoms += g.count;
             }
             let mut op_summary: Vec<_> = op_counts.iter().collect();
             op_summary.sort_by(|a, b| b.1.cmp(a.1));
@@ -1035,7 +1035,7 @@ mod tests {
                 let g = &graph.groups()[gi];
                 let entry = op_counts.entry(op_name(&g.op)).or_default();
                 entry.0 += 1;
-                entry.1 += g.count as u64;
+                entry.1 += g.count;
             }
             let mut op_list: Vec<_> = op_counts.iter().collect();
             op_list.sort_by(|a, b| b.1 .1.cmp(&a.1 .1));

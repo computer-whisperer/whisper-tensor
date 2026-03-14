@@ -127,8 +127,8 @@ pub fn partition_nanograph(graph: &NanoGraph, parallelism: usize) -> NanoPartiti
 
 /// Build a map from AtomId range to group index.
 /// Returns a sorted list of (base_id, count, group_index) for binary search.
-fn build_atom_to_group_map(groups: &[AtomGroup]) -> Vec<(u32, u32, usize)> {
-    let mut entries: Vec<(u32, u32, usize)> = groups
+fn build_atom_to_group_map(groups: &[AtomGroup]) -> Vec<(u64, u64, usize)> {
+    let mut entries: Vec<(u64, u64, usize)> = groups
         .iter()
         .enumerate()
         .map(|(i, g)| (g.base_id.0, g.count, i))
@@ -138,7 +138,7 @@ fn build_atom_to_group_map(groups: &[AtomGroup]) -> Vec<(u32, u32, usize)> {
 }
 
 /// Find the group index that owns a given AtomId.
-fn find_group_for_atom(atom: AtomId, map: &[(u32, u32, usize)]) -> Option<usize> {
+fn find_group_for_atom(atom: AtomId, map: &[(u64, u64, usize)]) -> Option<usize> {
     let idx = map.partition_point(|&(base, _, _)| base <= atom.0);
     if idx == 0 {
         return None;
@@ -159,7 +159,7 @@ fn find_group_for_atom(atom: AtomId, map: &[(u32, u32, usize)]) -> Option<usize>
 fn resolve_producer_groups(
     group: &AtomGroup,
     graph: &NanoGraph,
-    atom_to_group: &[(u32, u32, usize)],
+    atom_to_group: &[(u64, u64, usize)],
 ) -> HashSet<usize> {
     let mut producers = HashSet::new();
     for input in &group.inputs {
@@ -204,7 +204,7 @@ fn resolve_producer_groups(
                 // For each k in 0..k_bound, resolve at i=0 to find the group.
                 // Also resolve at i=count-1 to catch any cross-group spans.
                 for k in 0..k_bound {
-                    let atom = input.resolve(0, k as u32);
+                    let atom = input.resolve(0, k);
                     if let Some(gi) = find_group_for_atom(atom, atom_to_group) {
                         producers.insert(gi);
                     }
@@ -212,7 +212,7 @@ fn resolve_producer_groups(
                 // Also sample at i=count-1 for stride_i coverage.
                 if group.count > 1 {
                     for k in 0..k_bound {
-                        let atom = input.resolve(group.count - 1, k as u32);
+                        let atom = input.resolve(group.count - 1, k);
                         if let Some(gi) = find_group_for_atom(atom, atom_to_group) {
                             producers.insert(gi);
                         }
@@ -313,7 +313,7 @@ mod tests {
             result.num_kernels
         );
         for (i, kernel) in result.kernel_groups.iter().enumerate() {
-            let atom_count: u32 = kernel.iter().map(|&gi| g.groups()[gi].count).sum();
+            let atom_count: u64 = kernel.iter().map(|&gi| g.groups()[gi].count).sum();
             let ops: Vec<String> = kernel
                 .iter()
                 .map(|&gi| format!("{:?}", g.groups()[gi].op))
@@ -353,13 +353,13 @@ mod tests {
 
         // Check balance: no single compute kernel should have more than 60% of
         // total compute atoms.
-        let total_compute_atoms: u32 = compute_kernels
+        let total_compute_atoms: u64 = compute_kernels
             .iter()
             .flat_map(|k| k.iter())
             .map(|&gi| g.groups()[gi].count)
             .sum();
         for (i, kernel) in compute_kernels.iter().enumerate() {
-            let atoms: u32 = kernel.iter().map(|&gi| g.groups()[gi].count).sum();
+            let atoms: u64 = kernel.iter().map(|&gi| g.groups()[gi].count).sum();
             let pct = atoms as f64 / total_compute_atoms as f64 * 100.0;
             println!(
                 "  Compute kernel {}: {} atoms ({:.1}%)",
@@ -382,14 +382,14 @@ mod tests {
         // MatMul 1: C1[2,N1] = A1[2,4] @ B1[4,N1], N1=8
         let m1 = 2;
         let k1 = 4;
-        let n1 = 8u32;
+        let n1 = 8u64;
         let (mm1_first_mul, mm1_last_reduce) =
             build_matmul_into_graph(&mut g, m1, k1, n1);
 
         // MatMul 2: C2[3,N2] = A2[3,5] @ B2[5,N2], N2=6
         let m2 = 3;
         let k2 = 5;
-        let n2 = 6u32;
+        let n2 = 6u64;
         let (mm2_first_mul, mm2_last_reduce) =
             build_matmul_into_graph(&mut g, m2, k2, n2);
 
@@ -401,7 +401,7 @@ mod tests {
             result.num_kernels
         );
         for (i, kernel) in result.kernel_groups.iter().enumerate() {
-            let atom_count: u32 = kernel.iter().map(|&gi| g.groups()[gi].count).sum();
+            let atom_count: u64 = kernel.iter().map(|&gi| g.groups()[gi].count).sum();
             println!(
                 "  Kernel {}: {} groups, {} atoms",
                 i,
@@ -509,7 +509,7 @@ mod tests {
     //   - M ReduceSum groups, count=N each: SymAffine(mul_base_for_row, 1, N)
     // -----------------------------------------------------------------------
 
-    fn build_matmul_nanograph(m: u32, k: u32, n: u32) -> NanoGraph {
+    fn build_matmul_nanograph(m: u64, k: u64, n: u64) -> NanoGraph {
         let mut g = NanoGraph::new();
         build_matmul_into_graph(&mut g, m, k, n);
         g
@@ -518,9 +518,9 @@ mod tests {
     /// Build a matmul into an existing graph. Returns (first_mul_group_idx, last_reduce_group_idx).
     fn build_matmul_into_graph(
         g: &mut NanoGraph,
-        m: u32,
-        k: u32,
-        n: u32,
+        m: u64,
+        k: u64,
+        n: u64,
     ) -> (usize, usize) {
         let k_sym = g.bounded_sym_dim(
             &format!("matmul_k_{}", g.num_groups()),

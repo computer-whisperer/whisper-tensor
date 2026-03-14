@@ -27,18 +27,18 @@ impl NanoEval {
     /// `overrides` maps atom index → NumericScalar for input atoms whose
     /// Literal(0.0) placeholder should be replaced with an actual value.
     /// Groups are walked in insertion order (topological).
-    pub fn eval(graph: &NanoGraph, overrides: &HashMap<u32, NumericScalar>) -> Self {
+    pub fn eval(graph: &NanoGraph, overrides: &HashMap<u64, NumericScalar>) -> Self {
         Self::eval_inner(graph, overrides, false)
     }
 
     /// Like eval, but prints the first group that produces NaN/Inf.
-    pub fn eval_debug(graph: &NanoGraph, overrides: &HashMap<u32, NumericScalar>) -> Self {
+    pub fn eval_debug(graph: &NanoGraph, overrides: &HashMap<u64, NumericScalar>) -> Self {
         Self::eval_inner(graph, overrides, true)
     }
 
     fn eval_inner(
         graph: &NanoGraph,
-        overrides: &HashMap<u32, NumericScalar>,
+        overrides: &HashMap<u64, NumericScalar>,
         debug_nan: bool,
     ) -> Self {
         let num_atoms = graph.num_atoms() as usize;
@@ -82,7 +82,7 @@ impl NanoEval {
                         _ => unreachable!(),
                     };
 
-                    for k in 0..bound as u32 {
+                    for k in 0..bound as u64 {
                         let src = group.inputs[0].resolve(i, k);
                         let val = values[src.0 as usize].cast_to(compute_dtype);
                         acc = match &group.op {
@@ -232,7 +232,7 @@ impl NanoEval {
     }
 
     /// Get values for a contiguous range of atoms as f64.
-    pub fn get_range(&self, base: AtomId, count: u32) -> Vec<f64> {
+    pub fn get_range(&self, base: AtomId, count: u64) -> Vec<f64> {
         let start = base.0 as usize;
         self.values[start..start + count as usize]
             .iter()

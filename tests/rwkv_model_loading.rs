@@ -432,7 +432,7 @@ fn rwkv01b_nano_graph_integrity() {
         assert_eq!(scalars.len(), tam.count as usize,
             "Input {:?} count mismatch: {} vs {}", ext_id, scalars.len(), tam.count);
         for (i, val) in scalars.into_iter().enumerate() {
-            overrides.insert(tam.base_id.0 + i as u32, val);
+            overrides.insert(tam.base_id.0 + i as u64, val);
         }
     }
     eprintln!(
@@ -465,7 +465,7 @@ fn rwkv01b_nano_graph_integrity() {
 
     // ---- Check for atom overlap ----
     {
-        let mut ranges: Vec<(u32, u32, GlobalId)> = result.tensor_map.iter()
+        let mut ranges: Vec<(u64, u64, GlobalId)> = result.tensor_map.iter()
             .map(|(id, tam)| (tam.base_id.0, tam.base_id.0 + tam.count, *id))
             .collect();
         ranges.sort();
@@ -524,7 +524,7 @@ fn rwkv01b_nano_graph_integrity() {
 
         total_tensors += 1;
         for (i, &m) in milli_flat.iter().enumerate() {
-            let n = nano_eval.get(tam.base_id.offset(i as u32));
+            let n = nano_eval.get(tam.base_id.offset(i as u64));
             let diff = (m - n).abs();
             let rel = diff / m.abs().max(1e-10);
             if rel > max_rel_err {
@@ -594,7 +594,7 @@ fn rwkv01b_nano_graph_integrity() {
 
         let milli_flat = tensor_to_f64(milli_tensor);
         for (i, &m) in milli_flat.iter().enumerate() {
-            let n = nano_eval.get(tam.base_id.offset(i as u32));
+            let n = nano_eval.get(tam.base_id.offset(i as u64));
             let diff = (m - n).abs();
             let tol = 1e-3 * m.abs().max(1.0);
             assert!(
@@ -779,7 +779,7 @@ fn rwkv01b_v10_compile_and_run() {
         let Some(tam) = result.tensor_map.get(&int_id) else { continue };
         let scalars = tensor_to_scalars(tensor);
         for (i, val) in scalars.into_iter().enumerate() {
-            overrides.insert(tam.base_id.0 + i as u32, val);
+            overrides.insert(tam.base_id.0 + i as u64, val);
         }
     }
 
@@ -1010,7 +1010,7 @@ fn rwkv01b_v11_compile_and_run() {
         let Some(tam) = result.tensor_map.get(&int_id) else { continue };
         let scalars = tensor_to_scalars(tensor);
         for (i, val) in scalars.into_iter().enumerate() {
-            overrides.insert(tam.base_id.0 + i as u32, val);
+            overrides.insert(tam.base_id.0 + i as u64, val);
         }
     }
 

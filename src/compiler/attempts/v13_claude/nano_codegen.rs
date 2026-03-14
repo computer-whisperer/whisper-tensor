@@ -148,7 +148,7 @@ pub struct CompiledPipeline {
     num_atoms: usize,
     /// Literal values to pre-fill before execution.
     /// Maps atom index -> f32 value.
-    literals: Vec<(u32, f32)>,
+    literals: Vec<(u64, f32)>,
     /// Output atom IDs.
     output_atoms: Vec<AtomId>,
 }
@@ -284,7 +284,7 @@ impl CompiledPipeline {
     ///
     /// `overrides` maps atom index -> f32 value for input atoms.
     /// Returns a map of output atom ids -> f32 values.
-    pub fn execute(&self, overrides: &HashMap<u32, f32>) -> HashMap<u32, f32> {
+    pub fn execute(&self, overrides: &HashMap<u64, f32>) -> HashMap<u64, f32> {
         let mut values = vec![0.0f32; self.num_atoms];
 
         // Pre-fill literals.
@@ -314,7 +314,7 @@ impl CompiledPipeline {
     }
 
     /// Execute and return the entire values buffer (for testing).
-    pub fn execute_full(&self, overrides: &HashMap<u32, f32>) -> Vec<f32> {
+    pub fn execute_full(&self, overrides: &HashMap<u64, f32>) -> Vec<f32> {
         let mut values = vec![0.0f32; self.num_atoms];
 
         // Pre-fill literals.
@@ -478,7 +478,7 @@ fn emit_group_body(
     graph: &NanoGraph,
     values_ptr: Value,
     i_val: Option<Value>,
-    i_const: u32,
+    i_const: u64,
     math: &MathFuncs,
     var_counter: &mut VarCounter,
     table_counter: &mut usize,
@@ -602,7 +602,7 @@ fn emit_reduce(
     graph: &NanoGraph,
     values_ptr: Value,
     i_val: Option<Value>,
-    i_const: u32,
+    i_const: u64,
     math: &MathFuncs,
     var_counter: &mut VarCounter,
     table_counter: &mut usize,
@@ -709,7 +709,7 @@ fn load_input_ref(
     input: &InputRef,
     values_ptr: Value,
     i_val: Option<Value>,
-    i_const: u32,
+    i_const: u64,
     table_counter: &mut usize,
 ) -> Result<Value, String> {
     match input {
@@ -791,12 +791,11 @@ fn load_input_ref(
             let gv = module.declare_data_in_func(data_id, builder.func);
             let table_ptr = builder.ins().global_value(types::I64, gv);
 
-            // Load atom_id = table[i]
+            // Load atom_id = table[i] (table entries are u64 = 8 bytes each)
             let i = i_val.unwrap_or_else(|| builder.ins().iconst(types::I64, i_const as i64));
-            let idx_byte_off = builder.ins().imul_imm(i, 4);
+            let idx_byte_off = builder.ins().imul_imm(i, 8);
             let idx_addr = builder.ins().iadd(table_ptr, idx_byte_off);
-            let raw_atom_id = builder.ins().load(types::I32, MemFlags::new(), idx_addr, 0);
-            let atom_id_i64 = builder.ins().uextend(types::I64, raw_atom_id);
+            let atom_id_i64 = builder.ins().load(types::I64, MemFlags::new(), idx_addr, 0);
 
             // Load values[atom_id]
             let data_byte_off = builder.ins().imul_imm(atom_id_i64, 4);
@@ -837,7 +836,7 @@ fn load_input_ref_with_k(
     input: &InputRef,
     values_ptr: Value,
     i_val: Option<Value>,
-    i_const: u32,
+    i_const: u64,
     k_val: Value,
     table_counter: &mut usize,
 ) -> Result<Value, String> {
@@ -877,9 +876,9 @@ fn load_input_ref_with_k(
 fn store_atom(
     builder: &mut FunctionBuilder,
     values_ptr: Value,
-    base_id: u32,
+    base_id: u64,
     i_val: Option<Value>,
-    i_const: u32,
+    i_const: u64,
     val: Value,
 ) {
     let atom_idx = match i_val {
@@ -1054,9 +1053,9 @@ mod tests {
     use std::collections::HashMap;
 
     /// Helper: compare JIT output to interpreter output.
-    fn compare_jit_vs_interp(graph: &NanoGraph, overrides_f32: &HashMap<u32, f32>, label: &str) {
+    fn compare_jit_vs_interp(graph: &NanoGraph, overrides_f32: &HashMap<u64, f32>, label: &str) {
         // Build NumericScalar overrides for interpreter.
-        let overrides_ns: HashMap<u32, NumericScalar> = overrides_f32
+        let overrides_ns: HashMap<u64, NumericScalar> = overrides_f32
             .iter()
             .map(|(&k, &v)| (k, NumericScalar::F32(v)))
             .collect();
@@ -1083,7 +1082,7 @@ mod tests {
 
         // Compare all atoms.
         let mut max_abs_err: f64 = 0.0;
-        let mut max_err_atom: u32 = 0;
+        let mut max_err_atom: u64 = 0;
         for i in 0..graph.num_atoms() {
             let interp_val = interp.get(AtomId(i));
             let jit_val = jit_values[i as usize] as f64;
@@ -1153,7 +1152,7 @@ mod tests {
         }
 
         let mut overrides = HashMap::new();
-        for i in 0..4u32 {
+        for i in 0..4u64 {
             overrides.insert(a.0 + i, (i as f32 + 1.0) * 1.0); // a = [1,2,3,4]
             overrides.insert(b.0 + i, (i as f32 + 1.0) * 10.0); // b = [10,20,30,40]
         }
@@ -1202,7 +1201,7 @@ mod tests {
         }
 
         let mut overrides = HashMap::new();
-        for i in 0..4u32 {
+        for i in 0..4u64 {
             overrides.insert(a.0 + i, i as f32 * 0.5); // [0, 0.5, 1.0, 1.5]
         }
 
@@ -1249,7 +1248,7 @@ mod tests {
         }
 
         let mut overrides = HashMap::new();
-        for i in 0..4u32 {
+        for i in 0..4u64 {
             overrides.insert(a.0 + i, i as f32 + 1.0);
         }
         overrides.insert(b.0, 100.0);
@@ -1259,12 +1258,12 @@ mod tests {
 
     #[test]
     fn test_matmul_4x8x16() {
-        let m = 4u32;
-        let k_dim = 8u32;
-        let n = 16u32;
+        let m = 4u64;
+        let k_dim = 8u64;
+        let n = 16u64;
 
         let mut g = NanoGraph::new();
-        let k_sym = g.bounded_sym_dim("k", k_dim as u64);
+        let k_sym = g.bounded_sym_dim("k", k_dim);
 
         let a = g.push_group(
             m * k_dim,
@@ -1373,7 +1372,7 @@ mod tests {
         }
 
         let mut overrides = HashMap::new();
-        for i in 0..4u32 {
+        for i in 0..4u64 {
             overrides.insert(a.0 + i, (i as f32 + 1.0) * 3.14);
         }
 
@@ -1432,10 +1431,10 @@ mod tests {
         overrides.insert(cond.0 + 1, 0.0);
         overrides.insert(cond.0 + 2, 5.0);
         overrides.insert(cond.0 + 3, 0.0);
-        for i in 0..4u32 {
+        for i in 0..4u64 {
             overrides.insert(x.0 + i, (i as f32 + 1.0) * 10.0);
         }
-        for i in 0..4u32 {
+        for i in 0..4u64 {
             overrides.insert(y.0 + i, (i as f32 + 1.0) * 100.0);
         }
 
@@ -1475,7 +1474,7 @@ mod tests {
         let mut overrides = HashMap::new();
         let test_vals = [3.0, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0, 6.0];
         for (i, &v) in test_vals.iter().enumerate() {
-            overrides.insert(a.0 + i as u32, v);
+            overrides.insert(a.0 + i as u64, v);
         }
 
         compare_jit_vs_interp(&g, &overrides, "reduce_max");
@@ -1571,7 +1570,7 @@ mod tests {
         let a_vals = [1.0f32, 256.0, 0.1, 1000.0];
         let b_vals = [1e-4f32, 0.001, 0.0001, 0.5];
         let mut overrides = HashMap::new();
-        for i in 0..4u32 {
+        for i in 0..4u64 {
             overrides.insert(a.0 + i, a_vals[i as usize]);
             overrides.insert(b.0 + i, b_vals[i as usize]);
         }
@@ -1634,7 +1633,7 @@ mod tests {
         let a_vals = [1.0f32, 256.0, 0.1, 1000.0];
         let b_vals = [1e-4f32, 0.001, 0.0001, 0.5];
         let mut overrides = HashMap::new();
-        for i in 0..4u32 {
+        for i in 0..4u64 {
             overrides.insert(a.0 + i, a_vals[i as usize]);
             overrides.insert(b.0 + i, b_vals[i as usize]);
         }
@@ -1684,7 +1683,7 @@ mod tests {
         let a_vals = [1.0f32, 100.0, 0.1, 2048.0];
         let b_vals = [1e-5f32, 0.01, 1e-5, 0.25];
         let mut overrides = HashMap::new();
-        for i in 0..4u32 {
+        for i in 0..4u64 {
             overrides.insert(a.0 + i, a_vals[i as usize]);
             overrides.insert(b.0 + i, b_vals[i as usize]);
         }
@@ -1727,7 +1726,7 @@ mod tests {
         // Values that when summed produce something with low-bit detail that BF16 drops.
         let vals = [1.0f32, 0.001, 0.0001, 2.0, 0.00001, 3.0, 0.000001, 4.0];
         for (i, &v) in vals.iter().enumerate() {
-            overrides.insert(a.0 + i as u32, v);
+            overrides.insert(a.0 + i as u64, v);
         }
 
         compare_jit_vs_interp(&g, &overrides, "bf16_reduce_sum");
@@ -1850,7 +1849,7 @@ mod tests {
                 let flat = f32_t.flatten().unwrap();
                 let v: Vec<f32> = flat.to_ndarray().unwrap().try_into().unwrap();
                 for (i, &val) in v.iter().enumerate() {
-                    overrides_f32.insert(tam.base_id.0 + i as u32, val);
+                    overrides_f32.insert(tam.base_id.0 + i as u64, val);
                 }
             }
         }
@@ -1914,7 +1913,7 @@ mod tests {
                 let flat = f32_t.flatten().unwrap();
                 let v: Vec<f32> = flat.to_ndarray().unwrap().try_into().unwrap();
                 for (i, &val) in v.iter().enumerate() {
-                    overrides_f32.insert(tam.base_id.0 + i as u32, val);
+                    overrides_f32.insert(tam.base_id.0 + i as u64, val);
                 }
             }
         }

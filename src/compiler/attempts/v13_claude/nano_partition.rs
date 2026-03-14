@@ -37,7 +37,7 @@ pub struct NanoPartitionResult {
 pub fn partition_nanograph(graph: &NanoGraph, parallelism: usize) -> NanoPartitionResult {
     let groups = graph.groups();
     let num_groups = groups.len();
-    let total_atoms: u64 = groups.iter().map(|g| g.count as u64).sum();
+    let total_atoms: u64 = groups.iter().map(|g| g.count).sum();
 
     if num_groups == 0 {
         return NanoPartitionResult {
@@ -141,7 +141,7 @@ fn collect_source_groups(
                 return;
             }
             // Sample a few representative offsets.
-            let samples = [0u32, count / 2, count.saturating_sub(1)];
+            let samples = [0u64, count / 2, count.saturating_sub(1)];
             for &i in &samples {
                 if i < count {
                     let src = input_ref.resolve(i, 0);
@@ -184,10 +184,10 @@ fn collect_source_groups(
                 .first()
                 .and_then(|rd| graph.sym_dim_bounds.get(rd))
                 .copied()
-                .unwrap_or(1) as u32;
+                .unwrap_or(1);
 
             for k in 0..k_bound {
-                let samples = [0u32, count.saturating_sub(1)];
+                let samples = [0u64, count.saturating_sub(1)];
                 for &i in &samples {
                     if i < count {
                         let src = input_ref.resolve(i, k);
@@ -307,7 +307,7 @@ fn extract_chains(
         // Sort topologically (by group index, since groups are in topo order).
         chain_groups.sort();
 
-        let atom_count: u64 = chain_groups.iter().map(|&gi| groups[gi].count as u64).sum();
+        let atom_count: u64 = chain_groups.iter().map(|&gi| groups[gi].count).sum();
         chains.push(Chain {
             group_indices: chain_groups,
             atom_count,
@@ -320,7 +320,7 @@ fn extract_chains(
             assigned[gi] = true;
             chains.push(Chain {
                 group_indices: vec![gi],
-                atom_count: groups[gi].count as u64,
+                atom_count: groups[gi].count,
             });
         }
     }
@@ -559,7 +559,7 @@ mod tests {
             result.num_kernels, result.total_atoms
         );
         for (ki, kernel) in result.kernel_groups.iter().enumerate() {
-            let atoms: u64 = kernel.iter().map(|&gi| groups[gi].count as u64).sum();
+            let atoms: u64 = kernel.iter().map(|&gi| groups[gi].count).sum();
             eprintln!(
                 "  kernel {}: {} groups, {} atoms",
                 ki,
@@ -656,8 +656,8 @@ mod tests {
 
         // For each row m (0..4), create K=3 Mul groups of count N=2.
         let mut mul_bases = Vec::new();
-        for m in 0..4u32 {
-            for k in 0..3u32 {
+        for m in 0..4u64 {
+            for k in 0..3u64 {
                 // A[m,k] is at offset m*3 + k.
                 let a_atom = a_base.offset(m * 3 + k);
                 // B[k, *] starts at offset k*2.
@@ -686,7 +686,7 @@ mod tests {
 
         // For each row m, create a ReduceSum group that sums over the K Mul groups.
         let mut reduce_bases = Vec::new();
-        for m in 0..4u32 {
+        for m in 0..4u64 {
             // The first Mul group for row m is at mul_bases[m*3].
             let row_mul_base = mul_bases[(m * 3) as usize];
 
@@ -719,7 +719,7 @@ mod tests {
         validate_partition(&result, g.num_groups());
         print_partition(&result, g.groups());
 
-        assert_eq!(result.total_atoms as u32, g.num_atoms());
+        assert_eq!(result.total_atoms, g.num_atoms());
     }
 
     // -----------------------------------------------------------------------
@@ -732,9 +732,9 @@ mod tests {
         let k_sym = g.bounded_sym_dim("matmul_k", 4);
 
         // A[2,4], B[4,8] -> C[2,8]
-        let m = 2u32;
-        let k = 4u32;
-        let n = 8u32;
+        let m = 2u64;
+        let k = 4u64;
+        let n = 8u64;
 
         let a_base = g.push_group(
             m * k,
@@ -855,8 +855,8 @@ mod tests {
         let b1 = g.push_group(12, ScalarOp::Literal(NumericScalar::F32(1.0)), vec![], vec![], vec![]);
 
         let mut mul1_bases = Vec::new();
-        for row in 0..2u32 {
-            for ki in 0..3u32 {
+        for row in 0..2u64 {
+            for ki in 0..3u64 {
                 let mb = g.push_group(
                     4,
                     ScalarOp::Binary {
@@ -879,7 +879,7 @@ mod tests {
         }
 
         let mut reduce1 = Vec::new();
-        for row in 0..2u32 {
+        for row in 0..2u64 {
             let rb = g.push_group(
                 4,
                 ScalarOp::ReduceSum {
@@ -902,8 +902,8 @@ mod tests {
         let b2 = g.push_group(10, ScalarOp::Literal(NumericScalar::F32(2.0)), vec![], vec![], vec![]);
 
         let mut mul2_bases = Vec::new();
-        for row in 0..3u32 {
-            for ki in 0..2u32 {
+        for row in 0..3u64 {
+            for ki in 0..2u64 {
                 let mb = g.push_group(
                     5,
                     ScalarOp::Binary {
@@ -926,7 +926,7 @@ mod tests {
         }
 
         let mut reduce2 = Vec::new();
-        for row in 0..3u32 {
+        for row in 0..3u64 {
             let rb = g.push_group(
                 5,
                 ScalarOp::ReduceSum {

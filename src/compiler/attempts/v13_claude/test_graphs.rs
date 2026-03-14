@@ -9,7 +9,7 @@ use crate::numeric_scalar::NumericScalar;
 
 /// Elementwise binary op: C[N] = A[N] op B[N].
 /// Returns (graph, a_base, b_base, c_base).
-pub fn elementwise_binary(n: u32, op: ScalarBinOp) -> (NanoGraph, AtomId, AtomId, AtomId) {
+pub fn elementwise_binary(n: u64, op: ScalarBinOp) -> (NanoGraph, AtomId, AtomId, AtomId) {
     let mut g = NanoGraph::new();
     let a = g.push_group(
         n,
@@ -36,7 +36,7 @@ pub fn elementwise_binary(n: u32, op: ScalarBinOp) -> (NanoGraph, AtomId, AtomId
 
 /// Unary chain: out = op_n(op_{n-1}(...op_1(input))).
 /// Returns (graph, input_base, output_base).
-pub fn unary_chain(n: u32, ops: &[ScalarUnaryOp]) -> (NanoGraph, AtomId, AtomId) {
+pub fn unary_chain(n: u64, ops: &[ScalarUnaryOp]) -> (NanoGraph, AtomId, AtomId) {
     let mut g = NanoGraph::new();
     let input = g.push_group(
         n,
@@ -58,7 +58,7 @@ pub fn unary_chain(n: u32, ops: &[ScalarUnaryOp]) -> (NanoGraph, AtomId, AtomId)
 
 /// Broadcast-add: C[N] = A[N] + scalar_b.
 /// Returns (graph, a_base, scalar_b, c_base).
-pub fn broadcast_add(n: u32) -> (NanoGraph, AtomId, AtomId, AtomId) {
+pub fn broadcast_add(n: u64) -> (NanoGraph, AtomId, AtomId, AtomId) {
     let mut g = NanoGraph::new();
     let a = g.push_group(
         n,
@@ -92,7 +92,7 @@ pub fn broadcast_add(n: u32) -> (NanoGraph, AtomId, AtomId, AtomId) {
 ///
 /// Returns (graph, a_base, b_base, reduce_base) where reduce_base is the
 /// output matmul result.
-pub fn matmul(m: u32, k: u32, n: u32) -> (NanoGraph, AtomId, AtomId, AtomId) {
+pub fn matmul(m: u64, k: u64, n: u64) -> (NanoGraph, AtomId, AtomId, AtomId) {
     let mut g = NanoGraph::new();
 
     // A[M, K] — laid out row-major, so A[m, k] = a_base + m*K + k
@@ -171,7 +171,7 @@ pub fn matmul(m: u32, k: u32, n: u32) -> (NanoGraph, AtomId, AtomId, AtomId) {
 /// MatMul followed by elementwise activation: out = activation(A @ B).
 /// Returns (graph, a_base, b_base, out_base).
 pub fn matmul_activation(
-    m: u32, k: u32, n: u32,
+    m: u64, k: u64, n: u64,
     activation: ScalarUnaryOp,
 ) -> (NanoGraph, AtomId, AtomId, AtomId) {
     let mut g = NanoGraph::new();
@@ -257,7 +257,7 @@ pub fn matmul_activation(
 /// Mimics the common MLP pattern where one matmul feeds another.
 /// Returns (graph, a_base, b_base, c_base, out_base).
 pub fn matmul_chain(
-    m: u32, k1: u32, n1: u32, k2: u32, n2: u32,
+    m: u64, k1: u64, n1: u64, k2: u64, n2: u64,
 ) -> (NanoGraph, AtomId, AtomId, AtomId, AtomId) {
     // Note: n1 == k2 for the chain to be valid.
     assert_eq!(n1, k2, "inner dimensions must match: n1={} != k2={}", n1, k2);

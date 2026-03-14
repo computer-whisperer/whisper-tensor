@@ -81,7 +81,7 @@ pub fn estimate_kernel_cost(
 
     for overlap in &overlapping {
         let group = overlap.group;
-        let atom_count = overlap.count as u64;
+        let atom_count = overlap.count;
         compute_ops += atom_count;
 
         let mut info = GroupLivenessInfo {
@@ -165,7 +165,7 @@ pub fn estimate_kernel_cost(
                     // Per step: `per_step_external` external loads.
                     // Plus the accumulator (count atoms) is resident across all k steps.
                     info.streaming_inputs += per_step_external;
-                    info.streaming_step_size += overlap.count as u64;
+                    info.streaming_step_size += overlap.count;
                 }
                 InputRef::Explicit(ids) => {
                     // Arbitrary access — count external refs.
@@ -240,7 +240,7 @@ struct GroupLivenessInfo {
     /// Whether this group is a reduction (has reduce_dims).
     is_reduction: bool,
     /// Bound on the reduction dimension (K).
-    reduce_k: u32,
+    reduce_k: u64,
 }
 
 /// Estimate peak liveness from per-group analysis.
@@ -287,18 +287,18 @@ fn estimate_peak_liveness(groups: &[GroupLivenessInfo]) -> u64 {
 
 /// Compact set for fast atom membership testing.
 struct KernelAtomSet {
-    ranges: Vec<(u32, u32)>, // sorted (start, end) pairs
+    ranges: Vec<(u64, u64)>, // sorted (start, end) pairs
 }
 
 impl KernelAtomSet {
     fn new(ranges: &[AtomRange]) -> Self {
-        let mut sorted: Vec<(u32, u32)> = ranges
+        let mut sorted: Vec<(u64, u64)> = ranges
             .iter()
             .map(|r| (r.base.0, r.base.0 + r.count))
             .collect();
         sorted.sort_by_key(|&(s, _)| s);
         // Merge overlapping/adjacent ranges.
-        let mut merged: Vec<(u32, u32)> = Vec::new();
+        let mut merged: Vec<(u64, u64)> = Vec::new();
         for (s, e) in sorted {
             if let Some(last) = merged.last_mut() {
                 if s <= last.1 {
@@ -332,7 +332,7 @@ impl KernelAtomSet {
 struct GroupOverlap<'a> {
     group: &'a AtomGroup,
     /// How many atoms from this group are in the kernel.
-    count: u32,
+    count: u64,
 }
 
 /// Find groups that overlap the kernel's atom ranges.
@@ -346,7 +346,7 @@ fn find_overlapping_groups<'a>(
         let g_start = group.base_id.0;
         let g_end = g_start + group.count;
 
-        let mut overlap_count = 0u32;
+        let mut overlap_count = 0u64;
         for &(r_start, r_end) in &kernel_atoms.ranges {
             if r_start >= g_end || r_end <= g_start {
                 continue;
@@ -443,7 +443,7 @@ fn count_external_outputs(graph: &NanoGraph, kernel_atoms: &KernelAtomSet) -> u6
 }
 
 /// Check if a group is fully inside the kernel.
-fn is_group_in_kernel(g_start: u32, g_end: u32, kernel_atoms: &KernelAtomSet) -> bool {
+fn is_group_in_kernel(g_start: u64, g_end: u64, kernel_atoms: &KernelAtomSet) -> bool {
     // A group is "in the kernel" if all its atoms are in the kernel.
     // Quick check: is there a single kernel range that covers the entire group?
     for &(r_start, r_end) in &kernel_atoms.ranges {
@@ -455,13 +455,13 @@ fn is_group_in_kernel(g_start: u32, g_end: u32, kernel_atoms: &KernelAtomSet) ->
 }
 
 /// Resolve the K bound for a set of reduce dims.
-fn resolve_k_bound(graph: &NanoGraph, reduce_dims: &[SymDim]) -> u32 {
+fn resolve_k_bound(graph: &NanoGraph, reduce_dims: &[SymDim]) -> u64 {
     reduce_dims
         .iter()
         .filter_map(|sd| graph.sym_dim_bounds.get(sd))
         .next()
         .copied()
-        .unwrap_or(1) as u32
+        .unwrap_or(1)
 }
 
 #[cfg(test)]

@@ -25,10 +25,10 @@ pub struct SymDim(pub u16);
 /// `base_id + count - 1`. The offset within the group determines how
 /// `InputRef::Affine` strides are applied.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct AtomId(pub u32);
+pub struct AtomId(pub u64);
 
 impl AtomId {
-    pub fn offset(self, n: u32) -> Self {
+    pub fn offset(self, n: u64) -> Self {
         AtomId(self.0 + n)
     }
 }
@@ -68,11 +68,11 @@ pub enum InputRef {
 impl InputRef {
     /// Resolve the source atom for the `i`-th atom in the group,
     /// at sym_dim iteration `k` (ignored for non-SymAffine variants).
-    pub fn resolve(&self, i: u32, k: u32) -> AtomId {
+    pub fn resolve(&self, i: u64, k: u64) -> AtomId {
         match self {
             InputRef::Broadcast(id) => *id,
             InputRef::Affine { base, stride } => {
-                AtomId(base.0.wrapping_add((*stride as i64 * i as i64) as u32))
+                AtomId(base.0.wrapping_add((*stride as i64 * i as i64) as u64))
             }
             InputRef::Explicit(ids) => ids[i as usize],
             InputRef::SymAffine {
@@ -81,14 +81,14 @@ impl InputRef {
                 stride_k,
             } => {
                 AtomId(base.0.wrapping_add(
-                    (*stride_i as i64 * i as i64 + *stride_k as i64 * k as i64) as u32,
+                    (*stride_i as i64 * i as i64 + *stride_k as i64 * k as i64) as u64,
                 ))
             }
         }
     }
 
     /// Number of distinct source atoms referenced (for compression stats).
-    pub fn distinct_sources(&self, count: u32) -> usize {
+    pub fn distinct_sources(&self, count: u64) -> usize {
         match self {
             InputRef::Broadcast(_) => 1,
             InputRef::Affine { .. } => count as usize,
@@ -119,7 +119,7 @@ pub struct AtomGroup {
     /// First AtomId in this group.
     pub base_id: AtomId,
     /// Number of atoms in the group.
-    pub count: u32,
+    pub count: u64,
     /// The scalar operation each atom performs, including dtype precision.
     pub op: ScalarOp,
     /// Symbolic dimensions this group iterates over.
@@ -147,7 +147,7 @@ impl AtomGroup {
     }
 
     /// Offset of an AtomId within this group.
-    pub fn offset_of(&self, id: AtomId) -> Option<u32> {
+    pub fn offset_of(&self, id: AtomId) -> Option<u64> {
         if self.contains(id) {
             Some(id.0 - self.base_id.0)
         } else {
@@ -160,7 +160,7 @@ impl AtomGroup {
 #[derive(Default)]
 pub struct NanoGraph {
     groups: Vec<AtomGroup>,
-    next_atom_id: u32,
+    next_atom_id: u64,
     /// Named symbolic dimensions (e.g., "batch" → SymDim(0)).
     pub sym_dim_names: HashMap<String, SymDim>,
     /// Known upper bounds for symbolic dimensions. A SymDim with a known bound
@@ -203,7 +203,7 @@ impl NanoGraph {
     }
 
     /// Allocate `count` contiguous AtomIds. Returns the base id.
-    fn alloc_ids(&mut self, count: u32) -> AtomId {
+    fn alloc_ids(&mut self, count: u64) -> AtomId {
         let base = AtomId(self.next_atom_id);
         self.next_atom_id = self
             .next_atom_id
@@ -215,7 +215,7 @@ impl NanoGraph {
     /// Add an atom group to the graph. Returns the base AtomId.
     pub fn push_group(
         &mut self,
-        count: u32,
+        count: u64,
         op: ScalarOp,
         sym_dims: Vec<SymDim>,
         reduce_dims: Vec<SymDim>,
@@ -263,7 +263,7 @@ impl NanoGraph {
     }
 
     /// Look up group and offset for an atom.
-    pub fn group_and_offset(&self, id: AtomId) -> Option<(&AtomGroup, u32)> {
+    pub fn group_and_offset(&self, id: AtomId) -> Option<(&AtomGroup, u64)> {
         self.find_group_idx(id).map(|gi| {
             let group = &self.groups[gi];
             (group, id.0 - group.base_id.0)
@@ -286,7 +286,7 @@ impl NanoGraph {
     }
 
     /// Total number of atoms.
-    pub fn num_atoms(&self) -> u32 {
+    pub fn num_atoms(&self) -> u64 {
         self.next_atom_id
     }
 
@@ -298,7 +298,7 @@ impl NanoGraph {
         let mut groups_by_op: HashMap<&'static str, u64> = HashMap::new();
 
         for group in &self.groups {
-            total_atoms += group.count as u64;
+            total_atoms += group.count;
             if group.count == 1 {
                 singleton_groups += 1;
             }

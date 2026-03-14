@@ -17,7 +17,7 @@ pub struct PartitionMetrics {
     /// Total number of kernels.
     pub num_kernels: usize,
     /// Total number of atoms in the graph.
-    pub total_atoms: u32,
+    pub total_atoms: u64,
     /// Total cross-kernel data transfers (each value that crosses a boundary
     /// counts once per consuming kernel — i.e., if a value is read by 3
     /// different kernels, it counts as 3 transfers).
@@ -99,7 +99,7 @@ pub fn evaluate(graph: &NanoGraph, result: &PartitionResult) -> PartitionMetrics
                             .filter_map(|sd| graph.sym_dim_bounds.get(sd))
                             .next()
                             .copied()
-                            .unwrap_or(1) as u32;
+                            .unwrap_or(1);
                         (0..k_max).map(|k| input_ref.resolve(i, k)).collect()
                     }
                     _ => vec![input_ref.resolve(i, 0)],

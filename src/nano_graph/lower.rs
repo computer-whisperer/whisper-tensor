@@ -92,14 +92,14 @@ pub struct LowerResult {
     /// constant-folded ops, and any other tensor whose value is known at
     /// lowering time. User inputs (Shaped tensors) are NOT included — the
     /// caller must add those separately before passing to NanoEval.
-    pub numeric_overrides: HashMap<u32, crate::numeric_scalar::NumericScalar>,
+    pub numeric_overrides: HashMap<u64, crate::numeric_scalar::NumericScalar>,
 }
 
 /// Public view of how a milli tensor maps to nano atoms.
 #[derive(Debug, Clone)]
 pub struct TensorAtomMapInfo {
     pub base_id: AtomId,
-    pub count: u32,
+    pub count: u64,
     pub sym_dims: Vec<SymDim>,
 }
 
@@ -113,7 +113,7 @@ struct TensorAtomMap {
     /// First atom id in the group.
     base_id: AtomId,
     /// Total number of atoms (product of known dims).
-    count: u32,
+    count: u64,
     /// The full tensor layout: one entry per dim, preserving original order.
     /// Used to compute input refs when downstream ops index this tensor.
     layout: Vec<DimKind>,
@@ -132,7 +132,7 @@ enum DimKind {
 }
 
 /// (layout, known_dims, sym_dims, atom_count)
-type DimClassification = (Vec<DimKind>, Vec<u64>, Vec<SymDim>, u32);
+type DimClassification = (Vec<DimKind>, Vec<u64>, Vec<SymDim>, u64);
 
 impl TensorAtomMap {
     /// Compute row-major strides from known dim sizes.
@@ -224,7 +224,7 @@ pub fn lower_with_info(
 
     // Build overrides for all Numeric (constant-valued) tensors.
     use crate::numeric_scalar::NumericScalar;
-    let mut numeric_overrides: HashMap<u32, NumericScalar> = HashMap::new();
+    let mut numeric_overrides: HashMap<u64, NumericScalar> = HashMap::new();
     let mut backend = crate::backends::eval_backend::EvalBackend::NDArray;
     for (id, info) in &all_infos {
         let Some(numeric) = info.as_numeric() else {
@@ -251,7 +251,7 @@ pub fn lower_with_info(
         }
         for (i, &val) in v.iter().enumerate() {
             let scalar = NumericScalar::F32(val).cast_to(tensor_dtype);
-            numeric_overrides.insert(tam.base_id.0 + i as u32, scalar);
+            numeric_overrides.insert(tam.base_id.0 + i as u64, scalar);
         }
     }
 
@@ -277,7 +277,7 @@ struct LowerCtx {
     unsupported_details: Vec<String>,
     /// Overrides for synthetic atoms created during lowering (e.g., column
     /// offset literals for Gather). Merged into numeric_overrides in the result.
-    synthetic_overrides: HashMap<u32, NumericScalar>,
+    synthetic_overrides: HashMap<u64, NumericScalar>,
 }
 
 impl LowerCtx {
@@ -312,7 +312,6 @@ impl LowerCtx {
         }
 
         let count: u64 = known_dims.iter().product();
-        let count: u32 = count.try_into().ok()?;
 
         Some((layout, known_dims, sym_dims, count))
     }
@@ -586,7 +585,7 @@ impl LowerCtx {
                 flat_p += p_indices[i] * stride;
             }
 
-            ids.push(producer.base_id.offset(flat_p as u32));
+            ids.push(producer.base_id.offset(flat_p));
         }
 
         InputRef::Explicit(ids)
@@ -1138,7 +1137,7 @@ impl LowerCtx {
                 flat_in += in_indices[i] * stride;
             }
 
-            ids.push(in_map.base_id.offset(flat_in as u32));
+            ids.push(in_map.base_id.offset(flat_in));
         }
 
         let dt = out_info.dtype();
@@ -1529,7 +1528,7 @@ impl LowerCtx {
                 inp_flat += indices[i] * stride;
             }
 
-            ids.push(inp_map.base_id.offset(inp_flat as u32));
+            ids.push(inp_map.base_id.offset(inp_flat));
         }
 
         let dt = out_info.dtype();
@@ -1670,7 +1669,7 @@ impl LowerCtx {
                 inp_flat += indices[i] * stride;
             }
 
-            ids.push(in_map.base_id.offset(inp_flat as u32));
+            ids.push(in_map.base_id.offset(inp_flat));
         }
 
         let dt = out_info.dtype();
@@ -1888,7 +1887,7 @@ impl LowerCtx {
                 in_flat += in_idx * stride;
             }
 
-            ids.push(in_map.base_id.offset(in_flat as u32));
+            ids.push(in_map.base_id.offset(in_flat));
         }
 
         let dt = out_info.dtype();
@@ -2085,7 +2084,7 @@ impl LowerCtx {
         // The number of row groups: batch_known_product * (M if known, else 1).
         let m_groups = m_known.unwrap_or(1);
         let num_row_groups = (batch_known_product * m_groups) as usize;
-        let n_u32 = n as u32;
+        let n_u64 = n as u64;
 
         // For each row group, compute the A and B base offsets within their atoms.
         // A's known dims: [...batch_known, (M if known), K]
@@ -2147,10 +2146,10 @@ impl LowerCtx {
             for ki in 0..k {
                 let a_atom = a_map
                     .base_id
-                    .offset((a_offset + ki * a_strides[a_k_known_idx]) as u32);
+                    .offset(a_offset + ki * a_strides[a_k_known_idx]);
                 let b_atom = b_map
                     .base_id
-                    .offset((b_offset + ki * b_strides[b_k_known_idx]) as u32);
+                    .offset(b_offset + ki * b_strides[b_k_known_idx]);
 
                 let input_a = InputRef::Broadcast(a_atom);
                 let input_b = InputRef::Affine {
@@ -2159,7 +2158,7 @@ impl LowerCtx {
                 };
 
                 let base = self.nano.push_group(
-                    n_u32,
+                    n_u64,
                     ScalarOp::Binary {
                         op: ScalarBinOp::Mul,
                         compute_dtype: product_dtype,
@@ -2183,10 +2182,10 @@ impl LowerCtx {
         let mut reduce_base_id = None;
 
         for g in 0..num_row_groups {
-            let row_mul_base = AtomId(mul_base.0 + (g as u32) * (k as u32) * n_u32);
+            let row_mul_base = AtomId(mul_base.0 + (g as u64) * (k as u64) * n_u64);
 
             let base = self.nano.push_group(
-                n_u32,
+                n_u64,
                 ScalarOp::ReduceSum {
                     compute_dtype: accumulate_dtype,
                     output_dtype: out_dtype,
@@ -2196,7 +2195,7 @@ impl LowerCtx {
                 vec![InputRef::SymAffine {
                     base: row_mul_base,
                     stride_i: 1,
-                    stride_k: n_u32 as i32,
+                    stride_k: n_u64 as i32,
                 }],
             );
 
@@ -2364,7 +2363,7 @@ impl LowerCtx {
             .filter(|(i, _)| !reduce_known_indices.contains(i))
             .map(|(_, &v)| v)
             .collect();
-        let out_count = out_known.iter().product::<u64>().max(1) as u32;
+        let out_count = out_known.iter().product::<u64>().max(1);
 
         // Create bounded sym dim for the reduction.
         let reduce_sym = self
@@ -2433,7 +2432,7 @@ impl LowerCtx {
             for (i, &stride) in in_strides.iter().enumerate() {
                 in_flat += in_indices[i] * stride;
             }
-            base_ids.push(in_flat as u32);
+            base_ids.push(in_flat as u64);
         }
 
         // Check if the base_ids form a simple affine pattern.
@@ -2812,7 +2811,7 @@ impl LowerCtx {
             // Step 3: Add group — D_total atoms, each adds its column offset j
             // Column offsets: 0, 1, 2, ..., D_total-1
             let col_offsets_base = self.nano.push_group(
-                d_total as u32,
+                d_total as u64,
                 ScalarOp::Literal(NumericScalar::F32(0.0)),
                 vec![],
                 vec![],
@@ -2865,7 +2864,7 @@ impl LowerCtx {
             // in it via ctx synthetic overrides.
 
             // I'll add a synthetic_overrides map to LowerCtx and merge at the end.
-            for j in 0..d_total as u32 {
+            for j in 0..d_total as u64 {
                 self.synthetic_overrides.insert(
                     col_offsets_base.0 + j,
                     NumericScalar::F32(j as f32),
@@ -2873,7 +2872,7 @@ impl LowerCtx {
             }
 
             let add_id = self.nano.push_group(
-                d_total as u32,
+                d_total as u64,
                 ScalarOp::Binary {
                     op: ScalarBinOp::Add,
                     compute_dtype: DType::F32,
@@ -2892,7 +2891,7 @@ impl LowerCtx {
 
             // Step 4: IndirectLoad group — D_total atoms, each loads from data table
             let base_id = self.nano.push_group(
-                d_total as u32,
+                d_total as u64,
                 ScalarOp::IndirectLoad {
                     table_base: data_map.base_id,
                     output_dtype: out_dt,
@@ -2910,7 +2909,7 @@ impl LowerCtx {
                 out_id,
                 TensorAtomMap {
                     base_id,
-                    count: d_total as u32,
+                    count: d_total as u64,
                     layout: out_layout,
                     known_strides: out_strides,
                     sym_dims: out_sym_dims,
@@ -2932,7 +2931,7 @@ impl LowerCtx {
                 let mut ids = Vec::with_capacity(out_count as usize);
                 for flat in 0..out_count as u64 {
                     let row = flat / d_total;
-                    ids.push(indices_map.base_id.offset(row as u32));
+                    ids.push(indices_map.base_id.offset(row));
                 }
                 InputRef::Explicit(ids)
             };
@@ -3185,7 +3184,7 @@ mod tests {
                 let scalars = tensor_to_scalars(tensor);
                 assert_eq!(scalars.len(), tam.count as usize);
                 for (i, val) in scalars.into_iter().enumerate() {
-                    overrides.insert(tam.base_id.0 + i as u32, val);
+                    overrides.insert(tam.base_id.0 + i as u64, val);
                 }
             }
         }

@@ -36,9 +36,9 @@ struct SourceAccess {
     source_group: usize,
     /// The specific atom offset within the source group (for Broadcast).
     /// None means "range access" (Affine/SymAffine/Explicit).
-    broadcast_offset: Option<u32>,
+    broadcast_offset: Option<u64>,
     /// For Affine: the base offset and stride within the source group.
-    affine_range: Option<(u32, i32, u32)>, // (start_offset, stride, count)
+    affine_range: Option<(u64, i32, u64)>, // (start_offset, stride, count)
 }
 
 /// Info about a group's role in the computation.
@@ -55,9 +55,9 @@ struct GroupInfo {
     /// The set of leaf (Literal) group indices this transitively depends on.
     leaf_deps: BTreeSet<usize>,
     /// For groups with Broadcast inputs: which (source_group, atom_offset) pairs.
-    broadcast_sources: Vec<(usize, u32)>,
+    broadcast_sources: Vec<(usize, u64)>,
     /// For groups with Affine inputs: which (source_group, base_offset, stride) tuples.
-    affine_sources: Vec<(usize, u32, i32)>,
+    affine_sources: Vec<(usize, u64, i32)>,
 }
 
 /// Partition a NanoGraph into kernels.
@@ -86,7 +86,7 @@ pub fn partition_nanograph(graph: &NanoGraph, parallelism: usize) -> NanoPartiti
     // Actually, we can iterate groups and build a range map.
 
     // Build a sorted list of (base_id, group_idx) for binary search.
-    let group_ranges: Vec<(u32, u32, usize)> = groups
+    let group_ranges: Vec<(u64, u64, usize)> = groups
         .iter()
         .enumerate()
         .map(|(i, g)| (g.base_id.0, g.base_id.0 + g.count, i))
@@ -156,7 +156,7 @@ pub fn partition_nanograph(graph: &NanoGraph, parallelism: usize) -> NanoPartiti
 
                     for k in 0..k_bound {
                         // At k, atom 0 reads base + stride_k * k
-                        let atom_at_k = AtomId(base.0.wrapping_add((*stride_k as i64 * k as i64) as u32));
+                        let atom_at_k = AtomId(base.0.wrapping_add((*stride_k as i64 * k as i64) as u64));
                         if let Some(src_gi) = find_group(atom_at_k) {
                             if pred_set.insert(src_gi) {
                                 predecessors.push(src_gi);
@@ -297,7 +297,7 @@ pub fn partition_nanograph(graph: &NanoGraph, parallelism: usize) -> NanoPartiti
     struct ClusterInfo {
         groups: Vec<usize>,
         /// Broadcast sources: (source_group, atom_offset) pairs from all groups in cluster.
-        broadcast_sigs: BTreeSet<(usize, u32)>,
+        broadcast_sigs: BTreeSet<(usize, u64)>,
         /// Leaf dependencies of this cluster.
         leaf_deps: BTreeSet<usize>,
         /// Total atom count in this cluster.
@@ -324,7 +324,7 @@ pub fn partition_nanograph(graph: &NanoGraph, parallelism: usize) -> NanoPartiti
 
         for &gi in cluster_groups {
             group_to_cluster[gi] = Some(ci);
-            atom_count += groups[gi].count as u64;
+            atom_count += groups[gi].count;
 
             for &(src_gi, offset) in &infos[gi].broadcast_sources {
                 broadcast_sigs.insert((src_gi, offset));
@@ -610,7 +610,7 @@ pub fn print_partition_summary(graph: &NanoGraph, result: &NanoPartitionResult) 
         let mut total_atoms = 0u64;
         for &gi in kernel {
             let g = &groups[gi];
-            total_atoms += g.count as u64;
+            total_atoms += g.count;
             let op_name = match &g.op {
                 ScalarOp::Literal(_) => "Literal",
                 ScalarOp::Identity { .. } => "Identity",

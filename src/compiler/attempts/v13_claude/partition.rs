@@ -60,11 +60,11 @@ pub struct Kernel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AtomRange {
     pub base: AtomId,
-    pub count: u32,
+    pub count: u64,
 }
 
 impl AtomRange {
-    pub fn new(base: AtomId, count: u32) -> Self {
+    pub fn new(base: AtomId, count: u64) -> Self {
         Self { base, count }
     }
 

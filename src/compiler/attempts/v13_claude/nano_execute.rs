@@ -29,8 +29,8 @@ use super::nano_part_b::{partition_nanograph, NanoPartitionResult};
 /// Returns AtomId.0 -> computed NumericScalar value for all atoms.
 pub fn execute_nanograph_naive(
     graph: &NanoGraph,
-    inputs: &HashMap<u32, NumericScalar>,
-) -> HashMap<u32, NumericScalar> {
+    inputs: &HashMap<u64, NumericScalar>,
+) -> HashMap<u64, NumericScalar> {
     let num_atoms = graph.num_atoms() as usize;
     let mut values: Vec<NumericScalar> = vec![NumericScalar::F32(0.0); num_atoms];
 
@@ -41,7 +41,7 @@ pub fn execute_nanograph_naive(
     // Collect all atom values into the output map.
     let mut result = HashMap::new();
     for i in 0..num_atoms {
-        result.insert(i as u32, values[i].clone());
+        result.insert(i as u64, values[i].clone());
     }
     result
 }
@@ -59,8 +59,8 @@ pub fn execute_nanograph_naive(
 pub fn execute_nanograph_partitioned(
     graph: &NanoGraph,
     partition: &NanoPartitionResult,
-    inputs: &HashMap<u32, NumericScalar>,
-) -> HashMap<u32, NumericScalar> {
+    inputs: &HashMap<u64, NumericScalar>,
+) -> HashMap<u64, NumericScalar> {
     let num_atoms = graph.num_atoms() as usize;
     let mut values: Vec<NumericScalar> = vec![NumericScalar::F32(0.0); num_atoms];
     let groups = graph.groups();
@@ -82,7 +82,7 @@ pub fn execute_nanograph_partitioned(
     // Collect all atom values into the output map.
     let mut result = HashMap::new();
     for i in 0..num_atoms {
-        result.insert(i as u32, values[i].clone());
+        result.insert(i as u64, values[i].clone());
     }
     result
 }
@@ -94,7 +94,7 @@ pub fn execute_nanograph_partitioned(
 /// Result of the full nano pipeline: lower -> partition -> execute -> verify.
 pub struct NanoPipelineResult {
     /// Output atom values (from partitioned execution).
-    pub outputs: HashMap<u32, NumericScalar>,
+    pub outputs: HashMap<u64, NumericScalar>,
     /// Number of kernels in the partition.
     pub num_kernels: usize,
     /// Maximum absolute error between partitioned and naive execution.
@@ -106,7 +106,7 @@ pub struct NanoPipelineResult {
 /// Run the full pipeline: partition -> execute (partitioned + naive) -> compare.
 pub fn run_nano_pipeline(
     graph: &NanoGraph,
-    inputs: &HashMap<u32, NumericScalar>,
+    inputs: &HashMap<u64, NumericScalar>,
     parallelism: usize,
 ) -> NanoPipelineResult {
     // Step 1: Partition.
@@ -153,7 +153,7 @@ pub fn run_nano_pipeline(
 fn eval_group(
     graph: &NanoGraph,
     group: &AtomGroup,
-    inputs: &HashMap<u32, NumericScalar>,
+    inputs: &HashMap<u64, NumericScalar>,
     values: &mut [NumericScalar],
 ) {
     let is_reduce = group.op.is_reduce();
@@ -186,7 +186,7 @@ fn eval_group(
                 _ => unreachable!(),
             };
 
-            for k in 0..bound as u32 {
+            for k in 0..bound as u64 {
                 let src = group.inputs[0].resolve(i, k);
                 let val = values[src.0 as usize].cast_to(compute_dtype);
                 acc = match &group.op {
@@ -302,10 +302,10 @@ fn find_group_idx_for_atom(
 /// Collect representative source atom indices from an InputRef.
 fn collect_source_atoms(
     input: &InputRef,
-    count: u32,
+    count: u64,
     graph: &NanoGraph,
     group: &AtomGroup,
-) -> Vec<u32> {
+) -> Vec<u64> {
     match input {
         InputRef::Broadcast(id) => vec![id.0],
         InputRef::Affine { base, stride } => {
@@ -317,7 +317,7 @@ fn collect_source_atoms(
             atoms
         }
         InputRef::Explicit(ids) => {
-            let mut atoms: HashSet<u32> = HashSet::new();
+            let mut atoms: HashSet<u64> = HashSet::new();
             for id in ids {
                 atoms.insert(id.0);
             }
@@ -328,7 +328,7 @@ fn collect_source_atoms(
             stride_i,
             stride_k,
         } => {
-            let mut atoms: HashSet<u32> = HashSet::new();
+            let mut atoms: HashSet<u64> = HashSet::new();
             let k_max: u64 = group
                 .reduce_dims
                 .iter()
@@ -336,8 +336,8 @@ fn collect_source_atoms(
                 .next()
                 .unwrap_or(256);
             for k_val in 0..k_max {
-                for i_val in [0u32, count.saturating_sub(1)] {
-                    atoms.insert(input.resolve(i_val, k_val as u32).0);
+                for i_val in [0u64, count.saturating_sub(1)] {
+                    atoms.insert(input.resolve(i_val, k_val).0);
                 }
             }
             atoms.into_iter().collect()
@@ -406,13 +406,13 @@ mod tests {
     use crate::DynRank;
 
     /// Build the inputs map from numeric_overrides (already NumericScalar).
-    fn overrides_to_ns(overrides: &HashMap<u32, NumericScalar>) -> HashMap<u32, NumericScalar> {
+    fn overrides_to_ns(overrides: &HashMap<u64, NumericScalar>) -> HashMap<u64, NumericScalar> {
         overrides.clone()
     }
 
     /// Add tensor values to inputs map for a specific tensor.
     fn add_tensor_inputs(
-        inputs: &mut HashMap<u32, NumericScalar>,
+        inputs: &mut HashMap<u64, NumericScalar>,
         tensor_map: &HashMap<GlobalId, crate::nano_graph::lower::TensorAtomMapInfo>,
         tensor_id: GlobalId,
         values: &[f32],
@@ -425,7 +425,7 @@ mod tests {
                 tensor_id
             );
             for (i, &val) in values.iter().enumerate() {
-                inputs.insert(tam.base_id.0 + i as u32, NumericScalar::F32(val));
+                inputs.insert(tam.base_id.0 + i as u64, NumericScalar::F32(val));
             }
         }
     }
@@ -482,7 +482,7 @@ mod tests {
 
         // Also verify the actual output values match expected.
         let c_tam = lower_result.tensor_map.get(&c_id).unwrap();
-        for i in 0..4u32 {
+        for i in 0..4u64 {
             let atom_id = c_tam.base_id.0 + i;
             let expected = a_vals[i as usize] + b_vals[i as usize];
             let got = pipeline.outputs[&atom_id].to_f64() as f32;
@@ -558,10 +558,10 @@ mod tests {
 
         // Verify against manual matmul computation.
         let c_tam = lower_result.tensor_map.get(&c_id).unwrap();
-        for row in 0..4u32 {
-            for col in 0..16u32 {
+        for row in 0..4u64 {
+            for col in 0..16u64 {
                 let mut expected: f32 = 0.0;
-                for k in 0..8u32 {
+                for k in 0..8u64 {
                     expected += a_vals[(row * 8 + k) as usize] * b_vals[(k * 16 + col) as usize];
                 }
                 let atom_id = c_tam.base_id.0 + row * 16 + col;
@@ -661,7 +661,7 @@ mod tests {
 
         let d_tam = lower_result.tensor_map.get(&d_id).unwrap();
         for (i, &exp) in expected_d.iter().enumerate() {
-            let atom_id = d_tam.base_id.0 + i as u32;
+            let atom_id = d_tam.base_id.0 + i as u64;
             let got = pipeline.outputs[&atom_id].to_f64() as f32;
             let diff = (exp - got).abs();
             assert!(
@@ -786,13 +786,13 @@ mod tests {
         assert!(g.validate().is_empty(), "{:?}", g.validate());
 
         // No overrides needed -- literals provide the values.
-        let inputs: HashMap<u32, NumericScalar> = HashMap::new();
+        let inputs: HashMap<u64, NumericScalar> = HashMap::new();
 
         // Execute with naive executor.
         let result = execute_nanograph_naive(&g, &inputs);
 
         // BF16(1.5) + BF16(2.5) computed in F32 should give F32(4.0).
-        for i in 0..4u32 {
+        for i in 0..4u64 {
             let atom_id = c.0 + i;
             let got = result[&atom_id].to_f64();
             let expected = 4.0;
@@ -839,7 +839,7 @@ mod tests {
 
         let result2 = execute_nanograph_naive(&g2, &inputs);
 
-        for i in 0..4u32 {
+        for i in 0..4u64 {
             let atom_id = c2.0 + i;
             let val = &result2[&atom_id];
             // Output should be BF16.
@@ -862,7 +862,7 @@ mod tests {
 
         // Also verify that the NanoEval reference gives the same results.
         let eval_result = NanoEval::eval(&g2, &inputs);
-        for i in 0..4u32 {
+        for i in 0..4u64 {
             let atom_id = AtomId(c2.0 + i);
             let eval_val = eval_result.get(atom_id);
             let our_val = result2[&(c2.0 + i)].to_f64();
