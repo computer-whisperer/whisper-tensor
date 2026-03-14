@@ -2706,18 +2706,8 @@ impl LowerCtx {
             return;
         }
 
-        // Only handle 1D indices (the embedding lookup case).
-        let indices_rank = match indices_info.rank_if_known() {
-            Some(r) => r,
-            None => {
-                self.lower_as_boundary_named(g, all_infos, "Gather");
-                return;
-            }
-        };
-        if indices_rank != 1 {
-            self.lower_as_boundary_named(g, all_infos, "Gather");
-            return;
-        }
+        // Indices can be any rank — we treat them as a flat list of index values.
+        // The output shape is indices_shape + data_shape[1:] for axis=0.
 
         // data shape must be fully known (it's an embedding table).
         let data_known: Vec<u64> = data_map
