@@ -141,7 +141,7 @@ fn declare_math_funcs(module: &mut JITModule) -> Result<MathFuncs, String> {
 
 /// A compiled NanoGraph ready for execution.
 pub struct CompiledPipeline {
-    _module: JITModule,
+    _modules: Vec<JITModule>,
     /// One native function pointer per kernel.
     kernel_ptrs: Vec<*const u8>,
     /// Total number of atoms (size of the values buffer).
@@ -272,7 +272,7 @@ impl CompiledPipeline {
         let func_ptr = module.get_finalized_function(func_id);
 
         Ok(CompiledPipeline {
-            _module: module,
+            _modules: vec![module],
             kernel_ptrs: vec![func_ptr],
             num_atoms,
             literals,
@@ -381,41 +381,41 @@ impl CompiledPipeline {
             }
         }
 
-        // Set up Cranelift.
-        let mut flag_builder = settings::builder();
-        flag_builder.set("opt_level", "speed").unwrap();
-        let isa_builder = cranelift_native::builder()
-            .map_err(|e| format!("cranelift native ISA: {}", e))?;
-        let isa = isa_builder
-            .finish(settings::Flags::new(flag_builder))
-            .map_err(|e| format!("ISA finish: {}", e))?;
+        let mut modules = Vec::new();
+        let mut kernel_ptrs = Vec::new();
+        let mut table_counter: usize = 0;
 
-        let mut jit_builder =
-            JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
-
-        jit_builder.symbol("v13_expf", v13_expf as *const u8);
-        jit_builder.symbol("v13_logf", v13_logf as *const u8);
-        jit_builder.symbol("v13_tanhf", v13_tanhf as *const u8);
-        jit_builder.symbol("v13_sqrtf", v13_sqrtf as *const u8);
-        jit_builder.symbol("v13_floorf", v13_floorf as *const u8);
-        jit_builder.symbol("v13_ceilf", v13_ceilf as *const u8);
-        jit_builder.symbol("v13_fabsf", v13_fabsf as *const u8);
-        jit_builder.symbol("v13_powf", v13_powf as *const u8);
-        jit_builder.symbol("v13_fmodf", v13_fmodf as *const u8);
-        jit_builder.symbol("v13_round_bf16", v13_round_bf16 as *const u8);
-        jit_builder.symbol("v13_round_f16", v13_round_f16 as *const u8);
-
-        let mut module = JITModule::new(jit_builder);
-        let mut func_ctx = FunctionBuilderContext::new();
-        let math_funcs = declare_math_funcs(&mut module)?;
-
-        let mut kernel_func_ids = Vec::new();
-        let mut table_counter: usize = 0; // persists across kernels for unique data section names
-
-        // Compile each kernel as a separate function.
+        // Compile each kernel in its own JIT module to avoid relocation overflow.
         for (ki, kernel_group_indices) in partition.kernel_groups.iter().enumerate() {
             let mut sorted_indices = kernel_group_indices.clone();
             sorted_indices.sort();
+
+            let mut flag_builder = settings::builder();
+            flag_builder.set("opt_level", "speed").unwrap();
+            let isa_builder = cranelift_native::builder()
+                .map_err(|e| format!("cranelift native ISA: {}", e))?;
+            let isa = isa_builder
+                .finish(settings::Flags::new(flag_builder))
+                .map_err(|e| format!("ISA finish: {}", e))?;
+
+            let mut jit_builder =
+                JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+
+            jit_builder.symbol("v13_expf", v13_expf as *const u8);
+            jit_builder.symbol("v13_logf", v13_logf as *const u8);
+            jit_builder.symbol("v13_tanhf", v13_tanhf as *const u8);
+            jit_builder.symbol("v13_sqrtf", v13_sqrtf as *const u8);
+            jit_builder.symbol("v13_floorf", v13_floorf as *const u8);
+            jit_builder.symbol("v13_ceilf", v13_ceilf as *const u8);
+            jit_builder.symbol("v13_fabsf", v13_fabsf as *const u8);
+            jit_builder.symbol("v13_powf", v13_powf as *const u8);
+            jit_builder.symbol("v13_fmodf", v13_fmodf as *const u8);
+            jit_builder.symbol("v13_round_bf16", v13_round_bf16 as *const u8);
+            jit_builder.symbol("v13_round_f16", v13_round_f16 as *const u8);
+
+            let mut module = JITModule::new(jit_builder);
+            let mut func_ctx = FunctionBuilderContext::new();
+            let math_funcs = declare_math_funcs(&mut module)?;
 
             let mut ctx = module.make_context();
             ctx.func.signature.params.push(AbiParam::new(types::I64));
@@ -457,20 +457,17 @@ impl CompiledPipeline {
                 .define_function(func_id, &mut ctx)
                 .map_err(|e| format!("define kernel {}: {}", ki, e))?;
 
-            kernel_func_ids.push(func_id);
+            module
+                .finalize_definitions()
+                .map_err(|e| format!("finalize kernel {}: {}", ki, e))?;
+
+            let func_ptr = module.get_finalized_function(func_id);
+            kernel_ptrs.push(func_ptr);
+            modules.push(module);
         }
 
-        module
-            .finalize_definitions()
-            .map_err(|e| format!("finalize: {}", e))?;
-
-        let kernel_ptrs: Vec<*const u8> = kernel_func_ids
-            .iter()
-            .map(|fid| module.get_finalized_function(*fid))
-            .collect();
-
         Ok(CompiledPipeline {
-            _module: module,
+            _modules: modules,
             kernel_ptrs,
             num_atoms,
             literals,
