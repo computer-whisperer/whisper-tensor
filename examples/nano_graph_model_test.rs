@@ -177,7 +177,7 @@ fn main() {
     println!("  num_atoms = {}", num_atoms);
     println!("  Required buffer = {:.1} GB", buffer_gb);
 
-    let max_buffer_gb = 240.0; // 128GB RAM + 128GB swap available
+    let max_buffer_gb = 48.0; // Skip NumericScalar interpreter for large graphs (use JIT path instead)
     let nano_feasible = buffer_gb <= max_buffer_gb;
 
     if !nano_feasible {
@@ -351,32 +351,10 @@ fn main() {
         println!("\n=== Step 6: JIT Codegen Execution ===");
         println!("  f32 buffer: {:.1} GB ({} atoms × 4 bytes)", f32_buffer_gb, num_atoms);
 
-        if f32_buffer_gb > 240.0 {
-            println!("  SKIPPING: f32 buffer too large");
+        if f32_buffer_gb > 120.0 {
+            println!("  SKIPPING: f32 buffer too large ({:.1} GB)", f32_buffer_gb);
         } else {
             use whisper_tensor::compiler::attempts::v13_claude::nano_codegen::CompiledPipeline;
-
-            // Build f32 overrides from numeric_overrides
-            let mut overrides_f32: HashMap<u64, f32> = HashMap::new();
-            for (&atom_idx, scalar) in &result.numeric_overrides {
-                overrides_f32.insert(atom_idx, scalar.to_f64() as f32);
-            }
-
-            // Add user input values
-            let mut backend = whisper_tensor::backends::eval_backend::EvalBackend::NDArray;
-            for (name, (_dtype, _shape_dims)) in &input_info {
-                let Some(id) = tensors_by_name.get(name) else { continue };
-                let Some(tam) = result.tensor_map.get(id) else { continue };
-                let tensor = &milli_inputs[id];
-                let f32_tensor = tensor.cast(DType::F32, &mut backend).unwrap();
-                let flat = f32_tensor.flatten().unwrap();
-                let nd = flat.to_ndarray().unwrap();
-                let v: Vec<f32> = nd.try_into().unwrap();
-                for (i, &val) in v.iter().enumerate() {
-                    overrides_f32.insert(tam.base_id.0 + i as u64, val);
-                }
-            }
-            println!("  Total f32 overrides: {}", overrides_f32.len());
 
             // Compile per-kernel
             println!("  Compiling {} kernels...", partition.num_kernels);
@@ -386,10 +364,39 @@ fn main() {
                     let compile_elapsed = t_compile.elapsed();
                     println!("  Compiled in {:.3}s", compile_elapsed.as_secs_f64());
 
+                    // Allocate buffer and fill directly (no HashMap intermediary)
+                    println!("  Allocating {:.1} GB values buffer...", f32_buffer_gb);
+                    let t_alloc = Instant::now();
+                    let mut values = vec![0.0f32; num_atoms as usize];
+                    println!("  Allocated in {:.3}s", t_alloc.elapsed().as_secs_f64());
+
+                    // Fill literals directly into buffer
+                    pipeline.fill_literals(&mut values);
+
+                    // Fill numeric_overrides directly into buffer
+                    for (&atom_idx, scalar) in &result.numeric_overrides {
+                        values[atom_idx as usize] = scalar.to_f64() as f32;
+                    }
+
+                    // Fill user input values directly into buffer
+                    let mut backend = whisper_tensor::backends::eval_backend::EvalBackend::NDArray;
+                    for (name, (_dtype, _shape_dims)) in &input_info {
+                        let Some(id) = tensors_by_name.get(name) else { continue };
+                        let Some(tam) = result.tensor_map.get(id) else { continue };
+                        let tensor = &milli_inputs[id];
+                        let f32_tensor = tensor.cast(DType::F32, &mut backend).unwrap();
+                        let flat = f32_tensor.flatten().unwrap();
+                        let nd = flat.to_ndarray().unwrap();
+                        let v: Vec<f32> = nd.try_into().unwrap();
+                        for (i, &val) in v.iter().enumerate() {
+                            values[(tam.base_id.0 + i as u64) as usize] = val;
+                        }
+                    }
+
                     // Execute
                     println!("  Executing...");
                     let t_exec = Instant::now();
-                    let jit_values = pipeline.execute_full(&overrides_f32);
+                    pipeline.execute_on_buffer(&mut values);
                     let exec_elapsed = t_exec.elapsed();
                     println!("  Executed in {:.3}s", exec_elapsed.as_secs_f64());
 
@@ -421,8 +428,8 @@ fn main() {
                         let mut local_max_abs = 0.0f64;
                         for (i, &milli_val) in milli_vals.iter().enumerate() {
                             let atom_idx = (tam.base_id.0 + i as u64) as usize;
-                            if atom_idx >= jit_values.len() { break; }
-                            let jit_val = jit_values[atom_idx];
+                            if atom_idx >= values.len() { break; }
+                            let jit_val = values[atom_idx];
                             let abs_err = (milli_val - jit_val).abs() as f64;
                             local_max_abs = local_max_abs.max(abs_err);
                             let rel_err = if milli_val.abs() > 1e-8 {

@@ -338,6 +338,26 @@ impl CompiledPipeline {
         values
     }
 
+    /// Execute kernels on a pre-filled buffer. The caller is responsible for
+    /// allocating the buffer (`vec![0.0f32; pipeline.num_atoms()]`) and filling
+    /// in literal/input values before calling. This avoids intermediate HashMaps.
+    pub fn execute_on_buffer(&self, values: &mut [f32]) {
+        assert!(values.len() >= self.num_atoms);
+        let values_ptr = values.as_mut_ptr();
+        for &func_ptr in &self.kernel_ptrs {
+            let func: unsafe extern "C" fn(*mut f32) =
+                unsafe { std::mem::transmute(func_ptr) };
+            unsafe { func(values_ptr) };
+        }
+    }
+
+    /// Pre-fill literal values into a buffer.
+    pub fn fill_literals(&self, values: &mut [f32]) {
+        for &(idx, val) in &self.literals {
+            values[idx as usize] = val;
+        }
+    }
+
     /// Compile a NanoGraph with partitioned kernels.
     ///
     /// Each kernel is a set of group indices compiled into its own native function.
@@ -390,6 +410,7 @@ impl CompiledPipeline {
         let math_funcs = declare_math_funcs(&mut module)?;
 
         let mut kernel_func_ids = Vec::new();
+        let mut table_counter: usize = 0; // persists across kernels for unique data section names
 
         // Compile each kernel as a separate function.
         for (ki, kernel_group_indices) in partition.kernel_groups.iter().enumerate() {
@@ -413,7 +434,6 @@ impl CompiledPipeline {
 
                 let values_ptr = builder.block_params(entry)[0];
                 let mut var_counter = VarCounter::new();
-                let mut table_counter: usize = 0;
 
                 for &gi in &sorted_indices {
                     let group = &groups[gi];
