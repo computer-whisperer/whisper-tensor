@@ -20,5 +20,6 @@
 pub mod cost;
 pub mod evaluate;
 pub mod partition;
+pub mod creative3;
 pub mod simple_dag;
 pub mod test_graphs;
