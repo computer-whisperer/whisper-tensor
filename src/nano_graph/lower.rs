@@ -495,7 +495,8 @@ impl LowerCtx {
                 }
             })
             .collect();
-        let p_strides = TensorAtomMap::compute_strides(&p_known_sizes);
+        // Use the producer's actual strides (may be non-row-major after Transpose).
+        let p_strides = &producer.known_strides;
 
         // Build mapping from consumer known-dim index to producer known-dim
         // index using right-aligned broadcasting.
@@ -586,6 +587,62 @@ impl LowerCtx {
             }
 
             ids.push(producer.base_id.offset(flat_p));
+        }
+
+        // Try to compress the Explicit table into a simpler InputRef pattern.
+        Self::compress_explicit(ids)
+    }
+
+    /// Given an Explicit atom ID list, detect if it's actually a simpler pattern.
+    fn compress_explicit(ids: Vec<AtomId>) -> InputRef {
+        if ids.is_empty() {
+            return InputRef::Explicit(ids);
+        }
+        if ids.len() == 1 {
+            return InputRef::Broadcast(ids[0]);
+        }
+
+        // Check for Broadcast: all same.
+        if ids.iter().all(|id| id.0 == ids[0].0) {
+            return InputRef::Broadcast(ids[0]);
+        }
+
+        // Check for Affine: constant stride.
+        let stride = ids[1].0 as i64 - ids[0].0 as i64;
+        let is_affine = ids.windows(2).all(|w| {
+            (w[1].0 as i64 - w[0].0 as i64) == stride
+        });
+        if is_affine {
+            return InputRef::Affine {
+                base: ids[0],
+                stride: stride as i32,
+            };
+        }
+
+        // Check for StridedBroadcast: blocks of identical values with regular stride.
+        // Find repeat length (how many consecutive ids are the same).
+        let mut repeat = 1u64;
+        while (repeat as usize) < ids.len() && ids[repeat as usize].0 == ids[0].0 {
+            repeat += 1;
+        }
+        if repeat > 1 && ids.len() as u64 % repeat == 0 {
+            let num_blocks = ids.len() as u64 / repeat;
+            if num_blocks > 1 {
+                let block_stride = ids[repeat as usize].0 as i64 - ids[0].0 as i64;
+                let is_strided_broadcast = (0..num_blocks).all(|b| {
+                    let expected_base = ids[0].0 as i64 + block_stride * b as i64;
+                    (0..repeat).all(|r| {
+                        ids[(b * repeat + r) as usize].0 as i64 == expected_base
+                    })
+                });
+                if is_strided_broadcast {
+                    return InputRef::StridedBroadcast {
+                        base: ids[0],
+                        stride: block_stride,
+                        repeat,
+                    };
+                }
+            }
         }
 
         InputRef::Explicit(ids)
@@ -964,6 +1021,9 @@ impl LowerCtx {
     }
 
     /// Cast / CastLike / other shape-preserving identity ops.
+    ///
+    /// If input and output dtypes match, this is a zero-cost view (no atoms created).
+    /// Otherwise, emits an Identity group that performs the dtype cast.
     fn lower_identity_passthrough<T: Node>(
         &mut self,
         op: &T,
@@ -981,12 +1041,21 @@ impl LowerCtx {
             return;
         };
 
-        let dt = out_info.dtype();
+        let in_dt = all_infos.get(&in_id).map(|i| i.dtype());
+        let out_dt = out_info.dtype();
+
+        // If dtypes match, this is a no-op — just re-register the tensor.
+        if in_dt == Some(out_dt) {
+            self.tensor_map.insert(out_id, in_map);
+            return;
+        }
+
+        // Dtype differs — emit an Identity group for the cast.
         let base_id = self.nano.push_group(
             in_map.count,
             ScalarOp::Identity {
-                compute_dtype: dt,
-                output_dtype: dt,
+                compute_dtype: out_dt,
+                output_dtype: out_dt,
             },
             in_map.sym_dims.clone(),
             vec![],
@@ -1462,18 +1531,54 @@ impl LowerCtx {
             input_maps.push(inp_map);
         }
 
-        // Cumulative offsets along concat dim.
+        // Zero-cost concat: check if all inputs have row-major strides and
+        // are laid out contiguously along the concat axis in atom space.
+        // If so, the output is just a wider view of the same atoms.
+        let ref_strides = &input_maps[0].known_strides;
+        let concat_stride = ref_strides[concat_known_idx];
+        let inp0_known: Vec<u64> = input_maps[0]
+            .layout
+            .iter()
+            .filter_map(|d| if let DimKind::Known(s) = d { Some(*s) } else { None })
+            .collect();
+        let inp0_rowmajor = TensorAtomMap::compute_strides(&inp0_known);
+
+        if *ref_strides == inp0_rowmajor {
+            // Inputs have row-major strides. Check contiguity.
+            let mut contiguous = true;
+            let mut expected_base = input_maps[0].base_id;
+            for (i, inp_map) in input_maps.iter().enumerate() {
+                if inp_map.known_strides != *ref_strides || inp_map.base_id != expected_base {
+                    contiguous = false;
+                    break;
+                }
+                expected_base = AtomId(expected_base.0 + concat_dim_sizes[i] * concat_stride);
+            }
+            if contiguous {
+                self.tensor_map.insert(
+                    out_id,
+                    TensorAtomMap {
+                        base_id: input_maps[0].base_id,
+                        count: out_count,
+                        layout: out_layout,
+                        known_strides: TensorAtomMap::compute_strides(&out_known_dims),
+                        sym_dims: out_sym_dims,
+                    },
+                );
+                return;
+            }
+        }
+
+        // Fallback: build Explicit InputRef for non-contiguous concat.
         let mut cum_offsets = vec![0u64];
         for &s in &concat_dim_sizes {
             cum_offsets.push(cum_offsets.last().unwrap() + s);
         }
 
-        // Build Explicit InputRef: map each output atom to its source.
         let out_strides = TensorAtomMap::compute_strides(&out_known_dims);
         let mut ids = Vec::with_capacity(out_count as usize);
 
         for flat in 0..out_count as u64 {
-            // Decompose to known-dim indices.
             let mut indices = vec![0u64; out_known_dims.len()];
             let mut rem = flat;
             for (i, &stride) in out_strides.iter().enumerate() {
@@ -1483,21 +1588,17 @@ impl LowerCtx {
                 }
             }
 
-            // Find which input the concat-axis index falls into.
             let concat_idx = indices[concat_known_idx];
             let input_idx = match cum_offsets.iter().position(|&off| off > concat_idx) {
                 Some(pos) => pos - 1,
                 None => {
-                    // Shouldn't happen — boundary as fallback.
                     self.lower_as_boundary_named(concat, all_infos, "Concat");
                     return;
                 }
             };
 
-            // Adjust concat index to be relative to this input.
             indices[concat_known_idx] = concat_idx - cum_offsets[input_idx];
 
-            // Recompose to input flat index.
             let inp_map = &input_maps[input_idx];
             let mut inp_flat = 0u64;
             for (i, &stride) in inp_map.known_strides.iter().enumerate() {
@@ -1621,12 +1722,31 @@ impl LowerCtx {
             return;
         }
 
-        // Build Explicit InputRef: map each output atom to corresponding input atom.
+        // Zero-cost split: when the split axis is the outermost known dim
+        // and the input has row-major strides, the output atoms form a
+        // contiguous sub-range of the input atoms. Just register with an
+        // offset base_id — no new AtomGroups needed.
+        let in_rowmajor = TensorAtomMap::compute_strides(&in_known);
+        if split_known_idx == 0 && in_map.known_strides == in_rowmajor {
+            let base_offset = offset_along_axis * in_map.known_strides[split_known_idx];
+            self.tensor_map.insert(
+                out_id,
+                TensorAtomMap {
+                    base_id: in_map.base_id.offset(base_offset),
+                    count: out_count,
+                    layout: out_layout,
+                    known_strides: TensorAtomMap::compute_strides(&out_known_dims),
+                    sym_dims: out_sym_dims,
+                },
+            );
+            return;
+        }
+
+        // Fallback: build Explicit InputRef for non-outermost-axis splits.
         let out_strides = TensorAtomMap::compute_strides(&out_known_dims);
         let mut ids = Vec::with_capacity(out_count as usize);
 
         for flat in 0..out_count as u64 {
-            // Decompose to known-dim indices.
             let mut indices = vec![0u64; out_known_dims.len()];
             let mut rem = flat;
             for (i, &stride) in out_strides.iter().enumerate() {
@@ -1636,10 +1756,8 @@ impl LowerCtx {
                 }
             }
 
-            // Shift the split axis index by the offset.
             indices[split_known_idx] += offset_along_axis;
 
-            // Recompose to input flat index.
             let mut inp_flat = 0u64;
             for (i, &stride) in in_map.known_strides.iter().enumerate() {
                 inp_flat += indices[i] * stride;
@@ -1841,12 +1959,45 @@ impl LowerCtx {
             return;
         }
 
-        // Build Explicit InputRef.
+        // Zero-cost slice: if the output atoms are contiguous in the input's
+        // atom space, we can reuse the input's atoms with an offset base_id.
+        //
+        // Contiguity requires that the output row-major strides match the
+        // input strides scaled by steps. This fails when inner dims are
+        // sliced (shrunk) because outer strides then differ.
+        let out_rowmajor = TensorAtomMap::compute_strides(&out_known_dims);
+        let contiguous = (0..in_known.len()).all(|k| {
+            let expected = (in_map.known_strides[k] as i64 * known_steps[k]) as u64;
+            out_rowmajor[k] == expected
+        });
+
+        if contiguous {
+            // All steps must be positive for simple offset-based addressing.
+            let all_positive_steps = known_steps.iter().all(|&s| s > 0);
+            if all_positive_steps {
+                let mut base_offset: u64 = 0;
+                for ki in 0..in_known.len() {
+                    base_offset += known_starts[ki] as u64 * in_map.known_strides[ki];
+                }
+                self.tensor_map.insert(
+                    out_id,
+                    TensorAtomMap {
+                        base_id: in_map.base_id.offset(base_offset),
+                        count: out_count,
+                        layout: out_layout,
+                        known_strides: TensorAtomMap::compute_strides(&out_known_dims),
+                        sym_dims: out_sym_dims,
+                    },
+                );
+                return;
+            }
+        }
+
+        // Fallback: build Explicit InputRef for non-contiguous slices.
         let out_strides = TensorAtomMap::compute_strides(&out_known_dims);
         let mut ids = Vec::with_capacity(out_count as usize);
 
         for flat in 0..out_count as u64 {
-            // Decompose to output known-dim indices.
             let mut out_indices = vec![0u64; out_known_dims.len()];
             let mut rem = flat;
             for (i, &stride) in out_strides.iter().enumerate() {
@@ -1856,7 +2007,6 @@ impl LowerCtx {
                 }
             }
 
-            // Map to input known-dim indices.
             let mut in_flat = 0u64;
             for (ki, &stride) in in_map.known_strides.iter().enumerate() {
                 let in_idx = (known_starts[ki] + known_steps[ki] * out_indices[ki] as i64) as u64;
@@ -3435,6 +3585,316 @@ mod tests {
                 )
                 .unwrap(),
                 NumericTensor::from_vec_shape(vec![1.0f32, 3.0], vec![2]).unwrap(),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_split_zero_cost_axis0() {
+        // Split [4, 3] along axis 0 into [2, 3] and [2, 3].
+        // Both outputs should be zero-cost views (no Identity groups).
+        check_integrity(
+            |graph, rng| {
+                let data = graph.add_input(rng);
+                let out0 = crate::milli_graph::ops::Split::push_new(
+                    graph, data, None, 0, Some(2), 0, rng,
+                );
+                let out1 = crate::milli_graph::ops::Split::push_new(
+                    graph, data, None, 0, Some(2), 1, rng,
+                );
+                (vec![data], vec![out0, out1])
+            },
+            vec![NumericTensor::from_vec_shape(
+                vec![1.0f32, 2., 3., 4., 5., 6., 7., 8., 9., 10., 11., 12.],
+                vec![4, 3],
+            )
+            .unwrap()],
+        );
+
+        // Verify no Identity groups were created.
+        let mut rng = rand::rng();
+        let (mut milli, _) = MilliOpGraph::new(std::iter::empty(), &mut rng);
+        let data = milli.add_input(&mut rng);
+        let _out0 = crate::milli_graph::ops::Split::push_new(
+            &mut milli, data, None, 0, Some(2), 0, &mut rng,
+        );
+        let _out1 = crate::milli_graph::ops::Split::push_new(
+            &mut milli, data, None, 0, Some(2), 1, &mut rng,
+        );
+        let tensor: NumericTensor<DynRank> = NumericTensor::from_vec_shape(
+            vec![1.0f32; 12],
+            vec![4, 3],
+        )
+        .unwrap();
+        let mut info = std::collections::HashMap::new();
+        info.insert(data, TensorInfo::from(tensor));
+        let result = super::lower_with_info(&milli, &info).unwrap();
+        let identity_count = result.graph.groups().iter().filter(|g| {
+            matches!(&g.op, crate::nano_graph::ops::ScalarOp::Identity { .. })
+        }).count();
+        assert_eq!(identity_count, 0, "Split should be zero-cost (no Identity groups), got {}", identity_count);
+    }
+
+    #[test]
+    fn test_split_zero_cost_axis1() {
+        // Split [2, 6] along axis 1 into [2, 3] and [2, 3].
+        check_integrity(
+            |graph, rng| {
+                let data = graph.add_input(rng);
+                let out0 = crate::milli_graph::ops::Split::push_new(
+                    graph, data, None, 1, Some(2), 0, rng,
+                );
+                let out1 = crate::milli_graph::ops::Split::push_new(
+                    graph, data, None, 1, Some(2), 1, rng,
+                );
+                (vec![data], vec![out0, out1])
+            },
+            vec![NumericTensor::from_vec_shape(
+                (1..=12).map(|v| v as f32).collect(),
+                vec![2, 6],
+            )
+            .unwrap()],
+        );
+    }
+
+    #[test]
+    fn test_split_then_add() {
+        // Split [4] into [2] and [2], then add the two halves.
+        // Verifies zero-cost split outputs are correctly addressed by downstream ops.
+        check_integrity(
+            |graph, rng| {
+                let data = graph.add_input(rng);
+                let out0 = crate::milli_graph::ops::Split::push_new(
+                    graph, data, None, 0, Some(2), 0, rng,
+                );
+                let out1 = crate::milli_graph::ops::Split::push_new(
+                    graph, data, None, 0, Some(2), 1, rng,
+                );
+                let sum = crate::milli_graph::ops::SimpleBinary::add(graph, out0, out1, rng);
+                (vec![data], vec![sum])
+            },
+            vec![NumericTensor::from_vec_shape(vec![1.0f32, 2., 3., 4.], vec![4]).unwrap()],
+        );
+    }
+
+    #[test]
+    fn test_slice_zero_cost() {
+        // Slice [6] with start=1, end=4, step=1 → [3]
+        use crate::backends::ndarray_backend::NDArrayNumericTensor;
+        check_integrity(
+            |graph, rng| {
+                let data = graph.add_input(rng);
+                let starts = crate::milli_graph::ops::Constant::push_new(
+                    graph,
+                    NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![1i64], &vec![1]).unwrap(),
+                    rng,
+                );
+                let ends = crate::milli_graph::ops::Constant::push_new(
+                    graph,
+                    NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![4i64], &vec![1]).unwrap(),
+                    rng,
+                );
+                let out = crate::milli_graph::ops::Slice::push_new(
+                    graph, data, starts, ends, None, None, rng,
+                );
+                (vec![data], vec![out])
+            },
+            vec![NumericTensor::from_vec_shape(
+                vec![10.0f32, 20., 30., 40., 50., 60.],
+                vec![6],
+            )
+            .unwrap()],
+        );
+    }
+
+    #[test]
+    fn test_slice_zero_cost_2d() {
+        // Slice [3, 4] along axis 0 with start=1, end=3 → [2, 4]
+        use crate::backends::ndarray_backend::NDArrayNumericTensor;
+        check_integrity(
+            |graph, rng| {
+                let data = graph.add_input(rng);
+                let starts = crate::milli_graph::ops::Constant::push_new(
+                    graph,
+                    NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![1i64], &vec![1]).unwrap(),
+                    rng,
+                );
+                let ends = crate::milli_graph::ops::Constant::push_new(
+                    graph,
+                    NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![3i64], &vec![1]).unwrap(),
+                    rng,
+                );
+                let axes = crate::milli_graph::ops::Constant::push_new(
+                    graph,
+                    NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
+                    rng,
+                );
+                let out = crate::milli_graph::ops::Slice::push_new(
+                    graph, data, starts, ends, None, Some(axes), rng,
+                );
+                (vec![data], vec![out])
+            },
+            vec![NumericTensor::from_vec_shape(
+                (1..=12).map(|v| v as f32).collect(),
+                vec![3, 4],
+            )
+            .unwrap()],
+        );
+    }
+
+    #[test]
+    fn test_slice_then_add() {
+        // Slice [4] two ways and add: data[0:2] + data[2:4]
+        use crate::backends::ndarray_backend::NDArrayNumericTensor;
+        check_integrity(
+            |graph, rng| {
+                let data = graph.add_input(rng);
+                let s0 = crate::milli_graph::ops::Constant::push_new(
+                    graph,
+                    NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
+                    rng,
+                );
+                let e0 = crate::milli_graph::ops::Constant::push_new(
+                    graph,
+                    NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![2i64], &vec![1]).unwrap(),
+                    rng,
+                );
+                let s1 = crate::milli_graph::ops::Constant::push_new(
+                    graph,
+                    NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![2i64], &vec![1]).unwrap(),
+                    rng,
+                );
+                let e1 = crate::milli_graph::ops::Constant::push_new(
+                    graph,
+                    NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![4i64], &vec![1]).unwrap(),
+                    rng,
+                );
+                let out0 = crate::milli_graph::ops::Slice::push_new(
+                    graph, data, s0, e0, None, None, rng,
+                );
+                let out1 = crate::milli_graph::ops::Slice::push_new(
+                    graph, data, s1, e1, None, None, rng,
+                );
+                let sum = crate::milli_graph::ops::SimpleBinary::add(graph, out0, out1, rng);
+                (vec![data], vec![sum])
+            },
+            vec![NumericTensor::from_vec_shape(vec![1.0f32, 2., 3., 4.], vec![4]).unwrap()],
+        );
+    }
+
+    #[test]
+    fn test_slice_zero_cost_inner_axis() {
+        // Slice [3, 4] along axis 1 with start=1, end=3 → [3, 2]
+        // This is an inner-axis slice that falls back to Explicit, but
+        // should still produce correct results.
+        use crate::backends::ndarray_backend::NDArrayNumericTensor;
+        check_integrity(
+            |graph, rng| {
+                let data = graph.add_input(rng);
+                let starts = crate::milli_graph::ops::Constant::push_new(
+                    graph,
+                    NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![1i64], &vec![1]).unwrap(),
+                    rng,
+                );
+                let ends = crate::milli_graph::ops::Constant::push_new(
+                    graph,
+                    NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![3i64], &vec![1]).unwrap(),
+                    rng,
+                );
+                let axes = crate::milli_graph::ops::Constant::push_new(
+                    graph,
+                    NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![1i64], &vec![1]).unwrap(),
+                    rng,
+                );
+                let out = crate::milli_graph::ops::Slice::push_new(
+                    graph, data, starts, ends, None, Some(axes), rng,
+                );
+                (vec![data], vec![out])
+            },
+            vec![NumericTensor::from_vec_shape(
+                (1..=12).map(|v| v as f32).collect(),
+                vec![3, 4],
+            )
+            .unwrap()],
+        );
+    }
+
+    #[test]
+    fn test_slice_no_identity_groups() {
+        // Verify Slice [6] start=1 end=4 creates no Identity groups (zero-cost).
+        use crate::backends::ndarray_backend::NDArrayNumericTensor;
+        let mut rng = rand::rng();
+        let (mut milli, _) = MilliOpGraph::new(std::iter::empty(), &mut rng);
+        let data = milli.add_input(&mut rng);
+        let starts = crate::milli_graph::ops::Constant::push_new(
+            &mut milli,
+            NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![1i64], &vec![1]).unwrap(),
+            &mut rng,
+        );
+        let ends = crate::milli_graph::ops::Constant::push_new(
+            &mut milli,
+            NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![4i64], &vec![1]).unwrap(),
+            &mut rng,
+        );
+        let _out = crate::milli_graph::ops::Slice::push_new(
+            &mut milli, data, starts, ends, None, None, &mut rng,
+        );
+        let tensor: NumericTensor<DynRank> =
+            NumericTensor::from_vec_shape(vec![1.0f32; 6], vec![6]).unwrap();
+        let mut info = std::collections::HashMap::new();
+        info.insert(data, TensorInfo::from(tensor));
+        let result = super::lower_with_info(&milli, &info).unwrap();
+        let identity_count = result.graph.groups().iter().filter(|g| {
+            matches!(&g.op, crate::nano_graph::ops::ScalarOp::Identity { .. })
+        }).count();
+        assert_eq!(
+            identity_count, 0,
+            "Slice on outermost axis should be zero-cost (no Identity groups), got {}",
+            identity_count
+        );
+    }
+
+    #[test]
+    fn test_concat_zero_cost_contiguous() {
+        // Split [6] into [3] and [3], then concat back.
+        // The concat should be zero-cost because the split outputs are contiguous.
+        check_integrity(
+            |graph, rng| {
+                let data = graph.add_input(rng);
+                let out0 = crate::milli_graph::ops::Split::push_new(
+                    graph, data, None, 0, Some(2), 0, rng,
+                );
+                let out1 = crate::milli_graph::ops::Split::push_new(
+                    graph, data, None, 0, Some(2), 1, rng,
+                );
+                let cat = crate::milli_graph::ops::Concat::push_new(
+                    graph, vec![out0, out1], 0, rng,
+                );
+                (vec![data], vec![cat])
+            },
+            vec![NumericTensor::from_vec_shape(
+                vec![10.0f32, 20., 30., 40., 50., 60.],
+                vec![6],
+            )
+            .unwrap()],
+        );
+    }
+
+    #[test]
+    fn test_concat_non_contiguous() {
+        // Concat two separate inputs — not contiguous, should fall back to Explicit.
+        check_integrity(
+            |graph, rng| {
+                let a = graph.add_input(rng);
+                let b = graph.add_input(rng);
+                let cat = crate::milli_graph::ops::Concat::push_new(
+                    graph, vec![a, b], 0, rng,
+                );
+                (vec![a, b], vec![cat])
+            },
+            vec![
+                NumericTensor::from_vec_shape(vec![1.0f32, 2., 3.], vec![3]).unwrap(),
+                NumericTensor::from_vec_shape(vec![4.0f32, 5., 6.], vec![3]).unwrap(),
             ],
         );
     }
