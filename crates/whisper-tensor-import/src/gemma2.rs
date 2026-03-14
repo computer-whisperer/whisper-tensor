@@ -340,15 +340,15 @@ pub fn load_gemma2(
 
         let scores = MatMul::new(None, q, transpose(k.clone()))?;
         let mut scores: Arc<dyn Tensor> = div_scalar(scores, config.query_pre_attn_scalar.sqrt())?;
-        if let Some(softcap) = config.attn_logit_softcapping {
-            if softcap > 0.0 {
-                let s = div_scalar(scores, softcap)?;
-                let s = Tanh::new(None, s);
-                let scale: Arc<dyn Tensor> =
-                    Constant::new(None, TensorData::fill(Shape::from(&[1usize][..]), softcap)?);
-                let scale = cast(scale, s.dtype());
-                scores = Mul::new(None, s, scale)?;
-            }
+        if let Some(softcap) = config.attn_logit_softcapping
+            && softcap > 0.0
+        {
+            let s = div_scalar(scores, softcap)?;
+            let s = Tanh::new(None, s);
+            let scale: Arc<dyn Tensor> =
+                Constant::new(None, TensorData::fill(Shape::from(&[1usize][..]), softcap)?);
+            let scale = cast(scale, s.dtype());
+            scores = Mul::new(None, s, scale)?;
         }
 
         let scores = Softmax::new(None, scores, Some(3));
