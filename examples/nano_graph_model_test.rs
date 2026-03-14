@@ -343,6 +343,124 @@ fn main() {
             println!("    kernel {:>3}: {:>12} atoms", i, size);
         }
     }
+
+    // ---- Step 6: JIT Codegen Execution (f32 buffer — 4 bytes/atom) ----
+    #[cfg(feature = "cranelift")]
+    {
+        let f32_buffer_gb = num_atoms as f64 * 4.0 / (1024.0 * 1024.0 * 1024.0);
+        println!("\n=== Step 6: JIT Codegen Execution ===");
+        println!("  f32 buffer: {:.1} GB ({} atoms × 4 bytes)", f32_buffer_gb, num_atoms);
+
+        if f32_buffer_gb > 240.0 {
+            println!("  SKIPPING: f32 buffer too large");
+        } else {
+            use whisper_tensor::compiler::attempts::v13_claude::nano_codegen::CompiledPipeline;
+
+            // Build f32 overrides from numeric_overrides
+            let mut overrides_f32: HashMap<u64, f32> = HashMap::new();
+            for (&atom_idx, scalar) in &result.numeric_overrides {
+                overrides_f32.insert(atom_idx, scalar.to_f64() as f32);
+            }
+
+            // Add user input values
+            let mut backend = whisper_tensor::backends::eval_backend::EvalBackend::NDArray;
+            for (name, (_dtype, _shape_dims)) in &input_info {
+                let Some(id) = tensors_by_name.get(name) else { continue };
+                let Some(tam) = result.tensor_map.get(id) else { continue };
+                let tensor = &milli_inputs[id];
+                let f32_tensor = tensor.cast(DType::F32, &mut backend).unwrap();
+                let flat = f32_tensor.flatten().unwrap();
+                let nd = flat.to_ndarray().unwrap();
+                let v: Vec<f32> = nd.try_into().unwrap();
+                for (i, &val) in v.iter().enumerate() {
+                    overrides_f32.insert(tam.base_id.0 + i as u64, val);
+                }
+            }
+            println!("  Total f32 overrides: {}", overrides_f32.len());
+
+            // Compile per-kernel
+            println!("  Compiling {} kernels...", partition.num_kernels);
+            let t_compile = Instant::now();
+            match CompiledPipeline::compile_partitioned(&result.graph, &partition) {
+                Ok(pipeline) => {
+                    let compile_elapsed = t_compile.elapsed();
+                    println!("  Compiled in {:.3}s", compile_elapsed.as_secs_f64());
+
+                    // Execute
+                    println!("  Executing...");
+                    let t_exec = Instant::now();
+                    let jit_values = pipeline.execute_full(&overrides_f32);
+                    let exec_elapsed = t_exec.elapsed();
+                    println!("  Executed in {:.3}s", exec_elapsed.as_secs_f64());
+
+                    // Compare JIT output vs milli interpreter
+                    let reverse_output_map: HashMap<GlobalId, GlobalId> = milli_graph
+                        .output_map
+                        .as_ref()
+                        .map(|m| m.iter().map(|(&int, &ext)| (ext, int)).collect())
+                        .unwrap_or_default();
+
+                    let mut total_compared = 0u64;
+                    let mut max_abs_error: f64 = 0.0;
+                    let mut max_rel_error: f64 = 0.0;
+
+                    for (ext_id, milli_tensor) in &milli_outputs {
+                        let internal_id = reverse_output_map.get(ext_id).unwrap_or(ext_id);
+                        let tam = result.tensor_map.get(internal_id)
+                            .or_else(|| result.tensor_map.get(ext_id));
+                        let Some(tam) = tam else {
+                            println!("    Output {:?}: not in tensor_map", ext_id);
+                            continue;
+                        };
+
+                        let f32_tensor = milli_tensor.cast(DType::F32, &mut backend).unwrap();
+                        let flat = f32_tensor.flatten().unwrap();
+                        let nd = flat.to_ndarray().unwrap();
+                        let milli_vals: Vec<f32> = nd.try_into().unwrap();
+
+                        let mut local_max_abs = 0.0f64;
+                        for (i, &milli_val) in milli_vals.iter().enumerate() {
+                            let atom_idx = (tam.base_id.0 + i as u64) as usize;
+                            if atom_idx >= jit_values.len() { break; }
+                            let jit_val = jit_values[atom_idx];
+                            let abs_err = (milli_val - jit_val).abs() as f64;
+                            local_max_abs = local_max_abs.max(abs_err);
+                            let rel_err = if milli_val.abs() > 1e-8 {
+                                abs_err / milli_val.abs() as f64
+                            } else { 0.0 };
+                            max_rel_error = max_rel_error.max(rel_err);
+                            total_compared += 1;
+                        }
+                        max_abs_error = max_abs_error.max(local_max_abs);
+                        println!("    Output {:?}: {} elems, max_abs_err={:.6e}",
+                            ext_id, milli_vals.len(), local_max_abs);
+                    }
+
+                    println!("  Elements compared: {}", total_compared);
+                    println!("  Max absolute error: {:.6e}", max_abs_error);
+                    println!("  Max relative error: {:.6e}", max_rel_error);
+
+                    if total_compared > 0 && max_abs_error < 1e-2 {
+                        println!("  RESULT: PASS");
+                    } else if total_compared > 0 {
+                        println!("  RESULT: MISMATCH (max abs error = {:.6e})", max_abs_error);
+                    } else {
+                        println!("  RESULT: NO ELEMENTS COMPARED");
+                    }
+
+                    println!("\n=== JIT Timing Summary ===");
+                    println!("  Milli interpreter: {:.3}s", milli_elapsed.as_secs_f64());
+                    println!("  NanoGraph lowering: {:.3}s", lower_elapsed.as_secs_f64());
+                    println!("  Partitioning:      {:.3}s", part_elapsed.as_secs_f64());
+                    println!("  JIT compilation:   {:.3}s", compile_elapsed.as_secs_f64());
+                    println!("  JIT execution:     {:.3}s", exec_elapsed.as_secs_f64());
+                }
+                Err(e) => {
+                    println!("  Compilation FAILED: {}", e);
+                }
+            }
+        }
+    }
 }
 
 fn compare_tensor_with_nano(
