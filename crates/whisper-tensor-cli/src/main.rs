@@ -469,7 +469,7 @@ fn cmd_tts(
             std::process::exit(1);
         });
 
-    // Tokenize and build SuperGraph inputs based on model type
+    // Build SuperGraph inputs based on model type.
     let mut data = SuperGraphData::new();
     for (i, model_weights_link) in interface.model_weights.iter().enumerate() {
         data.tensor_maps.insert(
@@ -477,35 +477,19 @@ fn cmd_tts(
             output.models[i].model.get_tensor_store(),
         );
     }
+    data.strings.insert(interface.text_input_link, text.clone());
 
     match &interface.input_config {
         TTSInputConfig::Kokoro {
             style_link,
             speed_link,
-            tokenizer,
         } => {
-            let phonemes = text_to_kokoro_phonemes(&text);
-            let vocab = load_tts_vocab(tokenizer);
-            let token_ids: Vec<i64> = {
-                let mut ids = vec![0i64]; // BOS ($)
-                for ch in phonemes.chars() {
-                    if let Some(&id) = vocab.get(&ch) {
-                        ids.push(id as i64);
-                    }
-                }
-                ids.push(0i64); // EOS ($)
-                ids
-            };
-            eprintln!("Phonemes: {phonemes}");
-            let num_tokens = token_ids.len();
-            eprintln!("Tokens: {num_tokens}");
-
-            let input_ids_tensor =
-                NumericTensor::<DynRank>::from_vec_shape(token_ids, vec![1, num_tokens]).unwrap();
-
+            // Kokoro voice style bins are indexed by token count; use a simple
+            // text-length approximation here and let the graph handle tokenization.
+            let approx_tokens = text.chars().count().saturating_add(2);
             let voice_bin = model_dir.join("voices").join(format!("{voice_name}.bin"));
             let style_tensor = if voice_bin.exists() {
-                load_voice_style_bin(&voice_bin, num_tokens)
+                load_voice_style_bin(&voice_bin, approx_tokens)
             } else {
                 eprintln!("No voice file found: {}", voice_bin.display());
                 list_available_voices(&model_dir);
@@ -514,46 +498,14 @@ fn cmd_tts(
             let speed_tensor =
                 NumericTensor::<DynRank>::from_vec_shape(vec![speed], vec![1]).unwrap();
 
-            data.tensors
-                .insert(interface.text_ids_link, input_ids_tensor);
             data.tensors.insert(*style_link, style_tensor);
             data.tensors.insert(*speed_link, speed_tensor);
         }
         TTSInputConfig::Piper {
-            input_lengths_link,
             scales_link,
             speaker_id_link,
-            phoneme_id_map_json,
-            espeak_voice,
             ..
         } => {
-            let sentences = espeak_rs::text_to_phonemes(&text, espeak_voice, None, true, false)
-                .expect("espeak-ng phonemization failed");
-            let ipa = sentences.join(" ");
-            eprintln!("Phonemes: {ipa}");
-
-            let phoneme_id_map = parse_piper_phoneme_id_map(phoneme_id_map_json);
-
-            let mut token_ids: Vec<i64> = Vec::new();
-            token_ids.push(1); // BOS (^)
-            token_ids.push(0); // PAD (_)
-            for ch in ipa.chars() {
-                if let Some(ids) = phoneme_id_map.get(&ch) {
-                    for &id in ids {
-                        token_ids.push(id);
-                    }
-                }
-                token_ids.push(0); // PAD
-            }
-            token_ids.push(2); // EOS ($)
-
-            let num_tokens = token_ids.len();
-            eprintln!("Tokens: {num_tokens}");
-
-            let input_tensor =
-                NumericTensor::<DynRank>::from_vec_shape(token_ids, vec![1, num_tokens]).unwrap();
-            let input_lengths_tensor =
-                NumericTensor::<DynRank>::from_vec_shape(vec![num_tokens as i64], vec![1]).unwrap();
             let length_scale = 1.0 / speed;
             let scales_tensor = NumericTensor::<DynRank>::from_vec_shape(
                 vec![0.667f32, length_scale, 0.8],
@@ -561,9 +513,6 @@ fn cmd_tts(
             )
             .unwrap();
 
-            data.tensors.insert(interface.text_ids_link, input_tensor);
-            data.tensors
-                .insert(*input_lengths_link, input_lengths_tensor);
             data.tensors.insert(*scales_link, scales_tensor);
             if let Some(sid_link) = speaker_id_link {
                 data.tensors.insert(
@@ -578,7 +527,6 @@ fn cmd_tts(
             time_steps_link,
             iteration_count_link,
             nfe_steps,
-            vocab,
         } => {
             // Load reference audio
             let ref_audio_path = ref_audio.unwrap_or_else(|| {
@@ -593,7 +541,6 @@ fn cmd_tts(
                 ref_audio_len as f64 / 24000.0
             );
 
-            // Tokenize text using F5 character-level vocab
             let ref_text_str = ref_text.as_deref().unwrap_or("");
             let gen_text = &text;
             let combined_text = if ref_text_str.is_empty() {
@@ -601,15 +548,8 @@ fn cmd_tts(
             } else {
                 format!("{ref_text_str} {gen_text}")
             };
-            let vocab_map = build_f5_vocab(vocab);
-            let mut token_ids: Vec<i32> = Vec::new();
-            for ch in combined_text.chars() {
-                if let Some(&id) = vocab_map.get(&ch) {
-                    token_ids.push(id);
-                }
-            }
-            let num_tokens = token_ids.len();
-            eprintln!("Text tokens: {num_tokens}");
+            data.strings
+                .insert(interface.text_input_link, combined_text.clone());
 
             // Compute max_duration
             let hop_length: usize = 256;
@@ -634,9 +574,6 @@ fn cmd_tts(
                 NumericTensor::<DynRank>::from_vec_shape(ref_samples, vec![1, 1, ref_audio_len])
                     .unwrap();
 
-            let text_ids_tensor =
-                NumericTensor::<DynRank>::from_vec_shape(token_ids, vec![1, num_tokens]).unwrap();
-
             let max_duration_tensor =
                 NumericTensor::<DynRank>::from_vec_shape(vec![max_duration as i64], vec![])
                     .unwrap();
@@ -651,8 +588,6 @@ fn cmd_tts(
             let iteration_count_tensor =
                 NumericTensor::<DynRank>::from_vec_shape(vec![iterations as i64], vec![]).unwrap();
 
-            data.tensors
-                .insert(interface.text_ids_link, text_ids_tensor);
             data.tensors.insert(*ref_audio_link, ref_audio_tensor);
             data.tensors.insert(*max_duration_link, max_duration_tensor);
             data.tensors.insert(*time_steps_link, time_steps_tensor);
@@ -715,51 +650,6 @@ fn audio_tensor_to_samples(audio: &NumericTensor<DynRank>, backend: &mut EvalBac
         .expect("cast to f32 failed");
     let audio_ndarray = audio_f32.to_ndarray().expect("to_ndarray failed");
     audio_ndarray.flatten().try_into().expect("flatten failed")
-}
-
-/// Parse Piper's phoneme_id_map JSON into a char → Vec<i64> lookup.
-fn parse_piper_phoneme_id_map(json: &str) -> HashMap<char, Vec<i64>> {
-    let value: serde_json::Value = serde_json::from_str(json).expect("Invalid phoneme_id_map JSON");
-    let obj = value.as_object().expect("phoneme_id_map is not an object");
-    let mut map = HashMap::new();
-    for (key, val) in obj {
-        if let Some(ch) = key.chars().next() {
-            if key.chars().count() == 1 {
-                let ids: Vec<i64> = val
-                    .as_array()
-                    .expect("phoneme IDs not an array")
-                    .iter()
-                    .map(|v| v.as_i64().expect("phoneme ID not i64"))
-                    .collect();
-                map.insert(ch, ids);
-            }
-        }
-    }
-    map
-}
-
-/// Load phoneme vocab from tokenizer.json (Kokoro) or config.json (Kitten TTS).
-///
-/// Load Kokoro tokenizer vocab (character → token ID) from tokenizer.json.
-fn load_tts_vocab(info: &whisper_tensor::metadata::TokenizerInfo) -> HashMap<char, u32> {
-    let path = match info {
-        whisper_tensor::metadata::TokenizerInfo::HFTokenizerLocal(p) => p.clone(),
-        _ => panic!("Expected HFTokenizerLocal for TTS tokenizer"),
-    };
-    let json = std::fs::read_to_string(&path).expect("Failed to read tokenizer file");
-    let value: serde_json::Value = serde_json::from_str(&json).expect("Invalid JSON");
-
-    let vocab = value["model"]["vocab"]
-        .as_object()
-        .expect("Cannot find model.vocab in tokenizer file");
-    let mut map = HashMap::new();
-    for (key, val) in vocab {
-        let id = val.as_u64().expect("vocab id not u64") as u32;
-        if key.chars().count() == 1 {
-            map.insert(key.chars().next().unwrap(), id);
-        }
-    }
-    map
 }
 
 /// Load a voice style vector from a .bin file (Kokoro format), indexed by token count.
@@ -1234,103 +1124,6 @@ fn load_wav_f16(path: &std::path::Path, target_sr: u32) -> Vec<half::f16> {
         .iter()
         .map(|&s| half::f16::from_f32(s))
         .collect()
-}
-
-/// Build F5-TTS vocab: char → token ID from vocab.txt (one token per line).
-fn build_f5_vocab(vocab_text: &str) -> HashMap<char, i32> {
-    let mut map = HashMap::new();
-    for (id, line) in vocab_text.lines().enumerate() {
-        if line.chars().count() == 1 {
-            map.insert(line.chars().next().unwrap(), id as i32);
-        } else if line.is_empty() {
-            // Line 0 is space in F5 vocab
-            map.insert(' ', id as i32);
-        }
-    }
-    map
-}
-
-// ============================================================================
-// Phonemization (espeak-ng + E2M conversion for Kokoro)
-// ============================================================================
-
-/// Convert English text to Kokoro-compatible phoneme string.
-///
-/// Pipeline: text -> espeak-ng IPA -> E2M (espeak-to-Misaki) conversion
-fn text_to_kokoro_phonemes(text: &str) -> String {
-    let sentences = espeak_rs::text_to_phonemes(text, "en-us", None, true, false)
-        .expect("espeak-ng phonemization failed");
-    let ipa = sentences.join(" ");
-    espeak_to_misaki(&ipa)
-}
-
-/// Apply espeak-to-Misaki (E2M) phoneme conversion.
-///
-/// Converts espeak-ng's IPA output into the Misaki phoneme format
-/// that Kokoro's tokenizer expects. Replacements are applied in
-/// longest-first order to handle multi-character sequences correctly.
-fn espeak_to_misaki(ipa: &str) -> String {
-    // E2M replacements, applied longest-first
-    static E2M: &[(&str, &str)] = &[
-        // Multi-char (longest first)
-        ("a\u{0361}\u{026a}", "I"),        // a͡ɪ -> I (PRICE)
-        ("a\u{0361}\u{028a}", "W"),        // a͡ʊ -> W (MOUTH)
-        ("d\u{0361}\u{0292}", "\u{02A4}"), // d͡ʒ -> ʤ
-        ("e\u{0361}\u{026a}", "A"),        // e͡ɪ -> A (FACE)
-        ("t\u{0361}\u{0283}", "\u{02A7}"), // t͡ʃ -> ʧ
-        ("\u{0254}\u{0361}\u{026a}", "Y"), // ɔ͡ɪ -> Y (CHOICE)
-        ("o\u{0361}\u{028a}", "O"),        // o͡ʊ -> O (GOAT, US)
-        // Without tie bar (fallback)
-        ("a\u{026a}", "I"),        // aɪ -> I
-        ("a\u{028a}", "W"),        // aʊ -> W
-        ("d\u{0292}", "\u{02A4}"), // dʒ -> ʤ
-        ("e\u{026a}", "A"),        // eɪ -> A
-        ("t\u{0283}", "\u{02A7}"), // tʃ -> ʧ
-        ("\u{0254}\u{026a}", "Y"), // ɔɪ -> Y
-        ("o\u{028a}", "O"),        // oʊ -> O
-        // Syllabic patterns
-        ("\u{0294}\u{02cc}n\u{0329}", "t\u{1d4a}n"), // ʔˌn̩ -> tᵊn
-        ("\u{0294}n", "t\u{1d4a}n"),                 // ʔn -> tᵊn
-        ("\u{0259}\u{0361}l", "\u{1d4a}l"),          // ə͡l -> ᵊl
-        ("\u{0259}l", "\u{1d4a}l"),                  // əl -> ᵊl (no tie)
-        // R-colored
-        ("\u{025a}", "\u{0259}\u{0279}"), // ɚ -> əɹ
-        // US English specifics
-        ("\u{025c}\u{02d0}\u{0279}", "\u{025c}\u{0279}"), // ɜːɹ -> ɜɹ
-        ("\u{025c}\u{02d0}", "\u{025c}\u{0279}"),         // ɜː -> ɜɹ
-        ("\u{026a}\u{0259}", "i\u{0259}"),                // ɪə -> iə
-        // Single-char
-        ("e", "A"),        // bare e -> A
-        ("r", "\u{0279}"), // r -> ɹ
-        ("x", "k"),
-        ("\u{00e7}", "k"),        // ç -> k
-        ("\u{0250}", "\u{0259}"), // ɐ -> ə
-        ("\u{026c}", "l"),        // ɬ -> l
-        ("\u{0294}", "t"),        // ʔ -> t
-        ("o", "\u{0254}"),        // o -> ɔ
-        ("\u{027e}", "T"),        // ɾ -> T
-    ];
-
-    let mut result = ipa.to_string();
-
-    // Remove combining tilde
-    result = result.replace('\u{0303}', "");
-
-    // Remove remaining palatalization marker
-    result = result.replace('\u{02b2}', "");
-
-    // Apply E2M replacements
-    for &(from, to) in E2M {
-        result = result.replace(from, to);
-    }
-
-    // Remove length marks (US English)
-    result = result.replace('\u{02d0}', "");
-
-    // Remove syllabic marker (any remaining)
-    result = result.replace('\u{0329}', "");
-
-    result
 }
 
 // ============================================================================

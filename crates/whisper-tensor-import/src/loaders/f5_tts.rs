@@ -10,8 +10,8 @@ use whisper_tensor::super_graph::links::{
     SuperGraphLink, SuperGraphLinkDouble, SuperGraphLinkTriple,
 };
 use whisper_tensor::super_graph::nodes::{
-    SuperGraphNode, SuperGraphNodeMilliOpGraph, SuperGraphNodeModelExecution, SuperGraphNodeScan,
-    SuperGraphNodeTensorToAudioClip,
+    SuperGraphNode, SuperGraphNodeF5TextToTensor, SuperGraphNodeMilliOpGraph,
+    SuperGraphNodeModelExecution, SuperGraphNodeScan, SuperGraphNodeTensorToAudioClip,
 };
 
 const NFE_STEPS: u32 = 32;
@@ -126,7 +126,7 @@ fn build_f5_supergraph(vocab: &str, rng: &mut impl rand::Rng) -> TextToSpeechInt
     let mut builder = SuperGraphBuilder::new();
 
     // External input links
-    let text_ids_link = builder.new_tensor_link(rng);
+    let text_input_link = builder.new_string_link(rng);
     let ref_audio_link = builder.new_tensor_link(rng);
     let max_duration_link = builder.new_tensor_link(rng);
     let preprocess_weights = builder.new_model_link(rng);
@@ -135,6 +135,13 @@ fn build_f5_supergraph(vocab: &str, rng: &mut impl rand::Rng) -> TextToSpeechInt
     let time_steps_link = builder.new_tensor_link(rng);
     let iteration_count_link = builder.new_tensor_link(rng);
     let audio_tensor_output_link = builder.new_tensor_link(rng);
+
+    let text_ids_link = SuperGraphNodeF5TextToTensor::new_and_add(
+        &mut builder,
+        text_input_link,
+        vocab.to_string(),
+        rng,
+    );
 
     // --- Node 1: Preprocess ---
     let noise_link = builder.new_tensor_link(rng);
@@ -207,7 +214,7 @@ fn build_f5_supergraph(vocab: &str, rng: &mut impl rand::Rng) -> TextToSpeechInt
 
     // Build the top-level SuperGraph
     let sg_inputs = vec![
-        text_ids_link.to_any(),
+        text_input_link.to_any(),
         ref_audio_link.to_any(),
         max_duration_link.to_any(),
         preprocess_weights.to_any(),
@@ -221,7 +228,7 @@ fn build_f5_supergraph(vocab: &str, rng: &mut impl rand::Rng) -> TextToSpeechInt
 
     TextToSpeechInterface {
         super_graph,
-        text_ids_link,
+        text_input_link,
         model_weights: vec![preprocess_weights, transformer_weights, decode_weights],
         audio_output_link,
         sample_rate: SAMPLE_RATE,
@@ -231,7 +238,6 @@ fn build_f5_supergraph(vocab: &str, rng: &mut impl rand::Rng) -> TextToSpeechInt
             time_steps_link,
             iteration_count_link,
             nfe_steps: NFE_STEPS,
-            vocab: vocab.to_string(),
         },
     }
 }

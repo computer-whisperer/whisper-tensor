@@ -28,6 +28,7 @@ safetensors = {optional=true, version="0.7.0"}
 memmap2 = {optional=true, version="0.9"}
 wyrand = "0.3.2"
 rand = "0.9.2"
+espeak-rs = "0.1.9"
 
 ndarray = { version = "0.16.1", features = ["serde", "rayon", "matrixmultiply-threading"] }
 blas-src = { version = "0.10", features = ["openblas"], optional = true }

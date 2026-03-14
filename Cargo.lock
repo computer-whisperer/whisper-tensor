@@ -6869,6 +6869,7 @@ dependencies = [
  "cranelift-module",
  "cranelift-native",
  "env_logger",
+ "espeak-rs",
  "float8 0.7.0",
  "half",
  "image",
@@ -6909,7 +6910,6 @@ name = "whisper-tensor-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
- "espeak-rs",
  "half",
  "hound",
  "image",
@@ -6949,6 +6949,7 @@ dependencies = [
  "axum",
  "ciborium",
  "crossbeam",
+ "espeak-rs",
  "hf-hub",
  "log",
  "num-traits",

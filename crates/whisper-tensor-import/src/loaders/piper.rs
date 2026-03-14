@@ -3,7 +3,9 @@ use whisper_tensor::interfaces::{TTSInputConfig, TextToSpeechInterface};
 use whisper_tensor::loader::*;
 use whisper_tensor::super_graph::SuperGraphBuilder;
 use whisper_tensor::super_graph::nodes::{
-    SuperGraphNode, SuperGraphNodeModelExecution, SuperGraphNodeTensorToAudioClip,
+    SuperGraphNode, SuperGraphNodeModelExecution, SuperGraphNodePiperPhonemesToTensor,
+    SuperGraphNodeTensorToAudioClip, SuperGraphNodeTextToPhonemes,
+    SuperGraphNodeTextToPhonemesMode,
 };
 
 /// Loader for Piper VITS TTS models (ONNX format).
@@ -150,11 +152,25 @@ fn build_piper_supergraph(
 ) -> TextToSpeechInterface {
     let mut builder = SuperGraphBuilder::new();
 
-    let input_link = builder.new_tensor_link(rng);
-    let input_lengths_link = builder.new_tensor_link(rng);
+    let text_input_link = builder.new_string_link(rng);
     let scales_link = builder.new_tensor_link(rng);
     let model_weights_link = builder.new_model_link(rng);
     let audio_tensor_output_link = builder.new_tensor_link(rng);
+
+    let phonemes_link = SuperGraphNodeTextToPhonemes::new_and_add(
+        &mut builder,
+        text_input_link,
+        SuperGraphNodeTextToPhonemesMode::Piper {
+            voice: espeak_voice.clone(),
+        },
+        rng,
+    );
+    let (input_link, input_lengths_link) = SuperGraphNodePiperPhonemesToTensor::new_and_add(
+        &mut builder,
+        phonemes_link,
+        phoneme_id_map_json.clone(),
+        rng,
+    );
 
     let mut tensor_inputs = vec![
         (input_link, "input".to_string()),
@@ -191,8 +207,7 @@ fn build_piper_supergraph(
     );
 
     let mut sg_inputs = vec![
-        input_link.to_any(),
-        input_lengths_link.to_any(),
+        text_input_link.to_any(),
         scales_link.to_any(),
         model_weights_link.to_any(),
     ];
@@ -204,17 +219,14 @@ fn build_piper_supergraph(
 
     TextToSpeechInterface {
         super_graph,
-        text_ids_link: input_link,
+        text_input_link,
         model_weights: vec![model_weights_link],
         audio_output_link,
         sample_rate,
         input_config: TTSInputConfig::Piper {
-            input_lengths_link,
             scales_link,
             speaker_id_link,
             num_speakers,
-            phoneme_id_map_json,
-            espeak_voice,
         },
     }
 }

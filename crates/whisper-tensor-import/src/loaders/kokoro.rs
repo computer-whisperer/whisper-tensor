@@ -4,7 +4,9 @@ use whisper_tensor::loader::*;
 use whisper_tensor::metadata::TokenizerInfo;
 use whisper_tensor::super_graph::SuperGraphBuilder;
 use whisper_tensor::super_graph::nodes::{
-    SuperGraphNode, SuperGraphNodeModelExecution, SuperGraphNodeTensorToAudioClip,
+    SuperGraphNode, SuperGraphNodeKokoroPhonemesToTensor, SuperGraphNodeModelExecution,
+    SuperGraphNodeTensorToAudioClip, SuperGraphNodeTextToPhonemes,
+    SuperGraphNodeTextToPhonemesMode,
 };
 
 /// Loader for Kokoro TTS models (ONNX format).
@@ -96,8 +98,8 @@ impl Loader for KokoroLoader {
 
 /// Build a SuperGraph for the Kokoro TTS model.
 ///
-/// The graph is simple: three tensor inputs (input_ids, style, speed)
-/// go directly into the model execution node, which produces the waveform output.
+/// The graph converts raw text to Kokoro phoneme IDs, then runs model execution
+/// with style and speed conditioning to produce the waveform output.
 fn build_kokoro_supergraph(
     tokenizer: TokenizerInfo,
     rng: &mut impl rand::Rng,
@@ -105,11 +107,26 @@ fn build_kokoro_supergraph(
     let mut builder = SuperGraphBuilder::new();
 
     // External input links
-    let input_ids_link = builder.new_tensor_link(rng);
+    let text_input_link = builder.new_string_link(rng);
     let style_link = builder.new_tensor_link(rng);
     let speed_link = builder.new_tensor_link(rng);
     let model_weights_link = builder.new_model_link(rng);
     let audio_tensor_output_link = builder.new_tensor_link(rng);
+
+    let phonemes_link = SuperGraphNodeTextToPhonemes::new_and_add(
+        &mut builder,
+        text_input_link,
+        SuperGraphNodeTextToPhonemesMode::Kokoro {
+            voice: "en-us".to_string(),
+        },
+        rng,
+    );
+    let input_ids_link = SuperGraphNodeKokoroPhonemesToTensor::new_and_add(
+        &mut builder,
+        phonemes_link,
+        tokenizer.clone(),
+        rng,
+    );
 
     // Model execution: wire named inputs/outputs to the ONNX graph
     let tensor_inputs = vec![
@@ -139,7 +156,7 @@ fn build_kokoro_supergraph(
 
     // Build the SuperGraph
     let sg_inputs = vec![
-        input_ids_link.to_any(),
+        text_input_link.to_any(),
         style_link.to_any(),
         speed_link.to_any(),
         model_weights_link.to_any(),
@@ -149,14 +166,13 @@ fn build_kokoro_supergraph(
 
     TextToSpeechInterface {
         super_graph,
-        text_ids_link: input_ids_link,
+        text_input_link,
         model_weights: vec![model_weights_link],
         audio_output_link,
         sample_rate: 24000,
         input_config: TTSInputConfig::Kokoro {
             style_link,
             speed_link,
-            tokenizer,
         },
     }
 }

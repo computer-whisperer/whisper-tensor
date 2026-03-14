@@ -1649,25 +1649,18 @@ impl ImageGenerationInterface {
 /// Model-specific input configuration for TTS.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum TTSInputConfig {
-    /// Kokoro-style: phoneme IDs + style embedding + speed scalar.
-    /// Tokenizer points to tokenizer.json with char→id vocab.
+    /// Kokoro-style conditioning inputs.
     Kokoro {
         style_link: SuperGraphLink,
         speed_link: SuperGraphLink,
-        tokenizer: TokenizerInfo,
     },
-    /// Piper VITS: phoneme IDs + input_lengths + scales + optional speaker ID.
+    /// Piper VITS conditioning inputs.
     Piper {
-        input_lengths_link: SuperGraphLink,
         scales_link: SuperGraphLink,
         speaker_id_link: Option<SuperGraphLink>,
         num_speakers: u32,
-        /// IPA character → list of token IDs (JSON-serialized).
-        phoneme_id_map_json: String,
-        /// eSpeak voice code (e.g. "en-us").
-        espeak_voice: String,
     },
-    /// F5-TTS: text IDs + reference audio + max_duration.
+    /// F5-TTS conditioning inputs.
     /// 3-model pipeline with ODE loop baked into SuperGraph.
     F5 {
         ref_audio_link: SuperGraphLink,
@@ -1677,8 +1670,6 @@ pub enum TTSInputConfig {
         iteration_count_link: SuperGraphLink,
         /// Number of function evaluations (default 32).
         nfe_steps: u32,
-        /// Character-level vocab: line number = token ID.
-        vocab: String,
     },
 }
 
@@ -1686,20 +1677,20 @@ pub enum TTSInputConfig {
 ///
 /// Each model family builds a different SuperGraph that hides its internal
 /// complexity (single model, multi-model pipelines, ODE loops, etc.).
-/// The caller provides tokenized text IDs and model-specific conditioning
-/// inputs described by `input_config`.
+/// The caller provides raw text plus model-specific conditioning inputs
+/// described by `input_config`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TextToSpeechInterface {
     pub super_graph: SuperGraph,
-    /// Tokenized text/phoneme IDs input [1, seq_len].
-    pub text_ids_link: SuperGraphLink,
+    /// Raw text input.
+    pub text_input_link: SuperGraphLink,
     /// Model weights (one per model in the pipeline).
     pub model_weights: Vec<SuperGraphLink>,
     /// Output audio clip.
     pub audio_output_link: SuperGraphLink,
     /// Sample rate of the output audio in Hz.
     pub sample_rate: u32,
-    /// Model-specific input configuration and tokenization metadata.
+    /// Model-specific non-text conditioning inputs.
     pub input_config: TTSInputConfig,
 }
 

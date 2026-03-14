@@ -18,6 +18,7 @@ pub mod numeric_tensor;
 pub mod numeric_tensor_typed;
 pub mod packed_format;
 pub mod packed_tensor;
+pub mod phonemization;
 pub mod scalar_info;
 pub mod super_graph;
 pub mod symbolic_graph;

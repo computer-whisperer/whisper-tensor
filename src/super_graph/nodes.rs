@@ -9,6 +9,7 @@ use crate::metadata::TokenizerInfo;
 use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::observer::MilliOpGraphObserver;
 use crate::numeric_tensor::NumericTensor;
+use crate::phonemization::{text_to_kokoro_phonemes, text_to_piper_phonemes};
 use crate::super_graph::data::{SuperGraphAudioClip, SuperGraphImage};
 use crate::super_graph::links::{
     SuperGraphAnyLink, SuperGraphLink, SuperGraphLinkDouble, SuperGraphLinkKind,
@@ -87,6 +88,89 @@ fn read_rank0_bool_tensor(
         )));
     }
     Ok(tensor.first_element().into())
+}
+
+fn parse_piper_phoneme_id_map(json: &str) -> Result<HashMap<char, Vec<i64>>, SuperGraphError> {
+    let value: serde_json::Value = serde_json::from_str(json).map_err(|e| {
+        SuperGraphError::InvalidInputError(format!("invalid Piper phoneme_id_map JSON: {e}"))
+    })?;
+    let obj = value.as_object().ok_or(SuperGraphError::InvalidInputError(
+        "Piper phoneme_id_map is not an object".to_string(),
+    ))?;
+    let mut map = HashMap::new();
+    for (key, val) in obj {
+        if key.chars().count() != 1 {
+            continue;
+        }
+        let ch = key.chars().next().unwrap();
+        let ids = val
+            .as_array()
+            .ok_or(SuperGraphError::InvalidInputError(format!(
+                "Piper phoneme_id_map[{key}] is not an array"
+            )))?
+            .iter()
+            .map(|v| {
+                v.as_i64().ok_or(SuperGraphError::InvalidInputError(format!(
+                    "Piper phoneme_id_map[{key}] contains non-i64 value"
+                )))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        map.insert(ch, ids);
+    }
+    Ok(map)
+}
+
+fn load_kokoro_vocab(info: &TokenizerInfo) -> Result<HashMap<char, u32>, SuperGraphError> {
+    let path = match info {
+        TokenizerInfo::HFTokenizerLocal(path) => path,
+        _ => {
+            return Err(SuperGraphError::InvalidInputError(
+                "Kokoro phoneme tokenizer must be HFTokenizerLocal".to_string(),
+            ));
+        }
+    };
+    let json = std::fs::read_to_string(path).map_err(|e| {
+        SuperGraphError::InvalidInputError(format!(
+            "failed to read Kokoro tokenizer file {path}: {e}"
+        ))
+    })?;
+    let value: serde_json::Value = serde_json::from_str(&json).map_err(|e| {
+        SuperGraphError::InvalidInputError(format!(
+            "invalid JSON in Kokoro tokenizer file {path}: {e}"
+        ))
+    })?;
+    let vocab_obj =
+        value["model"]["vocab"]
+            .as_object()
+            .ok_or(SuperGraphError::InvalidInputError(format!(
+                "missing model.vocab object in Kokoro tokenizer file {path}"
+            )))?;
+    let mut vocab = HashMap::new();
+    for (key, val) in vocab_obj {
+        if key.chars().count() != 1 {
+            continue;
+        }
+        let id = val
+            .as_u64()
+            .ok_or(SuperGraphError::InvalidInputError(format!(
+                "non-u64 vocab id for key {key} in {path}"
+            )))? as u32;
+        vocab.insert(key.chars().next().unwrap(), id);
+    }
+    Ok(vocab)
+}
+
+fn build_f5_vocab(vocab_text: &str) -> HashMap<char, i32> {
+    let mut map = HashMap::new();
+    for (id, line) in vocab_text.lines().enumerate() {
+        if line.chars().count() == 1 {
+            map.insert(line.chars().next().unwrap(), id as i32);
+        } else if line.is_empty() {
+            // Line 0 is space in F5 vocab.
+            map.insert(' ', id as i32);
+        }
+    }
+    map
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -611,6 +695,389 @@ impl SuperGraphNode for SuperGraphNodeTokenizerDecode {
     fn outputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
         Box::new(std::iter::once(self.text_output.to_any()))
     }
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum SuperGraphNodeTextToPhonemesMode {
+    Piper { voice: String },
+    Kokoro { voice: String },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SuperGraphNodeTextToPhonemes {
+    global_id: GlobalId,
+    text_input: SuperGraphLink,
+    phonemes_output: SuperGraphLink,
+    mode: SuperGraphNodeTextToPhonemesMode,
+}
+
+impl SuperGraphNodeTextToPhonemes {
+    pub fn new(
+        _builder: &mut SuperGraphBuilder,
+        text_input: SuperGraphLink,
+        mode: SuperGraphNodeTextToPhonemesMode,
+        rng: &mut impl RngCore,
+    ) -> Self {
+        Self {
+            global_id: GlobalId::new(rng),
+            text_input,
+            phonemes_output: SuperGraphLink::new(SuperGraphLinkKind::String, rng),
+            mode,
+        }
+    }
+
+    pub fn new_and_add(
+        builder: &mut SuperGraphBuilder,
+        text_input: SuperGraphLink,
+        mode: SuperGraphNodeTextToPhonemesMode,
+        rng: &mut impl RngCore,
+    ) -> SuperGraphLink {
+        let node = Self::new(builder, text_input, mode, rng);
+        let output = node.get_phonemes_output();
+        builder.add_node(node.to_any());
+        output
+    }
+
+    pub fn get_phonemes_output(&self) -> SuperGraphLink {
+        self.phonemes_output
+    }
+}
+
+impl SuperGraphNode for SuperGraphNodeTextToPhonemes {
+    fn to_any(self) -> SuperGraphAnyNode {
+        SuperGraphAnyNode::TextToPhonemes(self)
+    }
+
+    fn eval<T: SuperGraphObserver>(
+        &self,
+        _this_path: &[GlobalId],
+        data: &mut SuperGraphData,
+        _context: &mut SuperGraphContext<T>,
+    ) -> Result<(), SuperGraphError> {
+        let text = data
+            .strings
+            .get(&self.text_input)
+            .ok_or(SuperGraphError::MissingLinkError(format!(
+                ": missing text input {:?}",
+                self.text_input
+            )))?;
+        let phonemes = match &self.mode {
+            SuperGraphNodeTextToPhonemesMode::Piper { voice } => {
+                text_to_piper_phonemes(text, voice)
+            }
+            SuperGraphNodeTextToPhonemesMode::Kokoro { voice } => {
+                text_to_kokoro_phonemes(text, voice)
+            }
+        }
+        .map_err(SuperGraphError::InvalidInputError)?;
+        data.strings.insert(self.phonemes_output, phonemes);
+        Ok(())
+    }
+
+    fn op_kind(&self) -> String {
+        "TextToPhonemes".to_string()
+    }
+
+    fn inputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new(std::iter::once(self.text_input.to_any()))
+    }
+
+    fn outputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new(std::iter::once(self.phonemes_output.to_any()))
+    }
+
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SuperGraphNodePiperPhonemesToTensor {
+    global_id: GlobalId,
+    phonemes_input: SuperGraphLink,
+    token_ids_output: SuperGraphLink,
+    input_lengths_output: SuperGraphLink,
+    phoneme_id_map_json: String,
+}
+
+impl SuperGraphNodePiperPhonemesToTensor {
+    pub fn new(
+        _builder: &mut SuperGraphBuilder,
+        phonemes_input: SuperGraphLink,
+        phoneme_id_map_json: String,
+        rng: &mut impl RngCore,
+    ) -> Self {
+        Self {
+            global_id: GlobalId::new(rng),
+            phonemes_input,
+            token_ids_output: SuperGraphLink::new(SuperGraphLinkKind::Tensor, rng),
+            input_lengths_output: SuperGraphLink::new(SuperGraphLinkKind::Tensor, rng),
+            phoneme_id_map_json,
+        }
+    }
+
+    pub fn new_and_add(
+        builder: &mut SuperGraphBuilder,
+        phonemes_input: SuperGraphLink,
+        phoneme_id_map_json: String,
+        rng: &mut impl RngCore,
+    ) -> (SuperGraphLink, SuperGraphLink) {
+        let node = Self::new(builder, phonemes_input, phoneme_id_map_json, rng);
+        let token_ids = node.get_token_ids_output();
+        let input_lengths = node.get_input_lengths_output();
+        builder.add_node(node.to_any());
+        (token_ids, input_lengths)
+    }
+
+    pub fn get_token_ids_output(&self) -> SuperGraphLink {
+        self.token_ids_output
+    }
+
+    pub fn get_input_lengths_output(&self) -> SuperGraphLink {
+        self.input_lengths_output
+    }
+}
+
+impl SuperGraphNode for SuperGraphNodePiperPhonemesToTensor {
+    fn to_any(self) -> SuperGraphAnyNode {
+        SuperGraphAnyNode::PiperPhonemesToTensor(self)
+    }
+
+    fn eval<T: SuperGraphObserver>(
+        &self,
+        _this_path: &[GlobalId],
+        data: &mut SuperGraphData,
+        _context: &mut SuperGraphContext<T>,
+    ) -> Result<(), SuperGraphError> {
+        let phonemes =
+            data.strings
+                .get(&self.phonemes_input)
+                .ok_or(SuperGraphError::MissingLinkError(format!(
+                    ": missing phoneme input {:?}",
+                    self.phonemes_input
+                )))?;
+        let phoneme_id_map = parse_piper_phoneme_id_map(&self.phoneme_id_map_json)?;
+
+        let mut token_ids: Vec<i64> = vec![1, 0];
+        for ch in phonemes.chars() {
+            if let Some(ids) = phoneme_id_map.get(&ch) {
+                token_ids.extend(ids.iter().copied());
+            }
+            token_ids.push(0);
+        }
+        token_ids.push(2);
+
+        let num_tokens = token_ids.len();
+        let token_ids_tensor =
+            NumericTensor::<DynRank>::from_vec_shape(token_ids, vec![1, num_tokens])?;
+        let input_lengths_tensor =
+            NumericTensor::<DynRank>::from_vec_shape(vec![num_tokens as i64], vec![1])?;
+        data.tensors.insert(self.token_ids_output, token_ids_tensor);
+        data.tensors
+            .insert(self.input_lengths_output, input_lengths_tensor);
+        Ok(())
+    }
+
+    fn op_kind(&self) -> String {
+        "PiperPhonemesToTensor".to_string()
+    }
+
+    fn inputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new(std::iter::once(self.phonemes_input.to_any()))
+    }
+
+    fn outputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new(
+            [
+                self.token_ids_output.to_any(),
+                self.input_lengths_output.to_any(),
+            ]
+            .into_iter(),
+        )
+    }
+
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SuperGraphNodeKokoroPhonemesToTensor {
+    global_id: GlobalId,
+    phonemes_input: SuperGraphLink,
+    token_ids_output: SuperGraphLink,
+    tokenizer: TokenizerInfo,
+}
+
+impl SuperGraphNodeKokoroPhonemesToTensor {
+    pub fn new(
+        _builder: &mut SuperGraphBuilder,
+        phonemes_input: SuperGraphLink,
+        tokenizer: TokenizerInfo,
+        rng: &mut impl RngCore,
+    ) -> Self {
+        Self {
+            global_id: GlobalId::new(rng),
+            phonemes_input,
+            token_ids_output: SuperGraphLink::new(SuperGraphLinkKind::Tensor, rng),
+            tokenizer,
+        }
+    }
+
+    pub fn new_and_add(
+        builder: &mut SuperGraphBuilder,
+        phonemes_input: SuperGraphLink,
+        tokenizer: TokenizerInfo,
+        rng: &mut impl RngCore,
+    ) -> SuperGraphLink {
+        let node = Self::new(builder, phonemes_input, tokenizer, rng);
+        let output = node.get_token_ids_output();
+        builder.add_node(node.to_any());
+        output
+    }
+
+    pub fn get_token_ids_output(&self) -> SuperGraphLink {
+        self.token_ids_output
+    }
+}
+
+impl SuperGraphNode for SuperGraphNodeKokoroPhonemesToTensor {
+    fn to_any(self) -> SuperGraphAnyNode {
+        SuperGraphAnyNode::KokoroPhonemesToTensor(self)
+    }
+
+    fn eval<T: SuperGraphObserver>(
+        &self,
+        _this_path: &[GlobalId],
+        data: &mut SuperGraphData,
+        _context: &mut SuperGraphContext<T>,
+    ) -> Result<(), SuperGraphError> {
+        let phonemes =
+            data.strings
+                .get(&self.phonemes_input)
+                .ok_or(SuperGraphError::MissingLinkError(format!(
+                    ": missing phoneme input {:?}",
+                    self.phonemes_input
+                )))?;
+        let vocab = load_kokoro_vocab(&self.tokenizer)?;
+        let mut token_ids: Vec<i64> = vec![0]; // BOS ($)
+        for ch in phonemes.chars() {
+            if let Some(&id) = vocab.get(&ch) {
+                token_ids.push(id as i64);
+            }
+        }
+        token_ids.push(0); // EOS ($)
+        let num_tokens = token_ids.len();
+        let token_ids_tensor =
+            NumericTensor::<DynRank>::from_vec_shape(token_ids, vec![1, num_tokens])?;
+        data.tensors.insert(self.token_ids_output, token_ids_tensor);
+        Ok(())
+    }
+
+    fn op_kind(&self) -> String {
+        "KokoroPhonemesToTensor".to_string()
+    }
+
+    fn inputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new(std::iter::once(self.phonemes_input.to_any()))
+    }
+
+    fn outputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new(std::iter::once(self.token_ids_output.to_any()))
+    }
+
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SuperGraphNodeF5TextToTensor {
+    global_id: GlobalId,
+    text_input: SuperGraphLink,
+    token_ids_output: SuperGraphLink,
+    vocab: String,
+}
+
+impl SuperGraphNodeF5TextToTensor {
+    pub fn new(
+        _builder: &mut SuperGraphBuilder,
+        text_input: SuperGraphLink,
+        vocab: String,
+        rng: &mut impl RngCore,
+    ) -> Self {
+        Self {
+            global_id: GlobalId::new(rng),
+            text_input,
+            token_ids_output: SuperGraphLink::new(SuperGraphLinkKind::Tensor, rng),
+            vocab,
+        }
+    }
+
+    pub fn new_and_add(
+        builder: &mut SuperGraphBuilder,
+        text_input: SuperGraphLink,
+        vocab: String,
+        rng: &mut impl RngCore,
+    ) -> SuperGraphLink {
+        let node = Self::new(builder, text_input, vocab, rng);
+        let output = node.get_token_ids_output();
+        builder.add_node(node.to_any());
+        output
+    }
+
+    pub fn get_token_ids_output(&self) -> SuperGraphLink {
+        self.token_ids_output
+    }
+}
+
+impl SuperGraphNode for SuperGraphNodeF5TextToTensor {
+    fn to_any(self) -> SuperGraphAnyNode {
+        SuperGraphAnyNode::F5TextToTensor(self)
+    }
+
+    fn eval<T: SuperGraphObserver>(
+        &self,
+        _this_path: &[GlobalId],
+        data: &mut SuperGraphData,
+        _context: &mut SuperGraphContext<T>,
+    ) -> Result<(), SuperGraphError> {
+        let text = data
+            .strings
+            .get(&self.text_input)
+            .ok_or(SuperGraphError::MissingLinkError(format!(
+                ": missing text input {:?}",
+                self.text_input
+            )))?;
+        let vocab_map = build_f5_vocab(&self.vocab);
+        let mut token_ids: Vec<i32> = Vec::new();
+        for ch in text.chars() {
+            if let Some(&id) = vocab_map.get(&ch) {
+                token_ids.push(id);
+            }
+        }
+        let num_tokens = token_ids.len();
+        let token_ids_tensor =
+            NumericTensor::<DynRank>::from_vec_shape(token_ids, vec![1, num_tokens])?;
+        data.tensors.insert(self.token_ids_output, token_ids_tensor);
+        Ok(())
+    }
+
+    fn op_kind(&self) -> String {
+        "F5TextToTensor".to_string()
+    }
+
+    fn inputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new(std::iter::once(self.text_input.to_any()))
+    }
+
+    fn outputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new(std::iter::once(self.token_ids_output.to_any()))
+    }
+
     fn global_id(&self) -> GlobalId {
         self.global_id
     }
@@ -1775,6 +2242,10 @@ pub enum SuperGraphAnyNode {
     TokenizerEncode(SuperGraphNodeTokenizerEncode),
     TokenizerDecode(SuperGraphNodeTokenizerDecode),
     TokenizerLoad(SuperGraphNodeTokenizerLoad),
+    TextToPhonemes(SuperGraphNodeTextToPhonemes),
+    PiperPhonemesToTensor(SuperGraphNodePiperPhonemesToTensor),
+    KokoroPhonemesToTensor(SuperGraphNodeKokoroPhonemesToTensor),
+    F5TextToTensor(SuperGraphNodeF5TextToTensor),
     TensorToImage(SuperGraphNodeTensorToImage),
     TensorToAudioClip(SuperGraphNodeTensorToAudioClip),
     AudioClipToTensor(SuperGraphNodeAudioClipToTensor),
@@ -1796,6 +2267,10 @@ macro_rules! delegate {
                 SuperGraphAnyNode::TokenizerEncode(x) => SuperGraphNode::$name(x,$($arg),*),
                 SuperGraphAnyNode::TokenizerDecode(x) => SuperGraphNode::$name(x,$($arg),*),
                 SuperGraphAnyNode::TokenizerLoad(x) => SuperGraphNode::$name(x,$($arg),*),
+                SuperGraphAnyNode::TextToPhonemes(x) => SuperGraphNode::$name(x,$($arg),*),
+                SuperGraphAnyNode::PiperPhonemesToTensor(x) => SuperGraphNode::$name(x,$($arg),*),
+                SuperGraphAnyNode::KokoroPhonemesToTensor(x) => SuperGraphNode::$name(x,$($arg),*),
+                SuperGraphAnyNode::F5TextToTensor(x) => SuperGraphNode::$name(x,$($arg),*),
                 SuperGraphAnyNode::TensorToImage(x) => SuperGraphNode::$name(x,$($arg),*),
                 SuperGraphAnyNode::TensorToAudioClip(x) => SuperGraphNode::$name(x,$($arg),*),
                 SuperGraphAnyNode::AudioClipToTensor(x) => SuperGraphNode::$name(x,$($arg),*),
@@ -1837,6 +2312,10 @@ impl SuperGraphNode for SuperGraphAnyNode {
             SuperGraphAnyNode::TokenizerEncode(node) => node.eval(node_path, data, context),
             SuperGraphAnyNode::TokenizerDecode(node) => node.eval(node_path, data, context),
             SuperGraphAnyNode::TokenizerLoad(node) => node.eval(node_path, data, context),
+            SuperGraphAnyNode::TextToPhonemes(node) => node.eval(node_path, data, context),
+            SuperGraphAnyNode::PiperPhonemesToTensor(node) => node.eval(node_path, data, context),
+            SuperGraphAnyNode::KokoroPhonemesToTensor(node) => node.eval(node_path, data, context),
+            SuperGraphAnyNode::F5TextToTensor(node) => node.eval(node_path, data, context),
             SuperGraphAnyNode::TensorToImage(node) => node.eval(node_path, data, context),
             SuperGraphAnyNode::TensorToAudioClip(node) => node.eval(node_path, data, context),
             SuperGraphAnyNode::AudioClipToTensor(node) => node.eval(node_path, data, context),
