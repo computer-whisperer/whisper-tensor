@@ -3,14 +3,6 @@
 pub mod attempts;
 pub mod common;
 
-// Re-export the current best attempt so the rest of the system
-// doesn't need to know which implementation is active.
-pub use attempts::v1_scalar_crystal::crystal;
-pub use common::v1_frontend::nano_op;
-
-#[cfg(feature = "cranelift")]
-pub use attempts::v1_scalar_crystal::codegen;
-
 use crate::milli_graph::MilliOpGraph;
 
 /// Run a MilliOpGraph through the interpreter and return results.
