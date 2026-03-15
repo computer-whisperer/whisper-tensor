@@ -258,10 +258,69 @@ fn print_explicit_diagnostic(graph: &NanoGraph) {
             op, g, e, *e as f64 * 8.0 / (1024.0*1024.0), min, max);
     }
 
-    // Show a few specific Explicit groups to understand the patterns
-    println!("\n  Sample Explicit groups (first 10):");
+    // Show Explicit groups, prioritizing large ones
+    println!("\n  Identity Explicit groups (largest first):");
+    let mut identity_explicits: Vec<(usize, usize, &Vec<whisper_tensor::nano_graph::AtomId>)> = Vec::new();
+    for (gi, group) in groups.iter().enumerate() {
+        if !matches!(&group.op, whisper_tensor::nano_graph::ScalarOp::Identity { .. }) { continue; }
+        for (input_idx, input) in group.inputs.iter().enumerate() {
+            if let InputRef::Explicit(ids) = input {
+                identity_explicits.push((gi, input_idx, ids));
+            }
+        }
+    }
+    identity_explicits.sort_by(|a, b| b.2.len().cmp(&a.2.len()));
+    for &(gi, input_idx, ids) in identity_explicits.iter().take(15) {
+        let group = &groups[gi];
+        let producer = if !ids.is_empty() { find_group_idx(ids[0]) } else { None };
+        let prod_info = producer.map(|pi| {
+            let pg = &groups[pi];
+            let op_name = format!("{:?}", pg.op)
+                .chars().take_while(|c| *c != ' ' && *c != '{' && *c != '(').collect::<String>();
+            format!("g{}:{} count={}", pi, op_name, pg.count)
+        }).unwrap_or("?".to_string());
+        // Check stride pattern within the explicit
+        let inner_pattern = if ids.len() >= 4 {
+            // Check global stride pattern
+            let s0 = ids[1].0 as i64 - ids[0].0 as i64;
+            let all_affine = ids.windows(2).take(20).all(|w| (w[1].0 as i64 - w[0].0 as i64) == s0);
+            if all_affine {
+                // Verify on a few more samples
+                let truly_affine = ids.len() < 100 || ids.windows(2).all(|w| (w[1].0 as i64 - w[0].0 as i64) == s0);
+                if truly_affine { format!("affine(stride={})", s0) }
+                else { format!("~affine(stride={},breaks)", s0) }
+            } else {
+                // Check if it's a segmented pattern (chunks of stride-1 with gaps)
+                let mut chunk_len = 1u64;
+                while (chunk_len as usize) < ids.len() && ids[chunk_len as usize].0 == ids[0].0 + chunk_len { chunk_len += 1; }
+                if chunk_len > 1 && chunk_len < ids.len() as u64 {
+                    let gap = ids[chunk_len as usize].0 as i64 - ids[chunk_len as usize - 1].0 as i64;
+                    // Check if all chunks have the same length and gap
+                    let num_chunks = (ids.len() as u64 + chunk_len - 1) / chunk_len;
+                    format!("chunks(len={},gap={},n={})", chunk_len, gap, num_chunks)
+                } else { "mixed".to_string() }
+            }
+        } else { "tiny".to_string() };
+        // Check if this looks like a slice of the producer (regular stride through a larger array)
+        let first = ids[0].0;
+        let last = if ids.len() > 1 { ids[ids.len()-1].0 } else { first };
+        let span = last - first + 1;
+        let ratio = if !ids.is_empty() { span as f64 / ids.len() as f64 } else { 0.0 };
+        // For top 3, show strides at chunk boundaries
+        let stride_detail = if identity_explicits.iter().position(|x| x.0 == gi).unwrap_or(99) < 3 && ids.len() > 10 {
+            let strides: Vec<i64> = ids.windows(2).take(10).map(|w| w[1].0 as i64 - w[0].0 as i64).collect();
+            // Also find first break in stride=1
+            let first_break = ids.windows(2).position(|w| w[1].0 != w[0].0 + 1).unwrap_or(ids.len());
+            format!(" strides={:?} first_break@{}", strides, first_break)
+        } else { String::new() };
+        println!("    g{} count={} entries={} inner={} span={} ratio={:.1} producer={}{}",
+            gi, group.count, ids.len(), inner_pattern, span, ratio, prod_info, stride_detail);
+    }
+
+    println!("\n  Other Explicit groups (first 10):");
     let mut shown = 0;
     for (gi, group) in groups.iter().enumerate() {
+        if matches!(&group.op, whisper_tensor::nano_graph::ScalarOp::Identity { .. }) { continue; }
         for (input_idx, input) in group.inputs.iter().enumerate() {
             if let InputRef::Explicit(ids) = input {
                 if shown >= 10 { break; }

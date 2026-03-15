@@ -101,6 +101,42 @@ pub struct TensorAtomMapInfo {
     pub base_id: AtomId,
     pub count: u64,
     pub sym_dims: Vec<SymDim>,
+    pub known_strides: Vec<u64>,
+    pub known_dims: Vec<u64>,
+    /// Concat segments (empty for simple views).
+    pub segments: Vec<(usize, u64, u64, AtomId, Vec<u64>)>, // (concat_dim, start, size, base_id, strides)
+}
+
+impl TensorAtomMapInfo {
+    /// Map logical element index to AtomId using strides.
+    pub fn atom_id_for_element(&self, flat: u64) -> AtomId {
+        let row_major = TensorAtomMap::compute_strides(&self.known_dims);
+        let mut indices = vec![0u64; self.known_dims.len()];
+        let mut rem = flat;
+        for (i, &rm_stride) in row_major.iter().enumerate() {
+            if rm_stride > 0 { indices[i] = rem / rm_stride; rem %= rm_stride; }
+        }
+        if !self.segments.is_empty() {
+            let (concat_dim, _, _, _, _) = &self.segments[0];
+            let concat_idx = indices[*concat_dim];
+            for &(_, start, size, seg_base, ref seg_strides) in &self.segments {
+                if concat_idx >= start && concat_idx < start + size {
+                    let mut seg_indices = indices.clone();
+                    seg_indices[*concat_dim] = concat_idx - start;
+                    let mut offset = 0u64;
+                    for (i, &stride) in seg_strides.iter().enumerate() {
+                        offset += seg_indices[i] * stride;
+                    }
+                    return seg_base.offset(offset);
+                }
+            }
+        }
+        let mut offset = 0u64;
+        for (i, &stride) in self.known_strides.iter().enumerate() {
+            offset += indices[i] * stride;
+        }
+        self.base_id.offset(offset)
+    }
 }
 
 /// How a milli tensor maps to atoms in the nano graph.
@@ -108,20 +144,41 @@ pub struct TensorAtomMapInfo {
 /// The tensor's dimensions are split into known (expanded to atoms) and
 /// symbolic (iteration parameters). Atoms are indexed by their position
 /// in the flattened known dims (row-major order).
+///
+/// For simple tensors (most ops), `base_id` + `known_strides` is sufficient.
+/// For concatenated tensors, `segments` describes how the concat axis is
+/// split across multiple source atom ranges, each with its own base_id and strides.
 #[derive(Debug, Clone)]
 struct TensorAtomMap {
-    /// First atom id in the group.
+    /// First atom id in the group (for simple views).
     base_id: AtomId,
     /// Total number of atoms (product of known dims).
     count: u64,
     /// The full tensor layout: one entry per dim, preserving original order.
-    /// Used to compute input refs when downstream ops index this tensor.
     layout: Vec<DimKind>,
-    /// Row-major strides for the known dims (one per known dim, in order
-    /// of appearance in the original shape).
+    /// Physical strides for the known dims into the atom buffer.
+    /// May be non-row-major for transposed or strided views.
     known_strides: Vec<u64>,
     /// Symbolic dims attached to each atom.
     sym_dims: Vec<SymDim>,
+    /// For concatenated tensors: segments along a specific known dim.
+    /// If empty, this is a simple single-range view.
+    segments: Vec<ConcatSegment>,
+}
+
+/// A segment of a concatenated tensor along one axis.
+#[derive(Debug, Clone)]
+struct ConcatSegment {
+    /// Which known dim index the concat is along.
+    concat_dim: usize,
+    /// Starting index along the concat dim for this segment.
+    start: u64,
+    /// Number of elements along the concat dim in this segment.
+    size: u64,
+    /// Base atom ID for this segment's source tensor.
+    base_id: AtomId,
+    /// Physical strides for this segment (into its source atom space).
+    known_strides: Vec<u64>,
 }
 
 /// Classification of one tensor dimension.
@@ -135,6 +192,18 @@ enum DimKind {
 type DimClassification = (Vec<DimKind>, Vec<u64>, Vec<SymDim>, u64);
 
 impl TensorAtomMap {
+    /// Create a simple (non-segmented) tensor atom map.
+    fn simple(base_id: AtomId, count: u64, layout: Vec<DimKind>, known_strides: Vec<u64>, sym_dims: Vec<SymDim>) -> Self {
+        Self { base_id, count, layout, known_strides, sym_dims, segments: vec![] }
+    }
+
+    /// Create a segmented tensor atom map (for Concat).
+    fn segmented(count: u64, layout: Vec<DimKind>, sym_dims: Vec<SymDim>, segments: Vec<ConcatSegment>) -> Self {
+        let base_id = if segments.is_empty() { AtomId(0) } else { segments[0].base_id };
+        let known_strides = if segments.is_empty() { vec![] } else { segments[0].known_strides.clone() };
+        Self { base_id, count, layout, known_strides, sym_dims, segments }
+    }
+
     /// Compute row-major strides from known dim sizes.
     fn compute_strides(known_dims: &[u64]) -> Vec<u64> {
         let mut strides = vec![0u64; known_dims.len()];
@@ -147,6 +216,57 @@ impl TensorAtomMap {
             stride *= known_dims[i];
         }
         strides
+    }
+
+    /// Get the known dim sizes from the layout.
+    fn known_dims(&self) -> Vec<u64> {
+        self.layout.iter().filter_map(|d| {
+            if let DimKind::Known(s) = d { Some(*s) } else { None }
+        }).collect()
+    }
+
+    /// Map logical element index to AtomId using strides.
+    /// Handles simple views, transposed/strided views, and segmented (concat) views.
+    fn atom_id_for_element(&self, flat: u64) -> AtomId {
+        let known_dims = self.known_dims();
+        let row_major = Self::compute_strides(&known_dims);
+
+        // Decompose flat index into per-dim indices using row-major strides.
+        let mut indices = vec![0u64; known_dims.len()];
+        let mut rem = flat;
+        for (i, &rm_stride) in row_major.iter().enumerate() {
+            if rm_stride > 0 {
+                indices[i] = rem / rm_stride;
+                rem %= rm_stride;
+            }
+        }
+
+        // If segmented (concat), find the right segment for the concat dim index.
+        if !self.segments.is_empty() {
+            let concat_dim = self.segments[0].concat_dim;
+            let concat_idx = indices[concat_dim];
+            for seg in &self.segments {
+                if concat_idx >= seg.start && concat_idx < seg.start + seg.size {
+                    // Remap the concat dim index to be relative to this segment.
+                    let mut seg_indices = indices.clone();
+                    seg_indices[concat_dim] = concat_idx - seg.start;
+                    let mut offset = 0u64;
+                    for (i, &stride) in seg.known_strides.iter().enumerate() {
+                        offset += seg_indices[i] * stride;
+                    }
+                    return seg.base_id.offset(offset);
+                }
+            }
+            // Shouldn't happen if segments cover the full concat dim.
+            panic!("Concat segment not found for index {} on dim {}", concat_idx, concat_dim);
+        }
+
+        // Simple view: use base_id + physical strides.
+        let mut offset = 0u64;
+        for (i, &stride) in self.known_strides.iter().enumerate() {
+            offset += indices[i] * stride;
+        }
+        self.base_id.offset(offset)
     }
 }
 
@@ -220,7 +340,7 @@ fn lower_inner(
         for out_id in &output_ids {
             if let Some(tam) = ctx.tensor_map.get(out_id) {
                 for i in 0..tam.count {
-                    ctx.nano.outputs.push(tam.base_id.offset(i));
+                    ctx.nano.outputs.push(tam.atom_id_for_element(i));
                 }
             }
         }
@@ -238,6 +358,11 @@ fn lower_inner(
                     base_id: tam.base_id,
                     count: tam.count,
                     sym_dims: tam.sym_dims.clone(),
+                    known_strides: tam.known_strides.clone(),
+                    known_dims: tam.known_dims(),
+                    segments: tam.segments.iter().map(|s| {
+                        (s.concat_dim, s.start, s.size, s.base_id, s.known_strides.clone())
+                    }).collect(),
                 },
             )
         })
@@ -287,7 +412,7 @@ fn lower_inner(
         }
         for (i, &val) in v.iter().enumerate() {
             let scalar = NumericScalar::F32(val).cast_to(tensor_dtype);
-            numeric_overrides.insert(tam.base_id.0 + i as u64, scalar);
+            numeric_overrides.insert(tam.atom_id_for_element(i as u64).0, scalar);
         }
     }
 
@@ -371,13 +496,7 @@ impl LowerCtx {
             );
             self.tensor_map.insert(
                 id,
-                TensorAtomMap {
-                    base_id,
-                    count: 1,
-                    layout: vec![],
-                    known_strides: vec![],
-                    sym_dims: vec![],
-                },
+                TensorAtomMap::simple(base_id, 1, vec![], vec![], vec![]),
             );
             return;
         };
@@ -395,13 +514,7 @@ impl LowerCtx {
 
         self.tensor_map.insert(
             id,
-            TensorAtomMap {
-                base_id,
-                count,
-                layout,
-                known_strides: strides,
-                sym_dims,
-            },
+            TensorAtomMap::simple(base_id, count, layout, strides, sym_dims),
         );
     }
 
@@ -417,13 +530,7 @@ impl LowerCtx {
             );
             self.tensor_map.insert(
                 output_id,
-                TensorAtomMap {
-                    base_id,
-                    count: 1,
-                    layout: vec![],
-                    known_strides: vec![],
-                    sym_dims: vec![],
-                },
+                TensorAtomMap::simple(base_id, 1, vec![], vec![], vec![]),
             );
             return;
         };
@@ -441,13 +548,7 @@ impl LowerCtx {
 
         self.tensor_map.insert(
             output_id,
-            TensorAtomMap {
-                base_id,
-                count,
-                layout,
-                known_strides: strides,
-                sym_dims,
-            },
+            TensorAtomMap::simple(base_id, count, layout, strides, sym_dims),
         );
     }
 
@@ -459,6 +560,12 @@ impl LowerCtx {
         consumer_info: &TensorInfo,
         producer_info: &TensorInfo,
     ) -> InputRef {
+        // Segmented producers (concat): always build via atom_id_for_element
+        // since they can't be expressed as a single Affine/Broadcast pattern.
+        if !producer.segments.is_empty() {
+            return self.build_segmented_input_ref(consumer, producer, consumer_info, producer_info);
+        }
+
         // Same count + same known shape → stride 1.
         if consumer.count == producer.count && consumer.count > 0 {
             let c_known: Vec<u64> = consumer
@@ -712,6 +819,81 @@ impl LowerCtx {
         InputRef::Explicit(ids)
     }
 
+    /// Build InputRef for a segmented (concat) producer.
+    /// Uses atom_id_for_element to resolve each consumer element's source,
+    /// then compresses the resulting Explicit table.
+    fn build_segmented_input_ref(
+        &self,
+        consumer: &TensorAtomMap,
+        producer: &TensorAtomMap,
+        consumer_info: &TensorInfo,
+        producer_info: &TensorInfo,
+    ) -> InputRef {
+        let c_rank = consumer_info.rank_if_known().unwrap_or(0);
+        let p_rank = producer_info.rank_if_known().unwrap_or(0);
+
+        let c_known_sizes: Vec<u64> = consumer.layout.iter()
+            .filter_map(|d| if let DimKind::Known(s) = d { Some(*s) } else { None })
+            .collect();
+        let p_known_sizes = producer.known_dims();
+
+        let offset = c_rank.saturating_sub(p_rank);
+
+        let c_known_indices: Vec<Option<usize>> = {
+            let mut ki = 0;
+            consumer.layout.iter().map(|d| {
+                if matches!(d, DimKind::Known(_)) { let idx = ki; ki += 1; Some(idx) } else { None }
+            }).collect()
+        };
+        let p_known_indices: Vec<Option<usize>> = {
+            let mut ki = 0;
+            producer.layout.iter().map(|d| {
+                if matches!(d, DimKind::Known(_)) { let idx = ki; ki += 1; Some(idx) } else { None }
+            }).collect()
+        };
+
+        let mut c_to_p_known: Vec<Option<usize>> = vec![None; c_known_sizes.len()];
+        for (c_orig, c_known_idx) in c_known_indices.iter().enumerate() {
+            let Some(c_ki) = *c_known_idx else { continue };
+            if c_orig < offset { continue; }
+            let p_orig = c_orig - offset;
+            if p_orig >= p_rank { continue; }
+            if let Some(p_ki) = p_known_indices[p_orig] {
+                c_to_p_known[c_ki] = Some(p_ki);
+            }
+        }
+
+        let c_strides = &consumer.known_strides;
+        let mut ids = Vec::with_capacity(consumer.count as usize);
+
+        for flat_c in 0..consumer.count as u64 {
+            let mut c_indices = vec![0u64; c_known_sizes.len()];
+            let mut rem = flat_c;
+            for (i, &stride) in c_strides.iter().enumerate() {
+                if stride > 0 { c_indices[i] = rem / stride; rem %= stride; }
+            }
+
+            let mut p_indices = vec![0u64; p_known_sizes.len()];
+            for (c_ki, &p_ki_opt) in c_to_p_known.iter().enumerate() {
+                if let Some(p_ki) = p_ki_opt {
+                    if p_known_sizes[p_ki] == 1 { p_indices[p_ki] = 0; }
+                    else { p_indices[p_ki] = c_indices[c_ki]; }
+                }
+            }
+
+            // Compute flat index in producer's logical space
+            let p_rowmajor = TensorAtomMap::compute_strides(&p_known_sizes);
+            let mut flat_p = 0u64;
+            for (i, &stride) in p_rowmajor.iter().enumerate() {
+                flat_p += p_indices[i] * stride;
+            }
+
+            ids.push(producer.atom_id_for_element(flat_p));
+        }
+
+        Self::compress_explicit(ids)
+    }
+
     fn lower_op(&mut self, op: &AnyMilliOp, all_infos: &HashMap<GlobalId, TensorInfo>) {
         match op {
             AnyMilliOp::SimpleBinary(bin) => self.lower_simple_binary(bin, all_infos),
@@ -906,13 +1088,7 @@ impl LowerCtx {
         let count = count.max(1);
         let strides = TensorAtomMap::compute_strides(&known_dims);
 
-        let out_tmp = TensorAtomMap {
-            base_id: AtomId(0),
-            count,
-            layout: layout.clone(),
-            known_strides: strides.clone(),
-            sym_dims: sym_dims.clone(),
-        };
+        let out_tmp = TensorAtomMap::simple(AtomId(0), count, layout.clone(), strides.clone(), sym_dims.clone());
 
         let a_info = all_infos.get(&a_id);
         let b_info = all_infos.get(&b_id);
@@ -931,13 +1107,7 @@ impl LowerCtx {
 
         self.tensor_map.insert(
             out_id,
-            TensorAtomMap {
-                base_id,
-                count,
-                layout,
-                known_strides: strides,
-                sym_dims,
-            },
+            TensorAtomMap::simple(base_id, count, layout, strides, sym_dims),
         );
     }
 
@@ -1026,13 +1196,7 @@ impl LowerCtx {
 
         self.tensor_map.insert(
             out_id,
-            TensorAtomMap {
-                base_id,
-                count: in_map.count,
-                layout: in_map.layout.clone(),
-                known_strides: in_map.known_strides.clone(),
-                sym_dims: in_map.sym_dims.clone(),
-            },
+            TensorAtomMap::simple(base_id, in_map.count, in_map.layout.clone(), in_map.known_strides.clone(), in_map.sym_dims.clone()),
         );
     }
 
@@ -1082,13 +1246,7 @@ impl LowerCtx {
 
         self.tensor_map.insert(
             out_id,
-            TensorAtomMap {
-                base_id,
-                count: in_map.count,
-                layout: in_map.layout.clone(),
-                known_strides: in_map.known_strides.clone(),
-                sym_dims: in_map.sym_dims.clone(),
-            },
+            TensorAtomMap::simple(base_id, in_map.count, in_map.layout.clone(), in_map.known_strides.clone(), in_map.sym_dims.clone()),
         );
     }
 
@@ -1139,13 +1297,7 @@ impl LowerCtx {
 
         self.tensor_map.insert(
             out_id,
-            TensorAtomMap {
-                base_id,
-                count: in_map.count,
-                layout: in_map.layout.clone(),
-                known_strides: in_map.known_strides.clone(),
-                sym_dims: in_map.sym_dims.clone(),
-            },
+            TensorAtomMap::simple(base_id, in_map.count, in_map.layout.clone(), in_map.known_strides.clone(), in_map.sym_dims.clone()),
         );
     }
 
@@ -1271,13 +1423,7 @@ impl LowerCtx {
 
         self.tensor_map.insert(
             out_id,
-            TensorAtomMap {
-                base_id: in_map.base_id, // same atoms!
-                count: in_map.count,      // same count
-                layout: transposed_layout,
-                known_strides: transposed_strides,
-                sym_dims: in_map.sym_dims.clone(),
-            },
+            TensorAtomMap::simple(in_map.base_id, in_map.count, transposed_layout, transposed_strides, in_map.sym_dims.clone()),
         );
     }
 
@@ -1305,13 +1451,7 @@ impl LowerCtx {
             // Atom-count preserving: just re-register with new layout.
             self.tensor_map.insert(
                 out_id,
-                TensorAtomMap {
-                    base_id: in_map.base_id,
-                    count,
-                    layout,
-                    known_strides: TensorAtomMap::compute_strides(&known_dims),
-                    sym_dims,
-                },
+                TensorAtomMap::simple(in_map.base_id, count, layout, TensorAtomMap::compute_strides(&known_dims), sym_dims),
             );
         } else {
             self.register_boundary(out_id, out_info, "ViewOp");
@@ -1347,22 +1487,10 @@ impl LowerCtx {
         if count == in_map.count {
             self.tensor_map.insert(
                 out_id,
-                TensorAtomMap {
-                    base_id: in_map.base_id,
-                    count,
-                    layout,
-                    known_strides: TensorAtomMap::compute_strides(&known_dims),
-                    sym_dims,
-                },
+                TensorAtomMap::simple(in_map.base_id, count, layout, TensorAtomMap::compute_strides(&known_dims), sym_dims),
             );
         } else {
-            let out_tmp = TensorAtomMap {
-                base_id: AtomId(0),
-                count,
-                layout: layout.clone(),
-                known_strides: TensorAtomMap::compute_strides(&known_dims),
-                sym_dims: sym_dims.clone(),
-            };
+            let out_tmp = TensorAtomMap::simple(AtomId(0), count, layout.clone(), TensorAtomMap::compute_strides(&known_dims), sym_dims.clone());
             let input_ref =
                 self.compute_input_ref(&out_tmp, &in_map, out_info, in_info.unwrap_or(out_info));
 
@@ -1380,13 +1508,7 @@ impl LowerCtx {
 
             self.tensor_map.insert(
                 out_id,
-                TensorAtomMap {
-                    base_id,
-                    count,
-                    layout,
-                    known_strides: TensorAtomMap::compute_strides(&known_dims),
-                    sym_dims,
-                },
+                TensorAtomMap::simple(base_id, count, layout, TensorAtomMap::compute_strides(&known_dims), sym_dims),
             );
         }
     }
@@ -1420,13 +1542,7 @@ impl LowerCtx {
         let count = count.max(1);
         let strides = TensorAtomMap::compute_strides(&known_dims);
 
-        let out_tmp = TensorAtomMap {
-            base_id: AtomId(0),
-            count,
-            layout: layout.clone(),
-            known_strides: strides.clone(),
-            sym_dims: sym_dims.clone(),
-        };
+        let out_tmp = TensorAtomMap::simple(AtomId(0), count, layout.clone(), strides.clone(), sym_dims.clone());
 
         let a_info = all_infos.get(&a_id);
         let b_info = all_infos.get(&b_id);
@@ -1450,13 +1566,7 @@ impl LowerCtx {
 
         self.tensor_map.insert(
             out_id,
-            TensorAtomMap {
-                base_id,
-                count,
-                layout,
-                known_strides: strides,
-                sym_dims,
-            },
+            TensorAtomMap::simple(base_id, count, layout, strides, sym_dims),
         );
     }
 
@@ -1491,13 +1601,7 @@ impl LowerCtx {
         let count = count.max(1);
         let strides = TensorAtomMap::compute_strides(&known_dims);
 
-        let out_tmp = TensorAtomMap {
-            base_id: AtomId(0),
-            count,
-            layout: layout.clone(),
-            known_strides: strides.clone(),
-            sym_dims: sym_dims.clone(),
-        };
+        let out_tmp = TensorAtomMap::simple(AtomId(0), count, layout.clone(), strides.clone(), sym_dims.clone());
 
         let cond_info = all_infos.get(&cond_id);
         let x_info = all_infos.get(&x_id);
@@ -1523,13 +1627,7 @@ impl LowerCtx {
 
         self.tensor_map.insert(
             out_id,
-            TensorAtomMap {
-                base_id,
-                count,
-                layout,
-                known_strides: strides,
-                sym_dims,
-            },
+            TensorAtomMap::simple(base_id, count, layout, strides, sym_dims),
         );
     }
 
@@ -1629,78 +1727,30 @@ impl LowerCtx {
             if contiguous {
                 self.tensor_map.insert(
                     out_id,
-                    TensorAtomMap {
-                        base_id: input_maps[0].base_id,
-                        count: out_count,
-                        layout: out_layout,
-                        known_strides: TensorAtomMap::compute_strides(&out_known_dims),
-                        sym_dims: out_sym_dims,
-                    },
+                    TensorAtomMap::simple(input_maps[0].base_id, out_count, out_layout, TensorAtomMap::compute_strides(&out_known_dims), out_sym_dims),
                 );
                 return;
             }
         }
 
-        // Fallback: build Explicit InputRef for non-contiguous concat.
-        let mut cum_offsets = vec![0u64];
-        for &s in &concat_dim_sizes {
-            cum_offsets.push(cum_offsets.last().unwrap() + s);
+        // Non-contiguous concat: zero-cost segmented view.
+        // Each input becomes a segment with its own base_id and strides.
+        let mut segments = Vec::with_capacity(input_maps.len());
+        let mut cum = 0u64;
+        for (i, inp_map) in input_maps.iter().enumerate() {
+            segments.push(ConcatSegment {
+                concat_dim: concat_known_idx,
+                start: cum,
+                size: concat_dim_sizes[i],
+                base_id: inp_map.base_id,
+                known_strides: inp_map.known_strides.clone(),
+            });
+            cum += concat_dim_sizes[i];
         }
-
-        let out_strides = TensorAtomMap::compute_strides(&out_known_dims);
-        let mut ids = Vec::with_capacity(out_count as usize);
-
-        for flat in 0..out_count as u64 {
-            let mut indices = vec![0u64; out_known_dims.len()];
-            let mut rem = flat;
-            for (i, &stride) in out_strides.iter().enumerate() {
-                if stride > 0 {
-                    indices[i] = rem / stride;
-                    rem %= stride;
-                }
-            }
-
-            let concat_idx = indices[concat_known_idx];
-            let input_idx = match cum_offsets.iter().position(|&off| off > concat_idx) {
-                Some(pos) => pos - 1,
-                None => {
-                    self.lower_as_boundary_named(concat, all_infos, "Concat");
-                    return;
-                }
-            };
-
-            indices[concat_known_idx] = concat_idx - cum_offsets[input_idx];
-
-            let inp_map = &input_maps[input_idx];
-            let mut inp_flat = 0u64;
-            for (i, &stride) in inp_map.known_strides.iter().enumerate() {
-                inp_flat += indices[i] * stride;
-            }
-
-            ids.push(inp_map.base_id.offset(inp_flat));
-        }
-
-        let dt = out_info.dtype();
-        let base_id = self.nano.push_group(
-            out_count,
-            ScalarOp::Identity {
-                compute_dtype: dt,
-                output_dtype: dt,
-            },
-            out_sym_dims.clone(),
-            vec![],
-            vec![InputRef::Explicit(ids)],
-        );
 
         self.tensor_map.insert(
             out_id,
-            TensorAtomMap {
-                base_id,
-                count: out_count,
-                layout: out_layout,
-                known_strides: TensorAtomMap::compute_strides(&out_known_dims),
-                sym_dims: out_sym_dims,
-            },
+            TensorAtomMap::segmented(out_count, out_layout, out_sym_dims, segments),
         );
     }
 
@@ -1794,71 +1844,25 @@ impl LowerCtx {
             return;
         }
 
-        // Zero-cost split: when the split axis is the outermost known dim
-        // and the input has row-major strides, the output atoms form a
-        // contiguous sub-range of the input atoms. Just register with an
-        // offset base_id — no new AtomGroups needed.
+        // Zero-cost split for outermost axis with row-major strides:
+        // output atoms are a contiguous sub-range.
         let in_rowmajor = TensorAtomMap::compute_strides(&in_known);
         if split_known_idx == 0 && in_map.known_strides == in_rowmajor {
             let base_offset = offset_along_axis * in_map.known_strides[split_known_idx];
             self.tensor_map.insert(
                 out_id,
-                TensorAtomMap {
-                    base_id: in_map.base_id.offset(base_offset),
-                    count: out_count,
-                    layout: out_layout,
-                    known_strides: TensorAtomMap::compute_strides(&out_known_dims),
-                    sym_dims: out_sym_dims,
-                },
+                TensorAtomMap::simple(in_map.base_id.offset(base_offset), out_count, out_layout, TensorAtomMap::compute_strides(&out_known_dims), out_sym_dims),
             );
             return;
         }
 
-        // Fallback: build Explicit InputRef for non-outermost-axis splits.
-        let out_strides = TensorAtomMap::compute_strides(&out_known_dims);
-        let mut ids = Vec::with_capacity(out_count as usize);
-
-        for flat in 0..out_count as u64 {
-            let mut indices = vec![0u64; out_known_dims.len()];
-            let mut rem = flat;
-            for (i, &stride) in out_strides.iter().enumerate() {
-                if stride > 0 {
-                    indices[i] = rem / stride;
-                    rem %= stride;
-                }
-            }
-
-            indices[split_known_idx] += offset_along_axis;
-
-            let mut inp_flat = 0u64;
-            for (i, &stride) in in_map.known_strides.iter().enumerate() {
-                inp_flat += indices[i] * stride;
-            }
-
-            ids.push(in_map.base_id.offset(inp_flat));
-        }
-
-        let dt = out_info.dtype();
-        let base_id = self.nano.push_group(
-            out_count,
-            ScalarOp::Identity {
-                compute_dtype: dt,
-                output_dtype: dt,
-            },
-            out_sym_dims.clone(),
-            vec![],
-            vec![InputRef::Explicit(ids)],
-        );
-
+        // Non-outermost split: zero-cost view with input's strides.
+        // The strides address the input's atom space with gaps between chunks.
+        // build_input_ref handles this correctly via stride decomposition.
+        let base_offset = offset_along_axis * in_map.known_strides[split_known_idx];
         self.tensor_map.insert(
             out_id,
-            TensorAtomMap {
-                base_id,
-                count: out_count,
-                layout: out_layout,
-                known_strides: TensorAtomMap::compute_strides(&out_known_dims),
-                sym_dims: out_sym_dims,
-            },
+            TensorAtomMap::simple(in_map.base_id.offset(base_offset), out_count, out_layout, in_map.known_strides.clone(), out_sym_dims),
         );
     }
 
@@ -2053,63 +2057,31 @@ impl LowerCtx {
                 }
                 self.tensor_map.insert(
                     out_id,
-                    TensorAtomMap {
-                        base_id: in_map.base_id.offset(base_offset),
-                        count: out_count,
-                        layout: out_layout,
-                        known_strides: TensorAtomMap::compute_strides(&out_known_dims),
-                        sym_dims: out_sym_dims,
-                    },
+                    TensorAtomMap::simple(in_map.base_id.offset(base_offset), out_count, out_layout, TensorAtomMap::compute_strides(&out_known_dims), out_sym_dims),
                 );
                 return;
             }
         }
 
-        // Fallback: build Explicit InputRef for non-contiguous slices.
-        let out_strides = TensorAtomMap::compute_strides(&out_known_dims);
-        let mut ids = Vec::with_capacity(out_count as usize);
-
-        for flat in 0..out_count as u64 {
-            let mut out_indices = vec![0u64; out_known_dims.len()];
-            let mut rem = flat;
-            for (i, &stride) in out_strides.iter().enumerate() {
-                if stride > 0 {
-                    out_indices[i] = rem / stride;
-                    rem %= stride;
-                }
+        // Non-contiguous slice: zero-cost view with strides that account for steps.
+        // Output stride[k] = input_stride[k] * step[k] (for positive steps).
+        let all_positive_steps = known_steps.iter().all(|&s| s > 0);
+        if all_positive_steps {
+            let mut base_offset: u64 = 0;
+            let mut out_phys_strides = Vec::with_capacity(in_known.len());
+            for ki in 0..in_known.len() {
+                base_offset += known_starts[ki] as u64 * in_map.known_strides[ki];
+                out_phys_strides.push((in_map.known_strides[ki] as i64 * known_steps[ki]) as u64);
             }
-
-            let mut in_flat = 0u64;
-            for (ki, &stride) in in_map.known_strides.iter().enumerate() {
-                let in_idx = (known_starts[ki] + known_steps[ki] * out_indices[ki] as i64) as u64;
-                in_flat += in_idx * stride;
-            }
-
-            ids.push(in_map.base_id.offset(in_flat));
+            self.tensor_map.insert(
+                out_id,
+                TensorAtomMap::simple(in_map.base_id.offset(base_offset), out_count, out_layout, out_phys_strides, out_sym_dims),
+            );
+            return;
         }
 
-        let dt = out_info.dtype();
-        let base_id = self.nano.push_group(
-            out_count,
-            ScalarOp::Identity {
-                compute_dtype: dt,
-                output_dtype: dt,
-            },
-            out_sym_dims.clone(),
-            vec![],
-            vec![InputRef::Explicit(ids)],
-        );
-
-        self.tensor_map.insert(
-            out_id,
-            TensorAtomMap {
-                base_id,
-                count: out_count,
-                layout: out_layout,
-                known_strides: TensorAtomMap::compute_strides(&out_known_dims),
-                sym_dims: out_sym_dims,
-            },
-        );
+        // Negative steps: fall back to boundary (rare).
+        self.lower_as_boundary_named(slice, all_infos, "Slice(negative step)");
     }
 
     /// Extract concrete i64 values from a tensor in all_infos.
@@ -2422,13 +2394,7 @@ impl LowerCtx {
 
         self.tensor_map.insert(
             out_id,
-            TensorAtomMap {
-                base_id,
-                count: out_count,
-                layout: out_layout,
-                known_strides: TensorAtomMap::compute_strides(&out_known_dims),
-                sym_dims: out_sym_dims,
-            },
+            TensorAtomMap::simple(base_id, out_count, out_layout, TensorAtomMap::compute_strides(&out_known_dims), out_sym_dims),
         );
     }
 
@@ -2485,13 +2451,7 @@ impl LowerCtx {
             );
             self.tensor_map.insert(
                 out_id,
-                TensorAtomMap {
-                    base_id,
-                    count,
-                    layout,
-                    known_strides: TensorAtomMap::compute_strides(&known_dims),
-                    sym_dims,
-                },
+                TensorAtomMap::simple(base_id, count, layout, TensorAtomMap::compute_strides(&known_dims), sym_dims),
             );
             return;
         } else {
@@ -2690,13 +2650,7 @@ impl LowerCtx {
 
         self.tensor_map.insert(
             out_id,
-            TensorAtomMap {
-                base_id,
-                count: out_count,
-                layout: out_layout,
-                known_strides: TensorAtomMap::compute_strides(&out_known_dims_full),
-                sym_dims: out_sym_dims,
-            },
+            TensorAtomMap::simple(base_id, out_count, out_layout, TensorAtomMap::compute_strides(&out_known_dims_full), out_sym_dims),
         );
     }
 
@@ -2803,13 +2757,7 @@ impl LowerCtx {
         // Update tensor_map to point to the divided result.
         self.tensor_map.insert(
             out_id,
-            TensorAtomMap {
-                base_id,
-                count: sum_map.count,
-                layout: sum_map.layout,
-                known_strides: sum_map.known_strides,
-                sym_dims: sum_map.sym_dims,
-            },
+            TensorAtomMap::simple(base_id, sum_map.count, sum_map.layout, sum_map.known_strides, sum_map.sym_dims),
         );
     }
 
@@ -3095,13 +3043,7 @@ impl LowerCtx {
             let out_strides = TensorAtomMap::compute_strides(&out_known_dims);
             self.tensor_map.insert(
                 out_id,
-                TensorAtomMap {
-                    base_id,
-                    count: d_total as u64,
-                    layout: out_layout,
-                    known_strides: out_strides,
-                    sym_dims: out_sym_dims,
-                },
+                TensorAtomMap::simple(base_id, d_total as u64, out_layout, out_strides, out_sym_dims),
             );
         } else {
             // Indices are fully known (constant). out_count = indices_count * D_total.
@@ -3193,13 +3135,7 @@ impl LowerCtx {
             let out_strides = TensorAtomMap::compute_strides(&out_known_dims);
             self.tensor_map.insert(
                 out_id,
-                TensorAtomMap {
-                    base_id,
-                    count: out_count,
-                    layout: out_layout,
-                    known_strides: out_strides,
-                    sym_dims: out_sym_dims,
-                },
+                TensorAtomMap::simple(base_id, out_count, out_layout, out_strides, out_sym_dims),
             );
         }
     }
@@ -3282,13 +3218,7 @@ impl LowerCtx {
         );
         self.tensor_map.insert(
             id,
-            TensorAtomMap {
-                base_id,
-                count: 1,
-                layout: vec![],
-                known_strides: vec![],
-                sym_dims: vec![],
-            },
+            TensorAtomMap::simple(base_id, 1, vec![], vec![], vec![]),
         );
     }
 }
@@ -3372,7 +3302,7 @@ mod tests {
                 let scalars = tensor_to_scalars(tensor);
                 assert_eq!(scalars.len(), tam.count as usize);
                 for (i, val) in scalars.into_iter().enumerate() {
-                    overrides.insert(tam.base_id.0 + i as u64, val);
+                    overrides.insert(tam.atom_id_for_element(i as u64).0, val);
                 }
             }
         }
@@ -3394,7 +3324,7 @@ mod tests {
             );
 
             let nano_flat: Vec<f64> = (0..tam.count)
-                .map(|i| nano_eval.get(tam.base_id.offset(i)))
+                .map(|i| nano_eval.get(tam.atom_id_for_element(i)))
                 .collect();
 
             assert_eq!(
