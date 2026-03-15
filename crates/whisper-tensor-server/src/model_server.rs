@@ -216,7 +216,7 @@ impl ModelServer {
 pub fn default_loaders() -> Vec<Box<dyn Loader>> {
     use whisper_tensor_import::loaders::{
         AutoLoader, FluxLoader, KokoroLoader, OnnxLoader, PiperLoader, Rwkv7Loader, SD15Loader,
-        TransformersLoader,
+        SD35Loader, TransformersLoader,
     };
     vec![
         Box::new(AutoLoader),
@@ -224,6 +224,7 @@ pub fn default_loaders() -> Vec<Box<dyn Loader>> {
         Box::new(TransformersLoader),
         Box::new(Rwkv7Loader),
         Box::new(SD15Loader),
+        Box::new(SD35Loader),
         Box::new(FluxLoader),
         Box::new(KokoroLoader),
         Box::new(PiperLoader),

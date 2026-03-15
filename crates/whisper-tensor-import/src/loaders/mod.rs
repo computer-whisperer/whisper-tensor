@@ -8,6 +8,7 @@ mod piper;
 mod rwkv7;
 mod sd15;
 mod sd2;
+mod sd35;
 mod sd_xl;
 mod transformers;
 mod whisper;
@@ -23,6 +24,7 @@ pub use self::rwkv7::Rwkv7Loader;
 pub use self::sd_xl::SDXLLoader;
 pub use self::sd2::SD2Loader;
 pub use self::sd15::SD15Loader;
+pub use self::sd35::SD35Loader;
 pub use self::transformers::TransformersLoader;
 pub use self::whisper::WhisperLoader;
 
