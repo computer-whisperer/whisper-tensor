@@ -291,7 +291,16 @@ fn main() {
             eprintln!("Loading model...");
             let loaded = load_model(&loader, config);
             cmd_tts(
-                loaded, model_dir, prompt, voice, speed, output, ref_audio, ref_text,
+                loaded,
+                TtsRunOptions {
+                    model_dir,
+                    text: prompt,
+                    voice_name: voice,
+                    speed,
+                    output_path: output,
+                    ref_audio,
+                    ref_text,
+                },
             );
         }
         Command::Stt {
@@ -442,8 +451,7 @@ fn cmd_image(
 // Text-to-speech
 // ============================================================================
 
-fn cmd_tts(
-    output: LoaderOutput,
+struct TtsRunOptions {
     model_dir: PathBuf,
     text: String,
     voice_name: String,
@@ -451,11 +459,23 @@ fn cmd_tts(
     output_path: PathBuf,
     ref_audio: Option<PathBuf>,
     ref_text: Option<String>,
-) {
+}
+
+fn cmd_tts(output: LoaderOutput, opts: TtsRunOptions) {
     use whisper_tensor::interfaces::TTSInputConfig;
     use whisper_tensor::super_graph::SuperGraphContext;
     use whisper_tensor::super_graph::cache::SuperGraphTensorCache;
     use whisper_tensor::super_graph::data::SuperGraphData;
+
+    let TtsRunOptions {
+        model_dir,
+        text,
+        voice_name,
+        speed,
+        output_path,
+        ref_audio,
+        ref_text,
+    } = opts;
 
     let interface = output
         .interfaces
