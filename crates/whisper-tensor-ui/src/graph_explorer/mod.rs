@@ -289,7 +289,7 @@ fn render_node_contents(
                         && label != op_kind
                     {
                         ui.add(Label::new(label).selectable(false));
-                        ui.add(Label::new(RichText::new(op_kind).small()).selectable(false));
+                        ui.add(Label::new(RichText::new(op_kind).size(9.0)).selectable(false));
                     } else {
                         ui.add(Label::new(op_kind).selectable(false));
                     }
@@ -299,7 +299,7 @@ fn render_node_contents(
                 let text = if let Some(link) = graph_subject.get_link_by_id(link_id)
                     && let Some(label) = link.label()
                 {
-                    format!("Input: {}", label)
+                    label.to_string()
                 } else {
                     "Input".to_string()
                 };
@@ -309,7 +309,7 @@ fn render_node_contents(
                 let text = if let Some(link) = graph_subject.get_link_by_id(link_id)
                     && let Some(label) = link.label()
                 {
-                    format!("Output: {}", label)
+                    label.to_string()
                 } else {
                     "Output".to_string()
                 };
