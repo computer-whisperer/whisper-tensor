@@ -356,9 +356,12 @@ fn build_cast_node(
     let output = builder.new_tensor_link(rng);
     let (mut mg, input_map) = MilliOpGraph::new(std::iter::once(input.global_id()), rng);
     let inp = *input_map.get(&input.global_id()).unwrap();
-    let casted = Cast::push_new(&mut mg, inp, dtype, rng);
+    let casted =
+        Cast::push_new_with_label(&mut mg, inp, dtype, Some(format!("cast_to_{dtype:?}")), rng);
     mg.set_output_map(std::iter::once((casted, output.global_id())));
-    builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
+    let mut node = SuperGraphNodeMilliOpGraph::new(mg, rng);
+    node.label = Some(format!("cast_to_{dtype:?}"));
+    builder.add_node(node.to_any());
     output
 }
 
@@ -388,13 +391,16 @@ fn build_denoising_loop(
 
     {
         let (mut mg, _) = MilliOpGraph::new(std::iter::empty(), rng);
-        let tier = Constant::push_new(
+        let tier = Constant::push_new_with_label(
             &mut mg,
             NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
+            Some("progress_tier_zero".to_string()),
             rng,
         );
         mg.set_output_map(std::iter::once((tier, progress_tier_link.global_id())));
-        builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
+        let mut node = SuperGraphNodeMilliOpGraph::new(mg, rng);
+        node.label = Some("denoise_progress_init".to_string());
+        builder.add_node(node.to_any());
     }
 
     let mut inner_builder = SuperGraphBuilder::new();
@@ -438,9 +444,10 @@ fn build_denoising_loop(
 
         // scale = 1 / sqrt(sigma^2 + 1)
         let sigma_sq = SimpleBinary::mul(&mut mg, sigma_in, sigma_in, rng);
-        let one = Constant::push_new(
+        let one = Constant::push_new_with_label(
             &mut mg,
             NDArrayNumericTensor::from_vec_shape(vec![1.0f32], &vec![1]).unwrap(),
+            Some("sigma.one".to_string()),
             rng,
         );
         let sigma_sq_plus_1 = SimpleBinary::add(&mut mg, sigma_sq, one, rng);
@@ -448,20 +455,41 @@ fn build_denoising_loop(
         let inv_scale = SimpleBinary::div(&mut mg, one, sqrt_val, rng);
         let scaled_lat = SimpleBinary::mul(&mut mg, lat_in, inv_scale, rng);
 
-        let lat_cast = Cast::push_new(&mut mg, scaled_lat, model_dtype, rng);
-        let ts_cast = Cast::push_new(&mut mg, ts_in, model_dtype, rng);
-        let zero_axis = Constant::push_new(
+        let lat_cast = Cast::push_new_with_label(
             &mut mg,
-            NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
+            scaled_lat,
+            model_dtype,
+            Some("latent.cast_model_dtype".to_string()),
             rng,
         );
-        let ts_reshaped = Unsqueeze::push_new(&mut mg, ts_cast, zero_axis, rng);
+        let ts_cast = Cast::push_new_with_label(
+            &mut mg,
+            ts_in,
+            model_dtype,
+            Some("timestep.cast_model_dtype".to_string()),
+            rng,
+        );
+        let zero_axis = Constant::push_new_with_label(
+            &mut mg,
+            NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
+            Some("timestep.unsqueeze_axis".to_string()),
+            rng,
+        );
+        let ts_reshaped = Unsqueeze::push_new_with_label(
+            &mut mg,
+            ts_cast,
+            zero_axis,
+            Some("timestep.reshape_for_unet".to_string()),
+            rng,
+        );
 
         mg.set_output_map([
             (lat_cast, cast_latent.global_id()),
             (ts_reshaped, cast_timestep.global_id()),
         ]);
-        inner_builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
+        let mut node = SuperGraphNodeMilliOpGraph::new(mg, rng);
+        node.label = Some("unet_input_prep".to_string());
+        inner_builder.add_node(node.to_any());
     }
 
     // Inner node 2: UNet unconditional
@@ -475,16 +503,15 @@ fn build_denoising_loop(
         if let Some(uy) = inner_uncond_y {
             inputs.push((uy, "y".to_string()));
         }
-        inner_builder.add_node(
-            SuperGraphNodeModelExecution::new(
-                rng,
-                inner_unet_weights,
-                unet_model_index,
-                inputs,
-                vec![("out_sample".to_string(), uncond_noise)],
-            )
-            .to_any(),
+        let mut node = SuperGraphNodeModelExecution::new(
+            rng,
+            inner_unet_weights,
+            unet_model_index,
+            inputs,
+            vec![("out_sample".to_string(), uncond_noise)],
         );
+        node.label = Some("unet_unconditional".to_string());
+        inner_builder.add_node(node.to_any());
     }
 
     // Inner node 3: UNet conditional
@@ -498,16 +525,15 @@ fn build_denoising_loop(
         if let Some(cy) = inner_cond_y {
             inputs.push((cy, "y".to_string()));
         }
-        inner_builder.add_node(
-            SuperGraphNodeModelExecution::new(
-                rng,
-                inner_unet_weights,
-                unet_model_index,
-                inputs,
-                vec![("out_sample".to_string(), cond_noise)],
-            )
-            .to_any(),
+        let mut node = SuperGraphNodeModelExecution::new(
+            rng,
+            inner_unet_weights,
+            unet_model_index,
+            inputs,
+            vec![("out_sample".to_string(), cond_noise)],
         );
+        node.label = Some("unet_conditional".to_string());
+        inner_builder.add_node(node.to_any());
     }
 
     // Inner node 4: CFG + Euler step
@@ -529,8 +555,20 @@ fn build_denoising_loop(
         let dt_in = *input_map.get(&inner_dt.global_id()).unwrap();
 
         // Cast noises to f32
-        let uncond_f32 = Cast::push_new(&mut mg, uncond_in, DType::F32, rng);
-        let cond_f32 = Cast::push_new(&mut mg, cond_in, DType::F32, rng);
+        let uncond_f32 = Cast::push_new_with_label(
+            &mut mg,
+            uncond_in,
+            DType::F32,
+            Some("noise_uncond.cast_f32".to_string()),
+            rng,
+        );
+        let cond_f32 = Cast::push_new_with_label(
+            &mut mg,
+            cond_in,
+            DType::F32,
+            Some("noise_cond.cast_f32".to_string()),
+            rng,
+        );
 
         // CFG: uncond + scale * (cond - uncond)
         let diff = SimpleBinary::sub(&mut mg, cond_f32, uncond_f32, rng);
@@ -542,32 +580,36 @@ fn build_denoising_loop(
         let latent_next = SimpleBinary::add(&mut mg, lat_in, step, rng);
 
         mg.set_output_map(std::iter::once((latent_next, inner_latent_out.global_id())));
-        inner_builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
+        let mut node = SuperGraphNodeMilliOpGraph::new(mg, rng);
+        node.label = Some("cfg_euler_step".to_string());
+        inner_builder.add_node(node.to_any());
     }
 
     {
         let (mut mg, input_map) =
             MilliOpGraph::new(std::iter::once(inner_step_in.global_id()), rng);
         let step_in = *input_map.get(&inner_step_in.global_id()).unwrap();
-        let one = Constant::push_new(
+        let one = Constant::push_new_with_label(
             &mut mg,
             NDArrayNumericTensor::from_vec_shape(vec![1i64], &vec![1]).unwrap(),
+            Some("step.one".to_string()),
             rng,
         );
         let step_next = SimpleBinary::add(&mut mg, step_in, one, rng);
         mg.set_output_map(std::iter::once((step_next, inner_step_out.global_id())));
-        inner_builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
+        let mut node = SuperGraphNodeMilliOpGraph::new(mg, rng);
+        node.label = Some("step_increment".to_string());
+        inner_builder.add_node(node.to_any());
     }
 
-    inner_builder.add_node(
-        SuperGraphNodeReportProgress::new(
-            inner_progress_tier,
-            inner_step_out,
-            inner_total_steps,
-            rng,
-        )
-        .to_any(),
+    let mut report = SuperGraphNodeReportProgress::new(
+        inner_progress_tier,
+        inner_step_out,
+        inner_total_steps,
+        rng,
     );
+    report.label = Some("denoise_progress".to_string());
+    inner_builder.add_node(report.to_any());
 
     // Build inner graph
     let mut inner_inputs: Vec<_> = vec![
@@ -614,7 +656,7 @@ fn build_denoising_loop(
         inner_total_steps,
     ));
 
-    let scan_node = SuperGraphNodeScan::new(
+    let mut scan_node = SuperGraphNodeScan::new(
         inner_graph,
         iteration_count_input,
         simple_inputs,
@@ -638,6 +680,7 @@ fn build_denoising_loop(
         )],
         rng,
     );
+    scan_node.label = Some("denoising_scan".to_string());
     builder.add_node(scan_node.to_any());
 
     outer_final_latent
@@ -659,31 +702,39 @@ fn build_vae_decode(
         let (mut mg, input_map) = MilliOpGraph::new(std::iter::once(latent.global_id()), rng);
         let lat_in = *input_map.get(&latent.global_id()).unwrap();
 
-        let scale = Constant::push_new(
+        let scale = Constant::push_new_with_label(
             &mut mg,
             NDArrayNumericTensor::from_vec_shape(vec![1.0f32 / vae_scale_factor], &vec![1])
                 .unwrap(),
+            Some("vae.inv_scale".to_string()),
             rng,
         );
         let scaled = SimpleBinary::mul(&mut mg, lat_in, scale, rng);
-        let scaled_cast = Cast::push_new(&mut mg, scaled, model_dtype, rng);
+        let scaled_cast = Cast::push_new_with_label(
+            &mut mg,
+            scaled,
+            model_dtype,
+            Some("vae_latent.cast_model_dtype".to_string()),
+            rng,
+        );
 
         mg.set_output_map(std::iter::once((scaled_cast, scaled_latent.global_id())));
-        builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
+        let mut node = SuperGraphNodeMilliOpGraph::new(mg, rng);
+        node.label = Some("vae_latent_prepare".to_string());
+        builder.add_node(node.to_any());
     }
 
     // VAE decoder
     let image_output = builder.new_tensor_link(rng);
-    builder.add_node(
-        SuperGraphNodeModelExecution::new(
-            rng,
-            vae_weights,
-            vae_model_index,
-            vec![(scaled_latent, "latent_sample".to_string())],
-            vec![("sample".to_string(), image_output)],
-        )
-        .to_any(),
+    let mut node = SuperGraphNodeModelExecution::new(
+        rng,
+        vae_weights,
+        vae_model_index,
+        vec![(scaled_latent, "latent_sample".to_string())],
+        vec![("sample".to_string(), image_output)],
     );
+    node.label = Some("vae_decode".to_string());
+    builder.add_node(node.to_any());
 
     image_output
 }
@@ -708,40 +759,49 @@ fn build_vae_decode_with_shift(
         let (mut mg, input_map) = MilliOpGraph::new(std::iter::once(latent.global_id()), rng);
         let lat_in = *input_map.get(&latent.global_id()).unwrap();
 
-        let inv_scale = Constant::push_new(
+        let inv_scale = Constant::push_new_with_label(
             &mut mg,
             NDArrayNumericTensor::from_vec_shape(vec![1.0f32 / vae_scale_factor], &vec![1])
                 .unwrap(),
+            Some("vae.inv_scale".to_string()),
             rng,
         );
         let scaled = SimpleBinary::mul(&mut mg, lat_in, inv_scale, rng);
         let shifted = if vae_shift_factor != 0.0 {
-            let shift = Constant::push_new(
+            let shift = Constant::push_new_with_label(
                 &mut mg,
                 NDArrayNumericTensor::from_vec_shape(vec![vae_shift_factor], &vec![1]).unwrap(),
+                Some("vae.shift".to_string()),
                 rng,
             );
             SimpleBinary::add(&mut mg, scaled, shift, rng)
         } else {
             scaled
         };
-        let casted = Cast::push_new(&mut mg, shifted, model_dtype, rng);
+        let casted = Cast::push_new_with_label(
+            &mut mg,
+            shifted,
+            model_dtype,
+            Some("vae_latent.cast_model_dtype".to_string()),
+            rng,
+        );
 
         mg.set_output_map(std::iter::once((casted, scaled_latent.global_id())));
-        builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
+        let mut node = SuperGraphNodeMilliOpGraph::new(mg, rng);
+        node.label = Some("vae_latent_prepare".to_string());
+        builder.add_node(node.to_any());
     }
 
     let image_output = builder.new_tensor_link(rng);
-    builder.add_node(
-        SuperGraphNodeModelExecution::new(
-            rng,
-            vae_weights,
-            vae_model_index,
-            vec![(scaled_latent, vae_input_name.to_string())],
-            vec![(vae_output_name.to_string(), image_output)],
-        )
-        .to_any(),
+    let mut node = SuperGraphNodeModelExecution::new(
+        rng,
+        vae_weights,
+        vae_model_index,
+        vec![(scaled_latent, vae_input_name.to_string())],
+        vec![(vae_output_name.to_string(), image_output)],
     );
+    node.label = Some("vae_decode".to_string());
+    builder.add_node(node.to_any());
 
     image_output
 }
@@ -756,9 +816,19 @@ fn build_eos_indices_node(
     let (mut mg, input_map) = MilliOpGraph::new(std::iter::once(input_ids.global_id()), rng);
     let ids_in = *input_map.get(&input_ids.global_id()).unwrap();
     // EOS (49407) is the max token in CLIP vocab, so argmax finds its position
-    let argmax = ArgMax::push_new(&mut mg, ids_in, 1, false, false, rng);
+    let argmax = ArgMax::push_new_with_label(
+        &mut mg,
+        ids_in,
+        1,
+        false,
+        false,
+        Some("eos_indices.argmax".to_string()),
+        rng,
+    );
     mg.set_output_map(std::iter::once((argmax, eos_indices.global_id())));
-    builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
+    let mut node = SuperGraphNodeMilliOpGraph::new(mg, rng);
+    node.label = Some("eos_indices".to_string());
+    builder.add_node(node.to_any());
     eos_indices
 }
 
@@ -788,13 +858,16 @@ fn build_flux_denoising_loop(
 
     {
         let (mut mg, _) = MilliOpGraph::new(std::iter::empty(), rng);
-        let tier = Constant::push_new(
+        let tier = Constant::push_new_with_label(
             &mut mg,
             NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
+            Some("progress_tier_zero".to_string()),
             rng,
         );
         mg.set_output_map(std::iter::once((tier, progress_tier_link.global_id())));
-        builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
+        let mut node = SuperGraphNodeMilliOpGraph::new(mg, rng);
+        node.label = Some("flux_progress_init".to_string());
+        builder.add_node(node.to_any());
     }
 
     let mut inner_builder = SuperGraphBuilder::new();
@@ -827,16 +900,29 @@ fn build_flux_denoising_loop(
         let ts_in = *input_map.get(&inner_timestep.global_id()).unwrap();
 
         // No sigma scaling for Flux (rectified flow operates directly on latents)
-        let lat_cast = Cast::push_new(&mut mg, lat_in, model_dtype, rng);
-
-        // Reshape timestep from scalar to [1, 1]
-        let ts_shape = Constant::push_new(
+        let lat_cast = Cast::push_new_with_label(
             &mut mg,
-            NDArrayNumericTensor::from_vec_shape(vec![1i64, 1], &vec![2]).unwrap(),
+            lat_in,
+            model_dtype,
+            Some("latent.cast_model_dtype".to_string()),
             rng,
         );
-        let ts_reshaped =
-            crate::milli_graph::ops::Reshape::push_new(&mut mg, ts_in, ts_shape, false, rng);
+
+        // Reshape timestep from scalar to [1, 1]
+        let ts_shape = Constant::push_new_with_label(
+            &mut mg,
+            NDArrayNumericTensor::from_vec_shape(vec![1i64, 1], &vec![2]).unwrap(),
+            Some("timestep.shape_1x1".to_string()),
+            rng,
+        );
+        let ts_reshaped = crate::milli_graph::ops::Reshape::push_new_with_label(
+            &mut mg,
+            ts_in,
+            ts_shape,
+            false,
+            Some("timestep.reshape_1x1".to_string()),
+            rng,
+        );
 
         let mut outputs = vec![
             (lat_cast, cast_latent.global_id()),
@@ -846,18 +932,27 @@ fn build_flux_denoising_loop(
         // Reshape guidance from scalar to [1, 1] (same as timestep)
         if let (Some(ig), Some(cg)) = (inner_guidance, cast_guidance) {
             let g_in = *input_map.get(&ig.global_id()).unwrap();
-            let g_shape = Constant::push_new(
+            let g_shape = Constant::push_new_with_label(
                 &mut mg,
                 NDArrayNumericTensor::from_vec_shape(vec![1i64, 1], &vec![2]).unwrap(),
+                Some("guidance.shape_1x1".to_string()),
                 rng,
             );
-            let g_reshaped =
-                crate::milli_graph::ops::Reshape::push_new(&mut mg, g_in, g_shape, false, rng);
+            let g_reshaped = crate::milli_graph::ops::Reshape::push_new_with_label(
+                &mut mg,
+                g_in,
+                g_shape,
+                false,
+                Some("guidance.reshape_1x1".to_string()),
+                rng,
+            );
             outputs.push((g_reshaped, cg.global_id()));
         }
 
         mg.set_output_map(outputs);
-        inner_builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
+        let mut node = SuperGraphNodeMilliOpGraph::new(mg, rng);
+        node.label = Some("dit_input_prep".to_string());
+        inner_builder.add_node(node.to_any());
     }
 
     // Inner node 2: DiT forward pass
@@ -871,16 +966,15 @@ fn build_flux_denoising_loop(
     if let Some(cg) = cast_guidance {
         dit_inputs.push((cg, "guidance".to_string()));
     }
-    inner_builder.add_node(
-        SuperGraphNodeModelExecution::new(
-            rng,
-            inner_dit_weights,
-            dit_model_index,
-            dit_inputs,
-            vec![("out_sample".to_string(), dit_output)],
-        )
-        .to_any(),
+    let mut node = SuperGraphNodeModelExecution::new(
+        rng,
+        inner_dit_weights,
+        dit_model_index,
+        dit_inputs,
+        vec![("out_sample".to_string(), dit_output)],
     );
+    node.label = Some("dit_forward".to_string());
+    inner_builder.add_node(node.to_any());
 
     // Inner node 3: Euler step — latent_new = latent + velocity * dt
     {
@@ -897,39 +991,49 @@ fn build_flux_denoising_loop(
         let dt_in = *input_map.get(&inner_dt.global_id()).unwrap();
 
         // Cast velocity to f32
-        let velocity_f32 = Cast::push_new(&mut mg, velocity, DType::F32, rng);
+        let velocity_f32 = Cast::push_new_with_label(
+            &mut mg,
+            velocity,
+            DType::F32,
+            Some("velocity.cast_f32".to_string()),
+            rng,
+        );
 
         // Euler step: latent + velocity * dt
         let step = SimpleBinary::mul(&mut mg, velocity_f32, dt_in, rng);
         let latent_next = SimpleBinary::add(&mut mg, lat_in, step, rng);
 
         mg.set_output_map(std::iter::once((latent_next, inner_latent_out.global_id())));
-        inner_builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
+        let mut node = SuperGraphNodeMilliOpGraph::new(mg, rng);
+        node.label = Some("euler_step".to_string());
+        inner_builder.add_node(node.to_any());
     }
 
     {
         let (mut mg, input_map) =
             MilliOpGraph::new(std::iter::once(inner_step_in.global_id()), rng);
         let step_in = *input_map.get(&inner_step_in.global_id()).unwrap();
-        let one = Constant::push_new(
+        let one = Constant::push_new_with_label(
             &mut mg,
             NDArrayNumericTensor::from_vec_shape(vec![1i64], &vec![1]).unwrap(),
+            Some("step.one".to_string()),
             rng,
         );
         let step_next = SimpleBinary::add(&mut mg, step_in, one, rng);
         mg.set_output_map(std::iter::once((step_next, inner_step_out.global_id())));
-        inner_builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
+        let mut node = SuperGraphNodeMilliOpGraph::new(mg, rng);
+        node.label = Some("step_increment".to_string());
+        inner_builder.add_node(node.to_any());
     }
 
-    inner_builder.add_node(
-        SuperGraphNodeReportProgress::new(
-            inner_progress_tier,
-            inner_step_out,
-            inner_total_steps,
-            rng,
-        )
-        .to_any(),
+    let mut report = SuperGraphNodeReportProgress::new(
+        inner_progress_tier,
+        inner_step_out,
+        inner_total_steps,
+        rng,
     );
+    report.label = Some("flux_progress".to_string());
+    inner_builder.add_node(report.to_any());
 
     // Build inner graph
     let mut inner_inputs: Vec<_> = vec![
@@ -967,7 +1071,7 @@ fn build_flux_denoising_loop(
         inner_total_steps,
     ));
 
-    let scan_node = SuperGraphNodeScan::new(
+    let mut scan_node = SuperGraphNodeScan::new(
         inner_graph,
         iteration_count_input,
         simple_inputs,
@@ -990,6 +1094,7 @@ fn build_flux_denoising_loop(
         )],
         rng,
     );
+    scan_node.label = Some("flux_denoise_scan".to_string());
     builder.add_node(scan_node.to_any());
 
     outer_final_latent
@@ -1027,13 +1132,16 @@ fn build_sd3_denoising_loop(
 
     {
         let (mut mg, _) = MilliOpGraph::new(std::iter::empty(), rng);
-        let tier = Constant::push_new(
+        let tier = Constant::push_new_with_label(
             &mut mg,
             NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
+            Some("progress_tier_zero".to_string()),
             rng,
         );
         mg.set_output_map(std::iter::once((tier, progress_tier_link.global_id())));
-        builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
+        let mut node = SuperGraphNodeMilliOpGraph::new(mg, rng);
+        node.label = Some("sd3_progress_init".to_string());
+        builder.add_node(node.to_any());
     }
 
     let mut inner_builder = SuperGraphBuilder::new();
@@ -1065,66 +1173,85 @@ fn build_sd3_denoising_loop(
         let lat_in = *input_map.get(&inner_latent_in.global_id()).unwrap();
         let ts_in = *input_map.get(&inner_timestep.global_id()).unwrap();
 
-        let lat_cast = Cast::push_new(&mut mg, lat_in, model_dtype, rng);
-        let ts_cast = Cast::push_new(&mut mg, ts_in, model_dtype, rng);
-        let zero_axis = Constant::push_new(
+        let lat_cast = Cast::push_new_with_label(
             &mut mg,
-            NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
+            lat_in,
+            model_dtype,
+            Some("latent.cast_model_dtype".to_string()),
             rng,
         );
-        let ts_reshaped = Unsqueeze::push_new(&mut mg, ts_cast, zero_axis, rng);
+        let ts_cast = Cast::push_new_with_label(
+            &mut mg,
+            ts_in,
+            model_dtype,
+            Some("timestep.cast_model_dtype".to_string()),
+            rng,
+        );
+        let zero_axis = Constant::push_new_with_label(
+            &mut mg,
+            NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
+            Some("timestep.unsqueeze_axis".to_string()),
+            rng,
+        );
+        let ts_reshaped = Unsqueeze::push_new_with_label(
+            &mut mg,
+            ts_cast,
+            zero_axis,
+            Some("timestep.reshape_for_transformer".to_string()),
+            rng,
+        );
 
         mg.set_output_map([
             (lat_cast, cast_latent.global_id()),
             (ts_reshaped, cast_timestep.global_id()),
         ]);
-        inner_builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
+        let mut node = SuperGraphNodeMilliOpGraph::new(mg, rng);
+        node.label = Some("transformer_input_prep".to_string());
+        inner_builder.add_node(node.to_any());
     }
 
     // Inner node 2: Transformer unconditional
     let uncond_pred = inner_builder.new_tensor_link(rng);
-    inner_builder.add_node(
-        SuperGraphNodeModelExecution::new(
-            rng,
-            inner_transformer_weights,
-            transformer_model_index,
-            vec![
-                (cast_latent, transformer_latent_input_name.to_string()),
-                (cast_timestep, transformer_timestep_input_name.to_string()),
-                (
-                    inner_uncond_context,
-                    transformer_context_input_name.to_string(),
-                ),
-                (
-                    inner_uncond_pooled,
-                    transformer_pooled_input_name.to_string(),
-                ),
-            ],
-            vec![(transformer_output_name.to_string(), uncond_pred)],
-        )
-        .to_any(),
+    let mut uncond_node = SuperGraphNodeModelExecution::new(
+        rng,
+        inner_transformer_weights,
+        transformer_model_index,
+        vec![
+            (cast_latent, transformer_latent_input_name.to_string()),
+            (cast_timestep, transformer_timestep_input_name.to_string()),
+            (
+                inner_uncond_context,
+                transformer_context_input_name.to_string(),
+            ),
+            (
+                inner_uncond_pooled,
+                transformer_pooled_input_name.to_string(),
+            ),
+        ],
+        vec![(transformer_output_name.to_string(), uncond_pred)],
     );
+    uncond_node.label = Some("transformer_unconditional".to_string());
+    inner_builder.add_node(uncond_node.to_any());
 
     // Inner node 3: Transformer conditional
     let cond_pred = inner_builder.new_tensor_link(rng);
-    inner_builder.add_node(
-        SuperGraphNodeModelExecution::new(
-            rng,
-            inner_transformer_weights,
-            transformer_model_index,
-            vec![
-                (cast_latent, transformer_latent_input_name.to_string()),
-                (cast_timestep, transformer_timestep_input_name.to_string()),
-                (
-                    inner_cond_context,
-                    transformer_context_input_name.to_string(),
-                ),
-                (inner_cond_pooled, transformer_pooled_input_name.to_string()),
-            ],
-            vec![(transformer_output_name.to_string(), cond_pred)],
-        )
-        .to_any(),
+    let mut cond_node = SuperGraphNodeModelExecution::new(
+        rng,
+        inner_transformer_weights,
+        transformer_model_index,
+        vec![
+            (cast_latent, transformer_latent_input_name.to_string()),
+            (cast_timestep, transformer_timestep_input_name.to_string()),
+            (
+                inner_cond_context,
+                transformer_context_input_name.to_string(),
+            ),
+            (inner_cond_pooled, transformer_pooled_input_name.to_string()),
+        ],
+        vec![(transformer_output_name.to_string(), cond_pred)],
     );
+    cond_node.label = Some("transformer_conditional".to_string());
+    inner_builder.add_node(cond_node.to_any());
 
     // Inner node 4: CFG + Euler step
     {
@@ -1144,8 +1271,20 @@ fn build_sd3_denoising_loop(
         let gs_in = *input_map.get(&inner_guidance_scale.global_id()).unwrap();
         let dt_in = *input_map.get(&inner_dt.global_id()).unwrap();
 
-        let uncond_f32 = Cast::push_new(&mut mg, uncond_in, DType::F32, rng);
-        let cond_f32 = Cast::push_new(&mut mg, cond_in, DType::F32, rng);
+        let uncond_f32 = Cast::push_new_with_label(
+            &mut mg,
+            uncond_in,
+            DType::F32,
+            Some("pred_uncond.cast_f32".to_string()),
+            rng,
+        );
+        let cond_f32 = Cast::push_new_with_label(
+            &mut mg,
+            cond_in,
+            DType::F32,
+            Some("pred_cond.cast_f32".to_string()),
+            rng,
+        );
         let diff = SimpleBinary::sub(&mut mg, cond_f32, uncond_f32, rng);
         let scaled = SimpleBinary::mul(&mut mg, diff, gs_in, rng);
         let guided = SimpleBinary::add(&mut mg, uncond_f32, scaled, rng);
@@ -1153,32 +1292,36 @@ fn build_sd3_denoising_loop(
         let latent_next = SimpleBinary::add(&mut mg, lat_in, step, rng);
 
         mg.set_output_map(std::iter::once((latent_next, inner_latent_out.global_id())));
-        inner_builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
+        let mut node = SuperGraphNodeMilliOpGraph::new(mg, rng);
+        node.label = Some("cfg_euler_step".to_string());
+        inner_builder.add_node(node.to_any());
     }
 
     {
         let (mut mg, input_map) =
             MilliOpGraph::new(std::iter::once(inner_step_in.global_id()), rng);
         let step_in = *input_map.get(&inner_step_in.global_id()).unwrap();
-        let one = Constant::push_new(
+        let one = Constant::push_new_with_label(
             &mut mg,
             NDArrayNumericTensor::from_vec_shape(vec![1i64], &vec![1]).unwrap(),
+            Some("step.one".to_string()),
             rng,
         );
         let step_next = SimpleBinary::add(&mut mg, step_in, one, rng);
         mg.set_output_map(std::iter::once((step_next, inner_step_out.global_id())));
-        inner_builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
+        let mut node = SuperGraphNodeMilliOpGraph::new(mg, rng);
+        node.label = Some("step_increment".to_string());
+        inner_builder.add_node(node.to_any());
     }
 
-    inner_builder.add_node(
-        SuperGraphNodeReportProgress::new(
-            inner_progress_tier,
-            inner_step_out,
-            inner_total_steps,
-            rng,
-        )
-        .to_any(),
+    let mut report = SuperGraphNodeReportProgress::new(
+        inner_progress_tier,
+        inner_step_out,
+        inner_total_steps,
+        rng,
     );
+    report.label = Some("sd3_progress".to_string());
+    inner_builder.add_node(report.to_any());
 
     let inner_inputs: Vec<_> = vec![
         inner_transformer_weights.to_any(),
@@ -1197,7 +1340,7 @@ fn build_sd3_denoising_loop(
     let inner_outputs: Vec<_> = vec![inner_latent_out.to_any(), inner_step_out.to_any()];
     let inner_graph = inner_builder.build(rng, &inner_inputs, &inner_outputs);
 
-    let scan_node = SuperGraphNodeScan::new(
+    let mut scan_node = SuperGraphNodeScan::new(
         inner_graph,
         iteration_count_input,
         vec![
@@ -1225,6 +1368,7 @@ fn build_sd3_denoising_loop(
         )],
         rng,
     );
+    scan_node.label = Some("sd3_denoise_scan".to_string());
     builder.add_node(scan_node.to_any());
 
     outer_final_latent
@@ -1247,37 +1391,46 @@ fn build_flux_vae_decode(
         let lat_in = *input_map.get(&latent.global_id()).unwrap();
 
         // Cast to F32 first (denoising loop outputs in model_dtype which may be BF16)
-        let f32_lat = Cast::push_new(&mut mg, lat_in, DType::F32, rng);
-
-        let inv_scale = Constant::push_new(
+        let f32_lat = Cast::push_new_with_label(
             &mut mg,
-            NDArrayNumericTensor::from_vec_shape(vec![1.0f32 / 0.3611], &vec![1]).unwrap(),
+            lat_in,
+            DType::F32,
+            Some("latent.cast_f32".to_string()),
             rng,
         );
-        let shift = Constant::push_new(
+
+        let inv_scale = Constant::push_new_with_label(
+            &mut mg,
+            NDArrayNumericTensor::from_vec_shape(vec![1.0f32 / 0.3611], &vec![1]).unwrap(),
+            Some("flux_vae.inv_scale".to_string()),
+            rng,
+        );
+        let shift = Constant::push_new_with_label(
             &mut mg,
             NDArrayNumericTensor::from_vec_shape(vec![0.1159f32], &vec![1]).unwrap(),
+            Some("flux_vae.shift".to_string()),
             rng,
         );
         let scaled = SimpleBinary::mul(&mut mg, f32_lat, inv_scale, rng);
         let shifted = SimpleBinary::add(&mut mg, scaled, shift, rng);
 
         mg.set_output_map(std::iter::once((shifted, scaled_latent.global_id())));
-        builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
+        let mut node = SuperGraphNodeMilliOpGraph::new(mg, rng);
+        node.label = Some("flux_vae_latent_prepare".to_string());
+        builder.add_node(node.to_any());
     }
 
     // VAE decoder
     let image_output = builder.new_tensor_link(rng);
-    builder.add_node(
-        SuperGraphNodeModelExecution::new(
-            rng,
-            vae_weights,
-            vae_model_index,
-            vec![(scaled_latent, "latent_sample".to_string())],
-            vec![("sample".to_string(), image_output)],
-        )
-        .to_any(),
+    let mut node = SuperGraphNodeModelExecution::new(
+        rng,
+        vae_weights,
+        vae_model_index,
+        vec![(scaled_latent, "latent_sample".to_string())],
+        vec![("sample".to_string(), image_output)],
     );
+    node.label = Some("flux_vae_decode".to_string());
+    builder.add_node(node.to_any());
 
     image_output
 }

@@ -53,7 +53,7 @@ pub(super) fn build_rnn_supergraph(
             .map(|&id| (id, super_graph_builder.new_tensor_link(rng)))
             .collect();
         let post_cache_tokens = super_graph_builder.new_tensor_link(rng);
-        let node = SuperGraphNodeRNNCacheRead::new(
+        let mut node = SuperGraphNodeRNNCacheRead::new(
             cache_key,
             token_context_input_link,
             post_cache_tokens,
@@ -67,6 +67,7 @@ pub(super) fn build_rnn_supergraph(
                 .collect(),
             rng,
         );
+        node.label = Some("cache_read".to_string());
         super_graph_builder.add_node(node.to_any());
         (post_cache_tokens, post_cache_state_init_links)
     };
@@ -77,9 +78,15 @@ pub(super) fn build_rnn_supergraph(
         let (mut milli_graph, input_map) =
             MilliOpGraph::new(std::iter::once(post_cache_tokens_input.global_id()), rng);
         let milli_op_graph_input = *input_map.get(&post_cache_tokens_input.global_id()).unwrap();
-        let shape_out = Shape::push_new(&mut milli_graph, milli_op_graph_input, rng);
+        let shape_out = Shape::push_new_with_label(
+            &mut milli_graph,
+            milli_op_graph_input,
+            Some("token_shape".to_string()),
+            rng,
+        );
         milli_graph.set_output_map(std::iter::once((shape_out, loop_count_link.global_id())));
-        let node = SuperGraphNodeMilliOpGraph::new(milli_graph, rng);
+        let mut node = SuperGraphNodeMilliOpGraph::new(milli_graph, rng);
+        node.label = Some("loop_count_from_shape".to_string());
         super_graph_builder.add_node(node.to_any());
         loop_count_link
     };
@@ -87,13 +94,15 @@ pub(super) fn build_rnn_supergraph(
     let progress_tier_link = {
         let progress_tier_link = super_graph_builder.new_tensor_link(rng);
         let (mut milli_graph, _) = MilliOpGraph::new(std::iter::empty(), rng);
-        let tier_zero = Constant::push_new(
+        let tier_zero = Constant::push_new_with_label(
             &mut milli_graph,
             NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
+            Some("progress_tier_zero".to_string()),
             rng,
         );
         milli_graph.set_output_map(std::iter::once((tier_zero, progress_tier_link.global_id())));
-        let node = SuperGraphNodeMilliOpGraph::new(milli_graph, rng);
+        let mut node = SuperGraphNodeMilliOpGraph::new(milli_graph, rng);
+        node.label = Some("progress_init".to_string());
         super_graph_builder.add_node(node.to_any());
         progress_tier_link
     };
@@ -130,12 +139,18 @@ pub(super) fn build_rnn_supergraph(
             .unwrap()
             .cast(input_tensor_dtype)
             .unwrap();
-            let input_tensor_tid = Constant::push_new(&mut milli_graph, input_tensor, rng);
+            let input_tensor_tid = Constant::push_new_with_label(
+                &mut milli_graph,
+                input_tensor,
+                Some(format!("state_init_{}", input_name)),
+                rng,
+            );
             output_map.insert(input_tensor_tid, link.global_id());
             output_order.push(link.global_id());
         }
         milli_graph.set_output_map_ordered(output_map, output_order);
-        let node = SuperGraphNodeMilliOpGraph::new(milli_graph, rng);
+        let mut node = SuperGraphNodeMilliOpGraph::new(milli_graph, rng);
+        node.label = Some("state_zero_init".to_string());
         super_graph_builder.add_node(node.to_any());
     }
 
@@ -182,24 +197,33 @@ pub(super) fn build_rnn_supergraph(
         let (mut milli_graph, input_map) =
             MilliOpGraph::new(std::iter::once(sub_token_input.global_id()), rng);
         let milli_op_graph_input = *input_map.get(&sub_token_input.global_id()).unwrap();
-        let mut x = Cast::push_new(
+        let mut x = Cast::push_new_with_label(
             &mut milli_graph,
             milli_op_graph_input,
             input_tensor_dtype,
+            Some("token.cast_dtype".to_string()),
             rng,
         );
-        let zero_tid = Constant::push_new(
+        let zero_tid = Constant::push_new_with_label(
             &mut milli_graph,
             NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
+            Some("token.unsqueeze_axis".to_string()),
             rng,
         );
         for _ in 0..input_tensor_rank {
-            x = Unsqueeze::push_new(&mut milli_graph, x, zero_tid, rng);
+            x = Unsqueeze::push_new_with_label(
+                &mut milli_graph,
+                x,
+                zero_tid,
+                Some("token.add_batch_dim".to_string()),
+                rng,
+            );
         }
 
         let processed_input_link = sub_builder.new_tensor_link(rng);
         milli_graph.set_output_map(std::iter::once((x, processed_input_link.global_id())));
-        let node = SuperGraphNodeMilliOpGraph::new(milli_graph, rng);
+        let mut node = SuperGraphNodeMilliOpGraph::new(milli_graph, rng);
+        node.label = Some("token_preprocess".to_string());
         sub_builder.add_node(node.to_any());
         processed_input_link
     };
@@ -215,16 +239,15 @@ pub(super) fn build_rnn_supergraph(
         for (id, pair) in state_pairs.iter().enumerate() {
             tensor_outputs.push((pair.1.clone(), *state_output_links.get(&id).unwrap()));
         }
-        sub_builder.add_node(
-            SuperGraphNodeModelExecution::new(
-                rng,
-                sub_model_input_link,
-                0,
-                tensor_inputs,
-                tensor_outputs,
-            )
-            .to_any(),
+        let mut node = SuperGraphNodeModelExecution::new(
+            rng,
+            sub_model_input_link,
+            0,
+            tensor_inputs,
+            tensor_outputs,
         );
+        node.label = Some("decoder_forward".to_string());
+        sub_builder.add_node(node.to_any());
     }
 
     // Output processing in sub-graph: squeeze + cast to F32
@@ -246,22 +269,36 @@ pub(super) fn build_rnn_supergraph(
             MilliOpGraph::new(std::iter::once(sub_logit_output.global_id()), rng);
         let milli_op_graph_input = *input_map.get(&sub_logit_output.global_id()).unwrap();
         let mut x = milli_op_graph_input;
-        let zero_tid = Constant::push_new(
+        let zero_tid = Constant::push_new_with_label(
             &mut milli_graph,
             NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
+            Some("logits.squeeze_axis".to_string()),
             rng,
         );
         for _ in 0..(output_tensor_rank - 1) {
-            x = Squeeze::push_new(&mut milli_graph, x, zero_tid, rng);
+            x = Squeeze::push_new_with_label(
+                &mut milli_graph,
+                x,
+                zero_tid,
+                Some("logits.remove_batch_dim".to_string()),
+                rng,
+            );
         }
-        x = Cast::push_new(&mut milli_graph, x, DType::F32, rng);
+        x = Cast::push_new_with_label(
+            &mut milli_graph,
+            x,
+            DType::F32,
+            Some("logits.cast_f32".to_string()),
+            rng,
+        );
 
         let processed_logit_output_link = sub_builder.new_tensor_link(rng);
         milli_graph.set_output_map(std::iter::once((
             x,
             processed_logit_output_link.global_id(),
         )));
-        let node = SuperGraphNodeMilliOpGraph::new(milli_graph, rng);
+        let mut node = SuperGraphNodeMilliOpGraph::new(milli_graph, rng);
+        node.label = Some("logits_postprocess".to_string());
         sub_builder.add_node(node.to_any());
         processed_logit_output_link
     };
@@ -270,21 +307,23 @@ pub(super) fn build_rnn_supergraph(
         let (mut milli_graph, input_map) =
             MilliOpGraph::new(std::iter::once(sub_step_in.global_id()), rng);
         let step_in = *input_map.get(&sub_step_in.global_id()).unwrap();
-        let one = Constant::push_new(
+        let one = Constant::push_new_with_label(
             &mut milli_graph,
             NDArrayNumericTensor::from_vec_shape(vec![1i64], &vec![1]).unwrap(),
+            Some("step.one".to_string()),
             rng,
         );
         let step_next = SimpleBinary::add(&mut milli_graph, step_in, one, rng);
         milli_graph.set_output_map(std::iter::once((step_next, sub_step_out.global_id())));
-        let node = SuperGraphNodeMilliOpGraph::new(milli_graph, rng);
+        let mut node = SuperGraphNodeMilliOpGraph::new(milli_graph, rng);
+        node.label = Some("step_increment".to_string());
         sub_builder.add_node(node.to_any());
     }
 
-    sub_builder.add_node(
-        SuperGraphNodeReportProgress::new(sub_progress_tier, sub_step_out, sub_total_steps, rng)
-            .to_any(),
-    );
+    let mut report =
+        SuperGraphNodeReportProgress::new(sub_progress_tier, sub_step_out, sub_total_steps, rng);
+    report.label = Some("decode_progress".to_string());
+    sub_builder.add_node(report.to_any());
 
     // Build scan state links
     let state_links: Vec<SuperGraphLinkTriple> = post_cache_state_init_links
@@ -327,7 +366,7 @@ pub(super) fn build_rnn_supergraph(
         .map(|(id, link)| SuperGraphLinkDouble::new(*state_output_links.get(id).unwrap(), *link))
         .collect();
 
-    let scan_node = SuperGraphNodeScan::new(
+    let mut scan_node = SuperGraphNodeScan::new(
         sub_graph_inner,
         loop_count_link,
         vec![
@@ -341,11 +380,12 @@ pub(super) fn build_rnn_supergraph(
         final_state_outputs.clone(),
         rng,
     );
+    scan_node.label = Some("token_decode_scan".to_string());
     super_graph_builder.add_node(scan_node.to_any());
 
     // Cache write
     {
-        let node = SuperGraphNodeRNNCacheWrite::new(
+        let mut node = SuperGraphNodeRNNCacheWrite::new(
             cache_key,
             token_context_input_link,
             final_state_output_links
@@ -354,6 +394,7 @@ pub(super) fn build_rnn_supergraph(
                 .collect(),
             rng,
         );
+        node.label = Some("cache_write".to_string());
         super_graph_builder.add_node(node.to_any());
     }
 

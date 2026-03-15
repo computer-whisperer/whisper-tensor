@@ -229,13 +229,16 @@ fn build_f5_denoising_loop(
 
     {
         let (mut mg, _) = MilliOpGraph::new(std::iter::empty(), rng);
-        let tier = Constant::push_new(
+        let tier = Constant::push_new_with_label(
             &mut mg,
             NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
+            Some("progress_tier_zero".to_string()),
             rng,
         );
         mg.set_output_map(std::iter::once((tier, progress_tier_link.global_id())));
-        builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
+        let mut node = SuperGraphNodeMilliOpGraph::new(mg, rng);
+        node.label = Some("f5_progress_init".to_string());
+        builder.add_node(node.to_any());
     }
 
     let mut inner_builder = SuperGraphBuilder::new();
@@ -261,24 +264,23 @@ fn build_f5_denoising_loop(
 
     // --- Inner Node A: Transformer model execution ---
     let raw_denoised = inner_builder.new_tensor_link(rng);
-    inner_builder.add_node(
-        SuperGraphNodeModelExecution::new(
-            rng,
-            inner_transformer_weights,
-            1, // model index 1
-            vec![
-                (inner_noise_in, "noise".to_string()),
-                (inner_rope_cos, "rope_cos".to_string()),
-                (inner_rope_sin, "rope_sin".to_string()),
-                (inner_cat_mel_text, "cat_mel_text".to_string()),
-                (inner_cat_mel_text_drop, "cat_mel_text_drop".to_string()),
-                (inner_qk_rotated_empty, "qk_rotated_empty".to_string()),
-                (inner_time_step, "time_step".to_string()),
-            ],
-            vec![("denoised".to_string(), raw_denoised)],
-        )
-        .to_any(),
+    let mut transformer_node = SuperGraphNodeModelExecution::new(
+        rng,
+        inner_transformer_weights,
+        1, // model index 1
+        vec![
+            (inner_noise_in, "noise".to_string()),
+            (inner_rope_cos, "rope_cos".to_string()),
+            (inner_rope_sin, "rope_sin".to_string()),
+            (inner_cat_mel_text, "cat_mel_text".to_string()),
+            (inner_cat_mel_text_drop, "cat_mel_text_drop".to_string()),
+            (inner_qk_rotated_empty, "qk_rotated_empty".to_string()),
+            (inner_time_step, "time_step".to_string()),
+        ],
+        vec![("denoised".to_string(), raw_denoised)],
     );
+    transformer_node.label = Some("f5_transformer_forward".to_string());
+    inner_builder.add_node(transformer_node.to_any());
 
     // --- Inner Node B: Euler step ---
     // noise_next = noise + dt * (denoised - noise)
@@ -292,20 +294,34 @@ fn build_f5_denoising_loop(
 
         // dt = 1/32 as f16 (matching model dtype)
         let dt_val = 1.0f32 / NFE_STEPS as f32;
-        let dt = Constant::push_new(
+        let dt = Constant::push_new_with_label(
             &mut mg,
             NDArrayNumericTensor::from_vec_shape(vec![dt_val], &vec![1]).unwrap(),
+            Some("ode.dt".to_string()),
             rng,
         );
-        let dt = Cast::push_new(&mut mg, dt, DType::F16, rng);
+        let dt = Cast::push_new_with_label(
+            &mut mg,
+            dt,
+            DType::F16,
+            Some("ode.dt.cast_f16".to_string()),
+            rng,
+        );
 
         // one_minus_dt = 1 - dt
-        let one = Constant::push_new(
+        let one = Constant::push_new_with_label(
             &mut mg,
             NDArrayNumericTensor::from_vec_shape(vec![1.0f32], &vec![1]).unwrap(),
+            Some("ode.one".to_string()),
             rng,
         );
-        let one = Cast::push_new(&mut mg, one, DType::F16, rng);
+        let one = Cast::push_new_with_label(
+            &mut mg,
+            one,
+            DType::F16,
+            Some("ode.one.cast_f16".to_string()),
+            rng,
+        );
         let one_minus_dt = SimpleBinary::sub(&mut mg, one, dt, rng);
 
         // noise_next = one_minus_dt * noise + dt * denoised
@@ -314,32 +330,36 @@ fn build_f5_denoising_loop(
         let noise_next = SimpleBinary::add(&mut mg, scaled_noise, scaled_denoised, rng);
 
         mg.set_output_map(std::iter::once((noise_next, inner_noise_out.global_id())));
-        inner_builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
+        let mut node = SuperGraphNodeMilliOpGraph::new(mg, rng);
+        node.label = Some("f5_euler_step".to_string());
+        inner_builder.add_node(node.to_any());
     }
 
     {
         let (mut mg, input_map) =
             MilliOpGraph::new(std::iter::once(inner_step_in.global_id()), rng);
         let step_in = *input_map.get(&inner_step_in.global_id()).unwrap();
-        let one = Constant::push_new(
+        let one = Constant::push_new_with_label(
             &mut mg,
             NDArrayNumericTensor::from_vec_shape(vec![1i64], &vec![1]).unwrap(),
+            Some("step.one".to_string()),
             rng,
         );
         let step_next = SimpleBinary::add(&mut mg, step_in, one, rng);
         mg.set_output_map(std::iter::once((step_next, inner_step_out.global_id())));
-        inner_builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
+        let mut node = SuperGraphNodeMilliOpGraph::new(mg, rng);
+        node.label = Some("step_increment".to_string());
+        inner_builder.add_node(node.to_any());
     }
 
-    inner_builder.add_node(
-        SuperGraphNodeReportProgress::new(
-            inner_progress_tier,
-            inner_step_out,
-            inner_total_steps,
-            rng,
-        )
-        .to_any(),
+    let mut report = SuperGraphNodeReportProgress::new(
+        inner_progress_tier,
+        inner_step_out,
+        inner_total_steps,
+        rng,
     );
+    report.label = Some("f5_progress".to_string());
+    inner_builder.add_node(report.to_any());
 
     // Build inner graph
     let inner_inputs = vec![
@@ -359,7 +379,7 @@ fn build_f5_denoising_loop(
     let inner_graph = inner_builder.build(rng, &inner_inputs, &inner_outputs);
 
     // Create scan node
-    let scan_node = SuperGraphNodeScan::new(
+    let mut scan_node = SuperGraphNodeScan::new(
         inner_graph,
         iteration_count_input,
         // simple_inputs: constant per iteration
@@ -389,6 +409,7 @@ fn build_f5_denoising_loop(
         )],
         rng,
     );
+    scan_node.label = Some("f5_denoise_scan".to_string());
     builder.add_node(scan_node.to_any());
 
     outer_final_denoised

@@ -59,16 +59,15 @@ pub(crate) fn build_whisper_supergraph(
     let decoder_weights_link = builder.new_model_link(rng);
     let encoder_hidden_link = builder.new_tensor_link(rng);
 
-    builder.add_node(
-        SuperGraphNodeModelExecution::new(
-            rng,
-            encoder_weights_link,
-            0, // model index 0 = encoder
-            vec![(mel_link, "input_features".to_string())],
-            vec![("last_hidden_state".to_string(), encoder_hidden_link)],
-        )
-        .to_any(),
+    let mut encoder_node = SuperGraphNodeModelExecution::new(
+        rng,
+        encoder_weights_link,
+        0, // model index 0 = encoder
+        vec![(mel_link, "input_features".to_string())],
+        vec![("last_hidden_state".to_string(), encoder_hidden_link)],
     );
+    encoder_node.label = Some("encoder_forward".to_string());
+    builder.add_node(encoder_node.to_any());
 
     // Decoder state layout:
     // - token state: [1] (current token id)
@@ -147,7 +146,9 @@ pub(crate) fn build_whisper_supergraph(
             output_order.push(link.global_id());
         }
         mg.set_output_map_ordered(output_map, output_order);
-        builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
+        let mut node = SuperGraphNodeMilliOpGraph::new(mg, rng);
+        node.label = Some("prefix_and_kv_init".to_string());
+        builder.add_node(node.to_any());
     }
 
     // Prefill scan over decoder prefix tokens to warm KV state and compute first generated token.
@@ -178,7 +179,9 @@ pub(crate) fn build_whisper_supergraph(
         let token_2d = Unsqueeze::push_new(&mut mg, token_i64, axis0, rng);
         let out = prefill_builder.new_tensor_link(rng);
         mg.set_output_map(std::iter::once((token_2d, out.global_id())));
-        prefill_builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
+        let mut node = SuperGraphNodeMilliOpGraph::new(mg, rng);
+        node.label = Some("prefill_token_prep".to_string());
+        prefill_builder.add_node(node.to_any());
         out
     };
 
@@ -194,16 +197,15 @@ pub(crate) fn build_whisper_supergraph(
             tensor_outputs.push((pair.1.clone(), *prefill_state_out.get(&id).unwrap()));
         }
 
-        prefill_builder.add_node(
-            SuperGraphNodeModelExecution::new(
-                rng,
-                prefill_model_link,
-                1, // model index 1 = decoder
-                tensor_inputs,
-                tensor_outputs,
-            )
-            .to_any(),
+        let mut node = SuperGraphNodeModelExecution::new(
+            rng,
+            prefill_model_link,
+            1, // model index 1 = decoder
+            tensor_inputs,
+            tensor_outputs,
         );
+        node.label = Some("decoder_prefill_forward".to_string());
+        prefill_builder.add_node(node.to_any());
     }
 
     let prefill_logits = {
@@ -220,7 +222,9 @@ pub(crate) fn build_whisper_supergraph(
         let squeezed = Squeeze::push_new(&mut mg, squeezed, axis0, rng);
         let logits_f32 = Cast::push_new(&mut mg, squeezed, DType::F32, rng);
         mg.set_output_map(std::iter::once((logits_f32, out.global_id())));
-        prefill_builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
+        let mut node = SuperGraphNodeMilliOpGraph::new(mg, rng);
+        node.label = Some("prefill_logits_postprocess".to_string());
+        prefill_builder.add_node(node.to_any());
         out
     };
 
@@ -267,22 +271,21 @@ pub(crate) fn build_whisper_supergraph(
         ));
     }
 
-    builder.add_node(
-        SuperGraphNodeScan::new(
-            prefill_graph,
-            prefix_iteration_count_link,
-            vec![
-                SuperGraphLinkDouble::new(decoder_weights_link, prefill_model_link),
-                SuperGraphLinkDouble::new(encoder_hidden_link, prefill_encoder_hidden),
-            ],
-            prefill_state_links,
-            vec![(prefix_tokens_link, prefill_token_in, 0)],
-            vec![],
-            prefill_simple_outputs,
-            rng,
-        )
-        .to_any(),
+    let mut prefill_scan = SuperGraphNodeScan::new(
+        prefill_graph,
+        prefix_iteration_count_link,
+        vec![
+            SuperGraphLinkDouble::new(decoder_weights_link, prefill_model_link),
+            SuperGraphLinkDouble::new(encoder_hidden_link, prefill_encoder_hidden),
+        ],
+        prefill_state_links,
+        vec![(prefix_tokens_link, prefill_token_in, 0)],
+        vec![],
+        prefill_simple_outputs,
+        rng,
     );
+    prefill_scan.label = Some("decoder_prefill_scan".to_string());
+    builder.add_node(prefill_scan.to_any());
 
     let token_state_init_link = builder.new_tensor_link(rng);
     let finished_state_init_link = builder.new_tensor_link(rng);
@@ -310,7 +313,9 @@ pub(crate) fn build_whisper_supergraph(
             (next_token, token_state_init_link.global_id()),
             (initial_finished, finished_state_init_link.global_id()),
         ]);
-        builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
+        let mut node = SuperGraphNodeMilliOpGraph::new(mg, rng);
+        node.label = Some("generation_state_init".to_string());
+        builder.add_node(node.to_any());
     }
 
     let generation_iteration_count_link = builder.new_tensor_link(rng);
@@ -331,7 +336,9 @@ pub(crate) fn build_whisper_supergraph(
             (loop_count, generation_iteration_count_link.global_id()),
             (progress_zero, generation_progress_zero_link.global_id()),
         ]);
-        builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
+        let mut node = SuperGraphNodeMilliOpGraph::new(mg, rng);
+        node.label = Some("generation_loop_config".to_string());
+        builder.add_node(node.to_any());
     }
 
     // Generation scan sub-graph.
@@ -368,7 +375,9 @@ pub(crate) fn build_whisper_supergraph(
         let token_2d = Unsqueeze::push_new(&mut mg, token_i64, axis0, rng);
         let out = sub_builder.new_tensor_link(rng);
         mg.set_output_map(std::iter::once((token_2d, out.global_id())));
-        sub_builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
+        let mut node = SuperGraphNodeMilliOpGraph::new(mg, rng);
+        node.label = Some("generation_token_prep".to_string());
+        sub_builder.add_node(node.to_any());
         out
     };
 
@@ -384,16 +393,15 @@ pub(crate) fn build_whisper_supergraph(
             tensor_outputs.push((pair.1.clone(), *sub_state_out.get(&id).unwrap()));
         }
 
-        sub_builder.add_node(
-            SuperGraphNodeModelExecution::new(
-                rng,
-                sub_model_link,
-                1, // model index 1 = decoder
-                tensor_inputs,
-                tensor_outputs,
-            )
-            .to_any(),
+        let mut node = SuperGraphNodeModelExecution::new(
+            rng,
+            sub_model_link,
+            1, // model index 1 = decoder
+            tensor_inputs,
+            tensor_outputs,
         );
+        node.label = Some("decoder_generate_forward".to_string());
+        sub_builder.add_node(node.to_any());
     }
 
     {
@@ -441,13 +449,15 @@ pub(crate) fn build_whisper_supergraph(
             (next_finished, sub_finished_out.global_id()),
             (next_step, sub_step_out.global_id()),
         ]);
-        sub_builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
+        let mut node = SuperGraphNodeMilliOpGraph::new(mg, rng);
+        node.label = Some("generation_step".to_string());
+        sub_builder.add_node(node.to_any());
     }
 
-    sub_builder.add_node(
-        SuperGraphNodeReportProgress::new(sub_progress_tier, sub_step_out, sub_total_steps, rng)
-            .to_any(),
-    );
+    let mut report =
+        SuperGraphNodeReportProgress::new(sub_progress_tier, sub_step_out, sub_total_steps, rng);
+    report.label = Some("generation_progress".to_string());
+    sub_builder.add_node(report.to_any());
 
     let mut sub_inputs = vec![
         sub_model_link.to_any(),
@@ -487,24 +497,23 @@ pub(crate) fn build_whisper_supergraph(
         ));
     }
 
-    builder.add_node(
-        SuperGraphNodeScan::new(
-            sub_graph,
-            generation_iteration_count_link,
-            vec![
-                SuperGraphLinkDouble::new(decoder_weights_link, sub_model_link),
-                SuperGraphLinkDouble::new(encoder_hidden_link, sub_encoder_hidden),
-                SuperGraphLinkDouble::new(generation_progress_zero_link, sub_progress_tier),
-                SuperGraphLinkDouble::new(generation_iteration_count_link, sub_total_steps),
-            ],
-            state_links,
-            vec![],
-            vec![(sub_token_out, generated_tokens_raw, 0)],
-            vec![],
-            rng,
-        )
-        .to_any(),
+    let mut generation_scan = SuperGraphNodeScan::new(
+        sub_graph,
+        generation_iteration_count_link,
+        vec![
+            SuperGraphLinkDouble::new(decoder_weights_link, sub_model_link),
+            SuperGraphLinkDouble::new(encoder_hidden_link, sub_encoder_hidden),
+            SuperGraphLinkDouble::new(generation_progress_zero_link, sub_progress_tier),
+            SuperGraphLinkDouble::new(generation_iteration_count_link, sub_total_steps),
+        ],
+        state_links,
+        vec![],
+        vec![(sub_token_out, generated_tokens_raw, 0)],
+        vec![],
+        rng,
     );
+    generation_scan.label = Some("decoder_generation_scan".to_string());
+    builder.add_node(generation_scan.to_any());
 
     let generated_tokens = {
         let out = builder.new_tensor_link(rng);
@@ -518,7 +527,9 @@ pub(crate) fn build_whisper_supergraph(
         );
         let squeezed = Squeeze::push_new(&mut mg, tokens, axis1, rng);
         mg.set_output_map(std::iter::once((squeezed, out.global_id())));
-        builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
+        let mut node = SuperGraphNodeMilliOpGraph::new(mg, rng);
+        node.label = Some("generated_tokens_squeeze".to_string());
+        builder.add_node(node.to_any());
         out
     };
 
@@ -532,7 +543,9 @@ pub(crate) fn build_whisper_supergraph(
         let prefix = *input_map.get(&prefix_tokens_link.global_id()).unwrap();
         let full_tokens = MilliConcat::push_new(&mut mg, vec![prefix, generated], 0, rng);
         mg.set_output_map(std::iter::once((full_tokens, out.global_id())));
-        builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
+        let mut node = SuperGraphNodeMilliOpGraph::new(mg, rng);
+        node.label = Some("output_tokens_concat_prefix".to_string());
+        builder.add_node(node.to_any());
         out
     };
 
