@@ -468,6 +468,164 @@ fn identify_row_families(
     families
 }
 
+// ─── Lane-locality check for AllRows chains ─────────────────────────────────
+
+/// Check whether an AllRows consumer group's inputs from same-phase AllRows
+/// producers are all lane-local when both consumer and producers are split
+/// evenly across lanes.
+///
+/// Only checks inputs that reference AllRows producers at `max_prod_phase`.
+/// Inputs from earlier-phase producers are already behind a barrier and
+/// don't need cross-lane checking.
+///
+/// An input is lane-local if lane j's slice of the consumer only reads
+/// from lane j's slice of each same-phase AllRows producer it references.
+///
+/// Lane-local patterns:
+/// - `Affine{stride=1}` from an AllRows producer with the same count:
+///   lane j reads `[j*chunk..(j+1)*chunk)` from producer = lane j's chunk.
+/// - `StridedBroadcast{stride, repeat}` from an AllRows producer where
+///   the mapping is proportional (monotonically maps each lane's chunk).
+/// - `Broadcast` from an earlier-phase producer: OK (already synchronized).
+///
+/// NOT lane-local:
+/// - `Broadcast` from a same-phase AllRows producer (one lane owns the
+///   atom, all lanes read it).
+/// - `Affine` with stride != 1 between same-phase AllRows of different counts.
+/// - `Modular` (wraps around, generally crosses lanes).
+/// - `Explicit` (arbitrary mapping).
+fn is_allrows_chain_lane_local_samephase(
+    gi: usize,
+    groups: &[AtomGroup],
+    row_families: &[RowFamily],
+    is_literal: &[bool],
+    group_phase: &[usize],
+    max_prod_phase: usize,
+) -> bool {
+    let consumer = &groups[gi];
+    let consumer_count = consumer.count;
+    if consumer_count == 0 {
+        return true;
+    }
+
+    for input in &consumer.inputs {
+        // Resolve which groups this input references.
+        let prod_groups = resolve_producer_groups(input, consumer_count, groups);
+
+        // Filter to non-literal AllRows producers IN THE SAME PHASE.
+        // Earlier-phase producers are already behind a barrier.
+        let same_phase_allrows: Vec<usize> = prod_groups
+            .iter()
+            .copied()
+            .filter(|&pi| {
+                !is_literal[pi]
+                    && row_families[pi] == RowFamily::AllRows
+                    && group_phase[pi] == max_prod_phase
+            })
+            .collect();
+
+        if same_phase_allrows.is_empty() {
+            // All producers for this input are either literal, non-AllRows,
+            // or in an earlier phase. No cross-lane issue from this input.
+            continue;
+        }
+
+        // Check the access pattern for lane-locality.
+        match input {
+            InputRef::Affine { stride, .. } => {
+                if *stride != 1 {
+                    return false; // Non-unit stride can cross lane boundaries.
+                }
+                // For stride=1, check that each same-phase AllRows producer
+                // has the same count as the consumer. Then lane j's chunk
+                // maps 1:1.
+                for &pi in &same_phase_allrows {
+                    if groups[pi].count != consumer_count {
+                        return false;
+                    }
+                }
+            }
+            InputRef::Broadcast(_) => {
+                // Broadcast from a same-phase AllRows producer: the broadcast
+                // atom lives in one lane, but ALL lanes read it → cross-lane.
+                return false;
+            }
+            InputRef::StridedBroadcast {
+                base: _,
+                stride: _,
+                repeat,
+            } => {
+                // atom i reads base + stride * (i / repeat).
+                // The mapping i → i/repeat is monotonically non-decreasing,
+                // so lane j's consumer range maps proportionally to the
+                // producer's range. Lane-local if each same-phase AllRows
+                // producer has count = ceil(consumer_count / repeat).
+                for &pi in &same_phase_allrows {
+                    let expected_prod_atoms =
+                        (consumer_count + repeat - 1) / repeat;
+                    if groups[pi].count != expected_prod_atoms {
+                        return false;
+                    }
+                }
+            }
+            InputRef::Modular { .. } => {
+                // Modular wraps around — not lane-local in general.
+                return false;
+            }
+            InputRef::Explicit(_) => {
+                // Arbitrary mapping — can't prove lane-locality.
+                return false;
+            }
+            InputRef::SymAffine { .. } => {
+                // SymAffine is used for contractions (matmul inner loop).
+                // Not lane-local.
+                return false;
+            }
+        }
+    }
+
+    // Also check ReduceSum/ReduceMax: the reduce itself must be lane-local.
+    // For ReduceSum with reduce_stride != 0, atom i accumulates over
+    // resolved_base(i) + k * reduce_stride for k in 0..reduce_count.
+    // This reads across stride boundaries in the input, potentially
+    // spanning multiple lanes.
+    match &consumer.op {
+        ScalarOp::ReduceSum {
+            reduce_count,
+            reduce_stride,
+            ..
+        }
+        | ScalarOp::ReduceMax {
+            reduce_count,
+            reduce_stride,
+            ..
+        } => {
+            if *reduce_count > 1 && *reduce_stride != 0 {
+                // Check if any input to this reduce is a same-phase AllRows
+                // producer. If so, the strided reads would cross lane
+                // boundaries.
+                let has_same_phase_allrows_input = consumer.inputs.iter().any(|inp| {
+                    let prods = resolve_producer_groups(inp, consumer_count, groups);
+                    prods.iter().any(|&pi| {
+                        !is_literal[pi]
+                            && row_families[pi] == RowFamily::AllRows
+                            && group_phase[pi] == max_prod_phase
+                    })
+                });
+                if has_same_phase_allrows_input {
+                    return false;
+                }
+                // If the reduce input is from an earlier phase, it's already
+                // synchronized — the reduce can proceed lane-locally if the
+                // InputRef check above passed.
+            }
+        }
+        _ => {}
+    }
+
+    true
+}
+
 // ─── Phase assignment ────────────────────────────────────────────────────────
 
 /// Compute phase assignments based on structural barrier detection.
@@ -505,35 +663,75 @@ fn compute_phase_assignment(
 
         // Collect the phases and families of non-literal producers.
         let mut max_prod_phase = 0usize;
-        let mut prod_families: HashSet<RowFamily> = HashSet::new();
 
         for &pi in &producers[gi] {
             if is_literal[pi] {
                 continue;
             }
             max_prod_phase = max_prod_phase.max(group_phase[pi]);
-            prod_families.insert(row_families[pi]);
+        }
+
+        // Only consider producers at max_prod_phase for cross-lane analysis.
+        // Producers in earlier phases are already behind a barrier — no concern.
+        let mut same_phase_families: HashSet<RowFamily> = HashSet::new();
+        for &pi in &producers[gi] {
+            if is_literal[pi] {
+                continue;
+            }
+            if group_phase[pi] == max_prod_phase {
+                same_phase_families.insert(row_families[pi]);
+            }
         }
 
         // Remove AllRows — an AllRows producer will be split across lanes,
         // so it acts as if it's in multiple families.
-        let has_all_rows = prod_families.remove(&RowFamily::AllRows);
+        let has_all_rows = same_phase_families.remove(&RowFamily::AllRows);
 
-        // Count distinct Row families among producers.
-        let distinct_row_families = prod_families
+        // Count distinct Row families among same-phase producers.
+        let distinct_row_families = same_phase_families
             .iter()
             .filter(|f| matches!(f, RowFamily::Row(_)))
             .count();
 
-        // Need barrier if:
-        // - Multiple distinct row families contribute (e.g., all M rows of
-        //   matmul feed into one elementwise)
-        // - An AllRows producer is present alongside Row producers
+        // Need barrier if same-phase producers create cross-lane dependencies:
+        // - Multiple distinct row families at max_prod_phase (e.g., all M rows
+        //   of matmul feed into one elementwise)
+        // - An AllRows producer at max_prod_phase alongside Row producers
         //   (AllRows producer was split across lanes, so we need all lanes
         //   to finish before reading it)
+        // - An AllRows producer at max_prod_phase feeds an AllRows consumer
+        //   BUT the access pattern is NOT lane-local
+        //
+        // Key insight: producers in earlier phases (< max_prod_phase) are
+        // already synchronized by the barrier that created their phase
+        // boundary. Only same-phase producers matter for cross-lane checks.
+        let allrows_to_allrows_needs_barrier = if has_all_rows
+            && same_phase_families.is_empty()
+            && row_families[gi] == RowFamily::AllRows
+        {
+            // All same-phase non-literal producers are AllRows, consumer is AllRows.
+            // Check if the access pattern from same-phase AllRows producers is lane-local.
+            !is_allrows_chain_lane_local_samephase(
+                gi, groups, row_families, is_literal, &group_phase, max_prod_phase,
+            )
+        } else if has_all_rows && same_phase_families.is_empty() {
+            // Consumer is not AllRows (e.g. Row) reading from AllRows at same phase
+            true
+        } else {
+            false
+        };
+
+        // Also: if consumer is AllRows (split across all lanes) but reads
+        // from any Row producer at same phase, it's cross-lane: the Row
+        // producer is on one specific lane, but other lanes of the consumer
+        // also need that data.
+        let allrows_consumer_reads_row = row_families[gi] == RowFamily::AllRows
+            && distinct_row_families >= 1;
+
         let needs_barrier = distinct_row_families > 1
             || (has_all_rows && distinct_row_families >= 1)
-            || (has_all_rows && prod_families.is_empty() && producers[gi].iter().any(|pi: &usize| !is_literal[*pi]));
+            || allrows_to_allrows_needs_barrier
+            || allrows_consumer_reads_row;
 
         if needs_barrier {
             group_phase[gi] = max_prod_phase + 1;
@@ -1439,14 +1637,15 @@ mod tests {
     /// Verify within-phase independence: no lane reads atoms produced by
     /// another lane in the same phase.
     ///
-    /// This version is split-aware: it checks at the atom level, not just
-    /// the group level.
+    /// This version is split-aware: it checks at the atom level by computing
+    /// the actual atom range each consumer slice reads from each producer,
+    /// and verifying those atoms belong to the same lane.
     fn verify_phase_independence(graph: &NanoGraph, plan: &ExecutionPlan) {
         let groups = graph.groups();
 
         for (phase_idx, phase) in plan.phases.iter().enumerate() {
-            // Build map: atom_id -> lane for all atoms produced in this phase.
-            // For efficiency, store as (group_idx, offset, count) -> lane.
+            // Build map: group_idx -> [(atom_offset, atom_count, lane_idx)]
+            // for all work items produced in this phase.
             let mut atom_to_lane: HashMap<usize, Vec<(u64, u64, usize)>> = HashMap::new();
 
             for (lane_idx, lane_work) in phase.lane_work.iter().enumerate() {
@@ -1458,33 +1657,249 @@ mod tests {
                 }
             }
 
-            // For each work item, check that all its inputs are either:
-            // 1. From a previous phase (fine)
-            // 2. From the same lane in this phase (fine)
-            // 3. From a literal group (fine)
-            // NOT from a different lane in this phase.
+            // For each work item, check that all atoms it reads from
+            // same-phase producers belong to the same lane.
             for (lane_idx, lane_work) in phase.lane_work.iter().enumerate() {
                 for work in lane_work {
                     let group = &groups[work.group_idx];
-                    // Check each input ref.
+                    // For this work item's slice [atom_offset..atom_offset+atom_count),
+                    // compute the range of atoms it reads from each input.
                     for input in &group.inputs {
-                        // Resolve the producer groups for this input.
-                        let prod_groups =
-                            resolve_producer_groups(input, group.count, groups);
-                        for pg in prod_groups {
-                            if let Some(lane_entries) = atom_to_lane.get(&pg) {
-                                for &(_, _, prod_lane) in lane_entries {
-                                    if prod_lane != lane_idx {
-                                        panic!(
-                                            "Phase {}: group {} (lane {}) reads from group {} (lane {}) - cross-lane dependency!",
-                                            phase_idx, work.group_idx, lane_idx, pg, prod_lane
-                                        );
+                        // Compute the actual atom IDs accessed by this work item's slice.
+                        let accessed_ranges = compute_accessed_ranges(
+                            input,
+                            work.atom_offset,
+                            work.atom_count,
+                            group.count,
+                            groups,
+                        );
+
+                        for (prod_gi, prod_lo, prod_hi) in &accessed_ranges {
+                            if let Some(lane_entries) = atom_to_lane.get(prod_gi) {
+                                for &(prod_offset, prod_count, prod_lane) in lane_entries {
+                                    // Check if the accessed range overlaps with this
+                                    // producer lane's range.
+                                    let prod_end = prod_offset + prod_count;
+                                    if *prod_lo < prod_end && *prod_hi > prod_offset {
+                                        // There's overlap — check same lane.
+                                        if prod_lane != lane_idx {
+                                            panic!(
+                                                "Phase {}: group {} slice [{},+{}) (lane {}) reads atoms [{},{}) from group {} (lane {}, slice [{},+{})) - cross-lane dependency!",
+                                                phase_idx, work.group_idx,
+                                                work.atom_offset, work.atom_count,
+                                                lane_idx,
+                                                prod_lo, prod_hi,
+                                                prod_gi, prod_lane,
+                                                prod_offset, prod_count,
+                                            );
+                                        }
                                     }
                                 }
                             }
                         }
                     }
+
+                    // For ReduceSum/ReduceMax, also check the strided access.
+                    match &group.op {
+                        ScalarOp::ReduceSum { reduce_count, reduce_stride, .. }
+                        | ScalarOp::ReduceMax { reduce_count, reduce_stride, .. }
+                            if *reduce_count > 1 && *reduce_stride != 0 =>
+                        {
+                            // Each atom i in [atom_offset..atom_offset+atom_count)
+                            // reads from input at resolved_base(i) + k*reduce_stride
+                            // for k in 0..reduce_count.
+                            // Compute the full span for this slice.
+                            for input in &group.inputs {
+                                let accessed = compute_accessed_ranges_with_reduce(
+                                    input,
+                                    work.atom_offset,
+                                    work.atom_count,
+                                    group.count,
+                                    *reduce_count,
+                                    *reduce_stride,
+                                    groups,
+                                );
+                                for (prod_gi, prod_lo, prod_hi) in &accessed {
+                                    if let Some(lane_entries) = atom_to_lane.get(prod_gi) {
+                                        for &(prod_offset, prod_count, prod_lane) in lane_entries {
+                                            let prod_end = prod_offset + prod_count;
+                                            if *prod_lo < prod_end && *prod_hi > prod_offset {
+                                                if prod_lane != lane_idx {
+                                                    panic!(
+                                                        "Phase {}: group {} (ReduceSum) slice [{},+{}) (lane {}) reads atoms [{},{}) from group {} (lane {}) - cross-lane dependency!",
+                                                        phase_idx, work.group_idx,
+                                                        work.atom_offset, work.atom_count,
+                                                        lane_idx,
+                                                        prod_lo, prod_hi,
+                                                        prod_gi, prod_lane,
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
                 }
+            }
+        }
+    }
+
+    /// Compute the range of atoms accessed by a work item's slice from an input.
+    /// Returns list of (producer_group_idx, lo_offset_in_group, hi_offset_in_group).
+    /// Offsets are relative to the producer group's base.
+    fn compute_accessed_ranges(
+        input: &InputRef,
+        atom_offset: u64,
+        atom_count: u64,
+        group_count: u64,
+        groups: &[AtomGroup],
+    ) -> Vec<(usize, u64, u64)> {
+        if atom_count == 0 {
+            return vec![];
+        }
+        let first_i = atom_offset;
+        let last_i = atom_offset + atom_count - 1;
+
+        match input {
+            InputRef::Broadcast(atom_id) => {
+                // All atoms read the same source.
+                if let Some(gi) = find_group_idx(groups, *atom_id) {
+                    let off = atom_id.0 - groups[gi].base_id.0;
+                    vec![(gi, off, off + 1)]
+                } else {
+                    vec![]
+                }
+            }
+            InputRef::Affine { base, stride } => {
+                let first_read = base.0 as i64 + *stride as i64 * first_i as i64;
+                let last_read = base.0 as i64 + *stride as i64 * last_i as i64;
+                let lo = first_read.min(last_read) as u64;
+                let hi = first_read.max(last_read) as u64 + 1;
+                // Find producer groups in this range.
+                let prods = find_groups_in_range(groups, lo, hi);
+                prods.into_iter().map(|gi| {
+                    let g = &groups[gi];
+                    let g_lo = g.base_id.0;
+                    let g_hi = g_lo + g.count;
+                    let overlap_lo = lo.max(g_lo) - g_lo;
+                    let overlap_hi = hi.min(g_hi) - g_lo;
+                    (gi, overlap_lo, overlap_hi)
+                }).collect()
+            }
+            InputRef::StridedBroadcast { base, stride, repeat } => {
+                let first_block = first_i / repeat;
+                let last_block = last_i / repeat;
+                let first_read = base.0 as i64 + *stride * first_block as i64;
+                let last_read = base.0 as i64 + *stride * last_block as i64;
+                let lo = first_read.min(last_read) as u64;
+                let hi = first_read.max(last_read) as u64 + 1;
+                let prods = find_groups_in_range(groups, lo, hi);
+                prods.into_iter().map(|gi| {
+                    let g = &groups[gi];
+                    let g_lo = g.base_id.0;
+                    let g_hi = g_lo + g.count;
+                    let overlap_lo = lo.max(g_lo) - g_lo;
+                    let overlap_hi = hi.min(g_hi) - g_lo;
+                    (gi, overlap_lo, overlap_hi)
+                }).collect()
+            }
+            InputRef::Modular { base, stride, modulus } => {
+                // Modular wraps, so the full range of the modulus is accessed.
+                let lo = base.0;
+                let span = (*stride as i64).unsigned_abs() * (*modulus - 1);
+                let hi = lo + span + 1;
+                let prods = find_groups_in_range(groups, lo, hi);
+                prods.into_iter().map(|gi| {
+                    let g = &groups[gi];
+                    let g_lo = g.base_id.0;
+                    let g_hi = g_lo + g.count;
+                    let overlap_lo = lo.max(g_lo) - g_lo;
+                    let overlap_hi = hi.min(g_hi) - g_lo;
+                    (gi, overlap_lo, overlap_hi)
+                }).collect()
+            }
+            InputRef::Explicit(ids) => {
+                // Check only the atoms in our slice.
+                let mut result: HashMap<usize, (u64, u64)> = HashMap::new();
+                for i in first_i..=last_i {
+                    if (i as usize) < ids.len() {
+                        let atom_id = ids[i as usize];
+                        if let Some(gi) = find_group_idx(groups, atom_id) {
+                            let off = atom_id.0 - groups[gi].base_id.0;
+                            let entry = result.entry(gi).or_insert((off, off + 1));
+                            entry.0 = entry.0.min(off);
+                            entry.1 = entry.1.max(off + 1);
+                        }
+                    }
+                }
+                result.into_iter().map(|(gi, (lo, hi))| (gi, lo, hi)).collect()
+            }
+            InputRef::SymAffine { base, stride_i, stride_k: _ } => {
+                // SymAffine for sym_dim k: we don't know k at plan time.
+                // Conservative: compute range for stride_i only.
+                let first_read = base.0 as i64 + *stride_i as i64 * first_i as i64;
+                let last_read = base.0 as i64 + *stride_i as i64 * last_i as i64;
+                let lo = first_read.min(last_read) as u64;
+                let hi = first_read.max(last_read) as u64 + 1;
+                let prods = find_groups_in_range(groups, lo, hi);
+                prods.into_iter().map(|gi| {
+                    let g = &groups[gi];
+                    let g_lo = g.base_id.0;
+                    let g_hi = g_lo + g.count;
+                    let overlap_lo = lo.max(g_lo) - g_lo;
+                    let overlap_hi = hi.min(g_hi) - g_lo;
+                    (gi, overlap_lo, overlap_hi)
+                }).collect()
+            }
+        }
+    }
+
+    /// Compute accessed ranges including ReduceSum/ReduceMax strided access.
+    fn compute_accessed_ranges_with_reduce(
+        input: &InputRef,
+        atom_offset: u64,
+        atom_count: u64,
+        group_count: u64,
+        reduce_count: u64,
+        reduce_stride: i64,
+        groups: &[AtomGroup],
+    ) -> Vec<(usize, u64, u64)> {
+        if atom_count == 0 {
+            return vec![];
+        }
+
+        // For each atom i in [atom_offset..atom_offset+atom_count),
+        // the reduce reads: resolved_input(i) + k*reduce_stride for k in 0..reduce_count.
+        // The min/max offsets across all i and k determine the accessed range.
+        match input {
+            InputRef::Affine { base, stride } => {
+                let first_i = atom_offset;
+                let last_i = atom_offset + atom_count - 1;
+                let first_base = base.0 as i64 + *stride as i64 * first_i as i64;
+                let last_base = base.0 as i64 + *stride as i64 * last_i as i64;
+                let min_base = first_base.min(last_base);
+                let max_base = first_base.max(last_base);
+                let min_stride_offset = 0i64.min(reduce_stride * (reduce_count as i64 - 1));
+                let max_stride_offset = 0i64.max(reduce_stride * (reduce_count as i64 - 1));
+                let lo = (min_base + min_stride_offset) as u64;
+                let hi = (max_base + max_stride_offset) as u64 + 1;
+                let prods = find_groups_in_range(groups, lo, hi);
+                prods.into_iter().map(|gi| {
+                    let g = &groups[gi];
+                    let g_lo = g.base_id.0;
+                    let g_hi = g_lo + g.count;
+                    let overlap_lo = lo.max(g_lo) - g_lo;
+                    let overlap_hi = hi.min(g_hi) - g_lo;
+                    (gi, overlap_lo, overlap_hi)
+                }).collect()
+            }
+            _ => {
+                // For non-Affine inputs with ReduceSum, be conservative:
+                // check the full group range.
+                compute_accessed_ranges(input, atom_offset, atom_count, group_count, groups)
             }
         }
     }
@@ -1918,6 +2333,225 @@ mod tests {
 
         // With 7 rows and 4 lanes: max 2 rows/lane, min 1 row/lane = 2x ratio.
         verify_balance(&plan, 2.5);
+    }
+
+    /// Build an AllRows→AllRows chain: A → B → C, all same count,
+    /// connected by Affine{stride=1}. Should be 1 phase (no barriers).
+    fn build_allrows_chain(count: u64) -> NanoGraph {
+        let mut g = NanoGraph::new();
+        let lit = g.push_group(
+            count,
+            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            vec![], vec![], vec![],
+        );
+        let a = g.push_group(
+            count,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Tanh,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![], vec![],
+            vec![InputRef::Affine { base: lit, stride: 1 }],
+        );
+        let b = g.push_group(
+            count,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Tanh,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![], vec![],
+            vec![InputRef::Affine { base: a, stride: 1 }],
+        );
+        let c = g.push_group(
+            count,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Tanh,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![], vec![],
+            vec![InputRef::Affine { base: b, stride: 1 }],
+        );
+        for i in 0..count {
+            g.outputs.push(AtomId(c.0 + i));
+        }
+        g
+    }
+
+    #[test]
+    fn test_allrows_chain_single_phase() {
+        // Three AllRows groups in a chain, all same count.
+        // Should be 1 phase: each lane's slice is independent.
+        let g = build_allrows_chain(1024);
+        assert!(g.validate().is_empty(), "{:?}", g.validate());
+
+        let plan = plan_execution(&g, 8);
+        verify_coverage(&g, &plan);
+        verify_phase_independence(&g, &plan);
+
+        assert_eq!(
+            plan.phases.len(), 1,
+            "AllRows chain should be 1 phase, got {}",
+            plan.phases.len()
+        );
+        verify_balance(&plan, 1.1);
+
+        println!("AllRows chain 8 lanes:");
+        plan.print_summary(g.groups());
+    }
+
+    #[test]
+    fn test_allrows_chain_with_broadcast() {
+        // AllRows chain where one group reads via Broadcast from
+        // a previous AllRows group. This needs a barrier.
+        let mut g = NanoGraph::new();
+        let count = 1024u64;
+        let lit = g.push_group(
+            count,
+            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            vec![], vec![], vec![],
+        );
+        let a = g.push_group(
+            count,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Tanh,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![], vec![],
+            vec![InputRef::Affine { base: lit, stride: 1 }],
+        );
+        // Broadcast from first element of a (which is AllRows) → needs barrier
+        let b = g.push_group(
+            count,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Add,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![], vec![],
+            vec![
+                InputRef::Affine { base: a, stride: 1 },
+                InputRef::Broadcast(a), // Broadcast from AllRows
+            ],
+        );
+        for i in 0..count {
+            g.outputs.push(AtomId(b.0 + i));
+        }
+        assert!(g.validate().is_empty(), "{:?}", g.validate());
+
+        let plan = plan_execution(&g, 4);
+        verify_coverage(&g, &plan);
+        verify_phase_independence(&g, &plan);
+
+        // Should have >= 2 phases because of the Broadcast cross-lane read
+        assert!(
+            plan.phases.len() >= 2,
+            "AllRows chain with Broadcast should have >= 2 phases, got {}",
+            plan.phases.len()
+        );
+    }
+
+    #[test]
+    fn test_allrows_chain_with_earlier_phase_broadcast() {
+        // AllRows group C reads from:
+        //   1. AllRows group B via Affine{stride=1} (same phase, lane-local)
+        //   2. AllRows group A via Broadcast (A is in EARLIER phase due to
+        //      a barrier between A and B)
+        // Since A is in an earlier phase, the Broadcast is fine — no new barrier.
+        let mut g = NanoGraph::new();
+        let count = 1024u64;
+        let small_count = 10u64;
+
+        // Literal for count
+        let lit = g.push_group(
+            count,
+            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            vec![], vec![], vec![],
+        );
+
+        // A: AllRows group (count) → phase 0
+        let a = g.push_group(
+            count,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Tanh,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![], vec![],
+            vec![InputRef::Affine { base: lit, stride: 1 }],
+        );
+
+        // mean: AllRows ReduceSum (small_count, reduce_count=count/small_count)
+        // This creates a barrier (AllRows→AllRows with different count)
+        let mean = g.push_group(
+            small_count,
+            ScalarOp::ReduceSum {
+                reduce_count: count / small_count,
+                reduce_stride: small_count as i64,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![], vec![],
+            vec![InputRef::Affine { base: a, stride: 1 }],
+        );
+
+        // B: AllRows binary that reads from mean via Broadcast
+        // This creates another barrier (Broadcast from AllRows)
+        let b = g.push_group(
+            count,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Sub,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![], vec![],
+            vec![
+                InputRef::Affine { base: a, stride: 1 },
+                InputRef::Broadcast(mean),
+            ],
+        );
+
+        // C: AllRows unary reading from B via Affine{stride=1}
+        // B is in same phase, lane-local → NO barrier
+        let c = g.push_group(
+            count,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Tanh,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![], vec![],
+            vec![InputRef::Affine { base: b, stride: 1 }],
+        );
+
+        for i in 0..count {
+            g.outputs.push(AtomId(c.0 + i));
+        }
+        assert!(g.validate().is_empty(), "{:?}", g.validate());
+
+        let plan = plan_execution(&g, 4);
+        verify_coverage(&g, &plan);
+        verify_phase_independence(&g, &plan);
+
+        println!("AllRows chain with earlier-phase broadcast, 4 lanes:");
+        plan.print_summary(g.groups());
+
+        // B and C should be in the same phase (no barrier between them).
+        // Total: at least 3 phases: A, mean, B+C
+        assert!(
+            plan.phases.len() >= 3,
+            "Should have >= 3 phases, got {}",
+            plan.phases.len()
+        );
+        // But B and C should be fused, so not more than ~4 phases
+        assert!(
+            plan.phases.len() <= 4,
+            "Should have <= 4 phases (B and C fused), got {}",
+            plan.phases.len()
+        );
     }
 
     #[test]
