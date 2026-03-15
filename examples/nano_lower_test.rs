@@ -260,6 +260,166 @@ fn main() {
         let plan = nano_plan_v2c::plan_execution(&result.graph, num_lanes);
         eprintln!("  Plan: {:.1}ms, {} phases", t0.elapsed().as_secs_f64() * 1e3, plan.phases.len());
 
+        // ---- Topology validation (no execution needed) ----
+        {
+            let t_val = Instant::now();
+            let groups = result.graph.groups();
+            let group_base_ids: Vec<u64> = groups.iter().map(|g| g.base_id.0).collect();
+            let find_gi = |atom_id: whisper_tensor::nano_graph::AtomId| -> Option<usize> {
+                match group_base_ids.binary_search(&atom_id.0) {
+                    Ok(i) => Some(i),
+                    Err(0) => None,
+                    Err(i) => {
+                        let gi = i - 1;
+                        if atom_id.0 < groups[gi].base_id.0 + groups[gi].count { Some(gi) } else { None }
+                    }
+                }
+            };
+
+            // Build group -> (phase, lane) map
+            let mut group_phase: HashMap<usize, usize> = HashMap::new();
+            let mut group_lane: HashMap<usize, usize> = HashMap::new();
+            let mut group_order_in_lane: HashMap<usize, usize> = HashMap::new(); // position within lane's work list
+            let mut assigned_groups = std::collections::HashSet::new();
+
+            for (pi, phase) in plan.phases.iter().enumerate() {
+                for (li, lane_work) in phase.lane_work.iter().enumerate() {
+                    for (wi, w) in lane_work.iter().enumerate() {
+                        group_phase.insert(w.group_idx, pi);
+                        group_lane.insert(w.group_idx, li);
+                        group_order_in_lane.insert(w.group_idx, wi);
+                        assigned_groups.insert(w.group_idx);
+                    }
+                }
+            }
+
+            // Check completeness: every compute group assigned
+            let mut missing = 0usize;
+            for (gi, g) in groups.iter().enumerate() {
+                if matches!(&g.op, ScalarOp::Literal(_)) { continue; }
+                if !assigned_groups.contains(&gi) {
+                    missing += 1;
+                    if missing <= 5 {
+                        let op = format!("{:?}", g.op).chars().take_while(|c| *c != ' ' && *c != '{').collect::<String>();
+                        println!("  MISSING: group {} ({}, count={})", gi, op, g.count);
+                    }
+                }
+            }
+            if missing > 0 {
+                println!("  TOPOLOGY FAIL: {} compute groups not assigned to any phase!", missing);
+            }
+
+            // Check ordering: for each assigned group, all non-Literal producers
+            // must be in earlier-or-equal phase. If same phase, must be same lane
+            // with earlier position, OR different lane (cross-lane = violation).
+            let mut violations = 0usize;
+            for (pi, phase) in plan.phases.iter().enumerate() {
+                for (li, lane_work) in phase.lane_work.iter().enumerate() {
+                    for (wi, w) in lane_work.iter().enumerate() {
+                        let group = &groups[w.group_idx];
+                        // Collect all producer atoms
+                        let mut producer_atoms: Vec<whisper_tensor::nano_graph::AtomId> = Vec::new();
+                        for input in &group.inputs {
+                            match input {
+                                InputRef::Broadcast(id) => producer_atoms.push(*id),
+                                InputRef::Affine { base, stride } => {
+                                    // Sample first and last atom in this sub-range
+                                    producer_atoms.push(input.resolve(w.atom_offset, 0));
+                                    if w.atom_count > 1 {
+                                        producer_atoms.push(input.resolve(w.atom_offset + w.atom_count - 1, 0));
+                                    }
+                                }
+                                InputRef::StridedBroadcast { base, stride, repeat } => {
+                                    producer_atoms.push(input.resolve(w.atom_offset, 0));
+                                    if w.atom_count > 1 {
+                                        producer_atoms.push(input.resolve(w.atom_offset + w.atom_count - 1, 0));
+                                    }
+                                }
+                                InputRef::Modular { base, .. } => producer_atoms.push(*base),
+                                InputRef::SymAffine { base, .. } => producer_atoms.push(*base),
+                                InputRef::Explicit(ids) => {
+                                    if w.atom_offset < ids.len() as u64 {
+                                        producer_atoms.push(ids[w.atom_offset as usize]);
+                                    }
+                                    let last = (w.atom_offset + w.atom_count).min(ids.len() as u64);
+                                    if last > 0 {
+                                        producer_atoms.push(ids[(last - 1) as usize]);
+                                    }
+                                }
+                            }
+                        }
+                        // Also check ReduceSum/ReduceMax strided access
+                        match &group.op {
+                            ScalarOp::ReduceSum { reduce_count, reduce_stride, .. }
+                            | ScalarOp::ReduceMax { reduce_count, reduce_stride, .. } => {
+                                if *reduce_stride != 0 && *reduce_count > 1 {
+                                    // The reduce reads at base + k*stride for k in 0..reduce_count
+                                    // Check the last k value
+                                    let base_atom = group.inputs[0].resolve(w.atom_offset, 0);
+                                    let last_atom = whisper_tensor::nano_graph::AtomId(
+                                        (base_atom.0 as i64 + (*reduce_count as i64 - 1) * *reduce_stride) as u64
+                                    );
+                                    producer_atoms.push(last_atom);
+                                }
+                            }
+                            ScalarOp::IndirectLoad { table_base, .. } => {
+                                producer_atoms.push(*table_base);
+                            }
+                            _ => {}
+                        }
+
+                        for &prod_atom in &producer_atoms {
+                            let Some(prod_gi) = find_gi(prod_atom) else { continue };
+                            if matches!(&groups[prod_gi].op, ScalarOp::Literal(_)) { continue; }
+                            let Some(&prod_phase) = group_phase.get(&prod_gi) else {
+                                // Producer not assigned — already caught by completeness check
+                                continue;
+                            };
+                            let prod_lane = group_lane[&prod_gi];
+                            let prod_order = group_order_in_lane[&prod_gi];
+
+                            if prod_phase > pi {
+                                // Producer in later phase
+                                violations += 1;
+                                if violations <= 10 {
+                                    let op = format!("{:?}", group.op).chars().take_while(|c| *c != ' ' && *c != '{').collect::<String>();
+                                    let prod_op = format!("{:?}", groups[prod_gi].op).chars().take_while(|c| *c != ' ' && *c != '{').collect::<String>();
+                                    println!("  VIOLATION [future-phase]: g{} ({}) phase {} reads g{} ({}) phase {}",
+                                        w.group_idx, op, pi, prod_gi, prod_op, prod_phase);
+                                }
+                            } else if prod_phase == pi && prod_lane != li {
+                                // Same phase, different lane — violation (lanes are parallel)
+                                violations += 1;
+                                if violations <= 10 {
+                                    let op = format!("{:?}", group.op).chars().take_while(|c| *c != ' ' && *c != '{').collect::<String>();
+                                    let prod_op = format!("{:?}", groups[prod_gi].op).chars().take_while(|c| *c != ' ' && *c != '{').collect::<String>();
+                                    println!("  VIOLATION [cross-lane same-phase]: g{} ({}) phase {}/lane {} reads g{} ({}) phase {}/lane {}",
+                                        w.group_idx, op, pi, li, prod_gi, prod_op, prod_phase, prod_lane);
+                                }
+                            } else if prod_phase == pi && prod_lane == li && prod_order >= wi && prod_gi != w.group_idx {
+                                // Same phase, same lane, producer at same or later position — violation
+                                violations += 1;
+                                if violations <= 10 {
+                                    let op = format!("{:?}", group.op).chars().take_while(|c| *c != ' ' && *c != '{').collect::<String>();
+                                    let prod_op = format!("{:?}", groups[prod_gi].op).chars().take_while(|c| *c != ' ' && *c != '{').collect::<String>();
+                                    println!("  VIOLATION [same-lane ordering]: g{} ({}) pos {} reads g{} ({}) pos {} (same phase {}/lane {})",
+                                        w.group_idx, op, wi, prod_gi, prod_op, prod_order, pi, li);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            let val_time = t_val.elapsed();
+            if violations == 0 && missing == 0 {
+                println!("  TOPOLOGY: VALID ({} groups checked in {:.1}ms)", assigned_groups.len(), val_time.as_secs_f64() * 1e3);
+            } else {
+                println!("  TOPOLOGY: {} violations, {} missing groups ({:.1}ms)",
+                    violations, missing, val_time.as_secs_f64() * 1e3);
+            }
+        }
+
         let f32_buffer_gb = result.graph.num_atoms() as f64 * 4.0 / (1024.0 * 1024.0 * 1024.0);
         println!("  f32 buffer: {:.1} GB", f32_buffer_gb);
 
