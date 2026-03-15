@@ -117,6 +117,94 @@ fn main() {
             ng: s.graph.num_groups(), na: s.graph.num_atoms(), ni: s.inputs.len(), no: s.outputs.len(),
         }).collect()).collect();
         print_span_summary("spans_c", &ss, plan.num_lanes, elapsed);
+
+        // Topology validation (O(groups), not O(atoms))
+        let t_val = Instant::now();
+        let mut errors = 0usize;
+        // Track which main-graph atom RANGES have been produced by earlier phases.
+        // Store as (base, count) ranges sorted by base.
+        let mut produced_ranges: Vec<(u64, u64)> = Vec::new();
+        // Also include all Literal group ranges as always-available.
+        for g in result.graph.groups() {
+            if matches!(&g.op, ScalarOp::Literal(_)) && g.inputs.is_empty() {
+                produced_ranges.push((g.base_id.0, g.count));
+            }
+        }
+        produced_ranges.sort();
+
+        let range_contains = |ranges: &[(u64, u64)], atom: u64| -> bool {
+            match ranges.binary_search_by(|&(base, _)| base.cmp(&atom)) {
+                Ok(_) => true,
+                Err(0) => false,
+                Err(i) => {
+                    let (base, count) = ranges[i - 1];
+                    atom < base + count
+                }
+            }
+        };
+
+        for (phase_idx, phase) in plan.phases.iter().enumerate() {
+            // Check each span's declared inputs are available
+            for (lane_idx, span) in phase.spans.iter().enumerate() {
+                for mapping in &span.inputs {
+                    // Check that main_base..main_base+count is covered by produced_ranges
+                    if !range_contains(&produced_ranges, mapping.main_base.0) {
+                        errors += 1;
+                        if errors <= 10 {
+                            println!("  SPAN VIOLATION: phase {}/lane {}: input base {:?} (count={}) not available",
+                                phase_idx, lane_idx, mapping.main_base, mapping.count);
+                        }
+                    }
+                }
+
+                // Check within each span: groups are in valid topo order
+                let span_groups = span.graph.groups();
+                let span_bases: Vec<u64> = span_groups.iter().map(|g| g.base_id.0).collect();
+                for (gi, group) in span_groups.iter().enumerate() {
+                    for input in &group.inputs {
+                        // Resolve the first atom of this input
+                        let src = input.resolve(0, 0);
+                        // Find which span group it belongs to
+                        let src_gi = match span_bases.binary_search(&src.0) {
+                            Ok(i) => Some(i),
+                            Err(0) => None,
+                            Err(i) => {
+                                let candidate = i - 1;
+                                if src.0 < span_groups[candidate].base_id.0 + span_groups[candidate].count {
+                                    Some(candidate)
+                                } else { None }
+                            }
+                        };
+                        if let Some(src_gi) = src_gi {
+                            if src_gi > gi && !matches!(&span_groups[src_gi].op, ScalarOp::Literal(_)) {
+                                errors += 1;
+                                if errors <= 10 {
+                                    let op = format!("{:?}", group.op).chars().take_while(|c| *c != ' ' && *c != '{').collect::<String>();
+                                    let src_op = format!("{:?}", span_groups[src_gi].op).chars().take_while(|c| *c != ' ' && *c != '{').collect::<String>();
+                                    println!("  SPAN TOPO VIOLATION: phase {}/lane {}: group {} ({}) reads from later group {} ({})",
+                                        phase_idx, lane_idx, gi, op, src_gi, src_op);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // After this phase, add all span outputs to produced_ranges
+            for span in &phase.spans {
+                for mapping in &span.outputs {
+                    produced_ranges.push((mapping.main_base.0, mapping.count));
+                }
+            }
+            produced_ranges.sort();
+        }
+
+        let val_time = t_val.elapsed();
+        if errors == 0 {
+            println!("    TOPOLOGY: VALID ({:.1}ms)", val_time.as_secs_f64() * 1e3);
+        } else {
+            println!("    TOPOLOGY: {} VIOLATIONS ({:.1}ms)", errors, val_time.as_secs_f64() * 1e3);
+        }
     }
     if which == "d" || which == "all" {
         use whisper_tensor::compiler::attempts::v13_claude::nano_plan_spans_d;
