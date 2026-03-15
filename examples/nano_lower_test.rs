@@ -337,6 +337,140 @@ fn main() {
         } else {
             println!("    V3C TOPOLOGY: {} VIOLATIONS ({:.1}ms)", errors, val_time.as_secs_f64() * 1e3);
         }
+        // ---- Span-by-span eval using trusted NanoEval ----
+        if std::env::var("EVAL_SPANS").ok().as_deref() == Some("1") {
+            use whisper_tensor::nano_graph::eval::NanoEval;
+            use whisper_tensor::numeric_scalar::NumericScalar;
+
+            println!("\n    === Span-by-span NanoEval ===");
+
+            // Need full lower for numeric_overrides
+            let t0 = Instant::now();
+            let full_result = whisper_tensor::nano_graph::lower::lower_with_info(&milli_graph, &all_infos).unwrap();
+            eprintln!("    Full lower: {:.1}s", t0.elapsed().as_secs_f64());
+
+            // Shared f32 buffer (30GB for GPT-2)
+            let num_main_atoms = result.graph.num_atoms() as usize;
+            let f32_buffer_gb = num_main_atoms as f64 * 4.0 / (1024.0 * 1024.0 * 1024.0);
+            println!("    Shared buffer: {:.1} GB ({} atoms)", f32_buffer_gb, num_main_atoms);
+
+            if f32_buffer_gb > 120.0 {
+                println!("    SKIPPING: buffer too large");
+            } else {
+                let t0 = Instant::now();
+                let mut shared = vec![0.0f32; num_main_atoms];
+
+                // Pre-fill from numeric_overrides
+                for (&idx, scalar) in &full_result.numeric_overrides {
+                    shared[idx as usize] = scalar.to_f64() as f32;
+                }
+                // Fill user inputs
+                let mut backend_eval = whisper_tensor::backends::eval_backend::EvalBackend::NDArray;
+                let sym_graph2 = model.get_symbolic_graph();
+                let tensor_store2 = model.get_tensor_store();
+                let initialized2 = sym_graph2.get_initialized_tensors(tensor_store2);
+                let mut milli_inputs2: HashMap<GlobalId, whisper_tensor::numeric_tensor::NumericTensor<whisper_tensor::DynRank>> = HashMap::new();
+                for (id, tensor) in initialized2 {
+                    milli_inputs2.insert(id, tensor);
+                }
+                for (name, (dtype, shape_dims)) in &input_info {
+                    let shape: Vec<u64> = shape_dims.iter().map(|d| d.unwrap_or(4)).collect();
+                    let numel: usize = shape.iter().product::<u64>() as usize;
+                    if let Some(id) = tensors_by_name.get(name) {
+                        let data: Vec<i64> = (0..numel as i64).collect();
+                        let tensor = whisper_tensor::numeric_tensor::NumericTensor::from_vec_shape(
+                            data, shape.iter().map(|&s| s as usize).collect()
+                        ).unwrap();
+                        milli_inputs2.insert(*id, tensor.clone());
+                        // Also fill shared buffer
+                        if let Some(tam) = full_result.tensor_map.get(id) {
+                            let f32_t = tensor.cast(whisper_tensor::dtype::DType::F32, &mut backend_eval).unwrap();
+                            let flat = f32_t.flatten().unwrap();
+                            let nd = flat.to_ndarray().unwrap();
+                            let v: Vec<f32> = nd.try_into().unwrap();
+                            for (i, &val) in v.iter().enumerate() {
+                                let atom_id = tam.atom_id_for_element(i as u64);
+                                shared[atom_id.0 as usize] = val;
+                            }
+                        }
+                    }
+                }
+                eprintln!("    Buffer filled: {:.1}s", t0.elapsed().as_secs_f64());
+
+                // Execute each phase's spans using NanoEval
+                let t0 = Instant::now();
+                for (phase_idx, phase) in plan.phases.iter().enumerate() {
+                    for (lane_idx, span) in phase.spans.iter().enumerate() {
+                        if span.graph.num_groups() == 0 { continue; }
+
+                        // Build overrides for this span from shared buffer
+                        let mut span_overrides: HashMap<u64, NumericScalar> = HashMap::new();
+                        for mapping in &span.inputs {
+                            for i in 0..mapping.count {
+                                let main_atom = mapping.main_base.0 + i;
+                                let span_atom = mapping.span_base.0 + i;
+                                span_overrides.insert(span_atom, NumericScalar::F32(shared[main_atom as usize]));
+                            }
+                        }
+
+                        // Eval the span
+                        let span_result = NanoEval::eval(&span.graph, &span_overrides);
+
+                        // Write outputs back to shared buffer
+                        for mapping in &span.outputs {
+                            for i in 0..mapping.count {
+                                let span_atom = mapping.span_base.0 + i;
+                                let main_atom = mapping.main_base.0 + i;
+                                shared[main_atom as usize] = span_result.get(whisper_tensor::nano_graph::AtomId(span_atom)) as f32;
+                            }
+                        }
+                    }
+                }
+                let eval_time = t0.elapsed();
+                println!("    Span eval: {:.1}s ({} phases)", eval_time.as_secs_f64(), plan.phases.len());
+
+                // Compare against milli interpreter
+                let t0 = Instant::now();
+                let milli_outputs = whisper_tensor::compiler::interpret_milli_graph(&milli_graph, &milli_inputs2).unwrap();
+                eprintln!("    Milli interpreter: {:.1}s", t0.elapsed().as_secs_f64());
+
+                let reverse_output_map: HashMap<GlobalId, GlobalId> = milli_graph
+                    .output_map.as_ref()
+                    .map(|m| m.iter().map(|(&int, &ext)| (ext, int)).collect())
+                    .unwrap_or_default();
+
+                let mut max_abs_error: f64 = 0.0;
+                let mut total_compared = 0u64;
+                for (ext_id, milli_tensor) in &milli_outputs {
+                    let internal_id = reverse_output_map.get(ext_id).unwrap_or(ext_id);
+                    let tam = full_result.tensor_map.get(internal_id)
+                        .or_else(|| full_result.tensor_map.get(ext_id));
+                    let Some(tam) = tam else { continue };
+
+                    let f32_tensor = milli_tensor.cast(whisper_tensor::dtype::DType::F32, &mut backend_eval).unwrap();
+                    let flat = f32_tensor.flatten().unwrap();
+                    let nd = flat.to_ndarray().unwrap();
+                    let milli_vals: Vec<f32> = nd.try_into().unwrap();
+
+                    let mut local_max = 0.0f64;
+                    for (i, &milli_val) in milli_vals.iter().enumerate() {
+                        let atom_id = tam.atom_id_for_element(i as u64);
+                        let span_val = shared[atom_id.0 as usize];
+                        let err = (milli_val - span_val).abs() as f64;
+                        local_max = local_max.max(err);
+                        total_compared += 1;
+                    }
+                    max_abs_error = max_abs_error.max(local_max);
+                }
+
+                println!("    Compared {} elements, max_abs_error={:.6e}", total_compared, max_abs_error);
+                if max_abs_error < 1e-2 {
+                    println!("    SPAN EVAL: PASS");
+                } else {
+                    println!("    SPAN EVAL: MISMATCH");
+                }
+            }
+        }
     }
     if which == "d" || which == "all" {
         use whisper_tensor::compiler::attempts::v13_claude::nano_plan_spans_d;
