@@ -228,6 +228,116 @@ fn main() {
             println!("    TOPOLOGY: {} VIOLATIONS ({:.1}ms)", errors, val_time.as_secs_f64() * 1e3);
         }
     }
+    if which == "v3c" || which == "all" {
+        use whisper_tensor::compiler::attempts::v13_claude::nano_plan_v3c;
+        let t0 = Instant::now();
+        let plan = nano_plan_v3c::plan_execution_spans(&result.graph, num_lanes);
+        let elapsed = t0.elapsed();
+        let ss: Vec<Vec<SS>> = plan.phases.iter().map(|p| p.spans.iter().map(|s| SS {
+            ng: s.graph.num_groups(), na: s.graph.num_atoms(), ni: s.inputs.len(), no: s.outputs.len(),
+        }).collect()).collect();
+        print_span_summary("v3c", &ss, plan.num_lanes, elapsed);
+
+        // Topology validation (same as spans_c)
+        let t_val = Instant::now();
+        let mut errors = 0usize;
+        let mut produced_ranges: Vec<(u64, u64)> = Vec::new();
+        for g in result.graph.groups() {
+            if matches!(&g.op, ScalarOp::Literal(_)) && g.inputs.is_empty() {
+                produced_ranges.push((g.base_id.0, g.count));
+            }
+        }
+        produced_ranges.sort();
+
+        let range_contains = |ranges: &[(u64, u64)], atom: u64| -> bool {
+            match ranges.binary_search_by(|&(base, _)| base.cmp(&atom)) {
+                Ok(_) => true,
+                Err(0) => false,
+                Err(i) => {
+                    let (base, count) = ranges[i - 1];
+                    atom < base + count
+                }
+            }
+        };
+
+        for (phase_idx, phase) in plan.phases.iter().enumerate() {
+            for (lane_idx, span) in phase.spans.iter().enumerate() {
+                for mapping in &span.inputs {
+                    if !range_contains(&produced_ranges, mapping.main_base.0) {
+                        errors += 1;
+                        if errors <= 10 {
+                            println!("  V3C VIOLATION: phase {}/lane {}: input base {:?} (count={}) not available",
+                                phase_idx, lane_idx, mapping.main_base, mapping.count);
+                            let main_groups = result.graph.groups();
+                            let atom_val = mapping.main_base.0;
+                            let idx = main_groups.partition_point(|g| g.base_id.0 <= atom_val);
+                            if idx > 0 {
+                                let g = &main_groups[idx - 1];
+                                if atom_val < g.base_id.0 + g.count {
+                                    let op_str = format!("{:?}", g.op).chars().take(60).collect::<String>();
+                                    let mut in_phase = "not in any output".to_string();
+                                    for (pi, ph) in plan.phases.iter().enumerate() {
+                                        for sp in &ph.spans {
+                                            for om in &sp.outputs {
+                                                if om.main_base.0 <= atom_val && atom_val < om.main_base.0 + om.count {
+                                                    in_phase = format!("phase {}", pi);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    println!("    group_idx={} base={:?} count={} op={} [{}]",
+                                        idx - 1, g.base_id, g.count, op_str, in_phase);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let span_groups = span.graph.groups();
+                let span_bases: Vec<u64> = span_groups.iter().map(|g| g.base_id.0).collect();
+                for (gi, group) in span_groups.iter().enumerate() {
+                    for input in &group.inputs {
+                        let src = input.resolve(0, 0);
+                        let src_gi = match span_bases.binary_search(&src.0) {
+                            Ok(i) => Some(i),
+                            Err(0) => None,
+                            Err(i) => {
+                                let candidate = i - 1;
+                                if src.0 < span_groups[candidate].base_id.0 + span_groups[candidate].count {
+                                    Some(candidate)
+                                } else { None }
+                            }
+                        };
+                        if let Some(src_gi) = src_gi {
+                            if src_gi > gi && !matches!(&span_groups[src_gi].op, ScalarOp::Literal(_)) {
+                                errors += 1;
+                                if errors <= 10 {
+                                    let op = format!("{:?}", group.op).chars().take_while(|c| *c != ' ' && *c != '{').collect::<String>();
+                                    let src_op = format!("{:?}", span_groups[src_gi].op).chars().take_while(|c| *c != ' ' && *c != '{').collect::<String>();
+                                    println!("  V3C TOPO VIOLATION: phase {}/lane {}: group {} ({}) reads from later group {} ({})",
+                                        phase_idx, lane_idx, gi, op, src_gi, src_op);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            for span in &phase.spans {
+                for mapping in &span.outputs {
+                    produced_ranges.push((mapping.main_base.0, mapping.count));
+                }
+            }
+            produced_ranges.sort();
+        }
+
+        let val_time = t_val.elapsed();
+        if errors == 0 {
+            println!("    V3C TOPOLOGY: VALID ({:.1}ms)", val_time.as_secs_f64() * 1e3);
+        } else {
+            println!("    V3C TOPOLOGY: {} VIOLATIONS ({:.1}ms)", errors, val_time.as_secs_f64() * 1e3);
+        }
+    }
     if which == "d" || which == "all" {
         use whisper_tensor::compiler::attempts::v13_claude::nano_plan_spans_d;
         let t0 = Instant::now();
@@ -237,6 +347,95 @@ fn main() {
             ng: s.graph.num_groups(), na: s.graph.num_atoms(), ni: s.inputs.len(), no: s.outputs.len(),
         }).collect()).collect();
         print_span_summary("spans_d", &ss, plan.num_lanes, elapsed);
+    }
+    if which == "v3d" || which == "all" {
+        use whisper_tensor::compiler::attempts::v13_claude::nano_plan_v3d;
+        let t0 = Instant::now();
+        let plan = nano_plan_v3d::plan_spans(&result.graph, num_lanes);
+        let elapsed = t0.elapsed();
+        let ss: Vec<Vec<SS>> = plan.phases.iter().map(|p| p.spans.iter().map(|s| SS {
+            ng: s.graph.num_groups(), na: s.graph.num_atoms(), ni: s.inputs.len(), no: s.outputs.len(),
+        }).collect()).collect();
+        print_span_summary("v3d", &ss, plan.num_lanes, elapsed);
+
+        // Topology validation
+        let t_val = Instant::now();
+        let mut errors = 0usize;
+        let mut produced_ranges: Vec<(u64, u64)> = Vec::new();
+        for g in result.graph.groups() {
+            if matches!(&g.op, ScalarOp::Literal(_)) && g.inputs.is_empty() {
+                produced_ranges.push((g.base_id.0, g.count));
+            }
+        }
+        produced_ranges.sort();
+
+        let range_contains = |ranges: &[(u64, u64)], atom: u64| -> bool {
+            match ranges.binary_search_by(|&(base, _)| base.cmp(&atom)) {
+                Ok(_) => true,
+                Err(0) => false,
+                Err(i) => {
+                    let (base, count) = ranges[i - 1];
+                    atom < base + count
+                }
+            }
+        };
+
+        for (phase_idx, phase) in plan.phases.iter().enumerate() {
+            for (lane_idx, span) in phase.spans.iter().enumerate() {
+                for mapping in &span.inputs {
+                    if !range_contains(&produced_ranges, mapping.main_base.0) {
+                        errors += 1;
+                        if errors <= 10 {
+                            println!("  V3D VIOLATION: phase {}/lane {}: input base {:?} (count={}) not available",
+                                phase_idx, lane_idx, mapping.main_base, mapping.count);
+                        }
+                    }
+                }
+
+                let span_groups = span.graph.groups();
+                let span_bases: Vec<u64> = span_groups.iter().map(|g| g.base_id.0).collect();
+                for (gi, group) in span_groups.iter().enumerate() {
+                    for input in &group.inputs {
+                        let src = input.resolve(0, 0);
+                        let src_gi = match span_bases.binary_search(&src.0) {
+                            Ok(i) => Some(i),
+                            Err(0) => None,
+                            Err(i) => {
+                                let candidate = i - 1;
+                                if src.0 < span_groups[candidate].base_id.0 + span_groups[candidate].count {
+                                    Some(candidate)
+                                } else { None }
+                            }
+                        };
+                        if let Some(src_gi) = src_gi {
+                            if src_gi > gi && !matches!(&span_groups[src_gi].op, ScalarOp::Literal(_)) {
+                                errors += 1;
+                                if errors <= 10 {
+                                    let op = format!("{:?}", group.op).chars().take_while(|c| *c != ' ' && *c != '{').collect::<String>();
+                                    let src_op = format!("{:?}", span_groups[src_gi].op).chars().take_while(|c| *c != ' ' && *c != '{').collect::<String>();
+                                    println!("  V3D TOPO VIOLATION: phase {}/lane {}: group {} ({}) reads from later group {} ({})",
+                                        phase_idx, lane_idx, gi, op, src_gi, src_op);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            for span in &phase.spans {
+                for mapping in &span.outputs {
+                    produced_ranges.push((mapping.main_base.0, mapping.count));
+                }
+            }
+            produced_ranges.sort();
+        }
+
+        let val_time = t_val.elapsed();
+        if errors == 0 {
+            println!("    TOPOLOGY: VALID ({:.1}ms)", val_time.as_secs_f64() * 1e3);
+        } else {
+            println!("    TOPOLOGY: {} VIOLATIONS ({:.1}ms)", errors, val_time.as_secs_f64() * 1e3);
+        }
     }
 }
 
