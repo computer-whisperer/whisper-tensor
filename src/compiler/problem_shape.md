@@ -137,27 +137,147 @@ Most compute platforms are memory-bandwidth limited. The optimization target:
 **minimize the number of times data crosses a cache boundary.** Every load/store
 across the boundary to the next memory tier is the dominant cost.
 
-## Kernel Formation: The Current Problem
+## Execution Model: Lanes, Phases, and Barriers
 
-A **kernel** is a chunk of compiled code that shares a cache level. The
-partitioner assigns groups to kernels.
+### The lane model
 
-### Requirements for a good partition
+The execution unit is a **lane** — a persistent thread pinned to a core (or
+warp on GPU). A lane runs through the entire model computation, hitting
+**barrier sync points** between phases. The lane's cache is persistent
+across phases.
 
-1. **No circular dependencies.** If kernel A reads from kernel B, then B must
-   not read from A. The kernel dependency graph must be a DAG. This is required
-   for correct sequential execution and for parallel scheduling.
+```
+Lane 0 (core 0): phase_0_work → barrier → phase_1_work → barrier → phase_2_work → ...
+Lane 1 (core 1): phase_0_work → barrier → phase_1_work → barrier → phase_2_work → ...
+...
+Lane N (core N): phase_N_work → barrier → phase_N_work → barrier → ...
+```
 
-2. **Balanced work.** No single kernel should dominate. For GPT-2, the current
-   partitioner puts 79% of atoms in one mega-kernel.
+A **phase** is the work between two consecutive barriers. Within a phase,
+all lanes execute independently — no cross-lane communication. At the
+barrier, all lanes synchronize and their outputs become visible to all lanes
+in the next phase.
 
-3. **Minimal cross-kernel traffic.** Data that crosses a kernel boundary must
-   be materialized to memory. Atoms that share inputs should be in the same
-   kernel to amortize load costs.
+### Why barriers align with matmul reductions
 
-4. **Sufficient parallelism.** Independent kernels can execute simultaneously.
-   The partition should expose enough independent kernels to utilize available
-   hardware parallelism.
+In a sequential matmul chain (the critical path through a transformer),
+matmul N+1's every output depends on ALL outputs from matmul N (because
+the reduction reads the full output vector). This is a mandatory sync
+point — you can't start any row of matmul N+1 until ALL rows of matmul N
+are done.
+
+Barriers naturally align with these reduction boundaries. Between barriers,
+the matmul rows are independent and distribute across lanes.
+
+### Cyclic dependencies are managed, not forbidden
+
+Unlike the earlier "acyclic kernel DAG" model, this model allows cyclic
+dependencies between lanes. Lane 0's phase 2 output might be read by
+lane 1 in phase 3, while lane 1's phase 2 output is read by lane 0 in
+phase 3. This is fine — the barrier ensures both lanes' phase 2 outputs
+are visible before any lane starts phase 3.
+
+The constraint is: **within a phase, lanes are independent.** All cross-lane
+communication happens through the barrier (via the shared values buffer).
+
+### Cache affinity across phases (lane pinning)
+
+A lane's cache is persistent across phases. Lane 0 in phase 3 inherits
+whatever is hot in L1/L2 from lane 0's phases 0-2. The partitioner should
+exploit this:
+
+- **Consistent row assignment.** If lane 0 handles rows 0-95 of matmul 1,
+  it should handle rows 0-95 of matmul 2, the same slice of LayerNorm,
+  etc. This keeps the row slice hot across phases.
+
+- **Cache-aware cost model.** When evaluating whether to assign a group to
+  a lane's phase N, the partitioner should consider what's already in that
+  lane's cache from phases 0..N-1. Values already hot are "free" to read.
+
+- **Lane assignment IS tiling.** The partitioner doesn't separately decide
+  tiling and kernel assignment — they're the same decision. Lane 0 gets
+  row slice [0, 96) across ALL matmuls in ALL layers.
+
+### Execution plan format
+
+```rust
+struct ExecutionPlan {
+    num_lanes: usize,
+    phases: Vec<Phase>,
+}
+struct Phase {
+    lane_work: Vec<Vec<usize>>,  // lane_idx -> group indices for this phase
+}
+```
+
+The codegen emits one function per lane — the lane function contains all
+phases with barrier calls between them:
+
+```rust
+fn lane_0(values: *mut f32, barriers: &[AtomicBarrier]) {
+    // Phase 0: Q matmul rows 0-95
+    ... compute ...
+    barrier_wait(&barriers[0]);
+    // Phase 1: attention head 0
+    ... compute ...
+    barrier_wait(&barriers[1]);
+    // ...continues through all phases/layers...
+}
+```
+
+### Inter-barrier spans as compilation units
+
+Each span (one lane's work in one phase) is compiled as a standalone code
+block within the lane function. For CPU targets, each span is a sequence
+of compute loops. The barrier call is a simple function call that blocks
+until all lanes arrive.
+
+This enables work-stealing: if a lane finishes its span early, the runtime
+can optionally assign it another lane's span from the same phase. But the
+primary model is pinned execution for cache affinity.
+
+### The partitioner's job
+
+The partitioner produces an `ExecutionPlan`: how many lanes, where the
+barriers go, and which groups each lane executes in each phase.
+
+1. **Identify barrier positions.** Find the matmul reduction boundaries on
+   the critical path. These are mandatory sync points.
+
+2. **Assign groups to lanes across all phases.** For each phase, distribute
+   the independent work (matmul rows, attention heads, elementwise slices)
+   across lanes. The same lane should get a consistent "slice" across phases
+   to maximize cache reuse.
+
+3. **Balance work per phase.** At each barrier, all lanes wait for the
+   slowest lane. Minimize waiting by balancing work across lanes within
+   each phase.
+
+4. **Track lane cache contents.** When choosing assignments, consider what
+   each lane already has hot from previous phases. Prefer assignments that
+   reuse cached data over assignments that require new loads.
+
+5. **Handle parallel matmul groups.** Q/K/V projections in attention are
+   three independent matmuls that branch from the same source and
+   reconverge. These can be interleaved across lanes (lane 0 does Q rows
+   0-95 AND K rows 0-95).
+
+### Requirements
+
+1. **Within each phase, lanes are independent.** No lane reads another
+   lane's current-phase output. All cross-lane communication goes through
+   barriers.
+
+2. **Balanced work per phase.** Max lane work / min lane work < 2x.
+
+3. **Cache-consistent lane assignment.** Each lane's data slice should be
+   stable across phases (same rows, same heads).
+
+4. **Reasonable number of lanes.** Match available hardware parallelism
+   (4-16 for CPU, 32+ for GPU).
+
+5. **Few barriers.** Each barrier is a sync cost. Minimize the number of
+   phases while respecting the mandatory matmul reduction boundaries.
 
 ### Previous partitioning attempts and what went wrong
 
@@ -210,13 +330,10 @@ in general) has two levels of structure:
 A good partitioner combines both: phase-level sequential boundaries
 (between layers) with within-phase parallelism (split matmul rows).
 
-**Concrete requirements:**
-
-1. **No circular kernel dependencies.** The kernel dependency graph is a DAG.
-2. **Expose parallelism.** Multiple independent kernels per sequential phase.
-3. **Balanced work.** No kernel should have more than ~10-20% of total work.
-4. **Minimal cross-kernel traffic.** Groups sharing data belong together.
-5. **Reasonable kernel count.** 20-100 kernels for GPT-2 (45.9K groups).
+Note: the earlier "acyclic kernel DAG" requirement is superseded by the
+lane+barrier model. Cyclic dependencies between lanes are fine — the
+barriers manage synchronization. The constraint is independence WITHIN
+a phase, not across phases.
 
 ### GPT-2 structure for reference
 
@@ -251,7 +368,8 @@ One possible strategy:
   penalties but doesn't prohibit a kernel.
 - **Shared data footprint drives grouping.** Atoms that share inputs/outputs
   belong together to amortize memory traffic.
-- **No circular kernel dependencies.** The kernel DAG must be acyclic.
+- **Barriers manage cross-lane sync.** Lanes are independent within phases;
+  barriers separate phases where cross-lane data is needed.
 - **Streaming dimensions reduce liveness.** Reduction dims are processed one
   step at a time, not materialized fully.
 - **No tensor op pattern matching.** One general mechanism for discovering
