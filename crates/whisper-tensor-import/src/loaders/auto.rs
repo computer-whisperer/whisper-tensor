@@ -39,7 +39,7 @@ impl Loader for AutoLoader {
                 return KokoroLoader.load(config);
             }
             // Check for Piper TTS (directory with .onnx + .onnx.json)
-            if super::piper::is_piper_model(&path) {
+            if crate::models::speech::piper::is_piper_model(&path) {
                 return PiperLoader.load(config);
             }
             let config_path = path.join("config.json");
@@ -95,7 +95,7 @@ impl Loader for AutoLoader {
             match ext.to_str().unwrap_or("") {
                 "onnx" => {
                     // Check for Piper (.onnx.json alongside)
-                    if super::piper::is_piper_model(&path) {
+                    if crate::models::speech::piper::is_piper_model(&path) {
                         return PiperLoader.load(config);
                     }
                     return OnnxLoader.load(config);
