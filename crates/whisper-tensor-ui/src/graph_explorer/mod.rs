@@ -21,8 +21,8 @@ use crate::widgets::toggle::toggle_ui;
 use crate::widgets::tokenized_rich_text::TokenizedRichText;
 use egui::epaint::CubicBezierShape;
 use egui::{
-    Color32, ColorImage, Context, Label, Margin, Mesh, Pos2, Rect, Response, Sense, Shape, Stroke,
-    StrokeKind, TextureHandle, Ui, UiBuilder, Vec2, vec2,
+    Color32, ColorImage, Context, Label, Margin, Mesh, Pos2, Rect, Response, RichText, Sense,
+    Shape, Stroke, StrokeKind, TextureHandle, Ui, UiBuilder, Vec2, vec2,
 };
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
@@ -285,11 +285,13 @@ fn render_node_contents(
             GraphLayoutNodeType::GraphNode(node_id) => {
                 if let Some(node) = &graph_subject.get_node_by_id(node_id) {
                     let op_kind = node.op_kind();
-                    ui.add(Label::new(op_kind.clone()).selectable(false));
                     if let Some(label) = node.label()
                         && label != op_kind
                     {
                         ui.add(Label::new(label).selectable(false));
+                        ui.add(Label::new(RichText::new(op_kind).small()).selectable(false));
+                    } else {
+                        ui.add(Label::new(op_kind).selectable(false));
                     }
                 }
             }
