@@ -10,6 +10,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArgMin {
     global_id: GlobalId,
+    pub(crate) label: Option<String>,
     output: GlobalId,
     input: GlobalId,
     axis: i64,
@@ -26,9 +27,22 @@ impl ArgMin {
         select_last_index: bool,
         rng: &mut impl rand::Rng,
     ) -> GlobalId {
+        Self::push_new_with_label(graph, input, axis, keepdims, select_last_index, None, rng)
+    }
+
+    pub fn push_new_with_label(
+        graph: &mut MilliOpGraph,
+        input: GlobalId,
+        axis: i64,
+        keepdims: bool,
+        select_last_index: bool,
+        label: Option<String>,
+        rng: &mut impl rand::Rng,
+    ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
         let node = Self {
             global_id: GlobalId::new(rng),
+            label,
             output,
             input,
             axis,

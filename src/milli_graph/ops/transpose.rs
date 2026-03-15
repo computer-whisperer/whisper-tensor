@@ -10,6 +10,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Transpose {
     global_id: GlobalId,
+    pub(crate) label: Option<String>,
     output: GlobalId,
     data: GlobalId,
     perm: Option<Vec<i64>>,
@@ -26,12 +27,23 @@ impl Transpose {
         perm: Option<Vec<i64>>,
         rng: &mut impl rand::Rng,
     ) -> GlobalId {
+        Self::push_new_with_label(graph, data, perm, None, rng)
+    }
+
+    pub fn push_new_with_label(
+        graph: &mut MilliOpGraph,
+        data: GlobalId,
+        perm: Option<Vec<i64>>,
+        label: Option<String>,
+        rng: &mut impl rand::Rng,
+    ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
         let node = Self {
             output,
             data,
             perm,
             global_id: GlobalId::new(rng),
+            label,
         };
         graph.push_op(AnyMilliOp::Transpose(node));
         output

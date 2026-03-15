@@ -694,6 +694,13 @@ impl MilliOpGraph {
         let mut graph = Self::new_empty(rng);
         let logits = graph.add_input(rng);
         let targets = graph.add_input(rng);
+        let loss_group = graph.create_group(MilliOpGroup {
+            id: GlobalId::new(rng),
+            phase: MilliOpPhase::Loss,
+            label: Some("cross_entropy_loss".to_string()),
+            ..Default::default()
+        });
+        graph.set_default_group(Some(loss_group));
 
         // Axis constant for class dimension (-1)
         let axis = ops::Constant::new_scalar(&mut graph, -1i64, rng);
@@ -718,6 +725,7 @@ impl MilliOpGraph {
         let loss = ops::ReduceMean::push_new(&mut graph, neg, None, false, false, rng);
 
         graph.set_outputs(vec![loss]);
+        graph.set_default_group(None);
 
         (
             graph,
@@ -736,12 +744,20 @@ impl MilliOpGraph {
         let mut graph = Self::new_empty(rng);
         let predictions = graph.add_input(rng);
         let targets = graph.add_input(rng);
+        let loss_group = graph.create_group(MilliOpGroup {
+            id: GlobalId::new(rng),
+            phase: MilliOpPhase::Loss,
+            label: Some("mse_loss".to_string()),
+            ..Default::default()
+        });
+        graph.set_default_group(Some(loss_group));
 
         let diff = ops::SimpleBinary::sub(&mut graph, predictions, targets, rng);
         let sq = ops::SimpleBinary::mul(&mut graph, diff, diff, rng);
         let loss = ops::ReduceMean::push_new(&mut graph, sq, None, false, false, rng);
 
         graph.set_outputs(vec![loss]);
+        graph.set_default_group(None);
 
         (
             graph,
@@ -760,12 +776,20 @@ impl MilliOpGraph {
         let mut graph = Self::new_empty(rng);
         let predictions = graph.add_input(rng);
         let targets = graph.add_input(rng);
+        let loss_group = graph.create_group(MilliOpGroup {
+            id: GlobalId::new(rng),
+            phase: MilliOpPhase::Loss,
+            label: Some("l1_loss".to_string()),
+            ..Default::default()
+        });
+        graph.set_default_group(Some(loss_group));
 
         let diff = ops::SimpleBinary::sub(&mut graph, predictions, targets, rng);
         let abs_diff = ops::SimpleUnaryOp::abs(&mut graph, diff, rng);
         let loss = ops::ReduceMean::push_new(&mut graph, abs_diff, None, false, false, rng);
 
         graph.set_outputs(vec![loss]);
+        graph.set_default_group(None);
 
         (
             graph,

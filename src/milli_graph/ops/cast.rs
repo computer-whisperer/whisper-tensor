@@ -12,6 +12,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Cast {
     global_id: GlobalId,
+    pub(crate) label: Option<String>,
     output: GlobalId,
     data: GlobalId,
     dtype: DType,
@@ -29,9 +30,20 @@ impl Cast {
         dtype: DType,
         rng: &mut impl Rng,
     ) -> GlobalId {
+        Self::push_new_with_label(graph, data, dtype, None, rng)
+    }
+
+    pub fn push_new_with_label(
+        graph: &mut MilliOpGraph,
+        data: GlobalId,
+        dtype: DType,
+        label: Option<String>,
+        rng: &mut impl Rng,
+    ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
         let node = Self {
             global_id: GlobalId::new(rng),
+            label,
             output,
             data,
             dtype,

@@ -46,6 +46,7 @@ pub enum ResizeKeepAspectRatioPolicy {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Resize {
     global_id: GlobalId,
+    pub(crate) label: Option<String>,
     output: GlobalId,
     input: GlobalId,
     roi: Option<GlobalId>,
@@ -81,9 +82,49 @@ impl Resize {
         keep_aspect_ratio_policy: ResizeKeepAspectRatioPolicy,
         rng: &mut impl rand::Rng,
     ) -> GlobalId {
+        Self::push_new_with_label(
+            graph,
+            input,
+            roi,
+            scales,
+            sizes,
+            mode,
+            coord_transform,
+            nearest_mode,
+            cubic_coeff_a,
+            antialias,
+            exclude_outside,
+            extrapolation_value,
+            axes,
+            keep_aspect_ratio_policy,
+            None,
+            rng,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_new_with_label(
+        graph: &mut MilliOpGraph,
+        input: GlobalId,
+        roi: Option<GlobalId>,
+        scales: Option<GlobalId>,
+        sizes: Option<GlobalId>,
+        mode: ResizeMode,
+        coord_transform: ResizeCoordTransform,
+        nearest_mode: ResizeNearestMode,
+        cubic_coeff_a: f32,
+        antialias: bool,
+        exclude_outside: bool,
+        extrapolation_value: f32,
+        axes: Vec<i64>,
+        keep_aspect_ratio_policy: ResizeKeepAspectRatioPolicy,
+        label: Option<String>,
+        rng: &mut impl rand::Rng,
+    ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
         let node = Self {
             global_id: GlobalId::new(rng),
+            label,
             output,
             input,
             roi,

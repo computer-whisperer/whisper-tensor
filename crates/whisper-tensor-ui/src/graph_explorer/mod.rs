@@ -284,8 +284,11 @@ fn render_node_contents(
         match &node_type {
             GraphLayoutNodeType::GraphNode(node_id) => {
                 if let Some(node) = &graph_subject.get_node_by_id(node_id) {
-                    ui.add(Label::new(node.op_kind()).selectable(false));
-                    if let Some(label) = node.label() {
+                    let op_kind = node.op_kind();
+                    ui.add(Label::new(op_kind.clone()).selectable(false));
+                    if let Some(label) = node.label()
+                        && label != op_kind
+                    {
                         ui.add(Label::new(label).selectable(false));
                     }
                 }

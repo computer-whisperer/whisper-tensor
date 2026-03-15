@@ -409,6 +409,51 @@ pub enum AnyMilliOp {
 }
 
 impl AnyMilliOp {
+    pub fn stored_label(&self) -> Option<String> {
+        match self {
+            AnyMilliOp::Constant(x) => x.label.clone(),
+            AnyMilliOp::ConstantOfShape(x) => x.label.clone(),
+            AnyMilliOp::SimpleBinary(x) => x.label.clone(),
+            AnyMilliOp::MatMul(x) => x.label.clone(),
+            AnyMilliOp::Pow(x) => x.label.clone(),
+            AnyMilliOp::SimpleUnary(x) => x.label.clone(),
+            AnyMilliOp::ClampMin(x) => x.label.clone(),
+            AnyMilliOp::NonZero(x) => x.label.clone(),
+            AnyMilliOp::CumSum(x) => x.label.clone(),
+            AnyMilliOp::Shape(x) => x.label.clone(),
+            AnyMilliOp::Reshape(x) => x.label.clone(),
+            AnyMilliOp::Slice(x) => x.label.clone(),
+            AnyMilliOp::ReduceSum(x) => x.label.clone(),
+            AnyMilliOp::ReduceMin(x) => x.label.clone(),
+            AnyMilliOp::ReduceMax(x) => x.label.clone(),
+            AnyMilliOp::ReduceProd(x) => x.label.clone(),
+            AnyMilliOp::ReduceMean(x) => x.label.clone(),
+            AnyMilliOp::Cast(x) => x.label.clone(),
+            AnyMilliOp::CastLike(x) => x.label.clone(),
+            AnyMilliOp::Transpose(x) => x.label.clone(),
+            AnyMilliOp::Squeeze(x) => x.label.clone(),
+            AnyMilliOp::Unsqueeze(x) => x.label.clone(),
+            AnyMilliOp::Gather(x) => x.label.clone(),
+            AnyMilliOp::GatherGrad(x) => x.label.clone(),
+            AnyMilliOp::Concat(x) => x.label.clone(),
+            AnyMilliOp::Split(x) => x.label.clone(),
+            AnyMilliOp::Where(x) => x.label.clone(),
+            AnyMilliOp::Range(x) => x.label.clone(),
+            AnyMilliOp::Expand(x) => x.label.clone(),
+            AnyMilliOp::SumTo(x) => x.label.clone(),
+            AnyMilliOp::ArgMax(x) => x.label.clone(),
+            AnyMilliOp::ArgMin(x) => x.label.clone(),
+            AnyMilliOp::Resize(x) => x.label.clone(),
+            AnyMilliOp::Conv(x) => x.label.clone(),
+            AnyMilliOp::ConvInputGrad(x) => x.label.clone(),
+            AnyMilliOp::ConvWeightGrad(x) => x.label.clone(),
+            AnyMilliOp::ConvBiasGrad(x) => x.label.clone(),
+            AnyMilliOp::Pad(x) => x.label.clone(),
+            AnyMilliOp::TopK(x) => x.label.clone(),
+            AnyMilliOp::RandomNormalLike(x) => x.label.clone(),
+        }
+    }
+
     pub fn remap_tensors(&mut self, map: &HashMap<GlobalId, GlobalId>, rng: &mut impl Rng) {
         match self {
             AnyMilliOp::Constant(x) => x.remap_tensors(map, rng),
@@ -579,6 +624,9 @@ impl Node for AnyMilliOp {
     delegate!(inputs() ->  Box<dyn Iterator<Item = GlobalId> + '_>);
     delegate!(outputs() -> Box<dyn Iterator<Item = GlobalId> + '_>);
     delegate!(global_id() -> GlobalId);
+    fn label(&self) -> Option<String> {
+        self.stored_label()
+    }
 }
 
 impl NodeMetadata for AnyMilliOp {

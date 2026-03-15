@@ -34,6 +34,7 @@ pub(crate) enum WhichSimpleUnaryOp {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SimpleUnaryOp {
     global_id: GlobalId,
+    pub(crate) label: Option<String>,
     output: GlobalId,
     input: GlobalId,
     op: WhichSimpleUnaryOp,
@@ -48,6 +49,7 @@ impl SimpleUnaryOp {
         graph: &mut MilliOpGraph,
         input: GlobalId,
         op: WhichSimpleUnaryOp,
+        label: Option<String>,
         rng: &mut impl rand::Rng,
     ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
@@ -56,45 +58,46 @@ impl SimpleUnaryOp {
             input,
             op,
             global_id: GlobalId::new(rng),
+            label,
         };
         graph.push_op(AnyMilliOp::SimpleUnary(node));
         output
     }
 
     pub fn neg(graph: &mut MilliOpGraph, input: GlobalId, rng: &mut impl rand::Rng) -> GlobalId {
-        Self::new_internal(graph, input, WhichSimpleUnaryOp::Neg, rng)
+        Self::new_internal(graph, input, WhichSimpleUnaryOp::Neg, None, rng)
     }
     pub fn abs(graph: &mut MilliOpGraph, input: GlobalId, rng: &mut impl rand::Rng) -> GlobalId {
-        Self::new_internal(graph, input, WhichSimpleUnaryOp::Abs, rng)
+        Self::new_internal(graph, input, WhichSimpleUnaryOp::Abs, None, rng)
     }
     pub fn exp(graph: &mut MilliOpGraph, input: GlobalId, rng: &mut impl rand::Rng) -> GlobalId {
-        Self::new_internal(graph, input, WhichSimpleUnaryOp::Exp, rng)
+        Self::new_internal(graph, input, WhichSimpleUnaryOp::Exp, None, rng)
     }
     pub fn ln(graph: &mut MilliOpGraph, input: GlobalId, rng: &mut impl rand::Rng) -> GlobalId {
-        Self::new_internal(graph, input, WhichSimpleUnaryOp::Ln, rng)
+        Self::new_internal(graph, input, WhichSimpleUnaryOp::Ln, None, rng)
     }
     pub fn sqrt(graph: &mut MilliOpGraph, input: GlobalId, rng: &mut impl rand::Rng) -> GlobalId {
-        Self::new_internal(graph, input, WhichSimpleUnaryOp::Sqrt, rng)
+        Self::new_internal(graph, input, WhichSimpleUnaryOp::Sqrt, None, rng)
     }
     pub fn not(graph: &mut MilliOpGraph, input: GlobalId, rng: &mut impl rand::Rng) -> GlobalId {
-        Self::new_internal(graph, input, WhichSimpleUnaryOp::Not, rng)
+        Self::new_internal(graph, input, WhichSimpleUnaryOp::Not, None, rng)
     }
     pub fn sign(graph: &mut MilliOpGraph, input: GlobalId, rng: &mut impl rand::Rng) -> GlobalId {
-        Self::new_internal(graph, input, WhichSimpleUnaryOp::Sign, rng)
+        Self::new_internal(graph, input, WhichSimpleUnaryOp::Sign, None, rng)
     }
     pub fn bitwise_not(
         graph: &mut MilliOpGraph,
         input: GlobalId,
         rng: &mut impl rand::Rng,
     ) -> GlobalId {
-        Self::new_internal(graph, input, WhichSimpleUnaryOp::BitwiseNot, rng)
+        Self::new_internal(graph, input, WhichSimpleUnaryOp::BitwiseNot, None, rng)
     }
     pub fn reciprocal(
         graph: &mut MilliOpGraph,
         input: GlobalId,
         rng: &mut impl rand::Rng,
     ) -> GlobalId {
-        Self::new_internal(graph, input, WhichSimpleUnaryOp::Reciprocal, rng)
+        Self::new_internal(graph, input, WhichSimpleUnaryOp::Reciprocal, None, rng)
     }
     pub fn trig(
         graph: &mut MilliOpGraph,
@@ -102,16 +105,16 @@ impl SimpleUnaryOp {
         trig_op: TrigOp,
         rng: &mut impl rand::Rng,
     ) -> GlobalId {
-        Self::new_internal(graph, input, WhichSimpleUnaryOp::Trig(trig_op), rng)
+        Self::new_internal(graph, input, WhichSimpleUnaryOp::Trig(trig_op), None, rng)
     }
     pub fn floor(graph: &mut MilliOpGraph, input: GlobalId, rng: &mut impl rand::Rng) -> GlobalId {
-        Self::new_internal(graph, input, WhichSimpleUnaryOp::Floor, rng)
+        Self::new_internal(graph, input, WhichSimpleUnaryOp::Floor, None, rng)
     }
     pub fn ceil(graph: &mut MilliOpGraph, input: GlobalId, rng: &mut impl rand::Rng) -> GlobalId {
-        Self::new_internal(graph, input, WhichSimpleUnaryOp::Ceil, rng)
+        Self::new_internal(graph, input, WhichSimpleUnaryOp::Ceil, None, rng)
     }
     pub fn round(graph: &mut MilliOpGraph, input: GlobalId, rng: &mut impl rand::Rng) -> GlobalId {
-        Self::new_internal(graph, input, WhichSimpleUnaryOp::Round, rng)
+        Self::new_internal(graph, input, WhichSimpleUnaryOp::Round, None, rng)
     }
     pub fn is_inf(
         graph: &mut MilliOpGraph,
@@ -127,14 +130,15 @@ impl SimpleUnaryOp {
                 detect_positive,
                 detect_negative,
             },
+            None,
             rng,
         )
     }
     pub fn is_nan(graph: &mut MilliOpGraph, input: GlobalId, rng: &mut impl rand::Rng) -> GlobalId {
-        Self::new_internal(graph, input, WhichSimpleUnaryOp::IsNan, rng)
+        Self::new_internal(graph, input, WhichSimpleUnaryOp::IsNan, None, rng)
     }
     pub fn erf(graph: &mut MilliOpGraph, input: GlobalId, rng: &mut impl rand::Rng) -> GlobalId {
-        Self::new_internal(graph, input, WhichSimpleUnaryOp::Erf, rng)
+        Self::new_internal(graph, input, WhichSimpleUnaryOp::Erf, None, rng)
     }
 }
 
@@ -305,6 +309,7 @@ impl MilliOp for SimpleUnaryOp {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClampMin {
     global_id: GlobalId,
+    pub(crate) label: Option<String>,
     output: GlobalId,
     input: GlobalId,
     value: f32,
@@ -321,9 +326,20 @@ impl ClampMin {
         value: f32,
         rng: &mut impl rand::Rng,
     ) -> GlobalId {
+        Self::push_new_with_label(graph, a, value, None, rng)
+    }
+
+    pub fn push_new_with_label(
+        graph: &mut MilliOpGraph,
+        a: GlobalId,
+        value: f32,
+        label: Option<String>,
+        rng: &mut impl rand::Rng,
+    ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
         let node = Self {
             global_id: GlobalId::new(rng),
+            label,
             output,
             input: a,
             value,

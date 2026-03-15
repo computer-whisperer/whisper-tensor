@@ -12,6 +12,7 @@ use typenum::P1;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Slice {
     global_id: crate::graph::GlobalId,
+    pub(crate) label: Option<String>,
     output: GlobalId,
     data: GlobalId,
     starts: GlobalId,
@@ -30,6 +31,20 @@ impl Slice {
         axes: Option<GlobalId>,
         rng: &mut impl rand::Rng,
     ) -> GlobalId {
+        Self::push_new_with_label(graph, data, starts, ends, steps, axes, None, rng)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_new_with_label(
+        graph: &mut MilliOpGraph,
+        data: GlobalId,
+        starts: GlobalId,
+        ends: GlobalId,
+        steps: Option<GlobalId>,
+        axes: Option<GlobalId>,
+        label: Option<String>,
+        rng: &mut impl rand::Rng,
+    ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
         let node = Self {
             output,
@@ -39,6 +54,7 @@ impl Slice {
             steps,
             axes,
             global_id: GlobalId::new(rng),
+            label,
         };
         graph.push_op(AnyMilliOp::Slice(node));
         output

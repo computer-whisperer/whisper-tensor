@@ -13,6 +13,7 @@ use typenum::P1;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Unsqueeze {
     global_id: GlobalId,
+    pub(crate) label: Option<String>,
     output: GlobalId,
     data: GlobalId,
     axes: GlobalId,
@@ -25,12 +26,23 @@ impl Unsqueeze {
         axes: GlobalId,
         rng: &mut impl rand::Rng,
     ) -> GlobalId {
+        Self::push_new_with_label(graph, data, axes, None, rng)
+    }
+
+    pub fn push_new_with_label(
+        graph: &mut MilliOpGraph,
+        data: GlobalId,
+        axes: GlobalId,
+        label: Option<String>,
+        rng: &mut impl rand::Rng,
+    ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
         let node = Self {
             output,
             data,
             axes,
             global_id: GlobalId::new(rng),
+            label,
         };
         graph.push_op(AnyMilliOp::Unsqueeze(node));
         output

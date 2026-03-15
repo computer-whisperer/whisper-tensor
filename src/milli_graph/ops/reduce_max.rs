@@ -11,6 +11,7 @@ use typenum::P1;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReduceMax {
     global_id: GlobalId,
+    pub(crate) label: Option<String>,
     output: GlobalId,
     data: GlobalId,
     axes: Option<GlobalId>,
@@ -38,9 +39,22 @@ impl ReduceMax {
         noop_with_empty_axes: bool,
         rng: &mut impl rand::Rng,
     ) -> GlobalId {
+        Self::push_new_with_label(graph, data, axes, keepdims, noop_with_empty_axes, None, rng)
+    }
+
+    pub fn push_new_with_label(
+        graph: &mut MilliOpGraph,
+        data: GlobalId,
+        axes: Option<GlobalId>,
+        keepdims: bool,
+        noop_with_empty_axes: bool,
+        label: Option<String>,
+        rng: &mut impl rand::Rng,
+    ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
         let node = Self {
             global_id: GlobalId::new(rng),
+            label,
             output,
             data,
             axes,

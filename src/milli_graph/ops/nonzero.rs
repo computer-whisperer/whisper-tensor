@@ -14,6 +14,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NonZero {
     global_id: GlobalId,
+    pub(crate) label: Option<String>,
     output: GlobalId,
     input: GlobalId,
 }
@@ -24,11 +25,21 @@ impl NonZero {
         input: GlobalId,
         rng: &mut impl rand::Rng,
     ) -> GlobalId {
+        Self::push_new_with_label(graph, input, None, rng)
+    }
+
+    pub fn push_new_with_label(
+        graph: &mut MilliOpGraph,
+        input: GlobalId,
+        label: Option<String>,
+        rng: &mut impl rand::Rng,
+    ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
         let node = Self {
             output,
             input,
             global_id: GlobalId::new(rng),
+            label,
         };
         graph.push_op(AnyMilliOp::NonZero(node));
         output

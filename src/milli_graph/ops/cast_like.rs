@@ -11,6 +11,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CastLike {
     global_id: GlobalId,
+    pub(crate) label: Option<String>,
     output: GlobalId,
     data: GlobalId,
     target_type: GlobalId,
@@ -23,9 +24,20 @@ impl CastLike {
         target_type: GlobalId,
         rng: &mut impl Rng,
     ) -> GlobalId {
+        Self::push_new_with_label(graph, data, target_type, None, rng)
+    }
+
+    pub fn push_new_with_label(
+        graph: &mut MilliOpGraph,
+        data: GlobalId,
+        target_type: GlobalId,
+        label: Option<String>,
+        rng: &mut impl Rng,
+    ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
         let node = Self {
             global_id: GlobalId::new(rng),
+            label,
             output,
             data,
             target_type,

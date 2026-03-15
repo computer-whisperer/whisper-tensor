@@ -693,12 +693,14 @@ impl SymbolicGraph {
         }
 
         // 3. Walk ops in topological order, merge each with a group
-        for op_id in self.topological_order_vec() {
+        for (op_index, op_id) in self.topological_order_vec().into_iter().enumerate() {
             let graph_op = &self.operations[&op_id];
+            let op_kind = graph_op.op.op_kind();
             let label = graph_op
                 .name
                 .clone()
-                .unwrap_or_else(|| graph_op.op.op_kind());
+                .filter(|name| name != &op_kind)
+                .unwrap_or_else(|| format!("node_{op_index}"));
             let group = MilliOpGroup {
                 id: GlobalId::new(rng),
                 source_op: Some(op_id),
@@ -767,12 +769,14 @@ impl SymbolicGraph {
 
         // 2. Generate forward pass — walk ops in topological order
         let topo_order = self.topological_order_vec();
-        for &op_id in &topo_order {
+        for (op_index, &op_id) in topo_order.iter().enumerate() {
             let graph_op = &self.operations[&op_id];
+            let op_kind = graph_op.op.op_kind();
             let label = graph_op
                 .name
                 .clone()
-                .unwrap_or_else(|| graph_op.op.op_kind());
+                .filter(|name| name != &op_kind)
+                .unwrap_or_else(|| format!("node_{op_index}"));
             let group = MilliOpGroup {
                 id: GlobalId::new(rng),
                 source_op: Some(op_id),

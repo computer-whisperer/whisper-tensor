@@ -13,6 +13,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RandomNormalLike {
     global_id: GlobalId,
+    pub(crate) label: Option<String>,
     output: GlobalId,
     input: GlobalId,
     dtype: Option<DType>,
@@ -31,9 +32,24 @@ impl RandomNormalLike {
         seed: Option<f32>,
         rng: &mut impl Rng,
     ) -> GlobalId {
+        Self::push_new_with_label(graph, input, dtype, mean, scale, seed, None, rng)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_new_with_label(
+        graph: &mut crate::milli_graph::MilliOpGraph,
+        input: GlobalId,
+        dtype: Option<DType>,
+        mean: f32,
+        scale: f32,
+        seed: Option<f32>,
+        label: Option<String>,
+        rng: &mut impl Rng,
+    ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
         let node = Self {
             global_id: GlobalId::new(rng),
+            label,
             output,
             input,
             dtype,

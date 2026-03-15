@@ -12,6 +12,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Gather {
     global_id: GlobalId,
+    pub(crate) label: Option<String>,
     output: GlobalId,
     data: GlobalId,
     indices: GlobalId,
@@ -26,9 +27,21 @@ impl Gather {
         axis: i64,
         rng: &mut impl Rng,
     ) -> GlobalId {
+        Self::push_new_with_label(graph, data, indices, axis, None, rng)
+    }
+
+    pub fn push_new_with_label(
+        graph: &mut MilliOpGraph,
+        data: GlobalId,
+        indices: GlobalId,
+        axis: i64,
+        label: Option<String>,
+        rng: &mut impl Rng,
+    ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
         let node = Self {
             global_id: GlobalId::new(rng),
+            label,
             output,
             data,
             indices,
@@ -175,6 +188,7 @@ impl MilliOp for Gather {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GatherGrad {
     global_id: GlobalId,
+    pub(crate) label: Option<String>,
     output: GlobalId,
     grad_output: GlobalId,
     indices: GlobalId,
@@ -192,9 +206,22 @@ impl GatherGrad {
         axis: i64,
         rng: &mut impl Rng,
     ) -> GlobalId {
+        Self::push_new_with_label(graph, grad_output, indices, data, axis, None, rng)
+    }
+
+    pub fn push_new_with_label(
+        graph: &mut MilliOpGraph,
+        grad_output: GlobalId,
+        indices: GlobalId,
+        data: GlobalId,
+        axis: i64,
+        label: Option<String>,
+        rng: &mut impl Rng,
+    ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
         let node = Self {
             global_id: GlobalId::new(rng),
+            label,
             output,
             grad_output,
             indices,

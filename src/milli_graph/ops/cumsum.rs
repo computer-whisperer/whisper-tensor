@@ -13,6 +13,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CumSum {
     global_id: GlobalId,
+    pub(crate) label: Option<String>,
     output: GlobalId,
     input: GlobalId,
     axis: GlobalId,
@@ -29,9 +30,22 @@ impl CumSum {
         reverse: bool,
         rng: &mut impl Rng,
     ) -> GlobalId {
+        Self::push_new_with_label(graph, input, axis, exclusive, reverse, None, rng)
+    }
+
+    pub fn push_new_with_label(
+        graph: &mut MilliOpGraph,
+        input: GlobalId,
+        axis: GlobalId,
+        exclusive: bool,
+        reverse: bool,
+        label: Option<String>,
+        rng: &mut impl Rng,
+    ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
         let node = Self {
             global_id: GlobalId::new(rng),
+            label,
             output,
             input,
             axis,

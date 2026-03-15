@@ -11,6 +11,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Concat {
     global_id: GlobalId,
+    pub(crate) label: Option<String>,
     output: GlobalId,
     inputs: Vec<GlobalId>,
     axis: i64,
@@ -23,9 +24,20 @@ impl Concat {
         axis: i64,
         rng: &mut impl Rng,
     ) -> GlobalId {
+        Self::push_new_with_label(graph, inputs, axis, None, rng)
+    }
+
+    pub fn push_new_with_label(
+        graph: &mut MilliOpGraph,
+        inputs: Vec<GlobalId>,
+        axis: i64,
+        label: Option<String>,
+        rng: &mut impl Rng,
+    ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
         let node = Self {
             global_id: GlobalId::new(rng),
+            label,
             output,
             inputs,
             axis,

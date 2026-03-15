@@ -34,6 +34,7 @@ pub(crate) enum WhichSimpleBinaryOp {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SimpleBinary {
     global_id: GlobalId,
+    pub(crate) label: Option<String>,
     output: GlobalId,
     which_op: WhichSimpleBinaryOp,
     a: GlobalId,
@@ -54,11 +55,13 @@ impl SimpleBinary {
         a: GlobalId,
         b: GlobalId,
         which_op: WhichSimpleBinaryOp,
+        label: Option<String>,
         rng: &mut impl Rng,
     ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
         let node = Self {
             global_id: GlobalId::new(rng),
+            label,
             output,
             which_op,
             a,
@@ -68,19 +71,19 @@ impl SimpleBinary {
         output
     }
     pub fn add(graph: &mut MilliOpGraph, a: GlobalId, b: GlobalId, rng: &mut impl Rng) -> GlobalId {
-        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Add, rng)
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Add, None, rng)
     }
 
     pub fn sub(graph: &mut MilliOpGraph, a: GlobalId, b: GlobalId, rng: &mut impl Rng) -> GlobalId {
-        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Sub, rng)
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Sub, None, rng)
     }
 
     pub fn mul(graph: &mut MilliOpGraph, a: GlobalId, b: GlobalId, rng: &mut impl Rng) -> GlobalId {
-        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Mul, rng)
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Mul, None, rng)
     }
 
     pub fn div(graph: &mut MilliOpGraph, a: GlobalId, b: GlobalId, rng: &mut impl Rng) -> GlobalId {
-        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Div, rng)
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Div, None, rng)
     }
 
     pub fn modulo(
@@ -90,18 +93,18 @@ impl SimpleBinary {
         fmod: Option<bool>,
         rng: &mut impl Rng,
     ) -> GlobalId {
-        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Modulo(fmod), rng)
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Modulo(fmod), None, rng)
     }
     pub fn and(graph: &mut MilliOpGraph, a: GlobalId, b: GlobalId, rng: &mut impl Rng) -> GlobalId {
-        Self::push_new(graph, a, b, WhichSimpleBinaryOp::And, rng)
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::And, None, rng)
     }
 
     pub fn or(graph: &mut MilliOpGraph, a: GlobalId, b: GlobalId, rng: &mut impl Rng) -> GlobalId {
-        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Or, rng)
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Or, None, rng)
     }
 
     pub fn xor(graph: &mut MilliOpGraph, a: GlobalId, b: GlobalId, rng: &mut impl Rng) -> GlobalId {
-        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Xor, rng)
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Xor, None, rng)
     }
 
     pub fn bitwise_and(
@@ -110,7 +113,7 @@ impl SimpleBinary {
         b: GlobalId,
         rng: &mut impl Rng,
     ) -> GlobalId {
-        Self::push_new(graph, a, b, WhichSimpleBinaryOp::BitwiseAnd, rng)
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::BitwiseAnd, None, rng)
     }
 
     pub fn bitwise_or(
@@ -119,7 +122,7 @@ impl SimpleBinary {
         b: GlobalId,
         rng: &mut impl Rng,
     ) -> GlobalId {
-        Self::push_new(graph, a, b, WhichSimpleBinaryOp::BitwiseOr, rng)
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::BitwiseOr, None, rng)
     }
 
     pub fn bitwise_xor(
@@ -128,7 +131,7 @@ impl SimpleBinary {
         b: GlobalId,
         rng: &mut impl Rng,
     ) -> GlobalId {
-        Self::push_new(graph, a, b, WhichSimpleBinaryOp::BitwiseXor, rng)
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::BitwiseXor, None, rng)
     }
 
     pub fn equal(
@@ -137,7 +140,7 @@ impl SimpleBinary {
         b: GlobalId,
         rng: &mut impl Rng,
     ) -> GlobalId {
-        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Equal, rng)
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Equal, None, rng)
     }
 
     pub fn greater(
@@ -146,7 +149,7 @@ impl SimpleBinary {
         b: GlobalId,
         rng: &mut impl Rng,
     ) -> GlobalId {
-        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Greater, rng)
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Greater, None, rng)
     }
 
     pub fn greater_or_equal(
@@ -155,7 +158,7 @@ impl SimpleBinary {
         b: GlobalId,
         rng: &mut impl Rng,
     ) -> GlobalId {
-        Self::push_new(graph, a, b, WhichSimpleBinaryOp::GreaterOrEqual, rng)
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::GreaterOrEqual, None, rng)
     }
 
     pub fn less(
@@ -164,7 +167,7 @@ impl SimpleBinary {
         b: GlobalId,
         rng: &mut impl Rng,
     ) -> GlobalId {
-        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Less, rng)
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Less, None, rng)
     }
 
     pub fn less_or_equal(
@@ -173,15 +176,15 @@ impl SimpleBinary {
         b: GlobalId,
         rng: &mut impl Rng,
     ) -> GlobalId {
-        Self::push_new(graph, a, b, WhichSimpleBinaryOp::LessOrEqual, rng)
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::LessOrEqual, None, rng)
     }
 
     pub fn max(graph: &mut MilliOpGraph, a: GlobalId, b: GlobalId, rng: &mut impl Rng) -> GlobalId {
-        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Max, rng)
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Max, None, rng)
     }
 
     pub fn min(graph: &mut MilliOpGraph, a: GlobalId, b: GlobalId, rng: &mut impl Rng) -> GlobalId {
-        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Min, rng)
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Min, None, rng)
     }
 }
 
@@ -381,6 +384,7 @@ impl MilliOp for SimpleBinary {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Pow {
     global_id: GlobalId,
+    pub(crate) label: Option<String>,
     output: GlobalId,
     a: GlobalId,
     b: GlobalId,
@@ -393,12 +397,23 @@ impl Pow {
         b: GlobalId,
         rng: &mut impl Rng,
     ) -> GlobalId {
+        Self::push_new_with_label(graph, a, b, None, rng)
+    }
+
+    pub fn push_new_with_label(
+        graph: &mut MilliOpGraph,
+        a: GlobalId,
+        b: GlobalId,
+        label: Option<String>,
+        rng: &mut impl Rng,
+    ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
         let node = Self {
             output,
             a,
             b,
             global_id: GlobalId::new(rng),
+            label,
         };
         graph.push_op(AnyMilliOp::Pow(node));
         output
@@ -498,6 +513,7 @@ fn default_f32() -> DType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MatMul {
     global_id: GlobalId,
+    pub(crate) label: Option<String>,
     output: GlobalId,
     a: GlobalId,
     b: GlobalId,
@@ -542,6 +558,31 @@ impl MatMul {
         output_dtype: DType,
         rng: &mut impl Rng,
     ) -> GlobalId {
+        Self::push_new_with_label(
+            graph,
+            a,
+            b,
+            input_dtype,
+            product_dtype,
+            accumulate_dtype,
+            output_dtype,
+            None,
+            rng,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_new_with_label(
+        graph: &mut MilliOpGraph,
+        a: GlobalId,
+        b: GlobalId,
+        input_dtype: DType,
+        product_dtype: DType,
+        accumulate_dtype: DType,
+        output_dtype: DType,
+        label: Option<String>,
+        rng: &mut impl Rng,
+    ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
         let node = Self {
             output,
@@ -552,6 +593,7 @@ impl MatMul {
             accumulate_dtype,
             output_dtype,
             global_id: GlobalId::new(rng),
+            label,
         };
         graph.push_op(AnyMilliOp::MatMul(node));
         output

@@ -569,7 +569,9 @@ impl GraphExplorerApp {
         {
             if let Some(node) = graph.get_node_by_id(&node_id) {
                 let op = node.op_kind();
-                if let Some(label) = node.label() {
+                if let Some(label) = node.label()
+                    && label != op
+                {
                     format!("{}: {}", op, label)
                 } else {
                     op.to_string()
@@ -851,7 +853,7 @@ impl GraphExplorerApp {
 
         if let Some(node) = graph.get_node_by_id(&node_id) {
             let op = node.op_kind();
-            let label = node.label();
+            let label = node.label().filter(|label| label != &op);
 
             let resp = egui::Frame::new()
                 .fill(Color32::from_rgb(45, 48, 55))

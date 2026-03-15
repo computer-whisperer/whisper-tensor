@@ -21,6 +21,7 @@ pub enum ConvAutoPad {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Conv {
     global_id: GlobalId,
+    pub(crate) label: Option<String>,
     output: GlobalId,
     input: GlobalId,
     weight: GlobalId,
@@ -48,9 +49,41 @@ impl Conv {
         strides: Vec<i64>,
         rng: &mut impl rand::Rng,
     ) -> GlobalId {
+        Self::push_new_with_label(
+            graph,
+            input,
+            weight,
+            bias,
+            auto_pad,
+            dilations,
+            group,
+            kernel_shape,
+            pads,
+            strides,
+            None,
+            rng,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_new_with_label(
+        graph: &mut MilliOpGraph,
+        input: GlobalId,
+        weight: GlobalId,
+        bias: Option<GlobalId>,
+        auto_pad: ConvAutoPad,
+        dilations: Vec<i64>,
+        group: i64,
+        kernel_shape: Vec<i64>,
+        pads: Vec<i64>,
+        strides: Vec<i64>,
+        label: Option<String>,
+        rng: &mut impl rand::Rng,
+    ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
         let node = Self {
             global_id: GlobalId::new(rng),
+            label,
             output,
             input,
             weight,
@@ -675,6 +708,7 @@ fn col2im_2d(col: &[f32], output: &mut [f32], p: &Im2Col2dParams) {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConvInputGrad {
     global_id: GlobalId,
+    pub(crate) label: Option<String>,
     output: GlobalId,
     grad_output: GlobalId,
     weight: GlobalId,
@@ -704,9 +738,41 @@ impl ConvInputGrad {
         strides: Vec<i64>,
         rng: &mut impl Rng,
     ) -> GlobalId {
+        Self::push_new_with_label(
+            graph,
+            grad_output,
+            weight,
+            input,
+            auto_pad,
+            dilations,
+            group,
+            kernel_shape,
+            pads,
+            strides,
+            None,
+            rng,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_new_with_label(
+        graph: &mut MilliOpGraph,
+        grad_output: GlobalId,
+        weight: GlobalId,
+        input: GlobalId,
+        auto_pad: ConvAutoPad,
+        dilations: Vec<i64>,
+        group: i64,
+        kernel_shape: Vec<i64>,
+        pads: Vec<i64>,
+        strides: Vec<i64>,
+        label: Option<String>,
+        rng: &mut impl Rng,
+    ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
         let node = Self {
             global_id: GlobalId::new(rng),
+            label,
             output,
             grad_output,
             weight,
@@ -902,6 +968,7 @@ impl MilliOp for ConvInputGrad {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConvWeightGrad {
     global_id: GlobalId,
+    pub(crate) label: Option<String>,
     output: GlobalId,
     grad_output: GlobalId,
     input: GlobalId,
@@ -927,9 +994,39 @@ impl ConvWeightGrad {
         strides: Vec<i64>,
         rng: &mut impl Rng,
     ) -> GlobalId {
+        Self::push_new_with_label(
+            graph,
+            grad_output,
+            input,
+            auto_pad,
+            dilations,
+            group,
+            kernel_shape,
+            pads,
+            strides,
+            None,
+            rng,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_new_with_label(
+        graph: &mut MilliOpGraph,
+        grad_output: GlobalId,
+        input: GlobalId,
+        auto_pad: ConvAutoPad,
+        dilations: Vec<i64>,
+        group: i64,
+        kernel_shape: Vec<i64>,
+        pads: Vec<i64>,
+        strides: Vec<i64>,
+        label: Option<String>,
+        rng: &mut impl Rng,
+    ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
         let node = Self {
             global_id: GlobalId::new(rng),
+            label,
             output,
             grad_output,
             input,
@@ -1104,6 +1201,7 @@ impl MilliOp for ConvWeightGrad {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConvBiasGrad {
     global_id: GlobalId,
+    pub(crate) label: Option<String>,
     output: GlobalId,
     grad_output: GlobalId,
 }
@@ -1114,9 +1212,19 @@ impl ConvBiasGrad {
         grad_output: GlobalId,
         rng: &mut impl Rng,
     ) -> GlobalId {
+        Self::push_new_with_label(graph, grad_output, None, rng)
+    }
+
+    pub fn push_new_with_label(
+        graph: &mut MilliOpGraph,
+        grad_output: GlobalId,
+        label: Option<String>,
+        rng: &mut impl Rng,
+    ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
         let node = Self {
             global_id: GlobalId::new(rng),
+            label,
             output,
             grad_output,
         };

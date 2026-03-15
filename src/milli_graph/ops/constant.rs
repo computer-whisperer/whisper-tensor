@@ -16,6 +16,7 @@ use typenum::P1;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Constant {
     global_id: GlobalId,
+    pub(crate) label: Option<String>,
     output: GlobalId,
     data: NDArrayNumericTensor<DynRank>,
 }
@@ -31,8 +32,18 @@ impl Constant {
         a: NDArrayNumericTensor<DynRank>,
         rng: &mut impl Rng,
     ) -> GlobalId {
+        Self::push_new_with_label(graph, a, None, rng)
+    }
+
+    pub fn push_new_with_label(
+        graph: &mut MilliOpGraph,
+        a: NDArrayNumericTensor<DynRank>,
+        label: Option<String>,
+        rng: &mut impl Rng,
+    ) -> GlobalId {
         let node = Self {
             global_id: GlobalId::new(rng),
+            label,
             output: graph.get_new_tensor_id(rng),
             data: a,
         };
@@ -45,9 +56,22 @@ impl Constant {
     where
         T: NDArrayNumericTensorType,
     {
+        Self::new_scalar_with_label(graph, v, None, rng)
+    }
+
+    pub(crate) fn new_scalar_with_label<T>(
+        graph: &mut MilliOpGraph,
+        v: T,
+        label: Option<String>,
+        rng: &mut impl Rng,
+    ) -> GlobalId
+    where
+        T: NDArrayNumericTensorType,
+    {
         let data = NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![v], &vec![1]).unwrap();
         let node = Self {
             global_id: GlobalId::new(rng),
+            label,
             output: graph.get_new_tensor_id(rng),
             data,
         };
@@ -96,6 +120,7 @@ impl MilliOp for Constant {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConstantOfShape {
     global_id: GlobalId,
+    pub(crate) label: Option<String>,
     output: GlobalId,
     value: NumericScalar,
     shape: GlobalId,
@@ -108,8 +133,19 @@ impl ConstantOfShape {
         shape: GlobalId,
         rng: &mut impl Rng,
     ) -> GlobalId {
+        Self::push_new_with_label(graph, value, shape, None, rng)
+    }
+
+    pub fn push_new_with_label(
+        graph: &mut MilliOpGraph,
+        value: NumericScalar,
+        shape: GlobalId,
+        label: Option<String>,
+        rng: &mut impl Rng,
+    ) -> GlobalId {
         let node = Self {
             global_id: GlobalId::new(rng),
+            label,
             output: graph.get_new_tensor_id(rng),
             value,
             shape,

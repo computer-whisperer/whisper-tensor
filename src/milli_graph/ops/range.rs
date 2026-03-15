@@ -12,6 +12,7 @@ use typenum::P1;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Range {
     global_id: GlobalId,
+    pub(crate) label: Option<String>,
     output: GlobalId,
     start: GlobalId,
     end: GlobalId,
@@ -26,9 +27,21 @@ impl Range {
         delta: GlobalId,
         rng: &mut impl Rng,
     ) -> GlobalId {
+        Self::push_new_with_label(graph, start, end, delta, None, rng)
+    }
+
+    pub fn push_new_with_label(
+        graph: &mut MilliOpGraph,
+        start: GlobalId,
+        end: GlobalId,
+        delta: GlobalId,
+        label: Option<String>,
+        rng: &mut impl Rng,
+    ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
         let node = Self {
             global_id: GlobalId::new(rng),
+            label,
             output,
             start,
             end,
