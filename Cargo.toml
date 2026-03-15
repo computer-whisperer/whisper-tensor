@@ -28,7 +28,7 @@ safetensors = {optional=true, version="0.7.0"}
 memmap2 = {optional=true, version="0.9"}
 wyrand = "0.3.2"
 rand = "0.9.2"
-espeak-rs = "0.1.9"
+espeak-rs = { version = "0.1.9", optional = true }
 
 ndarray = { version = "0.16.1", features = ["serde", "rayon", "matrixmultiply-threading"] }
 blas-src = { version = "0.10", features = ["openblas"], optional = true }
@@ -56,7 +56,7 @@ cranelift-native = { version = "0.116", optional = true }
 whisper-tensor-import = {workspace=true}
 
 [features]
-default = ["tokenizers", "rwkv-tokenizer", "http", "blas", "safetensors"]
+default = ["tokenizers", "rwkv-tokenizer", "http", "blas", "safetensors", "espeak"]
 safetensors = ["dep:safetensors", "dep:memmap2"]
 blas = ["ndarray/blas", "dep:blas-src", "dep:openblas-src"]
 onnx-reference = ["pyo3"]
@@ -67,6 +67,7 @@ rwkv-tokenizer = ["dep:rwkv-tokenizer"]
 vulkan = ["dep:vulkano", "dep:vulkano-shaders"]
 tch = ["dep:tch"]
 cranelift = ["dep:cranelift-codegen", "dep:cranelift-frontend", "dep:cranelift-module", "dep:cranelift-jit", "dep:cranelift-native"]
+espeak = ["dep:espeak-rs"]
 
 [build-dependencies]
 prost-build = "0.13.3"

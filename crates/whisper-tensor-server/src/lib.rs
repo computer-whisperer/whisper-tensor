@@ -55,6 +55,12 @@ impl Display for SuperGraphRequestBackendMode {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SuperGraphAudioInput {
+    pub samples: NDArrayNumericTensor<DynRank>,
+    pub sample_rate_hz: u32,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SuperGraphRequest {
     pub attention_token: Option<u64>,
     pub super_graph: SuperGraph,
@@ -63,6 +69,7 @@ pub struct SuperGraphRequest {
     pub string_inputs: HashMap<SuperGraphLink, String>,
     pub hash_inputs: HashMap<SuperGraphLink, SuperGraphHash>,
     pub tensor_inputs: HashMap<SuperGraphLink, NDArrayNumericTensor<DynRank>>,
+    pub audio_inputs: HashMap<SuperGraphLink, SuperGraphAudioInput>,
     pub model_inputs: HashMap<SuperGraphLink, LoadedModelId>,
     pub symbolic_graph_ids: Vec<LoadedModelId>,
     pub subscribed_tensors: Vec<Vec<GlobalId>>,

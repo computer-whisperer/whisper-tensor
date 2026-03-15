@@ -3,8 +3,13 @@ pub mod inspect_windows;
 mod tensor_swatch;
 
 use crate::app::{InterfaceId, LoadedModels, LoadedTokenizers};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::audio_io::pick_audio_file_native;
+#[cfg(target_arch = "wasm32")]
+use crate::audio_io::{WebAudioFilePickReceiver, start_audio_file_pick_web};
 use crate::audio_io::{
-    download_audio_wav, play_audio_samples, stop_audio_playback, tensor_to_audio_samples,
+    decode_wav_bytes_to_mono_f32, download_audio_wav, play_audio_samples, stop_audio_playback,
+    tensor_to_audio_samples,
 };
 use crate::graph_explorer::inspect_windows::{
     AnyInspectWindow, InspectWindowGraphLink, InspectWindowGraphNode,
@@ -56,6 +61,7 @@ use tensor_swatch::build_tensor_swatch;
 use web_time::{Duration, Instant};
 use whisper_tensor::DynRank;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
+use whisper_tensor::dtype::DType;
 use whisper_tensor::graph::{GlobalId, Graph, GraphDyn};
 use whisper_tensor::interfaces::{
     AnyInterface, ImageGenerationInterface, KokoroVoiceEmbedding, TTSInputConfig,
@@ -67,7 +73,8 @@ use whisper_tensor::super_graph::{SuperGraph, SuperGraphLink};
 use whisper_tensor::tokenizer::Tokenizer;
 use whisper_tensor_server::{
     AbbreviatedTensorReportSettings, AbbreviatedTensorValue, LoadedModelId, ServerConfigReport,
-    SuperGraphRequest, SuperGraphRequestBackendMode, WebsocketClientServerMessage,
+    SuperGraphAudioInput, SuperGraphRequest, SuperGraphRequestBackendMode,
+    WebsocketClientServerMessage,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -174,6 +181,36 @@ impl Default for TTSInferenceData {
     }
 }
 
+pub(crate) struct STTInferenceData {
+    use_cache: bool,
+    selected_mode: SuperGraphRequestBackendMode,
+    pending_request: Option<(u64, SuperGraphLink, u32, TokenizerInfo)>,
+    selected_audio_name: Option<String>,
+    selected_audio_bytes: Option<Vec<u8>>,
+    transcription_text: Option<String>,
+    transcription_tokens: Option<Vec<u32>>,
+    status_message: Option<String>,
+    #[cfg(target_arch = "wasm32")]
+    pending_web_audio_pick: Option<WebAudioFilePickReceiver>,
+}
+
+impl Default for STTInferenceData {
+    fn default() -> Self {
+        Self {
+            use_cache: false,
+            selected_mode: SuperGraphRequestBackendMode::NDArray,
+            pending_request: None,
+            selected_audio_name: None,
+            selected_audio_bytes: None,
+            transcription_text: None,
+            transcription_tokens: None,
+            status_message: None,
+            #[cfg(target_arch = "wasm32")]
+            pending_web_audio_pick: None,
+        }
+    }
+}
+
 pub(crate) struct GraphExplorerApp {
     pub(crate) root_selection: GraphRootSubjectSelection,
     pub(crate) explorer_selection: Option<GlobalId>,
@@ -190,6 +227,7 @@ pub(crate) struct GraphExplorerApp {
     pub(crate) text_inference_data: HashMap<InterfaceId, TextInferenceData>,
     pub(crate) sd_inference_data: HashMap<InterfaceId, SDInferenceData>,
     pub(crate) tts_inference_data: HashMap<InterfaceId, TTSInferenceData>,
+    pub(crate) stt_inference_data: HashMap<InterfaceId, STTInferenceData>,
     node_execution_timestamps: HashMap<Vec<GlobalId>, Instant>,
     node_execution_durations: HashMap<Vec<GlobalId>, Duration>,
     node_execution_op_kinds: HashMap<Vec<GlobalId>, String>,
@@ -431,6 +469,7 @@ impl GraphExplorerApp {
             text_inference_data: HashMap::new(),
             sd_inference_data: HashMap::new(),
             tts_inference_data: HashMap::new(),
+            stt_inference_data: HashMap::new(),
             node_execution_timestamps: HashMap::new(),
             node_execution_durations: HashMap::new(),
             node_execution_op_kinds: HashMap::new(),
@@ -1493,6 +1532,7 @@ impl GraphExplorerApp {
                                                                             .token_context_input_link,
                                                                         tokens_tensor,
                                                                     )]),
+                                                                    audio_inputs: HashMap::new(),
                                                                     symbolic_graph_ids: interface.model_ids.clone(),
                                                                     model_inputs: HashMap::from([(
                                                                         llm_interface
@@ -1870,6 +1910,7 @@ impl GraphExplorerApp {
                                                             backend_mode: sd_data.selected_mode,
                                                             symbolic_graph_ids,
                                                             tensor_inputs,
+                                                            audio_inputs: HashMap::new(),
                                                             model_inputs,
                                                             hash_inputs: HashMap::new(),
                                                         },
@@ -2253,6 +2294,7 @@ impl GraphExplorerApp {
                                                                 backend_mode: tts_data.selected_mode,
                                                                 symbolic_graph_ids,
                                                                 tensor_inputs,
+                                                                audio_inputs: HashMap::new(),
                                                                 model_inputs,
                                                                 hash_inputs: HashMap::new(),
                                                             },
@@ -2345,8 +2387,450 @@ impl GraphExplorerApp {
                             });
                         });
                     }
-                        AnyInterface::SpeechToTextInterface(_) => {
-                            ui.label("STT interface (not yet supported in WebUI)");
+                        AnyInterface::SpeechToTextInterface(stt_interface) => {
+                            let stt_data = self
+                                .stt_inference_data
+                                .entry(interface_id)
+                                .or_default();
+
+                            #[cfg(target_arch = "wasm32")]
+                            if let Some(receiver) = stt_data.pending_web_audio_pick.as_mut() {
+                                match receiver.try_recv() {
+                                    Ok(Ok(file)) => {
+                                        stt_data.selected_audio_name = Some(file.name.clone());
+                                        stt_data.selected_audio_bytes = Some(file.bytes);
+                                        stt_data.status_message =
+                                            Some(format!("Loaded audio file: {}", file.name));
+                                        stt_data.transcription_text = None;
+                                        stt_data.transcription_tokens = None;
+                                        stt_data.pending_web_audio_pick = None;
+                                    }
+                                    Ok(Err(err)) => {
+                                        if err != "file selection canceled" {
+                                            stt_data.status_message =
+                                                Some(format!("Failed to load audio file: {err}"));
+                                        }
+                                        stt_data.pending_web_audio_pick = None;
+                                    }
+                                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
+                                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                                        stt_data.pending_web_audio_pick = None;
+                                    }
+                                }
+                            }
+
+                            if let Some((request_id, _, _, _)) = &stt_data.pending_request {
+                                if let Some(reports) = server_request_manager.get_reports(*request_id)
+                                {
+                                    let time_now = Instant::now();
+                                    for report in reports {
+                                        for (path, value) in report.tensor_assignments {
+                                            self.inspect_window_tensor_subscription_returns
+                                                .insert(path, value);
+                                        }
+                                        for (node_path, op_kind, age, execution_duration) in
+                                            report.node_executions
+                                        {
+                                            let time = time_now - age;
+                                            self.node_execution_timestamps
+                                                .insert(node_path.clone(), time);
+                                            self.node_execution_durations
+                                                .insert(node_path.clone(), execution_duration);
+                                            if !op_kind.is_empty() {
+                                                self.node_execution_op_kinds
+                                                    .insert(node_path, op_kind);
+                                            }
+                                        }
+                                        for (tensor_path, value) in
+                                            report.abbreviated_tensor_assignments
+                                        {
+                                            self.rendered_tensor_swatches.remove(&tensor_path);
+                                            self.abbreviated_tensor_reports
+                                                .insert(tensor_path, value);
+                                        }
+                                    }
+                                }
+                                if let Some(response) = server_request_manager.get_response(*request_id)
+                                {
+                                    let (_, output_link, eos_token_id, tokenizer_info) =
+                                        stt_data.pending_request.take().unwrap();
+                                    match response.result {
+                                        Ok(mut data) => {
+                                            if let Some(token_tensor) =
+                                                data.tensor_outputs.remove(&output_link)
+                                            {
+                                                match token_tensor.cast(DType::U32) {
+                                                    Ok(token_tensor) => {
+                                                        match token_tensor.flatten().try_to_vec() {
+                                                            Ok(mut token_ids) => {
+                                                                if let Some(pos) = token_ids
+                                                                    .iter()
+                                                                    .position(|&token| token == eos_token_id)
+                                                                {
+                                                                    token_ids.truncate(pos);
+                                                                }
+                                                                stt_data.transcription_tokens =
+                                                                    Some(token_ids.clone());
+                                                                stt_data.transcription_text = None;
+                                                                match loaded_tokenizers
+                                                                    .loaded_tokenizers
+                                                                    .get(&tokenizer_info)
+                                                                    .cloned()
+                                                                    .flatten()
+                                                                {
+                                                                    Some(Ok(tokenizer)) => {
+                                                                        match tokenizer.decode(&token_ids) {
+                                                                            Ok(text) => {
+                                                                                stt_data.status_message = Some(
+                                                                                    format!(
+                                                                                        "Transcription complete ({} tokens)",
+                                                                                        token_ids.len()
+                                                                                    ),
+                                                                                );
+                                                                                stt_data.transcription_text =
+                                                                                    Some(text);
+                                                                            }
+                                                                            Err(err) => {
+                                                                                stt_data.status_message = Some(
+                                                                                    format!(
+                                                                                        "Token decode failed: {err} (raw tokens shown)"
+                                                                                    ),
+                                                                                );
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                    Some(Err(err)) => {
+                                                                        stt_data.status_message = Some(format!(
+                                                                            "Tokenizer load failed: {err} (raw tokens shown)"
+                                                                        ));
+                                                                    }
+                                                                    None => {
+                                                                        stt_data.status_message = Some(
+                                                                            "Tokenizer not loaded yet (raw tokens shown)"
+                                                                                .to_string(),
+                                                                        );
+                                                                    }
+                                                                }
+                                                            }
+                                                            Err(err) => {
+                                                                stt_data.status_message = Some(format!(
+                                                                    "Error: token decode failed: {err}"
+                                                                ));
+                                                                stt_data.transcription_text = None;
+                                                                stt_data.transcription_tokens = None;
+                                                            }
+                                                        }
+                                                    }
+                                                    Err(err) => {
+                                                        stt_data.status_message = Some(format!(
+                                                            "Error: token cast failed: {err}"
+                                                        ));
+                                                        stt_data.transcription_text = None;
+                                                        stt_data.transcription_tokens = None;
+                                                    }
+                                                }
+                                            } else {
+                                                stt_data.status_message = Some(
+                                                    "Error: output token tensor not found"
+                                                        .to_string(),
+                                                );
+                                                stt_data.transcription_text = None;
+                                                stt_data.transcription_tokens = None;
+                                            }
+                                        }
+                                        Err(err) => {
+                                            self.error_popup = Some(err);
+                                            stt_data.status_message =
+                                                Some("Error (see popup)".to_string());
+                                            stt_data.transcription_text = None;
+                                            stt_data.transcription_tokens = None;
+                                        }
+                                    }
+                                }
+                            }
+
+                            ui.columns(2, |columns| {
+                                let (left, right) = columns.split_at_mut(1);
+                                let controls_ui = &mut left[0];
+                                let results_ui = &mut right[0];
+
+                                let frame = egui::Frame::default()
+                                    .stroke(controls_ui.visuals().window_stroke)
+                                    .inner_margin(5.0);
+                                frame.show(controls_ui, |ui| {
+                                    ui.vertical(|ui| {
+                                        ui.heading("Speech to Text");
+                                        ui.label(format!(
+                                            "Input: mono WAV, resampled to {} Hz",
+                                            stt_interface.sample_rate
+                                        ));
+                                        ui.label(format!(
+                                            "Decode steps: {} (EOS token {})",
+                                            stt_interface.max_decode_steps, stt_interface.eos_token_id
+                                        ));
+                                        ui.label(format!(
+                                            "Tokenizer: {}",
+                                            match &stt_interface.tokenizer {
+                                                TokenizerInfo::HFTokenizer(name) => {
+                                                    format!("Huggingface: {name}")
+                                                }
+                                                TokenizerInfo::HFTokenizerLocal(path) => {
+                                                    format!("Local: {path}")
+                                                }
+                                                TokenizerInfo::RWKVWorld => "RWKV World".to_string(),
+                                                TokenizerInfo::HFTokenizerJson(_) => {
+                                                    "GGUF embedded".to_string()
+                                                }
+                                            }
+                                        ));
+
+                                        ui.horizontal(|ui| {
+                                            ui.label(format!(
+                                                "Audio: {}",
+                                                stt_data
+                                                    .selected_audio_name
+                                                    .as_deref()
+                                                    .unwrap_or("<none selected>")
+                                            ));
+
+                                            #[cfg(not(target_arch = "wasm32"))]
+                                            if ui.button("Choose WAV...").clicked() {
+                                                match pick_audio_file_native() {
+                                                    Ok(Some(file)) => {
+                                                        stt_data.selected_audio_name =
+                                                            Some(file.name.clone());
+                                                        stt_data.selected_audio_bytes =
+                                                            Some(file.bytes);
+                                                        stt_data.status_message = Some(format!(
+                                                            "Loaded audio file: {}",
+                                                            file.name
+                                                        ));
+                                                        stt_data.transcription_text = None;
+                                                        stt_data.transcription_tokens = None;
+                                                    }
+                                                    Ok(None) => {}
+                                                    Err(err) => {
+                                                        stt_data.status_message = Some(format!(
+                                                            "Failed to load audio file: {err}"
+                                                        ));
+                                                    }
+                                                }
+                                            }
+
+                                            #[cfg(target_arch = "wasm32")]
+                                            {
+                                                if stt_data.pending_web_audio_pick.is_some() {
+                                                    ui.spinner();
+                                                    ui.label("Waiting for file...");
+                                                } else if ui.button("Choose WAV...").clicked() {
+                                                    stt_data.pending_web_audio_pick =
+                                                        Some(start_audio_file_pick_web());
+                                                }
+                                            }
+
+                                            if ui.button("Clear").clicked() {
+                                                stt_data.selected_audio_name = None;
+                                                stt_data.selected_audio_bytes = None;
+                                            }
+                                        });
+
+                                        if stt_data.pending_request.is_some() {
+                                            ui.horizontal(|ui| {
+                                                ui.spinner();
+                                                ui.label("Transcribing...");
+                                            });
+                                        } else {
+                                            ui.horizontal(|ui| {
+                                                egui::ComboBox::from_id_salt((
+                                                    "stt_backend_mode",
+                                                    interface_id,
+                                                ))
+                                                .selected_text(stt_data.selected_mode.to_string())
+                                                .show_ui(ui, |ui| {
+                                                    ui.selectable_value(
+                                                        &mut stt_data.selected_mode,
+                                                        SuperGraphRequestBackendMode::NDArray,
+                                                        SuperGraphRequestBackendMode::NDArray
+                                                            .to_string(),
+                                                    );
+                                                    if server_config_report.vulkan_available {
+                                                        ui.selectable_value(
+                                                            &mut stt_data.selected_mode,
+                                                            SuperGraphRequestBackendMode::Vulkan,
+                                                            SuperGraphRequestBackendMode::Vulkan
+                                                                .to_string(),
+                                                        );
+                                                    }
+                                                    ui.selectable_value(
+                                                        &mut stt_data.selected_mode,
+                                                        SuperGraphRequestBackendMode::Compiler,
+                                                        SuperGraphRequestBackendMode::Compiler
+                                                            .to_string(),
+                                                    );
+                                                });
+                                                toggle_ui(ui, &mut stt_data.use_cache);
+                                                ui.label("Cache");
+                                                if ui.button("Transcribe").clicked() {
+                                                    if let Some(audio_bytes) =
+                                                        stt_data.selected_audio_bytes.as_ref()
+                                                    {
+                                                        match decode_wav_bytes_to_mono_f32(
+                                                            audio_bytes,
+                                                            stt_interface.sample_rate,
+                                                        ) {
+                                                            Ok(samples) => {
+                                                                if samples.is_empty() {
+                                                                    stt_data.status_message = Some(
+                                                                        "Audio file has no samples."
+                                                                            .to_string(),
+                                                                    );
+                                                                } else if interface.model_ids.len() < 2 {
+                                                                    stt_data.status_message = Some(format!(
+                                                                        "STT interface expected 2 model IDs (encoder+decoder), found {}",
+                                                                        interface.model_ids.len()
+                                                                    ));
+                                                                } else {
+                                                                    let audio_tensor = NDArrayNumericTensor::<DynRank>::from_vec_shape(
+                                                                        samples.clone(),
+                                                                        &vec![samples.len() as u64],
+                                                                    )
+                                                                    .unwrap();
+
+                                                                    let symbolic_graph_ids: Vec<_> =
+                                                                        interface.model_ids.to_vec();
+                                                                    let model_inputs = HashMap::from([
+                                                                        (
+                                                                            stt_interface.encoder_weights_link,
+                                                                            interface.model_ids[0],
+                                                                        ),
+                                                                        (
+                                                                            stt_interface.decoder_weights_link,
+                                                                            interface.model_ids[1],
+                                                                        ),
+                                                                    ]);
+
+                                                                    let swatch_settings = if state
+                                                                        .do_explorer_swatches_in_view
+                                                                        || state.do_all_explorer_swatches
+                                                                    {
+                                                                        Some(AbbreviatedTensorReportSettings {
+                                                                            downsampled_size: (state.swatch_dimension
+                                                                                * state.swatch_dimension)
+                                                                                as u64,
+                                                                            subscribed_tensors: self
+                                                                                .tensors_in_view
+                                                                                .iter()
+                                                                                .cloned()
+                                                                                .collect(),
+                                                                            do_all: state.do_all_explorer_swatches,
+                                                                        })
+                                                                    } else {
+                                                                        None
+                                                                    };
+
+                                                                    let token = server_request_manager
+                                                                        .submit_supergraph_request(
+                                                                            SuperGraphRequest {
+                                                                                do_node_execution_reports: state
+                                                                                    .explorer_node_wave,
+                                                                                abbreviated_tensor_report_settings:
+                                                                                    swatch_settings,
+                                                                                attention_token: None,
+                                                                                super_graph: stt_interface
+                                                                                    .super_graph
+                                                                                    .clone(),
+                                                                                subscribed_tensors: self
+                                                                                    .inspect_window_tensor_subscriptions
+                                                                                    .iter()
+                                                                                    .cloned()
+                                                                                    .collect(),
+                                                                                string_inputs: HashMap::new(),
+                                                                                use_cache: if stt_data.use_cache {
+                                                                                    Some(400 + interface_id as u64)
+                                                                                } else {
+                                                                                    None
+                                                                                },
+                                                                                backend_mode: stt_data.selected_mode,
+                                                                                symbolic_graph_ids,
+                                                                                tensor_inputs: HashMap::new(),
+                                                                                audio_inputs: HashMap::from([(
+                                                                                    stt_interface.audio_input_link,
+                                                                                    SuperGraphAudioInput {
+                                                                                        samples: audio_tensor,
+                                                                                        sample_rate_hz: stt_interface.sample_rate,
+                                                                                    },
+                                                                                )]),
+                                                                                model_inputs,
+                                                                                hash_inputs: HashMap::new(),
+                                                                            },
+                                                                        );
+                                                                    stt_data.pending_request = Some((
+                                                                        token,
+                                                                        stt_interface.output_token_link,
+                                                                        stt_interface.eos_token_id,
+                                                                        stt_interface.tokenizer.clone(),
+                                                                    ));
+                                                                    stt_data.status_message =
+                                                                        Some("Running STT pipeline...".to_string());
+                                                                    stt_data.transcription_text = None;
+                                                                    stt_data.transcription_tokens = None;
+                                                                }
+                                                            }
+                                                            Err(err) => {
+                                                                stt_data.status_message = Some(format!(
+                                                                    "Failed to decode WAV: {err}"
+                                                                ));
+                                                            }
+                                                        }
+                                                    } else {
+                                                        stt_data.status_message = Some(
+                                                            "Select a WAV file first.".to_string(),
+                                                        );
+                                                    }
+                                                }
+                                            });
+                                        }
+                                    });
+                                });
+
+                                let frame = egui::Frame::default()
+                                    .stroke(results_ui.visuals().window_stroke)
+                                    .inner_margin(5.0);
+                                frame.show(results_ui, |ui| {
+                                    ui.vertical(|ui| {
+                                        ui.heading("Result");
+                                        if let Some(msg) = &stt_data.status_message {
+                                            ui.label(msg);
+                                        } else {
+                                            ui.label("No transcription yet.");
+                                        }
+
+                                        if let Some(tokens) = &stt_data.transcription_tokens {
+                                            ui.label(format!("Tokens: {}", tokens.len()));
+                                        }
+                                        if let Some(text) = &stt_data.transcription_text {
+                                            let mut text = text.clone();
+                                            ui.add(
+                                                egui::TextEdit::multiline(&mut text)
+                                                    .interactive(false)
+                                                    .desired_rows(8),
+                                            );
+                                        } else if let Some(tokens) = &stt_data.transcription_tokens {
+                                            let preview = tokens
+                                                .iter()
+                                                .take(32)
+                                                .map(|x| x.to_string())
+                                                .collect::<Vec<_>>()
+                                                .join(", ");
+                                            ui.label(format!(
+                                                "Raw token preview: [{}{}]",
+                                                preview,
+                                                if tokens.len() > 32 { ", ..." } else { "" }
+                                            ));
+                                        }
+                                    });
+                                });
+                            });
                         }
                     }
                 });

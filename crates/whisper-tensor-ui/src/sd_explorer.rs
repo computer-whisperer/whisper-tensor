@@ -267,6 +267,7 @@ impl SDExplorerApp {
             backend_mode: SuperGraphRequestBackendMode::NDArray,
             symbolic_graph_ids,
             tensor_inputs,
+            audio_inputs: HashMap::new(),
             model_inputs,
             hash_inputs: HashMap::new(),
         });

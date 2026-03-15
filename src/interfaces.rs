@@ -1665,7 +1665,11 @@ impl KokoroVoiceEmbedding {
                 self.style_table_le_bytes.len()
             ));
         }
-        if self.style_table_le_bytes.len() % bytes_per_row != 0 {
+        if !self
+            .style_table_le_bytes
+            .len()
+            .is_multiple_of(bytes_per_row)
+        {
             return Err(format!(
                 "voice '{}' table size {} is not divisible by row size {}",
                 self.name,

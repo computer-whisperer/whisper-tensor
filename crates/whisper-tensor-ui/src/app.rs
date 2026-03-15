@@ -1,6 +1,7 @@
 use crate::graph_explorer::{GraphExplorerApp, GraphExplorerSettings, GraphRootSubjectSelection};
 use crate::llm_explorer::{LLMExplorerApp, LLMExplorerState};
 use crate::sd_explorer::{SDExplorerApp, SDExplorerState};
+use crate::stt_explorer::{STTExplorerApp, STTExplorerState};
 use crate::tts_explorer::{TTSExplorerApp, TTSExplorerState};
 use crate::websockets::ServerRequestManager;
 use crate::widgets::toggle::toggle_ui;
@@ -32,6 +33,7 @@ enum SelectedTab {
     GraphExplorer,
     LLMExplorer,
     SDExplorer,
+    STTExplorer,
     TTSExplorer,
 }
 
@@ -52,6 +54,7 @@ struct AppState {
     graph_explorer_settings: GraphExplorerSettings,
     llm_explorer_state: LLMExplorerState,
     sd_explorer_state: SDExplorerState,
+    stt_explorer_state: STTExplorerState,
     tts_explorer_state: TTSExplorerState,
 }
 
@@ -63,6 +66,7 @@ impl Default for AppState {
             graph_explorer_settings: GraphExplorerSettings::default(),
             llm_explorer_state: LLMExplorerState::default(),
             sd_explorer_state: SDExplorerState::default(),
+            stt_explorer_state: STTExplorerState::default(),
             tts_explorer_state: TTSExplorerState::default(),
         }
     }
@@ -100,6 +104,7 @@ pub struct WebUIApp {
     graph_explorer_app: HashMap<GraphRootSubjectSelection, GraphExplorerApp>,
     llm_explorer_app: LLMExplorerApp,
     sd_explorer_app: SDExplorerApp,
+    stt_explorer_app: STTExplorerApp,
     tts_explorer_app: TTSExplorerApp,
     loaded_tokenizers: LoadedTokenizers,
     server_config_report: Option<ServerConfigReport>,
@@ -142,6 +147,7 @@ impl WebUIApp {
             loaded_tokenizers: LoadedTokenizers::new(),
             llm_explorer_app: LLMExplorerApp::new(),
             sd_explorer_app: SDExplorerApp::new(),
+            stt_explorer_app: STTExplorerApp::new(),
             tts_explorer_app: TTSExplorerApp::new(),
             server_config_report: None,
             loader_registry: None,
@@ -241,19 +247,17 @@ impl WebUIApp {
                                             ui.text_edit_singleline(value);
                                             #[cfg(not(target_arch = "wasm32"))]
                                             {
-                                                if ui.button("File…").clicked() {
-                                                    if let Some(path) =
+                                                if ui.button("File…").clicked()
+                                                    && let Some(path) =
                                                         rfd::FileDialog::new().pick_file()
-                                                    {
-                                                        *value = path.to_string_lossy().to_string();
-                                                    }
+                                                {
+                                                    *value = path.to_string_lossy().to_string();
                                                 }
-                                                if ui.button("Dir…").clicked() {
-                                                    if let Some(path) =
+                                                if ui.button("Dir…").clicked()
+                                                    && let Some(path) =
                                                         rfd::FileDialog::new().pick_folder()
-                                                    {
-                                                        *value = path.to_string_lossy().to_string();
-                                                    }
+                                                {
+                                                    *value = path.to_string_lossy().to_string();
                                                 }
                                             }
                                         }
@@ -426,7 +430,9 @@ impl eframe::App for WebUIApp {
                                     }
                                     AnyInterface::ImageGenerationInterface(_) => {}
                                     AnyInterface::TextToSpeechInterface(_) => {}
-                                    AnyInterface::SpeechToTextInterface(_) => {}
+                                    AnyInterface::SpeechToTextInterface(iface) => {
+                                        needed_tokenizers.push(iface.tokenizer.clone());
+                                    }
                                 }
                             }
                             for tokenizer_info in needed_tokenizers {
@@ -584,6 +590,11 @@ impl eframe::App for WebUIApp {
                     &mut self.app_state.selected_tab,
                     SelectedTab::SDExplorer,
                     "SD Explorer",
+                );
+                ui.selectable_value(
+                    &mut self.app_state.selected_tab,
+                    SelectedTab::STTExplorer,
+                    "STT Explorer",
                 );
                 ui.selectable_value(
                     &mut self.app_state.selected_tab,
@@ -762,6 +773,15 @@ impl eframe::App for WebUIApp {
                 SelectedTab::TTSExplorer => {
                     self.tts_explorer_app.update(
                         &mut self.app_state.tts_explorer_state,
+                        &mut self.loaded_models,
+                        &mut self.loaded_tokenizers,
+                        &mut self.server_request_manager,
+                        ui,
+                    );
+                }
+                SelectedTab::STTExplorer => {
+                    self.stt_explorer_app.update(
+                        &mut self.app_state.stt_explorer_state,
                         &mut self.loaded_models,
                         &mut self.loaded_tokenizers,
                         &mut self.server_request_manager,

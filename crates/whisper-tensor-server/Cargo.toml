@@ -22,7 +22,6 @@ typenum = { version="1.18.0", features=["const-generics"] }
 crossbeam = "0.8.4"
 tempfile = "3.24.0"
 rand = "0.9.2"
-espeak-rs = "0.1.9"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { version = "1.49.0", features = ["rt", "rt-multi-thread", "time"] }
@@ -32,10 +31,11 @@ hf-hub = {version = "0.4.3", features = ["tokio"]}
 tokenizers = {version="0.22.2", default-features = false, features = ["unstable_wasm", "http"]}
 
 [features]
-default = ["whisper-tensor/default", "import"]
+default = ["whisper-tensor/default", "import", "espeak"]
 import = ["dep:whisper-tensor-import"]
 vulkan = ["whisper-tensor/vulkan"]
 candle = ["whisper-tensor/candle"]
 cranelift = ["whisper-tensor/cranelift"]
 http = ["whisper-tensor/http"]
 safetensors = ["whisper-tensor/safetensors"]
+espeak = ["whisper-tensor/espeak"]

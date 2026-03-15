@@ -1,7 +1,15 @@
 pub fn text_to_piper_phonemes(text: &str, voice: &str) -> Result<String, String> {
-    let sentences = espeak_rs::text_to_phonemes(text, voice, None, true, false)
-        .map_err(|e| format!("espeak-ng phonemization failed: {e}"))?;
-    Ok(sentences.join(" "))
+    #[cfg(feature = "espeak")]
+    {
+        let sentences = espeak_rs::text_to_phonemes(text, voice, None, true, false)
+            .map_err(|e| format!("espeak-ng phonemization failed: {e}"))?;
+        Ok(sentences.join(" "))
+    }
+    #[cfg(not(feature = "espeak"))]
+    {
+        let _ = (text, voice);
+        Err("espeak feature is not enabled".to_string())
+    }
 }
 
 pub fn text_to_kokoro_phonemes(text: &str, voice: &str) -> Result<String, String> {

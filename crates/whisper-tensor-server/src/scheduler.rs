@@ -287,6 +287,15 @@ pub async fn scheduler(mut input: mpsc::Receiver<SchedulerJob>, model_server: Ar
                                         .tensors
                                         .insert(link, NumericTensor::from(tensor));
                                 }
+                                for (link, clip) in req.audio_inputs {
+                                    super_graph_data.audio_clips.insert(
+                                        link,
+                                        whisper_tensor::super_graph::data::SuperGraphAudioClip::new(
+                                            NumericTensor::from(clip.samples),
+                                            clip.sample_rate_hz,
+                                        ),
+                                    );
+                                }
 
                                 // Populate data with refs
                                 for link in req.model_inputs.keys() {

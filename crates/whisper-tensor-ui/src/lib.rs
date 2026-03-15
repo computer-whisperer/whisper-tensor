@@ -3,6 +3,7 @@ mod audio_io;
 mod graph_explorer;
 mod llm_explorer;
 mod sd_explorer;
+mod stt_explorer;
 mod tts_explorer;
 mod websockets;
 mod widgets;

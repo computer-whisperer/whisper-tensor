@@ -4,6 +4,145 @@ use whisper_tensor::dtype::DType;
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::OnceLock;
+#[cfg(target_arch = "wasm32")]
+use tokio::sync::mpsc;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_futures::spawn_local;
+
+#[derive(Clone, Debug)]
+pub(crate) struct PickedAudioFile {
+    pub name: String,
+    pub bytes: Vec<u8>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn pick_audio_file_native() -> Result<Option<PickedAudioFile>, String> {
+    let Some(path) = rfd::FileDialog::new()
+        .add_filter("Waveform audio", &["wav"])
+        .pick_file()
+    else {
+        return Ok(None);
+    };
+
+    let bytes =
+        std::fs::read(&path).map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+    let name = path
+        .file_name()
+        .map(|x| x.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.display().to_string());
+    Ok(Some(PickedAudioFile { name, bytes }))
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) type WebAudioFilePickReceiver = mpsc::UnboundedReceiver<Result<PickedAudioFile, String>>;
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn start_audio_file_pick_web() -> WebAudioFilePickReceiver {
+    let (tx, rx) = mpsc::unbounded_channel();
+    spawn_local(async move {
+        let result = match rfd::AsyncFileDialog::new()
+            .add_filter("Waveform audio", &["wav"])
+            .pick_file()
+            .await
+        {
+            Some(file) => {
+                let name = file.file_name();
+                let bytes = file.read().await;
+                Ok(PickedAudioFile { name, bytes })
+            }
+            None => Err("file selection canceled".to_string()),
+        };
+        let _ = tx.send(result);
+    });
+    rx
+}
+
+pub(crate) fn decode_wav_bytes_to_mono_f32(
+    bytes: &[u8],
+    target_sample_rate_hz: u32,
+) -> Result<Vec<f32>, String> {
+    if target_sample_rate_hz == 0 {
+        return Err("target sample rate must be greater than zero".to_string());
+    }
+
+    let cursor = std::io::Cursor::new(bytes);
+    let mut reader = hound::WavReader::new(cursor)
+        .map_err(|err| format!("failed to open wav payload: {err}"))?;
+    let spec = reader.spec();
+
+    let samples = match spec.sample_format {
+        hound::SampleFormat::Int => {
+            let max_val = (1i64 << (spec.bits_per_sample.saturating_sub(1))) as f32;
+            if max_val <= 0.0 {
+                return Err(format!(
+                    "unsupported integer bit depth: {}",
+                    spec.bits_per_sample
+                ));
+            }
+            reader
+                .samples::<i32>()
+                .map(|s| {
+                    s.map(|x| x as f32 / max_val)
+                        .map_err(|err| format!("wav decode failed: {err}"))
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        }
+        hound::SampleFormat::Float => reader
+            .samples::<f32>()
+            .map(|s| s.map_err(|err| format!("wav decode failed: {err}")))
+            .collect::<Result<Vec<_>, _>>()?,
+    };
+
+    let mono: Vec<f32> = if spec.channels > 1 {
+        samples
+            .chunks(spec.channels as usize)
+            .filter_map(|chunk| chunk.first().copied())
+            .collect()
+    } else {
+        samples
+    };
+
+    if mono.is_empty() {
+        return Err("wav contains no audio samples".to_string());
+    }
+
+    if spec.sample_rate == target_sample_rate_hz {
+        Ok(mono)
+    } else {
+        Ok(linear_resample_mono(
+            &mono,
+            spec.sample_rate,
+            target_sample_rate_hz,
+        ))
+    }
+}
+
+fn linear_resample_mono(
+    samples: &[f32],
+    src_sample_rate_hz: u32,
+    dst_sample_rate_hz: u32,
+) -> Vec<f32> {
+    if samples.is_empty() || src_sample_rate_hz == 0 || dst_sample_rate_hz == 0 {
+        return Vec::new();
+    }
+    if src_sample_rate_hz == dst_sample_rate_hz {
+        return samples.to_vec();
+    }
+
+    let ratio = src_sample_rate_hz as f64 / dst_sample_rate_hz as f64;
+    let out_len = (samples.len() as f64 / ratio).round().max(1.0) as usize;
+
+    (0..out_len)
+        .map(|i| {
+            let pos = i as f64 * ratio;
+            let idx = pos.floor() as usize;
+            let frac = pos - idx as f64;
+            let a = samples[idx.min(samples.len() - 1)];
+            let b = samples[(idx + 1).min(samples.len() - 1)];
+            a + (b - a) * frac as f32
+        })
+        .collect()
+}
 
 pub(crate) fn tensor_to_audio_samples(
     audio_tensor: &NDArrayNumericTensor<DynRank>,

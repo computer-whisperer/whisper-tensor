@@ -428,6 +428,7 @@ impl LLMExplorerApp {
                                     token_context_input_link,
                                     tokens_tensor,
                                 )]),
+                                audio_inputs: HashMap::new(),
                                 model_inputs: HashMap::from([(
                                     model_input_link,
                                     *interface.model_ids.first().unwrap(),
