@@ -20,7 +20,7 @@ use crate::super_graph::nodes::{SuperGraphAnyNode, SuperGraphNode};
 use crate::super_graph::observer::SuperGraphObserver;
 use crate::symbolic_graph::SymbolicGraph;
 use crate::tokenizer::TokenizerError;
-use rand::{Rng, RngCore};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
@@ -230,42 +230,42 @@ impl SuperGraphBuilder {
         }
     }
 
-    pub fn new_tensor_link(&mut self, rng: &mut impl RngCore) -> SuperGraphLink {
+    pub fn new_tensor_link(&mut self, rng: &mut impl Rng) -> SuperGraphLink {
         SuperGraphLink::new(SuperGraphLinkKind::Tensor, rng)
     }
 
-    pub fn new_model_link(&mut self, rng: &mut impl RngCore) -> SuperGraphLink {
+    pub fn new_model_link(&mut self, rng: &mut impl Rng) -> SuperGraphLink {
         SuperGraphLink::new(SuperGraphLinkKind::TensorMap, rng)
     }
 
-    pub fn new_tokenizer_link(&mut self, rng: &mut impl RngCore) -> SuperGraphLink {
+    pub fn new_tokenizer_link(&mut self, rng: &mut impl Rng) -> SuperGraphLink {
         SuperGraphLink::new(SuperGraphLinkKind::Tokenizer, rng)
     }
 
-    pub fn new_string_link(&mut self, rng: &mut impl RngCore) -> SuperGraphLink {
+    pub fn new_string_link(&mut self, rng: &mut impl Rng) -> SuperGraphLink {
         SuperGraphLink::new(SuperGraphLinkKind::String, rng)
     }
 
-    pub fn new_hash_link(&mut self, rng: &mut impl RngCore) -> SuperGraphLink {
+    pub fn new_hash_link(&mut self, rng: &mut impl Rng) -> SuperGraphLink {
         SuperGraphLink::new(SuperGraphLinkKind::Hash, rng)
     }
 
-    pub fn new_image_link(&mut self, rng: &mut impl RngCore) -> SuperGraphLink {
+    pub fn new_image_link(&mut self, rng: &mut impl Rng) -> SuperGraphLink {
         SuperGraphLink::new(SuperGraphLinkKind::Image, rng)
     }
 
-    pub fn new_audio_clip_link(&mut self, rng: &mut impl RngCore) -> SuperGraphLink {
+    pub fn new_audio_clip_link(&mut self, rng: &mut impl Rng) -> SuperGraphLink {
         SuperGraphLink::new(SuperGraphLinkKind::AudioClip, rng)
     }
 
-    pub fn new_multimodal_item_link(&mut self, rng: &mut impl RngCore) -> SuperGraphLink {
+    pub fn new_multimodal_item_link(&mut self, rng: &mut impl Rng) -> SuperGraphLink {
         SuperGraphLink::new(SuperGraphLinkKind::MultimodalItem, rng)
     }
 
     pub fn new_list_link(
         &mut self,
         item_kind: SuperGraphAtomicLinkKind,
-        rng: &mut impl RngCore,
+        rng: &mut impl Rng,
     ) -> SuperGraphLink {
         SuperGraphLink::new(SuperGraphLinkKind::list(item_kind), rng)
     }

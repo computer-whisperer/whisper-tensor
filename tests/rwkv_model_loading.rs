@@ -198,7 +198,6 @@ fn rwkv01b_model_loads_with_binfile() {
     std::env::set_current_dir(old_cwd).expect("restore cwd");
 }
 
-#[cfg(feature = "candle")]
 #[test]
 fn rwkv01b_model_loads_with_origin_reference() {
     // Validate that the OriginReference strategy works by keeping weights in the original .pth
@@ -226,7 +225,7 @@ fn rwkv01b_model_loads_with_origin_reference() {
     let model =
         Model::new_from_onnx(&onnx_bytes, &mut rng, None).expect("model loads from onnx bytes");
 
-    // Trigger lazy tensor loading via the eval path (fetch tensors from the .pth via candle)
+    // Trigger lazy tensor loading via the eval path (fetch tensors from the .pth via local parser)
     let mut eval = EvalBackend::NDArray;
     let mut cache = whisper_tensor::backends::ModelLoadedTensorCache::default();
     model
@@ -467,7 +466,7 @@ fn rwkv01b_nano_graph_integrity() {
     {
         use whisper_tensor::graph::{Graph, Node};
         let mut vk_state_int_ids: HashMap<GlobalId, GlobalId> = HashMap::new();
-        for (ext_id, _tensor) in &input_tensors {
+        for ext_id in input_tensors.keys() {
             let Some(&int_id) = milli.input_map.get(ext_id) else {
                 continue;
             };
@@ -576,7 +575,7 @@ fn rwkv01b_nano_graph_integrity() {
                 let prod_op = milli.node_ids().find_map(|op_id| {
                     let node = milli.get_node_by_id(&op_id).unwrap();
                     if node.outputs().any(|o| o == **int_id) {
-                        Some(format!("{}", node.op_kind()))
+                        Some(node.op_kind().to_string())
                     } else {
                         None
                     }
@@ -601,7 +600,7 @@ fn rwkv01b_nano_graph_integrity() {
                 let producing_op = milli.node_ids().find_map(|op_id| {
                     let node = milli.get_node_by_id(&op_id).unwrap();
                     if node.outputs().any(|o| o == **int_id) {
-                        Some(format!("{}", node.op_kind()))
+                        Some(node.op_kind().to_string())
                     } else {
                         None
                     }

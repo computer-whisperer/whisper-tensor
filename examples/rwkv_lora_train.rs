@@ -29,6 +29,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use half::bf16;
+use rand::RngExt;
 use whisper_tensor::backends::eval_backend::EvalBackend;
 use whisper_tensor::dtype::DType;
 use whisper_tensor::graph::GlobalId;

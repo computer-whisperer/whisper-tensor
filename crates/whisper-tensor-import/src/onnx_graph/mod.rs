@@ -43,9 +43,9 @@ pub enum Error {
     #[error(transparent)]
     IoError(#[from] std::io::Error),
     #[error(transparent)]
-    CandleCoreError(#[from] candle_core::Error),
-    #[error(transparent)]
     SafeTensorError(#[from] safetensors::SafeTensorError),
+    #[error(transparent)]
+    PthError(#[from] whisper_tensor::pth::PthError),
     #[error("Other error")]
     OtherError,
     #[error(transparent)]

@@ -4011,10 +4011,10 @@ mod tests {
         // W1: [2, 8] (2 inputs, 8 hidden), W2: [8, 1]
         let mut w_rng = wyrand::WyRand::new(42);
         let mut w1_vals: Vec<f32> = (0..16)
-            .map(|_| (rand::Rng::random::<f32>(&mut w_rng) - 0.5) * 1.0)
+            .map(|_| (rand::RngExt::random::<f32>(&mut w_rng) - 0.5) * 1.0)
             .collect();
         let mut w2_vals: Vec<f32> = (0..8)
-            .map(|_| (rand::Rng::random::<f32>(&mut w_rng) - 0.5) * 1.0)
+            .map(|_| (rand::RngExt::random::<f32>(&mut w_rng) - 0.5) * 1.0)
             .collect();
 
         let mut m1_vals = vec![0.0f32; 16];

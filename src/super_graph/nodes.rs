@@ -21,7 +21,7 @@ use crate::super_graph::{
 };
 use crate::symbolic_graph::observer::SymbolicGraphObserver;
 use crate::tokenizer::{AnyTokenizer, Tokenizer};
-use rand::RngCore;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ptr;
@@ -189,7 +189,7 @@ pub struct SuperGraphNodeModelExecution {
 
 impl SuperGraphNodeModelExecution {
     pub fn new(
-        rng: &mut impl RngCore,
+        rng: &mut impl Rng,
         tensor_map: SuperGraphLink,
         symbolic_graph_id: usize,
         tensor_inputs: Vec<(SuperGraphLink, String)>,
@@ -406,11 +406,7 @@ pub struct SuperGraphNodeTokenizerLoad {
 }
 
 impl SuperGraphNodeTokenizerLoad {
-    pub fn new(
-        _builder: &mut SuperGraphBuilder,
-        info: TokenizerInfo,
-        rng: &mut impl RngCore,
-    ) -> Self {
+    pub fn new(_builder: &mut SuperGraphBuilder, info: TokenizerInfo, rng: &mut impl Rng) -> Self {
         Self {
             global_id: GlobalId::new(rng),
             info,
@@ -421,7 +417,7 @@ impl SuperGraphNodeTokenizerLoad {
     pub fn new_and_add(
         builder: &mut SuperGraphBuilder,
         info: TokenizerInfo,
-        rng: &mut impl RngCore,
+        rng: &mut impl Rng,
     ) -> SuperGraphLink {
         let node = Self::new(builder, info, rng);
         let output = node.get_tokenizer_output();
@@ -492,7 +488,7 @@ impl SuperGraphNodeTokenizerEncode {
         _builder: &mut SuperGraphBuilder,
         tokenizer: SuperGraphLink,
         text_input: SuperGraphLink,
-        rng: &mut impl RngCore,
+        rng: &mut impl Rng,
     ) -> Self {
         Self {
             global_id: GlobalId::new(rng),
@@ -508,7 +504,7 @@ impl SuperGraphNodeTokenizerEncode {
         tokenizer: SuperGraphLink,
         text_input: SuperGraphLink,
         mode: SuperGraphNodeTokenizerEncodeMode,
-        rng: &mut impl RngCore,
+        rng: &mut impl Rng,
     ) -> Self {
         Self {
             global_id: GlobalId::new(rng),
@@ -523,7 +519,7 @@ impl SuperGraphNodeTokenizerEncode {
         builder: &mut SuperGraphBuilder,
         tokenizer: SuperGraphLink,
         text_input: SuperGraphLink,
-        rng: &mut impl RngCore,
+        rng: &mut impl Rng,
     ) -> SuperGraphLink {
         let node = Self::new(builder, tokenizer, text_input, rng);
         let output = node.get_tensor_output();
@@ -536,7 +532,7 @@ impl SuperGraphNodeTokenizerEncode {
         tokenizer: SuperGraphLink,
         text_input: SuperGraphLink,
         mode: SuperGraphNodeTokenizerEncodeMode,
-        rng: &mut impl RngCore,
+        rng: &mut impl Rng,
     ) -> SuperGraphLink {
         let node = Self::new_with_mode(builder, tokenizer, text_input, mode, rng);
         let output = node.get_tensor_output();
@@ -640,7 +636,7 @@ impl SuperGraphNodeTokenizerDecode {
         _builder: &mut SuperGraphBuilder,
         tokenizer: SuperGraphLink,
         tensor_input: SuperGraphLink,
-        rng: &mut impl RngCore,
+        rng: &mut impl Rng,
     ) -> Self {
         Self {
             global_id: GlobalId::new(rng),
@@ -656,7 +652,7 @@ impl SuperGraphNodeTokenizerDecode {
         builder: &mut SuperGraphBuilder,
         tokenizer: SuperGraphLink,
         tensor_input: SuperGraphLink,
-        rng: &mut impl RngCore,
+        rng: &mut impl Rng,
     ) -> SuperGraphLink {
         let node = Self::new(builder, tokenizer, tensor_input, rng);
         let output = node.get_string_output();
@@ -719,7 +715,7 @@ impl SuperGraphNodeTextToPhonemes {
         _builder: &mut SuperGraphBuilder,
         text_input: SuperGraphLink,
         mode: SuperGraphNodeTextToPhonemesMode,
-        rng: &mut impl RngCore,
+        rng: &mut impl Rng,
     ) -> Self {
         Self {
             global_id: GlobalId::new(rng),
@@ -733,7 +729,7 @@ impl SuperGraphNodeTextToPhonemes {
         builder: &mut SuperGraphBuilder,
         text_input: SuperGraphLink,
         mode: SuperGraphNodeTextToPhonemesMode,
-        rng: &mut impl RngCore,
+        rng: &mut impl Rng,
     ) -> SuperGraphLink {
         let node = Self::new(builder, text_input, mode, rng);
         let output = node.get_phonemes_output();
@@ -808,7 +804,7 @@ impl SuperGraphNodePiperPhonemesToTensor {
         _builder: &mut SuperGraphBuilder,
         phonemes_input: SuperGraphLink,
         phoneme_id_map_json: String,
-        rng: &mut impl RngCore,
+        rng: &mut impl Rng,
     ) -> Self {
         Self {
             global_id: GlobalId::new(rng),
@@ -823,7 +819,7 @@ impl SuperGraphNodePiperPhonemesToTensor {
         builder: &mut SuperGraphBuilder,
         phonemes_input: SuperGraphLink,
         phoneme_id_map_json: String,
-        rng: &mut impl RngCore,
+        rng: &mut impl Rng,
     ) -> (SuperGraphLink, SuperGraphLink) {
         let node = Self::new(builder, phonemes_input, phoneme_id_map_json, rng);
         let token_ids = node.get_token_ids_output();
@@ -917,7 +913,7 @@ impl SuperGraphNodeKokoroPhonemesToTensor {
         _builder: &mut SuperGraphBuilder,
         phonemes_input: SuperGraphLink,
         tokenizer: TokenizerInfo,
-        rng: &mut impl RngCore,
+        rng: &mut impl Rng,
     ) -> Self {
         Self {
             global_id: GlobalId::new(rng),
@@ -931,7 +927,7 @@ impl SuperGraphNodeKokoroPhonemesToTensor {
         builder: &mut SuperGraphBuilder,
         phonemes_input: SuperGraphLink,
         tokenizer: TokenizerInfo,
-        rng: &mut impl RngCore,
+        rng: &mut impl Rng,
     ) -> SuperGraphLink {
         let node = Self::new(builder, phonemes_input, tokenizer, rng);
         let output = node.get_token_ids_output();
@@ -1007,7 +1003,7 @@ impl SuperGraphNodeF5TextToTensor {
         _builder: &mut SuperGraphBuilder,
         text_input: SuperGraphLink,
         vocab: String,
-        rng: &mut impl RngCore,
+        rng: &mut impl Rng,
     ) -> Self {
         Self {
             global_id: GlobalId::new(rng),
@@ -1021,7 +1017,7 @@ impl SuperGraphNodeF5TextToTensor {
         builder: &mut SuperGraphBuilder,
         text_input: SuperGraphLink,
         vocab: String,
-        rng: &mut impl RngCore,
+        rng: &mut impl Rng,
     ) -> SuperGraphLink {
         let node = Self::new(builder, text_input, vocab, rng);
         let output = node.get_token_ids_output();
@@ -1094,7 +1090,7 @@ impl SuperGraphNodeTensorToImage {
     pub fn new(
         _builder: &mut SuperGraphBuilder,
         tensor_input: SuperGraphLink,
-        rng: &mut impl RngCore,
+        rng: &mut impl Rng,
     ) -> Self {
         Self {
             global_id: GlobalId::new(rng),
@@ -1106,7 +1102,7 @@ impl SuperGraphNodeTensorToImage {
     pub fn new_and_add(
         builder: &mut SuperGraphBuilder,
         tensor_input: SuperGraphLink,
-        rng: &mut impl RngCore,
+        rng: &mut impl Rng,
     ) -> SuperGraphLink {
         let node = Self::new(builder, tensor_input, rng);
         let output = node.get_image_output();
@@ -1173,7 +1169,7 @@ impl SuperGraphNodeTensorToAudioClip {
         _builder: &mut SuperGraphBuilder,
         tensor_input: SuperGraphLink,
         sample_rate_hz: u32,
-        rng: &mut impl RngCore,
+        rng: &mut impl Rng,
     ) -> Self {
         Self {
             global_id: GlobalId::new(rng),
@@ -1187,7 +1183,7 @@ impl SuperGraphNodeTensorToAudioClip {
         builder: &mut SuperGraphBuilder,
         tensor_input: SuperGraphLink,
         sample_rate_hz: u32,
-        rng: &mut impl RngCore,
+        rng: &mut impl Rng,
     ) -> SuperGraphLink {
         let node = Self::new(builder, tensor_input, sample_rate_hz, rng);
         let output = node.get_audio_output();
@@ -1256,7 +1252,7 @@ impl SuperGraphNodeAudioClipToTensor {
         _builder: &mut SuperGraphBuilder,
         audio_input: SuperGraphLink,
         expected_sample_rate_hz: Option<u32>,
-        rng: &mut impl RngCore,
+        rng: &mut impl Rng,
     ) -> Self {
         Self {
             global_id: GlobalId::new(rng),
@@ -1270,7 +1266,7 @@ impl SuperGraphNodeAudioClipToTensor {
         builder: &mut SuperGraphBuilder,
         audio_input: SuperGraphLink,
         expected_sample_rate_hz: Option<u32>,
-        rng: &mut impl RngCore,
+        rng: &mut impl Rng,
     ) -> SuperGraphLink {
         let node = Self::new(builder, audio_input, expected_sample_rate_hz, rng);
         let output = node.get_tensor_output();
@@ -1360,7 +1356,7 @@ impl SuperGraphNodeAudioClipToMelSpectrogram {
         _builder: &mut SuperGraphBuilder,
         audio_input: SuperGraphLink,
         config: SuperGraphNodeAudioToMelConfig,
-        rng: &mut impl RngCore,
+        rng: &mut impl Rng,
     ) -> Self {
         Self {
             global_id: GlobalId::new(rng),
@@ -1374,7 +1370,7 @@ impl SuperGraphNodeAudioClipToMelSpectrogram {
         builder: &mut SuperGraphBuilder,
         audio_input: SuperGraphLink,
         config: SuperGraphNodeAudioToMelConfig,
-        rng: &mut impl RngCore,
+        rng: &mut impl Rng,
     ) -> SuperGraphLink {
         let node = Self::new(builder, audio_input, config, rng);
         let output = node.get_tensor_output();
@@ -1611,7 +1607,7 @@ pub struct SuperGraphNodeMilliOpGraph {
 }
 
 impl SuperGraphNodeMilliOpGraph {
-    pub fn new(graph: MilliOpGraph, rng: &mut impl RngCore) -> Self {
+    pub fn new(graph: MilliOpGraph, rng: &mut impl Rng) -> Self {
         Self {
             graph,
             global_id: GlobalId::new(rng),
@@ -1753,7 +1749,7 @@ impl SuperGraphNodeScan {
         scan_inputs: Vec<(SuperGraphLink, SuperGraphLink, u32)>,
         scan_outputs: Vec<(SuperGraphLink, SuperGraphLink, u32)>,
         simple_outputs: Vec<SuperGraphLinkDouble>,
-        rng: &mut impl RngCore,
+        rng: &mut impl Rng,
     ) -> Self {
         Self {
             inner_graph,
@@ -1975,7 +1971,7 @@ impl SuperGraphNodeRNNCacheRead {
         tokens_output: SuperGraphLink,
         state_outputs: Vec<(String, SuperGraphLink)>,
         default_state_inputs: Vec<(String, SuperGraphLink)>,
-        rng: &mut impl RngCore,
+        rng: &mut impl Rng,
     ) -> Self {
         Self {
             global_id: GlobalId::new(rng),
@@ -2094,7 +2090,7 @@ impl SuperGraphNodeRNNCacheWrite {
         key_input: SuperGraphLink,
         tokens_input: SuperGraphLink,
         state_inputs: Vec<(String, SuperGraphLink)>,
-        rng: &mut impl RngCore,
+        rng: &mut impl Rng,
     ) -> Self {
         Self {
             global_id: GlobalId::new(rng),
@@ -2179,7 +2175,7 @@ impl SuperGraphNodeTensorCacheRead {
         default_input: SuperGraphLink,
         value_output: SuperGraphLink,
         hit_output: SuperGraphLink,
-        rng: &mut impl RngCore,
+        rng: &mut impl Rng,
     ) -> Self {
         Self {
             global_id: GlobalId::new(rng),
@@ -2252,7 +2248,7 @@ impl SuperGraphNodeTensorCacheWrite {
         key_input: SuperGraphLink,
         value_input: SuperGraphLink,
         write_enable_input: SuperGraphLink,
-        rng: &mut impl RngCore,
+        rng: &mut impl Rng,
     ) -> Self {
         Self {
             global_id: GlobalId::new(rng),
@@ -2330,7 +2326,7 @@ impl SuperGraphNodeTensorPackCacheRead {
         value_outputs: Vec<(String, SuperGraphLink)>,
         default_value_inputs: Vec<(String, SuperGraphLink)>,
         hit_output: SuperGraphLink,
-        rng: &mut impl RngCore,
+        rng: &mut impl Rng,
     ) -> Self {
         Self {
             global_id: GlobalId::new(rng),
@@ -2440,7 +2436,7 @@ impl SuperGraphNodeTensorPackCacheWrite {
         key_input: SuperGraphLink,
         value_inputs: Vec<(String, SuperGraphLink)>,
         write_enable_input: SuperGraphLink,
-        rng: &mut impl RngCore,
+        rng: &mut impl Rng,
     ) -> Self {
         Self {
             global_id: GlobalId::new(rng),

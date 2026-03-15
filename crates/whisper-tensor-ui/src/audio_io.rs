@@ -263,14 +263,15 @@ fn ensure_native_audio_thread()
         .name("wt-audio-playback".to_string())
         .spawn(move || {
             use rodio::buffer::SamplesBuffer;
-            use rodio::{OutputStream, Sink};
+            use rodio::{DeviceSinkBuilder, Player};
+            use std::num::{NonZeroU16, NonZeroU32};
 
             let stream_result = {
                 let host = cpal::default_host();
                 let default_device = host.default_output_device();
                 let default_name = default_device
                     .as_ref()
-                    .and_then(|d| d.name().ok())
+                    .and_then(|d| d.description().ok().map(|desc| desc.name().to_string()))
                     .unwrap_or_else(|| "<none>".to_string());
                 let env_preference = std::env::var("WT_AUDIO_DEVICE")
                     .ok()
@@ -281,7 +282,9 @@ fn ensure_native_audio_thread()
                     .output_devices()
                     .map(|iter| {
                         iter.filter_map(|d| {
-                            d.name().ok().map(|name| (name.to_lowercase(), name, d))
+                            d.description().ok().map(|desc| {
+                                (desc.name().to_lowercase(), desc.name().to_string(), d)
+                            })
                         })
                         .map(|(_key, display_name, d)| (display_name, d))
                         .collect::<Vec<_>>()
@@ -289,7 +292,7 @@ fn ensure_native_audio_thread()
                     .unwrap_or_default();
 
                 if named_devices.is_empty() {
-                    OutputStream::try_default()
+                    DeviceSinkBuilder::open_default_sink()
                 } else {
                     fn rank_device(
                         name: &str,
@@ -336,7 +339,9 @@ fn ensure_native_audio_thread()
 
                     let mut opened_stream = None;
                     for (name, device) in named_devices {
-                        match OutputStream::try_from_device(&device) {
+                        match DeviceSinkBuilder::from_device(device.clone())
+                            .and_then(|builder| builder.open_sink_or_fallback())
+                        {
                             Ok(stream) => {
                                 log::info!("Selected audio output device: {name}");
                                 opened_stream = Some(stream);
@@ -351,12 +356,12 @@ fn ensure_native_audio_thread()
                     if let Some(stream) = opened_stream {
                         Ok(stream)
                     } else {
-                        OutputStream::try_default()
+                        DeviceSinkBuilder::open_default_sink()
                     }
                 }
             };
 
-            let (stream, stream_handle) = match stream_result {
+            let stream_handle = match stream_result {
                 Ok(v) => v,
                 Err(err) => {
                     let _ = init_tx.send(Err(format!("no audio output device: {err}")));
@@ -364,13 +369,7 @@ fn ensure_native_audio_thread()
                 }
             };
 
-            let mut sink = match Sink::try_new(&stream_handle) {
-                Ok(sink) => sink,
-                Err(err) => {
-                    let _ = init_tx.send(Err(format!("failed to create sink: {err}")));
-                    return;
-                }
-            };
+            let mut player = Player::connect_new(stream_handle.mixer());
 
             let _ = init_tx.send(Ok(()));
 
@@ -380,25 +379,20 @@ fn ensure_native_audio_thread()
                         samples,
                         sample_rate_hz,
                     } => {
-                        sink.stop();
-                        match Sink::try_new(&stream_handle) {
-                            Ok(new_sink) => {
-                                new_sink.append(SamplesBuffer::new(1, sample_rate_hz, samples));
-                                new_sink.play();
-                                sink = new_sink;
-                            }
-                            Err(err) => {
-                                log::error!("failed to create sink: {err}");
-                            }
-                        }
+                        let Some(sample_rate_hz) = NonZeroU32::new(sample_rate_hz) else {
+                            log::error!("invalid sample rate 0 for audio playback");
+                            continue;
+                        };
+                        let channels = NonZeroU16::new(1).expect("1 is non-zero");
+                        player.stop();
+                        let new_player = Player::connect_new(stream_handle.mixer());
+                        new_player.append(SamplesBuffer::new(channels, sample_rate_hz, samples));
+                        new_player.play();
+                        player = new_player;
                     }
-                    NativeAudioCommand::Stop => {
-                        sink.stop();
-                    }
+                    NativeAudioCommand::Stop => player.stop(),
                 }
             }
-
-            let _stream = stream;
         })
         .map_err(|err| format!("failed to start audio thread: {err}"))?;
 

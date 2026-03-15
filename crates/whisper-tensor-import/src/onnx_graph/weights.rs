@@ -3,22 +3,33 @@ use super::tensor::{DType, Shape, Tensor, TensorData};
 use super::{Error, onnx};
 use memmap2::Mmap;
 use safetensors::SafeTensors;
-use safetensors::tensor::{Metadata, TensorInfo};
+use safetensors::tensor::{Metadata, TensorInfo as SafeTensorInfo};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use whisper_tensor::dtype::DType as CoreDType;
+use whisper_tensor::pth::{PthTensors, TensorInfo as PthTensorInfo};
 
 pub trait WeightExternalOutputManager<'a> {
     fn write_pth_tensor_data(
         &mut self,
         graph_tensor: &'a dyn Tensor,
-        tensor_info: candle_core::pickle::TensorInfo,
-        tensors: Arc<candle_core::pickle::PthTensors>,
+        tensor_info: PthTensorInfo,
+        tensors: Arc<PthTensors>,
     ) -> Result<(), Error> {
-        let candle_tensor = tensors.get(&tensor_info.name).unwrap().unwrap();
-        self.write_tensor_data(graph_tensor, TensorData::from_candle_tensor(candle_tensor)?)
+        let bytes = tensors
+            .get_raw_bytes(&tensor_info.name)?
+            .ok_or_else(|| Error::NoSuchTensorError(tensor_info.name.clone()))?;
+        self.write_tensor_data(
+            graph_tensor,
+            TensorData::from_raw_encoding(
+                graph_tensor.dtype(),
+                graph_tensor.shape().clone(),
+                &bytes,
+            )?,
+        )
     }
     fn write_safetensors_tensor_data(
         &mut self,
@@ -56,8 +67,8 @@ impl<'a> WeightExternalOutputManager<'a> for NullOutputManager {
     fn write_pth_tensor_data(
         &mut self,
         _graph_tensor: &'a dyn Tensor,
-        _tensor_info: candle_core::pickle::TensorInfo,
-        _tensors: Arc<candle_core::pickle::PthTensors>,
+        _tensor_info: PthTensorInfo,
+        _tensors: Arc<PthTensors>,
     ) -> Result<(), Error> {
         Ok(())
     }
@@ -214,7 +225,7 @@ struct SafeTensorsTensorPath {
 }
 
 enum StoredOriginReferenceTensor {
-    PthTensor(candle_core::pickle::TensorInfo),
+    PthTensor(PthTensorInfo),
     SafeTensor(SafeTensorsTensorPath),
 }
 
@@ -239,8 +250,8 @@ impl<'a> WeightExternalOutputManager<'a> for OriginReferenceOutputManager<'a> {
     fn write_pth_tensor_data(
         &mut self,
         graph_tensor: &'a dyn Tensor,
-        tensor_info: candle_core::pickle::TensorInfo,
-        _tensors: Arc<candle_core::pickle::PthTensors>,
+        tensor_info: PthTensorInfo,
+        _tensors: Arc<PthTensors>,
     ) -> Result<(), Error> {
         self.stored_tensors.insert(
             graph_tensor,
@@ -399,24 +410,26 @@ impl<'a> WeightExternalOutputManager<'a> for OriginReferenceOutputManager<'a> {
 }
 
 pub struct PthTensor {
-    tensor_info: candle_core::pickle::TensorInfo,
-    tensors: Arc<candle_core::pickle::PthTensors>,
+    tensor_info: PthTensorInfo,
+    tensors: Arc<PthTensors>,
     data_type: DType,
     shape: Shape,
 }
 
+fn import_dtype_from_whisper(dtype: CoreDType) -> Result<DType, Error> {
+    match dtype {
+        CoreDType::F32 => Ok(DType::F32),
+        CoreDType::F16 => Ok(DType::F16),
+        CoreDType::BF16 => Ok(DType::BF16),
+        CoreDType::I64 => Ok(DType::I64),
+        _ => Err(Error::UnsupportedDTypeError),
+    }
+}
+
 impl PthTensor {
-    pub fn new(
-        tensor_info: candle_core::pickle::TensorInfo,
-        tensors: Arc<candle_core::pickle::PthTensors>,
-    ) -> Result<Arc<Self>, Error> {
-        let data_type = match tensor_info.dtype {
-            candle_core::DType::F32 => DType::F32,
-            candle_core::DType::F16 => DType::F16,
-            candle_core::DType::BF16 => DType::BF16,
-            _ => return Err(Error::UnsupportedDTypeError),
-        };
-        let shape = Shape::from(tensor_info.layout.shape());
+    pub fn new(tensor_info: PthTensorInfo, tensors: Arc<PthTensors>) -> Result<Arc<Self>, Error> {
+        let data_type = import_dtype_from_whisper(tensor_info.dtype)?;
+        let shape = Shape::from(tensor_info.layout.shape().to_vec());
         Ok(Arc::new(Self {
             tensors,
             shape,
@@ -476,11 +489,11 @@ pub trait WeightManager {
 pub struct PthWeightManager {
     prefix_tail: Option<String>,
     prefix: Option<String>,
-    pth_tensors: Arc<candle_core::pickle::PthTensors>,
+    pth_tensors: Arc<PthTensors>,
 }
 
 impl PthWeightManager {
-    pub fn new(pth_tensors: Arc<candle_core::pickle::PthTensors>) -> Self {
+    pub fn new(pth_tensors: Arc<PthTensors>) -> Self {
         Self {
             prefix_tail: None,
             prefix: None,
@@ -568,7 +581,7 @@ impl SafetensorsWeightManagerInner {
         self.file_paths.get(file_index).map(|p| p.as_path())
     }
 
-    pub fn get_tensor_info(&self, name: &str) -> Option<(usize, TensorInfo)> {
+    pub fn get_tensor_info(&self, name: &str) -> Option<(usize, SafeTensorInfo)> {
         for (i, metadata) in self.safetensors_metadata.iter().enumerate() {
             if let Some(tensor_info) = metadata.1.info(name) {
                 return Some((i, tensor_info.clone()));
@@ -657,7 +670,7 @@ pub struct SafetensorsTensor {
     name: String,
     inner: Arc<SafetensorsWeightManagerInner>,
     file_index: usize,
-    _tensor_info: TensorInfo,
+    _tensor_info: SafeTensorInfo,
     data_type: DType,
     shape: Shape,
 }

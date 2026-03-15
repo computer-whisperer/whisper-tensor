@@ -5,7 +5,7 @@ use crate::graph::GlobalId;
 use crate::milli_graph::MilliOpGraphError;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::numeric_tensor::NumericTensor;
-use rand::Rng;
+use rand::{Rng, RngExt};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -72,7 +72,7 @@ impl crate::graph::Node for RandomNormalLike {
 fn box_muller(rng: &mut impl Rng) -> (f32, f32) {
     let u1: f32 = rng.random_range(f32::EPSILON..1.0);
     let u2: f32 = rng.random_range(0.0f32..std::f32::consts::TAU);
-    let r = (-2.0 * u1.ln()).sqrt();
+    let r = (-2.0f32 * u1.ln()).sqrt();
     (r * u2.cos(), r * u2.sin())
 }
 

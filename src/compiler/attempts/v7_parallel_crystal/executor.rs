@@ -854,7 +854,7 @@ mod tests {
     use super::*;
     use crate::dtype::DType;
     use crate::milli_graph::ops::MatMul;
-    use rand::RngCore;
+    use rand::Rng;
 
     fn build_matmul(
         m: usize,

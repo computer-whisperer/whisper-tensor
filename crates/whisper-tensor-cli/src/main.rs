@@ -922,15 +922,15 @@ fn generate_gaussian_noise(n: usize, seed: u64) -> Vec<f32> {
     let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
     let mut vals = Vec::with_capacity(n);
     while vals.len() + 1 < n {
-        let u1: f32 = rand::Rng::random_range(&mut rng, f32::EPSILON..1.0);
-        let u2: f32 = rand::Rng::random_range(&mut rng, 0.0f32..std::f32::consts::TAU);
+        let u1: f32 = rand::RngExt::random_range(&mut rng, f32::EPSILON..1.0);
+        let u2: f32 = rand::RngExt::random_range(&mut rng, 0.0f32..std::f32::consts::TAU);
         let r = (-2.0 * u1.ln()).sqrt();
         vals.push(r * u2.cos());
         vals.push(r * u2.sin());
     }
     if vals.len() < n {
-        let u1: f32 = rand::Rng::random_range(&mut rng, f32::EPSILON..1.0);
-        let u2: f32 = rand::Rng::random_range(&mut rng, 0.0f32..std::f32::consts::TAU);
+        let u1: f32 = rand::RngExt::random_range(&mut rng, f32::EPSILON..1.0);
+        let u2: f32 = rand::RngExt::random_range(&mut rng, 0.0f32..std::f32::consts::TAU);
         vals.push((-2.0 * u1.ln()).sqrt() * u2.cos());
     }
     vals

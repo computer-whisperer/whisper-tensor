@@ -1247,7 +1247,7 @@ mod tests {
     use super::*;
     use crate::dtype::DType;
     use crate::milli_graph::ops::MatMul;
-    use rand::RngCore;
+    use rand::rand_core::RngCore;
 
     fn run_compiled_rank2_matmul(
         m: usize,

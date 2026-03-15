@@ -8,6 +8,7 @@
 /// the ergonomic gaps in wiring a training loop this way.
 use std::collections::HashMap;
 
+use rand::RngExt;
 use whisper_tensor::backends::eval_backend::EvalBackend;
 use whisper_tensor::dtype::DType;
 use whisper_tensor::graph::GlobalId;
