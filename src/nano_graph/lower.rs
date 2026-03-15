@@ -167,7 +167,9 @@ pub fn lower_with_info(
     graph: &MilliOpGraph,
     inputs: &HashMap<GlobalId, TensorInfo>,
 ) -> Result<LowerResult, LowerError> {
+    let t0 = std::time::Instant::now();
     let all_infos = graph.infer_all(inputs)?;
+    eprintln!("  [lower] infer_all: {:.1}ms", t0.elapsed().as_secs_f64() * 1e3);
     let mut ctx = LowerCtx::new();
 
     // Register all tensors that exist before ops run (graph inputs + inferred
@@ -185,12 +187,14 @@ pub fn lower_with_info(
     }
 
     // Walk ops in topological order.
+    let t1 = std::time::Instant::now();
     for &op_id in graph.op_ordering() {
         let Some(op) = graph.get_node_by_id(&op_id) else {
             continue;
         };
         ctx.lower_op(op, &all_infos);
     }
+    eprintln!("  [lower] ops: {:.1}ms ({} groups, {} atoms)", t1.elapsed().as_secs_f64() * 1e3, ctx.nano.num_groups(), ctx.nano.num_atoms());
 
     // Collect outputs. Try get_outputs() first; if empty, scan all tensors
     // in the tensor_map that aren't consumed by any op (terminal tensors).
@@ -223,6 +227,7 @@ pub fn lower_with_info(
         .collect();
 
     // Build overrides for all Numeric (constant-valued) tensors.
+    let t2 = std::time::Instant::now();
     use crate::numeric_scalar::NumericScalar;
     let mut numeric_overrides: HashMap<u64, NumericScalar> = HashMap::new();
     let mut backend = crate::backends::eval_backend::EvalBackend::NDArray;
@@ -254,6 +259,8 @@ pub fn lower_with_info(
             numeric_overrides.insert(tam.base_id.0 + i as u64, scalar);
         }
     }
+
+    eprintln!("  [lower] numeric_overrides: {:.1}ms ({} entries)", t2.elapsed().as_secs_f64() * 1e3, numeric_overrides.len());
 
     // Merge synthetic overrides (e.g., column offsets from Gather lowering).
     for (k, v) in ctx.synthetic_overrides {
