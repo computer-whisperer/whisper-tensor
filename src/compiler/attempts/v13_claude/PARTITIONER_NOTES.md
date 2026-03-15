@@ -1,16 +1,43 @@
-# Lane+Barrier Partitioner: Lessons Learned
+# Lane+Barrier Partitioner: Design Notes
 
-## The Execution Model
+## Current Architecture (v2c + nano_codegen_v2)
 
-See `problem_shape.md` for full details. Summary:
-- **Lanes** = persistent threads pinned to cores with cache affinity
-- **Phases** = work between barrier sync points
-- **Barriers** = sync points where all lanes wait before proceeding
-- Lane assignment IS the tiling decision
-- Cyclic dependencies between lanes are fine (barriers manage sync)
-- Within a phase, lanes must be independent
+The v2c planner + codegen pipeline works end-to-end on GPT-2 (45,921 groups).
+Balance is perfect (1.0x) but there are cross-lane dependency violations (2,201)
+when using multiple lanes. The core issue: groups that depend on each other get
+split across lanes without barriers between them.
 
-## Output Format
+## Next Architecture: Emit Separate NanoGraphs
+
+Instead of tracking sub-ranges of the original graph, the partitioner should
+emit N distinct NanoGraphs — one per lane per phase (or one per span). Each
+sub-graph is self-contained:
+
+- Has its own groups, atom IDs, and InputRefs
+- Declares explicit inputs (atoms it reads from external sources / other spans)
+- Declares explicit outputs (atoms it produces that other spans will read)
+- Can be independently validated for correctness
+- Can duplicate small computations (like Gather index math) rather than sharing
+
+### Why this is better
+
+1. **No cross-lane dependency ambiguity.** If a span needs a value, it either
+   computes it internally or declares it as an input. The "is this a cross-lane
+   read?" question doesn't arise — everything is explicit.
+
+2. **Allows recomputation.** If computing a Gather offset takes 3 Binary ops,
+   each lane can independently compute those 3 ops. There's no need to share
+   them or worry about which lane "owns" the computation. This is cheaper than
+   a barrier sync for 3 ops.
+
+3. **Validates naturally.** Each sub-graph can be validated independently:
+   all inputs are declared, all outputs are produced, topological order is
+   correct within the sub-graph. No need for cross-span validation.
+
+4. **Clean codegen interface.** Each sub-graph compiles to one Cranelift
+   function with a clear signature: `fn(inputs: &[f32], outputs: &mut [f32])`.
+
+### Output format
 
 ```rust
 struct ExecutionPlan {
@@ -18,129 +45,68 @@ struct ExecutionPlan {
     phases: Vec<Phase>,
 }
 struct Phase {
-    lane_work: Vec<Vec<usize>>,  // lane_idx -> group indices
+    spans: Vec<Span>,  // one per lane (may be empty for idle lanes)
+}
+struct Span {
+    /// Self-contained NanoGraph for this span's computation.
+    graph: NanoGraph,
+    /// Which atoms from the shared values buffer this span reads.
+    inputs: Vec<(AtomId, u64)>,  // (source atom in main graph, local atom in span graph)
+    /// Which atoms this span writes back to the shared values buffer.
+    outputs: Vec<(u64, AtomId)>,  // (local atom in span graph, target atom in main graph)
 }
 ```
 
-## GPT-2 NanoGraph Structure (45,921 groups, 8.1B atoms)
+### Partitioner algorithm
 
-Op breakdown:
-- 21,801 Mul (Binary) — matmul products (StridedBroadcast input, count=K*N)
-- 21,630 ReduceSum — matmul contractions + LayerNorm mean/variance
-- 2,082 Literal — weights (globally shared, not assigned to lanes)
-- ~400 other (Add, Div, Sub, Pow, Sqrt, Exp, Tanh, Select, ReduceMax)
-- 12 Identity — dtype casts
+1. **Find barrier positions.** Identify points where the computation
+   reconverges (matmul reductions that read the full prior output).
 
-### Matmul structure
-For C[M,N] = A[M,K] @ B[K,N] (e.g. M=64, K=768, N=768):
-- M Mul groups, each count=K*N=589,824 atoms
-- M ReduceSum groups, each count=N=768 atoms
-- Mul groups have StridedBroadcast (repeat=N) + Affine inputs
-- ReduceSum has reduce_count=K, reduce_stride=N
-- The M row pairs (Mul, ReduceSum) are INDEPENDENT — perfect for lanes
+2. **For each phase, identify the work to split across lanes.**
+   Matmul rows are the primary split axis. Elementwise ops split
+   proportionally.
 
-### Elementwise structure
-Between matmuls: LayerNorm, residual adds, activations.
-- **ONE group per op** covering the entire output (e.g., count=49,152)
-- These are NOT split into rows by the lowering
-- A LayerNorm has ~4 groups: Sub, Pow, ReduceSum(mean), ReduceSum(var), etc.
+3. **For each lane's slice, emit a new NanoGraph:**
+   - Copy the relevant groups (or sub-ranges of groups)
+   - For atoms that come from other lanes or earlier phases: create
+     Literal input groups in the sub-graph
+   - For atoms needed by later phases: mark as outputs
+   - For small dependency chains (like Gather index computation):
+     DUPLICATE them into each lane's sub-graph rather than sharing
 
-### The sync structure
-- Matmul N+1's inputs depend on ALL of matmul N's outputs (the reduce)
-- LayerNorm ReduceSums (mean/variance) also read the full input — they're
-  mini sync points within a layer, not just at matmul boundaries
-- Between two sync points, all the row-level work is independent
+4. **Validate each sub-graph** independently.
 
-## What Previous Attempts Got Wrong
+## Lessons from Previous Attempts
 
-### Round 1: Acyclic kernel partitioners (nano_part_*)
-- Tried to produce acyclic kernel DAGs
-- Either killed parallelism (contiguous topo ranges = sequential only)
-  or produced cycles (interleaved ranges without checking)
-- The acyclic constraint was wrong — barriers manage sync, cycles are ok
+### What worked
+- StridedBroadcast for matmul compression (800x group reduction)
+- Zero-cost view ops (Transpose, Split, Slice, Concat)
+- ReduceSum with known reduce_count/reduce_stride (no SymDim)
+- Modular InputRef for cyclic broadcasts
+- compress_explicit() pattern detection
+- Live-set analysis for finding phase boundaries
+- Group splitting via LaneWork sub-ranges (perfect balance)
 
-### Round 2: Lane+barrier planners (nano_plan_*)
-Three attempts, all finding barriers but failing at within-phase distribution:
+### What failed
+- Acyclic kernel DAG model (too restrictive, kills parallelism)
+- Contiguous topo range partitions (sequential only)
+- Treating every ReduceSum as a barrier (too many phases)
+- Monolithic elementwise groups (can't split across lanes)
+- Sampling-based producer lookup (misses spanning dependencies)
+- Cross-lane same-phase dependencies (the current bug)
 
-**creative (147 phases, 1536x imbalance):**
-- Over-eager barriers: put one at EVERY ReduceSum on critical path,
-  including LayerNorm internal reduces. Created 49 tiny phases with
-  only 4 groups each.
-- The 4-group phases have one 49,152-atom group and one 64-atom group —
-  impossible to balance across 8 lanes.
+### Key invariant
+Within a phase, lanes are INDEPENDENT. No lane may read an atom
+produced by another lane in the same phase. All cross-lane data
+flows through barriers (the shared values buffer, read between phases).
 
-**critical (73 phases, 9826x imbalance):**
-- Better barrier count (73 ≈ 1 per matmul) but still terrible balance
-- Same root cause: phases with monolithic elementwise groups
+## Files
 
-**iterative (49 phases, 6686x imbalance):**
-- Fewest phases, but still can't split the monolithic groups
-
-### Root cause analysis
-
-TWO problems compound:
-
-1. **AtomGroups are treated as indivisible.** Elementwise ops produce ONE
-   group of 49,152 atoms. The planners can't split this across lanes.
-   But AtomGroups are compression artifacts — the problem_shape.md says
-   the partitioner SHOULD be able to split groups.
-
-2. **Barrier placement doesn't distinguish matmul sync from internal sync.**
-   LayerNorm's ReduceSum (mean/variance) reads the full tensor but is
-   NOT a cross-lane sync point in the same way a matmul output is. If
-   lanes each have their row slice of the input, each lane can compute
-   its own slice's contribution to the mean, then sync to combine.
-
-   Actually: ReduceSum with reduce_count=768 reading from a 49,152-atom
-   elementwise group IS a full-width reduce — it needs all 768 elements
-   per position to compute the mean. But those 768 elements are within
-   one "position" (one batch*seq element), not across lanes. If the
-   49,152-atom group were split into 64 groups of 768, each lane could
-   handle its positions independently, and the ReduceSum would be local.
-
-## What the Next Attempt Should Do
-
-### Group splitting
-
-The partitioner MUST be able to split AtomGroups. For a group with
-count=N and Affine(stride=1) inputs, splitting into K sub-groups of
-count=N/K each is straightforward:
-- Sub-group j: base_id = original.base_id + j*(N/K), count = N/K
-- InputRef::Affine { base, stride } → Affine { base: base + j*(N/K)*stride, stride }
-- InputRef::Broadcast(id) → still Broadcast(id)
-- InputRef::StridedBroadcast { base, stride, repeat } → need to adjust
-  based on which sub-range of atoms we're taking
-
-For ReduceSum with reduce_count/reduce_stride: splitting along the
-output dimension (count) is safe — each output atom's reduce is
-independent. Sub-group j gets output atoms [j*chunk..(j+1)*chunk].
-
-### Barrier placement
-
-Barriers should be placed where the computation STRUCTURALLY requires
-all lanes' results — not at every ReduceSum. The structural requirement:
-a downstream op reads atoms produced by MULTIPLE lanes.
-
-Specifically: if a ReduceSum reads from a Mul group that's on ONE lane,
-no barrier needed — the reduce is lane-local. If a Binary::Add reads
-from TWO groups that are on DIFFERENT lanes, a barrier is needed before
-the Add.
-
-The barrier decision should be AFTER lane assignment, not before. Or
-iterative: tentatively assign to lanes, find where cross-lane reads
-happen, place barriers there, re-assign.
-
-### Cache affinity
-
-Lane 0 should consistently get the same "row slice" across all phases.
-This keeps data hot in L1/L2 across the entire model execution.
-
-## Files to reference
-
-- `src/compiler/problem_shape.md` — execution model
-- `src/nano_graph/pattern.rs` — AtomGroup, InputRef, NanoGraph
-- `src/nano_graph/ops.rs` — ScalarOp (especially ReduceSum fields)
-- `src/compiler/attempts/v13_claude/nano_plan_creative.rs` — best attempt (147 phases, 1536x imbalance)
-- `src/compiler/attempts/v13_claude/nano_plan_critical.rs` — critical path approach
-- `src/compiler/attempts/v13_claude/nano_plan_iterative.rs` — iterative refinement approach
-- `examples/nano_lower_test.rs` — GPT-2 diagnostic test
+- `problem_shape.md` — execution model (lanes, phases, barriers)
+- `nano_plan_v2c.rs` — current best planner (v2c with group splitting)
+- `nano_codegen_v2.rs` — codegen for execution plans
+- `nano_part_creative.rs` — reference for chain extraction + clustering
+- `nano_execute.rs` — dtype-correct reference interpreter
+- `nano_graph/pattern.rs` — NanoGraph, AtomGroup, InputRef types
+- `nano_graph/ops.rs` — ScalarOp variants
+- `nano_graph/eval.rs` — trusted NanoGraph evaluator

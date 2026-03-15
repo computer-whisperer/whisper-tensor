@@ -365,7 +365,7 @@ impl CompiledPipeline {
     /// Groups within each kernel are sorted by index (topological order).
     pub fn compile_partitioned(
         graph: &NanoGraph,
-        partition: &super::nano_part_b::NanoPartitionResult,
+        partition: &super::nano_part_creative::NanoPartitionResult,
     ) -> Result<Self, String> {
         let num_atoms = graph.num_atoms() as usize;
         let groups = graph.groups();
@@ -2118,7 +2118,7 @@ mod tests {
         use crate::nano_graph::lower::lower_with_info;
         use crate::numeric_tensor::NumericTensor;
         use crate::tensor_info::TensorInfo;
-        use crate::compiler::attempts::v13_claude::nano_part_b::partition_nanograph;
+        use crate::compiler::attempts::v13_claude::nano_part_creative::partition_nanograph;
 
         let mut rng = rand::rng();
         let (mut milli, _) = MilliOpGraph::new(std::iter::empty(), &mut rng);
