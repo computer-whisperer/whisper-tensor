@@ -101,6 +101,13 @@ d. **Split B differently** — so each lane's slice of B only reads the
 
 The ideal partitioner considers all four options and picks the cheapest.
 
+**The solution MUST be general.** No pattern-matching on specific op types
+(Select, ReduceSum, etc.) or specific InputRef variants. The algorithm should
+work from the DAG structure alone: which atoms does each group produce, which
+does it consume, and what happens when groups are split across lanes. If the
+algorithm is correct for arbitrary DAGs, it will handle all ONNX models, not
+just GPT-2's specific attention mask pattern.
+
 ## Key Invariants
 
 1. **Within a phase, spans are INDEPENDENT.** No cross-span reads.
