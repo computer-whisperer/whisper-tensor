@@ -28,6 +28,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use crate::nano_graph::{AtomGroup, AtomId, InputRef, NanoGraph, ScalarOp};
 
+/// Literal groups with fewer atoms than this are duplicated into spans.
+/// Larger literals (weight matrices) become external inputs instead.
+const LITERAL_INLINE_THRESHOLD: u64 = 1024;
+
 // ─── Public types ────────────────────────────────────────────────────────────
 
 /// A self-contained computation unit: one lane's work in one phase.
@@ -727,23 +731,34 @@ fn build_spans(
 
             let cell_set: HashSet<usize> = cell_groups.iter().copied().collect();
 
-            // Also include literal groups that are directly used by cell groups.
-            let mut literal_deps: BTreeSet<usize> = BTreeSet::new();
+            // Collect all literal groups directly used by cell groups,
+            // then split by size: small ones get inlined, large ones become external.
+            let mut all_literal_deps: BTreeSet<usize> = BTreeSet::new();
             for &gi in &cell_groups {
                 for &pi in &producers[gi] {
                     if is_literal[pi] {
-                        literal_deps.insert(pi);
+                        all_literal_deps.insert(pi);
                     }
+                }
+            }
+            let mut literal_deps: BTreeSet<usize> = BTreeSet::new(); // small, inlined
+            let mut large_literal_groups: BTreeSet<usize> = BTreeSet::new();
+            for &li in &all_literal_deps {
+                if groups[li].count < LITERAL_INLINE_THRESHOLD {
+                    literal_deps.insert(li);
+                } else {
+                    large_literal_groups.insert(li);
                 }
             }
 
             // Determine external inputs: atoms from non-literal, non-cell producers.
             // These are atoms produced by groups in earlier phases or other lanes
             // (which should not happen within a phase — that's a violation).
+            // Note: we pass only the inlined literal_deps so that large literals
+            // are NOT skipped and will be collected as external atoms.
             let mut external_atom_ids: BTreeSet<AtomId> = BTreeSet::new();
             for &gi in &cell_groups {
                 let group = &groups[gi];
-                // For each input ref, resolve the atoms it reads.
                 collect_external_atoms(
                     group,
                     groups,
@@ -752,6 +767,13 @@ fn build_spans(
                     is_literal,
                     &mut external_atom_ids,
                 );
+            }
+            // Also explicitly add large literal atoms as external inputs.
+            for &li in &large_literal_groups {
+                let lg = &groups[li];
+                for i in 0..lg.count {
+                    external_atom_ids.insert(lg.base_id.offset(i));
+                }
             }
 
             // Determine outputs: atoms produced by this cell that are consumed
@@ -818,8 +840,13 @@ fn collect_external_atoms(
     let producer_gis = find_all_producer_group_indices(group, all_groups);
 
     for pi in producer_gis {
-        if cell_set.contains(&pi) || literal_deps.contains(&pi) || is_literal[pi] {
-            continue; // Internal or literal — not external.
+        if cell_set.contains(&pi) || literal_deps.contains(&pi) {
+            continue; // Internal or inlined literal — not external.
+        }
+        // Skip non-dep literals that are small (not referenced by this span).
+        // Large literals (not in literal_deps) fall through and become external.
+        if is_literal[pi] && all_groups[pi].count < LITERAL_INLINE_THRESHOLD {
+            continue;
         }
         // This is an external producer. Add all atoms from it that this group reads.
         let read_range = compute_read_range_from_group(group, &all_groups[pi], all_groups);

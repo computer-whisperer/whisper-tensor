@@ -87,7 +87,8 @@ fn main() {
     let num_lanes = std::env::var("NUM_LANES").ok().and_then(|s| s.parse().ok()).unwrap_or(8);
     println!("\n=== Span-Based Plans (num_lanes={}) ===", num_lanes);
 
-    {
+    let which = std::env::var("SPAN_PLANNER").unwrap_or("all".to_string());
+    if which == "a" || which == "all" {
         use whisper_tensor::compiler::attempts::v13_claude::nano_plan_spans_a;
         let t0 = Instant::now();
         let plan = nano_plan_spans_a::plan_execution(&result.graph, num_lanes);
@@ -97,7 +98,7 @@ fn main() {
         }).collect()).collect();
         print_span_summary("spans_a", &ss, plan.num_lanes, elapsed);
     }
-    {
+    if which == "b" || which == "all" {
         use whisper_tensor::compiler::attempts::v13_claude::nano_plan_spans_b;
         let t0 = Instant::now();
         let plan = nano_plan_spans_b::plan_spans(&result.graph, num_lanes);
@@ -107,7 +108,7 @@ fn main() {
         }).collect()).collect();
         print_span_summary("spans_b", &ss, plan.num_lanes, elapsed);
     }
-    {
+    if which == "c" || which == "all" {
         use whisper_tensor::compiler::attempts::v13_claude::nano_plan_spans_c;
         let t0 = Instant::now();
         let plan = nano_plan_spans_c::plan_execution_spans(&result.graph, num_lanes);
@@ -117,7 +118,7 @@ fn main() {
         }).collect()).collect();
         print_span_summary("spans_c", &ss, plan.num_lanes, elapsed);
     }
-    {
+    if which == "d" || which == "all" {
         use whisper_tensor::compiler::attempts::v13_claude::nano_plan_spans_d;
         let t0 = Instant::now();
         let plan = nano_plan_spans_d::plan_spans(&result.graph, num_lanes);

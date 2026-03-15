@@ -56,6 +56,10 @@ pub struct ExecutionPlan {
 /// rather than requiring as a cross-phase input.
 const DUPLICATION_THRESHOLD: u64 = 512;
 
+/// Literal groups with fewer atoms than this are duplicated into spans.
+/// Larger literals (weight matrices) become external inputs instead.
+const LITERAL_INLINE_THRESHOLD: u64 = 1024;
+
 /// Plan execution for a NanoGraph with `num_lanes` persistent threads.
 ///
 /// Splits the graph into phases (separated by barriers) and spans within
@@ -661,8 +665,19 @@ fn build_single_span(
     for &gi in span_group_indices {
         collect_literal_deps(gi, groups, producers, is_literal, &mut literal_groups_needed);
     }
+    // Split literals by size: small ones get duplicated, large ones become external inputs.
+    let mut large_literal_groups: BTreeSet<usize> = BTreeSet::new();
     for &li in &literal_groups_needed {
-        included_groups.insert(li);
+        if groups[li].count < LITERAL_INLINE_THRESHOLD {
+            included_groups.insert(li);
+        } else {
+            large_literal_groups.insert(li);
+            // Add all atoms from this large literal as external dependencies.
+            let lg = &groups[li];
+            for i in 0..lg.count {
+                external_atoms.insert(lg.base_id.offset(i));
+            }
+        }
     }
 
     // Check for small duplicatable chains from earlier phases.
@@ -686,8 +701,20 @@ fn build_single_span(
         // Also include literal deps of duplicated groups.
         collect_literal_deps(di, groups, producers, is_literal, &mut literal_groups_needed);
     }
+    // Apply same size threshold for newly discovered literal deps.
     for &li in &literal_groups_needed {
-        included_groups.insert(li);
+        if large_literal_groups.contains(&li) {
+            continue; // Already handled as external.
+        }
+        if groups[li].count < LITERAL_INLINE_THRESHOLD {
+            included_groups.insert(li);
+        } else {
+            large_literal_groups.insert(li);
+            let lg = &groups[li];
+            for i in 0..lg.count {
+                external_atoms.insert(lg.base_id.offset(i));
+            }
+        }
     }
 
     // Now identify external atoms: atoms referenced by included groups that

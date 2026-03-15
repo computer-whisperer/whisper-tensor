@@ -18,6 +18,10 @@ use crate::nano_graph::{AtomGroup, AtomId, InputRef, NanoGraph, ScalarOp};
 
 use super::nano_plan_v2c;
 
+/// Literal groups with fewer atoms than this are duplicated into spans.
+/// Larger literals (weight matrices) become external inputs instead.
+const LITERAL_INLINE_THRESHOLD: u64 = 1024;
+
 // ─── Public API ──────────────────────────────────────────────────────────────
 
 /// A self-contained unit of work for one lane in one phase.
@@ -189,24 +193,29 @@ fn build_span(
         collect_literal_deps(gi, groups, is_literal, &mut needed_literals);
     }
 
-    // Third pass: add literal groups to the span graph.
-    // Literals are always fully included (they're shared/cheap).
+    // Third pass: add small literal groups to the span graph.
+    // Large literals (weight matrices) become external inputs instead.
+    let mut inlined_literals: BTreeSet<usize> = BTreeSet::new();
     for &lit_gi in &needed_literals {
         let lit_group = &groups[lit_gi];
-        let local_base = span_graph.push_group(
-            lit_group.count,
-            lit_group.op.clone(),
-            lit_group.sym_dims.clone(),
-            lit_group.reduce_dims.clone(),
-            vec![], // Literals have no inputs.
-        );
-        // Map all atoms in this literal group.
-        for offset in 0..lit_group.count {
-            main_to_local.insert(
-                AtomId(lit_group.base_id.0 + offset),
-                AtomId(local_base.0 + offset),
+        if lit_group.count < LITERAL_INLINE_THRESHOLD {
+            // Small literal: duplicate into span.
+            let local_base = span_graph.push_group(
+                lit_group.count,
+                lit_group.op.clone(),
+                lit_group.sym_dims.clone(),
+                lit_group.reduce_dims.clone(),
+                vec![], // Literals have no inputs.
             );
+            for offset in 0..lit_group.count {
+                main_to_local.insert(
+                    AtomId(lit_group.base_id.0 + offset),
+                    AtomId(local_base.0 + offset),
+                );
+            }
+            inlined_literals.insert(lit_gi);
         }
+        // Large literals will be handled as external atoms below.
     }
 
     // Fourth pass: for each assigned work item, determine external dependencies
@@ -247,7 +256,8 @@ fn build_span(
         // Find which group this atom belongs to in the main graph.
         if let Some(gi) = find_group_idx(groups, atom_id) {
             if is_literal[gi] {
-                return needed_literals.contains(&gi);
+                // Only inlined (small) literals count as local.
+                return inlined_literals.contains(&gi);
             }
             let offset_in_group = atom_id.0 - groups[gi].base_id.0;
             // Check if this (gi, offset) falls within any of our work items.
@@ -957,13 +967,23 @@ impl SpanPlan {
     /// Checks:
     /// 1. Each span's NanoGraph passes NanoGraph::validate()
     /// 2. All external inputs reference atoms that exist in earlier phases' outputs
+    ///    or in the original graph's literal groups
     /// 3. No cross-span dependencies within a phase (guaranteed by construction
     ///    since we use v2c's phase assignments)
-    pub fn validate(&self) -> Vec<String> {
+    pub fn validate(&self, original: &NanoGraph) -> Vec<String> {
         let mut errors = Vec::new();
 
-        // Collect all outputs from each phase (main graph AtomIds).
+        // Seed available atoms with all literal atoms from the original graph.
+        // These are always available (from the shared values buffer) without
+        // needing to be produced by an earlier phase.
         let mut available_atoms: HashSet<AtomId> = HashSet::new();
+        for group in original.groups() {
+            if matches!(group.op, ScalarOp::Literal(_)) && group.inputs.is_empty() {
+                for i in 0..group.count {
+                    available_atoms.insert(group.base_id.offset(i));
+                }
+            }
+        }
 
         for (phase_idx, phase) in self.phases.iter().enumerate() {
             for (lane_idx, span) in phase.spans.iter().enumerate() {
@@ -1231,7 +1251,7 @@ mod tests {
 
     /// Verify all span graphs pass internal validation and the plan is consistent.
     fn verify_span_plan(graph: &NanoGraph, plan: &SpanPlan) {
-        let errors = plan.validate();
+        let errors = plan.validate(graph);
         assert!(errors.is_empty(), "Span plan validation errors:\n{}", errors.join("\n"));
     }
 
@@ -1272,9 +1292,18 @@ mod tests {
     }
 
     /// Verify the phase ordering of external inputs: every external input
-    /// to a span in phase P must be produced by a span in phase < P.
-    fn verify_input_availability(plan: &SpanPlan) {
+    /// to a span in phase P must be produced by a span in phase < P
+    /// or be a literal atom from the original graph.
+    fn verify_input_availability(plan: &SpanPlan, graph: &NanoGraph) {
+        // Seed with all literal atoms from the original graph.
         let mut available: HashSet<AtomId> = HashSet::new();
+        for group in graph.groups() {
+            if matches!(group.op, ScalarOp::Literal(_)) && group.inputs.is_empty() {
+                for i in 0..group.count {
+                    available.insert(group.base_id.offset(i));
+                }
+            }
+        }
 
         for (phase_idx, phase) in plan.phases.iter().enumerate() {
             for (lane_idx, span) in phase.spans.iter().enumerate() {
@@ -1481,7 +1510,7 @@ mod tests {
         assert!(g.validate().is_empty());
 
         let plan = plan_execution_spans(&g, 2);
-        verify_input_availability(&plan);
+        verify_input_availability(&plan, &g);
         verify_phase_independence(&plan);
     }
 

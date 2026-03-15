@@ -25,6 +25,10 @@ use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 use crate::nano_graph::{AtomGroup, AtomId, InputRef, NanoGraph, ScalarBinOp, ScalarOp};
 
+/// Literal groups with fewer atoms than this are duplicated into spans.
+/// Larger literals (weight matrices) become external inputs instead.
+const LITERAL_INLINE_THRESHOLD: u64 = 1024;
+
 // ─── Public types ────────────────────────────────────────────────────────────
 
 /// A self-contained execution span with its own NanoGraph.
@@ -994,19 +998,27 @@ fn extract_single_span(
         }
     }
 
-    // Phase 2: Add duplicated Literal groups.
+    // Phase 2: Add duplicated Literal groups (small ones only).
+    // Large literals become external inputs to avoid memory explosion.
     for &lit_gi in &needed_literals {
         let lit_group = &groups[lit_gi];
-        let local_base = span_graph.push_group(
-            lit_group.count,
-            lit_group.op.clone(),
-            lit_group.sym_dims.clone(),
-            lit_group.reduce_dims.clone(),
-            vec![], // Literals have no inputs
-        );
-        // Map all atoms from this literal group.
-        for i in 0..lit_group.count {
-            atom_map.insert(lit_group.base_id.0 + i, AtomId(local_base.0 + i));
+        if lit_group.count < LITERAL_INLINE_THRESHOLD {
+            // Small literal: duplicate into span.
+            let local_base = span_graph.push_group(
+                lit_group.count,
+                lit_group.op.clone(),
+                lit_group.sym_dims.clone(),
+                lit_group.reduce_dims.clone(),
+                vec![], // Literals have no inputs
+            );
+            for i in 0..lit_group.count {
+                atom_map.insert(lit_group.base_id.0 + i, AtomId(local_base.0 + i));
+            }
+        } else {
+            // Large literal (weight matrix): treat as external input.
+            for i in 0..lit_group.count {
+                external_atoms.insert(lit_group.base_id.0 + i);
+            }
         }
     }
 
