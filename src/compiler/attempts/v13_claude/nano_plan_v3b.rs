@@ -117,36 +117,24 @@ pub fn plan_spans(graph: &NanoGraph, num_lanes: usize) -> SpanPlan {
     }
 
     // Step 1: Build group-level dependency DAG.
-    let _t0 = std::time::Instant::now();
     let (producers, consumers) = build_group_deps(groups);
-    let _t1 = std::time::Instant::now();
 
     // Step 2: Classify each group's split behaviour.
     let split_class = classify_splits(groups, &producers, &is_literal, num_lanes);
-    let _t2 = std::time::Instant::now();
 
     // Step 3: Build virtual-node DAG.
     let (vnodes, vnode_producers, group_to_vnodes) =
         build_vnode_dag(groups, &producers, &is_literal, &split_class, num_lanes);
-    let _t3 = std::time::Instant::now();
 
     // Step 4: Assign phases on the virtual DAG.
     let (vnode_phase, num_phases) =
         assign_vnode_phases(&vnodes, &vnode_producers, &is_literal);
-    let _t4 = std::time::Instant::now();
 
     // Step 5: Assign lanes. Split vnodes already have lanes. Unsplit vnodes
     // get assigned to the least-loaded lane in their phase.
     let vnode_lane = assign_vnode_lanes(
         &vnodes, &vnode_producers, &vnode_phase, num_phases, num_lanes, groups, &is_literal,
     );
-    let _t5 = std::time::Instant::now();
-
-    eprintln!("  v3b steps: deps={:.1}ms split={:.1}ms vdag={:.1}ms phase={:.1}ms lanes={:.1}ms",
-        (_t1 - _t0).as_secs_f64() * 1e3, (_t2 - _t1).as_secs_f64() * 1e3,
-        (_t3 - _t2).as_secs_f64() * 1e3, (_t4 - _t3).as_secs_f64() * 1e3,
-        (_t5 - _t4).as_secs_f64() * 1e3);
-    eprintln!("    {} groups, {} vnodes, {} phases", n, vnodes.len(), num_phases);
 
     // Step 6: Build spans.
     build_spans(
@@ -1026,28 +1014,7 @@ fn build_spans(
         }
     }
 
-    // Build atom ownership map for output detection.
-    // atom_ownership[group_idx] = vec of (atom_offset, atom_count, phase, lane)
-    let n = groups.len();
-    let mut atom_ownership: Vec<Vec<(u64, u64, usize, usize)>> = vec![Vec::new(); n];
-    for (phase_idx, phase) in work_items.iter().enumerate() {
-        for (lane_idx, lane_work) in phase.iter().enumerate() {
-            for &(gi, off, cnt) in lane_work {
-                atom_ownership[gi].push((off, cnt, phase_idx, lane_idx));
-            }
-        }
-    }
-
-    // Build group-level consumers for output detection.
-    let mut group_consumers: Vec<Vec<usize>> = vec![Vec::new(); n];
-    for (gi, prods) in producers.iter().enumerate() {
-        for &pi in prods {
-            group_consumers[pi].push(gi);
-        }
-    }
-
     // Build spans.
-    let _span_t0 = std::time::Instant::now();
     let mut phases = Vec::with_capacity(num_phases);
 
     for phase_idx in 0..num_phases {
@@ -1066,17 +1033,13 @@ fn build_spans(
             }
 
             let span = build_single_span(
-                graph, groups, is_literal, lane_work, &atom_ownership,
-                &group_consumers, phase_idx, lane_idx,
+                graph, groups, is_literal, lane_work,
             );
             spans.push(span);
         }
 
         phases.push(Phase { spans });
     }
-    let _span_t1 = std::time::Instant::now();
-    eprintln!("    span_build={:.1}ms", (_span_t1 - _span_t0).as_secs_f64() * 1e3);
-
     SpanPlan { num_lanes, phases }
 }
 
@@ -1114,10 +1077,6 @@ fn build_single_span(
     groups: &[AtomGroup],
     is_literal: &[bool],
     lane_work: &[(usize, u64, u64)],
-    atom_ownership: &[Vec<(u64, u64, usize, usize)>],
-    group_consumers: &[Vec<usize>],
-    phase_idx: usize,
-    lane_idx: usize,
 ) -> Span {
     let mut span_graph = NanoGraph::new();
 
@@ -1137,12 +1096,10 @@ fn build_single_span(
     let local_groups: HashSet<usize> = lane_work.iter().map(|&(gi, _, _)| gi).collect();
 
     // 1. Determine needed literals.
-    let _st0 = std::time::Instant::now();
     let mut needed_literals: BTreeSet<usize> = BTreeSet::new();
     for &(gi, _, _) in lane_work {
         collect_literal_deps(gi, groups, is_literal, &mut needed_literals);
     }
-    let _st1 = std::time::Instant::now();
 
     // 2. Inline small literals, track large ones as external.
     let mut large_literal_groups: BTreeSet<usize> = BTreeSet::new();
@@ -1162,7 +1119,6 @@ fn build_single_span(
             large_literal_groups.insert(lit_gi);
         }
     }
-    let _st2 = std::time::Instant::now();
 
     // 3. Collect external dependency ranges.
     let mut external_ranges: Vec<(usize, u64, u64)> = Vec::new();
@@ -1180,15 +1136,6 @@ fn build_single_span(
             group, atom_offset, atom_count, groups, is_literal,
             lane_work, &inlined_literals, &mut external_ranges,
         );
-    }
-    let _st3 = std::time::Instant::now();
-    if (_st3 - _st0).as_secs_f64() > 0.05 {
-        eprintln!("      span({},{}) lit_deps={:.1}ms inline={:.1}ms ext_ranges={:.1}ms work_items={}",
-            phase_idx, lane_idx,
-            (_st1 - _st0).as_secs_f64() * 1e3,
-            (_st2 - _st1).as_secs_f64() * 1e3,
-            (_st3 - _st2).as_secs_f64() * 1e3,
-            lane_work.len());
     }
 
     // Merge overlapping ranges.
@@ -1241,12 +1188,15 @@ fn build_single_span(
     }
 
     // 6. Mark graph outputs.
-    let main_outputs: HashSet<AtomId> = main_graph.outputs.iter().copied().collect();
-    for mapping in &output_mappings {
-        for i in 0..mapping.count {
-            let main_atom = mapping.main_base.offset(i);
-            if main_outputs.contains(&main_atom) {
-                span_graph.outputs.push(mapping.span_base.offset(i));
+    // Instead of iterating all atoms in all mappings (O(atoms)), check each
+    // graph output against the output mappings (O(outputs * log(mappings))).
+    for &out_id in &main_graph.outputs {
+        for mapping in &output_mappings {
+            let m_lo = mapping.main_base.0;
+            let m_hi = m_lo + mapping.count;
+            if out_id.0 >= m_lo && out_id.0 < m_hi {
+                let offset = out_id.0 - m_lo;
+                span_graph.outputs.push(mapping.span_base.offset(offset));
             }
         }
     }

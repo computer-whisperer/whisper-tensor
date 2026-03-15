@@ -227,21 +227,6 @@ fn fix_cross_lane_violations(
                 );
 
                 if !covered {
-                    // Find which lane(s) produce this range in the same phase.
-                    let key = (prod_gi, my_phase);
-                    let producer_lanes: Vec<usize> = if let Some(lane_ranges) = coverage.get(&key) {
-                        lane_ranges.keys().copied()
-                            .filter(|&l| l != my_lane)
-                            .filter(|&l| {
-                                lane_ranges.get(&l).map(|ranges| {
-                                    ranges_cover(ranges, need_lo, need_hi)
-                                }).unwrap_or(false)
-                            })
-                            .collect()
-                    } else {
-                        vec![]
-                    };
-
                     violations.push(Violation {
                         consumer_work_idx: wi,
                         consumer_gi: gi,
@@ -303,6 +288,27 @@ fn fix_cross_lane_violations(
                 atom_count: groups[prod_gi].count,
                 phase,
                 lane,
+            });
+        }
+
+        // Remove subsumed split slices: if we added a full copy of group G
+        // to lane L, remove any split slices of G on lane L in the same phase
+        // (they're redundant — the full copy covers them).
+        if !dup_set.is_empty() {
+            let full_copies: HashSet<(usize, usize, usize)> = dup_set.clone(); // (gi, phase, lane)
+            work_items.retain(|item| {
+                if full_copies.contains(&(item.group_idx, item.phase, item.lane)) {
+                    // Keep only if it's the full copy (offset=0, count=full).
+                    item.atom_offset == 0 && item.atom_count == groups[item.group_idx].count
+                } else {
+                    true
+                }
+            });
+            // Also deduplicate: if multiple full copies ended up on the same
+            // (gi, phase, lane), keep only one.
+            let mut seen: HashSet<(usize, usize, usize, u64)> = HashSet::new();
+            work_items.retain(|item| {
+                seen.insert((item.group_idx, item.phase, item.lane, item.atom_offset))
             });
         }
 
@@ -567,7 +573,7 @@ fn build_span_plan(
     // For each group_idx, find which lanes have it. If a group appears on multiple
     // lanes in the same phase with the same (offset, count), only the first lane outputs.
     // If a group is split across lanes (different offsets), each lane outputs its own slice.
-    let mut dup_output_info = compute_dup_output_info(work_items, groups, num_lanes);
+    let dup_output_info = compute_dup_output_info(work_items, groups, num_lanes);
 
     let mut phases = Vec::with_capacity(num_phases);
 
@@ -683,7 +689,7 @@ fn compute_dup_output_info(
                 // those overlapping ranges.
                 // Simple approach: only the split copies output, full copies
                 // are for internal consumption only.
-                let mut output_assignments: Vec<(usize, u64, u64)> = split_copies.clone();
+                let output_assignments: Vec<(usize, u64, u64)> = split_copies.clone();
                 // Check if split copies cover the full range.
                 let covered: u64 = split_copies.iter().map(|&(_, _, c)| c).sum();
                 if covered < full_count {
