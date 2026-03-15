@@ -29,16 +29,22 @@ use crate::nano_graph::{AtomGroup, AtomId, InputRef, NanoGraph, ScalarOp};
 
 // ─── Public API ──────────────────────────────────────────────────────────────
 
+/// A contiguous range of atoms mapped between main graph and span graph.
+#[derive(Debug, Clone)]
+pub struct AtomMapping {
+    pub main_base: AtomId,
+    pub span_base: AtomId,
+    pub count: u64,
+}
+
 /// A self-contained unit of work: one lane's work in one phase.
 pub struct Span {
     /// Self-contained NanoGraph for this span's computation.
     pub graph: NanoGraph,
-    /// Which atoms from the main graph this span reads.
-    /// (main graph atom ID, span-local atom ID)
-    pub inputs: Vec<(AtomId, AtomId)>,
-    /// Which atoms this span produces for the main graph.
-    /// (span-local atom ID, main graph atom ID)
-    pub outputs: Vec<(AtomId, AtomId)>,
+    /// Contiguous ranges of atoms this span reads from the main graph.
+    pub inputs: Vec<AtomMapping>,
+    /// Contiguous ranges of atoms this span produces for the main graph.
+    pub outputs: Vec<AtomMapping>,
 }
 
 /// One phase of execution (work between two consecutive barriers).
@@ -59,6 +65,31 @@ const DUPLICATION_THRESHOLD: u64 = 512;
 /// Literal groups with fewer atoms than this are duplicated into spans.
 /// Larger literals (weight matrices) become external inputs instead.
 const LITERAL_INLINE_THRESHOLD: u64 = 1024;
+
+/// Range-based atom map: stores contiguous range mappings for O(log n) lookup.
+struct RangeAtomMap {
+    ranges: Vec<(u64, u64, u64)>, // (main_base, span_base, count)
+}
+
+impl RangeAtomMap {
+    fn new() -> Self { Self { ranges: Vec::new() } }
+
+    fn insert_range(&mut self, main_base: AtomId, span_base: AtomId, count: u64) {
+        self.ranges.push((main_base.0, span_base.0, count));
+    }
+
+    fn sort(&mut self) {
+        self.ranges.sort_by_key(|&(base, _, _)| base);
+    }
+
+    fn get(&self, main_id: AtomId) -> Option<AtomId> {
+        let idx = self.ranges.partition_point(|&(base, _, _)| base <= main_id.0);
+        if idx == 0 { return None; }
+        let (base, span_base, count) = self.ranges[idx - 1];
+        let offset = main_id.0.wrapping_sub(base);
+        if offset < count { Some(AtomId(span_base + offset)) } else { None }
+    }
+}
 
 /// Plan execution for a NanoGraph with `num_lanes` persistent threads.
 ///
@@ -635,6 +666,7 @@ fn build_span_graphs(
 }
 
 /// Build a single self-contained span NanoGraph.
+/// All operations are O(num_groups), not O(num_atoms).
 fn build_single_span(
     original: &NanoGraph,
     groups: &[AtomGroup],
@@ -648,14 +680,10 @@ fn build_single_span(
 ) -> Span {
     let span_set: HashSet<usize> = span_group_indices.iter().copied().collect();
 
-    // Collect all groups we need to include in the span:
-    // - The span's own compute groups
-    // - Literal groups referenced by the span's groups
-    // - Small dependency chains that can be duplicated
     let mut included_groups: BTreeSet<usize> = BTreeSet::new();
-    let mut external_atoms: BTreeSet<AtomId> = BTreeSet::new();
+    // Collect external ranges as (group_idx, offset, count) instead of individual atoms.
+    let mut external_ranges: Vec<(usize, u64, u64)> = Vec::new();
 
-    // First pass: add span's own groups and identify their literal dependencies.
     for &gi in span_group_indices {
         included_groups.insert(gi);
     }
@@ -672,87 +700,67 @@ fn build_single_span(
             included_groups.insert(li);
         } else {
             large_literal_groups.insert(li);
-            // Add all atoms from this large literal as external dependencies.
+            // ONE range entry for the entire large literal group.
             let lg = &groups[li];
-            for i in 0..lg.count {
-                external_atoms.insert(lg.base_id.offset(i));
-            }
+            external_ranges.push((li, 0, lg.count));
         }
     }
 
     // Check for small duplicatable chains from earlier phases.
-    // Walk backward from span groups to find small producer chains that
-    // are entirely in earlier phases and small enough to duplicate.
     let mut to_duplicate: BTreeSet<usize> = BTreeSet::new();
     for &gi in span_group_indices {
         find_duplicatable_deps(
-            gi,
-            groups,
-            producers,
-            is_literal,
-            group_phase,
-            phase_idx,
-            &span_set,
-            &mut to_duplicate,
+            gi, groups, producers, is_literal, group_phase, phase_idx,
+            &span_set, &mut to_duplicate,
         );
     }
     for &di in &to_duplicate {
         included_groups.insert(di);
-        // Also include literal deps of duplicated groups.
         collect_literal_deps(di, groups, producers, is_literal, &mut literal_groups_needed);
     }
-    // Apply same size threshold for newly discovered literal deps.
     for &li in &literal_groups_needed {
         if large_literal_groups.contains(&li) {
-            continue; // Already handled as external.
+            continue;
         }
         if groups[li].count < LITERAL_INLINE_THRESHOLD {
             included_groups.insert(li);
         } else {
             large_literal_groups.insert(li);
             let lg = &groups[li];
-            for i in 0..lg.count {
-                external_atoms.insert(lg.base_id.offset(i));
-            }
+            external_ranges.push((li, 0, lg.count));
         }
     }
 
-    // Now identify external atoms: atoms referenced by included groups that
-    // come from groups NOT included in the span.
+    // Identify external dependencies: atoms referenced by included groups
+    // that come from groups NOT included in the span.
     for &gi in &included_groups {
         if is_literal[gi] {
-            continue; // Literals have no inputs.
+            continue;
         }
         let group = &groups[gi];
         for input in &group.inputs {
-            collect_external_atoms(
-                input,
-                group.count,
-                &group.op,
-                groups,
-                &included_groups,
-                &mut external_atoms,
+            collect_external_ranges_a(
+                input, group.count, &group.op, groups, &included_groups,
+                &mut external_ranges,
             );
         }
         // Handle IndirectLoad table_base.
         if let ScalarOp::IndirectLoad { table_base, .. } = &group.op {
             if let Some(table_gi) = find_group_idx(groups, *table_base) {
                 if !included_groups.contains(&table_gi) {
-                    // The entire table is external. Add all atoms.
                     let tg = &groups[table_gi];
-                    for i in 0..tg.count {
-                        external_atoms.insert(tg.base_id.offset(i));
-                    }
+                    external_ranges.push((table_gi, 0, tg.count));
                 }
             }
         }
     }
 
-    // Build the remapping: old AtomId -> new AtomId.
-    // Order: external input atoms first (as Literal identity placeholders),
-    // then included groups in their original topological order.
+    // Merge overlapping/adjacent ranges.
+    let external_ranges = merge_group_ranges_a(&mut external_ranges);
+
+    // Build the remapping using RangeAtomMap.
     let mut new_graph = NanoGraph::new();
-    let mut atom_remap: HashMap<AtomId, AtomId> = HashMap::new();
+    let mut atom_remap = RangeAtomMap::new();
 
     // Copy sym_dim info from original.
     for (name, &sd) in &original.sym_dim_names {
@@ -762,88 +770,225 @@ fn build_single_span(
         new_graph.sym_dim_bounds.insert(sd, bound);
     }
 
-    // Allocate placeholder groups for external input atoms.
-    // Group contiguous external atoms together for efficiency.
-    let input_mapping = allocate_external_inputs(&external_atoms, &mut new_graph, &mut atom_remap);
-
-    // Add included groups in topological order.
-    // We need topological order among included groups.
-    let included_sorted: Vec<usize> = included_groups.iter().copied().collect();
-    // Groups are already in insertion (topological) order in the NanoGraph,
-    // so BTreeSet iteration gives us ascending group index = topo order.
-
-    let mut group_output_remap: HashMap<usize, AtomId> = HashMap::new();
-    for &gi in &included_sorted {
-        let group = &groups[gi];
-        // Remap inputs.
-        let new_inputs: Vec<InputRef> = group
-            .inputs
-            .iter()
-            .map(|iref| remap_input_ref(iref, group.count, &atom_remap))
-            .collect();
-
-        // Handle op-specific remapping.
-        let new_op = remap_op(&group.op, &atom_remap);
-
-        let new_base = new_graph.push_group(
-            group.count,
-            new_op,
-            group.sym_dims.clone(),
-            group.reduce_dims.clone(),
-            new_inputs,
+    // Allocate placeholder groups for external input ranges.
+    let mut input_mapping: Vec<AtomMapping> = Vec::new();
+    for &(gi, offset, count) in &external_ranges {
+        let main_base = groups[gi].base_id.offset(offset);
+        let local_base = new_graph.push_group(
+            count,
+            ScalarOp::Literal(crate::numeric_scalar::NumericScalar::F32(0.0)),
+            vec![], vec![], vec![],
         );
+        atom_remap.insert_range(main_base, local_base, count);
+        input_mapping.push(AtomMapping {
+            main_base,
+            span_base: local_base,
+            count,
+        });
+    }
 
-        // Register all atoms in the remap.
-        for i in 0..group.count {
-            atom_remap.insert(group.base_id.offset(i), new_base.offset(i));
-        }
+    // Sort atom map before compute group processing.
+    atom_remap.sort();
+
+    // Add included groups in topological order (BTreeSet gives ascending = topo order).
+    let mut group_output_remap: HashMap<usize, AtomId> = HashMap::new();
+    for &gi in &included_groups {
+        let group = &groups[gi];
+        let new_inputs: Vec<InputRef> = group.inputs.iter()
+            .map(|iref| remap_input_ref_range(iref, &atom_remap))
+            .collect();
+        let new_op = remap_op_range(&group.op, &atom_remap);
+        let new_base = new_graph.push_group(
+            group.count, new_op, group.sym_dims.clone(),
+            group.reduce_dims.clone(), new_inputs,
+        );
+        atom_remap.insert_range(group.base_id, new_base, group.count);
         group_output_remap.insert(gi, new_base);
     }
 
-    // Determine outputs: atoms from span groups that are consumed by groups
-    // outside the span (in later phases or by other spans in the same phase),
-    // or that are graph outputs.
-    let mut output_mapping: Vec<(AtomId, AtomId)> = Vec::new();
-    let mut seen_outputs: HashSet<AtomId> = HashSet::new();
+    // Determine outputs as ranges.
+    let mut output_mapping: Vec<AtomMapping> = Vec::new();
+    let mut output_groups_emitted: HashSet<usize> = HashSet::new();
 
     for &gi in span_group_indices {
         let group = &groups[gi];
-
-        // Check if any atom in this group is a graph output.
-        for i in 0..group.count {
-            let old_atom = group.base_id.offset(i);
-            if output_atoms.contains(&old_atom) {
-                if let Some(&new_atom) = atom_remap.get(&old_atom) {
-                    if seen_outputs.insert(old_atom) {
-                        output_mapping.push((new_atom, old_atom));
-                    }
-                }
-            }
-        }
 
         // Check if any consumer is outside the span.
         let has_external_consumer = consumers[gi]
             .iter()
             .any(|&ci| !span_set.contains(&ci) && !to_duplicate.contains(&ci));
-        if has_external_consumer {
-            // All atoms in this group are potential outputs.
+
+        // Check if group has graph output atoms.
+        let has_graph_output = output_atoms.iter().any(|&out| group.contains(out));
+
+        if (has_external_consumer || has_graph_output) && !output_groups_emitted.contains(&gi) {
+            output_groups_emitted.insert(gi);
             let new_base = group_output_remap[&gi];
-            for i in 0..group.count {
-                let old_atom = group.base_id.offset(i);
-                if seen_outputs.insert(old_atom) {
-                    output_mapping.push((new_base.offset(i), old_atom));
-                }
-            }
+            output_mapping.push(AtomMapping {
+                main_base: group.base_id,
+                span_base: new_base,
+                count: group.count,
+            });
         }
     }
-
-    // Also mark duplicated groups' atoms as not needing output
-    // (they're internal to the span).
 
     Span {
         graph: new_graph,
         inputs: input_mapping,
         outputs: output_mapping,
+    }
+}
+
+/// Range-based external atom collection for spans_a.
+/// Collects (group_idx, offset, count) ranges instead of individual atoms.
+fn collect_external_ranges_a(
+    input: &InputRef,
+    count: u64,
+    op: &ScalarOp,
+    groups: &[AtomGroup],
+    included_groups: &BTreeSet<usize>,
+    external_ranges: &mut Vec<(usize, u64, u64)>,
+) {
+    let referenced_groups = resolve_producer_groups(input, count, groups);
+
+    let mut all_referenced = referenced_groups.clone();
+    match op {
+        ScalarOp::ReduceSum { reduce_count, reduce_stride, .. }
+        | ScalarOp::ReduceMax { reduce_count, reduce_stride, .. }
+            if *reduce_count > 1 && *reduce_stride != 0 =>
+        {
+            let extra = resolve_producer_groups_with_reduce(input, count, *reduce_count, *reduce_stride, groups);
+            for gi in extra {
+                if !all_referenced.contains(&gi) {
+                    all_referenced.push(gi);
+                }
+            }
+        }
+        _ => {}
+    }
+
+    for &gi in &all_referenced {
+        if !included_groups.contains(&gi) {
+            // Compute the range of atoms referenced from this external group.
+            let range = compute_referenced_range(input, count, op, gi, groups);
+            if let Some((offset, range_count)) = range {
+                external_ranges.push((gi, offset, range_count));
+            }
+        }
+    }
+}
+
+/// Compute (offset, count) within ext_group that the input references.
+fn compute_referenced_range(
+    input: &InputRef,
+    count: u64,
+    op: &ScalarOp,
+    ext_group_idx: usize,
+    groups: &[AtomGroup],
+) -> Option<(u64, u64)> {
+    let ext_group = &groups[ext_group_idx];
+    let (reduce_count, reduce_stride) = match op {
+        ScalarOp::ReduceSum { reduce_count, reduce_stride, .. }
+        | ScalarOp::ReduceMax { reduce_count, reduce_stride, .. }
+            if *reduce_count > 1 && *reduce_stride != 0 =>
+        {
+            (*reduce_count, *reduce_stride)
+        }
+        _ => (1, 0),
+    };
+
+    // Sample boundary atoms to find the range.
+    let sample_points = if count <= 128 {
+        (0..count).collect::<Vec<_>>()
+    } else {
+        let mut pts = Vec::new();
+        for i in 0..64u64 { pts.push(i); }
+        for i in (count.saturating_sub(64))..count { pts.push(i); }
+        pts.sort();
+        pts.dedup();
+        pts
+    };
+
+    let mut min_atom = u64::MAX;
+    let mut max_atom = 0u64;
+
+    for &i in &sample_points {
+        for k in 0..reduce_count {
+            let base = input.resolve(i, 0);
+            let atom = AtomId(base.0.wrapping_add((k as i64 * reduce_stride) as u64));
+            if ext_group.contains(atom) {
+                min_atom = min_atom.min(atom.0);
+                max_atom = max_atom.max(atom.0);
+            }
+        }
+    }
+
+    if min_atom <= max_atom {
+        let lo = min_atom.max(ext_group.base_id.0);
+        let hi = (max_atom + 1).min(ext_group.base_id.0 + ext_group.count);
+        let offset = lo - ext_group.base_id.0;
+        let range_count = hi - lo;
+        Some((offset, range_count))
+    } else {
+        None
+    }
+}
+
+/// Merge overlapping/adjacent ranges from the same group.
+fn merge_group_ranges_a(ranges: &mut Vec<(usize, u64, u64)>) -> Vec<(usize, u64, u64)> {
+    if ranges.is_empty() { return vec![]; }
+    ranges.sort_by_key(|&(gi, off, _)| (gi, off));
+    let mut merged: Vec<(usize, u64, u64)> = Vec::new();
+    for &(gi, off, count) in ranges.iter() {
+        if let Some(last) = merged.last_mut() {
+            if last.0 == gi && off <= last.1 + last.2 {
+                let new_end = (off + count).max(last.1 + last.2);
+                last.2 = new_end - last.1;
+                continue;
+            }
+        }
+        merged.push((gi, off, count));
+    }
+    merged
+}
+
+/// Remap InputRef using RangeAtomMap.
+fn remap_input_ref_range(input: &InputRef, atom_remap: &RangeAtomMap) -> InputRef {
+    match input {
+        InputRef::Broadcast(id) => InputRef::Broadcast(atom_remap.get(*id).unwrap_or(*id)),
+        InputRef::Affine { base, stride } => InputRef::Affine {
+            base: atom_remap.get(*base).unwrap_or(*base),
+            stride: *stride,
+        },
+        InputRef::Explicit(ids) => InputRef::Explicit(
+            ids.iter().map(|id| atom_remap.get(*id).unwrap_or(*id)).collect(),
+        ),
+        InputRef::SymAffine { base, stride_i, stride_k } => InputRef::SymAffine {
+            base: atom_remap.get(*base).unwrap_or(*base),
+            stride_i: *stride_i,
+            stride_k: *stride_k,
+        },
+        InputRef::StridedBroadcast { base, stride, repeat } => InputRef::StridedBroadcast {
+            base: atom_remap.get(*base).unwrap_or(*base),
+            stride: *stride,
+            repeat: *repeat,
+        },
+        InputRef::Modular { base, stride, modulus } => InputRef::Modular {
+            base: atom_remap.get(*base).unwrap_or(*base),
+            stride: *stride,
+            modulus: *modulus,
+        },
+    }
+}
+
+/// Remap ScalarOp fields using RangeAtomMap.
+fn remap_op_range(op: &ScalarOp, atom_remap: &RangeAtomMap) -> ScalarOp {
+    match op {
+        ScalarOp::IndirectLoad { table_base, output_dtype } => ScalarOp::IndirectLoad {
+            table_base: atom_remap.get(*table_base).unwrap_or(*table_base),
+            output_dtype: *output_dtype,
+        },
+        other => other.clone(),
     }
 }
 
@@ -1208,22 +1353,22 @@ pub fn validate_plan(plan: &ExecutionPlan, original: &NanoGraph) -> Vec<String> 
                 errors.push(format!("{}: {}", prefix, err));
             }
 
-            // Check that all declared outputs exist in the span's graph.
-            for &(local_atom, _main_atom) in &span.outputs {
-                if !span.graph.contains_atom(local_atom) {
+            // Check that all declared output base atoms exist in the span's graph.
+            for mapping in &span.outputs {
+                if !span.graph.contains_atom(mapping.span_base) {
                     errors.push(format!(
-                        "{}: declared output {} does not exist in span graph",
-                        prefix, local_atom
+                        "{}: declared output base {} does not exist in span graph",
+                        prefix, mapping.span_base
                     ));
                 }
             }
 
-            // Check that all declared inputs exist in the span's graph.
-            for &(_main_atom, local_atom) in &span.inputs {
-                if !span.graph.contains_atom(local_atom) {
+            // Check that all declared input base atoms exist in the span's graph.
+            for mapping in &span.inputs {
+                if !span.graph.contains_atom(mapping.span_base) {
                     errors.push(format!(
-                        "{}: declared input local atom {} does not exist in span graph",
-                        prefix, local_atom
+                        "{}: declared input base {} does not exist in span graph",
+                        prefix, mapping.span_base
                     ));
                 }
             }
@@ -1231,16 +1376,20 @@ pub fn validate_plan(plan: &ExecutionPlan, original: &NanoGraph) -> Vec<String> 
     }
 
     // Check that all original outputs are covered.
-    let all_outputs: HashSet<AtomId> = plan
-        .phases
-        .iter()
-        .flat_map(|p| p.spans.iter())
-        .flat_map(|s| s.outputs.iter())
-        .map(|&(_, main_atom)| main_atom)
-        .collect();
+    // Build a set of all main-graph atoms covered by output mappings.
+    let mut all_output_atoms: HashSet<AtomId> = HashSet::new();
+    for phase in &plan.phases {
+        for span in &phase.spans {
+            for mapping in &span.outputs {
+                for i in 0..mapping.count {
+                    all_output_atoms.insert(mapping.main_base.offset(i));
+                }
+            }
+        }
+    }
 
     for &out_atom in &original.outputs {
-        if !all_outputs.contains(&out_atom) {
+        if !all_output_atoms.contains(&out_atom) {
             errors.push(format!(
                 "Original graph output {} is not produced by any span",
                 out_atom
@@ -1248,26 +1397,29 @@ pub fn validate_plan(plan: &ExecutionPlan, original: &NanoGraph) -> Vec<String> 
         }
     }
 
-    // Check within-phase independence: no span in a phase reads an atom
-    // produced by another span in the same phase.
+    // Check within-phase independence using range-based checks.
     for (pi, phase) in plan.phases.iter().enumerate() {
-        // Collect all main-graph atoms produced by each span in this phase.
-        let mut produced_by_span: HashMap<AtomId, usize> = HashMap::new();
-        for (si, span) in phase.spans.iter().enumerate() {
-            for &(_, main_atom) in &span.outputs {
-                produced_by_span.insert(main_atom, si);
-            }
-        }
+        // Collect output ranges per span.
+        let span_output_ranges: Vec<&Vec<AtomMapping>> = phase.spans.iter()
+            .map(|s| &s.outputs).collect();
 
-        // Check: no span reads an atom produced by another span in this phase.
         for (si, span) in phase.spans.iter().enumerate() {
-            for &(main_atom, _) in &span.inputs {
-                if let Some(&producer_si) = produced_by_span.get(&main_atom) {
-                    if producer_si != si {
-                        errors.push(format!(
-                            "Phase {}: Span {} reads atom {} produced by Span {} (cross-span same-phase dependency)",
-                            pi, si, main_atom, producer_si
-                        ));
+            for input_mapping in &span.inputs {
+                // Check if this input range overlaps with any other span's output range.
+                for (other_si, other_outputs) in span_output_ranges.iter().enumerate() {
+                    if other_si == si { continue; }
+                    for other_mapping in other_outputs.iter() {
+                        // Check range overlap.
+                        let a_lo = input_mapping.main_base.0;
+                        let a_hi = a_lo + input_mapping.count;
+                        let b_lo = other_mapping.main_base.0;
+                        let b_hi = b_lo + other_mapping.count;
+                        if a_lo < b_hi && b_lo < a_hi {
+                            errors.push(format!(
+                                "Phase {}: Span {} reads atoms [{}, {}) produced by Span {} (cross-span same-phase dependency)",
+                                pi, si, a_lo, a_hi, other_si
+                            ));
+                        }
                     }
                 }
             }
@@ -1507,21 +1659,21 @@ mod tests {
                     errors.join("\n")
                 );
 
-                // All declared input local atoms should exist.
-                for &(main_atom, local_atom) in &span.inputs {
+                // All declared input base atoms should exist.
+                for mapping in &span.inputs {
                     assert!(
-                        span.graph.contains_atom(local_atom),
+                        span.graph.contains_atom(mapping.span_base),
                         "Phase {} Span {}: input local atom {} missing",
-                        pi, si, local_atom
+                        pi, si, mapping.span_base
                     );
                 }
 
-                // All declared output local atoms should exist.
-                for &(local_atom, main_atom) in &span.outputs {
+                // All declared output base atoms should exist.
+                for mapping in &span.outputs {
                     assert!(
-                        span.graph.contains_atom(local_atom),
+                        span.graph.contains_atom(mapping.span_base),
                         "Phase {} Span {}: output local atom {} missing",
-                        pi, si, local_atom
+                        pi, si, mapping.span_base
                     );
                 }
             }
@@ -1536,19 +1688,25 @@ mod tests {
         let plan = plan_execution(&g, 4);
 
         for (pi, phase) in plan.phases.iter().enumerate() {
-            let mut produced: HashMap<AtomId, usize> = HashMap::new();
+            // Build a map from main atom ranges to span index using output mappings.
+            let mut produced_ranges: Vec<(usize, &AtomMapping)> = Vec::new();
             for (si, span) in phase.spans.iter().enumerate() {
-                for &(_, main_atom) in &span.outputs {
-                    produced.insert(main_atom, si);
+                for mapping in &span.outputs {
+                    produced_ranges.push((si, mapping));
                 }
             }
             for (si, span) in phase.spans.iter().enumerate() {
-                for &(main_atom, _) in &span.inputs {
-                    if let Some(&prod_si) = produced.get(&main_atom) {
-                        assert_eq!(
-                            prod_si, si,
-                            "Phase {}: Span {} reads atom {} produced by Span {} (violation!)",
-                            pi, si, main_atom, prod_si
+                for input_mapping in &span.inputs {
+                    for &(other_si, other_mapping) in &produced_ranges {
+                        if other_si == si { continue; }
+                        let a_lo = input_mapping.main_base.0;
+                        let a_hi = a_lo + input_mapping.count;
+                        let b_lo = other_mapping.main_base.0;
+                        let b_hi = b_lo + other_mapping.count;
+                        assert!(
+                            a_lo >= b_hi || b_lo >= a_hi,
+                            "Phase {}: Span {} reads atoms [{}, {}) produced by Span {} (violation!)",
+                            pi, si, a_lo, a_hi, other_si
                         );
                     }
                 }
@@ -1562,17 +1720,17 @@ mod tests {
         let (g, _, _, _, _) = test_graphs::matmul_chain(4, 8, 16, 16, 32);
         let plan = plan_execution(&g, 4);
 
-        let all_span_outputs: HashSet<AtomId> = plan
-            .phases
-            .iter()
-            .flat_map(|p| p.spans.iter())
-            .flat_map(|s| s.outputs.iter())
-            .map(|&(_, main)| main)
-            .collect();
-
+        // Check all original outputs are covered by span output ranges.
         for &out in &g.outputs {
+            let covered = plan.phases.iter()
+                .flat_map(|p| p.spans.iter())
+                .flat_map(|s| s.outputs.iter())
+                .any(|mapping| {
+                    out.0 >= mapping.main_base.0
+                        && out.0 < mapping.main_base.0 + mapping.count
+                });
             assert!(
-                all_span_outputs.contains(&out),
+                covered,
                 "Original output {} not covered by any span",
                 out
             );

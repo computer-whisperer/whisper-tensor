@@ -47,16 +47,26 @@ struct ExecutionPlan {
 struct Phase {
     spans: Vec<Span>,  // one per lane (may be empty for idle lanes)
 }
+/// A contiguous range of atoms mapped between main graph and span graph.
+struct AtomMapping {
+    main_base: AtomId,   // start in the main graph's atom space
+    span_base: AtomId,   // start in the span graph's atom space
+    count: u64,          // number of contiguous atoms
+}
 struct Span {
     /// Self-contained NanoGraph for this span's computation.
     graph: NanoGraph,
-    /// Which atoms from the shared values buffer this span reads.
-    /// (source atom ID in main graph, local atom ID in span graph)
-    inputs: Vec<(AtomId, AtomId)>,
-    /// Which atoms this span writes back to the shared values buffer.
-    /// (local atom ID in span graph, target atom ID in main graph)
-    outputs: Vec<(AtomId, AtomId)>,
+    /// Ranges of atoms this span reads from the shared values buffer.
+    inputs: Vec<AtomMapping>,
+    /// Ranges of atoms this span writes back to the shared values buffer.
+    outputs: Vec<AtomMapping>,
 }
+```
+
+**IMPORTANT: Use ranges, not individual atom IDs.** A weight matrix with
+589K atoms should be ONE AtomMapping entry, not 589K individual pairs.
+All span input/output declarations MUST be O(num_groups), not O(num_atoms).
+Previous attempts that used `Vec<(AtomId, AtomId)>` caused OOM on GPT-2.
 ```
 
 ### Validation

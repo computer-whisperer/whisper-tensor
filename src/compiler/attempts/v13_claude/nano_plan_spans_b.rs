@@ -31,20 +31,25 @@ const LITERAL_INLINE_THRESHOLD: u64 = 1024;
 
 // ─── Public types ────────────────────────────────────────────────────────────
 
+/// A contiguous range of atoms mapped between main graph and span graph.
+#[derive(Debug, Clone)]
+pub struct AtomMapping {
+    pub main_base: AtomId,
+    pub span_base: AtomId,
+    pub count: u64,
+}
+
 /// A self-contained execution span with its own NanoGraph.
 pub struct Span {
     /// Self-contained NanoGraph for this span's computation.
     pub graph: NanoGraph,
-    /// External atoms this span reads: (main graph AtomId, span-local AtomId).
-    /// These must be provided by earlier phases via the shared values buffer.
-    pub inputs: Vec<(AtomId, AtomId)>,
-    /// Atoms this span produces that other spans need:
-    /// (span-local AtomId, main graph AtomId).
-    pub outputs: Vec<(AtomId, AtomId)>,
-    /// Mapping from main-graph AtomId to span-local AtomId for duplicated
-    /// Literal groups. Used by the runtime to inject weight/input values
-    /// into the span's Literal placeholders.
-    pub literal_map: Vec<(AtomId, AtomId)>,
+    /// Contiguous ranges of atoms this span reads from the main graph.
+    pub inputs: Vec<AtomMapping>,
+    /// Contiguous ranges of atoms this span produces for other spans.
+    pub outputs: Vec<AtomMapping>,
+    /// Contiguous ranges mapping main-graph atoms to span-local atoms for
+    /// duplicated Literal groups.
+    pub literal_map: Vec<AtomMapping>,
 }
 
 /// One phase of execution (work between two consecutive barriers).
@@ -895,7 +900,7 @@ fn extract_span_graphs(
     num_phases: usize,
     is_literal: &[bool],
     span_assignments: &[Vec<Vec<SpanWork>>],
-    span_outputs: &[Vec<HashSet<u64>>],
+    _span_outputs: &[Vec<HashSet<u64>>],
     group_phase: &[usize],
 ) -> Vec<Phase> {
     let mut phases = Vec::with_capacity(num_phases);
@@ -905,14 +910,12 @@ fn extract_span_graphs(
 
         for lane_idx in 0..num_lanes {
             let works = &span_assignments[phase_idx][lane_idx];
-            let outputs_needed = &span_outputs[phase_idx][lane_idx];
 
             let span = extract_single_span(
                 source_graph,
                 groups,
                 is_literal,
                 works,
-                outputs_needed,
                 group_phase,
                 phase_idx,
             );
@@ -925,13 +928,50 @@ fn extract_span_graphs(
     phases
 }
 
+/// Range-based atom map for efficient lookup.
+struct RangeAtomMap {
+    ranges: Vec<(u64, u64, u64)>, // (main_base, span_base, count)
+}
+impl RangeAtomMap {
+    fn new() -> Self { Self { ranges: Vec::new() } }
+    fn insert_range(&mut self, main_base: u64, span_base: u64, count: u64) {
+        self.ranges.push((main_base, span_base, count));
+    }
+    fn sort(&mut self) { self.ranges.sort_by_key(|&(base, _, _)| base); }
+    fn get(&self, main_id: u64) -> Option<AtomId> {
+        let idx = self.ranges.partition_point(|&(base, _, _)| base <= main_id);
+        if idx == 0 { return None; }
+        let (base, span_base, count) = self.ranges[idx - 1];
+        let offset = main_id.wrapping_sub(base);
+        if offset < count { Some(AtomId(span_base + offset)) } else { None }
+    }
+}
+
+/// Merge overlapping/adjacent ranges.
+fn merge_group_ranges_b(ranges: &mut Vec<(usize, u64, u64)>) -> Vec<(usize, u64, u64)> {
+    if ranges.is_empty() { return vec![]; }
+    ranges.sort_by_key(|&(gi, off, _)| (gi, off));
+    let mut merged: Vec<(usize, u64, u64)> = Vec::new();
+    for &(gi, off, count) in ranges.iter() {
+        if let Some(last) = merged.last_mut() {
+            if last.0 == gi && off <= last.1 + last.2 {
+                let new_end = (off + count).max(last.1 + last.2);
+                last.2 = new_end - last.1;
+                continue;
+            }
+        }
+        merged.push((gi, off, count));
+    }
+    merged
+}
+
 /// Extract a single span's self-contained NanoGraph.
+/// All operations are O(num_groups), not O(num_atoms).
 fn extract_single_span(
     source_graph: &NanoGraph,
     groups: &[AtomGroup],
     is_literal: &[bool],
     works: &[SpanWork],
-    outputs_needed: &HashSet<u64>,
     group_phase: &[usize],
     phase_idx: usize,
 ) -> Span {
@@ -946,7 +986,6 @@ fn extract_single_span(
 
     let mut span_graph = NanoGraph::new();
 
-    // Copy sym_dim metadata from source graph.
     for (name, &sd) in &source_graph.sym_dim_names {
         let new_sd = span_graph.sym_dim(name);
         if let Some(&bound) = source_graph.sym_dim_bounds.get(&sd) {
@@ -954,163 +993,342 @@ fn extract_single_span(
         }
     }
 
-    // Mapping: main-graph AtomId -> span-local AtomId.
-    // This is built incrementally as we add groups to the span.
-    let mut atom_map: HashMap<u64, AtomId> = HashMap::new();
+    let mut atom_map = RangeAtomMap::new();
 
-    // Track which main-graph groups we're including (for fast lookup).
-    // For split groups, we need to know the sub-range.
-    let mut included_groups: HashMap<usize, (u64, u64)> = HashMap::new(); // gi -> (offset, count)
+    // Track assigned work items for local coverage check.
+    let mut included_groups: HashMap<usize, (u64, u64)> = HashMap::new();
     for work in works {
         included_groups.insert(work.group_idx, (work.atom_offset, work.atom_count));
     }
 
-    // Collect all atoms this span produces.
-    let mut produced_atoms: HashSet<u64> = HashSet::new();
-    for work in works {
-        let group = &groups[work.group_idx];
-        let base = group.base_id.0 + work.atom_offset;
-        for i in 0..work.atom_count {
-            produced_atoms.insert(base + i);
-        }
-    }
-
-    // Phase 1: Identify ALL external atoms this span needs.
-    // Walk each work item's inputs and find atoms not produced by this span.
-    let mut external_atoms: BTreeSet<u64> = BTreeSet::new(); // sorted for determinism
-    let mut needed_literals: BTreeSet<usize> = BTreeSet::new(); // literal group indices
+    // Phase 1: Identify needed literal groups and external dependency ranges.
+    let mut needed_literals: BTreeSet<usize> = BTreeSet::new();
+    let mut external_ranges: Vec<(usize, u64, u64)> = Vec::new();
 
     for work in works {
         let group = &groups[work.group_idx];
-        let needed = collect_all_needed_atoms(groups, work, is_literal);
-        for atom_raw in needed {
-            if produced_atoms.contains(&atom_raw) {
-                continue; // Produced within this span.
-            }
-            // Check if it's from a literal group.
-            if let Some(gi) = find_group_idx(groups, AtomId(atom_raw)) {
-                if is_literal[gi] {
-                    needed_literals.insert(gi);
-                    continue;
-                }
-            }
-            external_atoms.insert(atom_raw);
-        }
+        // Find producer groups for this work item.
+        collect_needed_groups_b(
+            group, work.atom_offset, work.atom_count, groups, is_literal,
+            &included_groups, &mut needed_literals, &mut external_ranges,
+        );
     }
 
-    // Phase 2: Add duplicated Literal groups (small ones only).
-    // Large literals become external inputs to avoid memory explosion.
+    // Phase 2: Add small literal groups; large ones become external.
+    let mut inlined_literals: BTreeSet<usize> = BTreeSet::new();
     for &lit_gi in &needed_literals {
         let lit_group = &groups[lit_gi];
         if lit_group.count < LITERAL_INLINE_THRESHOLD {
-            // Small literal: duplicate into span.
             let local_base = span_graph.push_group(
-                lit_group.count,
-                lit_group.op.clone(),
-                lit_group.sym_dims.clone(),
-                lit_group.reduce_dims.clone(),
-                vec![], // Literals have no inputs
+                lit_group.count, lit_group.op.clone(),
+                lit_group.sym_dims.clone(), lit_group.reduce_dims.clone(), vec![],
             );
-            for i in 0..lit_group.count {
-                atom_map.insert(lit_group.base_id.0 + i, AtomId(local_base.0 + i));
-            }
+            atom_map.insert_range(lit_group.base_id.0, local_base.0, lit_group.count);
+            inlined_literals.insert(lit_gi);
         } else {
-            // Large literal (weight matrix): treat as external input.
-            for i in 0..lit_group.count {
-                external_atoms.insert(lit_group.base_id.0 + i);
-            }
+            external_ranges.push((lit_gi, 0, lit_group.count));
         }
     }
 
-    // Phase 3: Add input placeholder groups for external atoms.
-    // Each external atom becomes a single-atom Literal(0.0) placeholder in the span
-    // graph. The runtime will overwrite these with actual values.
-    let mut span_inputs: Vec<(AtomId, AtomId)> = Vec::new();
-    for &atom_raw in &external_atoms {
-        // Determine the dtype from the source group's output_dtype.
-        let local_id = span_graph.push_atom(
+    let external_ranges = merge_group_ranges_b(&mut external_ranges);
+
+    // Phase 3: Add input placeholder groups for external ranges.
+    let mut input_mappings: Vec<AtomMapping> = Vec::new();
+    for &(gi, offset, count) in &external_ranges {
+        let main_base = groups[gi].base_id.0 + offset;
+        let local_base = span_graph.push_group(
+            count,
             ScalarOp::Literal(crate::numeric_scalar::NumericScalar::F32(0.0)),
-            vec![],
-            vec![],
-            vec![],
+            vec![], vec![], vec![],
         );
-        atom_map.insert(atom_raw, local_id);
-        span_inputs.push((AtomId(atom_raw), local_id));
+        atom_map.insert_range(main_base, local_base.0, count);
+        input_mappings.push(AtomMapping {
+            main_base: AtomId(main_base),
+            span_base: local_base,
+            count,
+        });
     }
 
-    // Phase 4: Add the span's compute groups with remapped InputRefs.
-    // Process in group_idx order (which is topological order in the source graph).
+    // Sort atom map before compute group processing.
+    atom_map.sort();
+
+    // Phase 4: Add compute groups with remapped InputRefs.
     let mut sorted_works: Vec<&SpanWork> = works.iter().collect();
     sorted_works.sort_by_key(|w| (w.group_idx, w.atom_offset));
 
     for work in &sorted_works {
         let group = &groups[work.group_idx];
+        let remapped_inputs = remap_inputs_b(
+            &group.inputs, work.atom_count, work.atom_offset, &atom_map,
+        );
+        let local_base = span_graph.push_group(
+            work.atom_count, group.op.clone(),
+            group.sym_dims.clone(), group.reduce_dims.clone(), remapped_inputs,
+        );
+        let main_base = group.base_id.0 + work.atom_offset;
+        atom_map.insert_range(main_base, local_base.0, work.atom_count);
+    }
 
-        if work.atom_offset == 0 && work.atom_count == group.count {
-            // Full group — remap inputs and add.
-            let remapped_inputs = remap_inputs(&group.inputs, group.count, 0, &atom_map);
-            let local_base = span_graph.push_group(
-                group.count,
-                group.op.clone(),
-                group.sym_dims.clone(),
-                group.reduce_dims.clone(),
-                remapped_inputs,
-            );
-            for i in 0..group.count {
-                atom_map.insert(group.base_id.0 + i, AtomId(local_base.0 + i));
-            }
-        } else {
-            // Sub-range of a group — create a new group for the slice.
-            let remapped_inputs =
-                remap_inputs(&group.inputs, work.atom_count, work.atom_offset, &atom_map);
-
-            // For ReduceSum/ReduceMax, the op parameters stay the same (reduce_count
-            // and reduce_stride are per-atom, not per-group).
-            let local_base = span_graph.push_group(
-                work.atom_count,
-                group.op.clone(),
-                group.sym_dims.clone(),
-                group.reduce_dims.clone(),
-                remapped_inputs,
-            );
-            for i in 0..work.atom_count {
-                atom_map.insert(
-                    group.base_id.0 + work.atom_offset + i,
-                    AtomId(local_base.0 + i),
-                );
-            }
+    // Phase 5: Build output mappings — one per work item (all produced atoms are outputs).
+    let mut output_mappings: Vec<AtomMapping> = Vec::new();
+    for work in &sorted_works {
+        let group = &groups[work.group_idx];
+        let main_base = group.base_id.0 + work.atom_offset;
+        if let Some(local_base) = atom_map.get(main_base) {
+            output_mappings.push(AtomMapping {
+                main_base: AtomId(main_base),
+                span_base: local_base,
+                count: work.atom_count,
+            });
         }
     }
 
-    // Phase 5: Compute outputs — atoms produced by this span that are needed
-    // by other spans.
-    let mut span_outputs_vec: Vec<(AtomId, AtomId)> = Vec::new();
-    for &atom_raw in outputs_needed {
-        if let Some(&local_id) = atom_map.get(&atom_raw) {
-            span_outputs_vec.push((local_id, AtomId(atom_raw)));
-        }
-    }
-    span_outputs_vec.sort_by_key(|&(_, main_id)| main_id.0);
-
-    // Phase 6: Build literal_map — mapping from main-graph AtomId to local
-    // AtomId for all duplicated Literal atoms.
-    let mut literal_map: Vec<(AtomId, AtomId)> = Vec::new();
-    for &lit_gi in &needed_literals {
+    // Phase 6: Build literal_map as ranges.
+    let mut literal_mappings: Vec<AtomMapping> = Vec::new();
+    for &lit_gi in &inlined_literals {
         let lit_group = &groups[lit_gi];
-        for i in 0..lit_group.count {
-            let main_atom = lit_group.base_id.0 + i;
-            if let Some(&local_id) = atom_map.get(&main_atom) {
-                literal_map.push((AtomId(main_atom), local_id));
-            }
+        if let Some(local_base) = atom_map.get(lit_group.base_id.0) {
+            literal_mappings.push(AtomMapping {
+                main_base: lit_group.base_id,
+                span_base: local_base,
+                count: lit_group.count,
+            });
         }
     }
-    literal_map.sort_by_key(|&(main_id, _)| main_id.0);
 
     Span {
         graph: span_graph,
-        inputs: span_inputs,
-        outputs: span_outputs_vec,
-        literal_map,
+        inputs: input_mappings,
+        outputs: output_mappings,
+        literal_map: literal_mappings,
+    }
+}
+
+/// Collect needed literal groups and external dependency ranges for a work item.
+fn collect_needed_groups_b(
+    group: &AtomGroup,
+    atom_offset: u64,
+    atom_count: u64,
+    all_groups: &[AtomGroup],
+    is_literal: &[bool],
+    included_groups: &HashMap<usize, (u64, u64)>,
+    needed_literals: &mut BTreeSet<usize>,
+    external_ranges: &mut Vec<(usize, u64, u64)>,
+) {
+    // Find producer groups from InputRefs.
+    let mut producer_gis: BTreeSet<usize> = BTreeSet::new();
+    for input in &group.inputs {
+        // Compute the read range for this input over the work item's slice.
+        let range = compute_input_read_range(input, atom_offset, atom_count);
+        if let Some((lo, hi)) = range {
+            for (gi, g) in all_groups.iter().enumerate() {
+                let g_lo = g.base_id.0;
+                let g_hi = g_lo + g.count;
+                if lo < g_hi && hi > g_lo {
+                    producer_gis.insert(gi);
+                }
+            }
+        }
+    }
+
+    // Reduce strided access.
+    match &group.op {
+        ScalarOp::ReduceSum { reduce_count, reduce_stride, .. }
+        | ScalarOp::ReduceMax { reduce_count, reduce_stride, .. }
+            if *reduce_count > 1 && *reduce_stride != 0 =>
+        {
+            for input in &group.inputs {
+                let range = compute_input_read_range_with_reduce(
+                    input, atom_offset, atom_count, *reduce_count, *reduce_stride,
+                );
+                if let Some((lo, hi)) = range {
+                    for (gi, g) in all_groups.iter().enumerate() {
+                        let g_lo = g.base_id.0;
+                        let g_hi = g_lo + g.count;
+                        if lo < g_hi && hi > g_lo {
+                            producer_gis.insert(gi);
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+
+    // IndirectLoad table.
+    if let ScalarOp::IndirectLoad { table_base, .. } = &group.op {
+        if let Some(gi) = find_group_idx(all_groups, *table_base) {
+            producer_gis.insert(gi);
+        }
+    }
+
+    for pi in producer_gis {
+        if is_literal[pi] {
+            needed_literals.insert(pi);
+            continue;
+        }
+        // Check if this producer is locally covered.
+        if let Some(&(work_off, work_count)) = included_groups.get(&pi) {
+            // Compute what atoms from this producer the current group reads.
+            let prod = &all_groups[pi];
+            let mut read_lo = u64::MAX;
+            let mut read_hi = 0u64;
+            for input in &group.inputs {
+                let range = compute_input_read_range(input, atom_offset, atom_count);
+                if let Some((lo, hi)) = range {
+                    let g_lo = prod.base_id.0;
+                    let g_hi = g_lo + prod.count;
+                    if lo < g_hi && hi > g_lo {
+                        read_lo = read_lo.min(lo.max(g_lo));
+                        read_hi = read_hi.max(hi.min(g_hi));
+                    }
+                }
+            }
+            if read_lo < read_hi {
+                let off_lo = read_lo - prod.base_id.0;
+                let off_hi = read_hi - prod.base_id.0;
+                // Check if the read range is within the local assignment.
+                if off_lo >= work_off && off_hi <= work_off + work_count {
+                    continue; // Fully local.
+                }
+            }
+            // Partially covered or out of range -- add uncovered portion.
+            // For simplicity, add the full read range as external.
+            if read_lo < read_hi {
+                let offset = read_lo - prod.base_id.0;
+                let count = read_hi - read_lo;
+                external_ranges.push((pi, offset, count));
+            }
+        } else {
+            // Not assigned at all — fully external.
+            // Compute the actual read range.
+            let prod = &all_groups[pi];
+            let mut read_lo = u64::MAX;
+            let mut read_hi = 0u64;
+            for input in &group.inputs {
+                let range = compute_input_read_range(input, atom_offset, atom_count);
+                if let Some((lo, hi)) = range {
+                    let g_lo = prod.base_id.0;
+                    let g_hi = g_lo + prod.count;
+                    if lo < g_hi && hi > g_lo {
+                        read_lo = read_lo.min(lo.max(g_lo));
+                        read_hi = read_hi.max(hi.min(g_hi));
+                    }
+                }
+            }
+            // Also check reduce stride.
+            match &group.op {
+                ScalarOp::ReduceSum { reduce_count, reduce_stride, .. }
+                | ScalarOp::ReduceMax { reduce_count, reduce_stride, .. }
+                    if *reduce_count > 1 && *reduce_stride != 0 =>
+                {
+                    for input in &group.inputs {
+                        let range = compute_input_read_range_with_reduce(
+                            input, atom_offset, atom_count, *reduce_count, *reduce_stride,
+                        );
+                        if let Some((lo, hi)) = range {
+                            let g_lo = prod.base_id.0;
+                            let g_hi = g_lo + prod.count;
+                            if lo < g_hi && hi > g_lo {
+                                read_lo = read_lo.min(lo.max(g_lo));
+                                read_hi = read_hi.max(hi.min(g_hi));
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+            if read_lo < read_hi {
+                let offset = read_lo - prod.base_id.0;
+                let count = read_hi - read_lo;
+                external_ranges.push((pi, offset, count));
+            }
+        }
+    }
+}
+
+/// Compute the [lo, hi) atom range that an InputRef reads for a work item slice.
+fn compute_input_read_range(input: &InputRef, offset: u64, count: u64) -> Option<(u64, u64)> {
+    compute_input_read_range_with_reduce(input, offset, count, 1, 0)
+}
+
+fn compute_input_read_range_with_reduce(
+    input: &InputRef, offset: u64, count: u64,
+    reduce_count: u64, reduce_stride: i64,
+) -> Option<(u64, u64)> {
+    if count == 0 { return None; }
+    let first = input.resolve(offset, 0).0 as i64;
+    let last = input.resolve(offset + count - 1, 0).0 as i64;
+    let min_reduce = if reduce_count > 1 { 0i64.min(reduce_stride * (reduce_count as i64 - 1)) } else { 0 };
+    let max_reduce = if reduce_count > 1 { 0i64.max(reduce_stride * (reduce_count as i64 - 1)) } else { 0 };
+    let lo = first.min(last) + min_reduce;
+    let hi = first.max(last) + max_reduce + 1;
+    Some((lo as u64, hi as u64))
+}
+
+/// Remap InputRefs using RangeAtomMap.
+fn remap_inputs_b(
+    inputs: &[InputRef], count: u64, offset: u64, atom_map: &RangeAtomMap,
+) -> Vec<InputRef> {
+    inputs.iter().map(|input| remap_single_input_b(input, count, offset, atom_map)).collect()
+}
+
+fn remap_single_input_b(
+    input: &InputRef, count: u64, offset: u64, atom_map: &RangeAtomMap,
+) -> InputRef {
+    match input {
+        InputRef::Broadcast(id) => {
+            InputRef::Broadcast(atom_map.get(id.0).unwrap_or(*id))
+        }
+        InputRef::Affine { base, stride } => {
+            let new_base_raw = base.0.wrapping_add((*stride as i64 * offset as i64) as u64);
+            InputRef::Affine {
+                base: atom_map.get(new_base_raw).unwrap_or(AtomId(new_base_raw)),
+                stride: *stride,
+            }
+        }
+        InputRef::StridedBroadcast { base, stride, repeat } => {
+            let block_idx = (offset / repeat) as i64;
+            let new_base_raw = base.0.wrapping_add((stride * block_idx) as u64);
+            let new_offset_in_block = offset % repeat;
+            if new_offset_in_block == 0 {
+                InputRef::StridedBroadcast {
+                    base: atom_map.get(new_base_raw).unwrap_or(AtomId(new_base_raw)),
+                    stride: *stride,
+                    repeat: *repeat,
+                }
+            } else {
+                let mut ids = Vec::with_capacity(count as usize);
+                for i in 0..count {
+                    let main_id = input.resolve(offset + i, 0);
+                    ids.push(atom_map.get(main_id.0).unwrap_or(main_id));
+                }
+                InputRef::Explicit(ids)
+            }
+        }
+        InputRef::Modular { base, stride, modulus } => {
+            InputRef::Modular {
+                base: atom_map.get(base.0).unwrap_or(*base),
+                stride: *stride,
+                modulus: *modulus,
+            }
+        }
+        InputRef::SymAffine { base, stride_i, stride_k } => {
+            let new_base_raw = base.0.wrapping_add((*stride_i as i64 * offset as i64) as u64);
+            InputRef::SymAffine {
+                base: atom_map.get(new_base_raw).unwrap_or(AtomId(new_base_raw)),
+                stride_i: *stride_i,
+                stride_k: *stride_k,
+            }
+        }
+        InputRef::Explicit(ids) => {
+            let start = offset as usize;
+            let end = (offset + count) as usize;
+            let slice = if end <= ids.len() { &ids[start..end] } else { &ids[start..] };
+            InputRef::Explicit(
+                slice.iter().map(|id| atom_map.get(id.0).unwrap_or(*id)).collect(),
+            )
+        }
     }
 }
 
@@ -1532,22 +1750,22 @@ impl SpanPlan {
                     errors.push(format!("{}: {}", prefix, err));
                 }
 
-                // Validate inputs: each local AtomId should exist in the span graph.
-                for &(main_id, local_id) in &span.inputs {
-                    if !span.graph.contains_atom(local_id) {
+                // Validate inputs: each base atom should exist in the span graph.
+                for mapping in &span.inputs {
+                    if !span.graph.contains_atom(mapping.span_base) {
                         errors.push(format!(
-                            "{}: input (main={}, local={}) — local atom not in span graph",
-                            prefix, main_id, local_id
+                            "{}: input base (main={}, local={}) — local atom not in span graph",
+                            prefix, mapping.main_base, mapping.span_base
                         ));
                     }
                 }
 
-                // Validate outputs: each local AtomId should exist in the span graph.
-                for &(local_id, main_id) in &span.outputs {
-                    if !span.graph.contains_atom(local_id) {
+                // Validate outputs: each base atom should exist in the span graph.
+                for mapping in &span.outputs {
+                    if !span.graph.contains_atom(mapping.span_base) {
                         errors.push(format!(
-                            "{}: output (local={}, main={}) — local atom not in span graph",
-                            prefix, local_id, main_id
+                            "{}: output base (local={}, main={}) — local atom not in span graph",
+                            prefix, mapping.span_base, mapping.main_base
                         ));
                     }
                 }
@@ -1581,31 +1799,26 @@ mod tests {
     /// by another span in the same phase.
     fn assert_phase_independence(plan: &SpanPlan) {
         for (pi, phase) in plan.phases.iter().enumerate() {
-            // Collect outputs of each span in this phase.
-            let mut span_output_mains: Vec<HashSet<u64>> = Vec::new();
-            for span in &phase.spans {
-                let mains: HashSet<u64> = span.outputs.iter().map(|&(_, m)| m.0).collect();
-                span_output_mains.push(mains);
-            }
+            // Collect output ranges per span.
+            let span_output_ranges: Vec<Vec<(u64, u64)>> = phase.spans.iter().map(|span| {
+                span.outputs.iter().map(|m| (m.main_base.0, m.main_base.0 + m.count)).collect()
+            }).collect();
 
-            // Check: no span's inputs include another span's outputs from this phase.
+            // Check: no span's inputs overlap another span's outputs in the same phase.
             for (li, span) in phase.spans.iter().enumerate() {
-                let my_input_mains: HashSet<u64> =
-                    span.inputs.iter().map(|&(m, _)| m.0).collect();
-
-                for (other_li, other_outputs) in span_output_mains.iter().enumerate() {
-                    if other_li == li {
-                        continue;
+                for input_mapping in &span.inputs {
+                    let in_lo = input_mapping.main_base.0;
+                    let in_hi = in_lo + input_mapping.count;
+                    for (other_li, other_ranges) in span_output_ranges.iter().enumerate() {
+                        if other_li == li { continue; }
+                        for &(out_lo, out_hi) in other_ranges {
+                            assert!(
+                                in_lo >= out_hi || out_lo >= in_hi,
+                                "Phase {} Lane {} reads atoms from Lane {} in same phase",
+                                pi, li, other_li
+                            );
+                        }
                     }
-                    let overlap: Vec<u64> = my_input_mains
-                        .intersection(other_outputs)
-                        .copied()
-                        .collect();
-                    assert!(
-                        overlap.is_empty(),
-                        "Phase {} Lane {} reads atoms from Lane {} in same phase: {:?}",
-                        pi, li, other_li, overlap
-                    );
                 }
             }
         }
@@ -1823,15 +2036,23 @@ mod tests {
                 // Build inputs for this span: overwrite placeholder atoms
                 // with values from the shared buffer.
                 let mut span_inputs: HashMap<u64, NumericScalar> = HashMap::new();
-                for &(main_id, local_id) in &span.inputs {
-                    if let Some(val) = shared.get(&main_id.0) {
-                        span_inputs.insert(local_id.0, val.clone());
+                for mapping in &span.inputs {
+                    for i in 0..mapping.count {
+                        let main_id = mapping.main_base.0 + i;
+                        let local_id = mapping.span_base.0 + i;
+                        if let Some(val) = shared.get(&main_id) {
+                            span_inputs.insert(local_id, val.clone());
+                        }
                     }
                 }
                 // Also inject original input overrides into duplicated literals.
-                for &(main_id, local_id) in &span.literal_map {
-                    if let Some(val) = shared.get(&main_id.0) {
-                        span_inputs.insert(local_id.0, val.clone());
+                for mapping in &span.literal_map {
+                    for i in 0..mapping.count {
+                        let main_id = mapping.main_base.0 + i;
+                        let local_id = mapping.span_base.0 + i;
+                        if let Some(val) = shared.get(&main_id) {
+                            span_inputs.insert(local_id, val.clone());
+                        }
                     }
                 }
 
@@ -1840,9 +2061,13 @@ mod tests {
 
                 // Collect outputs.
                 let mut outputs = Vec::new();
-                for &(local_id, main_id) in &span.outputs {
-                    if let Some(val) = span_values.get(&local_id.0) {
-                        outputs.push((main_id.0, val.clone()));
+                for mapping in &span.outputs {
+                    for i in 0..mapping.count {
+                        let local_id = mapping.span_base.0 + i;
+                        let main_id = mapping.main_base.0 + i;
+                        if let Some(val) = span_values.get(&local_id) {
+                            outputs.push((main_id, val.clone()));
+                        }
                     }
                 }
                 phase_outputs.push(outputs);
