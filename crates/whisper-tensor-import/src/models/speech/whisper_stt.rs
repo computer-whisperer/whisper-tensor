@@ -36,6 +36,7 @@ pub(crate) fn build_whisper_supergraph(
 
     // Inputs and encoder pass.
     let audio_link = builder.new_audio_clip_link(rng);
+    builder.set_link_label(audio_link, "audio_input");
     let mel_link = SuperGraphNodeAudioClipToMelSpectrogram::new_and_add(
         &mut builder,
         audio_link,
@@ -58,6 +59,8 @@ pub(crate) fn build_whisper_supergraph(
     let encoder_weights_link = builder.new_model_link(rng);
     let decoder_weights_link = builder.new_model_link(rng);
     let encoder_hidden_link = builder.new_tensor_link(rng);
+    builder.set_link_label(encoder_weights_link, "encoder_weights");
+    builder.set_link_label(decoder_weights_link, "decoder_weights");
 
     let mut encoder_node = SuperGraphNodeModelExecution::new(
         rng,
@@ -535,6 +538,7 @@ pub(crate) fn build_whisper_supergraph(
 
     let output_token_link = {
         let out = builder.new_tensor_link(rng);
+        builder.set_link_label(out, "output_tokens");
         let (mut mg, input_map) = MilliOpGraph::new(
             [generated_tokens.global_id(), prefix_tokens_link.global_id()],
             rng,

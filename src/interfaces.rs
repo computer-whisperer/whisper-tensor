@@ -1459,6 +1459,17 @@ impl ImageGenerationInterface {
         let te_weights = builder.new_model_link(rng);
         let unet_weights = builder.new_model_link(rng);
         let vae_weights = builder.new_model_link(rng);
+        builder.set_link_label(positive_prompt_input, "prompt_positive");
+        builder.set_link_label(negative_prompt_input, "prompt_negative");
+        builder.set_link_label(initial_latent_input, "latent_initial");
+        builder.set_link_label(timesteps_input, "timesteps");
+        builder.set_link_label(dt_input, "dt");
+        builder.set_link_label(sigmas_input, "sigmas");
+        builder.set_link_label(iteration_count_input, "iteration_count");
+        builder.set_link_label(guidance_scale_input, "guidance_scale");
+        builder.set_link_label(te_weights, "text_encoder_weights");
+        builder.set_link_label(unet_weights, "unet_weights");
+        builder.set_link_label(vae_weights, "vae_decoder_weights");
 
         // Prompt tokenization inside the supergraph.
         let tokenizer_link =
@@ -1545,6 +1556,7 @@ impl ImageGenerationInterface {
         );
         let image_output =
             SuperGraphNodeTensorToImage::new_and_add(&mut builder, decoded_image_tensor, rng);
+        builder.set_link_label(image_output, "image_output");
 
         // Build outer graph
         let model_weights = vec![te_weights, unet_weights, vae_weights];
@@ -1600,6 +1612,18 @@ impl ImageGenerationInterface {
         let te2_weights = builder.new_model_link(rng);
         let unet_weights = builder.new_model_link(rng);
         let vae_weights = builder.new_model_link(rng);
+        builder.set_link_label(positive_prompt_input, "prompt_positive");
+        builder.set_link_label(negative_prompt_input, "prompt_negative");
+        builder.set_link_label(initial_latent_input, "latent_initial");
+        builder.set_link_label(timesteps_input, "timesteps");
+        builder.set_link_label(dt_input, "dt");
+        builder.set_link_label(sigmas_input, "sigmas");
+        builder.set_link_label(iteration_count_input, "iteration_count");
+        builder.set_link_label(guidance_scale_input, "guidance_scale");
+        builder.set_link_label(te1_weights, "text_encoder_1_weights");
+        builder.set_link_label(te2_weights, "text_encoder_2_weights");
+        builder.set_link_label(unet_weights, "unet_weights");
+        builder.set_link_label(vae_weights, "vae_decoder_weights");
 
         // Prompt tokenization inside the supergraph.
         let tokenizer_link =
@@ -1807,6 +1831,7 @@ impl ImageGenerationInterface {
         );
         let image_output =
             SuperGraphNodeTensorToImage::new_and_add(&mut builder, decoded_image_tensor, rng);
+        builder.set_link_label(image_output, "image_output");
 
         // Build outer graph
         let model_weights = vec![te1_weights, te2_weights, unet_weights, vae_weights];
@@ -1964,6 +1989,19 @@ impl ImageGenerationInterface {
         let t5_weights = builder.new_model_link(rng);
         let dit_weights = builder.new_model_link(rng);
         let vae_weights = builder.new_model_link(rng);
+        builder.set_link_label(positive_prompt_input, "prompt_positive");
+        builder.set_link_label(initial_latent_input, "latent_initial");
+        builder.set_link_label(timesteps_input, "timesteps");
+        builder.set_link_label(dt_input, "dt");
+        builder.set_link_label(sigmas_input, "sigmas");
+        builder.set_link_label(iteration_count_input, "iteration_count");
+        if let Some(gl) = guidance_scale_link {
+            builder.set_link_label(gl, "guidance_scale");
+        }
+        builder.set_link_label(clip_weights, "clip_l_weights");
+        builder.set_link_label(t5_weights, "t5_weights");
+        builder.set_link_label(dit_weights, "dit_weights");
+        builder.set_link_label(vae_weights, "vae_decoder_weights");
 
         // Prompt tokenization inside the supergraph.
         let clip_tokenizer_link =
@@ -2046,6 +2084,7 @@ impl ImageGenerationInterface {
             build_flux_vae_decode(&mut builder, rng, final_latent, vae_weights, 3);
         let image_output =
             SuperGraphNodeTensorToImage::new_and_add(&mut builder, decoded_image_tensor, rng);
+        builder.set_link_label(image_output, "image_output");
 
         // Build outer graph
         let model_weights = vec![clip_weights, t5_weights, dit_weights, vae_weights];
@@ -2135,6 +2174,19 @@ impl ImageGenerationInterface {
         let t5_weights = builder.new_model_link(rng);
         let transformer_weights = builder.new_model_link(rng);
         let vae_weights = builder.new_model_link(rng);
+        builder.set_link_label(positive_prompt_input, "prompt_positive");
+        builder.set_link_label(negative_prompt_input, "prompt_negative");
+        builder.set_link_label(initial_latent_input, "latent_initial");
+        builder.set_link_label(timesteps_input, "timesteps");
+        builder.set_link_label(dt_input, "dt");
+        builder.set_link_label(sigmas_input, "sigmas");
+        builder.set_link_label(iteration_count_input, "iteration_count");
+        builder.set_link_label(guidance_scale_input, "guidance_scale");
+        builder.set_link_label(clip_l_weights, "clip_l_weights");
+        builder.set_link_label(clip_g_weights, "clip_g_weights");
+        builder.set_link_label(t5_weights, "t5_weights");
+        builder.set_link_label(transformer_weights, "transformer_weights");
+        builder.set_link_label(vae_weights, "vae_decoder_weights");
 
         // Tokenizers
         let clip_tokenizer_link =
@@ -2434,6 +2486,7 @@ impl ImageGenerationInterface {
         );
         let image_output =
             SuperGraphNodeTensorToImage::new_and_add(&mut builder, decoded_image_tensor, rng);
+        builder.set_link_label(image_output, "image_output");
 
         let model_weights = vec![
             clip_l_weights,

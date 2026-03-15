@@ -99,6 +99,15 @@ fn build_f5_supergraph(vocab: &str, rng: &mut impl rand::Rng) -> TextToSpeechInt
     let time_steps_link = builder.new_tensor_link(rng);
     let iteration_count_link = builder.new_tensor_link(rng);
     let audio_tensor_output_link = builder.new_tensor_link(rng);
+    builder.set_link_label(text_input_link, "text");
+    builder.set_link_label(ref_audio_link, "reference_audio");
+    builder.set_link_label(max_duration_link, "max_duration");
+    builder.set_link_label(preprocess_weights, "preprocess_weights");
+    builder.set_link_label(transformer_weights, "transformer_weights");
+    builder.set_link_label(decode_weights, "decode_weights");
+    builder.set_link_label(time_steps_link, "time_steps");
+    builder.set_link_label(iteration_count_link, "iteration_count");
+    builder.set_link_label(audio_tensor_output_link, "raw_audio");
 
     let text_ids_link = SuperGraphNodeF5TextToTensor::new_and_add(
         &mut builder,
@@ -175,6 +184,7 @@ fn build_f5_supergraph(vocab: &str, rng: &mut impl rand::Rng) -> TextToSpeechInt
         SAMPLE_RATE,
         rng,
     );
+    builder.set_link_label(audio_output_link, "audio_output");
 
     // Build the top-level SuperGraph
     let sg_inputs = vec![

@@ -38,6 +38,9 @@ pub(super) fn build_rnn_supergraph(
     let token_context_input_link = super_graph_builder.new_tensor_link(rng);
     let model_input_link = super_graph_builder.new_model_link(rng);
     let cache_key = super_graph_builder.new_hash_link(rng);
+    super_graph_builder.set_link_label(cache_key, "cache_key");
+    super_graph_builder.set_link_label(model_input_link, "model_weights");
+    super_graph_builder.set_link_label(token_context_input_link, token_input_name);
 
     let state_ids: Vec<usize> = (0..state_pairs.len()).collect();
 
@@ -175,6 +178,9 @@ pub(super) fn build_rnn_supergraph(
         .iter()
         .map(|&id| (id, super_graph_builder.new_tensor_link(rng)))
         .collect();
+    for (id, link) in &final_state_output_links {
+        super_graph_builder.set_link_label(*link, format!("state_out_{}", state_pairs[*id].1));
+    }
 
     // Input processing in sub-graph: cast dtype + unsqueeze
     let adjusted_token_context = {
@@ -343,6 +349,7 @@ pub(super) fn build_rnn_supergraph(
         .collect();
 
     let outer_logit_output_link = super_graph_builder.new_tensor_link(rng);
+    super_graph_builder.set_link_label(outer_logit_output_link, logit_output_name);
 
     let mut input_links = vec![
         sub_model_input_link.to_any(),

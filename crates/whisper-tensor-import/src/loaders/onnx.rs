@@ -126,6 +126,10 @@ fn build_simple_transformer_supergraph(
     let model_input_link = super_graph_builder.new_model_link(rng);
     let raw_logit_output_link = super_graph_builder.new_tensor_link(rng);
     let cache_key = super_graph_builder.new_hash_link(rng);
+    super_graph_builder.set_link_label(cache_key, "cache_key");
+    super_graph_builder.set_link_label(model_input_link, "model_weights");
+    super_graph_builder.set_link_label(token_context_input_link, token_input_name);
+    super_graph_builder.set_link_label(raw_logit_output_link, "raw_logits");
 
     // Input processing: cast dtype + unsqueeze to match model rank
     let adjusted_token_context = {
@@ -204,6 +208,7 @@ fn build_simple_transformer_supergraph(
         );
 
         let processed_logit_output_link = super_graph_builder.new_tensor_link(rng);
+        super_graph_builder.set_link_label(processed_logit_output_link, logit_output_name);
         milli_graph.set_output_map(std::iter::once((
             x,
             processed_logit_output_link.global_id(),

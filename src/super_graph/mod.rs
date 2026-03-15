@@ -14,7 +14,8 @@ use crate::numeric_tensor_typed::TypedNumericTensorError;
 use crate::super_graph::cache::{SuperGraphCache, SuperGraphTensorCache};
 use crate::super_graph::data::SuperGraphData;
 pub use crate::super_graph::links::{
-    SuperGraphAnyLink, SuperGraphAtomicLinkKind, SuperGraphLink, SuperGraphLinkKind,
+    SuperGraphAnyLink, SuperGraphAtomicLinkKind, SuperGraphLink, SuperGraphLinkInfo,
+    SuperGraphLinkKind,
 };
 use crate::super_graph::nodes::{SuperGraphAnyNode, SuperGraphNode};
 use crate::super_graph::observer::SuperGraphObserver;
@@ -87,7 +88,7 @@ pub struct SuperGraph {
     pub input_links: HashSet<SuperGraphAnyLink>,
     pub output_links: HashSet<SuperGraphAnyLink>,
     pub nodes: HashMap<GlobalId, SuperGraphAnyNode>,
-    pub links_by_global_id: HashMap<GlobalId, SuperGraphAnyLink>,
+    pub links_by_global_id: HashMap<GlobalId, SuperGraphLinkInfo>,
 }
 
 impl SuperGraph {
@@ -174,12 +175,14 @@ impl SuperGraph {
 
 pub struct SuperGraphBuilder {
     nodes: HashMap<GlobalId, SuperGraphAnyNode>,
+    link_labels: HashMap<GlobalId, String>,
 }
 
 impl SuperGraphBuilder {
     pub fn new() -> Self {
         Self {
             nodes: HashMap::new(),
+            link_labels: HashMap::new(),
         }
     }
 
@@ -195,13 +198,14 @@ impl SuperGraphBuilder {
         input_links: &[SuperGraphAnyLink],
         output_links: &[SuperGraphAnyLink],
     ) -> SuperGraph {
+        let Self { nodes, link_labels } = self;
         // Validate that all input and output links are present in the graph
         let mut sourced_links = HashSet::new();
         let mut sinked_links = HashSet::new();
         sinked_links.extend(output_links.iter().cloned());
         sourced_links.extend(input_links.iter().cloned());
 
-        for node in self.nodes.values() {
+        for node in nodes.values() {
             for link in node.outputs() {
                 if !sourced_links.insert(link) {
                     panic!("Link {link:?} is sourced multiple times");
@@ -218,16 +222,23 @@ impl SuperGraphBuilder {
 
         let links_by_global_id = sourced_links
             .iter()
-            .map(|link| (link.global_id(), *link))
+            .map(|link| {
+                let label = link_labels.get(&link.global_id()).cloned();
+                (link.global_id(), SuperGraphLinkInfo::new(*link, label))
+            })
             .collect::<HashMap<_, _>>();
 
         SuperGraph {
             global_id: GlobalId::new(rng),
-            nodes: self.nodes,
+            nodes,
             input_links: HashSet::from_iter(input_links.iter().cloned()),
             output_links: HashSet::from_iter(output_links.iter().cloned()),
             links_by_global_id,
         }
+    }
+
+    pub fn set_link_label(&mut self, link: SuperGraphLink, label: impl Into<String>) {
+        self.link_labels.insert(link.global_id(), label.into());
     }
 
     pub fn new_tensor_link(&mut self, rng: &mut impl Rng) -> SuperGraphLink {
@@ -286,7 +297,7 @@ impl Link for SuperGraphAnyLink {
 impl Graph for SuperGraph {
     type Error = ();
     type AnyNode = SuperGraphAnyNode;
-    type AnyLink = SuperGraphAnyLink;
+    type AnyLink = SuperGraphLinkInfo;
 
     fn global_id(&self) -> GlobalId {
         self.global_id

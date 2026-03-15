@@ -124,6 +124,10 @@ fn build_piper_supergraph(
     let scales_link = builder.new_tensor_link(rng);
     let model_weights_link = builder.new_model_link(rng);
     let audio_tensor_output_link = builder.new_tensor_link(rng);
+    builder.set_link_label(text_input_link, "text");
+    builder.set_link_label(scales_link, "scales");
+    builder.set_link_label(model_weights_link, "model_weights");
+    builder.set_link_label(audio_tensor_output_link, "raw_audio");
 
     let phonemes_link = SuperGraphNodeTextToPhonemes::new_and_add(
         &mut builder,
@@ -148,6 +152,7 @@ fn build_piper_supergraph(
 
     let speaker_id_link = if num_speakers > 1 {
         let sid_link = builder.new_tensor_link(rng);
+        builder.set_link_label(sid_link, "speaker_id");
         tensor_inputs.push((sid_link, "sid".to_string()));
         Some(sid_link)
     } else {
@@ -173,6 +178,7 @@ fn build_piper_supergraph(
         sample_rate,
         rng,
     );
+    builder.set_link_label(audio_output_link, "audio_output");
 
     let mut sg_inputs = vec![
         text_input_link.to_any(),

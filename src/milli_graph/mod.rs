@@ -322,10 +322,11 @@ pub struct BackwardGenResult {
     pub differentiable_inputs: Vec<GlobalId>,
 }
 
-#[derive(Debug, Clone, Copy, Hash, Ord, PartialOrd, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Hash, Ord, PartialOrd, Eq, PartialEq, Serialize, Deserialize)]
 pub struct MilliOpGraphTensor {
     global_id: GlobalId,
     pub source_tensor: Option<GlobalId>,
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -367,6 +368,7 @@ impl MilliOpGraph {
                 MilliOpGraphTensor {
                     global_id,
                     source_tensor: None,
+                    label: None,
                 },
             );
         }
@@ -416,6 +418,7 @@ impl MilliOpGraph {
             MilliOpGraphTensor {
                 global_id: internal_id,
                 source_tensor: Some(external_id),
+                label: None,
             },
         );
         internal_id
@@ -459,6 +462,11 @@ impl MilliOpGraph {
                     && let Some(t) = self.tensors.get_mut(&fresh_id)
                 {
                     t.source_tensor = Some(src);
+                }
+                if let Some(label) = tensor.label.clone()
+                    && let Some(t) = self.tensors.get_mut(&fresh_id)
+                {
+                    t.label = Some(label);
                 }
                 tensor_map.insert(tensor_id, fresh_id);
             }
@@ -533,6 +541,7 @@ impl MilliOpGraph {
             MilliOpGraphTensor {
                 global_id,
                 source_tensor: None,
+                label: None,
             },
         );
         global_id
@@ -602,9 +611,32 @@ impl MilliOpGraph {
             MilliOpGraphTensor {
                 global_id: id,
                 source_tensor: None,
+                label: None,
             },
         );
         id
+    }
+
+    pub fn set_link_label(&mut self, link_id: GlobalId, label: impl Into<String>) {
+        if let Some(tensor) = self.tensors.get_mut(&link_id) {
+            tensor.label = Some(label.into());
+        }
+    }
+
+    pub fn set_input_label(&mut self, external_id: GlobalId, label: impl Into<String>) {
+        if let Some(link_id) = self.input_map.get(&external_id).copied() {
+            self.set_link_label(link_id, label);
+        }
+    }
+
+    pub fn set_output_label(&mut self, external_id: GlobalId, label: impl Into<String>) {
+        let Some(output_map) = self.output_map.as_ref() else {
+            return;
+        };
+        let Some((&internal_id, _)) = output_map.iter().find(|(_, id)| **id == external_id) else {
+            return;
+        };
+        self.set_link_label(internal_id, label);
     }
 
     /// Set outputs where external == internal IDs.
@@ -1411,6 +1443,10 @@ impl crate::graph::LinkMetadata for MilliOpGraphTensor {
 impl crate::graph::Link for MilliOpGraphTensor {
     fn global_id(&self) -> GlobalId {
         self.global_id
+    }
+
+    fn label(&self) -> Option<String> {
+        self.label.clone()
     }
 }
 

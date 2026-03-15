@@ -683,12 +683,26 @@ impl SymbolicGraph {
         // 1. Map ordered_inputs
         for &input_id in &self.ordered_inputs {
             let internal = combined.add_input_with_id(input_id, rng);
+            if let Some(name) = self
+                .tensors
+                .get(&input_id)
+                .and_then(|t| t.onnx_name.clone())
+            {
+                combined.set_input_label(input_id, name);
+            }
             sym_to_combined.insert(input_id, internal);
         }
 
         // 2. Map standalone constants
         for const_id in self.constant_link_ids() {
             let internal = combined.add_input_with_id(const_id, rng);
+            if let Some(name) = self
+                .tensors
+                .get(&const_id)
+                .and_then(|t| t.onnx_name.clone())
+            {
+                combined.set_input_label(const_id, name);
+            }
             sym_to_combined.insert(const_id, internal);
         }
 
@@ -718,6 +732,13 @@ impl SymbolicGraph {
         // 4. Map outputs
         for &output_id in &self.ordered_outputs {
             combined.add_output(sym_to_combined[&output_id], output_id);
+            if let Some(name) = self
+                .tensors
+                .get(&output_id)
+                .and_then(|t| t.onnx_name.clone())
+            {
+                combined.set_output_label(output_id, name);
+            }
         }
 
         combined
@@ -758,12 +779,26 @@ impl SymbolicGraph {
         // 1a. Map graph inputs
         for &input_id in &self.ordered_inputs {
             let internal = combined.add_input_with_id(input_id, rng);
+            if let Some(name) = self
+                .tensors
+                .get(&input_id)
+                .and_then(|t| t.onnx_name.clone())
+            {
+                combined.set_input_label(input_id, name);
+            }
             sym_to_combined.insert(input_id, internal);
         }
 
         // 1b. Map standalone constants
         for const_id in self.constant_link_ids() {
             let internal = combined.add_input_with_id(const_id, rng);
+            if let Some(name) = self
+                .tensors
+                .get(&const_id)
+                .and_then(|t| t.onnx_name.clone())
+            {
+                combined.set_input_label(const_id, name);
+            }
             sym_to_combined.insert(const_id, internal);
         }
 
@@ -806,8 +841,9 @@ impl SymbolicGraph {
             for wire in &backward_opts.loss_wiring {
                 let combined_id = match &wire.source {
                     LossInputSource::ForwardOutput(sym_id) => sym_to_combined[sym_id],
-                    LossInputSource::ExternalInput { .. } => {
+                    LossInputSource::ExternalInput { name } => {
                         let ext_id = combined.add_input(rng);
+                        combined.set_input_label(ext_id, name.clone());
                         external_inputs.push(ext_id);
                         ext_id
                     }
@@ -1038,10 +1074,27 @@ impl SymbolicGraph {
                 output_ids.push((input_grad, input_grad));
             }
             combined.set_output_map(output_ids);
+            combined.set_link_label(loss_tensor, "loss");
+            for &output_id in &self.ordered_outputs {
+                if let Some(name) = self
+                    .tensors
+                    .get(&output_id)
+                    .and_then(|t| t.onnx_name.clone())
+                {
+                    combined.set_output_label(output_id, name);
+                }
+            }
         } else {
             // Forward-only: map outputs normally
             for &output_id in &self.ordered_outputs {
                 combined.add_output(sym_to_combined[&output_id], output_id);
+                if let Some(name) = self
+                    .tensors
+                    .get(&output_id)
+                    .and_then(|t| t.onnx_name.clone())
+                {
+                    combined.set_output_label(output_id, name);
+                }
             }
         }
 

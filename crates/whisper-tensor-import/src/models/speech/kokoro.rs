@@ -65,6 +65,11 @@ fn build_kokoro_supergraph(
     let speed_link = builder.new_tensor_link(rng);
     let model_weights_link = builder.new_model_link(rng);
     let audio_tensor_output_link = builder.new_tensor_link(rng);
+    builder.set_link_label(text_input_link, "text");
+    builder.set_link_label(style_link, "style");
+    builder.set_link_label(speed_link, "speed");
+    builder.set_link_label(model_weights_link, "model_weights");
+    builder.set_link_label(audio_tensor_output_link, "raw_audio");
 
     let phonemes_link = SuperGraphNodeTextToPhonemes::new_and_add(
         &mut builder,
@@ -106,6 +111,7 @@ fn build_kokoro_supergraph(
         24000,
         rng,
     );
+    builder.set_link_label(audio_output_link, "audio_output");
 
     // Build the SuperGraph
     let sg_inputs = vec![

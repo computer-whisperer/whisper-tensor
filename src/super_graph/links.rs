@@ -1,4 +1,4 @@
-use crate::graph::{GlobalId, LinkMetadata, Property, PropertyValue};
+use crate::graph::{GlobalId, Link, LinkMetadata, Property, PropertyValue};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
@@ -116,6 +116,26 @@ impl SuperGraphLink {
 
 pub type SuperGraphAnyLink = SuperGraphLink;
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SuperGraphLinkInfo {
+    link: SuperGraphLink,
+    label: Option<String>,
+}
+
+impl SuperGraphLinkInfo {
+    pub fn new(link: SuperGraphLink, label: Option<String>) -> Self {
+        Self { link, label }
+    }
+
+    pub fn link(&self) -> SuperGraphLink {
+        self.link
+    }
+
+    pub fn kind(&self) -> SuperGraphLinkKind {
+        self.link.kind()
+    }
+}
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct SuperGraphLinkDouble {
     first: SuperGraphLink,
@@ -187,6 +207,25 @@ impl SuperGraphLinkTriple {
 }
 
 impl LinkMetadata for SuperGraphAnyLink {
+    fn properties(&self) -> Vec<Property> {
+        vec![Property::new(
+            "link_type",
+            PropertyValue::String(self.kind().as_str().to_string()),
+        )]
+    }
+}
+
+impl Link for SuperGraphLinkInfo {
+    fn global_id(&self) -> GlobalId {
+        self.link.global_id()
+    }
+
+    fn label(&self) -> Option<String> {
+        self.label.clone()
+    }
+}
+
+impl LinkMetadata for SuperGraphLinkInfo {
     fn properties(&self) -> Vec<Property> {
         vec![Property::new(
             "link_type",
