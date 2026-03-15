@@ -154,6 +154,23 @@ impl GroupDeps {
                             broadcast_inputs[gi].push((src_gi, offset));
                         }
                     }
+                    InputRef::Modular { base, stride, modulus } => {
+                        // Modular wraps: references `modulus` distinct source atoms.
+                        // Sample base and last distinct source for producer detection.
+                        if let Some(src_gi) = find_group_idx_for_atom(groups, *base) {
+                            producers[gi].insert(src_gi);
+                            consumers[src_gi].insert(gi);
+                            let offset = base.0 - groups[src_gi].base_id.0;
+                            broadcast_inputs[gi].push((src_gi, offset));
+                        }
+                        if *modulus > 1 {
+                            let last_atom = input.resolve(*modulus - 1, 0);
+                            if let Some(src_gi) = find_group_idx_for_atom(groups, last_atom) {
+                                producers[gi].insert(src_gi);
+                                consumers[src_gi].insert(gi);
+                            }
+                        }
+                    }
                     InputRef::SymAffine {
                         base,
                         stride_i,
@@ -890,6 +907,9 @@ mod tests {
                     } => format!("SymAffine({}, si={}, sk={})", base, stride_i, stride_k),
                     InputRef::StridedBroadcast { base, stride, repeat } => {
                         format!("StridedBcast({}, s={}, r={})", base, stride, repeat)
+                    }
+                    InputRef::Modular { base, stride, modulus } => {
+                        format!("Modular({}, s={}, m={})", base, stride, modulus)
                     }
                 })
                 .collect();

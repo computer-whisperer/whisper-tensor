@@ -341,6 +341,16 @@ fn collect_source_atoms(
             }
             atoms
         }
+        InputRef::Modular { base, stride, modulus } => {
+            // Modular wraps over `modulus` distinct atoms.
+            // Sample base and the last distinct source.
+            let mut atoms = vec![base.0];
+            if *modulus > 1 {
+                let last = input.resolve(*modulus - 1, 0);
+                atoms.push(last.0);
+            }
+            atoms
+        }
     }
 }
 

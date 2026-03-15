@@ -198,6 +198,19 @@ fn resolve_producer_groups(
                     }
                 }
             }
+            InputRef::Modular { base, stride, modulus } => {
+                // Modular wraps over `modulus` distinct source atoms.
+                // Sample base and base + stride*(modulus-1).
+                if let Some(gi) = find_group_for_atom(*base, atom_to_group) {
+                    producers.insert(gi);
+                }
+                if *modulus > 1 {
+                    let last = input.resolve(*modulus - 1, 0);
+                    if let Some(gi) = find_group_for_atom(last, atom_to_group) {
+                        producers.insert(gi);
+                    }
+                }
+            }
             InputRef::SymAffine { .. } => {
                 // Determine the K range from the group's reduce_dims.
                 // The reduce_dims tell us which symbolic dimensions this group
@@ -496,6 +509,9 @@ mod tests {
                         } => format!("SymAff({},si={},sk={})", base, stride_i, stride_k),
                         InputRef::StridedBroadcast { base, stride, repeat } => {
                             format!("SBcast({},s={},r={})", base, stride, repeat)
+                        }
+                        InputRef::Modular { base, stride, modulus } => {
+                            format!("Mod({},s={},m={})", base, stride, modulus)
                         }
                     })
                     .collect();

@@ -195,6 +195,20 @@ pub fn estimate_kernel_cost(
                     // Treat like broadcast — each source stays live while its block executes.
                     info.resident_inputs += ext_count;
                 }
+                InputRef::Modular { base, stride, modulus } => {
+                    // Modular access wraps: atom i reads base + stride * (i % modulus).
+                    // There are `modulus` distinct source atoms.
+                    let mut ext_count = 0u64;
+                    for m in 0..*modulus {
+                        let src = AtomId(base.0.wrapping_add((*stride as i64 * m as i64) as u64));
+                        if !kernel_atoms.contains(src) {
+                            external_inputs.insert(src);
+                            ext_count += 1;
+                        }
+                    }
+                    // The same `modulus` sources are reused cyclically — treat as resident.
+                    info.resident_inputs += ext_count;
+                }
             }
         }
 
@@ -457,6 +471,18 @@ fn count_external_outputs(graph: &NanoGraph, kernel_atoms: &KernelAtomSet) -> u6
                     let num_blocks = (group.count + repeat - 1) / repeat;
                     for block in 0..num_blocks {
                         let src = input_ref.resolve(block * repeat, 0);
+                        if kernel_atoms.contains(src) {
+                            output_atoms.insert(src);
+                        }
+                    }
+                }
+                InputRef::Modular { base, stride, modulus } => {
+                    if is_group_in_kernel(g_start, g_end, kernel_atoms) {
+                        continue;
+                    }
+                    // Modular wraps over `modulus` distinct source atoms.
+                    for m in 0..*modulus {
+                        let src = AtomId(base.0.wrapping_add((*stride as i64 * m as i64) as u64));
                         if kernel_atoms.contains(src) {
                             output_atoms.insert(src);
                         }

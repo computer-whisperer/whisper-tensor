@@ -183,7 +183,7 @@ fn main() {
                 let sample_atoms: Vec<whisper_tensor::nano_graph::AtomId> = match input {
                     InputRef::Broadcast(id) => vec![*id],
                     InputRef::Affine { base, .. } | InputRef::StridedBroadcast { base, .. }
-                    | InputRef::SymAffine { base, .. } => vec![*base],
+                    | InputRef::SymAffine { base, .. } | InputRef::Modular { base, .. } => vec![*base],
                     InputRef::Explicit(ids) => {
                         let mut s = vec![];
                         if !ids.is_empty() { s.push(ids[0]); }
@@ -208,9 +208,24 @@ fn main() {
 
 fn print_explicit_diagnostic(graph: &NanoGraph) {
     let groups = graph.groups();
+    let group_base_ids: Vec<u64> = groups.iter().map(|g| g.base_id.0).collect();
+    let find_group_idx = |atom_id: whisper_tensor::nano_graph::AtomId| -> Option<usize> {
+        match group_base_ids.binary_search(&atom_id.0) {
+            Ok(i) => Some(i),
+            Err(0) => None,
+            Err(i) => {
+                let gi = i - 1;
+                if atom_id.0 < groups[gi].base_id.0 + groups[gi].count { Some(gi) } else { None }
+            }
+        }
+    };
+
     let mut explicit_groups = 0u64;
     let mut total_entries = 0u64;
     let mut by_op: HashMap<String, (u64, u64)> = HashMap::new();
+    // Collect size distribution of Explicit tables
+    let mut size_buckets: HashMap<String, Vec<u64>> = HashMap::new(); // op -> vec of counts
+
     for group in groups {
         let mut has = false;
         let mut entries = 0u64;
@@ -225,8 +240,9 @@ fn print_explicit_diagnostic(graph: &NanoGraph) {
             total_entries += entries;
             let op_name = format!("{:?}", group.op)
                 .chars().take_while(|c| *c != ' ' && *c != '{' && *c != '(').collect::<String>();
-            let e = by_op.entry(op_name).or_default();
+            let e = by_op.entry(op_name.clone()).or_default();
             e.0 += 1; e.1 += entries;
+            size_buckets.entry(op_name).or_default().push(group.count);
         }
     }
     println!("\n=== Explicit InputRef ===");
@@ -235,7 +251,59 @@ fn print_explicit_diagnostic(graph: &NanoGraph) {
     let mut sorted: Vec<_> = by_op.into_iter().collect();
     sorted.sort_by(|a, b| b.1.1.cmp(&a.1.1));
     for (op, (g, e)) in &sorted {
-        println!("  {}: {} groups, {} entries ({:.1} MB)", op, g, e, *e as f64 * 8.0 / (1024.0*1024.0));
+        let sizes = size_buckets.get(op).unwrap();
+        let min = sizes.iter().copied().min().unwrap_or(0);
+        let max = sizes.iter().copied().max().unwrap_or(0);
+        println!("  {}: {} groups, {} entries ({:.1} MB), count range [{}, {}]",
+            op, g, e, *e as f64 * 8.0 / (1024.0*1024.0), min, max);
+    }
+
+    // Show a few specific Explicit groups to understand the patterns
+    println!("\n  Sample Explicit groups (first 10):");
+    let mut shown = 0;
+    for (gi, group) in groups.iter().enumerate() {
+        for (input_idx, input) in group.inputs.iter().enumerate() {
+            if let InputRef::Explicit(ids) = input {
+                if shown >= 10 { break; }
+                // Check if the Explicit pattern is regular
+                let pattern = if ids.len() >= 2 {
+                    let stride = ids[1].0 as i64 - ids[0].0 as i64;
+                    let is_affine = ids.windows(2).all(|w| (w[1].0 as i64 - w[0].0 as i64) == stride);
+                    if is_affine { format!("affine(stride={})", stride) }
+                    else {
+                        // Check for repeated blocks
+                        let mut rep = 1u64;
+                        while (rep as usize) < ids.len() && ids[rep as usize].0 == ids[0].0 { rep += 1; }
+                        if rep > 1 { format!("blocks(repeat={})", rep) }
+                        else { "irregular".to_string() }
+                    }
+                } else { "tiny".to_string() };
+
+                // Find producer group
+                let producer = if !ids.is_empty() { find_group_idx(ids[0]) } else { None };
+                let prod_info = producer.map(|pi| {
+                    let pg = &groups[pi];
+                    let op_name = format!("{:?}", pg.op)
+                        .chars().take_while(|c| *c != ' ' && *c != '{' && *c != '(').collect::<String>();
+                    format!("g{}:{} count={}", pi, op_name, pg.count)
+                }).unwrap_or("?".to_string());
+
+                let op_name = format!("{:?}", group.op)
+                    .chars().take_while(|c| *c != ' ' && *c != '{' && *c != '(').collect::<String>();
+                // Show first few entries for irregular patterns
+                let sample = if ids.len() > 8 {
+                    let first4: Vec<u64> = ids[..4].iter().map(|a| a.0).collect();
+                    let last2: Vec<u64> = ids[ids.len()-2..].iter().map(|a| a.0).collect();
+                    format!("[{:?}...{:?}]", first4, last2)
+                } else {
+                    format!("{:?}", ids.iter().map(|a| a.0).collect::<Vec<_>>())
+                };
+                println!("    g{} {} count={} input[{}]: {} entries, pattern={}, producer={}, ids={}",
+                    gi, op_name, group.count, input_idx, ids.len(), pattern, prod_info, sample);
+                shown += 1;
+            }
+        }
+        if shown >= 10 { break; }
     }
 }
 
@@ -246,6 +314,7 @@ fn print_inputref_distribution(graph: &NanoGraph) {
     let mut strided_broadcast = 0u64;
     let mut sym_affine = 0u64;
     let mut explicit = 0u64;
+    let mut modular = 0u64;
     for group in groups {
         for input in &group.inputs {
             match input {
@@ -254,6 +323,7 @@ fn print_inputref_distribution(graph: &NanoGraph) {
                 InputRef::StridedBroadcast { .. } => strided_broadcast += 1,
                 InputRef::SymAffine { .. } => sym_affine += 1,
                 InputRef::Explicit(_) => explicit += 1,
+                InputRef::Modular { .. } => modular += 1,
             }
         }
     }
@@ -263,6 +333,7 @@ fn print_inputref_distribution(graph: &NanoGraph) {
     println!("  StridedBroadcast: {}", strided_broadcast);
     println!("  SymAffine: {}", sym_affine);
     println!("  Explicit: {}", explicit);
+    println!("  Modular: {}", modular);
 }
 
 fn print_reduce_diagnostic(graph: &NanoGraph) {

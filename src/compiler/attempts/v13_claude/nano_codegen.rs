@@ -995,6 +995,26 @@ fn load_input_ref(
             let addr = builder.ins().iadd(values_ptr, byte_offset);
             Ok(builder.ins().load(types::F32, MemFlags::new(), addr, 0))
         }
+
+        InputRef::Modular { base, stride, modulus } => {
+            // atom_idx = base + stride * (i % modulus)
+            let atom_idx = match i_val {
+                Some(iv) => {
+                    let modval = builder.ins().iconst(types::I64, *modulus as i64);
+                    let wrapped = builder.ins().urem(iv, modval);
+                    let offset = builder.ins().imul_imm(wrapped, *stride as i64);
+                    builder.ins().iadd_imm(offset, base.0 as i64)
+                }
+                None => {
+                    let wrapped = i_const % modulus;
+                    let idx = (base.0 as i64) + (*stride as i64) * (wrapped as i64);
+                    builder.ins().iconst(types::I64, idx)
+                }
+            };
+            let byte_offset = builder.ins().imul_imm(atom_idx, 4);
+            let addr = builder.ins().iadd(values_ptr, byte_offset);
+            Ok(builder.ins().load(types::F32, MemFlags::new(), addr, 0))
+        }
     }
 }
 
@@ -1034,7 +1054,7 @@ fn load_input_ref_with_k(
         }
 
         // For non-SymAffine inputs in a reduce context, k doesn't affect the address.
-        InputRef::Broadcast(_) | InputRef::Affine { .. } | InputRef::Explicit(_) | InputRef::StridedBroadcast { .. } => {
+        InputRef::Broadcast(_) | InputRef::Affine { .. } | InputRef::Explicit(_) | InputRef::StridedBroadcast { .. } | InputRef::Modular { .. } => {
             load_input_ref(builder, module, input, values_ptr, i_val, i_const, table_counter)
         }
     }

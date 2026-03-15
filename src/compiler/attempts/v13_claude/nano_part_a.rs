@@ -200,6 +200,26 @@ pub fn partition_nanograph(graph: &NanoGraph, parallelism: usize) -> NanoPartiti
                         }
                     }
                 }
+                InputRef::Modular { base, stride, modulus } => {
+                    // Modular wraps: references `modulus` distinct source atoms.
+                    // Sample base and base + stride*(modulus-1) as producer atoms.
+                    if let Some(src_gi) = find_group(*base) {
+                        if pred_set.insert(src_gi) {
+                            predecessors.push(src_gi);
+                        }
+                        let src_group = &groups[src_gi];
+                        let base_offset = base.0 - src_group.base_id.0;
+                        affine_sources.push((src_gi, base_offset, *stride));
+                    }
+                    if *modulus > 1 {
+                        let last_atom = input_ref.resolve(*modulus - 1, 0);
+                        if let Some(src_gi) = find_group(last_atom) {
+                            if pred_set.insert(src_gi) {
+                                predecessors.push(src_gi);
+                            }
+                        }
+                    }
+                }
             }
         }
 

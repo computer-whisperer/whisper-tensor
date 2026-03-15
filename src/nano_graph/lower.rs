@@ -683,6 +683,32 @@ impl LowerCtx {
             }
         }
 
+        // Check for Modular: ids[i] = ids[i % period] for some period.
+        // Try small periods that divide the length.
+        let len = ids.len();
+        'modular: for period in [2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256,
+                                  384, 512, 768, 1024, 1536, 2048, 2304, 3072, 4096] {
+            if period >= len || len % period != 0 { continue; }
+            // Check if the pattern repeats with this period
+            let matches = ids.iter().enumerate().all(|(i, id)| id.0 == ids[i % period].0);
+            if !matches { continue; }
+            // Found a repeating period — check if the period itself is Affine
+            let inner_stride = if period >= 2 {
+                ids[1].0 as i64 - ids[0].0 as i64
+            } else { 0 };
+            let inner_is_affine = period < 2 || ids[..period].windows(2).all(|w| {
+                (w[1].0 as i64 - w[0].0 as i64) == inner_stride
+            });
+            if inner_is_affine {
+                return InputRef::Modular {
+                    base: ids[0],
+                    stride: inner_stride as i32,
+                    modulus: period as u64,
+                };
+            }
+            break 'modular;
+        }
+
         InputRef::Explicit(ids)
     }
 

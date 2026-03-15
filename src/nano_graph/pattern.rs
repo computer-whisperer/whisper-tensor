@@ -72,6 +72,14 @@ pub enum InputRef {
         stride: i64,
         repeat: u64,
     },
+    /// Modular/tiling access: atom at offset `i` reads `base + stride * (i % modulus)`.
+    /// Used when a smaller tensor tiles/repeats to fill a larger consumer
+    /// (e.g., bias broadcast along batch dimension).
+    Modular {
+        base: AtomId,
+        stride: i32,
+        modulus: u64,
+    },
 }
 
 impl InputRef {
@@ -101,6 +109,14 @@ impl InputRef {
                 let block = i / repeat;
                 AtomId(base.0.wrapping_add((*stride * block as i64) as u64))
             }
+            InputRef::Modular {
+                base,
+                stride,
+                modulus,
+            } => {
+                let wrapped = i % modulus;
+                AtomId(base.0.wrapping_add((*stride as i64 * wrapped as i64) as u64))
+            }
         }
     }
 
@@ -120,6 +136,7 @@ impl InputRef {
                 // Each block of `repeat` atoms shares one source.
                 ((count + repeat - 1) / repeat) as usize
             }
+            InputRef::Modular { modulus, .. } => *modulus as usize,
         }
     }
 }

@@ -93,6 +93,10 @@ pub enum ScalarOp {
         compute_dtype: DType,
         output_dtype: DType,
     },
+    // Note: if you add new ScalarOp variants, update compute_dtype(), output_dtype(),
+    // is_reduce(), and all match sites in eval.rs, nano_execute.rs, nano_codegen.rs,
+    // nano_part_*.rs, pattern.rs stats/validate.
+
     /// Indirect load: given a runtime-computed index (one input), read a value
     /// from a known table of atoms at `table_base + index`. Used for Gather
     /// (embedding lookups). No computation, just a runtime-dependent load.

@@ -216,6 +216,19 @@ fn collect_source_groups(
                 }
             }
         }
+        InputRef::Modular { base, stride, modulus } => {
+            // Modular wraps over `modulus` distinct source atoms.
+            // Sample base and base + stride*(modulus-1).
+            if let Some(gi) = find_group_idx(groups, *base) {
+                seen.insert(gi);
+            }
+            if *modulus > 1 {
+                let last = input_ref.resolve(*modulus - 1, 0);
+                if let Some(gi) = find_group_idx(groups, last) {
+                    seen.insert(gi);
+                }
+            }
+        }
     }
 }
 
