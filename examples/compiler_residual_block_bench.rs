@@ -1,4 +1,4 @@
-use rand::RngCore;
+use rand::Rng;
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::Instant;

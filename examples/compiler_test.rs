@@ -1,5 +1,5 @@
 use half::bf16;
-use rand::RngCore;
+use rand::Rng;
 use std::collections::HashMap;
 use std::time::Instant;
 

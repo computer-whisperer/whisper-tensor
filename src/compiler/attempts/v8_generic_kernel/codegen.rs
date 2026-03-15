@@ -2082,7 +2082,7 @@ mod tests {
     use super::*;
     use crate::dtype::DType;
     use crate::milli_graph::ops::{MatMul, SimpleBinary, SimpleUnaryOp};
-    use rand::rand_core::RngCore;
+    use rand::Rng;
 
     fn fill_random(rng: &mut wyrand::WyRand, n: usize) -> Vec<f32> {
         (0..n)

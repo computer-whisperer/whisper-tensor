@@ -1392,7 +1392,7 @@ mod tests {
     use super::*;
     use crate::dtype::DType;
     use crate::milli_graph::ops::{MatMul, SimpleBinary, SimpleUnaryOp};
-    use rand::rand_core::RngCore;
+    use rand::Rng;
 
     fn run_compiled_rank2_matmul(
         m: usize,

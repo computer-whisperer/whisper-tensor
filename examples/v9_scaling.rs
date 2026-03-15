@@ -16,7 +16,7 @@ use whisper_tensor::numeric_tensor::NumericTensor;
 use whisper_tensor::tensor_rank::DynRank;
 
 fn make_random_f32(n: usize, seed: u64) -> Vec<f32> {
-    use rand::RngCore;
+    use rand::Rng;
     let mut rng = wyrand::WyRand::new(seed);
     (0..n)
         .map(|_| {

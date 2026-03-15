@@ -149,8 +149,8 @@ fn build_cumsum_pipeline(
     b.begin_block(None).unwrap();
 
     // Predeclare common types and function-scope variables in entry block
-    let f32_t = b.type_float(32);
-    let f16_t = b.type_float(16);
+    let f32_t = b.type_float(32, None);
+    let f16_t = b.type_float(16, None);
     let acc_ptr_t = b.type_pointer(None, StorageClass::Function, f32_t);
     let acc_var = b.variable(acc_ptr_t, None, StorageClass::Function, None);
     let k_ptr_t = b.type_pointer(None, StorageClass::Function, u32_t);

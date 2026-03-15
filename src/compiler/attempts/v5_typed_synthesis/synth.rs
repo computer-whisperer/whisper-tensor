@@ -490,6 +490,7 @@ mod tests {
     use crate::compiler::attempts::v1_scalar_crystal::nano_op::{NanoOp, NanoValue, ScalarBinOp};
     use crate::compiler::attempts::v4_pool_growth::codegen::whitewash_pool_order;
     use half::bf16;
+    use rand::Rng;
 
     fn make_matmul_nano_pool(
         m: usize,
@@ -614,11 +615,11 @@ mod tests {
         let mut a_f = vec![0.0f32; m * k];
         let mut b_f = vec![0.0f32; k * n];
         for v in &mut a_f {
-            let bits = rand::rand_core::RngCore::next_u32(&mut rng);
+            let bits = rng.next_u32();
             *v = (bits as f32 / u32::MAX as f32) * 2.0 - 1.0;
         }
         for v in &mut b_f {
-            let bits = rand::rand_core::RngCore::next_u32(&mut rng);
+            let bits = rng.next_u32();
             *v = (bits as f32 / u32::MAX as f32) * 2.0 - 1.0;
         }
         let a_bf16: Vec<u16> = a_f.iter().map(|x| bf16::from_f32(*x).to_bits()).collect();
@@ -673,14 +674,14 @@ mod tests {
         let mut rng = wyrand::WyRand::new(777);
         let a_bf16: Vec<u16> = (0..m * k)
             .map(|_| {
-                let bits = rand::rand_core::RngCore::next_u32(&mut rng);
+                let bits = rng.next_u32();
                 let x = (bits as f32 / u32::MAX as f32) * 2.0 - 1.0;
                 bf16::from_f32(x).to_bits()
             })
             .collect();
         let b_bf16: Vec<u16> = (0..k * n)
             .map(|_| {
-                let bits = rand::rand_core::RngCore::next_u32(&mut rng);
+                let bits = rng.next_u32();
                 let x = (bits as f32 / u32::MAX as f32) * 2.0 - 1.0;
                 bf16::from_f32(x).to_bits()
             })
