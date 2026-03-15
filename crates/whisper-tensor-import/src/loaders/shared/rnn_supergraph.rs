@@ -165,6 +165,12 @@ pub(super) fn build_rnn_supergraph(
     let sub_total_steps = sub_builder.new_tensor_link(rng);
     let sub_step_in = sub_builder.new_tensor_link(rng);
     let sub_step_out = sub_builder.new_tensor_link(rng);
+    sub_builder.set_link_label(sub_model_input_link, "model_weights");
+    sub_builder.set_link_label(sub_token_input, token_input_name);
+    sub_builder.set_link_label(sub_progress_tier, "progress_tier");
+    sub_builder.set_link_label(sub_total_steps, "total_steps");
+    sub_builder.set_link_label(sub_step_in, "step_in");
+    sub_builder.set_link_label(sub_step_out, "step_out");
 
     let state_input_links: HashMap<usize, SuperGraphLink> = state_ids
         .iter()
@@ -174,6 +180,17 @@ pub(super) fn build_rnn_supergraph(
         .iter()
         .map(|&id| (id, sub_builder.new_tensor_link(rng)))
         .collect();
+    for &id in &state_ids {
+        let pair = &state_pairs[id];
+        sub_builder.set_link_label(
+            *state_input_links.get(&id).unwrap(),
+            format!("state_in_{}", pair.0),
+        );
+        sub_builder.set_link_label(
+            *state_output_links.get(&id).unwrap(),
+            format!("state_out_{}", pair.1),
+        );
+    }
     let final_state_output_links: Vec<(usize, SuperGraphLink)> = state_ids
         .iter()
         .map(|&id| (id, super_graph_builder.new_tensor_link(rng)))
@@ -227,6 +244,7 @@ pub(super) fn build_rnn_supergraph(
         }
 
         let processed_input_link = sub_builder.new_tensor_link(rng);
+        sub_builder.set_link_label(processed_input_link, "token_preprocessed");
         milli_graph.set_output_map(std::iter::once((x, processed_input_link.global_id())));
         let mut node = SuperGraphNodeMilliOpGraph::new(milli_graph, rng);
         node.label = Some("token_preprocess".to_string());
@@ -236,6 +254,7 @@ pub(super) fn build_rnn_supergraph(
 
     // Model execution in sub-graph
     let sub_logit_output = sub_builder.new_tensor_link(rng);
+    sub_builder.set_link_label(sub_logit_output, "raw_logits");
     {
         let mut tensor_inputs = vec![(adjusted_token_context, token_input_name.to_string())];
         for (id, pair) in state_pairs.iter().enumerate() {
@@ -299,6 +318,7 @@ pub(super) fn build_rnn_supergraph(
         );
 
         let processed_logit_output_link = sub_builder.new_tensor_link(rng);
+        sub_builder.set_link_label(processed_logit_output_link, logit_output_name);
         milli_graph.set_output_map(std::iter::once((
             x,
             processed_logit_output_link.global_id(),

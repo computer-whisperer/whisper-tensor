@@ -124,6 +124,13 @@ fn build_f5_supergraph(vocab: &str, rng: &mut impl rand::Rng) -> TextToSpeechInt
     let cat_mel_text_drop_link = builder.new_tensor_link(rng);
     let qk_rotated_empty_link = builder.new_tensor_link(rng);
     let ref_signal_len_link = builder.new_tensor_link(rng);
+    builder.set_link_label(noise_link, "noise_init");
+    builder.set_link_label(rope_cos_link, "rope_cos");
+    builder.set_link_label(rope_sin_link, "rope_sin");
+    builder.set_link_label(cat_mel_text_link, "cat_mel_text");
+    builder.set_link_label(cat_mel_text_drop_link, "cat_mel_text_drop");
+    builder.set_link_label(qk_rotated_empty_link, "qk_rotated_empty");
+    builder.set_link_label(ref_signal_len_link, "reference_signal_len");
 
     builder.add_node(
         SuperGraphNodeModelExecution::new(
@@ -236,6 +243,8 @@ fn build_f5_denoising_loop(
 ) -> SuperGraphLink {
     let outer_final_denoised = builder.new_tensor_link(rng);
     let progress_tier_link = builder.new_tensor_link(rng);
+    builder.set_link_label(outer_final_denoised, "denoised_final");
+    builder.set_link_label(progress_tier_link, "progress_tier");
 
     {
         let (mut mg, _) = MilliOpGraph::new(std::iter::empty(), rng);
@@ -262,18 +271,32 @@ fn build_f5_denoising_loop(
     let inner_qk_rotated_empty = inner_builder.new_tensor_link(rng);
     let inner_progress_tier = inner_builder.new_tensor_link(rng);
     let inner_total_steps = inner_builder.new_tensor_link(rng);
+    inner_builder.set_link_label(inner_transformer_weights, "transformer_weights");
+    inner_builder.set_link_label(inner_rope_cos, "rope_cos");
+    inner_builder.set_link_label(inner_rope_sin, "rope_sin");
+    inner_builder.set_link_label(inner_cat_mel_text, "cat_mel_text");
+    inner_builder.set_link_label(inner_cat_mel_text_drop, "cat_mel_text_drop");
+    inner_builder.set_link_label(inner_qk_rotated_empty, "qk_rotated_empty");
+    inner_builder.set_link_label(inner_progress_tier, "progress_tier");
+    inner_builder.set_link_label(inner_total_steps, "total_steps");
 
     // Inner links for state (noise carried between iterations)
     let inner_noise_in = inner_builder.new_tensor_link(rng);
     let inner_noise_out = inner_builder.new_tensor_link(rng);
     let inner_step_in = inner_builder.new_tensor_link(rng);
     let inner_step_out = inner_builder.new_tensor_link(rng);
+    inner_builder.set_link_label(inner_noise_in, "noise_in");
+    inner_builder.set_link_label(inner_noise_out, "noise_out");
+    inner_builder.set_link_label(inner_step_in, "step_in");
+    inner_builder.set_link_label(inner_step_out, "step_out");
 
     // Inner link for scan input (time_step per iteration)
     let inner_time_step = inner_builder.new_tensor_link(rng);
+    inner_builder.set_link_label(inner_time_step, "time_step");
 
     // --- Inner Node A: Transformer model execution ---
     let raw_denoised = inner_builder.new_tensor_link(rng);
+    inner_builder.set_link_label(raw_denoised, "raw_denoised");
     let mut transformer_node = SuperGraphNodeModelExecution::new(
         rng,
         inner_transformer_weights,

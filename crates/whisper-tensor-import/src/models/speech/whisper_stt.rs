@@ -93,6 +93,11 @@ pub(crate) fn build_whisper_supergraph(
         .collect();
     let prefix_tokens_link = builder.new_tensor_link(rng);
     let prefix_iteration_count_link = builder.new_tensor_link(rng);
+    builder.set_link_label(prefix_tokens_link, "decoder_prefix_tokens");
+    builder.set_link_label(prefix_iteration_count_link, "decoder_prefix_steps");
+    for (id, link) in &kv_state_zero_links {
+        builder.set_link_label(*link, format!("prefill_state_init_{}", state_names[*id].0));
+    }
 
     {
         let (mut mg, _) = MilliOpGraph::new(std::iter::empty(), rng);
@@ -159,6 +164,9 @@ pub(crate) fn build_whisper_supergraph(
     let prefill_model_link = prefill_builder.new_model_link(rng);
     let prefill_encoder_hidden = prefill_builder.new_tensor_link(rng);
     let prefill_token_in = prefill_builder.new_tensor_link(rng);
+    prefill_builder.set_link_label(prefill_model_link, "decoder_weights");
+    prefill_builder.set_link_label(prefill_encoder_hidden, "encoder_hidden_states");
+    prefill_builder.set_link_label(prefill_token_in, "prefix_token");
 
     let prefill_state_in: HashMap<usize, SuperGraphLink> = state_ids
         .iter()
@@ -168,6 +176,16 @@ pub(crate) fn build_whisper_supergraph(
         .iter()
         .map(|&id| (id, prefill_builder.new_tensor_link(rng)))
         .collect();
+    for &id in &state_ids {
+        prefill_builder.set_link_label(
+            *prefill_state_in.get(&id).unwrap(),
+            format!("state_in_{}", state_names[id].0),
+        );
+        prefill_builder.set_link_label(
+            *prefill_state_out.get(&id).unwrap(),
+            format!("state_out_{}", state_names[id].1),
+        );
+    }
 
     let prefill_decoder_input_ids = {
         let (mut mg, input_map) =
@@ -181,6 +199,7 @@ pub(crate) fn build_whisper_supergraph(
         );
         let token_2d = Unsqueeze::push_new(&mut mg, token_i64, axis0, rng);
         let out = prefill_builder.new_tensor_link(rng);
+        prefill_builder.set_link_label(out, "decoder_input_ids");
         mg.set_output_map(std::iter::once((token_2d, out.global_id())));
         let mut node = SuperGraphNodeMilliOpGraph::new(mg, rng);
         node.label = Some("prefill_token_prep".to_string());
@@ -189,6 +208,7 @@ pub(crate) fn build_whisper_supergraph(
     };
 
     let prefill_raw_logits = prefill_builder.new_tensor_link(rng);
+    prefill_builder.set_link_label(prefill_raw_logits, "prefill_raw_logits");
     {
         let mut tensor_inputs = vec![
             (prefill_decoder_input_ids, "decoder_input_ids".to_string()),
@@ -213,6 +233,7 @@ pub(crate) fn build_whisper_supergraph(
 
     let prefill_logits = {
         let out = prefill_builder.new_tensor_link(rng);
+        prefill_builder.set_link_label(out, "prefill_logits");
         let (mut mg, input_map) =
             MilliOpGraph::new(std::iter::once(prefill_raw_logits.global_id()), rng);
         let logits = *input_map.get(&prefill_raw_logits.global_id()).unwrap();
@@ -247,10 +268,14 @@ pub(crate) fn build_whisper_supergraph(
     let prefill_graph = prefill_builder.build(rng, &prefill_inputs, &prefill_outputs);
 
     let prefill_last_logits_link = builder.new_tensor_link(rng);
+    builder.set_link_label(prefill_last_logits_link, "prefill_last_logits");
     let prefill_final_state_links: Vec<(usize, SuperGraphLink)> = state_ids
         .iter()
         .map(|&id| (id, builder.new_tensor_link(rng)))
         .collect();
+    for (id, link) in &prefill_final_state_links {
+        builder.set_link_label(*link, format!("prefill_state_final_{}", state_names[*id].1));
+    }
 
     let prefill_state_links: Vec<SuperGraphLinkTriple> = kv_state_zero_links
         .iter()
@@ -292,6 +317,8 @@ pub(crate) fn build_whisper_supergraph(
 
     let token_state_init_link = builder.new_tensor_link(rng);
     let finished_state_init_link = builder.new_tensor_link(rng);
+    builder.set_link_label(token_state_init_link, "generation_token_init");
+    builder.set_link_label(finished_state_init_link, "generation_finished_init");
     {
         let (mut mg, input_map) =
             MilliOpGraph::new(std::iter::once(prefill_last_logits_link.global_id()), rng);
@@ -323,6 +350,8 @@ pub(crate) fn build_whisper_supergraph(
 
     let generation_iteration_count_link = builder.new_tensor_link(rng);
     let generation_progress_zero_link = builder.new_tensor_link(rng);
+    builder.set_link_label(generation_iteration_count_link, "generation_steps");
+    builder.set_link_label(generation_progress_zero_link, "generation_step_zero");
     {
         let (mut mg, _) = MilliOpGraph::new(std::iter::empty(), rng);
         let loop_count = Constant::push_new(
@@ -356,6 +385,16 @@ pub(crate) fn build_whisper_supergraph(
     let sub_total_steps = sub_builder.new_tensor_link(rng);
     let sub_step_in = sub_builder.new_tensor_link(rng);
     let sub_step_out = sub_builder.new_tensor_link(rng);
+    sub_builder.set_link_label(sub_model_link, "decoder_weights");
+    sub_builder.set_link_label(sub_encoder_hidden, "encoder_hidden_states");
+    sub_builder.set_link_label(sub_token_in, "token_in");
+    sub_builder.set_link_label(sub_finished_in, "finished_in");
+    sub_builder.set_link_label(sub_token_out, "token_out");
+    sub_builder.set_link_label(sub_finished_out, "finished_out");
+    sub_builder.set_link_label(sub_progress_tier, "progress_tier");
+    sub_builder.set_link_label(sub_total_steps, "total_steps");
+    sub_builder.set_link_label(sub_step_in, "step_in");
+    sub_builder.set_link_label(sub_step_out, "step_out");
 
     let sub_state_in: HashMap<usize, SuperGraphLink> = state_ids
         .iter()
@@ -365,6 +404,16 @@ pub(crate) fn build_whisper_supergraph(
         .iter()
         .map(|&id| (id, sub_builder.new_tensor_link(rng)))
         .collect();
+    for &id in &state_ids {
+        sub_builder.set_link_label(
+            *sub_state_in.get(&id).unwrap(),
+            format!("state_in_{}", state_names[id].0),
+        );
+        sub_builder.set_link_label(
+            *sub_state_out.get(&id).unwrap(),
+            format!("state_out_{}", state_names[id].1),
+        );
+    }
 
     let decoder_input_ids = {
         let (mut mg, input_map) = MilliOpGraph::new(std::iter::once(sub_token_in.global_id()), rng);
@@ -377,6 +426,7 @@ pub(crate) fn build_whisper_supergraph(
         );
         let token_2d = Unsqueeze::push_new(&mut mg, token_i64, axis0, rng);
         let out = sub_builder.new_tensor_link(rng);
+        sub_builder.set_link_label(out, "decoder_input_ids");
         mg.set_output_map(std::iter::once((token_2d, out.global_id())));
         let mut node = SuperGraphNodeMilliOpGraph::new(mg, rng);
         node.label = Some("generation_token_prep".to_string());
@@ -385,6 +435,7 @@ pub(crate) fn build_whisper_supergraph(
     };
 
     let sub_logits = sub_builder.new_tensor_link(rng);
+    sub_builder.set_link_label(sub_logits, "raw_logits");
     {
         let mut tensor_inputs = vec![
             (decoder_input_ids, "decoder_input_ids".to_string()),
@@ -487,6 +538,7 @@ pub(crate) fn build_whisper_supergraph(
 
     // Outer scan wiring.
     let generated_tokens_raw = builder.new_tensor_link(rng);
+    builder.set_link_label(generated_tokens_raw, "generated_tokens_raw");
     let mut state_links = vec![
         SuperGraphLinkTriple::new(token_state_init_link, sub_token_in, sub_token_out),
         SuperGraphLinkTriple::new(finished_state_init_link, sub_finished_in, sub_finished_out),

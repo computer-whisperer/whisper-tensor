@@ -388,6 +388,8 @@ fn build_denoising_loop(
 ) -> SuperGraphLink {
     let outer_final_latent = builder.new_tensor_link(rng);
     let progress_tier_link = builder.new_tensor_link(rng);
+    builder.set_link_label(outer_final_latent, "latent_final");
+    builder.set_link_label(progress_tier_link, "progress_tier");
 
     {
         let (mut mg, _) = MilliOpGraph::new(std::iter::empty(), rng);
@@ -419,16 +421,37 @@ fn build_denoising_loop(
     let inner_step_in = inner_builder.new_tensor_link(rng);
     let inner_step_out = inner_builder.new_tensor_link(rng);
     let inner_sigma = inner_builder.new_tensor_link(rng);
+    inner_builder.set_link_label(inner_unet_weights, "unet_weights");
+    inner_builder.set_link_label(inner_cond_context, "context_conditional");
+    inner_builder.set_link_label(inner_uncond_context, "context_unconditional");
+    inner_builder.set_link_label(inner_guidance_scale, "guidance_scale");
+    inner_builder.set_link_label(inner_latent_in, "latent_in");
+    inner_builder.set_link_label(inner_latent_out, "latent_out");
+    inner_builder.set_link_label(inner_timestep, "timestep");
+    inner_builder.set_link_label(inner_dt, "dt");
+    inner_builder.set_link_label(inner_progress_tier, "progress_tier");
+    inner_builder.set_link_label(inner_total_steps, "total_steps");
+    inner_builder.set_link_label(inner_step_in, "step_in");
+    inner_builder.set_link_label(inner_step_out, "step_out");
+    inner_builder.set_link_label(inner_sigma, "sigma");
 
     // Optional ADM conditioning links
     let inner_cond_y = cond_y.as_ref().map(|_| inner_builder.new_tensor_link(rng));
     let inner_uncond_y = uncond_y
         .as_ref()
         .map(|_| inner_builder.new_tensor_link(rng));
+    if let Some(cy) = inner_cond_y {
+        inner_builder.set_link_label(cy, "adm_conditional");
+    }
+    if let Some(uy) = inner_uncond_y {
+        inner_builder.set_link_label(uy, "adm_unconditional");
+    }
 
     // Inner node 1: Prep — scale latent by 1/sqrt(sigma²+1), cast to model_dtype, reshape timestep
     let cast_latent = inner_builder.new_tensor_link(rng);
     let cast_timestep = inner_builder.new_tensor_link(rng);
+    inner_builder.set_link_label(cast_latent, "latent_model_dtype");
+    inner_builder.set_link_label(cast_timestep, "timestep_model_dtype");
     {
         let (mut mg, input_map) = MilliOpGraph::new(
             [
@@ -494,6 +517,7 @@ fn build_denoising_loop(
 
     // Inner node 2: UNet unconditional
     let uncond_noise = inner_builder.new_tensor_link(rng);
+    inner_builder.set_link_label(uncond_noise, "noise_unconditional");
     {
         let mut inputs = vec![
             (cast_latent, "sample".to_string()),
@@ -516,6 +540,7 @@ fn build_denoising_loop(
 
     // Inner node 3: UNet conditional
     let cond_noise = inner_builder.new_tensor_link(rng);
+    inner_builder.set_link_label(cond_noise, "noise_conditional");
     {
         let mut inputs = vec![
             (cast_latent, "sample".to_string()),
@@ -855,6 +880,8 @@ fn build_flux_denoising_loop(
 ) -> SuperGraphLink {
     let outer_final_latent = builder.new_tensor_link(rng);
     let progress_tier_link = builder.new_tensor_link(rng);
+    builder.set_link_label(outer_final_latent, "latent_final");
+    builder.set_link_label(progress_tier_link, "progress_tier");
 
     {
         let (mut mg, _) = MilliOpGraph::new(std::iter::empty(), rng);
@@ -885,11 +912,30 @@ fn build_flux_denoising_loop(
     let inner_total_steps = inner_builder.new_tensor_link(rng);
     let inner_step_in = inner_builder.new_tensor_link(rng);
     let inner_step_out = inner_builder.new_tensor_link(rng);
+    inner_builder.set_link_label(inner_dit_weights, "dit_weights");
+    inner_builder.set_link_label(inner_clip_pooled, "clip_pooled");
+    inner_builder.set_link_label(inner_t5_hidden, "t5_hidden_states");
+    inner_builder.set_link_label(inner_latent_in, "latent_in");
+    inner_builder.set_link_label(inner_latent_out, "latent_out");
+    inner_builder.set_link_label(inner_timestep, "timestep");
+    inner_builder.set_link_label(inner_dt, "dt");
+    inner_builder.set_link_label(inner_progress_tier, "progress_tier");
+    inner_builder.set_link_label(inner_total_steps, "total_steps");
+    inner_builder.set_link_label(inner_step_in, "step_in");
+    inner_builder.set_link_label(inner_step_out, "step_out");
 
     // Inner node 1: Prep — cast latent to model_dtype, reshape timestep (and guidance)
     let cast_latent = inner_builder.new_tensor_link(rng);
     let cast_timestep = inner_builder.new_tensor_link(rng);
     let cast_guidance = inner_guidance.map(|_| inner_builder.new_tensor_link(rng));
+    inner_builder.set_link_label(cast_latent, "latent_model_dtype");
+    inner_builder.set_link_label(cast_timestep, "timestep_reshaped");
+    if let Some(ig) = inner_guidance {
+        inner_builder.set_link_label(ig, "guidance");
+    }
+    if let Some(cg) = cast_guidance {
+        inner_builder.set_link_label(cg, "guidance_reshaped");
+    }
     {
         let mut input_ids = vec![inner_latent_in.global_id(), inner_timestep.global_id()];
         if let Some(ig) = inner_guidance {
@@ -957,6 +1003,7 @@ fn build_flux_denoising_loop(
 
     // Inner node 2: DiT forward pass
     let dit_output = inner_builder.new_tensor_link(rng);
+    inner_builder.set_link_label(dit_output, "velocity_raw");
     let mut dit_inputs = vec![
         (cast_latent, "latent_sample".to_string()),
         (cast_timestep, "timestep".to_string()),
@@ -1129,6 +1176,8 @@ fn build_sd3_denoising_loop(
 ) -> SuperGraphLink {
     let outer_final_latent = builder.new_tensor_link(rng);
     let progress_tier_link = builder.new_tensor_link(rng);
+    builder.set_link_label(outer_final_latent, "latent_final");
+    builder.set_link_label(progress_tier_link, "progress_tier");
 
     {
         let (mut mg, _) = MilliOpGraph::new(std::iter::empty(), rng);
@@ -1161,10 +1210,26 @@ fn build_sd3_denoising_loop(
     let inner_total_steps = inner_builder.new_tensor_link(rng);
     let inner_step_in = inner_builder.new_tensor_link(rng);
     let inner_step_out = inner_builder.new_tensor_link(rng);
+    inner_builder.set_link_label(inner_transformer_weights, "transformer_weights");
+    inner_builder.set_link_label(inner_cond_context, "context_conditional");
+    inner_builder.set_link_label(inner_uncond_context, "context_unconditional");
+    inner_builder.set_link_label(inner_cond_pooled, "pooled_conditional");
+    inner_builder.set_link_label(inner_uncond_pooled, "pooled_unconditional");
+    inner_builder.set_link_label(inner_guidance_scale, "guidance_scale");
+    inner_builder.set_link_label(inner_latent_in, "latent_in");
+    inner_builder.set_link_label(inner_latent_out, "latent_out");
+    inner_builder.set_link_label(inner_timestep, "timestep");
+    inner_builder.set_link_label(inner_dt, "dt");
+    inner_builder.set_link_label(inner_progress_tier, "progress_tier");
+    inner_builder.set_link_label(inner_total_steps, "total_steps");
+    inner_builder.set_link_label(inner_step_in, "step_in");
+    inner_builder.set_link_label(inner_step_out, "step_out");
 
     // Inner node 1: cast latent/timestep to model_dtype and reshape timestep to [1]
     let cast_latent = inner_builder.new_tensor_link(rng);
     let cast_timestep = inner_builder.new_tensor_link(rng);
+    inner_builder.set_link_label(cast_latent, "latent_model_dtype");
+    inner_builder.set_link_label(cast_timestep, "timestep_model_dtype");
     {
         let (mut mg, input_map) = MilliOpGraph::new(
             [inner_latent_in.global_id(), inner_timestep.global_id()],
@@ -1212,6 +1277,7 @@ fn build_sd3_denoising_loop(
 
     // Inner node 2: Transformer unconditional
     let uncond_pred = inner_builder.new_tensor_link(rng);
+    inner_builder.set_link_label(uncond_pred, "prediction_unconditional");
     let mut uncond_node = SuperGraphNodeModelExecution::new(
         rng,
         inner_transformer_weights,
@@ -1235,6 +1301,7 @@ fn build_sd3_denoising_loop(
 
     // Inner node 3: Transformer conditional
     let cond_pred = inner_builder.new_tensor_link(rng);
+    inner_builder.set_link_label(cond_pred, "prediction_conditional");
     let mut cond_node = SuperGraphNodeModelExecution::new(
         rng,
         inner_transformer_weights,
