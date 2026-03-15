@@ -68,18 +68,31 @@ pub fn plan_execution_spans(graph: &NanoGraph, num_lanes: usize) -> SpanPlan {
     }
 
     // Step 1: Run v2c to get the lane/phase assignments.
-    let v2c_plan = nano_plan_v2c::plan_execution(graph, num_lanes);
+    let mut v2c_plan = nano_plan_v2c::plan_execution(graph, num_lanes);
+
+    let is_literal: Vec<bool> = groups
+        .iter()
+        .map(|g| matches!(g.op, ScalarOp::Literal(_)) && g.inputs.is_empty())
+        .collect();
+
+    // Step 1b: Fix cross-lane dependencies within phases.
+    //
+    // v2c splits AllRows groups across lanes. But if a downstream group in the
+    // SAME phase reads the FULL output range of a split group (not just its
+    // lane-local slice), that's a cross-lane dependency within a phase — which
+    // violates the independence invariant.
+    //
+    // Fix: duplicate the split group's computation into every lane. Each lane
+    // independently computes the full group (cheap for small groups like the
+    // 3072-atom attention mask Selects in GPT-2). However, for output purposes,
+    // each lane only outputs its original split slice to avoid duplicate outputs.
+    let dup_info = fix_cross_lane_deps(&mut v2c_plan, groups, &is_literal, num_lanes);
 
     // Step 2: Build a map from (main graph AtomId) -> which (phase, lane, work_item)
     // produces it. This lets us determine what's "external" to a span.
     //
     // For literal groups, they're "always available" — we'll inline them into
     // each span that needs them.
-
-    let is_literal: Vec<bool> = groups
-        .iter()
-        .map(|g| matches!(g.op, ScalarOp::Literal(_)) && g.inputs.is_empty())
-        .collect();
 
     // Build: group_idx -> (phase_idx, lane_idx) for all assigned compute groups.
     let mut group_assignment: HashMap<usize, (usize, usize)> = HashMap::new();
@@ -138,6 +151,7 @@ pub fn plan_execution_spans(graph: &NanoGraph, num_lanes: usize) -> SpanPlan {
                 lane_work,
                 phase_idx,
                 lane_idx,
+                &dup_info,
             );
             spans.push(span);
         }
@@ -146,6 +160,308 @@ pub fn plan_execution_spans(graph: &NanoGraph, num_lanes: usize) -> SpanPlan {
     }
 
     SpanPlan { num_lanes, phases }
+}
+
+// ─── Cross-lane dependency fix ───────────────────────────────────────────────
+
+/// Duplication info: for each duplicated group, the original per-lane output slice.
+/// Key = group_idx. Value = vec indexed by lane_idx, each entry = (atom_offset, atom_count).
+/// Lanes that didn't originally have this group get (0, 0).
+type DupInfo = HashMap<usize, Vec<(u64, u64)>>;
+
+/// Detect and fix cross-lane dependencies within phases.
+///
+/// When an AllRows group G is split across lanes in phase P, and a consumer
+/// group C in phase P reads a range of G that spans multiple lanes' slices,
+/// C can't run independently — it needs data from other lanes in the same phase.
+///
+/// Fix: replace G's per-lane slices with full-group duplication to every lane.
+/// Each lane independently computes all of G's atoms. This is cheap for small
+/// groups (e.g., 3072-atom attention mask Selects in GPT-2).
+///
+/// Returns duplication info so `build_span` can output only the original
+/// per-lane slices (avoiding duplicate output atoms across lanes).
+fn fix_cross_lane_deps(
+    plan: &mut nano_plan_v2c::ExecutionPlan,
+    groups: &[AtomGroup],
+    is_literal: &[bool],
+    num_lanes: usize,
+) -> DupInfo {
+    let n = groups.len();
+
+    // Build group_idx -> phase_idx mapping.
+    let mut group_phase: Vec<Option<usize>> = vec![None; n];
+    for (phase_idx, phase) in plan.phases.iter().enumerate() {
+        for lane_work in &phase.lane_work {
+            for work in lane_work {
+                // For split groups, all lanes are in the same phase.
+                group_phase[work.group_idx] = Some(phase_idx);
+            }
+        }
+    }
+
+    // Identify split groups: groups assigned to multiple lanes in the same phase.
+    // split_groups[group_idx] = Some(phase_idx) if the group is split.
+    let mut group_lane_count: Vec<usize> = vec![0; n];
+    for phase in &plan.phases {
+        for lane_work in &phase.lane_work {
+            for work in lane_work {
+                group_lane_count[work.group_idx] += 1;
+            }
+        }
+    }
+    let mut split_groups: HashSet<usize> = HashSet::new();
+    for gi in 0..n {
+        if group_lane_count[gi] > 1 {
+            split_groups.insert(gi);
+        }
+    }
+
+    if split_groups.is_empty() {
+        return HashMap::new();
+    }
+
+    // For each phase, check if any consumer's inputs reference a split group
+    // in a way that spans beyond the consumer's own lane-local slice.
+    //
+    // Approach: for each non-split (or split) group C in phase P, resolve its
+    // producer groups. If any producer G is split in phase P, check whether
+    // C's access to G is lane-local.
+    let mut groups_to_duplicate: HashSet<usize> = HashSet::new();
+
+    for (phase_idx, phase) in plan.phases.iter().enumerate() {
+        // Collect all groups in this phase.
+        let mut phase_groups_set: HashSet<usize> = HashSet::new();
+        for lane_work in &phase.lane_work {
+            for work in lane_work {
+                phase_groups_set.insert(work.group_idx);
+            }
+        }
+
+        // For each group in this phase, check its inputs.
+        for &gi in &phase_groups_set {
+            let group = &groups[gi];
+            for input in &group.inputs {
+                let referenced = resolve_all_referenced_atoms_to_groups(
+                    input, group.count, groups,
+                );
+                for prod_gi in referenced {
+                    if is_literal[prod_gi] || prod_gi == gi {
+                        continue;
+                    }
+                    if !split_groups.contains(&prod_gi) {
+                        continue;
+                    }
+                    if group_phase[prod_gi] != Some(phase_idx) {
+                        continue;
+                    }
+                    // prod_gi is a split group in the same phase as gi.
+                    // Check if the access is lane-local.
+                    if !is_input_lane_local(input, group.count, &groups[prod_gi], num_lanes) {
+                        groups_to_duplicate.insert(prod_gi);
+                    }
+                }
+            }
+
+            // Also check ReduceSum/ReduceMax extended access.
+            match &group.op {
+                ScalarOp::ReduceSum { reduce_count, reduce_stride, .. }
+                | ScalarOp::ReduceMax { reduce_count, reduce_stride, .. }
+                    if *reduce_count > 1 && *reduce_stride != 0 =>
+                {
+                    for input in &group.inputs {
+                        let referenced = resolve_input_to_group_ranges(
+                            input, 0, group.count, *reduce_count, *reduce_stride, groups,
+                        );
+                        for (prod_gi, _, _) in referenced {
+                            if is_literal[prod_gi] || prod_gi == gi {
+                                continue;
+                            }
+                            if !split_groups.contains(&prod_gi) {
+                                continue;
+                            }
+                            if group_phase[prod_gi] != Some(phase_idx) {
+                                continue;
+                            }
+                            // The reduce extends the read range, likely crossing lanes.
+                            groups_to_duplicate.insert(prod_gi);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if groups_to_duplicate.is_empty() {
+        return HashMap::new();
+    }
+
+    // Transitive closure: duplicated groups might themselves depend on split
+    // groups in the same phase. When we duplicate G, each lane computes ALL
+    // of G — so G's inputs must be fully available on each lane too.
+    // If G reads from a split group H in the same phase, H must also be
+    // duplicated (unless the access is lane-local, but since G is now full,
+    // it's reading the full range of H, which is never lane-local for a
+    // split group).
+    loop {
+        let mut new_dups: Vec<usize> = Vec::new();
+        for &gi in &groups_to_duplicate {
+            let group = &groups[gi];
+            let my_phase = group_phase[gi];
+            for input in &group.inputs {
+                let referenced = resolve_all_referenced_atoms_to_groups(
+                    input, group.count, groups,
+                );
+                for prod_gi in referenced {
+                    if is_literal[prod_gi] || prod_gi == gi {
+                        continue;
+                    }
+                    if !split_groups.contains(&prod_gi) {
+                        continue;
+                    }
+                    if group_phase[prod_gi] != my_phase {
+                        continue;
+                    }
+                    if !groups_to_duplicate.contains(&prod_gi) {
+                        new_dups.push(prod_gi);
+                    }
+                }
+            }
+            // Also check reduce extended access.
+            match &group.op {
+                ScalarOp::ReduceSum { reduce_count, reduce_stride, .. }
+                | ScalarOp::ReduceMax { reduce_count, reduce_stride, .. }
+                    if *reduce_count > 1 && *reduce_stride != 0 =>
+                {
+                    for input in &group.inputs {
+                        let referenced = resolve_input_to_group_ranges(
+                            input, 0, group.count, *reduce_count, *reduce_stride, groups,
+                        );
+                        for (prod_gi, _, _) in referenced {
+                            if is_literal[prod_gi] || prod_gi == gi {
+                                continue;
+                            }
+                            if !split_groups.contains(&prod_gi) {
+                                continue;
+                            }
+                            if group_phase[prod_gi] != my_phase {
+                                continue;
+                            }
+                            if !groups_to_duplicate.contains(&prod_gi) {
+                                new_dups.push(prod_gi);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if new_dups.is_empty() {
+            break;
+        }
+        for gi in new_dups {
+            groups_to_duplicate.insert(gi);
+        }
+    }
+
+    // Record original per-lane splits for duplicated groups before modifying.
+    let mut dup_info: DupInfo = HashMap::new();
+    for &gi in &groups_to_duplicate {
+        let mut per_lane: Vec<(u64, u64)> = vec![(0, 0); num_lanes];
+        for (phase_idx, phase) in plan.phases.iter().enumerate() {
+            if group_phase[gi] != Some(phase_idx) {
+                continue;
+            }
+            for (lane_idx, lane_work) in phase.lane_work.iter().enumerate() {
+                for work in lane_work {
+                    if work.group_idx == gi {
+                        per_lane[lane_idx] = (work.atom_offset, work.atom_count);
+                    }
+                }
+            }
+        }
+        dup_info.insert(gi, per_lane);
+    }
+
+    // Modify the plan: for each group to duplicate, replace per-lane slices
+    // with full-group assignment to every lane.
+    for (phase_idx, phase) in plan.phases.iter_mut().enumerate() {
+        let mut dups_in_phase: Vec<usize> = groups_to_duplicate
+            .iter()
+            .copied()
+            .filter(|&gi| group_phase[gi] == Some(phase_idx))
+            .collect();
+        dups_in_phase.sort();
+
+        if dups_in_phase.is_empty() {
+            continue;
+        }
+
+        // Remove old split work items for these groups.
+        for lane_work in &mut phase.lane_work {
+            lane_work.retain(|work| !groups_to_duplicate.contains(&work.group_idx));
+        }
+
+        // Add full-group work to every lane.
+        for &gi in &dups_in_phase {
+            for lane_idx in 0..num_lanes {
+                phase.lane_work[lane_idx].push(nano_plan_v2c::LaneWork {
+                    group_idx: gi,
+                    atom_offset: 0,
+                    atom_count: groups[gi].count,
+                });
+            }
+        }
+
+        // Re-sort work items within each lane.
+        for lane_work in &mut phase.lane_work {
+            lane_work.sort_by_key(|w| (w.group_idx, w.atom_offset));
+        }
+    }
+
+    dup_info
+}
+
+/// Check if a consumer's input access to a split producer is lane-local.
+///
+/// Lane-local means: when both consumer and producer are split evenly across
+/// N lanes, lane j's slice of the consumer only reads lane j's slice of the producer.
+fn is_input_lane_local(
+    input: &InputRef,
+    consumer_count: u64,
+    producer: &AtomGroup,
+    num_lanes: usize,
+) -> bool {
+    let producer_count = producer.count;
+    match input {
+        InputRef::Affine { stride, .. } => {
+            // stride=1, same count: lane j's chunk maps 1:1.
+            *stride == 1 && producer_count == consumer_count
+        }
+        InputRef::Broadcast(_) => {
+            // One atom read by all lanes — cross-lane.
+            false
+        }
+        InputRef::StridedBroadcast { repeat, .. } => {
+            // atom i reads base + stride * (i / repeat).
+            // Lane-local if producer count matches proportionally.
+            let expected = (consumer_count + repeat - 1) / repeat;
+            producer_count == expected
+        }
+        InputRef::Modular { .. } => {
+            // Modular wraps around — not lane-local.
+            false
+        }
+        InputRef::Explicit(_) => {
+            // Arbitrary mapping — can't prove lane-locality.
+            false
+        }
+        InputRef::SymAffine { .. } => {
+            // Contraction — not lane-local.
+            false
+        }
+    }
 }
 
 // ─── Span builder ────────────────────────────────────────────────────────────
@@ -192,6 +508,7 @@ fn build_span(
     lane_work: &[nano_plan_v2c::LaneWork],
     phase_idx: usize,
     lane_idx: usize,
+    dup_info: &DupInfo,
 ) -> Span {
     let mut span_graph = NanoGraph::new();
 
@@ -293,12 +610,29 @@ fn build_span(
         let main_base = AtomId(group.base_id.0 + atom_offset);
         main_to_local.insert_range(main_base, local_base, atom_count);
 
-        // All atoms produced by this work item are potential outputs.
-        output_mappings.push(AtomMapping {
-            main_base,
-            span_base: local_base,
-            count: atom_count,
-        });
+        // For duplicated groups, only output the lane's original slice
+        // (to avoid duplicate outputs across lanes). For normal groups,
+        // output the full work item.
+        if let Some(per_lane) = dup_info.get(&gi) {
+            let (orig_offset, orig_count) = per_lane[lane_idx];
+            if orig_count > 0 {
+                // This lane's original slice within the group.
+                // atom_offset is always 0 for duplicated groups (full group).
+                let out_main_base = AtomId(group.base_id.0 + orig_offset);
+                let out_span_base = AtomId(local_base.0 + orig_offset);
+                output_mappings.push(AtomMapping {
+                    main_base: out_main_base,
+                    span_base: out_span_base,
+                    count: orig_count,
+                });
+            }
+        } else {
+            output_mappings.push(AtomMapping {
+                main_base,
+                span_base: local_base,
+                count: atom_count,
+            });
+        }
     }
 
     // Mark graph outputs.
@@ -2131,5 +2465,156 @@ mod tests {
 
         println!("Reduce stride consumer 8 lanes:");
         plan.print_summary();
+    }
+
+    /// Build a graph with a cross-lane dependency: an AllRows Select-like group
+    /// consumed in the same phase by another group via a non-lane-local pattern.
+    ///
+    /// This mimics GPT-2's attention mask: a Select (count=mask_size) is read
+    /// by a larger consumer (count=consumer_size) via StridedBroadcast (each
+    /// consumer atom reads from a proportionally different spot in the Select).
+    /// When both are AllRows and in the same phase, splitting the Select across
+    /// lanes creates a cross-lane dependency that must be fixed by duplication.
+    fn build_cross_lane_select(mask_size: u64, consumer_size: u64) -> NanoGraph {
+        let mut g = NanoGraph::new();
+
+        // Condition literal for Select
+        let cond_lit = g.push_group(
+            mask_size,
+            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            vec![], vec![], vec![],
+        );
+        // Value literals for Select
+        let val_a = g.push_group(
+            mask_size,
+            ScalarOp::Literal(NumericScalar::F32(0.0)),
+            vec![], vec![], vec![],
+        );
+        let val_b = g.push_group(
+            mask_size,
+            ScalarOp::Literal(NumericScalar::F32(-1e9)),
+            vec![], vec![], vec![],
+        );
+
+        // Select group (AllRows, mask_size atoms)
+        let select = g.push_group(
+            mask_size,
+            ScalarOp::Select {
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![], vec![],
+            vec![
+                InputRef::Affine { base: cond_lit, stride: 1 },
+                InputRef::Affine { base: val_a, stride: 1 },
+                InputRef::Affine { base: val_b, stride: 1 },
+            ],
+        );
+
+        // Data literal for the consumer
+        let data_lit = g.push_group(
+            consumer_size,
+            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            vec![], vec![], vec![],
+        );
+
+        // Consumer: reads data_lit 1:1 and Select via StridedBroadcast
+        // (consumer_size atoms, each reading from select with repeat pattern).
+        // This means consumer atom i reads select atom i / repeat.
+        let repeat = consumer_size / mask_size; // e.g., 8
+        let consumer = g.push_group(
+            consumer_size,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Add,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![], vec![],
+            vec![
+                InputRef::Affine { base: data_lit, stride: 1 },
+                InputRef::StridedBroadcast { base: select, stride: 1, repeat },
+            ],
+        );
+
+        for i in 0..consumer_size {
+            g.outputs.push(AtomId(consumer.0 + i));
+        }
+        g
+    }
+
+    #[test]
+    fn test_cross_lane_select_duplication() {
+        // Mimics GPT-2 attention mask pattern: Select(3072) consumed by
+        // a larger group(24576) via StridedBroadcast{repeat=8}.
+        // Both are AllRows in the same phase. Without the fix, splitting
+        // the Select across 8 lanes creates 96-like violations.
+        let g = build_cross_lane_select(3072, 3072 * 8);
+        assert!(g.validate().is_empty(), "{:?}", g.validate());
+
+        let plan = plan_execution_spans(&g, 8);
+        verify_span_plan(&g, &plan);
+        verify_output_coverage(&g, &plan);
+        verify_input_availability(&plan, &g);
+
+        println!("Cross-lane Select 8 lanes:");
+        plan.print_summary();
+    }
+
+    #[test]
+    fn test_cross_lane_select_small() {
+        // Smaller variant to test basic correctness.
+        let g = build_cross_lane_select(64, 512);
+        assert!(g.validate().is_empty(), "{:?}", g.validate());
+
+        let plan = plan_execution_spans(&g, 4);
+        verify_span_plan(&g, &plan);
+        verify_output_coverage(&g, &plan);
+        verify_input_availability(&plan, &g);
+    }
+
+    #[test]
+    fn test_cross_lane_broadcast_from_split() {
+        // An AllRows group consumed via Broadcast (single atom) by another
+        // same-phase AllRows group. This is a degenerate cross-lane case.
+        let mut g = NanoGraph::new();
+        let lit = g.push_group(
+            1024,
+            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            vec![], vec![], vec![],
+        );
+        let src = g.push_group(
+            1024,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Tanh,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![], vec![],
+            vec![InputRef::Affine { base: lit, stride: 1 }],
+        );
+        // Consumer broadcasts a single atom from src. When src is split
+        // across lanes, only one lane owns that atom.
+        let consumer = g.push_group(
+            1024,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Add,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![], vec![],
+            vec![
+                InputRef::Affine { base: lit, stride: 1 },
+                InputRef::Broadcast(src), // reads atom 0 of src
+            ],
+        );
+        for i in 0..1024 {
+            g.outputs.push(AtomId(consumer.0 + i));
+        }
+        assert!(g.validate().is_empty(), "{:?}", g.validate());
+
+        let plan = plan_execution_spans(&g, 4);
+        verify_span_plan(&g, &plan);
+        verify_output_coverage(&g, &plan);
+        verify_input_availability(&plan, &g);
     }
 }
