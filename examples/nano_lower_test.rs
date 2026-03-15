@@ -306,7 +306,16 @@ fn main() {
                     let groups = full_result.graph.groups();
                     let num_atoms = full_result.graph.num_atoms() as usize;
                     let mut interp_values = vec![0.0f32; num_atoms];
-                    // Pre-fill from overrides
+                    // Pre-fill Literal atoms from the ScalarOp values
+                    for group in groups {
+                        if let ScalarOp::Literal(scalar) = &group.op {
+                            let val = scalar.to_f64() as f32;
+                            for i in 0..group.count {
+                                interp_values[(group.base_id.0 + i) as usize] = val;
+                            }
+                        }
+                    }
+                    // Then override with numeric_overrides (which may have different values)
                     for (&idx, &val) in &overrides {
                         interp_values[idx as usize] = val;
                     }

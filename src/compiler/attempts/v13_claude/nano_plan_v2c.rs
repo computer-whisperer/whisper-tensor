@@ -110,6 +110,9 @@ pub fn plan_execution(graph: &NanoGraph, num_lanes: usize) -> ExecutionPlan {
         &row_families,
     );
 
+    // Validate: every non-literal group's producers must be in an earlier or equal phase.
+    validate_phase_ordering(groups, &producers, &is_literal, &group_phase, &row_families);
+
     // Step 5: Within each phase, assign work to lanes with group splitting.
     let phases = assign_lanes_with_splitting(
         groups,
@@ -130,6 +133,11 @@ pub fn plan_execution(graph: &NanoGraph, num_lanes: usize) -> ExecutionPlan {
 // ─── Group dependency graph ──────────────────────────────────────────────────
 
 /// Build producer and consumer graphs at group level.
+///
+/// This accounts for THREE kinds of data dependencies:
+/// 1. InputRef resolution (the basic case)
+/// 2. ReduceSum/ReduceMax strided access (extends the read range beyond the InputRef)
+/// 3. IndirectLoad table_base (reads from a table group embedded in the ScalarOp)
 fn build_group_deps(groups: &[AtomGroup]) -> (Vec<Vec<usize>>, Vec<Vec<usize>>) {
     let n = groups.len();
     let mut producers: Vec<Vec<usize>> = Vec::with_capacity(n);
@@ -137,6 +145,8 @@ fn build_group_deps(groups: &[AtomGroup]) -> (Vec<Vec<usize>>, Vec<Vec<usize>>) 
 
     for (gi, group) in groups.iter().enumerate() {
         let mut prod_set = BTreeSet::new();
+
+        // 1. Basic InputRef resolution.
         for input in &group.inputs {
             let prods = resolve_producer_groups(input, group.count, groups);
             for pi in prods {
@@ -145,6 +155,36 @@ fn build_group_deps(groups: &[AtomGroup]) -> (Vec<Vec<usize>>, Vec<Vec<usize>>) 
                 }
             }
         }
+
+        // 2. ReduceSum/ReduceMax: the strided access extends beyond the InputRef range.
+        match &group.op {
+            ScalarOp::ReduceSum { reduce_count, reduce_stride, .. }
+            | ScalarOp::ReduceMax { reduce_count, reduce_stride, .. }
+                if *reduce_count > 1 && *reduce_stride != 0 =>
+            {
+                for input in &group.inputs {
+                    let prods = resolve_producer_groups_with_reduce(
+                        input, group.count, *reduce_count, *reduce_stride, groups,
+                    );
+                    for pi in prods {
+                        if pi != gi {
+                            prod_set.insert(pi);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        // 3. IndirectLoad: table_base references a group whose atoms are read at runtime.
+        if let ScalarOp::IndirectLoad { table_base, .. } = &group.op {
+            if let Some(pi) = find_group_idx(groups, *table_base) {
+                if pi != gi {
+                    prod_set.insert(pi);
+                }
+            }
+        }
+
         let prod_vec: Vec<usize> = prod_set.into_iter().collect();
         for &pi in &prod_vec {
             consumers[pi].push(gi);
@@ -588,7 +628,7 @@ fn is_allrows_chain_lane_local_samephase(
     // For ReduceSum with reduce_stride != 0, atom i accumulates over
     // resolved_base(i) + k * reduce_stride for k in 0..reduce_count.
     // This reads across stride boundaries in the input, potentially
-    // spanning multiple lanes.
+    // spanning multiple lanes AND multiple producer groups.
     match &consumer.op {
         ScalarOp::ReduceSum {
             reduce_count,
@@ -601,11 +641,13 @@ fn is_allrows_chain_lane_local_samephase(
             ..
         } => {
             if *reduce_count > 1 && *reduce_stride != 0 {
-                // Check if any input to this reduce is a same-phase AllRows
-                // producer. If so, the strided reads would cross lane
-                // boundaries.
+                // Check if any input (including extended reduce stride range)
+                // references a same-phase AllRows producer. If so, the strided
+                // reads would cross lane boundaries.
                 let has_same_phase_allrows_input = consumer.inputs.iter().any(|inp| {
-                    let prods = resolve_producer_groups(inp, consumer_count, groups);
+                    let prods = resolve_producer_groups_with_reduce(
+                        inp, consumer_count, *reduce_count, *reduce_stride, groups,
+                    );
                     prods.iter().any(|&pi| {
                         !is_literal[pi]
                             && row_families[pi] == RowFamily::AllRows
@@ -742,6 +784,158 @@ fn compute_phase_assignment(
 
     let num_phases = group_phase.iter().copied().max().map(|m| m + 1).unwrap_or(1);
     (group_phase, num_phases)
+}
+
+/// Validate that phase ordering respects data dependencies: for every non-literal
+/// group, all atoms it reads must come from groups in earlier or equal phases.
+///
+/// This validation is MORE THOROUGH than just checking the `producers` list --
+/// it independently discovers all dependencies by examining InputRefs AND
+/// ReduceSum/ReduceMax strided access AND IndirectLoad table_base references.
+fn validate_phase_ordering(
+    groups: &[AtomGroup],
+    producers: &[Vec<usize>],
+    is_literal: &[bool],
+    group_phase: &[usize],
+    row_families: &[RowFamily],
+) {
+    let n = groups.len();
+    for gi in 0..n {
+        if is_literal[gi] {
+            continue;
+        }
+        let my_phase = group_phase[gi];
+        let group = &groups[gi];
+
+        // Check 1: All producer groups from the InputRef resolution.
+        for input in &group.inputs {
+            let prods = resolve_producer_groups(input, group.count, groups);
+            for pi in prods {
+                if pi == gi || is_literal[pi] {
+                    continue;
+                }
+                if group_phase[pi] > my_phase {
+                    panic!(
+                        "Phase ordering violation (InputRef): group {} (phase {}, family {:?}, op {:?}) \
+                         reads from producer group {} (phase {}, family {:?}, op {:?}), \
+                         but producer is in a LATER phase! \
+                         Group {} base_id={}, count={}; Producer {} base_id={}, count={}",
+                        gi, my_phase, row_families[gi], std::mem::discriminant(&groups[gi].op),
+                        pi, group_phase[pi], row_families[pi], std::mem::discriminant(&groups[pi].op),
+                        gi, groups[gi].base_id.0, groups[gi].count,
+                        pi, groups[pi].base_id.0, groups[pi].count,
+                    );
+                }
+            }
+        }
+
+        // Check 2: ReduceSum/ReduceMax strided access extends the read range.
+        match &group.op {
+            ScalarOp::ReduceSum { reduce_count, reduce_stride, .. }
+            | ScalarOp::ReduceMax { reduce_count, reduce_stride, .. }
+                if *reduce_count > 1 && *reduce_stride != 0 =>
+            {
+                for input in &group.inputs {
+                    // Compute the FULL accessed range including reduce strides.
+                    let extended_prods = resolve_producer_groups_with_reduce(
+                        input, group.count, *reduce_count, *reduce_stride, groups,
+                    );
+                    for pi in extended_prods {
+                        if pi == gi || is_literal[pi] {
+                            continue;
+                        }
+                        if group_phase[pi] > my_phase {
+                            panic!(
+                                "Phase ordering violation (ReduceStride): group {} (phase {}) \
+                                 reads from group {} (phase {}) via reduce stride access. \
+                                 reduce_count={}, reduce_stride={}. \
+                                 Group {} base_id={}, count={}; Producer {} base_id={}, count={}",
+                                gi, my_phase, pi, group_phase[pi],
+                                reduce_count, reduce_stride,
+                                gi, groups[gi].base_id.0, groups[gi].count,
+                                pi, groups[pi].base_id.0, groups[pi].count,
+                            );
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        // Check 3: IndirectLoad table_base dependency.
+        if let ScalarOp::IndirectLoad { table_base, .. } = &group.op {
+            // The table_base points to a group whose atoms are read at runtime.
+            // We don't know the exact range (data-dependent), but the table group
+            // must be in an earlier or equal phase.
+            if let Some(pi) = find_group_idx(groups, *table_base) {
+                if !is_literal[pi] && group_phase[pi] > my_phase {
+                    panic!(
+                        "Phase ordering violation (IndirectLoad table_base): group {} (phase {}) \
+                         reads from table group {} (phase {}) via IndirectLoad. \
+                         Group {} base_id={}, count={}; Table group {} base_id={}, count={}",
+                        gi, my_phase, pi, group_phase[pi],
+                        gi, groups[gi].base_id.0, groups[gi].count,
+                        pi, groups[pi].base_id.0, groups[pi].count,
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Resolve producer groups considering ReduceSum/ReduceMax strided access.
+/// The reduce operation reads: resolved_input(i) + k * reduce_stride for k in 0..reduce_count.
+/// This extends the accessed range beyond what the InputRef alone specifies.
+fn resolve_producer_groups_with_reduce(
+    input: &InputRef,
+    count: u64,
+    reduce_count: u64,
+    reduce_stride: i64,
+    groups: &[AtomGroup],
+) -> Vec<usize> {
+    if count == 0 {
+        return vec![];
+    }
+    let min_reduce_ext = 0i64.min(reduce_stride * (reduce_count as i64 - 1));
+    let max_reduce_ext = 0i64.max(reduce_stride * (reduce_count as i64 - 1));
+
+    match input {
+        InputRef::Affine { base, stride } => {
+            let first_base = base.0 as i64;
+            let last_base = base.0 as i64 + *stride as i64 * (count as i64 - 1);
+            let lo = first_base.min(last_base) + min_reduce_ext;
+            let hi = first_base.max(last_base) + max_reduce_ext;
+            find_groups_in_range(groups, lo as u64, hi as u64)
+        }
+        InputRef::StridedBroadcast { base, stride, repeat } => {
+            let first_block = 0i64;
+            let last_block = ((count - 1) / repeat) as i64;
+            let first_read = base.0 as i64 + stride * first_block;
+            let last_read = base.0 as i64 + stride * last_block;
+            let lo = first_read.min(last_read) + min_reduce_ext;
+            let hi = first_read.max(last_read) + max_reduce_ext;
+            find_groups_in_range(groups, lo as u64, hi as u64)
+        }
+        InputRef::Broadcast(atom_id) => {
+            // Broadcast: all atoms read from the same base. Extend by reduce stride.
+            let base = atom_id.0 as i64;
+            let lo = base + min_reduce_ext;
+            let hi = base + max_reduce_ext;
+            find_groups_in_range(groups, lo as u64, hi as u64)
+        }
+        InputRef::SymAffine { base, stride_i, .. } => {
+            let first_base = base.0 as i64;
+            let last_base = base.0 as i64 + *stride_i as i64 * (count as i64 - 1);
+            let lo = first_base.min(last_base) + min_reduce_ext;
+            let hi = first_base.max(last_base) + max_reduce_ext;
+            find_groups_in_range(groups, lo as u64, hi as u64)
+        }
+        _ => {
+            // Modular, Explicit: fall back to the basic resolution.
+            // These are conservative enough for most cases.
+            resolve_producer_groups(input, count, groups)
+        }
+    }
 }
 
 // ─── Lane assignment with group splitting ────────────────────────────────────
@@ -2573,6 +2767,184 @@ mod tests {
             active_lanes <= 2,
             "Should have at most 2 active lanes, got {}",
             active_lanes
+        );
+    }
+
+    /// Test that ReduceSum strided access is properly tracked for dependencies.
+    ///
+    /// Constructs a graph where a ReduceSum's InputRef points to group A, but its
+    /// strided access reads atoms from group B (which is in a later phase due to
+    /// a barrier). The planner MUST recognize B as a dependency of the ReduceSum
+    /// and place it in a phase >= B's phase.
+    ///
+    /// Graph structure:
+    ///   lit_a (10 atoms) → row_mul_0, row_mul_1 (each K*N atoms, Row families)
+    ///                     → row_red_0, row_red_1 (each N atoms, Row families)
+    ///   lit_b (10 atoms)  ↗
+    ///   The reduces feed into a monolithic elementwise group (AllRows, phase 1).
+    ///   Then we have a second monolithic group that depends on the first.
+    ///   Finally, a ReduceSum whose InputRef base points into the first monolithic
+    ///   group but whose stride extends into the second — the missed dependency.
+    #[test]
+    fn test_reducesum_cross_group_stride_dependency() {
+        let mut g = NanoGraph::new();
+
+        // Phase 0: two Row families from a simple "matmul"
+        let lit_a = g.push_group(
+            8,
+            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            vec![], vec![], vec![],
+        );
+        let lit_b = g.push_group(
+            8,
+            ScalarOp::Literal(NumericScalar::F32(2.0)),
+            vec![], vec![], vec![],
+        );
+
+        // Two "rows" of Mul (same literal signature → Row families)
+        let mul0 = g.push_group(
+            8,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Mul,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![], vec![],
+            vec![
+                InputRef::StridedBroadcast { base: AtomId(lit_a.0), stride: 1, repeat: 4 },
+                InputRef::Affine { base: lit_b, stride: 1 },
+            ],
+        );
+        let mul1 = g.push_group(
+            8,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Mul,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![], vec![],
+            vec![
+                InputRef::StridedBroadcast { base: AtomId(lit_a.0 + 2), stride: 1, repeat: 4 },
+                InputRef::Affine { base: lit_b, stride: 1 },
+            ],
+        );
+
+        // Two Row ReduceSums
+        let red0 = g.push_group(
+            4,
+            ScalarOp::ReduceSum {
+                reduce_count: 2,
+                reduce_stride: 4,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![], vec![],
+            vec![InputRef::Affine { base: mul0, stride: 1 }],
+        );
+        let red1 = g.push_group(
+            4,
+            ScalarOp::ReduceSum {
+                reduce_count: 2,
+                reduce_stride: 4,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![], vec![],
+            vec![InputRef::Affine { base: mul1, stride: 1 }],
+        );
+
+        // Phase 1: monolithic elementwise that reads from BOTH row reduces (AllRows).
+        // This creates a barrier because it reads from multiple Row families.
+        // Note: red0 and red1 are contiguous in AtomId space.
+        let mono_a = g.push_group(
+            8, // 4 from red0 + 4 from red1
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Tanh,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![], vec![],
+            vec![InputRef::Affine { base: red0, stride: 1 }],
+        );
+
+        // mono_b: depends on mono_a via Broadcast (reads ONE atom from mono_a).
+        // Broadcast from AllRows → needs barrier → mono_b is in phase 2 (or later).
+        let mono_b = g.push_group(
+            8,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Add,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![], vec![],
+            vec![
+                InputRef::Affine { base: mono_a, stride: 1 },
+                InputRef::Broadcast(mono_a), // Broadcast from AllRows → barrier
+            ],
+        );
+
+        // The critical group: ReduceSum whose InputRef base is mono_a,
+        // but reduce_stride=8 extends the access into mono_b.
+        // atom i reads: mono_a+i, mono_a+i+8
+        // mono_a+i is in mono_a (atoms 0-7)
+        // mono_a+i+8 is in mono_b (atoms 0-7, since mono_b.base = mono_a.base + 8)
+        //
+        // BUG: resolve_producer_groups only finds mono_a (range [mono_a, mono_a+3]),
+        // so max_prod_phase = phase_of_mono_a. But mono_b is in a LATER phase,
+        // and the ReduceSum actually reads from it.
+        let reduce_cross = g.push_group(
+            4,
+            ScalarOp::ReduceSum {
+                reduce_count: 2,
+                reduce_stride: 8,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![], vec![],
+            vec![InputRef::Affine { base: mono_a, stride: 1 }],
+        );
+
+        for i in 0..4 {
+            g.outputs.push(AtomId(reduce_cross.0 + i));
+        }
+
+        assert!(g.validate().is_empty(), "{:?}", g.validate());
+
+        // This should NOT panic from validate_phase_ordering.
+        // If the ReduceSum's strided dependency on mono_b is missed,
+        // reduce_cross could be placed in the same phase as mono_a
+        // (because its only known producer via InputRef is mono_a),
+        // but mono_b is also in that phase and has higher group_idx,
+        // so within-phase ordering saves us. The validation should still pass.
+        //
+        // The REAL test is: does the validation function catch the dependency?
+        let plan = plan_execution(&g, 1);
+        verify_coverage(&g, &plan);
+
+        // Extract phase assignments from plan
+        let groups = g.groups();
+        let mut group_phase_from_plan: HashMap<usize, usize> = HashMap::new();
+        for (phase_idx, phase) in plan.phases.iter().enumerate() {
+            for lane in &phase.lane_work {
+                for w in lane {
+                    group_phase_from_plan.insert(w.group_idx, phase_idx);
+                }
+            }
+        }
+
+        let mono_b_gi = groups.iter().position(|grp| grp.base_id == mono_b).unwrap();
+        let reduce_gi = groups.iter().position(|grp| grp.base_id == reduce_cross).unwrap();
+
+        let mono_b_phase = group_phase_from_plan[&mono_b_gi];
+        let reduce_phase = group_phase_from_plan[&reduce_gi];
+
+        // reduce_cross MUST be in a phase >= mono_b's phase, since the
+        // ReduceSum's strided access reads from mono_b.
+        assert!(
+            reduce_phase >= mono_b_phase,
+            "ReduceSum group (gi={}, phase={}) reads atoms from mono_b (gi={}, phase={}) \
+             via strided reduce access, but is placed in an earlier phase!",
+            reduce_gi, reduce_phase, mono_b_gi, mono_b_phase,
         );
     }
 }
