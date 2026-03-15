@@ -320,6 +320,104 @@ fn print_partition_summary(graph: &NanoGraph, kernel_groups: &[Vec<usize>], name
     let num_dep_edges: usize = kernel_deps.iter().map(|d| d.len()).sum();
     println!("  acyclic={}, dep_edges={}", acyclic, num_dep_edges);
 
+    // If not acyclic, find and print one cycle
+    if !acyclic {
+        // Find a kernel still with nonzero in-degree (part of a cycle)
+        if let Some(start) = in_deg.iter().position(|&d| d > 0) {
+            // DFS to find cycle
+            let mut path = vec![start];
+            let mut visited_set = std::collections::HashSet::new();
+            visited_set.insert(start);
+            let mut found_cycle = false;
+            'outer: loop {
+                let cur = *path.last().unwrap();
+                let mut next = None;
+                for &dep in &kernel_deps[cur] {
+                    if in_deg[dep] > 0 { // still in a cycle component
+                        if visited_set.contains(&dep) {
+                            // Found cycle: dep appears earlier in path
+                            let cycle_start = path.iter().position(|&k| k == dep).unwrap();
+                            let cycle: Vec<usize> = path[cycle_start..].to_vec();
+                            println!("  CYCLE (len {}): {:?}", cycle.len(), cycle);
+                            // Print ALL edges in the cycle
+                            let mut cycle_ext = cycle.clone();
+                            cycle_ext.push(cycle[0]); // close the loop
+                            for w in cycle_ext.windows(2) {
+                                let (ka, kb) = (w[0], w[1]);
+                                // ka depends on kb (ka reads from kb)
+                                let mut edge_count = 0;
+                                for &gi in &kernel_groups[ka] {
+                                    for input in &groups[gi].inputs {
+                                        use whisper_tensor::nano_graph::InputRef;
+                                        let bases: Vec<whisper_tensor::nano_graph::AtomId> = match input {
+                                            InputRef::Broadcast(id) => vec![*id],
+                                            InputRef::Affine { base, .. } | InputRef::StridedBroadcast { base, .. }
+                                            | InputRef::SymAffine { base, .. } | InputRef::Modular { base, .. } => vec![*base],
+                                            InputRef::Explicit(ids) if !ids.is_empty() => vec![ids[0]],
+                                            _ => vec![],
+                                        };
+                                        for id in bases {
+                                            if let Some(src_gi) = find_gi(id) {
+                                                if g2k[src_gi] == kb && edge_count < 3 {
+                                                    let c_op = format!("{:?}", groups[gi].op).chars().take_while(|c| *c != ' ' && *c != '{' && *c != '(').collect::<String>();
+                                                    let p_op = format!("{:?}", groups[src_gi].op).chars().take_while(|c| *c != ' ' && *c != '{' && *c != '(').collect::<String>();
+                                                    println!("    k{} reads k{}: g{} ({} cnt={}) ← g{} ({} cnt={})",
+                                                        ka, kb, gi, c_op, groups[gi].count, src_gi, p_op, groups[src_gi].count);
+                                                    edge_count += 1;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            // Print details of each edge in the cycle
+                            for w in cycle.windows(2) {
+                                let (ka, kb) = (w[0], w[1]);
+                                // Find the actual group edge
+                                for &gi in &kernel_groups[ka] {
+                                    for input in &groups[gi].inputs {
+                                        use whisper_tensor::nano_graph::InputRef;
+                                        let bases: Vec<whisper_tensor::nano_graph::AtomId> = match input {
+                                            InputRef::Broadcast(id) => vec![*id],
+                                            InputRef::Affine { base, .. } | InputRef::StridedBroadcast { base, .. }
+                                            | InputRef::SymAffine { base, .. } | InputRef::Modular { base, .. } => vec![*base],
+                                            InputRef::Explicit(ids) if !ids.is_empty() => vec![ids[0]],
+                                            _ => vec![],
+                                        };
+                                        for id in bases {
+                                            if let Some(src_gi) = find_gi(id) {
+                                                if g2k[src_gi] == kb {
+                                                    let consumer_op = format!("{:?}", groups[gi].op)
+                                                        .chars().take_while(|c| *c != ' ' && *c != '{' && *c != '(').collect::<String>();
+                                                    let producer_op = format!("{:?}", groups[src_gi].op)
+                                                        .chars().take_while(|c| *c != ' ' && *c != '{' && *c != '(').collect::<String>();
+                                                    println!("    k{}→k{}: g{} ({}, count={}) reads from g{} ({}, count={})",
+                                                        kb, ka, gi, consumer_op, groups[gi].count,
+                                                        src_gi, producer_op, groups[src_gi].count);
+                                                    break 'outer;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            found_cycle = true;
+                            break 'outer;
+                        }
+                        next = Some(dep);
+                        break;
+                    }
+                }
+                if let Some(n) = next {
+                    path.push(n);
+                    visited_set.insert(n);
+                } else {
+                    break; // dead end
+                }
+            }
+        }
+    }
+
     // Top 5 kernels
     for &(ki, atoms, ngroups) in sizes.iter().take(5) {
         println!("    k{}: {} groups, {} atoms ({:.1}%)", ki, ngroups, atoms, atoms as f64 / total_atoms as f64 * 100.0);
