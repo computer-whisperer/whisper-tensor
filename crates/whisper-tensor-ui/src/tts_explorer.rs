@@ -184,11 +184,16 @@ impl TTSExplorerApp {
                     });
                 }
 
-                let is_running = self.pending_request.is_some();
                 ui.horizontal(|ui| {
-                    if is_running {
+                    if let Some(request_id) = self.pending_request.as_ref().map(|x| x.0) {
                         ui.spinner();
                         ui.label("Generating...");
+                        if ui.button("Cancel").clicked() {
+                            server_request_manager.cancel_request(request_id);
+                            self.pending_request = None;
+                            self.progress_widget_state.clear();
+                            self.status_message = Some("Cancelled".to_string());
+                        }
                     } else if ui.button("Generate").clicked() {
                         self.run_generation(
                             state,

@@ -19,6 +19,9 @@ pub trait SymbolicGraphObserver {
         backend: &mut EvalBackend,
     );
     fn on_loading_weight(&mut self, path: &[GlobalId], weight_name: Option<String>);
+    fn should_cancel(&mut self) -> bool {
+        false
+    }
 }
 
 impl SymbolicGraphObserver for () {
@@ -38,4 +41,7 @@ impl SymbolicGraphObserver for () {
     ) {
     }
     fn on_loading_weight(&mut self, _path: &[GlobalId], _weight_name: Option<String>) {}
+    fn should_cancel(&mut self) -> bool {
+        false
+    }
 }

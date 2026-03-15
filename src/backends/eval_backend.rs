@@ -116,6 +116,8 @@ pub enum EvalRuntimeError {
     MissingInputTensor(String, Option<DType>, Option<Vec<usize>>),
     #[error("Eval Error: {0:?} {1}")]
     EvalError(Option<String>, EvalError),
+    #[error("Execution cancelled")]
+    Cancelled,
 }
 
 pub fn run<T: SymbolicGraphObserver>(
@@ -126,6 +128,9 @@ pub fn run<T: SymbolicGraphObserver>(
     observer: &mut T,
     inputs: impl IntoIterator<Item = (String, NumericTensor<DynRank>)>,
 ) -> Result<HashMap<String, NumericTensor<DynRank>>, EvalRuntimeError> {
+    if observer.should_cancel() {
+        return Err(EvalRuntimeError::Cancelled);
+    }
     let initialized_tensors = if let Some(tensor_cache) = loaded_tensor_cache {
         model.get_initialized_tensors_cached_with_observer(
             tensor_store,
@@ -136,6 +141,9 @@ pub fn run<T: SymbolicGraphObserver>(
     } else {
         model.get_initialized_tensors_with_observer(tensor_store, observer)
     };
+    if observer.should_cancel() {
+        return Err(EvalRuntimeError::Cancelled);
+    }
     let mut tensor_uses_left: HashMap<GlobalId, usize> = HashMap::new();
     let mut active_tensors: HashMap<GlobalId, NumericTensor<DynRank>> = HashMap::new();
     for (tensor_id, tensor) in initialized_tensors {
@@ -169,6 +177,9 @@ pub fn run<T: SymbolicGraphObserver>(
     let ops = model.get_operations();
     let mut remaining_ops_to_complete: HashSet<GlobalId> = ops.keys().copied().collect();
     loop {
+        if observer.should_cancel() {
+            return Err(EvalRuntimeError::Cancelled);
+        }
         // Pick the next op to use
         let mut best_op_id = None;
         let mut best_op_id_score = None;
@@ -206,6 +217,9 @@ pub fn run<T: SymbolicGraphObserver>(
         }
 
         if let Some(op_id) = best_op_id {
+            if observer.should_cancel() {
+                return Err(EvalRuntimeError::Cancelled);
+            }
             let GraphOperation { name, op } = ops.get(&op_id).unwrap();
             let input_ids = op.inputs();
             let mut input_values = HashMap::new();

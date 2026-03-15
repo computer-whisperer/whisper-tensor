@@ -48,6 +48,8 @@ pub enum SuperGraphError {
     InvalidInputError(String),
     #[error(transparent)]
     EvalRuntimeError(#[from] EvalRuntimeError),
+    #[error("Execution cancelled")]
+    Cancelled,
 }
 
 pub type SuperGraphHash = u64;
@@ -111,6 +113,9 @@ impl SuperGraph {
         let mut remaining_ops = self.nodes.keys().cloned().collect::<Vec<_>>();
 
         loop {
+            if context.observer.should_cancel() {
+                return Err(SuperGraphError::Cancelled);
+            }
             let op_id_to_use = {
                 let mut op_id_to_use = None;
                 for op_id in &remaining_ops {
@@ -133,6 +138,9 @@ impl SuperGraph {
                 let op_id = *op_id;
                 let mut this_path = node_path.to_vec();
                 let op = self.nodes.get(&op_id).unwrap();
+                if context.observer.should_cancel() {
+                    return Err(SuperGraphError::Cancelled);
+                }
                 let start_instant = Instant::now();
                 op.eval(&this_path, &mut data, context)?;
                 this_path.push(op.global_id());

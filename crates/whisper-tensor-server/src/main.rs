@@ -6,11 +6,12 @@ use axum::{
     response::IntoResponse,
     routing::get,
 };
+use std::collections::{HashMap, HashSet};
 use std::default::Default;
 use std::fs::File;
 use std::io::Read;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Notify, mpsc};
@@ -28,7 +29,8 @@ use tokenizers::FromPretrainedParameters;
 use whisper_tensor::loader::ConfigValue;
 use whisper_tensor_server::model_server::{ModelServer, default_loaders};
 use whisper_tensor_server::scheduler::{
-    SchedulerJob, SchedulerReport, SchedulerReporter, scheduler,
+    ObserverSettingsRegistry, SchedulerJob, SchedulerReport, SchedulerReporter, scheduler,
+    update_observer_settings,
 };
 use whisper_tensor_server::{
     ServerConfigReport, SuperGraphExecutionReport, WebsocketClientServerMessage,
@@ -55,6 +57,8 @@ async fn not_found() -> impl IntoResponse {
 async fn websocket_handler(
     ws: WebSocketUpgrade,
     scheduler_sender: mpsc::Sender<SchedulerJob>,
+    cancellation_registry: Arc<StdMutex<HashSet<u64>>>,
+    observer_settings_registry: ObserverSettingsRegistry,
     model_server: Arc<ModelServer>,
     server_config_report: ServerConfigReport,
 ) -> impl IntoResponse {
@@ -62,6 +66,8 @@ async fn websocket_handler(
         handle_socket(
             socket,
             scheduler_sender,
+            cancellation_registry,
+            observer_settings_registry,
             model_server,
             server_config_report.clone(),
         )
@@ -113,6 +119,8 @@ pub async fn hf_from_pretrained<S: AsRef<str>>(
 async fn handle_socket(
     mut socket: WebSocket,
     scheduler_sender: mpsc::Sender<SchedulerJob>,
+    cancellation_registry: Arc<StdMutex<HashSet<u64>>>,
+    observer_settings_registry: ObserverSettingsRegistry,
     model_server: Arc<ModelServer>,
     server_config_report: ServerConfigReport,
 ) {
@@ -301,8 +309,31 @@ async fn handle_socket(
                                             send_message(&mut socket, msg_out).await;
                                         }
                                         WebsocketClientServerMessage::SuperGraphRequest(request) => {
+                                            if let Some(attention_token) = request.attention_token {
+                                                update_observer_settings(
+                                                    &observer_settings_registry,
+                                                    attention_token,
+                                                    request.do_node_execution_reports,
+                                                    request.abbreviated_tensor_report_settings.clone(),
+                                                    request.subscribed_tensors.clone(),
+                                                );
+                                            }
                                             let job = SchedulerJob::SuperGraphRequest((request, finished_supergraph_job_tx.clone(), Some(SchedulerReporter::new(report_queue.clone(), report_notify.clone()))));
                                             scheduler_sender.send(job).await.unwrap();
+                                        }
+                                        WebsocketClientServerMessage::UpdateSuperGraphObserverSettings(update) => {
+                                            update_observer_settings(
+                                                &observer_settings_registry,
+                                                update.attention_token,
+                                                update.do_node_execution_reports,
+                                                update.abbreviated_tensor_report_settings,
+                                                update.subscribed_tensors,
+                                            );
+                                        }
+                                        WebsocketClientServerMessage::CancelSuperGraphRequest(attention_token) => {
+                                            let _ = cancellation_registry
+                                                .lock()
+                                                .map(|mut set| set.insert(attention_token));
                                         }
                                         WebsocketClientServerMessage::CompileModel(model_id) => {
                                             let job = SchedulerJob::CompileModelRequest{model_id};
@@ -361,6 +392,8 @@ async fn main() {
     }
 
     let (scheduler_tx, scheduler_rx) = mpsc::channel(100);
+    let cancellation_registry = Arc::new(StdMutex::new(HashSet::<u64>::new()));
+    let observer_settings_registry = Arc::new(std::sync::Mutex::new(HashMap::new()));
 
     #[cfg(feature = "vulkan")]
     let vulkan_available = true;
@@ -369,7 +402,12 @@ async fn main() {
 
     let server_config_report = ServerConfigReport { vulkan_available };
 
-    tokio::spawn(scheduler(scheduler_rx, model_server.clone()));
+    tokio::spawn(scheduler(
+        scheduler_rx,
+        model_server.clone(),
+        cancellation_registry.clone(),
+        observer_settings_registry.clone(),
+    ));
 
     tokio::spawn(async move {
         let model_server = model_server.clone();
@@ -385,6 +423,8 @@ async fn main() {
                     websocket_handler(
                         ws,
                         scheduler_tx.clone(),
+                        cancellation_registry.clone(),
+                        observer_settings_registry.clone(),
                         model_server.clone(),
                         server_config_report.clone(),
                     )

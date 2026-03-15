@@ -29,7 +29,7 @@ impl core::fmt::Display for LoadedModelId {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AbbreviatedTensorReportSettings {
     pub downsampled_size: u64,
     pub subscribed_tensors: Vec<Vec<GlobalId>>,
@@ -78,6 +78,14 @@ pub struct SuperGraphRequest {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SuperGraphObserverSettingsUpdate {
+    pub attention_token: u64,
+    pub subscribed_tensors: Vec<Vec<GlobalId>>,
+    pub do_node_execution_reports: bool,
+    pub abbreviated_tensor_report_settings: Option<AbbreviatedTensorReportSettings>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SuperGraphResponseData {
     pub string_outputs: HashMap<SuperGraphLink, String>,
     pub hash_outputs: HashMap<SuperGraphLink, SuperGraphHash>,
@@ -116,6 +124,8 @@ pub enum WebsocketClientServerMessage {
     GetHFTokenizer(String),
     GetTokenizerFile(String),
     SuperGraphRequest(SuperGraphRequest),
+    UpdateSuperGraphObserverSettings(SuperGraphObserverSettingsUpdate),
+    CancelSuperGraphRequest(u64),
     CompileModel(LoadedModelId),
 }
 

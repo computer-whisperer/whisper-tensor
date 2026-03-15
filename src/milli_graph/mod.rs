@@ -54,6 +54,8 @@ pub enum MilliOpGraphError {
     TensorInfoError(#[from] TensorInfoError),
     #[error("Unable to do any type if inference")]
     UnableToInfer,
+    #[error("Execution cancelled")]
+    Cancelled,
 }
 
 /// Training phase a group of milli-ops belongs to.
@@ -851,6 +853,9 @@ impl MilliOpGraph {
         }
 
         for op_id in &self.op_ordering {
+            if observer.should_cancel() {
+                return Err(MilliOpGraphError::Cancelled);
+            }
             let op = &self.ops[op_id];
             let start_instant = Instant::now();
             let out_vec: Vec<_> = op.eval(&intermediate_values, backend)?.collect();

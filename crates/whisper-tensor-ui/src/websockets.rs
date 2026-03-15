@@ -4,14 +4,48 @@ use tokio::sync::mpsc::error::SendError;
 #[cfg(target_arch = "wasm32")]
 use whisper_tensor_server::WebsocketServerClientMessage;
 use whisper_tensor_server::{
-    SuperGraphExecutionReport, SuperGraphRequest, SuperGraphResponse, WebsocketClientServerMessage,
+    AbbreviatedTensorReportSettings, SuperGraphExecutionReport, SuperGraphObserverSettingsUpdate,
+    SuperGraphRequest, SuperGraphResponse, WebsocketClientServerMessage,
 };
+
+#[derive(Clone, Debug, PartialEq)]
+struct ObserverSettingsSnapshot {
+    subscribed_tensors: Vec<Vec<whisper_tensor::graph::GlobalId>>,
+    do_node_execution_reports: bool,
+    abbreviated_tensor_report_settings: Option<AbbreviatedTensorReportSettings>,
+}
+
+impl ObserverSettingsSnapshot {
+    fn new(
+        mut subscribed_tensors: Vec<Vec<whisper_tensor::graph::GlobalId>>,
+        do_node_execution_reports: bool,
+        mut abbreviated_tensor_report_settings: Option<AbbreviatedTensorReportSettings>,
+    ) -> Self {
+        for path in &mut subscribed_tensors {
+            path.shrink_to_fit();
+        }
+        subscribed_tensors.sort();
+        subscribed_tensors.dedup();
+
+        if let Some(settings) = &mut abbreviated_tensor_report_settings {
+            settings.subscribed_tensors.sort();
+            settings.subscribed_tensors.dedup();
+        }
+
+        Self {
+            subscribed_tensors,
+            do_node_execution_reports,
+            abbreviated_tensor_report_settings,
+        }
+    }
+}
 
 pub struct ServerRequestManager {
     client_server_sender: mpsc::UnboundedSender<WebsocketClientServerMessage>,
     incoming_responses: HashMap<u64, SuperGraphResponse>,
     incoming_reports: HashMap<u64, Vec<SuperGraphExecutionReport>>,
     active_requests: HashSet<u64>,
+    observer_settings_by_request: HashMap<u64, ObserverSettingsSnapshot>,
     next_attention_token: u64,
 }
 
@@ -22,6 +56,7 @@ impl ServerRequestManager {
             incoming_reports: HashMap::new(),
             incoming_responses: HashMap::new(),
             active_requests: HashSet::new(),
+            observer_settings_by_request: HashMap::new(),
             next_attention_token: 0,
         }
     }
@@ -50,6 +85,45 @@ impl ServerRequestManager {
         self.incoming_reports.remove(&attention_token);
         self.incoming_responses.remove(&attention_token);
         self.active_requests.remove(&attention_token);
+        self.observer_settings_by_request.remove(&attention_token);
+        let _ =
+            self.client_server_sender
+                .send(WebsocketClientServerMessage::CancelSuperGraphRequest(
+                    attention_token,
+                ));
+    }
+
+    pub fn update_observer_settings(
+        &mut self,
+        attention_token: u64,
+        subscribed_tensors: Vec<Vec<whisper_tensor::graph::GlobalId>>,
+        do_node_execution_reports: bool,
+        abbreviated_tensor_report_settings: Option<AbbreviatedTensorReportSettings>,
+    ) {
+        if !self.active_requests.contains(&attention_token) {
+            return;
+        }
+        let new_settings = ObserverSettingsSnapshot::new(
+            subscribed_tensors,
+            do_node_execution_reports,
+            abbreviated_tensor_report_settings,
+        );
+        if self.observer_settings_by_request.get(&attention_token) == Some(&new_settings) {
+            return;
+        }
+        self.observer_settings_by_request
+            .insert(attention_token, new_settings.clone());
+        let _ = self.client_server_sender.send(
+            WebsocketClientServerMessage::UpdateSuperGraphObserverSettings(
+                SuperGraphObserverSettingsUpdate {
+                    attention_token,
+                    subscribed_tensors: new_settings.subscribed_tensors,
+                    do_node_execution_reports: new_settings.do_node_execution_reports,
+                    abbreviated_tensor_report_settings: new_settings
+                        .abbreviated_tensor_report_settings,
+                },
+            ),
+        );
     }
 
     pub fn submit_supergraph_request(&mut self, mut req: SuperGraphRequest) -> u64 {
@@ -57,8 +131,16 @@ impl ServerRequestManager {
             req.attention_token = Some(self.next_attention_token);
             self.next_attention_token += 1;
         };
-        self.active_requests.insert(req.attention_token.unwrap());
         let ret = req.attention_token.unwrap();
+        self.active_requests.insert(ret);
+        self.observer_settings_by_request.insert(
+            ret,
+            ObserverSettingsSnapshot::new(
+                req.subscribed_tensors.clone(),
+                req.do_node_execution_reports,
+                req.abbreviated_tensor_report_settings.clone(),
+            ),
+        );
         self.client_server_sender
             .send(WebsocketClientServerMessage::SuperGraphRequest(req))
             .unwrap();
@@ -69,6 +151,7 @@ impl ServerRequestManager {
         if let Some(x) = self.incoming_responses.remove(&attention_token) {
             self.active_requests.remove(&attention_token);
             self.incoming_reports.remove(&attention_token);
+            self.observer_settings_by_request.remove(&attention_token);
             Some(x)
         } else {
             None

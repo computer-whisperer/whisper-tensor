@@ -330,6 +330,10 @@ impl<'a, T: SuperGraphObserver> SymbolicGraphObserver for SymbolicGraphObserverW
             .collect::<Vec<_>>();
         self.inner.on_loading_weight(path.as_slice(), weight_name);
     }
+
+    fn should_cancel(&mut self) -> bool {
+        self.inner.should_cancel()
+    }
 }
 
 impl<'a, T: SuperGraphObserver> CompiledProgramObserver for SymbolicGraphObserverWrapper<'a, T> {
@@ -379,6 +383,10 @@ impl<'a, T: SuperGraphObserver> CompiledProgramObserver for SymbolicGraphObserve
             .chain(path.iter().cloned())
             .collect::<Vec<_>>();
         self.inner.on_loading_weight(path.as_slice(), weight_name);
+    }
+
+    fn should_cancel(&mut self) -> bool {
+        self.inner.should_cancel()
     }
 }
 
@@ -1811,6 +1819,10 @@ impl<'a, T: SuperGraphObserver> MilliOpGraphObserver for MilliOpGraphObserverWra
             backend,
         );
     }
+
+    fn should_cancel(&mut self) -> bool {
+        self.inner.should_cancel()
+    }
 }
 
 impl SuperGraphNode for SuperGraphNodeMilliOpGraph {
@@ -1969,6 +1981,9 @@ impl SuperGraphNode for SuperGraphNodeScan {
         }
 
         for i in 0..iteration_count {
+            if context.observer.should_cancel() {
+                return Err(SuperGraphError::Cancelled);
+            }
             let iter_inputs = {
                 let mut iter_inputs = simple_inputs.clone();
                 iter_inputs.extend(&state_values);

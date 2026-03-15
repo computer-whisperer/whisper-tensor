@@ -124,6 +124,94 @@ pub enum SchedulerJob {
     },
 }
 
+#[derive(Clone, Debug)]
+pub struct ObserverSettingsRegistryEntry {
+    pub version: u64,
+    pub do_node_execute_report: bool,
+    pub subscribed_tensors: HashSet<Vec<GlobalId>>,
+    pub abbreviated_tensor_settings: Option<AbbreviatedTensorReportSettings>,
+    pub abbreviated_tensor_subscribed_table: Option<HashSet<Vec<GlobalId>>>,
+}
+
+impl ObserverSettingsRegistryEntry {
+    fn new(
+        version: u64,
+        do_node_execute_report: bool,
+        abbreviated_tensor_settings: Option<AbbreviatedTensorReportSettings>,
+        subscribed_tensors: Vec<Vec<GlobalId>>,
+    ) -> Self {
+        let subscribed_tensors = HashSet::from_iter(subscribed_tensors);
+        let abbreviated_tensor_subscribed_table = abbreviated_tensor_settings
+            .as_ref()
+            .map(|settings| settings.subscribed_tensors.iter().cloned().collect());
+        Self {
+            version,
+            do_node_execute_report,
+            subscribed_tensors,
+            abbreviated_tensor_settings,
+            abbreviated_tensor_subscribed_table,
+        }
+    }
+}
+
+pub type ObserverSettingsRegistry = Arc<Mutex<HashMap<u64, ObserverSettingsRegistryEntry>>>;
+
+pub fn ensure_observer_settings(
+    observer_settings_registry: &ObserverSettingsRegistry,
+    attention_token: Option<u64>,
+    do_node_execute_report: bool,
+    abbreviated_tensor_settings: Option<AbbreviatedTensorReportSettings>,
+    subscribed_tensors: Vec<Vec<GlobalId>>,
+) {
+    let Some(attention_token) = attention_token else {
+        return;
+    };
+    let _ = observer_settings_registry.lock().map(|mut settings| {
+        settings.entry(attention_token).or_insert_with(|| {
+            ObserverSettingsRegistryEntry::new(
+                0,
+                do_node_execute_report,
+                abbreviated_tensor_settings,
+                subscribed_tensors,
+            )
+        });
+    });
+}
+
+pub fn update_observer_settings(
+    observer_settings_registry: &ObserverSettingsRegistry,
+    attention_token: u64,
+    do_node_execute_report: bool,
+    abbreviated_tensor_settings: Option<AbbreviatedTensorReportSettings>,
+    subscribed_tensors: Vec<Vec<GlobalId>>,
+) {
+    let _ = observer_settings_registry.lock().map(|mut settings| {
+        let version = settings
+            .get(&attention_token)
+            .map_or(0, |entry| entry.version.saturating_add(1));
+        settings.insert(
+            attention_token,
+            ObserverSettingsRegistryEntry::new(
+                version,
+                do_node_execute_report,
+                abbreviated_tensor_settings,
+                subscribed_tensors,
+            ),
+        );
+    });
+}
+
+pub fn remove_observer_settings(
+    observer_settings_registry: &ObserverSettingsRegistry,
+    attention_token: Option<u64>,
+) {
+    if let Some(attention_token) = attention_token {
+        let _ = observer_settings_registry
+            .lock()
+            .map(|mut settings| settings.remove(&attention_token));
+    }
+}
+
 struct LocalSuperGraphObserver {
     attention: Option<u64>,
     do_node_execute_report: bool,
@@ -131,6 +219,10 @@ struct LocalSuperGraphObserver {
     subscribed_tensors: HashSet<Vec<GlobalId>>,
     abbreviated_tensor_settings: Option<AbbreviatedTensorReportSettings>,
     abbreviated_tensor_subscribed_table: Option<HashSet<Vec<GlobalId>>>,
+    cancellation_registry: Option<Arc<Mutex<HashSet<u64>>>>,
+    observer_settings_registry: Option<ObserverSettingsRegistry>,
+    observer_settings_version: u64,
+    cancellation_seen: bool,
 }
 
 impl LocalSuperGraphObserver {
@@ -140,6 +232,8 @@ impl LocalSuperGraphObserver {
         abbreviated_tensor_settings: Option<AbbreviatedTensorReportSettings>,
         reporter: Option<SchedulerReporter>,
         subscribed_tensors: HashSet<Vec<GlobalId>>,
+        cancellation_registry: Option<Arc<Mutex<HashSet<u64>>>>,
+        observer_settings_registry: Option<ObserverSettingsRegistry>,
     ) -> Self {
         let abbreviated_tensor_subscribed_table = abbreviated_tensor_settings
             .as_ref()
@@ -151,6 +245,32 @@ impl LocalSuperGraphObserver {
             reporter,
             subscribed_tensors,
             abbreviated_tensor_subscribed_table,
+            cancellation_registry,
+            observer_settings_registry,
+            observer_settings_version: 0,
+            cancellation_seen: false,
+        }
+    }
+
+    fn refresh_dynamic_settings(&mut self) {
+        let Some(attention) = self.attention else {
+            return;
+        };
+        let Some(registry) = &self.observer_settings_registry else {
+            return;
+        };
+        let entry = registry
+            .lock()
+            .ok()
+            .and_then(|settings| settings.get(&attention).cloned());
+        if let Some(entry) = entry
+            && entry.version != self.observer_settings_version
+        {
+            self.observer_settings_version = entry.version;
+            self.do_node_execute_report = entry.do_node_execute_report;
+            self.subscribed_tensors = entry.subscribed_tensors;
+            self.abbreviated_tensor_settings = entry.abbreviated_tensor_settings;
+            self.abbreviated_tensor_subscribed_table = entry.abbreviated_tensor_subscribed_table;
         }
     }
 }
@@ -164,6 +284,7 @@ impl SuperGraphObserver for LocalSuperGraphObserver {
         end_instant: Instant,
         _backend: &mut EvalBackend,
     ) {
+        self.refresh_dynamic_settings();
         if let Some(reporter) = &mut self.reporter
             && self.do_node_execute_report
         {
@@ -185,6 +306,7 @@ impl SuperGraphObserver for LocalSuperGraphObserver {
         tensor: &NumericTensor<DynRank>,
         backend: &mut EvalBackend,
     ) {
+        self.refresh_dynamic_settings();
         if let Some(reporter) = &mut self.reporter {
             if self.subscribed_tensors.contains(path) {
                 let report = SchedulerReport::SuperGraphTensorAssignedFull(
@@ -246,9 +368,65 @@ impl SuperGraphObserver for LocalSuperGraphObserver {
             reporter.push_report(report);
         }
     }
+
+    fn should_cancel(&mut self) -> bool {
+        if self.cancellation_seen {
+            return true;
+        }
+        let Some(attention) = self.attention else {
+            return false;
+        };
+        let Some(registry) = &self.cancellation_registry else {
+            return false;
+        };
+        let should_cancel = registry
+            .lock()
+            .map(|set| set.contains(&attention))
+            .unwrap_or(false);
+        if should_cancel {
+            self.cancellation_seen = true;
+        }
+        should_cancel
+    }
 }
 
-pub async fn scheduler(mut input: mpsc::Receiver<SchedulerJob>, model_server: Arc<ModelServer>) {
+fn cancel_response(attention_token: Option<u64>) -> SuperGraphResponse {
+    SuperGraphResponse {
+        attention_token,
+        result: Err("Execution cancelled".to_string()),
+    }
+}
+
+fn is_attention_cancelled(
+    cancellation_registry: &Arc<Mutex<HashSet<u64>>>,
+    attention_token: Option<u64>,
+) -> bool {
+    let Some(attention_token) = attention_token else {
+        return false;
+    };
+    cancellation_registry
+        .lock()
+        .map(|set| set.contains(&attention_token))
+        .unwrap_or(false)
+}
+
+fn clear_attention_cancellation(
+    cancellation_registry: &Arc<Mutex<HashSet<u64>>>,
+    attention_token: Option<u64>,
+) {
+    if let Some(attention_token) = attention_token {
+        let _ = cancellation_registry
+            .lock()
+            .map(|mut set| set.remove(&attention_token));
+    }
+}
+
+pub async fn scheduler(
+    mut input: mpsc::Receiver<SchedulerJob>,
+    model_server: Arc<ModelServer>,
+    cancellation_registry: Arc<Mutex<HashSet<u64>>>,
+    observer_settings_registry: ObserverSettingsRegistry,
+) {
     #[cfg(feature = "vulkan")]
     let vulkan_runtime = {
         use whisper_tensor::backends::vulkan_backend::{VulkanContext, VulkanImmediateExecutor};
@@ -282,9 +460,24 @@ pub async fn scheduler(mut input: mpsc::Receiver<SchedulerJob>, model_server: Ar
                     }
                 }
                 SchedulerJob::SuperGraphRequest((req, resp_sender, reporter)) => {
+                    ensure_observer_settings(
+                        &observer_settings_registry,
+                        req.attention_token,
+                        req.do_node_execution_reports,
+                        req.abbreviated_tensor_report_settings.clone(),
+                        req.subscribed_tensors.clone(),
+                    );
+                    if is_attention_cancelled(&cancellation_registry, req.attention_token) {
+                        let _ = resp_sender.send(cancel_response(req.attention_token)).await;
+                        clear_attention_cancellation(&cancellation_registry, req.attention_token);
+                        remove_observer_settings(&observer_settings_registry, req.attention_token);
+                        continue;
+                    }
                     // Collect links to needed models
                     let mut model_id_map = HashMap::new();
                     let mut compiled_models = HashMap::new();
+                    let cancellation_registry_for_request = cancellation_registry.clone();
+                    let observer_settings_registry_for_request = observer_settings_registry.clone();
                     let (models, symbolic_graph_models) = {
                         let mut models = HashMap::new();
                         let mut symbolic_graph_models = Vec::new();
@@ -364,6 +557,8 @@ pub async fn scheduler(mut input: mpsc::Receiver<SchedulerJob>, model_server: Ar
                                     req.abbreviated_tensor_report_settings,
                                     reporter,
                                     req.subscribed_tensors.iter().cloned().collect(),
+                                    Some(cancellation_registry_for_request.clone()),
+                                    Some(observer_settings_registry_for_request.clone()),
                                 );
                                 let mut caches = caches.lock().unwrap();
                                 #[cfg(feature = "vulkan")]
@@ -509,6 +704,8 @@ pub async fn scheduler(mut input: mpsc::Receiver<SchedulerJob>, model_server: Ar
                         attention_token: req.attention_token,
                         result,
                     };
+                    clear_attention_cancellation(&cancellation_registry, req.attention_token);
+                    remove_observer_settings(&observer_settings_registry, req.attention_token);
 
                     if let Err(e) = resp_sender.send(resp).await {
                         error!("Failed to send response: {e}");

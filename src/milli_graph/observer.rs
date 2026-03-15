@@ -18,6 +18,9 @@ pub trait MilliOpGraphObserver {
         end_instant: Instant,
         backend: &mut EvalBackend,
     );
+    fn should_cancel(&mut self) -> bool {
+        false
+    }
 }
 
 impl MilliOpGraphObserver for () {
@@ -36,5 +39,9 @@ impl MilliOpGraphObserver for () {
         _end_instant: Instant,
         _backend: &mut EvalBackend,
     ) {
+    }
+
+    fn should_cancel(&mut self) -> bool {
+        false
     }
 }

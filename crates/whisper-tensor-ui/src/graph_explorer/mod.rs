@@ -573,6 +573,30 @@ impl GraphExplorerApp {
         "?".to_string()
     }
 
+    fn interface_progress_widget_state(
+        &self,
+        interface_id: InterfaceId,
+    ) -> Option<&SuperGraphProgressWidgetState> {
+        self.text_inference_data
+            .get(&interface_id)
+            .map(|x| &x.progress_widget_state)
+            .or_else(|| {
+                self.sd_inference_data
+                    .get(&interface_id)
+                    .map(|x| &x.progress_widget_state)
+            })
+            .or_else(|| {
+                self.tts_inference_data
+                    .get(&interface_id)
+                    .map(|x| &x.progress_widget_state)
+            })
+            .or_else(|| {
+                self.stt_inference_data
+                    .get(&interface_id)
+                    .map(|x| &x.progress_widget_state)
+            })
+    }
+
     fn render_profiling_window(
         &self,
         ui: &mut Ui,
@@ -878,6 +902,7 @@ impl GraphExplorerApp {
         } else {
             0.0
         };
+        let mut graph_pane_rect: Option<Rect> = None;
 
         // Find the graph we are working with
         let root_graph: Option<&dyn GraphDyn> = match self.root_selection {
@@ -1087,6 +1112,8 @@ impl GraphExplorerApp {
                         frame_shape.y -= interface_panel_height;
                     }
                     let frame_base = ui.available_rect_before_wrap().min;
+                    graph_pane_rect =
+                        Some(Rect::from_min_max(frame_base, frame_base + frame_shape));
                     let ui_builder = UiBuilder::new()
                         .max_rect(Rect::from_min_max(frame_base, frame_base + frame_shape));
                     ui.scope_builder(ui_builder, |ui| {
@@ -1451,6 +1478,33 @@ impl GraphExplorerApp {
                                         if let Some((request_id, _, _)) =
                                             &text_inference_data.pending_request
                                         {
+                                            let swatch_settings = if state
+                                                .do_explorer_swatches_in_view
+                                                || state.do_all_explorer_swatches
+                                            {
+                                                Some(AbbreviatedTensorReportSettings {
+                                                    downsampled_size: (state.swatch_dimension
+                                                        * state.swatch_dimension)
+                                                        as u64,
+                                                    subscribed_tensors: self
+                                                        .tensors_in_view
+                                                        .iter()
+                                                        .cloned()
+                                                        .collect(),
+                                                    do_all: state.do_all_explorer_swatches,
+                                                })
+                                            } else {
+                                                None
+                                            };
+                                            server_request_manager.update_observer_settings(
+                                                *request_id,
+                                                self.inspect_window_tensor_subscriptions
+                                                    .iter()
+                                                    .cloned()
+                                                    .collect(),
+                                                state.explorer_node_wave,
+                                                swatch_settings,
+                                            );
                                             if let Some(reports) = server_request_manager.get_reports(*request_id) {
                                                 let time_now = Instant::now();
                                                 let mut node_activity_maps = NodeExecutionActivityMapsMut {
@@ -1558,8 +1612,24 @@ impl GraphExplorerApp {
                                                     };
                                                     ui.label(format!("Tokenizer: {v}"));
                                                 }
-                                                if text_inference_data.pending_request.is_some() {
-                                                    ui.spinner();
+                                                if let Some(request_id) = text_inference_data
+                                                    .pending_request
+                                                    .as_ref()
+                                                    .map(|x| x.0)
+                                                {
+                                                    ui.horizontal(|ui| {
+                                                        ui.spinner();
+                                                        ui.label("Running...");
+                                                        if ui.button("Cancel").clicked() {
+                                                            server_request_manager
+                                                                .cancel_request(request_id);
+                                                            text_inference_data.pending_request =
+                                                                None;
+                                                            text_inference_data
+                                                                .progress_widget_state
+                                                                .clear();
+                                                        }
+                                                    });
                                                 } else {
                                                     ui.horizontal(|ui| {
                                                         toggle_ui(ui, &mut text_inference_data.use_cache);
@@ -1647,9 +1717,6 @@ impl GraphExplorerApp {
                                                 }
                                             });
                                         });
-                                        if !text_inference_data.progress_widget_state.is_empty() {
-                                            text_inference_data.progress_widget_state.show(ui);
-                                        }
                                         let logits = {
                                             let mut logits = vec![];
                                             let mut context = vec![];
@@ -1708,6 +1775,31 @@ impl GraphExplorerApp {
 
                         // Handle pending reports (node wave, tensor swatches)
                         if let Some((request_id, _)) = &sd_data.pending_request {
+                            let swatch_settings =
+                                if state.do_explorer_swatches_in_view || state.do_all_explorer_swatches {
+                                    Some(AbbreviatedTensorReportSettings {
+                                        downsampled_size: (state.swatch_dimension
+                                            * state.swatch_dimension)
+                                            as u64,
+                                        subscribed_tensors: self
+                                            .tensors_in_view
+                                            .iter()
+                                            .cloned()
+                                            .collect(),
+                                        do_all: state.do_all_explorer_swatches,
+                                    })
+                                } else {
+                                    None
+                                };
+                            server_request_manager.update_observer_settings(
+                                *request_id,
+                                self.inspect_window_tensor_subscriptions
+                                    .iter()
+                                    .cloned()
+                                    .collect(),
+                                state.explorer_node_wave,
+                                swatch_settings,
+                            );
                             if let Some(reports) = server_request_manager.get_reports(*request_id) {
                                 let time_now = Instant::now();
                                 let mut node_activity_maps = NodeExecutionActivityMapsMut {
@@ -1808,10 +1900,19 @@ impl GraphExplorerApp {
                                         ));
                                     });
 
-                                    if sd_data.pending_request.is_some() {
+                                    if let Some(request_id) =
+                                        sd_data.pending_request.as_ref().map(|x| x.0)
+                                    {
                                         ui.horizontal(|ui| {
                                             ui.spinner();
                                             ui.label("Generating...");
+                                            if ui.button("Cancel").clicked() {
+                                                server_request_manager.cancel_request(request_id);
+                                                sd_data.pending_request = None;
+                                                sd_data.progress_widget_state.clear();
+                                                sd_data.status_message =
+                                                    Some("Cancelled".to_string());
+                                            }
                                         });
                                     } else {
                                         ui.horizontal(|ui| {
@@ -2035,9 +2136,6 @@ impl GraphExplorerApp {
                                     } else {
                                         ui.label("No image generated yet.");
                                     }
-                                    if !sd_data.progress_widget_state.is_empty() {
-                                        sd_data.progress_widget_state.show(ui);
-                                    }
                                     if let Some((texture, _color_image)) = &sd_data.generated_image
                                     {
                                         let size = texture.size_vec2();
@@ -2092,6 +2190,31 @@ impl GraphExplorerApp {
                             .or_default();
 
                         if let Some((request_id, _, _)) = &tts_data.pending_request {
+                            let swatch_settings =
+                                if state.do_explorer_swatches_in_view || state.do_all_explorer_swatches {
+                                    Some(AbbreviatedTensorReportSettings {
+                                        downsampled_size: (state.swatch_dimension
+                                            * state.swatch_dimension)
+                                            as u64,
+                                        subscribed_tensors: self
+                                            .tensors_in_view
+                                            .iter()
+                                            .cloned()
+                                            .collect(),
+                                        do_all: state.do_all_explorer_swatches,
+                                    })
+                                } else {
+                                    None
+                                };
+                            server_request_manager.update_observer_settings(
+                                *request_id,
+                                self.inspect_window_tensor_subscriptions
+                                    .iter()
+                                    .cloned()
+                                    .collect(),
+                                state.explorer_node_wave,
+                                swatch_settings,
+                            );
                             if let Some(reports) = server_request_manager.get_reports(*request_id) {
                                 let time_now = Instant::now();
                                 let mut node_activity_maps = NodeExecutionActivityMapsMut {
@@ -2222,10 +2345,19 @@ impl GraphExplorerApp {
                                         });
                                     }
 
-                                    if tts_data.pending_request.is_some() {
+                                    if let Some(request_id) =
+                                        tts_data.pending_request.as_ref().map(|x| x.0)
+                                    {
                                         ui.horizontal(|ui| {
                                             ui.spinner();
                                             ui.label("Generating...");
+                                            if ui.button("Cancel").clicked() {
+                                                server_request_manager.cancel_request(request_id);
+                                                tts_data.pending_request = None;
+                                                tts_data.progress_widget_state.clear();
+                                                tts_data.status_message =
+                                                    Some("Cancelled".to_string());
+                                            }
                                         });
                                     } else {
                                         ui.horizontal(|ui| {
@@ -2436,9 +2568,6 @@ impl GraphExplorerApp {
                                     } else {
                                         ui.label("No audio generated yet.");
                                     }
-                                    if !tts_data.progress_widget_state.is_empty() {
-                                        tts_data.progress_widget_state.show(ui);
-                                    }
                                     if let (Some(audio), Some(sample_rate_hz)) = (
                                         tts_data.generated_audio.clone(),
                                         tts_data.generated_sample_rate_hz,
@@ -2534,6 +2663,32 @@ impl GraphExplorerApp {
                             }
 
                             if let Some((request_id, _, _, _)) = &stt_data.pending_request {
+                                let swatch_settings = if state.do_explorer_swatches_in_view
+                                    || state.do_all_explorer_swatches
+                                {
+                                    Some(AbbreviatedTensorReportSettings {
+                                        downsampled_size: (state.swatch_dimension
+                                            * state.swatch_dimension)
+                                            as u64,
+                                        subscribed_tensors: self
+                                            .tensors_in_view
+                                            .iter()
+                                            .cloned()
+                                            .collect(),
+                                        do_all: state.do_all_explorer_swatches,
+                                    })
+                                } else {
+                                    None
+                                };
+                                server_request_manager.update_observer_settings(
+                                    *request_id,
+                                    self.inspect_window_tensor_subscriptions
+                                        .iter()
+                                        .cloned()
+                                        .collect(),
+                                    state.explorer_node_wave,
+                                    swatch_settings,
+                                );
                                 if let Some(reports) = server_request_manager.get_reports(*request_id)
                                 {
                                     let time_now = Instant::now();
@@ -2754,10 +2909,20 @@ impl GraphExplorerApp {
                                             }
                                         });
 
-                                        if stt_data.pending_request.is_some() {
+                                        if let Some(request_id) =
+                                            stt_data.pending_request.as_ref().map(|x| x.0)
+                                        {
                                             ui.horizontal(|ui| {
                                                 ui.spinner();
                                                 ui.label("Transcribing...");
+                                                if ui.button("Cancel").clicked() {
+                                                    server_request_manager
+                                                        .cancel_request(request_id);
+                                                    stt_data.pending_request = None;
+                                                    stt_data.progress_widget_state.clear();
+                                                    stt_data.status_message =
+                                                        Some("Cancelled".to_string());
+                                                }
                                             });
                                         } else {
                                             ui.horizontal(|ui| {
@@ -2925,10 +3090,6 @@ impl GraphExplorerApp {
                                         } else {
                                             ui.label("No transcription yet.");
                                         }
-                                        if !stt_data.progress_widget_state.is_empty() {
-                                            stt_data.progress_widget_state.show(ui);
-                                        }
-
                                         if let Some(tokens) = &stt_data.transcription_tokens {
                                             ui.label(format!("Tokens: {}", tokens.len()));
                                         }
@@ -2960,6 +3121,21 @@ impl GraphExplorerApp {
                 });
             });
         }
+
+        if let GraphRootSubjectSelection::Interface(interface_id) = self.root_selection
+            && let Some(graph_rect) = graph_pane_rect
+            && let Some(progress_state) = self.interface_progress_widget_state(interface_id)
+            && !progress_state.is_empty()
+        {
+            egui::Area::new(egui::Id::new(("graph_progress_overlay", interface_id)))
+                .order(egui::Order::Foreground)
+                .pivot(egui::Align2::LEFT_BOTTOM)
+                .fixed_pos(graph_rect.left_bottom() + vec2(10.0, -10.0))
+                .show(ui.ctx(), |ui| {
+                    progress_state.show(ui);
+                });
+        }
+
         // Prompt model loading
 
         for model_id in models_to_load {

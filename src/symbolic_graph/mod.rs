@@ -343,6 +343,9 @@ impl SymbolicGraph {
         let mut out = HashMap::new();
 
         for (key, tensor) in &self.tensors {
+            if observer.should_cancel() {
+                break;
+            }
             if let Some(x) = loaded_tensor_cache.tensors.get(key) {
                 out.insert(*key, x.clone());
             } else {
@@ -384,6 +387,9 @@ impl SymbolicGraph {
         let mut out = HashMap::new();
 
         for (key, tensor) in &self.tensors {
+            if observer.should_cancel() {
+                break;
+            }
             match &tensor.tensor_type {
                 TensorType::Constant(x) => {
                     let label = x.loading_label(tensor_store).or(tensor.onnx_name.clone());

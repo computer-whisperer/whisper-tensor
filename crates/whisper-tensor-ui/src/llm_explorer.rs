@@ -404,7 +404,17 @@ impl LLMExplorerApp {
                         ui.memory_mut(|mem| mem.request_focus(response.id));
                     }
                 });
-                if ui.button("Run").clicked() {
+                if let Some(request_id) = self.pending_request.as_ref().map(|x| x.0) {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Running...");
+                        if ui.button("Cancel").clicked() {
+                            server_request_manager.cancel_request(request_id);
+                            self.pending_request = None;
+                            self.progress_widget_state.clear();
+                        }
+                    });
+                } else if ui.button("Run").clicked() {
                     if requires_modal_inputs {
                         self.latest_logits = Some((
                             self.llm_explorer_cached_token_list

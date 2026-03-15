@@ -1,6 +1,9 @@
 #[cfg(not(target_arch = "wasm32"))]
 fn main() {
+    use std::collections::HashMap;
+    use std::collections::HashSet;
     use std::sync::Arc;
+    use std::sync::Mutex as StdMutex;
     use whisper_tensor_server::ServerConfigReport;
     use whisper_tensor_server::handler::handle_client_session;
     use whisper_tensor_server::model_server::{ModelServer, default_loaders};
@@ -24,6 +27,8 @@ fn main() {
         let model_server = Arc::new(ModelServer::new(loaders));
 
         let (scheduler_tx, scheduler_rx) = tokio::sync::mpsc::channel(100);
+        let cancellation_registry = Arc::new(StdMutex::new(HashSet::<u64>::new()));
+        let observer_settings_registry = Arc::new(std::sync::Mutex::new(HashMap::new()));
 
         #[cfg(feature = "vulkan")]
         let vulkan_available = true;
@@ -32,12 +37,19 @@ fn main() {
 
         let server_config_report = ServerConfigReport { vulkan_available };
 
-        tokio::spawn(scheduler(scheduler_rx, model_server.clone()));
+        tokio::spawn(scheduler(
+            scheduler_rx,
+            model_server.clone(),
+            cancellation_registry.clone(),
+            observer_settings_registry.clone(),
+        ));
 
         handle_client_session(
             client_server_receiver,
             server_client_sender,
             scheduler_tx,
+            cancellation_registry,
+            observer_settings_registry,
             model_server,
             server_config_report,
             move || {
