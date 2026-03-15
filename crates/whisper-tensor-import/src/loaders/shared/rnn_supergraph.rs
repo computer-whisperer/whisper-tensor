@@ -1,15 +1,11 @@
 use crate::onnx_graph::WeightStorageStrategy;
 use std::collections::HashMap;
-use std::path::Path;
-use std::sync::Arc;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::dtype::DType;
 use whisper_tensor::interfaces::TextInferenceTokensInLogitOutInterface;
-use whisper_tensor::loader::{LoadedModel, LoaderError, LoaderOutput};
 use whisper_tensor::metadata::TokenizerInfo;
 use whisper_tensor::milli_graph::MilliOpGraph;
 use whisper_tensor::milli_graph::ops::{Cast, Constant, Shape, Squeeze, Unsqueeze};
-use whisper_tensor::model::Model;
 use whisper_tensor::super_graph::SuperGraphBuilder;
 use whisper_tensor::super_graph::links::{
     SuperGraphLink, SuperGraphLinkDouble, SuperGraphLinkKind, SuperGraphLinkTriple,
@@ -18,29 +14,6 @@ use whisper_tensor::super_graph::nodes::{
     SuperGraphNode, SuperGraphNodeMilliOpGraph, SuperGraphNodeModelExecution,
     SuperGraphNodeRNNCacheRead, SuperGraphNodeRNNCacheWrite, SuperGraphNodeScan,
 };
-
-/// Helper: load ONNX bytes into a Model (no interface detection).
-/// The calling loader is responsible for building any interfaces.
-pub(super) fn onnx_bytes_to_model(
-    onnx_data: &[u8],
-    model_name: &str,
-    base_dir: Option<&Path>,
-) -> Result<(Arc<Model>, LoaderOutput), LoaderError> {
-    let mut rng = rand::rng();
-    let model = Model::new_from_onnx(onnx_data, &mut rng, base_dir)
-        .map_err(|e| LoaderError::LoadFailed(e.into()))?;
-    let model = Arc::new(model);
-
-    let output = LoaderOutput {
-        models: vec![LoadedModel {
-            name: model_name.to_string(),
-            model: model.clone(),
-        }],
-        interfaces: vec![],
-    };
-
-    Ok((model, output))
-}
 
 /// Get the default weight storage strategy for loaders.
 pub(super) fn default_storage() -> WeightStorageStrategy {
