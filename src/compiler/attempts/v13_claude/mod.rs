@@ -38,5 +38,8 @@ pub mod partition;
 pub mod nano_plan_creative;
 pub mod nano_plan_critical;
 pub mod nano_plan_iterative;
+pub mod nano_plan_v2a;
+pub mod nano_plan_v2b;
+pub mod nano_plan_v2c;
 pub mod simple_dag;
 pub mod test_graphs;

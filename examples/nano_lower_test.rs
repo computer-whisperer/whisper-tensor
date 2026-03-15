@@ -156,6 +156,67 @@ fn main() {
         print_plan_summary(&result.graph, &raw, plan.num_lanes, "iterative", elapsed);
     }
 
+    // ---- V2 Lane Planners (group splitting) ----
+    println!("\n=== V2 Lane+Barrier Plans (num_lanes={}) ===", num_lanes);
+    {
+        let t0 = Instant::now();
+        let plan = whisper_tensor::compiler::attempts::v13_claude::nano_plan_v2a::plan_execution(&result.graph, num_lanes);
+        let elapsed = t0.elapsed();
+        let raw: Vec<Vec<Vec<usize>>> = plan.phases.iter().map(|p| {
+            p.lane_work.iter().map(|lw| lw.iter().map(|w| w.group_idx).collect()).collect()
+        }).collect();
+        // Compute actual atom-level balance
+        let mut max_imb: f64 = 0.0;
+        for phase in &plan.phases {
+            let lane_atoms: Vec<u64> = phase.lane_work.iter()
+                .map(|lw| lw.iter().map(|w| w.atom_count).sum::<u64>()).collect();
+            let mx = lane_atoms.iter().copied().max().unwrap_or(0);
+            let mn = lane_atoms.iter().copied().filter(|&a| a > 0).min().unwrap_or(1);
+            if mn > 0 { max_imb = max_imb.max(mx as f64 / mn as f64); }
+        }
+        let total_work: u64 = plan.phases.iter().flat_map(|p| p.lane_work.iter())
+            .flat_map(|lw| lw.iter()).map(|w| w.atom_count).sum();
+        println!("  [v2a] {:.1}ms, {} lanes, {} phases, {:.1}B atoms, max_imbalance={:.1}x",
+            elapsed.as_secs_f64() * 1e3, plan.num_lanes, plan.phases.len(),
+            total_work as f64 / 1e9, max_imb);
+    }
+    {
+        let t0 = Instant::now();
+        let plan = whisper_tensor::compiler::attempts::v13_claude::nano_plan_v2b::plan_execution(&result.graph, num_lanes);
+        let elapsed = t0.elapsed();
+        let mut max_imb: f64 = 0.0;
+        for phase in &plan.phases {
+            let lane_atoms: Vec<u64> = phase.lane_work.iter()
+                .map(|lw| lw.iter().map(|w| w.atom_count).sum::<u64>()).collect();
+            let mx = lane_atoms.iter().copied().max().unwrap_or(0);
+            let mn = lane_atoms.iter().copied().filter(|&a| a > 0).min().unwrap_or(1);
+            if mn > 0 { max_imb = max_imb.max(mx as f64 / mn as f64); }
+        }
+        let total_work: u64 = plan.phases.iter().flat_map(|p| p.lane_work.iter())
+            .flat_map(|lw| lw.iter()).map(|w| w.atom_count).sum();
+        println!("  [v2b] {:.1}ms, {} lanes, {} phases, {:.1}B atoms, max_imbalance={:.1}x",
+            elapsed.as_secs_f64() * 1e3, plan.num_lanes, plan.phases.len(),
+            total_work as f64 / 1e9, max_imb);
+    }
+    {
+        let t0 = Instant::now();
+        let plan = whisper_tensor::compiler::attempts::v13_claude::nano_plan_v2c::plan_execution(&result.graph, num_lanes);
+        let elapsed = t0.elapsed();
+        let mut max_imb: f64 = 0.0;
+        for phase in &plan.phases {
+            let lane_atoms: Vec<u64> = phase.lane_work.iter()
+                .map(|lw| lw.iter().map(|w| w.atom_count).sum::<u64>()).collect();
+            let mx = lane_atoms.iter().copied().max().unwrap_or(0);
+            let mn = lane_atoms.iter().copied().filter(|&a| a > 0).min().unwrap_or(1);
+            if mn > 0 { max_imb = max_imb.max(mx as f64 / mn as f64); }
+        }
+        let total_work: u64 = plan.phases.iter().flat_map(|p| p.lane_work.iter())
+            .flat_map(|lw| lw.iter()).map(|w| w.atom_count).sum();
+        println!("  [v2c] {:.1}ms, {} lanes, {} phases, {:.1}B atoms, max_imbalance={:.1}x",
+            elapsed.as_secs_f64() * 1e3, plan.num_lanes, plan.phases.len(),
+            total_work as f64 / 1e9, max_imb);
+    }
+
     // ---- Old-style Partition (compare approaches) ----
     let target_kernels = 200;
 
