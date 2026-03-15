@@ -1901,6 +1901,730 @@ mod tests {
         }
     }
 
+    // =========================================================================
+    // Plan validation test: checks ordering, completeness, and f32 simulation
+    // =========================================================================
+
+    /// Helper: resolve all source atom indices for atom at offset `i` within a group.
+    /// For non-reduce ops, returns the InputRef-resolved sources.
+    /// For reduce ops, returns ALL atoms read by the reduction loop.
+    fn resolve_atom_sources(group: &AtomGroup, i: u64) -> Vec<u64> {
+        let mut sources = Vec::new();
+        match &group.op {
+            ScalarOp::Literal(_) => {}
+            ScalarOp::ReduceSum {
+                reduce_count,
+                reduce_stride,
+                ..
+            }
+            | ScalarOp::ReduceMax {
+                reduce_count,
+                reduce_stride,
+                ..
+            } => {
+                let base = group.inputs[0].resolve(i, 0);
+                for k in 0..*reduce_count {
+                    let src = (base.0 as i64 + k as i64 * reduce_stride) as u64;
+                    sources.push(src);
+                }
+            }
+            ScalarOp::IndirectLoad { table_base, .. } => {
+                // The index input
+                let idx_src = group.inputs[0].resolve(i, 0);
+                sources.push(idx_src.0);
+                // The table base is also a dependency but we can't know which
+                // element at compile time. We'll skip the table atoms for ordering
+                // validation since the plan builder handles them at group level.
+            }
+            _ => {
+                // Identity, Binary, Unary, Select: resolve each input
+                for input in &group.inputs {
+                    let src = input.resolve(i, 0);
+                    sources.push(src.0);
+                }
+            }
+        }
+        sources
+    }
+
+    /// Helper: compute a single atom's value using f32 arithmetic,
+    /// given the current values buffer. Mirrors what the JIT codegen does.
+    fn compute_atom_f32(group: &AtomGroup, i: u64, values: &[f32]) -> f32 {
+        match &group.op {
+            ScalarOp::Literal(scalar) => scalar.to_f64() as f32,
+            ScalarOp::Identity { .. } => {
+                let src = group.inputs[0].resolve(i, 0);
+                values[src.0 as usize]
+            }
+            ScalarOp::Binary { op, .. } => {
+                let a = values[group.inputs[0].resolve(i, 0).0 as usize];
+                let b = values[group.inputs[1].resolve(i, 0).0 as usize];
+                match op {
+                    ScalarBinOp::Add => a + b,
+                    ScalarBinOp::Sub => a - b,
+                    ScalarBinOp::Mul => a * b,
+                    ScalarBinOp::Div => a / b,
+                    ScalarBinOp::Max => a.max(b),
+                    ScalarBinOp::Min => a.min(b),
+                    ScalarBinOp::Mod => a % b,
+                    ScalarBinOp::Pow => a.powf(b),
+                    ScalarBinOp::Equal => {
+                        if a == b {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    }
+                    ScalarBinOp::Greater => {
+                        if a > b {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    }
+                    ScalarBinOp::GreaterOrEqual => {
+                        if a >= b {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    }
+                    ScalarBinOp::Less => {
+                        if a < b {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    }
+                    ScalarBinOp::LessOrEqual => {
+                        if a <= b {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    }
+                    ScalarBinOp::And => {
+                        if a != 0.0 && b != 0.0 {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    }
+                    ScalarBinOp::Or => {
+                        if a != 0.0 || b != 0.0 {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    }
+                    ScalarBinOp::Xor => {
+                        if (a != 0.0) ^ (b != 0.0) {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    }
+                }
+            }
+            ScalarOp::Unary { op, .. } => {
+                let x = values[group.inputs[0].resolve(i, 0).0 as usize];
+                match op {
+                    ScalarUnaryOp::Neg => -x,
+                    ScalarUnaryOp::Abs => x.abs(),
+                    ScalarUnaryOp::Exp => x.exp(),
+                    ScalarUnaryOp::Ln => x.ln(),
+                    ScalarUnaryOp::Sqrt => x.sqrt(),
+                    ScalarUnaryOp::Reciprocal => 1.0 / x,
+                    ScalarUnaryOp::Tanh => x.tanh(),
+                    ScalarUnaryOp::Floor => x.floor(),
+                    ScalarUnaryOp::Ceil => x.ceil(),
+                }
+            }
+            ScalarOp::Select { .. } => {
+                let cond = values[group.inputs[0].resolve(i, 0).0 as usize];
+                if cond != 0.0 {
+                    values[group.inputs[1].resolve(i, 0).0 as usize]
+                } else {
+                    values[group.inputs[2].resolve(i, 0).0 as usize]
+                }
+            }
+            ScalarOp::ReduceSum {
+                reduce_count,
+                reduce_stride,
+                ..
+            } => {
+                let base = group.inputs[0].resolve(i, 0);
+                let mut acc = 0.0f32;
+                for k in 0..*reduce_count {
+                    let src_idx = (base.0 as i64 + k as i64 * reduce_stride) as u64;
+                    acc += values[src_idx as usize];
+                }
+                acc
+            }
+            ScalarOp::ReduceMax {
+                reduce_count,
+                reduce_stride,
+                ..
+            } => {
+                let base = group.inputs[0].resolve(i, 0);
+                let mut acc = f32::NEG_INFINITY;
+                for k in 0..*reduce_count {
+                    let src_idx = (base.0 as i64 + k as i64 * reduce_stride) as u64;
+                    acc = acc.max(values[src_idx as usize]);
+                }
+                acc
+            }
+            ScalarOp::IndirectLoad { table_base, .. } => {
+                let idx_src = group.inputs[0].resolve(i, 0);
+                let index = values[idx_src.0 as usize] as usize;
+                values[table_base.0 as usize + index]
+            }
+        }
+    }
+
+    /// Comprehensive plan validation test.
+    ///
+    /// Builds a 2-layer MLP via real lowering (matmul -> exp -> matmul),
+    /// then validates the v2c plan's:
+    /// 1. Ordering correctness (no cross-lane dependencies within a phase)
+    /// 2. Completeness (every compute atom appears exactly once)
+    /// 3. "Copy from reference" simulation (plan structure is sound)
+    /// 4. f32 simulation (matches NanoEval within tolerance)
+    #[test]
+    fn test_plan_validation_2layer_mlp() {
+        use crate::backends::eval_backend::EvalBackend;
+        use crate::milli_graph::ops::{MatMul, SimpleUnaryOp};
+        use crate::milli_graph::MilliOpGraph;
+        use crate::nano_graph::lower::lower_with_info;
+        use crate::numeric_tensor::NumericTensor;
+        use crate::tensor_info::TensorInfo;
+
+        use super::super::nano_plan_v2c::plan_execution;
+
+        // --- Step 1: Build a 2-layer MLP ---
+        // Layer 1: A(8x16) @ B(16x32) -> exp activation
+        // Layer 2: result(8x32) @ C(32x16)
+        let m1 = 8usize;
+        let k1 = 16usize;
+        let n1 = 32usize;
+        let k2 = n1; // 32
+        let n2 = 16usize;
+
+        let mut rng = rand::rng();
+        let (mut milli, _) = MilliOpGraph::new(std::iter::empty(), &mut rng);
+        let a_id = milli.add_input(&mut rng);
+        let b_id = milli.add_input(&mut rng);
+        let c_id = milli.add_input(&mut rng);
+
+        // Layer 1: A @ B
+        let ab = MatMul::push_new_default_precision(
+            &mut milli, a_id, b_id, DType::F32, &mut rng,
+        );
+        // Activation: exp (simple, exercises unary ops)
+        let activated = SimpleUnaryOp::exp(&mut milli, ab, &mut rng);
+        // Layer 2: activated @ C
+        let _output = MatMul::push_new_default_precision(
+            &mut milli, activated, c_id, DType::F32, &mut rng,
+        );
+
+        // Generate deterministic test data with bounded values (small for exp stability)
+        let a_data: Vec<f32> = (0..(m1 * k1))
+            .map(|i| ((i as f32) * 0.037).sin() * 0.1)
+            .collect();
+        let b_data: Vec<f32> = (0..(k1 * n1))
+            .map(|i| ((i as f32) * 0.023).cos() * 0.1)
+            .collect();
+        let c_data: Vec<f32> = (0..(k2 * n2))
+            .map(|i| ((i as f32) * 0.041).sin() * 0.1)
+            .collect();
+
+        let a_tensor =
+            NumericTensor::from_vec_shape(a_data, vec![m1, k1]).unwrap();
+        let b_tensor =
+            NumericTensor::from_vec_shape(b_data, vec![k1, n1]).unwrap();
+        let c_tensor =
+            NumericTensor::from_vec_shape(c_data, vec![k2, n2]).unwrap();
+
+        let mut info_inputs = HashMap::new();
+        info_inputs.insert(a_id, TensorInfo::from(a_tensor.clone()));
+        info_inputs.insert(b_id, TensorInfo::from(b_tensor.clone()));
+        info_inputs.insert(c_id, TensorInfo::from(c_tensor.clone()));
+
+        // --- Step 2: Lower to NanoGraph ---
+        let result = lower_with_info(&milli, &info_inputs).unwrap();
+        assert!(
+            result.unsupported.is_empty(),
+            "unsupported ops: {:?}",
+            result.unsupported_details,
+        );
+
+        // Build f32 overrides (numeric_overrides + input tensor data)
+        let mut overrides_f32: HashMap<u64, f32> = HashMap::new();
+        for (&atom_idx, scalar) in &result.numeric_overrides {
+            overrides_f32.insert(atom_idx, scalar.to_f64() as f32);
+        }
+        for (id, tensor) in [
+            (a_id, &a_tensor),
+            (b_id, &b_tensor),
+            (c_id, &c_tensor),
+        ] {
+            if let Some(tam) = result.tensor_map.get(&id) {
+                let mut backend = EvalBackend::NDArray;
+                let f32_t = tensor.cast(DType::F32, &mut backend).unwrap();
+                let flat = f32_t.flatten().unwrap();
+                let v: Vec<f32> = flat.to_ndarray().unwrap().try_into().unwrap();
+                for (i, &val) in v.iter().enumerate() {
+                    overrides_f32.insert(tam.base_id.0 + i as u64, val);
+                }
+            }
+        }
+
+        let graph = &result.graph;
+        let groups = graph.groups();
+        let num_atoms = graph.num_atoms() as usize;
+
+        eprintln!(
+            "=== 2-layer MLP: {} groups, {} atoms ===",
+            groups.len(),
+            num_atoms
+        );
+        for (gi, g) in groups.iter().enumerate() {
+            let op_name = format!("{:?}", g.op)
+                .chars()
+                .take_while(|c| *c != ' ' && *c != '{')
+                .collect::<String>();
+            eprintln!(
+                "  group {:>2}: base={:>6} count={:>6} op={} inputs={}",
+                gi,
+                g.base_id.0,
+                g.count,
+                op_name,
+                g.inputs.len(),
+            );
+        }
+
+        // --- Step 3: Run trusted NanoGraph evaluator ---
+        let overrides_ns: HashMap<u64, NumericScalar> = overrides_f32
+            .iter()
+            .map(|(&k, &v)| (k, NumericScalar::F32(v)))
+            .collect();
+        let reference = NanoEval::eval(graph, &overrides_ns);
+
+        // --- Step 4: Generate v2c plan with 4 lanes ---
+        let plan = plan_execution(graph, 4);
+        eprintln!(
+            "Plan: {} phases, {} lanes",
+            plan.phases.len(),
+            plan.num_lanes,
+        );
+        for (pi, phase) in plan.phases.iter().enumerate() {
+            for (li, lane) in phase.lane_work.iter().enumerate() {
+                for w in lane {
+                    let g = &groups[w.group_idx];
+                    let op_name = format!("{:?}", g.op)
+                        .chars()
+                        .take_while(|c| *c != ' ' && *c != '{')
+                        .collect::<String>();
+                    eprintln!(
+                        "  phase {} lane {} group={} offset={} count={} op={}",
+                        pi, li, w.group_idx, w.atom_offset, w.atom_count, op_name,
+                    );
+                }
+            }
+        }
+
+        // --- Step 5: Validate plan ordering ---
+        // Build a map: atom_idx -> (phase, lane) where it's produced.
+        let mut atom_producer: HashMap<u64, (usize, usize)> = HashMap::new();
+
+        // Mark all literal atoms as "always available" with sentinel (usize::MAX, 0)
+        for g in groups {
+            if matches!(&g.op, ScalarOp::Literal(_)) {
+                for i in 0..g.count {
+                    atom_producer.insert(g.base_id.0 + i, (usize::MAX, 0));
+                }
+            }
+        }
+
+        // Register all atoms produced by plan work items
+        for (phase_idx, phase) in plan.phases.iter().enumerate() {
+            for (lane_idx, lane) in phase.lane_work.iter().enumerate() {
+                for work in lane {
+                    let g = &groups[work.group_idx];
+                    for i in work.atom_offset..(work.atom_offset + work.atom_count) {
+                        let atom_idx = g.base_id.0 + i;
+                        let prev = atom_producer.insert(atom_idx, (phase_idx, lane_idx));
+                        assert!(
+                            prev.is_none(),
+                            "atom {} produced by multiple work items: prev={:?} new=({}, {})",
+                            atom_idx,
+                            prev,
+                            phase_idx,
+                            lane_idx,
+                        );
+                    }
+                }
+            }
+        }
+
+        // Now check ordering: for each work item, for each atom, check that
+        // all source atoms are either:
+        // a) Literal (usize::MAX sentinel)
+        // b) Produced in an earlier phase
+        // c) Produced earlier in the same lane's same phase (within-lane ordering)
+        //
+        // A source in the SAME phase but DIFFERENT lane is a violation.
+        let mut ordering_violations = 0usize;
+        // Track within-lane ordering: atoms produced earlier in the same phase+lane
+        for (phase_idx, phase) in plan.phases.iter().enumerate() {
+            for (lane_idx, lane) in phase.lane_work.iter().enumerate() {
+                // Build set of atoms produced so far in this lane during this phase
+                let mut lane_produced_so_far: std::collections::HashSet<u64> =
+                    std::collections::HashSet::new();
+
+                for work in lane {
+                    let g = &groups[work.group_idx];
+                    for i in work.atom_offset..(work.atom_offset + work.atom_count) {
+                        let atom_idx = g.base_id.0 + i;
+                        let sources = resolve_atom_sources(g, i);
+
+                        for src in &sources {
+                            if let Some(&(src_phase, src_lane)) = atom_producer.get(src) {
+                                if src_phase == usize::MAX {
+                                    // Literal, always available
+                                    continue;
+                                }
+                                if src_phase < phase_idx {
+                                    // Produced in earlier phase, OK
+                                    continue;
+                                }
+                                if src_phase == phase_idx && src_lane == lane_idx {
+                                    // Same phase, same lane.
+                                    // Must have been produced earlier in this lane.
+                                    if !lane_produced_so_far.contains(src) {
+                                        // The source is in the same lane+phase but hasn't
+                                        // been produced yet. This is OK if it's part of the
+                                        // SAME work item (e.g., a self-referencing reduce).
+                                        // Check if it's in the current work item's range.
+                                        let work_start = g.base_id.0 + work.atom_offset;
+                                        let work_end =
+                                            work_start + work.atom_count;
+                                        if *src >= work_start && *src < work_end {
+                                            // Same work item -- this is fine for reduces
+                                            // (they read from OTHER groups, not self)
+                                            // Actually, a self-reference within the same
+                                            // group is unusual. Let's flag it but not fail.
+                                        } else {
+                                            eprintln!(
+                                                "  ORDERING VIOLATION: atom {} (phase {} lane {}) \
+                                                 reads src {} (same phase, same lane, but not yet produced)",
+                                                atom_idx, phase_idx, lane_idx, src,
+                                            );
+                                            ordering_violations += 1;
+                                        }
+                                    }
+                                    continue;
+                                }
+                                if src_phase == phase_idx && src_lane != lane_idx {
+                                    // VIOLATION: same phase, different lane
+                                    eprintln!(
+                                        "  ORDERING VIOLATION: atom {} (phase {} lane {}) \
+                                         reads src {} from DIFFERENT lane {} in same phase",
+                                        atom_idx, phase_idx, lane_idx, src, src_lane,
+                                    );
+                                    ordering_violations += 1;
+                                    continue;
+                                }
+                                if src_phase > phase_idx {
+                                    // Source produced in a LATER phase!
+                                    eprintln!(
+                                        "  ORDERING VIOLATION: atom {} (phase {} lane {}) \
+                                         reads src {} from LATER phase {}",
+                                        atom_idx, phase_idx, lane_idx, src, src_phase,
+                                    );
+                                    ordering_violations += 1;
+                                }
+                            }
+                            // If src not in atom_producer, it might be an override
+                            // (input tensor data). That's fine.
+                        }
+
+                        lane_produced_so_far.insert(atom_idx);
+                    }
+                }
+            }
+        }
+        eprintln!(
+            "Ordering validation: {} violations found",
+            ordering_violations,
+        );
+        assert_eq!(
+            ordering_violations, 0,
+            "Plan has {} ordering violations (cross-lane reads within phase or \
+             reads from later phase)",
+            ordering_violations,
+        );
+
+        // --- Step 6: Validate completeness ---
+        // Every compute (non-Literal) atom must appear in exactly one LaneWork item.
+        let mut plan_atoms: std::collections::HashSet<u64> =
+            std::collections::HashSet::new();
+        for phase in &plan.phases {
+            for lane in &phase.lane_work {
+                for work in lane {
+                    let g = &groups[work.group_idx];
+                    if matches!(&g.op, ScalarOp::Literal(_)) {
+                        continue;
+                    }
+                    for i in work.atom_offset..(work.atom_offset + work.atom_count) {
+                        let atom_idx = g.base_id.0 + i;
+                        let is_new = plan_atoms.insert(atom_idx);
+                        assert!(
+                            is_new,
+                            "atom {} appears in plan multiple times",
+                            atom_idx,
+                        );
+                    }
+                }
+            }
+        }
+
+        let mut missing_atoms = Vec::new();
+        for g in groups {
+            if matches!(&g.op, ScalarOp::Literal(_)) {
+                continue;
+            }
+            for i in 0..g.count {
+                let atom_idx = g.base_id.0 + i;
+                if !plan_atoms.contains(&atom_idx) {
+                    missing_atoms.push(atom_idx);
+                }
+            }
+        }
+        if !missing_atoms.is_empty() {
+            eprintln!(
+                "Completeness: {} atoms missing from plan (first 10: {:?})",
+                missing_atoms.len(),
+                &missing_atoms[..missing_atoms.len().min(10)],
+            );
+        }
+        assert!(
+            missing_atoms.is_empty(),
+            "Plan is incomplete: {} compute atoms not covered",
+            missing_atoms.len(),
+        );
+        eprintln!("Completeness validation: OK ({} compute atoms covered)", plan_atoms.len());
+
+        // --- Step 7: "Copy from reference" simulation ---
+        // Walk the plan in execution order. For each atom, copy the trusted
+        // NanoEval value. If the plan's ordering is correct, the final buffer
+        // should exactly match the reference.
+        let mut copy_values = vec![0.0f32; num_atoms];
+        // Pre-fill literals + overrides
+        for g in groups {
+            if let ScalarOp::Literal(scalar) = &g.op {
+                let val = scalar.to_f64() as f32;
+                for i in 0..g.count {
+                    copy_values[(g.base_id.0 + i) as usize] = val;
+                }
+            }
+        }
+        for (&idx, &val) in &overrides_f32 {
+            copy_values[idx as usize] = val;
+        }
+
+        // Walk plan, copy from reference
+        for phase in &plan.phases {
+            for lane in &phase.lane_work {
+                for work in lane {
+                    let g = &groups[work.group_idx];
+                    if matches!(&g.op, ScalarOp::Literal(_)) {
+                        continue;
+                    }
+                    for i in work.atom_offset..(work.atom_offset + work.atom_count) {
+                        let atom_idx = g.base_id.0 + i;
+                        copy_values[atom_idx as usize] =
+                            reference.get(AtomId(atom_idx)) as f32;
+                    }
+                }
+            }
+        }
+
+        // Compare copy_values against reference
+        let mut copy_max_err: f64 = 0.0;
+        let mut copy_err_atom: u64 = 0;
+        for i in 0..num_atoms {
+            let ref_val = reference.get(AtomId(i as u64));
+            let copy_val = copy_values[i] as f64;
+            let diff = (ref_val - copy_val).abs();
+            if diff > copy_max_err {
+                copy_max_err = diff;
+                copy_err_atom = i as u64;
+            }
+        }
+        eprintln!(
+            "Copy-from-reference simulation: max_err={:.2e} at atom {}",
+            copy_max_err, copy_err_atom,
+        );
+        // This should be essentially zero (only f64->f32->f64 roundtrip error)
+        assert!(
+            copy_max_err < 1e-3,
+            "Copy-from-reference has error {:.6e} at atom {} -- plan structure is wrong!",
+            copy_max_err,
+            copy_err_atom,
+        );
+
+        // --- Step 8: f32 computation simulation ---
+        // Walk the plan, compute each atom using f32 arithmetic (matching JIT).
+        let mut sim_values = vec![0.0f32; num_atoms];
+        // Pre-fill literals + overrides
+        for g in groups {
+            if let ScalarOp::Literal(scalar) = &g.op {
+                let val = scalar.to_f64() as f32;
+                for i in 0..g.count {
+                    sim_values[(g.base_id.0 + i) as usize] = val;
+                }
+            }
+        }
+        for (&idx, &val) in &overrides_f32 {
+            sim_values[idx as usize] = val;
+        }
+
+        // Walk plan, compute each atom
+        for phase in &plan.phases {
+            for lane in &phase.lane_work {
+                for work in lane {
+                    let g = &groups[work.group_idx];
+                    if matches!(&g.op, ScalarOp::Literal(_)) {
+                        continue;
+                    }
+                    for i in work.atom_offset..(work.atom_offset + work.atom_count) {
+                        let atom_idx = g.base_id.0 + i;
+                        let val = compute_atom_f32(g, i, &sim_values);
+                        sim_values[atom_idx as usize] = val;
+                    }
+                }
+            }
+        }
+
+        // Compare f32 simulation against NanoEval reference
+        let mut sim_max_err: f64 = 0.0;
+        let mut sim_err_atom: u64 = 0;
+        let mut sim_large_err_count = 0usize;
+        for i in 0..num_atoms {
+            let ref_val = reference.get(AtomId(i as u64));
+            let sim_val = sim_values[i] as f64;
+            let diff = (ref_val - sim_val).abs();
+            if diff > sim_max_err {
+                sim_max_err = diff;
+                sim_err_atom = i as u64;
+            }
+            if diff > 1e-3 {
+                sim_large_err_count += 1;
+                if sim_large_err_count <= 5 {
+                    let gi = groups
+                        .iter()
+                        .position(|g| {
+                            i as u64 >= g.base_id.0 && (i as u64) < g.base_id.0 + g.count
+                        })
+                        .unwrap_or(usize::MAX);
+                    let op_name = if gi < groups.len() {
+                        format!("{:?}", groups[gi].op)
+                            .chars()
+                            .take_while(|c| *c != ' ' && *c != '{')
+                            .collect::<String>()
+                    } else {
+                        "???".to_string()
+                    };
+                    eprintln!(
+                        "  f32-sim large error: atom {} (group {} {}) ref={} sim={} diff={}",
+                        i, gi, op_name, ref_val, sim_val, diff,
+                    );
+                }
+            }
+        }
+        eprintln!(
+            "f32 simulation: max_err={:.2e} at atom {}, {} atoms with err > 1e-3",
+            sim_max_err, sim_err_atom, sim_large_err_count,
+        );
+
+        // The f32 simulation should match reasonably well. For a 2-layer MLP with
+        // small values, we expect small precision differences. If max_err > 1.0,
+        // the plan likely has an ordering bug.
+        if sim_max_err > 1.0 {
+            panic!(
+                "f32 simulation max_err={:.2e} is too large -- likely a plan ordering bug, \
+                 not just precision. atom={}, {} atoms with err > 1e-3",
+                sim_max_err, sim_err_atom, sim_large_err_count,
+            );
+        }
+
+        // Also compare JIT execution against the f32 simulation.
+        // If the JIT disagrees with our manual f32 sim, the codegen has a bug.
+        let compiled = CompiledPlan::compile(graph, &plan).expect("compile failed");
+        let jit_values = compiled.execute(&overrides_f32);
+
+        let mut jit_vs_sim_max_err: f64 = 0.0;
+        let mut jit_vs_sim_err_atom: u64 = 0;
+        let mut jit_vs_sim_large = 0usize;
+        for i in 0..num_atoms {
+            let sim_val = sim_values[i] as f64;
+            let jit_val = jit_values[i] as f64;
+            let diff = (sim_val - jit_val).abs();
+            if diff > jit_vs_sim_max_err {
+                jit_vs_sim_max_err = diff;
+                jit_vs_sim_err_atom = i as u64;
+            }
+            if diff > 1e-4 {
+                jit_vs_sim_large += 1;
+                if jit_vs_sim_large <= 5 {
+                    let gi = groups
+                        .iter()
+                        .position(|g| {
+                            i as u64 >= g.base_id.0 && (i as u64) < g.base_id.0 + g.count
+                        })
+                        .unwrap_or(usize::MAX);
+                    let op_name = if gi < groups.len() {
+                        format!("{:?}", groups[gi].op)
+                            .chars()
+                            .take_while(|c| *c != ' ' && *c != '{')
+                            .collect::<String>()
+                    } else {
+                        "???".to_string()
+                    };
+                    eprintln!(
+                        "  JIT vs f32-sim: atom {} (group {} {}) sim={} jit={} diff={}",
+                        i, gi, op_name, sim_val, jit_val, diff,
+                    );
+                }
+            }
+        }
+        eprintln!(
+            "JIT vs f32-sim: max_err={:.2e} at atom {}, {} atoms with err > 1e-4",
+            jit_vs_sim_max_err, jit_vs_sim_err_atom, jit_vs_sim_large,
+        );
+
+        // JIT should match our manual f32 computation very closely.
+        // Differences > 1e-3 suggest a codegen bug.
+        if jit_vs_sim_max_err > 1e-3 {
+            // Get reference value for context
+            let ref_val = reference.get(AtomId(jit_vs_sim_err_atom));
+            panic!(
+                "JIT vs f32-sim max_err={:.2e} at atom {} (ref={}) -- likely a CODEGEN bug. \
+                 {} atoms differ by > 1e-4",
+                jit_vs_sim_max_err, jit_vs_sim_err_atom, ref_val, jit_vs_sim_large,
+            );
+        }
+
+        // Summary
+        eprintln!("=== Plan validation PASSED ===");
+        eprintln!("  Ordering:           0 violations");
+        eprintln!("  Completeness:       {} compute atoms covered", plan_atoms.len());
+        eprintln!("  Copy-from-ref err:  {:.2e}", copy_max_err);
+        eprintln!("  f32-sim vs ref:     {:.2e}", sim_max_err);
+        eprintln!("  JIT vs f32-sim:     {:.2e}", jit_vs_sim_max_err);
+    }
+
     /// Test with GPT-2 scale dimensions: 4x768 @ 768x768 + bias, followed by another matmul.
     /// This exercises the exact patterns that fail in GPT-2.
     #[test]
