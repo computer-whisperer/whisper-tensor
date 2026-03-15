@@ -237,6 +237,7 @@ pub(crate) struct GraphExplorerApp {
     pub(crate) tts_inference_data: HashMap<InterfaceId, TTSInferenceData>,
     pub(crate) stt_inference_data: HashMap<InterfaceId, STTInferenceData>,
     node_execution_timestamps: HashMap<Vec<GlobalId>, Instant>,
+    node_last_child_active_timestamps: HashMap<Vec<GlobalId>, Instant>,
     node_execution_durations: HashMap<Vec<GlobalId>, Duration>,
     node_execution_op_kinds: HashMap<Vec<GlobalId>, String>,
     abbreviated_tensor_reports: HashMap<Vec<GlobalId>, AbbreviatedTensorValue>,
@@ -423,6 +424,59 @@ fn format_shape(val: &[ScalarInfoTyped<u64>]) -> String {
     format!("({joined:})")
 }
 
+struct NodeExecutionActivityMapsMut<'a> {
+    node_execution_timestamps: &'a mut HashMap<Vec<GlobalId>, Instant>,
+    node_last_child_active_timestamps: &'a mut HashMap<Vec<GlobalId>, Instant>,
+    node_execution_durations: &'a mut HashMap<Vec<GlobalId>, Duration>,
+    node_execution_op_kinds: &'a mut HashMap<Vec<GlobalId>, String>,
+}
+
+fn record_node_execution_activity(
+    maps: &mut NodeExecutionActivityMapsMut<'_>,
+    node_path: Vec<GlobalId>,
+    op_kind: String,
+    execution_time: Instant,
+    execution_duration: Duration,
+) {
+    maps.node_execution_timestamps
+        .insert(node_path.clone(), execution_time);
+    maps.node_execution_durations
+        .insert(node_path.clone(), execution_duration);
+    if !op_kind.is_empty() {
+        maps.node_execution_op_kinds
+            .insert(node_path.clone(), op_kind);
+    }
+
+    if node_path.len() > 1 {
+        let mut ancestor_path = Vec::with_capacity(node_path.len() - 1);
+        for ancestor_id in node_path.iter().take(node_path.len() - 1) {
+            ancestor_path.push(*ancestor_id);
+            maps.node_last_child_active_timestamps
+                .insert(ancestor_path.clone(), execution_time);
+        }
+    }
+}
+
+fn duration_since_node_activity(
+    node_execution_timestamps: &HashMap<Vec<GlobalId>, Instant>,
+    node_last_child_active_timestamps: &HashMap<Vec<GlobalId>, Instant>,
+    node_path: &[GlobalId],
+    current_time: Instant,
+) -> Option<Duration> {
+    let own = node_execution_timestamps
+        .get(node_path)
+        .map(|x| current_time.saturating_duration_since(*x));
+    let child = node_last_child_active_timestamps
+        .get(node_path)
+        .map(|x| current_time.saturating_duration_since(*x));
+    match (own, child) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    }
+}
+
 pub(crate) enum LoadableGraphState<'a> {
     None,
     Unloaded(LoadedModelId),
@@ -484,6 +538,7 @@ impl GraphExplorerApp {
             tts_inference_data: HashMap::new(),
             stt_inference_data: HashMap::new(),
             node_execution_timestamps: HashMap::new(),
+            node_last_child_active_timestamps: HashMap::new(),
             node_execution_durations: HashMap::new(),
             node_execution_op_kinds: HashMap::new(),
             abbreviated_tensor_reports: HashMap::new(),
@@ -700,12 +755,14 @@ impl GraphExplorerApp {
                         let is_selected = self.explorer_selection == Some(node_id);
                         let is_hovered = self.explorer_hovered == Some(node_id);
 
-                        let time_since_last_eval: Option<Duration> = self
-                            .node_execution_timestamps
-                            .get(&node_path)
-                            .map(|eval_time| current_time - *eval_time);
+                        let time_since_last_activity = duration_since_node_activity(
+                            &self.node_execution_timestamps,
+                            &self.node_last_child_active_timestamps,
+                            &node_path,
+                            current_time,
+                        );
 
-                        let active_pulse = if let Some(x) = time_since_last_eval {
+                        let active_pulse = if let Some(x) = time_since_last_activity {
                             (1.0f32 - x.as_secs_f32() / 0.5f32).max(0.0f32)
                         } else {
                             0.0
@@ -1138,9 +1195,12 @@ impl GraphExplorerApp {
                                         self.nodes_in_view.insert(node_path.clone());
                                     }
                                     let duration_since_eval = if let Some(node_path) = &node_path {
-                                        self.node_execution_timestamps
-                                            .get(node_path)
-                                            .map(|x| current_time - *x)
+                                        duration_since_node_activity(
+                                            &self.node_execution_timestamps,
+                                            &self.node_last_child_active_timestamps,
+                                            node_path,
+                                            current_time,
+                                        )
                                     } else {
                                         None
                                     };
@@ -1393,6 +1453,12 @@ impl GraphExplorerApp {
                                         {
                                             if let Some(reports) = server_request_manager.get_reports(*request_id) {
                                                 let time_now = Instant::now();
+                                                let mut node_activity_maps = NodeExecutionActivityMapsMut {
+                                                    node_execution_timestamps: &mut self.node_execution_timestamps,
+                                                    node_last_child_active_timestamps: &mut self.node_last_child_active_timestamps,
+                                                    node_execution_durations: &mut self.node_execution_durations,
+                                                    node_execution_op_kinds: &mut self.node_execution_op_kinds,
+                                                };
                                                 for report in reports {
                                                     text_inference_data
                                                         .progress_widget_state
@@ -1402,11 +1468,13 @@ impl GraphExplorerApp {
                                                     }
                                                     for (node_path, op_kind, age, execution_duration) in report.node_executions {
                                                         let time = time_now - age;
-                                                        self.node_execution_timestamps.insert(node_path.clone(), time);
-                                                        self.node_execution_durations.insert(node_path.clone(), execution_duration);
-                                                        if !op_kind.is_empty() {
-                                                            self.node_execution_op_kinds.insert(node_path, op_kind);
-                                                        }
+                                                        record_node_execution_activity(
+                                                            &mut node_activity_maps,
+                                                            node_path,
+                                                            op_kind,
+                                                            time,
+                                                            execution_duration,
+                                                        );
                                                     }
                                                     for (tensor_path, value) in report.abbreviated_tensor_assignments {
                                                         self.rendered_tensor_swatches.remove(&tensor_path);
@@ -1642,6 +1710,12 @@ impl GraphExplorerApp {
                         if let Some((request_id, _)) = &sd_data.pending_request {
                             if let Some(reports) = server_request_manager.get_reports(*request_id) {
                                 let time_now = Instant::now();
+                                let mut node_activity_maps = NodeExecutionActivityMapsMut {
+                                    node_execution_timestamps: &mut self.node_execution_timestamps,
+                                    node_last_child_active_timestamps: &mut self.node_last_child_active_timestamps,
+                                    node_execution_durations: &mut self.node_execution_durations,
+                                    node_execution_op_kinds: &mut self.node_execution_op_kinds,
+                                };
                                 for report in reports {
                                     sd_data.progress_widget_state.ingest_report(report.clone());
                                     for (path, value) in report.tensor_assignments {
@@ -1649,11 +1723,13 @@ impl GraphExplorerApp {
                                     }
                                     for (node_path, op_kind, age, execution_duration) in report.node_executions {
                                         let time = time_now - age;
-                                        self.node_execution_timestamps.insert(node_path.clone(), time);
-                                        self.node_execution_durations.insert(node_path.clone(), execution_duration);
-                                        if !op_kind.is_empty() {
-                                            self.node_execution_op_kinds.insert(node_path, op_kind);
-                                        }
+                                        record_node_execution_activity(
+                                            &mut node_activity_maps,
+                                            node_path,
+                                            op_kind,
+                                            time,
+                                            execution_duration,
+                                        );
                                     }
                                     for (tensor_path, value) in report.abbreviated_tensor_assignments {
                                         self.rendered_tensor_swatches.remove(&tensor_path);
@@ -2018,6 +2094,12 @@ impl GraphExplorerApp {
                         if let Some((request_id, _, _)) = &tts_data.pending_request {
                             if let Some(reports) = server_request_manager.get_reports(*request_id) {
                                 let time_now = Instant::now();
+                                let mut node_activity_maps = NodeExecutionActivityMapsMut {
+                                    node_execution_timestamps: &mut self.node_execution_timestamps,
+                                    node_last_child_active_timestamps: &mut self.node_last_child_active_timestamps,
+                                    node_execution_durations: &mut self.node_execution_durations,
+                                    node_execution_op_kinds: &mut self.node_execution_op_kinds,
+                                };
                                 for report in reports {
                                     tts_data.progress_widget_state.ingest_report(report.clone());
                                     for (path, value) in report.tensor_assignments {
@@ -2025,11 +2107,13 @@ impl GraphExplorerApp {
                                     }
                                     for (node_path, op_kind, age, execution_duration) in report.node_executions {
                                         let time = time_now - age;
-                                        self.node_execution_timestamps.insert(node_path.clone(), time);
-                                        self.node_execution_durations.insert(node_path.clone(), execution_duration);
-                                        if !op_kind.is_empty() {
-                                            self.node_execution_op_kinds.insert(node_path, op_kind);
-                                        }
+                                        record_node_execution_activity(
+                                            &mut node_activity_maps,
+                                            node_path,
+                                            op_kind,
+                                            time,
+                                            execution_duration,
+                                        );
                                     }
                                     for (tensor_path, value) in report.abbreviated_tensor_assignments {
                                         self.rendered_tensor_swatches.remove(&tensor_path);
@@ -2453,6 +2537,12 @@ impl GraphExplorerApp {
                                 if let Some(reports) = server_request_manager.get_reports(*request_id)
                                 {
                                     let time_now = Instant::now();
+                                    let mut node_activity_maps = NodeExecutionActivityMapsMut {
+                                        node_execution_timestamps: &mut self.node_execution_timestamps,
+                                        node_last_child_active_timestamps: &mut self.node_last_child_active_timestamps,
+                                        node_execution_durations: &mut self.node_execution_durations,
+                                        node_execution_op_kinds: &mut self.node_execution_op_kinds,
+                                    };
                                     for report in reports {
                                         stt_data.progress_widget_state.ingest_report(report.clone());
                                         for (path, value) in report.tensor_assignments {
@@ -2463,14 +2553,13 @@ impl GraphExplorerApp {
                                             report.node_executions
                                         {
                                             let time = time_now - age;
-                                            self.node_execution_timestamps
-                                                .insert(node_path.clone(), time);
-                                            self.node_execution_durations
-                                                .insert(node_path.clone(), execution_duration);
-                                            if !op_kind.is_empty() {
-                                                self.node_execution_op_kinds
-                                                    .insert(node_path, op_kind);
-                                            }
+                                            record_node_execution_activity(
+                                                &mut node_activity_maps,
+                                                node_path,
+                                                op_kind,
+                                                time,
+                                                execution_duration,
+                                            );
                                         }
                                         for (tensor_path, value) in
                                             report.abbreviated_tensor_assignments
