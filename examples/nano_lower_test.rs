@@ -130,7 +130,33 @@ fn main() {
     // ---- ReduceSum diagnostic ----
     print_reduce_diagnostic(&result.graph);
 
-    // ---- Partition (compare approaches) ----
+    // ---- Lane+Barrier Execution Plans ----
+    let num_lanes = 8;
+    println!("\n=== Lane+Barrier Plans (num_lanes={}) ===", num_lanes);
+
+    {
+        let t0 = Instant::now();
+        let plan = whisper_tensor::compiler::attempts::v13_claude::nano_plan_creative::plan_execution(&result.graph, num_lanes);
+        let elapsed = t0.elapsed();
+        let raw: Vec<Vec<Vec<usize>>> = plan.phases.iter().map(|p| p.lane_work.clone()).collect();
+        print_plan_summary(&result.graph, &raw, plan.num_lanes, "creative", elapsed);
+    }
+    {
+        let t0 = Instant::now();
+        let plan = whisper_tensor::compiler::attempts::v13_claude::nano_plan_critical::plan_execution(&result.graph, num_lanes);
+        let elapsed = t0.elapsed();
+        let raw: Vec<Vec<Vec<usize>>> = plan.phases.iter().map(|p| p.lane_work.clone()).collect();
+        print_plan_summary(&result.graph, &raw, plan.num_lanes, "critical", elapsed);
+    }
+    {
+        let t0 = Instant::now();
+        let plan = whisper_tensor::compiler::attempts::v13_claude::nano_plan_iterative::plan_execution(&result.graph, num_lanes);
+        let elapsed = t0.elapsed();
+        let raw: Vec<Vec<Vec<usize>>> = plan.phases.iter().map(|p| p.lane_work.clone()).collect();
+        print_plan_summary(&result.graph, &raw, plan.num_lanes, "iterative", elapsed);
+    }
+
+    // ---- Old-style Partition (compare approaches) ----
     let target_kernels = 200;
 
     // New partitioners (allow interleaved group indices, expose parallelism)
@@ -424,6 +450,62 @@ fn print_partition_summary(graph: &NanoGraph, kernel_groups: &[Vec<usize>], name
     }
     if sizes.len() > 5 {
         println!("    ... and {} more kernels", sizes.len() - 5);
+    }
+}
+
+fn print_plan_summary(
+    graph: &NanoGraph,
+    phases: &[Vec<Vec<usize>>], // phase -> lane -> group indices
+    num_lanes: usize,
+    name: &str,
+    elapsed: std::time::Duration,
+) {
+    let groups = graph.groups();
+    let num_phases = phases.len();
+
+    // Count total assigned groups
+    let mut total_assigned = 0usize;
+    let mut total_atoms = 0u64;
+    for phase in phases {
+        for lane_groups in phase {
+            total_assigned += lane_groups.len();
+            total_atoms += lane_groups.iter().map(|&gi| groups[gi].count).sum::<u64>();
+        }
+    }
+
+    // Per-phase balance
+    let mut max_imbalance: f64 = 0.0;
+    let mut phase_sizes: Vec<(usize, u64, u64, usize)> = Vec::new(); // (phase, max_lane, min_lane, num_groups)
+    for (pi, phase) in phases.iter().enumerate() {
+        let lane_atoms: Vec<u64> = phase.iter()
+            .map(|lg| lg.iter().map(|&gi| groups[gi].count).sum::<u64>())
+            .collect();
+        let max_lane = lane_atoms.iter().copied().max().unwrap_or(0);
+        let min_lane = lane_atoms.iter().copied().filter(|&a| a > 0).min().unwrap_or(0);
+        let num_groups: usize = phase.iter().map(|lg| lg.len()).sum();
+        if min_lane > 0 {
+            max_imbalance = max_imbalance.max(max_lane as f64 / min_lane as f64);
+        }
+        phase_sizes.push((pi, max_lane, min_lane, num_groups));
+    }
+
+    println!("\n  [{}] {:.1}ms, {} lanes, {} phases, {} groups assigned, {:.1}B atoms",
+        name, elapsed.as_secs_f64() * 1e3, num_lanes, num_phases,
+        total_assigned, total_atoms as f64 / 1e9);
+    println!("    max phase imbalance: {:.1}x", max_imbalance);
+
+    // Show first few and last few phases
+    let show = 3;
+    for (pi, max_l, min_l, ng) in phase_sizes.iter().take(show).copied() {
+        let balance = if min_l > 0 { format!("{:.1}x", max_l as f64 / min_l as f64) } else { "inf".to_string() };
+        println!("    phase {:>3}: {:>6} groups, max_lane={:>12}, balance={}", pi, ng, max_l, balance);
+    }
+    if num_phases > show * 2 {
+        println!("    ... ({} more phases) ...", num_phases - show * 2);
+    }
+    for (pi, max_l, min_l, ng) in phase_sizes.iter().rev().take(show).copied().collect::<Vec<_>>().into_iter().rev() {
+        let balance = if min_l > 0 { format!("{:.1}x", max_l as f64 / min_l as f64) } else { "inf".to_string() };
+        println!("    phase {:>3}: {:>6} groups, max_lane={:>12}, balance={}", pi, ng, max_l, balance);
     }
 }
 

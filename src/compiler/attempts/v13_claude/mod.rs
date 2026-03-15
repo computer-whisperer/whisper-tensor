@@ -35,5 +35,8 @@ pub mod nano_part_merge;
 pub mod nano_part_topo;
 pub mod nano_partition;
 pub mod partition;
+pub mod nano_plan_creative;
+pub mod nano_plan_critical;
+pub mod nano_plan_iterative;
 pub mod simple_dag;
 pub mod test_graphs;
