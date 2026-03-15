@@ -320,7 +320,7 @@ fn render_node_contents(
                 let text = if let Some(link) = graph_subject.get_link_by_id(link_id)
                     && let Some(label) = link.label()
                 {
-                    format!("Constant: {}", label)
+                    label.to_string()
                 } else {
                     "Constant".to_string()
                 };
@@ -571,6 +571,48 @@ impl GraphExplorerApp {
             }
         }
         "?".to_string()
+    }
+
+    fn breadcrumb_node_text(graph: &dyn GraphDyn, node_id: GlobalId) -> String {
+        if let Some(node) = graph.get_node_by_id(&node_id) {
+            if let Some(label) = node.label()
+                && !label.is_empty()
+            {
+                return label;
+            }
+            let op_kind = node.op_kind();
+            if !op_kind.is_empty() {
+                return op_kind;
+            }
+        }
+        node_id.to_string()
+    }
+
+    fn build_graph_breadcrumb_items(
+        &self,
+        root_graph: &dyn GraphDyn,
+        working_path: &[GlobalId],
+        loaded_models: &LoadedModels,
+    ) -> Vec<(String, Vec<GlobalId>)> {
+        let mut items = vec![("Root".to_string(), Vec::<GlobalId>::new())];
+        let mut current_graph = root_graph;
+        let mut current_path = Vec::<GlobalId>::new();
+        for node_id in working_path {
+            current_path.push(*node_id);
+            items.push((
+                Self::breadcrumb_node_text(current_graph, *node_id),
+                current_path.clone(),
+            ));
+            match get_inner_graph(current_graph, *node_id, self.root_selection, loaded_models) {
+                LoadableGraphState::Loaded(next_graph) => {
+                    current_graph = next_graph;
+                }
+                LoadableGraphState::Unloaded(_) | LoadableGraphState::None => {
+                    break;
+                }
+            }
+        }
+        items
     }
 
     fn interface_progress_widget_state(
@@ -903,6 +945,7 @@ impl GraphExplorerApp {
             0.0
         };
         let mut graph_pane_rect: Option<Rect> = None;
+        let mut graph_breadcrumb_items: Option<Vec<(String, Vec<GlobalId>)>> = None;
 
         // Find the graph we are working with
         let root_graph: Option<&dyn GraphDyn> = match self.root_selection {
@@ -970,6 +1013,13 @@ impl GraphExplorerApp {
             }
         };
         if let Some((working_graph, working_path)) = graph_and_path {
+            if let Some(root_graph) = root_graph {
+                graph_breadcrumb_items = Some(self.build_graph_breadcrumb_items(
+                    root_graph,
+                    working_path.as_slice(),
+                    loaded_models,
+                ));
+            }
             if !self.graph_layouts.contains_key(&self.graph_subject_path) {
                 // Map tensors to link IDs
                 let mut tensor_link_ids = HashMap::new();
@@ -3134,6 +3184,43 @@ impl GraphExplorerApp {
                 .show(ui.ctx(), |ui| {
                     progress_state.show(ui);
                 });
+        }
+
+        if let Some(graph_rect) = graph_pane_rect
+            && let Some(breadcrumb_items) = graph_breadcrumb_items
+        {
+            let last_idx = breadcrumb_items.len().saturating_sub(1);
+            egui::Area::new(egui::Id::new((
+                "graph_breadcrumb_overlay",
+                self.root_selection,
+            )))
+            .order(egui::Order::Foreground)
+            .pivot(egui::Align2::LEFT_TOP)
+            .fixed_pos(graph_rect.left_top() + vec2(10.0, 10.0))
+            .show(ui.ctx(), |ui| {
+                egui::Frame::default()
+                    .stroke(ui.visuals().window_stroke)
+                    .inner_margin(egui::Margin::same(6))
+                    .show(ui, |ui| {
+                        ui.set_max_width(460.0);
+                        ui.horizontal_wrapped(|ui| {
+                            for (idx, (text, path)) in breadcrumb_items.into_iter().enumerate() {
+                                if idx > 0 {
+                                    ui.label(egui::RichText::new("/").size(11.0));
+                                }
+                                if idx < last_idx {
+                                    let response =
+                                        ui.link(egui::RichText::new(text.as_str()).size(11.0));
+                                    if response.clicked() {
+                                        self.next_graph_subject_path = Some(path);
+                                    }
+                                } else {
+                                    ui.label(egui::RichText::new(text).size(11.0));
+                                }
+                            }
+                        });
+                    });
+            });
         }
 
         // Prompt model loading
