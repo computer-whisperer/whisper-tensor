@@ -163,9 +163,26 @@ pub fn lower(
 }
 
 /// Lower a MilliOpGraph into a NanoGraph using partial tensor information.
+/// Lower without building numeric_overrides (fast path for diagnostics).
+pub fn lower_graph_only(
+    graph: &MilliOpGraph,
+    inputs: &HashMap<GlobalId, TensorInfo>,
+) -> Result<LowerResult, LowerError> {
+    lower_inner(graph, inputs, false)
+}
+
+/// Lower a MilliOpGraph into a NanoGraph using partial tensor information.
 pub fn lower_with_info(
     graph: &MilliOpGraph,
     inputs: &HashMap<GlobalId, TensorInfo>,
+) -> Result<LowerResult, LowerError> {
+    lower_inner(graph, inputs, true)
+}
+
+fn lower_inner(
+    graph: &MilliOpGraph,
+    inputs: &HashMap<GlobalId, TensorInfo>,
+    build_overrides: bool,
 ) -> Result<LowerResult, LowerError> {
     let t0 = std::time::Instant::now();
     let all_infos = graph.infer_all(inputs)?;
@@ -231,6 +248,20 @@ pub fn lower_with_info(
     use crate::numeric_scalar::NumericScalar;
     let mut numeric_overrides: HashMap<u64, NumericScalar> = HashMap::new();
     let mut backend = crate::backends::eval_backend::EvalBackend::NDArray;
+    if !build_overrides {
+        eprintln!("  [lower] numeric_overrides: SKIPPED");
+        // Merge synthetic overrides only.
+        for (k, v) in ctx.synthetic_overrides {
+            numeric_overrides.insert(k, v);
+        }
+        return Ok(LowerResult {
+            graph: ctx.nano,
+            unsupported: ctx.unsupported,
+            unsupported_details: ctx.unsupported_details,
+            tensor_map,
+            numeric_overrides,
+        });
+    }
     for (id, info) in &all_infos {
         let Some(numeric) = info.as_numeric() else {
             continue;

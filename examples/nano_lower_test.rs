@@ -77,16 +77,16 @@ fn main() {
     let inferred = milli_graph.infer_all(&all_infos).unwrap();
     eprintln!("infer_all: {:.1}ms ({} tensors)", t0.elapsed().as_secs_f64() * 1e3, inferred.len());
 
-    // ---- Lower (ops only, skip numeric_overrides) ----
+    // ---- Lower (graph only, skip numeric_overrides for speed) ----
     let t0 = Instant::now();
-    // Use lower_with_info but we only care about the graph, not the overrides.
-    // TODO: add a lower_graph_only that skips numeric_overrides
-    let result = whisper_tensor::nano_graph::lower::lower_with_info(&milli_graph, &all_infos).unwrap();
+    let result = whisper_tensor::nano_graph::lower::lower_graph_only(&milli_graph, &all_infos).unwrap();
     let lower_elapsed = t0.elapsed();
     eprintln!("lower_with_info: {:.1}s", lower_elapsed.as_secs_f64());
 
     // ---- NanoGraph stats ----
+    let ts = Instant::now();
     let stats = result.graph.stats();
+    eprintln!("stats: {:.1}ms", ts.elapsed().as_secs_f64() * 1e3);
     println!("\n=== NanoGraph ===");
     println!("{}", stats);
 
@@ -103,19 +103,29 @@ fn main() {
         }
     }
 
-    let errors = result.graph.validate();
-    if errors.is_empty() {
-        println!("Validation: PASSED");
+    if result.graph.num_atoms() < 10_000_000 {
+        let tv = Instant::now();
+        let errors = result.graph.validate();
+        eprintln!("validate: {:.1}ms", tv.elapsed().as_secs_f64() * 1e3);
+        if errors.is_empty() {
+            println!("Validation: PASSED");
+        } else {
+            println!("Validation: {} ERRORS", errors.len());
+            for e in errors.iter().take(10) { println!("  {}", e); }
+        }
     } else {
-        println!("Validation: {} ERRORS", errors.len());
-        for e in errors.iter().take(10) { println!("  {}", e); }
+        println!("Validation: SKIPPED ({}B atoms too large for full validation)", result.graph.num_atoms());
     }
 
     // ---- Explicit InputRef diagnostic ----
+    let te = Instant::now();
     print_explicit_diagnostic(&result.graph);
+    eprintln!("explicit diagnostic: {:.1}ms", te.elapsed().as_secs_f64() * 1e3);
 
     // ---- InputRef type distribution ----
+    let ti = Instant::now();
     print_inputref_distribution(&result.graph);
+    eprintln!("inputref distribution: {:.1}ms", ti.elapsed().as_secs_f64() * 1e3);
 
     // ---- ReduceSum diagnostic ----
     print_reduce_diagnostic(&result.graph);
