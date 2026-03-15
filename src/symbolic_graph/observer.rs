@@ -18,6 +18,7 @@ pub trait SymbolicGraphObserver {
         tensor: &NumericTensor<DynRank>,
         backend: &mut EvalBackend,
     );
+    fn on_loading_weight(&mut self, path: &[GlobalId], weight_name: Option<String>);
 }
 
 impl SymbolicGraphObserver for () {
@@ -36,4 +37,5 @@ impl SymbolicGraphObserver for () {
         _backend: &mut EvalBackend,
     ) {
     }
+    fn on_loading_weight(&mut self, _path: &[GlobalId], _weight_name: Option<String>) {}
 }

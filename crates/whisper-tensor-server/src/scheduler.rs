@@ -54,6 +54,14 @@ pub struct SchedulerReportSuperGraphProgress {
     pub denominator: f64,
 }
 
+#[derive(Debug)]
+pub struct SchedulerReportSuperGraphLoadingWeight {
+    pub attention: Option<u64>,
+    pub path: Vec<GlobalId>,
+    pub weight_name: Option<String>,
+    pub instant: Instant,
+}
+
 #[allow(clippy::enum_variant_names)]
 #[derive(Debug)]
 pub enum SchedulerReport {
@@ -61,6 +69,7 @@ pub enum SchedulerReport {
     SuperGraphTensorAssignedFull(SchedulerReportSuperGraphTensorAssigned),
     SuperGraphTensorAssignedAbbreviated(SchedulerReportSuperGraphTensorAssignedAbbreviated),
     SuperGraphProgress(SchedulerReportSuperGraphProgress),
+    SuperGraphLoadingWeight(SchedulerReportSuperGraphLoadingWeight),
 }
 
 impl SchedulerReport {
@@ -70,6 +79,7 @@ impl SchedulerReport {
             SchedulerReport::SuperGraphTensorAssignedFull(report) => report.attention,
             SchedulerReport::SuperGraphTensorAssignedAbbreviated(report) => report.attention,
             SchedulerReport::SuperGraphProgress(report) => report.attention,
+            SchedulerReport::SuperGraphLoadingWeight(report) => report.attention,
         }
     }
 }
@@ -220,6 +230,19 @@ impl SuperGraphObserver for LocalSuperGraphObserver {
                 numerator,
                 denominator,
             });
+            reporter.push_report(report);
+        }
+    }
+
+    fn on_loading_weight(&mut self, path: &[GlobalId], weight_name: Option<String>) {
+        if let Some(reporter) = &mut self.reporter {
+            let report =
+                SchedulerReport::SuperGraphLoadingWeight(SchedulerReportSuperGraphLoadingWeight {
+                    attention: self.attention,
+                    path: path.to_vec(),
+                    weight_name,
+                    instant: Instant::now(),
+                });
             reporter.push_report(report);
         }
     }

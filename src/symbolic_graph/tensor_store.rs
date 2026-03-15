@@ -179,6 +179,15 @@ impl StoredTensor {
             StoredTensor::ExternalGGUF { dtype, .. } => *dtype,
         }
     }
+
+    pub fn loading_label(&self) -> Option<String> {
+        match self {
+            StoredTensor::ExternalPth { tensor_name, .. } => Some(tensor_name.clone()),
+            StoredTensor::ExternalSafetensors { tensor_name, .. } => Some(tensor_name.clone()),
+            StoredTensor::ExternalGGUF { tensor_name, .. } => Some(tensor_name.clone()),
+            _ => None,
+        }
+    }
 }
 
 pub struct TensorStore {

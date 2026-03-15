@@ -1,4 +1,9 @@
 use std::collections::BTreeMap;
+use std::time::Duration;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
 use whisper_tensor_server::SuperGraphExecutionReport;
 
 #[derive(Clone, Debug)]
@@ -7,14 +12,24 @@ struct TierProgress {
     denominator: f64,
 }
 
+#[derive(Clone, Debug)]
+struct LoadingWeightStatus {
+    weight_name: Option<String>,
+    observed_at: Instant,
+}
+
+const WEIGHT_STATUS_TTL: Duration = Duration::from_secs(4);
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct SuperGraphProgressWidgetState {
     by_tier: BTreeMap<i64, TierProgress>,
+    loading_weight_status: Option<LoadingWeightStatus>,
 }
 
 impl SuperGraphProgressWidgetState {
     pub fn clear(&mut self) {
         self.by_tier.clear();
+        self.loading_weight_status = None;
     }
 
     pub fn ingest_reports(&mut self, reports: Vec<SuperGraphExecutionReport>) {
@@ -33,14 +48,31 @@ impl SuperGraphProgressWidgetState {
                 },
             );
         }
+        for (_path, weight_name, age) in report.loading_weight_reports {
+            self.loading_weight_status = Some(LoadingWeightStatus {
+                weight_name,
+                observed_at: Instant::now() - age,
+            });
+        }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.by_tier.is_empty()
+        self.by_tier.is_empty() && self.current_weight_status().is_none()
+    }
+
+    fn current_weight_status(&self) -> Option<(&LoadingWeightStatus, Duration)> {
+        let status = self.loading_weight_status.as_ref()?;
+        let age = Instant::now().saturating_duration_since(status.observed_at);
+        if age >= WEIGHT_STATUS_TTL {
+            None
+        } else {
+            Some((status, age))
+        }
     }
 
     pub fn show(&self, ui: &mut egui::Ui) {
-        if self.by_tier.is_empty() {
+        let loading_status = self.current_weight_status();
+        if self.by_tier.is_empty() && loading_status.is_none() {
             return;
         }
 
@@ -63,6 +95,18 @@ impl SuperGraphProgressWidgetState {
                             .text(text),
                     );
                 });
+            }
+            if let Some((status, age)) = loading_status {
+                let ttl = WEIGHT_STATUS_TTL.as_secs_f32();
+                let fade = (1.0 - age.as_secs_f32() / ttl).clamp(0.0, 1.0);
+                let text = match &status.weight_name {
+                    Some(name) => format!("Loading weight: {name}"),
+                    None => "Loading weight...".to_string(),
+                };
+                let color =
+                    egui::Color32::from_rgba_unmultiplied(220, 220, 220, (255.0 * fade) as u8);
+                ui.label(egui::RichText::new(text).color(color));
+                ui.ctx().request_repaint_after(Duration::from_millis(33));
             }
         });
     }

@@ -13,6 +13,7 @@ use crate::graph::{
 use crate::numeric_scalar::NumericScalar;
 use crate::numeric_tensor::NumericTensor;
 use crate::scalar_info::ScalarInfoTyped;
+use crate::symbolic_graph::observer::SymbolicGraphObserver;
 use crate::symbolic_graph::ops::{AnyOperation, EvalError, Operation};
 use crate::symbolic_graph::tensor_store::{StoredTensor, TensorStore, TensorStoreTensorId};
 use crate::symbolic_scalar::{SymbolicResolver, SymbolicScalar, SymbolicScalarTyped};
@@ -158,6 +159,15 @@ impl StoredOrNotTensor {
         match self {
             StoredOrNotTensor::Stored(id) => tensor_store.get_tensor(*id).unwrap().dtype(),
             StoredOrNotTensor::NotStored(tensor) => tensor.dtype(),
+        }
+    }
+
+    pub fn loading_label(&self, tensor_store: &TensorStore) -> Option<String> {
+        match self {
+            StoredOrNotTensor::Stored(id) => tensor_store
+                .get_tensor(*id)
+                .and_then(|tensor| tensor.loading_label()),
+            StoredOrNotTensor::NotStored(_) => None,
         }
     }
 }
@@ -315,18 +325,38 @@ impl SymbolicGraph {
         loaded_tensor_cache: &mut ModelLoadedTensorCache,
         eval_backend: &mut EvalBackend,
     ) -> HashMap<GlobalId, NumericTensor<DynRank>> {
+        self.get_initialized_tensors_cached_with_observer(
+            tensor_store,
+            loaded_tensor_cache,
+            eval_backend,
+            &mut (),
+        )
+    }
+
+    pub fn get_initialized_tensors_cached_with_observer<T: SymbolicGraphObserver>(
+        &self,
+        tensor_store: &TensorStore,
+        loaded_tensor_cache: &mut ModelLoadedTensorCache,
+        eval_backend: &mut EvalBackend,
+        observer: &mut T,
+    ) -> HashMap<GlobalId, NumericTensor<DynRank>> {
         let mut out = HashMap::new();
 
         for (key, tensor) in &self.tensors {
             if let Some(x) = loaded_tensor_cache.tensors.get(key) {
                 out.insert(*key, x.clone());
             } else {
-                let tensor = match &tensor.tensor_type {
-                    TensorType::Constant(x) => Some(x.get_tensor(tensor_store)),
-                    TensorType::Input(Some(x)) => Some(x.get_tensor(tensor_store)),
+                let source = match &tensor.tensor_type {
+                    TensorType::Constant(x) => Some(x),
+                    TensorType::Input(Some(x)) => Some(x),
                     _ => None,
                 };
-                if let Some(tensor) = tensor {
+                if let Some(source) = source {
+                    let label = source
+                        .loading_label(tensor_store)
+                        .or(tensor.onnx_name.clone());
+                    observer.on_loading_weight(&[*key], label);
+                    let tensor = source.get_tensor(tensor_store);
                     let loaded_tensor = eval_backend.to_native_type(&tensor);
                     loaded_tensor_cache
                         .tensors
@@ -343,14 +373,26 @@ impl SymbolicGraph {
         &self,
         tensor_store: &TensorStore,
     ) -> HashMap<GlobalId, NumericTensor<DynRank>> {
+        self.get_initialized_tensors_with_observer(tensor_store, &mut ())
+    }
+
+    pub fn get_initialized_tensors_with_observer<T: SymbolicGraphObserver>(
+        &self,
+        tensor_store: &TensorStore,
+        observer: &mut T,
+    ) -> HashMap<GlobalId, NumericTensor<DynRank>> {
         let mut out = HashMap::new();
 
         for (key, tensor) in &self.tensors {
             match &tensor.tensor_type {
                 TensorType::Constant(x) => {
+                    let label = x.loading_label(tensor_store).or(tensor.onnx_name.clone());
+                    observer.on_loading_weight(&[*key], label);
                     out.insert(*key, x.get_tensor(tensor_store));
                 }
                 TensorType::Input(Some(x)) => {
+                    let label = x.loading_label(tensor_store).or(tensor.onnx_name.clone());
+                    observer.on_loading_weight(&[*key], label);
                     out.insert(*key, x.get_tensor(tensor_store));
                 }
                 _ => {}

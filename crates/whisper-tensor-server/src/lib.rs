@@ -357,6 +357,7 @@ impl AbbreviatedTensorValue {
 pub struct SuperGraphExecutionReport {
     pub attention: Option<u64>,
     pub node_executions: Vec<(Vec<GlobalId>, String, Duration, Duration)>,
+    pub loading_weight_reports: Vec<(Vec<GlobalId>, Option<String>, Duration)>,
     pub abbreviated_tensor_assignments: Vec<(Vec<GlobalId>, AbbreviatedTensorValue)>,
     pub tensor_assignments: Vec<(Vec<GlobalId>, NDArrayNumericTensor<DynRank>)>,
     pub progress_reports: Vec<(Vec<GlobalId>, i64, f64, f64)>,

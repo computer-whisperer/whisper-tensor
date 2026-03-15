@@ -68,6 +68,7 @@ async fn flush_reports(
         let mut report = SuperGraphExecutionReport {
             attention: buf.first().unwrap().get_attention_token(),
             node_executions: Vec::new(),
+            loading_weight_reports: Vec::new(),
             tensor_assignments: Vec::new(),
             abbreviated_tensor_assignments: Vec::new(),
             progress_reports: Vec::new(),
@@ -101,6 +102,14 @@ async fn flush_reports(
                             x.tier,
                             x.numerator,
                             x.denominator,
+                        ));
+                    }
+                    SchedulerReport::SuperGraphLoadingWeight(x) => {
+                        let delta = Instant::now() - x.instant;
+                        report.loading_weight_reports.push((
+                            x.path.clone(),
+                            x.weight_name.clone(),
+                            delta,
                         ));
                     }
                 }

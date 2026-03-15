@@ -127,9 +127,14 @@ pub fn run<T: SymbolicGraphObserver>(
     inputs: impl IntoIterator<Item = (String, NumericTensor<DynRank>)>,
 ) -> Result<HashMap<String, NumericTensor<DynRank>>, EvalRuntimeError> {
     let initialized_tensors = if let Some(tensor_cache) = loaded_tensor_cache {
-        model.get_initialized_tensors_cached(tensor_store, tensor_cache, eval_backend)
+        model.get_initialized_tensors_cached_with_observer(
+            tensor_store,
+            tensor_cache,
+            eval_backend,
+            observer,
+        )
     } else {
-        model.get_initialized_tensors(tensor_store)
+        model.get_initialized_tensors_with_observer(tensor_store, observer)
     };
     let mut tensor_uses_left: HashMap<GlobalId, usize> = HashMap::new();
     let mut active_tensors: HashMap<GlobalId, NumericTensor<DynRank>> = HashMap::new();

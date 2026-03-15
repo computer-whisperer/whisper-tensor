@@ -320,6 +320,16 @@ impl<'a, T: SuperGraphObserver> SymbolicGraphObserver for SymbolicGraphObserverW
         self.inner
             .on_tensor_assigned(tensor_path.as_slice(), tensor, backend)
     }
+
+    fn on_loading_weight(&mut self, path: &[GlobalId], weight_name: Option<String>) {
+        let path = self
+            .path
+            .clone()
+            .into_iter()
+            .chain(path.iter().cloned())
+            .collect::<Vec<_>>();
+        self.inner.on_loading_weight(path.as_slice(), weight_name);
+    }
 }
 
 impl<'a, T: SuperGraphObserver> CompiledProgramObserver for SymbolicGraphObserverWrapper<'a, T> {
@@ -359,6 +369,16 @@ impl<'a, T: SuperGraphObserver> CompiledProgramObserver for SymbolicGraphObserve
             .collect::<Vec<_>>();
         self.inner
             .on_tensor_assigned(tensor_path.as_slice(), tensor, backend)
+    }
+
+    fn on_loading_weight(&mut self, path: &[GlobalId], weight_name: Option<String>) {
+        let path = self
+            .path
+            .clone()
+            .into_iter()
+            .chain(path.iter().cloned())
+            .collect::<Vec<_>>();
+        self.inner.on_loading_weight(path.as_slice(), weight_name);
     }
 }
 
