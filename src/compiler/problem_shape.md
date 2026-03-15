@@ -159,65 +159,86 @@ partitioner assigns groups to kernels.
    The partition should expose enough independent kernels to utilize available
    hardware parallelism.
 
-### What the current partitioner (nano_part_b) does wrong on GPT-2
+### Previous partitioning attempts and what went wrong
 
-nano_part_b uses Broadcast source analysis to detect "row slices" within
-individual matmuls and separates them into independent kernels. This works
-for toy examples but fails at model scale:
+**nano_part_b** (Broadcast source analysis): Detected matmul row structure
+and split rows into kernels. Result on GPT-2: star topology with circular
+deps — 35 small kernels feeding one mega-kernel (79% of atoms), with the
+mega-kernel also feeding back into them. Fundamental problem: split within
+matmuls across layers without understanding sequential structure.
 
-1. **Star topology with circular deps.** It peels off matmul rows as
-   independent kernels (35 small kernels), but dumps the entire sequential
-   backbone (LayerNorm, Softmax, attention glue, most matmuls) into one
-   mega-kernel. The mega-kernel depends on all small kernels AND they all
-   depend on it.
+**nano_part_topo/merge/live** (contiguous topo range approaches): Guaranteed
+acyclicity by restricting kernels to contiguous ranges of topologically-
+ordered groups. This was **a wrong constraint**: it forces purely sequential
+execution with zero within-phase parallelism. A matmul's rows are independent
+and should run in parallel — but they're interleaved in topo order with the
+matmul's shared inputs, so they can't be separated by contiguous ranges.
 
-2. **No sequential structure awareness.** GPT-2 is a pipeline: layer 1's
-   output feeds layer 2's input. The partitioner mixes groups from different
-   layers in the same kernel. It should respect the sequential data flow.
+### What a good partitioner must do
 
-3. **Interleaved group ranges.** A kernel's groups span nearly the entire
-   index range (e.g., [17..30947] out of 46K total). This means the
-   partitioner is splitting by matmul row (groups scattered across layers),
-   not by computation phase.
+The partitioner assigns groups to kernels. Groups from different parts of
+the topo order can be in the same kernel — this is NOT limited to contiguous
+ranges.
 
-### What a good partitioner should do
+**Acyclicity constraint:** The kernel dependency graph must be a DAG. This
+means: if kernel A contains a group that reads from a group in kernel B,
+and kernel B contains a group that reads from a group in kernel A, that's
+a cycle and is forbidden. The partitioner must check and enforce this.
+Note: acyclicity does NOT require contiguous topo ranges. Two parallel
+kernels can have interleaved group indices as long as neither reads from
+the other (both read from a third earlier kernel).
 
-The key insight: the NanoGraph is a DAG with clear topological structure.
-Groups earlier in topo order produce values consumed by later groups.
+**Parallelism:** The whole point of partitioning is to enable parallel
+execution. Within a single matmul, different output rows are independent
+(they read from the same weight data but produce independent outputs).
+These should be in separate kernels that can execute simultaneously.
+A partition that produces only sequential kernels defeats the purpose.
 
-A good partitioner should:
+**The two-level structure of transformer models:** GPT-2 (and transformers
+in general) has two levels of structure:
 
-1. **Respect the DAG structure.** Never create circular kernel dependencies.
-   If group A (topo order before B) is in kernel 1, and group B is in
-   kernel 2, then kernel 2 may depend on kernel 1 but not vice versa.
+1. **Sequential phases.** Layer 1 must complete before layer 2 starts.
+   Between layers, only the residual stream is live. These phase boundaries
+   have minimal cross-kernel traffic and are natural places for kernel
+   boundaries.
 
-2. **Find natural phase boundaries.** In a sequential model, there are points
-   where the live set narrows — between transformer layers, after attention
-   completes, etc. These are natural kernel boundaries because the cross-
-   kernel traffic is minimal (just the residual stream).
+2. **Parallel work within phases.** Within a single layer, the Q/K/V
+   matmul projections produce independent row groups. The attention score
+   computation across heads is independent. The FFN's output rows are
+   independent. These should be split across parallel kernels.
 
-3. **Parallelize within phases.** Within a single matmul or attention
-   computation, row-level parallelism exists. Split these into parallel
-   kernels that execute simultaneously.
+A good partitioner combines both: phase-level sequential boundaries
+(between layers) with within-phase parallelism (split matmul rows).
 
-4. **Consider data sharing.** Groups that share Broadcast or StridedBroadcast
-   inputs benefit from being in the same kernel (shared data loaded once).
+**Concrete requirements:**
 
-5. **Produce reasonably sized kernels.** Each kernel should be large enough
-   to amortize overhead but small enough to compile efficiently. For
-   Cranelift JIT: each kernel should be <100K groups and <1GB of code+data.
+1. **No circular kernel dependencies.** The kernel dependency graph is a DAG.
+2. **Expose parallelism.** Multiple independent kernels per sequential phase.
+3. **Balanced work.** No kernel should have more than ~10-20% of total work.
+4. **Minimal cross-kernel traffic.** Groups sharing data belong together.
+5. **Reasonable kernel count.** 20-100 kernels for GPT-2 (45.9K groups).
 
-### Practical constraints for GPT-2
+### GPT-2 structure for reference
 
-- 45,921 groups total
-- Sequential pipeline of 10 transformer layers
-- Each layer has: LayerNorm → attention (Q/K/V projections, scores, softmax,
-  output projection) → residual → LayerNorm → FFN (up + down projection) →
-  residual
-- The matmul structure is visible in the group DAG: Mul groups with
-  StridedBroadcast inputs feeding ReduceSum groups
-- The inter-layer "pinch points" where only the residual stream is live
-  are the ideal kernel boundaries
+- 45,921 groups, 8.1B atoms
+- 10 transformer layers, sequential pipeline
+- Each layer: LayerNorm → attention (Q/K/V projections, scores, softmax,
+  output projection) → residual → LayerNorm → FFN (up + down) → residual
+- Matmul structure: M Mul groups (StridedBroadcast) + M ReduceSum groups
+  per matmul. Rows are independent. ~73 matmuls total.
+- Inter-layer pinch points: only residual stream (~768 values) is live
+- Within a matmul: rows share weight data but produce independent outputs
+
+### Suggested approach (not prescriptive)
+
+One possible strategy:
+1. Detect sequential phase boundaries (live set analysis — where does the
+   set of "values produced but not yet consumed" narrow?)
+2. Within each phase, identify independent sub-DAGs (connected components
+   after removing shared inputs like weight literals)
+3. Assign independent sub-DAGs to parallel kernels
+4. Verify acyclicity of the resulting kernel dependency graph
+5. Balance by splitting large kernels or merging small ones
 
 ## Key Principles
 

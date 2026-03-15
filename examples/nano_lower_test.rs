@@ -130,11 +130,43 @@ fn main() {
     // ---- ReduceSum diagnostic ----
     print_reduce_diagnostic(&result.graph);
 
-    // ---- Partition ----
-    println!("\n=== Partitioner ===");
-    use whisper_tensor::compiler::attempts::v13_claude::nano_part_b::partition_nanograph;
+    // ---- Partition (compare approaches) ----
+    let target_kernels = 20;
+
+    for (name, partitioner) in [
+        ("topo", whisper_tensor::compiler::attempts::v13_claude::nano_part_topo::partition_nanograph as fn(&whisper_tensor::nano_graph::NanoGraph, usize) -> whisper_tensor::compiler::attempts::v13_claude::nano_part_topo::NanoPartitionResult),
+    ] {
+        println!("\n=== Partitioner: {} ===", name);
+        let t0 = Instant::now();
+        let p = partitioner(&result.graph, target_kernels);
+        eprintln!("{}: {:.1}ms, {} kernels", name, t0.elapsed().as_secs_f64() * 1e3, p.num_kernels);
+        print_partition_summary(&result.graph, &p.kernel_groups, name);
+    }
+
+    // nano_part_merge has same result type
+    {
+        let name = "merge";
+        println!("\n=== Partitioner: {} ===", name);
+        let t0 = Instant::now();
+        let p = whisper_tensor::compiler::attempts::v13_claude::nano_part_merge::partition_nanograph(&result.graph, target_kernels);
+        eprintln!("{}: {:.1}ms, {} kernels", name, t0.elapsed().as_secs_f64() * 1e3, p.num_kernels);
+        print_partition_summary(&result.graph, &p.kernel_groups, name);
+    }
+
+    // nano_part_live has same result type
+    {
+        let name = "live";
+        println!("\n=== Partitioner: {} ===", name);
+        let t0 = Instant::now();
+        let p = whisper_tensor::compiler::attempts::v13_claude::nano_part_live::partition_nanograph(&result.graph, target_kernels);
+        eprintln!("{}: {:.1}ms, {} kernels", name, t0.elapsed().as_secs_f64() * 1e3, p.num_kernels);
+        print_partition_summary(&result.graph, &p.kernel_groups, name);
+    }
+
+    // Use topo for the detailed breakdown
     let t0 = Instant::now();
-    let partition = partition_nanograph(&result.graph, 8);
+    use whisper_tensor::compiler::attempts::v13_claude::nano_part_topo::partition_nanograph;
+    let partition = partition_nanograph(&result.graph, target_kernels);
     eprintln!("Partitioned in {:.1}ms", t0.elapsed().as_secs_f64() * 1e3);
     println!("{} kernels", partition.num_kernels);
 
@@ -203,6 +235,58 @@ fn main() {
         let max_gi = kg.iter().copied().max().unwrap_or(0);
         println!("  k{:>2}: {:>6} grp [{:>5}..{:>5}] {:>12} atoms {:>8} explicit  deps={:?}  {}",
             ki, kg.len(), min_gi, max_gi, total_atoms, explicit_entries, reads_from, op_summary);
+    }
+}
+
+fn print_partition_summary(graph: &NanoGraph, kernel_groups: &[Vec<usize>], name: &str) {
+    let groups = graph.groups();
+    let num_kernels = kernel_groups.len();
+
+    // Kernel sizes
+    let mut sizes: Vec<(usize, u64, usize)> = kernel_groups.iter().enumerate()
+        .map(|(ki, kg)| (ki, kg.iter().map(|&gi| groups[gi].count).sum::<u64>(), kg.len()))
+        .collect();
+    sizes.sort_by(|a, b| b.1.cmp(&a.1));
+
+    let total_atoms: u64 = sizes.iter().map(|s| s.1).sum();
+    let max_pct = if total_atoms > 0 { sizes[0].1 as f64 / total_atoms as f64 * 100.0 } else { 0.0 };
+
+    println!("  {} kernels, max kernel {:.1}% of total", num_kernels, max_pct);
+
+    // Check contiguity (topo range = no circular deps)
+    let mut contiguous = true;
+    for kg in kernel_groups {
+        if kg.len() >= 2 {
+            let mut sorted = kg.clone();
+            sorted.sort();
+            if sorted.windows(2).any(|w| w[1] != w[0] + 1) {
+                contiguous = false;
+                break;
+            }
+        }
+    }
+
+    // Check ordering (kernel i's max < kernel i+1's min)
+    let mut ordered = true;
+    let ranges: Vec<(usize, usize)> = kernel_groups.iter()
+        .map(|kg| (*kg.iter().min().unwrap_or(&0), *kg.iter().max().unwrap_or(&0)))
+        .collect();
+    for w in ranges.windows(2) {
+        if w[0].1 >= w[1].0 {
+            ordered = false;
+            break;
+        }
+    }
+
+    let acyclic = contiguous && ordered;
+    println!("  contiguous={}, ordered={}, acyclic={}", contiguous, ordered, acyclic);
+
+    // Top 5 kernels
+    for &(ki, atoms, ngroups) in sizes.iter().take(5) {
+        println!("    k{}: {} groups, {} atoms ({:.1}%)", ki, ngroups, atoms, atoms as f64 / total_atoms as f64 * 100.0);
+    }
+    if sizes.len() > 5 {
+        println!("    ... and {} more kernels", sizes.len() - 5);
     }
 }
 
