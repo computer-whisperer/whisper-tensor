@@ -7,6 +7,7 @@ pub mod f5_tts;
 pub mod kokoro;
 pub mod piper;
 pub mod whisper;
+pub mod whisper_stt;
 
 /// Helper: load ONNX bytes into a Model (no interface detection).
 /// Speech model modules use this to assemble LoaderOutput.
