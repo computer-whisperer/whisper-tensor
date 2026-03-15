@@ -51,30 +51,21 @@ struct Span {
     /// Self-contained NanoGraph for this span's computation.
     graph: NanoGraph,
     /// Which atoms from the shared values buffer this span reads.
-    inputs: Vec<(AtomId, u64)>,  // (source atom in main graph, local atom in span graph)
+    /// (source atom ID in main graph, local atom ID in span graph)
+    inputs: Vec<(AtomId, AtomId)>,
     /// Which atoms this span writes back to the shared values buffer.
-    outputs: Vec<(u64, AtomId)>,  // (local atom in span graph, target atom in main graph)
+    /// (local atom ID in span graph, target atom ID in main graph)
+    outputs: Vec<(AtomId, AtomId)>,
 }
 ```
 
-### Partitioner algorithm
+### Validation
 
-1. **Find barrier positions.** Identify points where the computation
-   reconverges (matmul reductions that read the full prior output).
-
-2. **For each phase, identify the work to split across lanes.**
-   Matmul rows are the primary split axis. Elementwise ops split
-   proportionally.
-
-3. **For each lane's slice, emit a new NanoGraph:**
-   - Copy the relevant groups (or sub-ranges of groups)
-   - For atoms that come from other lanes or earlier phases: create
-     Literal input groups in the sub-graph
-   - For atoms needed by later phases: mark as outputs
-   - For small dependency chains (like Gather index computation):
-     DUPLICATE them into each lane's sub-graph rather than sharing
-
-4. **Validate each sub-graph** independently.
+Each span's NanoGraph can be validated independently:
+- All InputRefs resolve to atoms within the span or declared inputs
+- All groups are in valid topological order within the span
+- All declared outputs are actually produced by the span's groups
+- The span's NanoGraph passes `graph.validate()` (if atom count is small enough)
 
 ## Lessons from Previous Attempts
 
