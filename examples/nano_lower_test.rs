@@ -132,7 +132,7 @@ fn main() {
     print_reduce_diagnostic(&result.graph);
 
     // ---- Lane+Barrier Execution Plans ----
-    let num_lanes = 8;
+    let num_lanes = std::env::var("NUM_LANES").ok().and_then(|s| s.parse().ok()).unwrap_or(8);
     println!("\n=== Lane+Barrier Plans (num_lanes={}) ===", num_lanes);
 
     {
@@ -295,11 +295,108 @@ fn main() {
                     }
                     println!("  Overrides: {} entries (weights + user inputs)", overrides.len());
 
-                    // Execute
+                    // Execute via JIT
                     let t0 = Instant::now();
                     let values = compiled.execute(&overrides);
                     let exec_time = t0.elapsed();
-                    println!("  Executed in {:.1}s", exec_time.as_secs_f64());
+                    println!("  JIT executed in {:.1}s", exec_time.as_secs_f64());
+
+                    // Also execute via interpreter (same plan, no codegen)
+                    let t0 = Instant::now();
+                    let groups = full_result.graph.groups();
+                    let num_atoms = full_result.graph.num_atoms() as usize;
+                    let mut interp_values = vec![0.0f32; num_atoms];
+                    // Pre-fill from overrides
+                    for (&idx, &val) in &overrides {
+                        interp_values[idx as usize] = val;
+                    }
+                    // Execute plan phases in order, all lanes
+                    for phase in &plan.phases {
+                        for lane_work in &phase.lane_work {
+                            for w in lane_work {
+                                let group = &groups[w.group_idx];
+                                if matches!(&group.op, ScalarOp::Literal(_)) { continue; }
+                                for i in w.atom_offset..w.atom_offset + w.atom_count {
+                                    let atom_idx = (group.base_id.0 + i) as usize;
+                                    let val = match &group.op {
+                                        ScalarOp::Literal(_) => continue,
+                                        ScalarOp::Identity { .. } => {
+                                            interp_values[group.inputs[0].resolve(i, 0).0 as usize]
+                                        }
+                                        ScalarOp::Binary { op, .. } => {
+                                            let a = interp_values[group.inputs[0].resolve(i, 0).0 as usize];
+                                            let b = interp_values[group.inputs[1].resolve(i, 0).0 as usize];
+                                            match op {
+                                                whisper_tensor::nano_graph::ScalarBinOp::Add => a + b,
+                                                whisper_tensor::nano_graph::ScalarBinOp::Sub => a - b,
+                                                whisper_tensor::nano_graph::ScalarBinOp::Mul => a * b,
+                                                whisper_tensor::nano_graph::ScalarBinOp::Div => a / b,
+                                                whisper_tensor::nano_graph::ScalarBinOp::Max => a.max(b),
+                                                whisper_tensor::nano_graph::ScalarBinOp::Min => a.min(b),
+                                                whisper_tensor::nano_graph::ScalarBinOp::Pow => a.powf(b),
+                                                whisper_tensor::nano_graph::ScalarBinOp::Mod => a % b,
+                                                whisper_tensor::nano_graph::ScalarBinOp::Equal => if a == b { 1.0 } else { 0.0 },
+                                                whisper_tensor::nano_graph::ScalarBinOp::Greater => if a > b { 1.0 } else { 0.0 },
+                                                whisper_tensor::nano_graph::ScalarBinOp::GreaterOrEqual => if a >= b { 1.0 } else { 0.0 },
+                                                whisper_tensor::nano_graph::ScalarBinOp::Less => if a < b { 1.0 } else { 0.0 },
+                                                whisper_tensor::nano_graph::ScalarBinOp::LessOrEqual => if a <= b { 1.0 } else { 0.0 },
+                                                whisper_tensor::nano_graph::ScalarBinOp::And => if a != 0.0 && b != 0.0 { 1.0 } else { 0.0 },
+                                                whisper_tensor::nano_graph::ScalarBinOp::Or => if a != 0.0 || b != 0.0 { 1.0 } else { 0.0 },
+                                                whisper_tensor::nano_graph::ScalarBinOp::Xor => if (a != 0.0) ^ (b != 0.0) { 1.0 } else { 0.0 },
+                                            }
+                                        }
+                                        ScalarOp::Unary { op, .. } => {
+                                            let x = interp_values[group.inputs[0].resolve(i, 0).0 as usize];
+                                            match op {
+                                                whisper_tensor::nano_graph::ScalarUnaryOp::Neg => -x,
+                                                whisper_tensor::nano_graph::ScalarUnaryOp::Abs => x.abs(),
+                                                whisper_tensor::nano_graph::ScalarUnaryOp::Exp => x.exp(),
+                                                whisper_tensor::nano_graph::ScalarUnaryOp::Ln => x.ln(),
+                                                whisper_tensor::nano_graph::ScalarUnaryOp::Sqrt => x.sqrt(),
+                                                whisper_tensor::nano_graph::ScalarUnaryOp::Reciprocal => 1.0 / x,
+                                                whisper_tensor::nano_graph::ScalarUnaryOp::Tanh => x.tanh(),
+                                                whisper_tensor::nano_graph::ScalarUnaryOp::Floor => x.floor(),
+                                                whisper_tensor::nano_graph::ScalarUnaryOp::Ceil => x.ceil(),
+                                            }
+                                        }
+                                        ScalarOp::Select { .. } => {
+                                            let cond = interp_values[group.inputs[0].resolve(i, 0).0 as usize];
+                                            if cond != 0.0 {
+                                                interp_values[group.inputs[1].resolve(i, 0).0 as usize]
+                                            } else {
+                                                interp_values[group.inputs[2].resolve(i, 0).0 as usize]
+                                            }
+                                        }
+                                        ScalarOp::ReduceSum { reduce_count, reduce_stride, .. } => {
+                                            let base = group.inputs[0].resolve(i, 0);
+                                            let mut acc = 0.0f32;
+                                            for k in 0..*reduce_count {
+                                                let src = (base.0 as i64 + k as i64 * reduce_stride) as usize;
+                                                acc += interp_values[src];
+                                            }
+                                            acc
+                                        }
+                                        ScalarOp::ReduceMax { reduce_count, reduce_stride, .. } => {
+                                            let base = group.inputs[0].resolve(i, 0);
+                                            let mut acc = f32::NEG_INFINITY;
+                                            for k in 0..*reduce_count {
+                                                let src = (base.0 as i64 + k as i64 * reduce_stride) as usize;
+                                                acc = acc.max(interp_values[src]);
+                                            }
+                                            acc
+                                        }
+                                        ScalarOp::IndirectLoad { table_base, .. } => {
+                                            let idx = interp_values[group.inputs[0].resolve(i, 0).0 as usize];
+                                            interp_values[table_base.0 as usize + idx as usize]
+                                        }
+                                    };
+                                    interp_values[atom_idx] = val;
+                                }
+                            }
+                        }
+                    }
+                    let interp_exec_time = t0.elapsed();
+                    println!("  Plan interpreter executed in {:.1}s", interp_exec_time.as_secs_f64());
 
                     // Compare against milli interpreter
                     let reverse_output_map: HashMap<GlobalId, GlobalId> = milli_graph
@@ -308,51 +405,52 @@ fn main() {
                         .map(|m| m.iter().map(|(&int, &ext)| (ext, int)).collect())
                         .unwrap_or_default();
 
-                    let mut total_compared = 0u64;
-                    let mut max_abs_error: f64 = 0.0;
-                    let mut max_rel_error: f64 = 0.0;
                     let mut backend = whisper_tensor::backends::eval_backend::EvalBackend::NDArray;
 
-                    for (ext_id, milli_tensor) in &milli_outputs {
-                        let internal_id = reverse_output_map.get(ext_id).unwrap_or(ext_id);
-                        let tam = full_result.tensor_map.get(internal_id)
-                            .or_else(|| full_result.tensor_map.get(ext_id));
-                        let Some(tam) = tam else { continue };
+                    // Compare BOTH JIT and plan-interpreter against milli
+                    for (label, test_values) in [("JIT", &values), ("PlanInterp", &interp_values)] {
+                        println!("\n  --- {} vs Milli ---", label);
+                        let mut total_compared = 0u64;
+                        let mut max_abs_error: f64 = 0.0;
+                        let mut max_rel_error: f64 = 0.0;
 
-                        let f32_tensor = milli_tensor.cast(
-                            whisper_tensor::dtype::DType::F32, &mut backend).unwrap();
-                        let flat = f32_tensor.flatten().unwrap();
-                        let nd = flat.to_ndarray().unwrap();
-                        let milli_vals: Vec<f32> = nd.try_into().unwrap();
+                        for (ext_id, milli_tensor) in &milli_outputs {
+                            let internal_id = reverse_output_map.get(ext_id).unwrap_or(ext_id);
+                            let tam = full_result.tensor_map.get(internal_id)
+                                .or_else(|| full_result.tensor_map.get(ext_id));
+                            let Some(tam) = tam else { continue };
 
-                        let mut local_max_abs = 0.0f64;
-                        for (i, &milli_val) in milli_vals.iter().enumerate() {
-                            let atom_id = tam.atom_id_for_element(i as u64);
-                            let idx = atom_id.0 as usize;
-                            if idx >= values.len() { break; }
-                            let jit_val = values[idx];
-                            let abs_err = (milli_val - jit_val).abs() as f64;
-                            local_max_abs = local_max_abs.max(abs_err);
-                            let rel_err = if milli_val.abs() > 1e-8 {
-                                abs_err / milli_val.abs() as f64
-                            } else { 0.0 };
-                            max_rel_error = max_rel_error.max(rel_err);
-                            total_compared += 1;
+                            let f32_tensor = milli_tensor.cast(
+                                whisper_tensor::dtype::DType::F32, &mut backend).unwrap();
+                            let flat = f32_tensor.flatten().unwrap();
+                            let nd = flat.to_ndarray().unwrap();
+                            let milli_vals: Vec<f32> = nd.try_into().unwrap();
+
+                            let mut local_max_abs = 0.0f64;
+                            for (i, &milli_val) in milli_vals.iter().enumerate() {
+                                let atom_id = tam.atom_id_for_element(i as u64);
+                                let idx = atom_id.0 as usize;
+                                if idx >= test_values.len() { break; }
+                                let test_val = test_values[idx];
+                                let abs_err = (milli_val - test_val).abs() as f64;
+                                local_max_abs = local_max_abs.max(abs_err);
+                                let rel_err = if milli_val.abs() > 1e-8 {
+                                    abs_err / milli_val.abs() as f64
+                                } else { 0.0 };
+                                max_rel_error = max_rel_error.max(rel_err);
+                                total_compared += 1;
+                            }
+                            max_abs_error = max_abs_error.max(local_max_abs);
                         }
-                        max_abs_error = max_abs_error.max(local_max_abs);
-                        println!("    Output {:?}: {} elems, max_abs_err={:.6e}",
-                            ext_id, milli_vals.len(), local_max_abs);
-                    }
-
-                    println!("  Elements compared: {}", total_compared);
-                    println!("  Max absolute error: {:.6e}", max_abs_error);
-                    println!("  Max relative error: {:.6e}", max_rel_error);
-                    if total_compared > 0 && max_abs_error < 1e-1 {
-                        println!("  RESULT: PASS");
-                    } else if total_compared > 0 {
-                        println!("  RESULT: MISMATCH");
-                    } else {
-                        println!("  RESULT: NO ELEMENTS COMPARED");
+                        println!("  {} Elements compared: {}", label, total_compared);
+                        println!("  {} Max absolute error: {:.6e}", label, max_abs_error);
+                        if total_compared > 0 && max_abs_error < 1e-1 {
+                            println!("  {} RESULT: PASS", label);
+                        } else if total_compared > 0 {
+                            println!("  {} RESULT: MISMATCH", label);
+                        } else {
+                            println!("  {} RESULT: NO ELEMENTS COMPARED", label);
+                        }
                     }
                 }
                 Err(e) => {
