@@ -1,6 +1,6 @@
 use super::{
-    FluxLoader, GgufLoader, KokoroLoader, OnnxLoader, PiperLoader, Rwkv7Loader, SD2Loader,
-    SD15Loader, SD35Loader, SDXLLoader, TransformersLoader,
+    F5TtsLoader, FluxLoader, GgufLoader, KokoroLoader, OnnxLoader, PiperLoader, Rwkv7Loader,
+    SD2Loader, SD15Loader, SD35Loader, SDXLLoader, TransformersLoader, WhisperLoader,
 };
 use crate::onnx_graph::weights::SafetensorsWeightManager;
 use memmap2::Mmap;
@@ -41,6 +41,21 @@ impl Loader for AutoLoader {
             // Check for Piper TTS (directory with .onnx + .onnx.json)
             if crate::models::speech::piper::is_piper_model(&path) {
                 return PiperLoader.load(config);
+            }
+            // Check for F5-TTS (3-part ONNX pipeline + vocab).
+            if path.join("F5_Preprocess.onnx").exists()
+                && path.join("F5_Transformer.onnx").exists()
+                && path.join("F5_Decode.onnx").exists()
+                && path.join("vocab.txt").exists()
+            {
+                return F5TtsLoader.load(config);
+            }
+            // Check for Whisper STT (HF directory with model + tokenizer).
+            if path.join("model.safetensors").exists()
+                && path.join("config.json").exists()
+                && path.join("tokenizer.json").exists()
+            {
+                return WhisperLoader.load(config);
             }
             let config_path = path.join("config.json");
             if config_path.exists() {
