@@ -580,6 +580,7 @@ impl NumericScalarType for f64 {
             NumericScalar::I16(v) => *v as f64,
             NumericScalar::U8(v) => *v as f64,
             NumericScalar::I8(v) => *v as f64,
+            NumericScalar::BOOL(v) => if *v { 1.0 } else { 0.0 },
             _ => panic!("Cannot cast from {value:?} to f64"),
         }
     }

@@ -221,11 +221,39 @@ fn main() {
         print_v2c_diagnostic(&result.graph, &plan);
     }
 
-    // ---- V2C Codegen Execution ----
+    // ---- V2C Codegen Execution + Validity Check ----
     #[cfg(feature = "cranelift")]
     {
         use whisper_tensor::compiler::attempts::v13_claude::nano_codegen_v2::CompiledPlan;
         use whisper_tensor::compiler::attempts::v13_claude::nano_plan_v2c;
+
+        // Run milli interpreter for reference
+        println!("\n=== Milli Interpreter (reference) ===");
+        let t0 = Instant::now();
+        // Need full lower with numeric_overrides for the codegen
+        let full_result = whisper_tensor::nano_graph::lower::lower_with_info(&milli_graph, &all_infos).unwrap();
+        eprintln!("  Full lower: {:.1}s", t0.elapsed().as_secs_f64());
+
+        // Build input tensors for milli interpreter
+        let mut milli_inputs: HashMap<GlobalId, whisper_tensor::numeric_tensor::NumericTensor<whisper_tensor::DynRank>> = HashMap::new();
+        let initialized2 = sym_graph.get_initialized_tensors(tensor_store);
+        for (id, tensor) in initialized2 {
+            milli_inputs.insert(id, tensor);
+        }
+        for (name, (dtype, shape_dims)) in &input_info {
+            let shape: Vec<u64> = shape_dims.iter().map(|d| d.unwrap_or(4)).collect();
+            let numel: usize = shape.iter().product::<u64>() as usize;
+            if let Some(id) = tensors_by_name.get(name) {
+                let data: Vec<i64> = (0..numel as i64).collect();
+                let tensor = whisper_tensor::numeric_tensor::NumericTensor::from_vec_shape(
+                    data, shape.iter().map(|&s| s as usize).collect()
+                ).unwrap();
+                milli_inputs.insert(*id, tensor);
+            }
+        }
+        let t0 = Instant::now();
+        let milli_outputs = whisper_tensor::compiler::interpret_milli_graph(&milli_graph, &milli_inputs).unwrap();
+        println!("  Milli interpreter: {:.1}s, {} outputs", t0.elapsed().as_secs_f64(), milli_outputs.len());
 
         println!("\n=== V2C Codegen Execution ===");
         let t0 = Instant::now();
@@ -247,16 +275,70 @@ fn main() {
 
                     // Build f32 overrides from numeric_overrides (weights + constants)
                     let mut overrides: HashMap<u64, f32> = HashMap::new();
-                    for (&atom_idx, scalar) in &result.numeric_overrides {
+                    for (&atom_idx, scalar) in &full_result.numeric_overrides {
                         overrides.insert(atom_idx, scalar.to_f64() as f32);
                     }
                     println!("  Overrides: {} entries", overrides.len());
 
                     // Execute
                     let t0 = Instant::now();
-                    let _values = compiled.execute(&overrides);
+                    let values = compiled.execute(&overrides);
                     let exec_time = t0.elapsed();
                     println!("  Executed in {:.1}s", exec_time.as_secs_f64());
+
+                    // Compare against milli interpreter
+                    let reverse_output_map: HashMap<GlobalId, GlobalId> = milli_graph
+                        .output_map
+                        .as_ref()
+                        .map(|m| m.iter().map(|(&int, &ext)| (ext, int)).collect())
+                        .unwrap_or_default();
+
+                    let mut total_compared = 0u64;
+                    let mut max_abs_error: f64 = 0.0;
+                    let mut max_rel_error: f64 = 0.0;
+                    let mut backend = whisper_tensor::backends::eval_backend::EvalBackend::NDArray;
+
+                    for (ext_id, milli_tensor) in &milli_outputs {
+                        let internal_id = reverse_output_map.get(ext_id).unwrap_or(ext_id);
+                        let tam = full_result.tensor_map.get(internal_id)
+                            .or_else(|| full_result.tensor_map.get(ext_id));
+                        let Some(tam) = tam else { continue };
+
+                        let f32_tensor = milli_tensor.cast(
+                            whisper_tensor::dtype::DType::F32, &mut backend).unwrap();
+                        let flat = f32_tensor.flatten().unwrap();
+                        let nd = flat.to_ndarray().unwrap();
+                        let milli_vals: Vec<f32> = nd.try_into().unwrap();
+
+                        let mut local_max_abs = 0.0f64;
+                        for (i, &milli_val) in milli_vals.iter().enumerate() {
+                            let atom_id = tam.atom_id_for_element(i as u64);
+                            let idx = atom_id.0 as usize;
+                            if idx >= values.len() { break; }
+                            let jit_val = values[idx];
+                            let abs_err = (milli_val - jit_val).abs() as f64;
+                            local_max_abs = local_max_abs.max(abs_err);
+                            let rel_err = if milli_val.abs() > 1e-8 {
+                                abs_err / milli_val.abs() as f64
+                            } else { 0.0 };
+                            max_rel_error = max_rel_error.max(rel_err);
+                            total_compared += 1;
+                        }
+                        max_abs_error = max_abs_error.max(local_max_abs);
+                        println!("    Output {:?}: {} elems, max_abs_err={:.6e}",
+                            ext_id, milli_vals.len(), local_max_abs);
+                    }
+
+                    println!("  Elements compared: {}", total_compared);
+                    println!("  Max absolute error: {:.6e}", max_abs_error);
+                    println!("  Max relative error: {:.6e}", max_rel_error);
+                    if total_compared > 0 && max_abs_error < 1e-1 {
+                        println!("  RESULT: PASS");
+                    } else if total_compared > 0 {
+                        println!("  RESULT: MISMATCH");
+                    } else {
+                        println!("  RESULT: NO ELEMENTS COMPARED");
+                    }
                 }
                 Err(e) => {
                     println!("  Compilation FAILED: {}", e);
