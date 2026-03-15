@@ -9,9 +9,10 @@ use std::path::Path;
 use std::time::Instant;
 
 use whisper_tensor::compiler::op_census;
+use whisper_tensor::compiler::attempts::v13_claude::nano_plan_v2c::ExecutionPlan as V2cPlan;
 use whisper_tensor::graph::GlobalId;
 use whisper_tensor::model::Model;
-use whisper_tensor::nano_graph::{InputRef, NanoGraph};
+use whisper_tensor::nano_graph::{InputRef, NanoGraph, ScalarOp};
 use whisper_tensor::tensor_info::TensorInfo;
 use whisper_tensor_import::identify_and_load;
 use whisper_tensor_import::onnx_graph::WeightStorageStrategy;
@@ -215,6 +216,9 @@ fn main() {
         println!("  [v2c] {:.1}ms, {} lanes, {} phases, {:.1}B atoms, max_imbalance={:.1}x",
             elapsed.as_secs_f64() * 1e3, plan.num_lanes, plan.phases.len(),
             total_work as f64 / 1e9, max_imb);
+
+        // ---- V2C Deep Diagnostic ----
+        print_v2c_diagnostic(&result.graph, &plan);
     }
 
     // ---- Old-style Partition (compare approaches) ----
@@ -780,4 +784,395 @@ fn print_reduce_diagnostic(graph: &NanoGraph) {
     println!("  {} reduce groups, {} atoms", reduce_count, reduce_atoms);
     println!("  {} with SymAffine input (symbolic reduction)", has_sym_affine);
     println!("  {} with other input patterns", reduce_count - has_sym_affine);
+}
+
+fn op_short_name(op: &ScalarOp) -> String {
+    format!("{:?}", op)
+        .chars()
+        .take_while(|c| *c != ' ' && *c != '{' && *c != '(')
+        .collect()
+}
+
+fn print_v2c_diagnostic(graph: &NanoGraph, plan: &V2cPlan) {
+    let groups = graph.groups();
+    let num_phases = plan.phases.len();
+    let num_lanes = plan.num_lanes;
+
+    println!("\n========================================");
+    println!("=== V2C Deep Diagnostic ({} phases, {} lanes) ===", num_phases, num_lanes);
+    println!("========================================");
+
+    // ─── 1. Phase size distribution ─────────────────────────────────────
+    println!("\n--- 1. Phase Size Distribution ---");
+    let mut phase_group_counts: Vec<usize> = Vec::new();
+    let mut phase_atom_counts: Vec<u64> = Vec::new();
+    for phase in &plan.phases {
+        let ng: usize = phase.lane_work.iter().map(|l| l.len()).sum();
+        let na: u64 = phase.lane_work.iter().flat_map(|l| l.iter()).map(|w| w.atom_count).sum();
+        phase_group_counts.push(ng);
+        phase_atom_counts.push(na);
+    }
+
+    let total_atoms: u64 = phase_atom_counts.iter().sum();
+
+    let single_group = phase_group_counts.iter().filter(|&&c| c == 1).count();
+    let small_2_10 = phase_group_counts.iter().filter(|&&c| c >= 2 && c <= 10).count();
+    let medium_11_100 = phase_group_counts.iter().filter(|&&c| c >= 11 && c <= 100).count();
+    let large_100_plus = phase_group_counts.iter().filter(|&&c| c > 100).count();
+
+    println!("  Phases with 1 group:    {:>4}", single_group);
+    println!("  Phases with 2-10:       {:>4}", small_2_10);
+    println!("  Phases with 11-100:     {:>4}", medium_11_100);
+    println!("  Phases with 100+:       {:>4}", large_100_plus);
+
+    let mut sorted_gc = phase_group_counts.clone();
+    sorted_gc.sort();
+    let median_groups = if sorted_gc.is_empty() { 0 } else { sorted_gc[sorted_gc.len() / 2] };
+    let mean_groups = if num_phases > 0 { sorted_gc.iter().sum::<usize>() as f64 / num_phases as f64 } else { 0.0 };
+    println!("  Median groups/phase:    {:>4}", median_groups);
+    println!("  Mean groups/phase:      {:>6.1}", mean_groups);
+
+    // Atoms in tiny phases
+    let tiny_atoms: u64 = phase_group_counts.iter().zip(phase_atom_counts.iter())
+        .filter(|(gc, _)| **gc < 10)
+        .map(|(_, ac)| *ac)
+        .sum();
+    println!("  Atoms in tiny phases (<10 groups): {:.3}B ({:.1}% of total {:.3}B)",
+        tiny_atoms as f64 / 1e9,
+        if total_atoms > 0 { tiny_atoms as f64 / total_atoms as f64 * 100.0 } else { 0.0 },
+        total_atoms as f64 / 1e9);
+
+    // ─── 2. Barrier analysis ────────────────────────────────────────────
+    println!("\n--- 2. Barrier Analysis ---");
+
+    // Classify what ops are at phase boundaries
+    // For each phase, what ops are in it?
+    let mut phase_op_breakdown: Vec<HashMap<String, (usize, u64)>> = Vec::new(); // (count, atoms)
+    for phase in &plan.phases {
+        let mut ops: HashMap<String, (usize, u64)> = HashMap::new();
+        for lane in &phase.lane_work {
+            for w in lane {
+                let name = op_short_name(&groups[w.group_idx].op);
+                let e = ops.entry(name).or_default();
+                e.0 += 1;
+                e.1 += w.atom_count;
+            }
+        }
+        phase_op_breakdown.push(ops);
+    }
+
+    // Count barriers between matmul phases vs elementwise phases
+    // A "matmul phase" contains ReduceSum or Mul groups; "elementwise" does not
+    let is_matmul_phase: Vec<bool> = phase_op_breakdown.iter().map(|ops| {
+        ops.contains_key("ReduceSum") || ops.contains_key("ReduceMax")
+            || (ops.contains_key("Binary") && ops.values().map(|v| v.1).sum::<u64>() > 1_000_000)
+    }).collect();
+
+    let has_reduce: Vec<bool> = phase_op_breakdown.iter().map(|ops| {
+        ops.contains_key("ReduceSum") || ops.contains_key("ReduceMax")
+    }).collect();
+
+    let mut barriers_matmul_to_matmul = 0;
+    let mut barriers_matmul_to_elem = 0;
+    let mut barriers_elem_to_matmul = 0;
+    let mut barriers_elem_to_elem = 0;
+    let mut barriers_reduce_boundary = 0; // barrier where prev phase has ReduceSum
+    for i in 1..num_phases {
+        let prev_mm = is_matmul_phase[i - 1];
+        let cur_mm = is_matmul_phase[i];
+        match (prev_mm, cur_mm) {
+            (true, true) => barriers_matmul_to_matmul += 1,
+            (true, false) => barriers_matmul_to_elem += 1,
+            (false, true) => barriers_elem_to_matmul += 1,
+            (false, false) => barriers_elem_to_elem += 1,
+        }
+        if has_reduce[i - 1] {
+            barriers_reduce_boundary += 1;
+        }
+    }
+    println!("  Total barriers: {}", num_phases - 1);
+    println!("  Barriers at ReduceSum boundary: {}", barriers_reduce_boundary);
+    println!("  matmul->matmul: {}", barriers_matmul_to_matmul);
+    println!("  matmul->elem:   {}", barriers_matmul_to_elem);
+    println!("  elem->matmul:   {}", barriers_elem_to_matmul);
+    println!("  elem->elem:     {}", barriers_elem_to_elem);
+
+    // Potentially unnecessary barriers: phases where all work uses only 1 lane
+    // or where there's no actual cross-lane dependency
+    let mut single_lane_phases = 0;
+    let mut all_same_lane_phases = 0;
+    for phase in &plan.phases {
+        let active_lanes: Vec<usize> = phase.lane_work.iter().enumerate()
+            .filter(|(_, l)| !l.is_empty())
+            .map(|(i, _)| i)
+            .collect();
+        if active_lanes.len() <= 1 {
+            single_lane_phases += 1;
+        }
+        // Check if all work is on the same set of lanes (suggesting maybe barrier wasn't needed)
+        let distinct_groups: std::collections::HashSet<usize> = phase.lane_work.iter()
+            .flat_map(|l| l.iter().map(|w| w.group_idx))
+            .collect();
+        if distinct_groups.len() <= 1 {
+            all_same_lane_phases += 1;
+        }
+    }
+    println!("  Phases with only 1 active lane: {}", single_lane_phases);
+    println!("  Phases with only 1 distinct group: {}", all_same_lane_phases);
+
+    // ─── 3. Lane work consistency ───────────────────────────────────────
+    println!("\n--- 3. Lane Work Consistency ---");
+
+    // Find a sequence of 4 consecutive "interesting" phases (ones with >10 groups)
+    let interesting_phases: Vec<usize> = (0..num_phases)
+        .filter(|&pi| phase_group_counts[pi] > 10)
+        .collect();
+    let show_phases: Vec<usize> = if interesting_phases.len() >= 4 {
+        // Pick 4 consecutive interesting phases from the middle
+        let mid = interesting_phases.len() / 2;
+        let start = if mid >= 2 { mid - 2 } else { 0 };
+        interesting_phases[start..start.min(interesting_phases.len()) + 4.min(interesting_phases.len() - start)].to_vec()
+    } else {
+        // Just pick 4 phases from the middle
+        let start = if num_phases > 4 { num_phases / 2 - 2 } else { 0 };
+        (start..num_phases.min(start + 4)).collect()
+    };
+
+    for &pi in &show_phases {
+        let phase = &plan.phases[pi];
+        println!("  Phase {}:", pi);
+        for (lane_idx, lane) in phase.lane_work.iter().enumerate() {
+            if lane.is_empty() { continue; }
+            let total_atoms: u64 = lane.iter().map(|w| w.atom_count).sum();
+            let gis: Vec<usize> = lane.iter().map(|w| w.group_idx).collect();
+            let min_gi = gis.iter().copied().min().unwrap_or(0);
+            let max_gi = gis.iter().copied().max().unwrap_or(0);
+            // Summarize ops
+            let mut lane_ops: HashMap<String, usize> = HashMap::new();
+            for w in lane {
+                *lane_ops.entry(op_short_name(&groups[w.group_idx].op)).or_default() += 1;
+            }
+            let mut ops_sorted: Vec<_> = lane_ops.into_iter().collect();
+            ops_sorted.sort_by(|a, b| b.1.cmp(&a.1));
+            let op_str: String = ops_sorted.iter().take(3)
+                .map(|(op, c)| format!("{}x{}", c, op)).collect::<Vec<_>>().join(", ");
+            println!("    lane {}: {} items, {:.1}M atoms, groups [{}-{}], ops: {}",
+                lane_idx, lane.len(), total_atoms as f64 / 1e6, min_gi, max_gi, op_str);
+        }
+    }
+
+    // Check lane consistency: do the same lanes handle the same group index ranges across phases?
+    println!("\n  Lane consistency across phases (group index range per lane):");
+    // Sample 6 phases spread across the plan
+    let sample_phases: Vec<usize> = if num_phases <= 6 {
+        (0..num_phases).collect()
+    } else {
+        (0..6).map(|i| i * (num_phases - 1) / 5).collect()
+    };
+    print!("  {:>8}", "Phase");
+    for li in 0..num_lanes { print!("  lane{:<8}", li); }
+    println!();
+    for &pi in &sample_phases {
+        let phase = &plan.phases[pi];
+        print!("  {:>8}", pi);
+        for lane in &phase.lane_work {
+            if lane.is_empty() {
+                print!("  {:>12}", "-");
+            } else {
+                let min_gi = lane.iter().map(|w| w.group_idx).min().unwrap();
+                let max_gi = lane.iter().map(|w| w.group_idx).max().unwrap();
+                print!("  {:>5}-{:<5}", min_gi, max_gi);
+            }
+        }
+        println!();
+    }
+
+    // ─── 4. Phase content analysis ──────────────────────────────────────
+    println!("\n--- 4. Phase Content Analysis ---");
+
+    // 10 largest phases
+    let mut indexed_atom_counts: Vec<(usize, u64, usize)> = phase_atom_counts.iter()
+        .enumerate()
+        .map(|(i, &a)| (i, a, phase_group_counts[i]))
+        .collect();
+    indexed_atom_counts.sort_by(|a, b| b.1.cmp(&a.1));
+
+    println!("  10 largest phases (by atoms):");
+    for &(pi, atoms, ngroups) in indexed_atom_counts.iter().take(10) {
+        let ops = &phase_op_breakdown[pi];
+        let mut ops_sorted: Vec<_> = ops.iter().map(|(k, v)| (k.clone(), v.0, v.1)).collect();
+        ops_sorted.sort_by(|a, b| b.2.cmp(&a.2));
+        let op_str: String = ops_sorted.iter().take(5)
+            .map(|(op, c, a)| format!("{}x{} ({:.1}M)", c, op, *a as f64 / 1e6))
+            .collect::<Vec<_>>().join(", ");
+        // Balance for this phase
+        let phase = &plan.phases[pi];
+        let lane_atoms: Vec<u64> = phase.lane_work.iter()
+            .map(|l| l.iter().map(|w| w.atom_count).sum::<u64>()).collect();
+        let mx = lane_atoms.iter().copied().max().unwrap_or(0);
+        let mn = lane_atoms.iter().copied().filter(|&a| a > 0).min().unwrap_or(1);
+        let balance = if mn > 0 { mx as f64 / mn as f64 } else { f64::INFINITY };
+        println!("    phase {:>3}: {:>6} groups, {:>12.1}M atoms, balance={:.2}x | {}",
+            pi, ngroups, atoms as f64 / 1e6, balance, op_str);
+    }
+
+    // 10 smallest phases (non-empty)
+    let mut smallest: Vec<(usize, u64, usize)> = indexed_atom_counts.iter()
+        .filter(|&&(_, a, _)| a > 0)
+        .copied()
+        .collect();
+    smallest.sort_by(|a, b| a.1.cmp(&b.1));
+
+    println!("\n  10 smallest phases (by atoms):");
+    for &(pi, atoms, ngroups) in smallest.iter().take(10) {
+        let ops = &phase_op_breakdown[pi];
+        let mut ops_sorted: Vec<_> = ops.iter().map(|(k, v)| (k.clone(), v.0, v.1)).collect();
+        ops_sorted.sort_by(|a, b| b.2.cmp(&a.2));
+        let op_str: String = ops_sorted.iter().take(5)
+            .map(|(op, c, a)| format!("{}x{} ({})", c, op, a))
+            .collect::<Vec<_>>().join(", ");
+        // Check if adjacent phases could absorb this
+        let prev_atoms = if pi > 0 { phase_atom_counts[pi - 1] } else { 0 };
+        let next_atoms = if pi + 1 < num_phases { phase_atom_counts[pi + 1] } else { 0 };
+        println!("    phase {:>3}: {:>6} groups, {:>10} atoms | {} | neighbors: prev={}, next={}",
+            pi, ngroups, atoms, op_str, prev_atoms, next_atoms);
+    }
+
+    // ─── 5. Overall Assessment ──────────────────────────────────────────
+    println!("\n--- 5. Overall Assessment ---");
+
+    // Count matmuls and reduces
+    let mut total_reduce_groups = 0usize;
+    let mut total_reduce_atoms = 0u64;
+    let _total_mul_groups = 0usize;
+    let mut total_identity_groups = 0usize;
+    let mut total_binary_groups = 0usize;
+    let mut total_unary_groups = 0usize;
+    let mut total_literal_groups = 0usize;
+    for g in groups {
+        match &g.op {
+            ScalarOp::ReduceSum { .. } | ScalarOp::ReduceMax { .. } => {
+                total_reduce_groups += 1;
+                total_reduce_atoms += g.count;
+            }
+            ScalarOp::Binary { .. } => total_binary_groups += 1,
+            ScalarOp::Unary { .. } => total_unary_groups += 1,
+            ScalarOp::Identity { .. } => total_identity_groups += 1,
+            ScalarOp::Literal(_) => total_literal_groups += 1,
+            _ => {}
+        }
+    }
+
+    // Count phases that contain reduces
+    let phases_with_reduce = has_reduce.iter().filter(|&&r| r).count();
+
+    // Phases per reduce: how many phases does each reduce group span?
+    // Theoretical minimum barriers = number of "levels" in the reduce DAG
+    // For GPT-2 with 10 layers, each with ~7 matmuls: 70 matmuls, each creating
+    // a reduce boundary = ~140+ barriers minimum if all matmuls are sequential.
+
+    println!("  Total groups: {} ({} compute, {} literal)", groups.len(),
+        groups.len() - total_literal_groups, total_literal_groups);
+    println!("  Reduce groups: {} ({} atoms)", total_reduce_groups, total_reduce_atoms);
+    println!("  Binary groups: {}", total_binary_groups);
+    println!("  Unary groups: {}", total_unary_groups);
+    println!("  Identity groups: {}", total_identity_groups);
+    println!("  Phases with ReduceSum/Max: {} / {}", phases_with_reduce, num_phases);
+
+    // Phase efficiency: how much time is "wasted" in barrier overhead?
+    // Metric: what fraction of phases are "small" (< 1% of total work)?
+    let one_pct = total_atoms / 100;
+    let small_phases = phase_atom_counts.iter().filter(|&&a| a < one_pct).count();
+    println!("  Phases with <1% of total work: {} / {}", small_phases, num_phases);
+
+    // Compute effective parallelism: sum of (atoms in phase) / (max lane atoms in phase)
+    let mut effective_lanes_sum = 0.0f64;
+    let mut weighted_sum = 0.0f64;
+    for phase in &plan.phases {
+        let lane_atoms: Vec<u64> = phase.lane_work.iter()
+            .map(|l| l.iter().map(|w| w.atom_count).sum::<u64>()).collect();
+        let total_phase: u64 = lane_atoms.iter().sum();
+        let max_lane = lane_atoms.iter().copied().max().unwrap_or(0);
+        if max_lane > 0 {
+            let eff = total_phase as f64 / max_lane as f64;
+            effective_lanes_sum += eff;
+            weighted_sum += eff * total_phase as f64;
+        }
+    }
+    let avg_effective_lanes = if num_phases > 0 { effective_lanes_sum / num_phases as f64 } else { 0.0 };
+    let weighted_effective_lanes = if total_atoms > 0 { weighted_sum / total_atoms as f64 } else { 0.0 };
+    println!("  Average effective lanes (unweighted): {:.2}", avg_effective_lanes);
+    println!("  Average effective lanes (atom-weighted): {:.2}", weighted_effective_lanes);
+
+    // Total serialized work vs parallel work
+    let max_lane_sum: u64 = plan.phases.iter().map(|phase| {
+        phase.lane_work.iter()
+            .map(|l| l.iter().map(|w| w.atom_count).sum::<u64>())
+            .max().unwrap_or(0)
+    }).sum();
+    println!("  Total atoms: {:.3}B", total_atoms as f64 / 1e9);
+    println!("  Critical path atoms (sum of max lane per phase): {:.3}B", max_lane_sum as f64 / 1e9);
+    println!("  Theoretical speedup from {} lanes: {:.2}x (ideal: {}x)",
+        num_lanes, total_atoms as f64 / max_lane_sum as f64, num_lanes);
+
+    // Phase length histogram (atoms)
+    println!("\n  Phase atom histogram:");
+    let mut buckets: Vec<(&str, u64, u64, usize, u64)> = vec![
+        ("<1K",     0,        1_000,       0, 0),
+        ("1K-10K",  1_000,    10_000,      0, 0),
+        ("10K-100K",10_000,   100_000,     0, 0),
+        ("100K-1M", 100_000,  1_000_000,   0, 0),
+        ("1M-10M",  1_000_000,10_000_000,  0, 0),
+        ("10M-100M",10_000_000,100_000_000,0, 0),
+        ("100M-1B", 100_000_000,1_000_000_000, 0, 0),
+        (">1B",     1_000_000_000, u64::MAX,   0, 0),
+    ];
+    for &ac in &phase_atom_counts {
+        for b in buckets.iter_mut() {
+            if ac >= b.1 && ac < b.2 {
+                b.3 += 1;
+                b.4 += ac;
+                break;
+            }
+        }
+    }
+    for (label, _, _, count, atoms) in &buckets {
+        if *count > 0 {
+            println!("    {:>10}: {:>4} phases, {:>12.3}B atoms ({:.1}%)",
+                label, count, *atoms as f64 / 1e9,
+                if total_atoms > 0 { *atoms as f64 / total_atoms as f64 * 100.0 } else { 0.0 });
+        }
+    }
+
+    // Consecutive small phase runs (merging opportunities)
+    println!("\n  Consecutive small-phase runs (phases with <10 groups):");
+    let mut runs: Vec<(usize, usize)> = Vec::new(); // (start, length)
+    let mut run_start = None;
+    for i in 0..num_phases {
+        if phase_group_counts[i] < 10 {
+            if run_start.is_none() { run_start = Some(i); }
+        } else {
+            if let Some(s) = run_start {
+                runs.push((s, i - s));
+                run_start = None;
+            }
+        }
+    }
+    if let Some(s) = run_start { runs.push((s, num_phases - s)); }
+    runs.sort_by(|a, b| b.1.cmp(&a.1));
+    if runs.is_empty() {
+        println!("    No consecutive small-phase runs found.");
+    } else {
+        for &(start, len) in runs.iter().take(10) {
+            let total_run_atoms: u64 = (start..start+len).map(|i| phase_atom_counts[i]).sum();
+            let total_run_groups: usize = (start..start+len).map(|i| phase_group_counts[i]).sum();
+            println!("    phases {}-{}: {} phases, {} groups, {:.3}M atoms",
+                start, start + len - 1, len, total_run_groups, total_run_atoms as f64 / 1e6);
+        }
+        let total_small_runs: usize = runs.len();
+        let total_mergeable_phases: usize = runs.iter().map(|r| r.1).sum();
+        println!("    {} runs totaling {} phases could potentially be merged", total_small_runs, total_mergeable_phases);
+    }
+
+    println!("\n========================================");
 }
