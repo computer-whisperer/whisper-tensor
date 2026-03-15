@@ -1490,30 +1490,28 @@ impl ImageGenerationInterface {
 
         // Text encoder: conditional → F32, cast to model_dtype
         let cond_hidden_f32 = builder.new_tensor_link(rng);
-        builder.add_node(
-            SuperGraphNodeModelExecution::new(
-                rng,
-                te_weights,
-                0,
-                vec![(cond_ids_input, "input_ids".to_string())],
-                vec![("last_hidden_state".to_string(), cond_hidden_f32)],
-            )
-            .to_any(),
+        let mut cond_te = SuperGraphNodeModelExecution::new(
+            rng,
+            te_weights,
+            0,
+            vec![(cond_ids_input, "input_ids".to_string())],
+            vec![("last_hidden_state".to_string(), cond_hidden_f32)],
         );
+        cond_te.label = Some("text_encoder_conditional".to_string());
+        builder.add_node(cond_te.to_any());
         let cond_context = build_cast_node(&mut builder, rng, cond_hidden_f32, model_dtype);
 
         // Text encoder: unconditional → F32, cast to model_dtype
         let uncond_hidden_f32 = builder.new_tensor_link(rng);
-        builder.add_node(
-            SuperGraphNodeModelExecution::new(
-                rng,
-                te_weights,
-                0,
-                vec![(negative_cond_ids_input, "input_ids".to_string())],
-                vec![("last_hidden_state".to_string(), uncond_hidden_f32)],
-            )
-            .to_any(),
+        let mut uncond_te = SuperGraphNodeModelExecution::new(
+            rng,
+            te_weights,
+            0,
+            vec![(negative_cond_ids_input, "input_ids".to_string())],
+            vec![("last_hidden_state".to_string(), uncond_hidden_f32)],
         );
+        uncond_te.label = Some("text_encoder_unconditional".to_string());
+        builder.add_node(uncond_te.to_any());
         let uncond_context = build_cast_node(&mut builder, rng, uncond_hidden_f32, model_dtype);
 
         // Denoising loop
@@ -1635,16 +1633,15 @@ impl ImageGenerationInterface {
 
         // TE1 conditional: cond_ids → hidden1 [1, 77, 768] (F32)
         let cond_hidden1_f32 = builder.new_tensor_link(rng);
-        builder.add_node(
-            SuperGraphNodeModelExecution::new(
-                rng,
-                te1_weights,
-                0,
-                vec![(cond_ids_input, "input_ids".to_string())],
-                vec![("last_hidden_state".to_string(), cond_hidden1_f32)],
-            )
-            .to_any(),
+        let mut te1_cond = SuperGraphNodeModelExecution::new(
+            rng,
+            te1_weights,
+            0,
+            vec![(cond_ids_input, "input_ids".to_string())],
+            vec![("last_hidden_state".to_string(), cond_hidden1_f32)],
         );
+        te1_cond.label = Some("text_encoder_1_conditional".to_string());
+        builder.add_node(te1_cond.to_any());
 
         // Compute eos_indices for conditional
         let cond_eos = build_eos_indices_node(&mut builder, rng, cond_ids_input);
@@ -1652,22 +1649,21 @@ impl ImageGenerationInterface {
         // TE2 conditional: cond_ids + eos → penultimate [1, 77, 1280] + pooled [1, 1280] (F32)
         let cond_penult2_f32 = builder.new_tensor_link(rng);
         let cond_pooled_f32 = builder.new_tensor_link(rng);
-        builder.add_node(
-            SuperGraphNodeModelExecution::new(
-                rng,
-                te2_weights,
-                1,
-                vec![
-                    (cond_ids_input, "input_ids".to_string()),
-                    (cond_eos, "eos_indices".to_string()),
-                ],
-                vec![
-                    ("penultimate_hidden_state".to_string(), cond_penult2_f32),
-                    ("pooled_output".to_string(), cond_pooled_f32),
-                ],
-            )
-            .to_any(),
+        let mut te2_cond = SuperGraphNodeModelExecution::new(
+            rng,
+            te2_weights,
+            1,
+            vec![
+                (cond_ids_input, "input_ids".to_string()),
+                (cond_eos, "eos_indices".to_string()),
+            ],
+            vec![
+                ("penultimate_hidden_state".to_string(), cond_penult2_f32),
+                ("pooled_output".to_string(), cond_pooled_f32),
+            ],
         );
+        te2_cond.label = Some("text_encoder_2_conditional".to_string());
+        builder.add_node(te2_cond.to_any());
 
         // Concat hidden1 + penult2 → context [1, 77, 2048], pad pooled → y [1, 2816]
         // Then cast both to model_dtype
@@ -1703,23 +1699,24 @@ impl ImageGenerationInterface {
                 (ctx_cast, cond_context.global_id()),
                 (y_cast, cond_y.global_id()),
             ]);
-            builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
+            let mut node = SuperGraphNodeMilliOpGraph::new(mg, rng);
+            node.label = Some("conditioning_conditional_assemble".to_string());
+            builder.add_node(node.to_any());
         }
 
         // --- Unconditional path ---
 
         // TE1 unconditional
         let uncond_hidden1_f32 = builder.new_tensor_link(rng);
-        builder.add_node(
-            SuperGraphNodeModelExecution::new(
-                rng,
-                te1_weights,
-                0,
-                vec![(negative_cond_ids_input, "input_ids".to_string())],
-                vec![("last_hidden_state".to_string(), uncond_hidden1_f32)],
-            )
-            .to_any(),
+        let mut te1_uncond = SuperGraphNodeModelExecution::new(
+            rng,
+            te1_weights,
+            0,
+            vec![(negative_cond_ids_input, "input_ids".to_string())],
+            vec![("last_hidden_state".to_string(), uncond_hidden1_f32)],
         );
+        te1_uncond.label = Some("text_encoder_1_unconditional".to_string());
+        builder.add_node(te1_uncond.to_any());
 
         // Compute eos_indices for unconditional
         let uncond_eos = build_eos_indices_node(&mut builder, rng, negative_cond_ids_input);
@@ -1727,22 +1724,21 @@ impl ImageGenerationInterface {
         // TE2 unconditional
         let uncond_penult2_f32 = builder.new_tensor_link(rng);
         let uncond_pooled_f32 = builder.new_tensor_link(rng);
-        builder.add_node(
-            SuperGraphNodeModelExecution::new(
-                rng,
-                te2_weights,
-                1,
-                vec![
-                    (negative_cond_ids_input, "input_ids".to_string()),
-                    (uncond_eos, "eos_indices".to_string()),
-                ],
-                vec![
-                    ("penultimate_hidden_state".to_string(), uncond_penult2_f32),
-                    ("pooled_output".to_string(), uncond_pooled_f32),
-                ],
-            )
-            .to_any(),
+        let mut te2_uncond = SuperGraphNodeModelExecution::new(
+            rng,
+            te2_weights,
+            1,
+            vec![
+                (negative_cond_ids_input, "input_ids".to_string()),
+                (uncond_eos, "eos_indices".to_string()),
+            ],
+            vec![
+                ("penultimate_hidden_state".to_string(), uncond_penult2_f32),
+                ("pooled_output".to_string(), uncond_pooled_f32),
+            ],
         );
+        te2_uncond.label = Some("text_encoder_2_unconditional".to_string());
+        builder.add_node(te2_uncond.to_any());
 
         // Concat + pad for unconditional
         let uncond_context = builder.new_tensor_link(rng);
@@ -1775,7 +1771,9 @@ impl ImageGenerationInterface {
                 (ctx_cast, uncond_context.global_id()),
                 (y_cast, uncond_y.global_id()),
             ]);
-            builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
+            let mut node = SuperGraphNodeMilliOpGraph::new(mg, rng);
+            node.label = Some("conditioning_unconditional_assemble".to_string());
+            builder.add_node(node.to_any());
         }
 
         // --- Denoising loop ---
@@ -1998,33 +1996,31 @@ impl ImageGenerationInterface {
         // --- CLIP-L: input_ids + eos_indices → pooled_output [1, 768] ---
         let clip_pooled_f32 = builder.new_tensor_link(rng);
         let clip_eos = build_eos_indices_node(&mut builder, rng, cond_ids_input);
-        builder.add_node(
-            SuperGraphNodeModelExecution::new(
-                rng,
-                clip_weights,
-                0,
-                vec![
-                    (cond_ids_input, "input_ids".to_string()),
-                    (clip_eos, "eos_indices".to_string()),
-                ],
-                vec![("pooled_output".to_string(), clip_pooled_f32)],
-            )
-            .to_any(),
+        let mut clip_node = SuperGraphNodeModelExecution::new(
+            rng,
+            clip_weights,
+            0,
+            vec![
+                (cond_ids_input, "input_ids".to_string()),
+                (clip_eos, "eos_indices".to_string()),
+            ],
+            vec![("pooled_output".to_string(), clip_pooled_f32)],
         );
+        clip_node.label = Some("clip_l_encode".to_string());
+        builder.add_node(clip_node.to_any());
         let clip_pooled = build_cast_node(&mut builder, rng, clip_pooled_f32, model_dtype);
 
         // --- T5-XXL: input_ids → hidden_states [1, seq, 4096] ---
         let t5_hidden_f32 = builder.new_tensor_link(rng);
-        builder.add_node(
-            SuperGraphNodeModelExecution::new(
-                rng,
-                t5_weights,
-                1,
-                vec![(t5_ids_input, "input_ids".to_string())],
-                vec![("hidden_states".to_string(), t5_hidden_f32)],
-            )
-            .to_any(),
+        let mut t5_node = SuperGraphNodeModelExecution::new(
+            rng,
+            t5_weights,
+            1,
+            vec![(t5_ids_input, "input_ids".to_string())],
+            vec![("hidden_states".to_string(), t5_hidden_f32)],
         );
+        t5_node.label = Some("t5_encode".to_string());
+        builder.add_node(t5_node.to_any());
         let t5_hidden = build_cast_node(&mut builder, rng, t5_hidden_f32, model_dtype);
 
         // --- Denoising loop (rectified flow) ---
@@ -2201,19 +2197,18 @@ impl ImageGenerationInterface {
         if let Some(eos_name) = clip_l_eos_input_name {
             clip_l_cond_inputs.push((clip_eos_pos, eos_name.to_string()));
         }
-        builder.add_node(
-            SuperGraphNodeModelExecution::new(
-                rng,
-                clip_l_weights,
-                0,
-                clip_l_cond_inputs,
-                vec![
-                    (clip_l_hidden_output_name.to_string(), clip_l_hidden_pos),
-                    (clip_l_pooled_output_name.to_string(), clip_l_pooled_pos),
-                ],
-            )
-            .to_any(),
+        let mut clip_l_cond = SuperGraphNodeModelExecution::new(
+            rng,
+            clip_l_weights,
+            0,
+            clip_l_cond_inputs,
+            vec![
+                (clip_l_hidden_output_name.to_string(), clip_l_hidden_pos),
+                (clip_l_pooled_output_name.to_string(), clip_l_pooled_pos),
+            ],
         );
+        clip_l_cond.label = Some("clip_l_conditional".to_string());
+        builder.add_node(clip_l_cond.to_any());
 
         let clip_g_hidden_pos = builder.new_tensor_link(rng);
         let clip_g_pooled_pos = builder.new_tensor_link(rng);
@@ -2221,31 +2216,29 @@ impl ImageGenerationInterface {
         if let Some(eos_name) = clip_g_eos_input_name {
             clip_g_cond_inputs.push((clip_eos_pos, eos_name.to_string()));
         }
-        builder.add_node(
-            SuperGraphNodeModelExecution::new(
-                rng,
-                clip_g_weights,
-                1,
-                clip_g_cond_inputs,
-                vec![
-                    (clip_g_hidden_output_name.to_string(), clip_g_hidden_pos),
-                    (clip_g_pooled_output_name.to_string(), clip_g_pooled_pos),
-                ],
-            )
-            .to_any(),
+        let mut clip_g_cond = SuperGraphNodeModelExecution::new(
+            rng,
+            clip_g_weights,
+            1,
+            clip_g_cond_inputs,
+            vec![
+                (clip_g_hidden_output_name.to_string(), clip_g_hidden_pos),
+                (clip_g_pooled_output_name.to_string(), clip_g_pooled_pos),
+            ],
         );
+        clip_g_cond.label = Some("clip_g_conditional".to_string());
+        builder.add_node(clip_g_cond.to_any());
 
         let t5_hidden_pos = builder.new_tensor_link(rng);
-        builder.add_node(
-            SuperGraphNodeModelExecution::new(
-                rng,
-                t5_weights,
-                2,
-                vec![(t5_ids_pos, t5_input_name.to_string())],
-                vec![(t5_hidden_output_name.to_string(), t5_hidden_pos)],
-            )
-            .to_any(),
+        let mut t5_cond = SuperGraphNodeModelExecution::new(
+            rng,
+            t5_weights,
+            2,
+            vec![(t5_ids_pos, t5_input_name.to_string())],
+            vec![(t5_hidden_output_name.to_string(), t5_hidden_pos)],
         );
+        t5_cond.label = Some("t5_conditional".to_string());
+        builder.add_node(t5_cond.to_any());
 
         // Unconditional encoders
         let clip_l_hidden_neg = builder.new_tensor_link(rng);
@@ -2254,19 +2247,18 @@ impl ImageGenerationInterface {
         if let Some(eos_name) = clip_l_eos_input_name {
             clip_l_uncond_inputs.push((clip_eos_neg, eos_name.to_string()));
         }
-        builder.add_node(
-            SuperGraphNodeModelExecution::new(
-                rng,
-                clip_l_weights,
-                0,
-                clip_l_uncond_inputs,
-                vec![
-                    (clip_l_hidden_output_name.to_string(), clip_l_hidden_neg),
-                    (clip_l_pooled_output_name.to_string(), clip_l_pooled_neg),
-                ],
-            )
-            .to_any(),
+        let mut clip_l_uncond = SuperGraphNodeModelExecution::new(
+            rng,
+            clip_l_weights,
+            0,
+            clip_l_uncond_inputs,
+            vec![
+                (clip_l_hidden_output_name.to_string(), clip_l_hidden_neg),
+                (clip_l_pooled_output_name.to_string(), clip_l_pooled_neg),
+            ],
         );
+        clip_l_uncond.label = Some("clip_l_unconditional".to_string());
+        builder.add_node(clip_l_uncond.to_any());
 
         let clip_g_hidden_neg = builder.new_tensor_link(rng);
         let clip_g_pooled_neg = builder.new_tensor_link(rng);
@@ -2274,31 +2266,29 @@ impl ImageGenerationInterface {
         if let Some(eos_name) = clip_g_eos_input_name {
             clip_g_uncond_inputs.push((clip_eos_neg, eos_name.to_string()));
         }
-        builder.add_node(
-            SuperGraphNodeModelExecution::new(
-                rng,
-                clip_g_weights,
-                1,
-                clip_g_uncond_inputs,
-                vec![
-                    (clip_g_hidden_output_name.to_string(), clip_g_hidden_neg),
-                    (clip_g_pooled_output_name.to_string(), clip_g_pooled_neg),
-                ],
-            )
-            .to_any(),
+        let mut clip_g_uncond = SuperGraphNodeModelExecution::new(
+            rng,
+            clip_g_weights,
+            1,
+            clip_g_uncond_inputs,
+            vec![
+                (clip_g_hidden_output_name.to_string(), clip_g_hidden_neg),
+                (clip_g_pooled_output_name.to_string(), clip_g_pooled_neg),
+            ],
         );
+        clip_g_uncond.label = Some("clip_g_unconditional".to_string());
+        builder.add_node(clip_g_uncond.to_any());
 
         let t5_hidden_neg = builder.new_tensor_link(rng);
-        builder.add_node(
-            SuperGraphNodeModelExecution::new(
-                rng,
-                t5_weights,
-                2,
-                vec![(t5_ids_neg, t5_input_name.to_string())],
-                vec![(t5_hidden_output_name.to_string(), t5_hidden_neg)],
-            )
-            .to_any(),
+        let mut t5_uncond = SuperGraphNodeModelExecution::new(
+            rng,
+            t5_weights,
+            2,
+            vec![(t5_ids_neg, t5_input_name.to_string())],
+            vec![(t5_hidden_output_name.to_string(), t5_hidden_neg)],
         );
+        t5_uncond.label = Some("t5_unconditional".to_string());
+        builder.add_node(t5_uncond.to_any());
 
         // Build conditional context + pooled projections.
         let cond_context = builder.new_tensor_link(rng);
@@ -2350,7 +2340,9 @@ impl ImageGenerationInterface {
                 (combined_context, cond_context.global_id()),
                 (pooled, cond_pooled.global_id()),
             ]);
-            builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
+            let mut node = SuperGraphNodeMilliOpGraph::new(mg, rng);
+            node.label = Some("sd3_conditioning_conditional_assemble".to_string());
+            builder.add_node(node.to_any());
         }
 
         // Build unconditional context + pooled projections.
@@ -2400,7 +2392,9 @@ impl ImageGenerationInterface {
                 (combined_context, uncond_context.global_id()),
                 (pooled, uncond_pooled.global_id()),
             ]);
-            builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
+            let mut node = SuperGraphNodeMilliOpGraph::new(mg, rng);
+            node.label = Some("sd3_conditioning_unconditional_assemble".to_string());
+            builder.add_node(node.to_any());
         }
 
         let final_latent = build_sd3_denoising_loop(
