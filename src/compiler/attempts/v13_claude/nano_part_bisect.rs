@@ -46,18 +46,26 @@ pub fn partition_nanograph(graph: &NanoGraph, target_kernels: usize) -> NanoPart
         };
     }
 
-    if target_kernels == 1 || n == 1 {
-        return NanoPartitionResult {
-            kernel_groups: vec![(0..n).collect()],
-            num_kernels: 1,
-        };
-    }
-
     // Precompute: classify groups as data (Literal, no inputs) vs compute.
     let is_data: Vec<bool> = groups
         .iter()
         .map(|g| matches!(g.op, ScalarOp::Literal(_)) && g.inputs.is_empty())
         .collect();
+
+    let compute_indices: Vec<usize> = (0..n).filter(|&gi| !is_data[gi]).collect();
+    if compute_indices.is_empty() {
+        return NanoPartitionResult {
+            kernel_groups: vec![],
+            num_kernels: 0,
+        };
+    }
+
+    if target_kernels == 1 || compute_indices.len() == 1 {
+        return NanoPartitionResult {
+            kernel_groups: vec![compute_indices],
+            num_kernels: 1,
+        };
+    }
 
     // Precompute: producer map (sorted base_ids for binary search).
     let atom_to_group = build_atom_to_group_map(groups);
@@ -104,9 +112,10 @@ pub fn partition_nanograph(graph: &NanoGraph, target_kernels: usize) -> NanoPart
         group_atoms: &group_atoms,
     };
 
-    // Start with all groups in one kernel.
-    let all_groups: Vec<usize> = (0..n).collect();
-    let mut kernels: Vec<Vec<usize>> = vec![all_groups];
+    // Start with all compute (non-Literal) groups in one kernel.
+    // Data groups are globally available constants and don't belong to any kernel.
+    // (compute_indices already computed and validated above)
+    let mut kernels: Vec<Vec<usize>> = vec![(0..n).filter(|&gi| !is_data[gi]).collect()];
 
     // Repeatedly split the largest kernel until we reach target count.
     while kernels.len() < target_kernels {
@@ -156,13 +165,6 @@ pub fn partition_nanograph(graph: &NanoGraph, target_kernels: usize) -> NanoPart
         kernels.push(child_b);
     }
 
-    // Assign data (Literal) groups to the kernel that contains their first consumer.
-    // During splitting, data groups may end up in multiple kernels' dependency sets.
-    // We need each data group in exactly one kernel.
-    // Strategy: each data group goes to the kernel where its first consumer lives.
-    // If a data group has no consumers, it goes to kernel 0.
-    finalize_data_group_assignment(&mut kernels, &ctx);
-
     let num_kernels = kernels.len();
     NanoPartitionResult {
         kernel_groups: kernels,
@@ -186,15 +188,10 @@ impl<'a> BisectContext<'a> {
     /// balanced way. If only one component exists, falls back to topo-order
     /// live-set splitting.
     fn split_kernel(&self, groups: &[usize]) -> (Vec<usize>, Vec<usize>) {
-        // Separate data and compute groups.
+        // Groups passed in are already compute-only (no Literal/data groups).
         let compute_groups: Vec<usize> = groups
             .iter()
             .filter(|&&gi| !self.is_data[gi])
-            .copied()
-            .collect();
-        let data_groups: Vec<usize> = groups
-            .iter()
-            .filter(|&&gi| self.is_data[gi])
             .copied()
             .collect();
 
@@ -214,38 +211,14 @@ impl<'a> BisectContext<'a> {
         if components.len() >= 2 {
             // We have independent sub-DAGs. Distribute components into two
             // children to balance atom counts.
-            let (child_a_compute, child_b_compute) =
+            let (child_a, child_b) =
                 balance_components(&components, self.group_atoms);
-
-            // Assign data groups to whichever child contains more of their consumers.
-            let child_a_set: HashSet<usize> = child_a_compute.iter().copied().collect();
-            let child_b_set: HashSet<usize> = child_b_compute.iter().copied().collect();
-
-            let mut child_a = child_a_compute;
-            let mut child_b = child_b_compute;
-
-            for &dg in &data_groups {
-                let a_consumers = self.consumers[dg]
-                    .iter()
-                    .filter(|&&c| child_a_set.contains(&c))
-                    .count();
-                let b_consumers = self.consumers[dg]
-                    .iter()
-                    .filter(|&&c| child_b_set.contains(&c))
-                    .count();
-
-                if a_consumers >= b_consumers {
-                    child_a.push(dg);
-                } else {
-                    child_b.push(dg);
-                }
-            }
 
             (child_a, child_b)
         } else {
             // Single connected component — everything is on one dependency chain.
             // Fall back to topo-order splitting at the minimum live-set point.
-            self.split_by_livesets(groups, &compute_groups, &data_groups, &group_set)
+            self.split_by_livesets(&compute_groups, &group_set)
         }
     }
 
@@ -299,16 +272,14 @@ impl<'a> BisectContext<'a> {
     /// the live set (cross-cut traffic).
     fn split_by_livesets(
         &self,
-        all_groups: &[usize],
         compute_groups: &[usize],
-        data_groups: &[usize],
         group_set: &HashSet<usize>,
     ) -> (Vec<usize>, Vec<usize>) {
         // Compute a local topological order of compute groups within this kernel.
         let topo_order = self.local_topo_sort(compute_groups, group_set);
 
         if topo_order.len() <= 1 {
-            return (all_groups.to_vec(), vec![]);
+            return (compute_groups.to_vec(), vec![]);
         }
 
         // Map from group index -> position in topo_order.
@@ -394,31 +365,8 @@ impl<'a> BisectContext<'a> {
 
         // Groups in topo_order[0..=cut_pos] go to child A.
         // Groups in topo_order[cut_pos+1..] go to child B.
-        let child_a_set: HashSet<usize> =
-            topo_order[0..=cut_pos].iter().copied().collect();
-        let child_b_set: HashSet<usize> =
-            topo_order[cut_pos + 1..].iter().copied().collect();
-
-        let mut child_a: Vec<usize> = topo_order[0..=cut_pos].to_vec();
-        let mut child_b: Vec<usize> = topo_order[cut_pos + 1..].to_vec();
-
-        // Assign data groups.
-        for &dg in data_groups {
-            let a_consumers = self.consumers[dg]
-                .iter()
-                .filter(|&&c| child_a_set.contains(&c))
-                .count();
-            let b_consumers = self.consumers[dg]
-                .iter()
-                .filter(|&&c| child_b_set.contains(&c))
-                .count();
-
-            if a_consumers >= b_consumers {
-                child_a.push(dg);
-            } else {
-                child_b.push(dg);
-            }
-        }
+        let child_a: Vec<usize> = topo_order[0..=cut_pos].to_vec();
+        let child_b: Vec<usize> = topo_order[cut_pos + 1..].to_vec();
 
         (child_a, child_b)
     }
@@ -541,57 +489,6 @@ fn balance_components(
 /// During recursive splitting, data groups may get duplicated across children
 /// (both children claim the weight). This pass deduplicates: each data group
 /// goes to the kernel that has the most of its consumers.
-fn finalize_data_group_assignment(kernels: &mut Vec<Vec<usize>>, ctx: &BisectContext) {
-    let n = ctx.n;
-
-    // Build group -> kernel assignment for compute groups.
-    let mut group_kernel: Vec<Option<usize>> = vec![None; n];
-    for (ki, kernel) in kernels.iter().enumerate() {
-        for &gi in kernel {
-            if !ctx.is_data[gi] {
-                group_kernel[gi] = Some(ki);
-            }
-        }
-    }
-
-    // Remove data groups from all kernels.
-    for kernel in kernels.iter_mut() {
-        kernel.retain(|&gi| !ctx.is_data[gi]);
-    }
-
-    // Assign each data group to the kernel with the most of its consumers.
-    for gi in 0..n {
-        if !ctx.is_data[gi] {
-            continue;
-        }
-
-        // Count consumers in each kernel.
-        let mut kernel_counts: HashMap<usize, usize> = HashMap::new();
-        for &cons in &ctx.consumers[gi] {
-            if let Some(ki) = group_kernel[cons] {
-                *kernel_counts.entry(ki).or_default() += 1;
-            }
-        }
-
-        // Also check producers (for the rare case a data group feeds another data group).
-        // Actually, data groups have no producers by definition (Literal, no inputs).
-        // But their consumers' kernels are what matter.
-
-        let best_kernel = kernel_counts
-            .into_iter()
-            .max_by_key(|&(_, count)| count)
-            .map(|(ki, _)| ki)
-            .unwrap_or(0); // No consumers? Put in kernel 0.
-
-        kernels[best_kernel].push(gi);
-        group_kernel[gi] = Some(best_kernel);
-    }
-
-    // Verify all groups are assigned.
-    let total: usize = kernels.iter().map(|k| k.len()).sum();
-    debug_assert_eq!(total, n, "Not all groups assigned after finalization");
-}
-
 // -----------------------------------------------------------------------
 // Producer resolution (shared with nano_part_live.rs logic)
 // -----------------------------------------------------------------------
@@ -867,12 +764,23 @@ mod tests {
     use crate::nano_graph::{InputRef, NanoGraph, ScalarBinOp, ScalarOp, ScalarUnaryOp};
     use crate::numeric_scalar::NumericScalar;
 
-    /// Verify: every group assigned exactly once.
+    /// Verify: every compute (non-Literal) group assigned exactly once.
+    /// Data/Literal groups should NOT be in any kernel.
     fn assert_all_groups_assigned_once(graph: &NanoGraph, result: &NanoPartitionResult) {
-        let n = graph.num_groups();
+        let groups = graph.groups();
+        let n = groups.len();
+        let is_data: Vec<bool> = groups
+            .iter()
+            .map(|g| matches!(g.op, ScalarOp::Literal(_)) && g.inputs.is_empty())
+            .collect();
         let mut assigned = vec![false; n];
         for kernel in &result.kernel_groups {
             for &gi in kernel {
+                assert!(
+                    !is_data[gi],
+                    "Data/Literal group {} should not be in any kernel",
+                    gi
+                );
                 assert!(
                     !assigned[gi],
                     "Group {} assigned to multiple kernels",
@@ -882,7 +790,11 @@ mod tests {
             }
         }
         for gi in 0..n {
-            assert!(assigned[gi], "Group {} not assigned to any kernel", gi);
+            if is_data[gi] {
+                assert!(!assigned[gi], "Data group {} should not be assigned", gi);
+            } else {
+                assert!(assigned[gi], "Compute group {} not assigned to any kernel", gi);
+            }
         }
     }
 
@@ -1654,7 +1566,8 @@ mod tests {
         );
 
         let result = partition_nanograph(&g, 5);
-        assert_eq!(result.num_kernels, 1);
+        // Single Literal group -> no compute groups -> 0 kernels.
+        assert_eq!(result.num_kernels, 0);
         assert_all_groups_assigned_once(&g, &result);
     }
 

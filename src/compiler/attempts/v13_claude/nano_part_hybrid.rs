@@ -37,27 +37,30 @@ pub fn partition_nanograph(graph: &NanoGraph, target_kernels: usize) -> NanoPart
     let groups = graph.groups();
     let n = groups.len();
 
-    if n == 0 || target_kernels == 0 {
+    // Classify groups as data (Literal, no inputs) vs compute.
+    let is_data: Vec<bool> = groups
+        .iter()
+        .map(|g| matches!(g.op, ScalarOp::Literal(_)) && g.inputs.is_empty())
+        .collect();
+
+    let compute_indices: Vec<usize> = (0..n).filter(|&gi| !is_data[gi]).collect();
+
+    if n == 0 || target_kernels == 0 || compute_indices.is_empty() {
         return NanoPartitionResult {
             kernel_groups: vec![],
             num_kernels: 0,
         };
     }
 
-    if target_kernels == 1 || n == 1 {
+    if target_kernels == 1 || compute_indices.len() == 1 {
         return NanoPartitionResult {
-            kernel_groups: vec![(0..n).collect()],
+            kernel_groups: vec![compute_indices],
             num_kernels: 1,
         };
     }
 
     // --- Shared infrastructure ---
     let atom_to_group = build_atom_to_group_map(groups);
-
-    let is_data: Vec<bool> = groups
-        .iter()
-        .map(|g| matches!(g.op, ScalarOp::Literal(_)) && g.inputs.is_empty())
-        .collect();
 
     // For each group, which groups produce its inputs.
     let producers: Vec<Vec<usize>> = groups
@@ -293,8 +296,18 @@ fn split_phase_parallel(
     _atom_to_group: &[(u64, u64, usize)],
     _global_target: usize,
 ) -> Vec<Vec<usize>> {
-    if phase_groups.len() <= 2 {
-        return vec![phase_groups.to_vec()];
+    // Filter out data/Literal groups -- they don't belong in any kernel.
+    let compute_phase: Vec<usize> = phase_groups
+        .iter()
+        .copied()
+        .filter(|&gi| !is_data[gi])
+        .collect();
+
+    if compute_phase.len() <= 2 {
+        if compute_phase.is_empty() {
+            return vec![];
+        }
+        return vec![compute_phase];
     }
 
     let phase_set: HashSet<usize> = phase_groups.iter().copied().collect();
@@ -318,7 +331,7 @@ fn split_phase_parallel(
         .collect();
 
     if mul_groups.is_empty() {
-        return vec![phase_groups.to_vec()];
+        return vec![compute_phase];
     }
 
     // --- Step 1: Group Mul groups into clusters based on shared non-data producers ---
@@ -380,7 +393,7 @@ fn split_phase_parallel(
     }
 
     if num_components <= 1 {
-        return vec![phase_groups.to_vec()];
+        return vec![compute_phase];
     }
 
     // --- Step 2: Propagate clusters forward in topo order ---
@@ -432,6 +445,9 @@ fn split_phase_parallel(
     let mut backbone: Vec<usize> = Vec::new();
 
     for &gi in phase_groups {
+        if is_data[gi] {
+            continue; // Data groups don't go in any kernel.
+        }
         match group_cluster.get(&gi) {
             Some(&c) => cluster_vecs[c].push(gi),
             None => backbone.push(gi),
@@ -441,7 +457,7 @@ fn split_phase_parallel(
     // Check: are there enough non-empty clusters to be worth splitting?
     let non_empty_clusters: usize = cluster_vecs.iter().filter(|c| !c.is_empty()).count();
     if non_empty_clusters <= 1 {
-        return vec![phase_groups.to_vec()];
+        return vec![compute_phase.clone()];
     }
 
     // Check: is the cluster compute significant enough?
@@ -458,7 +474,7 @@ fn split_phase_parallel(
         .sum();
 
     if total_phase_compute > 0 && (cluster_compute as f64 / total_phase_compute as f64) < 0.1 {
-        return vec![phase_groups.to_vec()];
+        return vec![compute_phase.clone()];
     }
 
     // Assemble output.
@@ -475,7 +491,7 @@ fn split_phase_parallel(
     }
 
     if kernels.len() <= 1 {
-        return vec![phase_groups.to_vec()];
+        return vec![compute_phase.clone()];
     }
 
     kernels
@@ -757,13 +773,18 @@ mod tests {
     use crate::nano_graph::{InputRef, NanoGraph, ScalarBinOp, ScalarOp};
     use crate::numeric_scalar::NumericScalar;
 
-    /// Test: every group assigned exactly once.
+    /// Test: every compute group assigned exactly once, no data groups assigned.
     #[test]
     fn test_every_group_in_exactly_one_kernel() {
         let g = build_two_layer_matmul_pipeline();
         assert!(g.validate().is_empty(), "{:?}", g.validate());
 
         let result = partition_nanograph(&g, 8);
+        let groups = g.groups();
+        let is_data: Vec<bool> = groups
+            .iter()
+            .map(|gr| matches!(gr.op, ScalarOp::Literal(_)) && gr.inputs.is_empty())
+            .collect();
 
         let mut assigned: Vec<usize> = result
             .kernel_groups
@@ -773,11 +794,21 @@ mod tests {
         assigned.sort();
         assigned.dedup();
 
-        let expected: Vec<usize> = (0..g.num_groups()).collect();
+        // No data groups should be assigned.
+        for &gi in &assigned {
+            assert!(
+                !is_data[gi],
+                "Data/Literal group {} should not be in any kernel",
+                gi
+            );
+        }
+
+        // Every compute group should be assigned.
+        let expected: Vec<usize> = (0..g.num_groups()).filter(|&gi| !is_data[gi]).collect();
         assert_eq!(
             assigned.len(),
             expected.len(),
-            "Not every group assigned exactly once. Got {} unique, expected {}",
+            "Not every compute group assigned exactly once. Got {} unique, expected {}",
             assigned.len(),
             expected.len()
         );
@@ -961,7 +992,12 @@ mod tests {
         let g = build_two_layer_matmul_pipeline();
         let result = partition_nanograph(&g, 1);
         assert_eq!(result.num_kernels, 1);
-        assert_eq!(result.kernel_groups[0].len(), g.num_groups());
+        let groups = g.groups();
+        let num_compute = groups
+            .iter()
+            .filter(|gr| !(matches!(gr.op, ScalarOp::Literal(_)) && gr.inputs.is_empty()))
+            .count();
+        assert_eq!(result.kernel_groups[0].len(), num_compute);
     }
 
     /// Test: empty graph.
@@ -1020,13 +1056,20 @@ mod tests {
         assert!(g.validate().is_empty());
         let result = partition_nanograph(&g, 4);
 
-        // All groups assigned.
+        // All compute groups assigned (data groups are not in any kernel).
+        let groups = g.groups();
+        let is_data: Vec<bool> = groups
+            .iter()
+            .map(|gr| matches!(gr.op, ScalarOp::Literal(_)) && gr.inputs.is_empty())
+            .collect();
+        let num_compute = is_data.iter().filter(|&&d| !d).count();
         let total: usize = result.kernel_groups.iter().map(|k| k.len()).sum();
-        assert_eq!(total, g.num_groups());
+        assert_eq!(total, num_compute);
 
         println!(
-            "Simple chain: {} kernels from {} groups",
+            "Simple chain: {} kernels from {} compute groups (of {} total)",
             result.num_kernels,
+            num_compute,
             g.num_groups()
         );
     }
@@ -1039,7 +1082,13 @@ mod tests {
 
         let result = partition_nanograph(&g, 4);
 
-        // All groups assigned.
+        // All compute groups assigned (data groups not in any kernel).
+        let groups = g.groups();
+        let is_data_vec: Vec<bool> = groups
+            .iter()
+            .map(|gr| matches!(gr.op, ScalarOp::Literal(_)) && gr.inputs.is_empty())
+            .collect();
+        let num_compute = is_data_vec.iter().filter(|&&d| !d).count();
         let mut assigned: Vec<usize> = result
             .kernel_groups
             .iter()
@@ -1047,7 +1096,7 @@ mod tests {
             .collect();
         assigned.sort();
         assigned.dedup();
-        assert_eq!(assigned.len(), g.num_groups());
+        assert_eq!(assigned.len(), num_compute);
 
         let groups = g.groups();
         println!(

@@ -51,7 +51,15 @@ pub fn partition_nanograph(graph: &NanoGraph, target_kernels: usize) -> NanoPart
     let groups = graph.groups();
     let n = groups.len();
 
-    if n == 0 {
+    // Classify groups as data (Literal, no inputs) vs compute.
+    let is_data: Vec<bool> = groups
+        .iter()
+        .map(|g| matches!(g.op, ScalarOp::Literal(_)) && g.inputs.is_empty())
+        .collect();
+
+    let compute_count = is_data.iter().filter(|&&d| !d).count();
+
+    if n == 0 || compute_count == 0 {
         return NanoPartitionResult {
             kernel_groups: vec![],
             num_kernels: 0,
@@ -60,19 +68,17 @@ pub fn partition_nanograph(graph: &NanoGraph, target_kernels: usize) -> NanoPart
 
     let target_kernels = target_kernels.max(1);
 
-    if n <= target_kernels {
-        let kernel_groups: Vec<Vec<usize>> = (0..n).map(|i| vec![i]).collect();
+    if compute_count <= target_kernels {
+        // Each compute group gets its own kernel. Data groups are excluded.
+        let kernel_groups: Vec<Vec<usize>> = (0..n)
+            .filter(|&i| !is_data[i])
+            .map(|i| vec![i])
+            .collect();
         return NanoPartitionResult {
             num_kernels: kernel_groups.len(),
             kernel_groups,
         };
     }
-
-    // Step 1: Classify groups and build dependency graph.
-    let is_data: Vec<bool> = groups
-        .iter()
-        .map(|g| matches!(g.op, ScalarOp::Literal(_)) && g.inputs.is_empty())
-        .collect();
 
     let producers = build_producer_graph(groups, &is_data);
     let consumers = build_consumer_graph(n, &producers);
@@ -148,15 +154,7 @@ pub fn partition_nanograph(graph: &NanoGraph, target_kernels: usize) -> NanoPart
             .collect();
 
         if phase_chain_ids.is_empty() {
-            // Phase has only data groups.
-            let data_in_phase: Vec<usize> = phase
-                .iter()
-                .copied()
-                .filter(|&gi| is_data[gi])
-                .collect();
-            if !data_in_phase.is_empty() {
-                kernel_groups.push(data_in_phase);
-            }
+            // Phase has only data groups — skip, data groups don't go in kernels.
             continue;
         }
 
@@ -190,35 +188,6 @@ pub fn partition_nanograph(graph: &NanoGraph, target_kernels: usize) -> NanoPart
             }
         }
 
-        // Assign data groups in this phase to the slot that consumes them most.
-        let phase_set: HashSet<usize> = phase.iter().copied().collect();
-        let data_in_phase: Vec<usize> = phase
-            .iter()
-            .copied()
-            .filter(|&gi| is_data[gi] && group_to_chain.get(&gi).is_none())
-            .collect();
-
-        for &di in &data_in_phase {
-            let mut slot_votes: HashMap<usize, usize> = HashMap::new();
-            for &ci in &consumers[di] {
-                if let Some(&chain_id) = group_to_chain.get(&ci) {
-                    if let Some(pos) = chain_topo.iter().position(|&c| c == chain_id) {
-                        *slot_votes.entry(parallel_slots[pos]).or_default() += 1;
-                    }
-                }
-            }
-            let best_slot = slot_votes
-                .iter()
-                .max_by_key(|&(_, &count)| count)
-                .map(|(&slot, _)| slot)
-                .unwrap_or(0);
-            if best_slot < slot_groups.len() {
-                slot_groups[best_slot].push(di);
-            } else if !slot_groups.is_empty() {
-                slot_groups[0].push(di);
-            }
-        }
-
         for mut sg in slot_groups {
             if !sg.is_empty() {
                 sg.sort();
@@ -228,14 +197,17 @@ pub fn partition_nanograph(graph: &NanoGraph, target_kernels: usize) -> NanoPart
         }
     }
 
-    // Handle any groups not yet assigned (shouldn't happen, but defensive).
+    // Handle any compute groups not yet assigned (shouldn't happen, but defensive).
+    // Data/Literal groups are intentionally unassigned.
     let mut assigned: HashSet<usize> = HashSet::new();
     for kg in &kernel_groups {
         for &gi in kg {
             assigned.insert(gi);
         }
     }
-    let unassigned: Vec<usize> = (0..n).filter(|gi| !assigned.contains(gi)).collect();
+    let unassigned: Vec<usize> = (0..n)
+        .filter(|&gi| !assigned.contains(&gi) && !is_data[gi])
+        .collect();
     if !unassigned.is_empty() {
         kernel_groups.push(unassigned);
     }
@@ -1486,7 +1458,13 @@ mod tests {
 
     // --- Validation helpers ---
 
-    fn check_coverage(result: &NanoPartitionResult, total_groups: usize) {
+    fn check_coverage(result: &NanoPartitionResult, graph: &NanoGraph) {
+        let groups = graph.groups();
+        let is_data: Vec<bool> = groups
+            .iter()
+            .map(|g| matches!(g.op, ScalarOp::Literal(_)) && g.inputs.is_empty())
+            .collect();
+
         let mut assigned: Vec<usize> = result
             .kernel_groups
             .iter()
@@ -1502,15 +1480,27 @@ mod tests {
             total_assigned,
             assigned.len()
         );
-        assert_eq!(
-            assigned.len(),
-            total_groups,
-            "Expected {} groups, got {}",
-            total_groups,
-            assigned.len()
-        );
-        let expected: Vec<usize> = (0..total_groups).collect();
-        assert_eq!(assigned, expected, "Not all groups assigned");
+
+        // Every assigned group should be a compute group (not data/Literal).
+        for &gi in &assigned {
+            assert!(
+                !is_data[gi],
+                "Data/Literal group {} should not be in any kernel",
+                gi
+            );
+        }
+
+        // Every compute group should be assigned.
+        let assigned_set: HashSet<usize> = assigned.iter().copied().collect();
+        for gi in 0..groups.len() {
+            if !is_data[gi] {
+                assert!(
+                    assigned_set.contains(&gi),
+                    "Compute group {} not assigned to any kernel",
+                    gi
+                );
+            }
+        }
     }
 
     fn check_acyclicity(result: &NanoPartitionResult, groups: &[AtomGroup]) {
@@ -1606,14 +1596,14 @@ mod tests {
             vec![],
         );
         let result = partition_nanograph(&g, 4);
-        check_coverage(&result, 1);
+        check_coverage(&result, &g);
     }
 
     #[test]
     fn test_linear_chain() {
         let g = make_linear_chain(20);
         let result = partition_nanograph(&g, 4);
-        check_coverage(&result, g.num_groups());
+        check_coverage(&result, &g);
         check_acyclicity(&result, g.groups());
         println!(
             "Linear chain: {} kernels from {} groups",
@@ -1626,7 +1616,7 @@ mod tests {
     fn test_diamond() {
         let g = make_diamond();
         let result = partition_nanograph(&g, 4);
-        check_coverage(&result, g.num_groups());
+        check_coverage(&result, &g);
         check_acyclicity(&result, g.groups());
         let parallel = check_parallelism(&result, g.groups());
         println!("Diamond: {} kernels, {} independent pairs", result.num_kernels, parallel);
@@ -1636,7 +1626,7 @@ mod tests {
     fn test_pipeline_pinch() {
         let g = make_pipeline_pinch();
         let result = partition_nanograph(&g, 4);
-        check_coverage(&result, g.num_groups());
+        check_coverage(&result, &g);
         check_acyclicity(&result, g.groups());
         println!(
             "Pipeline pinch: {} kernels from {} groups",
@@ -1650,7 +1640,7 @@ mod tests {
     fn test_matmul_parallelism() {
         let g = make_matmul(4, 8, 16);
         let result = partition_nanograph(&g, 4);
-        check_coverage(&result, g.num_groups());
+        check_coverage(&result, &g);
         check_acyclicity(&result, g.groups());
         let parallel = check_parallelism(&result, g.groups());
         println!(
@@ -1665,7 +1655,7 @@ mod tests {
         // Key test: matmul rows should end up in different kernels.
         let g = make_matmul(4, 8, 16);
         let result = partition_nanograph(&g, 4);
-        check_coverage(&result, g.num_groups());
+        check_coverage(&result, &g);
         check_acyclicity(&result, g.groups());
 
         // Mul groups are at indices 2..6 (after 2 data groups).
@@ -1726,7 +1716,7 @@ mod tests {
     fn test_matmul_balance() {
         let g = make_matmul(8, 16, 8);
         let result = partition_nanograph(&g, 8);
-        check_coverage(&result, g.num_groups());
+        check_coverage(&result, &g);
         check_acyclicity(&result, g.groups());
         check_balance(&result, g.groups(), 0.5);
         println!("Matmul 8x16x8: {} kernels", result.num_kernels);
@@ -1736,7 +1726,7 @@ mod tests {
     fn test_matmul_chain() {
         let g = make_matmul_chain(4, 8, 8, 4);
         let result = partition_nanograph(&g, 8);
-        check_coverage(&result, g.num_groups());
+        check_coverage(&result, &g);
         check_acyclicity(&result, g.groups());
         println!(
             "Matmul chain: {} kernels from {} groups",
@@ -1750,7 +1740,7 @@ mod tests {
     fn test_parallel_matmuls() {
         let g = make_parallel_matmuls(4, 8, 16, 8);
         let result = partition_nanograph(&g, 8);
-        check_coverage(&result, g.num_groups());
+        check_coverage(&result, &g);
         check_acyclicity(&result, g.groups());
         let parallel = check_parallelism(&result, g.groups());
         println!(
@@ -1764,7 +1754,7 @@ mod tests {
     fn test_large_matmul_no_mega_kernel() {
         let g = make_matmul(16, 32, 64);
         let result = partition_nanograph(&g, 16);
-        check_coverage(&result, g.num_groups());
+        check_coverage(&result, &g);
         check_acyclicity(&result, g.groups());
         check_balance(&result, g.groups(), 0.30);
         let parallel = check_parallelism(&result, g.groups());
@@ -1789,7 +1779,7 @@ mod tests {
 
         for (name, graph, target) in &cases {
             let result = partition_nanograph(&graph, *target);
-            check_coverage(&result, graph.num_groups());
+            check_coverage(&result, &graph);
             check_acyclicity(&result, graph.groups());
             let parallel = check_parallelism(&result, graph.groups());
             println!(

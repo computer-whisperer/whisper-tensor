@@ -131,7 +131,7 @@ fn main() {
     print_reduce_diagnostic(&result.graph);
 
     // ---- Partition (compare approaches) ----
-    let target_kernels = 20;
+    let target_kernels = 200;
 
     // New partitioners (allow interleaved group indices, expose parallelism)
     {
