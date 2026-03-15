@@ -535,11 +535,6 @@ mod tests {
         k: u64,
         n: u64,
     ) -> (usize, usize) {
-        let k_sym = g.bounded_sym_dim(
-            &format!("matmul_k_{}", g.num_groups()),
-            k as u64,
-        );
-
         // A[M, K] as M*K singleton Literal groups.
         let mut a_atoms = Vec::new();
         for _mi in 0..m {
@@ -607,15 +602,16 @@ mod tests {
             g.push_group(
                 n,
                 ScalarOp::ReduceSum {
+                    reduce_count: k,
+                    reduce_stride: n as i64,
                     compute_dtype: DType::F32,
                     output_dtype: DType::F32,
                 },
                 vec![],
-                vec![k_sym],
-                vec![InputRef::SymAffine {
+                vec![],
+                vec![InputRef::Affine {
                     base: row_mul_base,
-                    stride_i: 1,
-                    stride_k: n as i32,
+                    stride: 1,
                 }],
             );
         }

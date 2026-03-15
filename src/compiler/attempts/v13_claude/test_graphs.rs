@@ -109,9 +109,6 @@ pub fn matmul(m: u64, k: u64, n: u64) -> (NanoGraph, AtomId, AtomId, AtomId) {
         vec![], vec![], vec![],
     );
 
-    // K sym dim for the contraction.
-    let k_sym = g.bounded_sym_dim("k", k as u64);
-
     // M*K Mul groups, each of count N.
     let mut mul_base: Option<AtomId> = None;
     for mi in 0..m {
@@ -147,15 +144,16 @@ pub fn matmul(m: u64, k: u64, n: u64) -> (NanoGraph, AtomId, AtomId, AtomId) {
         let base = g.push_group(
             n,
             ScalarOp::ReduceSum {
+                reduce_count: k,
+                reduce_stride: n as i64,
                 compute_dtype: DType::F32,
                 output_dtype: DType::F32,
             },
             vec![],
-            vec![k_sym],
-            vec![InputRef::SymAffine {
+            vec![],
+            vec![InputRef::Affine {
                 base: row_mul_base,
-                stride_i: 1,
-                stride_k: n as i32,
+                stride: 1,
             }],
         );
         if reduce_base.is_none() {
@@ -186,8 +184,6 @@ pub fn matmul_activation(
         ScalarOp::Literal(NumericScalar::F32(0.0)),
         vec![], vec![], vec![],
     );
-
-    let k_sym = g.bounded_sym_dim("k", k as u64);
 
     let mut mul_base: Option<AtomId> = None;
     for mi in 0..m {
@@ -220,15 +216,16 @@ pub fn matmul_activation(
         let base = g.push_group(
             n,
             ScalarOp::ReduceSum {
+                reduce_count: k,
+                reduce_stride: n as i64,
                 compute_dtype: DType::F32,
                 output_dtype: DType::F32,
             },
             vec![],
-            vec![k_sym],
-            vec![InputRef::SymAffine {
+            vec![],
+            vec![InputRef::Affine {
                 base: row_mul_base,
-                stride_i: 1,
-                stride_k: n as i32,
+                stride: 1,
             }],
         );
         if reduce_base.is_none() {
@@ -284,8 +281,6 @@ pub fn matmul_chain(
     );
 
     // First matmul: AB = A @ B  →  [M, N1]
-    let k1_sym = g.bounded_sym_dim("k1", k1 as u64);
-
     let mut mul1_base: Option<AtomId> = None;
     for mi in 0..m {
         for ki in 0..k1 {
@@ -317,15 +312,16 @@ pub fn matmul_chain(
         let base = g.push_group(
             n1,
             ScalarOp::ReduceSum {
+                reduce_count: k1,
+                reduce_stride: n1 as i64,
                 compute_dtype: DType::F32,
                 output_dtype: DType::F32,
             },
             vec![],
-            vec![k1_sym],
-            vec![InputRef::SymAffine {
+            vec![],
+            vec![InputRef::Affine {
                 base: row_mul_base,
-                stride_i: 1,
-                stride_k: n1 as i32,
+                stride: 1,
             }],
         );
         if ab_base.is_none() {
@@ -335,7 +331,6 @@ pub fn matmul_chain(
     let ab_base = ab_base.unwrap();
 
     // Second matmul: out = AB @ C  →  [M, N2]
-    let k2_sym = g.bounded_sym_dim("k2", k2 as u64);
 
     let mut mul2_base: Option<AtomId> = None;
     for mi in 0..m {
@@ -369,15 +364,16 @@ pub fn matmul_chain(
         let base = g.push_group(
             n2,
             ScalarOp::ReduceSum {
+                reduce_count: k2,
+                reduce_stride: n2 as i64,
                 compute_dtype: DType::F32,
                 output_dtype: DType::F32,
             },
             vec![],
-            vec![k2_sym],
-            vec![InputRef::SymAffine {
+            vec![],
+            vec![InputRef::Affine {
                 base: row_mul_base,
-                stride_i: 1,
-                stride_k: n2 as i32,
+                stride: 1,
             }],
         );
         if out_base.is_none() {

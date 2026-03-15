@@ -624,9 +624,12 @@ mod tests {
         );
 
         // Reduce over seq_len: each of 768 hidden atoms accumulates over seq.
+        // reduce_count=0 signals "driven by SymDim" rather than a known count.
         let _reduced = g.push_group(
             768,
             ScalarOp::ReduceSum {
+                reduce_count: 0,
+                reduce_stride: 0,
                 compute_dtype: DType::F32,
                 output_dtype: DType::F32,
             },

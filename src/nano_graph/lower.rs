@@ -729,15 +729,23 @@ impl LowerCtx {
             AnyMilliOp::Slice(s) => self.lower_slice(s, all_infos),
             AnyMilliOp::MatMul(m) => self.lower_matmul(m, all_infos),
             AnyMilliOp::ReduceSum(r) => {
-                self.lower_reduce(r, all_infos, |compute_dt, out_dt| ScalarOp::ReduceSum {
-                    compute_dtype: compute_dt,
-                    output_dtype: out_dt,
+                self.lower_reduce(r, all_infos, |compute_dt, out_dt, count, stride| {
+                    ScalarOp::ReduceSum {
+                        reduce_count: count,
+                        reduce_stride: stride,
+                        compute_dtype: compute_dt,
+                        output_dtype: out_dt,
+                    }
                 })
             }
             AnyMilliOp::ReduceMax(r) => {
-                self.lower_reduce(r, all_infos, |compute_dt, out_dt| ScalarOp::ReduceMax {
-                    compute_dtype: compute_dt,
-                    output_dtype: out_dt,
+                self.lower_reduce(r, all_infos, |compute_dt, out_dt, count, stride| {
+                    ScalarOp::ReduceMax {
+                        reduce_count: count,
+                        reduce_stride: stride,
+                        compute_dtype: compute_dt,
+                        output_dtype: out_dt,
+                    }
                 })
             }
             AnyMilliOp::ReduceMean(r) => self.lower_reduce_mean(r, all_infos),
@@ -2208,12 +2216,6 @@ impl LowerCtx {
         let accumulate_dtype = matmul.accumulate_dtype();
         let out_dtype = matmul.output_dtype();
 
-        // Create bounded sym dim for the contraction dimension K.
-        let k_sym = self
-            .nano
-            .bounded_sym_dim(&format!("matmul_k_{}", self.next_anon_sym), k);
-        self.next_anon_sym += 1;
-
         // Compute A's known-dim strides (for addressing within A's atoms).
         let a_known_dims: Vec<u64> = a_layout
             .iter()
@@ -2362,8 +2364,8 @@ impl LowerCtx {
         let mul_base = mul_base_id.unwrap();
 
         // ReduceSum: one group per row, each with N atoms.
-        // stride_k = N so that stepping k hops between k-blocks within the
-        // merged Mul group. stride_i = 1 for consecutive output atoms.
+        // reduce_stride = N so that stepping k hops between k-blocks within the
+        // merged Mul group. Input stride = 1 for consecutive output atoms.
         let mut reduce_base_id = None;
 
         for g in 0..num_row_groups {
@@ -2372,15 +2374,16 @@ impl LowerCtx {
             let base = self.nano.push_group(
                 n_u64,
                 ScalarOp::ReduceSum {
+                    reduce_count: k_u64,
+                    reduce_stride: n_u64 as i64,
                     compute_dtype: accumulate_dtype,
                     output_dtype: out_dtype,
                 },
                 out_sym_dims.clone(),
-                vec![k_sym],
-                vec![InputRef::SymAffine {
+                vec![],
+                vec![InputRef::Affine {
                     base: row_mul_base,
-                    stride_i: 1,
-                    stride_k: n_u64 as i32,
+                    stride: 1,
                 }],
             );
 
@@ -2412,7 +2415,7 @@ impl LowerCtx {
     ) where
         R: Node,
         R: ReduceAccessors,
-        F: Fn(DType, DType) -> ScalarOp,
+        F: Fn(DType, DType, u64, i64) -> ScalarOp,
     {
         let in_id = Node::inputs(reduce).next().unwrap();
         let out_id = Node::outputs(reduce).next().unwrap();
@@ -2550,25 +2553,6 @@ impl LowerCtx {
             .collect();
         let out_count = out_known.iter().product::<u64>().max(1);
 
-        // Create bounded sym dim for the reduction.
-        let reduce_sym = self
-            .nano
-            .bounded_sym_dim(&format!("reduce_{}", self.next_anon_sym), reduce_extent);
-        self.next_anon_sym += 1;
-
-        // Build the intermediate multiply group (identity * 1 for ReduceSum/Max,
-        // actually we need a group with sym_dims=[reduce_sym] that reads from
-        // the input with SymAffine).
-        //
-        // For each output atom (indices over non-reduced known dims), we need to
-        // iterate over the reduced dims. The SymAffine stride_k encodes how the
-        // reduction iteration advances through the input's flat index.
-        //
-        // For a single reduced dim at known-dim index `rki` with stride `s`:
-        //   stride_k = s (input stride of the reduced dim)
-        //   stride_i = 1 for the output's flat index
-        //
-        // For multiple reduced dims, we'd need multiple sym dims.
         // For now, handle single-axis reduction (covers most cases).
         if reduce_known_indices.len() != 1 {
             self.lower_as_boundary_named(reduce, all_infos, "Reduce");
@@ -2577,7 +2561,7 @@ impl LowerCtx {
 
         let rki = reduce_known_indices[0];
         let in_strides = TensorAtomMap::compute_strides(&in_known);
-        let reduce_stride = in_strides[rki] as i32;
+        let reduce_stride = in_strides[rki] as i64;
 
         // Build output known strides.
         let out_strides_local = TensorAtomMap::compute_strides(&out_known);
@@ -2630,21 +2614,20 @@ impl LowerCtx {
                 .all(|w| (w[1] as i64 - w[0] as i64) == stride)
         };
 
-        // Input group: out_count atoms with sym_dims including reduce_sym.
-        // Uses SymAffine to index into the source, advancing by reduce_stride per k.
+        // Build the input ref: Affine addressing for the base (at k=0),
+        // with reduce_count and reduce_stride encoded in the op itself.
         let input_ref = if is_affine && out_count > 0 {
             let stride_i = if out_count > 1 {
-                base_ids[1] as i32 - base_ids[0] as i32
+                (base_ids[1] as i64 - base_ids[0] as i64) as i32
             } else {
                 1
             };
-            InputRef::SymAffine {
+            InputRef::Affine {
                 base: in_map.base_id.offset(base_ids[0]),
-                stride_i,
-                stride_k: reduce_stride,
+                stride: stride_i,
             }
         } else {
-            // Need per-atom SymAffine, which we can't do with a single group.
+            // Need per-atom addressing, which we can't do with a single group.
             // Fall back to boundary.
             self.lower_as_boundary_named(reduce, all_infos, "Reduce");
             return;
@@ -2667,15 +2650,15 @@ impl LowerCtx {
             return;
         };
 
-        // ReduceSum/ReduceMax group: reads directly from input atoms via
-        // SymAffine. The compute_dtype handles casting inputs to the
-        // accumulation precision, and output_dtype casts the result.
-        let reduce_op = make_reduce_op(compute_dt, out_dt);
+        // ReduceSum/ReduceMax group: the op carries reduce_count and reduce_stride,
+        // and the input uses Affine addressing (base at k=0).
+        // The evaluator loops k=0..reduce_count, reading at base + stride*i + k*reduce_stride.
+        let reduce_op = make_reduce_op(compute_dt, out_dt, reduce_extent, reduce_stride);
         let base_id = self.nano.push_group(
             out_count,
             reduce_op,
             out_sym_dims.clone(),
-            vec![reduce_sym],
+            vec![],
             vec![input_ref],
         );
 
@@ -2749,9 +2732,13 @@ impl LowerCtx {
         };
 
         // Lower as ReduceSum, keeping output in compute_dt (not out_dt).
-        self.lower_reduce(reduce, all_infos, |cd, _od| ScalarOp::ReduceSum {
-            compute_dtype: cd,
-            output_dtype: cd,
+        self.lower_reduce(reduce, all_infos, |cd, _od, count, stride| {
+            ScalarOp::ReduceSum {
+                reduce_count: count,
+                reduce_stride: stride,
+                compute_dtype: cd,
+                output_dtype: cd,
+            }
         });
 
         // If ReduceSum succeeded (output is in tensor_map), divide by extent.

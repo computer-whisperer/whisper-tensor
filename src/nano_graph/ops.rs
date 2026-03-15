@@ -77,14 +77,19 @@ pub enum ScalarOp {
         compute_dtype: DType,
         output_dtype: DType,
     },
-    /// Reduce a dimension by summation. One input; the block iterates over the
-    /// reduction dimension and accumulates.
+    /// Reduce by summation over a known number of steps.
+    /// One input (Affine or similar); the group iterates k=0..reduce_count,
+    /// reading input at offset k*reduce_stride from the resolved base.
     ReduceSum {
+        reduce_count: u64,
+        reduce_stride: i64,
         compute_dtype: DType,
         output_dtype: DType,
     },
-    /// Reduce a dimension by max.
+    /// Reduce by max over a known number of steps.
     ReduceMax {
+        reduce_count: u64,
+        reduce_stride: i64,
         compute_dtype: DType,
         output_dtype: DType,
     },

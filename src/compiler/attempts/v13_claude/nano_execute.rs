@@ -162,21 +162,10 @@ fn eval_group(
         let atom_idx = group.base_id.0 + i;
 
         if is_reduce {
-            // Reduce ops iterate over sym_dim bounds.
-            assert!(
-                !group.reduce_dims.is_empty(),
-                "Reduce op must have reduce_dims"
-            );
-            let rd = group.reduce_dims[0];
-            let bound = graph
-                .sym_dim_bounds
-                .get(&rd)
-                .copied()
-                .expect("Reduce dim must have a bound");
-
-            let (compute_dtype, output_dtype) = match &group.op {
-                ScalarOp::ReduceSum { compute_dtype, output_dtype } => (*compute_dtype, *output_dtype),
-                ScalarOp::ReduceMax { compute_dtype, output_dtype } => (*compute_dtype, *output_dtype),
+            // Reduce ops use reduce_count/reduce_stride from the op.
+            let (reduce_count, reduce_stride, compute_dtype, output_dtype) = match &group.op {
+                ScalarOp::ReduceSum { reduce_count, reduce_stride, compute_dtype, output_dtype } => (*reduce_count, *reduce_stride, *compute_dtype, *output_dtype),
+                ScalarOp::ReduceMax { reduce_count, reduce_stride, compute_dtype, output_dtype } => (*reduce_count, *reduce_stride, *compute_dtype, *output_dtype),
                 _ => unreachable!(),
             };
 
@@ -186,9 +175,10 @@ fn eval_group(
                 _ => unreachable!(),
             };
 
-            for k in 0..bound as u64 {
-                let src = group.inputs[0].resolve(i, k);
-                let val = values[src.0 as usize].cast_to(compute_dtype);
+            let base = group.inputs[0].resolve(i, 0);
+            for k in 0..reduce_count {
+                let src_idx = (base.0 as i64 + k as i64 * reduce_stride) as u64;
+                let val = values[src_idx as usize].cast_to(compute_dtype);
                 acc = match &group.op {
                     ScalarOp::ReduceSum { .. } => acc.add(&val),
                     ScalarOp::ReduceMax { .. } => acc.scalar_max(&val),

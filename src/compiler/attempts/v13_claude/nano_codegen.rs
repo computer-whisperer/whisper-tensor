@@ -697,18 +697,12 @@ fn emit_group_body(
             Ok(())
         }
 
-        ScalarOp::ReduceSum {
-            compute_dtype,
-            output_dtype,
-        } => emit_reduce(
+        ScalarOp::ReduceSum { output_dtype, .. } => emit_reduce(
             builder, module, group, graph, values_ptr, i_val, i_const, math, var_counter,
             table_counter, true, *output_dtype,
         ),
 
-        ScalarOp::ReduceMax {
-            compute_dtype,
-            output_dtype,
-        } => emit_reduce(
+        ScalarOp::ReduceMax { output_dtype, .. } => emit_reduce(
             builder, module, group, graph, values_ptr, i_val, i_const, math, var_counter,
             table_counter, false, *output_dtype,
         ),
@@ -746,17 +740,12 @@ fn emit_reduce(
     is_sum: bool,
     output_dtype: DType,
 ) -> Result<(), String> {
-    assert_eq!(
-        group.reduce_dims.len(),
-        1,
-        "Only single reduce_dim supported"
-    );
-    let rd = group.reduce_dims[0];
-    let bound = graph
-        .sym_dim_bounds
-        .get(&rd)
-        .copied()
-        .ok_or_else(|| format!("Reduce dim {:?} has no bound", rd))?;
+    // Extract reduce_count and reduce_stride from the op.
+    let (reduce_count, reduce_stride) = match &group.op {
+        ScalarOp::ReduceSum { reduce_count, reduce_stride, .. } => (*reduce_count, *reduce_stride),
+        ScalarOp::ReduceMax { reduce_count, reduce_stride, .. } => (*reduce_count, *reduce_stride),
+        _ => return Err("emit_reduce called on non-reduce op".to_string()),
+    };
 
     let base_id = group.base_id.0;
 
@@ -770,6 +759,22 @@ fn emit_reduce(
     };
     builder.def_var(acc_var, init_val);
 
+    // Compute the base index for this atom's input (at k=0).
+    let base_idx = match &group.inputs[0] {
+        InputRef::Affine { base: input_base, stride } => {
+            match i_val {
+                Some(iv) => {
+                    let si = builder.ins().imul_imm(iv, *stride as i64);
+                    builder.ins().iadd_imm(si, input_base.0 as i64)
+                }
+                None => {
+                    builder.ins().iconst(types::I64, input_base.0 as i64 + (*stride as i64) * (i_const as i64))
+                }
+            }
+        }
+        _ => return Err(format!("Reduce input must be Affine, got {:?}", group.inputs[0])),
+    };
+
     // K loop variable.
     let k_var = var_counter.next();
     builder.declare_var(k_var, types::I64);
@@ -780,7 +785,7 @@ fn emit_reduce(
     let red_body = builder.create_block();
     let red_exit = builder.create_block();
 
-    let bound_val = builder.ins().iconst(types::I64, bound as i64);
+    let bound_val = builder.ins().iconst(types::I64, reduce_count as i64);
 
     builder.ins().jump(red_header, &[]);
 
@@ -794,15 +799,16 @@ fn emit_reduce(
     );
     builder.ins().brif(k_cmp, red_body, &[], red_exit, &[]);
 
-    // Reduction loop body: load source at (i, k), accumulate.
+    // Reduction loop body: load source at base_idx + k * reduce_stride.
     builder.switch_to_block(red_body);
     let k_val = builder.use_var(k_var);
 
-    // The single input ref for a reduce. For ReduceSum/ReduceMax, inputs[0]
-    // should be a SymAffine that depends on both i and k.
-    let src_val = load_input_ref_with_k(
-        builder, module, &group.inputs[0], values_ptr, i_val, i_const, k_val, table_counter,
-    )?;
+    // src_idx = base_idx + k * reduce_stride
+    let k_offset = builder.ins().imul_imm(k_val, reduce_stride);
+    let src_idx = builder.ins().iadd(base_idx, k_offset);
+    let byte_offset = builder.ins().imul_imm(src_idx, 4);
+    let addr = builder.ins().iadd(values_ptr, byte_offset);
+    let src_val = builder.ins().load(types::F32, MemFlags::new(), addr, 0);
 
     let acc = builder.use_var(acc_var);
     let new_acc = if is_sum {
@@ -1427,7 +1433,6 @@ mod tests {
         let n = 16u64;
 
         let mut g = NanoGraph::new();
-        let k_sym = g.bounded_sym_dim("k", k_dim);
 
         let a = g.push_group(
             m * k_dim,
@@ -1474,15 +1479,16 @@ mod tests {
         let c = g.push_group(
             m * n,
             ScalarOp::ReduceSum {
+                reduce_count: k_dim,
+                reduce_stride: 1,
                 compute_dtype: DType::F32,
                 output_dtype: DType::F32,
             },
             vec![],
-            vec![k_sym],
-            vec![InputRef::SymAffine {
+            vec![],
+            vec![InputRef::Affine {
                 base: prods,
-                stride_i: k_dim as i32,
-                stride_k: 1,
+                stride: k_dim as i32,
             }],
         );
 
@@ -1608,7 +1614,6 @@ mod tests {
     #[test]
     fn test_reduce_max() {
         let mut g = NanoGraph::new();
-        let k_sym = g.bounded_sym_dim("k", 8);
 
         let a = g.push_group(
             8,
@@ -1621,15 +1626,16 @@ mod tests {
         let c = g.push_group(
             1,
             ScalarOp::ReduceMax {
+                reduce_count: 8,
+                reduce_stride: 1,
                 compute_dtype: DType::F32,
                 output_dtype: DType::F32,
             },
             vec![],
-            vec![k_sym],
-            vec![InputRef::SymAffine {
+            vec![],
+            vec![InputRef::Affine {
                 base: a,
-                stride_i: 0,
-                stride_k: 1,
+                stride: 0,
             }],
         );
 
@@ -1859,7 +1865,6 @@ mod tests {
     fn test_bf16_reduce_sum() {
         // Test that ReduceSum with output_dtype: BF16 rounds the accumulated result.
         let mut g = NanoGraph::new();
-        let k_sym = g.bounded_sym_dim("k", 8);
 
         let a = g.push_group(
             8,
@@ -1872,15 +1877,16 @@ mod tests {
         let c = g.push_group(
             1,
             ScalarOp::ReduceSum {
+                reduce_count: 8,
+                reduce_stride: 1,
                 compute_dtype: DType::F32,
                 output_dtype: DType::BF16,
             },
             vec![],
-            vec![k_sym],
-            vec![InputRef::SymAffine {
+            vec![],
+            vec![InputRef::Affine {
                 base: a,
-                stride_i: 0,
-                stride_k: 1,
+                stride: 0,
             }],
         );
 

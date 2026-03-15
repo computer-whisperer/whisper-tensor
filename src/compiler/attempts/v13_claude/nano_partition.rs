@@ -645,7 +645,6 @@ mod tests {
         //   Total ReduceSum groups: 4, each count=2
 
         let mut g = NanoGraph::new();
-        let k_sym = g.bounded_sym_dim("matmul_k", 3);
 
         // A: 12 literal atoms (4x3 matrix).
         let a_base = g.push_group(
@@ -704,15 +703,16 @@ mod tests {
             let reduce_base = g.push_group(
                 2,
                 ScalarOp::ReduceSum {
+                    reduce_count: 3,
+                    reduce_stride: 2, // N=2, so reduce_stride=2 to hop between Mul groups
                     compute_dtype: DType::F32,
                     output_dtype: DType::F32,
                 },
                 vec![],
-                vec![k_sym],
-                vec![InputRef::SymAffine {
+                vec![],
+                vec![InputRef::Affine {
                     base: row_mul_base,
-                    stride_i: 1,
-                    stride_k: 2, // N=2, so stride_k=2 to hop between Mul groups
+                    stride: 1,
                 }],
             );
             reduce_bases.push(reduce_base);
@@ -740,7 +740,6 @@ mod tests {
     #[test]
     fn test_matmul_plus_activation() {
         let mut g = NanoGraph::new();
-        let k_sym = g.bounded_sym_dim("matmul_k", 4);
 
         // A[2,4], B[4,8] -> C[2,8]
         let m = 2u64;
@@ -796,15 +795,16 @@ mod tests {
             let rb = g.push_group(
                 n,
                 ScalarOp::ReduceSum {
+                    reduce_count: k,
+                    reduce_stride: n as i64,
                     compute_dtype: DType::F32,
                     output_dtype: DType::F32,
                 },
                 vec![],
-                vec![k_sym],
-                vec![InputRef::SymAffine {
+                vec![],
+                vec![InputRef::Affine {
                     base: row_mul_base,
-                    stride_i: 1,
-                    stride_k: n as i32,
+                    stride: 1,
                 }],
             );
             reduce_bases.push(rb);
@@ -858,8 +858,6 @@ mod tests {
     #[test]
     fn test_two_matmuls() {
         let mut g = NanoGraph::new();
-        let k_sym1 = g.bounded_sym_dim("k1", 3);
-        let k_sym2 = g.bounded_sym_dim("k2", 2);
 
         // Matmul 1: A1[2,3] @ B1[3,4] = C1[2,4]
         let a1 = g.push_group(6, ScalarOp::Literal(NumericScalar::F32(1.0)), vec![], vec![], vec![]);
@@ -894,15 +892,16 @@ mod tests {
             let rb = g.push_group(
                 4,
                 ScalarOp::ReduceSum {
+                    reduce_count: 3,
+                    reduce_stride: 4,
                     compute_dtype: DType::F32,
                     output_dtype: DType::F32,
                 },
                 vec![],
-                vec![k_sym1],
-                vec![InputRef::SymAffine {
+                vec![],
+                vec![InputRef::Affine {
                     base: mul1_bases[(row * 3) as usize],
-                    stride_i: 1,
-                    stride_k: 4,
+                    stride: 1,
                 }],
             );
             reduce1.push(rb);
@@ -941,15 +940,16 @@ mod tests {
             let rb = g.push_group(
                 5,
                 ScalarOp::ReduceSum {
+                    reduce_count: 2,
+                    reduce_stride: 5,
                     compute_dtype: DType::F32,
                     output_dtype: DType::F32,
                 },
                 vec![],
-                vec![k_sym2],
-                vec![InputRef::SymAffine {
+                vec![],
+                vec![InputRef::Affine {
                     base: mul2_bases[(row * 2) as usize],
-                    stride_i: 1,
-                    stride_k: 5,
+                    stride: 1,
                 }],
             );
             reduce2.push(rb);
