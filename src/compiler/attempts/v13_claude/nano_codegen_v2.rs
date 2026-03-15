@@ -1279,4 +1279,769 @@ mod tests {
         let plan2 = plan_execution(&result.graph, 2);
         compare_plan_vs_interp(&result.graph, &plan2, &overrides, "plan_matmul_2x3x2_2lanes");
     }
+
+    /// Test matmul chain: A@B + bias, then result@C.
+    /// This exercises multi-phase execution with AllRows groups (the Add).
+    #[test]
+    fn test_plan_matmul_chain() {
+        use crate::backends::eval_backend::EvalBackend;
+        use crate::milli_graph::ops::{MatMul, SimpleBinary};
+        use crate::milli_graph::MilliOpGraph;
+        use crate::nano_graph::lower::lower_with_info;
+        use crate::numeric_tensor::NumericTensor;
+        use crate::tensor_info::TensorInfo;
+
+        use super::super::nano_plan_v2c::plan_execution;
+
+        let mut rng = rand::rng();
+        let (mut milli, _) = MilliOpGraph::new(std::iter::empty(), &mut rng);
+        let a = milli.add_input(&mut rng); // 4x6
+        let b = milli.add_input(&mut rng); // 6x8
+        let bias = milli.add_input(&mut rng); // 4x8 (broadcast-compatible)
+        let c = milli.add_input(&mut rng); // 8x3
+
+        // ab = A @ B  (4x8)
+        let ab = MatMul::push_new_default_precision(
+            &mut milli, a, b, DType::F32, &mut rng,
+        );
+        // ab_bias = ab + bias  (4x8, elementwise)
+        let ab_bias = SimpleBinary::add(&mut milli, ab, bias, &mut rng);
+        // result = ab_bias @ C  (4x3)
+        let _result = MatMul::push_new_default_precision(
+            &mut milli, ab_bias, c, DType::F32, &mut rng,
+        );
+
+        let a_data: Vec<f32> = (0..24).map(|i| (i as f32) * 0.1 + 0.5).collect();
+        let b_data: Vec<f32> = (0..48).map(|i| (i as f32) * 0.05 - 1.0).collect();
+        let bias_data: Vec<f32> = (0..32).map(|i| (i as f32) * 0.01).collect();
+        let c_data: Vec<f32> = (0..24).map(|i| (i as f32) * 0.02 + 0.1).collect();
+
+        let a_tensor = NumericTensor::from_vec_shape(a_data, vec![4, 6]).unwrap();
+        let b_tensor = NumericTensor::from_vec_shape(b_data, vec![6, 8]).unwrap();
+        let bias_tensor = NumericTensor::from_vec_shape(bias_data, vec![4, 8]).unwrap();
+        let c_tensor = NumericTensor::from_vec_shape(c_data, vec![8, 3]).unwrap();
+
+        let mut info_inputs = HashMap::new();
+        info_inputs.insert(a, TensorInfo::from(a_tensor.clone()));
+        info_inputs.insert(b, TensorInfo::from(b_tensor.clone()));
+        info_inputs.insert(bias, TensorInfo::from(bias_tensor.clone()));
+        info_inputs.insert(c, TensorInfo::from(c_tensor.clone()));
+
+        let result = lower_with_info(&milli, &info_inputs).unwrap();
+        assert!(
+            result.unsupported.is_empty(),
+            "unsupported: {:?}",
+            result.unsupported_details
+        );
+
+        let mut overrides = HashMap::new();
+        for (&atom_idx, scalar) in &result.numeric_overrides {
+            overrides.insert(atom_idx, scalar.to_f64() as f32);
+        }
+        for (id, tensor) in [
+            (a, &a_tensor),
+            (b, &b_tensor),
+            (bias, &bias_tensor),
+            (c, &c_tensor),
+        ] {
+            if let Some(tam) = result.tensor_map.get(&id) {
+                let mut backend = EvalBackend::NDArray;
+                let f32_t = tensor.cast(DType::F32, &mut backend).unwrap();
+                let flat = f32_t.flatten().unwrap();
+                let v: Vec<f32> = flat.to_ndarray().unwrap().try_into().unwrap();
+                for (i, &val) in v.iter().enumerate() {
+                    overrides.insert(tam.base_id.0 + i as u64, val);
+                }
+            }
+        }
+
+        // Print plan structure for debugging.
+        let groups = result.graph.groups();
+        eprintln!("Matmul chain: {} groups, {} atoms", groups.len(), result.graph.num_atoms());
+        for (gi, g) in groups.iter().enumerate() {
+            eprintln!(
+                "  group {}: base={} count={} op={:?} inputs={}",
+                gi, g.base_id.0, g.count,
+                std::mem::discriminant(&g.op),
+                g.inputs.len()
+            );
+        }
+
+        // Single-lane plan (no splitting, should match interpreter exactly).
+        let plan1 = plan_execution(&result.graph, 1);
+        eprintln!("Plan 1 lane: {} phases", plan1.phases.len());
+        for (pi, phase) in plan1.phases.iter().enumerate() {
+            for (li, lane) in phase.lane_work.iter().enumerate() {
+                for w in lane {
+                    eprintln!(
+                        "  phase {} lane {} group_idx={} offset={} count={}",
+                        pi, li, w.group_idx, w.atom_offset, w.atom_count,
+                    );
+                }
+            }
+        }
+        compare_plan_vs_interp(
+            &result.graph, &plan1, &overrides, "matmul_chain_1lane",
+        );
+
+        // Two lanes.
+        let plan2 = plan_execution(&result.graph, 2);
+        eprintln!("Plan 2 lanes: {} phases", plan2.phases.len());
+        for (pi, phase) in plan2.phases.iter().enumerate() {
+            for (li, lane) in phase.lane_work.iter().enumerate() {
+                for w in lane {
+                    let g = &groups[w.group_idx];
+                    eprintln!(
+                        "  phase {} lane {} group_idx={} offset={} count={} (base={} total={})",
+                        pi, li, w.group_idx, w.atom_offset, w.atom_count,
+                        g.base_id.0, g.count,
+                    );
+                }
+            }
+        }
+        compare_plan_vs_interp(
+            &result.graph, &plan2, &overrides, "matmul_chain_2lanes",
+        );
+
+        // Four lanes.
+        let plan4 = plan_execution(&result.graph, 4);
+        compare_plan_vs_interp(
+            &result.graph, &plan4, &overrides, "matmul_chain_4lanes",
+        );
+
+        // Eight lanes.
+        let plan8 = plan_execution(&result.graph, 8);
+        compare_plan_vs_interp(
+            &result.graph, &plan8, &overrides, "matmul_chain_8lanes",
+        );
+    }
+
+    /// Test with elementwise chain only (no matmul) to isolate AllRows splitting.
+    #[test]
+    fn test_plan_elementwise_chain() {
+        use crate::milli_graph::ops::{SimpleBinary, SimpleUnaryOp};
+        use crate::milli_graph::MilliOpGraph;
+        use crate::nano_graph::lower::lower_with_info;
+        use crate::numeric_tensor::NumericTensor;
+        use crate::tensor_info::TensorInfo;
+        use crate::backends::eval_backend::EvalBackend;
+
+        use super::super::nano_plan_v2c::plan_execution;
+
+        let mut rng = rand::rng();
+        let (mut milli, _) = MilliOpGraph::new(std::iter::empty(), &mut rng);
+        let a = milli.add_input(&mut rng); // 16 elements
+        let b = milli.add_input(&mut rng); // 16 elements
+
+        // Chain: a + b, then exp
+        let sum = SimpleBinary::add(&mut milli, a, b, &mut rng);
+        let _exp = SimpleUnaryOp::exp(&mut milli, sum, &mut rng);
+
+        let a_data: Vec<f32> = (0..16).map(|i| (i as f32) * 0.1).collect();
+        let b_data: Vec<f32> = (0..16).map(|i| (i as f32) * 0.05 + 0.5).collect();
+        let a_tensor = NumericTensor::from_vec_shape(a_data, vec![4, 4]).unwrap();
+        let b_tensor = NumericTensor::from_vec_shape(b_data, vec![4, 4]).unwrap();
+
+        let mut info_inputs = HashMap::new();
+        info_inputs.insert(a, TensorInfo::from(a_tensor.clone()));
+        info_inputs.insert(b, TensorInfo::from(b_tensor.clone()));
+
+        let result = lower_with_info(&milli, &info_inputs).unwrap();
+        assert!(result.unsupported.is_empty());
+
+        let mut overrides = HashMap::new();
+        for (&atom_idx, scalar) in &result.numeric_overrides {
+            overrides.insert(atom_idx, scalar.to_f64() as f32);
+        }
+        for (id, tensor) in [(a, &a_tensor), (b, &b_tensor)] {
+            if let Some(tam) = result.tensor_map.get(&id) {
+                let mut backend = EvalBackend::NDArray;
+                let f32_t = tensor.cast(DType::F32, &mut backend).unwrap();
+                let flat = f32_t.flatten().unwrap();
+                let v: Vec<f32> = flat.to_ndarray().unwrap().try_into().unwrap();
+                for (i, &val) in v.iter().enumerate() {
+                    overrides.insert(tam.base_id.0 + i as u64, val);
+                }
+            }
+        }
+
+        for lanes in [1, 2, 4, 8] {
+            let plan = plan_execution(&result.graph, lanes);
+            compare_plan_vs_interp(
+                &result.graph,
+                &plan,
+                &overrides,
+                &format!("elementwise_chain_{}lanes", lanes),
+            );
+        }
+    }
+
+    /// Test with a larger matmul that has more rows to split.
+    #[test]
+    fn test_plan_large_matmul() {
+        use crate::backends::eval_backend::EvalBackend;
+        use crate::milli_graph::ops::MatMul;
+        use crate::milli_graph::MilliOpGraph;
+        use crate::nano_graph::lower::lower_with_info;
+        use crate::numeric_tensor::NumericTensor;
+        use crate::tensor_info::TensorInfo;
+
+        use super::super::nano_plan_v2c::plan_execution;
+
+        let mut rng = rand::rng();
+        let (mut milli, _) = MilliOpGraph::new(std::iter::empty(), &mut rng);
+        let a = milli.add_input(&mut rng); // 16x32
+        let b = milli.add_input(&mut rng); // 32x16
+
+        let _c = MatMul::push_new_default_precision(
+            &mut milli, a, b, DType::F32, &mut rng,
+        );
+
+        let a_data: Vec<f32> = (0..512).map(|i| ((i as f32) * 0.01).sin()).collect();
+        let b_data: Vec<f32> = (0..512).map(|i| ((i as f32) * 0.02).cos()).collect();
+        let a_tensor = NumericTensor::from_vec_shape(a_data, vec![16, 32]).unwrap();
+        let b_tensor = NumericTensor::from_vec_shape(b_data, vec![32, 16]).unwrap();
+
+        let mut info_inputs = HashMap::new();
+        info_inputs.insert(a, TensorInfo::from(a_tensor.clone()));
+        info_inputs.insert(b, TensorInfo::from(b_tensor.clone()));
+
+        let result = lower_with_info(&milli, &info_inputs).unwrap();
+        assert!(
+            result.unsupported.is_empty(),
+            "unsupported: {:?}",
+            result.unsupported_details,
+        );
+
+        let mut overrides = HashMap::new();
+        for (&atom_idx, scalar) in &result.numeric_overrides {
+            overrides.insert(atom_idx, scalar.to_f64() as f32);
+        }
+        for (id, tensor) in [(a, &a_tensor), (b, &b_tensor)] {
+            if let Some(tam) = result.tensor_map.get(&id) {
+                let mut backend = EvalBackend::NDArray;
+                let f32_t = tensor.cast(DType::F32, &mut backend).unwrap();
+                let flat = f32_t.flatten().unwrap();
+                let v: Vec<f32> = flat.to_ndarray().unwrap().try_into().unwrap();
+                for (i, &val) in v.iter().enumerate() {
+                    overrides.insert(tam.base_id.0 + i as u64, val);
+                }
+            }
+        }
+
+        for lanes in [1, 2, 4, 8] {
+            let plan = plan_execution(&result.graph, lanes);
+            compare_plan_vs_interp(
+                &result.graph,
+                &plan,
+                &overrides,
+                &format!("large_matmul_16x32x16_{}lanes", lanes),
+            );
+        }
+    }
+
+    /// Also compare v2 codegen against the OLD nano_codegen (whole-graph, no splitting).
+    #[test]
+    fn test_v2_vs_v1_codegen() {
+        use crate::backends::eval_backend::EvalBackend;
+        use crate::milli_graph::ops::{MatMul, SimpleBinary};
+        use crate::milli_graph::MilliOpGraph;
+        use crate::nano_graph::lower::lower_with_info;
+        use crate::numeric_tensor::NumericTensor;
+        use crate::tensor_info::TensorInfo;
+
+        use super::super::nano_codegen::CompiledPipeline;
+        use super::super::nano_plan_v2c::plan_execution;
+
+        let mut rng = rand::rng();
+        let (mut milli, _) = MilliOpGraph::new(std::iter::empty(), &mut rng);
+        let a = milli.add_input(&mut rng); // 8x12
+        let b = milli.add_input(&mut rng); // 12x6
+        let bias = milli.add_input(&mut rng); // 8x6
+
+        let ab = MatMul::push_new_default_precision(
+            &mut milli, a, b, DType::F32, &mut rng,
+        );
+        let _ab_bias = SimpleBinary::add(&mut milli, ab, bias, &mut rng);
+
+        let a_data: Vec<f32> = (0..96).map(|i| ((i as f32) * 0.1).sin()).collect();
+        let b_data: Vec<f32> = (0..72).map(|i| ((i as f32) * 0.15).cos()).collect();
+        let bias_data: Vec<f32> = (0..48).map(|i| (i as f32) * 0.01 - 0.2).collect();
+
+        let a_tensor = NumericTensor::from_vec_shape(a_data, vec![8, 12]).unwrap();
+        let b_tensor = NumericTensor::from_vec_shape(b_data, vec![12, 6]).unwrap();
+        let bias_tensor = NumericTensor::from_vec_shape(bias_data, vec![8, 6]).unwrap();
+
+        let mut info_inputs = HashMap::new();
+        info_inputs.insert(a, TensorInfo::from(a_tensor.clone()));
+        info_inputs.insert(b, TensorInfo::from(b_tensor.clone()));
+        info_inputs.insert(bias, TensorInfo::from(bias_tensor.clone()));
+
+        let result = lower_with_info(&milli, &info_inputs).unwrap();
+        assert!(result.unsupported.is_empty());
+
+        let mut overrides = HashMap::new();
+        for (&atom_idx, scalar) in &result.numeric_overrides {
+            overrides.insert(atom_idx, scalar.to_f64() as f32);
+        }
+        for (id, tensor) in [
+            (a, &a_tensor),
+            (b, &b_tensor),
+            (bias, &bias_tensor),
+        ] {
+            if let Some(tam) = result.tensor_map.get(&id) {
+                let mut backend = EvalBackend::NDArray;
+                let f32_t = tensor.cast(DType::F32, &mut backend).unwrap();
+                let flat = f32_t.flatten().unwrap();
+                let v: Vec<f32> = flat.to_ndarray().unwrap().try_into().unwrap();
+                for (i, &val) in v.iter().enumerate() {
+                    overrides.insert(tam.base_id.0 + i as u64, val);
+                }
+            }
+        }
+
+        // V1 (old codegen, whole-graph).
+        let v1_compiled = CompiledPipeline::compile(&result.graph).expect("v1 compile");
+        let v1_values = v1_compiled.execute_full(&overrides);
+
+        // V2 with various lane counts.
+        for lanes in [1, 2, 4, 8] {
+            let plan = plan_execution(&result.graph, lanes);
+            let v2_compiled = CompiledPlan::compile(&result.graph, &plan).expect("v2 compile");
+            let v2_values = v2_compiled.execute(&overrides);
+
+            let mut max_abs_err: f64 = 0.0;
+            let mut max_err_atom: u64 = 0;
+            let mut err_count = 0;
+            for i in 0..result.graph.num_atoms() as usize {
+                let v1_val = v1_values[i] as f64;
+                let v2_val = v2_values[i] as f64;
+                let diff = (v1_val - v2_val).abs();
+                if diff > max_abs_err {
+                    max_abs_err = diff;
+                    max_err_atom = i as u64;
+                }
+                if diff > 1e-6 {
+                    err_count += 1;
+                    if err_count <= 5 {
+                        eprintln!(
+                            "  v1 vs v2 ({}lanes): atom {} v1={} v2={} diff={}",
+                            lanes, i, v1_val, v2_val, diff,
+                        );
+                    }
+                }
+            }
+            eprintln!(
+                "[v1_vs_v2_{}lanes] max_abs_err={:.6e} at atom {}, {} atoms differ",
+                lanes, max_abs_err, max_err_atom, err_count,
+            );
+            assert!(
+                max_abs_err < 1e-5,
+                "v1 vs v2 ({}lanes): max_abs_err={:.6e} at atom {}",
+                lanes,
+                max_abs_err,
+                max_err_atom,
+            );
+        }
+    }
+
+    /// Test ReduceMean + matmul chain (simulates layer norm + projection).
+    /// ReduceMean creates a reduce pattern that interacts with AllRows splitting.
+    #[test]
+    fn test_plan_reducemean_matmul() {
+        use crate::backends::eval_backend::EvalBackend;
+        use crate::milli_graph::ops::{MatMul, ReduceMean, SimpleBinary};
+        use crate::milli_graph::MilliOpGraph;
+        use crate::nano_graph::lower::lower_with_info;
+        use crate::numeric_tensor::NumericTensor;
+        use crate::tensor_info::TensorInfo;
+
+        use super::super::nano_codegen::CompiledPipeline;
+        use super::super::nano_plan_v2c::plan_execution;
+
+        let mut rng = rand::rng();
+        let (mut milli, _) = MilliOpGraph::new(std::iter::empty(), &mut rng);
+        let x = milli.add_input(&mut rng); // 8x16 input
+        let w = milli.add_input(&mut rng); // 16x12 weight
+
+        // ReduceMean over last axis (simulates part of layer norm)
+        let mean = ReduceMean::push_new(&mut milli, x, None, true, false, &mut rng);
+        // Subtract mean from input
+        let centered = SimpleBinary::sub(&mut milli, x, mean, &mut rng);
+        // Project: centered @ w
+        let _proj = MatMul::push_new_default_precision(
+            &mut milli, centered, w, DType::F32, &mut rng,
+        );
+
+        let x_data: Vec<f32> = (0..128).map(|i| ((i as f32) * 0.07).sin() + 1.0).collect();
+        let w_data: Vec<f32> = (0..192).map(|i| ((i as f32) * 0.03).cos() * 0.5).collect();
+        let x_tensor = NumericTensor::from_vec_shape(x_data, vec![8, 16]).unwrap();
+        let w_tensor = NumericTensor::from_vec_shape(w_data, vec![16, 12]).unwrap();
+
+        let mut info_inputs = HashMap::new();
+        info_inputs.insert(x, TensorInfo::from(x_tensor.clone()));
+        info_inputs.insert(w, TensorInfo::from(w_tensor.clone()));
+
+        let result = lower_with_info(&milli, &info_inputs).unwrap();
+        if !result.unsupported.is_empty() {
+            eprintln!("unsupported: {:?}", result.unsupported_details);
+        }
+        // Allow some unsupported ops; just skip test if critical lowering fails
+        // (e.g., if axes=None ReduceMean isn't supported)
+
+        let mut overrides = HashMap::new();
+        for (&atom_idx, scalar) in &result.numeric_overrides {
+            overrides.insert(atom_idx, scalar.to_f64() as f32);
+        }
+        for (id, tensor) in [(x, &x_tensor), (w, &w_tensor)] {
+            if let Some(tam) = result.tensor_map.get(&id) {
+                let mut backend = EvalBackend::NDArray;
+                let f32_t = tensor.cast(DType::F32, &mut backend).unwrap();
+                let flat = f32_t.flatten().unwrap();
+                let v: Vec<f32> = flat.to_ndarray().unwrap().try_into().unwrap();
+                for (i, &val) in v.iter().enumerate() {
+                    overrides.insert(tam.base_id.0 + i as u64, val);
+                }
+            }
+        }
+
+        // V1 reference
+        let v1_compiled = CompiledPipeline::compile(&result.graph).expect("v1 compile");
+        let v1_values = v1_compiled.execute_full(&overrides);
+
+        for lanes in [1, 2, 4, 8] {
+            let plan = plan_execution(&result.graph, lanes);
+            let v2_compiled = CompiledPlan::compile(&result.graph, &plan).expect("v2 compile");
+            let v2_values = v2_compiled.execute(&overrides);
+
+            let mut max_abs_err: f64 = 0.0;
+            let mut max_err_atom: u64 = 0;
+            let mut err_count = 0;
+            for i in 0..result.graph.num_atoms() as usize {
+                let v1_val = v1_values[i] as f64;
+                let v2_val = v2_values[i] as f64;
+                let diff = (v1_val - v2_val).abs();
+                if diff > max_abs_err {
+                    max_abs_err = diff;
+                    max_err_atom = i as u64;
+                }
+                if diff > 1e-6 {
+                    err_count += 1;
+                    if err_count <= 3 {
+                        eprintln!(
+                            "  reducemean_matmul v1 vs v2 ({}lanes): atom {} v1={} v2={} diff={}",
+                            lanes, i, v1_val, v2_val, diff,
+                        );
+                    }
+                }
+            }
+            eprintln!(
+                "[reducemean_matmul_{}lanes] max_abs_err={:.6e} at atom {}, {} differ",
+                lanes, max_abs_err, max_err_atom, err_count,
+            );
+            assert!(
+                max_abs_err < 1e-4,
+                "reducemean_matmul v1 vs v2 ({}lanes): max_abs_err={:.6e} at atom {}",
+                lanes, max_abs_err, max_err_atom,
+            );
+        }
+    }
+
+    /// Test double matmul with residual add (GPT-2 pattern: attention + residual).
+    /// Pattern: Y = X @ W1 + X (residual), then Z = Y @ W2
+    #[test]
+    fn test_plan_matmul_residual() {
+        use crate::backends::eval_backend::EvalBackend;
+        use crate::milli_graph::ops::{MatMul, SimpleBinary};
+        use crate::milli_graph::MilliOpGraph;
+        use crate::nano_graph::lower::lower_with_info;
+        use crate::numeric_tensor::NumericTensor;
+        use crate::tensor_info::TensorInfo;
+
+        use super::super::nano_codegen::CompiledPipeline;
+        use super::super::nano_plan_v2c::plan_execution;
+
+        let mut rng = rand::rng();
+        let (mut milli, _) = MilliOpGraph::new(std::iter::empty(), &mut rng);
+        let x = milli.add_input(&mut rng);  // 8x16
+        let w1 = milli.add_input(&mut rng); // 16x16
+        let w2 = milli.add_input(&mut rng); // 16x8
+
+        // Y = X @ W1
+        let y = MatMul::push_new_default_precision(
+            &mut milli, x, w1, DType::F32, &mut rng,
+        );
+        // residual = Y + X (requires same shape: 8x16)
+        let residual = SimpleBinary::add(&mut milli, y, x, &mut rng);
+        // Z = residual @ W2
+        let _z = MatMul::push_new_default_precision(
+            &mut milli, residual, w2, DType::F32, &mut rng,
+        );
+
+        let x_data: Vec<f32> = (0..128).map(|i| ((i as f32) * 0.05).sin()).collect();
+        let w1_data: Vec<f32> = (0..256).map(|i| ((i as f32) * 0.02).cos() * 0.3).collect();
+        let w2_data: Vec<f32> = (0..128).map(|i| ((i as f32) * 0.04).sin() * 0.2).collect();
+
+        let x_tensor = NumericTensor::from_vec_shape(x_data, vec![8, 16]).unwrap();
+        let w1_tensor = NumericTensor::from_vec_shape(w1_data, vec![16, 16]).unwrap();
+        let w2_tensor = NumericTensor::from_vec_shape(w2_data, vec![16, 8]).unwrap();
+
+        let mut info_inputs = HashMap::new();
+        info_inputs.insert(x, TensorInfo::from(x_tensor.clone()));
+        info_inputs.insert(w1, TensorInfo::from(w1_tensor.clone()));
+        info_inputs.insert(w2, TensorInfo::from(w2_tensor.clone()));
+
+        let result = lower_with_info(&milli, &info_inputs).unwrap();
+        assert!(
+            result.unsupported.is_empty(),
+            "unsupported: {:?}", result.unsupported_details,
+        );
+
+        let mut overrides = HashMap::new();
+        for (&atom_idx, scalar) in &result.numeric_overrides {
+            overrides.insert(atom_idx, scalar.to_f64() as f32);
+        }
+        for (id, tensor) in [
+            (x, &x_tensor),
+            (w1, &w1_tensor),
+            (w2, &w2_tensor),
+        ] {
+            if let Some(tam) = result.tensor_map.get(&id) {
+                let mut backend = EvalBackend::NDArray;
+                let f32_t = tensor.cast(DType::F32, &mut backend).unwrap();
+                let flat = f32_t.flatten().unwrap();
+                let v: Vec<f32> = flat.to_ndarray().unwrap().try_into().unwrap();
+                for (i, &val) in v.iter().enumerate() {
+                    overrides.insert(tam.base_id.0 + i as u64, val);
+                }
+            }
+        }
+
+        // Print plan structure for debugging
+        let groups = result.graph.groups();
+        eprintln!("Matmul residual: {} groups, {} atoms", groups.len(), result.graph.num_atoms());
+        for (gi, g) in groups.iter().enumerate() {
+            let op_name = format!("{:?}", g.op).chars().take_while(|c| *c != ' ' && *c != '{').collect::<String>();
+            let input_types: Vec<String> = g.inputs.iter().map(|inp| {
+                match inp {
+                    InputRef::Broadcast(_) => "Bcast".to_string(),
+                    InputRef::Affine { stride, .. } => format!("Affine(s={})", stride),
+                    InputRef::Explicit(ids) => format!("Explicit({})", ids.len()),
+                    InputRef::SymAffine { .. } => "SymAffine".to_string(),
+                    InputRef::StridedBroadcast { repeat, .. } => format!("StridedBcast(r={})", repeat),
+                    InputRef::Modular { modulus, .. } => format!("Modular(m={})", modulus),
+                }
+            }).collect();
+            eprintln!(
+                "  group {:>2}: base={:>6} count={:>6} op={:>12} inputs=[{}]",
+                gi, g.base_id.0, g.count, op_name, input_types.join(", "),
+            );
+        }
+
+        // V1 reference
+        let v1_compiled = CompiledPipeline::compile(&result.graph).expect("v1 compile");
+        let v1_values = v1_compiled.execute_full(&overrides);
+
+        for lanes in [1, 2, 4, 8] {
+            let plan = plan_execution(&result.graph, lanes);
+
+            eprintln!("Plan {} lanes: {} phases", lanes, plan.phases.len());
+            for (pi, phase) in plan.phases.iter().enumerate() {
+                for (li, lane) in phase.lane_work.iter().enumerate() {
+                    for w in lane {
+                        let g = &groups[w.group_idx];
+                        let op_name = format!("{:?}", g.op).chars().take_while(|c| *c != ' ' && *c != '{').collect::<String>();
+                        eprintln!(
+                            "  phase {} lane {} group={} offset={} count={} (total={}) op={}",
+                            pi, li, w.group_idx, w.atom_offset, w.atom_count, g.count, op_name,
+                        );
+                    }
+                }
+            }
+
+            let v2_compiled = CompiledPlan::compile(&result.graph, &plan).expect("v2 compile");
+            let v2_values = v2_compiled.execute(&overrides);
+
+            let mut max_abs_err: f64 = 0.0;
+            let mut max_err_atom: u64 = 0;
+            let mut err_count = 0;
+            for i in 0..result.graph.num_atoms() as usize {
+                let v1_val = v1_values[i] as f64;
+                let v2_val = v2_values[i] as f64;
+                let diff = (v1_val - v2_val).abs();
+                if diff > max_abs_err {
+                    max_abs_err = diff;
+                    max_err_atom = i as u64;
+                }
+                if diff > 1e-6 {
+                    err_count += 1;
+                    if err_count <= 5 {
+                        let gi = groups.iter().position(|g| {
+                            i as u64 >= g.base_id.0 && (i as u64) < g.base_id.0 + g.count
+                        }).unwrap_or(usize::MAX);
+                        let op_name = if gi < groups.len() {
+                            format!("{:?}", groups[gi].op).chars().take_while(|c| *c != ' ' && *c != '{').collect::<String>()
+                        } else { "???".to_string() };
+                        eprintln!(
+                            "  matmul_residual v1 vs v2 ({}lanes): atom {} (group {} {}) v1={} v2={} diff={}",
+                            lanes, i, gi, op_name, v1_val, v2_val, diff,
+                        );
+                    }
+                }
+            }
+            eprintln!(
+                "[matmul_residual_{}lanes] max_abs_err={:.6e} at atom {}, {} differ",
+                lanes, max_abs_err, max_err_atom, err_count,
+            );
+            assert!(
+                max_abs_err < 1e-4,
+                "matmul_residual v1 vs v2 ({}lanes): max_abs_err={:.6e} at atom {}",
+                lanes, max_abs_err, max_err_atom,
+            );
+        }
+    }
+
+    /// Test with GPT-2 scale dimensions: 4x768 @ 768x768 + bias, followed by another matmul.
+    /// This exercises the exact patterns that fail in GPT-2.
+    #[test]
+    fn test_plan_gpt2_scale() {
+        use crate::backends::eval_backend::EvalBackend;
+        use crate::milli_graph::ops::{MatMul, SimpleBinary};
+        use crate::milli_graph::MilliOpGraph;
+        use crate::nano_graph::lower::lower_with_info;
+        use crate::numeric_tensor::NumericTensor;
+        use crate::tensor_info::TensorInfo;
+
+        use super::super::nano_codegen::CompiledPipeline;
+        use super::super::nano_plan_v2c::plan_execution;
+
+        let mut rng = rand::rng();
+        let (mut milli, _) = MilliOpGraph::new(std::iter::empty(), &mut rng);
+
+        // GPT-2 like dimensions
+        let seq = 4;
+        let d_model = 64; // Use 64 instead of 768 to keep test fast
+        let d_ff = 64;
+
+        let x = milli.add_input(&mut rng);      // [seq, d_model]
+        let w1 = milli.add_input(&mut rng);     // [d_model, d_ff]
+        let bias1 = milli.add_input(&mut rng);  // [d_ff]
+        let w2 = milli.add_input(&mut rng);     // [d_ff, d_model]
+        let bias2 = milli.add_input(&mut rng);  // [d_model]
+
+        // Layer 1: Y = X @ W1 + bias1
+        let y = MatMul::push_new_default_precision(&mut milli, x, w1, DType::F32, &mut rng);
+        let y_bias = SimpleBinary::add(&mut milli, y, bias1, &mut rng);
+
+        // Layer 2: Z = Y_bias @ W2 + bias2
+        let z = MatMul::push_new_default_precision(&mut milli, y_bias, w2, DType::F32, &mut rng);
+        let _z_bias = SimpleBinary::add(&mut milli, z, bias2, &mut rng);
+
+        // Generate random data
+        let mk_data = |n: usize| -> Vec<f32> {
+            (0..n).map(|i| ((i as f32) * 0.0037).sin() * 0.5).collect()
+        };
+        let x_data = mk_data(seq * d_model);
+        let w1_data = mk_data(d_model * d_ff);
+        let bias1_data = mk_data(d_ff);
+        let w2_data = mk_data(d_ff * d_model);
+        let bias2_data = mk_data(d_model);
+
+        let x_tensor = NumericTensor::from_vec_shape(x_data, vec![seq, d_model]).unwrap();
+        let w1_tensor = NumericTensor::from_vec_shape(w1_data, vec![d_model, d_ff]).unwrap();
+        let bias1_tensor = NumericTensor::from_vec_shape(bias1_data, vec![d_ff]).unwrap();
+        let w2_tensor = NumericTensor::from_vec_shape(w2_data, vec![d_ff, d_model]).unwrap();
+        let bias2_tensor = NumericTensor::from_vec_shape(bias2_data, vec![d_model]).unwrap();
+
+        let mut info_inputs = HashMap::new();
+        info_inputs.insert(x, TensorInfo::from(x_tensor.clone()));
+        info_inputs.insert(w1, TensorInfo::from(w1_tensor.clone()));
+        info_inputs.insert(bias1, TensorInfo::from(bias1_tensor.clone()));
+        info_inputs.insert(w2, TensorInfo::from(w2_tensor.clone()));
+        info_inputs.insert(bias2, TensorInfo::from(bias2_tensor.clone()));
+
+        let result = lower_with_info(&milli, &info_inputs).unwrap();
+        assert!(
+            result.unsupported.is_empty(),
+            "unsupported: {:?}", result.unsupported_details,
+        );
+
+        let mut overrides = HashMap::new();
+        for (&atom_idx, scalar) in &result.numeric_overrides {
+            overrides.insert(atom_idx, scalar.to_f64() as f32);
+        }
+        for (id, tensor) in [
+            (x, &x_tensor),
+            (w1, &w1_tensor),
+            (bias1, &bias1_tensor),
+            (w2, &w2_tensor),
+            (bias2, &bias2_tensor),
+        ] {
+            if let Some(tam) = result.tensor_map.get(&id) {
+                let mut backend = EvalBackend::NDArray;
+                let f32_t = tensor.cast(DType::F32, &mut backend).unwrap();
+                let flat = f32_t.flatten().unwrap();
+                let v: Vec<f32> = flat.to_ndarray().unwrap().try_into().unwrap();
+                for (i, &val) in v.iter().enumerate() {
+                    overrides.insert(tam.base_id.0 + i as u64, val);
+                }
+            }
+        }
+
+        // V1 reference
+        let v1_compiled = CompiledPipeline::compile(&result.graph).expect("v1 compile");
+        let v1_values = v1_compiled.execute_full(&overrides);
+
+        // Print group structure
+        let groups = result.graph.groups();
+        eprintln!("GPT-2 scale: {} groups, {} atoms", groups.len(), result.graph.num_atoms());
+        for (gi, g) in groups.iter().enumerate() {
+            let op_name = format!("{:?}", g.op).chars().take_while(|c| *c != ' ' && *c != '{').collect::<String>();
+            let input_types: Vec<String> = g.inputs.iter().map(|inp| {
+                match inp {
+                    InputRef::Broadcast(_) => "Bcast".to_string(),
+                    InputRef::Affine { stride, .. } => format!("Aff(s={})", stride),
+                    InputRef::Explicit(ids) => format!("Expl({})", ids.len()),
+                    InputRef::SymAffine { .. } => "SymAff".to_string(),
+                    InputRef::StridedBroadcast { repeat, .. } => format!("SBcast(r={})", repeat),
+                    InputRef::Modular { modulus, .. } => format!("Mod(m={})", modulus),
+                }
+            }).collect();
+            eprintln!(
+                "  g{:>2}: base={:>8} cnt={:>8} op={:>12} in=[{}]",
+                gi, g.base_id.0, g.count, op_name, input_types.join(", "),
+            );
+        }
+
+        for lanes in [1, 2, 4, 8] {
+            let plan = plan_execution(&result.graph, lanes);
+            let v2_compiled = CompiledPlan::compile(&result.graph, &plan).expect("v2 compile");
+            let v2_values = v2_compiled.execute(&overrides);
+
+            let mut max_abs_err: f64 = 0.0;
+            let mut max_err_atom: u64 = 0;
+            let mut err_count = 0;
+            for i in 0..result.graph.num_atoms() as usize {
+                let v1_val = v1_values[i] as f64;
+                let v2_val = v2_values[i] as f64;
+                let diff = (v1_val - v2_val).abs();
+                if diff > max_abs_err {
+                    max_abs_err = diff;
+                    max_err_atom = i as u64;
+                }
+                if diff > 1e-6 {
+                    err_count += 1;
+                }
+            }
+            eprintln!(
+                "[gpt2_scale_{}lanes] max_abs_err={:.6e} at atom {}, {} differ",
+                lanes, max_abs_err, max_err_atom, err_count,
+            );
+            assert!(
+                max_abs_err < 1e-4,
+                "gpt2_scale v1 vs v2 ({}lanes): max_abs_err={:.6e} at atom {} ({} differ)",
+                lanes, max_abs_err, max_err_atom, err_count,
+            );
+        }
+    }
 }

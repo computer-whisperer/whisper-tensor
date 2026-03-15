@@ -278,7 +278,22 @@ fn main() {
                     for (&atom_idx, scalar) in &full_result.numeric_overrides {
                         overrides.insert(atom_idx, scalar.to_f64() as f32);
                     }
-                    println!("  Overrides: {} entries", overrides.len());
+                    // Add user input values
+                    let mut backend_v2c = whisper_tensor::backends::eval_backend::EvalBackend::NDArray;
+                    for (name, (_dtype, _shape_dims)) in &input_info {
+                        let Some(id) = tensors_by_name.get(name) else { continue };
+                        let Some(tam) = full_result.tensor_map.get(id) else { continue };
+                        let Some(tensor) = milli_inputs.get(id) else { continue };
+                        let f32_tensor = tensor.cast(whisper_tensor::dtype::DType::F32, &mut backend_v2c).unwrap();
+                        let flat = f32_tensor.flatten().unwrap();
+                        let nd = flat.to_ndarray().unwrap();
+                        let v: Vec<f32> = nd.try_into().unwrap();
+                        for (i, &val) in v.iter().enumerate() {
+                            let atom_id = tam.atom_id_for_element(i as u64);
+                            overrides.insert(atom_id.0, val);
+                        }
+                    }
+                    println!("  Overrides: {} entries (weights + user inputs)", overrides.len());
 
                     // Execute
                     let t0 = Instant::now();
