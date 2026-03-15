@@ -721,71 +721,120 @@ fn build_kernel_dep_graph(
     deps
 }
 
-/// Find cycles in the kernel dependency graph.
-fn find_cycles(deps: &[HashSet<usize>]) -> Vec<(usize, usize)> {
+/// Find strongly connected components using Tarjan's algorithm.
+/// Returns SCCs with more than one node (i.e., actual cycles).
+fn find_sccs(deps: &[HashSet<usize>]) -> Vec<Vec<usize>> {
     let n = deps.len();
-    let mut cycles = Vec::new();
+    let mut index_counter: usize = 0;
+    let mut stack: Vec<usize> = Vec::new();
+    let mut on_stack = vec![false; n];
+    let mut index: Vec<Option<usize>> = vec![None; n];
+    let mut lowlink = vec![0usize; n];
+    let mut sccs: Vec<Vec<usize>> = Vec::new();
 
-    // Check for direct mutual dependencies.
-    for ki in 0..n {
-        for &dep in &deps[ki] {
-            if dep > ki && deps[dep].contains(&ki) {
-                cycles.push((ki, dep));
-            }
-        }
-    }
-
-    if !cycles.is_empty() {
-        return cycles;
-    }
-
-    // Full cycle detection using DFS coloring.
-    let mut color = vec![0u8; n]; // 0=white, 1=gray, 2=black
-
-    fn dfs(
-        node: usize,
+    fn strongconnect(
+        v: usize,
         deps: &[HashSet<usize>],
-        color: &mut [u8],
-        cycles: &mut Vec<(usize, usize)>,
+        index_counter: &mut usize,
+        stack: &mut Vec<usize>,
+        on_stack: &mut [bool],
+        index: &mut [Option<usize>],
+        lowlink: &mut [usize],
+        sccs: &mut Vec<Vec<usize>>,
     ) {
-        color[node] = 1;
-        for &next in &deps[node] {
-            if color[next] == 1 {
-                cycles.push((node, next));
-            } else if color[next] == 0 {
-                dfs(next, deps, color, cycles);
+        index[v] = Some(*index_counter);
+        lowlink[v] = *index_counter;
+        *index_counter += 1;
+        stack.push(v);
+        on_stack[v] = true;
+
+        for &w in &deps[v] {
+            if index[w].is_none() {
+                strongconnect(w, deps, index_counter, stack, on_stack, index, lowlink, sccs);
+                lowlink[v] = lowlink[v].min(lowlink[w]);
+            } else if on_stack[w] {
+                lowlink[v] = lowlink[v].min(index[w].unwrap());
             }
         }
-        color[node] = 2;
-    }
 
-    for start in 0..n {
-        if color[start] == 0 {
-            dfs(start, deps, &mut color, &mut cycles);
+        if lowlink[v] == index[v].unwrap() {
+            let mut scc = Vec::new();
+            loop {
+                let w = stack.pop().unwrap();
+                on_stack[w] = false;
+                scc.push(w);
+                if w == v {
+                    break;
+                }
+            }
+            if scc.len() > 1 {
+                sccs.push(scc);
+            }
         }
     }
 
-    cycles
+    for v in 0..n {
+        if index[v].is_none() {
+            strongconnect(
+                v,
+                deps,
+                &mut index_counter,
+                &mut stack,
+                &mut on_stack,
+                &mut index,
+                &mut lowlink,
+                &mut sccs,
+            );
+        }
+    }
+
+    sccs
 }
 
-/// Enforce acyclicity by merging kernels involved in cycles.
-fn enforce_acyclicity(kernel_groups: &mut Vec<Vec<usize>>, groups: &[AtomGroup]) {
-    for _ in 0..100 {
-        let deps = build_kernel_dep_graph(kernel_groups, groups);
-        let cycles = find_cycles(&deps);
+/// Check if the kernel dependency graph is acyclic.
+fn has_cycles(deps: &[HashSet<usize>]) -> bool {
+    !find_sccs(deps).is_empty()
+}
 
-        if cycles.is_empty() {
+/// Enforce acyclicity by finding all SCCs and merging kernels within each.
+fn enforce_acyclicity(kernel_groups: &mut Vec<Vec<usize>>, groups: &[AtomGroup]) {
+    // Iterate because merging can shift indices and reveal new cycles
+    // (shouldn't happen with proper SCC merge, but be defensive).
+    for _ in 0..50 {
+        let deps = build_kernel_dep_graph(kernel_groups, groups);
+        let sccs = find_sccs(&deps);
+
+        if sccs.is_empty() {
             break;
         }
 
-        let (a, b) = cycles[0];
-        let (keep, remove) = if a < b { (a, b) } else { (b, a) };
+        // Process all SCCs. Merge all kernels in each SCC into the
+        // lowest-indexed kernel of that SCC.
+        // Collect all merges first, then apply (indices shift during removal).
+        let mut to_remove: Vec<usize> = Vec::new();
+        for scc in &sccs {
+            let mut sorted_scc = scc.clone();
+            sorted_scc.sort();
+            let keep = sorted_scc[0];
+            for &remove in &sorted_scc[1..] {
+                let removed_groups = kernel_groups[remove].clone();
+                kernel_groups[keep].extend(removed_groups);
+                to_remove.push(remove);
+            }
+        }
 
-        let removed_groups = kernel_groups[remove].clone();
-        kernel_groups[keep].extend(removed_groups);
-        kernel_groups[keep].sort();
-        kernel_groups[keep].dedup();
-        kernel_groups.remove(remove);
+        // Deduplicate within merged kernels.
+        for kg in kernel_groups.iter_mut() {
+            kg.sort();
+            kg.dedup();
+        }
+
+        // Remove merged-away kernels in reverse order to preserve indices.
+        to_remove.sort();
+        to_remove.dedup();
+        for &idx in to_remove.iter().rev() {
+            kernel_groups.remove(idx);
+        }
     }
 }
 
@@ -794,6 +843,8 @@ fn enforce_acyclicity(kernel_groups: &mut Vec<Vec<usize>>, groups: &[AtomGroup])
 // ---------------------------------------------------------------------------
 
 /// Balance kernels: split oversized ones, merge tiny ones.
+/// Splits are topo-aware: we only split at points where the resulting
+/// two halves don't have mutual dependencies.
 fn balance_kernels(
     kernel_groups: &mut Vec<Vec<usize>>,
     groups: &[AtomGroup],
@@ -802,16 +853,28 @@ fn balance_kernels(
     let total_work: u64 = groups.iter().map(|g| g.count).sum();
     let max_work_per_kernel = total_work / 5; // 20% threshold
 
-    // Split oversized kernels.
+    // Build a global producer map for topo-aware splitting.
+    let is_data: Vec<bool> = groups
+        .iter()
+        .map(|g| matches!(g.op, ScalarOp::Literal(_)) && g.inputs.is_empty())
+        .collect();
+    let producers = build_producer_graph(groups, &is_data);
+
+    // Split oversized kernels using topo-aware splitting.
     let mut i = 0;
     while i < kernel_groups.len() {
         let work: u64 = kernel_groups[i].iter().map(|&gi| groups[gi].count).sum();
         if work > max_work_per_kernel && kernel_groups[i].len() > 1 {
-            let mid = kernel_groups[i].len() / 2;
-            let second_half: Vec<usize> = kernel_groups[i][mid..].to_vec();
-            kernel_groups[i].truncate(mid);
-            kernel_groups.push(second_half);
-            // Don't increment i, re-check the first half.
+            if let Some((first, second)) =
+                topo_aware_split(&kernel_groups[i], &producers, groups)
+            {
+                kernel_groups[i] = first;
+                kernel_groups.push(second);
+                // Don't increment i, re-check the first half.
+            } else {
+                // Can't split without creating cycles — leave it.
+                i += 1;
+            }
         } else {
             i += 1;
         }
@@ -848,6 +911,99 @@ fn balance_kernels(
             i += 1;
         }
     }
+}
+
+/// Split a kernel's groups into two parts along a topological boundary.
+/// Returns None if no valid split point exists (all groups are interdependent).
+fn topo_aware_split(
+    kernel_group_list: &[usize],
+    producers: &[Vec<usize>],
+    groups: &[AtomGroup],
+) -> Option<(Vec<usize>, Vec<usize>)> {
+    if kernel_group_list.len() < 2 {
+        return None;
+    }
+
+    let member_set: HashSet<usize> = kernel_group_list.iter().copied().collect();
+
+    // Build local in-degree within this kernel's groups.
+    let mut local_in_degree: HashMap<usize, usize> = HashMap::new();
+    let mut local_consumers: HashMap<usize, Vec<usize>> = HashMap::new();
+    for &gi in kernel_group_list {
+        local_in_degree.insert(gi, 0);
+    }
+    for &gi in kernel_group_list {
+        for &pi in &producers[gi] {
+            if member_set.contains(&pi) {
+                *local_in_degree.entry(gi).or_insert(0) += 1;
+                local_consumers.entry(pi).or_default().push(gi);
+            }
+        }
+    }
+
+    // Topo sort the groups within this kernel.
+    let mut queue: VecDeque<usize> = VecDeque::new();
+    for &gi in kernel_group_list {
+        if *local_in_degree.get(&gi).unwrap_or(&0) == 0 {
+            queue.push_back(gi);
+        }
+    }
+    let mut topo: Vec<usize> = Vec::with_capacity(kernel_group_list.len());
+    while let Some(gi) = queue.pop_front() {
+        topo.push(gi);
+        if let Some(consumers) = local_consumers.get(&gi) {
+            for &ci in consumers {
+                if let Some(deg) = local_in_degree.get_mut(&ci) {
+                    *deg -= 1;
+                    if *deg == 0 {
+                        queue.push_back(ci);
+                    }
+                }
+            }
+        }
+    }
+    // Append any remaining (shouldn't happen in a DAG).
+    if topo.len() < kernel_group_list.len() {
+        let in_topo: HashSet<usize> = topo.iter().copied().collect();
+        for &gi in kernel_group_list {
+            if !in_topo.contains(&gi) {
+                topo.push(gi);
+            }
+        }
+    }
+
+    // Find the split point closest to the middle (by work) that respects topo order.
+    // Any prefix of the topo order is a valid "first half" (no cycles).
+    let total_work: u64 = kernel_group_list.iter().map(|&gi| groups[gi].count).sum();
+    let target_work = total_work / 2;
+
+    let mut best_split = None;
+    let mut best_imbalance = u64::MAX;
+    let mut running_work: u64 = 0;
+
+    for split_pos in 1..topo.len() {
+        running_work += groups[topo[split_pos - 1]].count;
+        let remaining = total_work - running_work;
+        let imbalance = if running_work > target_work {
+            running_work - target_work
+        } else {
+            target_work - running_work
+        };
+        // Only consider splits where both halves are non-empty (guaranteed by loop bounds)
+        // and both halves have meaningful work.
+        if remaining > 0 && running_work > 0 && imbalance < best_imbalance {
+            best_imbalance = imbalance;
+            best_split = Some(split_pos);
+        }
+    }
+
+    best_split.map(|pos| {
+        let mut first: Vec<usize> = topo[..pos].to_vec();
+        let mut second: Vec<usize> = topo[pos..].to_vec();
+        first.sort();
+        second.sort();
+        (first, second)
+    })
 }
 
 /// Find best kernel to merge a tiny kernel with.
@@ -1505,12 +1661,12 @@ mod tests {
 
     fn check_acyclicity(result: &NanoPartitionResult, groups: &[AtomGroup]) {
         let deps = build_kernel_dep_graph(&result.kernel_groups, groups);
-        let cycles = find_cycles(&deps);
+        let sccs = find_sccs(&deps);
         assert!(
-            cycles.is_empty(),
-            "Found {} cycles: {:?}",
-            cycles.len(),
-            &cycles[..cycles.len().min(5)]
+            sccs.is_empty(),
+            "Found {} SCCs (cycles): {:?}",
+            sccs.len(),
+            &sccs[..sccs.len().min(5)]
         );
 
         // Verify topological sort succeeds.
@@ -1818,6 +1974,151 @@ mod tests {
         assert!(
             has_interleaved,
             "Matmul should produce interleaved group indices in kernels"
+        );
+    }
+
+    /// Multi-layer transformer-like structure that exercises cross-layer
+    /// dependencies. This is the pattern that caused cycles in GPT-2:
+    /// sequential matmuls with shared weights and intermediate reductions.
+    fn make_multi_layer_transformer(num_layers: usize, m: usize, k: usize, nn: usize) -> NanoGraph {
+        let mut g = NanoGraph::new();
+
+        // Shared weight matrix (like token embeddings).
+        let w_base = g.push_group(
+            (k * nn) as u64,
+            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
+
+        // Input (like initial embedding).
+        let input_base = g.push_group(
+            (m * k) as u64,
+            ScalarOp::Literal(NumericScalar::F32(0.5)),
+            vec![],
+            vec![],
+            vec![],
+        );
+
+        // First layer takes input_base.
+        let mut prev_layer_output = input_base;
+        let mut _prev_layer_count = (m * k) as u64;
+
+        for _layer in 0..num_layers {
+            // Matmul: prev_output @ W
+            let mut mul_bases = Vec::new();
+            for row in 0..m {
+                let mul = g.push_group(
+                    (k * nn) as u64,
+                    ScalarOp::Binary {
+                        op: ScalarBinOp::Mul,
+                        compute_dtype: DType::F32,
+                        output_dtype: DType::F32,
+                    },
+                    vec![],
+                    vec![],
+                    vec![
+                        InputRef::StridedBroadcast {
+                            base: AtomId(prev_layer_output.0 + (row * k) as u64),
+                            stride: 1,
+                            repeat: nn as u64,
+                        },
+                        InputRef::Affine {
+                            base: w_base,
+                            stride: 1,
+                        },
+                    ],
+                );
+                mul_bases.push(mul);
+            }
+
+            let mut reduce_bases = Vec::new();
+            for row in 0..m {
+                let red = g.push_group(
+                    nn as u64,
+                    ScalarOp::ReduceSum {
+                        reduce_count: k as u64,
+                        reduce_stride: nn as i64,
+                        compute_dtype: DType::F32,
+                        output_dtype: DType::F32,
+                    },
+                    vec![],
+                    vec![],
+                    vec![InputRef::Affine {
+                        base: mul_bases[row],
+                        stride: 1,
+                    }],
+                );
+                reduce_bases.push(red);
+            }
+
+            // Add an elementwise op (like ReLU/GELU) on the output.
+            let mut act_bases = Vec::new();
+            for row in 0..m {
+                let act = g.push_group(
+                    nn as u64,
+                    ScalarOp::Unary {
+                        op: ScalarUnaryOp::Exp,
+                        compute_dtype: DType::F32,
+                        output_dtype: DType::F32,
+                    },
+                    vec![],
+                    vec![],
+                    vec![InputRef::Affine {
+                        base: reduce_bases[row],
+                        stride: 1,
+                    }],
+                );
+                act_bases.push(act);
+            }
+
+            prev_layer_output = act_bases[0];
+            _prev_layer_count = (m * nn) as u64;
+        }
+
+        g
+    }
+
+    #[test]
+    fn test_multi_layer_acyclic() {
+        // This test exercises the pattern that caused cycles on GPT-2:
+        // multiple sequential layers with shared weights and parallel rows.
+        for (layers, m, k, n, target) in [
+            (3, 4, 8, 16, 8),
+            (5, 4, 8, 8, 12),
+            (4, 8, 16, 8, 16),
+            (6, 4, 8, 16, 20),
+        ] {
+            let g = make_multi_layer_transformer(layers, m, k, n);
+            let result = partition_nanograph(&g, target);
+            check_coverage(&result, &g);
+            check_acyclicity(&result, g.groups());
+            let parallel = check_parallelism(&result, g.groups());
+            println!(
+                "Transformer {}L {}x{}x{} target={}: {} groups -> {} kernels, {} independent pairs",
+                layers, m, k, n, target,
+                g.num_groups(),
+                result.num_kernels,
+                parallel
+            );
+        }
+    }
+
+    #[test]
+    fn test_large_multi_layer_acyclic() {
+        // Larger test closer to GPT-2 scale patterns.
+        let g = make_multi_layer_transformer(10, 8, 16, 32);
+        let result = partition_nanograph(&g, 24);
+        check_coverage(&result, &g);
+        check_acyclicity(&result, g.groups());
+        check_balance(&result, g.groups(), 0.30);
+        let parallel = check_parallelism(&result, g.groups());
+        println!(
+            "Large transformer 10L 8x16x32: {} groups -> {} kernels, {} independent pairs",
+            g.num_groups(),
+            result.num_kernels,
+            parallel
         );
     }
 }

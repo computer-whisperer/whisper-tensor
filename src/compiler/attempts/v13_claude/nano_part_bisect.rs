@@ -165,11 +165,148 @@ pub fn partition_nanograph(graph: &NanoGraph, target_kernels: usize) -> NanoPart
         kernels.push(child_b);
     }
 
+    // Safety net: repair any cycles by merging kernels in the same SCC.
+    let kernels = repair_cycles(kernels, &producers, &is_data);
+
     let num_kernels = kernels.len();
     NanoPartitionResult {
         kernel_groups: kernels,
         num_kernels,
     }
+}
+
+/// Post-hoc cycle repair: build the kernel dependency graph, find SCCs using
+/// Tarjan's algorithm, and merge any kernels that are in the same SCC.
+///
+/// This is a safety net. With correct producer resolution, the bisection algorithm
+/// should already produce an acyclic partition. But if any edge case is missed,
+/// this ensures the output is always a DAG.
+fn repair_cycles(
+    kernels: Vec<Vec<usize>>,
+    producers: &[Vec<usize>],
+    is_data: &[bool],
+) -> Vec<Vec<usize>> {
+    let nk = kernels.len();
+    if nk <= 1 {
+        return kernels;
+    }
+
+    // Build group -> kernel map.
+    let n = is_data.len();
+    let mut group_kernel: Vec<usize> = vec![0; n];
+    for (ki, kernel) in kernels.iter().enumerate() {
+        for &gi in kernel {
+            group_kernel[gi] = ki;
+        }
+    }
+
+    // Build kernel dependency adjacency list.
+    let mut kernel_deps: Vec<Vec<usize>> = vec![vec![]; nk];
+    for gi in 0..n {
+        if is_data[gi] {
+            continue;
+        }
+        let my_kernel = group_kernel[gi];
+        for &prod in &producers[gi] {
+            if is_data[prod] {
+                continue;
+            }
+            let prod_kernel = group_kernel[prod];
+            if prod_kernel != my_kernel {
+                kernel_deps[my_kernel].push(prod_kernel);
+            }
+        }
+    }
+    // Deduplicate.
+    for deps in kernel_deps.iter_mut() {
+        deps.sort_unstable();
+        deps.dedup();
+    }
+
+    // Tarjan's SCC algorithm.
+    let sccs = tarjan_scc(nk, &kernel_deps);
+
+    // If every SCC has size 1, no cycles exist.
+    let has_cycle = sccs.iter().any(|scc| scc.len() > 1);
+    if !has_cycle {
+        return kernels;
+    }
+
+    // Merge kernels in the same SCC.
+    let mut merged: Vec<Vec<usize>> = Vec::new();
+    for scc in &sccs {
+        if scc.len() == 1 {
+            merged.push(kernels[scc[0]].clone());
+        } else {
+            let mut combined = Vec::new();
+            for &ki in scc {
+                combined.extend_from_slice(&kernels[ki]);
+            }
+            merged.push(combined);
+        }
+    }
+
+    merged
+}
+
+/// Tarjan's algorithm for finding strongly connected components.
+/// Returns SCCs in reverse topological order (sinks first).
+fn tarjan_scc(n: usize, adj: &[Vec<usize>]) -> Vec<Vec<usize>> {
+    struct TarjanState {
+        index_counter: usize,
+        stack: Vec<usize>,
+        on_stack: Vec<bool>,
+        index: Vec<Option<usize>>,
+        lowlink: Vec<usize>,
+        sccs: Vec<Vec<usize>>,
+    }
+
+    let mut state = TarjanState {
+        index_counter: 0,
+        stack: Vec::new(),
+        on_stack: vec![false; n],
+        index: vec![None; n],
+        lowlink: vec![0; n],
+        sccs: Vec::new(),
+    };
+
+    fn strongconnect(v: usize, adj: &[Vec<usize>], state: &mut TarjanState) {
+        state.index[v] = Some(state.index_counter);
+        state.lowlink[v] = state.index_counter;
+        state.index_counter += 1;
+        state.stack.push(v);
+        state.on_stack[v] = true;
+
+        for &w in &adj[v] {
+            if state.index[w].is_none() {
+                strongconnect(w, adj, state);
+                state.lowlink[v] = state.lowlink[v].min(state.lowlink[w]);
+            } else if state.on_stack[w] {
+                state.lowlink[v] = state.lowlink[v].min(state.index[w].unwrap());
+            }
+        }
+
+        if state.lowlink[v] == state.index[v].unwrap() {
+            let mut scc = Vec::new();
+            loop {
+                let w = state.stack.pop().unwrap();
+                state.on_stack[w] = false;
+                scc.push(w);
+                if w == v {
+                    break;
+                }
+            }
+            state.sccs.push(scc);
+        }
+    }
+
+    for v in 0..n {
+        if state.index[v].is_none() {
+            strongconnect(v, adj, &mut state);
+        }
+    }
+
+    state.sccs
 }
 
 struct BisectContext<'a> {
@@ -518,10 +655,48 @@ fn find_group_for_atom(atom: AtomId, map: &[(u64, u64, usize)]) -> Option<usize>
     }
 }
 
+/// Find ALL group indices whose atom ranges overlap with [lo, hi] (inclusive).
+///
+/// The atom_to_group map is sorted by base_id. We find the first group that
+/// could contain `lo` and scan forward until groups start past `hi`.
+fn find_groups_in_range(
+    lo: AtomId,
+    hi: AtomId,
+    map: &[(u64, u64, usize)],
+    seen: &mut HashSet<usize>,
+    producers: &mut Vec<usize>,
+) {
+    if map.is_empty() || hi.0 < lo.0 {
+        return;
+    }
+    // Find the first entry whose base_id could contain lo.
+    // partition_point finds first entry where base > lo.0, so idx-1 is the
+    // last entry with base <= lo.0 (the one that might contain lo).
+    let start_idx = map.partition_point(|&(base, _, _)| base <= lo.0);
+    let start = if start_idx > 0 { start_idx - 1 } else { 0 };
+
+    for i in start..map.len() {
+        let (base, count, gi) = map[i];
+        if base > hi.0 {
+            break; // All remaining groups start past hi.
+        }
+        // Group covers [base, base+count-1]. Check overlap with [lo, hi].
+        let group_end = base + count - 1;
+        if group_end >= lo.0 && base <= hi.0 {
+            if seen.insert(gi) {
+                producers.push(gi);
+            }
+        }
+    }
+}
+
 /// Resolve all producer group indices for a given group's inputs.
 ///
-/// For ReduceSum/ReduceMax, the op iterates k=0..reduce_count at stride reduce_stride,
-/// so we must sample across the full reduction range to find all producer groups.
+/// Uses range-based lookup to find ALL producer groups whose atom ranges overlap
+/// with the referenced atom range. Previous sampling-based approach missed
+/// intermediate groups when a single InputRef spanned multiple producer groups,
+/// causing the partitioner to treat dependent groups as independent and creating
+/// cycles in the kernel dependency graph.
 fn resolve_producer_groups(
     group: &AtomGroup,
     graph: &NanoGraph,
@@ -529,13 +704,6 @@ fn resolve_producer_groups(
 ) -> Vec<usize> {
     let mut producers = Vec::new();
     let mut seen = HashSet::new();
-
-    let add_producer =
-        |gi: usize, seen: &mut HashSet<usize>, producers: &mut Vec<usize>| {
-            if seen.insert(gi) {
-                producers.push(gi);
-            }
-        };
 
     let (reduce_count, reduce_stride) = match &group.op {
         ScalarOp::ReduceSum {
@@ -552,81 +720,118 @@ fn resolve_producer_groups(
     };
 
     for input in &group.inputs {
+        // Compute the full range [lo, hi] of atoms referenced by this input
+        // across all i in 0..count and k in 0..reduce_count, then find all
+        // groups overlapping that range.
         match input {
             InputRef::Broadcast(id) => {
+                // All i values map to the same atom. With reduce, atoms are
+                // id + k * reduce_stride for k in 0..reduce_count.
                 if reduce_count > 0 {
-                    for k in 0..reduce_count {
-                        let atom =
-                            AtomId(id.0.wrapping_add((k as i64 * reduce_stride) as u64));
-                        if let Some(gi) = find_group_for_atom(atom, atom_to_group) {
-                            add_producer(gi, &mut seen, &mut producers);
-                        }
-                    }
+                    let a0 = id.0 as i64;
+                    let a_last = a0 + (reduce_count as i64 - 1) * reduce_stride;
+                    let lo = a0.min(a_last) as u64;
+                    let hi = a0.max(a_last) as u64;
+                    find_groups_in_range(
+                        AtomId(lo),
+                        AtomId(hi),
+                        atom_to_group,
+                        &mut seen,
+                        &mut producers,
+                    );
                 } else {
                     if let Some(gi) = find_group_for_atom(*id, atom_to_group) {
-                        add_producer(gi, &mut seen, &mut producers);
+                        if seen.insert(gi) {
+                            producers.push(gi);
+                        }
                     }
                 }
             }
-            InputRef::Affine { base, stride: _ } => {
+            InputRef::Affine { base, stride } => {
+                // atom[i] = base + stride * i
+                // With reduce: atom[i,k] = base + stride * i + k * reduce_stride
+                let stride = *stride as i64;
+                let count = group.count;
+                // Compute range of base + stride * i for i in [0, count-1]
+                let a_first = base.0 as i64;
+                let a_last = a_first + stride * (count.saturating_sub(1) as i64);
+                let mut lo = a_first.min(a_last);
+                let mut hi = a_first.max(a_last);
                 if reduce_count > 0 {
-                    for sample_i in [0, group.count.saturating_sub(1)] {
-                        let resolved = input.resolve(sample_i, 0);
-                        for k in 0..reduce_count {
-                            let atom = AtomId(
-                                resolved
-                                    .0
-                                    .wrapping_add((k as i64 * reduce_stride) as u64),
-                            );
-                            if let Some(gi) = find_group_for_atom(atom, atom_to_group) {
-                                add_producer(gi, &mut seen, &mut producers);
-                            }
-                        }
-                    }
-                } else {
-                    if let Some(gi) = find_group_for_atom(*base, atom_to_group) {
-                        add_producer(gi, &mut seen, &mut producers);
-                    }
-                    if group.count > 1 {
-                        let last = input.resolve(group.count - 1, 0);
-                        if let Some(gi) = find_group_for_atom(last, atom_to_group) {
-                            add_producer(gi, &mut seen, &mut producers);
-                        }
+                    // Add reduce offset range
+                    let r_last = (reduce_count as i64 - 1) * reduce_stride;
+                    if r_last >= 0 {
+                        hi += r_last;
+                    } else {
+                        lo += r_last;
                     }
                 }
+                find_groups_in_range(
+                    AtomId(lo as u64),
+                    AtomId(hi as u64),
+                    atom_to_group,
+                    &mut seen,
+                    &mut producers,
+                );
             }
             InputRef::Explicit(ids) => {
-                for id in ids {
-                    if let Some(gi) = find_group_for_atom(*id, atom_to_group) {
-                        add_producer(gi, &mut seen, &mut producers);
-                    }
+                // Each id is explicit; find the range and scan.
+                if !ids.is_empty() {
+                    let lo = ids.iter().map(|id| id.0).min().unwrap();
+                    let hi = ids.iter().map(|id| id.0).max().unwrap();
+                    find_groups_in_range(
+                        AtomId(lo),
+                        AtomId(hi),
+                        atom_to_group,
+                        &mut seen,
+                        &mut producers,
+                    );
                 }
             }
-            InputRef::StridedBroadcast { repeat, .. } => {
-                let num_blocks = (group.count + repeat - 1) / repeat;
-                for block in 0..num_blocks {
-                    let atom = input.resolve(block * repeat, 0);
-                    if let Some(gi) = find_group_for_atom(atom, atom_to_group) {
-                        add_producer(gi, &mut seen, &mut producers);
-                    }
-                }
+            InputRef::StridedBroadcast {
+                base,
+                stride,
+                repeat,
+            } => {
+                // atom[i] = base + stride * (i / repeat)
+                let count = group.count;
+                let num_blocks = (count + repeat - 1) / repeat;
+                let a_first = base.0 as i64;
+                let a_last = a_first + *stride * (num_blocks.saturating_sub(1) as i64);
+                let lo = a_first.min(a_last);
+                let hi = a_first.max(a_last);
+                find_groups_in_range(
+                    AtomId(lo as u64),
+                    AtomId(hi as u64),
+                    atom_to_group,
+                    &mut seen,
+                    &mut producers,
+                );
             }
             InputRef::Modular {
                 base,
-                stride: _,
+                stride,
                 modulus,
             } => {
-                if let Some(gi) = find_group_for_atom(*base, atom_to_group) {
-                    add_producer(gi, &mut seen, &mut producers);
-                }
-                if *modulus > 1 {
-                    let last = input.resolve(*modulus - 1, 0);
-                    if let Some(gi) = find_group_for_atom(last, atom_to_group) {
-                        add_producer(gi, &mut seen, &mut producers);
-                    }
-                }
+                // atom[i] = base + stride * (i % modulus)
+                // Range of (i % modulus) is [0, modulus-1]
+                let a_first = base.0 as i64;
+                let a_last = a_first + (*stride as i64) * (modulus.saturating_sub(1) as i64);
+                let lo = a_first.min(a_last);
+                let hi = a_first.max(a_last);
+                find_groups_in_range(
+                    AtomId(lo as u64),
+                    AtomId(hi as u64),
+                    atom_to_group,
+                    &mut seen,
+                    &mut producers,
+                );
             }
-            InputRef::SymAffine { .. } => {
+            InputRef::SymAffine {
+                base,
+                stride_i,
+                stride_k,
+            } => {
                 let k_bound = group
                     .reduce_dims
                     .iter()
@@ -635,20 +840,26 @@ fn resolve_producer_groups(
                     .copied()
                     .unwrap_or(1);
 
-                for k in 0..k_bound {
-                    let atom = input.resolve(0, k);
-                    if let Some(gi) = find_group_for_atom(atom, atom_to_group) {
-                        add_producer(gi, &mut seen, &mut producers);
-                    }
-                }
-                if group.count > 1 {
-                    for k in 0..k_bound {
-                        let atom = input.resolve(group.count - 1, k);
-                        if let Some(gi) = find_group_for_atom(atom, atom_to_group) {
-                            add_producer(gi, &mut seen, &mut producers);
-                        }
-                    }
-                }
+                let count = group.count;
+                // atom[i,k] = base + stride_i * i + stride_k * k
+                // Compute the 4 corners and take min/max.
+                let b = base.0 as i64;
+                let corners = [
+                    b,
+                    b + (*stride_i as i64) * (count.saturating_sub(1) as i64),
+                    b + (*stride_k as i64) * (k_bound.saturating_sub(1) as i64),
+                    b + (*stride_i as i64) * (count.saturating_sub(1) as i64)
+                        + (*stride_k as i64) * (k_bound.saturating_sub(1) as i64),
+                ];
+                let lo = *corners.iter().min().unwrap();
+                let hi = *corners.iter().max().unwrap();
+                find_groups_in_range(
+                    AtomId(lo as u64),
+                    AtomId(hi as u64),
+                    atom_to_group,
+                    &mut seen,
+                    &mut producers,
+                );
             }
         }
     }
@@ -1592,6 +1803,113 @@ mod tests {
         let result = partition_nanograph(&g, 1);
         assert_eq!(result.num_kernels, 1);
         assert_all_groups_assigned_once(&g, &result);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: Affine input spanning multiple producer groups (regression test
+    // for the bug where sampling only first/last atoms missed intermediate
+    // producer groups, causing incorrect independence detection and cycles).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_affine_spanning_multiple_producers() {
+        // Build a graph where one compute group has an Affine input that spans
+        // across 3 separate producer groups (A, B, C contiguous in atom space).
+        // The consumer reads all atoms from A through C.
+        //
+        // If the partitioner only samples first and last atoms, it finds A and C
+        // but misses B. This could cause B to be placed in a different "independent"
+        // component from the consumer, creating a cycle.
+        let mut g = NanoGraph::new();
+
+        // Three contiguous producer groups, each 100 atoms.
+        let a = g.push_group(
+            100,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Neg,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![],
+            vec![],
+            vec![InputRef::Affine {
+                // Self-referential base; just needs a valid input for the test.
+                base: AtomId(0),
+                stride: 0,
+            }],
+        );
+        let _b = g.push_group(
+            100,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Exp,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![],
+            vec![],
+            vec![InputRef::Affine {
+                base: AtomId(0),
+                stride: 0,
+            }],
+        );
+        let _c = g.push_group(
+            100,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Sqrt,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![],
+            vec![],
+            vec![InputRef::Affine {
+                base: AtomId(0),
+                stride: 0,
+            }],
+        );
+
+        // Consumer that reads across all three groups (300 atoms starting from a's base).
+        let _consumer = g.push_group(
+            300,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Tanh,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![],
+            vec![],
+            vec![InputRef::Affine {
+                base: a, // reads atoms a..a+300, spanning groups a, b, c
+                stride: 1,
+            }],
+        );
+
+        // Verify the producer resolution finds all three groups.
+        let atom_to_group = build_atom_to_group_map(g.groups());
+        let consumer_group = &g.groups()[3]; // the consumer is group index 3
+        let prods = resolve_producer_groups(consumer_group, &g, &atom_to_group);
+
+        // Should find groups 0, 1, 2 (a, b, c) as producers.
+        let prod_set: HashSet<usize> = prods.iter().copied().collect();
+        assert!(
+            prod_set.contains(&0),
+            "Producer group 0 (a) not found: {:?}",
+            prods
+        );
+        assert!(
+            prod_set.contains(&1),
+            "Producer group 1 (b) not found: {:?}",
+            prods
+        );
+        assert!(
+            prod_set.contains(&2),
+            "Producer group 2 (c) not found: {:?}",
+            prods
+        );
+
+        // Also verify partitioning produces no cycles.
+        let result = partition_nanograph(&g, 3);
+        assert_all_groups_assigned_once(&g, &result);
+        assert_no_cycles(&g, &result);
     }
 
     // -----------------------------------------------------------------------
