@@ -56,7 +56,7 @@ cranelift-native = { version = "0.116", optional = true }
 whisper-tensor-import = {workspace=true}
 
 [features]
-default = ["tokenizers", "rwkv-tokenizer", "http", "blas", "safetensors", "espeak"]
+default = ["tokenizers", "rwkv-tokenizer", "http", "blas", "safetensors"]
 safetensors = ["dep:safetensors", "dep:memmap2"]
 blas = ["ndarray/blas", "dep:blas-src", "dep:openblas-src"]
 onnx-reference = ["pyo3"]

@@ -31,7 +31,7 @@ hf-hub = {version = "0.4.3", features = ["tokio"]}
 tokenizers = {version="0.22.2", default-features = false, features = ["unstable_wasm", "http"]}
 
 [features]
-default = ["whisper-tensor/default", "import", "espeak"]
+default = ["whisper-tensor/default", "import"]
 import = ["dep:whisper-tensor-import"]
 vulkan = ["whisper-tensor/vulkan"]
 candle = ["whisper-tensor/candle"]

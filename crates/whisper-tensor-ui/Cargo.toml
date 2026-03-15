@@ -12,7 +12,7 @@ path = "src/main.rs"
 
 [features]
 default = []
-native = ["import", "candle", "cranelift", "http", "safetensors", "espeak"]
+native = ["import", "candle", "cranelift", "http", "safetensors"]
 import = ["whisper-tensor-server/import"]
 vulkan = ["whisper-tensor-server/vulkan"]
 candle = ["whisper-tensor-server/candle"]

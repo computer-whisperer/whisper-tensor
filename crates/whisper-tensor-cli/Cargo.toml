@@ -8,7 +8,7 @@ name = "wt"
 path = "src/main.rs"
 
 [dependencies]
-whisper-tensor = { workspace = true, features = ["tokenizers", "rwkv-tokenizer", "http", "blas", "safetensors", "espeak"] }
+whisper-tensor = { workspace = true, features = ["tokenizers", "rwkv-tokenizer", "http", "blas", "safetensors"] }
 whisper-tensor-import = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
