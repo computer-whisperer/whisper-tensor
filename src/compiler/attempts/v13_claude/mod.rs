@@ -23,6 +23,8 @@ pub mod evaluate;
 pub mod execute;
 #[cfg(feature = "cranelift")]
 pub mod nano_codegen;
+#[cfg(feature = "cranelift")]
+pub mod nano_codegen_v2;
 pub mod nano_execute;
 pub mod nano_part_a;
 pub mod nano_part_b;

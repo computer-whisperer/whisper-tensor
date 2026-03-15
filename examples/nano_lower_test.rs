@@ -221,6 +221,50 @@ fn main() {
         print_v2c_diagnostic(&result.graph, &plan);
     }
 
+    // ---- V2C Codegen Execution ----
+    #[cfg(feature = "cranelift")]
+    {
+        use whisper_tensor::compiler::attempts::v13_claude::nano_codegen_v2::CompiledPlan;
+        use whisper_tensor::compiler::attempts::v13_claude::nano_plan_v2c;
+
+        println!("\n=== V2C Codegen Execution ===");
+        let t0 = Instant::now();
+        let plan = nano_plan_v2c::plan_execution(&result.graph, num_lanes);
+        eprintln!("  Plan: {:.1}ms, {} phases", t0.elapsed().as_secs_f64() * 1e3, plan.phases.len());
+
+        let f32_buffer_gb = result.graph.num_atoms() as f64 * 4.0 / (1024.0 * 1024.0 * 1024.0);
+        println!("  f32 buffer: {:.1} GB", f32_buffer_gb);
+
+        if f32_buffer_gb > 120.0 {
+            println!("  SKIPPING: buffer too large");
+        } else {
+            let t0 = Instant::now();
+            match CompiledPlan::compile(&result.graph, &plan) {
+                Ok(compiled) => {
+                    let compile_time = t0.elapsed();
+                    println!("  Compiled in {:.1}s ({} phase modules)",
+                        compile_time.as_secs_f64(), plan.phases.len());
+
+                    // Build f32 overrides from numeric_overrides (weights + constants)
+                    let mut overrides: HashMap<u64, f32> = HashMap::new();
+                    for (&atom_idx, scalar) in &result.numeric_overrides {
+                        overrides.insert(atom_idx, scalar.to_f64() as f32);
+                    }
+                    println!("  Overrides: {} entries", overrides.len());
+
+                    // Execute
+                    let t0 = Instant::now();
+                    let _values = compiled.execute(&overrides);
+                    let exec_time = t0.elapsed();
+                    println!("  Executed in {:.1}s", exec_time.as_secs_f64());
+                }
+                Err(e) => {
+                    println!("  Compilation FAILED: {}", e);
+                }
+            }
+        }
+    }
+
     // ---- Old-style Partition (compare approaches) ----
     let target_kernels = 200;
 
