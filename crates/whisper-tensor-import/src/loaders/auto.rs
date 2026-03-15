@@ -1,6 +1,6 @@
 use super::{
     FluxLoader, GgufLoader, KokoroLoader, OnnxLoader, PiperLoader, Rwkv7Loader, SD2Loader,
-    SD15Loader, SDXLLoader, TransformersLoader,
+    SD15Loader, SD35Loader, SDXLLoader, TransformersLoader,
 };
 use crate::onnx_graph::weights::SafetensorsWeightManager;
 use memmap2::Mmap;
@@ -46,10 +46,47 @@ impl Loader for AutoLoader {
             if config_path.exists() {
                 return TransformersLoader.load(config);
             }
-            // Check for ONNX SD directory format (text_encoder/model.onnx, etc.)
-            let sd_dir = path.join("text_encoder").join("model.onnx");
-            if sd_dir.exists() {
-                // SD ONNX directory — not yet a dedicated loader, fall through
+            // Check for SD3.x ONNX pipeline directory.
+            let has_onnx_component = |name: &str| {
+                let dir = path.join(name);
+                if !dir.is_dir() {
+                    return false;
+                }
+                std::fs::read_dir(&dir).ok().is_some_and(|entries| {
+                    entries
+                        .filter_map(Result::ok)
+                        .any(|entry| entry.path().extension().is_some_and(|ext| ext == "onnx"))
+                })
+            };
+            if has_onnx_component("text_encoder")
+                && has_onnx_component("text_encoder_2")
+                && has_onnx_component("text_encoder_3")
+                && has_onnx_component("transformer")
+                && (has_onnx_component("vae_decoder") || has_onnx_component("vae"))
+            {
+                return SD35Loader.load(config);
+            }
+            let has_safetensors_component = |name: &str| {
+                let dir = path.join(name);
+                if !dir.is_dir() {
+                    return false;
+                }
+                std::fs::read_dir(&dir).ok().is_some_and(|entries| {
+                    entries.filter_map(Result::ok).any(|entry| {
+                        entry
+                            .path()
+                            .extension()
+                            .is_some_and(|ext| ext == "safetensors")
+                    })
+                })
+            };
+            if has_safetensors_component("text_encoder")
+                && has_safetensors_component("text_encoder_2")
+                && has_safetensors_component("text_encoder_3")
+                && has_safetensors_component("transformer")
+                && has_safetensors_component("vae")
+            {
+                return SD35Loader.load(config);
             }
             return Err(LoaderError::CannotIdentify(path));
         }

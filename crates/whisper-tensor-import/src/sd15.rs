@@ -1,15 +1,10 @@
 use crate::onnx_graph::Error;
 use crate::onnx_graph::WeightStorageStrategy;
-use crate::onnx_graph::operators::{Add, Gather, Softmax, Transpose};
+use crate::onnx_graph::operators::{Add, Softmax, Transpose};
 use crate::onnx_graph::pytorch::{cast, conv2d, div_scalar, group_norm, layer_norm, linear, silu};
-use crate::onnx_graph::tensor::{
-    DType, Dimension, InputTensor, InputTensorInitialized, Shape, Tensor, TensorData,
-};
+use crate::onnx_graph::tensor::{DType, Dimension, InputTensor, Shape, Tensor};
 use crate::onnx_graph::weights::{SafetensorsWeightManager, WeightManager};
-use crate::sd_common::{
-    self, CastingWeightManager, build_causal_mask, downsample, resnet_block, spatial_transformer,
-    upsample,
-};
+use crate::sd_common::{self, downsample, resnet_block, spatial_transformer, upsample};
 use memmap2::Mmap;
 use prost::Message;
 use std::path::Path;
@@ -94,67 +89,23 @@ pub fn build_text_encoder(
     output_method: WeightStorageStrategy,
     origin_path: &Path,
 ) -> Result<Vec<u8>, anyhow::Error> {
-    let wm = CastingWeightManager::new(
+    crate::sd_clip::build_clip_text_model_with_projection(
         weight_manager.prefix("cond_stage_model.transformer.text_model"),
-        DType::F32,
-    );
-    let emb_wm = wm.prefix("embeddings");
-    let _ = model_dtype;
-
-    let batch_dim = Dimension::new(Some(1), Some("batch_size".to_string()), None);
-    let seq_dim = Dimension::new(Some(CLIP_MAX_POSITION), Some("seq_len".to_string()), None);
-    let input_shape = Shape::new(vec![batch_dim.clone(), seq_dim.clone()]);
-
-    let input_ids = InputTensor::new("input_ids".to_string(), DType::I32, input_shape);
-
-    // Token embedding
-    let token_emb = Gather::new(
-        Some("token_embedding".to_string()),
-        emb_wm.get_tensor("token_embedding.weight")?,
-        input_ids.clone(),
-        0,
-    )?;
-
-    // Position embedding
-    let pos_emb = emb_wm.get_tensor("position_embedding.weight")?;
-    let x = Add::new(Some("pos_embed".to_string()), token_emb, pos_emb)?;
-
-    // Build causal mask
-    let mask_data = build_causal_mask(CLIP_MAX_POSITION);
-    let causal_mask = InputTensorInitialized::new(
-        "causal_mask".to_string(),
-        TensorData::new(
-            mask_data.into(),
-            Shape::new(vec![
-                Dimension::new(Some(1), None, None),
-                Dimension::new(Some(1), None, None),
-                Dimension::new(Some(CLIP_MAX_POSITION), None, None),
-                Dimension::new(Some(CLIP_MAX_POSITION), None, None),
-            ]),
-        )?,
-    );
-
-    // Transformer layers
-    let mut hidden: Arc<dyn Tensor> = x;
-    for i in 0..CLIP_NUM_LAYERS {
-        let layer_wm = wm.prefix(&format!("encoder.layers.{i}"));
-        hidden = clip_encoder_layer(&layer_wm, hidden, causal_mask.clone())?;
-    }
-
-    // Final layer norm
-    let output = layer_norm(&wm.prefix("final_layer_norm"), hidden, 1e-5)?;
-
-    let input_tensors: Vec<Arc<dyn Tensor>> = vec![input_ids];
-    let output_tensors: Vec<(String, Arc<dyn Tensor>)> =
-        vec![("last_hidden_state".to_string(), output)];
-
-    let onnx_model = crate::onnx_graph::build_proto_with_origin_path(
-        &input_tensors,
-        &output_tensors,
+        model_dtype,
         output_method,
-        Some(origin_path),
-    )?;
-    Ok(onnx_model.encode_to_vec())
+        origin_path,
+        "",
+        crate::sd_clip::ClipTextModelConfig {
+            hidden_dim: CLIP_HIDDEN_DIM,
+            num_heads: CLIP_NUM_HEADS,
+            num_layers: CLIP_NUM_LAYERS,
+            max_position: CLIP_MAX_POSITION,
+            layer_norm_eps: 1e-5,
+            mlp_activation: crate::sd_clip::ClipMlpActivation::QuickGelu,
+            hidden_source: crate::sd_clip::ClipHiddenStateSource::FinalLayerNorm,
+            output_pooled_projection: false,
+        },
+    )
 }
 
 pub(crate) fn clip_encoder_layer(
