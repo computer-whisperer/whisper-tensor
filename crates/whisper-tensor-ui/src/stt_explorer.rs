@@ -5,6 +5,7 @@ use crate::audio_io::pick_audio_file_native;
 #[cfg(target_arch = "wasm32")]
 use crate::audio_io::{WebAudioFilePickReceiver, start_audio_file_pick_web};
 use crate::websockets::ServerRequestManager;
+use crate::widgets::progress_report::SuperGraphProgressWidgetState;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use whisper_tensor::DynRank;
@@ -37,6 +38,7 @@ pub(crate) struct STTExplorerApp {
     status_message: Option<String>,
     transcription_text: Option<String>,
     transcription_tokens: Option<Vec<u32>>,
+    progress_widget_state: SuperGraphProgressWidgetState,
     #[cfg(target_arch = "wasm32")]
     pending_web_audio_pick: Option<WebAudioFilePickReceiver>,
 }
@@ -51,6 +53,7 @@ impl STTExplorerApp {
             status_message: None,
             transcription_text: None,
             transcription_tokens: None,
+            progress_widget_state: SuperGraphProgressWidgetState::default(),
             #[cfg(target_arch = "wasm32")]
             pending_web_audio_pick: None,
         }
@@ -66,6 +69,12 @@ impl STTExplorerApp {
     ) {
         #[cfg(target_arch = "wasm32")]
         self.poll_audio_file_upload_web();
+
+        if let Some(pending) = &self.pending_request
+            && let Some(reports) = server_request_manager.get_reports(pending.request_id)
+        {
+            self.progress_widget_state.ingest_reports(reports);
+        }
 
         self.handle_pending_response(loaded_tokenizers, server_request_manager);
 
@@ -159,6 +168,9 @@ impl STTExplorerApp {
 
                 if let Some(msg) = &self.status_message {
                     ui.label(msg);
+                }
+                if !self.progress_widget_state.is_empty() {
+                    self.progress_widget_state.show(ui);
                 }
 
                 if let Some(tokens) = &self.transcription_tokens {
@@ -276,6 +288,7 @@ impl STTExplorerApp {
         model_ids: Vec<whisper_tensor_server::LoadedModelId>,
         server_request_manager: &mut ServerRequestManager,
     ) {
+        self.progress_widget_state.clear();
         let Some(audio_bytes) = self.selected_audio_bytes.as_ref() else {
             self.status_message = Some("Select a WAV file first.".to_string());
             return;

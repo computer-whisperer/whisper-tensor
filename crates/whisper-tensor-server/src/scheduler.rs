@@ -45,12 +45,22 @@ pub struct SchedulerReportSuperGraphTensorAssignedAbbreviated {
     pub value: AbbreviatedTensorValue,
 }
 
+#[derive(Debug)]
+pub struct SchedulerReportSuperGraphProgress {
+    pub attention: Option<u64>,
+    pub path: Vec<GlobalId>,
+    pub tier: i64,
+    pub numerator: f64,
+    pub denominator: f64,
+}
+
 #[allow(clippy::enum_variant_names)]
 #[derive(Debug)]
 pub enum SchedulerReport {
     SuperGraphNodeExecuted(SchedulerReportSuperGraphNodeExecuted),
     SuperGraphTensorAssignedFull(SchedulerReportSuperGraphTensorAssigned),
     SuperGraphTensorAssignedAbbreviated(SchedulerReportSuperGraphTensorAssignedAbbreviated),
+    SuperGraphProgress(SchedulerReportSuperGraphProgress),
 }
 
 impl SchedulerReport {
@@ -59,6 +69,7 @@ impl SchedulerReport {
             SchedulerReport::SuperGraphNodeExecuted(report) => report.attention,
             SchedulerReport::SuperGraphTensorAssignedFull(report) => report.attention,
             SchedulerReport::SuperGraphTensorAssignedAbbreviated(report) => report.attention,
+            SchedulerReport::SuperGraphProgress(report) => report.attention,
         }
     }
 }
@@ -197,6 +208,19 @@ impl SuperGraphObserver for LocalSuperGraphObserver {
                     reporter.push_report(report);
                 }
             }
+        }
+    }
+
+    fn on_progress(&mut self, path: &[GlobalId], tier: i64, numerator: f64, denominator: f64) {
+        if let Some(reporter) = &mut self.reporter {
+            let report = SchedulerReport::SuperGraphProgress(SchedulerReportSuperGraphProgress {
+                attention: self.attention,
+                path: path.to_vec(),
+                tier,
+                numerator,
+                denominator,
+            });
+            reporter.push_report(report);
         }
     }
 }

@@ -3,6 +3,7 @@ use crate::audio_io::{
     download_audio_wav, play_audio_samples, stop_audio_playback, tensor_to_audio_samples,
 };
 use crate::websockets::ServerRequestManager;
+use crate::widgets::progress_report::SuperGraphProgressWidgetState;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
@@ -37,6 +38,7 @@ pub(crate) struct TTSExplorerApp {
     generated_audio: Option<NDArrayNumericTensor<whisper_tensor::DynRank>>,
     generated_sample_rate_hz: Option<u32>,
     status_message: Option<String>,
+    progress_widget_state: SuperGraphProgressWidgetState,
 }
 
 impl TTSExplorerApp {
@@ -47,6 +49,7 @@ impl TTSExplorerApp {
             generated_audio: None,
             generated_sample_rate_hz: None,
             status_message: None,
+            progress_widget_state: SuperGraphProgressWidgetState::default(),
         }
     }
 
@@ -58,6 +61,12 @@ impl TTSExplorerApp {
         server_request_manager: &mut ServerRequestManager,
         ui: &mut egui::Ui,
     ) {
+        if let Some((request_id, _output_link, _sample_rate_hz)) = self.pending_request
+            && let Some(reports) = server_request_manager.get_reports(request_id)
+        {
+            self.progress_widget_state.ingest_reports(reports);
+        }
+
         if let Some((request_id, output_link, sample_rate_hz)) = self.pending_request
             && let Some(response) = server_request_manager.get_response(request_id)
         {
@@ -193,6 +202,9 @@ impl TTSExplorerApp {
                 if let Some(msg) = &self.status_message {
                     ui.label(msg);
                 }
+                if !self.progress_widget_state.is_empty() {
+                    self.progress_widget_state.show(ui);
+                }
 
                 if let (Some(audio), Some(sample_rate_hz)) =
                     (self.generated_audio.clone(), self.generated_sample_rate_hz)
@@ -253,6 +265,7 @@ impl TTSExplorerApp {
         model_ids: Vec<whisper_tensor_server::LoadedModelId>,
         server_request_manager: &mut ServerRequestManager,
     ) {
+        self.progress_widget_state.clear();
         let mut tensor_inputs = HashMap::new();
         let mut string_inputs = HashMap::new();
         string_inputs.insert(tts.text_input_link, state.text.clone());

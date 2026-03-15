@@ -8,6 +8,7 @@ use crate::graph::{GlobalId, Graph, Node, NodeMetadata, Property, PropertyValue}
 use crate::metadata::TokenizerInfo;
 use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::observer::MilliOpGraphObserver;
+use crate::numeric_scalar::NumericScalar;
 use crate::numeric_tensor::NumericTensor;
 use crate::phonemization::{text_to_kokoro_phonemes, text_to_piper_phonemes};
 use crate::super_graph::data::{SuperGraphAudioClip, SuperGraphImage};
@@ -88,6 +89,59 @@ fn read_rank0_bool_tensor(
         )));
     }
     Ok(tensor.first_element().into())
+}
+
+fn read_rank0_i64_tensor(
+    tensor: &NumericTensor<DynRank>,
+    input_name: &str,
+    backend: &mut EvalBackend,
+) -> Result<i64, SuperGraphError> {
+    if tensor.rank() > 1
+        || (tensor.rank() == 1 && tensor.shape().first().copied().unwrap_or(0) != 1)
+    {
+        return Err(SuperGraphError::InvalidInputError(format!(
+            "{} must be a scalar (rank-0 or rank-1 with 1 element), got rank={} shape={:?}",
+            input_name,
+            tensor.rank(),
+            tensor.shape()
+        )));
+    }
+    if tensor.dtype() == DType::BOOL {
+        let value: bool = tensor.first_element().into();
+        return Ok(if value { 1 } else { 0 });
+    }
+    let cast_tensor = tensor.cast(DType::I64, backend)?;
+    Ok(cast_tensor.first_element().into())
+}
+
+fn read_rank0_f64_tensor(
+    tensor: &NumericTensor<DynRank>,
+    input_name: &str,
+    backend: &mut EvalBackend,
+) -> Result<f64, SuperGraphError> {
+    if tensor.rank() > 1
+        || (tensor.rank() == 1 && tensor.shape().first().copied().unwrap_or(0) != 1)
+    {
+        return Err(SuperGraphError::InvalidInputError(format!(
+            "{} must be a scalar (rank-0 or rank-1 with 1 element), got rank={} shape={:?}",
+            input_name,
+            tensor.rank(),
+            tensor.shape()
+        )));
+    }
+    if tensor.dtype() == DType::BOOL {
+        let value: bool = tensor.first_element().into();
+        return Ok(if value { 1.0 } else { 0.0 });
+    }
+    let cast_tensor = tensor.cast(DType::F64, backend)?;
+    if let NumericScalar::F64(value) = cast_tensor.first_element() {
+        Ok(value)
+    } else {
+        Err(SuperGraphError::InvalidInputError(format!(
+            "{} could not be converted into F64",
+            input_name
+        )))
+    }
 }
 
 fn parse_piper_phoneme_id_map(json: &str) -> Result<HashMap<char, Vec<i64>>, SuperGraphError> {
@@ -1955,6 +2009,103 @@ impl SuperGraphNode for SuperGraphNodeScan {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SuperGraphNodeReportProgress {
+    global_id: GlobalId,
+    tier_input: SuperGraphLink,
+    numerator_input: SuperGraphLink,
+    denominator_input: SuperGraphLink,
+}
+
+impl SuperGraphNodeReportProgress {
+    pub fn new(
+        tier_input: SuperGraphLink,
+        numerator_input: SuperGraphLink,
+        denominator_input: SuperGraphLink,
+        rng: &mut impl Rng,
+    ) -> Self {
+        Self {
+            global_id: GlobalId::new(rng),
+            tier_input,
+            numerator_input,
+            denominator_input,
+        }
+    }
+}
+
+impl SuperGraphNode for SuperGraphNodeReportProgress {
+    fn to_any(self) -> SuperGraphAnyNode {
+        SuperGraphAnyNode::ReportProgress(self)
+    }
+
+    fn eval<T: SuperGraphObserver>(
+        &self,
+        node_path: &[GlobalId],
+        data: &mut SuperGraphData,
+        context: &mut SuperGraphContext<T>,
+    ) -> Result<(), SuperGraphError> {
+        let tier = read_rank0_i64_tensor(
+            data.tensors
+                .get(&self.tier_input)
+                .ok_or(SuperGraphError::MissingLinkError(format!(
+                    ": report_progress tier_input {:?}",
+                    self.tier_input
+                )))?,
+            "ReportProgress.tier_input",
+            context.eval_backend,
+        )?;
+        let numerator = read_rank0_f64_tensor(
+            data.tensors
+                .get(&self.numerator_input)
+                .ok_or(SuperGraphError::MissingLinkError(format!(
+                    ": report_progress numerator_input {:?}",
+                    self.numerator_input
+                )))?,
+            "ReportProgress.numerator_input",
+            context.eval_backend,
+        )?;
+        let denominator = read_rank0_f64_tensor(
+            data.tensors
+                .get(&self.denominator_input)
+                .ok_or(SuperGraphError::MissingLinkError(format!(
+                    ": report_progress denominator_input {:?}",
+                    self.denominator_input
+                )))?,
+            "ReportProgress.denominator_input",
+            context.eval_backend,
+        )?;
+        let path = node_path
+            .iter()
+            .chain(core::iter::once(&self.global_id))
+            .copied()
+            .collect::<Vec<_>>();
+        context
+            .observer
+            .on_progress(path.as_slice(), tier, numerator, denominator);
+        Ok(())
+    }
+
+    fn op_kind(&self) -> String {
+        "ReportProgress".to_string()
+    }
+    fn inputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new(
+            [
+                self.tier_input.to_any(),
+                self.numerator_input.to_any(),
+                self.denominator_input.to_any(),
+            ]
+            .into_iter(),
+        )
+    }
+    fn outputs(&self) -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_> {
+        Box::new(std::iter::empty())
+    }
+    fn global_id(&self) -> GlobalId {
+        self.global_id
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SuperGraphNodeRNNCacheRead {
     global_id: GlobalId,
     key_input: SuperGraphLink,
@@ -2521,6 +2672,7 @@ pub enum SuperGraphAnyNode {
     AudioClipToMelSpectrogram(SuperGraphNodeAudioClipToMelSpectrogram),
     MilliOpGraph(SuperGraphNodeMilliOpGraph),
     Scan(SuperGraphNodeScan),
+    ReportProgress(SuperGraphNodeReportProgress),
     RNNCacheWrite(SuperGraphNodeRNNCacheWrite),
     RNNCacheRead(SuperGraphNodeRNNCacheRead),
     TensorCacheRead(SuperGraphNodeTensorCacheRead),
@@ -2547,6 +2699,7 @@ macro_rules! delegate {
                 SuperGraphAnyNode::AudioClipToMelSpectrogram(x) => SuperGraphNode::$name(x,$($arg),*),
                 SuperGraphAnyNode::MilliOpGraph(x) => SuperGraphNode::$name(x,$($arg),*),
                 SuperGraphAnyNode::Scan(x) => SuperGraphNode::$name(x,$($arg),*),
+                SuperGraphAnyNode::ReportProgress(x) => SuperGraphNode::$name(x,$($arg),*),
                 SuperGraphAnyNode::RNNCacheRead(x) => SuperGraphNode::$name(x,$($arg),*),
                 SuperGraphAnyNode::RNNCacheWrite(x) => SuperGraphNode::$name(x,$($arg),*),
                 SuperGraphAnyNode::TensorCacheRead(x) => SuperGraphNode::$name(x,$($arg),*),
@@ -2595,6 +2748,7 @@ impl SuperGraphNode for SuperGraphAnyNode {
             }
             SuperGraphAnyNode::MilliOpGraph(node) => node.eval(node_path, data, context),
             SuperGraphAnyNode::Scan(node) => node.eval(node_path, data, context),
+            SuperGraphAnyNode::ReportProgress(node) => node.eval(node_path, data, context),
             SuperGraphAnyNode::RNNCacheWrite(node) => node.eval(node_path, data, context),
             SuperGraphAnyNode::RNNCacheRead(node) => node.eval(node_path, data, context),
             SuperGraphAnyNode::TensorCacheRead(node) => node.eval(node_path, data, context),

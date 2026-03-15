@@ -12,7 +12,8 @@ use whisper_tensor::super_graph::links::{
 };
 use whisper_tensor::super_graph::nodes::{
     SuperGraphNode, SuperGraphNodeAudioClipToMelSpectrogram, SuperGraphNodeAudioToMelConfig,
-    SuperGraphNodeMilliOpGraph, SuperGraphNodeModelExecution, SuperGraphNodeScan,
+    SuperGraphNodeMilliOpGraph, SuperGraphNodeModelExecution, SuperGraphNodeReportProgress,
+    SuperGraphNodeScan,
 };
 
 pub(crate) struct WhisperSuperGraphResult {
@@ -313,6 +314,7 @@ pub(crate) fn build_whisper_supergraph(
     }
 
     let generation_iteration_count_link = builder.new_tensor_link(rng);
+    let generation_progress_zero_link = builder.new_tensor_link(rng);
     {
         let (mut mg, _) = MilliOpGraph::new(std::iter::empty(), rng);
         let loop_count = Constant::push_new(
@@ -320,10 +322,15 @@ pub(crate) fn build_whisper_supergraph(
             NDArrayNumericTensor::from_vec_shape(vec![max_decode_steps as i64], &vec![1]).unwrap(),
             rng,
         );
-        mg.set_output_map(std::iter::once((
-            loop_count,
-            generation_iteration_count_link.global_id(),
-        )));
+        let progress_zero = Constant::push_new(
+            &mut mg,
+            NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
+            rng,
+        );
+        mg.set_output_map([
+            (loop_count, generation_iteration_count_link.global_id()),
+            (progress_zero, generation_progress_zero_link.global_id()),
+        ]);
         builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
     }
 
@@ -335,6 +342,10 @@ pub(crate) fn build_whisper_supergraph(
     let sub_finished_in = sub_builder.new_tensor_link(rng);
     let sub_token_out = sub_builder.new_tensor_link(rng);
     let sub_finished_out = sub_builder.new_tensor_link(rng);
+    let sub_progress_tier = sub_builder.new_tensor_link(rng);
+    let sub_total_steps = sub_builder.new_tensor_link(rng);
+    let sub_step_in = sub_builder.new_tensor_link(rng);
+    let sub_step_out = sub_builder.new_tensor_link(rng);
 
     let sub_state_in: HashMap<usize, SuperGraphLink> = state_ids
         .iter()
@@ -386,10 +397,17 @@ pub(crate) fn build_whisper_supergraph(
     }
 
     {
-        let (mut mg, input_map) =
-            MilliOpGraph::new([sub_logits.global_id(), sub_finished_in.global_id()], rng);
+        let (mut mg, input_map) = MilliOpGraph::new(
+            [
+                sub_logits.global_id(),
+                sub_finished_in.global_id(),
+                sub_step_in.global_id(),
+            ],
+            rng,
+        );
         let logits = *input_map.get(&sub_logits.global_id()).unwrap();
         let finished_in = *input_map.get(&sub_finished_in.global_id()).unwrap();
+        let step_in = *input_map.get(&sub_step_in.global_id()).unwrap();
 
         let axis0 = Constant::push_new(
             &mut mg,
@@ -411,25 +429,44 @@ pub(crate) fn build_whisper_supergraph(
         let eos_hit = SimpleBinary::equal(&mut mg, next_token, eos_token, rng);
         let next_finished = SimpleBinary::or(&mut mg, finished_in, eos_hit, rng);
         let emitted_token = Where::push_new(&mut mg, finished_in, eos_token, next_token, rng);
+        let one = Constant::push_new(
+            &mut mg,
+            NDArrayNumericTensor::from_vec_shape(vec![1i64], &vec![1]).unwrap(),
+            rng,
+        );
+        let next_step = SimpleBinary::add(&mut mg, step_in, one, rng);
 
         mg.set_output_map([
             (emitted_token, sub_token_out.global_id()),
             (next_finished, sub_finished_out.global_id()),
+            (next_step, sub_step_out.global_id()),
         ]);
         sub_builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
     }
+
+    sub_builder.add_node(
+        SuperGraphNodeReportProgress::new(sub_progress_tier, sub_step_out, sub_total_steps, rng)
+            .to_any(),
+    );
 
     let mut sub_inputs = vec![
         sub_model_link.to_any(),
         sub_encoder_hidden.to_any(),
         sub_token_in.to_any(),
         sub_finished_in.to_any(),
+        sub_progress_tier.to_any(),
+        sub_total_steps.to_any(),
+        sub_step_in.to_any(),
     ];
     for id in &state_ids {
         sub_inputs.push(sub_state_in.get(id).unwrap().to_any());
     }
 
-    let mut sub_outputs = vec![sub_token_out.to_any(), sub_finished_out.to_any()];
+    let mut sub_outputs = vec![
+        sub_token_out.to_any(),
+        sub_finished_out.to_any(),
+        sub_step_out.to_any(),
+    ];
     for id in &state_ids {
         sub_outputs.push(sub_state_out.get(id).unwrap().to_any());
     }
@@ -440,6 +477,7 @@ pub(crate) fn build_whisper_supergraph(
     let mut state_links = vec![
         SuperGraphLinkTriple::new(token_state_init_link, sub_token_in, sub_token_out),
         SuperGraphLinkTriple::new(finished_state_init_link, sub_finished_in, sub_finished_out),
+        SuperGraphLinkTriple::new(generation_progress_zero_link, sub_step_in, sub_step_out),
     ];
     for (id, init_link) in &prefill_final_state_links {
         state_links.push(SuperGraphLinkTriple::new(
@@ -456,6 +494,8 @@ pub(crate) fn build_whisper_supergraph(
             vec![
                 SuperGraphLinkDouble::new(decoder_weights_link, sub_model_link),
                 SuperGraphLinkDouble::new(encoder_hidden_link, sub_encoder_hidden),
+                SuperGraphLinkDouble::new(generation_progress_zero_link, sub_progress_tier),
+                SuperGraphLinkDouble::new(generation_iteration_count_link, sub_total_steps),
             ],
             state_links,
             vec![],

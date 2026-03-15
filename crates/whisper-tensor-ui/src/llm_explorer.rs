@@ -1,5 +1,6 @@
 use crate::app::{InterfaceId, LoadedModels, LoadedTokenizers, ModelLoadState};
 use crate::websockets::ServerRequestManager;
+use crate::widgets::progress_report::SuperGraphProgressWidgetState;
 use egui::{Color32, CursorIcon, Event, EventFilter, Label, RichText, Sense, Widget};
 use log::info;
 use serde::{Deserialize, Serialize};
@@ -54,6 +55,7 @@ pub(crate) struct LLMExplorerApp {
     llm_explorer_cached_token_list: Option<Vec<u32>>,
     pending_request: Option<(u64, SuperGraphLink, Vec<u32>)>,
     pub(crate) latest_logits: Option<LogitData>,
+    progress_widget_state: SuperGraphProgressWidgetState,
 }
 
 impl LLMExplorerApp {
@@ -63,6 +65,7 @@ impl LLMExplorerApp {
             llm_explorer_cached_token_list: None,
             pending_request: None,
             latest_logits: None,
+            progress_widget_state: SuperGraphProgressWidgetState::default(),
         }
     }
 
@@ -74,6 +77,12 @@ impl LLMExplorerApp {
         server_request_manager: &mut ServerRequestManager,
         ui: &mut egui::Ui,
     ) {
+        if let Some((request_id, _link, _tokens)) = &self.pending_request
+            && let Some(reports) = server_request_manager.get_reports(*request_id)
+        {
+            self.progress_widget_state.ingest_reports(reports);
+        }
+
         // Handle pending requests
         if let Some((request_id, link, tokens)) = self.pending_request.clone()
             && let Some(response) = server_request_manager.get_response(request_id)
@@ -411,6 +420,7 @@ impl LLMExplorerApp {
                             self.llm_explorer_cached_token_list =
                                 Some(tokenizer.encode(&state.current_llm_text));
                         }
+                        self.progress_widget_state.clear();
                         let tokens = self.llm_explorer_cached_token_list.clone().unwrap();
                         let tokens_tensor = NDArrayNumericTensor::from_vec(tokens.clone()).to_dyn();
                         let token =
@@ -438,6 +448,9 @@ impl LLMExplorerApp {
                         self.pending_request = Some((token, logit_output_link, tokens));
                         self.latest_logits = None;
                     }
+                }
+                if !self.progress_widget_state.is_empty() {
+                    self.progress_widget_state.show(ui);
                 }
             }
             (Some(_), Some(Err(err))) => {

@@ -15,9 +15,9 @@ use crate::super_graph::cache::{SuperGraphCache, SuperGraphTensorCache};
 use crate::super_graph::data::{SuperGraphData, SuperGraphImage};
 use crate::super_graph::links::{SuperGraphLink, SuperGraphLinkDouble, SuperGraphLinkTriple};
 use crate::super_graph::nodes::{
-    SuperGraphNode, SuperGraphNodeMilliOpGraph, SuperGraphNodeModelExecution, SuperGraphNodeScan,
-    SuperGraphNodeTensorToImage, SuperGraphNodeTokenizerEncode, SuperGraphNodeTokenizerEncodeMode,
-    SuperGraphNodeTokenizerLoad,
+    SuperGraphNode, SuperGraphNodeMilliOpGraph, SuperGraphNodeModelExecution,
+    SuperGraphNodeReportProgress, SuperGraphNodeScan, SuperGraphNodeTensorToImage,
+    SuperGraphNodeTokenizerEncode, SuperGraphNodeTokenizerEncodeMode, SuperGraphNodeTokenizerLoad,
 };
 use crate::super_graph::{SuperGraph, SuperGraphBuilder, SuperGraphContext, SuperGraphError};
 use crate::tensor_rank::DynRank;
@@ -384,6 +384,18 @@ fn build_denoising_loop(
     unet_model_index: usize,
 ) -> SuperGraphLink {
     let outer_final_latent = builder.new_tensor_link(rng);
+    let progress_tier_link = builder.new_tensor_link(rng);
+
+    {
+        let (mut mg, _) = MilliOpGraph::new(std::iter::empty(), rng);
+        let tier = Constant::push_new(
+            &mut mg,
+            NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
+            rng,
+        );
+        mg.set_output_map(std::iter::once((tier, progress_tier_link.global_id())));
+        builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
+    }
 
     let mut inner_builder = SuperGraphBuilder::new();
 
@@ -396,6 +408,10 @@ fn build_denoising_loop(
     let inner_latent_out = inner_builder.new_tensor_link(rng);
     let inner_timestep = inner_builder.new_tensor_link(rng);
     let inner_dt = inner_builder.new_tensor_link(rng);
+    let inner_progress_tier = inner_builder.new_tensor_link(rng);
+    let inner_total_steps = inner_builder.new_tensor_link(rng);
+    let inner_step_in = inner_builder.new_tensor_link(rng);
+    let inner_step_out = inner_builder.new_tensor_link(rng);
     let inner_sigma = inner_builder.new_tensor_link(rng);
 
     // Optional ADM conditioning links
@@ -529,13 +545,40 @@ fn build_denoising_loop(
         inner_builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
     }
 
+    {
+        let (mut mg, input_map) =
+            MilliOpGraph::new(std::iter::once(inner_step_in.global_id()), rng);
+        let step_in = *input_map.get(&inner_step_in.global_id()).unwrap();
+        let one = Constant::push_new(
+            &mut mg,
+            NDArrayNumericTensor::from_vec_shape(vec![1i64], &vec![1]).unwrap(),
+            rng,
+        );
+        let step_next = SimpleBinary::add(&mut mg, step_in, one, rng);
+        mg.set_output_map(std::iter::once((step_next, inner_step_out.global_id())));
+        inner_builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
+    }
+
+    inner_builder.add_node(
+        SuperGraphNodeReportProgress::new(
+            inner_progress_tier,
+            inner_step_out,
+            inner_total_steps,
+            rng,
+        )
+        .to_any(),
+    );
+
     // Build inner graph
     let mut inner_inputs: Vec<_> = vec![
         inner_unet_weights.to_any(),
         inner_cond_context.to_any(),
         inner_uncond_context.to_any(),
         inner_guidance_scale.to_any(),
+        inner_progress_tier.to_any(),
+        inner_total_steps.to_any(),
         inner_latent_in.to_any(),
+        inner_step_in.to_any(),
         inner_timestep.to_any(),
         inner_dt.to_any(),
         inner_sigma.to_any(),
@@ -546,7 +589,7 @@ fn build_denoising_loop(
     if let Some(uy) = inner_uncond_y {
         inner_inputs.push(uy.to_any());
     }
-    let inner_outputs: Vec<_> = vec![inner_latent_out.to_any()];
+    let inner_outputs: Vec<_> = vec![inner_latent_out.to_any(), inner_step_out.to_any()];
     let inner_graph = inner_builder.build(rng, &inner_inputs, &inner_outputs);
 
     // Create scan node
@@ -562,17 +605,24 @@ fn build_denoising_loop(
     if let (Some(uy_outer), Some(uy_inner)) = (uncond_y, inner_uncond_y) {
         simple_inputs.push(SuperGraphLinkDouble::new(uy_outer, uy_inner));
     }
+    simple_inputs.push(SuperGraphLinkDouble::new(
+        progress_tier_link,
+        inner_progress_tier,
+    ));
+    simple_inputs.push(SuperGraphLinkDouble::new(
+        iteration_count_input,
+        inner_total_steps,
+    ));
 
     let scan_node = SuperGraphNodeScan::new(
         inner_graph,
         iteration_count_input,
         simple_inputs,
         // state_links: (initial, inner_in, inner_out)
-        vec![SuperGraphLinkTriple::new(
-            initial_latent_input,
-            inner_latent_in,
-            inner_latent_out,
-        )],
+        vec![
+            SuperGraphLinkTriple::new(initial_latent_input, inner_latent_in, inner_latent_out),
+            SuperGraphLinkTriple::new(progress_tier_link, inner_step_in, inner_step_out),
+        ],
         // scan_inputs: (outer, inner, axis)
         vec![
             (timesteps_input, inner_timestep, 0),
@@ -734,6 +784,18 @@ fn build_flux_denoising_loop(
     dit_model_index: usize,
 ) -> SuperGraphLink {
     let outer_final_latent = builder.new_tensor_link(rng);
+    let progress_tier_link = builder.new_tensor_link(rng);
+
+    {
+        let (mut mg, _) = MilliOpGraph::new(std::iter::empty(), rng);
+        let tier = Constant::push_new(
+            &mut mg,
+            NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
+            rng,
+        );
+        mg.set_output_map(std::iter::once((tier, progress_tier_link.global_id())));
+        builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
+    }
 
     let mut inner_builder = SuperGraphBuilder::new();
 
@@ -746,6 +808,10 @@ fn build_flux_denoising_loop(
     let inner_timestep = inner_builder.new_tensor_link(rng);
     let inner_dt = inner_builder.new_tensor_link(rng);
     let inner_guidance = guidance_input.map(|_| inner_builder.new_tensor_link(rng));
+    let inner_progress_tier = inner_builder.new_tensor_link(rng);
+    let inner_total_steps = inner_builder.new_tensor_link(rng);
+    let inner_step_in = inner_builder.new_tensor_link(rng);
+    let inner_step_out = inner_builder.new_tensor_link(rng);
 
     // Inner node 1: Prep — cast latent to model_dtype, reshape timestep (and guidance)
     let cast_latent = inner_builder.new_tensor_link(rng);
@@ -841,19 +907,46 @@ fn build_flux_denoising_loop(
         inner_builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
     }
 
+    {
+        let (mut mg, input_map) =
+            MilliOpGraph::new(std::iter::once(inner_step_in.global_id()), rng);
+        let step_in = *input_map.get(&inner_step_in.global_id()).unwrap();
+        let one = Constant::push_new(
+            &mut mg,
+            NDArrayNumericTensor::from_vec_shape(vec![1i64], &vec![1]).unwrap(),
+            rng,
+        );
+        let step_next = SimpleBinary::add(&mut mg, step_in, one, rng);
+        mg.set_output_map(std::iter::once((step_next, inner_step_out.global_id())));
+        inner_builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
+    }
+
+    inner_builder.add_node(
+        SuperGraphNodeReportProgress::new(
+            inner_progress_tier,
+            inner_step_out,
+            inner_total_steps,
+            rng,
+        )
+        .to_any(),
+    );
+
     // Build inner graph
     let mut inner_inputs: Vec<_> = vec![
         inner_dit_weights.to_any(),
         inner_clip_pooled.to_any(),
         inner_t5_hidden.to_any(),
+        inner_progress_tier.to_any(),
+        inner_total_steps.to_any(),
         inner_latent_in.to_any(),
+        inner_step_in.to_any(),
         inner_timestep.to_any(),
         inner_dt.to_any(),
     ];
     if let Some(ig) = inner_guidance {
         inner_inputs.push(ig.to_any());
     }
-    let inner_outputs: Vec<_> = vec![inner_latent_out.to_any()];
+    let inner_outputs: Vec<_> = vec![inner_latent_out.to_any(), inner_step_out.to_any()];
     let inner_graph = inner_builder.build(rng, &inner_inputs, &inner_outputs);
 
     // Create scan node
@@ -865,17 +958,24 @@ fn build_flux_denoising_loop(
     if let (Some(outer_g), Some(ig)) = (guidance_input, inner_guidance) {
         simple_inputs.push(SuperGraphLinkDouble::new(outer_g, ig));
     }
+    simple_inputs.push(SuperGraphLinkDouble::new(
+        progress_tier_link,
+        inner_progress_tier,
+    ));
+    simple_inputs.push(SuperGraphLinkDouble::new(
+        iteration_count_input,
+        inner_total_steps,
+    ));
 
     let scan_node = SuperGraphNodeScan::new(
         inner_graph,
         iteration_count_input,
         simple_inputs,
         // state_links: latent carried across iterations
-        vec![SuperGraphLinkTriple::new(
-            initial_latent_input,
-            inner_latent_in,
-            inner_latent_out,
-        )],
+        vec![
+            SuperGraphLinkTriple::new(initial_latent_input, inner_latent_in, inner_latent_out),
+            SuperGraphLinkTriple::new(progress_tier_link, inner_step_in, inner_step_out),
+        ],
         // scan_inputs: timestep and dt scanned along axis 0
         vec![
             (timesteps_input, inner_timestep, 0),
@@ -923,6 +1023,18 @@ fn build_sd3_denoising_loop(
     transformer_output_name: &str,
 ) -> SuperGraphLink {
     let outer_final_latent = builder.new_tensor_link(rng);
+    let progress_tier_link = builder.new_tensor_link(rng);
+
+    {
+        let (mut mg, _) = MilliOpGraph::new(std::iter::empty(), rng);
+        let tier = Constant::push_new(
+            &mut mg,
+            NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
+            rng,
+        );
+        mg.set_output_map(std::iter::once((tier, progress_tier_link.global_id())));
+        builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
+    }
 
     let mut inner_builder = SuperGraphBuilder::new();
 
@@ -937,6 +1049,10 @@ fn build_sd3_denoising_loop(
     let inner_latent_out = inner_builder.new_tensor_link(rng);
     let inner_timestep = inner_builder.new_tensor_link(rng);
     let inner_dt = inner_builder.new_tensor_link(rng);
+    let inner_progress_tier = inner_builder.new_tensor_link(rng);
+    let inner_total_steps = inner_builder.new_tensor_link(rng);
+    let inner_step_in = inner_builder.new_tensor_link(rng);
+    let inner_step_out = inner_builder.new_tensor_link(rng);
 
     // Inner node 1: cast latent/timestep to model_dtype and reshape timestep to [1]
     let cast_latent = inner_builder.new_tensor_link(rng);
@@ -1040,6 +1156,30 @@ fn build_sd3_denoising_loop(
         inner_builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
     }
 
+    {
+        let (mut mg, input_map) =
+            MilliOpGraph::new(std::iter::once(inner_step_in.global_id()), rng);
+        let step_in = *input_map.get(&inner_step_in.global_id()).unwrap();
+        let one = Constant::push_new(
+            &mut mg,
+            NDArrayNumericTensor::from_vec_shape(vec![1i64], &vec![1]).unwrap(),
+            rng,
+        );
+        let step_next = SimpleBinary::add(&mut mg, step_in, one, rng);
+        mg.set_output_map(std::iter::once((step_next, inner_step_out.global_id())));
+        inner_builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
+    }
+
+    inner_builder.add_node(
+        SuperGraphNodeReportProgress::new(
+            inner_progress_tier,
+            inner_step_out,
+            inner_total_steps,
+            rng,
+        )
+        .to_any(),
+    );
+
     let inner_inputs: Vec<_> = vec![
         inner_transformer_weights.to_any(),
         inner_cond_context.to_any(),
@@ -1047,11 +1187,14 @@ fn build_sd3_denoising_loop(
         inner_cond_pooled.to_any(),
         inner_uncond_pooled.to_any(),
         inner_guidance_scale.to_any(),
+        inner_progress_tier.to_any(),
+        inner_total_steps.to_any(),
         inner_latent_in.to_any(),
+        inner_step_in.to_any(),
         inner_timestep.to_any(),
         inner_dt.to_any(),
     ];
-    let inner_outputs: Vec<_> = vec![inner_latent_out.to_any()];
+    let inner_outputs: Vec<_> = vec![inner_latent_out.to_any(), inner_step_out.to_any()];
     let inner_graph = inner_builder.build(rng, &inner_inputs, &inner_outputs);
 
     let scan_node = SuperGraphNodeScan::new(
@@ -1064,12 +1207,13 @@ fn build_sd3_denoising_loop(
             SuperGraphLinkDouble::new(cond_pooled, inner_cond_pooled),
             SuperGraphLinkDouble::new(uncond_pooled, inner_uncond_pooled),
             SuperGraphLinkDouble::new(guidance_scale_input, inner_guidance_scale),
+            SuperGraphLinkDouble::new(progress_tier_link, inner_progress_tier),
+            SuperGraphLinkDouble::new(iteration_count_input, inner_total_steps),
         ],
-        vec![SuperGraphLinkTriple::new(
-            initial_latent_input,
-            inner_latent_in,
-            inner_latent_out,
-        )],
+        vec![
+            SuperGraphLinkTriple::new(initial_latent_input, inner_latent_in, inner_latent_out),
+            SuperGraphLinkTriple::new(progress_tier_link, inner_step_in, inner_step_out),
+        ],
         vec![
             (timesteps_input, inner_timestep, 0),
             (dt_input, inner_dt, 0),

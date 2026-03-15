@@ -70,6 +70,7 @@ async fn flush_reports(
             node_executions: Vec::new(),
             tensor_assignments: Vec::new(),
             abbreviated_tensor_assignments: Vec::new(),
+            progress_reports: Vec::new(),
         };
         buf.retain(|x| {
             if x.get_attention_token() == report.attention {
@@ -93,6 +94,14 @@ async fn flush_reports(
                         report
                             .abbreviated_tensor_assignments
                             .push((x.path.clone(), x.value.clone()));
+                    }
+                    SchedulerReport::SuperGraphProgress(x) => {
+                        report.progress_reports.push((
+                            x.path.clone(),
+                            x.tier,
+                            x.numerator,
+                            x.denominator,
+                        ));
                     }
                 }
                 false

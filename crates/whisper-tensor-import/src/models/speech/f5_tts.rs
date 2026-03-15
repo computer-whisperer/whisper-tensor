@@ -12,7 +12,8 @@ use whisper_tensor::super_graph::links::{
 };
 use whisper_tensor::super_graph::nodes::{
     SuperGraphNode, SuperGraphNodeF5TextToTensor, SuperGraphNodeMilliOpGraph,
-    SuperGraphNodeModelExecution, SuperGraphNodeScan, SuperGraphNodeTensorToAudioClip,
+    SuperGraphNodeModelExecution, SuperGraphNodeReportProgress, SuperGraphNodeScan,
+    SuperGraphNodeTensorToAudioClip,
 };
 
 const NFE_STEPS: u32 = 32;
@@ -224,6 +225,18 @@ fn build_f5_denoising_loop(
     iteration_count_input: SuperGraphLink,
 ) -> SuperGraphLink {
     let outer_final_denoised = builder.new_tensor_link(rng);
+    let progress_tier_link = builder.new_tensor_link(rng);
+
+    {
+        let (mut mg, _) = MilliOpGraph::new(std::iter::empty(), rng);
+        let tier = Constant::push_new(
+            &mut mg,
+            NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
+            rng,
+        );
+        mg.set_output_map(std::iter::once((tier, progress_tier_link.global_id())));
+        builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
+    }
 
     let mut inner_builder = SuperGraphBuilder::new();
 
@@ -234,10 +247,14 @@ fn build_f5_denoising_loop(
     let inner_cat_mel_text = inner_builder.new_tensor_link(rng);
     let inner_cat_mel_text_drop = inner_builder.new_tensor_link(rng);
     let inner_qk_rotated_empty = inner_builder.new_tensor_link(rng);
+    let inner_progress_tier = inner_builder.new_tensor_link(rng);
+    let inner_total_steps = inner_builder.new_tensor_link(rng);
 
     // Inner links for state (noise carried between iterations)
     let inner_noise_in = inner_builder.new_tensor_link(rng);
     let inner_noise_out = inner_builder.new_tensor_link(rng);
+    let inner_step_in = inner_builder.new_tensor_link(rng);
+    let inner_step_out = inner_builder.new_tensor_link(rng);
 
     // Inner link for scan input (time_step per iteration)
     let inner_time_step = inner_builder.new_tensor_link(rng);
@@ -300,6 +317,30 @@ fn build_f5_denoising_loop(
         inner_builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
     }
 
+    {
+        let (mut mg, input_map) =
+            MilliOpGraph::new(std::iter::once(inner_step_in.global_id()), rng);
+        let step_in = *input_map.get(&inner_step_in.global_id()).unwrap();
+        let one = Constant::push_new(
+            &mut mg,
+            NDArrayNumericTensor::from_vec_shape(vec![1i64], &vec![1]).unwrap(),
+            rng,
+        );
+        let step_next = SimpleBinary::add(&mut mg, step_in, one, rng);
+        mg.set_output_map(std::iter::once((step_next, inner_step_out.global_id())));
+        inner_builder.add_node(SuperGraphNodeMilliOpGraph::new(mg, rng).to_any());
+    }
+
+    inner_builder.add_node(
+        SuperGraphNodeReportProgress::new(
+            inner_progress_tier,
+            inner_step_out,
+            inner_total_steps,
+            rng,
+        )
+        .to_any(),
+    );
+
     // Build inner graph
     let inner_inputs = vec![
         inner_transformer_weights.to_any(),
@@ -308,10 +349,13 @@ fn build_f5_denoising_loop(
         inner_cat_mel_text.to_any(),
         inner_cat_mel_text_drop.to_any(),
         inner_qk_rotated_empty.to_any(),
+        inner_progress_tier.to_any(),
+        inner_total_steps.to_any(),
         inner_noise_in.to_any(),
+        inner_step_in.to_any(),
         inner_time_step.to_any(),
     ];
-    let inner_outputs = vec![inner_noise_out.to_any()];
+    let inner_outputs = vec![inner_noise_out.to_any(), inner_step_out.to_any()];
     let inner_graph = inner_builder.build(rng, &inner_inputs, &inner_outputs);
 
     // Create scan node
@@ -326,13 +370,14 @@ fn build_f5_denoising_loop(
             SuperGraphLinkDouble::new(cat_mel_text, inner_cat_mel_text),
             SuperGraphLinkDouble::new(cat_mel_text_drop, inner_cat_mel_text_drop),
             SuperGraphLinkDouble::new(qk_rotated_empty, inner_qk_rotated_empty),
+            SuperGraphLinkDouble::new(progress_tier_link, inner_progress_tier),
+            SuperGraphLinkDouble::new(iteration_count_input, inner_total_steps),
         ],
         // state_links: noise carried between iterations
-        vec![SuperGraphLinkTriple::new(
-            initial_noise,
-            inner_noise_in,
-            inner_noise_out,
-        )],
+        vec![
+            SuperGraphLinkTriple::new(initial_noise, inner_noise_in, inner_noise_out),
+            SuperGraphLinkTriple::new(progress_tier_link, inner_step_in, inner_step_out),
+        ],
         // scan_inputs: time_step sliced from [nfe_steps-1] tensor
         vec![(time_steps_input, inner_time_step, 0)],
         // scan_outputs: none (we only care about final state)

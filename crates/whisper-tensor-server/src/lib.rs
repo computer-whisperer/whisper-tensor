@@ -359,6 +359,7 @@ pub struct SuperGraphExecutionReport {
     pub node_executions: Vec<(Vec<GlobalId>, String, Duration, Duration)>,
     pub abbreviated_tensor_assignments: Vec<(Vec<GlobalId>, AbbreviatedTensorValue)>,
     pub tensor_assignments: Vec<(Vec<GlobalId>, NDArrayNumericTensor<DynRank>)>,
+    pub progress_reports: Vec<(Vec<GlobalId>, i64, f64, f64)>,
 }
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]

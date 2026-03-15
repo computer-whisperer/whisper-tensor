@@ -16,6 +16,7 @@ use crate::graph_explorer::inspect_windows::{
 };
 use crate::sd_explorer::{generate_normal_noise, tensor_to_egui_texture};
 use crate::websockets::ServerRequestManager;
+use crate::widgets::progress_report::SuperGraphProgressWidgetState;
 use crate::widgets::toggle::toggle_ui;
 use crate::widgets::tokenized_rich_text::TokenizedRichText;
 use egui::epaint::CubicBezierShape;
@@ -113,6 +114,7 @@ pub(crate) struct TextInferenceData {
     pending_request: Option<(u64, SuperGraphLink, Vec<u32>)>,
     use_cache: bool,
     selected_mode: SuperGraphRequestBackendMode,
+    progress_widget_state: SuperGraphProgressWidgetState,
 }
 
 #[derive(Clone)]
@@ -126,6 +128,7 @@ pub(crate) struct SDInferenceData {
     use_cache: bool,
     selected_mode: SuperGraphRequestBackendMode,
     pending_request: Option<(u64, SuperGraphLink)>,
+    progress_widget_state: SuperGraphProgressWidgetState,
     generated_image: Option<(TextureHandle, ColorImage)>,
     status_message: Option<String>,
     show_image_window: bool,
@@ -143,6 +146,7 @@ impl Default for SDInferenceData {
             use_cache: false,
             selected_mode: SuperGraphRequestBackendMode::NDArray,
             pending_request: None,
+            progress_widget_state: SuperGraphProgressWidgetState::default(),
             generated_image: None,
             status_message: None,
             show_image_window: false,
@@ -159,6 +163,7 @@ pub(crate) struct TTSInferenceData {
     use_cache: bool,
     selected_mode: SuperGraphRequestBackendMode,
     pending_request: Option<(u64, SuperGraphLink, u32)>,
+    progress_widget_state: SuperGraphProgressWidgetState,
     generated_audio: Option<NDArrayNumericTensor<DynRank>>,
     generated_sample_rate_hz: Option<u32>,
     status_message: Option<String>,
@@ -174,6 +179,7 @@ impl Default for TTSInferenceData {
             use_cache: false,
             selected_mode: SuperGraphRequestBackendMode::NDArray,
             pending_request: None,
+            progress_widget_state: SuperGraphProgressWidgetState::default(),
             generated_audio: None,
             generated_sample_rate_hz: None,
             status_message: None,
@@ -185,6 +191,7 @@ pub(crate) struct STTInferenceData {
     use_cache: bool,
     selected_mode: SuperGraphRequestBackendMode,
     pending_request: Option<(u64, SuperGraphLink, u32, TokenizerInfo)>,
+    progress_widget_state: SuperGraphProgressWidgetState,
     selected_audio_name: Option<String>,
     selected_audio_bytes: Option<Vec<u8>>,
     transcription_text: Option<String>,
@@ -200,6 +207,7 @@ impl Default for STTInferenceData {
             use_cache: false,
             selected_mode: SuperGraphRequestBackendMode::NDArray,
             pending_request: None,
+            progress_widget_state: SuperGraphProgressWidgetState::default(),
             selected_audio_name: None,
             selected_audio_bytes: None,
             transcription_text: None,
@@ -1381,6 +1389,9 @@ impl GraphExplorerApp {
                                             if let Some(reports) = server_request_manager.get_reports(*request_id) {
                                                 let time_now = Instant::now();
                                                 for report in reports {
+                                                    text_inference_data
+                                                        .progress_widget_state
+                                                        .ingest_report(report.clone());
                                                     for (path, value) in report.tensor_assignments {
                                                         self.inspect_window_tensor_subscription_returns.insert(path, value);
                                                     }
@@ -1507,6 +1518,7 @@ impl GraphExplorerApp {
                                                                 tokens.clone(),
                                                             )
                                                                 .to_dyn();
+                                                        text_inference_data.progress_widget_state.clear();
                                                         let swatch_settings = if state.do_explorer_swatches_in_view || state.do_all_explorer_swatches {
                                                             Some(AbbreviatedTensorReportSettings{
                                                                 downsampled_size: (state.swatch_dimension*state.swatch_dimension) as u64,
@@ -1562,6 +1574,9 @@ impl GraphExplorerApp {
                                                 }
                                             });
                                         });
+                                        if !text_inference_data.progress_widget_state.is_empty() {
+                                            text_inference_data.progress_widget_state.show(ui);
+                                        }
                                         let logits = {
                                             let mut logits = vec![];
                                             let mut context = vec![];
@@ -1623,6 +1638,7 @@ impl GraphExplorerApp {
                             if let Some(reports) = server_request_manager.get_reports(*request_id) {
                                 let time_now = Instant::now();
                                 for report in reports {
+                                    sd_data.progress_widget_state.ingest_report(report.clone());
                                     for (path, value) in report.tensor_assignments {
                                         self.inspect_window_tensor_subscription_returns.insert(path, value);
                                     }
@@ -1745,6 +1761,7 @@ impl GraphExplorerApp {
                                             toggle_ui(ui, &mut sd_data.use_cache);
                                             ui.label("Cache");
                                             if ui.button("Generate").clicked() {
+                                                sd_data.progress_widget_state.clear();
                                                 let mut tensor_inputs = HashMap::new();
                                                 let mut string_inputs = HashMap::new();
                                                 string_inputs.insert(
@@ -1937,6 +1954,9 @@ impl GraphExplorerApp {
                                     } else {
                                         ui.label("No image generated yet.");
                                     }
+                                    if !sd_data.progress_widget_state.is_empty() {
+                                        sd_data.progress_widget_state.show(ui);
+                                    }
                                     if let Some((texture, _color_image)) = &sd_data.generated_image
                                     {
                                         let size = texture.size_vec2();
@@ -1994,6 +2014,7 @@ impl GraphExplorerApp {
                             if let Some(reports) = server_request_manager.get_reports(*request_id) {
                                 let time_now = Instant::now();
                                 for report in reports {
+                                    tts_data.progress_widget_state.ingest_report(report.clone());
                                     for (path, value) in report.tensor_assignments {
                                         self.inspect_window_tensor_subscription_returns.insert(path, value);
                                     }
@@ -2148,6 +2169,7 @@ impl GraphExplorerApp {
                                             toggle_ui(ui, &mut tts_data.use_cache);
                                             ui.label("Cache");
                                             if ui.button("Generate").clicked() {
+                                                tts_data.progress_widget_state.clear();
                                                 let mut tensor_inputs = HashMap::new();
                                                 let mut string_inputs = HashMap::new();
                                                 string_inputs.insert(
@@ -2325,6 +2347,9 @@ impl GraphExplorerApp {
                                     } else {
                                         ui.label("No audio generated yet.");
                                     }
+                                    if !tts_data.progress_widget_state.is_empty() {
+                                        tts_data.progress_widget_state.show(ui);
+                                    }
                                     if let (Some(audio), Some(sample_rate_hz)) = (
                                         tts_data.generated_audio.clone(),
                                         tts_data.generated_sample_rate_hz,
@@ -2424,6 +2449,7 @@ impl GraphExplorerApp {
                                 {
                                     let time_now = Instant::now();
                                     for report in reports {
+                                        stt_data.progress_widget_state.ingest_report(report.clone());
                                         for (path, value) in report.tensor_assignments {
                                             self.inspect_window_tensor_subscription_returns
                                                 .insert(path, value);
@@ -2764,6 +2790,7 @@ impl GraphExplorerApp {
                                                                                 hash_inputs: HashMap::new(),
                                                                             },
                                                                         );
+                                                                    stt_data.progress_widget_state.clear();
                                                                     stt_data.pending_request = Some((
                                                                         token,
                                                                         stt_interface.output_token_link,
@@ -2803,6 +2830,9 @@ impl GraphExplorerApp {
                                             ui.label(msg);
                                         } else {
                                             ui.label("No transcription yet.");
+                                        }
+                                        if !stt_data.progress_widget_state.is_empty() {
+                                            stt_data.progress_widget_state.show(ui);
                                         }
 
                                         if let Some(tokens) = &stt_data.transcription_tokens {
