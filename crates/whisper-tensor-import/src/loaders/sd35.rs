@@ -482,10 +482,10 @@ fn parse_json_file<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, Loa
     serde_json::from_reader(file).map_err(|e| LoaderError::LoadFailed(e.into()))
 }
 
-fn clip_hidden_act_to_enum(act: &str) -> crate::sd_clip::ClipMlpActivation {
+fn clip_hidden_act_to_enum(act: &str) -> crate::models::diffusion::sd_clip::ClipMlpActivation {
     match act {
-        "gelu" => crate::sd_clip::ClipMlpActivation::Gelu,
-        _ => crate::sd_clip::ClipMlpActivation::QuickGelu,
+        "gelu" => crate::models::diffusion::sd_clip::ClipMlpActivation::Gelu,
+        _ => crate::models::diffusion::sd_clip::ClipMlpActivation::QuickGelu,
     }
 }
 
@@ -514,10 +514,12 @@ fn load_diffusers_sd3_pipeline(
     let vae_cfg: VaeConfigJson = parse_json_file(&path.join("vae").join("config.json"))?;
 
     let model_dtype = with_safetensors_manager(&transformer_files, |wm| {
-        Ok(crate::sd_common::detect_model_dtype_with_canary(
-            &wm,
-            "transformer_blocks.0.attn.to_q.weight",
-        ))
+        Ok(
+            crate::models::diffusion::sd_common::detect_model_dtype_with_canary(
+                &wm,
+                "transformer_blocks.0.attn.to_q.weight",
+            ),
+        )
     })
     .and_then(onnx_dtype_to_runtime)?;
     let import_dtype = match model_dtype {
@@ -538,17 +540,17 @@ fn load_diffusers_sd3_pipeline(
     println!("Building SD3.5 CLIP-L text encoder from safetensors...");
     let clip_l_onnx = with_safetensors_manager(&clip_l_files, |wm| {
         let wm = ClipProjectionRemapWeightManager::new(wm);
-        let cfg = crate::sd_clip::ClipTextModelConfig {
+        let cfg = crate::models::diffusion::sd_clip::ClipTextModelConfig {
             hidden_dim: clip_l_cfg.hidden_size,
             num_heads: clip_l_cfg.num_attention_heads,
             num_layers: clip_l_cfg.num_hidden_layers,
             max_position: clip_l_cfg.max_position_embeddings,
             layer_norm_eps: clip_l_cfg.layer_norm_eps,
             mlp_activation: clip_hidden_act_to_enum(&clip_l_cfg.hidden_act),
-            hidden_source: crate::sd_clip::ClipHiddenStateSource::Penultimate,
+            hidden_source: crate::models::diffusion::sd_clip::ClipHiddenStateSource::Penultimate,
             output_pooled_projection: true,
         };
-        crate::sd_clip::build_clip_text_model_with_projection(
+        crate::models::diffusion::sd_clip::build_clip_text_model_with_projection(
             wm,
             import_dtype,
             storage.clone(),
@@ -561,17 +563,17 @@ fn load_diffusers_sd3_pipeline(
     println!("Building SD3.5 CLIP-G text encoder from safetensors...");
     let clip_g_onnx = with_safetensors_manager(&clip_g_files, |wm| {
         let wm = ClipProjectionRemapWeightManager::new(wm);
-        let cfg = crate::sd_clip::ClipTextModelConfig {
+        let cfg = crate::models::diffusion::sd_clip::ClipTextModelConfig {
             hidden_dim: clip_g_cfg.hidden_size,
             num_heads: clip_g_cfg.num_attention_heads,
             num_layers: clip_g_cfg.num_hidden_layers,
             max_position: clip_g_cfg.max_position_embeddings,
             layer_norm_eps: clip_g_cfg.layer_norm_eps,
             mlp_activation: clip_hidden_act_to_enum(&clip_g_cfg.hidden_act),
-            hidden_source: crate::sd_clip::ClipHiddenStateSource::Penultimate,
+            hidden_source: crate::models::diffusion::sd_clip::ClipHiddenStateSource::Penultimate,
             output_pooled_projection: true,
         };
-        crate::sd_clip::build_clip_text_model_with_projection(
+        crate::models::diffusion::sd_clip::build_clip_text_model_with_projection(
             wm,
             import_dtype,
             storage.clone(),
@@ -583,12 +585,17 @@ fn load_diffusers_sd3_pipeline(
 
     println!("Building SD3.5 T5-XXL encoder from safetensors...");
     let t5_onnx = with_safetensors_manager(&t5_files, |wm| {
-        let t5_cfg = crate::t5::T5Config::t5_xxl(t5_seq_len);
-        crate::t5::load_t5_encoder_with_origin(wm, t5_cfg, storage.clone(), Some(&t5_files[0]))
+        let t5_cfg = crate::models::diffusion::t5::T5Config::t5_xxl(t5_seq_len);
+        crate::models::diffusion::t5::load_t5_encoder_with_origin(
+            wm,
+            t5_cfg,
+            storage.clone(),
+            Some(&t5_files[0]),
+        )
     })?;
 
     println!("Building SD3.5 transformer from safetensors...");
-    let sd3_transformer_cfg = crate::sd3::Sd3TransformerConfig {
+    let sd3_transformer_cfg = crate::models::diffusion::sd3::Sd3TransformerConfig {
         num_layers: transformer_cfg.num_layers,
         num_heads: transformer_cfg.num_attention_heads,
         head_dim: transformer_cfg.attention_head_dim,
@@ -604,7 +611,7 @@ fn load_diffusers_sd3_pipeline(
         dual_attention_layers: transformer_cfg.dual_attention_layers.into_iter().collect(),
     };
     let transformer_onnx = with_safetensors_manager(&transformer_files, |wm| {
-        crate::sd3::load_sd3_transformer_with_origin(
+        crate::models::diffusion::sd3::load_sd3_transformer_with_origin(
             wm,
             sd3_transformer_cfg,
             storage.clone(),
@@ -614,7 +621,12 @@ fn load_diffusers_sd3_pipeline(
 
     println!("Building SD3.5 VAE decoder from safetensors...");
     let vae_onnx = with_safetensors_manager(&vae_files, |wm| {
-        crate::sd3::build_sd3_vae_decoder(wm, import_dtype, storage.clone(), &vae_files[0])
+        crate::models::diffusion::sd3::build_sd3_vae_decoder(
+            wm,
+            import_dtype,
+            storage.clone(),
+            &vae_files[0],
+        )
     })?;
 
     let base_name = path

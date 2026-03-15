@@ -225,7 +225,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── 1. Load model ────────────────────────────────────────────────
     eprintln!("Loading RWKV7 from {}...", pth_path.display());
-    let onnx_data = whisper_tensor_import::rwkv7::load_rwkv7_pth(
+    let onnx_data = whisper_tensor_import::models::llm::rwkv7::load_rwkv7_pth(
         pth_path,
         whisper_tensor_import::onnx_graph::WeightStorageStrategy::OriginReference,
     )?;

@@ -1,3 +1,6 @@
+use crate::models::diffusion::sd_common::{
+    self, CastingWeightManager, cos_op, sin_op, slice_axis as slice_axis_common,
+};
 use crate::onnx_graph::Error;
 use crate::onnx_graph::WeightStorageStrategy;
 use crate::onnx_graph::operators::{
@@ -12,9 +15,6 @@ use crate::onnx_graph::tensor::{
     TensorDataValue,
 };
 use crate::onnx_graph::weights::{SafetensorsWeightManager, WeightManager};
-use crate::sd_common::{
-    self, CastingWeightManager, cos_op, sin_op, slice_axis as slice_axis_common,
-};
 use prost::Message;
 use std::collections::HashSet;
 use std::path::Path;

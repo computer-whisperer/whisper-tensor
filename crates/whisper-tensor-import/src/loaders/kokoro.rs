@@ -1,4 +1,4 @@
-use super::onnx_bytes_to_model;
+use super::shared::onnx_bytes_to_model;
 use whisper_tensor::interfaces::{KokoroVoiceEmbedding, TTSInputConfig, TextToSpeechInterface};
 use whisper_tensor::loader::*;
 use whisper_tensor::metadata::TokenizerInfo;

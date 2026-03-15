@@ -1,3 +1,4 @@
+use crate::models::diffusion::sd_common::{self, CastingWeightManager};
 use crate::onnx_graph::Error;
 use crate::onnx_graph::WeightStorageStrategy;
 use crate::onnx_graph::operators::{Add, Gather, MatMul, Softmax, Transpose};
@@ -6,7 +7,6 @@ use crate::onnx_graph::tensor::{
     DType, Dimension, InputTensor, InputTensorInitialized, Shape, Tensor, TensorData,
 };
 use crate::onnx_graph::weights::WeightManager;
-use crate::sd_common::{self, CastingWeightManager};
 use prost::Message;
 use std::path::Path;
 use std::sync::Arc;

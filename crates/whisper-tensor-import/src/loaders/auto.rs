@@ -111,13 +111,13 @@ impl Loader for AutoLoader {
                         if super::flux::is_flux_single_file_checkpoint(&wm) {
                             return FluxLoader.load(config);
                         }
-                        if crate::sd15::is_sd15_checkpoint(&wm) {
+                        if crate::models::diffusion::sd15::is_sd15_checkpoint(&wm) {
                             return SD15Loader.load(config);
                         }
-                        if crate::sd2::is_sd2_checkpoint(&wm) {
+                        if crate::models::diffusion::sd2::is_sd2_checkpoint(&wm) {
                             return SD2Loader.load(config);
                         }
-                        if crate::sd_xl::is_sdxl_checkpoint(&wm) {
+                        if crate::models::diffusion::sd_xl::is_sdxl_checkpoint(&wm) {
                             return SDXLLoader.load(config);
                         }
                     }

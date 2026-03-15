@@ -5,8 +5,8 @@ use whisper_tensor::backends::eval_backend::EvalBackend;
 use whisper_tensor::dtype::DType;
 use whisper_tensor::model::Model;
 use whisper_tensor::numeric_tensor::NumericTensor;
+use whisper_tensor_import::models::diffusion::sd_xl;
 use whisper_tensor_import::onnx_graph::WeightStorageStrategy;
-use whisper_tensor_import::sd_xl;
 
 const CHECKPOINT: &str = "/mnt/secondary/neural_networks/sd_xl_base_1.0.safetensors";
 
@@ -24,7 +24,8 @@ fn main() {
         let file = std::fs::File::open(checkpoint_path).expect("open checkpoint");
         let mmap = unsafe { Mmap::map(&file) }.expect("mmap");
         let wm = SafetensorsWeightManager::new(vec![Arc::new(mmap)]).expect("wm");
-        let import_dtype = whisper_tensor_import::sd_common::detect_model_dtype(&wm);
+        let import_dtype =
+            whisper_tensor_import::models::diffusion::sd_common::detect_model_dtype(&wm);
         match import_dtype {
             whisper_tensor_import::onnx_graph::tensor::DType::F16 => DType::F16,
             whisper_tensor_import::onnx_graph::tensor::DType::F32 => DType::F32,

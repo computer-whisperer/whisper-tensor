@@ -1,4 +1,4 @@
-use super::{build_rnn_supergraph, default_storage, onnx_bytes_to_model};
+use super::shared::{build_rnn_supergraph, default_storage, onnx_bytes_to_model};
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::dtype::DType;
 use whisper_tensor::interfaces::TextInferenceTokensInLogitOutInterface;

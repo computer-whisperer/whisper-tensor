@@ -1,4 +1,5 @@
 use crate::Error;
+use crate::models::diffusion::sd_common::CastingWeightManager;
 use crate::onnx_graph::WeightStorageStrategy;
 use crate::onnx_graph::operators::{
     Add, Concat, Constant, Div, Gather, MatMul, Mul, RotaryEmbedding, ShapeOp, Slice, Softmax,
@@ -12,7 +13,6 @@ use crate::onnx_graph::tensor::{
     TensorDataValue,
 };
 use crate::onnx_graph::weights::WeightManager;
-use crate::sd_common::CastingWeightManager;
 use prost::Message;
 use std::sync::Arc;
 

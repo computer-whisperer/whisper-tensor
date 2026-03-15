@@ -19,7 +19,7 @@ use whisper_tensor::super_graph::nodes::{
     SuperGraphNodeMilliOpGraph, SuperGraphNodeModelExecution, SuperGraphNodeScan,
 };
 
-use crate::whisper::WhisperConfig;
+use crate::models::speech::whisper::WhisperConfig;
 
 /// Loader for Whisper speech-to-text models (HuggingFace safetensors format).
 ///
@@ -114,15 +114,23 @@ impl Loader for WhisperLoader {
 
         // Build encoder ONNX model
         eprintln!("Building Whisper encoder...");
-        let encoder_onnx =
-            crate::whisper::build_encoder(&wm, &whisper_config, storage.clone(), &origin_path)
-                .map_err(LoaderError::LoadFailed)?;
+        let encoder_onnx = crate::models::speech::whisper::build_encoder(
+            &wm,
+            &whisper_config,
+            storage.clone(),
+            &origin_path,
+        )
+        .map_err(LoaderError::LoadFailed)?;
 
         // Build decoder ONNX model
         eprintln!("Building Whisper decoder...");
-        let decoder_onnx =
-            crate::whisper::build_decoder(&wm, &whisper_config, storage, &origin_path)
-                .map_err(LoaderError::LoadFailed)?;
+        let decoder_onnx = crate::models::speech::whisper::build_decoder(
+            &wm,
+            &whisper_config,
+            storage,
+            &origin_path,
+        )
+        .map_err(LoaderError::LoadFailed)?;
 
         let base_dir = dir.as_path();
 

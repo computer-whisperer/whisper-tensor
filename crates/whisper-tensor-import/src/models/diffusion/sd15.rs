@@ -1,10 +1,12 @@
+use crate::models::diffusion::sd_common::{
+    self, downsample, resnet_block, spatial_transformer, upsample,
+};
 use crate::onnx_graph::Error;
 use crate::onnx_graph::WeightStorageStrategy;
 use crate::onnx_graph::operators::{Add, Softmax, Transpose};
 use crate::onnx_graph::pytorch::{cast, conv2d, div_scalar, group_norm, layer_norm, linear, silu};
 use crate::onnx_graph::tensor::{DType, Dimension, InputTensor, Shape, Tensor};
 use crate::onnx_graph::weights::{SafetensorsWeightManager, WeightManager};
-use crate::sd_common::{self, downsample, resnet_block, spatial_transformer, upsample};
 use memmap2::Mmap;
 use prost::Message;
 use std::path::Path;
@@ -89,20 +91,20 @@ pub fn build_text_encoder(
     output_method: WeightStorageStrategy,
     origin_path: &Path,
 ) -> Result<Vec<u8>, anyhow::Error> {
-    crate::sd_clip::build_clip_text_model_with_projection(
+    crate::models::diffusion::sd_clip::build_clip_text_model_with_projection(
         weight_manager.prefix("cond_stage_model.transformer.text_model"),
         model_dtype,
         output_method,
         origin_path,
         "",
-        crate::sd_clip::ClipTextModelConfig {
+        crate::models::diffusion::sd_clip::ClipTextModelConfig {
             hidden_dim: CLIP_HIDDEN_DIM,
             num_heads: CLIP_NUM_HEADS,
             num_layers: CLIP_NUM_LAYERS,
             max_position: CLIP_MAX_POSITION,
             layer_norm_eps: 1e-5,
-            mlp_activation: crate::sd_clip::ClipMlpActivation::QuickGelu,
-            hidden_source: crate::sd_clip::ClipHiddenStateSource::FinalLayerNorm,
+            mlp_activation: crate::models::diffusion::sd_clip::ClipMlpActivation::QuickGelu,
+            hidden_source: crate::models::diffusion::sd_clip::ClipHiddenStateSource::FinalLayerNorm,
             output_pooled_projection: false,
         },
     )

@@ -1,3 +1,7 @@
+use crate::models::diffusion::sd_common::{
+    self, CastingWeightManager, build_causal_mask, downsample, reshape_symbolic, resnet_block,
+    slice_axis, spatial_transformer, upsample,
+};
 use crate::onnx_graph::Error;
 use crate::onnx_graph::WeightStorageStrategy;
 use crate::onnx_graph::operators::{Add, Concat, Gather, MatMul, Softmax, Transpose};
@@ -8,10 +12,6 @@ use crate::onnx_graph::tensor::{
     DType, Dimension, InputTensor, InputTensorInitialized, Shape, Tensor, TensorData,
 };
 use crate::onnx_graph::weights::{SafetensorsWeightManager, WeightManager};
-use crate::sd_common::{
-    self, CastingWeightManager, build_causal_mask, downsample, reshape_symbolic, resnet_block,
-    slice_axis, spatial_transformer, upsample,
-};
 use memmap2::Mmap;
 use prost::Message;
 use std::path::Path;

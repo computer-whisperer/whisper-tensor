@@ -5,8 +5,8 @@ use whisper_tensor::loader::*;
 use whisper_tensor::metadata::TokenizerInfo;
 use whisper_tensor::model::Model;
 
+use crate::models::diffusion::sd_common::CastingWeightManager;
 use crate::onnx_graph::weights::{SafetensorsWeightManager, WeightManager};
-use crate::sd_common::CastingWeightManager;
 
 /// Unified Flux loader supporting both Schnell and Dev, in single-file or multi-file format.
 ///
@@ -106,7 +106,7 @@ pub fn is_flux_single_file_checkpoint(wm: &SafetensorsWeightManager) -> bool {
 fn load_single_file(path: PathBuf, img_size: usize) -> Result<LoaderOutput, LoaderError> {
     use memmap2::Mmap;
 
-    let storage = super::default_storage();
+    let storage = super::shared::default_storage();
 
     let file = std::fs::File::open(&path).map_err(|e| LoaderError::LoadFailed(e.into()))?;
     let mmap = unsafe { Mmap::map(&file) }.map_err(|e| LoaderError::LoadFailed(e.into()))?;
@@ -130,8 +130,9 @@ fn load_single_file(path: PathBuf, img_size: usize) -> Result<LoaderOutput, Load
         .prefix("text_encoders")
         .prefix("clip_l")
         .prefix("transformer");
-    let clip_onnx = crate::flux::build_clip_l_pooled(clip_wm, storage.clone(), Some(&path))
-        .map_err(LoaderError::LoadFailed)?;
+    let clip_onnx =
+        crate::models::diffusion::flux::build_clip_l_pooled(clip_wm, storage.clone(), Some(&path))
+            .map_err(LoaderError::LoadFailed)?;
 
     // Build T5-XXL (T5 builder casts to F32 internally)
     println!("Building T5-XXL encoder...");
@@ -140,9 +141,14 @@ fn load_single_file(path: PathBuf, img_size: usize) -> Result<LoaderOutput, Load
         .prefix("t5xxl")
         .prefix("transformer");
     let t5_onnx = {
-        let config = crate::t5::T5Config::t5_xxl(256);
-        crate::t5::load_t5_encoder_with_origin(t5_wm, config, storage.clone(), Some(&path))
-            .map_err(LoaderError::LoadFailed)?
+        let config = crate::models::diffusion::t5::T5Config::t5_xxl(256);
+        crate::models::diffusion::t5::load_t5_encoder_with_origin(
+            t5_wm,
+            config,
+            storage.clone(),
+            Some(&path),
+        )
+        .map_err(LoaderError::LoadFailed)?
     };
 
     // Build Flux DiT (cast F8E4M3→BF16 if needed)
@@ -151,17 +157,27 @@ fn load_single_file(path: PathBuf, img_size: usize) -> Result<LoaderOutput, Load
     let flux_config = make_flux_config(img_size, has_guidance);
     let dit_onnx = if needs_dit_cast {
         let cast_wm = CastingWeightManager::new(dit_wm, crate::onnx_graph::tensor::DType::BF16);
-        crate::flux::load_flux_dit_with_origin(cast_wm, flux_config, storage.clone(), Some(&path))
-            .map_err(LoaderError::LoadFailed)?
+        crate::models::diffusion::flux::load_flux_dit_with_origin(
+            cast_wm,
+            flux_config,
+            storage.clone(),
+            Some(&path),
+        )
+        .map_err(LoaderError::LoadFailed)?
     } else {
-        crate::flux::load_flux_dit_with_origin(dit_wm, flux_config, storage.clone(), Some(&path))
-            .map_err(LoaderError::LoadFailed)?
+        crate::models::diffusion::flux::load_flux_dit_with_origin(
+            dit_wm,
+            flux_config,
+            storage.clone(),
+            Some(&path),
+        )
+        .map_err(LoaderError::LoadFailed)?
     };
 
     // Build Flux VAE decoder (F32 — no cast needed)
     println!("Building Flux VAE decoder...");
     let vae_wm = wm.prefix("vae");
-    let vae_onnx = crate::sd_common::build_flux_vae_decoder(
+    let vae_onnx = crate::models::diffusion::sd_common::build_flux_vae_decoder(
         vae_wm,
         crate::onnx_graph::tensor::DType::F32,
         storage.clone(),
@@ -192,7 +208,7 @@ fn load_multi_file(config: &ConfigValues, img_size: usize) -> Result<LoaderOutpu
     let vae_path = require_path(config, "vae_path")?;
     let clip_path = require_path(config, "clip_path")?;
     let t5_path = require_path(config, "t5_path")?;
-    let storage = super::default_storage();
+    let storage = super::shared::default_storage();
 
     // Detect DiT dtype and variant
     let (compute_dtype, needs_dit_cast, has_guidance) = {
@@ -213,14 +229,19 @@ fn load_multi_file(config: &ConfigValues, img_size: usize) -> Result<LoaderOutpu
     // Build CLIP-L
     println!("Building CLIP-L encoder...");
     let clip_onnx = build_from_safetensors(&clip_path, |wm| {
-        crate::flux::build_clip_l_pooled(wm, storage.clone(), Some(&clip_path))
+        crate::models::diffusion::flux::build_clip_l_pooled(wm, storage.clone(), Some(&clip_path))
     })?;
 
     // Build T5-XXL
     println!("Building T5-XXL encoder...");
     let t5_onnx = build_from_safetensors(&t5_path, |wm| {
-        let config = crate::t5::T5Config::t5_xxl(256);
-        crate::t5::load_t5_encoder_with_origin(wm, config, storage.clone(), Some(&t5_path))
+        let config = crate::models::diffusion::t5::T5Config::t5_xxl(256);
+        crate::models::diffusion::t5::load_t5_encoder_with_origin(
+            wm,
+            config,
+            storage.clone(),
+            Some(&t5_path),
+        )
     })?;
 
     // Build Flux DiT
@@ -229,7 +250,7 @@ fn load_multi_file(config: &ConfigValues, img_size: usize) -> Result<LoaderOutpu
     let dit_onnx = if needs_dit_cast {
         build_from_safetensors(&dit_path, |wm| {
             let cast_wm = CastingWeightManager::new(wm, crate::onnx_graph::tensor::DType::BF16);
-            crate::flux::load_flux_dit_with_origin(
+            crate::models::diffusion::flux::load_flux_dit_with_origin(
                 cast_wm,
                 flux_config,
                 storage.clone(),
@@ -238,7 +259,7 @@ fn load_multi_file(config: &ConfigValues, img_size: usize) -> Result<LoaderOutpu
         })?
     } else {
         build_from_safetensors(&dit_path, |wm| {
-            crate::flux::load_flux_dit_with_origin(
+            crate::models::diffusion::flux::load_flux_dit_with_origin(
                 wm,
                 flux_config,
                 storage.clone(),
@@ -250,7 +271,7 @@ fn load_multi_file(config: &ConfigValues, img_size: usize) -> Result<LoaderOutpu
     // Build Flux VAE decoder
     println!("Building Flux VAE decoder...");
     let vae_onnx = build_from_safetensors(&vae_path, |wm| {
-        crate::sd_common::build_flux_vae_decoder(
+        crate::models::diffusion::sd_common::build_flux_vae_decoder(
             wm,
             crate::onnx_graph::tensor::DType::F32,
             storage.clone(),
@@ -282,7 +303,8 @@ fn detect_compute_dtype(
     wm: &SafetensorsWeightManager,
     canary: &str,
 ) -> Result<(whisper_tensor::dtype::DType, bool), LoaderError> {
-    let storage_dtype = crate::sd_common::detect_model_dtype_with_canary(wm, canary);
+    let storage_dtype =
+        crate::models::diffusion::sd_common::detect_model_dtype_with_canary(wm, canary);
     println!("Detected DiT storage dtype: {storage_dtype:?}");
     match storage_dtype {
         crate::onnx_graph::tensor::DType::F8E4M3 => Ok((whisper_tensor::dtype::DType::BF16, true)),
@@ -295,11 +317,14 @@ fn detect_compute_dtype(
     }
 }
 
-fn make_flux_config(img_size: usize, has_guidance: bool) -> crate::flux::FluxConfig {
+fn make_flux_config(
+    img_size: usize,
+    has_guidance: bool,
+) -> crate::models::diffusion::flux::FluxConfig {
     if has_guidance {
-        crate::flux::FluxConfig::dev(img_size, 256)
+        crate::models::diffusion::flux::FluxConfig::dev(img_size, 256)
     } else {
-        crate::flux::FluxConfig::schnell(img_size, 256)
+        crate::models::diffusion::flux::FluxConfig::schnell(img_size, 256)
     }
 }
 
