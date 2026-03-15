@@ -133,40 +133,35 @@ fn main() {
     // ---- Partition (compare approaches) ----
     let target_kernels = 20;
 
-    for (name, partitioner) in [
-        ("topo", whisper_tensor::compiler::attempts::v13_claude::nano_part_topo::partition_nanograph as fn(&whisper_tensor::nano_graph::NanoGraph, usize) -> whisper_tensor::compiler::attempts::v13_claude::nano_part_topo::NanoPartitionResult),
-    ] {
-        println!("\n=== Partitioner: {} ===", name);
-        let t0 = Instant::now();
-        let p = partitioner(&result.graph, target_kernels);
-        eprintln!("{}: {:.1}ms, {} kernels", name, t0.elapsed().as_secs_f64() * 1e3, p.num_kernels);
-        print_partition_summary(&result.graph, &p.kernel_groups, name);
-    }
-
-    // nano_part_merge has same result type
+    // New partitioners (allow interleaved group indices, expose parallelism)
     {
-        let name = "merge";
+        let name = "bisect";
         println!("\n=== Partitioner: {} ===", name);
         let t0 = Instant::now();
-        let p = whisper_tensor::compiler::attempts::v13_claude::nano_part_merge::partition_nanograph(&result.graph, target_kernels);
+        let p = whisper_tensor::compiler::attempts::v13_claude::nano_part_bisect::partition_nanograph(&result.graph, target_kernels);
         eprintln!("{}: {:.1}ms, {} kernels", name, t0.elapsed().as_secs_f64() * 1e3, p.num_kernels);
         print_partition_summary(&result.graph, &p.kernel_groups, name);
     }
-
-    // nano_part_live has same result type
     {
-        let name = "live";
+        let name = "hybrid";
         println!("\n=== Partitioner: {} ===", name);
         let t0 = Instant::now();
-        let p = whisper_tensor::compiler::attempts::v13_claude::nano_part_live::partition_nanograph(&result.graph, target_kernels);
+        let p = whisper_tensor::compiler::attempts::v13_claude::nano_part_hybrid::partition_nanograph(&result.graph, target_kernels);
+        eprintln!("{}: {:.1}ms, {} kernels", name, t0.elapsed().as_secs_f64() * 1e3, p.num_kernels);
+        print_partition_summary(&result.graph, &p.kernel_groups, name);
+    }
+    {
+        let name = "creative";
+        println!("\n=== Partitioner: {} ===", name);
+        let t0 = Instant::now();
+        let p = whisper_tensor::compiler::attempts::v13_claude::nano_part_creative::partition_nanograph(&result.graph, target_kernels);
         eprintln!("{}: {:.1}ms, {} kernels", name, t0.elapsed().as_secs_f64() * 1e3, p.num_kernels);
         print_partition_summary(&result.graph, &p.kernel_groups, name);
     }
 
-    // Use topo for the detailed breakdown
+    // Use creative for the detailed breakdown
     let t0 = Instant::now();
-    use whisper_tensor::compiler::attempts::v13_claude::nano_part_topo::partition_nanograph;
-    let partition = partition_nanograph(&result.graph, target_kernels);
+    let partition = whisper_tensor::compiler::attempts::v13_claude::nano_part_creative::partition_nanograph(&result.graph, target_kernels);
     eprintln!("Partitioned in {:.1}ms", t0.elapsed().as_secs_f64() * 1e3);
     println!("{} kernels", partition.num_kernels);
 
@@ -253,33 +248,77 @@ fn print_partition_summary(graph: &NanoGraph, kernel_groups: &[Vec<usize>], name
 
     println!("  {} kernels, max kernel {:.1}% of total", num_kernels, max_pct);
 
-    // Check contiguity (topo range = no circular deps)
-    let mut contiguous = true;
-    for kg in kernel_groups {
-        if kg.len() >= 2 {
-            let mut sorted = kg.clone();
-            sorted.sort();
-            if sorted.windows(2).any(|w| w[1] != w[0] + 1) {
-                contiguous = false;
-                break;
+    // Check acyclicity of the kernel dependency graph
+    let groups = graph.groups();
+    let group_base_ids: Vec<u64> = groups.iter().map(|g| g.base_id.0).collect();
+    let find_gi = |atom_id: whisper_tensor::nano_graph::AtomId| -> Option<usize> {
+        match group_base_ids.binary_search(&atom_id.0) {
+            Ok(i) => Some(i),
+            Err(0) => None,
+            Err(i) => {
+                let gi = i - 1;
+                if atom_id.0 < groups[gi].base_id.0 + groups[gi].count { Some(gi) } else { None }
+            }
+        }
+    };
+    let mut g2k = vec![usize::MAX; groups.len()];
+    for (ki, kg) in kernel_groups.iter().enumerate() {
+        for &gi in kg { g2k[gi] = ki; }
+    }
+    // Build kernel dep edges
+    let mut kernel_deps: Vec<std::collections::BTreeSet<usize>> = vec![std::collections::BTreeSet::new(); num_kernels];
+    for (ki, kg) in kernel_groups.iter().enumerate() {
+        for &gi in kg {
+            for input in &groups[gi].inputs {
+                use whisper_tensor::nano_graph::InputRef;
+                let bases: Vec<whisper_tensor::nano_graph::AtomId> = match input {
+                    InputRef::Broadcast(id) => vec![*id],
+                    InputRef::Affine { base, .. } | InputRef::StridedBroadcast { base, .. }
+                    | InputRef::SymAffine { base, .. } | InputRef::Modular { base, .. } => vec![*base],
+                    InputRef::Explicit(ids) => {
+                        let mut s = vec![];
+                        if !ids.is_empty() { s.push(ids[0]); }
+                        if ids.len() > 1 { s.push(ids[ids.len()-1]); }
+                        s
+                    }
+                };
+                for id in bases {
+                    if let Some(src_gi) = find_gi(id) {
+                        let src_ki = g2k[src_gi];
+                        if src_ki != ki && src_ki != usize::MAX {
+                            kernel_deps[ki].insert(src_ki);
+                        }
+                    }
+                }
             }
         }
     }
-
-    // Check ordering (kernel i's max < kernel i+1's min)
-    let mut ordered = true;
-    let ranges: Vec<(usize, usize)> = kernel_groups.iter()
-        .map(|kg| (*kg.iter().min().unwrap_or(&0), *kg.iter().max().unwrap_or(&0)))
-        .collect();
-    for w in ranges.windows(2) {
-        if w[0].1 >= w[1].0 {
-            ordered = false;
-            break;
+    // Check for cycles via Kahn's algorithm
+    let mut in_degree = vec![0usize; num_kernels];
+    for deps in &kernel_deps {
+        for &dep in deps { in_degree[dep] += 1; } // note: this counts reverse edges
+    }
+    // Actually: kernel_deps[ki] = set of kernels ki reads FROM. So edges are dep→ki.
+    let mut in_deg = vec![0usize; num_kernels];
+    for (ki, deps) in kernel_deps.iter().enumerate() {
+        in_deg[ki] = deps.len(); // ki has in_deg = number of kernels it depends on
+    }
+    let mut queue: std::collections::VecDeque<usize> = in_deg.iter().enumerate()
+        .filter(|&(_, d)| *d == 0).map(|(i, _)| i).collect();
+    let mut visited = 0;
+    while let Some(ki) = queue.pop_front() {
+        visited += 1;
+        // Find kernels that depend on ki
+        for (other, deps) in kernel_deps.iter().enumerate() {
+            if deps.contains(&ki) {
+                in_deg[other] -= 1;
+                if in_deg[other] == 0 { queue.push_back(other); }
+            }
         }
     }
-
-    let acyclic = contiguous && ordered;
-    println!("  contiguous={}, ordered={}, acyclic={}", contiguous, ordered, acyclic);
+    let acyclic = visited == num_kernels;
+    let num_dep_edges: usize = kernel_deps.iter().map(|d| d.len()).sum();
+    println!("  acyclic={}, dep_edges={}", acyclic, num_dep_edges);
 
     // Top 5 kernels
     for &(ki, atoms, ngroups) in sizes.iter().take(5) {
