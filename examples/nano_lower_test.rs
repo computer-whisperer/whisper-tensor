@@ -153,6 +153,28 @@ fn main() {
                         if errors <= 10 {
                             println!("  SPAN VIOLATION: phase {}/lane {}: input base {:?} (count={}) not available",
                                 phase_idx, lane_idx, mapping.main_base, mapping.count);
+                            // Trace producer group for diagnostics
+                            let main_groups = result.graph.groups();
+                            let atom_val = mapping.main_base.0;
+                            let idx = main_groups.partition_point(|g| g.base_id.0 <= atom_val);
+                            if idx > 0 {
+                                let g = &main_groups[idx - 1];
+                                if atom_val < g.base_id.0 + g.count {
+                                    let op_str = format!("{:?}", g.op).chars().take(60).collect::<String>();
+                                    let mut in_phase = "not in any output".to_string();
+                                    for (pi, ph) in plan.phases.iter().enumerate() {
+                                        for sp in &ph.spans {
+                                            for om in &sp.outputs {
+                                                if om.main_base.0 <= atom_val && atom_val < om.main_base.0 + om.count {
+                                                    in_phase = format!("phase {}", pi);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    println!("    group_idx={} base={:?} count={} op={} [{}]",
+                                        idx - 1, g.base_id, g.count, op_str, in_phase);
+                                }
+                            }
                         }
                     }
                 }

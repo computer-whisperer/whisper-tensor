@@ -152,27 +152,29 @@ pub fn plan_execution_spans(graph: &NanoGraph, num_lanes: usize) -> SpanPlan {
 
 /// Build a self-contained NanoGraph for one (phase, lane)'s work.
 ///
-/// Range-based atom map for efficient lookup.
-/// Call sort() after all pre-compute insertions. After sorting,
-/// new insertions must be in ascending main_base order.
+/// Range-based atom map for efficient lookup, backed by a BTreeMap.
+/// Supports interleaved insertions and lookups in O(log n).
 struct RangeAtomMap {
-    ranges: Vec<(u64, u64, u64)>, // (main_base, span_base, count)
+    /// Maps main_base -> (span_base, count). BTreeMap keeps entries sorted.
+    map: BTreeMap<u64, (u64, u64)>,
 }
 
 impl RangeAtomMap {
-    fn new() -> Self { Self { ranges: Vec::new() } }
+    fn new() -> Self { Self { map: BTreeMap::new() } }
     fn insert_range(&mut self, main_base: AtomId, span_base: AtomId, count: u64) {
-        self.ranges.push((main_base.0, span_base.0, count));
-    }
-    fn sort(&mut self) {
-        self.ranges.sort_by_key(|&(base, _, _)| base);
+        self.map.insert(main_base.0, (span_base.0, count));
     }
     fn get(&self, main_id: AtomId) -> Option<AtomId> {
-        let idx = self.ranges.partition_point(|&(base, _, _)| base <= main_id.0);
-        if idx == 0 { return None; }
-        let (base, span_base, count) = self.ranges[idx - 1];
-        let offset = main_id.0.wrapping_sub(base);
-        if offset < count { Some(AtomId(span_base + offset)) } else { None }
+        // Find the greatest key <= main_id.0.
+        use std::ops::Bound;
+        let mut iter = self.map.range((Bound::Unbounded, Bound::Included(main_id.0)));
+        if let Some((&base, &(span_base, count))) = iter.next_back() {
+            let offset = main_id.0.wrapping_sub(base);
+            if offset < count {
+                return Some(AtomId(span_base + offset));
+            }
+        }
+        None
     }
 }
 
@@ -271,10 +273,6 @@ fn build_span(
         });
     }
 
-    // Sort the atom map before compute group processing.
-    // After this, compute group insertions are in NanoGraph order (ascending).
-    main_to_local.sort();
-
     // Build the compute groups with remapped InputRefs.
     let mut output_mappings: Vec<AtomMapping> = Vec::new();
 
@@ -322,8 +320,10 @@ fn build_span(
 }
 
 /// Collect external dependency ranges for a work item (sub-range of a group).
-/// Computes the actual atom read range from each InputRef for this slice,
-/// then checks which atoms are NOT locally produced.
+///
+/// For each InputRef, identifies which groups are ACTUALLY referenced (not just
+/// bounding-box overlap) and checks whether they're locally produced. Groups
+/// that aren't locally produced become external inputs.
 fn collect_external_ranges_c(
     group: &AtomGroup,
     atom_offset: u64,
@@ -334,9 +334,13 @@ fn collect_external_ranges_c(
     inlined_literals: &BTreeSet<usize>,
     external_ranges: &mut Vec<(usize, u64, u64)>,
 ) {
-    // Build a set of (group_idx, offset, count) for quick local coverage checks.
+    if atom_count == 0 {
+        return;
+    }
+
+    // Check if a range [atom_lo, atom_hi) within group `prod_gi` is fully
+    // covered by the current lane's assigned work slices.
     let is_locally_covered = |atom_lo: u64, atom_hi: u64, prod_gi: usize| -> bool {
-        // Check if the range [atom_lo, atom_hi) is fully covered by assigned slices.
         let prod_base = all_groups[prod_gi].base_id.0;
         let off_lo = atom_lo - prod_base;
         let off_hi = atom_hi - prod_base;
@@ -348,6 +352,11 @@ fn collect_external_ranges_c(
         false
     };
 
+    let should_skip = |gi: usize| -> bool {
+        inlined_literals.contains(&gi)
+            || (is_literal[gi] && all_groups[gi].count < LITERAL_INLINE_THRESHOLD)
+    };
+
     let (is_reduce, reduce_count, reduce_stride) = match &group.op {
         ScalarOp::ReduceSum { reduce_count, reduce_stride, .. }
         | ScalarOp::ReduceMax { reduce_count, reduce_stride, .. }
@@ -356,36 +365,30 @@ fn collect_external_ranges_c(
         _ => (false, 0, 0),
     };
 
-    // For each InputRef, compute the actual read range for this work item slice.
+    // For each InputRef, find the ACTUAL groups referenced (not bounding-box).
     for input in &group.inputs {
-        let range = if is_reduce {
-            input_ref_range(input, atom_offset, atom_count, reduce_count, reduce_stride)
-        } else {
-            input_ref_range(input, atom_offset, atom_count, 1, 0)
-        };
-        if let Some((read_lo, read_hi)) = range {
-            // Find which groups this range overlaps.
-            for (gi, g) in all_groups.iter().enumerate() {
-                let g_lo = g.base_id.0;
-                let g_hi = g_lo + g.count;
-                if read_lo >= g_hi || read_hi <= g_lo {
-                    continue;
-                }
-                if inlined_literals.contains(&gi) {
-                    continue;
-                }
-                if is_literal[gi] && g.count < LITERAL_INLINE_THRESHOLD {
-                    continue;
-                }
-                // Compute the overlap.
-                let overlap_lo = read_lo.max(g_lo);
-                let overlap_hi = read_hi.min(g_hi);
-                // Check if this overlap is locally covered.
-                if !is_locally_covered(overlap_lo, overlap_hi, gi) {
-                    let offset = overlap_lo - g_lo;
-                    let count = overlap_hi - overlap_lo;
-                    external_ranges.push((gi, offset, count));
-                }
+        // Collect (group_idx, read_lo, read_hi) for actual references.
+        let referenced = resolve_input_to_group_ranges(
+            input, atom_offset, atom_count,
+            if is_reduce { reduce_count } else { 1 },
+            if is_reduce { reduce_stride } else { 0 },
+            all_groups,
+        );
+
+        for (gi, range_lo, range_hi) in referenced {
+            if should_skip(gi) {
+                continue;
+            }
+            let g_lo = all_groups[gi].base_id.0;
+            let overlap_lo = range_lo.max(g_lo);
+            let overlap_hi = range_hi.min(g_lo + all_groups[gi].count);
+            if overlap_lo >= overlap_hi {
+                continue;
+            }
+            if !is_locally_covered(overlap_lo, overlap_hi, gi) {
+                let offset = overlap_lo - g_lo;
+                let count = overlap_hi - overlap_lo;
+                external_ranges.push((gi, offset, count));
             }
         }
     }
@@ -401,6 +404,272 @@ fn collect_external_ranges_c(
                 }
             }
         }
+    }
+}
+
+/// Resolve an InputRef (for a sub-range of a consumer group, including reduce
+/// extension) to the actual set of (group_idx, atom_lo, atom_hi) tuples.
+///
+/// Unlike `input_ref_range` which returns a bounding box, this function
+/// identifies which groups are ACTUALLY touched, avoiding false positives
+/// from high-stride Affine patterns that span many unrelated groups.
+fn resolve_input_to_group_ranges(
+    input: &InputRef,
+    offset: u64,
+    count: u64,
+    reduce_count: u64,
+    reduce_stride: i64,
+    groups: &[AtomGroup],
+) -> Vec<(usize, u64, u64)> {
+    let mut result = Vec::new();
+    if count == 0 {
+        return result;
+    }
+
+    match input {
+        InputRef::Broadcast(atom_id) => {
+            // Single atom, possibly extended by reduce stride.
+            let base = atom_id.0 as i64;
+            let (lo, hi) = reduce_extent(base, reduce_count, reduce_stride);
+            for gi in find_groups_in_range(groups, lo as u64, hi as u64) {
+                let g = &groups[gi];
+                result.push((gi, lo as u64, (hi + 1) as u64));
+            }
+        }
+        InputRef::Affine { base, stride } => {
+            // Atoms: base + stride * (offset + i) for i in 0..count
+            // With reduce: each atom extended by reduce_stride * k for k in 0..reduce_count
+            let first_k = offset;
+            let last_k = offset + count - 1;
+            let first_pos = base.0 as i64 + *stride as i64 * first_k as i64;
+            let last_pos = base.0 as i64 + *stride as i64 * last_k as i64;
+
+            if *stride == 0 {
+                // All atoms read the same position.
+                let (lo, hi) = reduce_extent(first_pos, reduce_count, reduce_stride);
+                for gi in find_groups_in_range(groups, lo as u64, hi as u64) {
+                    result.push((gi, lo as u64, (hi + 1) as u64));
+                }
+            } else if stride.unsigned_abs() == 1 {
+                // Stride 1 or -1: contiguous range, bounding box is exact.
+                let base_lo = first_pos.min(last_pos);
+                let base_hi = first_pos.max(last_pos);
+                let (lo, hi) = reduce_extent_range(base_lo, base_hi, reduce_count, reduce_stride);
+                for gi in find_groups_in_range(groups, lo as u64, hi as u64) {
+                    result.push((gi, lo as u64, (hi + 1) as u64));
+                }
+            } else {
+                // High stride: check each group in the bounding box individually.
+                let base_lo = first_pos.min(last_pos);
+                let base_hi = first_pos.max(last_pos);
+                let (ext_lo, ext_hi) = reduce_extent_range(base_lo, base_hi, reduce_count, reduce_stride);
+                let candidates = find_groups_in_range(groups, ext_lo as u64, ext_hi as u64);
+                for gi in candidates {
+                    let g = &groups[gi];
+                    let g_lo = g.base_id.0 as i64;
+                    let g_hi = g_lo + g.count as i64;
+                    // Check if any strided atom (possibly extended by reduce) lands in this group.
+                    if affine_touches_range(
+                        first_pos, *stride as i64, count, g_lo, g_hi,
+                        reduce_count, reduce_stride,
+                    ) {
+                        let overlap_lo = (g_lo as u64).max(ext_lo as u64);
+                        let overlap_hi = (g_hi as u64).min((ext_hi + 1) as u64);
+                        result.push((gi, overlap_lo, overlap_hi));
+                    }
+                }
+            }
+        }
+        InputRef::StridedBroadcast { base, stride, repeat } => {
+            // atom i reads base + stride * (i / repeat)
+            // For sub-range [offset, offset+count): blocks offset/repeat .. (offset+count-1)/repeat
+            let first_block = offset / repeat;
+            let last_block = (offset + count - 1) / repeat;
+            for block in first_block..=last_block {
+                let pos = base.0 as i64 + *stride * block as i64;
+                let (lo, hi) = reduce_extent(pos, reduce_count, reduce_stride);
+                for gi in find_groups_in_range(groups, lo as u64, hi as u64) {
+                    result.push((gi, lo as u64, (hi + 1) as u64));
+                }
+            }
+        }
+        InputRef::Modular { base, stride, modulus } => {
+            // Reads base + stride * (k % modulus) for k in [offset, offset+count).
+            // The set of distinct values is base + stride * j for j in 0..modulus.
+            if *modulus == 0 {
+                return result;
+            }
+            let num_distinct = (*modulus).min(count);
+            // Compute bounding box of the modular pattern.
+            let mut lo = base.0 as i64;
+            let mut hi = base.0 as i64;
+            for j in 0..num_distinct {
+                let pos = base.0 as i64 + *stride as i64 * j as i64;
+                lo = lo.min(pos);
+                hi = hi.max(pos);
+            }
+            let (ext_lo, ext_hi) = reduce_extent_range(lo, hi, reduce_count, reduce_stride);
+            for gi in find_groups_in_range(groups, ext_lo as u64, ext_hi as u64) {
+                result.push((gi, ext_lo as u64, (ext_hi + 1) as u64));
+            }
+        }
+        InputRef::Explicit(ids) => {
+            // Resolve each atom in the sub-range and track the min/max
+            // range per group.
+            let start = offset as usize;
+            let end = ((offset + count) as usize).min(ids.len());
+            let mut group_ranges: BTreeMap<usize, (u64, u64)> = BTreeMap::new();
+            for i in start..end {
+                let atom = ids[i];
+                let (lo, hi) = reduce_extent(atom.0 as i64, reduce_count, reduce_stride);
+                for gi in find_groups_in_range(groups, lo as u64, hi as u64) {
+                    let entry = group_ranges.entry(gi).or_insert((lo as u64, (hi + 1) as u64));
+                    entry.0 = entry.0.min(lo as u64);
+                    entry.1 = entry.1.max((hi + 1) as u64);
+                }
+            }
+            for (gi, (lo, hi)) in group_ranges {
+                result.push((gi, lo, hi));
+            }
+        }
+        InputRef::SymAffine { base, stride_i, stride_k } => {
+            // atom i reads base + stride_i * i (stride_k is for the sym_dim loop).
+            // For sub-range [offset, offset+count):
+            let first_pos = base.0 as i64 + *stride_i as i64 * offset as i64;
+            let last_pos = base.0 as i64 + *stride_i as i64 * (offset + count - 1) as i64;
+            let base_lo = first_pos.min(last_pos);
+            let base_hi = first_pos.max(last_pos);
+            // stride_k extends in the k dimension — we don't know k at plan time.
+            // Use bounding box for the i dimension; stride_k is handled by the
+            // reduce/sym_dim loop at runtime.
+            let (ext_lo, ext_hi) = reduce_extent_range(base_lo, base_hi, reduce_count, reduce_stride);
+
+            if stride_i.unsigned_abs() <= 1 {
+                // Contiguous or broadcast in i: bounding box is exact.
+                for gi in find_groups_in_range(groups, ext_lo as u64, ext_hi as u64) {
+                    result.push((gi, ext_lo as u64, (ext_hi + 1) as u64));
+                }
+            } else {
+                // High stride in i: check each candidate group.
+                let candidates = find_groups_in_range(groups, ext_lo as u64, ext_hi as u64);
+                for gi in candidates {
+                    let g = &groups[gi];
+                    let g_lo = g.base_id.0 as i64;
+                    let g_hi = g_lo + g.count as i64;
+                    if affine_touches_range(
+                        first_pos, *stride_i as i64, count, g_lo, g_hi,
+                        reduce_count, reduce_stride,
+                    ) {
+                        let overlap_lo = (g_lo as u64).max(ext_lo as u64);
+                        let overlap_hi = (g_hi as u64).min((ext_hi + 1) as u64);
+                        result.push((gi, overlap_lo, overlap_hi));
+                    }
+                }
+            }
+        }
+    }
+
+    result
+}
+
+/// Compute the extent [lo, hi] (inclusive) of a single position extended by reduce stride.
+fn reduce_extent(pos: i64, reduce_count: u64, reduce_stride: i64) -> (i64, i64) {
+    if reduce_count <= 1 {
+        return (pos, pos);
+    }
+    let ext = reduce_stride * (reduce_count as i64 - 1);
+    (pos + ext.min(0), pos + ext.max(0))
+}
+
+/// Compute the extent [lo, hi] (inclusive) of a range [base_lo, base_hi] extended by reduce stride.
+fn reduce_extent_range(base_lo: i64, base_hi: i64, reduce_count: u64, reduce_stride: i64) -> (i64, i64) {
+    if reduce_count <= 1 {
+        return (base_lo, base_hi);
+    }
+    let ext = reduce_stride * (reduce_count as i64 - 1);
+    (base_lo + ext.min(0), base_hi + ext.max(0))
+}
+
+/// Check if any atom in the strided sequence first_pos, first_pos+stride, ..., first_pos+stride*(count-1)
+/// (optionally extended by reduce_stride * k for k in 0..reduce_count)
+/// falls within the range [g_lo, g_hi).
+fn affine_touches_range(
+    first_pos: i64,
+    stride: i64,
+    count: u64,
+    g_lo: i64,
+    g_hi: i64,
+    reduce_count: u64,
+    reduce_stride: i64,
+) -> bool {
+    if count == 0 || g_lo >= g_hi {
+        return false;
+    }
+
+    // Extend the group range inward by the reduce extent to simplify:
+    // an atom at position p touches the group if any p + reduce_stride*k is in [g_lo, g_hi).
+    // Equivalently, p is in [g_lo - max_reduce_ext, g_hi - min_reduce_ext).
+    let (min_reduce_ext, max_reduce_ext) = if reduce_count > 1 {
+        let ext = reduce_stride * (reduce_count as i64 - 1);
+        (ext.min(0), ext.max(0))
+    } else {
+        (0, 0)
+    };
+    let eff_lo = g_lo - max_reduce_ext;
+    let eff_hi = g_hi - min_reduce_ext;
+
+    if stride == 0 {
+        return first_pos >= eff_lo && first_pos < eff_hi;
+    }
+
+    // Find if any integer i in [0, count) satisfies: eff_lo <= first_pos + stride * i < eff_hi
+    // Rearranging: (eff_lo - first_pos) / stride <= i < (eff_hi - first_pos) / stride
+    // (careful with sign of stride for division direction)
+    let (i_lo, i_hi) = if stride > 0 {
+        // i >= ceil((eff_lo - first_pos) / stride)
+        // i < ceil((eff_hi - first_pos) / stride)
+        let num_lo = eff_lo - first_pos;
+        let num_hi = eff_hi - first_pos;
+        (div_ceil_signed(num_lo, stride), div_ceil_signed(num_hi, stride))
+    } else {
+        // stride < 0: dividing by negative flips inequality
+        // i >= ceil((eff_hi - 1 - first_pos) / stride)  -- tricky with negative stride
+        // Simpler: pos = first_pos + stride*i >= eff_lo and pos < eff_hi
+        // first_pos + stride*i >= eff_lo  =>  stride*i >= eff_lo - first_pos  =>  i <= (eff_lo - first_pos) / stride (since stride < 0)
+        // first_pos + stride*i < eff_hi   =>  stride*i < eff_hi - first_pos   =>  i > (eff_hi - first_pos) / stride (since stride < 0)
+        // So i in (floor((eff_hi - first_pos - 1) / stride), floor((eff_lo - first_pos) / stride)]
+        // i.e., i_lo = floor((eff_hi - first_pos - 1) / stride) + 1, i_hi = floor((eff_lo - first_pos) / stride) + 1
+        let neg_stride = -stride; // positive
+        // first_pos + stride*i >= eff_lo => i <= (first_pos - eff_lo) / neg_stride
+        // first_pos + stride*i < eff_hi  => i > (first_pos - eff_hi) / neg_stride
+        //                                => i >= floor((first_pos - eff_hi) / neg_stride) + 1
+        //                                   BUT need ceiling of (first_pos - eff_hi + 1) / neg_stride
+        let i_max = div_floor_signed(first_pos - eff_lo, neg_stride);
+        let i_min = div_ceil_signed(first_pos - eff_hi + 1, neg_stride);
+        (i_min, i_max + 1) // [i_min, i_max] => [i_min, i_max+1) for consistency
+    };
+
+    // Check if [i_lo, i_hi) intersects [0, count).
+    let valid_lo = i_lo.max(0);
+    let valid_hi = i_hi.min(count as i64);
+    valid_lo < valid_hi
+}
+
+fn div_ceil_signed(a: i64, b: i64) -> i64 {
+    assert!(b > 0);
+    if a >= 0 {
+        (a + b - 1) / b
+    } else {
+        -((-a) / b)
+    }
+}
+
+fn div_floor_signed(a: i64, b: i64) -> i64 {
+    assert!(b > 0);
+    if a >= 0 {
+        a / b
+    } else {
+        -(((-a) + b - 1) / b)
     }
 }
 
@@ -1761,5 +2030,106 @@ mod tests {
         let plan = plan_execution_spans(&g, 4);
         verify_span_plan(&g, &plan);
         verify_output_coverage(&g, &plan);
+    }
+
+    /// Build a graph where a large AllRows group (produced in phase 0) feeds
+    /// into a consumer in phase 1 via a ReduceSum with large reduce_stride.
+    ///
+    /// The ReduceSum's `reduce_stride * reduce_count` bounding box can be very
+    /// wide, overlapping many unrelated groups. The planner must only declare
+    /// ACTUAL dependencies as external inputs, not bounding-box false positives.
+    fn build_large_allrows_reduce(total_atoms: u64, reduce_count: u64, reduce_stride: i64) -> NanoGraph {
+        let mut g = NanoGraph::new();
+
+        // Source: a large AllRows group from a literal
+        let src_lit = g.push_group(
+            total_atoms,
+            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            vec![], vec![], vec![],
+        );
+        // Elementwise tanh on it (so it's a compute group, AllRows)
+        let src = g.push_group(
+            total_atoms,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Tanh,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![], vec![],
+            vec![InputRef::Affine { base: src_lit, stride: 1 }],
+        );
+
+        // Another AllRows group that's independent (to place in same phase as src)
+        let other_lit = g.push_group(
+            total_atoms,
+            ScalarOp::Literal(NumericScalar::F32(2.0)),
+            vec![], vec![], vec![],
+        );
+        let other = g.push_group(
+            total_atoms,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Tanh,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![], vec![],
+            vec![InputRef::Affine { base: other_lit, stride: 1 }],
+        );
+
+        // ReduceSum that reads from `src` with large stride.
+        // This is an AllRows consumer of an AllRows producer,
+        // but with stride it may need a barrier.
+        let out_count = total_atoms / (reduce_count * reduce_stride.unsigned_abs());
+        let red = g.push_group(
+            out_count.max(1),
+            ScalarOp::ReduceSum {
+                reduce_count,
+                reduce_stride,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![], vec![],
+            vec![InputRef::Affine { base: src, stride: 1 }],
+        );
+
+        for i in 0..out_count.max(1) {
+            g.outputs.push(AtomId(red.0 + i));
+        }
+        // Also output the other group so it's not dead
+        for i in 0..total_atoms {
+            g.outputs.push(AtomId(other.0 + i));
+        }
+        g
+    }
+
+    #[test]
+    fn test_reduce_stride_no_false_deps() {
+        // ReduceSum with large stride: bounding box spans the full src group.
+        // The planner should only declare src as external, not the unrelated
+        // `other` group that happens to be in the bounding box.
+        let g = build_large_allrows_reduce(1024, 8, 128);
+        assert!(g.validate().is_empty(), "{:?}", g.validate());
+
+        let plan = plan_execution_spans(&g, 4);
+        verify_span_plan(&g, &plan);
+        verify_output_coverage(&g, &plan);
+        verify_input_availability(&plan, &g);
+
+        println!("Reduce stride consumer 4 lanes:");
+        plan.print_summary();
+    }
+
+    #[test]
+    fn test_reduce_stride_8lanes() {
+        let g = build_large_allrows_reduce(2048, 16, 128);
+        assert!(g.validate().is_empty(), "{:?}", g.validate());
+
+        let plan = plan_execution_spans(&g, 8);
+        verify_span_plan(&g, &plan);
+        verify_output_coverage(&g, &plan);
+        verify_input_availability(&plan, &g);
+
+        println!("Reduce stride consumer 8 lanes:");
+        plan.print_summary();
     }
 }
