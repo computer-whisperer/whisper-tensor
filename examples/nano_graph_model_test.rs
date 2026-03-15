@@ -368,17 +368,91 @@ fn main() {
         .collect();
     kernel_sizes.sort_unstable_by(|a, b| b.cmp(a));
 
-    if !kernel_sizes.is_empty() {
-        println!("  Largest kernel:  {} atoms", kernel_sizes[0]);
-        println!("  Smallest kernel: {} atoms", kernel_sizes.last().unwrap());
-        let total: u64 = kernel_sizes.iter().sum();
-        println!("  Average kernel:  {} atoms", total / kernel_sizes.len() as u64);
-
-        // Show distribution
-        println!("  Kernel sizes (top 10):");
-        for (i, size) in kernel_sizes.iter().take(10).enumerate() {
-            println!("    kernel {:>3}: {:>12} atoms", i, size);
+    // Build group_idx → kernel_idx map
+    let mut group_to_kernel = vec![usize::MAX; groups.len()];
+    for (ki, kg) in partition.kernel_groups.iter().enumerate() {
+        for &gi in kg {
+            group_to_kernel[gi] = ki;
         }
+    }
+
+    // Find which group index an atom belongs to, using binary search on base_ids
+    let group_base_ids: Vec<u64> = groups.iter().map(|g| g.base_id.0).collect();
+    let find_group_idx = |atom_id: whisper_tensor::nano_graph::AtomId| -> Option<usize> {
+        match group_base_ids.binary_search(&atom_id.0) {
+            Ok(i) => Some(i),
+            Err(0) => None,
+            Err(i) => {
+                let gi = i - 1;
+                if atom_id.0 < groups[gi].base_id.0 + groups[gi].count {
+                    Some(gi)
+                } else {
+                    None
+                }
+            }
+        }
+    };
+
+    // Per-kernel analysis
+    println!("\n  === Per-kernel breakdown ===");
+    for (ki, kg) in partition.kernel_groups.iter().enumerate() {
+        let total_atoms: u64 = kg.iter().map(|&gi| groups[gi].count).sum();
+
+        // Op breakdown
+        let mut op_counts: HashMap<String, usize> = HashMap::new();
+        let mut explicit_entries = 0u64;
+        for &gi in kg {
+            let op_name = format!("{:?}", groups[gi].op)
+                .chars().take_while(|c| *c != ' ' && *c != '{' && *c != '(').collect::<String>();
+            *op_counts.entry(op_name).or_default() += 1;
+            for input in &groups[gi].inputs {
+                if let whisper_tensor::nano_graph::InputRef::Explicit(ids) = input {
+                    explicit_entries += ids.len() as u64;
+                }
+            }
+        }
+        let mut sorted_ops: Vec<_> = op_counts.into_iter().collect();
+        sorted_ops.sort_by(|a, b| b.1.cmp(&a.1));
+        let op_summary: String = sorted_ops.iter()
+            .take(5)
+            .map(|(op, count)| format!("{}x{}", count, op))
+            .collect::<Vec<_>>().join(", ");
+
+        // Dependencies: which other kernels does this kernel read from?
+        let mut reads_from: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
+        for &gi in kg {
+            for input in &groups[gi].inputs {
+                use whisper_tensor::nano_graph::InputRef;
+                let sample_atoms: Vec<whisper_tensor::nano_graph::AtomId> = match input {
+                    InputRef::Broadcast(id) => vec![*id],
+                    InputRef::Affine { base, .. } => vec![*base],
+                    InputRef::StridedBroadcast { base, .. } => vec![*base],
+                    InputRef::SymAffine { base, .. } => vec![*base],
+                    InputRef::Explicit(ids) => {
+                        let mut s = vec![];
+                        if !ids.is_empty() { s.push(ids[0]); }
+                        if ids.len() > 1 { s.push(ids[ids.len() - 1]); }
+                        s
+                    }
+                };
+                for id in sample_atoms {
+                    if let Some(src_gi) = find_group_idx(id) {
+                        let src_ki = group_to_kernel[src_gi];
+                        if src_ki != ki && src_ki != usize::MAX {
+                            reads_from.insert(src_ki);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Min/max group index range (shows where in topo order this kernel sits)
+        let min_gi = kg.iter().copied().min().unwrap_or(0);
+        let max_gi = kg.iter().copied().max().unwrap_or(0);
+
+        println!("  kernel {:>2}: {:>6} groups [{:>5}..{:>5}], {:>12} atoms, {:>8} explicit, reads_from={:?}",
+            ki, kg.len(), min_gi, max_gi, total_atoms, explicit_entries, reads_from);
+        println!("            ops: {}", op_summary);
     }
 
     // ---- Step 6: JIT Codegen Execution (f32 buffer — 4 bytes/atom) ----
