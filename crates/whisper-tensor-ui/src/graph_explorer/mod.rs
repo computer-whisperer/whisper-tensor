@@ -6,6 +6,7 @@ pub mod inspect_windows;
 mod media_helpers;
 mod tensor_swatch;
 mod update;
+mod update_flow;
 mod view_helpers;
 mod voice_helpers;
 
