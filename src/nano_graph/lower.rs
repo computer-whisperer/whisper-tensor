@@ -785,6 +785,7 @@ impl LowerCtx {
 
         let mut ids = Vec::with_capacity(consumer.count as usize);
         let c_strides = &consumer.known_strides;
+        let p_row_major = TensorAtomMap::compute_strides(&p_known_sizes);
 
         for flat_c in 0..consumer.count {
             // Decompose flat_c into known-dim indices.
@@ -809,13 +810,26 @@ impl LowerCtx {
                 }
             }
 
-            // Flatten producer indices.
+            // Convert producer dim indices to an atom ID.
+            // Use row-major strides to get a logical element index, then
+            // atom_id_for_element to convert to an AtomId (handles segments
+            // and non-contiguous layouts).
             let mut flat_p = 0u64;
-            for (i, &stride) in p_strides.iter().enumerate() {
+            for (i, &stride) in p_row_major.iter().enumerate() {
                 flat_p += p_indices[i] * stride;
             }
+            debug_assert!(flat_p < producer.count,
+                "broadcast mapped to element {} but producer only has {} elements",
+                flat_p, producer.count);
 
-            ids.push(producer.base_id.offset(flat_p));
+            // For simple (non-segmented) producers, use the element index directly.
+            // atom_id_for_element uses known_strides which may be stale for
+            // producers whose strides were inherited from a larger parent tensor.
+            if producer.segments.is_empty() {
+                ids.push(producer.base_id.offset(flat_p));
+            } else {
+                ids.push(producer.atom_id_for_element(flat_p));
+            }
         }
 
         // Try to compress the Explicit table into a simpler InputRef pattern.
