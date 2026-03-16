@@ -1690,7 +1690,9 @@ fn find_missing_external_atoms(
     }
     compute_atom_ranges.sort_by_key(|&(lo, _)| lo);
 
-    let atom_available = |atom: u64| -> bool {
+    // Check if a main-graph atom is available, EXCLUDING a specific group's
+    // own output range (a group can't use its own outputs as inputs).
+    let atom_available = |atom: u64, exclude_range: Option<(u64, u64)>| -> bool {
         // In main_to_local (from literals or external inputs)?
         if main_to_local.get(AtomId(atom)).is_some() {
             return true;
@@ -1699,7 +1701,15 @@ fn find_missing_external_atoms(
         let idx = compute_atom_ranges.partition_point(|&(lo, _)| lo <= atom);
         if idx > 0 {
             let (lo, hi) = compute_atom_ranges[idx - 1];
-            if atom >= lo && atom < hi { return true; }
+            if atom >= lo && atom < hi {
+                // But not if this is the group's own output range
+                if let Some((excl_lo, excl_hi)) = exclude_range {
+                    if lo == excl_lo && hi == excl_hi {
+                        return false; // Don't count self as available
+                    }
+                }
+                return true;
+            }
         }
         false
     };
@@ -1708,6 +1718,11 @@ fn find_missing_external_atoms(
 
     for slice in span_slices.iter() {
         let group = &groups[slice.group_idx];
+        // This slice's own output range — exclude from availability check
+        // (a group can't use its own outputs as inputs).
+        let self_main_base = groups[slice.group_idx].base_id.0 + slice.atom_offset;
+        let self_exclude = Some((self_main_base, self_main_base + slice.atom_count));
+
         let (reduce_count, reduce_stride) = match &group.op {
             ScalarOp::ReduceSum { reduce_count, reduce_stride, .. }
             | ScalarOp::ReduceMax { reduce_count, reduce_stride, .. }
@@ -1750,7 +1765,7 @@ fn find_missing_external_atoms(
                     ]
                 };
 
-                if check_atoms.iter().any(|&a| !atom_available(a)) {
+                if check_atoms.iter().any(|&a| !atom_available(a, self_exclude)) {
                     missing_ranges.push((ref_gi, clamped_lo - g_lo, clamped_hi - clamped_lo));
                 }
             }
@@ -1760,7 +1775,7 @@ fn find_missing_external_atoms(
         for input in &group.inputs {
             let atoms_to_lookup = get_remap_lookup_atoms(input, slice.atom_offset, slice.atom_count);
             for atom in atoms_to_lookup {
-                if !atom_available(atom.0) {
+                if !atom_available(atom.0, self_exclude) {
                     if let Some(ref_gi) = find_group_idx(groups, atom) {
                         let g = &groups[ref_gi];
                         missing_ranges.push((ref_gi, atom.0 - g.base_id.0, 1));
@@ -1771,7 +1786,7 @@ fn find_missing_external_atoms(
 
         // IndirectLoad table_base.
         if let ScalarOp::IndirectLoad { table_base, .. } = &group.op {
-            if !atom_available(table_base.0) {
+            if !atom_available(table_base.0, self_exclude) {
                 if let Some(ref_gi) = find_group_idx(groups, *table_base) {
                     missing_ranges.push((ref_gi, 0, groups[ref_gi].count));
                 }
@@ -4346,6 +4361,281 @@ mod tests {
         // With 256 rows of Mul groups, total Mul atoms > DUPLICATION_THRESHOLD.
         // This forces multi-phase execution.
         let g = build_layernorm_matmul(256, 256, 128);
+        assert!(g.validate().is_empty(), "graph validation: {:?}", g.validate());
+        let plan = plan_spans(&g, 8);
+        plan.print_summary();
+        verify_span_plan(&g, &plan);
+        verify_output_coverage(&g, &plan);
+        verify_input_availability(&plan, &g);
+        verify_phase_independence(&plan);
+        validate_all_spans_self_contained(&plan);
+    }
+
+    /// Explicit InputRef referencing a large compute group (> DUPLICATION_THRESHOLD).
+    /// This simulates a transpose/reshape in GPT-2 attention where an Explicit InputRef
+    /// references scattered atoms from a producer that's split across lanes.
+    /// The producer must complete in an earlier phase, so it becomes an external input.
+    #[test]
+    fn test_explicit_large_producer() {
+        let mut g = NanoGraph::new();
+
+        // A large literal source.
+        let data = g.push_group(
+            100_000,
+            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
+
+        // Large compute group A: 100_000 atoms (> DUPLICATION_THRESHOLD of 65536).
+        let a = g.push_group(
+            100_000,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Tanh,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![],
+            vec![],
+            vec![InputRef::Affine { base: data, stride: 1 }],
+        );
+
+        // Consumer B: 1000 atoms with Explicit InputRef referencing scattered atoms from A.
+        // Simulates a transpose: B[i] reads A[some_permuted_index].
+        let out_count = 1000u64;
+        let mut explicit_ids = Vec::with_capacity(out_count as usize);
+        // Reference atoms scattered across A: stride of 100 covers range [0, 99900].
+        for i in 0..out_count {
+            explicit_ids.push(a.offset(i * 100));
+        }
+        let b = g.push_group(
+            out_count,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Tanh,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![],
+            vec![],
+            vec![InputRef::Explicit(explicit_ids)],
+        );
+
+        for i in 0..out_count {
+            g.outputs.push(b.offset(i));
+        }
+
+        assert!(g.validate().is_empty(), "graph validation: {:?}", g.validate());
+        let plan = plan_spans(&g, 8);
+        plan.print_summary();
+        verify_span_plan(&g, &plan);
+        verify_output_coverage(&g, &plan);
+        verify_input_availability(&plan, &g);
+        verify_phase_independence(&plan);
+        validate_all_spans_self_contained(&plan);
+    }
+
+    /// Explicit InputRef with a small compute producer (< DUPLICATION_THRESHOLD).
+    /// Producer can be duplicated, so it stays in the same phase.
+    #[test]
+    fn test_explicit_small_producer_duplicated() {
+        let mut g = NanoGraph::new();
+
+        let data = g.push_group(
+            1000,
+            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
+
+        // Small compute group A: 1000 atoms (< DUPLICATION_THRESHOLD).
+        let a = g.push_group(
+            1000,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Tanh,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![],
+            vec![],
+            vec![InputRef::Affine { base: data, stride: 1 }],
+        );
+
+        // Consumer B: 500 atoms with Explicit InputRef referencing atoms from A.
+        let out_count = 500u64;
+        let mut explicit_ids = Vec::with_capacity(out_count as usize);
+        for i in 0..out_count {
+            explicit_ids.push(a.offset(i * 2)); // Every other atom
+        }
+        let b = g.push_group(
+            out_count,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Tanh,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![],
+            vec![],
+            vec![InputRef::Explicit(explicit_ids)],
+        );
+
+        for i in 0..out_count {
+            g.outputs.push(b.offset(i));
+        }
+
+        assert!(g.validate().is_empty(), "graph validation: {:?}", g.validate());
+        let plan = plan_spans(&g, 4);
+        verify_span_plan(&g, &plan);
+        verify_output_coverage(&g, &plan);
+        verify_input_availability(&plan, &g);
+        verify_phase_independence(&plan);
+        validate_all_spans_self_contained(&plan);
+    }
+
+    /// Explicit InputRef where consumer and producer are BOTH split across lanes.
+    /// Consumer's slice references atoms from the producer that are OUTSIDE this
+    /// lane's producer slice. This tests the safety net in find_missing_external_atoms.
+    #[test]
+    fn test_explicit_cross_lane_reference() {
+        let mut g = NanoGraph::new();
+
+        // Literal source for A.
+        let data = g.push_group(
+            100_000,
+            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
+
+        // Large compute group A: 100_000 atoms, will be split across lanes.
+        // Phase 0.
+        let a = g.push_group(
+            100_000,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Tanh,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![],
+            vec![],
+            vec![InputRef::Affine { base: data, stride: 1 }],
+        );
+
+        // Consumer B: also large (100_000 atoms), will be split.
+        // B's Explicit InputRef references atoms from A in a transposed/shuffled pattern.
+        // Importantly, lane 0's slice of B references atoms scattered across ALL of A,
+        // not just lane 0's slice of A.
+        // With 8 lanes, each lane gets 12500 atoms. Lane 0's B[0..12500) will
+        // reference atoms at positions 0, 8, 16, 24, ... (stride 8) within A.
+        // This means lane 0 needs atoms from all lanes of A.
+        let out_count = 100_000u64;
+        let mut explicit_ids = Vec::with_capacity(out_count as usize);
+        for i in 0..out_count {
+            // Transpose-like: B[i] reads A[(i * 8) % 100_000 + i / 12500]
+            // This creates a scattered pattern that crosses lane boundaries.
+            let src = (i * 8) % 100_000;
+            explicit_ids.push(a.offset(src));
+        }
+        let b = g.push_group(
+            out_count,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Tanh,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![],
+            vec![],
+            vec![InputRef::Explicit(explicit_ids)],
+        );
+
+        for i in 0..out_count {
+            g.outputs.push(b.offset(i));
+        }
+
+        assert!(g.validate().is_empty(), "graph validation: {:?}", g.validate());
+        let plan = plan_spans(&g, 8);
+        plan.print_summary();
+        verify_span_plan(&g, &plan);
+        verify_output_coverage(&g, &plan);
+        verify_input_availability(&plan, &g);
+        verify_phase_independence(&plan);
+        validate_all_spans_self_contained(&plan);
+    }
+
+    /// Explicit InputRef referencing multiple producer groups.
+    /// This simulates a concat-then-use pattern where the Explicit InputRef
+    /// references atoms from multiple distinct compute groups.
+    #[test]
+    fn test_explicit_multi_producer() {
+        let mut g = NanoGraph::new();
+
+        let lit1 = g.push_group(
+            100_000,
+            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
+        let lit2 = g.push_group(
+            100_000,
+            ScalarOp::Literal(NumericScalar::F32(2.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
+
+        // Two large compute groups.
+        let a = g.push_group(
+            100_000,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Tanh,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![],
+            vec![],
+            vec![InputRef::Affine { base: lit1, stride: 1 }],
+        );
+        let b = g.push_group(
+            100_000,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Tanh,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![],
+            vec![],
+            vec![InputRef::Affine { base: lit2, stride: 1 }],
+        );
+
+        // Consumer C: alternates between atoms from A and B.
+        let out_count = 200u64;
+        let mut explicit_ids = Vec::with_capacity(out_count as usize);
+        for i in 0..out_count {
+            if i % 2 == 0 {
+                explicit_ids.push(a.offset(i * 500)); // From A
+            } else {
+                explicit_ids.push(b.offset(i * 500)); // From B
+            }
+        }
+        let c = g.push_group(
+            out_count,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Tanh,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![],
+            vec![],
+            vec![InputRef::Explicit(explicit_ids)],
+        );
+
+        for i in 0..out_count {
+            g.outputs.push(c.offset(i));
+        }
+
         assert!(g.validate().is_empty(), "graph validation: {:?}", g.validate());
         let plan = plan_spans(&g, 8);
         plan.print_summary();
