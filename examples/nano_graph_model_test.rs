@@ -255,31 +255,17 @@ fn main() {
     } else {
         println!("  Buffer fits in memory, proceeding with nano execution");
 
-        // Build nano inputs:
-        // 1. Start with numeric_overrides (weights, constants)
-        let mut nano_inputs: HashMap<u64, NumericScalar> = result.numeric_overrides.clone();
-        println!(
-            "  Numeric overrides (weights/constants): {} atoms",
-            nano_inputs.len()
-        );
-
-        // 2. Add user input tensor values using tensor_map
-        let mut user_input_atoms = 0u64;
+        // Build nano inputs from all tensors via tensor_map.
+        let mut nano_inputs: HashMap<u64, NumericScalar> = HashMap::new();
         let mut backend = whisper_tensor::backends::eval_backend::EvalBackend::NDArray;
-        for (name, (_dtype, _shape_dims)) in &input_info {
-            let Some(id) = tensors_by_name.get(name) else {
+        for (ext_id, tensor) in &milli_inputs {
+            let Some(&int_id) = milli_graph.input_map.get(ext_id) else {
                 continue;
             };
-            let Some(tam) = result.tensor_map.get(id) else {
-                println!(
-                    "    WARNING: input '{}' ({:?}) not found in tensor_map",
-                    name, id
-                );
+            let Some(tam) = result.tensor_map.get(&int_id) else {
                 continue;
             };
-
-            let tensor = &milli_inputs[id];
-            // Cast to F32, flatten, extract values
+            let dtype = tensor.dtype();
             let f32_tensor = tensor.cast(DType::F32, &mut backend).unwrap();
             let flat = f32_tensor.flatten().unwrap();
             let nd = flat.to_ndarray().unwrap();
@@ -287,8 +273,8 @@ fn main() {
 
             if v.len() != tam.count as usize {
                 println!(
-                    "    WARNING: input '{}' has {} elements but tensor_map says {} atoms",
-                    name,
+                    "    WARNING: tensor {:?} has {} elements but tensor_map says {} atoms",
+                    ext_id,
                     v.len(),
                     tam.count
                 );
@@ -297,25 +283,18 @@ fn main() {
 
             for (i, &val) in v.iter().enumerate() {
                 let atom_id = tam.base_id.0 + i as u64;
-                // Use original dtype for the scalar value
-                let scalar = match tensor.dtype() {
-                    DType::I64 => {
-                        // Recover the original i64 value
-                        NumericScalar::I64(val as i64)
-                    }
+                let scalar = match dtype {
+                    DType::I64 => NumericScalar::I64(val as i64),
                     DType::I32 => NumericScalar::I32(val as i32),
                     _ => NumericScalar::F32(val),
                 };
                 nano_inputs.insert(atom_id, scalar);
             }
-            user_input_atoms += tam.count;
-            println!(
-                "    Input '{}': {} atoms at base {:?}",
-                name, tam.count, tam.base_id
-            );
         }
-        println!("  User input atoms: {}", user_input_atoms);
-        println!("  Total input atoms: {}", nano_inputs.len());
+        println!(
+            "  Numeric overrides (all tensors): {} atoms",
+            nano_inputs.len()
+        );
 
         // ---- Run nano interpreter ----
         println!("\n=== Step 3: Nano Interpreter ===");

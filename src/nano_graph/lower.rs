@@ -7,7 +7,6 @@
 
 use std::collections::HashMap;
 
-use crate::DynRank;
 use crate::dtype::DType;
 use crate::graph::{GlobalId, Graph, Node};
 use crate::milli_graph::MilliOpGraph;
@@ -15,7 +14,6 @@ use crate::milli_graph::ops::AnyMilliOp;
 use crate::nano_graph::ops::{ScalarBinOp, ScalarOp, ScalarUnaryOp};
 use crate::nano_graph::pattern::{AtomId, InputRef, NanoGraph, SymDim};
 use crate::numeric_scalar::NumericScalar;
-use crate::numeric_tensor::NumericTensor;
 use crate::tensor_info::TensorInfo;
 
 /// Common accessors for reduce ops (ReduceSum, ReduceMax, ReduceMean).
@@ -87,12 +85,6 @@ pub struct LowerResult {
     pub unsupported_details: Vec<String>,
     /// Mapping from milli tensor GlobalId to nano atom group.
     pub tensor_map: HashMap<GlobalId, TensorAtomMapInfo>,
-    /// Pre-built overrides for all Numeric (constant) tensors.
-    /// Maps atom index → NumericScalar value. Covers model weights,
-    /// constant-folded ops, and any other tensor whose value is known at
-    /// lowering time. User inputs (Shaped tensors) are NOT included — the
-    /// caller must add those separately before passing to NanoEval.
-    pub numeric_overrides: HashMap<u64, crate::numeric_scalar::NumericScalar>,
 }
 
 /// Public view of how a milli tensor maps to nano atoms.
@@ -316,39 +308,14 @@ impl TensorAtomMap {
     }
 }
 
-/// Lower a MilliOpGraph into a NanoGraph using concrete inputs.
+/// Lower a MilliOpGraph into a NanoGraph using partial tensor information.
+///
+/// Walks ops in topological order, classifying dimensions, and building atom
+/// groups. The returned `LowerResult` contains the NanoGraph, a tensor map,
+/// and any ops that couldn't be lowered (boundary ops).
 pub fn lower(
     graph: &MilliOpGraph,
-    inputs: &HashMap<GlobalId, NumericTensor<DynRank>>,
-) -> Result<LowerResult, LowerError> {
-    let info_inputs: HashMap<GlobalId, TensorInfo> = inputs
-        .iter()
-        .map(|(id, tensor)| (*id, TensorInfo::from(tensor.clone())))
-        .collect();
-    lower_with_info(graph, &info_inputs)
-}
-
-/// Lower a MilliOpGraph into a NanoGraph using partial tensor information.
-/// Lower without building numeric_overrides (fast path for diagnostics).
-pub fn lower_graph_only(
-    graph: &MilliOpGraph,
     inputs: &HashMap<GlobalId, TensorInfo>,
-) -> Result<LowerResult, LowerError> {
-    lower_inner(graph, inputs, false)
-}
-
-/// Lower a MilliOpGraph into a NanoGraph using partial tensor information.
-pub fn lower_with_info(
-    graph: &MilliOpGraph,
-    inputs: &HashMap<GlobalId, TensorInfo>,
-) -> Result<LowerResult, LowerError> {
-    lower_inner(graph, inputs, true)
-}
-
-fn lower_inner(
-    graph: &MilliOpGraph,
-    inputs: &HashMap<GlobalId, TensorInfo>,
-    build_overrides: bool,
 ) -> Result<LowerResult, LowerError> {
     let t0 = std::time::Instant::now();
     let all_infos = graph.infer_all(inputs)?;
@@ -443,72 +410,21 @@ fn lower_inner(
         })
         .collect();
 
-    // Build overrides for all Numeric (constant-valued) tensors.
-    let t2 = std::time::Instant::now();
-    use crate::numeric_scalar::NumericScalar;
-    let mut numeric_overrides: HashMap<u64, NumericScalar> = HashMap::new();
-    let mut backend = crate::backends::eval_backend::EvalBackend::NDArray;
-    if !build_overrides {
-        eprintln!("  [lower] numeric_overrides: SKIPPED");
-        // Merge synthetic overrides only.
-        for (k, v) in ctx.synthetic_overrides {
-            numeric_overrides.insert(k, v);
-        }
-        return Ok(LowerResult {
-            graph: ctx.nano,
-            unsupported: ctx.unsupported,
-            unsupported_details: ctx.unsupported_details,
-            tensor_map,
-            numeric_overrides,
-        });
-    }
-    for (id, info) in &all_infos {
-        let Some(numeric) = info.as_numeric() else {
-            continue;
-        };
-        let Some(tam) = ctx.tensor_map.get(id) else {
-            continue;
-        };
-        let tensor_dtype = numeric.dtype();
-        // Extract values via f32 (exact for BF16/F16/F32, sufficient for most cases),
-        // then cast to the tensor's actual dtype to preserve rounding semantics.
-        let Ok(f32_tensor) = numeric.cast(DType::F32, &mut backend) else {
-            continue;
-        };
-        let Ok(flat) = f32_tensor.flatten() else {
-            continue;
-        };
-        let Ok(nd) = flat.to_ndarray() else { continue };
-        let Ok(v): Result<Vec<f32>, _> = nd.try_into() else {
-            continue;
-        };
-        if v.len() != tam.count as usize {
-            continue;
-        }
-        for (i, &val) in v.iter().enumerate() {
-            let scalar = NumericScalar::F32(val).cast_to(tensor_dtype);
-            numeric_overrides.insert(tam.atom_id_for_element(i as u64).0, scalar);
-        }
-    }
-
-    eprintln!(
-        "  [lower] numeric_overrides: {:.1}ms ({} entries)",
-        t2.elapsed().as_secs_f64() * 1e3,
-        numeric_overrides.len()
-    );
-
-    // Merge synthetic overrides (e.g., column offsets from Gather lowering).
-    for (k, v) in ctx.synthetic_overrides {
-        numeric_overrides.entry(k).or_insert(v);
-    }
-
     Ok(LowerResult {
         graph: ctx.nano,
         unsupported: ctx.unsupported,
         unsupported_details: ctx.unsupported_details,
         tensor_map,
-        numeric_overrides,
     })
+}
+
+/// Backward-compatible alias for `lower()`. Will be removed once all call
+/// sites are migrated.
+pub fn lower_with_info(
+    graph: &MilliOpGraph,
+    inputs: &HashMap<GlobalId, TensorInfo>,
+) -> Result<LowerResult, LowerError> {
+    lower(graph, inputs)
 }
 
 struct LowerCtx {
@@ -517,9 +433,6 @@ struct LowerCtx {
     next_anon_sym: usize,
     unsupported: Vec<(GlobalId, String)>,
     unsupported_details: Vec<String>,
-    /// Overrides for synthetic atoms created during lowering (e.g., column
-    /// offset literals for Gather). Merged into numeric_overrides in the result.
-    synthetic_overrides: HashMap<u64, NumericScalar>,
 }
 
 impl LowerCtx {
@@ -530,7 +443,6 @@ impl LowerCtx {
             next_anon_sym: 0,
             unsupported: Vec::new(),
             unsupported_details: Vec::new(),
-            synthetic_overrides: HashMap::new(),
         }
     }
 
@@ -565,8 +477,15 @@ impl LowerCtx {
     }
 
     /// Register a graph input as leaf atoms.
+    ///
+    /// Creates Literal groups with placeholder value 0.0. For external inputs
+    /// (user-provided tensors), the executor fills in actual values at runtime.
+    /// For constant tensors whose values are known at lowering time, the
+    /// Literal(0.0) placeholder is similarly overridden by the executor using
+    /// the tensor data from `all_infos`.
     fn register_input(&mut self, id: GlobalId, info: &TensorInfo) {
         let Some((layout, known_dims, sym_dims, count)) = self.classify_dims(info) else {
+            // Unknown rank — register a single placeholder atom.
             let base_id = self.nano.push_atom(
                 ScalarOp::Literal(NumericScalar::F32(0.0)),
                 vec![],
@@ -583,6 +502,7 @@ impl LowerCtx {
         let strides = TensorAtomMap::compute_strides(&known_dims);
         let count = count.max(1);
 
+        // Placeholder Literal group — actual values supplied by executor.
         let base_id = self.nano.push_group(
             count,
             ScalarOp::Literal(NumericScalar::F32(0.0)),
@@ -3229,63 +3149,22 @@ impl LowerCtx {
 
             // Step 3: Add group — D_total atoms, each adds its column offset j
             // Column offsets: 0, 1, 2, ..., D_total-1
-            let col_offsets_base = self.nano.push_group(
-                d_total,
+            // Each value is distinct, so we push D_total singleton Literal groups.
+            // push_atom allocates contiguous AtomIds, so downstream Affine
+            // addressing (stride=1) works correctly.
+            let col_offsets_base = self.nano.push_atom(
                 ScalarOp::Literal(NumericScalar::F32(0.0)),
                 vec![],
                 vec![],
                 vec![],
             );
-            // Fill in the column offset overrides (they'll go into numeric_overrides via
-            // the normal constant path, but since these are freshly created Literal atoms
-            // we can't rely on that — we need to set their literal values directly).
-            // Actually, Literal atoms carry their value in the ScalarOp itself. We need
-            // individual atoms with different literal values. Push them one by one.
-
-            // Ugh — push_group creates a single group with one shared Literal value.
-            // We need D_total atoms each with a different literal. Use Explicit + Identity
-            // or just push individual atoms. For efficiency, push individual Literal atoms.
-
-            // Actually, let me reconsider. We can create D_total Literal atoms by pushing
-            // them individually, but that's D_total groups of size 1. Let's do it differently:
-            // Create a single Literal(0.0) group of D_total atoms and rely on numeric_overrides
-            // to set their values. But numeric_overrides are populated from all_infos which
-            // only has the original tensors, not our synthetic ones.
-
-            // Better approach: For column offsets, we can use the Literal group and put the
-            // offsets into the overrides. But since these are synthesized atoms (not from
-            // any milli tensor), we need to add them to numeric_overrides manually.
-            // The LowerResult's numeric_overrides are built in the outer `lower_with_info`,
-            // which iterates all_infos. Our synthetic atoms won't be there.
-
-            // Simplest correct approach: push individual Literal atoms with the actual values.
-            // This is O(D_total) groups but correct.
-
-            // Actually wait — I already pushed a group above. Let me remove that and do it
-            // properly. I'll track a base AtomId for column offset literals, pushing them
-            // as one group. The NanoEval handles Literal by taking the ScalarOp's value,
-            // with overrides on top. So I need either:
-            //   a) One Literal atom per distinct offset value (D_total singleton groups), or
-            //   b) One Literal(0.0) group + numeric_overrides set by the lowering code
-
-            // Option (b) is cleaner. I pushed col_offsets_base above as Literal(0.0) group.
-            // I need to return those overrides somehow. The simplest way: store them in
-            // a side-channel on LowerCtx and merge them into numeric_overrides in the caller.
-
-            // Let me add a field `synthetic_overrides` to LowerCtx for this purpose.
-
-            // For now, let me just push individual atoms. D_total is typically 384/768/1024,
-            // which is fine.
-
-            // Remove the group we already pushed — actually we can't un-push.
-            // Let me just not use it and create the proper structure.
-            // The col_offsets_base group is already allocated. We'll put correct values
-            // in it via ctx synthetic overrides.
-
-            // I'll add a synthetic_overrides map to LowerCtx and merge at the end.
-            for j in 0..d_total {
-                self.synthetic_overrides
-                    .insert(col_offsets_base.0 + j, NumericScalar::F32(j as f32));
+            for j in 1..d_total {
+                self.nano.push_atom(
+                    ScalarOp::Literal(NumericScalar::F32(j as f32)),
+                    vec![],
+                    vec![],
+                    vec![],
+                );
             }
 
             let add_id = self.nano.push_group(
@@ -3360,21 +3239,24 @@ impl LowerCtx {
                 vec![indices_ref, InputRef::Broadcast(stride_lit)],
             );
 
-            // Column offset literals — one group, values set via synthetic_overrides
-            let col_offsets_base = self.nano.push_group(
-                out_count,
+            // Column offset literals: d_total singletons with values [0, 1, ..., d_total-1].
+            // The out_count Add group references these via Modular (i % d_total).
+            let col_lit_base = self.nano.push_atom(
                 ScalarOp::Literal(NumericScalar::F32(0.0)),
                 vec![],
                 vec![],
                 vec![],
             );
-            for flat in 0..out_count {
-                let col = flat % d_total;
-                self.synthetic_overrides
-                    .insert(col_offsets_base.0 + flat, NumericScalar::F32(col as f32));
+            for j in 1..d_total {
+                self.nano.push_atom(
+                    ScalarOp::Literal(NumericScalar::F32(j as f32)),
+                    vec![],
+                    vec![],
+                    vec![],
+                );
             }
 
-            // Add group: mul_result + column_offset
+            // Add group: mul_result + column_offset (via Modular over d_total literals)
             let add_base = self.nano.push_group(
                 out_count,
                 ScalarOp::Binary {
@@ -3389,9 +3271,10 @@ impl LowerCtx {
                         base: mul_base,
                         stride: 1,
                     },
-                    InputRef::Affine {
-                        base: col_offsets_base,
+                    InputRef::Modular {
+                        base: col_lit_base,
                         stride: 1,
+                        modulus: d_total,
                     },
                 ],
             );
@@ -3574,8 +3457,8 @@ mod tests {
             result.unsupported_details
         );
 
-        // Start with numeric overrides from lowering, add input values on top.
-        let mut overrides = result.numeric_overrides;
+        // Build overrides from input tensors via tensor_map.
+        let mut overrides: HashMap<u64, NumericScalar> = HashMap::new();
         for (&id, tensor) in input_ids.iter().zip(inputs.iter()) {
             if let Some(tam) = result.tensor_map.get(&id) {
                 let scalars = tensor_to_scalars(tensor);

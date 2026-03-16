@@ -1106,6 +1106,35 @@ mod tests {
     use crate::nano_graph::{AtomId, InputRef, NanoGraph, ScalarOp};
     use crate::numeric_scalar::NumericScalar;
 
+    /// Build f32 overrides from TensorInfo inputs using the tensor_map in LowerResult.
+    /// Iterates all info_inputs, extracts numeric tensor data, and maps elements to atom IDs.
+    fn build_f32_overrides(
+        info_inputs: &HashMap<crate::graph::GlobalId, crate::tensor_info::TensorInfo>,
+        result: &crate::nano_graph::lower::LowerResult,
+    ) -> HashMap<u64, f32> {
+        use crate::numeric_tensor::NumericTensor;
+        let mut overrides = HashMap::new();
+        let mut backend = crate::backends::eval_backend::EvalBackend::NDArray;
+        for (id, info) in info_inputs {
+            let Some(numeric): Option<&NumericTensor<crate::DynRank>> = info.as_numeric() else {
+                continue;
+            };
+            let Some(tam) = result.tensor_map.get(id) else {
+                continue;
+            };
+            let f32_t = numeric
+                .cast(crate::dtype::DType::F32, &mut backend)
+                .unwrap();
+            let flat = f32_t.flatten().unwrap();
+            let nd = flat.to_ndarray().unwrap();
+            let v: Vec<f32> = nd.try_into().unwrap();
+            for (i, &val) in v.iter().enumerate() {
+                overrides.insert(tam.base_id.0 + i as u64, val);
+            }
+        }
+        overrides
+    }
+
     /// Compare CompiledPlan output against the NanoEval interpreter.
     fn compare_plan_vs_interp(
         graph: &NanoGraph,
@@ -1174,7 +1203,6 @@ mod tests {
 
     #[test]
     fn test_plan_lowered_matmul() {
-        use crate::backends::eval_backend::EvalBackend;
         use crate::milli_graph::MilliOpGraph;
         use crate::nano_graph::lower::lower_with_info;
         use crate::numeric_tensor::NumericTensor;
@@ -1197,8 +1225,8 @@ mod tests {
         // 4x6 * 6x8 = 4x8 matmul
         let a_data: Vec<f32> = (0..24).map(|i| (i as f32) * 0.1 + 0.5).collect();
         let b_data: Vec<f32> = (0..48).map(|i| (i as f32) * 0.05 - 1.0).collect();
-        let a_tensor = NumericTensor::from_vec_shape(a_data, vec![4, 6]).unwrap();
-        let b_tensor = NumericTensor::from_vec_shape(b_data, vec![6, 8]).unwrap();
+        let a_tensor = NumericTensor::<crate::DynRank>::from_vec_shape(a_data, vec![4, 6]).unwrap();
+        let b_tensor = NumericTensor::<crate::DynRank>::from_vec_shape(b_data, vec![6, 8]).unwrap();
 
         let mut info_inputs = HashMap::new();
         info_inputs.insert(a, TensorInfo::from(a_tensor.clone()));
@@ -1211,22 +1239,8 @@ mod tests {
             result.unsupported_details
         );
 
-        // Build f32 overrides.
-        let mut overrides = HashMap::new();
-        for (&atom_idx, scalar) in &result.numeric_overrides {
-            overrides.insert(atom_idx, scalar.to_f64() as f32);
-        }
-        for (id, tensor) in [(a, &a_tensor), (b, &b_tensor)] {
-            if let Some(tam) = result.tensor_map.get(&id) {
-                let mut backend = EvalBackend::NDArray;
-                let f32_t = tensor.cast(DType::F32, &mut backend).unwrap();
-                let flat = f32_t.flatten().unwrap();
-                let v: Vec<f32> = flat.to_ndarray().unwrap().try_into().unwrap();
-                for (i, &val) in v.iter().enumerate() {
-                    overrides.insert(tam.base_id.0 + i as u64, val);
-                }
-            }
-        }
+        // Build f32 overrides from info_inputs.
+        let overrides = build_f32_overrides(&info_inputs, &result);
 
         // Plan with 2 lanes.
         let plan = plan_execution(&result.graph, 2);
@@ -1255,7 +1269,6 @@ mod tests {
 
     #[test]
     fn test_plan_small_matmul() {
-        use crate::backends::eval_backend::EvalBackend;
         use crate::milli_graph::MilliOpGraph;
         use crate::nano_graph::lower::lower_with_info;
         use crate::numeric_tensor::NumericTensor;
@@ -1277,10 +1290,10 @@ mod tests {
 
         // 2x3 * 3x2 = 2x2 matmul
         let a_tensor =
-            NumericTensor::from_vec_shape(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3])
+            NumericTensor::<crate::DynRank>::from_vec_shape(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3])
                 .unwrap();
         let b_tensor =
-            NumericTensor::from_vec_shape(vec![1.0f32, 0.0, 0.0, 1.0, 1.0, 1.0], vec![3, 2])
+            NumericTensor::<crate::DynRank>::from_vec_shape(vec![1.0f32, 0.0, 0.0, 1.0, 1.0, 1.0], vec![3, 2])
                 .unwrap();
 
         let mut info_inputs = HashMap::new();
@@ -1290,21 +1303,7 @@ mod tests {
         let result = lower_with_info(&milli, &info_inputs).unwrap();
         assert!(result.unsupported.is_empty());
 
-        let mut overrides = HashMap::new();
-        for (&atom_idx, scalar) in &result.numeric_overrides {
-            overrides.insert(atom_idx, scalar.to_f64() as f32);
-        }
-        for (id, tensor) in [(a, &a_tensor), (b, &b_tensor)] {
-            if let Some(tam) = result.tensor_map.get(&id) {
-                let mut backend = EvalBackend::NDArray;
-                let f32_t = tensor.cast(DType::F32, &mut backend).unwrap();
-                let flat = f32_t.flatten().unwrap();
-                let v: Vec<f32> = flat.to_ndarray().unwrap().try_into().unwrap();
-                for (i, &val) in v.iter().enumerate() {
-                    overrides.insert(tam.base_id.0 + i as u64, val);
-                }
-            }
-        }
+        let overrides = build_f32_overrides(&info_inputs, &result);
 
         // Single-lane plan (should behave identically to whole-graph codegen).
         let plan1 = plan_execution(&result.graph, 1);
@@ -1324,7 +1323,6 @@ mod tests {
     /// This exercises multi-phase execution with AllRows groups (the Add).
     #[test]
     fn test_plan_matmul_chain() {
-        use crate::backends::eval_backend::EvalBackend;
         use crate::milli_graph::MilliOpGraph;
         use crate::milli_graph::ops::{MatMul, SimpleBinary};
         use crate::nano_graph::lower::lower_with_info;
@@ -1353,10 +1351,10 @@ mod tests {
         let bias_data: Vec<f32> = (0..32).map(|i| (i as f32) * 0.01).collect();
         let c_data: Vec<f32> = (0..24).map(|i| (i as f32) * 0.02 + 0.1).collect();
 
-        let a_tensor = NumericTensor::from_vec_shape(a_data, vec![4, 6]).unwrap();
-        let b_tensor = NumericTensor::from_vec_shape(b_data, vec![6, 8]).unwrap();
-        let bias_tensor = NumericTensor::from_vec_shape(bias_data, vec![4, 8]).unwrap();
-        let c_tensor = NumericTensor::from_vec_shape(c_data, vec![8, 3]).unwrap();
+        let a_tensor = NumericTensor::<crate::DynRank>::from_vec_shape(a_data, vec![4, 6]).unwrap();
+        let b_tensor = NumericTensor::<crate::DynRank>::from_vec_shape(b_data, vec![6, 8]).unwrap();
+        let bias_tensor = NumericTensor::<crate::DynRank>::from_vec_shape(bias_data, vec![4, 8]).unwrap();
+        let c_tensor = NumericTensor::<crate::DynRank>::from_vec_shape(c_data, vec![8, 3]).unwrap();
 
         let mut info_inputs = HashMap::new();
         info_inputs.insert(a, TensorInfo::from(a_tensor.clone()));
@@ -1371,26 +1369,7 @@ mod tests {
             result.unsupported_details
         );
 
-        let mut overrides = HashMap::new();
-        for (&atom_idx, scalar) in &result.numeric_overrides {
-            overrides.insert(atom_idx, scalar.to_f64() as f32);
-        }
-        for (id, tensor) in [
-            (a, &a_tensor),
-            (b, &b_tensor),
-            (bias, &bias_tensor),
-            (c, &c_tensor),
-        ] {
-            if let Some(tam) = result.tensor_map.get(&id) {
-                let mut backend = EvalBackend::NDArray;
-                let f32_t = tensor.cast(DType::F32, &mut backend).unwrap();
-                let flat = f32_t.flatten().unwrap();
-                let v: Vec<f32> = flat.to_ndarray().unwrap().try_into().unwrap();
-                for (i, &val) in v.iter().enumerate() {
-                    overrides.insert(tam.base_id.0 + i as u64, val);
-                }
-            }
-        }
+        let overrides = build_f32_overrides(&info_inputs, &result);
 
         // Print plan structure for debugging.
         let groups = result.graph.groups();
@@ -1453,7 +1432,6 @@ mod tests {
     /// Test with elementwise chain only (no matmul) to isolate AllRows splitting.
     #[test]
     fn test_plan_elementwise_chain() {
-        use crate::backends::eval_backend::EvalBackend;
         use crate::milli_graph::MilliOpGraph;
         use crate::milli_graph::ops::{SimpleBinary, SimpleUnaryOp};
         use crate::nano_graph::lower::lower_with_info;
@@ -1473,8 +1451,8 @@ mod tests {
 
         let a_data: Vec<f32> = (0..16).map(|i| (i as f32) * 0.1).collect();
         let b_data: Vec<f32> = (0..16).map(|i| (i as f32) * 0.05 + 0.5).collect();
-        let a_tensor = NumericTensor::from_vec_shape(a_data, vec![4, 4]).unwrap();
-        let b_tensor = NumericTensor::from_vec_shape(b_data, vec![4, 4]).unwrap();
+        let a_tensor = NumericTensor::<crate::DynRank>::from_vec_shape(a_data, vec![4, 4]).unwrap();
+        let b_tensor = NumericTensor::<crate::DynRank>::from_vec_shape(b_data, vec![4, 4]).unwrap();
 
         let mut info_inputs = HashMap::new();
         info_inputs.insert(a, TensorInfo::from(a_tensor.clone()));
@@ -1483,21 +1461,7 @@ mod tests {
         let result = lower_with_info(&milli, &info_inputs).unwrap();
         assert!(result.unsupported.is_empty());
 
-        let mut overrides = HashMap::new();
-        for (&atom_idx, scalar) in &result.numeric_overrides {
-            overrides.insert(atom_idx, scalar.to_f64() as f32);
-        }
-        for (id, tensor) in [(a, &a_tensor), (b, &b_tensor)] {
-            if let Some(tam) = result.tensor_map.get(&id) {
-                let mut backend = EvalBackend::NDArray;
-                let f32_t = tensor.cast(DType::F32, &mut backend).unwrap();
-                let flat = f32_t.flatten().unwrap();
-                let v: Vec<f32> = flat.to_ndarray().unwrap().try_into().unwrap();
-                for (i, &val) in v.iter().enumerate() {
-                    overrides.insert(tam.base_id.0 + i as u64, val);
-                }
-            }
-        }
+        let overrides = build_f32_overrides(&info_inputs, &result);
 
         for lanes in [1, 2, 4, 8] {
             let plan = plan_execution(&result.graph, lanes);
@@ -1513,7 +1477,6 @@ mod tests {
     /// Test with a larger matmul that has more rows to split.
     #[test]
     fn test_plan_large_matmul() {
-        use crate::backends::eval_backend::EvalBackend;
         use crate::milli_graph::MilliOpGraph;
         use crate::milli_graph::ops::MatMul;
         use crate::nano_graph::lower::lower_with_info;
@@ -1531,8 +1494,8 @@ mod tests {
 
         let a_data: Vec<f32> = (0..512).map(|i| ((i as f32) * 0.01).sin()).collect();
         let b_data: Vec<f32> = (0..512).map(|i| ((i as f32) * 0.02).cos()).collect();
-        let a_tensor = NumericTensor::from_vec_shape(a_data, vec![16, 32]).unwrap();
-        let b_tensor = NumericTensor::from_vec_shape(b_data, vec![32, 16]).unwrap();
+        let a_tensor = NumericTensor::<crate::DynRank>::from_vec_shape(a_data, vec![16, 32]).unwrap();
+        let b_tensor = NumericTensor::<crate::DynRank>::from_vec_shape(b_data, vec![32, 16]).unwrap();
 
         let mut info_inputs = HashMap::new();
         info_inputs.insert(a, TensorInfo::from(a_tensor.clone()));
@@ -1545,21 +1508,7 @@ mod tests {
             result.unsupported_details,
         );
 
-        let mut overrides = HashMap::new();
-        for (&atom_idx, scalar) in &result.numeric_overrides {
-            overrides.insert(atom_idx, scalar.to_f64() as f32);
-        }
-        for (id, tensor) in [(a, &a_tensor), (b, &b_tensor)] {
-            if let Some(tam) = result.tensor_map.get(&id) {
-                let mut backend = EvalBackend::NDArray;
-                let f32_t = tensor.cast(DType::F32, &mut backend).unwrap();
-                let flat = f32_t.flatten().unwrap();
-                let v: Vec<f32> = flat.to_ndarray().unwrap().try_into().unwrap();
-                for (i, &val) in v.iter().enumerate() {
-                    overrides.insert(tam.base_id.0 + i as u64, val);
-                }
-            }
-        }
+        let overrides = build_f32_overrides(&info_inputs, &result);
 
         for lanes in [1, 2, 4, 8] {
             let plan = plan_execution(&result.graph, lanes);
@@ -1576,7 +1525,6 @@ mod tests {
     /// ReduceMean creates a reduce pattern that interacts with AllRows splitting.
     #[test]
     fn test_plan_reducemean_matmul() {
-        use crate::backends::eval_backend::EvalBackend;
         use crate::milli_graph::MilliOpGraph;
         use crate::milli_graph::ops::{MatMul, ReduceMean, SimpleBinary};
         use crate::nano_graph::lower::lower_with_info;
@@ -1600,8 +1548,8 @@ mod tests {
 
         let x_data: Vec<f32> = (0..128).map(|i| ((i as f32) * 0.07).sin() + 1.0).collect();
         let w_data: Vec<f32> = (0..192).map(|i| ((i as f32) * 0.03).cos() * 0.5).collect();
-        let x_tensor = NumericTensor::from_vec_shape(x_data, vec![8, 16]).unwrap();
-        let w_tensor = NumericTensor::from_vec_shape(w_data, vec![16, 12]).unwrap();
+        let x_tensor = NumericTensor::<crate::DynRank>::from_vec_shape(x_data, vec![8, 16]).unwrap();
+        let w_tensor = NumericTensor::<crate::DynRank>::from_vec_shape(w_data, vec![16, 12]).unwrap();
 
         let mut info_inputs = HashMap::new();
         info_inputs.insert(x, TensorInfo::from(x_tensor.clone()));
@@ -1612,21 +1560,7 @@ mod tests {
             eprintln!("unsupported: {:?}", result.unsupported_details);
         }
 
-        let mut overrides = HashMap::new();
-        for (&atom_idx, scalar) in &result.numeric_overrides {
-            overrides.insert(atom_idx, scalar.to_f64() as f32);
-        }
-        for (id, tensor) in [(x, &x_tensor), (w, &w_tensor)] {
-            if let Some(tam) = result.tensor_map.get(&id) {
-                let mut backend = EvalBackend::NDArray;
-                let f32_t = tensor.cast(DType::F32, &mut backend).unwrap();
-                let flat = f32_t.flatten().unwrap();
-                let v: Vec<f32> = flat.to_ndarray().unwrap().try_into().unwrap();
-                for (i, &val) in v.iter().enumerate() {
-                    overrides.insert(tam.base_id.0 + i as u64, val);
-                }
-            }
-        }
+        let overrides = build_f32_overrides(&info_inputs, &result);
 
         for lanes in [1, 2, 4, 8] {
             let plan = plan_execution(&result.graph, lanes);
@@ -1643,7 +1577,6 @@ mod tests {
     /// Pattern: Y = X @ W1 + X (residual), then Z = Y @ W2
     #[test]
     fn test_plan_matmul_residual() {
-        use crate::backends::eval_backend::EvalBackend;
         use crate::milli_graph::MilliOpGraph;
         use crate::milli_graph::ops::{MatMul, SimpleBinary};
         use crate::nano_graph::lower::lower_with_info;
@@ -1669,9 +1602,9 @@ mod tests {
         let w1_data: Vec<f32> = (0..256).map(|i| ((i as f32) * 0.02).cos() * 0.3).collect();
         let w2_data: Vec<f32> = (0..128).map(|i| ((i as f32) * 0.04).sin() * 0.2).collect();
 
-        let x_tensor = NumericTensor::from_vec_shape(x_data, vec![8, 16]).unwrap();
-        let w1_tensor = NumericTensor::from_vec_shape(w1_data, vec![16, 16]).unwrap();
-        let w2_tensor = NumericTensor::from_vec_shape(w2_data, vec![16, 8]).unwrap();
+        let x_tensor = NumericTensor::<crate::DynRank>::from_vec_shape(x_data, vec![8, 16]).unwrap();
+        let w1_tensor = NumericTensor::<crate::DynRank>::from_vec_shape(w1_data, vec![16, 16]).unwrap();
+        let w2_tensor = NumericTensor::<crate::DynRank>::from_vec_shape(w2_data, vec![16, 8]).unwrap();
 
         let mut info_inputs = HashMap::new();
         info_inputs.insert(x, TensorInfo::from(x_tensor.clone()));
@@ -1685,21 +1618,7 @@ mod tests {
             result.unsupported_details,
         );
 
-        let mut overrides = HashMap::new();
-        for (&atom_idx, scalar) in &result.numeric_overrides {
-            overrides.insert(atom_idx, scalar.to_f64() as f32);
-        }
-        for (id, tensor) in [(x, &x_tensor), (w1, &w1_tensor), (w2, &w2_tensor)] {
-            if let Some(tam) = result.tensor_map.get(&id) {
-                let mut backend = EvalBackend::NDArray;
-                let f32_t = tensor.cast(DType::F32, &mut backend).unwrap();
-                let flat = f32_t.flatten().unwrap();
-                let v: Vec<f32> = flat.to_ndarray().unwrap().try_into().unwrap();
-                for (i, &val) in v.iter().enumerate() {
-                    overrides.insert(tam.base_id.0 + i as u64, val);
-                }
-            }
-        }
+        let overrides = build_f32_overrides(&info_inputs, &result);
 
         for lanes in [1, 2, 4, 8] {
             let plan = plan_execution(&result.graph, lanes);
@@ -1903,7 +1822,6 @@ mod tests {
     /// 4. f32 simulation (matches NanoEval within tolerance)
     #[test]
     fn test_plan_validation_2layer_mlp() {
-        use crate::backends::eval_backend::EvalBackend;
         use crate::milli_graph::MilliOpGraph;
         use crate::milli_graph::ops::{MatMul, SimpleUnaryOp};
         use crate::nano_graph::lower::lower_with_info;
@@ -1946,9 +1864,9 @@ mod tests {
             .map(|i| ((i as f32) * 0.041).sin() * 0.1)
             .collect();
 
-        let a_tensor = NumericTensor::from_vec_shape(a_data, vec![m1, k1]).unwrap();
-        let b_tensor = NumericTensor::from_vec_shape(b_data, vec![k1, n1]).unwrap();
-        let c_tensor = NumericTensor::from_vec_shape(c_data, vec![k2, n2]).unwrap();
+        let a_tensor = NumericTensor::<crate::DynRank>::from_vec_shape(a_data, vec![m1, k1]).unwrap();
+        let b_tensor = NumericTensor::<crate::DynRank>::from_vec_shape(b_data, vec![k1, n1]).unwrap();
+        let c_tensor = NumericTensor::<crate::DynRank>::from_vec_shape(c_data, vec![k2, n2]).unwrap();
 
         let mut info_inputs = HashMap::new();
         info_inputs.insert(a_id, TensorInfo::from(a_tensor.clone()));
@@ -1963,22 +1881,8 @@ mod tests {
             result.unsupported_details,
         );
 
-        // Build f32 overrides (numeric_overrides + input tensor data)
-        let mut overrides_f32: HashMap<u64, f32> = HashMap::new();
-        for (&atom_idx, scalar) in &result.numeric_overrides {
-            overrides_f32.insert(atom_idx, scalar.to_f64() as f32);
-        }
-        for (id, tensor) in [(a_id, &a_tensor), (b_id, &b_tensor), (c_id, &c_tensor)] {
-            if let Some(tam) = result.tensor_map.get(&id) {
-                let mut backend = EvalBackend::NDArray;
-                let f32_t = tensor.cast(DType::F32, &mut backend).unwrap();
-                let flat = f32_t.flatten().unwrap();
-                let v: Vec<f32> = flat.to_ndarray().unwrap().try_into().unwrap();
-                for (i, &val) in v.iter().enumerate() {
-                    overrides_f32.insert(tam.base_id.0 + i as u64, val);
-                }
-            }
-        }
+        // Build f32 overrides from info_inputs.
+        let overrides_f32 = build_f32_overrides(&info_inputs, &result);
 
         let graph = &result.graph;
         let groups = graph.groups();
@@ -2425,7 +2329,6 @@ mod tests {
     /// This exercises the exact patterns that fail in GPT-2.
     #[test]
     fn test_plan_gpt2_scale() {
-        use crate::backends::eval_backend::EvalBackend;
         use crate::milli_graph::MilliOpGraph;
         use crate::milli_graph::ops::{MatMul, SimpleBinary};
         use crate::nano_graph::lower::lower_with_info;
@@ -2465,11 +2368,11 @@ mod tests {
         let w2_data = mk_data(d_ff * d_model);
         let bias2_data = mk_data(d_model);
 
-        let x_tensor = NumericTensor::from_vec_shape(x_data, vec![seq, d_model]).unwrap();
-        let w1_tensor = NumericTensor::from_vec_shape(w1_data, vec![d_model, d_ff]).unwrap();
-        let bias1_tensor = NumericTensor::from_vec_shape(bias1_data, vec![d_ff]).unwrap();
-        let w2_tensor = NumericTensor::from_vec_shape(w2_data, vec![d_ff, d_model]).unwrap();
-        let bias2_tensor = NumericTensor::from_vec_shape(bias2_data, vec![d_model]).unwrap();
+        let x_tensor = NumericTensor::<crate::DynRank>::from_vec_shape(x_data, vec![seq, d_model]).unwrap();
+        let w1_tensor = NumericTensor::<crate::DynRank>::from_vec_shape(w1_data, vec![d_model, d_ff]).unwrap();
+        let bias1_tensor = NumericTensor::<crate::DynRank>::from_vec_shape(bias1_data, vec![d_ff]).unwrap();
+        let w2_tensor = NumericTensor::<crate::DynRank>::from_vec_shape(w2_data, vec![d_ff, d_model]).unwrap();
+        let bias2_tensor = NumericTensor::<crate::DynRank>::from_vec_shape(bias2_data, vec![d_model]).unwrap();
 
         let mut info_inputs = HashMap::new();
         info_inputs.insert(x, TensorInfo::from(x_tensor.clone()));
@@ -2485,27 +2388,7 @@ mod tests {
             result.unsupported_details,
         );
 
-        let mut overrides = HashMap::new();
-        for (&atom_idx, scalar) in &result.numeric_overrides {
-            overrides.insert(atom_idx, scalar.to_f64() as f32);
-        }
-        for (id, tensor) in [
-            (x, &x_tensor),
-            (w1, &w1_tensor),
-            (bias1, &bias1_tensor),
-            (w2, &w2_tensor),
-            (bias2, &bias2_tensor),
-        ] {
-            if let Some(tam) = result.tensor_map.get(&id) {
-                let mut backend = EvalBackend::NDArray;
-                let f32_t = tensor.cast(DType::F32, &mut backend).unwrap();
-                let flat = f32_t.flatten().unwrap();
-                let v: Vec<f32> = flat.to_ndarray().unwrap().try_into().unwrap();
-                for (i, &val) in v.iter().enumerate() {
-                    overrides.insert(tam.base_id.0 + i as u64, val);
-                }
-            }
-        }
+        let overrides = build_f32_overrides(&info_inputs, &result);
 
         for lanes in [1, 2, 4, 8] {
             let plan = plan_execution(&result.graph, lanes);

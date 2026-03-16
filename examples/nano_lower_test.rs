@@ -93,11 +93,11 @@ fn main() {
         all_infos.insert(id, TensorInfo::from(tensor));
     }
 
-    // ---- Lower (graph only, skip numeric_overrides) ----
+    // ---- Lower ----
     let t0 = Instant::now();
     let result =
-        whisper_tensor::nano_graph::lower::lower_graph_only(&milli_graph, &all_infos).unwrap();
-    eprintln!("lower_graph_only: {:.1}s", t0.elapsed().as_secs_f64());
+        whisper_tensor::nano_graph::lower::lower(&milli_graph, &all_infos).unwrap();
+    eprintln!("lower: {:.1}s", t0.elapsed().as_secs_f64());
 
     let stats = result.graph.stats();
     println!("\n=== NanoGraph ===\n{}", stats);

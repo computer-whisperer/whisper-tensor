@@ -27,7 +27,7 @@ pub struct Span {
     /// Contiguous ranges of atoms this span writes back to the shared buffer.
     pub outputs: Vec<AtomMapping>,
     /// Main↔span mapping for inlined literal groups (needed to feed
-    /// numeric_overrides into NanoEval during execution).
+    /// tensor overrides into NanoEval during execution).
     pub literal_mappings: Vec<AtomMapping>,
 }
 

@@ -419,12 +419,8 @@ fn rwkv01b_nano_graph_integrity() {
     }
 
     // ---- Build NanoGraph overrides ----
-    // Start with the numeric overrides from lowering (weights + constant-folded values).
+    // Extract numeric values from all tensors (weights + inputs) via tensor_map.
     let t0 = std::time::Instant::now();
-    let mut overrides = result.numeric_overrides;
-    eprintln!("  {} numeric overrides from lowering", overrides.len());
-
-    // Add user input values on top (these are Shaped, not Numeric, so not in numeric_overrides).
     use whisper_tensor::numeric_scalar::NumericScalar;
     let tensor_to_scalars = |t: &NumericTensor<DynRank>| -> Vec<NumericScalar> {
         let mut be = EvalBackend::NDArray;
@@ -437,7 +433,13 @@ fn rwkv01b_nano_graph_integrity() {
             .collect()
     };
 
-    for (ext_id, tensor) in &input_tensors {
+    let mut overrides: HashMap<u64, NumericScalar> = HashMap::new();
+    // All tensors (weights + inputs) keyed by external ID.
+    let all_tensors: Vec<(&GlobalId, &NumericTensor<DynRank>)> = weight_tensors
+        .iter()
+        .chain(input_tensors.iter())
+        .collect();
+    for (ext_id, tensor) in all_tensors {
         let Some(&int_id) = milli.input_map.get(ext_id) else {
             continue;
         };
@@ -448,7 +450,7 @@ fn rwkv01b_nano_graph_integrity() {
         assert_eq!(
             scalars.len(),
             tam.count as usize,
-            "Input {:?} count mismatch: {} vs {}",
+            "Tensor {:?} count mismatch: {} vs {}",
             ext_id,
             scalars.len(),
             tam.count
