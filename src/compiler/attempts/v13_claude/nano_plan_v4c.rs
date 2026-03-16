@@ -66,6 +66,9 @@ pub struct Span {
     pub inputs: Vec<AtomMapping>,
     /// Contiguous ranges of atoms this span writes back to the shared buffer.
     pub outputs: Vec<AtomMapping>,
+    /// Main↔span mapping for inlined literal groups (needed to feed
+    /// numeric_overrides into NanoEval during execution).
+    pub literal_mappings: Vec<AtomMapping>,
 }
 
 /// One phase of execution (between two barriers).
@@ -772,6 +775,7 @@ fn build_span_plan(
                     graph: NanoGraph::new(),
                     inputs: vec![],
                     outputs: vec![],
+                    literal_mappings: vec![],
                 });
                 continue;
             }
@@ -972,6 +976,7 @@ fn build_single_span(
     let mut main_to_local = RangeAtomMap::new();
 
     // 1. Inline small literals.
+    let mut literal_mappings: Vec<AtomMapping> = Vec::new();
     for &lit_gi in &inlined_literals {
         let lit_group = &groups[lit_gi];
         let local_base = span_graph.push_group(
@@ -982,6 +987,11 @@ fn build_single_span(
             vec![],
         );
         main_to_local.insert_range(lit_group.base_id, local_base, lit_group.count);
+        literal_mappings.push(AtomMapping {
+            main_base: lit_group.base_id,
+            span_base: local_base,
+            count: lit_group.count,
+        });
     }
 
     // 2. Create placeholder groups for external inputs.
@@ -1093,6 +1103,7 @@ fn build_single_span(
         graph: span_graph,
         inputs: input_mappings,
         outputs: output_mappings,
+        literal_mappings,
     }
 }
 
