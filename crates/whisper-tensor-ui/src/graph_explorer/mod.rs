@@ -431,6 +431,27 @@ fn format_shape(val: &[ScalarInfoTyped<u64>]) -> String {
     format!("({joined:})")
 }
 
+fn ensure_layout_link_id(
+    tensor_id: GlobalId,
+    tensor_link_ids: &mut HashMap<GlobalId, GraphLayoutLinkId>,
+    link_data: &mut HashMap<GraphLayoutLinkId, GraphLayoutLinkData>,
+    next_link_id: &mut usize,
+) -> GraphLayoutLinkId {
+    if let Some(link_id) = tensor_link_ids.get(&tensor_id).copied() {
+        return link_id;
+    }
+    let link_id = GraphLayoutLinkId(*next_link_id);
+    *next_link_id += 1;
+    tensor_link_ids.insert(tensor_id, link_id);
+    link_data.insert(
+        link_id,
+        GraphLayoutLinkData {
+            global_id: tensor_id,
+        },
+    );
+    link_id
+}
+
 struct NodeExecutionActivityMapsMut<'a> {
     node_execution_timestamps: &'a mut HashMap<Vec<GlobalId>, Instant>,
     node_last_child_active_timestamps: &'a mut HashMap<Vec<GlobalId>, Instant>,
@@ -1130,6 +1151,7 @@ impl GraphExplorerApp {
                 // Map tensors to link IDs
                 let mut tensor_link_ids = HashMap::new();
                 let mut link_data = HashMap::new();
+                let mut next_link_id = 0usize;
                 for (i, link_global_id) in working_graph.inner_link_ids().enumerate() {
                     let new_link_id = GraphLayoutLinkId(i);
                     tensor_link_ids.insert(link_global_id, new_link_id);
@@ -1139,6 +1161,7 @@ impl GraphExplorerApp {
                             global_id: link_global_id,
                         },
                     );
+                    next_link_id = i + 1;
                 }
 
                 // Build node init data for ops and I/O tensors
@@ -1152,12 +1175,23 @@ impl GraphExplorerApp {
 
                         let mut inputs = vec![];
                         for tensor_id in node.inputs() {
-                            inputs.push(tensor_link_ids[&tensor_id]);
+                            inputs.push(ensure_layout_link_id(
+                                tensor_id,
+                                &mut tensor_link_ids,
+                                &mut link_data,
+                                &mut next_link_id,
+                            ));
                         }
                         let mut outputs = vec![];
                         for tensor_id in node.outputs() {
-                            sourced_links.insert(tensor_link_ids[&tensor_id]);
-                            outputs.push(tensor_link_ids[&tensor_id]);
+                            let link_id = ensure_layout_link_id(
+                                tensor_id,
+                                &mut tensor_link_ids,
+                                &mut link_data,
+                                &mut next_link_id,
+                            );
+                            sourced_links.insert(link_id);
+                            outputs.push(link_id);
                         }
                         node_init_data.insert(
                             new_node_id,
@@ -1172,60 +1206,74 @@ impl GraphExplorerApp {
 
                 let mut io_tensor_node_ids = HashMap::new();
                 for (_outer_id, inner_id) in working_graph.input_link_ids() {
-                    if let Some(link_id) = tensor_link_ids.get(&inner_id) {
-                        let node_id = GraphLayoutNodeId(next_node_id);
-                        io_tensor_node_ids.insert(inner_id, node_id);
-                        next_node_id += 1;
-                        sourced_links.insert(*link_id);
-                        node_init_data.insert(
-                            node_id,
-                            GraphLayoutNodeInitData {
-                                node_type: GraphLayoutNodeType::InputLinkNode(inner_id),
-                                inputs: vec![],
-                                outputs: vec![tensor_link_ids[&inner_id]],
-                            },
-                        );
-                    }
+                    let link_id = ensure_layout_link_id(
+                        inner_id,
+                        &mut tensor_link_ids,
+                        &mut link_data,
+                        &mut next_link_id,
+                    );
+                    let node_id = GraphLayoutNodeId(next_node_id);
+                    io_tensor_node_ids.insert(inner_id, node_id);
+                    next_node_id += 1;
+                    sourced_links.insert(link_id);
+                    node_init_data.insert(
+                        node_id,
+                        GraphLayoutNodeInitData {
+                            node_type: GraphLayoutNodeType::InputLinkNode(inner_id),
+                            inputs: vec![],
+                            outputs: vec![link_id],
+                        },
+                    );
                 }
                 for (_outer_id, inner_id) in working_graph.output_link_ids() {
-                    if let Some(link_id) = tensor_link_ids.get(&inner_id) {
-                        let node_id = GraphLayoutNodeId(next_node_id);
-                        io_tensor_node_ids.insert(inner_id, node_id);
-                        next_node_id += 1;
+                    let link_id = ensure_layout_link_id(
+                        inner_id,
+                        &mut tensor_link_ids,
+                        &mut link_data,
+                        &mut next_link_id,
+                    );
+                    let node_id = GraphLayoutNodeId(next_node_id);
+                    io_tensor_node_ids.insert(inner_id, node_id);
+                    next_node_id += 1;
 
-                        node_init_data.insert(
-                            node_id,
-                            GraphLayoutNodeInitData {
-                                node_type: GraphLayoutNodeType::OutputLinkNode(inner_id),
-                                inputs: vec![*link_id],
-                                outputs: vec![],
-                            },
-                        );
-                    }
+                    node_init_data.insert(
+                        node_id,
+                        GraphLayoutNodeInitData {
+                            node_type: GraphLayoutNodeType::OutputLinkNode(inner_id),
+                            inputs: vec![link_id],
+                            outputs: vec![],
+                        },
+                    );
                 }
                 for inner_id in working_graph.constant_link_ids() {
-                    if let Some(link_id) = tensor_link_ids.get(&inner_id) {
-                        let node_id = GraphLayoutNodeId(next_node_id);
-                        io_tensor_node_ids.insert(inner_id, node_id);
-                        next_node_id += 1;
-                        sourced_links.insert(*link_id);
-                        node_init_data.insert(
-                            node_id,
-                            GraphLayoutNodeInitData {
-                                node_type: GraphLayoutNodeType::ConstantLinkNode(inner_id),
-                                inputs: vec![],
-                                outputs: vec![tensor_link_ids[&inner_id]],
-                            },
-                        );
-                    }
+                    let link_id = ensure_layout_link_id(
+                        inner_id,
+                        &mut tensor_link_ids,
+                        &mut link_data,
+                        &mut next_link_id,
+                    );
+                    let node_id = GraphLayoutNodeId(next_node_id);
+                    io_tensor_node_ids.insert(inner_id, node_id);
+                    next_node_id += 1;
+                    sourced_links.insert(link_id);
+                    node_init_data.insert(
+                        node_id,
+                        GraphLayoutNodeInitData {
+                            node_type: GraphLayoutNodeType::ConstantLinkNode(inner_id),
+                            inputs: vec![],
+                            outputs: vec![link_id],
+                        },
+                    );
                 }
-                for global_id in tensor_link_ids.iter().filter_map(|(global_id, link_id)| {
-                    if !sourced_links.contains(link_id) {
-                        Some(global_id)
-                    } else {
-                        None
-                    }
-                }) {
+                for (global_id, link_id) in
+                    tensor_link_ids.iter().filter_map(|(global_id, link_id)| {
+                        if !sourced_links.contains(link_id) {
+                            Some((global_id, link_id))
+                        } else {
+                            None
+                        }
+                    })
+                {
                     let node_id = GraphLayoutNodeId(next_node_id);
                     io_tensor_node_ids.insert(*global_id, node_id);
                     next_node_id += 1;
@@ -1234,7 +1282,7 @@ impl GraphExplorerApp {
                         GraphLayoutNodeInitData {
                             node_type: GraphLayoutNodeType::InputLinkNode(*global_id),
                             inputs: vec![],
-                            outputs: vec![tensor_link_ids[global_id]],
+                            outputs: vec![*link_id],
                         },
                     );
                 }

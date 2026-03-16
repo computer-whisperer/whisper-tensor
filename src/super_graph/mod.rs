@@ -46,6 +46,8 @@ pub enum SuperGraphError {
     MissingLinkError(String),
     #[error("Invalid input: {0}")]
     InvalidInputError(String),
+    #[error("Invalid graph structure: {0}")]
+    InvalidGraph(String),
     #[error(transparent)]
     EvalRuntimeError(#[from] EvalRuntimeError),
     #[error("Execution cancelled")]
@@ -108,6 +110,10 @@ impl SuperGraph {
         data: SuperGraphData<'b>,
         context: &mut SuperGraphContext<'a, 'b, 'c, 'd, T>,
     ) -> Result<SuperGraphData<'b>, SuperGraphError> {
+        if let Some(first_issue) = self.validate_structure().into_iter().next() {
+            return Err(SuperGraphError::InvalidGraph(first_issue));
+        }
+
         let mut data = data;
 
         let mut remaining_ops = self.nodes.keys().cloned().collect::<Vec<_>>();
@@ -178,6 +184,45 @@ impl SuperGraph {
             links.extend(node.outputs());
         }
         links
+    }
+
+    /// Returns structural issues for editor/draft scenarios where graphs may be partially wired.
+    /// This does not panic and can be called on intentionally invalid graphs.
+    pub fn validate_structure(&self) -> Vec<String> {
+        let mut issues = Vec::new();
+
+        let mut sourced_links = HashSet::new();
+        sourced_links.extend(self.input_links.iter().copied());
+        for node in self.nodes.values() {
+            for link in node.outputs() {
+                if !sourced_links.insert(link) {
+                    issues.push(format!("link {link:?} is sourced multiple times"));
+                }
+            }
+        }
+
+        let mut sinked_links = HashSet::new();
+        sinked_links.extend(self.output_links.iter().copied());
+        for node in self.nodes.values() {
+            sinked_links.extend(node.inputs());
+        }
+        for link in sinked_links {
+            if !sourced_links.contains(&link) {
+                issues.push(format!("link {link:?} is sinked but never sourced"));
+            }
+        }
+
+        for link in &sourced_links {
+            if !self.links_by_global_id.contains_key(&link.global_id()) {
+                issues.push(format!(
+                    "missing link metadata entry for link {:?} ({})",
+                    link,
+                    link.global_id()
+                ));
+            }
+        }
+
+        issues
     }
 }
 
@@ -346,5 +391,51 @@ impl Graph for SuperGraph {
 
     fn constant_link_ids(&self) -> impl Iterator<Item = GlobalId> {
         core::iter::empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backends::eval_backend::EvalBackend;
+    use crate::super_graph::cache::SuperGraphTensorCache;
+    use crate::super_graph::data::SuperGraphData;
+
+    #[test]
+    fn validate_structure_reports_unsourced_output_link() {
+        let mut rng = rand::rng();
+        let mut builder = SuperGraphBuilder::new();
+        let io_link = builder.new_tensor_link(&mut rng).to_any();
+        let mut graph = builder.build(&mut rng, &[io_link], &[io_link]);
+
+        let dangling_output = SuperGraphLink::new(SuperGraphLinkKind::Tensor, &mut rng).to_any();
+        graph.output_links.insert(dangling_output);
+
+        let issues = graph.validate_structure();
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.contains("sinked but never sourced")),
+            "expected unsourced-link validation issue, got: {issues:?}"
+        );
+    }
+
+    #[test]
+    fn eval_rejects_invalid_structure_before_execution() {
+        let mut rng = rand::rng();
+        let mut builder = SuperGraphBuilder::new();
+        let io_link = builder.new_tensor_link(&mut rng).to_any();
+        let mut graph = builder.build(&mut rng, &[io_link], &[io_link]);
+
+        let dangling_output = SuperGraphLink::new(SuperGraphLinkKind::Tensor, &mut rng).to_any();
+        graph.output_links.insert(dangling_output);
+
+        let mut backend = EvalBackend::NDArray;
+        let mut observer = ();
+        let mut tensor_cache = SuperGraphTensorCache::new();
+        let mut context = SuperGraphContext::new(&mut backend, &mut observer, &mut tensor_cache);
+
+        let result = graph.eval(&[], SuperGraphData::new(), &mut context);
+        assert!(matches!(result, Err(SuperGraphError::InvalidGraph(_))));
     }
 }
