@@ -1369,7 +1369,9 @@ impl GraphExplorerApp {
         server_request_manager: &mut ServerRequestManager,
     ) {
         // Get root graph based on selection
-        let root_graph = loaded_models.root_graph(self.root_selection);
+        let root_graph = loaded_models
+            .resolve_root_graph(self.root_selection)
+            .map(|x| x.graph);
 
         let Some(root_graph) = root_graph else {
             return;

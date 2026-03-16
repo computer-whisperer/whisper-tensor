@@ -2,7 +2,10 @@ mod graph_layout;
 pub mod inspect_windows;
 mod tensor_swatch;
 
-use crate::app::{ClientGraphId, InterfaceId, LoadedModels, LoadedTokenizers};
+use crate::app::{
+    ClientGraphId, GraphEditability, GraphRootOwnership, InterfaceId, LoadedModels,
+    LoadedTokenizers,
+};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::audio_io::pick_audio_file_native;
 #[cfg(target_arch = "wasm32")]
@@ -913,9 +916,20 @@ impl GraphExplorerApp {
         ui: &mut Ui,
         working_graph: &dyn GraphDyn,
         working_path: &[GlobalId],
+        ownership: GraphRootOwnership,
+        editability: GraphEditability,
     ) {
         ui.vertical(|ui| {
             ui.label(egui::RichText::new("Actions").size(11.0).strong());
+            let ownership_text = match ownership {
+                GraphRootOwnership::Server => "server",
+                GraphRootOwnership::Client => "client",
+            };
+            ui.label(egui::RichText::new(format!("ownership: {ownership_text}")).size(11.0));
+            ui.label(egui::RichText::new(editability.description()).size(11.0));
+            if editability.can_edit() {
+                ui.label(egui::RichText::new("edit actions: enabled").size(11.0));
+            }
 
             let export_result = if let Some(super_graph) =
                 <dyn Any>::downcast_ref::<SuperGraph>(working_graph.as_any())
@@ -1034,7 +1048,20 @@ impl GraphExplorerApp {
         let mut graph_breadcrumb_items: Option<Vec<(String, Vec<GlobalId>)>> = None;
 
         // Find the graph we are working with
-        let root_graph = loaded_models.root_graph(self.root_selection);
+        let root_graph_resolution = loaded_models.resolve_root_graph(self.root_selection);
+        let root_graph = root_graph_resolution.as_ref().map(|x| x.graph);
+        let root_ownership = root_graph_resolution
+            .as_ref()
+            .map(|x| x.ownership)
+            .unwrap_or(match self.root_selection {
+                GraphRootSubjectSelection::ServerModel(_)
+                | GraphRootSubjectSelection::ServerInterface(_) => GraphRootOwnership::Server,
+                GraphRootSubjectSelection::ClientGraph(_) => GraphRootOwnership::Client,
+            });
+        let root_editability = root_graph_resolution
+            .as_ref()
+            .map(|x| x.editability)
+            .unwrap_or_else(|| loaded_models.root_graph_editability(self.root_selection));
         if let GraphRootSubjectSelection::ServerModel(model_id) = self.root_selection
             && root_graph.is_none()
         {
@@ -3321,7 +3348,13 @@ impl GraphExplorerApp {
                     .inner_margin(egui::Margin::same(6))
                     .show(ui, |ui| {
                         ui.set_max_width(360.0);
-                        self.render_graph_actions_panel(ui, *working_graph, working_path);
+                        self.render_graph_actions_panel(
+                            ui,
+                            *working_graph,
+                            working_path,
+                            root_ownership,
+                            root_editability,
+                        );
                     });
             });
         }

@@ -81,32 +81,97 @@ pub(crate) type InterfaceId = u32;
 pub(crate) type ClientGraphId = u32;
 
 pub(crate) enum ClientLoadedGraphData {
-    SuperGraph(SuperGraph),
-    MilliOpGraph(MilliOpGraph),
-    SymbolicGraph(SymbolicGraph),
+    Super(Box<SuperGraph>),
+    MilliOp(Box<MilliOpGraph>),
+    Symbolic(Box<SymbolicGraph>),
 }
 
 impl ClientLoadedGraphData {
     pub(crate) fn as_graph_dyn(&self) -> &dyn GraphDyn {
         match self {
-            Self::SuperGraph(graph) => graph,
-            Self::MilliOpGraph(graph) => graph,
-            Self::SymbolicGraph(graph) => graph,
+            Self::Super(graph) => graph.as_ref(),
+            Self::MilliOp(graph) => graph.as_ref(),
+            Self::Symbolic(graph) => graph.as_ref(),
         }
     }
 
     pub(crate) fn kind_name(&self) -> &'static str {
         match self {
-            Self::SuperGraph(_) => "SuperGraph",
-            Self::MilliOpGraph(_) => "MilliOpGraph",
-            Self::SymbolicGraph(_) => "SymbolicGraph",
+            Self::Super(_) => "SuperGraph",
+            Self::MilliOp(_) => "MilliOpGraph",
+            Self::Symbolic(_) => "SymbolicGraph",
         }
+    }
+
+    pub(crate) fn supports_editing(&self) -> bool {
+        matches!(self, Self::Super(_) | Self::MilliOp(_))
     }
 }
 
 pub(crate) struct ClientLoadedGraphEntry {
     pub(crate) display_name: String,
     pub(crate) graph: ClientLoadedGraphData,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GraphRootOwnership {
+    Server,
+    Client,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GraphEditability {
+    ServerReadOnly,
+    ClientEditable,
+    ClientReadOnlyUnsupported,
+}
+
+impl GraphEditability {
+    pub(crate) fn description(self) -> &'static str {
+        match self {
+            Self::ServerReadOnly => "server-loaded (read-only)",
+            Self::ClientEditable => "client-loaded (editable)",
+            Self::ClientReadOnlyUnsupported => "client-loaded (read-only, unsupported type)",
+        }
+    }
+
+    pub(crate) fn can_edit(self) -> bool {
+        matches!(self, Self::ClientEditable)
+    }
+}
+
+pub(crate) struct ResolvedRootGraph<'a> {
+    pub(crate) graph: &'a dyn GraphDyn,
+    pub(crate) ownership: GraphRootOwnership,
+    pub(crate) editability: GraphEditability,
+}
+
+#[allow(dead_code)] // Reserved for upcoming graph-edit command plumbing.
+pub(crate) enum EditableClientGraphMut<'a> {
+    SuperGraph(&'a mut SuperGraph),
+    MilliOpGraph(&'a mut MilliOpGraph),
+}
+
+#[allow(dead_code)] // Reserved for upcoming graph-edit command plumbing.
+#[derive(Debug)]
+pub(crate) enum GraphEditAccessError {
+    NotClientGraphRoot,
+    ClientGraphNotFound(ClientGraphId),
+    UnsupportedClientGraphType(&'static str),
+}
+
+impl core::fmt::Display for GraphEditAccessError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NotClientGraphRoot => {
+                write!(f, "graph root is not a client-loaded graph")
+            }
+            Self::ClientGraphNotFound(id) => write!(f, "client graph {id} not found"),
+            Self::UnsupportedClientGraphType(kind) => {
+                write!(f, "client graph type {kind} is not editable")
+            }
+        }
+    }
 }
 
 #[derive(Default)]
@@ -149,23 +214,88 @@ pub(crate) struct LoadedModels {
 }
 
 impl LoadedModels {
-    pub(crate) fn root_graph(&self, selection: GraphRootSubjectSelection) -> Option<&dyn GraphDyn> {
+    pub(crate) fn root_graph_editability(
+        &self,
+        selection: GraphRootSubjectSelection,
+    ) -> GraphEditability {
+        match selection {
+            GraphRootSubjectSelection::ServerModel(_)
+            | GraphRootSubjectSelection::ServerInterface(_) => GraphEditability::ServerReadOnly,
+            GraphRootSubjectSelection::ClientGraph(client_graph_id) => self
+                .client_graphs
+                .graphs
+                .get(&client_graph_id)
+                .map_or(GraphEditability::ClientReadOnlyUnsupported, |entry| {
+                    if entry.graph.supports_editing() {
+                        GraphEditability::ClientEditable
+                    } else {
+                        GraphEditability::ClientReadOnlyUnsupported
+                    }
+                }),
+        }
+    }
+
+    pub(crate) fn resolve_root_graph(
+        &self,
+        selection: GraphRootSubjectSelection,
+    ) -> Option<ResolvedRootGraph<'_>> {
+        let editability = self.root_graph_editability(selection);
         match selection {
             GraphRootSubjectSelection::ServerModel(model_id) => self
                 .server_graphs
                 .symbolic_graphs
                 .get(&model_id)
-                .map(|graph| graph as &dyn GraphDyn),
+                .map(|graph| ResolvedRootGraph {
+                    graph,
+                    ownership: GraphRootOwnership::Server,
+                    editability,
+                }),
             GraphRootSubjectSelection::ServerInterface(interface_id) => self
                 .server_graphs
                 .current_interfaces
                 .get(&interface_id)
-                .map(|entry| entry.interface.get_super_graph() as &dyn GraphDyn),
+                .map(|entry| ResolvedRootGraph {
+                    graph: entry.interface.get_super_graph(),
+                    ownership: GraphRootOwnership::Server,
+                    editability,
+                }),
             GraphRootSubjectSelection::ClientGraph(client_graph_id) => self
                 .client_graphs
                 .graphs
                 .get(&client_graph_id)
-                .map(|entry| entry.graph.as_graph_dyn()),
+                .map(|entry| ResolvedRootGraph {
+                    graph: entry.graph.as_graph_dyn(),
+                    ownership: GraphRootOwnership::Client,
+                    editability,
+                }),
+        }
+    }
+
+    #[allow(dead_code)] // Reserved for upcoming graph-edit command plumbing.
+    pub(crate) fn with_editable_client_graph_mut<R>(
+        &mut self,
+        selection: GraphRootSubjectSelection,
+        f: impl FnOnce(EditableClientGraphMut<'_>) -> R,
+    ) -> Result<R, GraphEditAccessError> {
+        let client_graph_id = match selection {
+            GraphRootSubjectSelection::ClientGraph(client_graph_id) => client_graph_id,
+            _ => return Err(GraphEditAccessError::NotClientGraphRoot),
+        };
+        let entry = self
+            .client_graphs
+            .graphs
+            .get_mut(&client_graph_id)
+            .ok_or(GraphEditAccessError::ClientGraphNotFound(client_graph_id))?;
+        match &mut entry.graph {
+            ClientLoadedGraphData::Super(graph) => {
+                Ok(f(EditableClientGraphMut::SuperGraph(graph.as_mut())))
+            }
+            ClientLoadedGraphData::MilliOp(graph) => {
+                Ok(f(EditableClientGraphMut::MilliOpGraph(graph.as_mut())))
+            }
+            ClientLoadedGraphData::Symbolic(_) => Err(
+                GraphEditAccessError::UnsupportedClientGraphType("SymbolicGraph"),
+            ),
         }
     }
 }
@@ -245,17 +375,17 @@ impl WebUIApp {
     fn decode_client_graph_bytes(bytes: &[u8]) -> Result<ClientLoadedGraphData, String> {
         let super_res = SuperGraph::from_cbor_bytes(bytes);
         if let Ok(graph) = super_res {
-            return Ok(ClientLoadedGraphData::SuperGraph(graph));
+            return Ok(ClientLoadedGraphData::Super(Box::new(graph)));
         }
 
         let milli_res = MilliOpGraph::from_cbor_bytes(bytes);
         if let Ok(graph) = milli_res {
-            return Ok(ClientLoadedGraphData::MilliOpGraph(graph));
+            return Ok(ClientLoadedGraphData::MilliOp(Box::new(graph)));
         }
 
         let symbolic_res = ciborium::from_reader::<SymbolicGraph, _>(bytes);
         if let Ok(graph) = symbolic_res {
-            return Ok(ClientLoadedGraphData::SymbolicGraph(graph));
+            return Ok(ClientLoadedGraphData::Symbolic(Box::new(graph)));
         }
 
         Err(format!(
