@@ -73,7 +73,32 @@ work — the fundamental approach is wrong.
 
 ## What Previous Attempts Got Wrong
 
-### v2c + spans_c approach (current best, 96 violations on GPT-2)
+### v3a (edge classification): OOM at 80GB
+Correct algorithm (edge classification before phase assignment) but span
+NanoGraph construction iterated individual atoms to build input/output
+mappings. 23 unit tests pass, dies on GPT-2.
+
+### v3b (split-first vnode DAG): >120s timeout
+Built a virtual-node DAG with one vnode per (group × lane). For 45K groups
+× 8 lanes = 368K vnodes. Dependency resolution between vnodes was too
+expensive. 17 unit tests pass, too slow for GPT-2.
+
+### v3c (general post-process): 0 violations, but span build has bugs
+Best topology result: 0 violations, 1.0x balance, 2.1s. But span
+NanoGraph construction has incomplete dependency tracking — Select
+groups duplicated into spans have InputRefs pointing outside the span.
+96 span input errors when validated with NanoEval.
+
+The root cause: cross-lane violation detection + repair (duplication)
+doesn't transitively resolve ALL dependencies of duplicated groups.
+When group G is duplicated into a span, G's own inputs must also be
+available — either already in the span, or declared as external inputs.
+
+### v3d (build-verify-repair): 55 violations, fast (91ms)
+Verify+repair loop doesn't catch all cross-lane patterns. Fast because
+it doesn't build span NanoGraphs (just metadata).
+
+### v2c + spans_c approach (earlier, 96 violations on GPT-2)
 - v2c assigns phases, spans_c builds span NanoGraphs
 - v2c's phase assignment was designed for within-lane sequential execution,
   not for independent parallel spans
@@ -107,6 +132,36 @@ work from the DAG structure alone: which atoms does each group produce, which
 does it consume, and what happens when groups are split across lanes. If the
 algorithm is correct for arbitrary DAGs, it will handle all ONNX models, not
 just GPT-2's specific attention mask pattern.
+
+## Hard Performance Constraints
+
+**GPT-2 has 8.1 BILLION atoms across 45,921 groups.**
+
+1. **NEVER iterate individual atoms.** All operations must be O(groups), not
+   O(atoms). A group with count=589,824 is ONE unit of work for the
+   partitioner, not 589,824 units.
+
+2. **NEVER store per-atom data structures.** No `HashMap<AtomId, ...>`,
+   no `Vec` indexed by atom ID, no `HashSet<AtomId>`. These would require
+   billions of entries. Use group-level or range-level data structures.
+
+3. **NEVER iterate atoms to build span inputs/outputs.** Use AtomMapping
+   RANGES. One AtomMapping per group or per contiguous range.
+
+4. **NEVER iterate atoms inside span NanoGraph construction.** Copy whole
+   groups. Remap InputRefs at the group level (adjust base + stride), not
+   per-atom.
+
+5. **Span NanoGraph construction must be O(span_groups).** Each span has
+   ~100-1000 groups. Building the span is O(span_groups × inputs_per_group).
+   Total across all spans: O(total_groups × num_lanes).
+
+6. **Target: < 10 seconds for GPT-2 (45,921 groups, 8 lanes).** Previous
+   successful attempts: v3c at 2.1s, v3d at 91ms.
+
+Any algorithm that touches individual atoms will OOM or take hours on GPT-2.
+The test suite uses small graphs (< 1000 atoms) where O(atoms) works fine,
+so this constraint is ONLY visible at model scale.
 
 ## Key Invariants
 
