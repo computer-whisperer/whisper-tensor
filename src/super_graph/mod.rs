@@ -6,7 +6,7 @@ pub mod observer;
 
 use crate::backends::eval_backend::{EvalBackend, EvalRuntimeError};
 use crate::compiler::{CompiledProgram, CompilerError};
-use crate::graph::{GlobalId, Graph, Link};
+use crate::graph::{GlobalId, Graph, Link, collect_disconnected_node_slots};
 use crate::milli_graph::MilliOpGraphError;
 use crate::model::{Model, ModelError};
 use crate::numeric_tensor::NumericTensorError;
@@ -112,6 +112,9 @@ impl SuperGraph {
     ) -> Result<SuperGraphData<'b>, SuperGraphError> {
         if let Some(first_issue) = self.validate_structure().into_iter().next() {
             return Err(SuperGraphError::InvalidGraph(first_issue));
+        }
+        if let Some(first_issue) = collect_disconnected_node_slots(self).into_iter().next() {
+            return Err(SuperGraphError::InvalidGraph(first_issue.describe()));
         }
 
         let mut data = data;

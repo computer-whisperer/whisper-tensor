@@ -1174,24 +1174,28 @@ impl GraphExplorerApp {
                         next_node_id += 1;
 
                         let mut inputs = vec![];
-                        for tensor_id in node.inputs() {
-                            inputs.push(ensure_layout_link_id(
-                                tensor_id,
-                                &mut tensor_link_ids,
-                                &mut link_data,
-                                &mut next_link_id,
-                            ));
+                        for maybe_tensor_id in node.input_slots() {
+                            inputs.push(maybe_tensor_id.map(|tensor_id| {
+                                ensure_layout_link_id(
+                                    tensor_id,
+                                    &mut tensor_link_ids,
+                                    &mut link_data,
+                                    &mut next_link_id,
+                                )
+                            }));
                         }
                         let mut outputs = vec![];
-                        for tensor_id in node.outputs() {
-                            let link_id = ensure_layout_link_id(
-                                tensor_id,
-                                &mut tensor_link_ids,
-                                &mut link_data,
-                                &mut next_link_id,
-                            );
-                            sourced_links.insert(link_id);
-                            outputs.push(link_id);
+                        for maybe_tensor_id in node.output_slots() {
+                            outputs.push(maybe_tensor_id.map(|tensor_id| {
+                                let link_id = ensure_layout_link_id(
+                                    tensor_id,
+                                    &mut tensor_link_ids,
+                                    &mut link_data,
+                                    &mut next_link_id,
+                                );
+                                sourced_links.insert(link_id);
+                                link_id
+                            }));
                         }
                         node_init_data.insert(
                             new_node_id,
@@ -1221,7 +1225,7 @@ impl GraphExplorerApp {
                         GraphLayoutNodeInitData {
                             node_type: GraphLayoutNodeType::InputLinkNode(inner_id),
                             inputs: vec![],
-                            outputs: vec![link_id],
+                            outputs: vec![Some(link_id)],
                         },
                     );
                 }
@@ -1240,7 +1244,7 @@ impl GraphExplorerApp {
                         node_id,
                         GraphLayoutNodeInitData {
                             node_type: GraphLayoutNodeType::OutputLinkNode(inner_id),
-                            inputs: vec![link_id],
+                            inputs: vec![Some(link_id)],
                             outputs: vec![],
                         },
                     );
@@ -1261,7 +1265,7 @@ impl GraphExplorerApp {
                         GraphLayoutNodeInitData {
                             node_type: GraphLayoutNodeType::ConstantLinkNode(inner_id),
                             inputs: vec![],
-                            outputs: vec![link_id],
+                            outputs: vec![Some(link_id)],
                         },
                     );
                 }
@@ -1282,7 +1286,7 @@ impl GraphExplorerApp {
                         GraphLayoutNodeInitData {
                             node_type: GraphLayoutNodeType::InputLinkNode(*global_id),
                             inputs: vec![],
-                            outputs: vec![*link_id],
+                            outputs: vec![Some(*link_id)],
                         },
                     );
                 }

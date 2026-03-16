@@ -1,7 +1,7 @@
 use crate::DynRank;
 use crate::backends::eval_backend::EvalBackend;
 use crate::dtype::{DType, DTypeError};
-use crate::graph::{GlobalId, Graph, Link, Node};
+use crate::graph::{GlobalId, Graph, Link, Node, collect_disconnected_node_slots};
 use crate::milli_graph::observer::MilliOpGraphObserver;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::numeric_tensor::NumericTensor;
@@ -918,6 +918,10 @@ impl MilliOpGraph {
             ));
         }
 
+        if let Some(first_issue) = collect_disconnected_node_slots(self).into_iter().next() {
+            return Err(MilliOpGraphError::InvalidGraph(first_issue.describe()));
+        }
+
         if let Some(first_issue) = self.validate_structure().into_iter().next() {
             return Err(MilliOpGraphError::InvalidGraph(first_issue));
         }
@@ -1157,6 +1161,10 @@ impl MilliOpGraph {
         &self,
         inputs: &HashMap<GlobalId, TensorInfo>,
     ) -> Result<HashMap<GlobalId, TensorInfo>, MilliOpGraphError> {
+        if let Some(first_issue) = collect_disconnected_node_slots(self).into_iter().next() {
+            return Err(MilliOpGraphError::InvalidGraph(first_issue.describe()));
+        }
+
         if let Some(first_issue) = self.validate_structure().into_iter().next() {
             return Err(MilliOpGraphError::InvalidGraph(first_issue));
         }
