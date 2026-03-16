@@ -1,4 +1,10 @@
-#![allow(clippy::all, dead_code, unreachable_patterns, unused_variables, unused_imports)]
+#![allow(
+    clippy::all,
+    dead_code,
+    unreachable_patterns,
+    unused_variables,
+    unused_imports
+)]
 //! Span-based partitioner v3d: Optimistic plan → verify → repair loop.
 //!
 //! Previous attempts tried to get the plan right on the first pass. That's hard
@@ -91,7 +97,9 @@ impl RangeAtomMap {
     }
 
     fn get(&self, main_id: AtomId) -> Option<AtomId> {
-        let idx = self.ranges.partition_point(|&(base, _, _)| base <= main_id.0);
+        let idx = self
+            .ranges
+            .partition_point(|&(base, _, _)| base <= main_id.0);
         if idx == 0 {
             return None;
         }
@@ -139,14 +147,26 @@ pub fn plan_spans(graph: &NanoGraph, num_lanes: usize) -> SpanPlan {
     let topo_order = topological_sort(n, &producers);
 
     // Step 2: Optimistic phase + lane assignment.
-    let (mut group_phase, mut group_lane, mut duplicates) =
-        optimistic_assignment(groups, num_lanes, &topo_order, &producers, &consumers, &is_literal);
+    let (mut group_phase, mut group_lane, mut duplicates) = optimistic_assignment(
+        groups,
+        num_lanes,
+        &topo_order,
+        &producers,
+        &consumers,
+        &is_literal,
+    );
 
     // Step 3: Verify + repair loop.
     let max_iterations = 50;
     for iteration in 0..max_iterations {
         let violations = verify(
-            groups, num_lanes, &group_phase, &group_lane, &producers, &is_literal, &duplicates,
+            groups,
+            num_lanes,
+            &group_phase,
+            &group_lane,
+            &producers,
+            &is_literal,
+            &duplicates,
         );
         if violations.is_empty() {
             break;
@@ -168,7 +188,13 @@ pub fn plan_spans(graph: &NanoGraph, num_lanes: usize) -> SpanPlan {
     // Step 4: Build span NanoGraphs.
     let num_phases = group_phase.iter().copied().max().unwrap_or(0) + 1;
     build_span_plan(
-        graph, num_lanes, num_phases, &group_phase, &group_lane, &producers, &is_literal,
+        graph,
+        num_lanes,
+        num_phases,
+        &group_phase,
+        &group_lane,
+        &producers,
+        &is_literal,
         &duplicates,
     )
 }
@@ -404,11 +430,7 @@ fn compute_depth(
             depth[gi] = 0;
             continue;
         }
-        let max_prod_depth = producers[gi]
-            .iter()
-            .map(|&pi| depth[pi])
-            .max()
-            .unwrap_or(0);
+        let max_prod_depth = producers[gi].iter().map(|&pi| depth[pi]).max().unwrap_or(0);
         depth[gi] = if producers[gi].iter().all(|&pi| is_literal[pi]) {
             1
         } else {
@@ -586,10 +608,7 @@ fn repair(
 
     // Apply duplications.
     for (phase, prod_gi) in &producers_to_fix {
-        duplicates
-            .entry(*phase)
-            .or_default()
-            .insert(*prod_gi);
+        duplicates.entry(*phase).or_default().insert(*prod_gi);
     }
 
     // Apply bumps: move consumer and its same-lane, same-phase dependents to
@@ -618,8 +637,7 @@ fn repair(
                     if is_literal[ci] {
                         continue;
                     }
-                    if group_phase[ci] == phase && group_lane[ci] == lane && !bumped.contains(&ci)
-                    {
+                    if group_phase[ci] == phase && group_lane[ci] == lane && !bumped.contains(&ci) {
                         bumped.insert(ci);
                         queue.push_back(ci);
                     }
@@ -657,7 +675,13 @@ fn repair(
         // chain integrity within each phase.
         let num_phases = group_phase.iter().copied().max().unwrap_or(0) + 1;
         reassign_lanes_for_phases(
-            groups, num_lanes, num_phases, group_phase, group_lane, producers, is_literal,
+            groups,
+            num_lanes,
+            num_phases,
+            group_phase,
+            group_lane,
+            producers,
+            is_literal,
         );
     }
 }
@@ -1191,7 +1215,8 @@ fn collect_external_ranges(
         if is_literal[pi] && all_groups[pi].count < LITERAL_INLINE_THRESHOLD {
             continue;
         }
-        let (overlap_lo, overlap_hi) = compute_read_range_bounds(group, &all_groups[pi], all_groups);
+        let (overlap_lo, overlap_hi) =
+            compute_read_range_bounds(group, &all_groups[pi], all_groups);
         if overlap_hi > overlap_lo {
             let prod = &all_groups[pi];
             let offset = overlap_lo - prod.base_id.0;
@@ -1275,8 +1300,13 @@ fn compute_read_range_bounds(
     let mut overall_hi = 0u64;
 
     for input in &consumer.inputs {
-        let (range_lo, range_hi) =
-            input_ref_atom_range(input, consumer.count, is_reduce, reduce_count, reduce_stride);
+        let (range_lo, range_hi) = input_ref_atom_range(
+            input,
+            consumer.count,
+            is_reduce,
+            reduce_count,
+            reduce_stride,
+        );
         if range_hi <= prod_lo || range_lo >= prod_hi {
             continue;
         }
@@ -1444,9 +1474,11 @@ fn remap_one_input_ref(input: &InputRef, atom_map: &RangeAtomMap) -> InputRef {
             stride_i: *stride_i,
             stride_k: *stride_k,
         },
-        InputRef::Explicit(ids) => {
-            InputRef::Explicit(ids.iter().map(|id| atom_map.get(*id).unwrap_or(*id)).collect())
-        }
+        InputRef::Explicit(ids) => InputRef::Explicit(
+            ids.iter()
+                .map(|id| atom_map.get(*id).unwrap_or(*id))
+                .collect(),
+        ),
     }
 }
 

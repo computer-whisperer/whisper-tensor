@@ -1,3 +1,4 @@
+#![allow(clippy::all, dead_code, unused_variables, unused_imports)]
 //! Kernel cost estimation from structural analysis of addressing modes.
 //!
 //! Estimates memory traffic for a candidate kernel WITHOUT fully scheduling it.
@@ -133,7 +134,11 @@ pub fn estimate_kernel_cost(
                     info.streaming_inputs += ext_count;
                     info.streaming_step_size += 1; // one element per atom step
                 }
-                InputRef::SymAffine { base, stride_i, stride_k } => {
+                InputRef::SymAffine {
+                    base,
+                    stride_i,
+                    stride_k,
+                } => {
                     // 2D access: varies with both atom offset and reduction step k.
                     // The k dimension is STREAMED — only one k-step is live at a time.
                     let k_bound = info.reduce_k;
@@ -175,7 +180,8 @@ pub fn estimate_kernel_cost(
                         }
                     }
                     // Conservative: treat all as resident (no streaming pattern).
-                    info.resident_inputs += ids.iter()
+                    info.resident_inputs += ids
+                        .iter()
                         .filter(|id| !kernel_atoms.contains(**id))
                         .collect::<HashSet<_>>()
                         .len() as u64;
@@ -195,7 +201,11 @@ pub fn estimate_kernel_cost(
                     // Treat like broadcast — each source stays live while its block executes.
                     info.resident_inputs += ext_count;
                 }
-                InputRef::Modular { base, stride, modulus } => {
+                InputRef::Modular {
+                    base,
+                    stride,
+                    modulus,
+                } => {
                     // Modular access wraps: atom i reads base + stride * (i % modulus).
                     // There are `modulus` distinct source atoms.
                     let mut ext_count = 0u64;
@@ -303,9 +313,7 @@ fn estimate_peak_liveness(groups: &[GroupLivenessInfo]) -> u64 {
             // Non-reduction: outputs + all inputs.
             // Streaming inputs are processed in chunks, but we estimate
             // the chunk as the per-step size.
-            info.atom_count
-                + info.resident_inputs
-                + info.streaming_inputs
+            info.atom_count + info.resident_inputs + info.streaming_inputs
         };
 
         peak = peak.max(live);
@@ -410,7 +418,9 @@ fn count_external_outputs(graph: &NanoGraph, kernel_atoms: &KernelAtomSet) -> u6
         for input_ref in &group.inputs {
             match input_ref {
                 InputRef::Broadcast(src) => {
-                    if kernel_atoms.contains(*src) && !is_group_in_kernel(g_start, g_end, kernel_atoms) {
+                    if kernel_atoms.contains(*src)
+                        && !is_group_in_kernel(g_start, g_end, kernel_atoms)
+                    {
                         output_atoms.insert(*src);
                     }
                 }
@@ -476,7 +486,11 @@ fn count_external_outputs(graph: &NanoGraph, kernel_atoms: &KernelAtomSet) -> u6
                         }
                     }
                 }
-                InputRef::Modular { base, stride, modulus } => {
+                InputRef::Modular {
+                    base,
+                    stride,
+                    modulus,
+                } => {
                     if is_group_in_kernel(g_start, g_end, kernel_atoms) {
                         continue;
                     }
@@ -619,7 +633,11 @@ mod tests {
         // - ReduceSum groups stream over K (only one k-step live at a time)
         // - Mul groups are intermediates consumed by ReduceSum
         // The ReduceSum peak per group: 64 accumulators + 1 broadcast + 64 streaming = 129
-        println!("  peak liveness: {} (vs {} total atoms)", cost.peak_liveness, g.num_atoms());
+        println!(
+            "  peak liveness: {} (vs {} total atoms)",
+            cost.peak_liveness,
+            g.num_atoms()
+        );
         assert!(cost.peak_liveness < cost.compute_ops);
     }
 
@@ -633,7 +651,11 @@ mod tests {
         let cost = estimate_kernel_cost(&g, &ranges, &config);
 
         println!("matmul 24x96x192 single kernel: {}", cost);
-        println!("  peak_liveness: {} vs cache_capacity: {}", cost.peak_liveness, config.l1_capacity());
+        println!(
+            "  peak_liveness: {} vs cache_capacity: {}",
+            cost.peak_liveness,
+            config.l1_capacity()
+        );
 
         // This should show nonzero traffic if peak exceeds cache.
         // But all atoms are internal, so external_io = 0.

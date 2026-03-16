@@ -1,4 +1,10 @@
-#![allow(clippy::all, dead_code, unreachable_patterns, unused_variables, unused_imports)]
+#![allow(
+    clippy::all,
+    dead_code,
+    unreachable_patterns,
+    unused_variables,
+    unused_imports
+)]
 //! Span-based execution planner v3c: general cross-lane violation resolution.
 //!
 //! Strategy:
@@ -137,13 +143,23 @@ fn build_group_producers(groups: &[AtomGroup], is_literal: &[bool]) -> Vec<Vec<u
 
         // 2. ReduceSum/ReduceMax: strided access extends beyond InputRef range.
         match &group.op {
-            ScalarOp::ReduceSum { reduce_count, reduce_stride, .. }
-            | ScalarOp::ReduceMax { reduce_count, reduce_stride, .. }
-                if *reduce_count > 1 && *reduce_stride != 0 =>
-            {
+            ScalarOp::ReduceSum {
+                reduce_count,
+                reduce_stride,
+                ..
+            }
+            | ScalarOp::ReduceMax {
+                reduce_count,
+                reduce_stride,
+                ..
+            } if *reduce_count > 1 && *reduce_stride != 0 => {
                 for input in &group.inputs {
                     for pi in resolve_producer_groups_with_reduce(
-                        input, group.count, *reduce_count, *reduce_stride, groups,
+                        input,
+                        group.count,
+                        *reduce_count,
+                        *reduce_stride,
+                        groups,
                     ) {
                         if pi != gi && !is_literal[pi] {
                             prod_set.insert(pi);
@@ -209,9 +225,8 @@ fn fix_cross_lane_violations(
             let my_lane = item.lane;
 
             // Get the needed producer group ranges for this work item's slice.
-            let needed = compute_needed_ranges(
-                group, item.atom_offset, item.atom_count, groups, is_literal,
-            );
+            let needed =
+                compute_needed_ranges(group, item.atom_offset, item.atom_count, groups, is_literal);
 
             for (prod_gi, need_lo, need_hi) in &needed {
                 let prod_gi = *prod_gi;
@@ -221,10 +236,8 @@ fn fix_cross_lane_violations(
                 // Check if [need_lo, need_hi) is covered by:
                 // 1. A work item for prod_gi on the SAME lane in the SAME or EARLIER phase, OR
                 // 2. A work item for prod_gi in an EARLIER phase (any lane)
-                let covered = is_range_covered(
-                    &coverage, prod_gi, need_lo, need_hi,
-                    my_phase, my_lane,
-                );
+                let covered =
+                    is_range_covered(&coverage, prod_gi, need_lo, need_hi, my_phase, my_lane);
 
                 if !covered {
                     violations.push(Violation {
@@ -316,7 +329,10 @@ fn fix_cross_lane_violations(
         if !defer_set.is_empty() {
             let mut deferred_groups_in_phase: HashMap<usize, HashSet<usize>> = HashMap::new();
             for &(phase, gi) in &defer_set {
-                deferred_groups_in_phase.entry(phase).or_default().insert(gi);
+                deferred_groups_in_phase
+                    .entry(phase)
+                    .or_default()
+                    .insert(gi);
             }
 
             for (&phase, deferred) in &mut deferred_groups_in_phase {
@@ -326,12 +342,19 @@ fn fix_cross_lane_violations(
                         if item.phase != phase || deferred.contains(&item.group_idx) {
                             continue;
                         }
-                        if producers[item.group_idx].iter().any(|&pi| deferred.contains(&pi)) {
+                        if producers[item.group_idx]
+                            .iter()
+                            .any(|&pi| deferred.contains(&pi))
+                        {
                             new_defers.push(item.group_idx);
                         }
                     }
-                    if new_defers.is_empty() { break; }
-                    for gi in new_defers { deferred.insert(gi); }
+                    if new_defers.is_empty() {
+                        break;
+                    }
+                    for gi in new_defers {
+                        deferred.insert(gi);
+                    }
                 }
             }
 
@@ -425,15 +448,21 @@ fn is_range_covered(
 
 /// Check if sorted ranges fully cover [need_lo, need_hi).
 fn ranges_cover(ranges: &[(u64, u64)], need_lo: u64, need_hi: u64) -> bool {
-    if need_lo >= need_hi { return true; }
+    if need_lo >= need_hi {
+        return true;
+    }
     let mut covered_up_to = need_lo;
     for &(off, count) in ranges {
-        if off > covered_up_to { return false; }
+        if off > covered_up_to {
+            return false;
+        }
         let end = off + count;
         if end > covered_up_to {
             covered_up_to = end;
         }
-        if covered_up_to >= need_hi { return true; }
+        if covered_up_to >= need_hi {
+            return true;
+        }
     }
     false
 }
@@ -449,31 +478,45 @@ fn compute_needed_ranges(
     is_literal: &[bool],
 ) -> Vec<(usize, u64, u64)> {
     let mut result = Vec::new();
-    if atom_count == 0 { return result; }
+    if atom_count == 0 {
+        return result;
+    }
 
     let (is_reduce, reduce_count, reduce_stride) = match &group.op {
-        ScalarOp::ReduceSum { reduce_count, reduce_stride, .. }
-        | ScalarOp::ReduceMax { reduce_count, reduce_stride, .. }
-            if *reduce_count > 1 && *reduce_stride != 0 =>
-            (true, *reduce_count, *reduce_stride),
+        ScalarOp::ReduceSum {
+            reduce_count,
+            reduce_stride,
+            ..
+        }
+        | ScalarOp::ReduceMax {
+            reduce_count,
+            reduce_stride,
+            ..
+        } if *reduce_count > 1 && *reduce_stride != 0 => (true, *reduce_count, *reduce_stride),
         _ => (false, 0, 0),
     };
 
     for input in &group.inputs {
         let referenced = resolve_input_to_group_ranges(
-            input, atom_offset, atom_count,
+            input,
+            atom_offset,
+            atom_count,
             if is_reduce { reduce_count } else { 1 },
             if is_reduce { reduce_stride } else { 0 },
             all_groups,
         );
 
         for (gi, range_lo, range_hi) in referenced {
-            if is_literal[gi] { continue; }
+            if is_literal[gi] {
+                continue;
+            }
             let g_lo = all_groups[gi].base_id.0;
             let g_hi = g_lo + all_groups[gi].count;
             let overlap_lo = range_lo.max(g_lo);
             let overlap_hi = range_hi.min(g_hi);
-            if overlap_lo >= overlap_hi { continue; }
+            if overlap_lo >= overlap_hi {
+                continue;
+            }
             // Convert to offset within group.
             result.push((gi, overlap_lo - g_lo, overlap_hi - g_lo));
         }
@@ -528,13 +571,19 @@ struct RangeAtomMap {
 }
 
 impl RangeAtomMap {
-    fn new() -> Self { Self { map: BTreeMap::new() } }
+    fn new() -> Self {
+        Self {
+            map: BTreeMap::new(),
+        }
+    }
     fn insert_range(&mut self, main_base: AtomId, span_base: AtomId, count: u64) {
         self.map.insert(main_base.0, (span_base.0, count));
     }
     fn get(&self, main_id: AtomId) -> Option<AtomId> {
         use std::ops::Bound;
-        let mut iter = self.map.range((Bound::Unbounded, Bound::Included(main_id.0)));
+        let mut iter = self
+            .map
+            .range((Bound::Unbounded, Bound::Included(main_id.0)));
         if let Some((&base, &(span_base, count))) = iter.next_back() {
             let offset = main_id.0.wrapping_sub(base);
             if offset < count {
@@ -553,10 +602,16 @@ fn build_span_plan(
     work_items: &[WorkItem],
     num_lanes: usize,
 ) -> SpanPlan {
-    let num_phases = work_items.iter().map(|w| w.phase).max().map(|m| m + 1).unwrap_or(0);
+    let num_phases = work_items
+        .iter()
+        .map(|w| w.phase)
+        .max()
+        .map(|m| m + 1)
+        .unwrap_or(0);
 
     // Group work items by (phase, lane).
-    let mut phase_lane_work: Vec<Vec<Vec<&WorkItem>>> = vec![vec![Vec::new(); num_lanes]; num_phases];
+    let mut phase_lane_work: Vec<Vec<Vec<&WorkItem>>> =
+        vec![vec![Vec::new(); num_lanes]; num_phases];
     for item in work_items {
         phase_lane_work[item.phase][item.lane].push(item);
     }
@@ -626,10 +681,12 @@ fn compute_dup_output_info(
     // For each group, collect all (phase, lane, offset, count) assignments.
     let mut group_assignments: HashMap<usize, Vec<(usize, usize, u64, u64)>> = HashMap::new();
     for item in work_items {
-        group_assignments
-            .entry(item.group_idx)
-            .or_default()
-            .push((item.phase, item.lane, item.atom_offset, item.atom_count));
+        group_assignments.entry(item.group_idx).or_default().push((
+            item.phase,
+            item.lane,
+            item.atom_offset,
+            item.atom_count,
+        ));
     }
 
     let mut dup_info: HashMap<usize, Vec<(usize, u64, u64)>> = HashMap::new();
@@ -638,7 +695,10 @@ fn compute_dup_output_info(
         // Group by phase.
         let mut by_phase: HashMap<usize, Vec<(usize, u64, u64)>> = HashMap::new();
         for &(phase, lane, offset, count) in assignments {
-            by_phase.entry(phase).or_default().push((lane, offset, count));
+            by_phase
+                .entry(phase)
+                .or_default()
+                .push((lane, offset, count));
         }
 
         for (&phase, lane_assignments) in &by_phase {
@@ -746,8 +806,11 @@ fn build_span(
         let lit_group = &groups[lit_gi];
         if lit_group.count < LITERAL_INLINE_THRESHOLD {
             let local_base = span_graph.push_group(
-                lit_group.count, lit_group.op.clone(),
-                lit_group.sym_dims.clone(), lit_group.reduce_dims.clone(), vec![],
+                lit_group.count,
+                lit_group.op.clone(),
+                lit_group.sym_dims.clone(),
+                lit_group.reduce_dims.clone(),
+                vec![],
             );
             main_to_local.insert_range(lit_group.base_id, local_base, lit_group.count);
             inlined_literals.insert(lit_gi);
@@ -769,8 +832,14 @@ fn build_span(
     for &(gi, atom_offset, atom_count) in assigned_slices {
         let group = &groups[gi];
         collect_external_ranges(
-            group, atom_offset, atom_count, groups, is_literal,
-            assigned_slices, &inlined_literals, &mut external_ranges,
+            group,
+            atom_offset,
+            atom_count,
+            groups,
+            is_literal,
+            assigned_slices,
+            &inlined_literals,
+            &mut external_ranges,
         );
     }
 
@@ -784,7 +853,9 @@ fn build_span(
         let local_base = span_graph.push_group(
             count,
             ScalarOp::Literal(crate::numeric_scalar::NumericScalar::F32(0.0)),
-            vec![], vec![], vec![],
+            vec![],
+            vec![],
+            vec![],
         );
         main_to_local.insert_range(main_base, local_base, count);
         input_mappings.push(AtomMapping {
@@ -801,24 +872,38 @@ fn build_span(
         let group = &groups[gi];
 
         let local_inputs = remap_inputs_range(
-            &group.inputs, &group.op, atom_offset, atom_count,
-            group.count, groups, &main_to_local,
+            &group.inputs,
+            &group.op,
+            atom_offset,
+            atom_count,
+            group.count,
+            groups,
+            &main_to_local,
         );
         let local_op = remap_op_range(&group.op, &main_to_local);
 
         let local_base = span_graph.push_group(
-            atom_count, local_op.clone(),
-            group.sym_dims.clone(), group.reduce_dims.clone(), local_inputs.clone(),
+            atom_count,
+            local_op.clone(),
+            group.sym_dims.clone(),
+            group.reduce_dims.clone(),
+            local_inputs.clone(),
         );
 
         // Verify all InputRef targets (including reduce-extended atoms) exist.
         #[cfg(debug_assertions)]
         {
             let (dbg_reduce_count, dbg_reduce_stride) = match &local_op {
-                ScalarOp::ReduceSum { reduce_count, reduce_stride, .. }
-                | ScalarOp::ReduceMax { reduce_count, reduce_stride, .. }
-                    if *reduce_count > 1 && *reduce_stride != 0 =>
-                    (*reduce_count, *reduce_stride),
+                ScalarOp::ReduceSum {
+                    reduce_count,
+                    reduce_stride,
+                    ..
+                }
+                | ScalarOp::ReduceMax {
+                    reduce_count,
+                    reduce_stride,
+                    ..
+                } if *reduce_count > 1 && *reduce_stride != 0 => (*reduce_count, *reduce_stride),
                 _ => (1, 0i64),
             };
 
@@ -834,8 +919,14 @@ fn build_span(
                         span_graph.contains_atom(base),
                         "build_span: group {} (base={}, op={:?}, offset={}, count={}) \
                          input {} offset {}: resolves to {} which doesn't exist in span",
-                        gi, group.base_id, group.op, atom_offset, atom_count,
-                        inp_idx, off, base,
+                        gi,
+                        group.base_id,
+                        group.op,
+                        atom_offset,
+                        atom_count,
+                        inp_idx,
+                        off,
+                        base,
                     );
                     for k in 1..dbg_reduce_count {
                         let ext = AtomId((base.0 as i64 + k as i64 * dbg_reduce_stride) as u64);
@@ -843,7 +934,13 @@ fn build_span(
                             span_graph.contains_atom(ext),
                             "build_span: group {} (base={}, op={:?}) input {} offset {} \
                              reduce k={}: atom {} doesn't exist in span",
-                            gi, group.base_id, group.op, inp_idx, off, k, ext,
+                            gi,
+                            group.base_id,
+                            group.op,
+                            inp_idx,
+                            off,
+                            k,
+                            ext,
                         );
                     }
                 }
@@ -852,7 +949,8 @@ fn build_span(
                 debug_assert!(
                     span_graph.contains_atom(*table_base),
                     "build_span: group {} (IndirectLoad) table_base {} not in span",
-                    gi, table_base,
+                    gi,
+                    table_base,
                 );
             }
         }
@@ -866,7 +964,9 @@ fn build_span(
             for &(out_lane, out_offset, out_count) in dup_outputs {
                 if out_lane == lane_idx {
                     // Check if this work item covers the output range.
-                    if atom_offset <= out_offset && atom_offset + atom_count >= out_offset + out_count {
+                    if atom_offset <= out_offset
+                        && atom_offset + atom_count >= out_offset + out_count
+                    {
                         let local_out_offset = out_offset - atom_offset;
                         let out_main_base = AtomId(group.base_id.0 + out_offset);
                         let out_span_base = AtomId(local_base.0 + local_out_offset);
@@ -941,21 +1041,27 @@ fn collect_external_ranges(
     // found all literal dependencies, but it can miss groups referenced through
     // indirect paths (e.g., ReduceSum stride extensions, or groups whose
     // InputRefs don't obviously reach the literal).
-    let should_skip = |gi: usize| -> bool {
-        inlined_literals.contains(&gi)
-    };
+    let should_skip = |gi: usize| -> bool { inlined_literals.contains(&gi) };
 
     let (is_reduce, reduce_count, reduce_stride) = match &group.op {
-        ScalarOp::ReduceSum { reduce_count, reduce_stride, .. }
-        | ScalarOp::ReduceMax { reduce_count, reduce_stride, .. }
-            if *reduce_count > 1 && *reduce_stride != 0 =>
-            (true, *reduce_count, *reduce_stride),
+        ScalarOp::ReduceSum {
+            reduce_count,
+            reduce_stride,
+            ..
+        }
+        | ScalarOp::ReduceMax {
+            reduce_count,
+            reduce_stride,
+            ..
+        } if *reduce_count > 1 && *reduce_stride != 0 => (true, *reduce_count, *reduce_stride),
         _ => (false, 0, 0),
     };
 
     for input in &group.inputs {
         let referenced = resolve_input_to_group_ranges(
-            input, atom_offset, atom_count,
+            input,
+            atom_offset,
+            atom_count,
             if is_reduce { reduce_count } else { 1 },
             if is_reduce { reduce_stride } else { 0 },
             all_groups,
@@ -998,11 +1104,11 @@ fn collect_external_ranges(
 /// Find all groups that produce atoms referenced by an InputRef.
 fn resolve_producer_groups(input: &InputRef, count: u64, groups: &[AtomGroup]) -> Vec<usize> {
     match input {
-        InputRef::Broadcast(atom_id) => {
-            find_group_idx(groups, *atom_id).into_iter().collect()
-        }
+        InputRef::Broadcast(atom_id) => find_group_idx(groups, *atom_id).into_iter().collect(),
         InputRef::Affine { base, stride } => {
-            if count == 0 { return vec![]; }
+            if count == 0 {
+                return vec![];
+            }
             let last_offset = (*stride as i64) * (count as i64 - 1);
             let last = AtomId(base.0.wrapping_add(last_offset as u64));
             let lo = base.0.min(last.0);
@@ -1014,21 +1120,31 @@ fn resolve_producer_groups(input: &InputRef, count: u64, groups: &[AtomGroup]) -
             let mut seen = HashSet::new();
             for id in ids {
                 if let Some(gi) = find_group_idx(groups, *id) {
-                    if seen.insert(gi) { result.push(gi); }
+                    if seen.insert(gi) {
+                        result.push(gi);
+                    }
                 }
             }
             result
         }
         InputRef::SymAffine { base, stride_i, .. } => {
-            if count == 0 { return vec![]; }
+            if count == 0 {
+                return vec![];
+            }
             let last_offset = (*stride_i as i64) * (count as i64 - 1);
             let last = AtomId(base.0.wrapping_add(last_offset as u64));
             let lo = base.0.min(last.0);
             let hi = base.0.max(last.0);
             find_groups_in_range(groups, lo, hi)
         }
-        InputRef::StridedBroadcast { base, stride, repeat } => {
-            if count == 0 { return vec![]; }
+        InputRef::StridedBroadcast {
+            base,
+            stride,
+            repeat,
+        } => {
+            if count == 0 {
+                return vec![];
+            }
             let num_blocks = (count + repeat - 1) / repeat;
             let last_offset = *stride * (num_blocks as i64 - 1);
             let last = AtomId(base.0.wrapping_add(last_offset as u64));
@@ -1036,8 +1152,14 @@ fn resolve_producer_groups(input: &InputRef, count: u64, groups: &[AtomGroup]) -
             let hi = base.0.max(last.0);
             find_groups_in_range(groups, lo, hi)
         }
-        InputRef::Modular { base, stride, modulus } => {
-            if *modulus == 0 { return vec![]; }
+        InputRef::Modular {
+            base,
+            stride,
+            modulus,
+        } => {
+            if *modulus == 0 {
+                return vec![];
+            }
             let last_offset = (*stride as i64) * (*modulus as i64 - 1);
             let last = AtomId(base.0.wrapping_add(last_offset as u64));
             let lo = base.0.min(last.0);
@@ -1055,7 +1177,9 @@ fn resolve_producer_groups_with_reduce(
     reduce_stride: i64,
     groups: &[AtomGroup],
 ) -> Vec<usize> {
-    if count == 0 { return vec![]; }
+    if count == 0 {
+        return vec![];
+    }
     let min_reduce_ext = 0i64.min(reduce_stride * (reduce_count as i64 - 1));
     let max_reduce_ext = 0i64.max(reduce_stride * (reduce_count as i64 - 1));
 
@@ -1067,7 +1191,11 @@ fn resolve_producer_groups_with_reduce(
             let hi = first_base.max(last_base) + max_reduce_ext;
             find_groups_in_range(groups, lo as u64, hi as u64)
         }
-        InputRef::StridedBroadcast { base, stride, repeat } => {
+        InputRef::StridedBroadcast {
+            base,
+            stride,
+            repeat,
+        } => {
             let last_block = ((count - 1) / repeat) as i64;
             let first_read = base.0 as i64;
             let last_read = base.0 as i64 + stride * last_block;
@@ -1102,7 +1230,9 @@ fn resolve_input_to_group_ranges(
     groups: &[AtomGroup],
 ) -> Vec<(usize, u64, u64)> {
     let mut result = Vec::new();
-    if count == 0 { return result; }
+    if count == 0 {
+        return result;
+    }
 
     match input {
         InputRef::Broadcast(atom_id) => {
@@ -1133,13 +1263,22 @@ fn resolve_input_to_group_ranges(
             } else {
                 let base_lo = first_pos.min(last_pos);
                 let base_hi = first_pos.max(last_pos);
-                let (ext_lo, ext_hi) = reduce_extent_range(base_lo, base_hi, reduce_count, reduce_stride);
+                let (ext_lo, ext_hi) =
+                    reduce_extent_range(base_lo, base_hi, reduce_count, reduce_stride);
                 let candidates = find_groups_in_range(groups, ext_lo as u64, ext_hi as u64);
                 for gi in candidates {
                     let g = &groups[gi];
                     let g_lo = g.base_id.0 as i64;
                     let g_hi = g_lo + g.count as i64;
-                    if affine_touches_range(first_pos, *stride as i64, count, g_lo, g_hi, reduce_count, reduce_stride) {
+                    if affine_touches_range(
+                        first_pos,
+                        *stride as i64,
+                        count,
+                        g_lo,
+                        g_hi,
+                        reduce_count,
+                        reduce_stride,
+                    ) {
                         let overlap_lo = (g_lo as u64).max(ext_lo as u64);
                         let overlap_hi = (g_hi as u64).min((ext_hi + 1) as u64);
                         result.push((gi, overlap_lo, overlap_hi));
@@ -1147,7 +1286,11 @@ fn resolve_input_to_group_ranges(
                 }
             }
         }
-        InputRef::StridedBroadcast { base, stride, repeat } => {
+        InputRef::StridedBroadcast {
+            base,
+            stride,
+            repeat,
+        } => {
             let first_block = offset / repeat;
             let last_block = (offset + count - 1) / repeat;
             for block in first_block..=last_block {
@@ -1158,8 +1301,14 @@ fn resolve_input_to_group_ranges(
                 }
             }
         }
-        InputRef::Modular { base, stride, modulus } => {
-            if *modulus == 0 { return result; }
+        InputRef::Modular {
+            base,
+            stride,
+            modulus,
+        } => {
+            if *modulus == 0 {
+                return result;
+            }
             let num_distinct = (*modulus).min(count);
             let mut lo = base.0 as i64;
             let mut hi = base.0 as i64;
@@ -1181,7 +1330,9 @@ fn resolve_input_to_group_ranges(
                 let atom = ids[i];
                 let (lo, hi) = reduce_extent(atom.0 as i64, reduce_count, reduce_stride);
                 for gi in find_groups_in_range(groups, lo as u64, hi as u64) {
-                    let entry = group_ranges.entry(gi).or_insert((lo as u64, (hi + 1) as u64));
+                    let entry = group_ranges
+                        .entry(gi)
+                        .or_insert((lo as u64, (hi + 1) as u64));
                     entry.0 = entry.0.min(lo as u64);
                     entry.1 = entry.1.max((hi + 1) as u64);
                 }
@@ -1190,12 +1341,17 @@ fn resolve_input_to_group_ranges(
                 result.push((gi, lo, hi));
             }
         }
-        InputRef::SymAffine { base, stride_i, stride_k } => {
+        InputRef::SymAffine {
+            base,
+            stride_i,
+            stride_k,
+        } => {
             let first_pos = base.0 as i64 + *stride_i as i64 * offset as i64;
             let last_pos = base.0 as i64 + *stride_i as i64 * (offset + count - 1) as i64;
             let base_lo = first_pos.min(last_pos);
             let base_hi = first_pos.max(last_pos);
-            let (ext_lo, ext_hi) = reduce_extent_range(base_lo, base_hi, reduce_count, reduce_stride);
+            let (ext_lo, ext_hi) =
+                reduce_extent_range(base_lo, base_hi, reduce_count, reduce_stride);
 
             if stride_i.unsigned_abs() <= 1 {
                 for gi in find_groups_in_range(groups, ext_lo as u64, ext_hi as u64) {
@@ -1207,7 +1363,15 @@ fn resolve_input_to_group_ranges(
                     let g = &groups[gi];
                     let g_lo = g.base_id.0 as i64;
                     let g_hi = g_lo + g.count as i64;
-                    if affine_touches_range(first_pos, *stride_i as i64, count, g_lo, g_hi, reduce_count, reduce_stride) {
+                    if affine_touches_range(
+                        first_pos,
+                        *stride_i as i64,
+                        count,
+                        g_lo,
+                        g_hi,
+                        reduce_count,
+                        reduce_stride,
+                    ) {
                         let overlap_lo = (g_lo as u64).max(ext_lo as u64);
                         let overlap_hi = (g_hi as u64).min((ext_hi + 1) as u64);
                         result.push((gi, overlap_lo, overlap_hi));
@@ -1223,23 +1387,38 @@ fn resolve_input_to_group_ranges(
 // ─── Math helpers ────────────────────────────────────────────────────────────
 
 fn reduce_extent(pos: i64, reduce_count: u64, reduce_stride: i64) -> (i64, i64) {
-    if reduce_count <= 1 { return (pos, pos); }
+    if reduce_count <= 1 {
+        return (pos, pos);
+    }
     let ext = reduce_stride * (reduce_count as i64 - 1);
     (pos + ext.min(0), pos + ext.max(0))
 }
 
-fn reduce_extent_range(base_lo: i64, base_hi: i64, reduce_count: u64, reduce_stride: i64) -> (i64, i64) {
-    if reduce_count <= 1 { return (base_lo, base_hi); }
+fn reduce_extent_range(
+    base_lo: i64,
+    base_hi: i64,
+    reduce_count: u64,
+    reduce_stride: i64,
+) -> (i64, i64) {
+    if reduce_count <= 1 {
+        return (base_lo, base_hi);
+    }
     let ext = reduce_stride * (reduce_count as i64 - 1);
     (base_lo + ext.min(0), base_hi + ext.max(0))
 }
 
 fn affine_touches_range(
-    first_pos: i64, stride: i64, count: u64,
-    g_lo: i64, g_hi: i64,
-    reduce_count: u64, reduce_stride: i64,
+    first_pos: i64,
+    stride: i64,
+    count: u64,
+    g_lo: i64,
+    g_hi: i64,
+    reduce_count: u64,
+    reduce_stride: i64,
 ) -> bool {
-    if count == 0 || g_lo >= g_hi { return false; }
+    if count == 0 || g_lo >= g_hi {
+        return false;
+    }
 
     let (min_reduce_ext, max_reduce_ext) = if reduce_count > 1 {
         let ext = reduce_stride * (reduce_count as i64 - 1);
@@ -1257,7 +1436,10 @@ fn affine_touches_range(
     let (i_lo, i_hi) = if stride > 0 {
         let num_lo = eff_lo - first_pos;
         let num_hi = eff_hi - first_pos;
-        (div_ceil_signed(num_lo, stride), div_ceil_signed(num_hi, stride))
+        (
+            div_ceil_signed(num_lo, stride),
+            div_ceil_signed(num_hi, stride),
+        )
     } else {
         let neg_stride = -stride;
         let i_max = div_floor_signed(first_pos - eff_lo, neg_stride);
@@ -1284,9 +1466,15 @@ fn div_floor_signed(a: i64, b: i64) -> i64 {
 
 fn find_group_idx(groups: &[AtomGroup], id: AtomId) -> Option<usize> {
     let idx = groups.partition_point(|g| g.base_id.0 <= id.0);
-    if idx == 0 { return None; }
+    if idx == 0 {
+        return None;
+    }
     let gi = idx - 1;
-    if groups[gi].contains(id) { Some(gi) } else { None }
+    if groups[gi].contains(id) {
+        Some(gi)
+    } else {
+        None
+    }
 }
 
 fn find_groups_in_range(groups: &[AtomGroup], lo: u64, hi: u64) -> Vec<usize> {
@@ -1294,8 +1482,12 @@ fn find_groups_in_range(groups: &[AtomGroup], lo: u64, hi: u64) -> Vec<usize> {
     let start = groups.partition_point(|g| g.base_id.0 + g.count <= lo);
     for gi in start..groups.len() {
         let g = &groups[gi];
-        if g.base_id.0 > hi { break; }
-        if g.count == 0 { continue; }
+        if g.base_id.0 > hi {
+            break;
+        }
+        if g.count == 0 {
+            continue;
+        }
         let g_end = g.base_id.0 + g.count - 1;
         if g.base_id.0 <= hi && g_end >= lo {
             result.push(gi);
@@ -1336,52 +1528,82 @@ fn resolve_all_referenced_groups(
     let mut result = BTreeSet::new();
     match input {
         InputRef::Broadcast(atom_id) => {
-            if let Some(gi) = find_group_idx(groups, *atom_id) { result.insert(gi); }
+            if let Some(gi) = find_group_idx(groups, *atom_id) {
+                result.insert(gi);
+            }
         }
         InputRef::Affine { base, stride } => {
-            if count == 0 { return result; }
+            if count == 0 {
+                return result;
+            }
             let last_offset = (*stride as i64) * (count as i64 - 1);
             let last = AtomId(base.0.wrapping_add(last_offset as u64));
             let lo = base.0.min(last.0);
             let hi = base.0.max(last.0);
-            for gi in find_groups_in_range(groups, lo, hi) { result.insert(gi); }
+            for gi in find_groups_in_range(groups, lo, hi) {
+                result.insert(gi);
+            }
         }
         InputRef::Explicit(ids) => {
             for id in ids {
-                if let Some(gi) = find_group_idx(groups, *id) { result.insert(gi); }
+                if let Some(gi) = find_group_idx(groups, *id) {
+                    result.insert(gi);
+                }
             }
         }
         InputRef::SymAffine { base, stride_i, .. } => {
-            if count == 0 { return result; }
+            if count == 0 {
+                return result;
+            }
             let last_offset = (*stride_i as i64) * (count as i64 - 1);
             let last = AtomId(base.0.wrapping_add(last_offset as u64));
             let lo = base.0.min(last.0);
             let hi = base.0.max(last.0);
-            for gi in find_groups_in_range(groups, lo, hi) { result.insert(gi); }
+            for gi in find_groups_in_range(groups, lo, hi) {
+                result.insert(gi);
+            }
         }
-        InputRef::StridedBroadcast { base, stride, repeat } => {
-            if count == 0 { return result; }
+        InputRef::StridedBroadcast {
+            base,
+            stride,
+            repeat,
+        } => {
+            if count == 0 {
+                return result;
+            }
             let num_blocks = (count + repeat - 1) / repeat;
             let last_offset = *stride * (num_blocks as i64 - 1);
             let last = AtomId(base.0.wrapping_add(last_offset as u64));
             let lo = base.0.min(last.0);
             let hi = base.0.max(last.0);
-            for gi in find_groups_in_range(groups, lo, hi) { result.insert(gi); }
+            for gi in find_groups_in_range(groups, lo, hi) {
+                result.insert(gi);
+            }
         }
-        InputRef::Modular { base, stride, modulus } => {
-            if *modulus == 0 { return result; }
+        InputRef::Modular {
+            base,
+            stride,
+            modulus,
+        } => {
+            if *modulus == 0 {
+                return result;
+            }
             let last_offset = (*stride as i64) * (*modulus as i64 - 1);
             let last = AtomId(base.0.wrapping_add(last_offset as u64));
             let lo = base.0.min(last.0);
             let hi = base.0.max(last.0);
-            for gi in find_groups_in_range(groups, lo, hi) { result.insert(gi); }
+            for gi in find_groups_in_range(groups, lo, hi) {
+                result.insert(gi);
+            }
         }
     }
     result
 }
 
 fn merge_group_ranges(ranges: &mut Vec<(usize, u64, u64)>) -> Vec<(usize, u64, u64)> {
-    if ranges.is_empty() { return vec![]; }
+    if ranges.is_empty() {
+        return vec![];
+    }
     ranges.sort_by_key(|&(gi, off, _)| (gi, off));
     let mut merged: Vec<(usize, u64, u64)> = Vec::new();
     for &(gi, off, count) in ranges.iter() {
@@ -1408,9 +1630,12 @@ fn remap_inputs_range(
     groups: &[AtomGroup],
     atom_map: &RangeAtomMap,
 ) -> Vec<InputRef> {
-    inputs.iter().map(|input| {
-        remap_single_input_range(input, atom_offset, atom_count, orig_group_count, atom_map)
-    }).collect()
+    inputs
+        .iter()
+        .map(|input| {
+            remap_single_input_range(input, atom_offset, atom_count, orig_group_count, atom_map)
+        })
+        .collect()
 }
 
 fn remap_single_input_range(
@@ -1421,17 +1646,22 @@ fn remap_single_input_range(
     atom_map: &RangeAtomMap,
 ) -> InputRef {
     match input {
-        InputRef::Broadcast(id) => {
-            InputRef::Broadcast(atom_map.get(*id).unwrap_or(*id))
-        }
+        InputRef::Broadcast(id) => InputRef::Broadcast(atom_map.get(*id).unwrap_or(*id)),
         InputRef::Affine { base, stride } => {
-            let new_base_raw = AtomId(base.0.wrapping_add((*stride as i64 * atom_offset as i64) as u64));
+            let new_base_raw = AtomId(
+                base.0
+                    .wrapping_add((*stride as i64 * atom_offset as i64) as u64),
+            );
             InputRef::Affine {
                 base: atom_map.get(new_base_raw).unwrap_or(new_base_raw),
                 stride: *stride,
             }
         }
-        InputRef::StridedBroadcast { base, stride, repeat } => {
+        InputRef::StridedBroadcast {
+            base,
+            stride,
+            repeat,
+        } => {
             let block_idx = (atom_offset / repeat) as i64;
             let new_base_raw = AtomId(base.0.wrapping_add((stride * block_idx) as u64));
             let new_offset_in_block = atom_offset % repeat;
@@ -1450,15 +1680,24 @@ fn remap_single_input_range(
                 InputRef::Explicit(ids)
             }
         }
-        InputRef::Modular { base, stride, modulus } => {
-            InputRef::Modular {
-                base: atom_map.get(*base).unwrap_or(*base),
-                stride: *stride,
-                modulus: *modulus,
-            }
-        }
-        InputRef::SymAffine { base, stride_i, stride_k } => {
-            let new_base_raw = AtomId(base.0.wrapping_add((*stride_i as i64 * atom_offset as i64) as u64));
+        InputRef::Modular {
+            base,
+            stride,
+            modulus,
+        } => InputRef::Modular {
+            base: atom_map.get(*base).unwrap_or(*base),
+            stride: *stride,
+            modulus: *modulus,
+        },
+        InputRef::SymAffine {
+            base,
+            stride_i,
+            stride_k,
+        } => {
+            let new_base_raw = AtomId(
+                base.0
+                    .wrapping_add((*stride_i as i64 * atom_offset as i64) as u64),
+            );
             InputRef::SymAffine {
                 base: atom_map.get(new_base_raw).unwrap_or(new_base_raw),
                 stride_i: *stride_i,
@@ -1468,9 +1707,16 @@ fn remap_single_input_range(
         InputRef::Explicit(ids) => {
             let start = atom_offset as usize;
             let end = (atom_offset + atom_count) as usize;
-            let slice = if end <= ids.len() { &ids[start..end] } else { &ids[start..] };
+            let slice = if end <= ids.len() {
+                &ids[start..end]
+            } else {
+                &ids[start..]
+            };
             InputRef::Explicit(
-                slice.iter().map(|id| atom_map.get(*id).unwrap_or(*id)).collect(),
+                slice
+                    .iter()
+                    .map(|id| atom_map.get(*id).unwrap_or(*id))
+                    .collect(),
             )
         }
     }
@@ -1478,7 +1724,10 @@ fn remap_single_input_range(
 
 fn remap_op_range(op: &ScalarOp, atom_map: &RangeAtomMap) -> ScalarOp {
     match op {
-        ScalarOp::IndirectLoad { table_base, output_dtype } => ScalarOp::IndirectLoad {
+        ScalarOp::IndirectLoad {
+            table_base,
+            output_dtype,
+        } => ScalarOp::IndirectLoad {
             table_base: atom_map.get(*table_base).unwrap_or(*table_base),
             output_dtype: *output_dtype,
         },
@@ -1491,25 +1740,47 @@ fn remap_op_range(op: &ScalarOp, atom_map: &RangeAtomMap) -> ScalarOp {
 impl SpanPlan {
     pub fn print_summary(&self) {
         let total_spans: usize = self.phases.iter().map(|p| p.spans.len()).sum();
-        let non_empty: usize = self.phases.iter()
+        let non_empty: usize = self
+            .phases
+            .iter()
             .flat_map(|p| p.spans.iter())
             .filter(|s| s.graph.num_groups() > 0)
             .count();
         println!(
             "SpanPlan: {} lanes, {} phases, {} spans ({} non-empty)",
-            self.num_lanes, self.phases.len(), total_spans, non_empty
+            self.num_lanes,
+            self.phases.len(),
+            total_spans,
+            non_empty
         );
         for (pi, phase) in self.phases.iter().enumerate() {
-            let active = phase.spans.iter().filter(|s| s.graph.num_groups() > 0).count();
-            let max_atoms = phase.spans.iter().map(|s| s.graph.num_atoms()).max().unwrap_or(0);
-            let min_atoms = phase.spans.iter()
+            let active = phase
+                .spans
+                .iter()
+                .filter(|s| s.graph.num_groups() > 0)
+                .count();
+            let max_atoms = phase
+                .spans
+                .iter()
+                .map(|s| s.graph.num_atoms())
+                .max()
+                .unwrap_or(0);
+            let min_atoms = phase
+                .spans
+                .iter()
                 .filter(|s| s.graph.num_atoms() > 0)
                 .map(|s| s.graph.num_atoms())
-                .min().unwrap_or(0);
+                .min()
+                .unwrap_or(0);
             let balance = if min_atoms > 0 {
                 format!("{:.1}x", max_atoms as f64 / min_atoms as f64)
-            } else { "N/A".to_string() };
-            println!("  Phase {}: {} active lanes, balance {}", pi, active, balance);
+            } else {
+                "N/A".to_string()
+            };
+            println!(
+                "  Phase {}: {} active lanes, balance {}",
+                pi, active, balance
+            );
         }
     }
 
@@ -1563,18 +1834,42 @@ mod tests {
 
     fn build_matmul(m: u64, k: u64, n: u64) -> NanoGraph {
         let mut g = NanoGraph::new();
-        let a_base = g.push_group(m * k, ScalarOp::Literal(NumericScalar::F32(1.0)), vec![], vec![], vec![]);
-        let b_base = g.push_group(k * n, ScalarOp::Literal(NumericScalar::F32(1.0)), vec![], vec![], vec![]);
+        let a_base = g.push_group(
+            m * k,
+            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
+        let b_base = g.push_group(
+            k * n,
+            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
         let mut mul_bases = Vec::new();
         for row in 0..m {
             let a_row = AtomId(a_base.0 + row * k);
             let mul = g.push_group(
                 k * n,
-                ScalarOp::Binary { op: ScalarBinOp::Mul, compute_dtype: DType::F32, output_dtype: DType::F32 },
-                vec![], vec![],
+                ScalarOp::Binary {
+                    op: ScalarBinOp::Mul,
+                    compute_dtype: DType::F32,
+                    output_dtype: DType::F32,
+                },
+                vec![],
+                vec![],
                 vec![
-                    InputRef::StridedBroadcast { base: a_row, stride: 1, repeat: n },
-                    InputRef::Affine { base: b_base, stride: 1 },
+                    InputRef::StridedBroadcast {
+                        base: a_row,
+                        stride: 1,
+                        repeat: n,
+                    },
+                    InputRef::Affine {
+                        base: b_base,
+                        stride: 1,
+                    },
                 ],
             );
             mul_bases.push(mul);
@@ -1583,33 +1878,68 @@ mod tests {
         for row in 0..m {
             let red = g.push_group(
                 n,
-                ScalarOp::ReduceSum { reduce_count: k, reduce_stride: n as i64, compute_dtype: DType::F32, output_dtype: DType::F32 },
-                vec![], vec![],
-                vec![InputRef::Affine { base: mul_bases[row as usize], stride: 1 }],
+                ScalarOp::ReduceSum {
+                    reduce_count: k,
+                    reduce_stride: n as i64,
+                    compute_dtype: DType::F32,
+                    output_dtype: DType::F32,
+                },
+                vec![],
+                vec![],
+                vec![InputRef::Affine {
+                    base: mul_bases[row as usize],
+                    stride: 1,
+                }],
             );
             reduce_bases.push(red);
         }
         for &rb in &reduce_bases {
-            for i in 0..n { g.outputs.push(AtomId(rb.0 + i)); }
+            for i in 0..n {
+                g.outputs.push(AtomId(rb.0 + i));
+            }
         }
         g
     }
 
     fn build_matmul_chain(m: u64, k1: u64, n1: u64, k2: u64, n2: u64) -> NanoGraph {
         let mut g = NanoGraph::new();
-        let a1 = g.push_group(m * k1, ScalarOp::Literal(NumericScalar::F32(1.0)), vec![], vec![], vec![]);
-        let b1 = g.push_group(k1 * n1, ScalarOp::Literal(NumericScalar::F32(1.0)), vec![], vec![], vec![]);
+        let a1 = g.push_group(
+            m * k1,
+            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
+        let b1 = g.push_group(
+            k1 * n1,
+            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
 
         let mut mul1_bases = Vec::new();
         for row in 0..m {
             let a_row = AtomId(a1.0 + row * k1);
             let mul = g.push_group(
                 k1 * n1,
-                ScalarOp::Binary { op: ScalarBinOp::Mul, compute_dtype: DType::F32, output_dtype: DType::F32 },
-                vec![], vec![],
+                ScalarOp::Binary {
+                    op: ScalarBinOp::Mul,
+                    compute_dtype: DType::F32,
+                    output_dtype: DType::F32,
+                },
+                vec![],
+                vec![],
                 vec![
-                    InputRef::StridedBroadcast { base: a_row, stride: 1, repeat: n1 },
-                    InputRef::Affine { base: b1, stride: 1 },
+                    InputRef::StridedBroadcast {
+                        base: a_row,
+                        stride: 1,
+                        repeat: n1,
+                    },
+                    InputRef::Affine {
+                        base: b1,
+                        stride: 1,
+                    },
                 ],
             );
             mul1_bases.push(mul);
@@ -1618,31 +1948,66 @@ mod tests {
         for row in 0..m {
             let red = g.push_group(
                 n1,
-                ScalarOp::ReduceSum { reduce_count: k1, reduce_stride: n1 as i64, compute_dtype: DType::F32, output_dtype: DType::F32 },
-                vec![], vec![],
-                vec![InputRef::Affine { base: mul1_bases[row as usize], stride: 1 }],
+                ScalarOp::ReduceSum {
+                    reduce_count: k1,
+                    reduce_stride: n1 as i64,
+                    compute_dtype: DType::F32,
+                    output_dtype: DType::F32,
+                },
+                vec![],
+                vec![],
+                vec![InputRef::Affine {
+                    base: mul1_bases[row as usize],
+                    stride: 1,
+                }],
             );
             red1_bases.push(red);
         }
 
         let act = g.push_group(
             m * n1,
-            ScalarOp::Unary { op: ScalarUnaryOp::Tanh, compute_dtype: DType::F32, output_dtype: DType::F32 },
-            vec![], vec![],
-            vec![InputRef::Affine { base: red1_bases[0], stride: 1 }],
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Tanh,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![],
+            vec![],
+            vec![InputRef::Affine {
+                base: red1_bases[0],
+                stride: 1,
+            }],
         );
 
-        let b2 = g.push_group(n1 * n2, ScalarOp::Literal(NumericScalar::F32(1.0)), vec![], vec![], vec![]);
+        let b2 = g.push_group(
+            n1 * n2,
+            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
 
         let mut mul2_bases = Vec::new();
         for row in 0..m {
             let mul = g.push_group(
                 n1 * n2,
-                ScalarOp::Binary { op: ScalarBinOp::Mul, compute_dtype: DType::F32, output_dtype: DType::F32 },
-                vec![], vec![],
+                ScalarOp::Binary {
+                    op: ScalarBinOp::Mul,
+                    compute_dtype: DType::F32,
+                    output_dtype: DType::F32,
+                },
+                vec![],
+                vec![],
                 vec![
-                    InputRef::StridedBroadcast { base: AtomId(act.0 + row * n1), stride: 1, repeat: n2 },
-                    InputRef::Affine { base: b2, stride: 1 },
+                    InputRef::StridedBroadcast {
+                        base: AtomId(act.0 + row * n1),
+                        stride: 1,
+                        repeat: n2,
+                    },
+                    InputRef::Affine {
+                        base: b2,
+                        stride: 1,
+                    },
                 ],
             );
             mul2_bases.push(mul);
@@ -1651,54 +2016,113 @@ mod tests {
         for row in 0..m {
             let red = g.push_group(
                 n2,
-                ScalarOp::ReduceSum { reduce_count: n1, reduce_stride: n2 as i64, compute_dtype: DType::F32, output_dtype: DType::F32 },
-                vec![], vec![],
-                vec![InputRef::Affine { base: mul2_bases[row as usize], stride: 1 }],
+                ScalarOp::ReduceSum {
+                    reduce_count: n1,
+                    reduce_stride: n2 as i64,
+                    compute_dtype: DType::F32,
+                    output_dtype: DType::F32,
+                },
+                vec![],
+                vec![],
+                vec![InputRef::Affine {
+                    base: mul2_bases[row as usize],
+                    stride: 1,
+                }],
             );
             red2_bases.push(red);
         }
         for &rb in &red2_bases {
-            for i in 0..n2 { g.outputs.push(AtomId(rb.0 + i)); }
+            for i in 0..n2 {
+                g.outputs.push(AtomId(rb.0 + i));
+            }
         }
         g
     }
 
     fn build_elementwise(count: u64) -> NanoGraph {
         let mut g = NanoGraph::new();
-        let a = g.push_group(count, ScalarOp::Literal(NumericScalar::F32(1.0)), vec![], vec![], vec![]);
-        let b = g.push_group(count, ScalarOp::Literal(NumericScalar::F32(2.0)), vec![], vec![], vec![]);
+        let a = g.push_group(
+            count,
+            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
+        let b = g.push_group(
+            count,
+            ScalarOp::Literal(NumericScalar::F32(2.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
         let c = g.push_group(
             count,
-            ScalarOp::Binary { op: ScalarBinOp::Add, compute_dtype: DType::F32, output_dtype: DType::F32 },
-            vec![], vec![],
-            vec![InputRef::Affine { base: a, stride: 1 }, InputRef::Affine { base: b, stride: 1 }],
+            ScalarOp::Binary {
+                op: ScalarBinOp::Add,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![],
+            vec![],
+            vec![
+                InputRef::Affine { base: a, stride: 1 },
+                InputRef::Affine { base: b, stride: 1 },
+            ],
         );
-        for i in 0..count { g.outputs.push(AtomId(c.0 + i)); }
+        for i in 0..count {
+            g.outputs.push(AtomId(c.0 + i));
+        }
         g
     }
 
     fn build_allrows_chain(count: u64) -> NanoGraph {
         let mut g = NanoGraph::new();
-        let lit = g.push_group(count, ScalarOp::Literal(NumericScalar::F32(1.0)), vec![], vec![], vec![]);
+        let lit = g.push_group(
+            count,
+            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
         let a = g.push_group(
             count,
-            ScalarOp::Unary { op: ScalarUnaryOp::Tanh, compute_dtype: DType::F32, output_dtype: DType::F32 },
-            vec![], vec![],
-            vec![InputRef::Affine { base: lit, stride: 1 }],
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Tanh,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![],
+            vec![],
+            vec![InputRef::Affine {
+                base: lit,
+                stride: 1,
+            }],
         );
         let b = g.push_group(
             count,
-            ScalarOp::Unary { op: ScalarUnaryOp::Tanh, compute_dtype: DType::F32, output_dtype: DType::F32 },
-            vec![], vec![],
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Tanh,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![],
+            vec![],
             vec![InputRef::Affine { base: a, stride: 1 }],
         );
         let c = g.push_group(
             count,
-            ScalarOp::Unary { op: ScalarUnaryOp::Tanh, compute_dtype: DType::F32, output_dtype: DType::F32 },
-            vec![], vec![],
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Tanh,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![],
+            vec![],
             vec![InputRef::Affine { base: b, stride: 1 }],
         );
-        for i in 0..count { g.outputs.push(AtomId(c.0 + i)); }
+        for i in 0..count {
+            g.outputs.push(AtomId(c.0 + i));
+        }
         g
     }
 
@@ -1707,37 +2131,88 @@ mod tests {
     /// A downstream group in the same phase broadcasts from it.
     fn build_cross_lane_pattern(small_count: u64, big_count: u64) -> NanoGraph {
         let mut g = NanoGraph::new();
-        let lit_a = g.push_group(small_count, ScalarOp::Literal(NumericScalar::F32(1.0)), vec![], vec![], vec![]);
-        let lit_b = g.push_group(small_count, ScalarOp::Literal(NumericScalar::F32(0.0)), vec![], vec![], vec![]);
-        let lit_cond = g.push_group(small_count, ScalarOp::Literal(NumericScalar::F32(1.0)), vec![], vec![], vec![]);
+        let lit_a = g.push_group(
+            small_count,
+            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
+        let lit_b = g.push_group(
+            small_count,
+            ScalarOp::Literal(NumericScalar::F32(0.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
+        let lit_cond = g.push_group(
+            small_count,
+            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
 
         // Select: count=small_count, three inputs, all Affine stride=1.
         // This will be AllRows and split across lanes.
         let sel = g.push_group(
             small_count,
-            ScalarOp::Select { compute_dtype: DType::F32, output_dtype: DType::F32 },
-            vec![], vec![],
+            ScalarOp::Select {
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![],
+            vec![],
             vec![
-                InputRef::Affine { base: lit_cond, stride: 1 },
-                InputRef::Affine { base: lit_a, stride: 1 },
-                InputRef::Affine { base: lit_b, stride: 1 },
+                InputRef::Affine {
+                    base: lit_cond,
+                    stride: 1,
+                },
+                InputRef::Affine {
+                    base: lit_a,
+                    stride: 1,
+                },
+                InputRef::Affine {
+                    base: lit_b,
+                    stride: 1,
+                },
             ],
         );
 
         // Downstream group with big_count atoms that broadcasts from sel.
         // This reads the FULL range of sel via Modular, which is NOT lane-local.
-        let lit_d = g.push_group(big_count, ScalarOp::Literal(NumericScalar::F32(1.0)), vec![], vec![], vec![]);
+        let lit_d = g.push_group(
+            big_count,
+            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
         let downstream = g.push_group(
             big_count,
-            ScalarOp::Binary { op: ScalarBinOp::Add, compute_dtype: DType::F32, output_dtype: DType::F32 },
-            vec![], vec![],
+            ScalarOp::Binary {
+                op: ScalarBinOp::Add,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![],
+            vec![],
             vec![
-                InputRef::Modular { base: sel, stride: 1, modulus: small_count },
-                InputRef::Affine { base: lit_d, stride: 1 },
+                InputRef::Modular {
+                    base: sel,
+                    stride: 1,
+                    modulus: small_count,
+                },
+                InputRef::Affine {
+                    base: lit_d,
+                    stride: 1,
+                },
             ],
         );
 
-        for i in 0..big_count { g.outputs.push(AtomId(downstream.0 + i)); }
+        for i in 0..big_count {
+            g.outputs.push(AtomId(downstream.0 + i));
+        }
         g
     }
 
@@ -1745,12 +2220,17 @@ mod tests {
 
     fn verify_span_plan(graph: &NanoGraph, plan: &SpanPlan) {
         let errors = plan.validate(graph);
-        assert!(errors.is_empty(), "Span plan errors:\n{}", errors.join("\n"));
+        assert!(
+            errors.is_empty(),
+            "Span plan errors:\n{}",
+            errors.join("\n")
+        );
     }
 
     fn verify_output_coverage(graph: &NanoGraph, plan: &SpanPlan) {
         let groups = graph.groups();
-        let is_literal: Vec<bool> = groups.iter()
+        let is_literal: Vec<bool> = groups
+            .iter()
             .map(|g| matches!(g.op, ScalarOp::Literal(_)) && g.inputs.is_empty())
             .collect();
 
@@ -1766,13 +2246,17 @@ mod tests {
         }
 
         for (gi, group) in groups.iter().enumerate() {
-            if is_literal[gi] { continue; }
+            if is_literal[gi] {
+                continue;
+            }
             for offset in 0..group.count {
                 let atom = AtomId(group.base_id.0 + offset);
                 let count = produced.get(&atom).copied().unwrap_or(0);
-                assert_eq!(count, 1,
+                assert_eq!(
+                    count, 1,
                     "Atom {:?} (group {}, offset {}) appears {} times in outputs",
-                    atom, gi, offset, count);
+                    atom, gi, offset, count
+                );
             }
         }
     }
@@ -1789,9 +2273,13 @@ mod tests {
         for (phase_idx, phase) in plan.phases.iter().enumerate() {
             for (lane_idx, span) in phase.spans.iter().enumerate() {
                 for mapping in &span.inputs {
-                    assert!(available.contains(&mapping.main_base),
+                    assert!(
+                        available.contains(&mapping.main_base),
                         "Phase {} lane {}: input base {:?} not available",
-                        phase_idx, lane_idx, mapping.main_base);
+                        phase_idx,
+                        lane_idx,
+                        mapping.main_base
+                    );
                 }
             }
             for span in &phase.spans {
@@ -1817,9 +2305,16 @@ mod tests {
                     let in_lo = mapping.main_base.0;
                     let in_hi = in_lo + mapping.count;
                     for &(out_lo, out_hi) in &output_ranges {
-                        assert!(in_lo >= out_hi || out_lo >= in_hi,
+                        assert!(
+                            in_lo >= out_hi || out_lo >= in_hi,
                             "Phase {} lane {}: input [{}, {}) overlaps output [{}, {})",
-                            phase_idx, lane_idx, in_lo, in_hi, out_lo, out_hi);
+                            phase_idx,
+                            lane_idx,
+                            in_lo,
+                            in_hi,
+                            out_lo,
+                            out_hi
+                        );
                     }
                 }
             }
@@ -1843,13 +2338,17 @@ mod tests {
         let indices = g.push_group(
             num_indices,
             ScalarOp::Literal(NumericScalar::I64(0)),
-            vec![], vec![], vec![],
+            vec![],
+            vec![],
+            vec![],
         );
 
         // Stride literal (single atom)
         let stride_lit = g.push_atom(
             ScalarOp::Literal(NumericScalar::I64(d_total as i64)),
-            vec![], vec![], vec![],
+            vec![],
+            vec![],
+            vec![],
         );
 
         let out_count = num_indices * d_total;
@@ -1867,18 +2366,18 @@ mod tests {
                 compute_dtype: DType::I64,
                 output_dtype: DType::I64,
             },
-            vec![], vec![],
-            vec![
-                InputRef::Explicit(mul_ids),
-                InputRef::Broadcast(stride_lit),
-            ],
+            vec![],
+            vec![],
+            vec![InputRef::Explicit(mul_ids), InputRef::Broadcast(stride_lit)],
         );
 
         // Column offset literals
         let col_offsets = g.push_group(
             out_count,
             ScalarOp::Literal(NumericScalar::I64(0)),
-            vec![], vec![], vec![],
+            vec![],
+            vec![],
+            vec![],
         );
 
         // Add group: mul + col_offset
@@ -1889,10 +2388,17 @@ mod tests {
                 compute_dtype: DType::I64,
                 output_dtype: DType::I64,
             },
-            vec![], vec![],
+            vec![],
+            vec![],
             vec![
-                InputRef::Affine { base: mul_base, stride: 1 },
-                InputRef::Affine { base: col_offsets, stride: 1 },
+                InputRef::Affine {
+                    base: mul_base,
+                    stride: 1,
+                },
+                InputRef::Affine {
+                    base: col_offsets,
+                    stride: 1,
+                },
             ],
         );
 
@@ -1900,7 +2406,9 @@ mod tests {
         let data_table = g.push_group(
             table_size,
             ScalarOp::Literal(NumericScalar::F32(1.0)),
-            vec![], vec![], vec![],
+            vec![],
+            vec![],
+            vec![],
         );
 
         // IndirectLoad group
@@ -1910,8 +2418,12 @@ mod tests {
                 table_base: data_table,
                 output_dtype: DType::F32,
             },
-            vec![], vec![],
-            vec![InputRef::Affine { base: add_base, stride: 1 }],
+            vec![],
+            vec![],
+            vec![InputRef::Affine {
+                base: add_base,
+                stride: 1,
+            }],
         );
 
         for i in 0..out_count {
@@ -1934,10 +2446,18 @@ mod tests {
 
                     // Get reduce parameters if applicable.
                     let (reduce_count, reduce_stride) = match &group.op {
-                        ScalarOp::ReduceSum { reduce_count, reduce_stride, .. }
-                        | ScalarOp::ReduceMax { reduce_count, reduce_stride, .. }
-                            if *reduce_count > 1 && *reduce_stride != 0 =>
-                            (*reduce_count, *reduce_stride),
+                        ScalarOp::ReduceSum {
+                            reduce_count,
+                            reduce_stride,
+                            ..
+                        }
+                        | ScalarOp::ReduceMax {
+                            reduce_count,
+                            reduce_stride,
+                            ..
+                        } if *reduce_count > 1 && *reduce_stride != 0 => {
+                            (*reduce_count, *reduce_stride)
+                        }
                         _ => (1, 0),
                     };
 
@@ -1948,18 +2468,32 @@ mod tests {
                                 span.graph.contains_atom(base),
                                 "Phase {} lane {} group {} (base={}, op={:?}) input {} offset {}: \
                                  references atom {} which doesn't exist in span graph",
-                                phase_idx, lane_idx,
-                                gi, group.base_id, group.op, inp_idx, i, base,
+                                phase_idx,
+                                lane_idx,
+                                gi,
+                                group.base_id,
+                                group.op,
+                                inp_idx,
+                                i,
+                                base,
                             );
                             // Also check reduce-extended atoms.
                             for k in 1..reduce_count {
-                                let ext_atom = AtomId((base.0 as i64 + k as i64 * reduce_stride) as u64);
+                                let ext_atom =
+                                    AtomId((base.0 as i64 + k as i64 * reduce_stride) as u64);
                                 assert!(
                                     span.graph.contains_atom(ext_atom),
                                     "Phase {} lane {} group {} (base={}, op={:?}) input {} offset {} \
                                      reduce step k={}: references atom {} which doesn't exist in span graph",
-                                    phase_idx, lane_idx,
-                                    gi, group.base_id, group.op, inp_idx, i, k, ext_atom,
+                                    phase_idx,
+                                    lane_idx,
+                                    gi,
+                                    group.base_id,
+                                    group.op,
+                                    inp_idx,
+                                    i,
+                                    k,
+                                    ext_atom,
                                 );
                             }
                         }
@@ -1969,7 +2503,11 @@ mod tests {
                             span.graph.contains_atom(*table_base),
                             "Phase {} lane {} group {} (base={}, IndirectLoad): \
                              table_base {} doesn't exist in span graph",
-                            phase_idx, lane_idx, gi, group.base_id, table_base,
+                            phase_idx,
+                            lane_idx,
+                            gi,
+                            group.base_id,
+                            table_base,
                         );
                     }
                 }
@@ -2050,7 +2588,11 @@ mod tests {
         verify_output_coverage(&g, &plan);
         verify_input_availability(&plan, &g);
         verify_phase_independence(&plan);
-        println!("Cross-lane pattern: {} phases, {} lanes", plan.phases.len(), plan.num_lanes);
+        println!(
+            "Cross-lane pattern: {} phases, {} lanes",
+            plan.phases.len(),
+            plan.num_lanes
+        );
         plan.print_summary();
     }
 
@@ -2061,7 +2603,11 @@ mod tests {
         let plan = plan_execution_spans(&g, 4);
         verify_span_plan(&g, &plan);
         verify_output_coverage(&g, &plan);
-        assert!(plan.phases.len() <= 10, "Should have <= 10 phases, got {}", plan.phases.len());
+        assert!(
+            plan.phases.len() <= 10,
+            "Should have <= 10 phases, got {}",
+            plan.phases.len()
+        );
     }
 
     #[test]
@@ -2087,7 +2633,12 @@ mod tests {
             verify_input_availability(&plan, &graph);
             verify_phase_independence(&plan);
             validate_all_spans_self_contained(&plan);
-            println!("  {}: {} phases, {} lanes", name, plan.phases.len(), plan.num_lanes);
+            println!(
+                "  {}: {} phases, {} lanes",
+                name,
+                plan.phases.len(),
+                plan.num_lanes
+            );
         }
     }
 
@@ -2157,19 +2708,43 @@ mod tests {
         let mut g = NanoGraph::new();
 
         // Matmul: A[m,k] * B[k,n] → mul groups → reduce → result[m,n]
-        let a_base = g.push_group(m * k, ScalarOp::Literal(NumericScalar::F32(1.0)), vec![], vec![], vec![]);
-        let b_base = g.push_group(k * n, ScalarOp::Literal(NumericScalar::F32(1.0)), vec![], vec![], vec![]);
+        let a_base = g.push_group(
+            m * k,
+            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
+        let b_base = g.push_group(
+            k * n,
+            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
 
         let mut mul_bases = Vec::new();
         for row in 0..m {
             let a_row = AtomId(a_base.0 + row * k);
             let mul = g.push_group(
                 k * n,
-                ScalarOp::Binary { op: ScalarBinOp::Mul, compute_dtype: DType::F32, output_dtype: DType::F32 },
-                vec![], vec![],
+                ScalarOp::Binary {
+                    op: ScalarBinOp::Mul,
+                    compute_dtype: DType::F32,
+                    output_dtype: DType::F32,
+                },
+                vec![],
+                vec![],
                 vec![
-                    InputRef::StridedBroadcast { base: a_row, stride: 1, repeat: n },
-                    InputRef::Affine { base: b_base, stride: 1 },
+                    InputRef::StridedBroadcast {
+                        base: a_row,
+                        stride: 1,
+                        repeat: n,
+                    },
+                    InputRef::Affine {
+                        base: b_base,
+                        stride: 1,
+                    },
                 ],
             );
             mul_bases.push(mul);
@@ -2178,9 +2753,18 @@ mod tests {
         for row in 0..m {
             let red = g.push_group(
                 n,
-                ScalarOp::ReduceSum { reduce_count: k, reduce_stride: n as i64, compute_dtype: DType::F32, output_dtype: DType::F32 },
-                vec![], vec![],
-                vec![InputRef::Affine { base: mul_bases[row as usize], stride: 1 }],
+                ScalarOp::ReduceSum {
+                    reduce_count: k,
+                    reduce_stride: n as i64,
+                    compute_dtype: DType::F32,
+                    output_dtype: DType::F32,
+                },
+                vec![],
+                vec![],
+                vec![InputRef::Affine {
+                    base: mul_bases[row as usize],
+                    stride: 1,
+                }],
             );
             red_bases.push(red);
         }
@@ -2188,7 +2772,9 @@ mod tests {
         // Now: divisor literal (small, count=1) — needed in a LATER phase
         let divisor = g.push_atom(
             ScalarOp::Literal(NumericScalar::I64(42)),
-            vec![], vec![], vec![],
+            vec![],
+            vec![],
+            vec![],
         );
 
         // Division by divisor — depends on reduce results (phase 1+)
@@ -2200,9 +2786,13 @@ mod tests {
                 compute_dtype: DType::F32,
                 output_dtype: DType::F32,
             },
-            vec![], vec![],
+            vec![],
+            vec![],
             vec![
-                InputRef::Affine { base: red_bases[0], stride: 1 },
+                InputRef::Affine {
+                    base: red_bases[0],
+                    stride: 1,
+                },
                 InputRef::Broadcast(divisor),
             ],
         );
@@ -2222,7 +2812,11 @@ mod tests {
         assert!(g.validate().is_empty(), "graph validation failed");
         let plan = plan_execution_spans(&g, 4);
         plan.print_summary();
-        assert!(plan.phases.len() >= 2, "Expected multi-phase, got {}", plan.phases.len());
+        assert!(
+            plan.phases.len() >= 2,
+            "Expected multi-phase, got {}",
+            plan.phases.len()
+        );
         verify_span_plan(&g, &plan);
         verify_output_coverage(&g, &plan);
         verify_input_availability(&plan, &g);
@@ -2255,7 +2849,9 @@ mod tests {
         let data0 = g.push_group(
             n,
             ScalarOp::Literal(NumericScalar::F32(1.0)),
-            vec![], vec![], vec![],
+            vec![],
+            vec![],
+            vec![],
         );
 
         // Adjacent literal: the reduce stride sweeps through here.
@@ -2263,21 +2859,27 @@ mod tests {
         let lit_adj = g.push_group(
             n,
             ScalarOp::Literal(NumericScalar::I64(42)),
-            vec![], vec![], vec![],
+            vec![],
+            vec![],
+            vec![],
         );
 
         // Data part 1: continue the data range.
         let data1 = g.push_group(
             n,
             ScalarOp::Literal(NumericScalar::F32(2.0)),
-            vec![], vec![], vec![],
+            vec![],
+            vec![],
+            vec![],
         );
 
         // Data part 2
         let _data2 = g.push_group(
             n,
             ScalarOp::Literal(NumericScalar::F32(3.0)),
-            vec![], vec![], vec![],
+            vec![],
+            vec![],
+            vec![],
         );
 
         // ReduceSum: n outputs, reduce_count=4, reduce_stride=n.
@@ -2294,8 +2896,12 @@ mod tests {
                 compute_dtype: DType::F32,
                 output_dtype: DType::F32,
             },
-            vec![], vec![],
-            vec![InputRef::Affine { base: data0, stride: 1 }],
+            vec![],
+            vec![],
+            vec![InputRef::Affine {
+                base: data0,
+                stride: 1,
+            }],
         );
 
         for i in 0..n {
@@ -2333,7 +2939,11 @@ mod tests {
         ];
 
         for (name, graph, lanes) in configs {
-            assert!(graph.validate().is_empty(), "{}: graph validation failed", name);
+            assert!(
+                graph.validate().is_empty(),
+                "{}: graph validation failed",
+                name
+            );
             let plan = plan_execution_spans(&graph, lanes);
             validate_all_spans_self_contained(&plan);
         }

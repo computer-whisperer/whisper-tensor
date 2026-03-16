@@ -1,3 +1,4 @@
+#![allow(clippy::all, dead_code, unused_variables, unused_imports)]
 //! Simplified scalar DAG for partitioner development.
 //!
 //! Strips away NanoGraph's compression (AtomGroups, InputRef addressing modes,
@@ -92,7 +93,10 @@ impl SimpleDag {
                     errors.push(format!("Op {} references nonexistent input {}", i, input));
                 }
                 if input >= i as u32 {
-                    errors.push(format!("Op {} references non-earlier input {} (not a DAG)", i, input));
+                    errors.push(format!(
+                        "Op {} references non-earlier input {} (not a DAG)",
+                        i, input
+                    ));
                 }
             }
         }
@@ -205,7 +209,11 @@ impl std::fmt::Display for SimpleCost {
 }
 
 /// Evaluate partition cost.
-pub fn evaluate_cost(dag: &SimpleDag, partition: &SimplePartition, config: &HardwareConfig) -> SimpleCost {
+pub fn evaluate_cost(
+    dag: &SimpleDag,
+    partition: &SimplePartition,
+    config: &HardwareConfig,
+) -> SimpleCost {
     // Build op → kernel mapping.
     let mut op_kernel = vec![0usize; dag.ops.len()];
     for (ki, kernel) in partition.kernels.iter().enumerate() {
@@ -232,7 +240,9 @@ pub fn evaluate_cost(dag: &SimpleDag, partition: &SimplePartition, config: &Hard
         }
     }
 
-    let total_ops = dag.ops.iter()
+    let total_ops = dag
+        .ops
+        .iter()
         .filter(|op| !matches!(op.kind, OpKind::Input | OpKind::Literal))
         .count() as u64;
 
@@ -406,20 +416,24 @@ pub fn build_matmul_into(
 ///
 /// Tests whether the partitioner can identify two separate patterns
 /// and keep them appropriately separated.
-pub fn build_parallel_matmuls(
-    m: u32,
-    k1: u32, n1: u32,
-    k2: u32, n2: u32,
-) -> SimpleDag {
+pub fn build_parallel_matmuls(m: u32, k1: u32, n1: u32, k2: u32, n2: u32) -> SimpleDag {
     let mut dag = SimpleDag::new();
 
     // A1, B1 inputs
-    let a1: Vec<u32> = (0..m * k1).map(|_| dag.push(OpKind::Input, vec![])).collect();
-    let b1: Vec<u32> = (0..k1 * n1).map(|_| dag.push(OpKind::Input, vec![])).collect();
+    let a1: Vec<u32> = (0..m * k1)
+        .map(|_| dag.push(OpKind::Input, vec![]))
+        .collect();
+    let b1: Vec<u32> = (0..k1 * n1)
+        .map(|_| dag.push(OpKind::Input, vec![]))
+        .collect();
 
     // A2, B2 inputs
-    let a2: Vec<u32> = (0..m * k2).map(|_| dag.push(OpKind::Input, vec![])).collect();
-    let b2: Vec<u32> = (0..k2 * n2).map(|_| dag.push(OpKind::Input, vec![])).collect();
+    let a2: Vec<u32> = (0..m * k2)
+        .map(|_| dag.push(OpKind::Input, vec![]))
+        .collect();
+    let b2: Vec<u32> = (0..k2 * n2)
+        .map(|_| dag.push(OpKind::Input, vec![]))
+        .collect();
 
     // Build both matmuls
     let out1 = build_matmul_into(&mut dag, &a1, &b1, m, k1, n1);
@@ -436,22 +450,23 @@ pub fn build_parallel_matmuls(
 ///
 /// Tests whether the partitioner recognizes shared input and tiles
 /// both matmuls to share loads of X.
-pub fn build_shared_input_matmuls(
-    m: u32,
-    d: u32,
-    dq: u32,
-    dk: u32,
-) -> SimpleDag {
+pub fn build_shared_input_matmuls(m: u32, d: u32, dq: u32, dk: u32) -> SimpleDag {
     let mut dag = SimpleDag::new();
 
     // Shared input X[M, D]
-    let x: Vec<u32> = (0..m * d).map(|_| dag.push(OpKind::Input, vec![])).collect();
+    let x: Vec<u32> = (0..m * d)
+        .map(|_| dag.push(OpKind::Input, vec![]))
+        .collect();
 
     // Wq[D, Dq]
-    let wq: Vec<u32> = (0..d * dq).map(|_| dag.push(OpKind::Input, vec![])).collect();
+    let wq: Vec<u32> = (0..d * dq)
+        .map(|_| dag.push(OpKind::Input, vec![]))
+        .collect();
 
     // Wk[D, Dk]
-    let wk: Vec<u32> = (0..d * dk).map(|_| dag.push(OpKind::Input, vec![])).collect();
+    let wk: Vec<u32> = (0..d * dk)
+        .map(|_| dag.push(OpKind::Input, vec![]))
+        .collect();
 
     // Q = X @ Wq
     let q = build_matmul_into(&mut dag, &x, &wq, m, d, dq);
@@ -469,20 +484,24 @@ pub fn build_shared_input_matmuls(
 /// Q = tanh(X @ Wq)
 /// K = tanh(X @ Wk)
 /// V = tanh(X @ Wv)
-pub fn build_qkv_projections(
-    m: u32,
-    d: u32,
-    d_head: u32,
-) -> SimpleDag {
+pub fn build_qkv_projections(m: u32, d: u32, d_head: u32) -> SimpleDag {
     let mut dag = SimpleDag::new();
 
     // Shared input X[M, D]
-    let x: Vec<u32> = (0..m * d).map(|_| dag.push(OpKind::Input, vec![])).collect();
+    let x: Vec<u32> = (0..m * d)
+        .map(|_| dag.push(OpKind::Input, vec![]))
+        .collect();
 
     // Three weight matrices
-    let wq: Vec<u32> = (0..d * d_head).map(|_| dag.push(OpKind::Input, vec![])).collect();
-    let wk: Vec<u32> = (0..d * d_head).map(|_| dag.push(OpKind::Input, vec![])).collect();
-    let wv: Vec<u32> = (0..d * d_head).map(|_| dag.push(OpKind::Input, vec![])).collect();
+    let wq: Vec<u32> = (0..d * d_head)
+        .map(|_| dag.push(OpKind::Input, vec![]))
+        .collect();
+    let wk: Vec<u32> = (0..d * d_head)
+        .map(|_| dag.push(OpKind::Input, vec![]))
+        .collect();
+    let wv: Vec<u32> = (0..d * d_head)
+        .map(|_| dag.push(OpKind::Input, vec![]))
+        .collect();
 
     // Q, K, V projections
     let q = build_matmul_into(&mut dag, &x, &wq, m, d, d_head);
@@ -654,8 +673,12 @@ mod tests {
         // Split: inputs in kernel 0, adds in kernel 1.
         let partition = SimplePartition {
             kernels: vec![
-                SimpleKernel { ops: (0..128).collect() },      // A and B
-                SimpleKernel { ops: (128..192).collect() },     // C = A + B
+                SimpleKernel {
+                    ops: (0..128).collect(),
+                }, // A and B
+                SimpleKernel {
+                    ops: (128..192).collect(),
+                }, // C = A + B
             ],
         };
         let config = HardwareConfig::default();

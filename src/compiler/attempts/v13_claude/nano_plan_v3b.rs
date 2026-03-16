@@ -1,4 +1,10 @@
-#![allow(clippy::all, dead_code, unreachable_patterns, unused_variables, unused_imports)]
+#![allow(
+    clippy::all,
+    dead_code,
+    unreachable_patterns,
+    unused_variables,
+    unused_imports
+)]
 //! Split-first span partitioner v3b.
 //!
 //! Previous attempts failed because they assigned phases first, then tried to
@@ -127,19 +133,33 @@ pub fn plan_spans(graph: &NanoGraph, num_lanes: usize) -> SpanPlan {
         build_vnode_dag(groups, &producers, &is_literal, &split_class, num_lanes);
 
     // Step 4: Assign phases on the virtual DAG.
-    let (vnode_phase, num_phases) =
-        assign_vnode_phases(&vnodes, &vnode_producers, &is_literal);
+    let (vnode_phase, num_phases) = assign_vnode_phases(&vnodes, &vnode_producers, &is_literal);
 
     // Step 5: Assign lanes. Split vnodes already have lanes. Unsplit vnodes
     // get assigned to the least-loaded lane in their phase.
     let vnode_lane = assign_vnode_lanes(
-        &vnodes, &vnode_producers, &vnode_phase, num_phases, num_lanes, groups, &is_literal,
+        &vnodes,
+        &vnode_producers,
+        &vnode_phase,
+        num_phases,
+        num_lanes,
+        groups,
+        &is_literal,
     );
 
     // Step 6: Build spans.
     build_spans(
-        graph, groups, &is_literal, &vnodes, &vnode_phase, &vnode_lane,
-        &producers, &consumers, &group_to_vnodes, num_lanes, num_phases,
+        graph,
+        groups,
+        &is_literal,
+        &vnodes,
+        &vnode_phase,
+        &vnode_lane,
+        &producers,
+        &consumers,
+        &group_to_vnodes,
+        num_lanes,
+        num_phases,
     )
 }
 
@@ -188,7 +208,14 @@ fn classify_splits(
         // Check if every input is lane-decomposable.
         let mut can_split = true;
         for input in &group.inputs {
-            if !is_input_lane_decomposable(input, group.count, groups, producers, is_literal, num_lanes) {
+            if !is_input_lane_decomposable(
+                input,
+                group.count,
+                groups,
+                producers,
+                is_literal,
+                num_lanes,
+            ) {
                 can_split = false;
                 break;
             }
@@ -216,10 +243,16 @@ fn classify_splits(
         // read ranges. We must check this.
         if can_split {
             match &group.op {
-                ScalarOp::ReduceSum { reduce_count, reduce_stride, .. }
-                | ScalarOp::ReduceMax { reduce_count, reduce_stride, .. }
-                    if *reduce_count > 1 && *reduce_stride != 0 =>
-                {
+                ScalarOp::ReduceSum {
+                    reduce_count,
+                    reduce_stride,
+                    ..
+                }
+                | ScalarOp::ReduceMax {
+                    reduce_count,
+                    reduce_stride,
+                    ..
+                } if *reduce_count > 1 && *reduce_stride != 0 => {
                     // The reduce extends reads. Check that splitting the count
                     // dimension doesn't cause lane j to read atoms that belong
                     // to a different lane's producer slice.
@@ -339,7 +372,11 @@ fn is_input_lane_decomposable(
             // chunk reads the same single atom.
             true
         }
-        InputRef::StridedBroadcast { base, stride, repeat } => {
+        InputRef::StridedBroadcast {
+            base,
+            stride,
+            repeat,
+        } => {
             // atom i reads base + stride * (i / repeat).
             // When split into N chunks of consumer_count/N each:
             // chunk j reads atoms base + stride * (floor((j*consumer_count/N + local_i) / repeat))
@@ -354,7 +391,11 @@ fn is_input_lane_decomposable(
             // source indices. Splitting into contiguous chunks preserves this.
             true
         }
-        InputRef::Modular { base, stride, modulus } => {
+        InputRef::Modular {
+            base,
+            stride,
+            modulus,
+        } => {
             // atom i reads base + stride * (i % modulus).
             // This wraps around — all chunks read the same set of `modulus`
             // source atoms. Not lane-decomposable (each lane needs the full
@@ -482,7 +523,13 @@ fn build_vnode_dag(
                 //
                 // This depends on the InputRef pattern and the atom offsets.
                 let relevant = find_relevant_producer_vnodes(
-                    vnode, group, &groups[prod_gi], prod_gi, prod_vnodes_list, &vnodes, groups,
+                    vnode,
+                    group,
+                    &groups[prod_gi],
+                    prod_gi,
+                    prod_vnodes_list,
+                    &vnodes,
+                    groups,
                 );
                 for pvi in relevant {
                     prod_vnodes.insert(pvi);
@@ -517,9 +564,8 @@ fn find_relevant_producer_vnodes(
     let mut result = Vec::new();
 
     // Compute the range of producer atoms that the consumer vnode reads.
-    let (read_lo, read_hi) = compute_consumer_read_range(
-        consumer_vnode, consumer_group, producer_group, all_groups,
-    );
+    let (read_lo, read_hi) =
+        compute_consumer_read_range(consumer_vnode, consumer_group, producer_group, all_groups);
 
     if read_hi <= read_lo {
         return result;
@@ -554,10 +600,16 @@ fn compute_consumer_read_range(
     let c_count = consumer_vnode.atom_count;
 
     let (is_reduce, reduce_count, reduce_stride) = match &consumer_group.op {
-        ScalarOp::ReduceSum { reduce_count, reduce_stride, .. }
-        | ScalarOp::ReduceMax { reduce_count, reduce_stride, .. }
-            if *reduce_count > 1 && *reduce_stride != 0 =>
-            (true, *reduce_count, *reduce_stride),
+        ScalarOp::ReduceSum {
+            reduce_count,
+            reduce_stride,
+            ..
+        }
+        | ScalarOp::ReduceMax {
+            reduce_count,
+            reduce_stride,
+            ..
+        } if *reduce_count > 1 && *reduce_stride != 0 => (true, *reduce_count, *reduce_stride),
         _ => (false, 0, 0),
     };
 
@@ -566,7 +618,12 @@ fn compute_consumer_read_range(
 
     for input in &consumer_group.inputs {
         let (range_lo, range_hi) = input_ref_range_for_slice(
-            input, c_offset, c_count, is_reduce, reduce_count, reduce_stride,
+            input,
+            c_offset,
+            c_count,
+            is_reduce,
+            reduce_count,
+            reduce_stride,
         );
         if range_hi <= prod_lo || range_lo >= prod_hi {
             continue;
@@ -607,10 +664,14 @@ fn input_ref_range_for_slice(
     }
     let min_reduce_ext = if is_reduce {
         0i64.min(reduce_stride * (reduce_count as i64 - 1))
-    } else { 0 };
+    } else {
+        0
+    };
     let max_reduce_ext = if is_reduce {
         0i64.max(reduce_stride * (reduce_count as i64 - 1))
-    } else { 0 };
+    } else {
+        0
+    };
 
     match input {
         InputRef::Broadcast(id) => {
@@ -625,7 +686,11 @@ fn input_ref_range_for_slice(
             let hi = first.max(last) + max_reduce_ext + 1;
             (lo as u64, hi as u64)
         }
-        InputRef::StridedBroadcast { base, stride, repeat } => {
+        InputRef::StridedBroadcast {
+            base,
+            stride,
+            repeat,
+        } => {
             let first_block = (offset / repeat) as i64;
             let last_block = ((offset + count - 1) / repeat) as i64;
             let first_read = base.0 as i64 + stride * first_block;
@@ -634,7 +699,11 @@ fn input_ref_range_for_slice(
             let hi = first_read.max(last_read) + max_reduce_ext + 1;
             (lo as u64, hi as u64)
         }
-        InputRef::Modular { base, stride, modulus } => {
+        InputRef::Modular {
+            base,
+            stride,
+            modulus,
+        } => {
             if *modulus == 0 {
                 return (0, 0);
             }
@@ -769,7 +838,8 @@ fn assign_vnode_phases(
         let family_convergence = prod_families_at_max.len() > 1;
 
         let lane_conflict = {
-            let non_any_lanes: HashSet<u32> = prod_lanes_at_max.iter()
+            let non_any_lanes: HashSet<u32> = prod_lanes_at_max
+                .iter()
                 .copied()
                 .filter(|&l| l != LANE_ANY)
                 .collect();
@@ -863,7 +933,10 @@ fn assign_vnode_lanes(
         // Collect LANE_ANY vnodes in this phase.
         let mut any_vnodes: Vec<usize> = Vec::new();
         for vi in 0..nv {
-            if vnode_phase[vi] == phase && vnodes[vi].lane == LANE_ANY && !is_literal[vnodes[vi].group_idx] {
+            if vnode_phase[vi] == phase
+                && vnodes[vi].lane == LANE_ANY
+                && !is_literal[vnodes[vi].group_idx]
+            {
                 any_vnodes.push(vi);
             }
         }
@@ -931,7 +1004,10 @@ fn assign_vnode_lanes(
         // Compute per-lane load from already-assigned vnodes in this phase.
         let mut lane_load = vec![0u64; num_lanes];
         for vi in 0..nv {
-            if vnode_phase[vi] == phase && vnodes[vi].lane != LANE_ANY && !is_literal[vnodes[vi].group_idx] {
+            if vnode_phase[vi] == phase
+                && vnodes[vi].lane != LANE_ANY
+                && !is_literal[vnodes[vi].group_idx]
+            {
                 lane_load[vnodes[vi].lane as usize] += vnodes[vi].atom_count;
             }
         }
@@ -944,7 +1020,12 @@ fn assign_vnode_lanes(
                 forced
             } else {
                 // Assign to least-loaded lane.
-                lane_load.iter().enumerate().min_by_key(|&(_, load)| *load).unwrap().0
+                lane_load
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|&(_, load)| *load)
+                    .unwrap()
+                    .0
             };
 
             for &vi in chain {
@@ -1032,9 +1113,7 @@ fn build_spans(
                 continue;
             }
 
-            let span = build_single_span(
-                graph, groups, is_literal, lane_work,
-            );
+            let span = build_single_span(graph, groups, is_literal, lane_work);
             spans.push(span);
         }
 
@@ -1051,7 +1130,9 @@ struct RangeAtomMap {
 
 impl RangeAtomMap {
     fn new() -> Self {
-        Self { map: BTreeMap::new() }
+        Self {
+            map: BTreeMap::new(),
+        }
     }
 
     fn insert_range(&mut self, main_base: AtomId, span_base: AtomId, count: u64) {
@@ -1060,7 +1141,9 @@ impl RangeAtomMap {
 
     fn get(&self, main_id: AtomId) -> Option<AtomId> {
         use std::ops::Bound;
-        let mut iter = self.map.range((Bound::Unbounded, Bound::Included(main_id.0)));
+        let mut iter = self
+            .map
+            .range((Bound::Unbounded, Bound::Included(main_id.0)));
         if let Some((&base, &(span_base, count))) = iter.next_back() {
             let offset = main_id.0.wrapping_sub(base);
             if offset < count {
@@ -1108,7 +1191,8 @@ fn build_single_span(
         let lit_group = &groups[lit_gi];
         if lit_group.count < LITERAL_INLINE_THRESHOLD {
             let local_base = span_graph.push_group(
-                lit_group.count, lit_group.op.clone(),
+                lit_group.count,
+                lit_group.op.clone(),
                 remap_sym_dims(&lit_group.sym_dims, main_graph, &span_graph),
                 remap_sym_dims(&lit_group.reduce_dims, main_graph, &span_graph),
                 vec![],
@@ -1133,8 +1217,14 @@ fn build_single_span(
     for &(gi, atom_offset, atom_count) in lane_work {
         let group = &groups[gi];
         collect_external_ranges(
-            group, atom_offset, atom_count, groups, is_literal,
-            lane_work, &inlined_literals, &mut external_ranges,
+            group,
+            atom_offset,
+            atom_count,
+            groups,
+            is_literal,
+            lane_work,
+            &inlined_literals,
+            &mut external_ranges,
         );
     }
 
@@ -1148,7 +1238,9 @@ fn build_single_span(
         let local_base = span_graph.push_group(
             count,
             ScalarOp::Literal(crate::numeric_scalar::NumericScalar::F32(0.0)),
-            vec![], vec![], vec![],
+            vec![],
+            vec![],
+            vec![],
         );
         main_to_local.insert_range(main_base, local_base, count);
         input_mappings.push(AtomMapping {
@@ -1165,13 +1257,18 @@ fn build_single_span(
         let group = &groups[gi];
 
         let local_inputs = remap_inputs_range(
-            &group.inputs, &group.op, atom_offset, atom_count,
-            group.count, &main_to_local,
+            &group.inputs,
+            &group.op,
+            atom_offset,
+            atom_count,
+            group.count,
+            &main_to_local,
         );
         let local_op = remap_op(&group.op, &main_to_local);
 
         let local_base = span_graph.push_group(
-            atom_count, local_op,
+            atom_count,
+            local_op,
             remap_sym_dims(&group.sym_dims, main_graph, &span_graph),
             remap_sym_dims(&group.reduce_dims, main_graph, &span_graph),
             local_inputs,
@@ -1241,16 +1338,24 @@ fn collect_external_ranges(
     };
 
     let (is_reduce, reduce_count, reduce_stride) = match &group.op {
-        ScalarOp::ReduceSum { reduce_count, reduce_stride, .. }
-        | ScalarOp::ReduceMax { reduce_count, reduce_stride, .. }
-            if *reduce_count > 1 && *reduce_stride != 0 =>
-            (true, *reduce_count, *reduce_stride),
+        ScalarOp::ReduceSum {
+            reduce_count,
+            reduce_stride,
+            ..
+        }
+        | ScalarOp::ReduceMax {
+            reduce_count,
+            reduce_stride,
+            ..
+        } if *reduce_count > 1 && *reduce_stride != 0 => (true, *reduce_count, *reduce_stride),
         _ => (false, 0, 0),
     };
 
     for input in &group.inputs {
         let referenced = resolve_input_to_group_ranges(
-            input, atom_offset, atom_count,
+            input,
+            atom_offset,
+            atom_count,
             if is_reduce { reduce_count } else { 1 },
             if is_reduce { reduce_stride } else { 0 },
             all_groups,
@@ -1333,15 +1438,21 @@ fn resolve_input_to_group_ranges(
                 // High stride: bounding box approach.
                 let base_lo = first_pos.min(last_pos);
                 let base_hi = first_pos.max(last_pos);
-                let (ext_lo, ext_hi) = reduce_extent_range(base_lo, base_hi, reduce_count, reduce_stride);
+                let (ext_lo, ext_hi) =
+                    reduce_extent_range(base_lo, base_hi, reduce_count, reduce_stride);
                 let candidates = find_groups_in_range(groups, ext_lo as u64, ext_hi as u64);
                 for gi in candidates {
                     let g = &groups[gi];
                     let g_lo = g.base_id.0 as i64;
                     let g_hi = g_lo + g.count as i64;
                     if affine_touches_range(
-                        first_pos, *stride as i64, count, g_lo, g_hi,
-                        reduce_count, reduce_stride,
+                        first_pos,
+                        *stride as i64,
+                        count,
+                        g_lo,
+                        g_hi,
+                        reduce_count,
+                        reduce_stride,
                     ) {
                         let overlap_lo = (g_lo as u64).max(ext_lo as u64);
                         let overlap_hi = (g_hi as u64).min((ext_hi + 1) as u64);
@@ -1350,7 +1461,11 @@ fn resolve_input_to_group_ranges(
                 }
             }
         }
-        InputRef::StridedBroadcast { base, stride, repeat } => {
+        InputRef::StridedBroadcast {
+            base,
+            stride,
+            repeat,
+        } => {
             let first_block = offset / repeat;
             let last_block = (offset + count - 1) / repeat;
             // Compute bounding box for all blocks.
@@ -1363,7 +1478,11 @@ fn resolve_input_to_group_ranges(
                 result.push((gi, lo as u64, (hi + 1) as u64));
             }
         }
-        InputRef::Modular { base, stride, modulus } => {
+        InputRef::Modular {
+            base,
+            stride,
+            modulus,
+        } => {
             if *modulus == 0 {
                 return result;
             }
@@ -1388,7 +1507,9 @@ fn resolve_input_to_group_ranges(
                 let atom = ids[i];
                 let (lo, hi) = reduce_extent(atom.0 as i64, reduce_count, reduce_stride);
                 for gi in find_groups_in_range(groups, lo as u64, hi as u64) {
-                    let entry = group_ranges.entry(gi).or_insert((lo as u64, (hi + 1) as u64));
+                    let entry = group_ranges
+                        .entry(gi)
+                        .or_insert((lo as u64, (hi + 1) as u64));
                     entry.0 = entry.0.min(lo as u64);
                     entry.1 = entry.1.max((hi + 1) as u64);
                 }
@@ -1397,12 +1518,17 @@ fn resolve_input_to_group_ranges(
                 result.push((gi, lo, hi));
             }
         }
-        InputRef::SymAffine { base, stride_i, stride_k } => {
+        InputRef::SymAffine {
+            base,
+            stride_i,
+            stride_k,
+        } => {
             let first_pos = base.0 as i64 + *stride_i as i64 * offset as i64;
             let last_pos = base.0 as i64 + *stride_i as i64 * (offset + count - 1) as i64;
             let base_lo = first_pos.min(last_pos);
             let base_hi = first_pos.max(last_pos);
-            let (ext_lo, ext_hi) = reduce_extent_range(base_lo, base_hi, reduce_count, reduce_stride);
+            let (ext_lo, ext_hi) =
+                reduce_extent_range(base_lo, base_hi, reduce_count, reduce_stride);
 
             if stride_i.unsigned_abs() <= 1 {
                 for gi in find_groups_in_range(groups, ext_lo as u64, ext_hi as u64) {
@@ -1415,8 +1541,13 @@ fn resolve_input_to_group_ranges(
                     let g_lo = g.base_id.0 as i64;
                     let g_hi = g_lo + g.count as i64;
                     if affine_touches_range(
-                        first_pos, *stride_i as i64, count, g_lo, g_hi,
-                        reduce_count, reduce_stride,
+                        first_pos,
+                        *stride_i as i64,
+                        count,
+                        g_lo,
+                        g_hi,
+                        reduce_count,
+                        reduce_stride,
                     ) {
                         let overlap_lo = (g_lo as u64).max(ext_lo as u64);
                         let overlap_hi = (g_hi as u64).min((ext_hi + 1) as u64);
@@ -1440,9 +1571,10 @@ fn remap_inputs_range(
     orig_group_count: u64,
     atom_map: &RangeAtomMap,
 ) -> Vec<InputRef> {
-    inputs.iter().map(|input| {
-        remap_single_input(input, atom_offset, atom_count, orig_group_count, atom_map)
-    }).collect()
+    inputs
+        .iter()
+        .map(|input| remap_single_input(input, atom_offset, atom_count, orig_group_count, atom_map))
+        .collect()
 }
 
 fn remap_single_input(
@@ -1453,17 +1585,22 @@ fn remap_single_input(
     atom_map: &RangeAtomMap,
 ) -> InputRef {
     match input {
-        InputRef::Broadcast(id) => {
-            InputRef::Broadcast(atom_map.get(*id).unwrap_or(*id))
-        }
+        InputRef::Broadcast(id) => InputRef::Broadcast(atom_map.get(*id).unwrap_or(*id)),
         InputRef::Affine { base, stride } => {
-            let new_base_raw = AtomId(base.0.wrapping_add((*stride as i64 * atom_offset as i64) as u64));
+            let new_base_raw = AtomId(
+                base.0
+                    .wrapping_add((*stride as i64 * atom_offset as i64) as u64),
+            );
             InputRef::Affine {
                 base: atom_map.get(new_base_raw).unwrap_or(new_base_raw),
                 stride: *stride,
             }
         }
-        InputRef::StridedBroadcast { base, stride, repeat } => {
+        InputRef::StridedBroadcast {
+            base,
+            stride,
+            repeat,
+        } => {
             let block_idx = (atom_offset / repeat) as i64;
             let new_base_raw = AtomId(base.0.wrapping_add((stride * block_idx) as u64));
             let new_offset_in_block = atom_offset % repeat;
@@ -1483,15 +1620,24 @@ fn remap_single_input(
                 InputRef::Explicit(ids)
             }
         }
-        InputRef::Modular { base, stride, modulus } => {
-            InputRef::Modular {
-                base: atom_map.get(*base).unwrap_or(*base),
-                stride: *stride,
-                modulus: *modulus,
-            }
-        }
-        InputRef::SymAffine { base, stride_i, stride_k } => {
-            let new_base_raw = AtomId(base.0.wrapping_add((*stride_i as i64 * atom_offset as i64) as u64));
+        InputRef::Modular {
+            base,
+            stride,
+            modulus,
+        } => InputRef::Modular {
+            base: atom_map.get(*base).unwrap_or(*base),
+            stride: *stride,
+            modulus: *modulus,
+        },
+        InputRef::SymAffine {
+            base,
+            stride_i,
+            stride_k,
+        } => {
+            let new_base_raw = AtomId(
+                base.0
+                    .wrapping_add((*stride_i as i64 * atom_offset as i64) as u64),
+            );
             InputRef::SymAffine {
                 base: atom_map.get(new_base_raw).unwrap_or(new_base_raw),
                 stride_i: *stride_i,
@@ -1501,9 +1647,16 @@ fn remap_single_input(
         InputRef::Explicit(ids) => {
             let start = atom_offset as usize;
             let end = (atom_offset + atom_count) as usize;
-            let slice = if end <= ids.len() { &ids[start..end] } else { &ids[start..] };
+            let slice = if end <= ids.len() {
+                &ids[start..end]
+            } else {
+                &ids[start..]
+            };
             InputRef::Explicit(
-                slice.iter().map(|id| atom_map.get(*id).unwrap_or(*id)).collect(),
+                slice
+                    .iter()
+                    .map(|id| atom_map.get(*id).unwrap_or(*id))
+                    .collect(),
             )
         }
     }
@@ -1511,7 +1664,10 @@ fn remap_single_input(
 
 fn remap_op(op: &ScalarOp, atom_map: &RangeAtomMap) -> ScalarOp {
     match op {
-        ScalarOp::IndirectLoad { table_base, output_dtype } => ScalarOp::IndirectLoad {
+        ScalarOp::IndirectLoad {
+            table_base,
+            output_dtype,
+        } => ScalarOp::IndirectLoad {
             table_base: atom_map.get(*table_base).unwrap_or(*table_base),
             output_dtype: *output_dtype,
         },
@@ -1557,13 +1713,23 @@ fn collect_literal_deps(
     }
     // ReduceSum/ReduceMax extended access.
     match &group.op {
-        ScalarOp::ReduceSum { reduce_count, reduce_stride, .. }
-        | ScalarOp::ReduceMax { reduce_count, reduce_stride, .. }
-            if *reduce_count > 1 && *reduce_stride != 0 =>
-        {
+        ScalarOp::ReduceSum {
+            reduce_count,
+            reduce_stride,
+            ..
+        }
+        | ScalarOp::ReduceMax {
+            reduce_count,
+            reduce_stride,
+            ..
+        } if *reduce_count > 1 && *reduce_stride != 0 => {
             for input in &group.inputs {
                 let referenced = resolve_producer_groups_with_reduce(
-                    input, group.count, *reduce_count, *reduce_stride, groups,
+                    input,
+                    group.count,
+                    *reduce_count,
+                    *reduce_stride,
+                    groups,
                 );
                 for ref_gi in referenced {
                     if is_literal[ref_gi] {
@@ -1604,13 +1770,23 @@ fn build_group_deps(groups: &[AtomGroup]) -> (Vec<Vec<usize>>, Vec<Vec<usize>>) 
 
         // ReduceSum/ReduceMax strided access.
         match &group.op {
-            ScalarOp::ReduceSum { reduce_count, reduce_stride, .. }
-            | ScalarOp::ReduceMax { reduce_count, reduce_stride, .. }
-                if *reduce_count > 1 && *reduce_stride != 0 =>
-            {
+            ScalarOp::ReduceSum {
+                reduce_count,
+                reduce_stride,
+                ..
+            }
+            | ScalarOp::ReduceMax {
+                reduce_count,
+                reduce_stride,
+                ..
+            } if *reduce_count > 1 && *reduce_stride != 0 => {
                 for input in &group.inputs {
                     for pi in resolve_producer_groups_with_reduce(
-                        input, group.count, *reduce_count, *reduce_stride, groups,
+                        input,
+                        group.count,
+                        *reduce_count,
+                        *reduce_stride,
+                        groups,
                     ) {
                         if pi != gi {
                             prod_set.insert(pi);
@@ -1644,7 +1820,9 @@ fn resolve_producer_groups(input: &InputRef, count: u64, groups: &[AtomGroup]) -
     match input {
         InputRef::Broadcast(atom_id) => find_group_idx(groups, *atom_id).into_iter().collect(),
         InputRef::Affine { base, stride } => {
-            if count == 0 { return vec![]; }
+            if count == 0 {
+                return vec![];
+            }
             let last_offset = (*stride as i64) * (count as i64 - 1);
             let last = AtomId(base.0.wrapping_add(last_offset as u64));
             let lo = base.0.min(last.0);
@@ -1656,21 +1834,31 @@ fn resolve_producer_groups(input: &InputRef, count: u64, groups: &[AtomGroup]) -
             let mut seen = HashSet::new();
             for id in ids {
                 if let Some(gi) = find_group_idx(groups, *id) {
-                    if seen.insert(gi) { result.push(gi); }
+                    if seen.insert(gi) {
+                        result.push(gi);
+                    }
                 }
             }
             result
         }
         InputRef::SymAffine { base, stride_i, .. } => {
-            if count == 0 { return vec![]; }
+            if count == 0 {
+                return vec![];
+            }
             let last_offset = (*stride_i as i64) * (count as i64 - 1);
             let last = AtomId(base.0.wrapping_add(last_offset as u64));
             let lo = base.0.min(last.0);
             let hi = base.0.max(last.0);
             find_groups_in_range(groups, lo, hi)
         }
-        InputRef::StridedBroadcast { base, stride, repeat } => {
-            if count == 0 { return vec![]; }
+        InputRef::StridedBroadcast {
+            base,
+            stride,
+            repeat,
+        } => {
+            if count == 0 {
+                return vec![];
+            }
             let num_blocks = (count + repeat - 1) / repeat;
             let last_offset = *stride * (num_blocks as i64 - 1);
             let last = AtomId(base.0.wrapping_add(last_offset as u64));
@@ -1678,8 +1866,14 @@ fn resolve_producer_groups(input: &InputRef, count: u64, groups: &[AtomGroup]) -
             let hi = base.0.max(last.0);
             find_groups_in_range(groups, lo, hi)
         }
-        InputRef::Modular { base, stride, modulus } => {
-            if *modulus == 0 { return vec![]; }
+        InputRef::Modular {
+            base,
+            stride,
+            modulus,
+        } => {
+            if *modulus == 0 {
+                return vec![];
+            }
             let last_offset = (*stride as i64) * (*modulus as i64 - 1);
             let last = AtomId(base.0.wrapping_add(last_offset as u64));
             let lo = base.0.min(last.0);
@@ -1696,7 +1890,9 @@ fn resolve_producer_groups_with_reduce(
     reduce_stride: i64,
     groups: &[AtomGroup],
 ) -> Vec<usize> {
-    if count == 0 { return vec![]; }
+    if count == 0 {
+        return vec![];
+    }
     let min_reduce_ext = 0i64.min(reduce_stride * (reduce_count as i64 - 1));
     let max_reduce_ext = 0i64.max(reduce_stride * (reduce_count as i64 - 1));
 
@@ -1708,7 +1904,11 @@ fn resolve_producer_groups_with_reduce(
             let hi = first_base.max(last_base) + max_reduce_ext;
             find_groups_in_range(groups, lo as u64, hi as u64)
         }
-        InputRef::StridedBroadcast { base, stride, repeat } => {
+        InputRef::StridedBroadcast {
+            base,
+            stride,
+            repeat,
+        } => {
             let last_block = ((count - 1) / repeat) as i64;
             let first_read = base.0 as i64;
             let last_read = base.0 as i64 + stride * last_block;
@@ -1729,8 +1929,14 @@ fn resolve_producer_groups_with_reduce(
             let hi = first_base.max(last_base) + max_reduce_ext;
             find_groups_in_range(groups, lo as u64, hi as u64)
         }
-        InputRef::Modular { base, stride, modulus } => {
-            if *modulus == 0 { return vec![]; }
+        InputRef::Modular {
+            base,
+            stride,
+            modulus,
+        } => {
+            if *modulus == 0 {
+                return vec![];
+            }
             let first_read = base.0 as i64;
             let last_read = base.0 as i64 + *stride as i64 * (*modulus as i64 - 1);
             let lo = first_read.min(last_read) + min_reduce_ext;
@@ -1756,9 +1962,15 @@ fn resolve_producer_groups_with_reduce(
 
 fn find_group_idx(groups: &[AtomGroup], id: AtomId) -> Option<usize> {
     let idx = groups.partition_point(|g| g.base_id.0 <= id.0);
-    if idx == 0 { return None; }
+    if idx == 0 {
+        return None;
+    }
     let gi = idx - 1;
-    if groups[gi].contains(id) { Some(gi) } else { None }
+    if groups[gi].contains(id) {
+        Some(gi)
+    } else {
+        None
+    }
 }
 
 fn find_groups_in_range(groups: &[AtomGroup], lo: u64, hi: u64) -> Vec<usize> {
@@ -1766,8 +1978,12 @@ fn find_groups_in_range(groups: &[AtomGroup], lo: u64, hi: u64) -> Vec<usize> {
     let start = groups.partition_point(|g| g.base_id.0 + g.count <= lo);
     for gi in start..groups.len() {
         let g = &groups[gi];
-        if g.base_id.0 > hi { break; }
-        if g.count == 0 { continue; }
+        if g.base_id.0 > hi {
+            break;
+        }
+        if g.count == 0 {
+            continue;
+        }
         let g_end = g.base_id.0 + g.count - 1;
         if g.base_id.0 <= hi && g_end >= lo {
             result.push(gi);
@@ -1777,26 +1993,44 @@ fn find_groups_in_range(groups: &[AtomGroup], lo: u64, hi: u64) -> Vec<usize> {
 }
 
 fn reduce_extent(pos: i64, reduce_count: u64, reduce_stride: i64) -> (i64, i64) {
-    if reduce_count <= 1 { return (pos, pos); }
+    if reduce_count <= 1 {
+        return (pos, pos);
+    }
     let ext = reduce_stride * (reduce_count as i64 - 1);
     (pos + ext.min(0), pos + ext.max(0))
 }
 
-fn reduce_extent_range(base_lo: i64, base_hi: i64, reduce_count: u64, reduce_stride: i64) -> (i64, i64) {
-    if reduce_count <= 1 { return (base_lo, base_hi); }
+fn reduce_extent_range(
+    base_lo: i64,
+    base_hi: i64,
+    reduce_count: u64,
+    reduce_stride: i64,
+) -> (i64, i64) {
+    if reduce_count <= 1 {
+        return (base_lo, base_hi);
+    }
     let ext = reduce_stride * (reduce_count as i64 - 1);
     (base_lo + ext.min(0), base_hi + ext.max(0))
 }
 
 fn affine_touches_range(
-    first_pos: i64, stride: i64, count: u64, g_lo: i64, g_hi: i64,
-    reduce_count: u64, reduce_stride: i64,
+    first_pos: i64,
+    stride: i64,
+    count: u64,
+    g_lo: i64,
+    g_hi: i64,
+    reduce_count: u64,
+    reduce_stride: i64,
 ) -> bool {
-    if count == 0 || g_lo >= g_hi { return false; }
+    if count == 0 || g_lo >= g_hi {
+        return false;
+    }
     let (min_reduce_ext, max_reduce_ext) = if reduce_count > 1 {
         let ext = reduce_stride * (reduce_count as i64 - 1);
         (ext.min(0), ext.max(0))
-    } else { (0, 0) };
+    } else {
+        (0, 0)
+    };
     let eff_lo = g_lo - max_reduce_ext;
     let eff_hi = g_hi - min_reduce_ext;
 
@@ -1807,7 +2041,10 @@ fn affine_touches_range(
     let (i_lo, i_hi) = if stride > 0 {
         let num_lo = eff_lo - first_pos;
         let num_hi = eff_hi - first_pos;
-        (div_ceil_signed(num_lo, stride), div_ceil_signed(num_hi, stride))
+        (
+            div_ceil_signed(num_lo, stride),
+            div_ceil_signed(num_hi, stride),
+        )
     } else {
         let neg_stride = -stride;
         let i_max = div_floor_signed(first_pos - eff_lo, neg_stride);
@@ -1831,7 +2068,9 @@ fn div_floor_signed(a: i64, b: i64) -> i64 {
 }
 
 fn merge_group_ranges(ranges: &mut Vec<(usize, u64, u64)>) -> Vec<(usize, u64, u64)> {
-    if ranges.is_empty() { return vec![]; }
+    if ranges.is_empty() {
+        return vec![];
+    }
     ranges.sort_by_key(|&(gi, off, _)| (gi, off));
     let mut merged: Vec<(usize, u64, u64)> = Vec::new();
     for &(gi, off, count) in ranges.iter() {
@@ -1923,13 +2162,20 @@ mod tests {
                             Err(0) => None,
                             Err(i) => {
                                 let candidate = i - 1;
-                                if src.0 < span_groups[candidate].base_id.0 + span_groups[candidate].count {
+                                if src.0
+                                    < span_groups[candidate].base_id.0
+                                        + span_groups[candidate].count
+                                {
                                     Some(candidate)
-                                } else { None }
+                                } else {
+                                    None
+                                }
                             }
                         };
                         if let Some(src_gi) = src_gi {
-                            if src_gi > gi && !matches!(&span_groups[src_gi].op, ScalarOp::Literal(_)) {
+                            if src_gi > gi
+                                && !matches!(&span_groups[src_gi].op, ScalarOp::Literal(_))
+                            {
                                 errors.push(format!(
                                     "Phase {} Lane {}: topo violation, group {} reads from later group {}",
                                     phase_idx, lane_idx, gi, src_gi
@@ -1972,7 +2218,9 @@ mod tests {
         g.push_group(
             100,
             ScalarOp::Literal(NumericScalar::F32(1.0)),
-            vec![], vec![], vec![],
+            vec![],
+            vec![],
+            vec![],
         );
         let (plan, errors) = plan_and_validate(&g, 2);
         assert!(errors.is_empty(), "{:?}", errors);
@@ -1994,7 +2242,9 @@ mod tests {
         assert!(errors.is_empty(), "Errors: {:?}", errors);
         assert!(plan.phases.len() >= 1);
         // The Add group should be split across 4 lanes.
-        let total_output_atoms: u64 = plan.phases.iter()
+        let total_output_atoms: u64 = plan
+            .phases
+            .iter()
             .flat_map(|p| p.spans.iter())
             .flat_map(|s| s.outputs.iter())
             .map(|m| m.count)
@@ -2055,7 +2305,11 @@ mod tests {
         let (plan, plan_errors) = plan_and_validate(&g, 2);
         assert!(plan_errors.is_empty(), "Plan errors: {:?}", plan_errors);
         // Must have at least 2 phases (barrier between matmuls).
-        assert!(plan.phases.len() >= 2, "Expected >= 2 phases, got {}", plan.phases.len());
+        assert!(
+            plan.phases.len() >= 2,
+            "Expected >= 2 phases, got {}",
+            plan.phases.len()
+        );
     }
 
     #[test]
@@ -2075,30 +2329,49 @@ mod tests {
 
         // Mask literal (small, will be inlined).
         let mask = g.push_group(
-            512, ScalarOp::Literal(NumericScalar::F32(0.0)),
-            vec![], vec![], vec![],
+            512,
+            ScalarOp::Literal(NumericScalar::F32(0.0)),
+            vec![],
+            vec![],
+            vec![],
         );
 
         // Large input (split across lanes).
         let input = g.push_group(
-            3072, ScalarOp::Literal(NumericScalar::F32(1.0)),
-            vec![], vec![], vec![],
+            3072,
+            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            vec![],
+            vec![],
+            vec![],
         );
 
         // Negative infinity.
         let neg_inf = g.push_atom(
             ScalarOp::Literal(NumericScalar::F32(f32::NEG_INFINITY)),
-            vec![], vec![], vec![],
+            vec![],
+            vec![],
+            vec![],
         );
 
         // Select: condition ? input : neg_inf
         let sel = g.push_group(
             3072,
-            ScalarOp::Select { compute_dtype: DType::F32, output_dtype: DType::F32 },
-            vec![], vec![],
+            ScalarOp::Select {
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![],
+            vec![],
             vec![
-                InputRef::Modular { base: mask, stride: 1, modulus: 512 },
-                InputRef::Affine { base: input, stride: 1 },
+                InputRef::Modular {
+                    base: mask,
+                    stride: 1,
+                    modulus: 512,
+                },
+                InputRef::Affine {
+                    base: input,
+                    stride: 1,
+                },
                 InputRef::Broadcast(neg_inf),
             ],
         );
@@ -2111,8 +2384,12 @@ mod tests {
                 compute_dtype: DType::F32,
                 output_dtype: DType::F32,
             },
-            vec![], vec![],
-            vec![InputRef::Affine { base: sel, stride: 1 }],
+            vec![],
+            vec![],
+            vec![InputRef::Affine {
+                base: sel,
+                stride: 1,
+            }],
         );
         g.outputs = vec![out];
 
@@ -2136,7 +2413,9 @@ mod tests {
         g: &mut NanoGraph,
         a_base: AtomId, // [M*K] literal
         b_base: AtomId, // [K*N] literal
-        m: u64, k: u64, n: u64,
+        m: u64,
+        k: u64,
+        n: u64,
     ) -> AtomId {
         // M Mul groups, each count = K*N.
         let mut mul_bases: Vec<AtomId> = Vec::new();
@@ -2146,12 +2425,21 @@ mod tests {
                 k * n,
                 ScalarOp::Binary {
                     op: ScalarBinOp::Mul,
-                    compute_dtype: DType::F32, output_dtype: DType::F32,
+                    compute_dtype: DType::F32,
+                    output_dtype: DType::F32,
                 },
-                vec![], vec![],
+                vec![],
+                vec![],
                 vec![
-                    InputRef::StridedBroadcast { base: a_row, stride: 1, repeat: n },
-                    InputRef::Affine { base: b_base, stride: 1 },
+                    InputRef::StridedBroadcast {
+                        base: a_row,
+                        stride: 1,
+                        repeat: n,
+                    },
+                    InputRef::Affine {
+                        base: b_base,
+                        stride: 1,
+                    },
                 ],
             );
             mul_bases.push(base);
@@ -2163,11 +2451,17 @@ mod tests {
             let base = g.push_group(
                 n,
                 ScalarOp::ReduceSum {
-                    reduce_count: k, reduce_stride: n as i64,
-                    compute_dtype: DType::F32, output_dtype: DType::F32,
+                    reduce_count: k,
+                    reduce_stride: n as i64,
+                    compute_dtype: DType::F32,
+                    output_dtype: DType::F32,
                 },
-                vec![], vec![],
-                vec![InputRef::Affine { base: mul_bases[mi as usize], stride: 1 }],
+                vec![],
+                vec![],
+                vec![InputRef::Affine {
+                    base: mul_bases[mi as usize],
+                    stride: 1,
+                }],
             );
             if reduce_base.is_none() {
                 reduce_base = Some(base);
@@ -2186,10 +2480,16 @@ mod tests {
         g.push_group(
             count,
             ScalarOp::Unary {
-                op, compute_dtype: DType::F32, output_dtype: DType::F32,
+                op,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
             },
-            vec![], vec![],
-            vec![InputRef::Affine { base: input_base, stride: 1 }],
+            vec![],
+            vec![],
+            vec![InputRef::Affine {
+                base: input_base,
+                stride: 1,
+            }],
         )
     }
 
@@ -2208,24 +2508,32 @@ mod tests {
         let input = g.push_group(
             m * hidden,
             ScalarOp::Literal(NumericScalar::F32(0.0)),
-            vec![], vec![], vec![],
+            vec![],
+            vec![],
+            vec![],
         );
 
         // Weight matrices.
         let w_q = g.push_group(
             k * n,
             ScalarOp::Literal(NumericScalar::F32(0.0)),
-            vec![], vec![], vec![],
+            vec![],
+            vec![],
+            vec![],
         );
         let w_v = g.push_group(
             k * n,
             ScalarOp::Literal(NumericScalar::F32(0.0)),
-            vec![], vec![], vec![],
+            vec![],
+            vec![],
+            vec![],
         );
         let w_out = g.push_group(
             k * n,
             ScalarOp::Literal(NumericScalar::F32(0.0)),
-            vec![], vec![], vec![],
+            vec![],
+            vec![],
+            vec![],
         );
 
         // Q projection: [M, hidden] = input @ W_q
@@ -2246,12 +2554,20 @@ mod tests {
             m * hidden,
             ScalarOp::Binary {
                 op: ScalarBinOp::Add,
-                compute_dtype: DType::F32, output_dtype: DType::F32,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
             },
-            vec![], vec![],
+            vec![],
+            vec![],
             vec![
-                InputRef::Affine { base: input, stride: 1 },
-                InputRef::Affine { base: out, stride: 1 },
+                InputRef::Affine {
+                    base: input,
+                    stride: 1,
+                },
+                InputRef::Affine {
+                    base: out,
+                    stride: 1,
+                },
             ],
         );
         g.outputs = vec![residual];
@@ -2263,20 +2579,36 @@ mod tests {
         assert!(plan_errors.is_empty(), "Plan errors: {:?}", plan_errors);
 
         // Should have multiple phases (at least 3: Q/V matmuls, activation+out matmul, residual).
-        assert!(plan.phases.len() >= 2, "Expected >= 2 phases, got {}", plan.phases.len());
+        assert!(
+            plan.phases.len() >= 2,
+            "Expected >= 2 phases, got {}",
+            plan.phases.len()
+        );
 
         // Check balance: compute max imbalance across phases.
         for (pi, phase) in plan.phases.iter().enumerate() {
-            let lane_atoms: Vec<u64> = phase.spans.iter()
+            let lane_atoms: Vec<u64> = phase
+                .spans
+                .iter()
                 .map(|s| s.outputs.iter().map(|m| m.count).sum())
                 .collect();
             let mx = lane_atoms.iter().copied().max().unwrap_or(0);
-            let mn = lane_atoms.iter().copied().filter(|&a| a > 0).min().unwrap_or(1);
+            let mn = lane_atoms
+                .iter()
+                .copied()
+                .filter(|&a| a > 0)
+                .min()
+                .unwrap_or(1);
             if mn > 0 && mx > 0 {
                 let imbalance = mx as f64 / mn as f64;
-                assert!(imbalance < 100.0,
+                assert!(
+                    imbalance < 100.0,
                     "Phase {} imbalance {:.1}x too high (max={}, min={})",
-                    pi, imbalance, mx, mn);
+                    pi,
+                    imbalance,
+                    mx,
+                    mn
+                );
             }
         }
     }
@@ -2294,7 +2626,9 @@ mod tests {
         let mut current = g.push_group(
             m * hidden,
             ScalarOp::Literal(NumericScalar::F32(0.0)),
-            vec![], vec![], vec![],
+            vec![],
+            vec![],
+            vec![],
         );
 
         for _layer in 0..num_layers {
@@ -2302,7 +2636,9 @@ mod tests {
             let w = g.push_group(
                 hidden * hidden,
                 ScalarOp::Literal(NumericScalar::F32(0.0)),
-                vec![], vec![], vec![],
+                vec![],
+                vec![],
+                vec![],
             );
 
             // Matmul.
@@ -2316,12 +2652,20 @@ mod tests {
                 m * hidden,
                 ScalarOp::Binary {
                     op: ScalarBinOp::Add,
-                    compute_dtype: DType::F32, output_dtype: DType::F32,
+                    compute_dtype: DType::F32,
+                    output_dtype: DType::F32,
                 },
-                vec![], vec![],
+                vec![],
+                vec![],
                 vec![
-                    InputRef::Affine { base: current, stride: 1 },
-                    InputRef::Affine { base: act, stride: 1 },
+                    InputRef::Affine {
+                        base: current,
+                        stride: 1,
+                    },
+                    InputRef::Affine {
+                        base: act,
+                        stride: 1,
+                    },
                 ],
             );
 
@@ -2339,13 +2683,20 @@ mod tests {
         assert!(plan_errors.is_empty(), "Plan errors: {:?}", plan_errors);
 
         // Should have enough phases for the 3-layer chain.
-        assert!(plan.phases.len() >= num_layers,
+        assert!(
+            plan.phases.len() >= num_layers,
             "Expected >= {} phases for {} layers, got {}",
-            num_layers, num_layers, plan.phases.len());
+            num_layers,
+            num_layers,
+            plan.phases.len()
+        );
 
         // Should be fast.
-        assert!(elapsed.as_secs_f64() < 5.0,
-            "Planning took {:.2}s, expected < 5s", elapsed.as_secs_f64());
+        assert!(
+            elapsed.as_secs_f64() < 5.0,
+            "Planning took {:.2}s, expected < 5s",
+            elapsed.as_secs_f64()
+        );
     }
 
     /// Larger test: 10-layer transformer chain with merged matmuls.
@@ -2354,7 +2705,7 @@ mod tests {
     fn test_large_transformer_stack() {
         let mut g = NanoGraph::new();
 
-        let m = 64u64;     // batch*seq
+        let m = 64u64; // batch*seq
         let hidden = 128u64; // hidden dim
         let num_layers = 10;
 
@@ -2362,7 +2713,9 @@ mod tests {
         let mut current = g.push_group(
             m * hidden,
             ScalarOp::Literal(NumericScalar::F32(0.0)),
-            vec![], vec![], vec![],
+            vec![],
+            vec![],
+            vec![],
         );
 
         for _layer in 0..num_layers {
@@ -2370,13 +2723,17 @@ mod tests {
             let w_q = g.push_group(
                 hidden * hidden,
                 ScalarOp::Literal(NumericScalar::F32(0.0)),
-                vec![], vec![], vec![],
+                vec![],
+                vec![],
+                vec![],
             );
             // Weight matrix for output projection.
             let w_out = g.push_group(
                 hidden * hidden,
                 ScalarOp::Literal(NumericScalar::F32(0.0)),
-                vec![], vec![], vec![],
+                vec![],
+                vec![],
+                vec![],
             );
 
             // Q projection matmul.
@@ -2393,12 +2750,20 @@ mod tests {
                 m * hidden,
                 ScalarOp::Binary {
                     op: ScalarBinOp::Add,
-                    compute_dtype: DType::F32, output_dtype: DType::F32,
+                    compute_dtype: DType::F32,
+                    output_dtype: DType::F32,
                 },
-                vec![], vec![],
+                vec![],
+                vec![],
                 vec![
-                    InputRef::Affine { base: current, stride: 1 },
-                    InputRef::Affine { base: out, stride: 1 },
+                    InputRef::Affine {
+                        base: current,
+                        stride: 1,
+                    },
+                    InputRef::Affine {
+                        base: out,
+                        stride: 1,
+                    },
                 ],
             );
         }
@@ -2414,28 +2779,45 @@ mod tests {
         let (plan, plan_errors) = plan_and_validate(&g, 8);
         let elapsed = t0.elapsed();
 
-        assert!(plan_errors.is_empty(),
+        assert!(
+            plan_errors.is_empty(),
             "Plan errors (first 10): {:?}",
-            &plan_errors[..plan_errors.len().min(10)]);
+            &plan_errors[..plan_errors.len().min(10)]
+        );
 
         // Performance check.
-        assert!(elapsed.as_secs_f64() < 10.0,
+        assert!(
+            elapsed.as_secs_f64() < 10.0,
             "Planning {} groups ({:.1}B atoms) took {:.2}s, expected < 10s",
-            num_groups, num_atoms as f64 / 1e9, elapsed.as_secs_f64());
+            num_groups,
+            num_atoms as f64 / 1e9,
+            elapsed.as_secs_f64()
+        );
 
         // Print stats for debugging.
-        eprintln!("  [v3b large] {:.1}ms, {} groups, {:.1}M atoms",
-            elapsed.as_secs_f64() * 1e3, num_groups, num_atoms as f64 / 1e6);
+        eprintln!(
+            "  [v3b large] {:.1}ms, {} groups, {:.1}M atoms",
+            elapsed.as_secs_f64() * 1e3,
+            num_groups,
+            num_atoms as f64 / 1e6
+        );
         eprintln!("    {} phases, {} lanes", plan.phases.len(), 8);
 
         // Compute balance info.
         let mut max_imbalance = 0f64;
         for phase in &plan.phases {
-            let lane_atoms: Vec<u64> = phase.spans.iter()
+            let lane_atoms: Vec<u64> = phase
+                .spans
+                .iter()
                 .map(|s| s.outputs.iter().map(|m| m.count).sum())
                 .collect();
             let mx = lane_atoms.iter().copied().max().unwrap_or(0);
-            let mn = lane_atoms.iter().copied().filter(|&a| a > 0).min().unwrap_or(1);
+            let mn = lane_atoms
+                .iter()
+                .copied()
+                .filter(|&a| a > 0)
+                .min()
+                .unwrap_or(1);
             if mn > 0 && mx > 0 {
                 max_imbalance = max_imbalance.max(mx as f64 / mn as f64);
             }
@@ -2443,12 +2825,18 @@ mod tests {
         eprintln!("    max_imbalance: {:.1}x", max_imbalance);
 
         // Structural checks.
-        assert!(plan.phases.len() >= num_layers,
+        assert!(
+            plan.phases.len() >= num_layers,
             "Expected >= {} phases for {} layers, got {}",
-            num_layers, num_layers, plan.phases.len());
+            num_layers,
+            num_layers,
+            plan.phases.len()
+        );
 
         // Check that all compute atoms are covered.
-        let total_output_atoms: u64 = plan.phases.iter()
+        let total_output_atoms: u64 = plan
+            .phases
+            .iter()
             .flat_map(|p| p.spans.iter())
             .flat_map(|s| s.outputs.iter())
             .map(|m| m.count)
@@ -2462,25 +2850,47 @@ mod tests {
     fn test_gpt2_scale_single_layer() {
         let mut g = NanoGraph::new();
 
-        let m = 48u64;      // batch * seq (keeping small for test speed)
+        let m = 48u64; // batch * seq (keeping small for test speed)
         let hidden = 768u64; // GPT-2 hidden dim
         let num_layers = 1;
 
         let mut current = g.push_group(
             m * hidden,
             ScalarOp::Literal(NumericScalar::F32(0.0)),
-            vec![], vec![], vec![],
+            vec![],
+            vec![],
+            vec![],
         );
 
         // One transformer layer with Q, K, V projections.
-        let w_q = g.push_group(hidden * hidden, ScalarOp::Literal(NumericScalar::F32(0.0)),
-            vec![], vec![], vec![]);
-        let w_k = g.push_group(hidden * hidden, ScalarOp::Literal(NumericScalar::F32(0.0)),
-            vec![], vec![], vec![]);
-        let w_v = g.push_group(hidden * hidden, ScalarOp::Literal(NumericScalar::F32(0.0)),
-            vec![], vec![], vec![]);
-        let w_out = g.push_group(hidden * hidden, ScalarOp::Literal(NumericScalar::F32(0.0)),
-            vec![], vec![], vec![]);
+        let w_q = g.push_group(
+            hidden * hidden,
+            ScalarOp::Literal(NumericScalar::F32(0.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
+        let w_k = g.push_group(
+            hidden * hidden,
+            ScalarOp::Literal(NumericScalar::F32(0.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
+        let w_v = g.push_group(
+            hidden * hidden,
+            ScalarOp::Literal(NumericScalar::F32(0.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
+        let w_out = g.push_group(
+            hidden * hidden,
+            ScalarOp::Literal(NumericScalar::F32(0.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
 
         let q = build_merged_matmul(&mut g, current, w_q, m, hidden, hidden);
         let k = build_merged_matmul(&mut g, current, w_k, m, hidden, hidden);
@@ -2496,12 +2906,20 @@ mod tests {
             m * hidden,
             ScalarOp::Binary {
                 op: ScalarBinOp::Add,
-                compute_dtype: DType::F32, output_dtype: DType::F32,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
             },
-            vec![], vec![],
+            vec![],
+            vec![],
             vec![
-                InputRef::Affine { base: current, stride: 1 },
-                InputRef::Affine { base: out, stride: 1 },
+                InputRef::Affine {
+                    base: current,
+                    stride: 1,
+                },
+                InputRef::Affine {
+                    base: out,
+                    stride: 1,
+                },
             ],
         );
         g.outputs = vec![current];
@@ -2517,17 +2935,26 @@ mod tests {
         let plan_errors = validate_plan(&plan, &g);
         let val_elapsed = t1.elapsed();
 
-        eprintln!("  [v3b gpt2_scale] plan={:.1}ms val={:.1}ms, {} groups, {:.1}B atoms, {} phases",
-            plan_elapsed.as_secs_f64() * 1e3, val_elapsed.as_secs_f64() * 1e3,
-            g.num_groups(), g.num_atoms() as f64 / 1e9,
-            plan.phases.len());
+        eprintln!(
+            "  [v3b gpt2_scale] plan={:.1}ms val={:.1}ms, {} groups, {:.1}B atoms, {} phases",
+            plan_elapsed.as_secs_f64() * 1e3,
+            val_elapsed.as_secs_f64() * 1e3,
+            g.num_groups(),
+            g.num_atoms() as f64 / 1e9,
+            plan.phases.len()
+        );
 
-        assert!(plan_errors.is_empty(),
+        assert!(
+            plan_errors.is_empty(),
             "Plan errors (first 10): {:?}",
-            &plan_errors[..plan_errors.len().min(10)]);
+            &plan_errors[..plan_errors.len().min(10)]
+        );
 
-        assert!(plan_elapsed.as_secs_f64() < 10.0,
-            "Planning took {:.2}s, expected < 10s", plan_elapsed.as_secs_f64());
+        assert!(
+            plan_elapsed.as_secs_f64() < 10.0,
+            "Planning took {:.2}s, expected < 10s",
+            plan_elapsed.as_secs_f64()
+        );
     }
 
     /// Test with attention mask pattern: Select group with Modular input
@@ -2541,32 +2968,66 @@ mod tests {
         let n = 32u64;
 
         // Weights.
-        let w1 = g.push_group(k * n, ScalarOp::Literal(NumericScalar::F32(0.0)),
-            vec![], vec![], vec![]);
-        let w2 = g.push_group(n * n, ScalarOp::Literal(NumericScalar::F32(0.0)),
-            vec![], vec![], vec![]);
+        let w1 = g.push_group(
+            k * n,
+            ScalarOp::Literal(NumericScalar::F32(0.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
+        let w2 = g.push_group(
+            n * n,
+            ScalarOp::Literal(NumericScalar::F32(0.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
 
         // Input.
-        let input = g.push_group(m * k, ScalarOp::Literal(NumericScalar::F32(0.0)),
-            vec![], vec![], vec![]);
+        let input = g.push_group(
+            m * k,
+            ScalarOp::Literal(NumericScalar::F32(0.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
 
         // First matmul.
         let mm1 = build_merged_matmul(&mut g, input, w1, m, k, n);
 
         // Attention mask.
-        let mask = g.push_group(64, ScalarOp::Literal(NumericScalar::F32(1.0)),
-            vec![], vec![], vec![]);
+        let mask = g.push_group(
+            64,
+            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
         let neg_inf = g.push_atom(
             ScalarOp::Literal(NumericScalar::F32(f32::NEG_INFINITY)),
-            vec![], vec![], vec![]);
+            vec![],
+            vec![],
+            vec![],
+        );
 
         let masked = g.push_group(
             m * n,
-            ScalarOp::Select { compute_dtype: DType::F32, output_dtype: DType::F32 },
-            vec![], vec![],
+            ScalarOp::Select {
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![],
+            vec![],
             vec![
-                InputRef::Modular { base: mask, stride: 1, modulus: 64 },
-                InputRef::Affine { base: mm1, stride: 1 },
+                InputRef::Modular {
+                    base: mask,
+                    stride: 1,
+                    modulus: 64,
+                },
+                InputRef::Affine {
+                    base: mm1,
+                    stride: 1,
+                },
                 InputRef::Broadcast(neg_inf),
             ],
         );

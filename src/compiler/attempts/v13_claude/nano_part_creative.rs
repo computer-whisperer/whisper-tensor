@@ -1,4 +1,10 @@
-#![allow(clippy::all, dead_code, unreachable_patterns)]
+#![allow(
+    clippy::all,
+    dead_code,
+    unreachable_patterns,
+    unused_variables,
+    unused_imports
+)]
 //! NanoGraph partitioner: Chain-based DAG partitioning with phase detection.
 //!
 //! Algorithm:
@@ -70,10 +76,8 @@ pub fn partition_nanograph(graph: &NanoGraph, target_kernels: usize) -> NanoPart
 
     if compute_count <= target_kernels {
         // Each compute group gets its own kernel. Data groups are excluded.
-        let kernel_groups: Vec<Vec<usize>> = (0..n)
-            .filter(|&i| !is_data[i])
-            .map(|i| vec![i])
-            .collect();
+        let kernel_groups: Vec<Vec<usize>> =
+            (0..n).filter(|&i| !is_data[i]).map(|i| vec![i]).collect();
         return NanoPartitionResult {
             num_kernels: kernel_groups.len(),
             kernel_groups,
@@ -87,11 +91,7 @@ pub fn partition_nanograph(graph: &NanoGraph, target_kernels: usize) -> NanoPart
     let fan_out: Vec<usize> = consumers
         .iter()
         .enumerate()
-        .map(|(gi, cons)| {
-            cons.iter()
-                .filter(|&&ci| !is_data[ci])
-                .count()
-        })
+        .map(|(gi, cons)| cons.iter().filter(|&&ci| !is_data[ci]).count())
         .collect();
 
     // Step 2: Extract chains.
@@ -104,13 +104,7 @@ pub fn partition_nanograph(graph: &NanoGraph, target_kernels: usize) -> NanoPart
 
     // Step 4: Detect phase boundaries.
     let topo_order = topological_sort(n, &producers);
-    let phases = detect_and_split_phases(
-        &topo_order,
-        groups,
-        &consumers,
-        &is_data,
-        target_kernels,
-    );
+    let phases = detect_and_split_phases(&topo_order, groups, &consumers, &is_data, target_kernels);
 
     // Step 5: Assign each chain to exactly one phase (by its sink group's position).
     // Then distribute chains across parallel kernels within each phase.
@@ -172,11 +166,7 @@ pub fn partition_nanograph(graph: &NanoGraph, target_kernels: usize) -> NanoPart
 
         let chain_topo = topo_sort_chains(&phase_chain_ids, &chain_local_deps);
 
-        let parallel_slots = compute_parallel_slots(
-            &chain_topo,
-            &chain_local_deps,
-            target_kernels,
-        );
+        let parallel_slots = compute_parallel_slots(&chain_topo, &chain_local_deps, target_kernels);
 
         let num_slots = parallel_slots.iter().copied().max().unwrap_or(0) + 1;
         let mut slot_groups: Vec<Vec<usize>> = vec![Vec::new(); num_slots];
@@ -310,11 +300,7 @@ fn extract_chains(
             let exclusive_prods: Vec<usize> = producers[current]
                 .iter()
                 .copied()
-                .filter(|&pi| {
-                    !is_data[pi]
-                        && chain_of[pi].is_none()
-                        && fan_out[pi] == 1
-                })
+                .filter(|&pi| !is_data[pi] && chain_of[pi].is_none() && fan_out[pi] == 1)
                 .collect();
 
             if exclusive_prods.len() == 1 {
@@ -750,7 +736,16 @@ fn find_sccs(deps: &[HashSet<usize>]) -> Vec<Vec<usize>> {
 
         for &w in &deps[v] {
             if index[w].is_none() {
-                strongconnect(w, deps, index_counter, stack, on_stack, index, lowlink, sccs);
+                strongconnect(
+                    w,
+                    deps,
+                    index_counter,
+                    stack,
+                    on_stack,
+                    index,
+                    lowlink,
+                    sccs,
+                );
                 lowlink[v] = lowlink[v].min(lowlink[w]);
             } else if on_stack[w] {
                 lowlink[v] = lowlink[v].min(index[w].unwrap());
@@ -865,9 +860,7 @@ fn balance_kernels(
     while i < kernel_groups.len() {
         let work: u64 = kernel_groups[i].iter().map(|&gi| groups[gi].count).sum();
         if work > max_work_per_kernel && kernel_groups[i].len() > 1 {
-            if let Some((first, second)) =
-                topo_aware_split(&kernel_groups[i], &producers, groups)
-            {
+            if let Some((first, second)) = topo_aware_split(&kernel_groups[i], &producers, groups) {
                 kernel_groups[i] = first;
                 kernel_groups.push(second);
                 // Don't increment i, re-check the first half.
@@ -894,11 +887,7 @@ fn balance_kernels(
                 let target = find_merge_target(i, &deps, kernel_groups, groups);
 
                 if let Some(target) = target {
-                    let (keep, remove) = if target < i {
-                        (target, i)
-                    } else {
-                        (i, target)
-                    };
+                    let (keep, remove) = if target < i { (target, i) } else { (i, target) };
                     let removed = kernel_groups[remove].clone();
                     kernel_groups[keep].extend(removed);
                     kernel_groups[keep].sort();
@@ -1054,9 +1043,7 @@ fn find_merge_target(
 
 fn resolve_producer_groups(input: &InputRef, count: u64, groups: &[AtomGroup]) -> Vec<usize> {
     match input {
-        InputRef::Broadcast(atom_id) => {
-            find_group_idx(groups, *atom_id).into_iter().collect()
-        }
+        InputRef::Broadcast(atom_id) => find_group_idx(groups, *atom_id).into_iter().collect(),
 
         InputRef::Affine { base, stride } => {
             if count == 0 {
@@ -1082,9 +1069,7 @@ fn resolve_producer_groups(input: &InputRef, count: u64, groups: &[AtomGroup]) -
             result
         }
 
-        InputRef::SymAffine {
-            base, stride_i, ..
-        } => {
+        InputRef::SymAffine { base, stride_i, .. } => {
             if count == 0 {
                 return vec![];
             }
@@ -1169,8 +1154,8 @@ fn find_groups_in_range(groups: &[AtomGroup], lo: u64, hi: u64) -> Vec<usize> {
 mod tests {
     use super::*;
     use crate::dtype::DType;
-    use crate::nano_graph::{ScalarBinOp, ScalarOp, ScalarUnaryOp};
     use crate::nano_graph::NanoGraph;
+    use crate::nano_graph::{ScalarBinOp, ScalarOp, ScalarUnaryOp};
     use crate::numeric_scalar::NumericScalar;
 
     // --- Test graph builders ---
@@ -1221,10 +1206,7 @@ mod tests {
             },
             vec![],
             vec![],
-            vec![InputRef::Affine {
-                base: a,
-                stride: 1,
-            }],
+            vec![InputRef::Affine { base: a, stride: 1 }],
         );
         let c = g.push_group(
             100,
@@ -1235,10 +1217,7 @@ mod tests {
             },
             vec![],
             vec![],
-            vec![InputRef::Affine {
-                base: a,
-                stride: 1,
-            }],
+            vec![InputRef::Affine { base: a, stride: 1 }],
         );
         let _d = g.push_group(
             100,
@@ -1775,7 +1754,10 @@ mod tests {
         check_coverage(&result, &g);
         check_acyclicity(&result, g.groups());
         let parallel = check_parallelism(&result, g.groups());
-        println!("Diamond: {} kernels, {} independent pairs", result.num_kernels, parallel);
+        println!(
+            "Diamond: {} kernels, {} independent pairs",
+            result.num_kernels, parallel
+        );
     }
 
     #[test]
@@ -1789,7 +1771,11 @@ mod tests {
             result.num_kernels,
             g.num_groups()
         );
-        assert!(result.num_kernels >= 2, "Expected >=2, got {}", result.num_kernels);
+        assert!(
+            result.num_kernels >= 2,
+            "Expected >=2, got {}",
+            result.num_kernels
+        );
     }
 
     #[test]
@@ -1803,7 +1789,11 @@ mod tests {
             "Matmul 4x8x16: {} kernels, {} independent pairs",
             result.num_kernels, parallel
         );
-        assert!(result.num_kernels >= 2, "Expected >=2 kernels, got {}", result.num_kernels);
+        assert!(
+            result.num_kernels >= 2,
+            "Expected >=2 kernels, got {}",
+            result.num_kernels
+        );
     }
 
     #[test]
@@ -1889,7 +1879,11 @@ mod tests {
             result.num_kernels,
             g.num_groups()
         );
-        assert!(result.num_kernels >= 2, "Expected >=2, got {}", result.num_kernels);
+        assert!(
+            result.num_kernels >= 2,
+            "Expected >=2, got {}",
+            result.num_kernels
+        );
     }
 
     #[test]
@@ -2097,7 +2091,11 @@ mod tests {
             let parallel = check_parallelism(&result, g.groups());
             println!(
                 "Transformer {}L {}x{}x{} target={}: {} groups -> {} kernels, {} independent pairs",
-                layers, m, k, n, target,
+                layers,
+                m,
+                k,
+                n,
+                target,
                 g.num_groups(),
                 result.num_kernels,
                 parallel

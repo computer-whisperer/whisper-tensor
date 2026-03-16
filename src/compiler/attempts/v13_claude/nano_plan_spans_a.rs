@@ -1,4 +1,10 @@
-#![allow(clippy::all, dead_code, unreachable_patterns, unused_variables, unused_imports)]
+#![allow(
+    clippy::all,
+    dead_code,
+    unreachable_patterns,
+    unused_variables,
+    unused_imports
+)]
 //! NanoGraph span partitioner: splits a NanoGraph into self-contained sub-graphs.
 //!
 //! Each span is an independent NanoGraph with declared inputs (atoms read from
@@ -72,7 +78,9 @@ struct RangeAtomMap {
 }
 
 impl RangeAtomMap {
-    fn new() -> Self { Self { ranges: Vec::new() } }
+    fn new() -> Self {
+        Self { ranges: Vec::new() }
+    }
 
     fn insert_range(&mut self, main_base: AtomId, span_base: AtomId, count: u64) {
         self.ranges.push((main_base.0, span_base.0, count));
@@ -83,11 +91,19 @@ impl RangeAtomMap {
     }
 
     fn get(&self, main_id: AtomId) -> Option<AtomId> {
-        let idx = self.ranges.partition_point(|&(base, _, _)| base <= main_id.0);
-        if idx == 0 { return None; }
+        let idx = self
+            .ranges
+            .partition_point(|&(base, _, _)| base <= main_id.0);
+        if idx == 0 {
+            return None;
+        }
         let (base, span_base, count) = self.ranges[idx - 1];
         let offset = main_id.0.wrapping_sub(base);
-        if offset < count { Some(AtomId(span_base + offset)) } else { None }
+        if offset < count {
+            Some(AtomId(span_base + offset))
+        } else {
+            None
+        }
     }
 }
 
@@ -158,10 +174,7 @@ pub fn plan_execution(graph: &NanoGraph, num_lanes: usize) -> ExecutionPlan {
         num_phases,
     );
 
-    ExecutionPlan {
-        num_lanes,
-        phases,
-    }
+    ExecutionPlan { num_lanes, phases }
 }
 
 // ─── Group dependency graph ──────────────────────────────────────────────────
@@ -327,8 +340,14 @@ fn resolve_producer_groups_with_reduce(
             let base_first = base.0 as i64;
             let base_last = base_first + (*stride as i64) * (count as i64 - 1);
             let reduce_end = reduce_stride * (reduce_count as i64 - 1);
-            let lo = base_first.min(base_first + reduce_end).min(base_last).min(base_last + reduce_end);
-            let hi = base_first.max(base_first + reduce_end).max(base_last).max(base_last + reduce_end);
+            let lo = base_first
+                .min(base_first + reduce_end)
+                .min(base_last)
+                .min(base_last + reduce_end);
+            let hi = base_first
+                .max(base_first + reduce_end)
+                .max(base_last)
+                .max(base_last + reduce_end);
             find_groups_in_range(groups, lo as u64, hi as u64)
         }
         _ => {
@@ -343,7 +362,8 @@ fn resolve_producer_groups_with_reduce(
                 };
                 let base_atom = input.resolve(i, 0);
                 for k in 0..reduce_count {
-                    let read_id = AtomId(base_atom.0.wrapping_add((k as i64 * reduce_stride) as u64));
+                    let read_id =
+                        AtomId(base_atom.0.wrapping_add((k as i64 * reduce_stride) as u64));
                     all_ids.insert(read_id.0);
                 }
             }
@@ -691,7 +711,13 @@ fn build_single_span(
     // Collect literal groups referenced by span groups.
     let mut literal_groups_needed: BTreeSet<usize> = BTreeSet::new();
     for &gi in span_group_indices {
-        collect_literal_deps(gi, groups, producers, is_literal, &mut literal_groups_needed);
+        collect_literal_deps(
+            gi,
+            groups,
+            producers,
+            is_literal,
+            &mut literal_groups_needed,
+        );
     }
     // Split literals by size: small ones get duplicated, large ones become external inputs.
     let mut large_literal_groups: BTreeSet<usize> = BTreeSet::new();
@@ -710,13 +736,25 @@ fn build_single_span(
     let mut to_duplicate: BTreeSet<usize> = BTreeSet::new();
     for &gi in span_group_indices {
         find_duplicatable_deps(
-            gi, groups, producers, is_literal, group_phase, phase_idx,
-            &span_set, &mut to_duplicate,
+            gi,
+            groups,
+            producers,
+            is_literal,
+            group_phase,
+            phase_idx,
+            &span_set,
+            &mut to_duplicate,
         );
     }
     for &di in &to_duplicate {
         included_groups.insert(di);
-        collect_literal_deps(di, groups, producers, is_literal, &mut literal_groups_needed);
+        collect_literal_deps(
+            di,
+            groups,
+            producers,
+            is_literal,
+            &mut literal_groups_needed,
+        );
     }
     for &li in &literal_groups_needed {
         if large_literal_groups.contains(&li) {
@@ -740,7 +778,11 @@ fn build_single_span(
         let group = &groups[gi];
         for input in &group.inputs {
             collect_external_ranges_a(
-                input, group.count, &group.op, groups, &included_groups,
+                input,
+                group.count,
+                &group.op,
+                groups,
+                &included_groups,
                 &mut external_ranges,
             );
         }
@@ -777,7 +819,9 @@ fn build_single_span(
         let local_base = new_graph.push_group(
             count,
             ScalarOp::Literal(crate::numeric_scalar::NumericScalar::F32(0.0)),
-            vec![], vec![], vec![],
+            vec![],
+            vec![],
+            vec![],
         );
         atom_remap.insert_range(main_base, local_base, count);
         input_mapping.push(AtomMapping {
@@ -794,13 +838,18 @@ fn build_single_span(
     let mut group_output_remap: HashMap<usize, AtomId> = HashMap::new();
     for &gi in &included_groups {
         let group = &groups[gi];
-        let new_inputs: Vec<InputRef> = group.inputs.iter()
+        let new_inputs: Vec<InputRef> = group
+            .inputs
+            .iter()
             .map(|iref| remap_input_ref_range(iref, &atom_remap))
             .collect();
         let new_op = remap_op_range(&group.op, &atom_remap);
         let new_base = new_graph.push_group(
-            group.count, new_op, group.sym_dims.clone(),
-            group.reduce_dims.clone(), new_inputs,
+            group.count,
+            new_op,
+            group.sym_dims.clone(),
+            group.reduce_dims.clone(),
+            new_inputs,
         );
         atom_remap.insert_range(group.base_id, new_base, group.count);
         group_output_remap.insert(gi, new_base);
@@ -853,11 +902,23 @@ fn collect_external_ranges_a(
 
     let mut all_referenced = referenced_groups.clone();
     match op {
-        ScalarOp::ReduceSum { reduce_count, reduce_stride, .. }
-        | ScalarOp::ReduceMax { reduce_count, reduce_stride, .. }
-            if *reduce_count > 1 && *reduce_stride != 0 =>
-        {
-            let extra = resolve_producer_groups_with_reduce(input, count, *reduce_count, *reduce_stride, groups);
+        ScalarOp::ReduceSum {
+            reduce_count,
+            reduce_stride,
+            ..
+        }
+        | ScalarOp::ReduceMax {
+            reduce_count,
+            reduce_stride,
+            ..
+        } if *reduce_count > 1 && *reduce_stride != 0 => {
+            let extra = resolve_producer_groups_with_reduce(
+                input,
+                count,
+                *reduce_count,
+                *reduce_stride,
+                groups,
+            );
             for gi in extra {
                 if !all_referenced.contains(&gi) {
                     all_referenced.push(gi);
@@ -888,12 +949,16 @@ fn compute_referenced_range(
 ) -> Option<(u64, u64)> {
     let ext_group = &groups[ext_group_idx];
     let (reduce_count, reduce_stride) = match op {
-        ScalarOp::ReduceSum { reduce_count, reduce_stride, .. }
-        | ScalarOp::ReduceMax { reduce_count, reduce_stride, .. }
-            if *reduce_count > 1 && *reduce_stride != 0 =>
-        {
-            (*reduce_count, *reduce_stride)
+        ScalarOp::ReduceSum {
+            reduce_count,
+            reduce_stride,
+            ..
         }
+        | ScalarOp::ReduceMax {
+            reduce_count,
+            reduce_stride,
+            ..
+        } if *reduce_count > 1 && *reduce_stride != 0 => (*reduce_count, *reduce_stride),
         _ => (1, 0),
     };
 
@@ -902,8 +967,12 @@ fn compute_referenced_range(
         (0..count).collect::<Vec<_>>()
     } else {
         let mut pts = Vec::new();
-        for i in 0..64u64 { pts.push(i); }
-        for i in (count.saturating_sub(64))..count { pts.push(i); }
+        for i in 0..64u64 {
+            pts.push(i);
+        }
+        for i in (count.saturating_sub(64))..count {
+            pts.push(i);
+        }
         pts.sort();
         pts.dedup();
         pts
@@ -936,7 +1005,9 @@ fn compute_referenced_range(
 
 /// Merge overlapping/adjacent ranges from the same group.
 fn merge_group_ranges_a(ranges: &mut Vec<(usize, u64, u64)>) -> Vec<(usize, u64, u64)> {
-    if ranges.is_empty() { return vec![]; }
+    if ranges.is_empty() {
+        return vec![];
+    }
     ranges.sort_by_key(|&(gi, off, _)| (gi, off));
     let mut merged: Vec<(usize, u64, u64)> = Vec::new();
     for &(gi, off, count) in ranges.iter() {
@@ -961,19 +1032,33 @@ fn remap_input_ref_range(input: &InputRef, atom_remap: &RangeAtomMap) -> InputRe
             stride: *stride,
         },
         InputRef::Explicit(ids) => InputRef::Explicit(
-            ids.iter().map(|id| atom_remap.get(*id).unwrap_or(*id)).collect(),
+            ids.iter()
+                .map(|id| atom_remap.get(*id).unwrap_or(*id))
+                .collect(),
         ),
-        InputRef::SymAffine { base, stride_i, stride_k } => InputRef::SymAffine {
+        InputRef::SymAffine {
+            base,
+            stride_i,
+            stride_k,
+        } => InputRef::SymAffine {
             base: atom_remap.get(*base).unwrap_or(*base),
             stride_i: *stride_i,
             stride_k: *stride_k,
         },
-        InputRef::StridedBroadcast { base, stride, repeat } => InputRef::StridedBroadcast {
+        InputRef::StridedBroadcast {
+            base,
+            stride,
+            repeat,
+        } => InputRef::StridedBroadcast {
             base: atom_remap.get(*base).unwrap_or(*base),
             stride: *stride,
             repeat: *repeat,
         },
-        InputRef::Modular { base, stride, modulus } => InputRef::Modular {
+        InputRef::Modular {
+            base,
+            stride,
+            modulus,
+        } => InputRef::Modular {
             base: atom_remap.get(*base).unwrap_or(*base),
             stride: *stride,
             modulus: *modulus,
@@ -984,7 +1069,10 @@ fn remap_input_ref_range(input: &InputRef, atom_remap: &RangeAtomMap) -> InputRe
 /// Remap ScalarOp fields using RangeAtomMap.
 fn remap_op_range(op: &ScalarOp, atom_remap: &RangeAtomMap) -> ScalarOp {
     match op {
-        ScalarOp::IndirectLoad { table_base, output_dtype } => ScalarOp::IndirectLoad {
+        ScalarOp::IndirectLoad {
+            table_base,
+            output_dtype,
+        } => ScalarOp::IndirectLoad {
             table_base: atom_remap.get(*table_base).unwrap_or(*table_base),
             output_dtype: *output_dtype,
         },
@@ -1034,9 +1122,20 @@ fn find_duplicatable_deps(
             continue;
         }
         // Walk backward and compute total chain size.
-        let chain = trace_chain_backward(pi, groups, producers, is_literal, group_phase, current_phase);
+        let chain = trace_chain_backward(
+            pi,
+            groups,
+            producers,
+            is_literal,
+            group_phase,
+            current_phase,
+        );
         let total_atoms: u64 = chain.iter().map(|&ci| groups[ci].count).sum();
-        if total_atoms <= DUPLICATION_THRESHOLD && !chain.iter().any(|&ci| matches!(groups[ci].op, ScalarOp::IndirectLoad { .. })) {
+        if total_atoms <= DUPLICATION_THRESHOLD
+            && !chain
+                .iter()
+                .any(|&ci| matches!(groups[ci].op, ScalarOp::IndirectLoad { .. }))
+        {
             for &ci in &chain {
                 duplicated.insert(ci);
             }
@@ -1096,11 +1195,23 @@ fn collect_external_atoms(
     // Also handle reduce stride extension.
     let mut all_referenced = referenced_groups.clone();
     match op {
-        ScalarOp::ReduceSum { reduce_count, reduce_stride, .. }
-        | ScalarOp::ReduceMax { reduce_count, reduce_stride, .. }
-            if *reduce_count > 1 && *reduce_stride != 0 =>
-        {
-            let extra = resolve_producer_groups_with_reduce(input, count, *reduce_count, *reduce_stride, groups);
+        ScalarOp::ReduceSum {
+            reduce_count,
+            reduce_stride,
+            ..
+        }
+        | ScalarOp::ReduceMax {
+            reduce_count,
+            reduce_stride,
+            ..
+        } if *reduce_count > 1 && *reduce_stride != 0 => {
+            let extra = resolve_producer_groups_with_reduce(
+                input,
+                count,
+                *reduce_count,
+                *reduce_stride,
+                groups,
+            );
             for gi in extra {
                 if !all_referenced.contains(&gi) {
                     all_referenced.push(gi);
@@ -1134,12 +1245,16 @@ fn add_referenced_atoms_from_group(
     // For efficiency, compute the range and add all atoms in it that belong to
     // the external group.
     let (reduce_count, reduce_stride) = match op {
-        ScalarOp::ReduceSum { reduce_count, reduce_stride, .. }
-        | ScalarOp::ReduceMax { reduce_count, reduce_stride, .. }
-            if *reduce_count > 1 && *reduce_stride != 0 =>
-        {
-            (*reduce_count, *reduce_stride)
+        ScalarOp::ReduceSum {
+            reduce_count,
+            reduce_stride,
+            ..
         }
+        | ScalarOp::ReduceMax {
+            reduce_count,
+            reduce_stride,
+            ..
+        } if *reduce_count > 1 && *reduce_stride != 0 => (*reduce_count, *reduce_stride),
         _ => (1, 0),
     };
 
@@ -1237,24 +1352,14 @@ fn allocate_external_inputs(
 }
 
 /// Remap an InputRef to use new AtomIds.
-fn remap_input_ref(
-    input: &InputRef,
-    count: u64,
-    atom_remap: &HashMap<AtomId, AtomId>,
-) -> InputRef {
+fn remap_input_ref(input: &InputRef, count: u64, atom_remap: &HashMap<AtomId, AtomId>) -> InputRef {
     match input {
         InputRef::Broadcast(atom_id) => {
-            let new_id = atom_remap
-                .get(atom_id)
-                .copied()
-                .unwrap_or(*atom_id);
+            let new_id = atom_remap.get(atom_id).copied().unwrap_or(*atom_id);
             InputRef::Broadcast(new_id)
         }
         InputRef::Affine { base, stride } => {
-            let new_base = atom_remap
-                .get(base)
-                .copied()
-                .unwrap_or(*base);
+            let new_base = atom_remap.get(base).copied().unwrap_or(*base);
             InputRef::Affine {
                 base: new_base,
                 stride: *stride,
@@ -1272,10 +1377,7 @@ fn remap_input_ref(
             stride_i,
             stride_k,
         } => {
-            let new_base = atom_remap
-                .get(base)
-                .copied()
-                .unwrap_or(*base);
+            let new_base = atom_remap.get(base).copied().unwrap_or(*base);
             InputRef::SymAffine {
                 base: new_base,
                 stride_i: *stride_i,
@@ -1287,10 +1389,7 @@ fn remap_input_ref(
             stride,
             repeat,
         } => {
-            let new_base = atom_remap
-                .get(base)
-                .copied()
-                .unwrap_or(*base);
+            let new_base = atom_remap.get(base).copied().unwrap_or(*base);
             InputRef::StridedBroadcast {
                 base: new_base,
                 stride: *stride,
@@ -1302,10 +1401,7 @@ fn remap_input_ref(
             stride,
             modulus,
         } => {
-            let new_base = atom_remap
-                .get(base)
-                .copied()
-                .unwrap_or(*base);
+            let new_base = atom_remap.get(base).copied().unwrap_or(*base);
             InputRef::Modular {
                 base: new_base,
                 stride: *stride,
@@ -1322,10 +1418,7 @@ fn remap_op(op: &ScalarOp, atom_remap: &HashMap<AtomId, AtomId>) -> ScalarOp {
             table_base,
             output_dtype,
         } => {
-            let new_base = atom_remap
-                .get(table_base)
-                .copied()
-                .unwrap_or(*table_base);
+            let new_base = atom_remap.get(table_base).copied().unwrap_or(*table_base);
             ScalarOp::IndirectLoad {
                 table_base: new_base,
                 output_dtype: *output_dtype,
@@ -1400,14 +1493,16 @@ pub fn validate_plan(plan: &ExecutionPlan, original: &NanoGraph) -> Vec<String> 
     // Check within-phase independence using range-based checks.
     for (pi, phase) in plan.phases.iter().enumerate() {
         // Collect output ranges per span.
-        let span_output_ranges: Vec<&Vec<AtomMapping>> = phase.spans.iter()
-            .map(|s| &s.outputs).collect();
+        let span_output_ranges: Vec<&Vec<AtomMapping>> =
+            phase.spans.iter().map(|s| &s.outputs).collect();
 
         for (si, span) in phase.spans.iter().enumerate() {
             for input_mapping in &span.inputs {
                 // Check if this input range overlaps with any other span's output range.
                 for (other_si, other_outputs) in span_output_ranges.iter().enumerate() {
-                    if other_si == si { continue; }
+                    if other_si == si {
+                        continue;
+                    }
                     for other_mapping in other_outputs.iter() {
                         // Check range overlap.
                         let a_lo = input_mapping.main_base.0;
@@ -1442,7 +1537,11 @@ mod tests {
     /// Helper: validate a plan and assert no errors.
     fn assert_plan_valid(plan: &ExecutionPlan, original: &NanoGraph) {
         let errors = validate_plan(plan, original);
-        assert!(errors.is_empty(), "Plan validation errors:\n{}", errors.join("\n"));
+        assert!(
+            errors.is_empty(),
+            "Plan validation errors:\n{}",
+            errors.join("\n")
+        );
     }
 
     /// Helper: validate each span's graph independently.
@@ -1495,7 +1594,11 @@ mod tests {
         assert_eq!(plan.num_lanes, 1);
         // Should have exactly 1 phase for Mul + 1 phase for ReduceSum consumers
         // (ReduceSum itself could be in phase 0 or 1 depending on phase assignment).
-        assert!(plan.phases.len() >= 1, "Expected >= 1 phase, got {}", plan.phases.len());
+        assert!(
+            plan.phases.len() >= 1,
+            "Expected >= 1 phase, got {}",
+            plan.phases.len()
+        );
     }
 
     #[test]
@@ -1564,8 +1667,20 @@ mod tests {
         let mut g = NanoGraph::new();
 
         // Matmul 1: A[2,4] @ B[4,8]
-        let a1 = g.push_group(8, ScalarOp::Literal(NumericScalar::F32(1.0)), vec![], vec![], vec![]);
-        let b1 = g.push_group(32, ScalarOp::Literal(NumericScalar::F32(1.0)), vec![], vec![], vec![]);
+        let a1 = g.push_group(
+            8,
+            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
+        let b1 = g.push_group(
+            32,
+            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
         let mut mul1_base = None;
         for mi in 0..2u64 {
             for ki in 0..4u64 {
@@ -1573,11 +1688,24 @@ mod tests {
                 let b_row = b1.offset(ki * 8);
                 let base = g.push_group(
                     8,
-                    ScalarOp::Binary { op: ScalarBinOp::Mul, compute_dtype: DType::F32, output_dtype: DType::F32 },
-                    vec![], vec![],
-                    vec![InputRef::Broadcast(a_atom), InputRef::Affine { base: b_row, stride: 1 }],
+                    ScalarOp::Binary {
+                        op: ScalarBinOp::Mul,
+                        compute_dtype: DType::F32,
+                        output_dtype: DType::F32,
+                    },
+                    vec![],
+                    vec![],
+                    vec![
+                        InputRef::Broadcast(a_atom),
+                        InputRef::Affine {
+                            base: b_row,
+                            stride: 1,
+                        },
+                    ],
                 );
-                if mul1_base.is_none() { mul1_base = Some(base); }
+                if mul1_base.is_none() {
+                    mul1_base = Some(base);
+                }
             }
         }
         let mul1_base = mul1_base.unwrap();
@@ -1586,16 +1714,39 @@ mod tests {
             let row_base = AtomId(mul1_base.0 + mi * 4 * 8);
             let base = g.push_group(
                 8,
-                ScalarOp::ReduceSum { reduce_count: 4, reduce_stride: 8, compute_dtype: DType::F32, output_dtype: DType::F32 },
-                vec![], vec![],
-                vec![InputRef::Affine { base: row_base, stride: 1 }],
+                ScalarOp::ReduceSum {
+                    reduce_count: 4,
+                    reduce_stride: 8,
+                    compute_dtype: DType::F32,
+                    output_dtype: DType::F32,
+                },
+                vec![],
+                vec![],
+                vec![InputRef::Affine {
+                    base: row_base,
+                    stride: 1,
+                }],
             );
-            if red1_base.is_none() { red1_base = Some(base); }
+            if red1_base.is_none() {
+                red1_base = Some(base);
+            }
         }
 
         // Matmul 2: C[2,4] @ D[4,8] (completely independent)
-        let c1 = g.push_group(8, ScalarOp::Literal(NumericScalar::F32(2.0)), vec![], vec![], vec![]);
-        let d1 = g.push_group(32, ScalarOp::Literal(NumericScalar::F32(2.0)), vec![], vec![], vec![]);
+        let c1 = g.push_group(
+            8,
+            ScalarOp::Literal(NumericScalar::F32(2.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
+        let d1 = g.push_group(
+            32,
+            ScalarOp::Literal(NumericScalar::F32(2.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
         let mut mul2_base = None;
         for mi in 0..2u64 {
             for ki in 0..4u64 {
@@ -1603,11 +1754,24 @@ mod tests {
                 let d_row = d1.offset(ki * 8);
                 let base = g.push_group(
                     8,
-                    ScalarOp::Binary { op: ScalarBinOp::Mul, compute_dtype: DType::F32, output_dtype: DType::F32 },
-                    vec![], vec![],
-                    vec![InputRef::Broadcast(c_atom), InputRef::Affine { base: d_row, stride: 1 }],
+                    ScalarOp::Binary {
+                        op: ScalarBinOp::Mul,
+                        compute_dtype: DType::F32,
+                        output_dtype: DType::F32,
+                    },
+                    vec![],
+                    vec![],
+                    vec![
+                        InputRef::Broadcast(c_atom),
+                        InputRef::Affine {
+                            base: d_row,
+                            stride: 1,
+                        },
+                    ],
                 );
-                if mul2_base.is_none() { mul2_base = Some(base); }
+                if mul2_base.is_none() {
+                    mul2_base = Some(base);
+                }
             }
         }
         let mul2_base = mul2_base.unwrap();
@@ -1616,11 +1780,22 @@ mod tests {
             let row_base = AtomId(mul2_base.0 + mi * 4 * 8);
             let base = g.push_group(
                 8,
-                ScalarOp::ReduceSum { reduce_count: 4, reduce_stride: 8, compute_dtype: DType::F32, output_dtype: DType::F32 },
-                vec![], vec![],
-                vec![InputRef::Affine { base: row_base, stride: 1 }],
+                ScalarOp::ReduceSum {
+                    reduce_count: 4,
+                    reduce_stride: 8,
+                    compute_dtype: DType::F32,
+                    output_dtype: DType::F32,
+                },
+                vec![],
+                vec![],
+                vec![InputRef::Affine {
+                    base: row_base,
+                    stride: 1,
+                }],
             );
-            if red2_base.is_none() { red2_base = Some(base); }
+            if red2_base.is_none() {
+                red2_base = Some(base);
+            }
         }
 
         g.outputs = vec![red1_base.unwrap(), red2_base.unwrap()];
@@ -1664,7 +1839,9 @@ mod tests {
                     assert!(
                         span.graph.contains_atom(mapping.span_base),
                         "Phase {} Span {}: input local atom {} missing",
-                        pi, si, mapping.span_base
+                        pi,
+                        si,
+                        mapping.span_base
                     );
                 }
 
@@ -1673,7 +1850,9 @@ mod tests {
                     assert!(
                         span.graph.contains_atom(mapping.span_base),
                         "Phase {} Span {}: output local atom {} missing",
-                        pi, si, mapping.span_base
+                        pi,
+                        si,
+                        mapping.span_base
                     );
                 }
             }
@@ -1698,7 +1877,9 @@ mod tests {
             for (si, span) in phase.spans.iter().enumerate() {
                 for input_mapping in &span.inputs {
                     for &(other_si, other_mapping) in &produced_ranges {
-                        if other_si == si { continue; }
+                        if other_si == si {
+                            continue;
+                        }
                         let a_lo = input_mapping.main_base.0;
                         let a_hi = a_lo + input_mapping.count;
                         let b_lo = other_mapping.main_base.0;
@@ -1706,7 +1887,11 @@ mod tests {
                         assert!(
                             a_lo >= b_hi || b_lo >= a_hi,
                             "Phase {}: Span {} reads atoms [{}, {}) produced by Span {} (violation!)",
-                            pi, si, a_lo, a_hi, other_si
+                            pi,
+                            si,
+                            a_lo,
+                            a_hi,
+                            other_si
                         );
                     }
                 }
@@ -1722,18 +1907,15 @@ mod tests {
 
         // Check all original outputs are covered by span output ranges.
         for &out in &g.outputs {
-            let covered = plan.phases.iter()
+            let covered = plan
+                .phases
+                .iter()
                 .flat_map(|p| p.spans.iter())
                 .flat_map(|s| s.outputs.iter())
                 .any(|mapping| {
-                    out.0 >= mapping.main_base.0
-                        && out.0 < mapping.main_base.0 + mapping.count
+                    out.0 >= mapping.main_base.0 && out.0 < mapping.main_base.0 + mapping.count
                 });
-            assert!(
-                covered,
-                "Original output {} not covered by any span",
-                out
-            );
+            assert!(covered, "Original output {} not covered by any span", out);
         }
     }
 
@@ -1747,7 +1929,13 @@ mod tests {
     #[test]
     fn test_literals_only() {
         let mut g = NanoGraph::new();
-        g.push_group(100, ScalarOp::Literal(NumericScalar::F32(1.0)), vec![], vec![], vec![]);
+        g.push_group(
+            100,
+            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
         let plan = plan_execution(&g, 4);
         assert_eq!(plan.phases.len(), 0);
     }

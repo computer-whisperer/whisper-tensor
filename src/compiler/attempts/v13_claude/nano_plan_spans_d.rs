@@ -1,4 +1,10 @@
-#![allow(clippy::all, dead_code, unreachable_patterns, unused_variables, unused_imports)]
+#![allow(
+    clippy::all,
+    dead_code,
+    unreachable_patterns,
+    unused_variables,
+    unused_imports
+)]
 //! DAG-slicing span partitioner: Phase+Lane → self-contained NanoGraph spans.
 //!
 //! Algorithm:
@@ -98,7 +104,9 @@ impl RangeAtomMap {
     /// Look up a single main-graph AtomId, returning the span-graph AtomId.
     fn get(&self, main_id: AtomId) -> Option<AtomId> {
         // Binary search for the range containing main_id.
-        let idx = self.ranges.partition_point(|&(base, _, _)| base <= main_id.0);
+        let idx = self
+            .ranges
+            .partition_point(|&(base, _, _)| base <= main_id.0);
         if idx == 0 {
             return None;
         }
@@ -148,8 +156,14 @@ pub fn plan_spans(graph: &NanoGraph, num_lanes: usize) -> SpanPlan {
     let depth = compute_depth(n, &topo_order, &producers, &is_literal);
 
     // Step 3: Find phase boundaries and assign groups to phases.
-    let (group_phase, num_phases) =
-        assign_phases(groups, &topo_order, &producers, &consumers, &is_literal, &depth);
+    let (group_phase, num_phases) = assign_phases(
+        groups,
+        &topo_order,
+        &producers,
+        &consumers,
+        &is_literal,
+        &depth,
+    );
 
     // Step 4: Within each phase, assign groups to lanes.
     let group_lane = assign_lanes(
@@ -469,11 +483,7 @@ fn compute_depth(
             depth[gi] = 0;
             continue;
         }
-        let max_prod_depth = producers[gi]
-            .iter()
-            .map(|&pi| depth[pi])
-            .max()
-            .unwrap_or(0);
+        let max_prod_depth = producers[gi].iter().map(|&pi| depth[pi]).max().unwrap_or(0);
         // Literals don't add depth, compute groups do.
         depth[gi] = if producers[gi].iter().all(|&pi| is_literal[pi]) {
             1 // first compute layer
@@ -923,7 +933,8 @@ fn collect_external_ranges(
             continue;
         }
         // Compute the range of atoms from this producer that the consumer reads.
-        let (overlap_lo, overlap_hi) = compute_read_range_bounds(group, &all_groups[pi], all_groups);
+        let (overlap_lo, overlap_hi) =
+            compute_read_range_bounds(group, &all_groups[pi], all_groups);
         if overlap_hi > overlap_lo {
             let prod = &all_groups[pi];
             let offset = overlap_lo - prod.base_id.0;
@@ -944,9 +955,16 @@ fn compute_read_range_bounds(
     let prod_hi = producer.base_id.0 + producer.count;
 
     let (is_reduce, reduce_count, reduce_stride) = match &consumer.op {
-        ScalarOp::ReduceSum { reduce_count, reduce_stride, .. }
-        | ScalarOp::ReduceMax { reduce_count, reduce_stride, .. }
-            if *reduce_count > 1 && *reduce_stride != 0 => (true, *reduce_count, *reduce_stride),
+        ScalarOp::ReduceSum {
+            reduce_count,
+            reduce_stride,
+            ..
+        }
+        | ScalarOp::ReduceMax {
+            reduce_count,
+            reduce_stride,
+            ..
+        } if *reduce_count > 1 && *reduce_stride != 0 => (true, *reduce_count, *reduce_stride),
         _ => (false, 0, 0),
     };
 
@@ -954,7 +972,13 @@ fn compute_read_range_bounds(
     let mut overall_hi = 0u64;
 
     for input in &consumer.inputs {
-        let (range_lo, range_hi) = input_ref_atom_range(input, consumer.count, is_reduce, reduce_count, reduce_stride);
+        let (range_lo, range_hi) = input_ref_atom_range(
+            input,
+            consumer.count,
+            is_reduce,
+            reduce_count,
+            reduce_stride,
+        );
         if range_hi <= prod_lo || range_lo >= prod_hi {
             continue;
         }
@@ -1001,13 +1025,23 @@ fn find_all_producer_group_indices(group: &AtomGroup, all_groups: &[AtomGroup]) 
 
     // Reduce strided access.
     match &group.op {
-        ScalarOp::ReduceSum { reduce_count, reduce_stride, .. }
-        | ScalarOp::ReduceMax { reduce_count, reduce_stride, .. }
-            if *reduce_count > 1 && *reduce_stride != 0 =>
-        {
+        ScalarOp::ReduceSum {
+            reduce_count,
+            reduce_stride,
+            ..
+        }
+        | ScalarOp::ReduceMax {
+            reduce_count,
+            reduce_stride,
+            ..
+        } if *reduce_count > 1 && *reduce_stride != 0 => {
             for input in &group.inputs {
                 for pi in resolve_producer_groups_with_reduce(
-                    input, group.count, *reduce_count, *reduce_stride, all_groups,
+                    input,
+                    group.count,
+                    *reduce_count,
+                    *reduce_stride,
+                    all_groups,
                 ) {
                     result.insert(pi);
                 }
@@ -1040,9 +1074,16 @@ fn compute_read_range_from_group(
     let prod_hi = producer.base_id.0 + producer.count;
 
     let (is_reduce, reduce_count, reduce_stride) = match &consumer.op {
-        ScalarOp::ReduceSum { reduce_count, reduce_stride, .. }
-        | ScalarOp::ReduceMax { reduce_count, reduce_stride, .. }
-            if *reduce_count > 1 && *reduce_stride != 0 => (true, *reduce_count, *reduce_stride),
+        ScalarOp::ReduceSum {
+            reduce_count,
+            reduce_stride,
+            ..
+        }
+        | ScalarOp::ReduceMax {
+            reduce_count,
+            reduce_stride,
+            ..
+        } if *reduce_count > 1 && *reduce_stride != 0 => (true, *reduce_count, *reduce_stride),
         _ => (false, 0, 0),
     };
 
@@ -1051,7 +1092,13 @@ fn compute_read_range_from_group(
     for input in &consumer.inputs {
         // Compute the full range of source atoms this InputRef covers
         // (including reduce expansion) and intersect with producer range.
-        let (range_lo, range_hi) = input_ref_atom_range(input, consumer.count, is_reduce, reduce_count, reduce_stride);
+        let (range_lo, range_hi) = input_ref_atom_range(
+            input,
+            consumer.count,
+            is_reduce,
+            reduce_count,
+            reduce_stride,
+        );
         if range_hi < prod_lo || range_lo >= prod_hi {
             continue; // No overlap.
         }
@@ -1101,7 +1148,11 @@ fn input_ref_atom_range(
             let hi = first.max(last) + max_reduce_ext + 1;
             (lo as u64, hi as u64)
         }
-        InputRef::StridedBroadcast { base, stride, repeat } => {
+        InputRef::StridedBroadcast {
+            base,
+            stride,
+            repeat,
+        } => {
             if count == 0 {
                 return (0, 0);
             }
@@ -1112,7 +1163,11 @@ fn input_ref_atom_range(
             let hi = first_read.max(last_read) + max_reduce_ext + 1;
             (lo as u64, hi as u64)
         }
-        InputRef::Modular { base, stride, modulus } => {
+        InputRef::Modular {
+            base,
+            stride,
+            modulus,
+        } => {
             if *modulus == 0 {
                 return (0, 0);
             }
@@ -1288,10 +1343,7 @@ fn build_span_graph(
 }
 
 /// Remap InputRefs from main-graph AtomIds to span-graph AtomIds.
-fn remap_input_refs(
-    inputs: &[InputRef],
-    atom_map: &RangeAtomMap,
-) -> Vec<InputRef> {
+fn remap_input_refs(inputs: &[InputRef], atom_map: &RangeAtomMap) -> Vec<InputRef> {
     inputs
         .iter()
         .map(|input| remap_one_input_ref(input, atom_map))
@@ -1300,15 +1352,11 @@ fn remap_input_refs(
 
 fn remap_one_input_ref(input: &InputRef, atom_map: &RangeAtomMap) -> InputRef {
     match input {
-        InputRef::Broadcast(id) => {
-            InputRef::Broadcast(atom_map.get(*id).unwrap_or(*id))
-        }
-        InputRef::Affine { base, stride } => {
-            InputRef::Affine {
-                base: atom_map.get(*base).unwrap_or(*base),
-                stride: *stride,
-            }
-        }
+        InputRef::Broadcast(id) => InputRef::Broadcast(atom_map.get(*id).unwrap_or(*id)),
+        InputRef::Affine { base, stride } => InputRef::Affine {
+            base: atom_map.get(*base).unwrap_or(*base),
+            stride: *stride,
+        },
         InputRef::StridedBroadcast {
             base,
             stride,
@@ -1336,13 +1384,11 @@ fn remap_one_input_ref(input: &InputRef, atom_map: &RangeAtomMap) -> InputRef {
             stride_i: *stride_i,
             stride_k: *stride_k,
         },
-        InputRef::Explicit(ids) => {
-            InputRef::Explicit(
-                ids.iter()
-                    .map(|id| atom_map.get(*id).unwrap_or(*id))
-                    .collect(),
-            )
-        }
+        InputRef::Explicit(ids) => InputRef::Explicit(
+            ids.iter()
+                .map(|id| atom_map.get(*id).unwrap_or(*id))
+                .collect(),
+        ),
     }
 }
 
@@ -1748,8 +1794,7 @@ mod tests {
         // Matmul + activation: the activation is elementwise on the matmul output.
         // Should be in the same phase as the reduce since it reads only from one
         // family (the reduce outputs).
-        let (g, _, _, _) =
-            test_graphs::matmul_activation(4, 2, 3, ScalarUnaryOp::Tanh);
+        let (g, _, _, _) = test_graphs::matmul_activation(4, 2, 3, ScalarUnaryOp::Tanh);
         let errors = g.validate();
         assert!(errors.is_empty(), "Graph validation: {:?}", errors);
 
@@ -1927,7 +1972,10 @@ mod tests {
             vec![],
             vec![],
             vec![
-                InputRef::Affine { base: a0, stride: 1 },
+                InputRef::Affine {
+                    base: a0,
+                    stride: 1,
+                },
                 InputRef::Affine { base: b, stride: 1 },
             ],
         );
@@ -1957,7 +2005,10 @@ mod tests {
             vec![],
             vec![],
             vec![
-                InputRef::Affine { base: a1, stride: 1 },
+                InputRef::Affine {
+                    base: a1,
+                    stride: 1,
+                },
                 InputRef::Affine { base: b, stride: 1 },
             ],
         );
@@ -1985,10 +2036,7 @@ mod tests {
             },
             vec![],
             vec![],
-            vec![
-                InputRef::Broadcast(red0),
-                InputRef::Broadcast(red1),
-            ],
+            vec![InputRef::Broadcast(red0), InputRef::Broadcast(red1)],
         );
         g.outputs = vec![out];
 
@@ -2073,8 +2121,14 @@ mod tests {
         // There should be some cross-span data flow.
         // (B and C outputs → D inputs)
         if plan.phases.len() >= 2 {
-            assert!(total_outputs > 0, "Expected some span outputs for cross-phase data");
-            assert!(total_inputs > 0, "Expected some span inputs for cross-phase data");
+            assert!(
+                total_outputs > 0,
+                "Expected some span outputs for cross-phase data"
+            );
+            assert!(
+                total_inputs > 0,
+                "Expected some span inputs for cross-phase data"
+            );
         }
     }
 }

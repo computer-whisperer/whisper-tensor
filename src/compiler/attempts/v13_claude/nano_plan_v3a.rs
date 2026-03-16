@@ -1,4 +1,10 @@
-#![allow(clippy::all, dead_code, unreachable_patterns, unused_variables, unused_imports)]
+#![allow(
+    clippy::all,
+    dead_code,
+    unreachable_patterns,
+    unused_variables,
+    unused_imports
+)]
 //! Span-based NanoGraph partitioner v3a: edge-classification approach.
 //!
 //! Previous attempts failed because they assigned phases first (e.g., using v2c),
@@ -96,7 +102,9 @@ impl RangeAtomMap {
     }
 
     fn get(&self, main_id: AtomId) -> Option<AtomId> {
-        let idx = self.ranges.partition_point(|&(base, _, _)| base <= main_id.0);
+        let idx = self
+            .ranges
+            .partition_point(|&(base, _, _)| base <= main_id.0);
         if idx == 0 {
             return None;
         }
@@ -147,8 +155,14 @@ pub fn plan_spans(graph: &NanoGraph, num_lanes: usize) -> SpanPlan {
     let topo_order = topological_sort(n, &producers);
 
     // Step 3: Classify edges and assign phases.
-    let (group_phase, num_phases, duplicated) =
-        assign_phases_from_edges(groups, &topo_order, &producers, &consumers, &is_literal, num_lanes);
+    let (group_phase, num_phases, duplicated) = assign_phases_from_edges(
+        groups,
+        &topo_order,
+        &producers,
+        &consumers,
+        &is_literal,
+        num_lanes,
+    );
 
     // Step 4: Build spans.
     let phases = build_all_spans(
@@ -275,7 +289,11 @@ fn is_edge_lane_aligned(
             is_affine_lane_aligned(*base, *stride, prod_base, prod_count, cons_count, num_lanes)
         }
 
-        InputRef::StridedBroadcast { base, stride, repeat } => {
+        InputRef::StridedBroadcast {
+            base,
+            stride,
+            repeat,
+        } => {
             // Atom i of consumer reads base + stride * (i / repeat).
             // Each block of `repeat` consecutive atoms shares one source.
             //
@@ -297,7 +315,11 @@ fn is_edge_lane_aligned(
             )
         }
 
-        InputRef::Modular { base, stride, modulus } => {
+        InputRef::Modular {
+            base,
+            stride,
+            modulus,
+        } => {
             // Atom i reads base + stride * (i % modulus).
             // This cycles through the same `modulus` atoms for every `modulus` consumer atoms.
             // Splitting the consumer means each lane reads the full set of `modulus` atoms.
@@ -349,7 +371,9 @@ fn is_affine_lane_aligned(
             continue;
         }
         let read_lo = base.0.wrapping_add((stride as i64 * c_lo as i64) as u64);
-        let read_hi = base.0.wrapping_add((stride as i64 * (c_hi - 1) as i64) as u64);
+        let read_hi = base
+            .0
+            .wrapping_add((stride as i64 * (c_hi - 1) as i64) as u64);
         let (read_min, read_max) = if stride >= 0 {
             (read_lo, read_hi)
         } else {
@@ -547,10 +571,16 @@ fn assign_phases_from_edges(
 
                 // Also check reduce-extended access if applicable.
                 match &group.op {
-                    ScalarOp::ReduceSum { reduce_count, reduce_stride, .. }
-                    | ScalarOp::ReduceMax { reduce_count, reduce_stride, .. }
-                        if *reduce_count > 1 && *reduce_stride != 0 =>
-                    {
+                    ScalarOp::ReduceSum {
+                        reduce_count,
+                        reduce_stride,
+                        ..
+                    }
+                    | ScalarOp::ReduceMax {
+                        reduce_count,
+                        reduce_stride,
+                        ..
+                    } if *reduce_count > 1 && *reduce_stride != 0 => {
                         if !is_reduce_edge_lane_aligned(
                             input_ref,
                             group.count,
@@ -637,7 +667,10 @@ fn assign_phases_from_edges(
                             break;
                         }
                     }
-                    if needs_full && producer.count <= DUPLICATE_THRESHOLD && !producer.op.is_reduce() {
+                    if needs_full
+                        && producer.count <= DUPLICATE_THRESHOLD
+                        && !producer.op.is_reduce()
+                    {
                         duplicated.insert(pi);
                         changed = true;
                     }
@@ -670,13 +703,21 @@ fn input_ref_range(input: &InputRef, count: u64) -> (u64, u64) {
             let last = first + *stride as i64 * (count as i64 - 1);
             (first.min(last) as u64, first.max(last) as u64 + 1)
         }
-        InputRef::StridedBroadcast { base, stride, repeat } => {
+        InputRef::StridedBroadcast {
+            base,
+            stride,
+            repeat,
+        } => {
             let last_block = ((count - 1) / repeat) as i64;
             let first = base.0 as i64;
             let last = first + stride * last_block;
             (first.min(last) as u64, first.max(last) as u64 + 1)
         }
-        InputRef::Modular { base, stride, modulus } => {
+        InputRef::Modular {
+            base,
+            stride,
+            modulus,
+        } => {
             if *modulus == 0 {
                 return (0, 0);
             }
@@ -736,13 +777,23 @@ fn build_group_deps(groups: &[AtomGroup]) -> (Vec<Vec<usize>>, Vec<Vec<usize>>) 
 
         // ReduceSum/ReduceMax strided access.
         match &group.op {
-            ScalarOp::ReduceSum { reduce_count, reduce_stride, .. }
-            | ScalarOp::ReduceMax { reduce_count, reduce_stride, .. }
-                if *reduce_count > 1 && *reduce_stride != 0 =>
-            {
+            ScalarOp::ReduceSum {
+                reduce_count,
+                reduce_stride,
+                ..
+            }
+            | ScalarOp::ReduceMax {
+                reduce_count,
+                reduce_stride,
+                ..
+            } if *reduce_count > 1 && *reduce_stride != 0 => {
                 for input in &group.inputs {
                     for pi in resolve_producer_groups_with_reduce(
-                        input, group.count, *reduce_count, *reduce_stride, groups,
+                        input,
+                        group.count,
+                        *reduce_count,
+                        *reduce_stride,
+                        groups,
                     ) {
                         if pi != gi {
                             prod_set.insert(pi);
@@ -807,7 +858,11 @@ fn resolve_producer_groups(input: &InputRef, count: u64, groups: &[AtomGroup]) -
             let hi = base.0.max(last.0);
             find_groups_in_range(groups, lo, hi)
         }
-        InputRef::StridedBroadcast { base, stride, repeat } => {
+        InputRef::StridedBroadcast {
+            base,
+            stride,
+            repeat,
+        } => {
             if count == 0 {
                 return vec![];
             }
@@ -818,7 +873,11 @@ fn resolve_producer_groups(input: &InputRef, count: u64, groups: &[AtomGroup]) -
             let hi = base.0.max(last.0);
             find_groups_in_range(groups, lo, hi)
         }
-        InputRef::Modular { base, stride, modulus } => {
+        InputRef::Modular {
+            base,
+            stride,
+            modulus,
+        } => {
             if *modulus == 0 {
                 return vec![];
             }
@@ -852,7 +911,11 @@ fn resolve_producer_groups_with_reduce(
             let hi = (first.max(last) + max_ext) as u64;
             find_groups_in_range(groups, lo, hi)
         }
-        InputRef::StridedBroadcast { base, stride, repeat } => {
+        InputRef::StridedBroadcast {
+            base,
+            stride,
+            repeat,
+        } => {
             let last_block = ((count - 1) / repeat) as i64;
             let first = base.0 as i64;
             let last = first + stride * last_block;
@@ -873,7 +936,11 @@ fn resolve_producer_groups_with_reduce(
             let hi = (first.max(last) + max_ext) as u64;
             find_groups_in_range(groups, lo, hi)
         }
-        InputRef::Modular { base, stride, modulus } => {
+        InputRef::Modular {
+            base,
+            stride,
+            modulus,
+        } => {
             if *modulus == 0 {
                 return vec![];
             }
@@ -1143,8 +1210,11 @@ fn build_one_span(
                 } else {
                     // Large literal: only include the range this slice actually reads.
                     let ranges = compute_read_ranges_from_producer(
-                        &groups[gi], slice.atom_offset, slice.atom_count,
-                        &groups[pi], groups,
+                        &groups[gi],
+                        slice.atom_offset,
+                        slice.atom_count,
+                        &groups[pi],
+                        groups,
                     );
                     for (offset, count) in ranges {
                         large_literal_ranges.push((pi, offset, count));
@@ -1167,13 +1237,19 @@ fn build_one_span(
             // If our group is duplicated, we need the full range.
             let ranges = if slice.is_duplicated {
                 compute_read_ranges_from_producer(
-                    &groups[gi], 0, groups[gi].count,
-                    &groups[pi], groups,
+                    &groups[gi],
+                    0,
+                    groups[gi].count,
+                    &groups[pi],
+                    groups,
                 )
             } else {
                 compute_read_ranges_from_producer(
-                    &groups[gi], slice.atom_offset, slice.atom_count,
-                    &groups[pi], groups,
+                    &groups[gi],
+                    slice.atom_offset,
+                    slice.atom_count,
+                    &groups[pi],
+                    groups,
                 )
             };
             for (offset, count) in ranges {
@@ -1207,7 +1283,9 @@ fn build_one_span(
         let local_base = span_graph.push_group(
             count,
             ScalarOp::Literal(crate::numeric_scalar::NumericScalar::F32(0.0)),
-            vec![], vec![], vec![],
+            vec![],
+            vec![],
+            vec![],
         );
         atom_map.insert_range(main_base, local_base, count);
         input_mappings.push(AtomMapping {
@@ -1224,7 +1302,9 @@ fn build_one_span(
         let local_base = span_graph.push_group(
             count,
             ScalarOp::Literal(crate::numeric_scalar::NumericScalar::F32(0.0)),
-            vec![], vec![], vec![],
+            vec![],
+            vec![],
+            vec![],
         );
         atom_map.insert_range(main_base, local_base, count);
         input_mappings.push(AtomMapping {
@@ -1342,12 +1422,16 @@ fn compute_read_ranges_from_producer(
     let prod_hi = prod_lo + producer.count;
 
     let (is_reduce, reduce_count, reduce_stride) = match &consumer.op {
-        ScalarOp::ReduceSum { reduce_count, reduce_stride, .. }
-        | ScalarOp::ReduceMax { reduce_count, reduce_stride, .. }
-            if *reduce_count > 1 && *reduce_stride != 0 =>
-        {
-            (true, *reduce_count, *reduce_stride)
+        ScalarOp::ReduceSum {
+            reduce_count,
+            reduce_stride,
+            ..
         }
+        | ScalarOp::ReduceMax {
+            reduce_count,
+            reduce_stride,
+            ..
+        } if *reduce_count > 1 && *reduce_stride != 0 => (true, *reduce_count, *reduce_stride),
         _ => (false, 0u64, 0i64),
     };
 
@@ -1429,7 +1513,11 @@ fn sliced_input_ref_range(
             let hi = first.max(last) + max_reduce_ext + 1;
             (lo as u64, hi as u64)
         }
-        InputRef::StridedBroadcast { base, stride, repeat } => {
+        InputRef::StridedBroadcast {
+            base,
+            stride,
+            repeat,
+        } => {
             let first_block = atom_offset / repeat;
             let last_block = (atom_offset + atom_count - 1) / repeat;
             let first_read = base.0 as i64 + *stride * first_block as i64;
@@ -1438,7 +1526,11 @@ fn sliced_input_ref_range(
             let hi = first_read.max(last_read) + max_reduce_ext + 1;
             (lo as u64, hi as u64)
         }
-        InputRef::Modular { base, stride, modulus } => {
+        InputRef::Modular {
+            base,
+            stride,
+            modulus,
+        } => {
             if *modulus == 0 {
                 return (0, 0);
             }
@@ -1524,7 +1616,11 @@ fn adjust_input_ref_for_slice(
                 stride: *stride,
             }
         }
-        InputRef::StridedBroadcast { base, stride, repeat } => {
+        InputRef::StridedBroadcast {
+            base,
+            stride,
+            repeat,
+        } => {
             // Original: atom i reads base + stride * (i / repeat).
             // Sliced: new atom j reads base + stride * ((offset + j) / repeat).
             //
@@ -1554,7 +1650,11 @@ fn adjust_input_ref_for_slice(
                 InputRef::Explicit(ids)
             }
         }
-        InputRef::Modular { base, stride, modulus } => {
+        InputRef::Modular {
+            base,
+            stride,
+            modulus,
+        } => {
             // Original: atom i reads base + stride * (i % modulus).
             // Sliced: new atom j reads base + stride * ((offset + j) % modulus).
             //
@@ -1570,19 +1670,33 @@ fn adjust_input_ref_for_slice(
                 let ids: Vec<AtomId> = (0..count)
                     .map(|j| {
                         let wrapped = (offset + j) % modulus;
-                        AtomId(base.0.wrapping_add((*stride as i64 * wrapped as i64) as u64))
+                        AtomId(
+                            base.0
+                                .wrapping_add((*stride as i64 * wrapped as i64) as u64),
+                        )
                     })
                     .collect();
                 InputRef::Explicit(ids)
             } else {
-                InputRef::Modular { base: *base, stride: *stride, modulus: *modulus }
+                InputRef::Modular {
+                    base: *base,
+                    stride: *stride,
+                    modulus: *modulus,
+                }
             }
         }
-        InputRef::SymAffine { base, stride_i, stride_k } => {
+        InputRef::SymAffine {
+            base,
+            stride_i,
+            stride_k,
+        } => {
             // Original: atom i reads base + stride_i * i + stride_k * k.
             // Sliced: new atom j reads base + stride_i * (offset + j) + stride_k * k.
             // = (base + stride_i * offset) + stride_i * j + stride_k * k.
-            let new_base = AtomId(base.0.wrapping_add((*stride_i as i64 * offset as i64) as u64));
+            let new_base = AtomId(
+                base.0
+                    .wrapping_add((*stride_i as i64 * offset as i64) as u64),
+            );
             InputRef::SymAffine {
                 base: new_base,
                 stride_i: *stride_i,
@@ -1606,56 +1720,55 @@ fn adjust_op_for_slice(op: &ScalarOp) -> ScalarOp {
 }
 
 fn remap_input_refs(inputs: &[InputRef], atom_map: &RangeAtomMap) -> Vec<InputRef> {
-    inputs.iter().map(|input| remap_one_input_ref(input, atom_map)).collect()
+    inputs
+        .iter()
+        .map(|input| remap_one_input_ref(input, atom_map))
+        .collect()
 }
 
 fn remap_one_input_ref(input: &InputRef, atom_map: &RangeAtomMap) -> InputRef {
     match input {
-        InputRef::Broadcast(id) => {
-            InputRef::Broadcast(atom_map.get(*id).unwrap_or(*id))
-        }
-        InputRef::Affine { base, stride } => {
-            InputRef::Affine {
-                base: atom_map.get(*base).unwrap_or(*base),
-                stride: *stride,
-            }
-        }
-        InputRef::StridedBroadcast { base, stride, repeat } => {
-            InputRef::StridedBroadcast {
-                base: atom_map.get(*base).unwrap_or(*base),
-                stride: *stride,
-                repeat: *repeat,
-            }
-        }
-        InputRef::Modular { base, stride, modulus } => {
-            InputRef::Modular {
-                base: atom_map.get(*base).unwrap_or(*base),
-                stride: *stride,
-                modulus: *modulus,
-            }
-        }
-        InputRef::SymAffine { base, stride_i, stride_k } => {
-            InputRef::SymAffine {
-                base: atom_map.get(*base).unwrap_or(*base),
-                stride_i: *stride_i,
-                stride_k: *stride_k,
-            }
-        }
-        InputRef::Explicit(ids) => {
-            InputRef::Explicit(
-                ids.iter()
-                    .map(|id| atom_map.get(*id).unwrap_or(*id))
-                    .collect(),
-            )
-        }
+        InputRef::Broadcast(id) => InputRef::Broadcast(atom_map.get(*id).unwrap_or(*id)),
+        InputRef::Affine { base, stride } => InputRef::Affine {
+            base: atom_map.get(*base).unwrap_or(*base),
+            stride: *stride,
+        },
+        InputRef::StridedBroadcast {
+            base,
+            stride,
+            repeat,
+        } => InputRef::StridedBroadcast {
+            base: atom_map.get(*base).unwrap_or(*base),
+            stride: *stride,
+            repeat: *repeat,
+        },
+        InputRef::Modular {
+            base,
+            stride,
+            modulus,
+        } => InputRef::Modular {
+            base: atom_map.get(*base).unwrap_or(*base),
+            stride: *stride,
+            modulus: *modulus,
+        },
+        InputRef::SymAffine {
+            base,
+            stride_i,
+            stride_k,
+        } => InputRef::SymAffine {
+            base: atom_map.get(*base).unwrap_or(*base),
+            stride_i: *stride_i,
+            stride_k: *stride_k,
+        },
+        InputRef::Explicit(ids) => InputRef::Explicit(
+            ids.iter()
+                .map(|id| atom_map.get(*id).unwrap_or(*id))
+                .collect(),
+        ),
     }
 }
 
-fn remap_sym_dims(
-    dims: &[SymDim],
-    main_graph: &NanoGraph,
-    span_graph: &NanoGraph,
-) -> Vec<SymDim> {
+fn remap_sym_dims(dims: &[SymDim], main_graph: &NanoGraph, span_graph: &NanoGraph) -> Vec<SymDim> {
     dims.iter()
         .map(|&sd| {
             for (name, &main_sd) in &main_graph.sym_dim_names {
@@ -1748,7 +1861,10 @@ pub fn validate_span_plan(plan: &SpanPlan, graph: &NanoGraph) -> Vec<String> {
         for i in 0..group.count {
             let atom = group.base_id.0 + i;
             if !atom_covered.contains_key(&atom) {
-                errors.push(format!("Compute atom {} (group {}) not output by any span", atom, gi));
+                errors.push(format!(
+                    "Compute atom {} (group {}) not output by any span",
+                    atom, gi
+                ));
                 // Only report first missing atom per group.
                 break;
             }
@@ -1839,7 +1955,9 @@ mod tests {
         g.push_group(
             100,
             ScalarOp::Literal(NumericScalar::F32(1.0)),
-            vec![], vec![], vec![],
+            vec![],
+            vec![],
+            vec![],
         );
         let (plan, errors) = plan_and_validate(&g, 2);
         assert!(errors.is_empty(), "{:?}", errors);
@@ -1981,19 +2099,25 @@ mod tests {
         let cond = g.push_group(
             3072,
             ScalarOp::Literal(NumericScalar::F32(0.0)),
-            vec![], vec![], vec![],
+            vec![],
+            vec![],
+            vec![],
         );
         // True value literal.
         let true_val = g.push_group(
             3072,
             ScalarOp::Literal(NumericScalar::F32(1.0)),
-            vec![], vec![], vec![],
+            vec![],
+            vec![],
+            vec![],
         );
         // False value literal.
         let false_val = g.push_group(
             3072,
             ScalarOp::Literal(NumericScalar::F32(-1e9)),
-            vec![], vec![], vec![],
+            vec![],
+            vec![],
+            vec![],
         );
 
         // Select group: count=3072, reads 3 literals.
@@ -2003,11 +2127,21 @@ mod tests {
                 compute_dtype: DType::F32,
                 output_dtype: DType::F32,
             },
-            vec![], vec![],
+            vec![],
+            vec![],
             vec![
-                InputRef::Affine { base: cond, stride: 1 },
-                InputRef::Affine { base: true_val, stride: 1 },
-                InputRef::Affine { base: false_val, stride: 1 },
+                InputRef::Affine {
+                    base: cond,
+                    stride: 1,
+                },
+                InputRef::Affine {
+                    base: true_val,
+                    stride: 1,
+                },
+                InputRef::Affine {
+                    base: false_val,
+                    stride: 1,
+                },
             ],
         );
 
@@ -2015,7 +2149,9 @@ mod tests {
         let data_lit = g.push_group(
             24576,
             ScalarOp::Literal(NumericScalar::F32(0.5)),
-            vec![], vec![], vec![],
+            vec![],
+            vec![],
+            vec![],
         );
 
         // Consumer: count=24576, reads data_lit 1:1 and Select via StridedBroadcast{repeat=8}.
@@ -2028,10 +2164,18 @@ mod tests {
                 compute_dtype: DType::F32,
                 output_dtype: DType::F32,
             },
-            vec![], vec![],
+            vec![],
+            vec![],
             vec![
-                InputRef::Affine { base: data_lit, stride: 1 },
-                InputRef::StridedBroadcast { base: select, stride: 1, repeat: 8 },
+                InputRef::Affine {
+                    base: data_lit,
+                    stride: 1,
+                },
+                InputRef::StridedBroadcast {
+                    base: select,
+                    stride: 1,
+                    repeat: 8,
+                },
             ],
         );
         g.outputs = vec![consumer];
@@ -2052,7 +2196,13 @@ mod tests {
         // This IS lane-aligned: 3072/4 = 768 = 6144/8.
         // So Select and Consumer should be in the same phase, both split.
         let total = count_output_atoms(&plan);
-        assert_eq!(total, 24576 + 3072, "Expected {} output atoms, got {}", 24576 + 3072, total);
+        assert_eq!(
+            total,
+            24576 + 3072,
+            "Expected {} output atoms, got {}",
+            24576 + 3072,
+            total
+        );
     }
 
     /// Test: Select consumed by a consumer where the StridedBroadcast repeat
@@ -2064,17 +2214,23 @@ mod tests {
         let cond = g.push_group(
             100,
             ScalarOp::Literal(NumericScalar::F32(0.0)),
-            vec![], vec![], vec![],
+            vec![],
+            vec![],
+            vec![],
         );
         let true_val = g.push_group(
             100,
             ScalarOp::Literal(NumericScalar::F32(1.0)),
-            vec![], vec![], vec![],
+            vec![],
+            vec![],
+            vec![],
         );
         let false_val = g.push_group(
             100,
             ScalarOp::Literal(NumericScalar::F32(0.0)),
-            vec![], vec![], vec![],
+            vec![],
+            vec![],
+            vec![],
         );
 
         let select = g.push_group(
@@ -2083,18 +2239,30 @@ mod tests {
                 compute_dtype: DType::F32,
                 output_dtype: DType::F32,
             },
-            vec![], vec![],
+            vec![],
+            vec![],
             vec![
-                InputRef::Affine { base: cond, stride: 1 },
-                InputRef::Affine { base: true_val, stride: 1 },
-                InputRef::Affine { base: false_val, stride: 1 },
+                InputRef::Affine {
+                    base: cond,
+                    stride: 1,
+                },
+                InputRef::Affine {
+                    base: true_val,
+                    stride: 1,
+                },
+                InputRef::Affine {
+                    base: false_val,
+                    stride: 1,
+                },
             ],
         );
 
         let data = g.push_group(
             1000,
             ScalarOp::Literal(NumericScalar::F32(0.5)),
-            vec![], vec![], vec![],
+            vec![],
+            vec![],
+            vec![],
         );
 
         // StridedBroadcast{repeat=7}: 1000/7 ~= 143, but Select has only 100 atoms.
@@ -2107,10 +2275,18 @@ mod tests {
                 compute_dtype: DType::F32,
                 output_dtype: DType::F32,
             },
-            vec![], vec![],
+            vec![],
+            vec![],
             vec![
-                InputRef::Affine { base: data, stride: 1 },
-                InputRef::StridedBroadcast { base: select, stride: 1, repeat: 7 },
+                InputRef::Affine {
+                    base: data,
+                    stride: 1,
+                },
+                InputRef::StridedBroadcast {
+                    base: select,
+                    stride: 1,
+                    repeat: 7,
+                },
             ],
         );
         g.outputs = vec![consumer];
@@ -2136,12 +2312,16 @@ mod tests {
         let a = g.push_group(
             8 * 4,
             ScalarOp::Literal(NumericScalar::F32(0.1)),
-            vec![], vec![], vec![],
+            vec![],
+            vec![],
+            vec![],
         );
         let b = g.push_group(
             4 * 8,
             ScalarOp::Literal(NumericScalar::F32(0.2)),
-            vec![], vec![], vec![],
+            vec![],
+            vec![],
+            vec![],
         );
 
         // Mul groups for layer 1.
@@ -2155,10 +2335,14 @@ mod tests {
                         compute_dtype: DType::F32,
                         output_dtype: DType::F32,
                     },
-                    vec![], vec![],
+                    vec![],
+                    vec![],
                     vec![
                         InputRef::Broadcast(a.offset(m * 4 + k)),
-                        InputRef::Affine { base: b.offset(k * 8), stride: 1 },
+                        InputRef::Affine {
+                            base: b.offset(k * 8),
+                            stride: 1,
+                        },
                     ],
                 );
                 if mul1_base.is_none() {
@@ -2179,7 +2363,8 @@ mod tests {
                     compute_dtype: DType::F32,
                     output_dtype: DType::F32,
                 },
-                vec![], vec![],
+                vec![],
+                vec![],
                 vec![InputRef::Affine {
                     base: AtomId(mul1_base.0 + m * 4 * 8),
                     stride: 1,
@@ -2200,14 +2385,20 @@ mod tests {
                 compute_dtype: DType::F32,
                 output_dtype: DType::F32,
             },
-            vec![], vec![],
-            vec![InputRef::Affine { base: red1_base, stride: 1 }],
+            vec![],
+            vec![],
+            vec![InputRef::Affine {
+                base: red1_base,
+                stride: 1,
+            }],
         );
 
         // Bias add with Broadcast scalar (should be duplicated, not barrier).
         let bias = g.push_atom(
             ScalarOp::Literal(NumericScalar::F32(0.1)),
-            vec![], vec![], vec![],
+            vec![],
+            vec![],
+            vec![],
         );
         let biased = g.push_group(
             64,
@@ -2216,9 +2407,13 @@ mod tests {
                 compute_dtype: DType::F32,
                 output_dtype: DType::F32,
             },
-            vec![], vec![],
+            vec![],
+            vec![],
             vec![
-                InputRef::Affine { base: tanh_out, stride: 1 },
+                InputRef::Affine {
+                    base: tanh_out,
+                    stride: 1,
+                },
                 InputRef::Broadcast(bias),
             ],
         );
@@ -2229,7 +2424,9 @@ mod tests {
         let c = g.push_group(
             8 * 4,
             ScalarOp::Literal(NumericScalar::F32(0.3)),
-            vec![], vec![], vec![],
+            vec![],
+            vec![],
+            vec![],
         );
 
         let mut mul2_base: Option<AtomId> = None;
@@ -2242,10 +2439,14 @@ mod tests {
                         compute_dtype: DType::F32,
                         output_dtype: DType::F32,
                     },
-                    vec![], vec![],
+                    vec![],
+                    vec![],
                     vec![
                         InputRef::Broadcast(biased.offset(m * 8 + k)),
-                        InputRef::Affine { base: c.offset(k * 4), stride: 1 },
+                        InputRef::Affine {
+                            base: c.offset(k * 4),
+                            stride: 1,
+                        },
                     ],
                 );
                 if mul2_base.is_none() {
@@ -2265,7 +2466,8 @@ mod tests {
                     compute_dtype: DType::F32,
                     output_dtype: DType::F32,
                 },
-                vec![], vec![],
+                vec![],
+                vec![],
                 vec![InputRef::Affine {
                     base: AtomId(mul2_base.0 + m * 8 * 4),
                     stride: 1,
@@ -2283,11 +2485,7 @@ mod tests {
 
         // Test with 4 lanes.
         let (plan, plan_errors) = plan_and_validate(&g, 4);
-        assert!(
-            plan_errors.is_empty(),
-            "Plan errors: {:?}",
-            plan_errors
-        );
+        assert!(plan_errors.is_empty(), "Plan errors: {:?}", plan_errors);
 
         // Should have multiple phases (at least 2: matmul1+tanh+bias, matmul2).
         assert!(
@@ -2314,14 +2512,18 @@ mod tests {
         let bias = g.push_group(
             768,
             ScalarOp::Literal(NumericScalar::F32(0.1)),
-            vec![], vec![], vec![],
+            vec![],
+            vec![],
+            vec![],
         );
 
         // Input data: 3072 atoms (4 * 768 batch dimension).
         let data = g.push_group(
             3072,
             ScalarOp::Literal(NumericScalar::F32(0.5)),
-            vec![], vec![], vec![],
+            vec![],
+            vec![],
+            vec![],
         );
 
         // Add with Modular input: each batch repeats the same bias.
@@ -2333,10 +2535,18 @@ mod tests {
                 compute_dtype: DType::F32,
                 output_dtype: DType::F32,
             },
-            vec![], vec![],
+            vec![],
+            vec![],
             vec![
-                InputRef::Affine { base: data, stride: 1 },
-                InputRef::Modular { base: bias, stride: 1, modulus: 768 },
+                InputRef::Affine {
+                    base: data,
+                    stride: 1,
+                },
+                InputRef::Modular {
+                    base: bias,
+                    stride: 1,
+                    modulus: 768,
+                },
             ],
         );
         g.outputs = vec![added];
@@ -2345,11 +2555,7 @@ mod tests {
         assert!(errors.is_empty(), "Graph validation: {:?}", errors);
 
         let (plan, plan_errors) = plan_and_validate(&g, 4);
-        assert!(
-            plan_errors.is_empty(),
-            "Plan errors: {:?}",
-            plan_errors
-        );
+        assert!(plan_errors.is_empty(), "Plan errors: {:?}", plan_errors);
     }
 
     /// Test edge classification directly.
@@ -2373,10 +2579,21 @@ mod tests {
             },
             sym_dims: vec![],
             reduce_dims: vec![],
-            inputs: vec![InputRef::Affine { base: AtomId(0), stride: 1 }],
+            inputs: vec![InputRef::Affine {
+                base: AtomId(0),
+                stride: 1,
+            }],
         };
         // Same count, stride=1, base matches producer start -> lane-aligned.
-        assert!(is_edge_lane_aligned(&prod, &cons, &InputRef::Affine { base: AtomId(0), stride: 1 }, 4));
+        assert!(is_edge_lane_aligned(
+            &prod,
+            &cons,
+            &InputRef::Affine {
+                base: AtomId(0),
+                stride: 1
+            },
+            4
+        ));
     }
 
     #[test]
@@ -2402,7 +2619,12 @@ mod tests {
             inputs: vec![InputRef::Broadcast(AtomId(500))],
         };
         // Broadcast from a multi-atom producer -> cross-lane.
-        assert!(!is_edge_lane_aligned(&prod, &cons, &InputRef::Broadcast(AtomId(500)), 4));
+        assert!(!is_edge_lane_aligned(
+            &prod,
+            &cons,
+            &InputRef::Broadcast(AtomId(500)),
+            4
+        ));
     }
 
     #[test]
@@ -2428,13 +2650,25 @@ mod tests {
             inputs: vec![InputRef::Broadcast(AtomId(0))],
         };
         // Broadcast from a single-atom producer -> lane-aligned (trivially).
-        assert!(is_edge_lane_aligned(&prod, &cons, &InputRef::Broadcast(AtomId(0)), 4));
+        assert!(is_edge_lane_aligned(
+            &prod,
+            &cons,
+            &InputRef::Broadcast(AtomId(0)),
+            4
+        ));
     }
 
     /// Build a realistic matmul using the StridedBroadcast pattern from GPT-2.
     /// C[M, N] = A[M, K] @ B[K, N], with M Mul groups (each count=K*N)
     /// and M ReduceSum groups (each count=N).
-    fn build_realistic_matmul(g: &mut NanoGraph, a_base: AtomId, b_base: AtomId, m: u64, k: u64, n: u64) -> AtomId {
+    fn build_realistic_matmul(
+        g: &mut NanoGraph,
+        a_base: AtomId,
+        b_base: AtomId,
+        m: u64,
+        k: u64,
+        n: u64,
+    ) -> AtomId {
         let mut mul_bases = Vec::new();
         for row in 0..m {
             let a_row = a_base.offset(row * k);
@@ -2445,10 +2679,18 @@ mod tests {
                     compute_dtype: DType::F32,
                     output_dtype: DType::F32,
                 },
-                vec![], vec![],
+                vec![],
+                vec![],
                 vec![
-                    InputRef::StridedBroadcast { base: a_row, stride: 1, repeat: n },
-                    InputRef::Affine { base: b_base, stride: 1 },
+                    InputRef::StridedBroadcast {
+                        base: a_row,
+                        stride: 1,
+                        repeat: n,
+                    },
+                    InputRef::Affine {
+                        base: b_base,
+                        stride: 1,
+                    },
                 ],
             );
             mul_bases.push(mul);
@@ -2463,8 +2705,12 @@ mod tests {
                     compute_dtype: DType::F32,
                     output_dtype: DType::F32,
                 },
-                vec![], vec![],
-                vec![InputRef::Affine { base: mul_bases[row as usize], stride: 1 }],
+                vec![],
+                vec![],
+                vec![InputRef::Affine {
+                    base: mul_bases[row as usize],
+                    stride: 1,
+                }],
             );
             if reduce_base.is_none() {
                 reduce_base = Some(red);
@@ -2481,8 +2727,20 @@ mod tests {
         let k = 4u64;
         let n = 6u64;
 
-        let a = g.push_group(m * k, ScalarOp::Literal(NumericScalar::F32(1.0)), vec![], vec![], vec![]);
-        let b = g.push_group(k * n, ScalarOp::Literal(NumericScalar::F32(1.0)), vec![], vec![], vec![]);
+        let a = g.push_group(
+            m * k,
+            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
+        let b = g.push_group(
+            k * n,
+            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
 
         let red_base = build_realistic_matmul(&mut g, a, b, m, k, n);
         g.outputs = vec![red_base];
@@ -2496,7 +2754,11 @@ mod tests {
 
         // Test with 8 lanes.
         let (plan8, plan8_errors) = plan_and_validate(&g, 8);
-        assert!(plan8_errors.is_empty(), "Plan errors (8 lanes): {:?}", plan8_errors);
+        assert!(
+            plan8_errors.is_empty(),
+            "Plan errors (8 lanes): {:?}",
+            plan8_errors
+        );
     }
 
     /// Realistic two-layer matmul chain: (A @ B) -> Tanh -> (result @ C).
@@ -2512,8 +2774,20 @@ mod tests {
         let n2 = 4u64;
 
         // Layer 1 weights.
-        let a = g.push_group(m * k1, ScalarOp::Literal(NumericScalar::F32(1.0)), vec![], vec![], vec![]);
-        let b1 = g.push_group(k1 * n1, ScalarOp::Literal(NumericScalar::F32(1.0)), vec![], vec![], vec![]);
+        let a = g.push_group(
+            m * k1,
+            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
+        let b1 = g.push_group(
+            k1 * n1,
+            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
 
         let red1 = build_realistic_matmul(&mut g, a, b1, m, k1, n1);
 
@@ -2525,12 +2799,22 @@ mod tests {
                 compute_dtype: DType::F32,
                 output_dtype: DType::F32,
             },
-            vec![], vec![],
-            vec![InputRef::Affine { base: red1, stride: 1 }],
+            vec![],
+            vec![],
+            vec![InputRef::Affine {
+                base: red1,
+                stride: 1,
+            }],
         );
 
         // Layer 2 weights.
-        let b2 = g.push_group(k2 * n2, ScalarOp::Literal(NumericScalar::F32(1.0)), vec![], vec![], vec![]);
+        let b2 = g.push_group(
+            k2 * n2,
+            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
 
         // Layer 2 matmul: uses activation output as A matrix.
         // Each Mul group reads one A element via Broadcast from `act`.
@@ -2546,11 +2830,19 @@ mod tests {
         let (plan, plan_errors) = plan_and_validate(&g, 4);
         assert!(plan_errors.is_empty(), "Plan errors: {:?}", plan_errors);
         // Must have at least 2 phases: matmul1+tanh vs matmul2.
-        assert!(plan.phases.len() >= 2, "Expected >= 2 phases, got {}", plan.phases.len());
+        assert!(
+            plan.phases.len() >= 2,
+            "Expected >= 2 phases, got {}",
+            plan.phases.len()
+        );
 
         // Test with 8 lanes.
         let (plan8, plan8_errors) = plan_and_validate(&g, 8);
-        assert!(plan8_errors.is_empty(), "Plan errors (8 lanes): {:?}", plan8_errors);
+        assert!(
+            plan8_errors.is_empty(),
+            "Plan errors (8 lanes): {:?}",
+            plan8_errors
+        );
     }
 
     /// Test the GPT-2 attention mask pattern: a small Select group consumed
@@ -2560,23 +2852,60 @@ mod tests {
         let mut g = NanoGraph::new();
 
         // Attention mask Select: count=3072 (12 heads * 256 positions).
-        let mask_cond = g.push_group(3072, ScalarOp::Literal(NumericScalar::F32(0.0)), vec![], vec![], vec![]);
-        let mask_true = g.push_group(3072, ScalarOp::Literal(NumericScalar::F32(1.0)), vec![], vec![], vec![]);
-        let mask_false = g.push_group(3072, ScalarOp::Literal(NumericScalar::F32(-1e9)), vec![], vec![], vec![]);
+        let mask_cond = g.push_group(
+            3072,
+            ScalarOp::Literal(NumericScalar::F32(0.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
+        let mask_true = g.push_group(
+            3072,
+            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
+        let mask_false = g.push_group(
+            3072,
+            ScalarOp::Literal(NumericScalar::F32(-1e9)),
+            vec![],
+            vec![],
+            vec![],
+        );
 
         let mask = g.push_group(
             3072,
-            ScalarOp::Select { compute_dtype: DType::F32, output_dtype: DType::F32 },
-            vec![], vec![],
+            ScalarOp::Select {
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![],
+            vec![],
             vec![
-                InputRef::Affine { base: mask_cond, stride: 1 },
-                InputRef::Affine { base: mask_true, stride: 1 },
-                InputRef::Affine { base: mask_false, stride: 1 },
+                InputRef::Affine {
+                    base: mask_cond,
+                    stride: 1,
+                },
+                InputRef::Affine {
+                    base: mask_true,
+                    stride: 1,
+                },
+                InputRef::Affine {
+                    base: mask_false,
+                    stride: 1,
+                },
             ],
         );
 
         // Attention scores: count=24576 (3072 * 8 repeat).
-        let scores = g.push_group(24576, ScalarOp::Literal(NumericScalar::F32(0.5)), vec![], vec![], vec![]);
+        let scores = g.push_group(
+            24576,
+            ScalarOp::Literal(NumericScalar::F32(0.5)),
+            vec![],
+            vec![],
+            vec![],
+        );
 
         // Masked scores: scores + mask via StridedBroadcast{repeat=8}.
         let masked = g.push_group(
@@ -2586,10 +2915,18 @@ mod tests {
                 compute_dtype: DType::F32,
                 output_dtype: DType::F32,
             },
-            vec![], vec![],
+            vec![],
+            vec![],
             vec![
-                InputRef::Affine { base: scores, stride: 1 },
-                InputRef::StridedBroadcast { base: mask, stride: 1, repeat: 8 },
+                InputRef::Affine {
+                    base: scores,
+                    stride: 1,
+                },
+                InputRef::StridedBroadcast {
+                    base: mask,
+                    stride: 1,
+                    repeat: 8,
+                },
             ],
         );
 
@@ -2601,8 +2938,12 @@ mod tests {
                 compute_dtype: DType::F32,
                 output_dtype: DType::F32,
             },
-            vec![], vec![],
-            vec![InputRef::Affine { base: masked, stride: 1 }],
+            vec![],
+            vec![],
+            vec![InputRef::Affine {
+                base: masked,
+                stride: 1,
+            }],
         );
         g.outputs = vec![softmax];
 
@@ -2612,15 +2953,27 @@ mod tests {
         // Test with 4 lanes: the StridedBroadcast{repeat=8} is lane-aligned
         // when 3072/4 = 768 and 24576/4 = 6144, since 6144/8 = 768.
         let (plan, plan_errors) = plan_and_validate(&g, 4);
-        assert!(plan_errors.is_empty(), "Plan errors (4 lanes): {:?}", plan_errors);
+        assert!(
+            plan_errors.is_empty(),
+            "Plan errors (4 lanes): {:?}",
+            plan_errors
+        );
 
         // Test with 8 lanes: 3072/8 = 384, 24576/8 = 3072, 3072/8 = 384. Also aligned.
         let (plan8, plan8_errors) = plan_and_validate(&g, 8);
-        assert!(plan8_errors.is_empty(), "Plan errors (8 lanes): {:?}", plan8_errors);
+        assert!(
+            plan8_errors.is_empty(),
+            "Plan errors (8 lanes): {:?}",
+            plan8_errors
+        );
 
         // Test with 7 lanes: not perfectly aligned, should still produce 0 violations.
         let (plan7, plan7_errors) = plan_and_validate(&g, 7);
-        assert!(plan7_errors.is_empty(), "Plan errors (7 lanes): {:?}", plan7_errors);
+        assert!(
+            plan7_errors.is_empty(),
+            "Plan errors (7 lanes): {:?}",
+            plan7_errors
+        );
     }
 
     /// Stress test: larger matmul chain to verify no regressions.
@@ -2633,30 +2986,69 @@ mod tests {
         let k2 = n1;
         let n2 = 8u64;
 
-        let a = g.push_group(m * k1, ScalarOp::Literal(NumericScalar::F32(0.1)), vec![], vec![], vec![]);
-        let b1 = g.push_group(k1 * n1, ScalarOp::Literal(NumericScalar::F32(0.2)), vec![], vec![], vec![]);
+        let a = g.push_group(
+            m * k1,
+            ScalarOp::Literal(NumericScalar::F32(0.1)),
+            vec![],
+            vec![],
+            vec![],
+        );
+        let b1 = g.push_group(
+            k1 * n1,
+            ScalarOp::Literal(NumericScalar::F32(0.2)),
+            vec![],
+            vec![],
+            vec![],
+        );
 
         let red1 = build_realistic_matmul(&mut g, a, b1, m, k1, n1);
 
         // Elementwise chain: Tanh -> Add bias -> result.
         let act = g.push_group(
             m * n1,
-            ScalarOp::Unary { op: ScalarUnaryOp::Tanh, compute_dtype: DType::F32, output_dtype: DType::F32 },
-            vec![], vec![],
-            vec![InputRef::Affine { base: red1, stride: 1 }],
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Tanh,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![],
+            vec![],
+            vec![InputRef::Affine {
+                base: red1,
+                stride: 1,
+            }],
         );
-        let bias = g.push_atom(ScalarOp::Literal(NumericScalar::F32(0.1)), vec![], vec![], vec![]);
+        let bias = g.push_atom(
+            ScalarOp::Literal(NumericScalar::F32(0.1)),
+            vec![],
+            vec![],
+            vec![],
+        );
         let biased = g.push_group(
             m * n1,
-            ScalarOp::Binary { op: ScalarBinOp::Add, compute_dtype: DType::F32, output_dtype: DType::F32 },
-            vec![], vec![],
+            ScalarOp::Binary {
+                op: ScalarBinOp::Add,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![],
+            vec![],
             vec![
-                InputRef::Affine { base: act, stride: 1 },
+                InputRef::Affine {
+                    base: act,
+                    stride: 1,
+                },
                 InputRef::Broadcast(bias),
             ],
         );
 
-        let b2 = g.push_group(k2 * n2, ScalarOp::Literal(NumericScalar::F32(0.3)), vec![], vec![], vec![]);
+        let b2 = g.push_group(
+            k2 * n2,
+            ScalarOp::Literal(NumericScalar::F32(0.3)),
+            vec![],
+            vec![],
+            vec![],
+        );
         let red2 = build_realistic_matmul(&mut g, biased, b2, m, k2, n2);
         g.outputs = vec![red2];
 

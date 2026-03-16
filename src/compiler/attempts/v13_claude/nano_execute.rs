@@ -6,7 +6,9 @@
 
 use std::collections::HashMap;
 
-use crate::nano_graph::{AtomGroup, AtomId, InputRef, NanoGraph, ScalarBinOp, ScalarOp, ScalarUnaryOp};
+use crate::nano_graph::{
+    AtomGroup, AtomId, InputRef, NanoGraph, ScalarBinOp, ScalarOp, ScalarUnaryOp,
+};
 use crate::numeric_scalar::NumericScalar;
 
 /// Execute all groups sequentially in index order (topological order).
@@ -54,10 +56,18 @@ fn eval_group(
 
     if is_reduce {
         let (reduce_count, reduce_stride, compute_dtype, output_dtype) = match &group.op {
-            ScalarOp::ReduceSum { reduce_count, reduce_stride, compute_dtype, output_dtype } =>
-                (*reduce_count, *reduce_stride, *compute_dtype, *output_dtype),
-            ScalarOp::ReduceMax { reduce_count, reduce_stride, compute_dtype, output_dtype } =>
-                (*reduce_count, *reduce_stride, *compute_dtype, *output_dtype),
+            ScalarOp::ReduceSum {
+                reduce_count,
+                reduce_stride,
+                compute_dtype,
+                output_dtype,
+            } => (*reduce_count, *reduce_stride, *compute_dtype, *output_dtype),
+            ScalarOp::ReduceMax {
+                reduce_count,
+                reduce_stride,
+                compute_dtype,
+                output_dtype,
+            } => (*reduce_count, *reduce_stride, *compute_dtype, *output_dtype),
             _ => unreachable!(),
         };
         let is_sum = matches!(&group.op, ScalarOp::ReduceSum { .. });
@@ -73,7 +83,11 @@ fn eval_group(
             for k in 0..reduce_count {
                 let src = (base.0 as i64 + k as i64 * reduce_stride) as usize;
                 let val = values[src].cast_to(compute_dtype);
-                acc = if is_sum { acc.add(&val) } else { acc.scalar_max(&val) };
+                acc = if is_sum {
+                    acc.add(&val)
+                } else {
+                    acc.scalar_max(&val)
+                };
             }
             values[atom_idx] = acc.cast_to(output_dtype);
         }
@@ -88,13 +102,24 @@ fn eval_group(
                         scalar.clone()
                     }
                 }
-                ScalarOp::Identity { compute_dtype, output_dtype } => {
+                ScalarOp::Identity {
+                    compute_dtype,
+                    output_dtype,
+                } => {
                     let src = group.inputs[0].resolve(i, 0);
-                    values[src.0 as usize].cast_to(*compute_dtype).cast_to(*output_dtype)
+                    values[src.0 as usize]
+                        .cast_to(*compute_dtype)
+                        .cast_to(*output_dtype)
                 }
-                ScalarOp::Binary { op, compute_dtype, output_dtype } => {
-                    let a = values[group.inputs[0].resolve(i, 0).0 as usize].cast_to(*compute_dtype);
-                    let b = values[group.inputs[1].resolve(i, 0).0 as usize].cast_to(*compute_dtype);
+                ScalarOp::Binary {
+                    op,
+                    compute_dtype,
+                    output_dtype,
+                } => {
+                    let a =
+                        values[group.inputs[0].resolve(i, 0).0 as usize].cast_to(*compute_dtype);
+                    let b =
+                        values[group.inputs[1].resolve(i, 0).0 as usize].cast_to(*compute_dtype);
                     let result = match op {
                         ScalarBinOp::Add => a.add(&b),
                         ScalarBinOp::Sub => a.sub(&b),
@@ -104,19 +129,72 @@ fn eval_group(
                         ScalarBinOp::Min => a.scalar_min(&b),
                         ScalarBinOp::Mod => a.modulo(&b),
                         ScalarBinOp::Pow => a.pow(&b),
-                        ScalarBinOp::Equal => if a.to_f64() == b.to_f64() { NumericScalar::F32(1.0) } else { NumericScalar::F32(0.0) },
-                        ScalarBinOp::Greater => if a.to_f64() > b.to_f64() { NumericScalar::F32(1.0) } else { NumericScalar::F32(0.0) },
-                        ScalarBinOp::GreaterOrEqual => if a.to_f64() >= b.to_f64() { NumericScalar::F32(1.0) } else { NumericScalar::F32(0.0) },
-                        ScalarBinOp::Less => if a.to_f64() < b.to_f64() { NumericScalar::F32(1.0) } else { NumericScalar::F32(0.0) },
-                        ScalarBinOp::LessOrEqual => if a.to_f64() <= b.to_f64() { NumericScalar::F32(1.0) } else { NumericScalar::F32(0.0) },
-                        ScalarBinOp::And => if a.to_f64() != 0.0 && b.to_f64() != 0.0 { NumericScalar::F32(1.0) } else { NumericScalar::F32(0.0) },
-                        ScalarBinOp::Or => if a.to_f64() != 0.0 || b.to_f64() != 0.0 { NumericScalar::F32(1.0) } else { NumericScalar::F32(0.0) },
-                        ScalarBinOp::Xor => if (a.to_f64() != 0.0) ^ (b.to_f64() != 0.0) { NumericScalar::F32(1.0) } else { NumericScalar::F32(0.0) },
+                        ScalarBinOp::Equal => {
+                            if a.to_f64() == b.to_f64() {
+                                NumericScalar::F32(1.0)
+                            } else {
+                                NumericScalar::F32(0.0)
+                            }
+                        }
+                        ScalarBinOp::Greater => {
+                            if a.to_f64() > b.to_f64() {
+                                NumericScalar::F32(1.0)
+                            } else {
+                                NumericScalar::F32(0.0)
+                            }
+                        }
+                        ScalarBinOp::GreaterOrEqual => {
+                            if a.to_f64() >= b.to_f64() {
+                                NumericScalar::F32(1.0)
+                            } else {
+                                NumericScalar::F32(0.0)
+                            }
+                        }
+                        ScalarBinOp::Less => {
+                            if a.to_f64() < b.to_f64() {
+                                NumericScalar::F32(1.0)
+                            } else {
+                                NumericScalar::F32(0.0)
+                            }
+                        }
+                        ScalarBinOp::LessOrEqual => {
+                            if a.to_f64() <= b.to_f64() {
+                                NumericScalar::F32(1.0)
+                            } else {
+                                NumericScalar::F32(0.0)
+                            }
+                        }
+                        ScalarBinOp::And => {
+                            if a.to_f64() != 0.0 && b.to_f64() != 0.0 {
+                                NumericScalar::F32(1.0)
+                            } else {
+                                NumericScalar::F32(0.0)
+                            }
+                        }
+                        ScalarBinOp::Or => {
+                            if a.to_f64() != 0.0 || b.to_f64() != 0.0 {
+                                NumericScalar::F32(1.0)
+                            } else {
+                                NumericScalar::F32(0.0)
+                            }
+                        }
+                        ScalarBinOp::Xor => {
+                            if (a.to_f64() != 0.0) ^ (b.to_f64() != 0.0) {
+                                NumericScalar::F32(1.0)
+                            } else {
+                                NumericScalar::F32(0.0)
+                            }
+                        }
                     };
                     result.cast_to(*output_dtype)
                 }
-                ScalarOp::Unary { op, compute_dtype, output_dtype } => {
-                    let x = values[group.inputs[0].resolve(i, 0).0 as usize].cast_to(*compute_dtype);
+                ScalarOp::Unary {
+                    op,
+                    compute_dtype,
+                    output_dtype,
+                } => {
+                    let x =
+                        values[group.inputs[0].resolve(i, 0).0 as usize].cast_to(*compute_dtype);
                     let result = match op {
                         ScalarUnaryOp::Neg => x.neg(),
                         ScalarUnaryOp::Abs => x.abs(),
@@ -130,8 +208,12 @@ fn eval_group(
                     };
                     result.cast_to(*output_dtype)
                 }
-                ScalarOp::Select { compute_dtype, output_dtype } => {
-                    let cond = values[group.inputs[0].resolve(i, 0).0 as usize].cast_to(*compute_dtype);
+                ScalarOp::Select {
+                    compute_dtype,
+                    output_dtype,
+                } => {
+                    let cond =
+                        values[group.inputs[0].resolve(i, 0).0 as usize].cast_to(*compute_dtype);
                     let result = if cond.is_nonzero() {
                         values[group.inputs[1].resolve(i, 0).0 as usize].cast_to(*compute_dtype)
                     } else {
@@ -139,7 +221,10 @@ fn eval_group(
                     };
                     result.cast_to(*output_dtype)
                 }
-                ScalarOp::IndirectLoad { table_base, output_dtype } => {
+                ScalarOp::IndirectLoad {
+                    table_base,
+                    output_dtype,
+                } => {
                     let idx = values[group.inputs[0].resolve(i, 0).0 as usize].to_f64() as usize;
                     values[table_base.0 as usize + idx].cast_to(*output_dtype)
                 }

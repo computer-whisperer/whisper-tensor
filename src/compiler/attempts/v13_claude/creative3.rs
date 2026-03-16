@@ -1,4 +1,10 @@
-#![allow(clippy::all, dead_code, unreachable_patterns)]
+#![allow(
+    clippy::all,
+    dead_code,
+    unreachable_patterns,
+    unused_variables,
+    unused_imports
+)]
 //! creative3: Load-optimal agglomerative clustering + SA input assignment.
 //!
 //! A genuinely different approach that directly optimizes the cost metric at
@@ -24,8 +30,8 @@
 //! pairs disappear when two groups merge.
 
 use super::simple_dag::*;
-use std::collections::{BTreeSet, BinaryHeap, HashMap, HashSet};
 use std::cmp::Ordering;
+use std::collections::{BTreeSet, BinaryHeap, HashMap, HashSet};
 
 pub struct Creative3Partitioner;
 
@@ -39,14 +45,18 @@ impl SimplePartitioner for Creative3Partitioner {
         let (chains, chain_deps) = extract_chains(dag);
         if chains.is_empty() {
             return SimplePartition {
-                kernels: vec![SimpleKernel { ops: (0..n as u32).collect() }],
+                kernels: vec![SimpleKernel {
+                    ops: (0..n as u32).collect(),
+                }],
             };
         }
 
         let k = hw.parallelism.min(chains.len()).max(1) as u32;
         if k <= 1 {
             return SimplePartition {
-                kernels: vec![SimpleKernel { ops: (0..n as u32).collect() }],
+                kernels: vec![SimpleKernel {
+                    ops: (0..n as u32).collect(),
+                }],
             };
         }
 
@@ -88,23 +98,33 @@ fn consumers(dag: &SimpleDag) -> Vec<Vec<u32>> {
 
 // ─── Chain extraction ───────────────────────────────────────────────────────
 
-struct OutputChain { ops: BTreeSet<u32> }
+struct OutputChain {
+    ops: BTreeSet<u32>,
+}
 
 fn extract_chains(dag: &SimpleDag) -> (Vec<OutputChain>, Vec<BTreeSet<u32>>) {
     let fo = dag.fan_out();
     let mut chains = Vec::new();
     let mut deps = Vec::new();
     for &root in &output_ops(dag) {
-        if is_source(&dag.ops[root as usize].kind) { continue; }
+        if is_source(&dag.ops[root as usize].kind) {
+            continue;
+        }
         let mut ops = BTreeSet::new();
         let mut inp = BTreeSet::new();
         let mut stk = vec![root];
         while let Some(cur) = stk.pop() {
-            if !ops.insert(cur) { continue; }
+            if !ops.insert(cur) {
+                continue;
+            }
             for &i in &dag.ops[cur as usize].inputs {
-                if is_source(&dag.ops[i as usize].kind) { inp.insert(i); }
-                else if fo[i as usize] == 1 { stk.push(i); }
-                else { gather_inputs(dag, i, &mut inp); }
+                if is_source(&dag.ops[i as usize].kind) {
+                    inp.insert(i);
+                } else if fo[i as usize] == 1 {
+                    stk.push(i);
+                } else {
+                    gather_inputs(dag, i, &mut inp);
+                }
             }
         }
         chains.push(OutputChain { ops });
@@ -117,9 +137,16 @@ fn gather_inputs(dag: &SimpleDag, start: u32, out: &mut BTreeSet<u32>) {
     let mut stk = vec![start];
     let mut vis = HashSet::new();
     while let Some(cur) = stk.pop() {
-        if !vis.insert(cur) { continue; }
-        if is_source(&dag.ops[cur as usize].kind) { out.insert(cur); }
-        else { for &i in &dag.ops[cur as usize].inputs { stk.push(i); } }
+        if !vis.insert(cur) {
+            continue;
+        }
+        if is_source(&dag.ops[cur as usize].kind) {
+            out.insert(cur);
+        } else {
+            for &i in &dag.ops[cur as usize].inputs {
+                stk.push(i);
+            }
+        }
     }
 }
 
@@ -134,7 +161,9 @@ struct InputInfo {
 impl InputInfo {
     fn build(chain_deps: &[BTreeSet<u32>]) -> Self {
         let mut all: BTreeSet<u32> = BTreeSet::new();
-        for d in chain_deps { all.extend(d); }
+        for d in chain_deps {
+            all.extend(d);
+        }
         let inputs: Vec<u32> = all.into_iter().collect();
         let idx: HashMap<u32, usize> = inputs.iter().enumerate().map(|(i, &o)| (o, i)).collect();
         let mut ub: Vec<Vec<usize>> = vec![Vec::new(); inputs.len()];
@@ -142,10 +171,16 @@ impl InputInfo {
         for (c, d) in chain_deps.iter().enumerate() {
             let mut v: Vec<usize> = d.iter().filter_map(|o| idx.get(o).copied()).collect();
             v.sort();
-            for &ii in &v { ub[ii].push(c); }
+            for &ii in &v {
+                ub[ii].push(c);
+            }
             ci.push(v);
         }
-        InputInfo { inputs, used_by_chains: ub, chain_inputs: ci }
+        InputInfo {
+            inputs,
+            used_by_chains: ub,
+            chain_inputs: ci,
+        }
     }
 }
 
@@ -160,20 +195,35 @@ struct UF {
 
 impl UF {
     fn new(n: usize) -> Self {
-        UF { parent: (0..n).collect(), rank: vec![0; n], size: vec![1; n] }
+        UF {
+            parent: (0..n).collect(),
+            rank: vec![0; n],
+            size: vec![1; n],
+        }
     }
     fn find(&mut self, mut x: usize) -> usize {
-        while self.parent[x] != x { self.parent[x] = self.parent[self.parent[x]]; x = self.parent[x]; }
+        while self.parent[x] != x {
+            self.parent[x] = self.parent[self.parent[x]];
+            x = self.parent[x];
+        }
         x
     }
     fn union(&mut self, a: usize, b: usize) -> usize {
         let ra = self.find(a);
         let rb = self.find(b);
-        if ra == rb { return ra; }
-        let (big, small) = if self.rank[ra] >= self.rank[rb] { (ra, rb) } else { (rb, ra) };
+        if ra == rb {
+            return ra;
+        }
+        let (big, small) = if self.rank[ra] >= self.rank[rb] {
+            (ra, rb)
+        } else {
+            (rb, ra)
+        };
         self.parent[small] = big;
         self.size[big] += self.size[small];
-        if self.rank[big] == self.rank[small] { self.rank[big] += 1; }
+        if self.rank[big] == self.rank[small] {
+            self.rank[big] += 1;
+        }
         big
     }
 }
@@ -182,18 +232,32 @@ impl UF {
 struct MergeCandidate {
     g1: usize,
     g2: usize,
-    benefit: i32,  // positive = good merge (reduces loads)
+    benefit: i32, // positive = good merge (reduces loads)
 }
 
-impl PartialEq for MergeCandidate { fn eq(&self, o: &Self) -> bool { self.benefit == o.benefit } }
+impl PartialEq for MergeCandidate {
+    fn eq(&self, o: &Self) -> bool {
+        self.benefit == o.benefit
+    }
+}
 impl Eq for MergeCandidate {}
-impl PartialOrd for MergeCandidate { fn partial_cmp(&self, o: &Self) -> Option<Ordering> { Some(self.cmp(o)) } }
-impl Ord for MergeCandidate { fn cmp(&self, o: &Self) -> Ordering { self.benefit.cmp(&o.benefit) } }
+impl PartialOrd for MergeCandidate {
+    fn partial_cmp(&self, o: &Self) -> Option<Ordering> {
+        Some(self.cmp(o))
+    }
+}
+impl Ord for MergeCandidate {
+    fn cmp(&self, o: &Self) -> Ordering {
+        self.benefit.cmp(&o.benefit)
+    }
+}
 
 /// Cluster chains into k groups by greedily merging the pair with highest
 /// load-reduction benefit.
 fn agglomerative_cluster(info: &InputInfo, nc: usize, k: u32) -> Vec<u32> {
-    if nc <= k as usize { return (0..nc as u32).collect(); }
+    if nc <= k as usize {
+        return (0..nc as u32).collect();
+    }
 
     let ni = info.inputs.len();
 
@@ -225,7 +289,11 @@ fn agglomerative_cluster(info: &InputInfo, nc: usize, k: u32) -> Vec<u32> {
     // Build priority queue
     let mut heap: BinaryHeap<MergeCandidate> = BinaryHeap::new();
     for (&(g1, g2), &count) in &shared {
-        heap.push(MergeCandidate { g1, g2, benefit: count as i32 });
+        heap.push(MergeCandidate {
+            g1,
+            g2,
+            benefit: count as i32,
+        });
     }
 
     // Group inputs: for each group root, which input indices it contains
@@ -246,7 +314,9 @@ fn agglomerative_cluster(info: &InputInfo, nc: usize, k: u32) -> Vec<u32> {
 
         let r1 = uf.find(cand.g1);
         let r2 = uf.find(cand.g2);
-        if r1 == r2 { continue; } // already merged
+        if r1 == r2 {
+            continue;
+        } // already merged
 
         // Check if this candidate is stale (groups have been merged with others)
         // We need to recompute the benefit if the groups have changed.
@@ -254,13 +324,19 @@ fn agglomerative_cluster(info: &InputInfo, nc: usize, k: u32) -> Vec<u32> {
             // Recompute: shared inputs between the actual groups r1, r2
             let shared_count = group_inputs[r1].intersection(&group_inputs[r2]).count();
             if shared_count > 0 {
-                heap.push(MergeCandidate { g1: r1, g2: r2, benefit: shared_count as i32 });
+                heap.push(MergeCandidate {
+                    g1: r1,
+                    g2: r2,
+                    benefit: shared_count as i32,
+                });
             }
             continue;
         }
 
         // Check size constraint
-        if uf.size[r1] + uf.size[r2] > max_size { continue; }
+        if uf.size[r1] + uf.size[r2] > max_size {
+            continue;
+        }
 
         // Merge
         let new_root = uf.union(r1, r2);
@@ -292,7 +368,11 @@ fn agglomerative_cluster(info: &InputInfo, nc: usize, k: u32) -> Vec<u32> {
         }
 
         for (neighbor, count) in neighbor_shared {
-            heap.push(MergeCandidate { g1: new_root, g2: neighbor, benefit: count as i32 });
+            heap.push(MergeCandidate {
+                g1: new_root,
+                g2: neighbor,
+                benefit: count as i32,
+            });
         }
     }
 
@@ -302,7 +382,11 @@ fn agglomerative_cluster(info: &InputInfo, nc: usize, k: u32) -> Vec<u32> {
     let mut chain_groups = vec![0u32; nc];
     for ci in 0..nc {
         let root = uf.find(ci);
-        let gid = *group_map.entry(root).or_insert_with(|| { let g = next_group; next_group += 1; g });
+        let gid = *group_map.entry(root).or_insert_with(|| {
+            let g = next_group;
+            next_group += 1;
+            g
+        });
         chain_groups[ci] = gid;
     }
 
@@ -321,7 +405,9 @@ fn agglomerative_cluster(info: &InputInfo, nc: usize, k: u32) -> Vec<u32> {
                 largest_group = gid;
             }
         }
-        if largest_size <= 1 { break; }
+        if largest_size <= 1 {
+            break;
+        }
 
         // Split largest group in half
         let members = &groups_by_id[&largest_group];
@@ -347,7 +433,9 @@ fn optimize_input_assignment(info: &InputInfo, chain_groups: &[u32], k: u32) -> 
     for (ci, iis) in info.chain_inputs.iter().enumerate() {
         let ck = chain_groups[ci] as usize;
         if ck < k as usize {
-            for &ii in iis { need[ii * k as usize + ck] += 1; }
+            for &ii in iis {
+                need[ii * k as usize + ck] += 1;
+            }
         }
     }
 
@@ -355,7 +443,10 @@ fn optimize_input_assignment(info: &InputInfo, chain_groups: &[u32], k: u32) -> 
     let mut inp_k = vec![0u32; ni];
     for ii in 0..ni {
         let base = ii * k as usize;
-        let (bk, _) = (0..k).map(|kk| (kk, need[base + kk as usize])).max_by_key(|x| x.1).unwrap();
+        let (bk, _) = (0..k)
+            .map(|kk| (kk, need[base + kk as usize]))
+            .max_by_key(|x| x.1)
+            .unwrap();
         inp_k[ii] = bk;
     }
 
@@ -365,7 +456,9 @@ fn optimize_input_assignment(info: &InputInfo, chain_groups: &[u32], k: u32) -> 
             let base = ii * k as usize;
             let ok = ik[ii] as usize;
             for kk in 0..k as usize {
-                if kk != ok && need[base + kk] > 0 { loads += 1; }
+                if kk != ok && need[base + kk] > 0 {
+                    loads += 1;
+                }
             }
         }
         loads
@@ -378,7 +471,9 @@ fn optimize_input_assignment(info: &InputInfo, chain_groups: &[u32], k: u32) -> 
     // SA polish
     let mut rng: u64 = 42;
     let mut rand = || -> u64 {
-        rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        rng = rng
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         rng >> 33
     };
 
@@ -387,10 +482,14 @@ fn optimize_input_assignment(info: &InputInfo, chain_groups: &[u32], k: u32) -> 
 
     for it in 0..iters {
         let temp = t0 * (1.0 - it as f64 / iters as f64);
-        if temp < 0.001 { break; }
+        if temp < 0.001 {
+            break;
+        }
 
         let ii = (rand() as usize) % ni;
-        if k <= 1 { break; }
+        if k <= 1 {
+            break;
+        }
         let ok = inp_k[ii];
         let nk = (ok + 1 + (rand() as u32) % (k - 1)) % k;
         let base = ii * k as usize;
@@ -398,8 +497,12 @@ fn optimize_input_assignment(info: &InputInfo, chain_groups: &[u32], k: u32) -> 
         let mut delta = 0i32;
         for kk in 0..k as usize {
             if need[base + kk] > 0 {
-                if kk != ok as usize { delta -= 1; }
-                if kk != nk as usize { delta += 1; }
+                if kk != ok as usize {
+                    delta -= 1;
+                }
+                if kk != nk as usize {
+                    delta += 1;
+                }
             }
         }
 
@@ -417,7 +520,9 @@ fn optimize_input_assignment(info: &InputInfo, chain_groups: &[u32], k: u32) -> 
 }
 
 fn accept_sa(delta: i32, temp: f64, rng: &mut impl FnMut() -> u64) -> bool {
-    if delta <= 0 { return true; }
+    if delta <= 0 {
+        return true;
+    }
     let p = (-delta as f64 / temp).exp();
     (rng() % 10000) as f64 / 10000.0 < p
 }
@@ -425,13 +530,18 @@ fn accept_sa(delta: i32, temp: f64, rng: &mut impl FnMut() -> u64) -> bool {
 // ─── Assemble ───────────────────────────────────────────────────────────────
 
 fn assemble(
-    dag: &SimpleDag, chains: &[OutputChain], info: &InputInfo,
-    chain_groups: &[u32], input_assign: &[u32],
+    dag: &SimpleDag,
+    chains: &[OutputChain],
+    info: &InputInfo,
+    chain_groups: &[u32],
+    input_assign: &[u32],
 ) -> SimplePartition {
     let n = dag.ops.len();
     let mut kof: Vec<Option<u32>> = vec![None; n];
     for (ci, ch) in chains.iter().enumerate() {
-        for &op in &ch.ops { kof[op as usize] = Some(chain_groups[ci]); }
+        for &op in &ch.ops {
+            kof[op as usize] = Some(chain_groups[ci]);
+        }
     }
     for (ii, &op) in info.inputs.iter().enumerate() {
         kof[op as usize] = Some(input_assign[ii]);
@@ -441,32 +551,54 @@ fn assemble(
     while changed {
         changed = false;
         for i in (0..n).rev() {
-            if kof[i].is_some() { continue; }
+            if kof[i].is_some() {
+                continue;
+            }
             let mut votes: HashMap<u32, u32> = HashMap::new();
             for &c in &cons[i] {
-                if let Some(k) = kof[c as usize] { *votes.entry(k).or_default() += 1; }
+                if let Some(k) = kof[c as usize] {
+                    *votes.entry(k).or_default() += 1;
+                }
             }
             if let Some((&bk, _)) = votes.iter().max_by_key(|&(_, &v)| v) {
-                kof[i] = Some(bk); changed = true;
+                kof[i] = Some(bk);
+                changed = true;
             }
         }
         for i in 0..n {
-            if kof[i].is_some() { continue; }
+            if kof[i].is_some() {
+                continue;
+            }
             for &inp in &dag.ops[i].inputs {
-                if let Some(k) = kof[inp as usize] { kof[i] = Some(k); changed = true; break; }
+                if let Some(k) = kof[inp as usize] {
+                    kof[i] = Some(k);
+                    changed = true;
+                    break;
+                }
             }
         }
     }
-    for k in kof.iter_mut() { if k.is_none() { *k = Some(0); } }
+    for k in kof.iter_mut() {
+        if k.is_none() {
+            *k = Some(0);
+        }
+    }
 
     // Remap to contiguous kernel IDs and build SimplePartition
     let mut seen = HashMap::new();
     let mut next = 0u32;
-    let kernel_of: Vec<u32> = kof.into_iter().map(|k| {
-        let kid = k.unwrap_or(0);
-        let e = *seen.entry(kid).or_insert_with(|| { let id = next; next += 1; id });
-        e
-    }).collect();
+    let kernel_of: Vec<u32> = kof
+        .into_iter()
+        .map(|k| {
+            let kid = k.unwrap_or(0);
+            let e = *seen.entry(kid).or_insert_with(|| {
+                let id = next;
+                next += 1;
+                id
+            });
+            e
+        })
+        .collect();
 
     // Build kernel op lists
     let num_kernels = next as usize;
@@ -476,7 +608,10 @@ fn assemble(
     }
 
     SimplePartition {
-        kernels: kernel_ops.into_iter().map(|ops| SimpleKernel { ops }).collect(),
+        kernels: kernel_ops
+            .into_iter()
+            .map(|ops| SimpleKernel { ops })
+            .collect(),
     }
 }
 
@@ -494,13 +629,19 @@ mod tests {
         println!("  ops: {} | {}", dag.ops.len(), cost);
         for (i, kernel) in partition.kernels.iter().enumerate() {
             if kernel.ops.len() <= 25 {
-                let kinds: Vec<&str> = kernel.ops.iter().map(|&o| match dag.ops[o as usize].kind {
-                    OpKind::Input => "In", OpKind::Literal => "Lit",
-                    OpKind::Add => "+", OpKind::Mul => "*",
-                    OpKind::Neg => "-",
-                    OpKind::Tanh => "T",
-                    _ => "?",
-                }).collect();
+                let kinds: Vec<&str> = kernel
+                    .ops
+                    .iter()
+                    .map(|&o| match dag.ops[o as usize].kind {
+                        OpKind::Input => "In",
+                        OpKind::Literal => "Lit",
+                        OpKind::Add => "+",
+                        OpKind::Mul => "*",
+                        OpKind::Neg => "-",
+                        OpKind::Tanh => "T",
+                        _ => "?",
+                    })
+                    .collect();
                 println!("  k{}: {} ops {:?}", i, kernel.ops.len(), kinds);
             } else {
                 println!("  k{}: {} ops", i, kernel.ops.len());
@@ -574,7 +715,10 @@ mod tests {
         // X[0,0] fans out to 3 * d_head
         assert!(fo[0] >= 6, "idx=0 fo={}", fo[0]);
         assert!(c.num_kernels >= 1);
-        println!("  QKV: {} kernels, {} transfers", c.num_kernels, c.total_loads);
+        println!(
+            "  QKV: {} kernels, {} transfers",
+            c.num_kernels, c.total_loads
+        );
     }
 
     #[test]
@@ -595,7 +739,10 @@ mod tests {
     fn test_partition_validity() {
         let cases: Vec<(&str, SimpleDag)> = vec![
             ("add", build_elementwise_add(8)),
-            ("chain", build_unary_chain(8, &[OpKind::Exp, OpKind::Neg, OpKind::Tanh])),
+            (
+                "chain",
+                build_unary_chain(8, &[OpKind::Exp, OpKind::Neg, OpKind::Tanh]),
+            ),
             ("matmul", build_matmul(2, 3, 2)),
             ("act", build_matmul_activation(2, 3, 2, OpKind::Tanh)),
             ("chain_mm", build_matmul_chain(2, 3, 4, 2)),
@@ -609,10 +756,15 @@ mod tests {
             let errors = p.validate(dag);
             assert!(errors.is_empty(), "{}: {:?}", name, errors);
             let cost = evaluate_cost(dag, &p, &hw);
-            assert_eq!(cost.total_ops, dag.ops.iter()
-                .filter(|op| !matches!(op.kind, OpKind::Input | OpKind::Literal))
-                .count() as u64,
-                "{}", name);
+            assert_eq!(
+                cost.total_ops,
+                dag.ops
+                    .iter()
+                    .filter(|op| !matches!(op.kind, OpKind::Input | OpKind::Literal))
+                    .count() as u64,
+                "{}",
+                name
+            );
         }
     }
 }
