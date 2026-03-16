@@ -557,6 +557,212 @@ fn main() {
         }).collect()).collect();
         print_span_summary("v4b", &ss, plan.num_lanes, elapsed);
         validate_v4_plan!("v4b", plan, &result.graph);
+
+        // Span-by-span eval if requested
+        if std::env::var("EVAL_SPANS").ok().as_deref() == Some("1") {
+            use whisper_tensor::nano_graph::eval::NanoEval;
+            use whisper_tensor::numeric_scalar::NumericScalar;
+
+            println!("\n    === v4b Span-by-span NanoEval ===");
+            let t0 = Instant::now();
+            let full_result = whisper_tensor::nano_graph::lower::lower_with_info(&milli_graph, &all_infos).unwrap();
+            eprintln!("    Full lower: {:.1}s", t0.elapsed().as_secs_f64());
+
+            let num_main_atoms = result.graph.num_atoms() as usize;
+            let f32_gb = num_main_atoms as f64 * 4.0 / (1024.0 * 1024.0 * 1024.0);
+            println!("    Buffer: {:.1} GB", f32_gb);
+
+            if f32_gb > 120.0 {
+                println!("    SKIPPING: buffer too large");
+            } else {
+                let mut shared = vec![0.0f32; num_main_atoms];
+
+                // Fill Literal atoms from ScalarOp values
+                for g in result.graph.groups() {
+                    if let ScalarOp::Literal(scalar) = &g.op {
+                        let val = scalar.to_f64() as f32;
+                        for i in 0..g.count { shared[(g.base_id.0 + i) as usize] = val; }
+                    }
+                }
+                // Override with numeric_overrides
+                for (&idx, scalar) in &full_result.numeric_overrides {
+                    shared[idx as usize] = scalar.to_f64() as f32;
+                }
+                // Fill user inputs
+                let sym_graph2 = model.get_symbolic_graph();
+                let tensor_store2 = model.get_tensor_store();
+                let initialized2 = sym_graph2.get_initialized_tensors(tensor_store2);
+                let mut milli_inputs2: HashMap<GlobalId, whisper_tensor::numeric_tensor::NumericTensor<whisper_tensor::DynRank>> = HashMap::new();
+                for (id, tensor) in initialized2 { milli_inputs2.insert(id, tensor); }
+                let mut backend_v4 = whisper_tensor::backends::eval_backend::EvalBackend::NDArray;
+                for (name, (_dtype, _shape_dims)) in &input_info {
+                    let shape: Vec<u64> = _shape_dims.iter().map(|d| d.unwrap_or(4)).collect();
+                    let numel: usize = shape.iter().product::<u64>() as usize;
+                    if let Some(id) = tensors_by_name.get(name) {
+                        let data: Vec<i64> = (0..numel as i64).collect();
+                        let tensor = whisper_tensor::numeric_tensor::NumericTensor::from_vec_shape(
+                            data, shape.iter().map(|&s| s as usize).collect()
+                        ).unwrap();
+                        milli_inputs2.insert(*id, tensor.clone());
+                        if let Some(tam) = full_result.tensor_map.get(id) {
+                            let f32_t = tensor.cast(whisper_tensor::dtype::DType::F32, &mut backend_v4).unwrap();
+                            let flat = f32_t.flatten().unwrap();
+                            let nd = flat.to_ndarray().unwrap();
+                            let v: Vec<f32> = nd.try_into().unwrap();
+                            for (i, &val) in v.iter().enumerate() {
+                                let atom_id = tam.atom_id_for_element(i as u64);
+                                shared[atom_id.0 as usize] = val;
+                            }
+                        }
+                    }
+                }
+                eprintln!("    Buffer filled");
+
+                // Execute spans phase by phase using flat f32 buffers (no HashMap)
+                let t0 = Instant::now();
+                let mut span_errors = 0usize;
+                for (pi, phase) in plan.phases.iter().enumerate() {
+                    for (li, span) in phase.spans.iter().enumerate() {
+                        if span.graph.num_groups() == 0 { continue; }
+
+                        let sn = span.graph.num_atoms() as usize;
+                        let mut sbuf = vec![0.0f32; sn];
+
+                        // Fill Literal atoms from span's ScalarOp values
+                        for g in span.graph.groups() {
+                            if let ScalarOp::Literal(scalar) = &g.op {
+                                let val = scalar.to_f64() as f32;
+                                for i in 0..g.count {
+                                    sbuf[(g.base_id.0 + i) as usize] = val;
+                                }
+                            }
+                        }
+                        // Bulk copy inputs from shared buffer
+                        for mapping in &span.inputs {
+                            let src_start = mapping.main_base.0 as usize;
+                            let dst_start = mapping.span_base.0 as usize;
+                            let count = mapping.count as usize;
+                            sbuf[dst_start..dst_start + count]
+                                .copy_from_slice(&shared[src_start..src_start + count]);
+                        }
+
+                        // Eval each group using f32 arithmetic
+                        let sg = span.graph.groups();
+                        let mut panic_group = None;
+                        for (gi, group) in sg.iter().enumerate() {
+                            if matches!(&group.op, ScalarOp::Literal(_)) { continue; }
+                            for i in 0..group.count {
+                                let aidx = (group.base_id.0 + i) as usize;
+                                let val = match &group.op {
+                                    ScalarOp::Literal(_) => continue,
+                                    ScalarOp::Identity { .. } => {
+                                        sbuf[group.inputs[0].resolve(i, 0).0 as usize]
+                                    }
+                                    ScalarOp::Binary { op, .. } => {
+                                        let a = sbuf[group.inputs[0].resolve(i, 0).0 as usize];
+                                        let b = sbuf[group.inputs[1].resolve(i, 0).0 as usize];
+                                        use whisper_tensor::nano_graph::ScalarBinOp::*;
+                                        match op {
+                                            Add => a + b, Sub => a - b, Mul => a * b,
+                                            Div => { if b == 0.0 && panic_group.is_none() { panic_group = Some((pi, li, gi, "div by zero")); } a / b },
+                                            Max => a.max(b), Min => a.min(b), Pow => a.powf(b), Mod => a % b,
+                                            Equal => if a == b { 1.0 } else { 0.0 },
+                                            Greater => if a > b { 1.0 } else { 0.0 },
+                                            GreaterOrEqual => if a >= b { 1.0 } else { 0.0 },
+                                            Less => if a < b { 1.0 } else { 0.0 },
+                                            LessOrEqual => if a <= b { 1.0 } else { 0.0 },
+                                            And => if a != 0.0 && b != 0.0 { 1.0 } else { 0.0 },
+                                            Or => if a != 0.0 || b != 0.0 { 1.0 } else { 0.0 },
+                                            Xor => if (a != 0.0) ^ (b != 0.0) { 1.0 } else { 0.0 },
+                                        }
+                                    }
+                                    ScalarOp::Unary { op, .. } => {
+                                        let x = sbuf[group.inputs[0].resolve(i, 0).0 as usize];
+                                        use whisper_tensor::nano_graph::ScalarUnaryOp::*;
+                                        match op {
+                                            Neg => -x, Abs => x.abs(), Exp => x.exp(), Ln => x.ln(),
+                                            Sqrt => x.sqrt(), Reciprocal => 1.0 / x, Tanh => x.tanh(),
+                                            Floor => x.floor(), Ceil => x.ceil(),
+                                        }
+                                    }
+                                    ScalarOp::Select { .. } => {
+                                        let c = sbuf[group.inputs[0].resolve(i, 0).0 as usize];
+                                        if c != 0.0 { sbuf[group.inputs[1].resolve(i, 0).0 as usize] }
+                                        else { sbuf[group.inputs[2].resolve(i, 0).0 as usize] }
+                                    }
+                                    ScalarOp::ReduceSum { reduce_count, reduce_stride, .. } => {
+                                        let base = group.inputs[0].resolve(i, 0);
+                                        let mut acc = 0.0f32;
+                                        for k in 0..*reduce_count {
+                                            let src = (base.0 as i64 + k as i64 * reduce_stride) as usize;
+                                            acc += sbuf[src];
+                                        }
+                                        acc
+                                    }
+                                    ScalarOp::ReduceMax { reduce_count, reduce_stride, .. } => {
+                                        let base = group.inputs[0].resolve(i, 0);
+                                        let mut acc = f32::NEG_INFINITY;
+                                        for k in 0..*reduce_count {
+                                            let src = (base.0 as i64 + k as i64 * reduce_stride) as usize;
+                                            acc = acc.max(sbuf[src]);
+                                        }
+                                        acc
+                                    }
+                                    ScalarOp::IndirectLoad { table_base, .. } => {
+                                        let idx = sbuf[group.inputs[0].resolve(i, 0).0 as usize];
+                                        sbuf[table_base.0 as usize + idx as usize]
+                                    }
+                                };
+                                sbuf[aidx] = val;
+                            }
+                        }
+                        if let Some((p, l, g, msg)) = panic_group {
+                            println!("    WARN: phase {}/lane {} group {}: {}", p, l, g, msg);
+                            span_errors += 1;
+                        }
+
+                        // Bulk copy outputs back to shared buffer
+                        for mapping in &span.outputs {
+                            let src_start = mapping.span_base.0 as usize;
+                            let dst_start = mapping.main_base.0 as usize;
+                            let count = mapping.count as usize;
+                            shared[dst_start..dst_start + count]
+                                .copy_from_slice(&sbuf[src_start..src_start + count]);
+                        }
+                    }
+                }
+                let eval_time = t0.elapsed();
+                println!("    Span eval: {:.1}s ({} phases)", eval_time.as_secs_f64(), plan.phases.len());
+
+                // Compare against milli
+                let t0 = Instant::now();
+                let milli_outputs = whisper_tensor::compiler::interpret_milli_graph(&milli_graph, &milli_inputs2).unwrap();
+                eprintln!("    Milli: {:.1}s", t0.elapsed().as_secs_f64());
+
+                let reverse_map: HashMap<GlobalId, GlobalId> = milli_graph.output_map.as_ref()
+                    .map(|m| m.iter().map(|(&i, &e)| (e, i)).collect()).unwrap_or_default();
+                let mut max_err: f64 = 0.0;
+                let mut total = 0u64;
+                for (ext_id, mt) in &milli_outputs {
+                    let int_id = reverse_map.get(ext_id).unwrap_or(ext_id);
+                    let tam = full_result.tensor_map.get(int_id).or_else(|| full_result.tensor_map.get(ext_id));
+                    let Some(tam) = tam else { continue };
+                    let f32_t = mt.cast(whisper_tensor::dtype::DType::F32, &mut backend_v4).unwrap();
+                    let flat = f32_t.flatten().unwrap();
+                    let nd = flat.to_ndarray().unwrap();
+                    let vals: Vec<f32> = nd.try_into().unwrap();
+                    for (i, &mv) in vals.iter().enumerate() {
+                        let aid = tam.atom_id_for_element(i as u64);
+                        let sv = shared[aid.0 as usize];
+                        max_err = max_err.max((mv - sv).abs() as f64);
+                        total += 1;
+                    }
+                }
+                println!("    Compared {} elements, max_abs_error={:.6e}", total, max_err);
+                if max_err < 1e-2 { println!("    V4B EVAL: PASS"); }
+                else { println!("    V4B EVAL: MISMATCH"); }
+            }
+        }
     }
     if which == "v4c" || which == "all_v4" {
         use whisper_tensor::compiler::attempts::v13_claude::nano_plan_v4c;
