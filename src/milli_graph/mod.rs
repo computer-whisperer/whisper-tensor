@@ -655,6 +655,63 @@ impl MilliOpGraph {
         self.output_ordering = Some(output_ordering);
     }
 
+    pub fn get_op_mut(&mut self, id: &GlobalId) -> Option<&mut AnyMilliOp> {
+        self.ops.get_mut(id)
+    }
+
+    pub fn has_internal_input_link(&self, internal_id: GlobalId) -> bool {
+        self.input_map.values().any(|x| *x == internal_id)
+    }
+
+    pub fn ensure_tensor_with_id(&mut self, tensor_id: GlobalId) {
+        self.tensors.entry(tensor_id).or_insert(MilliOpGraphTensor {
+            global_id: tensor_id,
+            source_tensor: None,
+            label: None,
+        });
+    }
+
+    pub fn retarget_output_internal_link(
+        &mut self,
+        old_internal_id: GlobalId,
+        new_internal_id: GlobalId,
+    ) -> Result<bool, String> {
+        if self.output_map.is_none() {
+            let mut output_map = HashMap::new();
+            if let Some(output_ordering) = &self.output_ordering {
+                for external_id in output_ordering {
+                    output_map.insert(*external_id, *external_id);
+                }
+            }
+            self.output_map = Some(output_map);
+        }
+
+        self.ensure_tensor_with_id(new_internal_id);
+
+        let output_map = self
+            .output_map
+            .as_mut()
+            .ok_or_else(|| "output_map is not configured".to_string())?;
+        let Some(external_id) = output_map.remove(&old_internal_id) else {
+            return Err(format!("missing graph output link {}", old_internal_id));
+        };
+        if old_internal_id == new_internal_id {
+            output_map.insert(old_internal_id, external_id);
+            return Ok(false);
+        }
+        if let Some(existing_external_id) = output_map.get(&new_internal_id).copied()
+            && existing_external_id != external_id
+        {
+            output_map.insert(old_internal_id, external_id);
+            return Err(format!(
+                "cannot retarget output {} to {}; external {} is already mapped to {}",
+                old_internal_id, new_internal_id, existing_external_id, new_internal_id
+            ));
+        }
+        output_map.insert(new_internal_id, external_id);
+        Ok(true)
+    }
+
     // --- Tensor role queries ---
 
     pub fn tensor_role(&self, id: GlobalId) -> Option<TensorRole> {

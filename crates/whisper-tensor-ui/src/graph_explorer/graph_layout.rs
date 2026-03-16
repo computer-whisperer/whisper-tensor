@@ -2,7 +2,7 @@ use egui::{Pos2, Rect, UiBuilder, Vec2, vec2};
 use rand::{random, random_range};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
-use whisper_tensor::graph::GlobalId;
+use whisper_tensor::graph::{GlobalId, SlotDirection};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct GraphLayoutNodeId(pub(crate) usize);
@@ -84,6 +84,10 @@ pub(crate) struct GraphLayout {
 pub(crate) enum GraphLayoutError {
     #[error("Invalid link")]
     InvalidLinkError,
+    #[error("Layout node not found")]
+    NodeNotFound,
+    #[error("Slot index out of range")]
+    SlotOutOfRange,
 }
 
 fn calculate_height(
@@ -480,6 +484,104 @@ impl GraphLayout {
 
     pub(crate) fn get_link_data(&self) -> &HashMap<GraphLayoutLinkId, GraphLayoutLinkData> {
         &self.link_data
+    }
+
+    pub(crate) fn ensure_link_id_for_global(&mut self, global_id: GlobalId) -> GraphLayoutLinkId {
+        if let Some(existing_link_id) = self
+            .link_data
+            .iter()
+            .filter_map(|(link_id, link_data)| {
+                if link_data.global_id == global_id {
+                    Some(*link_id)
+                } else {
+                    None
+                }
+            })
+            .min_by_key(|link_id| link_id.0)
+        {
+            return existing_link_id;
+        }
+
+        let next_link_id = self
+            .link_data
+            .keys()
+            .map(|x| x.0)
+            .max()
+            .map_or(0, |x| x + 1);
+        let link_id = GraphLayoutLinkId(next_link_id);
+        self.link_data
+            .insert(link_id, GraphLayoutLinkData { global_id });
+        link_id
+    }
+
+    pub(crate) fn set_slot_link(
+        &mut self,
+        node_type: &GraphLayoutNodeType,
+        direction: SlotDirection,
+        slot_index: usize,
+        link_id: Option<GraphLayoutLinkId>,
+    ) -> Result<(), GraphLayoutError> {
+        let Some(node) = self
+            .nodes
+            .values_mut()
+            .find(|node| node.node_type == *node_type)
+        else {
+            return Err(GraphLayoutError::NodeNotFound);
+        };
+
+        let slots = match direction {
+            SlotDirection::Input => &mut node.inputs,
+            SlotDirection::Output => &mut node.outputs,
+        };
+        let Some(slot) = slots.get_mut(slot_index) else {
+            return Err(GraphLayoutError::SlotOutOfRange);
+        };
+        *slot = link_id;
+        Ok(())
+    }
+
+    pub(crate) fn rebuild_connectivity(&mut self) {
+        self.edges.clear();
+        self.upstream_node_for_link.clear();
+        self.downstream_nodes_for_link.clear();
+
+        let mut sorted_node_ids = self.nodes.keys().copied().collect::<Vec<_>>();
+        sorted_node_ids.sort_by_key(|node_id| node_id.0);
+
+        for node_id in &sorted_node_ids {
+            let node = &self.nodes[node_id];
+            for (slot_index, maybe_link_id) in node.outputs.iter().enumerate() {
+                if let Some(link_id) = maybe_link_id {
+                    self.upstream_node_for_link
+                        .entry(*link_id)
+                        .or_insert((*node_id, slot_index));
+                }
+            }
+            for (slot_index, maybe_link_id) in node.inputs.iter().enumerate() {
+                if let Some(link_id) = maybe_link_id {
+                    self.downstream_nodes_for_link
+                        .entry(*link_id)
+                        .or_default()
+                        .push((*node_id, slot_index));
+                }
+            }
+        }
+
+        for node_id in sorted_node_ids {
+            let node = &self.nodes[&node_id];
+            for (slot_index, maybe_link_id) in node.inputs.iter().enumerate() {
+                if let Some(link_id) = maybe_link_id
+                    && let Some((upstream_node_id, upstream_slot_index)) =
+                        self.upstream_node_for_link.get(link_id)
+                {
+                    self.edges.push((
+                        (*upstream_node_id, *upstream_slot_index),
+                        (node_id, slot_index),
+                        *link_id,
+                    ));
+                }
+            }
+        }
     }
 
     pub(crate) fn get_bounding_rect(&self) -> Rect {

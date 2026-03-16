@@ -3231,6 +3231,13 @@ impl SuperGraphAnyNode {
             _ => None,
         }
     }
+
+    pub fn get_sub_graph_mut(&mut self) -> Option<&mut SuperGraph> {
+        match self {
+            SuperGraphAnyNode::Scan(x) => Some(&mut x.inner_graph),
+            _ => None,
+        }
+    }
 }
 
 impl SuperGraphNode for SuperGraphAnyNode {

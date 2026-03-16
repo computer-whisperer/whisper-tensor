@@ -3,8 +3,8 @@ pub mod inspect_windows;
 mod tensor_swatch;
 
 use crate::app::{
-    ClientGraphId, GraphEditability, GraphRootOwnership, InterfaceId, LoadedModels,
-    LoadedTokenizers,
+    ClientGraphId, EditableClientGraphMut, GraphEditability, GraphRootOwnership, InterfaceId,
+    LoadedModels, LoadedTokenizers,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use crate::audio_io::pick_audio_file_native;
@@ -66,7 +66,7 @@ use web_time::{Duration, Instant};
 use whisper_tensor::DynRank;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::dtype::DType;
-use whisper_tensor::graph::{GlobalId, Graph, GraphDyn};
+use whisper_tensor::graph::{GlobalId, Graph, GraphDyn, Node, SlotDirection};
 use whisper_tensor::graph_format::{MILLI_OP_GRAPH_FILE_EXTENSION, SUPER_GRAPH_FILE_EXTENSION};
 use whisper_tensor::interfaces::{
     AnyInterface, ImageGenerationInterface, KokoroVoiceEmbedding, TTSInputConfig,
@@ -74,8 +74,8 @@ use whisper_tensor::interfaces::{
 use whisper_tensor::metadata::TokenizerInfo;
 use whisper_tensor::milli_graph::MilliOpGraph;
 use whisper_tensor::scalar_info::ScalarInfoTyped;
-use whisper_tensor::super_graph::nodes::SuperGraphAnyNode;
-use whisper_tensor::super_graph::{SuperGraph, SuperGraphLink};
+use whisper_tensor::super_graph::nodes::{SuperGraphAnyNode, SuperGraphNode};
+use whisper_tensor::super_graph::{SuperGraph, SuperGraphLink, SuperGraphLinkInfo};
 use whisper_tensor::tokenizer::Tokenizer;
 use whisper_tensor_server::{
     AbbreviatedTensorReportSettings, AbbreviatedTensorValue, LoadedModelId, ServerConfigReport,
@@ -253,6 +253,85 @@ pub(crate) struct GraphExplorerApp {
     actions_status: Option<String>,
     error_popup: Option<String>,
     pub(crate) show_profiling_window: bool,
+    undo_history: Vec<GraphEditHistoryEntry>,
+    redo_history: Vec<GraphEditHistoryEntry>,
+    pending_link_drag: Option<PendingLinkDrag>,
+    pending_link_edit_request: Option<(Vec<GlobalId>, SlotPipEndpoint, SlotPipEndpoint)>,
+    pending_history_action: Option<PendingHistoryAction>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SlotPipOwner {
+    Node(GlobalId),
+    InputLink(GlobalId),
+    OutputLink(GlobalId),
+    ConstantLink(GlobalId),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SlotPipEndpoint {
+    owner: SlotPipOwner,
+    direction: SlotDirection,
+    slot_index: usize,
+    link_id: Option<GlobalId>,
+    layout_link_id: Option<GraphLayoutLinkId>,
+    screen_pos: Pos2,
+}
+
+#[derive(Clone, Debug)]
+struct PendingLinkDrag {
+    graph_path: Vec<GlobalId>,
+    source: SlotPipEndpoint,
+}
+
+#[derive(Clone, Debug)]
+struct LinkEditApplyResult {
+    status: String,
+    link_global_id: GlobalId,
+    requires_layout_refresh: bool,
+    history_entry: Option<GraphEditHistoryEntry>,
+}
+
+#[derive(Clone, Debug)]
+enum EditableGraphSnapshot {
+    SuperGraph(Box<SuperGraph>),
+    MilliOpGraph(Box<MilliOpGraph>),
+}
+
+#[derive(Clone, Debug)]
+struct GraphEditHistoryEntry {
+    label: String,
+    before: EditableGraphSnapshot,
+    after: EditableGraphSnapshot,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PendingHistoryAction {
+    Undo,
+    Redo,
+}
+
+const MAX_GRAPH_UNDO_HISTORY: usize = 64;
+
+fn resolve_supergraph_mut_at_path<'a>(
+    root_graph: &'a mut SuperGraph,
+    path: &[GlobalId],
+) -> Option<&'a mut SuperGraph> {
+    let mut graph = root_graph;
+    for node_id in path {
+        let node = graph.nodes.get_mut(node_id)?;
+        graph = node.get_sub_graph_mut()?;
+    }
+    Some(graph)
+}
+
+fn graph_layout_node_type_for_slot_owner(owner: SlotPipOwner) -> GraphLayoutNodeType {
+    match owner {
+        SlotPipOwner::Node(node_id) => GraphLayoutNodeType::GraphNode(node_id),
+        SlotPipOwner::InputLink(link_id) => GraphLayoutNodeType::InputLinkNode(link_id),
+        SlotPipOwner::OutputLink(link_id) => GraphLayoutNodeType::OutputLinkNode(link_id),
+        SlotPipOwner::ConstantLink(link_id) => GraphLayoutNodeType::ConstantLinkNode(link_id),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -579,6 +658,11 @@ impl GraphExplorerApp {
             actions_status: None,
             error_popup: None,
             show_profiling_window: false,
+            undo_history: Vec::new(),
+            redo_history: Vec::new(),
+            pending_link_drag: None,
+            pending_link_edit_request: None,
+            pending_history_action: None,
         }
     }
 
@@ -932,6 +1016,59 @@ impl GraphExplorerApp {
         }
     }
 
+    fn push_history_entry(&mut self, entry: GraphEditHistoryEntry) {
+        self.undo_history.push(entry);
+        if self.undo_history.len() > MAX_GRAPH_UNDO_HISTORY {
+            self.undo_history.drain(..1);
+        }
+        self.redo_history.clear();
+    }
+
+    fn restore_root_graph_snapshot(
+        &mut self,
+        loaded_models: &mut LoadedModels,
+        snapshot: &EditableGraphSnapshot,
+    ) -> Result<(), String> {
+        let restore_result =
+            loaded_models.with_editable_client_graph_mut(self.root_selection, |graph| {
+                match (graph, snapshot) {
+                    (
+                        EditableClientGraphMut::SuperGraph(target_graph),
+                        EditableGraphSnapshot::SuperGraph(snapshot_graph),
+                    ) => {
+                        *target_graph = snapshot_graph.as_ref().clone();
+                        Ok(())
+                    }
+                    (
+                        EditableClientGraphMut::MilliOpGraph(target_graph),
+                        EditableGraphSnapshot::MilliOpGraph(snapshot_graph),
+                    ) => {
+                        *target_graph = snapshot_graph.as_ref().clone();
+                        Ok(())
+                    }
+                    (
+                        EditableClientGraphMut::MilliOpGraph(_),
+                        EditableGraphSnapshot::SuperGraph(_),
+                    ) => Err("snapshot type mismatch: expected MilliOpGraph snapshot".to_string()),
+                    (
+                        EditableClientGraphMut::SuperGraph(_),
+                        EditableGraphSnapshot::MilliOpGraph(_),
+                    ) => Err("snapshot type mismatch: expected SuperGraph snapshot".to_string()),
+                }
+            });
+        match restore_result {
+            Ok(inner) => inner,
+            Err(err) => Err(err.to_string()),
+        }
+    }
+
+    fn invalidate_graph_view_cache(&mut self) {
+        self.graph_layouts.clear();
+        self.model_view_scene_rects.clear();
+        self.pending_link_drag = None;
+        self.pending_link_edit_request = None;
+    }
+
     fn render_graph_actions_panel(
         &mut self,
         ui: &mut Ui,
@@ -950,6 +1087,27 @@ impl GraphExplorerApp {
             ui.label(egui::RichText::new(editability.description()).size(11.0));
             if editability.can_edit() {
                 ui.label(egui::RichText::new("edit actions: enabled").size(11.0));
+                ui.horizontal(|ui| {
+                    let undo_count = self.undo_history.len();
+                    let redo_count = self.redo_history.len();
+                    let undo_clicked = ui
+                        .add_enabled(
+                            undo_count > 0,
+                            egui::Button::new(format!("Undo ({undo_count})")),
+                        )
+                        .clicked();
+                    let redo_clicked = ui
+                        .add_enabled(
+                            redo_count > 0,
+                            egui::Button::new(format!("Redo ({redo_count})")),
+                        )
+                        .clicked();
+                    if undo_clicked {
+                        self.pending_history_action = Some(PendingHistoryAction::Undo);
+                    } else if redo_clicked {
+                        self.pending_history_action = Some(PendingHistoryAction::Redo);
+                    }
+                });
             }
 
             let export_result = if let Some(super_graph) =
@@ -1018,6 +1176,494 @@ impl GraphExplorerApp {
         });
     }
 
+    fn apply_link_drag_edit(
+        &mut self,
+        loaded_models: &mut LoadedModels,
+        working_path: &[GlobalId],
+        source: SlotPipEndpoint,
+        target: SlotPipEndpoint,
+        editability: GraphEditability,
+    ) -> Result<LinkEditApplyResult, String> {
+        if !editability.can_edit() {
+            return Err(
+                "Link editing is only enabled for client-loaded editable graphs.".to_string(),
+            );
+        }
+
+        let (output_endpoint, input_endpoint) = match (source.direction, target.direction) {
+            (SlotDirection::Output, SlotDirection::Input) => (source, target),
+            (SlotDirection::Input, SlotDirection::Output) => (target, source),
+            _ => {
+                return Err(
+                    "Drag must connect an output slot to an input slot (or vice versa)."
+                        .to_string(),
+                );
+            }
+        };
+
+        let edit_result = loaded_models.with_editable_client_graph_mut(
+            self.root_selection,
+            |graph| match graph {
+                EditableClientGraphMut::SuperGraph(root_graph) => {
+                    let before_snapshot =
+                        EditableGraphSnapshot::SuperGraph(Box::new(root_graph.clone()));
+
+                    let mut requires_layout_refresh = false;
+
+                    let (status, output_link_global_id) = {
+                        let graph = resolve_supergraph_mut_at_path(root_graph, working_path)
+                            .ok_or_else(|| {
+                                "Failed to resolve mutable SuperGraph at current path.".to_string()
+                            })?;
+                        let link_global_id = output_endpoint
+                            .link_id
+                            .or(input_endpoint.link_id)
+                            .unwrap_or_else(|| {
+                                let mut rng = rand::rng();
+                                GlobalId::new(&mut rng)
+                            });
+
+                        match output_endpoint.owner {
+                            SlotPipOwner::Node(node_id) => {
+                                let output_node = graph
+                                    .nodes
+                                    .get_mut(&node_id)
+                                    .ok_or_else(|| format!("Missing output node {node_id}"))?;
+                                Node::set_output_slot(
+                                    output_node,
+                                    output_endpoint.slot_index,
+                                    Some(link_global_id),
+                                )
+                                .map_err(|err| {
+                                    format!(
+                                        "Failed to set output slot {} on {}: {err:?}",
+                                        output_endpoint.slot_index, node_id
+                                    )
+                                })?;
+                            }
+                            SlotPipOwner::InputLink(link_id)
+                            | SlotPipOwner::ConstantLink(link_id) => {
+                                if link_id != link_global_id {
+                                    return Err(format!(
+                                        "Cannot retarget source link {} to {}",
+                                        link_id, link_global_id
+                                    ));
+                                }
+                            }
+                            SlotPipOwner::OutputLink(link_id) => {
+                                return Err(format!(
+                                    "Graph output link {} cannot be used as a source endpoint",
+                                    link_id
+                                ));
+                            }
+                        }
+
+                        match input_endpoint.owner {
+                            SlotPipOwner::Node(node_id) => {
+                                let input_node = graph
+                                    .nodes
+                                    .get_mut(&node_id)
+                                    .ok_or_else(|| format!("Missing input node {node_id}"))?;
+                                Node::set_input_slot(
+                                    input_node,
+                                    input_endpoint.slot_index,
+                                    Some(link_global_id),
+                                )
+                                .map_err(|err| {
+                                    format!(
+                                        "Failed to set input slot {} on {}: {err:?}",
+                                        input_endpoint.slot_index, node_id
+                                    )
+                                })?;
+                            }
+                            SlotPipOwner::OutputLink(link_id) => {
+                                if !graph.output_links.iter().any(|x| x.global_id() == link_id) {
+                                    return Err(format!("Missing graph output link {}", link_id));
+                                }
+                            }
+                            SlotPipOwner::InputLink(link_id) => {
+                                return Err(format!(
+                                    "Graph input link {} cannot be used as an input endpoint",
+                                    link_id
+                                ));
+                            }
+                            SlotPipOwner::ConstantLink(link_id) => {
+                                return Err(format!(
+                                    "Constant link {} cannot be used as an input endpoint",
+                                    link_id
+                                ));
+                            }
+                        }
+
+                        let output_link = match output_endpoint.owner {
+                            SlotPipOwner::Node(node_id) => {
+                                let output_node = graph
+                                    .nodes
+                                    .get(&node_id)
+                                    .ok_or_else(|| format!("Missing output node {node_id}"))?;
+                                SuperGraphNode::output_slots(output_node)
+                                    .nth(output_endpoint.slot_index)
+                                    .flatten()
+                                    .ok_or_else(|| {
+                                        format!(
+                                            "Output slot {} on {} has no link after update",
+                                            output_endpoint.slot_index, node_id
+                                        )
+                                    })?
+                            }
+                            SlotPipOwner::InputLink(link_id)
+                            | SlotPipOwner::OutputLink(link_id)
+                            | SlotPipOwner::ConstantLink(link_id) => graph
+                                .links_by_global_id
+                                .get(&link_id)
+                                .map(|x| x.link())
+                                .ok_or_else(|| {
+                                    format!("Missing link metadata for endpoint link {}", link_id)
+                                })?,
+                        };
+
+                        graph
+                            .links_by_global_id
+                            .entry(output_link.global_id())
+                            .or_insert_with(|| SuperGraphLinkInfo::new(output_link, None));
+
+                        if let SlotPipOwner::OutputLink(existing_output_global_id) =
+                            input_endpoint.owner
+                            && existing_output_global_id != output_link.global_id()
+                        {
+                            let existing_output_link = graph
+                                .output_links
+                                .iter()
+                                .copied()
+                                .find(|x| x.global_id() == existing_output_global_id)
+                                .ok_or_else(|| {
+                                    format!(
+                                        "Missing graph output link {}",
+                                        existing_output_global_id
+                                    )
+                                })?;
+                            if existing_output_link.kind() != output_link.kind() {
+                                return Err(format!(
+                                    "Cannot retarget output link {} ({}) to {} ({})",
+                                    existing_output_global_id,
+                                    existing_output_link.kind().as_str(),
+                                    output_link.global_id(),
+                                    output_link.kind().as_str()
+                                ));
+                            }
+                            graph.output_links.remove(&existing_output_link);
+                            graph.output_links.insert(output_link);
+                            requires_layout_refresh = true;
+                        }
+
+                        let describe_endpoint = |endpoint: &SlotPipEndpoint| -> String {
+                            match endpoint.owner {
+                                SlotPipOwner::Node(node_id) => {
+                                    format!("node {} slot {}", node_id, endpoint.slot_index)
+                                }
+                                SlotPipOwner::InputLink(link_id) => {
+                                    format!(
+                                        "graph input link {} slot {}",
+                                        link_id, endpoint.slot_index
+                                    )
+                                }
+                                SlotPipOwner::OutputLink(link_id) => {
+                                    format!(
+                                        "graph output link {} slot {}",
+                                        link_id, endpoint.slot_index
+                                    )
+                                }
+                                SlotPipOwner::ConstantLink(link_id) => {
+                                    format!(
+                                        "constant link {} slot {}",
+                                        link_id, endpoint.slot_index
+                                    )
+                                }
+                            }
+                        };
+
+                        (
+                            format!(
+                                "Linked {} -> {} ({})",
+                                describe_endpoint(&output_endpoint),
+                                describe_endpoint(&input_endpoint),
+                                output_link.global_id()
+                            ),
+                            output_link.global_id(),
+                        )
+                    };
+
+                    let after_snapshot =
+                        EditableGraphSnapshot::SuperGraph(Box::new(root_graph.clone()));
+                    let history_entry = GraphEditHistoryEntry {
+                        label: status.clone(),
+                        before: before_snapshot,
+                        after: after_snapshot,
+                    };
+
+                    Ok(LinkEditApplyResult {
+                        status,
+                        link_global_id: output_link_global_id,
+                        requires_layout_refresh,
+                        history_entry: Some(history_entry),
+                    })
+                }
+                EditableClientGraphMut::MilliOpGraph(graph) => {
+                    if !working_path.is_empty() {
+                        return Err(
+                            "MilliOpGraph link editing does not support nested graph paths."
+                                .to_string(),
+                        );
+                    }
+
+                    let before_snapshot =
+                        EditableGraphSnapshot::MilliOpGraph(Box::new(graph.clone()));
+                    let mut requires_layout_refresh = false;
+
+                    let (status, link_global_id) = {
+                        let link_global_id = output_endpoint
+                            .link_id
+                            .or(input_endpoint.link_id)
+                            .unwrap_or_else(|| {
+                                let mut rng = rand::rng();
+                                GlobalId::new(&mut rng)
+                            });
+                        graph.ensure_tensor_with_id(link_global_id);
+
+                        match output_endpoint.owner {
+                            SlotPipOwner::Node(node_id) => {
+                                let output_node = graph
+                                    .get_op_mut(&node_id)
+                                    .ok_or_else(|| format!("Missing output node {node_id}"))?;
+                                Node::set_output_slot(
+                                    output_node,
+                                    output_endpoint.slot_index,
+                                    Some(link_global_id),
+                                )
+                                .map_err(|err| {
+                                    format!(
+                                        "Failed to set output slot {} on {}: {err:?}",
+                                        output_endpoint.slot_index, node_id
+                                    )
+                                })?;
+                            }
+                            SlotPipOwner::InputLink(link_id) => {
+                                if !graph.has_internal_input_link(link_id) {
+                                    return Err(format!("Missing graph input link {}", link_id));
+                                }
+                                if link_id != link_global_id {
+                                    return Err(format!(
+                                        "Cannot retarget source link {} to {}",
+                                        link_id, link_global_id
+                                    ));
+                                }
+                            }
+                            SlotPipOwner::ConstantLink(link_id) => {
+                                return Err(format!(
+                                    "Constant link {} cannot be used as a source endpoint",
+                                    link_id
+                                ));
+                            }
+                            SlotPipOwner::OutputLink(link_id) => {
+                                return Err(format!(
+                                    "Graph output link {} cannot be used as a source endpoint",
+                                    link_id
+                                ));
+                            }
+                        }
+
+                        match input_endpoint.owner {
+                            SlotPipOwner::Node(node_id) => {
+                                let input_node = graph
+                                    .get_op_mut(&node_id)
+                                    .ok_or_else(|| format!("Missing input node {node_id}"))?;
+                                Node::set_input_slot(
+                                    input_node,
+                                    input_endpoint.slot_index,
+                                    Some(link_global_id),
+                                )
+                                .map_err(|err| {
+                                    format!(
+                                        "Failed to set input slot {} on {}: {err:?}",
+                                        input_endpoint.slot_index, node_id
+                                    )
+                                })?;
+                            }
+                            SlotPipOwner::OutputLink(link_id) => {
+                                let changed = graph
+                                    .retarget_output_internal_link(link_id, link_global_id)
+                                    .map_err(|err| {
+                                        format!(
+                                            "Cannot retarget output sink link {} to {}: {err}",
+                                            link_id, link_global_id
+                                        )
+                                    })?;
+                                if changed {
+                                    requires_layout_refresh = true;
+                                }
+                            }
+                            SlotPipOwner::InputLink(link_id) => {
+                                return Err(format!(
+                                    "Graph input link {} cannot be used as an input endpoint",
+                                    link_id
+                                ));
+                            }
+                            SlotPipOwner::ConstantLink(link_id) => {
+                                return Err(format!(
+                                    "Constant link {} cannot be used as an input endpoint",
+                                    link_id
+                                ));
+                            }
+                        }
+
+                        let describe_endpoint = |endpoint: &SlotPipEndpoint| -> String {
+                            match endpoint.owner {
+                                SlotPipOwner::Node(node_id) => {
+                                    format!("node {} slot {}", node_id, endpoint.slot_index)
+                                }
+                                SlotPipOwner::InputLink(link_id) => {
+                                    format!(
+                                        "graph input link {} slot {}",
+                                        link_id, endpoint.slot_index
+                                    )
+                                }
+                                SlotPipOwner::OutputLink(link_id) => {
+                                    format!(
+                                        "graph output link {} slot {}",
+                                        link_id, endpoint.slot_index
+                                    )
+                                }
+                                SlotPipOwner::ConstantLink(link_id) => {
+                                    format!(
+                                        "constant link {} slot {}",
+                                        link_id, endpoint.slot_index
+                                    )
+                                }
+                            }
+                        };
+
+                        (
+                            format!(
+                                "Linked {} -> {} ({})",
+                                describe_endpoint(&output_endpoint),
+                                describe_endpoint(&input_endpoint),
+                                link_global_id
+                            ),
+                            link_global_id,
+                        )
+                    };
+
+                    let after_snapshot =
+                        EditableGraphSnapshot::MilliOpGraph(Box::new(graph.clone()));
+                    let history_entry = GraphEditHistoryEntry {
+                        label: status.clone(),
+                        before: before_snapshot,
+                        after: after_snapshot,
+                    };
+
+                    Ok(LinkEditApplyResult {
+                        status,
+                        link_global_id,
+                        requires_layout_refresh,
+                        history_entry: Some(history_entry),
+                    })
+                }
+            },
+        );
+
+        match edit_result {
+            Ok(result) => result,
+            Err(err) => Err(err.to_string()),
+        }
+    }
+
+    fn apply_link_drag_edit_to_layout(
+        graph_layout: &mut GraphLayout,
+        source: SlotPipEndpoint,
+        target: SlotPipEndpoint,
+        link_global_id: GlobalId,
+    ) -> Result<(), String> {
+        let (output_endpoint, input_endpoint) = match (source.direction, target.direction) {
+            (SlotDirection::Output, SlotDirection::Input) => (source, target),
+            (SlotDirection::Input, SlotDirection::Output) => (target, source),
+            _ => {
+                return Err(
+                    "Drag must connect an output slot to an input slot (or vice versa)."
+                        .to_string(),
+                );
+            }
+        };
+
+        let layout_link_id = output_endpoint
+            .layout_link_id
+            .filter(|_| output_endpoint.link_id == Some(link_global_id))
+            .or_else(|| {
+                input_endpoint
+                    .layout_link_id
+                    .filter(|_| input_endpoint.link_id == Some(link_global_id))
+            })
+            .unwrap_or_else(|| graph_layout.ensure_link_id_for_global(link_global_id));
+
+        match output_endpoint.owner {
+            SlotPipOwner::Node(_) | SlotPipOwner::InputLink(_) | SlotPipOwner::ConstantLink(_) => {}
+            SlotPipOwner::OutputLink(link_id) => {
+                return Err(format!(
+                    "Graph output link {} cannot be used as a source endpoint",
+                    link_id
+                ));
+            }
+        }
+
+        match input_endpoint.owner {
+            SlotPipOwner::Node(_) | SlotPipOwner::OutputLink(_) => {}
+            SlotPipOwner::InputLink(link_id) => {
+                return Err(format!(
+                    "Graph input link {} cannot be used as an input endpoint",
+                    link_id
+                ));
+            }
+            SlotPipOwner::ConstantLink(link_id) => {
+                return Err(format!(
+                    "Constant link {} cannot be used as an input endpoint",
+                    link_id
+                ));
+            }
+        }
+
+        let output_node_type = graph_layout_node_type_for_slot_owner(output_endpoint.owner);
+        graph_layout
+            .set_slot_link(
+                &output_node_type,
+                SlotDirection::Output,
+                output_endpoint.slot_index,
+                Some(layout_link_id),
+            )
+            .map_err(|err| {
+                format!(
+                    "Failed to set layout output slot {} for {:?}: {err}",
+                    output_endpoint.slot_index, output_node_type
+                )
+            })?;
+
+        let input_node_type = graph_layout_node_type_for_slot_owner(input_endpoint.owner);
+        graph_layout
+            .set_slot_link(
+                &input_node_type,
+                SlotDirection::Input,
+                input_endpoint.slot_index,
+                Some(layout_link_id),
+            )
+            .map_err(|err| {
+                format!(
+                    "Failed to set layout input slot {} for {:?}: {err}",
+                    input_endpoint.slot_index, input_node_type
+                )
+            })?;
+
+        graph_layout.rebuild_connectivity();
+        Ok(())
+    }
+
     pub(crate) fn update(
         &mut self,
         state: &mut GraphExplorerSettings,
@@ -1052,6 +1698,129 @@ impl GraphExplorerApp {
             self.inspect_window_tensor_subscriptions.clear();
             self.inspect_windows.clear();
             self.actions_status = None;
+            self.pending_link_drag = None;
+            self.pending_link_edit_request = None;
+            self.pending_history_action = None;
+        }
+
+        if let Some((working_path, source_endpoint, target_endpoint)) =
+            self.pending_link_edit_request.take()
+        {
+            let editability = loaded_models.root_graph_editability(self.root_selection);
+            match self.apply_link_drag_edit(
+                loaded_models,
+                working_path.as_slice(),
+                source_endpoint,
+                target_endpoint,
+                editability,
+            ) {
+                Ok(result) => {
+                    let LinkEditApplyResult {
+                        status,
+                        link_global_id,
+                        requires_layout_refresh,
+                        history_entry,
+                    } = result;
+                    self.actions_status = Some(status.clone());
+                    if let Some(history_entry) = history_entry {
+                        self.push_history_entry(history_entry);
+                    }
+
+                    let mut should_relayout = requires_layout_refresh;
+                    let mut relayout_reason = if requires_layout_refresh {
+                        Some("graph I/O endpoint identity changed".to_string())
+                    } else {
+                        None
+                    };
+                    if !should_relayout {
+                        match self.graph_layouts.get_mut(&working_path) {
+                            Some(Ok(graph_layout)) => {
+                                if let Err(err) = Self::apply_link_drag_edit_to_layout(
+                                    graph_layout,
+                                    source_endpoint,
+                                    target_endpoint,
+                                    link_global_id,
+                                ) {
+                                    should_relayout = true;
+                                    relayout_reason = Some(err);
+                                }
+                            }
+                            Some(Err(err)) => {
+                                should_relayout = true;
+                                relayout_reason = Some(format!(
+                                    "Cached layout was already invalid before edit: {err}"
+                                ));
+                            }
+                            None => {
+                                should_relayout = true;
+                            }
+                        }
+                    }
+
+                    if should_relayout {
+                        self.graph_layouts.remove(&working_path);
+                        self.model_view_scene_rects.remove(&working_path);
+                        if let Some(reason) = relayout_reason {
+                            self.actions_status =
+                                Some(format!("{} (layout refresh fallback: {reason})", status));
+                        }
+                    }
+                }
+                Err(err) => {
+                    let full_error = format!("Link edit failed: {err}");
+                    self.actions_status = Some(full_error.clone());
+                    self.error_popup = Some(full_error);
+                }
+            }
+        }
+
+        if let Some(history_action) = self.pending_history_action.take() {
+            match history_action {
+                PendingHistoryAction::Undo => {
+                    if let Some(entry) = self.undo_history.pop() {
+                        match self.restore_root_graph_snapshot(loaded_models, &entry.before) {
+                            Ok(()) => {
+                                self.invalidate_graph_view_cache();
+                                self.actions_status = Some(format!("Undo: {}", entry.label));
+                                self.redo_history.push(entry);
+                                if self.redo_history.len() > MAX_GRAPH_UNDO_HISTORY {
+                                    self.redo_history.drain(..1);
+                                }
+                            }
+                            Err(err) => {
+                                self.undo_history.push(entry);
+                                let full_error = format!("Undo failed: {err}");
+                                self.actions_status = Some(full_error.clone());
+                                self.error_popup = Some(full_error);
+                            }
+                        }
+                    } else {
+                        self.actions_status = Some("Nothing to undo.".to_string());
+                    }
+                }
+                PendingHistoryAction::Redo => {
+                    if let Some(entry) = self.redo_history.pop() {
+                        match self.restore_root_graph_snapshot(loaded_models, &entry.after) {
+                            Ok(()) => {
+                                self.invalidate_graph_view_cache();
+                                self.actions_status = Some(format!("Redo: {}", entry.label));
+                                self.undo_history.push(entry);
+                                if self.undo_history.len() > MAX_GRAPH_UNDO_HISTORY {
+                                    self.undo_history.drain(..1);
+                                }
+                            }
+                            Err(err) => {
+                                self.redo_history.push(entry);
+                                let full_error = format!("Redo failed: {err}");
+                                self.actions_status = Some(full_error.clone());
+                                self.error_popup = Some(full_error);
+                            }
+                        }
+                    } else {
+                        self.actions_status = Some("Nothing to redo.".to_string());
+                    }
+                }
+            }
         }
 
         let do_interface_panel = matches!(
@@ -1309,8 +2078,31 @@ impl GraphExplorerApp {
                     .insert(working_path.clone(), initial_layout);
             }
 
+            let mut pending_link_edit_request: Option<(SlotPipEndpoint, SlotPipEndpoint)> = None;
             match self.graph_layouts.get_mut(&self.graph_subject_path) {
                 Some(Ok(graph_layout)) => {
+                    let working_is_super =
+                        <dyn Any>::downcast_ref::<SuperGraph>(working_graph.as_any()).is_some();
+                    let working_is_milli =
+                        <dyn Any>::downcast_ref::<MilliOpGraph>(working_graph.as_any()).is_some();
+                    let root_is_super = root_graph.is_some_and(|graph| {
+                        <dyn Any>::downcast_ref::<SuperGraph>(graph.as_any()).is_some()
+                    });
+                    let root_is_milli = root_graph.is_some_and(|graph| {
+                        <dyn Any>::downcast_ref::<MilliOpGraph>(graph.as_any()).is_some()
+                    });
+                    let can_edit_links = root_editability.can_edit()
+                        && ((root_is_super && working_is_super)
+                            || (root_is_milli && working_is_milli));
+                    if !can_edit_links {
+                        self.pending_link_drag = None;
+                    }
+                    if let Some(link_drag) = &self.pending_link_drag
+                        && link_drag.graph_path != working_path
+                    {
+                        self.pending_link_drag = None;
+                    }
+
                     // Update positions
                     if state.explorer_physics && graph_layout.update_layout(5000) {
                         ui.ctx().request_repaint_after(Duration::from_millis(20));
@@ -1408,6 +2200,9 @@ impl GraphExplorerApp {
 
                                 let mut node_io_connections = HashMap::new();
                                 let mut node_bounding_boxes = HashMap::new();
+                                let mut hovered_slot_endpoint: Option<SlotPipEndpoint> = None;
+                                let mut nodes_with_active_slot_drag = HashSet::new();
+                                let link_data = graph_layout.get_link_data().clone();
 
                                 self.nodes_in_view.clear();
                                 let current_time = Instant::now();
@@ -1479,7 +2274,213 @@ impl GraphExplorerApp {
                                     if resp.clicked() {
                                         self.explorer_selection = Some(global_id);
                                     }
-                                    if resp.dragged() {
+
+                                    let slot_owner = match current_node_data[&node_id].node_type {
+                                        GraphLayoutNodeType::GraphNode(graph_node_id) => {
+                                            Some(SlotPipOwner::Node(graph_node_id))
+                                        }
+                                        GraphLayoutNodeType::InputLinkNode(link_id) => {
+                                            Some(SlotPipOwner::InputLink(link_id))
+                                        }
+                                        GraphLayoutNodeType::OutputLinkNode(link_id) => {
+                                            Some(SlotPipOwner::OutputLink(link_id))
+                                        }
+                                        GraphLayoutNodeType::ConstantLinkNode(link_id) => {
+                                            Some(SlotPipOwner::ConstantLink(link_id))
+                                        }
+                                        GraphLayoutNodeType::ConnectionByNameSrc(_)
+                                        | GraphLayoutNodeType::ConnectionByNameDest(_) => None,
+                                    };
+                                    if can_edit_links
+                                        && let Some(slot_owner) = slot_owner
+                                    {
+                                        let node_center = node_bounding_boxes[&node_id].center();
+                                        let slot_pip_radius = 4.0f32;
+                                        let slot_pip_rect_radius = 8.0f32;
+                                        let interaction_sense = Sense::click_and_drag();
+
+                                        for (slot_index, offset) in
+                                            node_io_connections[&node_id].inputs.iter().enumerate()
+                                        {
+                                            let center = node_center + *offset;
+                                            let maybe_layout_link = current_node_data[&node_id]
+                                                .inputs
+                                                .get(slot_index)
+                                                .copied()
+                                                .flatten();
+                                            let maybe_link = maybe_layout_link.and_then(|layout_link| {
+                                                link_data.get(&layout_link).map(|x| x.global_id)
+                                            });
+                                            let endpoint = SlotPipEndpoint {
+                                                owner: slot_owner,
+                                                direction: SlotDirection::Input,
+                                                slot_index,
+                                                link_id: maybe_link,
+                                                layout_link_id: maybe_layout_link,
+                                                screen_pos: center,
+                                            };
+
+                                            let pip_rect = Rect::from_center_size(
+                                                center,
+                                                Vec2::splat(slot_pip_rect_radius * 2.0),
+                                            );
+                                            let pip_resp = ui.interact(
+                                                pip_rect,
+                                                ui.id().with((
+                                                    "slot_pip",
+                                                    global_id,
+                                                    0u8,
+                                                    slot_index,
+                                                )),
+                                                interaction_sense,
+                                            );
+
+                                            if pip_resp.drag_started() {
+                                                nodes_with_active_slot_drag.insert(node_id);
+                                                self.pending_link_drag = Some(PendingLinkDrag {
+                                                    graph_path: working_path.clone(),
+                                                    source: endpoint,
+                                                });
+                                            }
+                                            if pip_resp.dragged() {
+                                                nodes_with_active_slot_drag.insert(node_id);
+                                            }
+                                            if let Some(drag) = &self.pending_link_drag
+                                                && drag.graph_path == working_path
+                                                && drag.source.direction != endpoint.direction
+                                                && pip_resp.hovered()
+                                            {
+                                                hovered_slot_endpoint = Some(endpoint);
+                                            }
+
+                                            let is_drag_source = self
+                                                .pending_link_drag
+                                                .as_ref()
+                                                .is_some_and(|drag| {
+                                                    drag.graph_path == working_path
+                                                        && drag.source.owner == endpoint.owner
+                                                        && drag.source.direction
+                                                            == endpoint.direction
+                                                        && drag.source.slot_index
+                                                            == endpoint.slot_index
+                                                });
+                                            let fill_color = if is_drag_source {
+                                                Color32::from_rgb(255, 197, 48)
+                                            } else if maybe_link.is_some() {
+                                                Color32::from_rgb(98, 190, 250)
+                                            } else {
+                                                Color32::from_rgb(76, 84, 97)
+                                            };
+                                            let stroke_color = if pip_resp.hovered() {
+                                                Color32::from_rgb(236, 244, 255)
+                                            } else {
+                                                Color32::from_gray(12)
+                                            };
+                                            ui.painter().circle_filled(
+                                                center,
+                                                slot_pip_radius,
+                                                fill_color,
+                                            );
+                                            ui.painter().circle_stroke(
+                                                center,
+                                                slot_pip_radius,
+                                                Stroke::new(1.0, stroke_color),
+                                            );
+                                        }
+
+                                        for (slot_index, offset) in
+                                            node_io_connections[&node_id].outputs.iter().enumerate()
+                                        {
+                                            let center = node_center + *offset;
+                                            let maybe_layout_link = current_node_data[&node_id]
+                                                .outputs
+                                                .get(slot_index)
+                                                .copied()
+                                                .flatten();
+                                            let maybe_link = maybe_layout_link.and_then(|layout_link| {
+                                                link_data.get(&layout_link).map(|x| x.global_id)
+                                            });
+                                            let endpoint = SlotPipEndpoint {
+                                                owner: slot_owner,
+                                                direction: SlotDirection::Output,
+                                                slot_index,
+                                                link_id: maybe_link,
+                                                layout_link_id: maybe_layout_link,
+                                                screen_pos: center,
+                                            };
+
+                                            let pip_rect = Rect::from_center_size(
+                                                center,
+                                                Vec2::splat(slot_pip_rect_radius * 2.0),
+                                            );
+                                            let pip_resp = ui.interact(
+                                                pip_rect,
+                                                ui.id().with((
+                                                    "slot_pip",
+                                                    global_id,
+                                                    1u8,
+                                                    slot_index,
+                                                )),
+                                                interaction_sense,
+                                            );
+
+                                            if pip_resp.drag_started() {
+                                                nodes_with_active_slot_drag.insert(node_id);
+                                                self.pending_link_drag = Some(PendingLinkDrag {
+                                                    graph_path: working_path.clone(),
+                                                    source: endpoint,
+                                                });
+                                            }
+                                            if pip_resp.dragged() {
+                                                nodes_with_active_slot_drag.insert(node_id);
+                                            }
+                                            if let Some(drag) = &self.pending_link_drag
+                                                && drag.graph_path == working_path
+                                                && drag.source.direction != endpoint.direction
+                                                && pip_resp.hovered()
+                                            {
+                                                hovered_slot_endpoint = Some(endpoint);
+                                            }
+
+                                            let is_drag_source = self
+                                                .pending_link_drag
+                                                .as_ref()
+                                                .is_some_and(|drag| {
+                                                    drag.graph_path == working_path
+                                                        && drag.source.owner == endpoint.owner
+                                                        && drag.source.direction
+                                                            == endpoint.direction
+                                                        && drag.source.slot_index
+                                                            == endpoint.slot_index
+                                                });
+                                            let fill_color = if is_drag_source {
+                                                Color32::from_rgb(255, 197, 48)
+                                            } else if maybe_link.is_some() {
+                                                Color32::from_rgb(95, 219, 140)
+                                            } else {
+                                                Color32::from_rgb(76, 84, 97)
+                                            };
+                                            let stroke_color = if pip_resp.hovered() {
+                                                Color32::from_rgb(236, 244, 255)
+                                            } else {
+                                                Color32::from_gray(12)
+                                            };
+                                            ui.painter().circle_filled(
+                                                center,
+                                                slot_pip_radius,
+                                                fill_color,
+                                            );
+                                            ui.painter().circle_stroke(
+                                                center,
+                                                slot_pip_radius,
+                                                Stroke::new(1.0, stroke_color),
+                                            );
+                                        }
+                                    }
+
+                                    if resp.dragged()
+                                        && !nodes_with_active_slot_drag.contains(&node_id)
+                                    {
                                         node_position_updates.insert(
                                             node_id,
                                             current_node_data.get(&node_id).unwrap().position
@@ -1543,7 +2544,6 @@ impl GraphExplorerApp {
 
                                 // Draw lines
                                 self.tensors_in_view.clear();
-                                let link_data = graph_layout.get_link_data();
                                 for (
                                     (src_id, src_id_i),
                                     (dst_id, dst_id_i),
@@ -1628,6 +2628,50 @@ impl GraphExplorerApp {
                                         }
                                     }
                                 }
+
+                                if let Some(link_drag) = &self.pending_link_drag
+                                    && link_drag.graph_path == working_path
+                                {
+                                    if let Some(pointer_pos_global) =
+                                        ui.input(|x| x.pointer.interact_pos())
+                                    {
+                                        let pointer_pos = ui
+                                            .ctx()
+                                            .layer_transform_from_global(ui.layer_id())
+                                            .map_or(pointer_pos_global, |from_global| {
+                                                from_global * pointer_pos_global
+                                            });
+                                        let points = [
+                                            link_drag.source.screen_pos,
+                                            egui::pos2(
+                                                link_drag.source.screen_pos.x + 40.0,
+                                                link_drag.source.screen_pos.y,
+                                            ),
+                                            egui::pos2(pointer_pos.x - 40.0, pointer_pos.y),
+                                            pointer_pos,
+                                        ];
+                                        let preview_stroke = Stroke {
+                                            width: 2.0,
+                                            color: Color32::from_rgb(255, 197, 48),
+                                        };
+                                        ui.painter().add(CubicBezierShape::from_points_stroke(
+                                            points,
+                                            false,
+                                            Color32::TRANSPARENT,
+                                            preview_stroke,
+                                        ));
+                                    }
+
+                                    if ui.input(|x| x.pointer.primary_released()) {
+                                        if let Some(target_endpoint) = hovered_slot_endpoint {
+                                            pending_link_edit_request =
+                                                Some((link_drag.source, target_endpoint));
+                                        }
+                                        self.pending_link_drag = None;
+                                    } else {
+                                        ui.ctx().request_repaint_after(Duration::from_millis(20));
+                                    }
+                                }
                             });
                             self.model_view_scene_rects
                                 .insert(self.graph_subject_path.clone(), scene_rect);
@@ -1640,6 +2684,11 @@ impl GraphExplorerApp {
                 None => {
                     ui.label("No graph generated");
                 }
+            }
+
+            if let Some((source_endpoint, target_endpoint)) = pending_link_edit_request.take() {
+                self.pending_link_edit_request =
+                    Some((working_path.clone(), source_endpoint, target_endpoint));
             }
         } else {
             ui.label("No graph selected");
