@@ -55,8 +55,8 @@ extern "C" {
     fn js_copy_image_to_clipboard(rgba_data: &[u8], width: u32, height: u32);
 }
 use editing::{
-    GraphEditHistoryEntry, LinkEditApplyResult, MAX_GRAPH_UNDO_HISTORY, PendingHistoryAction,
-    PendingLinkDrag, SlotPipEndpoint, SlotPipOwner,
+    GraphEditHistoryEntry, LinkDragController, LinkEditApplyResult, MAX_GRAPH_UNDO_HISTORY,
+    PendingHistoryAction, SlotPipEndpoint, SlotPipOwner,
 };
 use graph_layout::{
     GraphLayout, GraphLayoutError, GraphLayoutLinkData, GraphLayoutLinkId, GraphLayoutNodeId,
@@ -268,7 +268,7 @@ pub(crate) struct GraphExplorerApp {
     pub(crate) show_profiling_window: bool,
     undo_history: Vec<GraphEditHistoryEntry>,
     redo_history: Vec<GraphEditHistoryEntry>,
-    pending_link_drag: Option<PendingLinkDrag>,
+    link_drag_controller: LinkDragController,
     pending_link_edit_request: Option<(Vec<GlobalId>, SlotPipEndpoint, SlotPipEndpoint)>,
     pending_history_action: Option<PendingHistoryAction>,
 }

@@ -28,7 +28,7 @@ impl GraphExplorerApp {
             self.inspect_window_tensor_subscriptions.clear();
             self.inspect_windows.clear();
             self.actions_status = None;
-            self.pending_link_drag = None;
+            self.link_drag_controller.clear();
             self.pending_link_edit_request = None;
             self.pending_history_action = None;
         }
@@ -112,7 +112,7 @@ impl GraphExplorerApp {
             match history_action {
                 PendingHistoryAction::Undo => {
                     if let Some(entry) = self.undo_history.pop() {
-                        match self.restore_root_graph_snapshot(loaded_models, &entry.before) {
+                        match self.apply_edit_command(loaded_models, &entry.undo_command) {
                             Ok(()) => {
                                 self.invalidate_graph_view_cache();
                                 self.actions_status = Some(format!("Undo: {}", entry.label));
@@ -134,7 +134,7 @@ impl GraphExplorerApp {
                 }
                 PendingHistoryAction::Redo => {
                     if let Some(entry) = self.redo_history.pop() {
-                        match self.restore_root_graph_snapshot(loaded_models, &entry.after) {
+                        match self.apply_edit_command(loaded_models, &entry.redo_command) {
                             Ok(()) => {
                                 self.invalidate_graph_view_cache();
                                 self.actions_status = Some(format!("Redo: {}", entry.label));

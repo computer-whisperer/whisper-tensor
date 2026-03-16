@@ -31,7 +31,7 @@ impl GraphExplorerApp {
             show_profiling_window: false,
             undo_history: Vec::new(),
             redo_history: Vec::new(),
-            pending_link_drag: None,
+            link_drag_controller: LinkDragController::default(),
             pending_link_edit_request: None,
             pending_history_action: None,
         }

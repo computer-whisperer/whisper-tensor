@@ -288,13 +288,10 @@ impl GraphExplorerApp {
                         && ((root_is_super && working_is_super)
                             || (root_is_milli && working_is_milli));
                     if !can_edit_links {
-                        self.pending_link_drag = None;
+                        self.link_drag_controller.clear();
                     }
-                    if let Some(link_drag) = &self.pending_link_drag
-                        && link_drag.graph_path != working_path
-                    {
-                        self.pending_link_drag = None;
-                    }
+                    self.link_drag_controller
+                        .clear_if_graph_mismatch(working_path.as_slice());
 
                     // Update positions
                     if state.explorer_physics && graph_layout.update_layout(5000) {
@@ -393,11 +390,12 @@ impl GraphExplorerApp {
 
                                 let mut node_io_connections = HashMap::new();
                                 let mut node_bounding_boxes = HashMap::new();
-                                let mut hovered_slot_endpoint: Option<SlotPipEndpoint> = None;
                                 let mut nodes_with_active_slot_drag = HashSet::new();
                                 let link_data = graph_layout.get_link_data().clone();
 
                                 self.nodes_in_view.clear();
+                                self.link_drag_controller
+                                    .clear_hover_target_for_graph(working_path.as_slice());
                                 let current_time = Instant::now();
                                 let current_node_data = graph_layout.get_nodes();
                                 let mut node_position_updates = HashMap::new();
@@ -530,33 +528,22 @@ impl GraphExplorerApp {
 
                                             if pip_resp.drag_started() {
                                                 nodes_with_active_slot_drag.insert(node_id);
-                                                self.pending_link_drag = Some(PendingLinkDrag {
-                                                    graph_path: working_path.clone(),
-                                                    source: endpoint,
-                                                });
+                                                self.link_drag_controller
+                                                    .begin_drag(working_path.clone(), endpoint);
                                             }
                                             if pip_resp.dragged() {
                                                 nodes_with_active_slot_drag.insert(node_id);
                                             }
-                                            if let Some(drag) = &self.pending_link_drag
-                                                && drag.graph_path == working_path
-                                                && drag.source.direction != endpoint.direction
-                                                && pip_resp.hovered()
-                                            {
-                                                hovered_slot_endpoint = Some(endpoint);
+                                            if pip_resp.hovered() {
+                                                self.link_drag_controller.set_hover_target(
+                                                    working_path.as_slice(),
+                                                    endpoint,
+                                                );
                                             }
 
                                             let is_drag_source = self
-                                                .pending_link_drag
-                                                .as_ref()
-                                                .is_some_and(|drag| {
-                                                    drag.graph_path == working_path
-                                                        && drag.source.owner == endpoint.owner
-                                                        && drag.source.direction
-                                                            == endpoint.direction
-                                                        && drag.source.slot_index
-                                                            == endpoint.slot_index
-                                                });
+                                                .link_drag_controller
+                                                .is_drag_source(working_path.as_slice(), endpoint);
                                             let fill_color = if is_drag_source {
                                                 Color32::from_rgb(255, 197, 48)
                                             } else if maybe_link.is_some() {
@@ -619,33 +606,22 @@ impl GraphExplorerApp {
 
                                             if pip_resp.drag_started() {
                                                 nodes_with_active_slot_drag.insert(node_id);
-                                                self.pending_link_drag = Some(PendingLinkDrag {
-                                                    graph_path: working_path.clone(),
-                                                    source: endpoint,
-                                                });
+                                                self.link_drag_controller
+                                                    .begin_drag(working_path.clone(), endpoint);
                                             }
                                             if pip_resp.dragged() {
                                                 nodes_with_active_slot_drag.insert(node_id);
                                             }
-                                            if let Some(drag) = &self.pending_link_drag
-                                                && drag.graph_path == working_path
-                                                && drag.source.direction != endpoint.direction
-                                                && pip_resp.hovered()
-                                            {
-                                                hovered_slot_endpoint = Some(endpoint);
+                                            if pip_resp.hovered() {
+                                                self.link_drag_controller.set_hover_target(
+                                                    working_path.as_slice(),
+                                                    endpoint,
+                                                );
                                             }
 
                                             let is_drag_source = self
-                                                .pending_link_drag
-                                                .as_ref()
-                                                .is_some_and(|drag| {
-                                                    drag.graph_path == working_path
-                                                        && drag.source.owner == endpoint.owner
-                                                        && drag.source.direction
-                                                            == endpoint.direction
-                                                        && drag.source.slot_index
-                                                            == endpoint.slot_index
-                                                });
+                                                .link_drag_controller
+                                                .is_drag_source(working_path.as_slice(), endpoint);
                                             let fill_color = if is_drag_source {
                                                 Color32::from_rgb(255, 197, 48)
                                             } else if maybe_link.is_some() {
@@ -822,8 +798,9 @@ impl GraphExplorerApp {
                                     }
                                 }
 
-                                if let Some(link_drag) = &self.pending_link_drag
-                                    && link_drag.graph_path == working_path
+                                if let Some(source_endpoint) = self
+                                    .link_drag_controller
+                                    .source_for_graph(working_path.as_slice())
                                 {
                                     if let Some(pointer_pos_global) =
                                         ui.input(|x| x.pointer.interact_pos())
@@ -835,10 +812,10 @@ impl GraphExplorerApp {
                                                 from_global * pointer_pos_global
                                             });
                                         let points = [
-                                            link_drag.source.screen_pos,
+                                            source_endpoint.screen_pos,
                                             egui::pos2(
-                                                link_drag.source.screen_pos.x + 40.0,
-                                                link_drag.source.screen_pos.y,
+                                                source_endpoint.screen_pos.x + 40.0,
+                                                source_endpoint.screen_pos.y,
                                             ),
                                             egui::pos2(pointer_pos.x - 40.0, pointer_pos.y),
                                             pointer_pos,
@@ -855,13 +832,18 @@ impl GraphExplorerApp {
                                         ));
                                     }
 
-                                    if ui.input(|x| x.pointer.primary_released()) {
-                                        if let Some(target_endpoint) = hovered_slot_endpoint {
-                                            pending_link_edit_request =
-                                                Some((link_drag.source, target_endpoint));
-                                        }
-                                        self.pending_link_drag = None;
-                                    } else {
+                                    let pointer_released =
+                                        ui.input(|x| x.pointer.primary_released());
+                                    if let Some((source_endpoint, target_endpoint)) = self
+                                        .link_drag_controller
+                                        .finish_if_released(
+                                            working_path.as_slice(),
+                                            pointer_released,
+                                        )
+                                    {
+                                        pending_link_edit_request =
+                                            Some((source_endpoint, target_endpoint));
+                                    } else if !pointer_released {
                                         ui.ctx().request_repaint_after(Duration::from_millis(20));
                                     }
                                 }
