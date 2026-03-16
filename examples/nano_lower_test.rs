@@ -15,6 +15,19 @@ use whisper_tensor::tensor_info::TensorInfo;
 use whisper_tensor_import::identify_and_load;
 use whisper_tensor_import::onnx_graph::WeightStorageStrategy;
 
+macro_rules! validate_v4_plan {
+    ($name:expr, $plan:expr, $graph:expr) => {{
+        let raw: Vec<Vec<(&NanoGraph, Vec<(u64, u64)>, Vec<(u64, u64)>)>> = $plan.phases.iter().map(|phase| {
+            phase.spans.iter().map(|span| {
+                let inputs: Vec<(u64, u64)> = span.inputs.iter().map(|m| (m.main_base.0, m.count)).collect();
+                let outputs: Vec<(u64, u64)> = span.outputs.iter().map(|m| (m.main_base.0, m.count)).collect();
+                (&span.graph as &NanoGraph, inputs, outputs)
+            }).collect()
+        }).collect();
+        validate_span_topology_raw($name, &raw, $graph);
+    }};
+}
+
 fn main() {
     let onnx_path = std::env::args()
         .nth(1)
@@ -532,6 +545,7 @@ fn main() {
             ng: s.graph.num_groups(), na: s.graph.num_atoms(), ni: s.inputs.len(), no: s.outputs.len(),
         }).collect()).collect();
         print_span_summary("v4a", &ss, plan.num_lanes, elapsed);
+        validate_v4_plan!("v4a", plan, &result.graph);
     }
     if which == "v4b" || which == "all_v4" {
         use whisper_tensor::compiler::attempts::v13_claude::nano_plan_v4b;
@@ -542,6 +556,7 @@ fn main() {
             ng: s.graph.num_groups(), na: s.graph.num_atoms(), ni: s.inputs.len(), no: s.outputs.len(),
         }).collect()).collect();
         print_span_summary("v4b", &ss, plan.num_lanes, elapsed);
+        validate_v4_plan!("v4b", plan, &result.graph);
     }
     if which == "v4c" || which == "all_v4" {
         use whisper_tensor::compiler::attempts::v13_claude::nano_plan_v4c;
@@ -552,6 +567,7 @@ fn main() {
             ng: s.graph.num_groups(), na: s.graph.num_atoms(), ni: s.inputs.len(), no: s.outputs.len(),
         }).collect()).collect();
         print_span_summary("v4c", &ss, plan.num_lanes, elapsed);
+        validate_v4_plan!("v4c", plan, &result.graph);
     }
     if which == "d" || which == "all" {
         use whisper_tensor::compiler::attempts::v13_claude::nano_plan_spans_d;
@@ -655,6 +671,111 @@ fn main() {
 }
 
 struct SS { ng: usize, na: u64, ni: usize, no: usize }
+
+/// Span topology validation using extracted data.
+fn validate_span_topology_raw(
+    name: &str,
+    // phases[phase_idx][span_idx] = (graph, input_ranges, output_ranges)
+    phases: &[Vec<(&NanoGraph, Vec<(u64, u64)>, Vec<(u64, u64)>)>],
+    original: &NanoGraph,
+) {
+    let t0 = Instant::now();
+    let mut produced_ranges: Vec<(u64, u64)> = Vec::new();
+    // Seed with all Literal group ranges
+    for g in original.groups() {
+        if matches!(&g.op, ScalarOp::Literal(_)) && g.inputs.is_empty() {
+            produced_ranges.push((g.base_id.0, g.count));
+        }
+    }
+    produced_ranges.sort();
+
+    let range_contains = |ranges: &[(u64, u64)], atom: u64| -> bool {
+        match ranges.binary_search_by(|&(base, _)| base.cmp(&atom)) {
+            Ok(_) => true,
+            Err(0) => false,
+            Err(i) => {
+                let (base, count) = ranges[i - 1];
+                atom < base + count
+            }
+        }
+    };
+
+    let mut input_errors = 0usize;
+    let mut topo_errors = 0usize;
+    let mut resolve_errors = 0usize;
+
+    for (pi, phase) in phases.iter().enumerate() {
+        for (li, (sg, inputs, _outputs)) in phase.iter().enumerate() {
+            if sg.num_groups() == 0 { continue; }
+
+            // Check inputs are available
+            for &(main_base, count) in inputs {
+                if !range_contains(&produced_ranges, main_base) {
+                    input_errors += 1;
+                    if input_errors <= 5 {
+                        println!("    {} INPUT ERR: phase {}/lane {}: main atom {} (count={}) not available",
+                            name, pi, li, main_base, count);
+                    }
+                }
+            }
+
+            // Check within-span topo order and InputRef resolution
+            let span_groups = sg.groups();
+            let span_bases: Vec<u64> = span_groups.iter().map(|g| g.base_id.0).collect();
+            for (gi, group) in span_groups.iter().enumerate() {
+                if matches!(&group.op, ScalarOp::Literal(_)) { continue; }
+                for input in &group.inputs {
+                    let resolved = input.resolve(0, 0);
+                    if resolved.0 >= sg.num_atoms() {
+                        resolve_errors += 1;
+                        if resolve_errors <= 3 {
+                            let op = format!("{:?}", group.op).chars().take_while(|c| *c != ' ' && *c != '{').collect::<String>();
+                            println!("    {} RESOLVE ERR: phase {}/lane {}: group {} ({}) resolves to {} (max={})",
+                                name, pi, li, gi, op, resolved.0, sg.num_atoms());
+                        }
+                    }
+                }
+                // Check ReduceSum stride
+                match &group.op {
+                    ScalarOp::ReduceSum { reduce_count, reduce_stride, .. }
+                    | ScalarOp::ReduceMax { reduce_count, reduce_stride, .. } => {
+                        if *reduce_count > 0 && *reduce_stride != 0 {
+                            let base = group.inputs[0].resolve(0, 0);
+                            let last = (base.0 as i64 + (*reduce_count as i64 - 1) * reduce_stride) as u64;
+                            if last >= sg.num_atoms() {
+                                resolve_errors += 1;
+                                if resolve_errors <= 3 {
+                                    let op = format!("{:?}", group.op).chars().take_while(|c| *c != ' ' && *c != '{').collect::<String>();
+                                    println!("    {} REDUCE ERR: phase {}/lane {}: {} reaches atom {} (max={})",
+                                        name, pi, li, op, last, sg.num_atoms());
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // Add this phase's outputs to produced
+        for (_sg, _inputs, outputs) in phase {
+            for &(main_base, count) in outputs {
+                produced_ranges.push((main_base, count));
+            }
+        }
+        produced_ranges.sort();
+    }
+
+    let total = input_errors + topo_errors + resolve_errors;
+    let elapsed = t0.elapsed();
+    if total == 0 {
+        println!("    {} TOPOLOGY: VALID ({:.1}ms)", name, elapsed.as_secs_f64() * 1e3);
+    } else {
+        println!("    {} TOPOLOGY: {} errors ({} input, {} resolve) ({:.1}ms)",
+            name, total, input_errors, resolve_errors, elapsed.as_secs_f64() * 1e3);
+    }
+}
+
+// Old macro/function definitions removed (moved to top of file)
 
 fn print_span_summary(name: &str, phases: &[Vec<SS>], num_lanes: usize, elapsed: std::time::Duration) {
     let num_phases = phases.len();
