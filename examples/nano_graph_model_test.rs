@@ -319,10 +319,24 @@ fn main() {
 
         // ---- Run nano interpreter ----
         println!("\n=== Step 3: Nano Interpreter ===");
-        use whisper_tensor::compiler::attempts::v13_claude::nano_execute::execute_nanograph_naive;
+        use whisper_tensor::nano_graph::eval::NanoEval;
 
         let t_nano = Instant::now();
-        let nano_outputs = execute_nanograph_naive(&result.graph, &nano_inputs);
+        let nano_eval = NanoEval::eval(&result.graph, &nano_inputs);
+        // Build lookup for output tensor atoms (compare_tensor_with_nano
+        // looks up atoms by base_id + offset from TensorAtomMapInfo).
+        let mut nano_outputs: HashMap<u64, NumericScalar> = HashMap::new();
+        for tam in result.tensor_map.values() {
+            for i in 0..tam.count {
+                let aid = tam.base_id.0 + i;
+                nano_outputs.insert(
+                    aid,
+                    nano_eval
+                        .get_scalar(whisper_tensor::nano_graph::AtomId(aid))
+                        .clone(),
+                );
+            }
+        }
         let nano_elapsed = t_nano.elapsed();
         println!(
             "  Nano interpreter completed in {:.1}s",
