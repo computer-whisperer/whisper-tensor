@@ -13,6 +13,7 @@ use typenum::P1;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Squeeze {
     global_id: GlobalId,
+    pub(crate) label: Option<String>,
     output: GlobalId,
     data: GlobalId,
     axes: GlobalId,
@@ -25,12 +26,23 @@ impl Squeeze {
         axes: GlobalId,
         rng: &mut impl rand::Rng,
     ) -> GlobalId {
+        Self::push_new_with_label(graph, data, axes, None, rng)
+    }
+
+    pub fn push_new_with_label(
+        graph: &mut MilliOpGraph,
+        data: GlobalId,
+        axes: GlobalId,
+        label: Option<String>,
+        rng: &mut impl rand::Rng,
+    ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
         let node = Self {
             output,
             data,
             axes,
             global_id: GlobalId::new(rng),
+            label,
         };
         graph.push_op(AnyMilliOp::Squeeze(node));
         output
@@ -84,13 +96,9 @@ impl MilliOp for Squeeze {
             .ok_or(MilliOpGraphError::UnableToInfer)?;
 
         // If both inputs are concrete, delegate to eval
-        if let (Some(data_num), Some(axes_num)) =
-            (data_info.as_numeric(), axes_info.as_numeric())
-        {
-            let inputs = HashMap::from([
-                (self.data, data_num.clone()),
-                (self.axes, axes_num.clone()),
-            ]);
+        if let (Some(data_num), Some(axes_num)) = (data_info.as_numeric(), axes_info.as_numeric()) {
+            let inputs =
+                HashMap::from([(self.data, data_num.clone()), (self.axes, axes_num.clone())]);
             let out: Vec<_> = self
                 .eval(&inputs, backend)?
                 .map(|(id, t)| (id, TensorInfo::from(t)))
@@ -101,8 +109,7 @@ impl MilliOp for Squeeze {
         let first_elem = data_info.first_element();
 
         // If we know the input shape and the axes are concrete, compute output shape
-        if let (Some(data_ranked), Some(axes_num)) =
-            (data_info.as_ranked(), axes_info.as_numeric())
+        if let (Some(data_ranked), Some(axes_num)) = (data_info.as_ranked(), axes_info.as_numeric())
         {
             let axes_values: Vec<i64> = axes_num
                 .cast(DType::I64, backend)?

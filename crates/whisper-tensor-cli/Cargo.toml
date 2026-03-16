@@ -12,9 +12,8 @@ whisper-tensor = { workspace = true, features = ["tokenizers", "rwkv-tokenizer",
 whisper-tensor-import = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-rand = "0.9.2"
+rand = "0.10.0"
 image = "0.25"
-espeak-rs = "0.1.9"
 half = "2.5.0"
 hound = "3.5.1"
 serde_json = "1.0.149"

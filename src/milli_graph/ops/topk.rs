@@ -11,6 +11,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TopK {
     global_id: GlobalId,
+    pub(crate) label: Option<String>,
     input: GlobalId,
     k: GlobalId,
     output_values: GlobalId,
@@ -30,10 +31,25 @@ impl TopK {
         sorted: bool,
         rng: &mut impl Rng,
     ) -> (GlobalId, GlobalId) {
+        Self::push_new_with_label(graph, input, k, axis, largest, sorted, None, rng)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_new_with_label(
+        graph: &mut MilliOpGraph,
+        input: GlobalId,
+        k: GlobalId,
+        axis: i64,
+        largest: bool,
+        sorted: bool,
+        label: Option<String>,
+        rng: &mut impl Rng,
+    ) -> (GlobalId, GlobalId) {
         let output_values = graph.get_new_tensor_id(rng);
         let output_indices = graph.get_new_tensor_id(rng);
         let node = Self {
             global_id: GlobalId::new(rng),
+            label,
             input,
             k,
             output_values,

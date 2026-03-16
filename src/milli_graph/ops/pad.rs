@@ -20,6 +20,7 @@ pub enum PadMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Pad {
     global_id: GlobalId,
+    pub(crate) label: Option<String>,
     output: GlobalId,
     data: GlobalId,
     pads: GlobalId,
@@ -38,6 +39,20 @@ impl Pad {
         mode: PadMode,
         rng: &mut impl rand::Rng,
     ) -> GlobalId {
+        Self::push_new_with_label(graph, data, pads, constant_value, axes, mode, None, rng)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_new_with_label(
+        graph: &mut crate::milli_graph::MilliOpGraph,
+        data: GlobalId,
+        pads: GlobalId,
+        constant_value: Option<GlobalId>,
+        axes: Option<GlobalId>,
+        mode: PadMode,
+        label: Option<String>,
+        rng: &mut impl rand::Rng,
+    ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
         let node = Self {
             output,
@@ -47,6 +62,7 @@ impl Pad {
             axes,
             mode,
             global_id: GlobalId::new(rng),
+            label,
         };
         graph.push_op(AnyMilliOp::Pad(node));
         output

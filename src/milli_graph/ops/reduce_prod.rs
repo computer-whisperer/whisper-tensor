@@ -13,6 +13,7 @@ use super::AccumulationMode;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReduceProd {
     global_id: GlobalId,
+    pub(crate) label: Option<String>,
     output: GlobalId,
     data: GlobalId,
     axes: Option<GlobalId>,
@@ -36,9 +37,22 @@ impl ReduceProd {
         noop_with_empty_axes: bool,
         rng: &mut impl rand::Rng,
     ) -> GlobalId {
+        Self::push_new_with_label(graph, data, axes, keepdims, noop_with_empty_axes, None, rng)
+    }
+
+    pub fn push_new_with_label(
+        graph: &mut MilliOpGraph,
+        data: GlobalId,
+        axes: Option<GlobalId>,
+        keepdims: bool,
+        noop_with_empty_axes: bool,
+        label: Option<String>,
+        rng: &mut impl rand::Rng,
+    ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
         let node = Self {
             global_id: GlobalId::new(rng),
+            label,
             output,
             data,
             axes,
@@ -125,9 +139,9 @@ impl MilliOp for ReduceProd {
 
         let num_axes: Option<usize> = if let Some(ax_id) = self.axes {
             if let Some(ax_info) = known_inputs.get(&ax_id) {
-                ax_info.rank_if_known().and_then(|_| {
-                    ax_info.dim_if_known(0).map(|n| n as usize)
-                })
+                ax_info
+                    .rank_if_known()
+                    .and_then(|_| ax_info.dim_if_known(0).map(|n| n as usize))
             } else {
                 None
             }
@@ -160,14 +174,14 @@ impl MilliOp for ReduceProd {
                 } else if self.keepdims {
                     ScalarInfoTyped::Numeric(input_rank)
                 } else {
-                    ScalarInfoTyped::Symbolic(
-                        crate::symbolic_scalar::SymbolicScalarTyped::new(symbolic_resolver),
-                    )
+                    ScalarInfoTyped::Symbolic(crate::symbolic_scalar::SymbolicScalarTyped::new(
+                        symbolic_resolver,
+                    ))
                 }
             }
-            _ => ScalarInfoTyped::Symbolic(
-                crate::symbolic_scalar::SymbolicScalarTyped::new(symbolic_resolver),
-            ),
+            _ => ScalarInfoTyped::Symbolic(crate::symbolic_scalar::SymbolicScalarTyped::new(
+                symbolic_resolver,
+            )),
         };
 
         let first_elem = crate::scalar_info::ScalarInfo::Symbolic(

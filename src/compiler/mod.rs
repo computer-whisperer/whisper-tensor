@@ -72,6 +72,10 @@ pub trait CompiledProgramObserver {
         tensor: &NumericTensor<DynRank>,
         backend: &mut EvalBackend,
     );
+    fn on_loading_weight(&mut self, path: &[GlobalId], weight_name: Option<String>);
+    fn should_cancel(&mut self) -> bool {
+        false
+    }
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -108,6 +112,14 @@ impl<T: CompiledProgramObserver> SymbolicGraphObserver for SymbolicGraphObserver
     ) {
         self.observer
             .on_tensor_assigned(tensor_path, tensor, backend);
+    }
+
+    fn on_loading_weight(&mut self, path: &[GlobalId], weight_name: Option<String>) {
+        self.observer.on_loading_weight(path, weight_name);
+    }
+
+    fn should_cancel(&mut self) -> bool {
+        self.observer.should_cancel()
     }
 }
 

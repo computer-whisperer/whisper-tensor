@@ -10,6 +10,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Where {
     global_id: GlobalId,
+    pub(crate) label: Option<String>,
     output: GlobalId,
     condition: GlobalId,
     x: GlobalId,
@@ -24,9 +25,21 @@ impl Where {
         y: GlobalId,
         rng: &mut impl rand::Rng,
     ) -> GlobalId {
+        Self::push_new_with_label(graph, condition, x, y, None, rng)
+    }
+
+    pub fn push_new_with_label(
+        graph: &mut MilliOpGraph,
+        condition: GlobalId,
+        x: GlobalId,
+        y: GlobalId,
+        label: Option<String>,
+        rng: &mut impl rand::Rng,
+    ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
         let node = Self {
             global_id: GlobalId::new(rng),
+            label,
             output,
             condition,
             x,
@@ -75,12 +88,21 @@ impl MilliOp for Where {
     > {
         use crate::tensor_info::TensorInfo;
 
-        let cond_info = known_inputs.get(&self.condition).ok_or(MilliOpGraphError::UnableToInfer)?;
-        let x_info = known_inputs.get(&self.x).ok_or(MilliOpGraphError::UnableToInfer)?;
-        let y_info = known_inputs.get(&self.y).ok_or(MilliOpGraphError::UnableToInfer)?;
+        let cond_info = known_inputs
+            .get(&self.condition)
+            .ok_or(MilliOpGraphError::UnableToInfer)?;
+        let x_info = known_inputs
+            .get(&self.x)
+            .ok_or(MilliOpGraphError::UnableToInfer)?;
+        let y_info = known_inputs
+            .get(&self.y)
+            .ok_or(MilliOpGraphError::UnableToInfer)?;
 
         // If all concrete, fall back to eval.
-        if cond_info.as_numeric().is_some() && x_info.as_numeric().is_some() && y_info.as_numeric().is_some() {
+        if cond_info.as_numeric().is_some()
+            && x_info.as_numeric().is_some()
+            && y_info.as_numeric().is_some()
+        {
             let mut resolved = HashMap::new();
             resolved.insert(self.condition, cond_info.as_numeric().unwrap().clone());
             resolved.insert(self.x, x_info.as_numeric().unwrap().clone());
@@ -95,16 +117,16 @@ impl MilliOp for Where {
         let out_dtype = x_info.dtype();
 
         // Try per-dim broadcast shape inference.
-        if let (Some(c_ranked), Some(x_ranked), Some(y_ranked)) =
-            (cond_info.as_ranked(), x_info.as_ranked(), y_info.as_ranked())
-        {
-            if let Ok(out_dims) = super::infer_multidirectional_broadcasting_shape(
-                &[c_ranked.shape(), x_ranked.shape(), y_ranked.shape()],
-                symbolic_resolver,
-            ) {
-                let out_info = TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims);
-                return Ok(Box::new([(self.output, out_info)].into_iter()));
-            }
+        if let (Some(c_ranked), Some(x_ranked), Some(y_ranked)) = (
+            cond_info.as_ranked(),
+            x_info.as_ranked(),
+            y_info.as_ranked(),
+        ) && let Ok(out_dims) = super::infer_multidirectional_broadcasting_shape(
+            &[c_ranked.shape(), x_ranked.shape(), y_ranked.shape()],
+            symbolic_resolver,
+        ) {
+            let out_info = TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims);
+            return Ok(Box::new([(self.output, out_info)].into_iter()));
         }
 
         // Fallback: rank-only inference.
@@ -118,7 +140,8 @@ impl MilliOp for Where {
         let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
             crate::symbolic_scalar::SymbolicScalar::new(out_dtype, symbolic_resolver),
         );
-        let out_info = TensorInfo::new_from_first_element_and_rank(first_elem, out_rank, symbolic_resolver);
+        let out_info =
+            TensorInfo::new_from_first_element_and_rank(first_elem, out_rank, symbolic_resolver);
         Ok(Box::new([(self.output, out_info)].into_iter()))
     }
 

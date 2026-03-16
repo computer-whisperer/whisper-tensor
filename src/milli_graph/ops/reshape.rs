@@ -12,6 +12,7 @@ use typenum::P1;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Reshape {
     global_id: GlobalId,
+    pub(crate) label: Option<String>,
     output: GlobalId,
     data: GlobalId,
     shape: GlobalId,
@@ -26,9 +27,21 @@ impl Reshape {
         allowzero: bool,
         rng: &mut impl rand::Rng,
     ) -> GlobalId {
+        Self::push_new_with_label(graph, data, shape, allowzero, None, rng)
+    }
+
+    pub fn push_new_with_label(
+        graph: &mut MilliOpGraph,
+        data: GlobalId,
+        shape: GlobalId,
+        allowzero: bool,
+        label: Option<String>,
+        rng: &mut impl rand::Rng,
+    ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
         let node = Self {
             global_id: GlobalId::new(rng),
+            label,
             output,
             data,
             shape,
@@ -135,8 +148,7 @@ impl MilliOp for Reshape {
             .ok_or(MilliOpGraphError::UnableToInfer)?;
 
         // If both inputs are concrete, delegate to eval
-        if let (Some(data_num), Some(shape_num)) =
-            (data_info.as_numeric(), shape_info.as_numeric())
+        if let (Some(data_num), Some(shape_num)) = (data_info.as_numeric(), shape_info.as_numeric())
         {
             let inputs = HashMap::from([
                 (self.data, data_num.clone()),
@@ -175,21 +187,21 @@ impl MilliOp for Reshape {
                         if let Some(Some(d)) = ds.get(i) {
                             output_dims.push(ScalarInfoTyped::Numeric(*d));
                         } else {
-                            output_dims.push(ScalarInfoTyped::Symbolic(
-                                SymbolicScalarTyped::new(symbolic_resolver),
-                            ));
+                            output_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(
+                                symbolic_resolver,
+                            )));
                         }
                     } else {
-                        output_dims.push(ScalarInfoTyped::Symbolic(
-                            SymbolicScalarTyped::new(symbolic_resolver),
-                        ));
+                        output_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(
+                            symbolic_resolver,
+                        )));
                     }
                 } else if sv == -1 {
                     has_minus_one = true;
                     // Placeholder, will try to resolve below
-                    output_dims.push(ScalarInfoTyped::Symbolic(
-                        SymbolicScalarTyped::new(symbolic_resolver),
-                    ));
+                    output_dims.push(ScalarInfoTyped::Symbolic(SymbolicScalarTyped::new(
+                        symbolic_resolver,
+                    )));
                 } else if sv > 0 {
                     output_dims.push(ScalarInfoTyped::Numeric(sv as u64));
                 } else {
@@ -213,8 +225,7 @@ impl MilliOp for Reshape {
                     && kp > 0
                 {
                     let inferred = total / kp;
-                    let minus_one_idx =
-                        shape_values.iter().position(|&v| v == -1).unwrap();
+                    let minus_one_idx = shape_values.iter().position(|&v| v == -1).unwrap();
                     output_dims[minus_one_idx] = ScalarInfoTyped::Numeric(inferred);
                 }
             }

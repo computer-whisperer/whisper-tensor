@@ -54,6 +54,8 @@ pub enum MilliOpGraphError {
     TensorInfoError(#[from] TensorInfoError),
     #[error("Unable to do any type if inference")]
     UnableToInfer,
+    #[error("Execution cancelled")]
+    Cancelled,
 }
 
 /// Training phase a group of milli-ops belongs to.
@@ -322,10 +324,11 @@ pub struct BackwardGenResult {
     pub differentiable_inputs: Vec<GlobalId>,
 }
 
-#[derive(Debug, Clone, Copy, Hash, Ord, PartialOrd, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Hash, Ord, PartialOrd, Eq, PartialEq, Serialize, Deserialize)]
 pub struct MilliOpGraphTensor {
     global_id: GlobalId,
     pub source_tensor: Option<GlobalId>,
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -367,6 +370,7 @@ impl MilliOpGraph {
                 MilliOpGraphTensor {
                     global_id,
                     source_tensor: None,
+                    label: None,
                 },
             );
         }
@@ -416,6 +420,7 @@ impl MilliOpGraph {
             MilliOpGraphTensor {
                 global_id: internal_id,
                 source_tensor: Some(external_id),
+                label: None,
             },
         );
         internal_id
@@ -459,6 +464,11 @@ impl MilliOpGraph {
                     && let Some(t) = self.tensors.get_mut(&fresh_id)
                 {
                     t.source_tensor = Some(src);
+                }
+                if let Some(label) = tensor.label.clone()
+                    && let Some(t) = self.tensors.get_mut(&fresh_id)
+                {
+                    t.label = Some(label);
                 }
                 tensor_map.insert(tensor_id, fresh_id);
             }
@@ -533,6 +543,7 @@ impl MilliOpGraph {
             MilliOpGraphTensor {
                 global_id,
                 source_tensor: None,
+                label: None,
             },
         );
         global_id
@@ -602,9 +613,32 @@ impl MilliOpGraph {
             MilliOpGraphTensor {
                 global_id: id,
                 source_tensor: None,
+                label: None,
             },
         );
         id
+    }
+
+    pub fn set_link_label(&mut self, link_id: GlobalId, label: impl Into<String>) {
+        if let Some(tensor) = self.tensors.get_mut(&link_id) {
+            tensor.label = Some(label.into());
+        }
+    }
+
+    pub fn set_input_label(&mut self, external_id: GlobalId, label: impl Into<String>) {
+        if let Some(link_id) = self.input_map.get(&external_id).copied() {
+            self.set_link_label(link_id, label);
+        }
+    }
+
+    pub fn set_output_label(&mut self, external_id: GlobalId, label: impl Into<String>) {
+        let Some(output_map) = self.output_map.as_ref() else {
+            return;
+        };
+        let Some((&internal_id, _)) = output_map.iter().find(|(_, id)| **id == external_id) else {
+            return;
+        };
+        self.set_link_label(internal_id, label);
     }
 
     /// Set outputs where external == internal IDs.
@@ -694,6 +728,13 @@ impl MilliOpGraph {
         let mut graph = Self::new_empty(rng);
         let logits = graph.add_input(rng);
         let targets = graph.add_input(rng);
+        let loss_group = graph.create_group(MilliOpGroup {
+            id: GlobalId::new(rng),
+            phase: MilliOpPhase::Loss,
+            label: Some("cross_entropy_loss".to_string()),
+            ..Default::default()
+        });
+        graph.set_default_group(Some(loss_group));
 
         // Axis constant for class dimension (-1)
         let axis = ops::Constant::new_scalar(&mut graph, -1i64, rng);
@@ -718,6 +759,7 @@ impl MilliOpGraph {
         let loss = ops::ReduceMean::push_new(&mut graph, neg, None, false, false, rng);
 
         graph.set_outputs(vec![loss]);
+        graph.set_default_group(None);
 
         (
             graph,
@@ -736,12 +778,20 @@ impl MilliOpGraph {
         let mut graph = Self::new_empty(rng);
         let predictions = graph.add_input(rng);
         let targets = graph.add_input(rng);
+        let loss_group = graph.create_group(MilliOpGroup {
+            id: GlobalId::new(rng),
+            phase: MilliOpPhase::Loss,
+            label: Some("mse_loss".to_string()),
+            ..Default::default()
+        });
+        graph.set_default_group(Some(loss_group));
 
         let diff = ops::SimpleBinary::sub(&mut graph, predictions, targets, rng);
         let sq = ops::SimpleBinary::mul(&mut graph, diff, diff, rng);
         let loss = ops::ReduceMean::push_new(&mut graph, sq, None, false, false, rng);
 
         graph.set_outputs(vec![loss]);
+        graph.set_default_group(None);
 
         (
             graph,
@@ -760,12 +810,20 @@ impl MilliOpGraph {
         let mut graph = Self::new_empty(rng);
         let predictions = graph.add_input(rng);
         let targets = graph.add_input(rng);
+        let loss_group = graph.create_group(MilliOpGroup {
+            id: GlobalId::new(rng),
+            phase: MilliOpPhase::Loss,
+            label: Some("l1_loss".to_string()),
+            ..Default::default()
+        });
+        graph.set_default_group(Some(loss_group));
 
         let diff = ops::SimpleBinary::sub(&mut graph, predictions, targets, rng);
         let abs_diff = ops::SimpleUnaryOp::abs(&mut graph, diff, rng);
         let loss = ops::ReduceMean::push_new(&mut graph, abs_diff, None, false, false, rng);
 
         graph.set_outputs(vec![loss]);
+        graph.set_default_group(None);
 
         (
             graph,
@@ -795,6 +853,9 @@ impl MilliOpGraph {
         }
 
         for op_id in &self.op_ordering {
+            if observer.should_cancel() {
+                return Err(MilliOpGraphError::Cancelled);
+            }
             let op = &self.ops[op_id];
             let start_instant = Instant::now();
             let out_vec: Vec<_> = op.eval(&intermediate_values, backend)?.collect();
@@ -1387,6 +1448,10 @@ impl crate::graph::LinkMetadata for MilliOpGraphTensor {
 impl crate::graph::Link for MilliOpGraphTensor {
     fn global_id(&self) -> GlobalId {
         self.global_id
+    }
+
+    fn label(&self) -> Option<String> {
+        self.label.clone()
     }
 }
 
@@ -2775,7 +2840,15 @@ mod tests {
     fn test_backward_matmul_broadcast_batch() {
         // A=[2,3,4] @ B=[4,2] → output=[2,3,2], grad_B must sum out batch dim
         check_general_backward(
-            |graph, inputs, rng| ops::MatMul::push_new_default_precision(graph, inputs[0], inputs[1], DType::F32, rng),
+            |graph, inputs, rng| {
+                ops::MatMul::push_new_default_precision(
+                    graph,
+                    inputs[0],
+                    inputs[1],
+                    DType::F32,
+                    rng,
+                )
+            },
             &[
                 (1..=24).map(|x| x as f32 * 0.1).collect(),
                 vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
@@ -4003,10 +4076,10 @@ mod tests {
         // W1: [2, 8] (2 inputs, 8 hidden), W2: [8, 1]
         let mut w_rng = wyrand::WyRand::new(42);
         let mut w1_vals: Vec<f32> = (0..16)
-            .map(|_| (rand::Rng::random::<f32>(&mut w_rng) - 0.5) * 1.0)
+            .map(|_| (rand::RngExt::random::<f32>(&mut w_rng) - 0.5) * 1.0)
             .collect();
         let mut w2_vals: Vec<f32> = (0..8)
-            .map(|_| (rand::Rng::random::<f32>(&mut w_rng) - 0.5) * 1.0)
+            .map(|_| (rand::RngExt::random::<f32>(&mut w_rng) - 0.5) * 1.0)
             .collect();
 
         let mut m1_vals = vec![0.0f32; 16];
@@ -4119,8 +4192,7 @@ mod tests {
         graph.set_output_map(output_map);
 
         // Provide a concrete tensor as TensorInfo for input x.
-        let x_tensor =
-            NumericTensor::<DynRank>::from_vec_shape(vec![3.0f32], vec![1]).unwrap();
+        let x_tensor = NumericTensor::<DynRank>::from_vec_shape(vec![3.0f32], vec![1]).unwrap();
         let mut inputs = HashMap::new();
         inputs.insert(ext_x, TensorInfo::from(x_tensor));
 

@@ -1,17 +1,21 @@
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::Read;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use crossbeam::queue::ArrayQueue;
 use hf_hub::api::tokio::ApiBuilder;
 use hf_hub::{Repo, RepoType};
-use tokio::sync::{Mutex, Notify, mpsc};
 use tokenizers::FromPretrainedParameters;
+use tokio::sync::{Mutex, Notify, mpsc};
 
 use crate::model_server::ModelServer;
-use crate::scheduler::{SchedulerJob, SchedulerReport, SchedulerReporter};
+use crate::scheduler::{
+    ObserverSettingsRegistry, SchedulerJob, SchedulerReport, SchedulerReporter,
+    update_observer_settings,
+};
 use crate::{
     ServerConfigReport, SuperGraphExecutionReport, WebsocketClientServerMessage,
     WebsocketServerClientMessage,
@@ -68,8 +72,10 @@ async fn flush_reports(
         let mut report = SuperGraphExecutionReport {
             attention: buf.first().unwrap().get_attention_token(),
             node_executions: Vec::new(),
+            loading_weight_reports: Vec::new(),
             tensor_assignments: Vec::new(),
             abbreviated_tensor_assignments: Vec::new(),
+            progress_reports: Vec::new(),
         };
         buf.retain(|x| {
             if x.get_attention_token() == report.attention {
@@ -94,6 +100,22 @@ async fn flush_reports(
                             .abbreviated_tensor_assignments
                             .push((x.path.clone(), x.value.clone()));
                     }
+                    SchedulerReport::SuperGraphProgress(x) => {
+                        report.progress_reports.push((
+                            x.path.clone(),
+                            x.tier,
+                            x.numerator,
+                            x.denominator,
+                        ));
+                    }
+                    SchedulerReport::SuperGraphLoadingWeight(x) => {
+                        let delta = Instant::now() - x.instant;
+                        report.loading_weight_reports.push((
+                            x.path.clone(),
+                            x.weight_name.clone(),
+                            delta,
+                        ));
+                    }
                 }
                 false
             } else {
@@ -110,10 +132,13 @@ async fn flush_reports(
 
 /// Handles a client session using in-process channels (no WebSocket/CBOR).
 /// This is the native equivalent of the WebSocket `handle_socket` in main.rs.
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_client_session(
     mut client_rx: mpsc::UnboundedReceiver<WebsocketClientServerMessage>,
     server_tx: mpsc::UnboundedSender<WebsocketServerClientMessage>,
     scheduler_sender: mpsc::Sender<SchedulerJob>,
+    cancellation_registry: Arc<StdMutex<HashSet<u64>>>,
+    observer_settings_registry: ObserverSettingsRegistry,
     model_server: Arc<ModelServer>,
     server_config_report: ServerConfigReport,
     on_message_sent: impl Fn() + Send + 'static,
@@ -242,12 +267,35 @@ pub async fn handle_client_session(
                         on_message_sent();
                     }
                     WebsocketClientServerMessage::SuperGraphRequest(request) => {
+                        if let Some(attention_token) = request.attention_token {
+                            update_observer_settings(
+                                &observer_settings_registry,
+                                attention_token,
+                                request.do_node_execution_reports,
+                                request.abbreviated_tensor_report_settings.clone(),
+                                request.subscribed_tensors.clone(),
+                            );
+                        }
                         let job = SchedulerJob::SuperGraphRequest((
                             request,
                             finished_tx.clone(),
                             Some(SchedulerReporter::new(report_queue.clone(), report_notify.clone())),
                         ));
                         scheduler_sender.send(job).await.unwrap();
+                    }
+                    WebsocketClientServerMessage::UpdateSuperGraphObserverSettings(update) => {
+                        update_observer_settings(
+                            &observer_settings_registry,
+                            update.attention_token,
+                            update.do_node_execution_reports,
+                            update.abbreviated_tensor_report_settings,
+                            update.subscribed_tensors,
+                        );
+                    }
+                    WebsocketClientServerMessage::CancelSuperGraphRequest(attention_token) => {
+                        let _ = cancellation_registry
+                            .lock()
+                            .map(|mut set| set.insert(attention_token));
                     }
                     WebsocketClientServerMessage::CompileModel(model_id) => {
                         let job = SchedulerJob::CompileModelRequest { model_id };

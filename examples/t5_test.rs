@@ -6,9 +6,9 @@ use whisper_tensor::backends::eval_backend::EvalBackend;
 use whisper_tensor::dtype::DType;
 use whisper_tensor::model::Model;
 use whisper_tensor::numeric_tensor::NumericTensor;
+use whisper_tensor_import::models::diffusion::t5::{T5Config, load_t5_encoder_with_origin};
 use whisper_tensor_import::onnx_graph::WeightStorageStrategy;
 use whisper_tensor_import::onnx_graph::weights::SafetensorsWeightManager;
-use whisper_tensor_import::t5::{T5Config, load_t5_encoder_with_origin};
 
 const T5_PATH: &str = "/ceph/public/neural_models/comfyui/clip/t5xxl_fp16.safetensors";
 

@@ -16,9 +16,7 @@ use whisper_tensor::graph::GlobalId;
 use whisper_tensor::interfaces::AnyInterface;
 use whisper_tensor::loader::{ConfigField, ConfigValues};
 use whisper_tensor::numeric_tensor::NumericTensor;
-use whisper_tensor::super_graph::links::{
-    SuperGraphLinkHash, SuperGraphLinkString, SuperGraphLinkTensor, SuperGraphLinkTensorMap,
-};
+use whisper_tensor::super_graph::links::SuperGraphLink;
 use whisper_tensor::super_graph::{SuperGraph, SuperGraphHash};
 use whisper_tensor::symbolic_graph::tensor_store::TensorStoreTensorId;
 
@@ -31,7 +29,7 @@ impl core::fmt::Display for LoadedModelId {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AbbreviatedTensorReportSettings {
     pub downsampled_size: u64,
     pub subscribed_tensors: Vec<Vec<GlobalId>>,
@@ -57,15 +55,22 @@ impl Display for SuperGraphRequestBackendMode {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SuperGraphAudioInput {
+    pub samples: NDArrayNumericTensor<DynRank>,
+    pub sample_rate_hz: u32,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SuperGraphRequest {
     pub attention_token: Option<u64>,
     pub super_graph: SuperGraph,
     pub use_cache: Option<u64>,
     pub backend_mode: SuperGraphRequestBackendMode,
-    pub string_inputs: HashMap<SuperGraphLinkString, String>,
-    pub hash_inputs: HashMap<SuperGraphLinkHash, SuperGraphHash>,
-    pub tensor_inputs: HashMap<SuperGraphLinkTensor, NDArrayNumericTensor<DynRank>>,
-    pub model_inputs: HashMap<SuperGraphLinkTensorMap, LoadedModelId>,
+    pub string_inputs: HashMap<SuperGraphLink, String>,
+    pub hash_inputs: HashMap<SuperGraphLink, SuperGraphHash>,
+    pub tensor_inputs: HashMap<SuperGraphLink, NDArrayNumericTensor<DynRank>>,
+    pub audio_inputs: HashMap<SuperGraphLink, SuperGraphAudioInput>,
+    pub model_inputs: HashMap<SuperGraphLink, LoadedModelId>,
     pub symbolic_graph_ids: Vec<LoadedModelId>,
     pub subscribed_tensors: Vec<Vec<GlobalId>>,
     pub do_node_execution_reports: bool,
@@ -73,10 +78,18 @@ pub struct SuperGraphRequest {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SuperGraphObserverSettingsUpdate {
+    pub attention_token: u64,
+    pub subscribed_tensors: Vec<Vec<GlobalId>>,
+    pub do_node_execution_reports: bool,
+    pub abbreviated_tensor_report_settings: Option<AbbreviatedTensorReportSettings>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SuperGraphResponseData {
-    pub string_outputs: HashMap<SuperGraphLinkString, String>,
-    pub hash_outputs: HashMap<SuperGraphLinkHash, SuperGraphHash>,
-    pub tensor_outputs: HashMap<SuperGraphLinkTensor, NDArrayNumericTensor<DynRank>>,
+    pub string_outputs: HashMap<SuperGraphLink, String>,
+    pub hash_outputs: HashMap<SuperGraphLink, SuperGraphHash>,
+    pub tensor_outputs: HashMap<SuperGraphLink, NDArrayNumericTensor<DynRank>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -111,6 +124,8 @@ pub enum WebsocketClientServerMessage {
     GetHFTokenizer(String),
     GetTokenizerFile(String),
     SuperGraphRequest(SuperGraphRequest),
+    UpdateSuperGraphObserverSettings(SuperGraphObserverSettingsUpdate),
+    CancelSuperGraphRequest(u64),
     CompileModel(LoadedModelId),
 }
 
@@ -352,8 +367,10 @@ impl AbbreviatedTensorValue {
 pub struct SuperGraphExecutionReport {
     pub attention: Option<u64>,
     pub node_executions: Vec<(Vec<GlobalId>, String, Duration, Duration)>,
+    pub loading_weight_reports: Vec<(Vec<GlobalId>, Option<String>, Duration)>,
     pub abbreviated_tensor_assignments: Vec<(Vec<GlobalId>, AbbreviatedTensorValue)>,
     pub tensor_assignments: Vec<(Vec<GlobalId>, NDArrayNumericTensor<DynRank>)>,
+    pub progress_reports: Vec<(Vec<GlobalId>, i64, f64, f64)>,
 }
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]

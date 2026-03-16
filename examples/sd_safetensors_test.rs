@@ -123,16 +123,18 @@ fn main() {
     let initial_noise: Vec<f32> = {
         let mut vals = Vec::with_capacity(latent_n);
         while vals.len() + 1 < latent_n {
-            let u1: f32 = rand::Rng::random_range(&mut latent_rng, f32::EPSILON..1.0);
-            let u2: f32 = rand::Rng::random_range(&mut latent_rng, 0.0f32..std::f32::consts::TAU);
-            let r = (-2.0 * u1.ln()).sqrt();
+            let u1: f32 = rand::RngExt::random_range(&mut latent_rng, f32::EPSILON..1.0);
+            let u2: f32 =
+                rand::RngExt::random_range(&mut latent_rng, 0.0f32..std::f32::consts::TAU);
+            let r = (-2.0f32 * u1.ln()).sqrt();
             vals.push(r * u2.cos());
             vals.push(r * u2.sin());
         }
         if vals.len() < latent_n {
-            let u1: f32 = rand::Rng::random_range(&mut latent_rng, f32::EPSILON..1.0);
-            let u2: f32 = rand::Rng::random_range(&mut latent_rng, 0.0f32..std::f32::consts::TAU);
-            vals.push((-2.0 * u1.ln()).sqrt() * u2.cos());
+            let u1: f32 = rand::RngExt::random_range(&mut latent_rng, f32::EPSILON..1.0);
+            let u2: f32 =
+                rand::RngExt::random_range(&mut latent_rng, 0.0f32..std::f32::consts::TAU);
+            vals.push((-2.0f32 * u1.ln()).sqrt() * u2.cos());
         }
         vals
     };

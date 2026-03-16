@@ -1,3 +1,4 @@
+use crate::models::diffusion::sd_common::CastingWeightManager;
 use crate::onnx_graph::WeightStorageStrategy;
 use crate::onnx_graph::operators::{Add, Gather, MatMul, Mul, Softmax, Transpose};
 use crate::onnx_graph::pytorch::{gelu, linear, reshape, rms_norm, transpose, unsqueeze};
@@ -6,7 +7,6 @@ use crate::onnx_graph::tensor::{
     TensorDataValue,
 };
 use crate::onnx_graph::weights::WeightManager;
-use crate::sd_common::CastingWeightManager;
 use prost::Message;
 use std::sync::Arc;
 

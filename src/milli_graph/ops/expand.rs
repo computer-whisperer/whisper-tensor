@@ -12,6 +12,7 @@ use typenum::P1;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Expand {
     global_id: GlobalId,
+    pub(crate) label: Option<String>,
     output: GlobalId,
     input: GlobalId,
     shape: GlobalId,
@@ -24,9 +25,20 @@ impl Expand {
         shape: GlobalId,
         rng: &mut impl Rng,
     ) -> GlobalId {
+        Self::push_new_with_label(graph, input, shape, None, rng)
+    }
+
+    pub fn push_new_with_label(
+        graph: &mut MilliOpGraph,
+        input: GlobalId,
+        shape: GlobalId,
+        label: Option<String>,
+        rng: &mut impl Rng,
+    ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
         let node = Self {
             global_id: GlobalId::new(rng),
+            label,
             output,
             input,
             shape,
@@ -128,9 +140,10 @@ impl MilliOp for Expand {
                     };
 
                     let dim = match (target_dim, input_dim) {
-                        (Some(ScalarInfoTyped::Numeric(t)), Some(ScalarInfoTyped::Numeric(inp))) => {
-                            ScalarInfoTyped::Numeric(t.max(inp))
-                        }
+                        (
+                            Some(ScalarInfoTyped::Numeric(t)),
+                            Some(ScalarInfoTyped::Numeric(inp)),
+                        ) => ScalarInfoTyped::Numeric(t.max(inp)),
                         (Some(t), None) => t,
                         (None, Some(inp)) => inp,
                         (Some(ScalarInfoTyped::Numeric(t)), Some(_)) => {

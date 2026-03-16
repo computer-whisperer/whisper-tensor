@@ -13,6 +13,7 @@ use crate::graph::{
 use crate::numeric_scalar::NumericScalar;
 use crate::numeric_tensor::NumericTensor;
 use crate::scalar_info::ScalarInfoTyped;
+use crate::symbolic_graph::observer::SymbolicGraphObserver;
 use crate::symbolic_graph::ops::{AnyOperation, EvalError, Operation};
 use crate::symbolic_graph::tensor_store::{StoredTensor, TensorStore, TensorStoreTensorId};
 use crate::symbolic_scalar::{SymbolicResolver, SymbolicScalar, SymbolicScalarTyped};
@@ -158,6 +159,15 @@ impl StoredOrNotTensor {
         match self {
             StoredOrNotTensor::Stored(id) => tensor_store.get_tensor(*id).unwrap().dtype(),
             StoredOrNotTensor::NotStored(tensor) => tensor.dtype(),
+        }
+    }
+
+    pub fn loading_label(&self, tensor_store: &TensorStore) -> Option<String> {
+        match self {
+            StoredOrNotTensor::Stored(id) => tensor_store
+                .get_tensor(*id)
+                .and_then(|tensor| tensor.loading_label()),
+            StoredOrNotTensor::NotStored(_) => None,
         }
     }
 }
@@ -315,18 +325,41 @@ impl SymbolicGraph {
         loaded_tensor_cache: &mut ModelLoadedTensorCache,
         eval_backend: &mut EvalBackend,
     ) -> HashMap<GlobalId, NumericTensor<DynRank>> {
+        self.get_initialized_tensors_cached_with_observer(
+            tensor_store,
+            loaded_tensor_cache,
+            eval_backend,
+            &mut (),
+        )
+    }
+
+    pub fn get_initialized_tensors_cached_with_observer<T: SymbolicGraphObserver>(
+        &self,
+        tensor_store: &TensorStore,
+        loaded_tensor_cache: &mut ModelLoadedTensorCache,
+        eval_backend: &mut EvalBackend,
+        observer: &mut T,
+    ) -> HashMap<GlobalId, NumericTensor<DynRank>> {
         let mut out = HashMap::new();
 
         for (key, tensor) in &self.tensors {
+            if observer.should_cancel() {
+                break;
+            }
             if let Some(x) = loaded_tensor_cache.tensors.get(key) {
                 out.insert(*key, x.clone());
             } else {
-                let tensor = match &tensor.tensor_type {
-                    TensorType::Constant(x) => Some(x.get_tensor(tensor_store)),
-                    TensorType::Input(Some(x)) => Some(x.get_tensor(tensor_store)),
+                let source = match &tensor.tensor_type {
+                    TensorType::Constant(x) => Some(x),
+                    TensorType::Input(Some(x)) => Some(x),
                     _ => None,
                 };
-                if let Some(tensor) = tensor {
+                if let Some(source) = source {
+                    let label = source
+                        .loading_label(tensor_store)
+                        .or(tensor.onnx_name.clone());
+                    observer.on_loading_weight(&[*key], label);
+                    let tensor = source.get_tensor(tensor_store);
                     let loaded_tensor = eval_backend.to_native_type(&tensor);
                     loaded_tensor_cache
                         .tensors
@@ -343,14 +376,29 @@ impl SymbolicGraph {
         &self,
         tensor_store: &TensorStore,
     ) -> HashMap<GlobalId, NumericTensor<DynRank>> {
+        self.get_initialized_tensors_with_observer(tensor_store, &mut ())
+    }
+
+    pub fn get_initialized_tensors_with_observer<T: SymbolicGraphObserver>(
+        &self,
+        tensor_store: &TensorStore,
+        observer: &mut T,
+    ) -> HashMap<GlobalId, NumericTensor<DynRank>> {
         let mut out = HashMap::new();
 
         for (key, tensor) in &self.tensors {
+            if observer.should_cancel() {
+                break;
+            }
             match &tensor.tensor_type {
                 TensorType::Constant(x) => {
+                    let label = x.loading_label(tensor_store).or(tensor.onnx_name.clone());
+                    observer.on_loading_weight(&[*key], label);
                     out.insert(*key, x.get_tensor(tensor_store));
                 }
                 TensorType::Input(Some(x)) => {
+                    let label = x.loading_label(tensor_store).or(tensor.onnx_name.clone());
+                    observer.on_loading_weight(&[*key], label);
                     out.insert(*key, x.get_tensor(tensor_store));
                 }
                 _ => {}
@@ -683,22 +731,38 @@ impl SymbolicGraph {
         // 1. Map ordered_inputs
         for &input_id in &self.ordered_inputs {
             let internal = combined.add_input_with_id(input_id, rng);
+            if let Some(name) = self
+                .tensors
+                .get(&input_id)
+                .and_then(|t| t.onnx_name.clone())
+            {
+                combined.set_input_label(input_id, name);
+            }
             sym_to_combined.insert(input_id, internal);
         }
 
         // 2. Map standalone constants
         for const_id in self.constant_link_ids() {
             let internal = combined.add_input_with_id(const_id, rng);
+            if let Some(name) = self
+                .tensors
+                .get(&const_id)
+                .and_then(|t| t.onnx_name.clone())
+            {
+                combined.set_input_label(const_id, name);
+            }
             sym_to_combined.insert(const_id, internal);
         }
 
         // 3. Walk ops in topological order, merge each with a group
-        for op_id in self.topological_order_vec() {
+        for (op_index, op_id) in self.topological_order_vec().into_iter().enumerate() {
             let graph_op = &self.operations[&op_id];
+            let op_kind = graph_op.op.op_kind();
             let label = graph_op
                 .name
                 .clone()
-                .unwrap_or_else(|| graph_op.op.op_kind());
+                .filter(|name| name != &op_kind)
+                .unwrap_or_else(|| format!("node_{op_index}"));
             let group = MilliOpGroup {
                 id: GlobalId::new(rng),
                 source_op: Some(op_id),
@@ -716,6 +780,13 @@ impl SymbolicGraph {
         // 4. Map outputs
         for &output_id in &self.ordered_outputs {
             combined.add_output(sym_to_combined[&output_id], output_id);
+            if let Some(name) = self
+                .tensors
+                .get(&output_id)
+                .and_then(|t| t.onnx_name.clone())
+            {
+                combined.set_output_label(output_id, name);
+            }
         }
 
         combined
@@ -756,23 +827,39 @@ impl SymbolicGraph {
         // 1a. Map graph inputs
         for &input_id in &self.ordered_inputs {
             let internal = combined.add_input_with_id(input_id, rng);
+            if let Some(name) = self
+                .tensors
+                .get(&input_id)
+                .and_then(|t| t.onnx_name.clone())
+            {
+                combined.set_input_label(input_id, name);
+            }
             sym_to_combined.insert(input_id, internal);
         }
 
         // 1b. Map standalone constants
         for const_id in self.constant_link_ids() {
             let internal = combined.add_input_with_id(const_id, rng);
+            if let Some(name) = self
+                .tensors
+                .get(&const_id)
+                .and_then(|t| t.onnx_name.clone())
+            {
+                combined.set_input_label(const_id, name);
+            }
             sym_to_combined.insert(const_id, internal);
         }
 
         // 2. Generate forward pass — walk ops in topological order
         let topo_order = self.topological_order_vec();
-        for &op_id in &topo_order {
+        for (op_index, &op_id) in topo_order.iter().enumerate() {
             let graph_op = &self.operations[&op_id];
+            let op_kind = graph_op.op.op_kind();
             let label = graph_op
                 .name
                 .clone()
-                .unwrap_or_else(|| graph_op.op.op_kind());
+                .filter(|name| name != &op_kind)
+                .unwrap_or_else(|| format!("node_{op_index}"));
             let group = MilliOpGroup {
                 id: GlobalId::new(rng),
                 source_op: Some(op_id),
@@ -802,8 +889,9 @@ impl SymbolicGraph {
             for wire in &backward_opts.loss_wiring {
                 let combined_id = match &wire.source {
                     LossInputSource::ForwardOutput(sym_id) => sym_to_combined[sym_id],
-                    LossInputSource::ExternalInput { .. } => {
+                    LossInputSource::ExternalInput { name } => {
                         let ext_id = combined.add_input(rng);
+                        combined.set_input_label(ext_id, name.clone());
                         external_inputs.push(ext_id);
                         ext_id
                     }
@@ -1034,10 +1122,27 @@ impl SymbolicGraph {
                 output_ids.push((input_grad, input_grad));
             }
             combined.set_output_map(output_ids);
+            combined.set_link_label(loss_tensor, "loss");
+            for &output_id in &self.ordered_outputs {
+                if let Some(name) = self
+                    .tensors
+                    .get(&output_id)
+                    .and_then(|t| t.onnx_name.clone())
+                {
+                    combined.set_output_label(output_id, name);
+                }
+            }
         } else {
             // Forward-only: map outputs normally
             for &output_id in &self.ordered_outputs {
                 combined.add_output(sym_to_combined[&output_id], output_id);
+                if let Some(name) = self
+                    .tensors
+                    .get(&output_id)
+                    .and_then(|t| t.onnx_name.clone())
+                {
+                    combined.set_output_label(output_id, name);
+                }
             }
         }
 

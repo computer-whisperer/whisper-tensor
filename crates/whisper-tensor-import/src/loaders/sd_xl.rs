@@ -40,7 +40,7 @@ impl Loader for SDXLLoader {
                 unsafe { Mmap::map(&file) }.map_err(|e| LoaderError::LoadFailed(e.into()))?;
             let wm = SafetensorsWeightManager::new(vec![Arc::new(mmap)])
                 .map_err(|e| LoaderError::LoadFailed(e.into()))?;
-            let import_dtype = crate::sd_common::detect_model_dtype(&wm);
+            let import_dtype = crate::models::diffusion::sd_common::detect_model_dtype(&wm);
             match import_dtype {
                 crate::onnx_graph::tensor::DType::F16 => whisper_tensor::dtype::DType::F16,
                 crate::onnx_graph::tensor::DType::BF16 => whisper_tensor::dtype::DType::BF16,
@@ -55,7 +55,8 @@ impl Loader for SDXLLoader {
         };
 
         let (te1_onnx, te2_onnx, unet_onnx, vae_onnx) =
-            crate::sd_xl::load_sdxl_checkpoint(&path, storage).map_err(LoaderError::LoadFailed)?;
+            crate::models::diffusion::sd_xl::load_sdxl_checkpoint(&path, storage)
+                .map_err(LoaderError::LoadFailed)?;
 
         let base_name = path
             .file_stem()

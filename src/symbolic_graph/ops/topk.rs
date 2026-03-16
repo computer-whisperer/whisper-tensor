@@ -1,6 +1,6 @@
 use crate::graph::{GlobalId, Node, Property, PropertyValue};
-use crate::milli_graph::{MilliLoweringContext, MilliOpGraph};
 use crate::milli_graph::ops::*;
+use crate::milli_graph::{MilliLoweringContext, MilliOpGraph};
 use crate::onnx;
 use crate::symbolic_graph::ONNXDecodingError;
 use crate::symbolic_graph::ops::Operation;

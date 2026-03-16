@@ -19,6 +19,11 @@ pub trait SuperGraphObserver {
         tensor: &NumericTensor<DynRank>,
         backend: &mut EvalBackend,
     );
+    fn on_loading_weight(&mut self, path: &[GlobalId], weight_name: Option<String>);
+    fn on_progress(&mut self, path: &[GlobalId], tier: i64, numerator: f64, denominator: f64);
+    fn should_cancel(&mut self) -> bool {
+        false
+    }
 }
 
 impl SuperGraphObserver for () {
@@ -37,5 +42,10 @@ impl SuperGraphObserver for () {
         _tensor: &NumericTensor<DynRank>,
         _backend: &mut EvalBackend,
     ) {
+    }
+    fn on_loading_weight(&mut self, _path: &[GlobalId], _weight_name: Option<String>) {}
+    fn on_progress(&mut self, _path: &[GlobalId], _tier: i64, _numerator: f64, _denominator: f64) {}
+    fn should_cancel(&mut self) -> bool {
+        false
     }
 }

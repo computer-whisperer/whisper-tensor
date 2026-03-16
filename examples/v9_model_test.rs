@@ -85,8 +85,11 @@ fn load_model(path: &Path) -> Arc<Model> {
     let onnx_data = match ext {
         "pth" => {
             println!("Loading via RWKV7 pth → ONNX...");
-            whisper_tensor_import::rwkv7::load_rwkv7_pth(path, WeightStorageStrategy::EmbeddedData)
-                .unwrap()
+            whisper_tensor_import::models::llm::rwkv7::load_rwkv7_pth(
+                path,
+                WeightStorageStrategy::EmbeddedData,
+            )
+            .unwrap()
         }
         _ => {
             println!("Loading via ONNX...");

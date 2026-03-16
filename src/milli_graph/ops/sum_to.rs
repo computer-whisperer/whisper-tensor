@@ -18,6 +18,7 @@ use typenum::P1;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SumTo {
     global_id: GlobalId,
+    pub(crate) label: Option<String>,
     output: GlobalId,
     data: GlobalId,
     target_shape: GlobalId,
@@ -30,9 +31,20 @@ impl SumTo {
         target_shape: GlobalId,
         rng: &mut impl rand::Rng,
     ) -> GlobalId {
+        Self::push_new_with_label(graph, data, target_shape, None, rng)
+    }
+
+    pub fn push_new_with_label(
+        graph: &mut MilliOpGraph,
+        data: GlobalId,
+        target_shape: GlobalId,
+        label: Option<String>,
+        rng: &mut impl rand::Rng,
+    ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
         let node = Self {
             global_id: GlobalId::new(rng),
+            label,
             output,
             data,
             target_shape,
@@ -112,7 +124,12 @@ impl MilliOp for SumTo {
         // ReduceSum along broadcast axes with keepdims=true (preserves rank)
         let mut result = data.clone();
         if !reduce_axes.is_empty() {
-            result = result.reduce_sum(reduce_axes, true, super::AccumulationMode::default(), backend)?;
+            result = result.reduce_sum(
+                reduce_axes,
+                true,
+                super::AccumulationMode::default(),
+                backend,
+            )?;
         }
 
         // Reshape to target shape (removes any rank-padded leading dims)

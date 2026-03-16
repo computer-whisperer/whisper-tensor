@@ -11,7 +11,7 @@ use rspirv::dr::Operand;
 use rspirv::dr::Operand::LiteralBit32;
 use rspirv::spirv;
 use rspirv::spirv::{
-    BuiltIn, Capability, Decoration, ExecutionMode, ExecutionModel, GLOp, SelectionControl,
+    BuiltIn, Capability, Decoration, ExecutionMode, ExecutionModel, GlslStd450Op, SelectionControl,
     StorageClass,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -517,7 +517,7 @@ impl<R: Rank> VulkanTensor<R> {
                             data_type,
                             None,
                             glsl,
-                            GLOp::FAbs as u32,
+                            GlslStd450Op::FAbs as u32,
                             [rspirv::dr::Operand::IdRef(i)],
                         )
                         .unwrap()),
@@ -533,7 +533,7 @@ impl<R: Rank> VulkanTensor<R> {
                             data_type,
                             None,
                             glsl,
-                            GLOp::SAbs as u32,
+                            GlslStd450Op::SAbs as u32,
                             [rspirv::dr::Operand::IdRef(i)],
                         )
                         .unwrap()),
@@ -561,7 +561,7 @@ impl<R: Rank> VulkanTensor<R> {
                             data_type,
                             None,
                             glsl,
-                            GLOp::Exp as u32,
+                            GlslStd450Op::Exp as u32,
                             [rspirv::dr::Operand::IdRef(i)],
                         )
                         .unwrap()),
@@ -588,7 +588,7 @@ impl<R: Rank> VulkanTensor<R> {
                             data_type,
                             None,
                             glsl,
-                            GLOp::Log as u32,
+                            GlslStd450Op::Log as u32,
                             [rspirv::dr::Operand::IdRef(i)],
                         )
                         .unwrap()),
@@ -615,7 +615,7 @@ impl<R: Rank> VulkanTensor<R> {
                             data_type,
                             None,
                             glsl,
-                            GLOp::Sqrt as u32,
+                            GlslStd450Op::Sqrt as u32,
                             [rspirv::dr::Operand::IdRef(i)],
                         )
                         .unwrap()),
@@ -660,7 +660,7 @@ impl<R: Rank> VulkanTensor<R> {
                             data_type,
                             None,
                             glsl,
-                            GLOp::FSign as u32,
+                            GlslStd450Op::FSign as u32,
                             [rspirv::dr::Operand::IdRef(i)],
                         )
                         .unwrap()),
@@ -676,7 +676,7 @@ impl<R: Rank> VulkanTensor<R> {
                             data_type,
                             None,
                             glsl,
-                            GLOp::SSign as u32,
+                            GlslStd450Op::SSign as u32,
                             [rspirv::dr::Operand::IdRef(i)],
                         )
                         .unwrap()),
@@ -721,7 +721,7 @@ impl<R: Rank> VulkanTensor<R> {
             self.dtype,
             |b, i, input_dtype, output_dtype| {
                 let data_type = get_spirv_datatype(b, output_dtype)?;
-                let f32_type = b.type_float(32);
+                let f32_type = b.type_float(32, None);
                 match input_dtype {
                     DType::F16 | DType::F32 | DType::F64 => {
                         let const_one = b.constant_bit32(f32_type, 1.0f32.to_bits());
@@ -753,7 +753,7 @@ impl<R: Rank> VulkanTensor<R> {
                                 data_type,
                                 None,
                                 glsl,
-                                GLOp::Asin as u32,
+                                GlslStd450Op::Asin as u32,
                                 [rspirv::dr::Operand::IdRef(i)],
                             )
                             .unwrap()),
@@ -774,7 +774,7 @@ impl<R: Rank> VulkanTensor<R> {
                                 data_type,
                                 None,
                                 glsl,
-                                GLOp::Asinh as u32,
+                                GlslStd450Op::Asinh as u32,
                                 [rspirv::dr::Operand::IdRef(i)],
                             )
                             .unwrap()),
@@ -795,7 +795,7 @@ impl<R: Rank> VulkanTensor<R> {
                                 data_type,
                                 None,
                                 glsl,
-                                GLOp::Acos as u32,
+                                GlslStd450Op::Acos as u32,
                                 [rspirv::dr::Operand::IdRef(i)],
                             )
                             .unwrap()),
@@ -816,7 +816,7 @@ impl<R: Rank> VulkanTensor<R> {
                                 data_type,
                                 None,
                                 glsl,
-                                GLOp::Acosh as u32,
+                                GlslStd450Op::Acosh as u32,
                                 [rspirv::dr::Operand::IdRef(i)],
                             )
                             .unwrap()),
@@ -837,7 +837,7 @@ impl<R: Rank> VulkanTensor<R> {
                                 data_type,
                                 None,
                                 glsl,
-                                GLOp::Atan as u32,
+                                GlslStd450Op::Atan as u32,
                                 [rspirv::dr::Operand::IdRef(i)],
                             )
                             .unwrap()),
@@ -858,7 +858,7 @@ impl<R: Rank> VulkanTensor<R> {
                                 data_type,
                                 None,
                                 glsl,
-                                GLOp::Atanh as u32,
+                                GlslStd450Op::Atanh as u32,
                                 [rspirv::dr::Operand::IdRef(i)],
                             )
                             .unwrap()),
@@ -879,7 +879,7 @@ impl<R: Rank> VulkanTensor<R> {
                                 data_type,
                                 None,
                                 glsl,
-                                GLOp::Sin as u32,
+                                GlslStd450Op::Sin as u32,
                                 [rspirv::dr::Operand::IdRef(i)],
                             )
                             .unwrap()),
@@ -900,7 +900,7 @@ impl<R: Rank> VulkanTensor<R> {
                                 data_type,
                                 None,
                                 glsl,
-                                GLOp::Sinh as u32,
+                                GlslStd450Op::Sinh as u32,
                                 [rspirv::dr::Operand::IdRef(i)],
                             )
                             .unwrap()),
@@ -921,7 +921,7 @@ impl<R: Rank> VulkanTensor<R> {
                                 data_type,
                                 None,
                                 glsl,
-                                GLOp::Cos as u32,
+                                GlslStd450Op::Cos as u32,
                                 [rspirv::dr::Operand::IdRef(i)],
                             )
                             .unwrap()),
@@ -942,7 +942,7 @@ impl<R: Rank> VulkanTensor<R> {
                                 data_type,
                                 None,
                                 glsl,
-                                GLOp::Cosh as u32,
+                                GlslStd450Op::Cosh as u32,
                                 [rspirv::dr::Operand::IdRef(i)],
                             )
                             .unwrap()),
@@ -963,7 +963,7 @@ impl<R: Rank> VulkanTensor<R> {
                                 data_type,
                                 None,
                                 glsl,
-                                GLOp::Tan as u32,
+                                GlslStd450Op::Tan as u32,
                                 [rspirv::dr::Operand::IdRef(i)],
                             )
                             .unwrap()),
@@ -984,7 +984,7 @@ impl<R: Rank> VulkanTensor<R> {
                                 data_type,
                                 None,
                                 glsl,
-                                GLOp::Tanh as u32,
+                                GlslStd450Op::Tanh as u32,
                                 [rspirv::dr::Operand::IdRef(i)],
                             )
                             .unwrap()),
@@ -1012,7 +1012,7 @@ impl<R: Rank> VulkanTensor<R> {
                             data_type,
                             None,
                             glsl,
-                            GLOp::Floor as u32,
+                            GlslStd450Op::Floor as u32,
                             [rspirv::dr::Operand::IdRef(i)],
                         )
                         .unwrap()),
@@ -1039,7 +1039,7 @@ impl<R: Rank> VulkanTensor<R> {
                             data_type,
                             None,
                             glsl,
-                            GLOp::Ceil as u32,
+                            GlslStd450Op::Ceil as u32,
                             [rspirv::dr::Operand::IdRef(i)],
                         )
                         .unwrap()),
@@ -1066,7 +1066,7 @@ impl<R: Rank> VulkanTensor<R> {
                             data_type,
                             None,
                             glsl,
-                            GLOp::RoundEven as u32,
+                            GlslStd450Op::RoundEven as u32,
                             [rspirv::dr::Operand::IdRef(i)],
                         )
                         .unwrap()),

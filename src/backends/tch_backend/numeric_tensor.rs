@@ -1,7 +1,9 @@
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::dtype::{DType, DTypeError};
 use crate::tensor_rank::{DimContainer, DynRank, Rank};
+use ndarray::IxDyn;
 use std::marker::PhantomData;
+use tch::kind::Element;
 use tch::{Kind, Tensor};
 
 #[derive(Debug, thiserror::Error)]
@@ -10,8 +12,36 @@ pub enum TCHNumericTensorError {
     DTypeError(#[from] DTypeError),
     #[error(transparent)]
     TCHError(#[from] tch::TchError),
+    #[error(transparent)]
+    NdarrayShape(#[from] ndarray::ShapeError),
     #[error("Unsupported DType")]
     UnsupportedDtype,
+}
+
+/// Copy a tch Tensor into an ndarray ArrayD, bypassing tch's built-in ndarray
+/// conversions (which target ndarray 0.16).
+fn tensor_to_arrayd<T: Element + Copy>(
+    tensor: &Tensor,
+) -> Result<ndarray::ArrayD<T>, TCHNumericTensorError> {
+    let numel = tensor.numel();
+    let mut vec = vec![T::ZERO; numel];
+    tensor.f_to_kind(T::KIND)?.f_copy_data(&mut vec, numel)?;
+    let shape: Vec<usize> = tensor.size().iter().map(|s| *s as usize).collect();
+    Ok(ndarray::ArrayD::from_shape_vec(IxDyn(&shape), vec)?)
+}
+
+/// Build a tch Tensor from a contiguous ndarray, bypassing tch's built-in
+/// ndarray conversions (which target ndarray 0.16).
+fn arrayd_to_tensor<T: Element, D: ndarray::Dimension>(
+    arr: &ndarray::ArrayBase<ndarray::OwnedArcRepr<T>, D, T>,
+) -> Result<Tensor, TCHNumericTensorError> {
+    let contiguous = arr.as_standard_layout();
+    let slice = contiguous
+        .as_slice()
+        .expect("standard_layout array must be contiguous");
+    let tn = Tensor::f_from_slice(slice)?;
+    let shape: Vec<i64> = arr.shape().iter().map(|s| *s as i64).collect();
+    Ok(tn.f_reshape(shape)?)
 }
 
 #[derive(Debug)]
@@ -28,56 +58,56 @@ impl<R: Rank> TCHNumericTensor<R> {
         let kind = self.tensor.kind();
         match kind {
             Kind::Double => {
-                let ndw: ndarray::ArrayD<f64> = (&self.tensor).try_into()?;
+                let ndw = tensor_to_arrayd::<f64>(&self.tensor)?;
                 Ok(NDArrayNumericTensor::<DynRank>::F64(ndw.to_shared())
                     .try_to_rank()
                     .unwrap())
             }
             Kind::Float => {
-                let ndw: ndarray::ArrayD<f32> = (&self.tensor).try_into()?;
+                let ndw = tensor_to_arrayd::<f32>(&self.tensor)?;
                 Ok(NDArrayNumericTensor::<DynRank>::F32(ndw.to_shared())
                     .try_to_rank()
                     .unwrap())
             }
             Kind::BFloat16 => {
                 let tensor_f32 = self.tensor.to_kind(Kind::Float);
-                let ndw: ndarray::ArrayD<f32> = (&tensor_f32).try_into()?;
+                let ndw = tensor_to_arrayd::<f32>(&tensor_f32)?;
                 let ndarray_tensor = NDArrayNumericTensor::<DynRank>::F32(ndw.to_shared());
                 let bf_tensor = ndarray_tensor.cast(DType::BF16).unwrap();
                 Ok(bf_tensor.try_to_rank().unwrap())
             }
             Kind::Half => {
-                let ndw: ndarray::ArrayD<half::f16> = (&self.tensor).try_into()?;
+                let ndw = tensor_to_arrayd::<half::f16>(&self.tensor)?;
                 Ok(NDArrayNumericTensor::<DynRank>::F16(ndw.to_shared())
                     .try_to_rank()
                     .unwrap())
             }
             Kind::Int64 => {
-                let ndw: ndarray::ArrayD<i64> = (&self.tensor).try_into()?;
+                let ndw = tensor_to_arrayd::<i64>(&self.tensor)?;
                 Ok(NDArrayNumericTensor::<DynRank>::I64(ndw.to_shared())
                     .try_to_rank()
                     .unwrap())
             }
             Kind::Int => {
-                let ndw: ndarray::ArrayD<i32> = (&self.tensor).try_into()?;
+                let ndw = tensor_to_arrayd::<i32>(&self.tensor)?;
                 Ok(NDArrayNumericTensor::<DynRank>::I32(ndw.to_shared())
                     .try_to_rank()
                     .unwrap())
             }
             Kind::Int16 => {
-                let ndw: ndarray::ArrayD<i16> = (&self.tensor).try_into()?;
+                let ndw = tensor_to_arrayd::<i16>(&self.tensor)?;
                 Ok(NDArrayNumericTensor::<DynRank>::I16(ndw.to_shared())
                     .try_to_rank()
                     .unwrap())
             }
             Kind::Int8 => {
-                let ndw: ndarray::ArrayD<i8> = (&self.tensor).try_into()?;
+                let ndw = tensor_to_arrayd::<i8>(&self.tensor)?;
                 Ok(NDArrayNumericTensor::<DynRank>::I8(ndw.to_shared())
                     .try_to_rank()
                     .unwrap())
             }
             Kind::Uint8 => {
-                let ndw: ndarray::ArrayD<u8> = (&self.tensor).try_into()?;
+                let ndw = tensor_to_arrayd::<u8>(&self.tensor)?;
                 Ok(NDArrayNumericTensor::<DynRank>::U8(ndw.to_shared())
                     .try_to_rank()
                     .unwrap())
@@ -91,11 +121,11 @@ impl<R: Rank> TCHNumericTensor<R> {
     ) -> Result<Self, TCHNumericTensorError> {
         match orig_value {
             NDArrayNumericTensor::F64(value) => Ok(Self {
-                tensor: Tensor::try_from(value)?,
+                tensor: arrayd_to_tensor(&value)?,
                 phantom_data: PhantomData::<R>,
             }),
             NDArrayNumericTensor::F32(value) => Ok(Self {
-                tensor: Tensor::try_from(value)?,
+                tensor: arrayd_to_tensor(&value)?,
                 phantom_data: PhantomData::<R>,
             }),
             NDArrayNumericTensor::BF16(_) => {
@@ -104,7 +134,7 @@ impl<R: Rank> TCHNumericTensor<R> {
                     NDArrayNumericTensor::F32(value_f32_inner) => value_f32_inner,
                     _ => unreachable!(),
                 };
-                let tensor_f32 = Tensor::try_from(value_f32_inner)?;
+                let tensor_f32 = arrayd_to_tensor(&value_f32_inner)?;
                 let tensor_bf16 = tensor_f32.to_kind(Kind::BFloat16);
                 Ok(Self {
                     tensor: tensor_bf16,
@@ -112,31 +142,31 @@ impl<R: Rank> TCHNumericTensor<R> {
                 })
             }
             NDArrayNumericTensor::F16(value) => Ok(Self {
-                tensor: Tensor::try_from(value)?,
+                tensor: arrayd_to_tensor(&value)?,
                 phantom_data: PhantomData::<R>,
             }),
             NDArrayNumericTensor::I64(value) => Ok(Self {
-                tensor: Tensor::try_from(value)?,
+                tensor: arrayd_to_tensor(&value)?,
                 phantom_data: PhantomData::<R>,
             }),
             NDArrayNumericTensor::I32(value) => Ok(Self {
-                tensor: Tensor::try_from(value)?,
+                tensor: arrayd_to_tensor(&value)?,
                 phantom_data: PhantomData::<R>,
             }),
             NDArrayNumericTensor::I16(value) => Ok(Self {
-                tensor: Tensor::try_from(value)?,
+                tensor: arrayd_to_tensor(&value)?,
                 phantom_data: PhantomData::<R>,
             }),
             NDArrayNumericTensor::U8(value) => Ok(Self {
-                tensor: Tensor::try_from(value)?,
+                tensor: arrayd_to_tensor(&value)?,
                 phantom_data: PhantomData::<R>,
             }),
             NDArrayNumericTensor::I8(value) => Ok(Self {
-                tensor: Tensor::try_from(value)?,
+                tensor: arrayd_to_tensor(&value)?,
                 phantom_data: PhantomData::<R>,
             }),
             NDArrayNumericTensor::BOOL(value) => Ok(Self {
-                tensor: Tensor::try_from(value)?,
+                tensor: arrayd_to_tensor(&value)?,
                 phantom_data: PhantomData::<R>,
             }),
             _ => Err(DTypeError::DTypeNotSupportedByBackend(orig_value.dtype()).into()),

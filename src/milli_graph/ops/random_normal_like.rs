@@ -5,7 +5,7 @@ use crate::graph::GlobalId;
 use crate::milli_graph::MilliOpGraphError;
 use crate::milli_graph::ops::{AnyMilliOp, MilliOp};
 use crate::numeric_tensor::NumericTensor;
-use rand::Rng;
+use rand::{Rng, RngExt};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -13,6 +13,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RandomNormalLike {
     global_id: GlobalId,
+    pub(crate) label: Option<String>,
     output: GlobalId,
     input: GlobalId,
     dtype: Option<DType>,
@@ -31,9 +32,24 @@ impl RandomNormalLike {
         seed: Option<f32>,
         rng: &mut impl Rng,
     ) -> GlobalId {
+        Self::push_new_with_label(graph, input, dtype, mean, scale, seed, None, rng)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_new_with_label(
+        graph: &mut crate::milli_graph::MilliOpGraph,
+        input: GlobalId,
+        dtype: Option<DType>,
+        mean: f32,
+        scale: f32,
+        seed: Option<f32>,
+        label: Option<String>,
+        rng: &mut impl Rng,
+    ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
         let node = Self {
             global_id: GlobalId::new(rng),
+            label,
             output,
             input,
             dtype,
@@ -72,7 +88,7 @@ impl crate::graph::Node for RandomNormalLike {
 fn box_muller(rng: &mut impl Rng) -> (f32, f32) {
     let u1: f32 = rng.random_range(f32::EPSILON..1.0);
     let u2: f32 = rng.random_range(0.0f32..std::f32::consts::TAU);
-    let r = (-2.0 * u1.ln()).sqrt();
+    let r = (-2.0f32 * u1.ln()).sqrt();
     (r * u2.cos(), r * u2.sin())
 }
 

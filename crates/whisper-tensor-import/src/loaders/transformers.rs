@@ -1,4 +1,4 @@
-use super::{build_rnn_supergraph, default_storage, onnx_bytes_to_model};
+use super::shared::{build_rnn_supergraph, default_storage, onnx_bytes_to_model};
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::dtype::DType;
 use whisper_tensor::interfaces::TextInferenceTokensInLogitOutInterface;
@@ -7,7 +7,6 @@ use whisper_tensor::metadata::TokenizerInfo;
 use whisper_tensor::milli_graph::MilliOpGraph;
 use whisper_tensor::milli_graph::ops::{Cast, Constant, Squeeze, Unsqueeze};
 use whisper_tensor::super_graph::SuperGraphBuilder;
-use whisper_tensor::super_graph::links::SuperGraphLink;
 use whisper_tensor::super_graph::nodes::{
     SuperGraphNode, SuperGraphNodeMilliOpGraph, SuperGraphNodeModelExecution,
 };
@@ -160,6 +159,10 @@ fn build_simple_transformer_supergraph(
     let model_input_link = super_graph_builder.new_model_link(rng);
     let raw_logit_output_link = super_graph_builder.new_tensor_link(rng);
     let cache_key = super_graph_builder.new_hash_link(rng);
+    super_graph_builder.set_link_label(cache_key, "cache_key");
+    super_graph_builder.set_link_label(model_input_link, "model_weights");
+    super_graph_builder.set_link_label(token_context_input_link, token_input_name);
+    super_graph_builder.set_link_label(raw_logit_output_link, "raw_logits");
 
     // Input processing: cast dtype + unsqueeze to match model rank
     let adjusted_token_context = {
@@ -168,20 +171,34 @@ fn build_simple_transformer_supergraph(
         let milli_op_graph_input = *input_map
             .get(&token_context_input_link.global_id())
             .unwrap();
-        let mut x = Cast::push_new(&mut milli_graph, milli_op_graph_input, input_dtype, rng);
-        let zero_tid = Constant::push_new(
+        let mut x = Cast::push_new_with_label(
+            &mut milli_graph,
+            milli_op_graph_input,
+            input_dtype,
+            Some("input.cast_dtype".to_string()),
+            rng,
+        );
+        let zero_tid = Constant::push_new_with_label(
             &mut milli_graph,
             NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
+            Some("input.unsqueeze_axis".to_string()),
             rng,
         );
         for _ in 0..(input_rank - 1) {
-            x = Unsqueeze::push_new(&mut milli_graph, x, zero_tid, rng);
+            x = Unsqueeze::push_new_with_label(
+                &mut milli_graph,
+                x,
+                zero_tid,
+                Some("input.add_batch_dim".to_string()),
+                rng,
+            );
         }
 
         let processed_input_link = super_graph_builder.new_tensor_link(rng);
         milli_graph.set_output_map(std::iter::once((x, processed_input_link.global_id())));
 
-        let node = SuperGraphNodeMilliOpGraph::new(milli_graph, rng);
+        let mut node = SuperGraphNodeMilliOpGraph::new(milli_graph, rng);
+        node.label = Some("input_preprocess".to_string());
         super_graph_builder.add_node(node.to_any());
         processed_input_link
     };
@@ -189,10 +206,10 @@ fn build_simple_transformer_supergraph(
     let tensor_inputs = vec![(adjusted_token_context, token_input_name.to_string())];
     let tensor_outputs = vec![(logit_output_name.to_string(), raw_logit_output_link)];
 
-    super_graph_builder.add_node(
-        SuperGraphNodeModelExecution::new(rng, model_input_link, 0, tensor_inputs, tensor_outputs)
-            .to_any(),
-    );
+    let mut model_exec =
+        SuperGraphNodeModelExecution::new(rng, model_input_link, 0, tensor_inputs, tensor_outputs);
+    model_exec.label = Some("model_forward".to_string());
+    super_graph_builder.add_node(model_exec.to_any());
 
     // Output processing: squeeze extra dims + cast to F32
     let processed_logit_output_link = {
@@ -200,23 +217,38 @@ fn build_simple_transformer_supergraph(
             MilliOpGraph::new(std::iter::once(raw_logit_output_link.global_id()), rng);
         let milli_op_graph_input = *input_map.get(&raw_logit_output_link.global_id()).unwrap();
         let mut x = milli_op_graph_input;
-        let zero_tid = Constant::push_new(
+        let zero_tid = Constant::push_new_with_label(
             &mut milli_graph,
             NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
+            Some("output.squeeze_axis".to_string()),
             rng,
         );
         for _ in 0..(output_rank - 2) {
-            x = Squeeze::push_new(&mut milli_graph, x, zero_tid, rng);
+            x = Squeeze::push_new_with_label(
+                &mut milli_graph,
+                x,
+                zero_tid,
+                Some("output.remove_batch_dim".to_string()),
+                rng,
+            );
         }
-        x = Cast::push_new(&mut milli_graph, x, DType::F32, rng);
+        x = Cast::push_new_with_label(
+            &mut milli_graph,
+            x,
+            DType::F32,
+            Some("output.cast_f32".to_string()),
+            rng,
+        );
 
         let processed_logit_output_link = super_graph_builder.new_tensor_link(rng);
+        super_graph_builder.set_link_label(processed_logit_output_link, logit_output_name);
         milli_graph.set_output_map(std::iter::once((
             x,
             processed_logit_output_link.global_id(),
         )));
 
-        let node = SuperGraphNodeMilliOpGraph::new(milli_graph, rng);
+        let mut node = SuperGraphNodeMilliOpGraph::new(milli_graph, rng);
+        node.label = Some("output_postprocess".to_string());
         super_graph_builder.add_node(node.to_any());
         processed_logit_output_link
     };

@@ -34,6 +34,7 @@ pub(crate) enum WhichSimpleBinaryOp {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SimpleBinary {
     global_id: GlobalId,
+    pub(crate) label: Option<String>,
     output: GlobalId,
     which_op: WhichSimpleBinaryOp,
     a: GlobalId,
@@ -54,11 +55,13 @@ impl SimpleBinary {
         a: GlobalId,
         b: GlobalId,
         which_op: WhichSimpleBinaryOp,
+        label: Option<String>,
         rng: &mut impl Rng,
     ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
         let node = Self {
             global_id: GlobalId::new(rng),
+            label,
             output,
             which_op,
             a,
@@ -68,19 +71,19 @@ impl SimpleBinary {
         output
     }
     pub fn add(graph: &mut MilliOpGraph, a: GlobalId, b: GlobalId, rng: &mut impl Rng) -> GlobalId {
-        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Add, rng)
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Add, None, rng)
     }
 
     pub fn sub(graph: &mut MilliOpGraph, a: GlobalId, b: GlobalId, rng: &mut impl Rng) -> GlobalId {
-        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Sub, rng)
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Sub, None, rng)
     }
 
     pub fn mul(graph: &mut MilliOpGraph, a: GlobalId, b: GlobalId, rng: &mut impl Rng) -> GlobalId {
-        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Mul, rng)
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Mul, None, rng)
     }
 
     pub fn div(graph: &mut MilliOpGraph, a: GlobalId, b: GlobalId, rng: &mut impl Rng) -> GlobalId {
-        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Div, rng)
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Div, None, rng)
     }
 
     pub fn modulo(
@@ -90,18 +93,18 @@ impl SimpleBinary {
         fmod: Option<bool>,
         rng: &mut impl Rng,
     ) -> GlobalId {
-        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Modulo(fmod), rng)
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Modulo(fmod), None, rng)
     }
     pub fn and(graph: &mut MilliOpGraph, a: GlobalId, b: GlobalId, rng: &mut impl Rng) -> GlobalId {
-        Self::push_new(graph, a, b, WhichSimpleBinaryOp::And, rng)
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::And, None, rng)
     }
 
     pub fn or(graph: &mut MilliOpGraph, a: GlobalId, b: GlobalId, rng: &mut impl Rng) -> GlobalId {
-        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Or, rng)
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Or, None, rng)
     }
 
     pub fn xor(graph: &mut MilliOpGraph, a: GlobalId, b: GlobalId, rng: &mut impl Rng) -> GlobalId {
-        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Xor, rng)
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Xor, None, rng)
     }
 
     pub fn bitwise_and(
@@ -110,7 +113,7 @@ impl SimpleBinary {
         b: GlobalId,
         rng: &mut impl Rng,
     ) -> GlobalId {
-        Self::push_new(graph, a, b, WhichSimpleBinaryOp::BitwiseAnd, rng)
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::BitwiseAnd, None, rng)
     }
 
     pub fn bitwise_or(
@@ -119,7 +122,7 @@ impl SimpleBinary {
         b: GlobalId,
         rng: &mut impl Rng,
     ) -> GlobalId {
-        Self::push_new(graph, a, b, WhichSimpleBinaryOp::BitwiseOr, rng)
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::BitwiseOr, None, rng)
     }
 
     pub fn bitwise_xor(
@@ -128,7 +131,7 @@ impl SimpleBinary {
         b: GlobalId,
         rng: &mut impl Rng,
     ) -> GlobalId {
-        Self::push_new(graph, a, b, WhichSimpleBinaryOp::BitwiseXor, rng)
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::BitwiseXor, None, rng)
     }
 
     pub fn equal(
@@ -137,7 +140,7 @@ impl SimpleBinary {
         b: GlobalId,
         rng: &mut impl Rng,
     ) -> GlobalId {
-        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Equal, rng)
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Equal, None, rng)
     }
 
     pub fn greater(
@@ -146,7 +149,7 @@ impl SimpleBinary {
         b: GlobalId,
         rng: &mut impl Rng,
     ) -> GlobalId {
-        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Greater, rng)
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Greater, None, rng)
     }
 
     pub fn greater_or_equal(
@@ -155,7 +158,7 @@ impl SimpleBinary {
         b: GlobalId,
         rng: &mut impl Rng,
     ) -> GlobalId {
-        Self::push_new(graph, a, b, WhichSimpleBinaryOp::GreaterOrEqual, rng)
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::GreaterOrEqual, None, rng)
     }
 
     pub fn less(
@@ -164,7 +167,7 @@ impl SimpleBinary {
         b: GlobalId,
         rng: &mut impl Rng,
     ) -> GlobalId {
-        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Less, rng)
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Less, None, rng)
     }
 
     pub fn less_or_equal(
@@ -173,15 +176,15 @@ impl SimpleBinary {
         b: GlobalId,
         rng: &mut impl Rng,
     ) -> GlobalId {
-        Self::push_new(graph, a, b, WhichSimpleBinaryOp::LessOrEqual, rng)
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::LessOrEqual, None, rng)
     }
 
     pub fn max(graph: &mut MilliOpGraph, a: GlobalId, b: GlobalId, rng: &mut impl Rng) -> GlobalId {
-        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Max, rng)
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Max, None, rng)
     }
 
     pub fn min(graph: &mut MilliOpGraph, a: GlobalId, b: GlobalId, rng: &mut impl Rng) -> GlobalId {
-        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Min, rng)
+        Self::push_new(graph, a, b, WhichSimpleBinaryOp::Min, None, rng)
     }
 }
 
@@ -245,7 +248,8 @@ impl MilliOp for SimpleBinary {
             let a_dims = a_ranked.shape();
             let b_dims = b_ranked.shape();
             if let Ok(out_dims) = super::infer_multidirectional_broadcasting_shape(
-                &[a_dims.clone(), b_dims.clone()], symbolic_resolver,
+                &[a_dims.clone(), b_dims.clone()],
+                symbolic_resolver,
             ) {
                 let out_info = TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims);
                 return Ok(Box::new([(self.output, out_info)].into_iter()));
@@ -255,8 +259,10 @@ impl MilliOp for SimpleBinary {
         // Fallback: rank-only inference.
         let a_shape = a_info.shape(symbolic_resolver);
         let b_shape = b_info.shape(symbolic_resolver);
-        let out_rank =
-            super::infer_multidirectional_broadcasting_rank(&[a_shape, b_shape], symbolic_resolver)?;
+        let out_rank = super::infer_multidirectional_broadcasting_rank(
+            &[a_shape, b_shape],
+            symbolic_resolver,
+        )?;
 
         let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
             crate::symbolic_scalar::SymbolicScalar::new(out_dtype, symbolic_resolver),
@@ -378,6 +384,7 @@ impl MilliOp for SimpleBinary {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Pow {
     global_id: GlobalId,
+    pub(crate) label: Option<String>,
     output: GlobalId,
     a: GlobalId,
     b: GlobalId,
@@ -390,12 +397,23 @@ impl Pow {
         b: GlobalId,
         rng: &mut impl Rng,
     ) -> GlobalId {
+        Self::push_new_with_label(graph, a, b, None, rng)
+    }
+
+    pub fn push_new_with_label(
+        graph: &mut MilliOpGraph,
+        a: GlobalId,
+        b: GlobalId,
+        label: Option<String>,
+        rng: &mut impl Rng,
+    ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
         let node = Self {
             output,
             a,
             b,
             global_id: GlobalId::new(rng),
+            label,
         };
         graph.push_op(AnyMilliOp::Pow(node));
         output
@@ -452,7 +470,8 @@ impl MilliOp for Pow {
             let a_dims = a_ranked.shape();
             let b_dims = b_ranked.shape();
             if let Ok(out_dims) = super::infer_multidirectional_broadcasting_shape(
-                &[a_dims.clone(), b_dims.clone()], symbolic_resolver,
+                &[a_dims.clone(), b_dims.clone()],
+                symbolic_resolver,
             ) {
                 let out_info = TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims);
                 return Ok(Box::new([(self.output, out_info)].into_iter()));
@@ -462,8 +481,10 @@ impl MilliOp for Pow {
         // Fallback: rank-only inference.
         let a_shape = a_info.shape(symbolic_resolver);
         let b_shape = b_info.shape(symbolic_resolver);
-        let out_rank =
-            super::infer_multidirectional_broadcasting_rank(&[a_shape, b_shape], symbolic_resolver)?;
+        let out_rank = super::infer_multidirectional_broadcasting_rank(
+            &[a_shape, b_shape],
+            symbolic_resolver,
+        )?;
 
         let first_elem = crate::scalar_info::ScalarInfo::Symbolic(
             crate::symbolic_scalar::SymbolicScalar::new(out_dtype, symbolic_resolver),
@@ -492,6 +513,7 @@ fn default_f32() -> DType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MatMul {
     global_id: GlobalId,
+    pub(crate) label: Option<String>,
     output: GlobalId,
     a: GlobalId,
     b: GlobalId,
@@ -525,6 +547,7 @@ impl MatMul {
         self.output_dtype
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn push_new(
         graph: &mut MilliOpGraph,
         a: GlobalId,
@@ -533,6 +556,31 @@ impl MatMul {
         product_dtype: DType,
         accumulate_dtype: DType,
         output_dtype: DType,
+        rng: &mut impl Rng,
+    ) -> GlobalId {
+        Self::push_new_with_label(
+            graph,
+            a,
+            b,
+            input_dtype,
+            product_dtype,
+            accumulate_dtype,
+            output_dtype,
+            None,
+            rng,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_new_with_label(
+        graph: &mut MilliOpGraph,
+        a: GlobalId,
+        b: GlobalId,
+        input_dtype: DType,
+        product_dtype: DType,
+        accumulate_dtype: DType,
+        output_dtype: DType,
+        label: Option<String>,
         rng: &mut impl Rng,
     ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
@@ -545,6 +593,7 @@ impl MatMul {
             accumulate_dtype,
             output_dtype,
             global_id: GlobalId::new(rng),
+            label,
         };
         graph.push_op(AnyMilliOp::MatMul(node));
         output
@@ -632,8 +681,10 @@ impl MilliOp for MatMul {
                     let a_batch = &a_dims[..a_rank - 2];
                     let b_batch = &b_dims[..b_rank - 2];
                     let batch = super::infer_multidirectional_broadcasting_shape(
-                        &[a_batch.to_vec(), b_batch.to_vec()], symbolic_resolver,
-                    ).ok();
+                        &[a_batch.to_vec(), b_batch.to_vec()],
+                        symbolic_resolver,
+                    )
+                    .ok();
                     batch.map(|mut out| {
                         out.push(a_dims[a_rank - 2].clone()); // M
                         out.push(b_dims[b_rank - 1].clone()); // N
@@ -722,14 +773,26 @@ impl MilliOp for MatMul {
         // d/dA (A @ B) = grad @ B^T
         let b_t = super::Transpose::push_new(graph, self.b, Some(vec![-1, -2]), rng);
         let grad_a = MatMul::push_new(
-            graph, grad_output, b_t,
-            self.input_dtype, self.product_dtype, self.accumulate_dtype, self.output_dtype, rng,
+            graph,
+            grad_output,
+            b_t,
+            self.input_dtype,
+            self.product_dtype,
+            self.accumulate_dtype,
+            self.output_dtype,
+            rng,
         );
         // d/dB (A @ B) = A^T @ grad
         let a_t = super::Transpose::push_new(graph, self.a, Some(vec![-1, -2]), rng);
         let grad_b = MatMul::push_new(
-            graph, a_t, grad_output,
-            self.input_dtype, self.product_dtype, self.accumulate_dtype, self.output_dtype, rng,
+            graph,
+            a_t,
+            grad_output,
+            self.input_dtype,
+            self.product_dtype,
+            self.accumulate_dtype,
+            self.output_dtype,
+            rng,
         );
 
         // Reduce gradients to match input shapes (un-broadcast batch dims)

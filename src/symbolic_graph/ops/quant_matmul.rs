@@ -76,10 +76,8 @@ impl Operation for QuantMatMulOperation {
         let mut patched = inputs.clone();
         patched.insert(self.weight, weight_f32);
 
-        let tensor_dtypes: HashMap<GlobalId, DType> = patched
-            .iter()
-            .map(|(id, t)| (*id, t.dtype()))
-            .collect();
+        let tensor_dtypes: HashMap<GlobalId, DType> =
+            patched.iter().map(|(id, t)| (*id, t.dtype())).collect();
         let ctx = MilliLoweringContext::new(tensor_dtypes);
         let mut rng = wyrand::WyRand::new(Default::default());
         let milli_graph = self.get_milli_op_graph(&ctx, &mut rng);
@@ -94,7 +92,13 @@ impl Operation for QuantMatMulOperation {
         // Transpose weight [N, K] -> [K, N]
         let bt = milli_graph::ops::Transpose::push_new(&mut graph, b, Some(vec![1, 0]), rng);
         // MatMul: input @ weight^T — weight is dequantized to F32
-        let out = milli_graph::ops::MatMul::push_new_default_precision(&mut graph, a, bt, DType::F32, rng);
+        let out = milli_graph::ops::MatMul::push_new_default_precision(
+            &mut graph,
+            a,
+            bt,
+            DType::F32,
+            rng,
+        );
         graph.set_output_map(std::iter::once((out, self.output)));
         graph
     }

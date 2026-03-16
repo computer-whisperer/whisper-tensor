@@ -10,10 +10,10 @@ use crate::onnx_graph::tensor::{
     TensorDataValue,
 };
 use crate::onnx_graph::weights::WeightManager;
-use candle_core::pickle::PthTensors;
 use prost::Message;
 use std::path::Path;
 use std::sync::Arc;
+use whisper_tensor::pth::PthTensors;
 
 fn lerp(
     a: Arc<dyn Tensor>,

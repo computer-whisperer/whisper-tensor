@@ -765,10 +765,10 @@ fn multi_to_flat(indices: &[usize], strides: &[usize]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dtype::DType;
     use crate::graph::GlobalId;
     use crate::milli_graph::MilliOpGraph;
     use crate::milli_graph::ops::{MatMul, SimpleBinary};
-    use crate::dtype::DType;
 
     fn make_id(rng: &mut impl rand::Rng) -> GlobalId {
         GlobalId::new(rng)
@@ -865,7 +865,8 @@ mod tests {
         let (mut graph, input_map) = MilliOpGraph::new([ext_a, ext_b], &mut rng);
         let int_a = input_map[&ext_a];
         let int_b = input_map[&ext_b];
-        let int_out = MatMul::push_new_default_precision(&mut graph, int_a, int_b, DType::F32, &mut rng);
+        let int_out =
+            MatMul::push_new_default_precision(&mut graph, int_a, int_b, DType::F32, &mut rng);
 
         let mut shapes = HashMap::new();
         shapes.insert(int_a, vec![2, 3]);

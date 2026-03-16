@@ -11,6 +11,7 @@ use typenum::P1;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Split {
     global_id: GlobalId,
+    pub(crate) label: Option<String>,
     output: GlobalId,
     data: GlobalId,
     split: Option<MilliOpTensorIDOrLiteral>,
@@ -28,10 +29,6 @@ impl Split {
         self.output_id
     }
 
-    pub(crate) fn num_outputs(&self) -> Option<usize> {
-        self.num_outputs
-    }
-
     pub(crate) fn split_tensor(&self) -> Option<&MilliOpTensorIDOrLiteral> {
         self.split.as_ref()
     }
@@ -45,9 +42,24 @@ impl Split {
         output_id: usize,
         rng: &mut impl rand::Rng,
     ) -> GlobalId {
+        Self::push_new_with_label(graph, data, split, axis, num_outputs, output_id, None, rng)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_new_with_label(
+        graph: &mut MilliOpGraph,
+        data: GlobalId,
+        split: Option<MilliOpTensorIDOrLiteral>,
+        axis: i64,
+        num_outputs: Option<usize>,
+        output_id: usize,
+        label: Option<String>,
+        rng: &mut impl rand::Rng,
+    ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
         let node = Self {
             global_id: GlobalId::new(rng),
+            label,
             output,
             data,
             split,
@@ -101,10 +113,12 @@ impl MilliOp for Split {
         Box<dyn Iterator<Item = (GlobalId, crate::tensor_info::TensorInfo)>>,
         MilliOpGraphError,
     > {
-        use crate::tensor_info::TensorInfo;
         use crate::scalar_info::ScalarInfoTyped;
+        use crate::tensor_info::TensorInfo;
 
-        let data_info = known_inputs.get(&self.data).ok_or(MilliOpGraphError::UnableToInfer)?;
+        let data_info = known_inputs
+            .get(&self.data)
+            .ok_or(MilliOpGraphError::UnableToInfer)?;
 
         // If all inputs are concrete, fall back to eval.
         let split_numeric = match &self.split {
@@ -117,8 +131,15 @@ impl MilliOp for Split {
         if data_info.as_numeric().is_some() && split_numeric {
             let mut resolved = HashMap::new();
             for id in self.inputs() {
-                let info = known_inputs.get(&id).ok_or(MilliOpGraphError::UnableToInfer)?;
-                resolved.insert(id, info.as_numeric().ok_or(MilliOpGraphError::UnableToInfer)?.clone());
+                let info = known_inputs
+                    .get(&id)
+                    .ok_or(MilliOpGraphError::UnableToInfer)?;
+                resolved.insert(
+                    id,
+                    info.as_numeric()
+                        .ok_or(MilliOpGraphError::UnableToInfer)?
+                        .clone(),
+                );
             }
             let collected: Vec<(GlobalId, TensorInfo)> = self
                 .eval(&resolved, backend)?
@@ -128,7 +149,9 @@ impl MilliOp for Split {
         }
 
         // Shape-only inference.
-        let data_ranked = data_info.as_ranked().ok_or(MilliOpGraphError::UnableToInfer)?;
+        let data_ranked = data_info
+            .as_ranked()
+            .ok_or(MilliOpGraphError::UnableToInfer)?;
         let data_shape = data_ranked.shape();
         let data_rank = data_shape.len();
         let axis = if self.axis < 0 {
@@ -141,13 +164,13 @@ impl MilliOp for Split {
         let split_sizes: Vec<i64> = if let Some(split) = &self.split {
             match split {
                 MilliOpTensorIDOrLiteral::TensorID(id) => {
-                    let info = known_inputs.get(id).ok_or(MilliOpGraphError::UnableToInfer)?;
+                    let info = known_inputs
+                        .get(id)
+                        .ok_or(MilliOpGraphError::UnableToInfer)?;
                     let tensor = info.as_numeric().ok_or(MilliOpGraphError::UnableToInfer)?;
                     tensor.clone().try_to_rank::<P1>()?.try_into()?
                 }
-                MilliOpTensorIDOrLiteral::Literal(lit) => {
-                    lit.try_to_rank::<P1>()?.try_into()?
-                }
+                MilliOpTensorIDOrLiteral::Literal(lit) => lit.try_to_rank::<P1>()?.try_into()?,
             }
         } else if let Some(num_outputs) = self.num_outputs {
             // Compute from data shape along axis.
@@ -155,7 +178,9 @@ impl MilliOp for Split {
                 let dim = *dim_val as usize;
                 let base = dim / num_outputs;
                 let remainder = dim % num_outputs;
-                (0..num_outputs).map(|i| (base + if i < remainder { 1 } else { 0 }) as i64).collect()
+                (0..num_outputs)
+                    .map(|i| (base + if i < remainder { 1 } else { 0 }) as i64)
+                    .collect()
             } else {
                 return Err(MilliOpGraphError::UnableToInfer);
             }

@@ -54,7 +54,11 @@ impl Node for CastLikeOperation {
 }
 
 impl Operation for CastLikeOperation {
-    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl rand::Rng) -> MilliOpGraph {
+    fn get_milli_op_graph(
+        &self,
+        _ctx: &MilliLoweringContext,
+        rng: &mut impl rand::Rng,
+    ) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let out = milli_graph::ops::CastLike::push_new(
             &mut graph,
@@ -172,7 +176,11 @@ impl Operation for CastOperation {
         Ok(milli_graph.eval(inputs, &mut (), backend)?)
     }
 
-    fn get_milli_op_graph(&self, _ctx: &MilliLoweringContext, rng: &mut impl rand::Rng) -> MilliOpGraph {
+    fn get_milli_op_graph(
+        &self,
+        _ctx: &MilliLoweringContext,
+        rng: &mut impl rand::Rng,
+    ) -> MilliOpGraph {
         let (mut graph, input_map) = MilliOpGraph::new(self.inputs(), rng);
         let out =
             milli_graph::ops::Cast::push_new(&mut graph, input_map[&self.input], self.to, rng);

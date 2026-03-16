@@ -13,16 +13,15 @@ use crate::numeric_tensor::NumericTensorError;
 use crate::numeric_tensor_typed::TypedNumericTensorError;
 use crate::super_graph::cache::{SuperGraphCache, SuperGraphTensorCache};
 use crate::super_graph::data::SuperGraphData;
-use crate::super_graph::links::SuperGraphLinkTensorMap;
 pub use crate::super_graph::links::{
-    SuperGraphAnyLink, SuperGraphLinkHash, SuperGraphLinkString, SuperGraphLinkTensor,
-    SuperGraphLinkTokenizer,
+    SuperGraphAnyLink, SuperGraphAtomicLinkKind, SuperGraphLink, SuperGraphLinkInfo,
+    SuperGraphLinkKind,
 };
 use crate::super_graph::nodes::{SuperGraphAnyNode, SuperGraphNode};
 use crate::super_graph::observer::SuperGraphObserver;
 use crate::symbolic_graph::SymbolicGraph;
 use crate::tokenizer::TokenizerError;
-use rand::{Rng, RngCore};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
@@ -45,8 +44,12 @@ pub enum SuperGraphError {
     CompilerError(#[from] CompilerError),
     #[error("Missing link{0}")]
     MissingLinkError(String),
+    #[error("Invalid input: {0}")]
+    InvalidInputError(String),
     #[error(transparent)]
     EvalRuntimeError(#[from] EvalRuntimeError),
+    #[error("Execution cancelled")]
+    Cancelled,
 }
 
 pub type SuperGraphHash = u64;
@@ -87,7 +90,7 @@ pub struct SuperGraph {
     pub input_links: HashSet<SuperGraphAnyLink>,
     pub output_links: HashSet<SuperGraphAnyLink>,
     pub nodes: HashMap<GlobalId, SuperGraphAnyNode>,
-    pub links_by_global_id: HashMap<GlobalId, SuperGraphAnyLink>,
+    pub links_by_global_id: HashMap<GlobalId, SuperGraphLinkInfo>,
 }
 
 impl SuperGraph {
@@ -110,43 +113,18 @@ impl SuperGraph {
         let mut remaining_ops = self.nodes.keys().cloned().collect::<Vec<_>>();
 
         loop {
+            if context.observer.should_cancel() {
+                return Err(SuperGraphError::Cancelled);
+            }
             let op_id_to_use = {
                 let mut op_id_to_use = None;
                 for op_id in &remaining_ops {
                     let op = self.nodes.get(op_id).unwrap();
                     let mut all_inputs_ready = true;
                     for input in SuperGraphNode::inputs(op) {
-                        match input {
-                            SuperGraphAnyLink::Tensor(x) => {
-                                if !data.tensors.contains_key(&x) {
-                                    all_inputs_ready = false;
-                                    break;
-                                }
-                            }
-                            SuperGraphAnyLink::String(x) => {
-                                if !data.strings.contains_key(&x) {
-                                    all_inputs_ready = false;
-                                    break;
-                                }
-                            }
-                            SuperGraphAnyLink::TensorMap(x) => {
-                                if !data.tensor_maps.contains_key(&x) {
-                                    all_inputs_ready = false;
-                                    break;
-                                }
-                            }
-                            SuperGraphAnyLink::Tokenizer(x) => {
-                                if !data.tokenizers.contains_key(&x) {
-                                    all_inputs_ready = false;
-                                    break;
-                                }
-                            }
-                            SuperGraphAnyLink::Hash(x) => {
-                                if !data.hashes.contains_key(&x) {
-                                    all_inputs_ready = false;
-                                    break;
-                                }
-                            }
+                        if !data.contains_link(&input) {
+                            all_inputs_ready = false;
+                            break;
                         }
                     }
                     if all_inputs_ready {
@@ -160,6 +138,9 @@ impl SuperGraph {
                 let op_id = *op_id;
                 let mut this_path = node_path.to_vec();
                 let op = self.nodes.get(&op_id).unwrap();
+                if context.observer.should_cancel() {
+                    return Err(SuperGraphError::Cancelled);
+                }
                 let start_instant = Instant::now();
                 op.eval(&this_path, &mut data, context)?;
                 this_path.push(op.global_id());
@@ -202,12 +183,14 @@ impl SuperGraph {
 
 pub struct SuperGraphBuilder {
     nodes: HashMap<GlobalId, SuperGraphAnyNode>,
+    link_labels: HashMap<GlobalId, String>,
 }
 
 impl SuperGraphBuilder {
     pub fn new() -> Self {
         Self {
             nodes: HashMap::new(),
+            link_labels: HashMap::new(),
         }
     }
 
@@ -223,13 +206,14 @@ impl SuperGraphBuilder {
         input_links: &[SuperGraphAnyLink],
         output_links: &[SuperGraphAnyLink],
     ) -> SuperGraph {
+        let Self { nodes, link_labels } = self;
         // Validate that all input and output links are present in the graph
         let mut sourced_links = HashSet::new();
         let mut sinked_links = HashSet::new();
         sinked_links.extend(output_links.iter().cloned());
         sourced_links.extend(input_links.iter().cloned());
 
-        for node in self.nodes.values() {
+        for node in nodes.values() {
             for link in node.outputs() {
                 if !sourced_links.insert(link) {
                     panic!("Link {link:?} is sourced multiple times");
@@ -246,36 +230,63 @@ impl SuperGraphBuilder {
 
         let links_by_global_id = sourced_links
             .iter()
-            .map(|link| (link.global_id(), *link))
+            .map(|link| {
+                let label = link_labels.get(&link.global_id()).cloned();
+                (link.global_id(), SuperGraphLinkInfo::new(*link, label))
+            })
             .collect::<HashMap<_, _>>();
 
         SuperGraph {
             global_id: GlobalId::new(rng),
-            nodes: self.nodes,
+            nodes,
             input_links: HashSet::from_iter(input_links.iter().cloned()),
             output_links: HashSet::from_iter(output_links.iter().cloned()),
             links_by_global_id,
         }
     }
 
-    pub fn new_tensor_link(&mut self, rng: &mut impl RngCore) -> SuperGraphLinkTensor {
-        SuperGraphLinkTensor::new(rng)
+    pub fn set_link_label(&mut self, link: SuperGraphLink, label: impl Into<String>) {
+        self.link_labels.insert(link.global_id(), label.into());
     }
 
-    pub fn new_model_link(&mut self, rng: &mut impl RngCore) -> SuperGraphLinkTensorMap {
-        SuperGraphLinkTensorMap::new(rng)
+    pub fn new_tensor_link(&mut self, rng: &mut impl Rng) -> SuperGraphLink {
+        SuperGraphLink::new(SuperGraphLinkKind::Tensor, rng)
     }
 
-    pub fn new_tokenizer_link(&mut self, rng: &mut impl RngCore) -> SuperGraphLinkTokenizer {
-        SuperGraphLinkTokenizer::new(rng)
+    pub fn new_model_link(&mut self, rng: &mut impl Rng) -> SuperGraphLink {
+        SuperGraphLink::new(SuperGraphLinkKind::TensorMap, rng)
     }
 
-    pub fn new_string_link(&mut self, rng: &mut impl RngCore) -> SuperGraphLinkString {
-        SuperGraphLinkString::new(rng)
+    pub fn new_tokenizer_link(&mut self, rng: &mut impl Rng) -> SuperGraphLink {
+        SuperGraphLink::new(SuperGraphLinkKind::Tokenizer, rng)
     }
 
-    pub fn new_hash_link(&mut self, rng: &mut impl RngCore) -> SuperGraphLinkHash {
-        SuperGraphLinkHash::new(rng)
+    pub fn new_string_link(&mut self, rng: &mut impl Rng) -> SuperGraphLink {
+        SuperGraphLink::new(SuperGraphLinkKind::String, rng)
+    }
+
+    pub fn new_hash_link(&mut self, rng: &mut impl Rng) -> SuperGraphLink {
+        SuperGraphLink::new(SuperGraphLinkKind::Hash, rng)
+    }
+
+    pub fn new_image_link(&mut self, rng: &mut impl Rng) -> SuperGraphLink {
+        SuperGraphLink::new(SuperGraphLinkKind::Image, rng)
+    }
+
+    pub fn new_audio_clip_link(&mut self, rng: &mut impl Rng) -> SuperGraphLink {
+        SuperGraphLink::new(SuperGraphLinkKind::AudioClip, rng)
+    }
+
+    pub fn new_multimodal_item_link(&mut self, rng: &mut impl Rng) -> SuperGraphLink {
+        SuperGraphLink::new(SuperGraphLinkKind::MultimodalItem, rng)
+    }
+
+    pub fn new_list_link(
+        &mut self,
+        item_kind: SuperGraphAtomicLinkKind,
+        rng: &mut impl Rng,
+    ) -> SuperGraphLink {
+        SuperGraphLink::new(SuperGraphLinkKind::list(item_kind), rng)
     }
 }
 
@@ -294,7 +305,7 @@ impl Link for SuperGraphAnyLink {
 impl Graph for SuperGraph {
     type Error = ();
     type AnyNode = SuperGraphAnyNode;
-    type AnyLink = SuperGraphAnyLink;
+    type AnyLink = SuperGraphLinkInfo;
 
     fn global_id(&self) -> GlobalId {
         self.global_id

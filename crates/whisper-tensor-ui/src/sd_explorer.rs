@@ -1,11 +1,12 @@
 use crate::app::{InterfaceId, LoadedModels, LoadedTokenizers, ModelLoadState};
 use crate::websockets::ServerRequestManager;
+use crate::widgets::progress_report::SuperGraphProgressWidgetState;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::dtype::DType;
 use whisper_tensor::interfaces::{AnyInterface, ImageGenerationInterface};
-use whisper_tensor::super_graph::links::SuperGraphLinkTensor;
+use whisper_tensor::super_graph::links::SuperGraphLink;
 use whisper_tensor_server::{SuperGraphRequest, SuperGraphRequestBackendMode};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -33,9 +34,10 @@ impl Default for SDExplorerState {
 
 pub(crate) struct SDExplorerApp {
     selected_interface_id: Option<InterfaceId>,
-    pending_request: Option<(u64, SuperGraphLinkTensor)>,
+    pending_request: Option<(u64, SuperGraphLink)>,
     generated_image: Option<egui::TextureHandle>,
     status_message: Option<String>,
+    progress_widget_state: SuperGraphProgressWidgetState,
 }
 
 impl SDExplorerApp {
@@ -45,6 +47,7 @@ impl SDExplorerApp {
             pending_request: None,
             generated_image: None,
             status_message: None,
+            progress_widget_state: SuperGraphProgressWidgetState::default(),
         }
     }
 
@@ -52,10 +55,16 @@ impl SDExplorerApp {
         &mut self,
         state: &mut SDExplorerState,
         loaded_models: &mut LoadedModels,
-        loaded_tokenizers: &mut LoadedTokenizers,
+        _loaded_tokenizers: &mut LoadedTokenizers,
         server_request_manager: &mut ServerRequestManager,
         ui: &mut egui::Ui,
     ) {
+        if let Some((request_id, _output_link)) = self.pending_request
+            && let Some(reports) = server_request_manager.get_reports(request_id)
+        {
+            self.progress_widget_state.ingest_reports(reports);
+        }
+
         // Handle pending response
         if let Some((request_id, output_link)) = self.pending_request
             && let Some(response) = server_request_manager.get_response(request_id)
@@ -145,59 +154,33 @@ impl SDExplorerApp {
                     ));
                 });
 
-                let is_running = self.pending_request.is_some();
-
-                // Check all needed tokenizers are loaded
-                let all_tokenizer_infos: Vec<_> = sd
-                    .positive_prompts
-                    .iter()
-                    .chain(sd.negative_prompts.iter().flatten())
-                    .map(|pi| &pi.tokenizer)
-                    .collect();
-                let mut tokenizers_ready = true;
-                let mut tokenizer_error = None;
-                for tok_info in &all_tokenizer_infos {
-                    match loaded_tokenizers
-                        .loaded_tokenizers
-                        .get(*tok_info)
-                        .and_then(|v| v.as_ref())
-                    {
-                        Some(Ok(_)) => {}
-                        Some(Err(err)) => {
-                            tokenizer_error = Some(err.clone());
-                            break;
-                        }
-                        None => {
-                            tokenizers_ready = false;
-                            break;
-                        }
-                    }
-                }
-
                 ui.horizontal(|ui| {
-                    if is_running {
+                    if let Some(request_id) = self.pending_request.as_ref().map(|x| x.0) {
                         ui.spinner();
                         ui.label("Generating...");
-                    } else if let Some(err) = &tokenizer_error {
-                        ui.label(format!("Tokenizer error: {err}"));
-                    } else if tokenizers_ready {
+                        if ui.button("Cancel").clicked() {
+                            server_request_manager.cancel_request(request_id);
+                            self.pending_request = None;
+                            self.progress_widget_state.clear();
+                            self.status_message = Some("Cancelled".to_string());
+                        }
+                    } else {
                         if ui.button("Generate").clicked() {
                             self.run_generation(
                                 state,
                                 sd,
                                 interface.model_ids.clone(),
-                                loaded_tokenizers,
                                 server_request_manager,
                             );
                         }
-                    } else {
-                        ui.spinner();
-                        ui.label("Loading tokenizer...");
                     }
                 });
 
                 if let Some(msg) = &self.status_message {
                     ui.label(msg);
+                }
+                if !self.progress_widget_state.is_empty() {
+                    self.progress_widget_state.show(ui);
                 }
 
                 // Display image
@@ -220,38 +203,14 @@ impl SDExplorerApp {
         state: &SDExplorerState,
         sd: &ImageGenerationInterface,
         model_ids: Vec<whisper_tensor_server::LoadedModelId>,
-        loaded_tokenizers: &LoadedTokenizers,
         server_request_manager: &mut ServerRequestManager,
     ) {
-        // Tokenize positive prompts
+        self.progress_widget_state.clear();
         let mut tensor_inputs = HashMap::new();
-        for pi in &sd.positive_prompts {
-            let tokenizer = loaded_tokenizers
-                .loaded_tokenizers
-                .get(&pi.tokenizer)
-                .and_then(|v| v.as_ref())
-                .and_then(|r| r.as_ref().ok())
-                .expect("tokenizer should be loaded");
-            let ids = pi.tokenize(tokenizer.as_ref(), &state.prompt_text);
-            let tensor =
-                NDArrayNumericTensor::from_vec_shape(ids, &vec![1, pi.seq_len as u64]).unwrap();
-            tensor_inputs.insert(pi.link, tensor);
-        }
-
-        // Tokenize negative prompts
-        if let Some(neg_prompts) = &sd.negative_prompts {
-            for pi in neg_prompts {
-                let tokenizer = loaded_tokenizers
-                    .loaded_tokenizers
-                    .get(&pi.tokenizer)
-                    .and_then(|v| v.as_ref())
-                    .and_then(|r| r.as_ref().ok())
-                    .expect("tokenizer should be loaded");
-                let ids = pi.tokenize(tokenizer.as_ref(), "");
-                let tensor =
-                    NDArrayNumericTensor::from_vec_shape(ids, &vec![1, pi.seq_len as u64]).unwrap();
-                tensor_inputs.insert(pi.link, tensor);
-            }
+        let mut string_inputs = HashMap::new();
+        string_inputs.insert(sd.positive_prompt_input, state.prompt_text.clone());
+        if let Some(negative_link) = sd.negative_prompt_input {
+            string_inputs.insert(negative_link, String::new());
         }
 
         // Compute scheduler params
@@ -320,11 +279,12 @@ impl SDExplorerApp {
             attention_token: None,
             super_graph: sd.super_graph.clone(),
             subscribed_tensors: Vec::new(),
-            string_inputs: HashMap::new(),
+            string_inputs,
             use_cache: None,
             backend_mode: SuperGraphRequestBackendMode::NDArray,
             symbolic_graph_ids,
             tensor_inputs,
+            audio_inputs: HashMap::new(),
             model_inputs,
             hash_inputs: HashMap::new(),
         });
@@ -396,15 +356,15 @@ pub(crate) fn generate_normal_noise(n: usize, seed: u64) -> Vec<f32> {
     let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
     let mut vals = Vec::with_capacity(n);
     while vals.len() + 1 < n {
-        let u1: f32 = rand::Rng::random_range(&mut rng, f32::EPSILON..1.0);
-        let u2: f32 = rand::Rng::random_range(&mut rng, 0.0f32..std::f32::consts::TAU);
+        let u1: f32 = rand::RngExt::random_range(&mut rng, f32::EPSILON..1.0);
+        let u2: f32 = rand::RngExt::random_range(&mut rng, 0.0f32..std::f32::consts::TAU);
         let r = (-2.0 * u1.ln()).sqrt();
         vals.push(r * u2.cos());
         vals.push(r * u2.sin());
     }
     if vals.len() < n {
-        let u1: f32 = rand::Rng::random_range(&mut rng, f32::EPSILON..1.0);
-        let u2: f32 = rand::Rng::random_range(&mut rng, 0.0f32..std::f32::consts::TAU);
+        let u1: f32 = rand::RngExt::random_range(&mut rng, f32::EPSILON..1.0);
+        let u2: f32 = rand::RngExt::random_range(&mut rng, 0.0f32..std::f32::consts::TAU);
         vals.push((-2.0 * u1.ln()).sqrt() * u2.cos());
     }
     vals

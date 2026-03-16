@@ -1,0 +1,448 @@
+use crate::onnx_graph::WeightStorageStrategy;
+use std::collections::HashMap;
+use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
+use whisper_tensor::dtype::DType;
+use whisper_tensor::interfaces::TextInferenceTokensInLogitOutInterface;
+use whisper_tensor::metadata::TokenizerInfo;
+use whisper_tensor::milli_graph::MilliOpGraph;
+use whisper_tensor::milli_graph::ops::{Cast, Constant, Shape, SimpleBinary, Squeeze, Unsqueeze};
+use whisper_tensor::super_graph::SuperGraphBuilder;
+use whisper_tensor::super_graph::links::{
+    SuperGraphLink, SuperGraphLinkDouble, SuperGraphLinkKind, SuperGraphLinkTriple,
+};
+use whisper_tensor::super_graph::nodes::{
+    SuperGraphNode, SuperGraphNodeMilliOpGraph, SuperGraphNodeModelExecution,
+    SuperGraphNodeRNNCacheRead, SuperGraphNodeRNNCacheWrite, SuperGraphNodeReportProgress,
+    SuperGraphNodeScan,
+};
+
+/// Get the default weight storage strategy for loaders.
+pub(super) fn default_storage() -> WeightStorageStrategy {
+    WeightStorageStrategy::OriginReference
+}
+
+/// Build a SuperGraph for an RNN-style / KV-cache model (processes one token at a time
+/// with recurrent state). Used by TransformersLoader, Rwkv7Loader, and GgufLoader.
+///
+/// `state_pairs` are `(input_name, output_name)` pairs for state tensors.
+/// The SuperGraph wraps the model in a Scan loop with RNN cache read/write.
+pub(super) fn build_rnn_supergraph(
+    tokenizer: TokenizerInfo,
+    token_input_name: &str,
+    logit_output_name: &str,
+    state_pairs: &[(String, String)],
+    symbolic_graph: &whisper_tensor::symbolic_graph::SymbolicGraph,
+    rng: &mut impl rand::Rng,
+) -> TextInferenceTokensInLogitOutInterface {
+    let mut super_graph_builder = SuperGraphBuilder::new();
+    let token_context_input_link = super_graph_builder.new_tensor_link(rng);
+    let model_input_link = super_graph_builder.new_model_link(rng);
+    let cache_key = super_graph_builder.new_hash_link(rng);
+    super_graph_builder.set_link_label(cache_key, "cache_key");
+    super_graph_builder.set_link_label(model_input_link, "model_weights");
+    super_graph_builder.set_link_label(token_context_input_link, token_input_name);
+
+    let state_ids: Vec<usize> = (0..state_pairs.len()).collect();
+
+    let state_init_links: Vec<(usize, SuperGraphLink)> = state_ids
+        .iter()
+        .map(|&id| (id, super_graph_builder.new_tensor_link(rng)))
+        .collect();
+
+    // Cache read
+    let (post_cache_tokens_input, post_cache_state_init_links) = {
+        let post_cache_state_init_links: Vec<(usize, SuperGraphLink)> = state_ids
+            .iter()
+            .map(|&id| (id, super_graph_builder.new_tensor_link(rng)))
+            .collect();
+        let post_cache_tokens = super_graph_builder.new_tensor_link(rng);
+        let mut node = SuperGraphNodeRNNCacheRead::new(
+            cache_key,
+            token_context_input_link,
+            post_cache_tokens,
+            post_cache_state_init_links
+                .iter()
+                .map(|(id, link)| (id.to_string(), *link))
+                .collect(),
+            state_init_links
+                .iter()
+                .map(|(id, link)| (id.to_string(), *link))
+                .collect(),
+            rng,
+        );
+        node.label = Some("cache_read".to_string());
+        super_graph_builder.add_node(node.to_any());
+        (post_cache_tokens, post_cache_state_init_links)
+    };
+
+    // Loop count from token sequence length
+    let loop_count_link = {
+        let loop_count_link = SuperGraphLink::new(SuperGraphLinkKind::Tensor, rng);
+        let (mut milli_graph, input_map) =
+            MilliOpGraph::new(std::iter::once(post_cache_tokens_input.global_id()), rng);
+        let milli_op_graph_input = *input_map.get(&post_cache_tokens_input.global_id()).unwrap();
+        let shape_out = Shape::push_new_with_label(
+            &mut milli_graph,
+            milli_op_graph_input,
+            Some("token_shape".to_string()),
+            rng,
+        );
+        milli_graph.set_output_map(std::iter::once((shape_out, loop_count_link.global_id())));
+        let mut node = SuperGraphNodeMilliOpGraph::new(milli_graph, rng);
+        node.label = Some("loop_count_from_shape".to_string());
+        super_graph_builder.add_node(node.to_any());
+        loop_count_link
+    };
+
+    let progress_tier_link = {
+        let progress_tier_link = super_graph_builder.new_tensor_link(rng);
+        let (mut milli_graph, _) = MilliOpGraph::new(std::iter::empty(), rng);
+        let tier_zero = Constant::push_new_with_label(
+            &mut milli_graph,
+            NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
+            Some("progress_tier_zero".to_string()),
+            rng,
+        );
+        milli_graph.set_output_map(std::iter::once((tier_zero, progress_tier_link.global_id())));
+        let mut node = SuperGraphNodeMilliOpGraph::new(milli_graph, rng);
+        node.label = Some("progress_init".to_string());
+        super_graph_builder.add_node(node.to_any());
+        progress_tier_link
+    };
+
+    // State initialization (zeros matching model input shapes/dtypes)
+    {
+        let (mut milli_graph, _) = MilliOpGraph::new(std::iter::empty(), rng);
+        let mut output_map = HashMap::new();
+        let mut output_order = vec![];
+        for (id, link) in &state_init_links {
+            let input_name = &state_pairs[*id].0;
+            let input_tensor_id = *symbolic_graph
+                .get_tensors_by_name()
+                .get(input_name)
+                .expect("state pair input tensor not found in graph");
+            let input_tensor_info = symbolic_graph
+                .get_tensor_info(input_tensor_id)
+                .expect("state pair input tensor has no info");
+            let input_tensor_shape: Vec<u64> = input_tensor_info
+                .shape
+                .clone()
+                .expect("state pair input tensor has no shape")
+                .iter()
+                .map(|x| x.as_numeric().copied().unwrap_or(0))
+                .collect();
+            let input_tensor_dtype = input_tensor_info
+                .dtype
+                .expect("state pair input tensor has no dtype");
+            let num_elements = input_tensor_shape.iter().product::<u64>();
+            let input_tensor = NDArrayNumericTensor::from_vec_shape(
+                vec![0.0; num_elements as usize],
+                &input_tensor_shape,
+            )
+            .unwrap()
+            .cast(input_tensor_dtype)
+            .unwrap();
+            let input_tensor_tid = Constant::push_new_with_label(
+                &mut milli_graph,
+                input_tensor,
+                Some(format!("state_init_{}", input_name)),
+                rng,
+            );
+            output_map.insert(input_tensor_tid, link.global_id());
+            output_order.push(link.global_id());
+        }
+        milli_graph.set_output_map_ordered(output_map, output_order);
+        let mut node = SuperGraphNodeMilliOpGraph::new(milli_graph, rng);
+        node.label = Some("state_zero_init".to_string());
+        super_graph_builder.add_node(node.to_any());
+    }
+
+    // Build scan sub-graph
+    let mut sub_builder = SuperGraphBuilder::new();
+    let sub_model_input_link = sub_builder.new_model_link(rng);
+    let sub_token_input = sub_builder.new_tensor_link(rng);
+    let sub_progress_tier = sub_builder.new_tensor_link(rng);
+    let sub_total_steps = sub_builder.new_tensor_link(rng);
+    let sub_step_in = sub_builder.new_tensor_link(rng);
+    let sub_step_out = sub_builder.new_tensor_link(rng);
+    sub_builder.set_link_label(sub_model_input_link, "model_weights");
+    sub_builder.set_link_label(sub_token_input, token_input_name);
+    sub_builder.set_link_label(sub_progress_tier, "progress_tier");
+    sub_builder.set_link_label(sub_total_steps, "total_steps");
+    sub_builder.set_link_label(sub_step_in, "step_in");
+    sub_builder.set_link_label(sub_step_out, "step_out");
+
+    let state_input_links: HashMap<usize, SuperGraphLink> = state_ids
+        .iter()
+        .map(|&id| (id, sub_builder.new_tensor_link(rng)))
+        .collect();
+    let state_output_links: HashMap<usize, SuperGraphLink> = state_ids
+        .iter()
+        .map(|&id| (id, sub_builder.new_tensor_link(rng)))
+        .collect();
+    for &id in &state_ids {
+        let pair = &state_pairs[id];
+        sub_builder.set_link_label(
+            *state_input_links.get(&id).unwrap(),
+            format!("state_in_{}", pair.0),
+        );
+        sub_builder.set_link_label(
+            *state_output_links.get(&id).unwrap(),
+            format!("state_out_{}", pair.1),
+        );
+    }
+    let final_state_output_links: Vec<(usize, SuperGraphLink)> = state_ids
+        .iter()
+        .map(|&id| (id, super_graph_builder.new_tensor_link(rng)))
+        .collect();
+    for (id, link) in &final_state_output_links {
+        super_graph_builder.set_link_label(*link, format!("state_out_{}", state_pairs[*id].1));
+    }
+
+    // Input processing in sub-graph: cast dtype + unsqueeze
+    let adjusted_token_context = {
+        let input_tensor_id = *symbolic_graph
+            .get_tensors_by_name()
+            .get(token_input_name)
+            .expect("token input tensor not found in graph");
+        let input_tensor_info = symbolic_graph
+            .get_tensor_info(input_tensor_id)
+            .expect("token input tensor has no info");
+        let input_tensor_rank = input_tensor_info
+            .shape
+            .clone()
+            .expect("token input tensor has no shape")
+            .len();
+        let input_tensor_dtype = input_tensor_info
+            .dtype
+            .expect("token input tensor has no dtype");
+
+        let (mut milli_graph, input_map) =
+            MilliOpGraph::new(std::iter::once(sub_token_input.global_id()), rng);
+        let milli_op_graph_input = *input_map.get(&sub_token_input.global_id()).unwrap();
+        let mut x = Cast::push_new_with_label(
+            &mut milli_graph,
+            milli_op_graph_input,
+            input_tensor_dtype,
+            Some("token.cast_dtype".to_string()),
+            rng,
+        );
+        let zero_tid = Constant::push_new_with_label(
+            &mut milli_graph,
+            NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
+            Some("token.unsqueeze_axis".to_string()),
+            rng,
+        );
+        for _ in 0..input_tensor_rank {
+            x = Unsqueeze::push_new_with_label(
+                &mut milli_graph,
+                x,
+                zero_tid,
+                Some("token.add_batch_dim".to_string()),
+                rng,
+            );
+        }
+
+        let processed_input_link = sub_builder.new_tensor_link(rng);
+        sub_builder.set_link_label(processed_input_link, "token_preprocessed");
+        milli_graph.set_output_map(std::iter::once((x, processed_input_link.global_id())));
+        let mut node = SuperGraphNodeMilliOpGraph::new(milli_graph, rng);
+        node.label = Some("token_preprocess".to_string());
+        sub_builder.add_node(node.to_any());
+        processed_input_link
+    };
+
+    // Model execution in sub-graph
+    let sub_logit_output = sub_builder.new_tensor_link(rng);
+    sub_builder.set_link_label(sub_logit_output, "raw_logits");
+    {
+        let mut tensor_inputs = vec![(adjusted_token_context, token_input_name.to_string())];
+        for (id, pair) in state_pairs.iter().enumerate() {
+            tensor_inputs.push((*state_input_links.get(&id).unwrap(), pair.0.clone()));
+        }
+        let mut tensor_outputs = vec![(logit_output_name.to_string(), sub_logit_output)];
+        for (id, pair) in state_pairs.iter().enumerate() {
+            tensor_outputs.push((pair.1.clone(), *state_output_links.get(&id).unwrap()));
+        }
+        let mut node = SuperGraphNodeModelExecution::new(
+            rng,
+            sub_model_input_link,
+            0,
+            tensor_inputs,
+            tensor_outputs,
+        );
+        node.label = Some("decoder_forward".to_string());
+        sub_builder.add_node(node.to_any());
+    }
+
+    // Output processing in sub-graph: squeeze + cast to F32
+    let processed_logit_output_link = {
+        let output_tensor_id = *symbolic_graph
+            .get_tensors_by_name()
+            .get(logit_output_name)
+            .expect("logit output tensor not found in graph");
+        let output_tensor_info = symbolic_graph
+            .get_tensor_info(output_tensor_id)
+            .expect("logit output tensor has no info");
+        let output_tensor_rank = output_tensor_info
+            .shape
+            .clone()
+            .expect("logit output tensor has no shape")
+            .len();
+
+        let (mut milli_graph, input_map) =
+            MilliOpGraph::new(std::iter::once(sub_logit_output.global_id()), rng);
+        let milli_op_graph_input = *input_map.get(&sub_logit_output.global_id()).unwrap();
+        let mut x = milli_op_graph_input;
+        let zero_tid = Constant::push_new_with_label(
+            &mut milli_graph,
+            NDArrayNumericTensor::from_vec_shape(vec![0i64], &vec![1]).unwrap(),
+            Some("logits.squeeze_axis".to_string()),
+            rng,
+        );
+        for _ in 0..(output_tensor_rank - 1) {
+            x = Squeeze::push_new_with_label(
+                &mut milli_graph,
+                x,
+                zero_tid,
+                Some("logits.remove_batch_dim".to_string()),
+                rng,
+            );
+        }
+        x = Cast::push_new_with_label(
+            &mut milli_graph,
+            x,
+            DType::F32,
+            Some("logits.cast_f32".to_string()),
+            rng,
+        );
+
+        let processed_logit_output_link = sub_builder.new_tensor_link(rng);
+        sub_builder.set_link_label(processed_logit_output_link, logit_output_name);
+        milli_graph.set_output_map(std::iter::once((
+            x,
+            processed_logit_output_link.global_id(),
+        )));
+        let mut node = SuperGraphNodeMilliOpGraph::new(milli_graph, rng);
+        node.label = Some("logits_postprocess".to_string());
+        sub_builder.add_node(node.to_any());
+        processed_logit_output_link
+    };
+
+    {
+        let (mut milli_graph, input_map) =
+            MilliOpGraph::new(std::iter::once(sub_step_in.global_id()), rng);
+        let step_in = *input_map.get(&sub_step_in.global_id()).unwrap();
+        let one = Constant::push_new_with_label(
+            &mut milli_graph,
+            NDArrayNumericTensor::from_vec_shape(vec![1i64], &vec![1]).unwrap(),
+            Some("step.one".to_string()),
+            rng,
+        );
+        let step_next = SimpleBinary::add(&mut milli_graph, step_in, one, rng);
+        milli_graph.set_output_map(std::iter::once((step_next, sub_step_out.global_id())));
+        let mut node = SuperGraphNodeMilliOpGraph::new(milli_graph, rng);
+        node.label = Some("step_increment".to_string());
+        sub_builder.add_node(node.to_any());
+    }
+
+    let mut report =
+        SuperGraphNodeReportProgress::new(sub_progress_tier, sub_step_out, sub_total_steps, rng);
+    report.label = Some("decode_progress".to_string());
+    sub_builder.add_node(report.to_any());
+
+    // Build scan state links
+    let state_links: Vec<SuperGraphLinkTriple> = post_cache_state_init_links
+        .iter()
+        .map(|(id, init_link)| {
+            SuperGraphLinkTriple::new(
+                *init_link,
+                *state_input_links.get(id).unwrap(),
+                *state_output_links.get(id).unwrap(),
+            )
+        })
+        .chain(std::iter::once(SuperGraphLinkTriple::new(
+            progress_tier_link,
+            sub_step_in,
+            sub_step_out,
+        )))
+        .collect();
+
+    let outer_logit_output_link = super_graph_builder.new_tensor_link(rng);
+    super_graph_builder.set_link_label(outer_logit_output_link, logit_output_name);
+
+    let mut input_links = vec![
+        sub_model_input_link.to_any(),
+        sub_token_input.to_any(),
+        sub_progress_tier.to_any(),
+        sub_total_steps.to_any(),
+        sub_step_in.to_any(),
+    ];
+    for &id in &state_ids {
+        input_links.push(state_input_links.get(&id).unwrap().to_any());
+    }
+    let mut output_links = vec![processed_logit_output_link.to_any(), sub_step_out.to_any()];
+    for id in &state_ids {
+        output_links.push(state_output_links.get(id).unwrap().to_any());
+    }
+
+    let sub_graph_inner = sub_builder.build(rng, &input_links, &output_links);
+
+    let final_state_outputs: Vec<SuperGraphLinkDouble> = final_state_output_links
+        .iter()
+        .map(|(id, link)| SuperGraphLinkDouble::new(*state_output_links.get(id).unwrap(), *link))
+        .collect();
+
+    let mut scan_node = SuperGraphNodeScan::new(
+        sub_graph_inner,
+        loop_count_link,
+        vec![
+            SuperGraphLinkDouble::new(model_input_link, sub_model_input_link),
+            SuperGraphLinkDouble::new(progress_tier_link, sub_progress_tier),
+            SuperGraphLinkDouble::new(loop_count_link, sub_total_steps),
+        ],
+        state_links,
+        vec![(post_cache_tokens_input, sub_token_input, 0)],
+        vec![(processed_logit_output_link, outer_logit_output_link, 0)],
+        final_state_outputs.clone(),
+        rng,
+    );
+    scan_node.label = Some("token_decode_scan".to_string());
+    super_graph_builder.add_node(scan_node.to_any());
+
+    // Cache write
+    {
+        let mut node = SuperGraphNodeRNNCacheWrite::new(
+            cache_key,
+            token_context_input_link,
+            final_state_output_links
+                .iter()
+                .map(|(id, link)| (id.to_string(), *link))
+                .collect(),
+            rng,
+        );
+        node.label = Some("cache_write".to_string());
+        super_graph_builder.add_node(node.to_any());
+    }
+
+    let super_graph_inputs = vec![
+        cache_key.to_any(),
+        model_input_link.to_any(),
+        token_context_input_link.to_any(),
+    ];
+    let super_graph_outputs = vec![outer_logit_output_link.to_any()];
+    let super_graph = super_graph_builder.build(
+        rng,
+        super_graph_inputs.as_slice(),
+        super_graph_outputs.as_slice(),
+    );
+
+    TextInferenceTokensInLogitOutInterface {
+        tokenizer,
+        model_input_link,
+        token_context_input_link,
+        logit_output_link: outer_logit_output_link,
+        super_graph,
+        cache_key_input_link: cache_key,
+    }
+}

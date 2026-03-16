@@ -1,4 +1,4 @@
-use super::{build_rnn_supergraph, default_storage, onnx_bytes_to_model};
+use super::shared::{build_rnn_supergraph, default_storage, onnx_bytes_to_model};
 use whisper_tensor::loader::*;
 use whisper_tensor::metadata::TokenizerInfo;
 
@@ -29,8 +29,8 @@ impl Loader for Rwkv7Loader {
         let path = require_path(&config, "path")?;
         let storage = default_storage();
 
-        let onnx_data =
-            crate::rwkv7::load_rwkv7_pth(&path, storage).map_err(LoaderError::LoadFailed)?;
+        let onnx_data = crate::models::llm::rwkv7::load_rwkv7_pth(&path, storage)
+            .map_err(LoaderError::LoadFailed)?;
 
         let model_name = path
             .file_stem()

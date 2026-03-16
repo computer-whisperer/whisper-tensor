@@ -18,6 +18,10 @@ pub trait SymbolicGraphObserver {
         tensor: &NumericTensor<DynRank>,
         backend: &mut EvalBackend,
     );
+    fn on_loading_weight(&mut self, path: &[GlobalId], weight_name: Option<String>);
+    fn should_cancel(&mut self) -> bool {
+        false
+    }
 }
 
 impl SymbolicGraphObserver for () {
@@ -35,5 +39,9 @@ impl SymbolicGraphObserver for () {
         _tensor: &NumericTensor<DynRank>,
         _backend: &mut EvalBackend,
     ) {
+    }
+    fn on_loading_weight(&mut self, _path: &[GlobalId], _weight_name: Option<String>) {}
+    fn should_cancel(&mut self) -> bool {
+        false
     }
 }

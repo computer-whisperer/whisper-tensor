@@ -194,7 +194,7 @@ pub fn matmul_bf16_fp32_accumulate(
             for col in 0..p {
                 let mut acc = 0.0f32;
                 for kk in 0..k_left {
-                    acc = acc + a_mat[(r, kk)] * b_mat[(kk, col)];
+                    acc += a_mat[(r, kk)] * b_mat[(kk, col)];
                 }
                 c[(r, col)] = acc;
             }
@@ -334,7 +334,10 @@ where
             for col in 0..p {
                 let mut acc = T::zero();
                 for kk in 0..k_left {
-                    acc = acc + a_mat[(r, kk)] * b_mat[(kk, col)];
+                    #[allow(clippy::assign_op_pattern)]
+                    {
+                        acc = acc + a_mat[(r, kk)] * b_mat[(kk, col)];
+                    }
                 }
                 c[(r, col)] = acc;
             }

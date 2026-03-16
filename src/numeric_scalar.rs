@@ -499,7 +499,9 @@ impl NumericScalar {
         match (self, other) {
             (Self::F64(a), Self::F64(b)) => Self::F64(a.powf(*b)),
             (Self::F32(a), Self::F32(b)) => Self::F32(a.powf(*b)),
-            (Self::BF16(a), Self::BF16(b)) => Self::BF16(bf16::from_f32(a.to_f32().powf(b.to_f32()))),
+            (Self::BF16(a), Self::BF16(b)) => {
+                Self::BF16(bf16::from_f32(a.to_f32().powf(b.to_f32())))
+            }
             (Self::F16(a), Self::F16(b)) => Self::F16(f16::from_f32(a.to_f32().powf(b.to_f32()))),
             _ => panic!("Cannot pow {:?} ^ {:?}", self.dtype(), other.dtype()),
         }

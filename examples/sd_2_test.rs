@@ -4,8 +4,8 @@ use whisper_tensor::DynRank;
 use whisper_tensor::backends::eval_backend::EvalBackend;
 use whisper_tensor::model::Model;
 use whisper_tensor::numeric_tensor::NumericTensor;
+use whisper_tensor_import::models::diffusion::sd2;
 use whisper_tensor_import::onnx_graph::WeightStorageStrategy;
-use whisper_tensor_import::sd2;
 
 const CHECKPOINT: &str = "/mnt/secondary/neural_networks/sd2.1/v2-1_768-ema-pruned.safetensors";
 

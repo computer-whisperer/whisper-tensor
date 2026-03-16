@@ -23,8 +23,8 @@ fn test_dit() {
     let mmap = unsafe { memmap2::Mmap::map(&file) }.expect("mmap");
     let wm = SafetensorsWeightManager::new(vec![Arc::new(mmap)]).expect("weight manager");
 
-    let config = whisper_tensor_import::flux::FluxConfig::schnell_1024(256);
-    let onnx_data = whisper_tensor_import::flux::load_flux_dit_with_origin(
+    let config = whisper_tensor_import::models::diffusion::flux::FluxConfig::schnell_1024(256);
+    let onnx_data = whisper_tensor_import::models::diffusion::flux::load_flux_dit_with_origin(
         wm,
         config,
         WeightStorageStrategy::OriginReference,
@@ -116,7 +116,7 @@ fn test_vae() {
     let mmap = unsafe { memmap2::Mmap::map(&file) }.expect("mmap");
     let wm = SafetensorsWeightManager::new(vec![Arc::new(mmap)]).expect("weight manager");
 
-    let onnx_data = whisper_tensor_import::sd_common::build_flux_vae_decoder(
+    let onnx_data = whisper_tensor_import::models::diffusion::sd_common::build_flux_vae_decoder(
         wm,
         whisper_tensor_import::onnx_graph::tensor::DType::F32,
         WeightStorageStrategy::OriginReference,

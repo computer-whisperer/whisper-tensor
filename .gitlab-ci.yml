@@ -1,0 +1,70 @@
+stages:
+  - lint
+  - build
+  - test
+
+variables:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+  # Submodules are checked out manually in before_script because
+  # .gitmodules contains SSH URLs that fail in the runner container.
+  GIT_SUBMODULE_STRATEGY: none
+  # Features to test (everything except vulkan and tch which need
+  # heavy system deps not yet available in the runner image)
+  CI_FEATURES: "tokenizers,rwkv-tokenizer,http,blas,safetensors,cranelift"
+
+default:
+  image: docker.io/library/rust:latest
+  before_script:
+    # Rewrite SSH submodule URLs to HTTPS so the runner can clone without keys
+    - git config --global url."https://github.com/".insteadOf "git@github.com:"
+    - git submodule update --init --recursive
+    - apt-get update -qq && apt-get install -y -qq protobuf-compiler libopenblas-dev > /dev/null
+
+# ---------------------------------------------------------------------------
+# Lint stage
+# ---------------------------------------------------------------------------
+
+format:
+  stage: lint
+  before_script:
+    - git config --global url."https://github.com/".insteadOf "git@github.com:"
+    - git submodule update --init --recursive
+    - rustup component add rustfmt
+    - apt-get update -qq && apt-get install -y -qq protobuf-compiler jq > /dev/null
+  script:
+    - |
+      META=$(cargo metadata --no-deps --format-version 1)
+      PKGS=$(echo "$META" | jq -r '.packages[] | select(.manifest_path | test("/libs/") | not) | .name')
+      FMT_ARGS=""
+      for p in $PKGS; do FMT_ARGS="$FMT_ARGS -p $p"; done
+      cargo fmt $FMT_ARGS -- --check
+
+clippy:
+  stage: lint
+  script:
+    - rustup component add clippy
+    - cargo clippy -p whisper-tensor --no-deps --features "$CI_FEATURES" -- -D warnings
+    - cargo clippy -p whisper-tensor-server --no-deps --features "import,cranelift" -- -D warnings
+    - cargo clippy -p whisper-tensor-import --no-deps --all-features -- -D warnings
+
+# ---------------------------------------------------------------------------
+# Build stage
+# ---------------------------------------------------------------------------
+
+build:
+  stage: build
+  script:
+    - cargo build -p whisper-tensor --lib --locked --verbose
+    - cargo build -p whisper-tensor --lib --locked --verbose --features "$CI_FEATURES"
+    - cargo build -p whisper-tensor-server --locked --verbose
+
+# ---------------------------------------------------------------------------
+# Test stage
+# ---------------------------------------------------------------------------
+
+test:
+  stage: test
+  script:
+    - cargo test -p whisper-tensor --features "$CI_FEATURES" --locked --verbose

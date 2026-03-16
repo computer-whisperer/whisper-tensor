@@ -1,4 +1,4 @@
-use super::build_rnn_supergraph;
+use super::shared::build_rnn_supergraph;
 use std::sync::Arc;
 use whisper_tensor::loader::*;
 use whisper_tensor::metadata::TokenizerInfo;

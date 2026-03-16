@@ -3,17 +3,26 @@ pub mod inspect_windows;
 mod tensor_swatch;
 
 use crate::app::{InterfaceId, LoadedModels, LoadedTokenizers};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::audio_io::pick_audio_file_native;
+#[cfg(target_arch = "wasm32")]
+use crate::audio_io::{WebAudioFilePickReceiver, start_audio_file_pick_web};
+use crate::audio_io::{
+    decode_wav_bytes_to_mono_f32, download_audio_wav, play_audio_samples, stop_audio_playback,
+    tensor_to_audio_samples,
+};
 use crate::graph_explorer::inspect_windows::{
     AnyInspectWindow, InspectWindowGraphLink, InspectWindowGraphNode,
 };
 use crate::sd_explorer::{generate_normal_noise, tensor_to_egui_texture};
 use crate::websockets::ServerRequestManager;
+use crate::widgets::progress_report::SuperGraphProgressWidgetState;
 use crate::widgets::toggle::toggle_ui;
 use crate::widgets::tokenized_rich_text::TokenizedRichText;
 use egui::epaint::CubicBezierShape;
 use egui::{
-    Color32, ColorImage, Context, Label, Margin, Mesh, Pos2, Rect, Response, Sense, Shape, Stroke,
-    StrokeKind, TextureHandle, Ui, UiBuilder, Vec2, vec2,
+    Color32, ColorImage, Context, Label, Margin, Mesh, Pos2, Rect, Response, RichText, Sense,
+    Shape, Stroke, StrokeKind, TextureHandle, Ui, UiBuilder, Vec2, vec2,
 };
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
@@ -46,23 +55,27 @@ use std::any::Any;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::{Duration, Instant};
 use tensor_swatch::build_tensor_swatch;
 #[cfg(target_arch = "wasm32")]
 use web_time::{Duration, Instant};
-#[cfg(not(target_arch = "wasm32"))]
-use std::time::{Duration, Instant};
 use whisper_tensor::DynRank;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
+use whisper_tensor::dtype::DType;
 use whisper_tensor::graph::{GlobalId, Graph, GraphDyn};
-use whisper_tensor::interfaces::{AnyInterface, ImageGenerationInterface};
+use whisper_tensor::interfaces::{
+    AnyInterface, ImageGenerationInterface, KokoroVoiceEmbedding, TTSInputConfig,
+};
 use whisper_tensor::metadata::TokenizerInfo;
 use whisper_tensor::scalar_info::ScalarInfoTyped;
 use whisper_tensor::super_graph::nodes::SuperGraphAnyNode;
-use whisper_tensor::super_graph::{SuperGraph, SuperGraphLinkTensor};
+use whisper_tensor::super_graph::{SuperGraph, SuperGraphLink};
 use whisper_tensor::tokenizer::Tokenizer;
 use whisper_tensor_server::{
     AbbreviatedTensorReportSettings, AbbreviatedTensorValue, LoadedModelId, ServerConfigReport,
-    SuperGraphRequest, SuperGraphRequestBackendMode, WebsocketClientServerMessage,
+    SuperGraphAudioInput, SuperGraphRequest, SuperGraphRequestBackendMode,
+    WebsocketClientServerMessage,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -98,9 +111,10 @@ pub(crate) enum GraphRootSubjectSelection {
 pub(crate) struct TextInferenceData {
     tokens: Vec<u32>,
     logits: HashMap<Vec<u32>, Vec<(u32, f32)>>,
-    pending_request: Option<(u64, SuperGraphLinkTensor, Vec<u32>)>,
+    pending_request: Option<(u64, SuperGraphLink, Vec<u32>)>,
     use_cache: bool,
     selected_mode: SuperGraphRequestBackendMode,
+    progress_widget_state: SuperGraphProgressWidgetState,
 }
 
 #[derive(Clone)]
@@ -113,7 +127,8 @@ pub(crate) struct SDInferenceData {
     seed: u64,
     use_cache: bool,
     selected_mode: SuperGraphRequestBackendMode,
-    pending_request: Option<(u64, SuperGraphLinkTensor)>,
+    pending_request: Option<(u64, SuperGraphLink)>,
+    progress_widget_state: SuperGraphProgressWidgetState,
     generated_image: Option<(TextureHandle, ColorImage)>,
     status_message: Option<String>,
     show_image_window: bool,
@@ -131,9 +146,75 @@ impl Default for SDInferenceData {
             use_cache: false,
             selected_mode: SuperGraphRequestBackendMode::NDArray,
             pending_request: None,
+            progress_widget_state: SuperGraphProgressWidgetState::default(),
             generated_image: None,
             status_message: None,
             show_image_window: false,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct TTSInferenceData {
+    text: String,
+    speed: f32,
+    piper_speaker_id: i64,
+    kokoro_voice_name: Option<String>,
+    use_cache: bool,
+    selected_mode: SuperGraphRequestBackendMode,
+    pending_request: Option<(u64, SuperGraphLink, u32)>,
+    progress_widget_state: SuperGraphProgressWidgetState,
+    generated_audio: Option<NDArrayNumericTensor<DynRank>>,
+    generated_sample_rate_hz: Option<u32>,
+    status_message: Option<String>,
+}
+
+impl Default for TTSInferenceData {
+    fn default() -> Self {
+        Self {
+            text: "Hello from Whisper Tensor".to_string(),
+            speed: 1.0,
+            piper_speaker_id: 0,
+            kokoro_voice_name: None,
+            use_cache: false,
+            selected_mode: SuperGraphRequestBackendMode::NDArray,
+            pending_request: None,
+            progress_widget_state: SuperGraphProgressWidgetState::default(),
+            generated_audio: None,
+            generated_sample_rate_hz: None,
+            status_message: None,
+        }
+    }
+}
+
+pub(crate) struct STTInferenceData {
+    use_cache: bool,
+    selected_mode: SuperGraphRequestBackendMode,
+    pending_request: Option<(u64, SuperGraphLink, u32, TokenizerInfo)>,
+    progress_widget_state: SuperGraphProgressWidgetState,
+    selected_audio_name: Option<String>,
+    selected_audio_bytes: Option<Vec<u8>>,
+    transcription_text: Option<String>,
+    transcription_tokens: Option<Vec<u32>>,
+    status_message: Option<String>,
+    #[cfg(target_arch = "wasm32")]
+    pending_web_audio_pick: Option<WebAudioFilePickReceiver>,
+}
+
+impl Default for STTInferenceData {
+    fn default() -> Self {
+        Self {
+            use_cache: false,
+            selected_mode: SuperGraphRequestBackendMode::NDArray,
+            pending_request: None,
+            progress_widget_state: SuperGraphProgressWidgetState::default(),
+            selected_audio_name: None,
+            selected_audio_bytes: None,
+            transcription_text: None,
+            transcription_tokens: None,
+            status_message: None,
+            #[cfg(target_arch = "wasm32")]
+            pending_web_audio_pick: None,
         }
     }
 }
@@ -153,7 +234,10 @@ pub(crate) struct GraphExplorerApp {
     pub(crate) next_graph_subject_path: Option<Vec<GlobalId>>,
     pub(crate) text_inference_data: HashMap<InterfaceId, TextInferenceData>,
     pub(crate) sd_inference_data: HashMap<InterfaceId, SDInferenceData>,
+    pub(crate) tts_inference_data: HashMap<InterfaceId, TTSInferenceData>,
+    pub(crate) stt_inference_data: HashMap<InterfaceId, STTInferenceData>,
     node_execution_timestamps: HashMap<Vec<GlobalId>, Instant>,
+    node_last_child_active_timestamps: HashMap<Vec<GlobalId>, Instant>,
     node_execution_durations: HashMap<Vec<GlobalId>, Duration>,
     node_execution_op_kinds: HashMap<Vec<GlobalId>, String>,
     abbreviated_tensor_reports: HashMap<Vec<GlobalId>, AbbreviatedTensorValue>,
@@ -201,9 +285,14 @@ fn render_node_contents(
         match &node_type {
             GraphLayoutNodeType::GraphNode(node_id) => {
                 if let Some(node) = &graph_subject.get_node_by_id(node_id) {
-                    ui.add(Label::new(node.op_kind()).selectable(false));
-                    if let Some(label) = node.label() {
+                    let op_kind = node.op_kind();
+                    if let Some(label) = node.label()
+                        && label != op_kind
+                    {
                         ui.add(Label::new(label).selectable(false));
+                        ui.add(Label::new(RichText::new(op_kind).size(9.0)).selectable(false));
+                    } else {
+                        ui.add(Label::new(op_kind).selectable(false));
                     }
                 }
             }
@@ -211,7 +300,7 @@ fn render_node_contents(
                 let text = if let Some(link) = graph_subject.get_link_by_id(link_id)
                     && let Some(label) = link.label()
                 {
-                    format!("Input: {}", label)
+                    label.to_string()
                 } else {
                     "Input".to_string()
                 };
@@ -221,7 +310,7 @@ fn render_node_contents(
                 let text = if let Some(link) = graph_subject.get_link_by_id(link_id)
                     && let Some(label) = link.label()
                 {
-                    format!("Output: {}", label)
+                    label.to_string()
                 } else {
                     "Output".to_string()
                 };
@@ -231,7 +320,7 @@ fn render_node_contents(
                 let text = if let Some(link) = graph_subject.get_link_by_id(link_id)
                     && let Some(label) = link.label()
                 {
-                    format!("Constant: {}", label)
+                    label.to_string()
                 } else {
                     "Constant".to_string()
                 };
@@ -335,6 +424,59 @@ fn format_shape(val: &[ScalarInfoTyped<u64>]) -> String {
     format!("({joined:})")
 }
 
+struct NodeExecutionActivityMapsMut<'a> {
+    node_execution_timestamps: &'a mut HashMap<Vec<GlobalId>, Instant>,
+    node_last_child_active_timestamps: &'a mut HashMap<Vec<GlobalId>, Instant>,
+    node_execution_durations: &'a mut HashMap<Vec<GlobalId>, Duration>,
+    node_execution_op_kinds: &'a mut HashMap<Vec<GlobalId>, String>,
+}
+
+fn record_node_execution_activity(
+    maps: &mut NodeExecutionActivityMapsMut<'_>,
+    node_path: Vec<GlobalId>,
+    op_kind: String,
+    execution_time: Instant,
+    execution_duration: Duration,
+) {
+    maps.node_execution_timestamps
+        .insert(node_path.clone(), execution_time);
+    maps.node_execution_durations
+        .insert(node_path.clone(), execution_duration);
+    if !op_kind.is_empty() {
+        maps.node_execution_op_kinds
+            .insert(node_path.clone(), op_kind);
+    }
+
+    if node_path.len() > 1 {
+        let mut ancestor_path = Vec::with_capacity(node_path.len() - 1);
+        for ancestor_id in node_path.iter().take(node_path.len() - 1) {
+            ancestor_path.push(*ancestor_id);
+            maps.node_last_child_active_timestamps
+                .insert(ancestor_path.clone(), execution_time);
+        }
+    }
+}
+
+fn duration_since_node_activity(
+    node_execution_timestamps: &HashMap<Vec<GlobalId>, Instant>,
+    node_last_child_active_timestamps: &HashMap<Vec<GlobalId>, Instant>,
+    node_path: &[GlobalId],
+    current_time: Instant,
+) -> Option<Duration> {
+    let own = node_execution_timestamps
+        .get(node_path)
+        .map(|x| current_time.saturating_duration_since(*x));
+    let child = node_last_child_active_timestamps
+        .get(node_path)
+        .map(|x| current_time.saturating_duration_since(*x));
+    match (own, child) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    }
+}
+
 pub(crate) enum LoadableGraphState<'a> {
     None,
     Unloaded(LoadedModelId),
@@ -393,7 +535,10 @@ impl GraphExplorerApp {
             next_graph_subject_path: None,
             text_inference_data: HashMap::new(),
             sd_inference_data: HashMap::new(),
+            tts_inference_data: HashMap::new(),
+            stt_inference_data: HashMap::new(),
             node_execution_timestamps: HashMap::new(),
+            node_last_child_active_timestamps: HashMap::new(),
             node_execution_durations: HashMap::new(),
             node_execution_op_kinds: HashMap::new(),
             abbreviated_tensor_reports: HashMap::new(),
@@ -426,6 +571,72 @@ impl GraphExplorerApp {
             }
         }
         "?".to_string()
+    }
+
+    fn breadcrumb_node_text(graph: &dyn GraphDyn, node_id: GlobalId) -> String {
+        if let Some(node) = graph.get_node_by_id(&node_id) {
+            if let Some(label) = node.label()
+                && !label.is_empty()
+            {
+                return label;
+            }
+            let op_kind = node.op_kind();
+            if !op_kind.is_empty() {
+                return op_kind;
+            }
+        }
+        node_id.to_string()
+    }
+
+    fn build_graph_breadcrumb_items(
+        &self,
+        root_graph: &dyn GraphDyn,
+        working_path: &[GlobalId],
+        loaded_models: &LoadedModels,
+    ) -> Vec<(String, Vec<GlobalId>)> {
+        let mut items = vec![("Root".to_string(), Vec::<GlobalId>::new())];
+        let mut current_graph = root_graph;
+        let mut current_path = Vec::<GlobalId>::new();
+        for node_id in working_path {
+            current_path.push(*node_id);
+            items.push((
+                Self::breadcrumb_node_text(current_graph, *node_id),
+                current_path.clone(),
+            ));
+            match get_inner_graph(current_graph, *node_id, self.root_selection, loaded_models) {
+                LoadableGraphState::Loaded(next_graph) => {
+                    current_graph = next_graph;
+                }
+                LoadableGraphState::Unloaded(_) | LoadableGraphState::None => {
+                    break;
+                }
+            }
+        }
+        items
+    }
+
+    fn interface_progress_widget_state(
+        &self,
+        interface_id: InterfaceId,
+    ) -> Option<&SuperGraphProgressWidgetState> {
+        self.text_inference_data
+            .get(&interface_id)
+            .map(|x| &x.progress_widget_state)
+            .or_else(|| {
+                self.sd_inference_data
+                    .get(&interface_id)
+                    .map(|x| &x.progress_widget_state)
+            })
+            .or_else(|| {
+                self.tts_inference_data
+                    .get(&interface_id)
+                    .map(|x| &x.progress_widget_state)
+            })
+            .or_else(|| {
+                self.stt_inference_data
+                    .get(&interface_id)
+                    .map(|x| &x.progress_widget_state)
+            })
     }
 
     fn render_profiling_window(
@@ -610,12 +821,14 @@ impl GraphExplorerApp {
                         let is_selected = self.explorer_selection == Some(node_id);
                         let is_hovered = self.explorer_hovered == Some(node_id);
 
-                        let time_since_last_eval: Option<Duration> = self
-                            .node_execution_timestamps
-                            .get(&node_path)
-                            .map(|eval_time| current_time - *eval_time);
+                        let time_since_last_activity = duration_since_node_activity(
+                            &self.node_execution_timestamps,
+                            &self.node_last_child_active_timestamps,
+                            &node_path,
+                            current_time,
+                        );
 
-                        let active_pulse = if let Some(x) = time_since_last_eval {
+                        let active_pulse = if let Some(x) = time_since_last_activity {
                             (1.0f32 - x.as_secs_f32() / 0.5f32).max(0.0f32)
                         } else {
                             0.0
@@ -724,7 +937,15 @@ impl GraphExplorerApp {
 
         let do_interface_panel =
             matches!(self.root_selection, GraphRootSubjectSelection::Interface(_));
-        let interface_panel_height = 150.0;
+        let available_height = ui.available_size_before_wrap().y;
+        let interface_panel_height = if do_interface_panel {
+            // Keep graph view dominant while still reserving enough room for controls.
+            150.0f32.min((available_height - 120.0).max(80.0))
+        } else {
+            0.0
+        };
+        let mut graph_pane_rect: Option<Rect> = None;
+        let mut graph_breadcrumb_items: Option<Vec<(String, Vec<GlobalId>)>> = None;
 
         // Find the graph we are working with
         let root_graph: Option<&dyn GraphDyn> = match self.root_selection {
@@ -792,6 +1013,13 @@ impl GraphExplorerApp {
             }
         };
         if let Some((working_graph, working_path)) = graph_and_path {
+            if let Some(root_graph) = root_graph {
+                graph_breadcrumb_items = Some(self.build_graph_breadcrumb_items(
+                    root_graph,
+                    working_path.as_slice(),
+                    loaded_models,
+                ));
+            }
             if !self.graph_layouts.contains_key(&self.graph_subject_path) {
                 // Map tensors to link IDs
                 let mut tensor_link_ids = HashMap::new();
@@ -934,6 +1162,8 @@ impl GraphExplorerApp {
                         frame_shape.y -= interface_panel_height;
                     }
                     let frame_base = ui.available_rect_before_wrap().min;
+                    graph_pane_rect =
+                        Some(Rect::from_min_max(frame_base, frame_base + frame_shape));
                     let ui_builder = UiBuilder::new()
                         .max_rect(Rect::from_min_max(frame_base, frame_base + frame_shape));
                     ui.scope_builder(ui_builder, |ui| {
@@ -1042,9 +1272,12 @@ impl GraphExplorerApp {
                                         self.nodes_in_view.insert(node_path.clone());
                                     }
                                     let duration_since_eval = if let Some(node_path) = &node_path {
-                                        self.node_execution_timestamps
-                                            .get(node_path)
-                                            .map(|x| current_time - *x)
+                                        duration_since_node_activity(
+                                            &self.node_execution_timestamps,
+                                            &self.node_last_child_active_timestamps,
+                                            node_path,
+                                            current_time,
+                                        )
                                     } else {
                                         None
                                     };
@@ -1256,9 +1489,14 @@ impl GraphExplorerApp {
         if let GraphRootSubjectSelection::Interface(interface_id) = self.root_selection
             && let Some(interface) = loaded_models.current_interfaces.get(&interface_id)
         {
-            let frame = egui::Frame::default().stroke(ui.visuals().window_stroke);
-            frame.show(ui, |ui| {
-                match &interface.interface {
+            egui::ScrollArea::vertical()
+                .id_salt(("graph_interface_panel", interface_id))
+                .max_height(interface_panel_height)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    let frame = egui::Frame::default().stroke(ui.visuals().window_stroke);
+                    frame.show(ui, |ui| {
+                        match &interface.interface {
                     AnyInterface::TextInferenceTokensInLogitOutInterface(llm_interface) => {
                         ui.horizontal_top(|ui| {
                             let tokenizer_info = llm_interface.get_tokenizer();
@@ -1290,19 +1528,57 @@ impl GraphExplorerApp {
                                         if let Some((request_id, _, _)) =
                                             &text_inference_data.pending_request
                                         {
+                                            let swatch_settings = if state
+                                                .do_explorer_swatches_in_view
+                                                || state.do_all_explorer_swatches
+                                            {
+                                                Some(AbbreviatedTensorReportSettings {
+                                                    downsampled_size: (state.swatch_dimension
+                                                        * state.swatch_dimension)
+                                                        as u64,
+                                                    subscribed_tensors: self
+                                                        .tensors_in_view
+                                                        .iter()
+                                                        .cloned()
+                                                        .collect(),
+                                                    do_all: state.do_all_explorer_swatches,
+                                                })
+                                            } else {
+                                                None
+                                            };
+                                            server_request_manager.update_observer_settings(
+                                                *request_id,
+                                                self.inspect_window_tensor_subscriptions
+                                                    .iter()
+                                                    .cloned()
+                                                    .collect(),
+                                                state.explorer_node_wave,
+                                                swatch_settings,
+                                            );
                                             if let Some(reports) = server_request_manager.get_reports(*request_id) {
                                                 let time_now = Instant::now();
+                                                let mut node_activity_maps = NodeExecutionActivityMapsMut {
+                                                    node_execution_timestamps: &mut self.node_execution_timestamps,
+                                                    node_last_child_active_timestamps: &mut self.node_last_child_active_timestamps,
+                                                    node_execution_durations: &mut self.node_execution_durations,
+                                                    node_execution_op_kinds: &mut self.node_execution_op_kinds,
+                                                };
                                                 for report in reports {
+                                                    text_inference_data
+                                                        .progress_widget_state
+                                                        .ingest_report(report.clone());
                                                     for (path, value) in report.tensor_assignments {
                                                         self.inspect_window_tensor_subscription_returns.insert(path, value);
                                                     }
                                                     for (node_path, op_kind, age, execution_duration) in report.node_executions {
                                                         let time = time_now - age;
-                                                        self.node_execution_timestamps.insert(node_path.clone(), time);
-                                                        self.node_execution_durations.insert(node_path.clone(), execution_duration);
-                                                        if !op_kind.is_empty() {
-                                                            self.node_execution_op_kinds.insert(node_path, op_kind);
-                                                        }
+                                                        record_node_execution_activity(
+                                                            &mut node_activity_maps,
+                                                            node_path,
+                                                            op_kind,
+                                                            time,
+                                                            execution_duration,
+                                                        );
                                                     }
                                                     for (tensor_path, value) in report.abbreviated_tensor_assignments {
                                                         self.rendered_tensor_swatches.remove(&tensor_path);
@@ -1386,8 +1662,24 @@ impl GraphExplorerApp {
                                                     };
                                                     ui.label(format!("Tokenizer: {v}"));
                                                 }
-                                                if text_inference_data.pending_request.is_some() {
-                                                    ui.spinner();
+                                                if let Some(request_id) = text_inference_data
+                                                    .pending_request
+                                                    .as_ref()
+                                                    .map(|x| x.0)
+                                                {
+                                                    ui.horizontal(|ui| {
+                                                        ui.spinner();
+                                                        ui.label("Running...");
+                                                        if ui.button("Cancel").clicked() {
+                                                            server_request_manager
+                                                                .cancel_request(request_id);
+                                                            text_inference_data.pending_request =
+                                                                None;
+                                                            text_inference_data
+                                                                .progress_widget_state
+                                                                .clear();
+                                                        }
+                                                    });
                                                 } else {
                                                     ui.horizontal(|ui| {
                                                         toggle_ui(ui, &mut text_inference_data.use_cache);
@@ -1419,6 +1711,7 @@ impl GraphExplorerApp {
                                                                 tokens.clone(),
                                                             )
                                                                 .to_dyn();
+                                                        text_inference_data.progress_widget_state.clear();
                                                         let swatch_settings = if state.do_explorer_swatches_in_view || state.do_all_explorer_swatches {
                                                             Some(AbbreviatedTensorReportSettings{
                                                                 downsampled_size: (state.swatch_dimension*state.swatch_dimension) as u64,
@@ -1444,6 +1737,7 @@ impl GraphExplorerApp {
                                                                             .token_context_input_link,
                                                                         tokens_tensor,
                                                                     )]),
+                                                                    audio_inputs: HashMap::new(),
                                                                     symbolic_graph_ids: interface.model_ids.clone(),
                                                                     model_inputs: HashMap::from([(
                                                                         llm_interface
@@ -1504,6 +1798,25 @@ impl GraphExplorerApp {
                             }
                         });
                     }
+                    AnyInterface::MultimodalLanguageInterface(mm_interface) => {
+                        ui.label("Multimodal language interface");
+                        ui.label(format!(
+                            "Modality input slots: {}",
+                            mm_interface.modality_inputs.len()
+                        ));
+                        let required = mm_interface
+                            .modality_inputs
+                            .iter()
+                            .filter(|x| x.required)
+                            .map(|x| x.name.clone())
+                            .collect::<Vec<_>>();
+                        if !required.is_empty() {
+                            ui.label(format!(
+                                "Required modalities are not yet editable in this panel: {}",
+                                required.join(", ")
+                            ));
+                        }
+                    }
                     AnyInterface::ImageGenerationInterface(sd_interface) => {
                         let sd_data = self
                             .sd_inference_data
@@ -1512,19 +1825,53 @@ impl GraphExplorerApp {
 
                         // Handle pending reports (node wave, tensor swatches)
                         if let Some((request_id, _)) = &sd_data.pending_request {
+                            let swatch_settings =
+                                if state.do_explorer_swatches_in_view || state.do_all_explorer_swatches {
+                                    Some(AbbreviatedTensorReportSettings {
+                                        downsampled_size: (state.swatch_dimension
+                                            * state.swatch_dimension)
+                                            as u64,
+                                        subscribed_tensors: self
+                                            .tensors_in_view
+                                            .iter()
+                                            .cloned()
+                                            .collect(),
+                                        do_all: state.do_all_explorer_swatches,
+                                    })
+                                } else {
+                                    None
+                                };
+                            server_request_manager.update_observer_settings(
+                                *request_id,
+                                self.inspect_window_tensor_subscriptions
+                                    .iter()
+                                    .cloned()
+                                    .collect(),
+                                state.explorer_node_wave,
+                                swatch_settings,
+                            );
                             if let Some(reports) = server_request_manager.get_reports(*request_id) {
                                 let time_now = Instant::now();
+                                let mut node_activity_maps = NodeExecutionActivityMapsMut {
+                                    node_execution_timestamps: &mut self.node_execution_timestamps,
+                                    node_last_child_active_timestamps: &mut self.node_last_child_active_timestamps,
+                                    node_execution_durations: &mut self.node_execution_durations,
+                                    node_execution_op_kinds: &mut self.node_execution_op_kinds,
+                                };
                                 for report in reports {
+                                    sd_data.progress_widget_state.ingest_report(report.clone());
                                     for (path, value) in report.tensor_assignments {
                                         self.inspect_window_tensor_subscription_returns.insert(path, value);
                                     }
                                     for (node_path, op_kind, age, execution_duration) in report.node_executions {
                                         let time = time_now - age;
-                                        self.node_execution_timestamps.insert(node_path.clone(), time);
-                                        self.node_execution_durations.insert(node_path.clone(), execution_duration);
-                                        if !op_kind.is_empty() {
-                                            self.node_execution_op_kinds.insert(node_path, op_kind);
-                                        }
+                                        record_node_execution_activity(
+                                            &mut node_activity_maps,
+                                            node_path,
+                                            op_kind,
+                                            time,
+                                            execution_duration,
+                                        );
                                     }
                                     for (tensor_path, value) in report.abbreviated_tensor_assignments {
                                         self.rendered_tensor_swatches.remove(&tensor_path);
@@ -1552,225 +1899,315 @@ impl GraphExplorerApp {
                         }
 
                         // UI panel
-                        ui.horizontal_top(|ui| {
-                        let frame = egui::Frame::default()
-                            .stroke(ui.visuals().window_stroke)
-                            .inner_margin(5.0);
-                        frame.show(ui, |ui| {
-                            ui.vertical(|ui| {
-                                ui.heading("Stable Diffusion");
+                        ui.columns(2, |columns| {
+                            let (left, right) = columns.split_at_mut(1);
+                            let controls_ui = &mut left[0];
+                            let results_ui = &mut right[0];
 
-                                ui.horizontal(|ui| {
-                                    ui.label("Prompt:");
-                                    ui.text_edit_singleline(&mut sd_data.prompt);
-                                });
+                            let frame = egui::Frame::default()
+                                .stroke(controls_ui.visuals().window_stroke)
+                                .inner_margin(5.0);
+                            frame.show(controls_ui, |ui| {
+                                ui.vertical(|ui| {
+                                    ui.heading("Stable Diffusion");
 
-                                ui.horizontal(|ui| {
-                                    ui.label("Steps:");
-                                    ui.add(egui::DragValue::new(&mut sd_data.num_steps).range(1..=100));
-                                    ui.label("Guidance:");
-                                    ui.add(egui::DragValue::new(&mut sd_data.guidance_scale).speed(0.1).range(1.0..=30.0));
-                                    ui.label("Seed:");
-                                    ui.add(egui::DragValue::new(&mut sd_data.seed));
-                                });
-
-                                ui.horizontal(|ui| {
-                                    ui.label("Latent H:");
-                                    ui.add(egui::DragValue::new(&mut sd_data.latent_h).range(4..=128));
-                                    ui.label("Latent W:");
-                                    ui.add(egui::DragValue::new(&mut sd_data.latent_w).range(4..=128));
-                                    ui.label(format!("({}x{} px)", sd_data.latent_w * 8, sd_data.latent_h * 8));
-                                });
-
-                                if sd_data.pending_request.is_some() {
                                     ui.horizontal(|ui| {
-                                        ui.spinner();
-                                        ui.label("Generating...");
+                                        ui.label("Prompt:");
+                                        ui.text_edit_singleline(&mut sd_data.prompt);
                                     });
-                                } else {
+
                                     ui.horizontal(|ui| {
-                                        egui::ComboBox::from_id_salt("sd_backend_mode")
-                                            .selected_text(sd_data.selected_mode.to_string())
-                                            .show_ui(ui, |ui| {
-                                                ui.selectable_value(
-                                                    &mut sd_data.selected_mode,
-                                                    SuperGraphRequestBackendMode::NDArray,
-                                                    SuperGraphRequestBackendMode::NDArray.to_string(),
-                                                );
-                                                if server_config_report.vulkan_available {
+                                        ui.label("Steps:");
+                                        ui.add(
+                                            egui::DragValue::new(&mut sd_data.num_steps)
+                                                .range(1..=100),
+                                        );
+                                        ui.label("Guidance:");
+                                        ui.add(
+                                            egui::DragValue::new(&mut sd_data.guidance_scale)
+                                                .speed(0.1)
+                                                .range(1.0..=30.0),
+                                        );
+                                        ui.label("Seed:");
+                                        ui.add(egui::DragValue::new(&mut sd_data.seed));
+                                    });
+
+                                    ui.horizontal(|ui| {
+                                        ui.label("Latent H:");
+                                        ui.add(
+                                            egui::DragValue::new(&mut sd_data.latent_h)
+                                                .range(4..=128),
+                                        );
+                                        ui.label("Latent W:");
+                                        ui.add(
+                                            egui::DragValue::new(&mut sd_data.latent_w)
+                                                .range(4..=128),
+                                        );
+                                        ui.label(format!(
+                                            "({}x{} px)",
+                                            sd_data.latent_w * 8,
+                                            sd_data.latent_h * 8
+                                        ));
+                                    });
+
+                                    if let Some(request_id) =
+                                        sd_data.pending_request.as_ref().map(|x| x.0)
+                                    {
+                                        ui.horizontal(|ui| {
+                                            ui.spinner();
+                                            ui.label("Generating...");
+                                            if ui.button("Cancel").clicked() {
+                                                server_request_manager.cancel_request(request_id);
+                                                sd_data.pending_request = None;
+                                                sd_data.progress_widget_state.clear();
+                                                sd_data.status_message =
+                                                    Some("Cancelled".to_string());
+                                            }
+                                        });
+                                    } else {
+                                        ui.horizontal(|ui| {
+                                            egui::ComboBox::from_id_salt("sd_backend_mode")
+                                                .selected_text(sd_data.selected_mode.to_string())
+                                                .show_ui(ui, |ui| {
                                                     ui.selectable_value(
                                                         &mut sd_data.selected_mode,
-                                                        SuperGraphRequestBackendMode::Vulkan,
-                                                        SuperGraphRequestBackendMode::Vulkan.to_string(),
+                                                        SuperGraphRequestBackendMode::NDArray,
+                                                        SuperGraphRequestBackendMode::NDArray
+                                                            .to_string(),
                                                     );
-                                                }
-                                                ui.selectable_value(
-                                                    &mut sd_data.selected_mode,
-                                                    SuperGraphRequestBackendMode::Compiler,
-                                                    SuperGraphRequestBackendMode::Compiler.to_string(),
+                                                    if server_config_report.vulkan_available {
+                                                        ui.selectable_value(
+                                                            &mut sd_data.selected_mode,
+                                                            SuperGraphRequestBackendMode::Vulkan,
+                                                            SuperGraphRequestBackendMode::Vulkan
+                                                                .to_string(),
+                                                        );
+                                                    }
+                                                    ui.selectable_value(
+                                                        &mut sd_data.selected_mode,
+                                                        SuperGraphRequestBackendMode::Compiler,
+                                                        SuperGraphRequestBackendMode::Compiler
+                                                            .to_string(),
+                                                    );
+                                                });
+                                            toggle_ui(ui, &mut sd_data.use_cache);
+                                            ui.label("Cache");
+                                            if ui.button("Generate").clicked() {
+                                                sd_data.progress_widget_state.clear();
+                                                let mut tensor_inputs = HashMap::new();
+                                                let mut string_inputs = HashMap::new();
+                                                string_inputs.insert(
+                                                    sd_interface.positive_prompt_input,
+                                                    sd_data.prompt.clone(),
                                                 );
-                                            });
-                                        toggle_ui(ui, &mut sd_data.use_cache);
-                                        ui.label("Cache");
-                                        // Check all tokenizers ready
-                                        let all_tok_infos: Vec<_> = sd_interface.positive_prompts.iter()
-                                            .chain(sd_interface.negative_prompts.iter().flatten())
-                                            .map(|pi| &pi.tokenizer)
-                                            .collect();
-                                        let can_generate = all_tok_infos.iter().all(|ti| {
-                                            matches!(
-                                                loaded_tokenizers.loaded_tokenizers.get(*ti).and_then(|v| v.as_ref()),
-                                                Some(Ok(_))
-                                            )
+                                                if let Some(negative_link) =
+                                                    sd_interface.negative_prompt_input
+                                                {
+                                                    string_inputs
+                                                        .insert(negative_link, String::new());
+                                                }
+
+                                                let channels = sd_interface.latent_channels;
+                                                let (
+                                                    timestep_values,
+                                                    dt_values,
+                                                    sigma_values,
+                                                    initial_noise,
+                                                ) = match &sd_interface.scheduler {
+                                                    whisper_tensor::interfaces::SchedulerType::EulerDiscrete => {
+                                                        let (ts, dt, sigmas, init_sigma) =
+                                                            ImageGenerationInterface::compute_euler_schedule(sd_data.num_steps);
+                                                        let latent_n = channels
+                                                            * sd_data.latent_h
+                                                            * sd_data.latent_w;
+                                                        let noise =
+                                                            generate_normal_noise(latent_n, sd_data.seed);
+                                                        let scaled: Vec<f32> = noise
+                                                            .iter()
+                                                            .map(|&x| x * init_sigma)
+                                                            .collect();
+                                                        (ts, dt, sigmas, scaled)
+                                                    }
+                                                    whisper_tensor::interfaces::SchedulerType::RectifiedFlow => {
+                                                        let (ts, dt, sigmas) =
+                                                            ImageGenerationInterface::compute_flux_schedule(sd_data.num_steps);
+                                                        let latent_n = channels
+                                                            * sd_data.latent_h
+                                                            * sd_data.latent_w;
+                                                        let noise =
+                                                            generate_normal_noise(latent_n, sd_data.seed);
+                                                        (ts, dt, sigmas, noise)
+                                                    }
+                                                };
+
+                                                let latent_tensor =
+                                                    NDArrayNumericTensor::from_vec_shape(
+                                                        initial_noise,
+                                                        &vec![
+                                                            1,
+                                                            channels as u64,
+                                                            sd_data.latent_h as u64,
+                                                            sd_data.latent_w as u64,
+                                                        ],
+                                                    )
+                                                    .unwrap();
+
+                                                let timesteps_tensor =
+                                                    NDArrayNumericTensor::from_vec_shape(
+                                                        timestep_values,
+                                                        &vec![sd_data.num_steps as u64],
+                                                    )
+                                                    .unwrap();
+                                                let dt_tensor =
+                                                    NDArrayNumericTensor::from_vec_shape(
+                                                        dt_values,
+                                                        &vec![sd_data.num_steps as u64],
+                                                    )
+                                                    .unwrap();
+                                                let sigmas_tensor =
+                                                    NDArrayNumericTensor::from_vec_shape(
+                                                        sigma_values,
+                                                        &vec![sd_data.num_steps as u64],
+                                                    )
+                                                    .unwrap();
+                                                let iter_count =
+                                                    NDArrayNumericTensor::from_vec_shape(
+                                                        vec![sd_data.num_steps as i64],
+                                                        &vec![1],
+                                                    )
+                                                    .unwrap();
+
+                                                tensor_inputs.insert(
+                                                    sd_interface.initial_latent_input,
+                                                    latent_tensor,
+                                                );
+                                                tensor_inputs.insert(
+                                                    sd_interface.timesteps_input,
+                                                    timesteps_tensor,
+                                                );
+                                                tensor_inputs
+                                                    .insert(sd_interface.dt_input, dt_tensor);
+                                                tensor_inputs.insert(
+                                                    sd_interface.sigmas_input,
+                                                    sigmas_tensor,
+                                                );
+                                                tensor_inputs.insert(
+                                                    sd_interface.iteration_count_input,
+                                                    iter_count,
+                                                );
+                                                if let Some(gs_link) =
+                                                    sd_interface.guidance_scale_input
+                                                {
+                                                    let guidance =
+                                                        NDArrayNumericTensor::from_vec(vec![
+                                                            sd_data.guidance_scale,
+                                                        ])
+                                                        .to_dyn();
+                                                    tensor_inputs.insert(gs_link, guidance);
+                                                }
+
+                                                let symbolic_graph_ids: Vec<_> =
+                                                    interface.model_ids.to_vec();
+                                                let model_inputs: HashMap<_, _> = sd_interface
+                                                    .model_weights
+                                                    .iter()
+                                                    .zip(interface.model_ids.iter())
+                                                    .map(|(&link, &id)| (link, id))
+                                                    .collect();
+
+                                                let swatch_settings = if state
+                                                    .do_explorer_swatches_in_view
+                                                    || state.do_all_explorer_swatches
+                                                {
+                                                    Some(AbbreviatedTensorReportSettings {
+                                                        downsampled_size: (state.swatch_dimension
+                                                            * state.swatch_dimension)
+                                                            as u64,
+                                                        subscribed_tensors: self
+                                                            .tensors_in_view
+                                                            .iter()
+                                                            .cloned()
+                                                            .collect(),
+                                                        do_all: state.do_all_explorer_swatches,
+                                                    })
+                                                } else {
+                                                    None
+                                                };
+
+                                                let token = server_request_manager
+                                                    .submit_supergraph_request(
+                                                        SuperGraphRequest {
+                                                            do_node_execution_reports: state
+                                                                .explorer_node_wave,
+                                                            abbreviated_tensor_report_settings:
+                                                                swatch_settings,
+                                                            attention_token: None,
+                                                            super_graph: sd_interface
+                                                                .super_graph
+                                                                .clone(),
+                                                            subscribed_tensors: self
+                                                                .inspect_window_tensor_subscriptions
+                                                                .iter()
+                                                                .cloned()
+                                                                .collect(),
+                                                            string_inputs,
+                                                            use_cache: if sd_data.use_cache {
+                                                                Some(200 + interface_id as u64)
+                                                            } else {
+                                                                None
+                                                            },
+                                                            backend_mode: sd_data.selected_mode,
+                                                            symbolic_graph_ids,
+                                                            tensor_inputs,
+                                                            audio_inputs: HashMap::new(),
+                                                            model_inputs,
+                                                            hash_inputs: HashMap::new(),
+                                                        },
+                                                    );
+
+                                                sd_data.pending_request =
+                                                    Some((token, sd_interface.image_output));
+                                                sd_data.status_message =
+                                                    Some("Running SD pipeline...".to_string());
+                                            }
                                         });
-                                        if !can_generate {
-                                            let has_error = all_tok_infos.iter().any(|ti| {
-                                                matches!(
-                                                    loaded_tokenizers.loaded_tokenizers.get(*ti).and_then(|v| v.as_ref()),
-                                                    Some(Err(_))
-                                                )
-                                            });
-                                            if has_error {
-                                                ui.label("Tokenizer error");
-                                            } else {
-                                                ui.spinner();
-                                            }
+                                    }
+                                });
+                            });
+
+                            let frame = egui::Frame::default()
+                                .stroke(results_ui.visuals().window_stroke)
+                                .inner_margin(5.0);
+                            frame.show(results_ui, |ui| {
+                                ui.vertical(|ui| {
+                                    ui.heading("Result");
+                                    if let Some(msg) = &sd_data.status_message {
+                                        ui.label(msg);
+                                    } else {
+                                        ui.label("No image generated yet.");
+                                    }
+                                    if let Some((texture, _color_image)) = &sd_data.generated_image
+                                    {
+                                        let size = texture.size_vec2();
+                                        let thumb_max = 200.0;
+                                        let scale = (thumb_max / size.x.max(size.y)).min(1.0);
+                                        let display_size =
+                                            egui::vec2(size.x * scale, size.y * scale);
+                                        let response = ui.add(
+                                            egui::Image::new(egui::load::SizedTexture::new(
+                                                texture.id(),
+                                                display_size,
+                                            ))
+                                            .sense(Sense::click()),
+                                        );
+                                        if response.clicked() {
+                                            sd_data.show_image_window = !sd_data.show_image_window;
                                         }
-                                        if can_generate && ui.button("Generate").clicked() {
-                                            // Tokenize positive prompts
-                                            let mut tensor_inputs = HashMap::new();
-                                            for pi in &sd_interface.positive_prompts {
-                                                let tokenizer = loaded_tokenizers.loaded_tokenizers.get(&pi.tokenizer)
-                                                    .and_then(|v| v.as_ref()).and_then(|r| r.as_ref().ok()).unwrap();
-                                                let ids = pi.tokenize(tokenizer.as_ref(), &sd_data.prompt);
-                                                let tensor = NDArrayNumericTensor::from_vec_shape(ids, &vec![1, pi.seq_len as u64]).unwrap();
-                                                tensor_inputs.insert(pi.link, tensor);
-                                            }
-                                            // Tokenize negative prompts
-                                            if let Some(neg_prompts) = &sd_interface.negative_prompts {
-                                                for pi in neg_prompts {
-                                                    let tokenizer = loaded_tokenizers.loaded_tokenizers.get(&pi.tokenizer)
-                                                        .and_then(|v| v.as_ref()).and_then(|r| r.as_ref().ok()).unwrap();
-                                                    let ids = pi.tokenize(tokenizer.as_ref(), "");
-                                                    let tensor = NDArrayNumericTensor::from_vec_shape(ids, &vec![1, pi.seq_len as u64]).unwrap();
-                                                    tensor_inputs.insert(pi.link, tensor);
-                                                }
-                                            }
-
-                                            let channels = sd_interface.latent_channels;
-                                            let (timestep_values, dt_values, sigma_values, initial_noise) = match &sd_interface.scheduler {
-                                                whisper_tensor::interfaces::SchedulerType::EulerDiscrete => {
-                                                    let (ts, dt, sigmas, init_sigma) =
-                                                        ImageGenerationInterface::compute_euler_schedule(sd_data.num_steps);
-                                                    let latent_n = channels * sd_data.latent_h * sd_data.latent_w;
-                                                    let noise = generate_normal_noise(latent_n, sd_data.seed);
-                                                    let scaled: Vec<f32> = noise.iter().map(|&x| x * init_sigma).collect();
-                                                    (ts, dt, sigmas, scaled)
-                                                }
-                                                whisper_tensor::interfaces::SchedulerType::RectifiedFlow => {
-                                                    let (ts, dt, sigmas) =
-                                                        ImageGenerationInterface::compute_flux_schedule(sd_data.num_steps);
-                                                    let latent_n = channels * sd_data.latent_h * sd_data.latent_w;
-                                                    let noise = generate_normal_noise(latent_n, sd_data.seed);
-                                                    (ts, dt, sigmas, noise)
-                                                }
-                                            };
-
-                                            let latent_tensor = NDArrayNumericTensor::from_vec_shape(
-                                                initial_noise,
-                                                &vec![1, channels as u64, sd_data.latent_h as u64, sd_data.latent_w as u64],
-                                            ).unwrap();
-
-                                            let timesteps_tensor = NDArrayNumericTensor::from_vec_shape(
-                                                timestep_values,
-                                                &vec![sd_data.num_steps as u64],
-                                            ).unwrap();
-                                            let dt_tensor = NDArrayNumericTensor::from_vec_shape(
-                                                dt_values,
-                                                &vec![sd_data.num_steps as u64],
-                                            ).unwrap();
-                                            let sigmas_tensor = NDArrayNumericTensor::from_vec_shape(
-                                                sigma_values,
-                                                &vec![sd_data.num_steps as u64],
-                                            ).unwrap();
-                                            let iter_count = NDArrayNumericTensor::from_vec_shape(
-                                                vec![sd_data.num_steps as i64],
-                                                &vec![1],
-                                            ).unwrap();
-
-                                            tensor_inputs.insert(sd_interface.initial_latent_input, latent_tensor);
-                                            tensor_inputs.insert(sd_interface.timesteps_input, timesteps_tensor);
-                                            tensor_inputs.insert(sd_interface.dt_input, dt_tensor);
-                                            tensor_inputs.insert(sd_interface.sigmas_input, sigmas_tensor);
-                                            tensor_inputs.insert(sd_interface.iteration_count_input, iter_count);
-                                            if let Some(gs_link) = sd_interface.guidance_scale_input {
-                                                let guidance = NDArrayNumericTensor::from_vec(vec![sd_data.guidance_scale]).to_dyn();
-                                                tensor_inputs.insert(gs_link, guidance);
-                                            }
-
-                                            let symbolic_graph_ids: Vec<_> = interface.model_ids.to_vec();
-                                            let model_inputs: HashMap<_, _> = sd_interface
-                                                .model_weights
-                                                .iter()
-                                                .zip(interface.model_ids.iter())
-                                                .map(|(&link, &id)| (link, id))
-                                                .collect();
-
-                                            let swatch_settings = if state.do_explorer_swatches_in_view || state.do_all_explorer_swatches {
-                                                Some(AbbreviatedTensorReportSettings {
-                                                    downsampled_size: (state.swatch_dimension * state.swatch_dimension) as u64,
-                                                    subscribed_tensors: self.tensors_in_view.iter().cloned().collect(),
-                                                    do_all: state.do_all_explorer_swatches,
-                                                })
-                                            } else {
-                                                None
-                                            };
-
-                                            let token = server_request_manager.submit_supergraph_request(SuperGraphRequest {
-                                                do_node_execution_reports: state.explorer_node_wave,
-                                                abbreviated_tensor_report_settings: swatch_settings,
-                                                attention_token: None,
-                                                super_graph: sd_interface.super_graph.clone(),
-                                                subscribed_tensors: self.inspect_window_tensor_subscriptions.iter().cloned().collect(),
-                                                string_inputs: HashMap::new(),
-                                                use_cache: if sd_data.use_cache { Some(200 + interface_id as u64) } else { None },
-                                                backend_mode: sd_data.selected_mode,
-                                                symbolic_graph_ids,
-                                                tensor_inputs,
-                                                model_inputs,
-                                                hash_inputs: HashMap::new(),
-                                            });
-
-                                            sd_data.pending_request = Some((token, sd_interface.image_output));
-                                            sd_data.status_message = Some("Running SD pipeline...".to_string());
-                                        }
-                                    });
-                                }
-
-                                if let Some(msg) = &sd_data.status_message {
-                                    ui.label(msg);
-                                }
+                                        response.on_hover_text("Click to inspect");
+                                    }
+                                });
                             });
                         });
-
-                        // Display generated image thumbnail to the right of controls
-                        if let Some((texture, _color_image)) = &sd_data.generated_image {
-                            ui.vertical(|ui| {
-                                let size = texture.size_vec2();
-                                let thumb_max = 200.0;
-                                let scale = (thumb_max / size.x.max(size.y)).min(1.0);
-                                let display_size = egui::vec2(size.x * scale, size.y * scale);
-                                let response = ui.add(
-                                    egui::Image::new(egui::load::SizedTexture::new(texture.id(), display_size))
-                                        .sense(Sense::click()),
-                                );
-                                if response.clicked() {
-                                    sd_data.show_image_window = !sd_data.show_image_window;
-                                }
-                                response.on_hover_text("Click to inspect");
-                            });
-                        }
-                        }); // end horizontal_top
 
                         // Floating inspect window for full-size image
                         if sd_data.show_image_window
@@ -1796,16 +2233,996 @@ impl GraphExplorerApp {
                                 sd_data.show_image_window = open;
                         }
                     }
-                    AnyInterface::TextToSpeechInterface(_) => {
-                        ui.label("TTS interface (not yet supported in WebUI)");
+                    AnyInterface::TextToSpeechInterface(tts_interface) => {
+                        let tts_data = self
+                            .tts_inference_data
+                            .entry(interface_id)
+                            .or_default();
+
+                        if let Some((request_id, _, _)) = &tts_data.pending_request {
+                            let swatch_settings =
+                                if state.do_explorer_swatches_in_view || state.do_all_explorer_swatches {
+                                    Some(AbbreviatedTensorReportSettings {
+                                        downsampled_size: (state.swatch_dimension
+                                            * state.swatch_dimension)
+                                            as u64,
+                                        subscribed_tensors: self
+                                            .tensors_in_view
+                                            .iter()
+                                            .cloned()
+                                            .collect(),
+                                        do_all: state.do_all_explorer_swatches,
+                                    })
+                                } else {
+                                    None
+                                };
+                            server_request_manager.update_observer_settings(
+                                *request_id,
+                                self.inspect_window_tensor_subscriptions
+                                    .iter()
+                                    .cloned()
+                                    .collect(),
+                                state.explorer_node_wave,
+                                swatch_settings,
+                            );
+                            if let Some(reports) = server_request_manager.get_reports(*request_id) {
+                                let time_now = Instant::now();
+                                let mut node_activity_maps = NodeExecutionActivityMapsMut {
+                                    node_execution_timestamps: &mut self.node_execution_timestamps,
+                                    node_last_child_active_timestamps: &mut self.node_last_child_active_timestamps,
+                                    node_execution_durations: &mut self.node_execution_durations,
+                                    node_execution_op_kinds: &mut self.node_execution_op_kinds,
+                                };
+                                for report in reports {
+                                    tts_data.progress_widget_state.ingest_report(report.clone());
+                                    for (path, value) in report.tensor_assignments {
+                                        self.inspect_window_tensor_subscription_returns.insert(path, value);
+                                    }
+                                    for (node_path, op_kind, age, execution_duration) in report.node_executions {
+                                        let time = time_now - age;
+                                        record_node_execution_activity(
+                                            &mut node_activity_maps,
+                                            node_path,
+                                            op_kind,
+                                            time,
+                                            execution_duration,
+                                        );
+                                    }
+                                    for (tensor_path, value) in report.abbreviated_tensor_assignments {
+                                        self.rendered_tensor_swatches.remove(&tensor_path);
+                                        self.abbreviated_tensor_reports.insert(tensor_path, value);
+                                    }
+                                }
+                            }
+                            if let Some(response) = server_request_manager.get_response(*request_id) {
+                                let (_, output_link, sample_rate_hz) = tts_data.pending_request.take().unwrap();
+                                match response.result {
+                                    Ok(mut data) => {
+                                        if let Some(audio_tensor) = data.tensor_outputs.remove(&output_link) {
+                                            let sample_count =
+                                                audio_tensor.shape().iter().copied().product::<u64>() as usize;
+                                            let duration_s = sample_count as f64 / sample_rate_hz as f64;
+                                            tts_data.status_message = Some(format!(
+                                                "Generated audio: {sample_count} samples ({duration_s:.2}s @ {sample_rate_hz}Hz)"
+                                            ));
+                                            tts_data.generated_audio = Some(audio_tensor);
+                                            tts_data.generated_sample_rate_hz =
+                                                Some(sample_rate_hz);
+                                        } else {
+                                            tts_data.status_message =
+                                                Some("Error: output audio not found".to_string());
+                                            tts_data.generated_sample_rate_hz = None;
+                                        }
+                                    }
+                                    Err(err) => {
+                                        self.error_popup = Some(err);
+                                        tts_data.status_message = Some("Error (see popup)".to_string());
+                                        tts_data.generated_sample_rate_hz = None;
+                                    }
+                                }
+                            }
+                        }
+
+                        ui.columns(2, |columns| {
+                            let (left, right) = columns.split_at_mut(1);
+                            let controls_ui = &mut left[0];
+                            let results_ui = &mut right[0];
+
+                            let frame = egui::Frame::default()
+                                .stroke(controls_ui.visuals().window_stroke)
+                                .inner_margin(5.0);
+                            frame.show(controls_ui, |ui| {
+                                ui.vertical(|ui| {
+                                    ui.heading("Text to Speech");
+
+                                    ui.horizontal(|ui| {
+                                        ui.label("Text:");
+                                        ui.text_edit_singleline(&mut tts_data.text);
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label("Speed:");
+                                        ui.add(
+                                            egui::DragValue::new(&mut tts_data.speed)
+                                                .speed(0.05)
+                                                .range(0.1..=4.0),
+                                        );
+                                    });
+                                    if let TTSInputConfig::Kokoro {
+                                        voices,
+                                        default_voice,
+                                        ..
+                                    } = &tts_interface.input_config
+                                    {
+                                        ensure_kokoro_voice_selection(
+                                            &mut tts_data.kokoro_voice_name,
+                                            voices,
+                                            default_voice.as_deref(),
+                                        );
+                                        if !voices.is_empty() {
+                                            let mut selected =
+                                                tts_data.kokoro_voice_name.clone().unwrap();
+                                            egui::ComboBox::from_id_salt((
+                                                "graph_tts_kokoro_voice",
+                                                interface_id,
+                                            ))
+                                            .selected_text(selected.clone())
+                                            .show_ui(ui, |ui| {
+                                                for voice in voices {
+                                                    ui.selectable_value(
+                                                        &mut selected,
+                                                        voice.name.clone(),
+                                                        voice.name.as_str(),
+                                                    );
+                                                }
+                                            });
+                                            tts_data.kokoro_voice_name = Some(selected);
+                                        }
+                                    }
+                                    if let TTSInputConfig::Piper {
+                                        speaker_id_link: Some(_),
+                                        num_speakers,
+                                        ..
+                                    } = &tts_interface.input_config
+                                    {
+                                        ui.horizontal(|ui| {
+                                            ui.label("Speaker ID:");
+                                            let max_speaker =
+                                                (*num_speakers as i64).saturating_sub(1).max(0);
+                                            ui.add(
+                                                egui::DragValue::new(&mut tts_data.piper_speaker_id)
+                                                    .range(0..=max_speaker),
+                                            );
+                                        });
+                                    }
+
+                                    if let Some(request_id) =
+                                        tts_data.pending_request.as_ref().map(|x| x.0)
+                                    {
+                                        ui.horizontal(|ui| {
+                                            ui.spinner();
+                                            ui.label("Generating...");
+                                            if ui.button("Cancel").clicked() {
+                                                server_request_manager.cancel_request(request_id);
+                                                tts_data.pending_request = None;
+                                                tts_data.progress_widget_state.clear();
+                                                tts_data.status_message =
+                                                    Some("Cancelled".to_string());
+                                            }
+                                        });
+                                    } else {
+                                        ui.horizontal(|ui| {
+                                            egui::ComboBox::from_id_salt((
+                                                "tts_backend_mode",
+                                                interface_id,
+                                            ))
+                                            .selected_text(tts_data.selected_mode.to_string())
+                                            .show_ui(ui, |ui| {
+                                                ui.selectable_value(
+                                                    &mut tts_data.selected_mode,
+                                                    SuperGraphRequestBackendMode::NDArray,
+                                                    SuperGraphRequestBackendMode::NDArray.to_string(),
+                                                );
+                                                if server_config_report.vulkan_available {
+                                                    ui.selectable_value(
+                                                        &mut tts_data.selected_mode,
+                                                        SuperGraphRequestBackendMode::Vulkan,
+                                                        SuperGraphRequestBackendMode::Vulkan
+                                                            .to_string(),
+                                                    );
+                                                }
+                                                ui.selectable_value(
+                                                    &mut tts_data.selected_mode,
+                                                    SuperGraphRequestBackendMode::Compiler,
+                                                    SuperGraphRequestBackendMode::Compiler
+                                                        .to_string(),
+                                                );
+                                            });
+                                            toggle_ui(ui, &mut tts_data.use_cache);
+                                            ui.label("Cache");
+                                            if ui.button("Generate").clicked() {
+                                                tts_data.progress_widget_state.clear();
+                                                let mut tensor_inputs = HashMap::new();
+                                                let mut string_inputs = HashMap::new();
+                                                string_inputs.insert(
+                                                    tts_interface.text_input_link,
+                                                    tts_data.text.clone(),
+                                                );
+
+                                                let mut should_submit = true;
+                                                match &tts_interface.input_config {
+                                                    TTSInputConfig::Kokoro {
+                                                        style_link,
+                                                        speed_link,
+                                                        voices,
+                                                        default_voice,
+                                                    } => {
+                                                        if let Some(voice) = selected_kokoro_voice(
+                                                            &tts_data.kokoro_voice_name,
+                                                            voices,
+                                                            default_voice.as_deref(),
+                                                        ) {
+                                                            let approx_tokens = tts_data
+                                                                .text
+                                                                .chars()
+                                                                .count()
+                                                                .saturating_add(2);
+                                                            match voice
+                                                                .style_for_token_count(approx_tokens)
+                                                            {
+                                                                Ok(style_values) => {
+                                                                    let style = NDArrayNumericTensor::<DynRank>::from_vec_shape(
+                                                                        style_values,
+                                                                        &vec![1, KokoroVoiceEmbedding::STYLE_DIM as u64],
+                                                                    ).unwrap();
+                                                                    let speed = NDArrayNumericTensor::<DynRank>::from_vec_shape(
+                                                                        vec![tts_data.speed],
+                                                                        &vec![1],
+                                                                    ).unwrap();
+                                                                    tensor_inputs
+                                                                        .insert(*style_link, style);
+                                                                    tensor_inputs
+                                                                        .insert(*speed_link, speed);
+                                                                }
+                                                                Err(err) => {
+                                                                    tts_data.status_message = Some(
+                                                                        format!(
+                                                                            "Failed to decode Kokoro voice '{}': {}",
+                                                                            voice.name, err
+                                                                        ),
+                                                                    );
+                                                                    should_submit = false;
+                                                                }
+                                                            }
+                                                        } else {
+                                                            tts_data.status_message = Some(
+                                                                "no Kokoro voice embeddings available"
+                                                                    .to_string(),
+                                                            );
+                                                            should_submit = false;
+                                                        }
+                                                    }
+                                                    TTSInputConfig::Piper {
+                                                        scales_link,
+                                                        speaker_id_link,
+                                                        ..
+                                                    } => {
+                                                        let length_scale =
+                                                            1.0 / tts_data.speed.max(0.1);
+                                                        let scales = NDArrayNumericTensor::<DynRank>::from_vec_shape(
+                                                            vec![0.667f32, length_scale, 0.8],
+                                                            &vec![3],
+                                                        ).unwrap();
+                                                        tensor_inputs.insert(*scales_link, scales);
+                                                        if let Some(sid_link) = speaker_id_link {
+                                                            let speaker_id = NDArrayNumericTensor::<DynRank>::from_vec_shape(
+                                                                vec![tts_data.piper_speaker_id],
+                                                                &vec![1],
+                                                            ).unwrap();
+                                                            tensor_inputs.insert(
+                                                                *sid_link,
+                                                                speaker_id,
+                                                            );
+                                                        }
+                                                    }
+                                                    TTSInputConfig::F5 { .. } => {
+                                                        tts_data.status_message = Some(
+                                                            "F5-TTS UI wiring for reference audio is not implemented yet"
+                                                                .to_string(),
+                                                        );
+                                                        should_submit = false;
+                                                    }
+                                                }
+
+                                                if should_submit {
+                                                    let symbolic_graph_ids: Vec<_> =
+                                                        interface.model_ids.to_vec();
+                                                    let model_inputs: HashMap<_, _> = tts_interface
+                                                        .model_weights
+                                                        .iter()
+                                                        .zip(interface.model_ids.iter())
+                                                        .map(|(&link, &id)| (link, id))
+                                                        .collect();
+
+                                                    let swatch_settings = if state
+                                                        .do_explorer_swatches_in_view
+                                                        || state.do_all_explorer_swatches
+                                                    {
+                                                        Some(AbbreviatedTensorReportSettings {
+                                                            downsampled_size: (state.swatch_dimension
+                                                                * state.swatch_dimension)
+                                                                as u64,
+                                                            subscribed_tensors: self
+                                                                .tensors_in_view
+                                                                .iter()
+                                                                .cloned()
+                                                                .collect(),
+                                                            do_all: state.do_all_explorer_swatches,
+                                                        })
+                                                    } else {
+                                                        None
+                                                    };
+
+                                                    let token = server_request_manager
+                                                        .submit_supergraph_request(
+                                                            SuperGraphRequest {
+                                                                do_node_execution_reports: state
+                                                                    .explorer_node_wave,
+                                                                abbreviated_tensor_report_settings:
+                                                                    swatch_settings,
+                                                                attention_token: None,
+                                                                super_graph: tts_interface
+                                                                    .super_graph
+                                                                    .clone(),
+                                                                subscribed_tensors: self
+                                                                    .inspect_window_tensor_subscriptions
+                                                                    .iter()
+                                                                    .cloned()
+                                                                    .collect(),
+                                                                string_inputs,
+                                                                use_cache: if tts_data.use_cache {
+                                                                    Some(300 + interface_id as u64)
+                                                                } else {
+                                                                    None
+                                                                },
+                                                                backend_mode: tts_data.selected_mode,
+                                                                symbolic_graph_ids,
+                                                                tensor_inputs,
+                                                                audio_inputs: HashMap::new(),
+                                                                model_inputs,
+                                                                hash_inputs: HashMap::new(),
+                                                            },
+                                                        );
+
+                                                    tts_data.pending_request = Some((
+                                                        token,
+                                                        tts_interface.audio_output_link,
+                                                        tts_interface.sample_rate,
+                                                    ));
+                                                    tts_data.status_message =
+                                                        Some("Running TTS pipeline...".to_string());
+                                                }
+                                            }
+                                        });
+                                    }
+                                });
+                            });
+
+                            let frame = egui::Frame::default()
+                                .stroke(results_ui.visuals().window_stroke)
+                                .inner_margin(5.0);
+                            frame.show(results_ui, |ui| {
+                                ui.vertical(|ui| {
+                                    ui.heading("Result");
+                                    if let Some(msg) = &tts_data.status_message {
+                                        ui.label(msg);
+                                    } else {
+                                        ui.label("No audio generated yet.");
+                                    }
+                                    if let (Some(audio), Some(sample_rate_hz)) = (
+                                        tts_data.generated_audio.clone(),
+                                        tts_data.generated_sample_rate_hz,
+                                    ) {
+                                        ui.label(format!("Output tensor shape: {:?}", audio.shape()));
+                                        let mut play_clicked = false;
+                                        let mut stop_clicked = false;
+                                        let mut download_clicked = false;
+                                        ui.horizontal(|ui| {
+                                            play_clicked = ui.button("Play").clicked();
+                                            stop_clicked = ui.button("Stop").clicked();
+                                            download_clicked = ui.button("Download WAV").clicked();
+                                        });
+
+                                        if play_clicked {
+                                            let result = tensor_to_audio_samples(&audio).and_then(
+                                                |samples| {
+                                                    play_audio_samples(&samples, sample_rate_hz)
+                                                },
+                                            );
+                                            match result {
+                                                Ok(()) => {
+                                                    tts_data.status_message = Some(format!(
+                                                        "Playing audio @ {sample_rate_hz}Hz"
+                                                    ));
+                                                }
+                                                Err(err) => {
+                                                    tts_data.status_message = Some(format!(
+                                                        "Audio playback failed: {err}"
+                                                    ));
+                                                }
+                                            }
+                                        }
+                                        if stop_clicked {
+                                            stop_audio_playback();
+                                            tts_data.status_message =
+                                                Some("Stopped playback".to_string());
+                                        }
+                                        if download_clicked {
+                                            let result =
+                                                tensor_to_audio_samples(&audio).and_then(|samples| {
+                                                    download_audio_wav(&samples, sample_rate_hz)
+                                                });
+                                            match result {
+                                                Ok(()) => {
+                                                    tts_data.status_message =
+                                                        Some("Saved generated_audio.wav".to_string());
+                                                }
+                                                Err(err) => {
+                                                    tts_data.status_message = Some(format!(
+                                                        "Audio download failed: {err}"
+                                                    ));
+                                                }
+                                            }
+                                        }
+                                    } else if let Some(audio) = &tts_data.generated_audio {
+                                        ui.label(format!("Output tensor shape: {:?}", audio.shape()));
+                                    }
+                                });
+                            });
+                        });
                     }
-                    AnyInterface::SpeechToTextInterface(_) => {
-                        ui.label("STT interface (not yet supported in WebUI)");
+                        AnyInterface::SpeechToTextInterface(stt_interface) => {
+                            let stt_data = self
+                                .stt_inference_data
+                                .entry(interface_id)
+                                .or_default();
+
+                            #[cfg(target_arch = "wasm32")]
+                            if let Some(receiver) = stt_data.pending_web_audio_pick.as_mut() {
+                                match receiver.try_recv() {
+                                    Ok(Ok(file)) => {
+                                        stt_data.selected_audio_name = Some(file.name.clone());
+                                        stt_data.selected_audio_bytes = Some(file.bytes);
+                                        stt_data.status_message =
+                                            Some(format!("Loaded audio file: {}", file.name));
+                                        stt_data.transcription_text = None;
+                                        stt_data.transcription_tokens = None;
+                                        stt_data.pending_web_audio_pick = None;
+                                    }
+                                    Ok(Err(err)) => {
+                                        if err != "file selection canceled" {
+                                            stt_data.status_message =
+                                                Some(format!("Failed to load audio file: {err}"));
+                                        }
+                                        stt_data.pending_web_audio_pick = None;
+                                    }
+                                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
+                                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                                        stt_data.pending_web_audio_pick = None;
+                                    }
+                                }
+                            }
+
+                            if let Some((request_id, _, _, _)) = &stt_data.pending_request {
+                                let swatch_settings = if state.do_explorer_swatches_in_view
+                                    || state.do_all_explorer_swatches
+                                {
+                                    Some(AbbreviatedTensorReportSettings {
+                                        downsampled_size: (state.swatch_dimension
+                                            * state.swatch_dimension)
+                                            as u64,
+                                        subscribed_tensors: self
+                                            .tensors_in_view
+                                            .iter()
+                                            .cloned()
+                                            .collect(),
+                                        do_all: state.do_all_explorer_swatches,
+                                    })
+                                } else {
+                                    None
+                                };
+                                server_request_manager.update_observer_settings(
+                                    *request_id,
+                                    self.inspect_window_tensor_subscriptions
+                                        .iter()
+                                        .cloned()
+                                        .collect(),
+                                    state.explorer_node_wave,
+                                    swatch_settings,
+                                );
+                                if let Some(reports) = server_request_manager.get_reports(*request_id)
+                                {
+                                    let time_now = Instant::now();
+                                    let mut node_activity_maps = NodeExecutionActivityMapsMut {
+                                        node_execution_timestamps: &mut self.node_execution_timestamps,
+                                        node_last_child_active_timestamps: &mut self.node_last_child_active_timestamps,
+                                        node_execution_durations: &mut self.node_execution_durations,
+                                        node_execution_op_kinds: &mut self.node_execution_op_kinds,
+                                    };
+                                    for report in reports {
+                                        stt_data.progress_widget_state.ingest_report(report.clone());
+                                        for (path, value) in report.tensor_assignments {
+                                            self.inspect_window_tensor_subscription_returns
+                                                .insert(path, value);
+                                        }
+                                        for (node_path, op_kind, age, execution_duration) in
+                                            report.node_executions
+                                        {
+                                            let time = time_now - age;
+                                            record_node_execution_activity(
+                                                &mut node_activity_maps,
+                                                node_path,
+                                                op_kind,
+                                                time,
+                                                execution_duration,
+                                            );
+                                        }
+                                        for (tensor_path, value) in
+                                            report.abbreviated_tensor_assignments
+                                        {
+                                            self.rendered_tensor_swatches.remove(&tensor_path);
+                                            self.abbreviated_tensor_reports
+                                                .insert(tensor_path, value);
+                                        }
+                                    }
+                                }
+                                if let Some(response) = server_request_manager.get_response(*request_id)
+                                {
+                                    let (_, output_link, eos_token_id, tokenizer_info) =
+                                        stt_data.pending_request.take().unwrap();
+                                    match response.result {
+                                        Ok(mut data) => {
+                                            if let Some(token_tensor) =
+                                                data.tensor_outputs.remove(&output_link)
+                                            {
+                                                match token_tensor.cast(DType::U32) {
+                                                    Ok(token_tensor) => {
+                                                        match token_tensor.flatten().try_to_vec() {
+                                                            Ok(mut token_ids) => {
+                                                                if let Some(pos) = token_ids
+                                                                    .iter()
+                                                                    .position(|&token| token == eos_token_id)
+                                                                {
+                                                                    token_ids.truncate(pos);
+                                                                }
+                                                                stt_data.transcription_tokens =
+                                                                    Some(token_ids.clone());
+                                                                stt_data.transcription_text = None;
+                                                                match loaded_tokenizers
+                                                                    .loaded_tokenizers
+                                                                    .get(&tokenizer_info)
+                                                                    .cloned()
+                                                                    .flatten()
+                                                                {
+                                                                    Some(Ok(tokenizer)) => {
+                                                                        match tokenizer.decode(&token_ids) {
+                                                                            Ok(text) => {
+                                                                                stt_data.status_message = Some(
+                                                                                    format!(
+                                                                                        "Transcription complete ({} tokens)",
+                                                                                        token_ids.len()
+                                                                                    ),
+                                                                                );
+                                                                                stt_data.transcription_text =
+                                                                                    Some(text);
+                                                                            }
+                                                                            Err(err) => {
+                                                                                stt_data.status_message = Some(
+                                                                                    format!(
+                                                                                        "Token decode failed: {err} (raw tokens shown)"
+                                                                                    ),
+                                                                                );
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                    Some(Err(err)) => {
+                                                                        stt_data.status_message = Some(format!(
+                                                                            "Tokenizer load failed: {err} (raw tokens shown)"
+                                                                        ));
+                                                                    }
+                                                                    None => {
+                                                                        stt_data.status_message = Some(
+                                                                            "Tokenizer not loaded yet (raw tokens shown)"
+                                                                                .to_string(),
+                                                                        );
+                                                                    }
+                                                                }
+                                                            }
+                                                            Err(err) => {
+                                                                stt_data.status_message = Some(format!(
+                                                                    "Error: token decode failed: {err}"
+                                                                ));
+                                                                stt_data.transcription_text = None;
+                                                                stt_data.transcription_tokens = None;
+                                                            }
+                                                        }
+                                                    }
+                                                    Err(err) => {
+                                                        stt_data.status_message = Some(format!(
+                                                            "Error: token cast failed: {err}"
+                                                        ));
+                                                        stt_data.transcription_text = None;
+                                                        stt_data.transcription_tokens = None;
+                                                    }
+                                                }
+                                            } else {
+                                                stt_data.status_message = Some(
+                                                    "Error: output token tensor not found"
+                                                        .to_string(),
+                                                );
+                                                stt_data.transcription_text = None;
+                                                stt_data.transcription_tokens = None;
+                                            }
+                                        }
+                                        Err(err) => {
+                                            self.error_popup = Some(err);
+                                            stt_data.status_message =
+                                                Some("Error (see popup)".to_string());
+                                            stt_data.transcription_text = None;
+                                            stt_data.transcription_tokens = None;
+                                        }
+                                    }
+                                }
+                            }
+
+                            ui.columns(2, |columns| {
+                                let (left, right) = columns.split_at_mut(1);
+                                let controls_ui = &mut left[0];
+                                let results_ui = &mut right[0];
+
+                                let frame = egui::Frame::default()
+                                    .stroke(controls_ui.visuals().window_stroke)
+                                    .inner_margin(5.0);
+                                frame.show(controls_ui, |ui| {
+                                    ui.vertical(|ui| {
+                                        ui.heading("Speech to Text");
+                                        ui.label(format!(
+                                            "Input: mono WAV, resampled to {} Hz",
+                                            stt_interface.sample_rate
+                                        ));
+                                        ui.label(format!(
+                                            "Decode steps: {} (EOS token {})",
+                                            stt_interface.max_decode_steps, stt_interface.eos_token_id
+                                        ));
+                                        ui.label(format!(
+                                            "Tokenizer: {}",
+                                            match &stt_interface.tokenizer {
+                                                TokenizerInfo::HFTokenizer(name) => {
+                                                    format!("Huggingface: {name}")
+                                                }
+                                                TokenizerInfo::HFTokenizerLocal(path) => {
+                                                    format!("Local: {path}")
+                                                }
+                                                TokenizerInfo::RWKVWorld => "RWKV World".to_string(),
+                                                TokenizerInfo::HFTokenizerJson(_) => {
+                                                    "GGUF embedded".to_string()
+                                                }
+                                            }
+                                        ));
+
+                                        ui.horizontal(|ui| {
+                                            ui.label(format!(
+                                                "Audio: {}",
+                                                stt_data
+                                                    .selected_audio_name
+                                                    .as_deref()
+                                                    .unwrap_or("<none selected>")
+                                            ));
+
+                                            #[cfg(not(target_arch = "wasm32"))]
+                                            if ui.button("Choose WAV...").clicked() {
+                                                match pick_audio_file_native() {
+                                                    Ok(Some(file)) => {
+                                                        stt_data.selected_audio_name =
+                                                            Some(file.name.clone());
+                                                        stt_data.selected_audio_bytes =
+                                                            Some(file.bytes);
+                                                        stt_data.status_message = Some(format!(
+                                                            "Loaded audio file: {}",
+                                                            file.name
+                                                        ));
+                                                        stt_data.transcription_text = None;
+                                                        stt_data.transcription_tokens = None;
+                                                    }
+                                                    Ok(None) => {}
+                                                    Err(err) => {
+                                                        stt_data.status_message = Some(format!(
+                                                            "Failed to load audio file: {err}"
+                                                        ));
+                                                    }
+                                                }
+                                            }
+
+                                            #[cfg(target_arch = "wasm32")]
+                                            {
+                                                if stt_data.pending_web_audio_pick.is_some() {
+                                                    ui.spinner();
+                                                    ui.label("Waiting for file...");
+                                                } else if ui.button("Choose WAV...").clicked() {
+                                                    stt_data.pending_web_audio_pick =
+                                                        Some(start_audio_file_pick_web());
+                                                }
+                                            }
+
+                                            if ui.button("Clear").clicked() {
+                                                stt_data.selected_audio_name = None;
+                                                stt_data.selected_audio_bytes = None;
+                                            }
+                                        });
+
+                                        if let Some(request_id) =
+                                            stt_data.pending_request.as_ref().map(|x| x.0)
+                                        {
+                                            ui.horizontal(|ui| {
+                                                ui.spinner();
+                                                ui.label("Transcribing...");
+                                                if ui.button("Cancel").clicked() {
+                                                    server_request_manager
+                                                        .cancel_request(request_id);
+                                                    stt_data.pending_request = None;
+                                                    stt_data.progress_widget_state.clear();
+                                                    stt_data.status_message =
+                                                        Some("Cancelled".to_string());
+                                                }
+                                            });
+                                        } else {
+                                            ui.horizontal(|ui| {
+                                                egui::ComboBox::from_id_salt((
+                                                    "stt_backend_mode",
+                                                    interface_id,
+                                                ))
+                                                .selected_text(stt_data.selected_mode.to_string())
+                                                .show_ui(ui, |ui| {
+                                                    ui.selectable_value(
+                                                        &mut stt_data.selected_mode,
+                                                        SuperGraphRequestBackendMode::NDArray,
+                                                        SuperGraphRequestBackendMode::NDArray
+                                                            .to_string(),
+                                                    );
+                                                    if server_config_report.vulkan_available {
+                                                        ui.selectable_value(
+                                                            &mut stt_data.selected_mode,
+                                                            SuperGraphRequestBackendMode::Vulkan,
+                                                            SuperGraphRequestBackendMode::Vulkan
+                                                                .to_string(),
+                                                        );
+                                                    }
+                                                    ui.selectable_value(
+                                                        &mut stt_data.selected_mode,
+                                                        SuperGraphRequestBackendMode::Compiler,
+                                                        SuperGraphRequestBackendMode::Compiler
+                                                            .to_string(),
+                                                    );
+                                                });
+                                                toggle_ui(ui, &mut stt_data.use_cache);
+                                                ui.label("Cache");
+                                                if ui.button("Transcribe").clicked() {
+                                                    if let Some(audio_bytes) =
+                                                        stt_data.selected_audio_bytes.as_ref()
+                                                    {
+                                                        match decode_wav_bytes_to_mono_f32(
+                                                            audio_bytes,
+                                                            stt_interface.sample_rate,
+                                                        ) {
+                                                            Ok(samples) => {
+                                                                if samples.is_empty() {
+                                                                    stt_data.status_message = Some(
+                                                                        "Audio file has no samples."
+                                                                            .to_string(),
+                                                                    );
+                                                                } else if interface.model_ids.len() < 2 {
+                                                                    stt_data.status_message = Some(format!(
+                                                                        "STT interface expected 2 model IDs (encoder+decoder), found {}",
+                                                                        interface.model_ids.len()
+                                                                    ));
+                                                                } else {
+                                                                    let audio_tensor = NDArrayNumericTensor::<DynRank>::from_vec_shape(
+                                                                        samples.clone(),
+                                                                        &vec![samples.len() as u64],
+                                                                    )
+                                                                    .unwrap();
+
+                                                                    let symbolic_graph_ids: Vec<_> =
+                                                                        interface.model_ids.to_vec();
+                                                                    let model_inputs = HashMap::from([
+                                                                        (
+                                                                            stt_interface.encoder_weights_link,
+                                                                            interface.model_ids[0],
+                                                                        ),
+                                                                        (
+                                                                            stt_interface.decoder_weights_link,
+                                                                            interface.model_ids[1],
+                                                                        ),
+                                                                    ]);
+
+                                                                    let swatch_settings = if state
+                                                                        .do_explorer_swatches_in_view
+                                                                        || state.do_all_explorer_swatches
+                                                                    {
+                                                                        Some(AbbreviatedTensorReportSettings {
+                                                                            downsampled_size: (state.swatch_dimension
+                                                                                * state.swatch_dimension)
+                                                                                as u64,
+                                                                            subscribed_tensors: self
+                                                                                .tensors_in_view
+                                                                                .iter()
+                                                                                .cloned()
+                                                                                .collect(),
+                                                                            do_all: state.do_all_explorer_swatches,
+                                                                        })
+                                                                    } else {
+                                                                        None
+                                                                    };
+
+                                                                    let token = server_request_manager
+                                                                        .submit_supergraph_request(
+                                                                            SuperGraphRequest {
+                                                                                do_node_execution_reports: state
+                                                                                    .explorer_node_wave,
+                                                                                abbreviated_tensor_report_settings:
+                                                                                    swatch_settings,
+                                                                                attention_token: None,
+                                                                                super_graph: stt_interface
+                                                                                    .super_graph
+                                                                                    .clone(),
+                                                                                subscribed_tensors: self
+                                                                                    .inspect_window_tensor_subscriptions
+                                                                                    .iter()
+                                                                                    .cloned()
+                                                                                    .collect(),
+                                                                                string_inputs: HashMap::new(),
+                                                                                use_cache: if stt_data.use_cache {
+                                                                                    Some(400 + interface_id as u64)
+                                                                                } else {
+                                                                                    None
+                                                                                },
+                                                                                backend_mode: stt_data.selected_mode,
+                                                                                symbolic_graph_ids,
+                                                                                tensor_inputs: HashMap::new(),
+                                                                                audio_inputs: HashMap::from([(
+                                                                                    stt_interface.audio_input_link,
+                                                                                    SuperGraphAudioInput {
+                                                                                        samples: audio_tensor,
+                                                                                        sample_rate_hz: stt_interface.sample_rate,
+                                                                                    },
+                                                                                )]),
+                                                                                model_inputs,
+                                                                                hash_inputs: HashMap::new(),
+                                                                            },
+                                                                        );
+                                                                    stt_data.progress_widget_state.clear();
+                                                                    stt_data.pending_request = Some((
+                                                                        token,
+                                                                        stt_interface.output_token_link,
+                                                                        stt_interface.eos_token_id,
+                                                                        stt_interface.tokenizer.clone(),
+                                                                    ));
+                                                                    stt_data.status_message =
+                                                                        Some("Running STT pipeline...".to_string());
+                                                                    stt_data.transcription_text = None;
+                                                                    stt_data.transcription_tokens = None;
+                                                                }
+                                                            }
+                                                            Err(err) => {
+                                                                stt_data.status_message = Some(format!(
+                                                                    "Failed to decode WAV: {err}"
+                                                                ));
+                                                            }
+                                                        }
+                                                    } else {
+                                                        stt_data.status_message = Some(
+                                                            "Select a WAV file first.".to_string(),
+                                                        );
+                                                    }
+                                                }
+                                            });
+                                        }
+                                    });
+                                });
+
+                                let frame = egui::Frame::default()
+                                    .stroke(results_ui.visuals().window_stroke)
+                                    .inner_margin(5.0);
+                                frame.show(results_ui, |ui| {
+                                    ui.vertical(|ui| {
+                                        ui.heading("Result");
+                                        if let Some(msg) = &stt_data.status_message {
+                                            ui.label(msg);
+                                        } else {
+                                            ui.label("No transcription yet.");
+                                        }
+                                        if let Some(tokens) = &stt_data.transcription_tokens {
+                                            ui.label(format!("Tokens: {}", tokens.len()));
+                                        }
+                                        if let Some(text) = &stt_data.transcription_text {
+                                            let mut text = text.clone();
+                                            ui.add(
+                                                egui::TextEdit::multiline(&mut text)
+                                                    .interactive(false)
+                                                    .desired_rows(8),
+                                            );
+                                        } else if let Some(tokens) = &stt_data.transcription_tokens {
+                                            let preview = tokens
+                                                .iter()
+                                                .take(32)
+                                                .map(|x| x.to_string())
+                                                .collect::<Vec<_>>()
+                                                .join(", ");
+                                            ui.label(format!(
+                                                "Raw token preview: [{}{}]",
+                                                preview,
+                                                if tokens.len() > 32 { ", ..." } else { "" }
+                                            ));
+                                        }
+                                    });
+                                });
+                            });
+                        }
                     }
-                }
-                ui.allocate_exact_size(ui.available_size_before_wrap(), Sense::click());
+                });
             });
         }
+
+        if let GraphRootSubjectSelection::Interface(interface_id) = self.root_selection
+            && let Some(graph_rect) = graph_pane_rect
+            && let Some(progress_state) = self.interface_progress_widget_state(interface_id)
+            && !progress_state.is_empty()
+        {
+            egui::Area::new(egui::Id::new(("graph_progress_overlay", interface_id)))
+                .order(egui::Order::Foreground)
+                .pivot(egui::Align2::LEFT_BOTTOM)
+                .fixed_pos(graph_rect.left_bottom() + vec2(10.0, -10.0))
+                .show(ui.ctx(), |ui| {
+                    progress_state.show(ui);
+                });
+        }
+
+        if let Some(graph_rect) = graph_pane_rect
+            && let Some(breadcrumb_items) = graph_breadcrumb_items
+        {
+            let last_idx = breadcrumb_items.len().saturating_sub(1);
+            egui::Area::new(egui::Id::new((
+                "graph_breadcrumb_overlay",
+                self.root_selection,
+            )))
+            .order(egui::Order::Foreground)
+            .pivot(egui::Align2::LEFT_TOP)
+            .fixed_pos(graph_rect.left_top() + vec2(10.0, 10.0))
+            .show(ui.ctx(), |ui| {
+                egui::Frame::default()
+                    .stroke(ui.visuals().window_stroke)
+                    .inner_margin(egui::Margin::same(6))
+                    .show(ui, |ui| {
+                        ui.set_max_width(460.0);
+                        ui.horizontal_wrapped(|ui| {
+                            for (idx, (text, path)) in breadcrumb_items.into_iter().enumerate() {
+                                if idx > 0 {
+                                    ui.label(egui::RichText::new("/").size(11.0));
+                                }
+                                if idx < last_idx {
+                                    let response =
+                                        ui.link(egui::RichText::new(text.as_str()).size(11.0));
+                                    if response.clicked() {
+                                        self.next_graph_subject_path = Some(path);
+                                    }
+                                } else {
+                                    ui.label(egui::RichText::new(text).size(11.0));
+                                }
+                            }
+                        });
+                    });
+            });
+        }
+
         // Prompt model loading
 
         for model_id in models_to_load {
@@ -1820,6 +3237,44 @@ impl GraphExplorerApp {
             }
         }
     }
+}
+
+fn ensure_kokoro_voice_selection(
+    selected: &mut Option<String>,
+    voices: &[KokoroVoiceEmbedding],
+    default_voice: Option<&str>,
+) {
+    let selected_valid = selected
+        .as_ref()
+        .is_some_and(|name| voices.iter().any(|v| v.name == *name));
+    if selected_valid {
+        return;
+    }
+    if let Some(default_voice) = default_voice
+        && voices.iter().any(|v| v.name == default_voice)
+    {
+        *selected = Some(default_voice.to_string());
+        return;
+    }
+    *selected = voices.first().map(|v| v.name.clone());
+}
+
+fn selected_kokoro_voice<'a>(
+    selected: &Option<String>,
+    voices: &'a [KokoroVoiceEmbedding],
+    default_voice: Option<&str>,
+) -> Option<&'a KokoroVoiceEmbedding> {
+    if let Some(name) = selected
+        && let Some(voice) = voices.iter().find(|v| v.name == *name)
+    {
+        return Some(voice);
+    }
+    if let Some(default_voice) = default_voice
+        && let Some(voice) = voices.iter().find(|v| v.name == default_voice)
+    {
+        return Some(voice);
+    }
+    voices.first()
 }
 
 fn save_image_to_download(color_image: &ColorImage) {

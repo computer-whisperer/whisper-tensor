@@ -1,12 +1,8 @@
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;
 use whisper_tensor::backends::eval_backend::EvalBackend;
 use whisper_tensor::interfaces::AnyInterface;
 use whisper_tensor::loader::{ConfigValue, ConfigValues, Loader};
-use whisper_tensor::numeric_tensor::NumericTensor;
-use whisper_tensor::tensor_rank::DynRank;
-use whisper_tensor::tokenizer::AnyTokenizer;
 use whisper_tensor_import::loaders::SDXLLoader;
 
 const CHECKPOINT: &str = "/mnt/secondary/neural_networks/sd_xl_base_1.0.safetensors";
@@ -47,26 +43,8 @@ fn main() {
         })
         .expect("No ImageGeneration interface");
 
-    // Tokenize using generic prompt inputs
     let prompt = "a photo of a cat";
     let negative_prompt = "";
-
-    let mut prompt_tokens = HashMap::new();
-    for pi in &interface.positive_prompts {
-        let tokenizer = AnyTokenizer::from_tokenizer_info(&pi.tokenizer);
-        let ids = pi.tokenize(&tokenizer, prompt);
-        let tensor = NumericTensor::<DynRank>::from_vec_shape(ids, vec![1, pi.seq_len]).unwrap();
-        prompt_tokens.insert(pi.link, tensor);
-    }
-    if let Some(neg_prompts) = &interface.negative_prompts {
-        for pi in neg_prompts {
-            let tokenizer = AnyTokenizer::from_tokenizer_info(&pi.tokenizer);
-            let ids = pi.tokenize(&tokenizer, negative_prompt);
-            let tensor =
-                NumericTensor::<DynRank>::from_vec_shape(ids, vec![1, pi.seq_len]).unwrap();
-            prompt_tokens.insert(pi.link, tensor);
-        }
-    }
 
     // Tiny latent for fast test
     let latent_h = 8;
@@ -90,14 +68,16 @@ fn main() {
     let image_tensor = interface
         .run(
             &models,
-            prompt_tokens,
+            prompt.to_string(),
+            Some(negative_prompt.to_string()),
             initial_noise,
             vec![1, channels, latent_h, latent_w],
             steps,
             guidance_scale,
             &mut backend,
         )
-        .expect("Interface run failed");
+        .expect("Interface run failed")
+        .tensor;
 
     println!(
         "  Output: dtype={:?}, shape={:?}, took {:.2?}",
@@ -123,16 +103,16 @@ fn generate_gaussian_noise(n: usize, seed: u64) -> Vec<f32> {
     let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
     let mut vals = Vec::with_capacity(n);
     while vals.len() + 1 < n {
-        let u1: f32 = rand::Rng::random_range(&mut rng, f32::EPSILON..1.0);
-        let u2: f32 = rand::Rng::random_range(&mut rng, 0.0f32..std::f32::consts::TAU);
-        let r = (-2.0 * u1.ln()).sqrt();
+        let u1: f32 = rand::RngExt::random_range(&mut rng, f32::EPSILON..1.0);
+        let u2: f32 = rand::RngExt::random_range(&mut rng, 0.0f32..std::f32::consts::TAU);
+        let r = (-2.0f32 * u1.ln()).sqrt();
         vals.push(r * u2.cos());
         vals.push(r * u2.sin());
     }
     if vals.len() < n {
-        let u1: f32 = rand::Rng::random_range(&mut rng, f32::EPSILON..1.0);
-        let u2: f32 = rand::Rng::random_range(&mut rng, 0.0f32..std::f32::consts::TAU);
-        vals.push((-2.0 * u1.ln()).sqrt() * u2.cos());
+        let u1: f32 = rand::RngExt::random_range(&mut rng, f32::EPSILON..1.0);
+        let u2: f32 = rand::RngExt::random_range(&mut rng, 0.0f32..std::f32::consts::TAU);
+        vals.push((-2.0f32 * u1.ln()).sqrt() * u2.cos());
     }
     vals
 }

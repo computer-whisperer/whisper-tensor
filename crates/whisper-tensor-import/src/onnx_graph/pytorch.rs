@@ -1,7 +1,7 @@
 use super::operators::{
     Add, Cast, Concat, Constant, Conv, CumSum, Div, Erf, Expand, GroupNormalization,
     LayerNormalization, Mul, RMSNormalization, ReduceSum, Reshape, Resize, Sigmoid, Slice, Squeeze,
-    TopK, Transpose, Unsqueeze,
+    Tanh, TopK, Transpose, Unsqueeze,
 };
 use super::tensor::{DType, Dimension, Shape, Tensor, TensorData};
 use super::weights::WeightManager;
@@ -172,6 +172,27 @@ pub fn gelu(input: Arc<dyn Tensor>) -> Result<Arc<dyn Tensor>, Error> {
     let half = f32_scalar_matching(0.5, input.as_ref());
     let scaled = Mul::new(None, erf_plus_one, half)?;
     Ok(Mul::new(None, input, scaled)?)
+}
+
+pub fn gelu_pytorch_tanh(input: Arc<dyn Tensor>) -> Result<Arc<dyn Tensor>, Error> {
+    // PyTorch approximate GELU:
+    // 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+    let x2 = Mul::new(None, input.clone(), input.clone())?;
+    let x3 = Mul::new(None, x2, input.clone())?;
+
+    let c = f32_scalar_matching(0.044715, input.as_ref());
+    let c_x3 = Mul::new(None, c, x3)?;
+    let inner = Add::new(None, input.clone(), c_x3)?;
+
+    let sqrt_2_over_pi = f32_scalar_matching(0.7978846, input.as_ref());
+    let scaled = Mul::new(None, sqrt_2_over_pi, inner)?;
+    let t = Tanh::new(None, scaled);
+
+    let one = f32_scalar_matching(1.0, input.as_ref());
+    let one_plus_t = Add::new(None, one, t)?;
+    let half = f32_scalar_matching(0.5, input.as_ref());
+    let half_x = Mul::new(None, half, input)?;
+    Ok(Mul::new(None, half_x, one_plus_t)?)
 }
 
 pub fn quick_gelu(input: Arc<dyn Tensor>) -> Result<Arc<dyn Tensor>, Error> {

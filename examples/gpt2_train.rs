@@ -8,7 +8,7 @@
 /// rather than importing from ONNX.
 use std::collections::HashMap;
 
-use rand::Rng;
+use rand::RngExt;
 use whisper_tensor::backends::eval_backend::EvalBackend;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::dtype::DType;

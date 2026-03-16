@@ -9,7 +9,7 @@ use whisper_tensor::loader::{ConfigValue, ConfigValues, Loader, LoaderOutput};
 use whisper_tensor::numeric_tensor::NumericTensor;
 use whisper_tensor::super_graph::cache::SuperGraphCache;
 use whisper_tensor::tensor_rank::DynRank;
-use whisper_tensor::tokenizer::{AnyTokenizer, Tokenizer};
+use whisper_tensor::tokenizer::Tokenizer;
 
 #[derive(Parser)]
 #[command(name = "wt", about = "Whisper Tensor CLI")]
@@ -154,6 +154,7 @@ enum LoaderChoice {
     Gguf,
     Sd15,
     Sd2,
+    Sd35,
     Sdxl,
     Flux,
     Kokoro,
@@ -212,6 +213,7 @@ fn load_model(loader: &LoaderChoice, config: ConfigValues) -> LoaderOutput {
         LoaderChoice::Gguf => GgufLoader.load(config),
         LoaderChoice::Sd15 => SD15Loader.load(config),
         LoaderChoice::Sd2 => SD2Loader.load(config),
+        LoaderChoice::Sd35 => SD35Loader.load(config),
         LoaderChoice::Sdxl => SDXLLoader.load(config),
         LoaderChoice::Flux => FluxLoader.load(config),
         LoaderChoice::Kokoro => KokoroLoader.load(config),
@@ -291,7 +293,16 @@ fn main() {
             eprintln!("Loading model...");
             let loaded = load_model(&loader, config);
             cmd_tts(
-                loaded, model_dir, prompt, voice, speed, output, ref_audio, ref_text,
+                loaded,
+                TtsRunOptions {
+                    model_dir,
+                    text: prompt,
+                    voice_name: voice,
+                    speed,
+                    output_path: output,
+                    ref_audio,
+                    ref_text,
+                },
             );
         }
         Command::Stt {
@@ -401,26 +412,6 @@ fn cmd_image(
             std::process::exit(1);
         });
 
-    // Tokenize positive prompt for all input slots
-    let mut prompt_tokens = HashMap::new();
-    for pi in &interface.positive_prompts {
-        let tokenizer = AnyTokenizer::from_tokenizer_info(&pi.tokenizer);
-        let ids = pi.tokenize(&tokenizer, &prompt);
-        let tensor = NumericTensor::<DynRank>::from_vec_shape(ids, vec![1, pi.seq_len]).unwrap();
-        prompt_tokens.insert(pi.link, tensor);
-    }
-
-    // Tokenize negative prompt for all input slots (if CFG)
-    if let Some(neg_prompts) = &interface.negative_prompts {
-        for pi in neg_prompts {
-            let tokenizer = AnyTokenizer::from_tokenizer_info(&pi.tokenizer);
-            let ids = pi.tokenize(&tokenizer, &negative_prompt);
-            let tensor =
-                NumericTensor::<DynRank>::from_vec_shape(ids, vec![1, pi.seq_len]).unwrap();
-            prompt_tokens.insert(pi.link, tensor);
-        }
-    }
-
     // Generate initial noise
     let channels = interface.latent_channels;
     let latent_n = channels * latent_h * latent_w;
@@ -438,13 +429,15 @@ fn cmd_image(
     let image_tensor = interface
         .run(
             &models,
-            prompt_tokens,
+            prompt,
+            Some(negative_prompt),
             initial_noise,
             vec![1, channels, latent_h, latent_w],
             steps,
             guidance_scale,
             &mut backend,
         )
+        .map(|x| x.tensor)
         .unwrap_or_else(|e| {
             eprintln!("Inference error: {e}");
             std::process::exit(1);
@@ -460,8 +453,7 @@ fn cmd_image(
 // Text-to-speech
 // ============================================================================
 
-fn cmd_tts(
-    output: LoaderOutput,
+struct TtsRunOptions {
     model_dir: PathBuf,
     text: String,
     voice_name: String,
@@ -469,11 +461,23 @@ fn cmd_tts(
     output_path: PathBuf,
     ref_audio: Option<PathBuf>,
     ref_text: Option<String>,
-) {
+}
+
+fn cmd_tts(output: LoaderOutput, opts: TtsRunOptions) {
     use whisper_tensor::interfaces::TTSInputConfig;
     use whisper_tensor::super_graph::SuperGraphContext;
     use whisper_tensor::super_graph::cache::SuperGraphTensorCache;
     use whisper_tensor::super_graph::data::SuperGraphData;
+
+    let TtsRunOptions {
+        model_dir,
+        text,
+        voice_name,
+        speed,
+        output_path,
+        ref_audio,
+        ref_text,
+    } = opts;
 
     let interface = output
         .interfaces
@@ -487,7 +491,7 @@ fn cmd_tts(
             std::process::exit(1);
         });
 
-    // Tokenize and build SuperGraph inputs based on model type
+    // Build SuperGraph inputs based on model type.
     let mut data = SuperGraphData::new();
     for (i, model_weights_link) in interface.model_weights.iter().enumerate() {
         data.tensor_maps.insert(
@@ -495,83 +499,63 @@ fn cmd_tts(
             output.models[i].model.get_tensor_store(),
         );
     }
+    data.strings.insert(interface.text_input_link, text.clone());
 
     match &interface.input_config {
         TTSInputConfig::Kokoro {
             style_link,
             speed_link,
-            tokenizer,
+            voices,
+            default_voice,
         } => {
-            let phonemes = text_to_kokoro_phonemes(&text);
-            let vocab = load_tts_vocab(tokenizer);
-            let token_ids: Vec<i64> = {
-                let mut ids = vec![0i64]; // BOS ($)
-                for ch in phonemes.chars() {
-                    if let Some(&id) = vocab.get(&ch) {
-                        ids.push(id as i64);
-                    }
-                }
-                ids.push(0i64); // EOS ($)
-                ids
-            };
-            eprintln!("Phonemes: {phonemes}");
-            let num_tokens = token_ids.len();
-            eprintln!("Tokens: {num_tokens}");
-
-            let input_ids_tensor =
-                NumericTensor::<DynRank>::from_vec_shape(token_ids, vec![1, num_tokens]).unwrap();
-
-            let voice_bin = model_dir.join("voices").join(format!("{voice_name}.bin"));
-            let style_tensor = if voice_bin.exists() {
-                load_voice_style_bin(&voice_bin, num_tokens)
+            // Kokoro voice style bins are indexed by token count; use a simple
+            // text-length approximation here and let the graph handle tokenization.
+            let approx_tokens = text.chars().count().saturating_add(2);
+            let style_tensor = if !voices.is_empty() {
+                let selected_voice = if voices.iter().any(|v| v.name == voice_name) {
+                    voice_name.clone()
+                } else if let Some(default_voice) = default_voice
+                    && voices.iter().any(|v| v.name == *default_voice)
+                {
+                    eprintln!(
+                        "Voice '{}' not found, using default '{}'",
+                        voice_name, default_voice
+                    );
+                    default_voice.clone()
+                } else {
+                    let fallback = voices.first().unwrap().name.clone();
+                    eprintln!("Voice '{}' not found, using '{}'", voice_name, fallback);
+                    fallback
+                };
+                let voice = voices.iter().find(|v| v.name == selected_voice).unwrap();
+                let style_values = voice
+                    .style_for_token_count(approx_tokens)
+                    .unwrap_or_else(|e| {
+                        eprintln!("Failed to decode embedded voice '{}': {}", voice.name, e);
+                        std::process::exit(1);
+                    });
+                NumericTensor::<DynRank>::from_vec_shape(style_values, vec![1, 256]).unwrap()
             } else {
-                eprintln!("No voice file found: {}", voice_bin.display());
-                list_available_voices(&model_dir);
-                std::process::exit(1);
+                let voice_bin = model_dir.join("voices").join(format!("{voice_name}.bin"));
+                if !voice_bin.exists() {
+                    eprintln!("No voice file found: {}", voice_bin.display());
+                    list_available_voices(&model_dir);
+                    std::process::exit(1);
+                }
+                load_voice_style_bin(&voice_bin, approx_tokens)
             };
+
             let speed_tensor =
                 NumericTensor::<DynRank>::from_vec_shape(vec![speed], vec![1]).unwrap();
 
-            data.tensors
-                .insert(interface.text_ids_link, input_ids_tensor);
             data.tensors.insert(*style_link, style_tensor);
             data.tensors.insert(*speed_link, speed_tensor);
         }
         TTSInputConfig::Piper {
-            input_lengths_link,
             scales_link,
             speaker_id_link,
-            phoneme_id_map_json,
-            espeak_voice,
             ..
         } => {
-            let sentences = espeak_rs::text_to_phonemes(&text, espeak_voice, None, true, false)
-                .expect("espeak-ng phonemization failed");
-            let ipa = sentences.join(" ");
-            eprintln!("Phonemes: {ipa}");
-
-            let phoneme_id_map = parse_piper_phoneme_id_map(phoneme_id_map_json);
-
-            let mut token_ids: Vec<i64> = Vec::new();
-            token_ids.push(1); // BOS (^)
-            token_ids.push(0); // PAD (_)
-            for ch in ipa.chars() {
-                if let Some(ids) = phoneme_id_map.get(&ch) {
-                    for &id in ids {
-                        token_ids.push(id);
-                    }
-                }
-                token_ids.push(0); // PAD
-            }
-            token_ids.push(2); // EOS ($)
-
-            let num_tokens = token_ids.len();
-            eprintln!("Tokens: {num_tokens}");
-
-            let input_tensor =
-                NumericTensor::<DynRank>::from_vec_shape(token_ids, vec![1, num_tokens]).unwrap();
-            let input_lengths_tensor =
-                NumericTensor::<DynRank>::from_vec_shape(vec![num_tokens as i64], vec![1]).unwrap();
             let length_scale = 1.0 / speed;
             let scales_tensor = NumericTensor::<DynRank>::from_vec_shape(
                 vec![0.667f32, length_scale, 0.8],
@@ -579,9 +563,6 @@ fn cmd_tts(
             )
             .unwrap();
 
-            data.tensors.insert(interface.text_ids_link, input_tensor);
-            data.tensors
-                .insert(*input_lengths_link, input_lengths_tensor);
             data.tensors.insert(*scales_link, scales_tensor);
             if let Some(sid_link) = speaker_id_link {
                 data.tensors.insert(
@@ -596,7 +577,6 @@ fn cmd_tts(
             time_steps_link,
             iteration_count_link,
             nfe_steps,
-            vocab,
         } => {
             // Load reference audio
             let ref_audio_path = ref_audio.unwrap_or_else(|| {
@@ -611,7 +591,6 @@ fn cmd_tts(
                 ref_audio_len as f64 / 24000.0
             );
 
-            // Tokenize text using F5 character-level vocab
             let ref_text_str = ref_text.as_deref().unwrap_or("");
             let gen_text = &text;
             let combined_text = if ref_text_str.is_empty() {
@@ -619,15 +598,8 @@ fn cmd_tts(
             } else {
                 format!("{ref_text_str} {gen_text}")
             };
-            let vocab_map = build_f5_vocab(vocab);
-            let mut token_ids: Vec<i32> = Vec::new();
-            for ch in combined_text.chars() {
-                if let Some(&id) = vocab_map.get(&ch) {
-                    token_ids.push(id);
-                }
-            }
-            let num_tokens = token_ids.len();
-            eprintln!("Text tokens: {num_tokens}");
+            data.strings
+                .insert(interface.text_input_link, combined_text.clone());
 
             // Compute max_duration
             let hop_length: usize = 256;
@@ -652,9 +624,6 @@ fn cmd_tts(
                 NumericTensor::<DynRank>::from_vec_shape(ref_samples, vec![1, 1, ref_audio_len])
                     .unwrap();
 
-            let text_ids_tensor =
-                NumericTensor::<DynRank>::from_vec_shape(token_ids, vec![1, num_tokens]).unwrap();
-
             let max_duration_tensor =
                 NumericTensor::<DynRank>::from_vec_shape(vec![max_duration as i64], vec![])
                     .unwrap();
@@ -669,8 +638,6 @@ fn cmd_tts(
             let iteration_count_tensor =
                 NumericTensor::<DynRank>::from_vec_shape(vec![iterations as i64], vec![]).unwrap();
 
-            data.tensors
-                .insert(interface.text_ids_link, text_ids_tensor);
             data.tensors.insert(*ref_audio_link, ref_audio_tensor);
             data.tensors.insert(*max_duration_link, max_duration_tensor);
             data.tensors.insert(*time_steps_link, time_steps_tensor);
@@ -711,17 +678,17 @@ fn cmd_tts(
     };
 
     let audio = super_graph_output
-        .tensors
+        .audio_clips
         .get(&interface.audio_output_link)
-        .expect("No audio output tensor");
+        .expect("No audio output clip");
 
     eprintln!("Generated in {:.2?}", start.elapsed());
 
-    let samples = audio_tensor_to_samples(audio, &mut backend);
-    save_wav(&samples, interface.sample_rate, &output_path);
+    let samples = audio_tensor_to_samples(&audio.samples, &mut backend);
+    save_wav(&samples, audio.sample_rate_hz, &output_path);
     eprintln!(
         "Saved {:.1}s of audio to {}",
-        samples.len() as f64 / interface.sample_rate as f64,
+        samples.len() as f64 / audio.sample_rate_hz as f64,
         output_path.display()
     );
 }
@@ -733,51 +700,6 @@ fn audio_tensor_to_samples(audio: &NumericTensor<DynRank>, backend: &mut EvalBac
         .expect("cast to f32 failed");
     let audio_ndarray = audio_f32.to_ndarray().expect("to_ndarray failed");
     audio_ndarray.flatten().try_into().expect("flatten failed")
-}
-
-/// Parse Piper's phoneme_id_map JSON into a char → Vec<i64> lookup.
-fn parse_piper_phoneme_id_map(json: &str) -> HashMap<char, Vec<i64>> {
-    let value: serde_json::Value = serde_json::from_str(json).expect("Invalid phoneme_id_map JSON");
-    let obj = value.as_object().expect("phoneme_id_map is not an object");
-    let mut map = HashMap::new();
-    for (key, val) in obj {
-        if let Some(ch) = key.chars().next() {
-            if key.chars().count() == 1 {
-                let ids: Vec<i64> = val
-                    .as_array()
-                    .expect("phoneme IDs not an array")
-                    .iter()
-                    .map(|v| v.as_i64().expect("phoneme ID not i64"))
-                    .collect();
-                map.insert(ch, ids);
-            }
-        }
-    }
-    map
-}
-
-/// Load phoneme vocab from tokenizer.json (Kokoro) or config.json (Kitten TTS).
-///
-/// Load Kokoro tokenizer vocab (character → token ID) from tokenizer.json.
-fn load_tts_vocab(info: &whisper_tensor::metadata::TokenizerInfo) -> HashMap<char, u32> {
-    let path = match info {
-        whisper_tensor::metadata::TokenizerInfo::HFTokenizerLocal(p) => p.clone(),
-        _ => panic!("Expected HFTokenizerLocal for TTS tokenizer"),
-    };
-    let json = std::fs::read_to_string(&path).expect("Failed to read tokenizer file");
-    let value: serde_json::Value = serde_json::from_str(&json).expect("Invalid JSON");
-
-    let vocab = value["model"]["vocab"]
-        .as_object()
-        .expect("Cannot find model.vocab in tokenizer file");
-    let mut map = HashMap::new();
-    for (key, val) in vocab {
-        let id = val.as_u64().expect("vocab id not u64") as u32;
-        if key.chars().count() == 1 {
-            map.insert(key.chars().next().unwrap(), id);
-        }
-    }
-    map
 }
 
 /// Load a voice style vector from a .bin file (Kokoro format), indexed by token count.
@@ -834,10 +756,10 @@ fn save_wav(samples: &[f32], sample_rate: u32, path: &std::path::Path) {
 // Speech-to-text (Whisper)
 // ============================================================================
 
-fn cmd_stt(output: LoaderOutput, audio_path: PathBuf, model_dir: Option<PathBuf>) {
+fn cmd_stt(output: LoaderOutput, audio_path: PathBuf, _model_dir: Option<PathBuf>) {
     use whisper_tensor::super_graph::SuperGraphContext;
     use whisper_tensor::super_graph::cache::SuperGraphTensorCache;
-    use whisper_tensor::super_graph::data::SuperGraphData;
+    use whisper_tensor::super_graph::data::{SuperGraphAudioClip, SuperGraphData};
 
     let interface = output
         .interfaces
@@ -851,7 +773,7 @@ fn cmd_stt(output: LoaderOutput, audio_path: PathBuf, model_dir: Option<PathBuf>
             std::process::exit(1);
         });
 
-    // Load and preprocess audio → mel spectrogram
+    // Load audio at model sample rate.
     eprintln!("Loading audio: {}", audio_path.display());
     let samples = load_wav_f32(&audio_path, interface.sample_rate);
     let audio_duration = samples.len() as f64 / interface.sample_rate as f64;
@@ -862,34 +784,32 @@ fn cmd_stt(output: LoaderOutput, audio_path: PathBuf, model_dir: Option<PathBuf>
         interface.sample_rate
     );
 
-    // Load mel filterbank from preprocessor_config.json
-    let mel_filters = load_mel_filters(model_dir.as_deref(), interface.num_mel_bins as usize);
-    let mel = compute_mel_spectrogram(&samples, interface.num_mel_bins as usize, &mel_filters);
-    let mel_len = mel.len() / interface.num_mel_bins as usize;
-    eprintln!(
-        "Mel spectrogram: {} bins x {} frames",
-        interface.num_mel_bins, mel_len
-    );
+    let audio_len = samples.len();
+    let audio_tensor = NumericTensor::<DynRank>::from_vec_shape(samples, vec![audio_len]).unwrap();
 
-    let mel_tensor = NumericTensor::<DynRank>::from_vec_shape(
-        mel,
-        vec![1, interface.num_mel_bins as usize, mel_len],
-    )
-    .unwrap();
-
-    // Run encoder
-    eprintln!("Running encoder...");
+    // Run unified STT supergraph (encoder + fixed-step decoder generation)
+    eprintln!("Running STT supergraph...");
     let mut backend = EvalBackend::NDArray;
     let start = std::time::Instant::now();
 
-    let encoder_output = {
+    let output_data = {
         let mut data = SuperGraphData::new();
-        data.tensors.insert(interface.mel_input_link, mel_tensor);
+        data.audio_clips.insert(
+            interface.audio_input_link,
+            SuperGraphAudioClip::new(audio_tensor, interface.sample_rate),
+        );
         data.tensor_maps.insert(
             interface.encoder_weights_link,
             output.models[0].model.get_tensor_store(),
         );
-        let symbolic_graphs = vec![output.models[0].model.get_symbolic_graph()];
+        data.tensor_maps.insert(
+            interface.decoder_weights_link,
+            output.models[1].model.get_tensor_store(),
+        );
+        let symbolic_graphs = vec![
+            output.models[0].model.get_symbolic_graph(),
+            output.models[1].model.get_symbolic_graph(),
+        ];
         let mut observer = ();
         let mut tensor_cache = SuperGraphTensorCache::new();
         let mut context = SuperGraphContext {
@@ -902,117 +822,23 @@ fn cmd_stt(output: LoaderOutput, audio_path: PathBuf, model_dir: Option<PathBuf>
             compiled_models: None,
         };
         interface
-            .encoder_super_graph
+            .super_graph
             .run(data, &mut context)
             .unwrap_or_else(|e| {
-                eprintln!("Encoder error: {e}");
+                eprintln!("STT supergraph error: {e}");
                 std::process::exit(1);
             })
     };
 
-    let encoder_hidden = encoder_output
+    let token_tensor = output_data
         .tensors
-        .get(&interface.encoder_output_link)
-        .expect("No encoder output tensor")
-        .clone();
-    eprintln!("Encoder done in {:.2?}", start.elapsed());
-
-    // Run decoder autoregressively
-    eprintln!("Running decoder...");
-    let decode_start = std::time::Instant::now();
-
-    let mut super_graph_caches = SuperGraphCache::new();
-
-    let decoder_sg = &interface.decoder_super_graph;
-    let decoder_symbolic_graphs = vec![
-        output.models[0].model.get_symbolic_graph(), // dummy for index 0
-        output.models[1].model.get_symbolic_graph(), // decoder at index 1
-    ];
-
-    // Start with decoder_start_token_id + forced decoder IDs from generation_config
-    // For English-only Whisper: [50257(<|startoftranscript|>), 50362(<|notimestamps|>)]
-    let forced_ids =
-        load_forced_decoder_ids(model_dir.as_deref(), interface.decoder_start_token_id);
-    let mut token_ids: Vec<u32> = forced_ids;
-    let max_tokens = 448;
-
-    let mut step_start = std::time::Instant::now();
-    for _step in 0..max_tokens {
-        let mut data = SuperGraphData::new();
-        data.tensor_maps.insert(
-            interface.decoder_weights_link,
-            output.models[1].model.get_tensor_store(),
-        );
-        data.tensors.insert(
-            interface.decoder_encoder_hidden_link,
-            encoder_hidden.clone(),
-        );
-
-        let token_tensor =
-            NumericTensor::<DynRank>::from_vec_shape(token_ids.clone(), vec![token_ids.len()])
-                .unwrap();
-        data.tensors
-            .insert(interface.decoder_token_link, token_tensor);
-        data.hashes.insert(interface.decoder_cache_key_link, 0);
-
-        let mut observer = ();
-        let mut tensor_cache = SuperGraphTensorCache::new();
-        let mut context = SuperGraphContext {
-            observer: &mut observer,
-            eval_backend: &mut backend,
-            super_graph_tensor_cache: &mut tensor_cache,
-            caches: Some(&mut super_graph_caches),
-            symbolic_graphs: decoder_symbolic_graphs.clone(),
-            use_compiled_models: false,
-            compiled_models: None,
-        };
-
-        let result = decoder_sg.run(data, &mut context).unwrap_or_else(|e| {
-            eprintln!("Decoder error at step {_step}: {e}");
-            std::process::exit(1);
-        });
-
-        // Get logits and pick next token (greedy argmax)
-        let logits = result
-            .tensors
-            .get(&interface.decoder_logit_link)
-            .expect("No decoder logit output");
-
-        let logits_f32 = logits
-            .cast(whisper_tensor::dtype::DType::F32, &mut backend)
-            .expect("cast failed");
-        let logits_shape = logits_f32.shape();
-        let logits_ndarray = logits_f32.to_ndarray().expect("to_ndarray failed");
-        let logits_flat: Vec<f32> = logits_ndarray.flatten().try_into().expect("flatten failed");
-
-        // Take last token's logits — vocab_size is the last dimension
-        let vocab_size = *logits_shape.last().unwrap_or(&(logits_flat.len() as u64)) as usize;
-        let last_logits = &logits_flat[logits_flat.len() - vocab_size..];
-
-        let next_token = last_logits
-            .iter()
-            .enumerate()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
-            .map(|(i, _)| i as u32)
-            .unwrap();
-
-        let step_elapsed = step_start.elapsed();
-        eprint!("\rDecoder step {_step}: token {next_token} ({step_elapsed:.1?})  ");
-
-        if next_token == interface.eos_token_id {
-            eprintln!();
-            break;
-        }
-
-        token_ids.push(next_token);
-        step_start = std::time::Instant::now();
+        .get(&interface.output_token_link)
+        .expect("No STT output token tensor");
+    let token_nd = token_tensor.to_ndarray().expect("to_ndarray failed");
+    let mut token_ids: Vec<u32> = token_nd.flatten().try_into().expect("flatten failed");
+    if let Some(pos) = token_ids.iter().position(|&t| t == interface.eos_token_id) {
+        token_ids.truncate(pos);
     }
-
-    eprintln!(
-        "Decoder done in {:.2?} ({} tokens)",
-        decode_start.elapsed(),
-        token_ids.len()
-    );
 
     // Decode tokens to text
     let tokenizer =
@@ -1074,171 +900,6 @@ fn load_wav_f32(path: &std::path::Path, target_sr: u32) -> Vec<f32> {
     }
 }
 
-/// Load forced decoder IDs from generation_config.json.
-/// Returns the initial token sequence: [start_token, forced_id_1, forced_id_2, ...]
-fn load_forced_decoder_ids(model_dir: Option<&std::path::Path>, start_token: u32) -> Vec<u32> {
-    let mut ids = vec![start_token];
-    if let Some(dir) = model_dir {
-        let config_path = dir.join("generation_config.json");
-        if let Ok(data) = std::fs::read_to_string(&config_path) {
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&data) {
-                if let Some(forced) = json["forced_decoder_ids"].as_array() {
-                    // forced_decoder_ids: [[position, token_id], ...]
-                    let mut pairs: Vec<(u64, u32)> = forced
-                        .iter()
-                        .filter_map(|pair| {
-                            let arr = pair.as_array()?;
-                            Some((arr[0].as_u64()?, arr[1].as_u64()? as u32))
-                        })
-                        .collect();
-                    pairs.sort_by_key(|p| p.0);
-                    for (_, tok) in pairs {
-                        ids.push(tok);
-                    }
-                    eprintln!("Forced decoder IDs: {:?}", ids);
-                }
-            }
-        }
-    }
-    ids
-}
-
-/// Load mel filterbank from the model's preprocessor_config.json.
-/// Falls back to a simple triangular filterbank if the file is not found.
-fn load_mel_filters(model_dir: Option<&std::path::Path>, num_mel_bins: usize) -> Vec<f32> {
-    let n_freqs = 201; // n_fft/2 + 1 where n_fft=400
-    if let Some(dir) = model_dir {
-        let config_path = dir.join("preprocessor_config.json");
-        if config_path.exists() {
-            if let Ok(data) = std::fs::read_to_string(&config_path) {
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&data) {
-                    if let Some(filters) = json["mel_filters"].as_array() {
-                        let mut flat = Vec::with_capacity(num_mel_bins * n_freqs);
-                        for row in filters {
-                            if let Some(arr) = row.as_array() {
-                                for v in arr {
-                                    flat.push(v.as_f64().unwrap_or(0.0) as f32);
-                                }
-                            }
-                        }
-                        if flat.len() == num_mel_bins * n_freqs {
-                            eprintln!("Loaded mel filterbank from {}", config_path.display());
-                            return flat;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    eprintln!("Using built-in mel filterbank");
-    build_mel_filterbank(num_mel_bins, n_freqs, 16000, 400)
-}
-
-/// Compute log-mel spectrogram from audio samples.
-///
-/// Uses n_fft=400, hop_length=160 (Whisper defaults).
-/// Returns flattened [num_mel_bins, num_frames] in row-major order.
-fn compute_mel_spectrogram(samples: &[f32], num_mel_bins: usize, mel_filters: &[f32]) -> Vec<f32> {
-    let n_fft = 400;
-    let hop_length = 160;
-    let n_freqs = n_fft / 2 + 1; // 201
-    assert_eq!(mel_filters.len(), num_mel_bins * n_freqs);
-
-    // Pad to 30 seconds + extra for STFT centering (Whisper expects 3000 frames)
-    let target_len = 480000; // 30s * 16000Hz
-    let pad = n_fft / 2;
-    let total_len = target_len + 2 * pad;
-    let mut padded = vec![0.0f32; total_len];
-    let copy_len = samples.len().min(target_len);
-    padded[pad..pad + copy_len].copy_from_slice(&samples[..copy_len]);
-
-    // Hann window
-    let window: Vec<f32> = (0..n_fft)
-        .map(|i| 0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / n_fft as f32).cos()))
-        .collect();
-
-    // STFT — drop last frame to match Whisper's `stft[..., :-1]`
-    let num_frames = (padded.len() - n_fft) / hop_length; // stft_frames - 1
-    let mut magnitudes = vec![0.0f32; n_freqs * num_frames];
-
-    for frame in 0..num_frames {
-        let start = frame * hop_length;
-        let mut real = vec![0.0f32; n_fft];
-
-        for i in 0..n_fft {
-            real[i] = padded[start + i] * window[i];
-        }
-
-        for k in 0..n_freqs {
-            let mut re = 0.0f32;
-            let mut im = 0.0f32;
-            for n in 0..n_fft {
-                let angle = -2.0 * std::f32::consts::PI * k as f32 * n as f32 / n_fft as f32;
-                re += real[n] * angle.cos();
-                im += real[n] * angle.sin();
-            }
-            magnitudes[k * num_frames + frame] = re * re + im * im;
-        }
-    }
-
-    // Apply mel filterbank
-    let mut mel_spec = vec![0.0f32; num_mel_bins * num_frames];
-    for mel in 0..num_mel_bins {
-        for frame in 0..num_frames {
-            let mut sum = 0.0f32;
-            for freq in 0..n_freqs {
-                sum += mel_filters[mel * n_freqs + freq] * magnitudes[freq * num_frames + frame];
-            }
-            mel_spec[mel * num_frames + frame] = sum;
-        }
-    }
-
-    // Log mel spectrogram
-    let log_spec: Vec<f32> = mel_spec.iter().map(|&x| (x.max(1e-10)).log10()).collect();
-
-    // Normalize: clamp to max - 8, then (x + 4) / 4
-    let max_val = log_spec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    log_spec
-        .iter()
-        .map(|&x| (x.max(max_val - 8.0) + 4.0) / 4.0)
-        .collect()
-}
-
-/// Build a mel filterbank matrix [num_mel_bins, n_freqs].
-fn build_mel_filterbank(
-    num_mel_bins: usize,
-    n_freqs: usize,
-    sample_rate: u32,
-    n_fft: usize,
-) -> Vec<f32> {
-    let hz_to_mel = |hz: f32| -> f32 { 2595.0 * (1.0 + hz / 700.0).log10() };
-    let mel_to_hz = |mel: f32| -> f32 { 700.0 * (10.0f32.powf(mel / 2595.0) - 1.0) };
-
-    let mel_low = hz_to_mel(0.0);
-    let mel_high = hz_to_mel(sample_rate as f32 / 2.0);
-    let mel_points: Vec<f32> = (0..num_mel_bins + 2)
-        .map(|i| mel_to_hz(mel_low + (mel_high - mel_low) * i as f32 / (num_mel_bins + 1) as f32))
-        .collect();
-
-    let freq_bins: Vec<f32> = (0..n_freqs)
-        .map(|i| i as f32 * sample_rate as f32 / n_fft as f32)
-        .collect();
-
-    let mut filters = vec![0.0f32; num_mel_bins * n_freqs];
-    for m in 0..num_mel_bins {
-        let (f_low, f_center, f_high) = (mel_points[m], mel_points[m + 1], mel_points[m + 2]);
-        for k in 0..n_freqs {
-            let freq = freq_bins[k];
-            if freq >= f_low && freq <= f_center {
-                filters[m * n_freqs + k] = (freq - f_low) / (f_center - f_low);
-            } else if freq > f_center && freq <= f_high {
-                filters[m * n_freqs + k] = (f_high - freq) / (f_high - f_center);
-            }
-        }
-    }
-    filters
-}
-
 // ============================================================================
 // F5-TTS helpers
 // ============================================================================
@@ -1251,103 +912,6 @@ fn load_wav_f16(path: &std::path::Path, target_sr: u32) -> Vec<half::f16> {
         .collect()
 }
 
-/// Build F5-TTS vocab: char → token ID from vocab.txt (one token per line).
-fn build_f5_vocab(vocab_text: &str) -> HashMap<char, i32> {
-    let mut map = HashMap::new();
-    for (id, line) in vocab_text.lines().enumerate() {
-        if line.chars().count() == 1 {
-            map.insert(line.chars().next().unwrap(), id as i32);
-        } else if line.is_empty() {
-            // Line 0 is space in F5 vocab
-            map.insert(' ', id as i32);
-        }
-    }
-    map
-}
-
-// ============================================================================
-// Phonemization (espeak-ng + E2M conversion for Kokoro)
-// ============================================================================
-
-/// Convert English text to Kokoro-compatible phoneme string.
-///
-/// Pipeline: text -> espeak-ng IPA -> E2M (espeak-to-Misaki) conversion
-fn text_to_kokoro_phonemes(text: &str) -> String {
-    let sentences = espeak_rs::text_to_phonemes(text, "en-us", None, true, false)
-        .expect("espeak-ng phonemization failed");
-    let ipa = sentences.join(" ");
-    espeak_to_misaki(&ipa)
-}
-
-/// Apply espeak-to-Misaki (E2M) phoneme conversion.
-///
-/// Converts espeak-ng's IPA output into the Misaki phoneme format
-/// that Kokoro's tokenizer expects. Replacements are applied in
-/// longest-first order to handle multi-character sequences correctly.
-fn espeak_to_misaki(ipa: &str) -> String {
-    // E2M replacements, applied longest-first
-    static E2M: &[(&str, &str)] = &[
-        // Multi-char (longest first)
-        ("a\u{0361}\u{026a}", "I"),        // a͡ɪ -> I (PRICE)
-        ("a\u{0361}\u{028a}", "W"),        // a͡ʊ -> W (MOUTH)
-        ("d\u{0361}\u{0292}", "\u{02A4}"), // d͡ʒ -> ʤ
-        ("e\u{0361}\u{026a}", "A"),        // e͡ɪ -> A (FACE)
-        ("t\u{0361}\u{0283}", "\u{02A7}"), // t͡ʃ -> ʧ
-        ("\u{0254}\u{0361}\u{026a}", "Y"), // ɔ͡ɪ -> Y (CHOICE)
-        ("o\u{0361}\u{028a}", "O"),        // o͡ʊ -> O (GOAT, US)
-        // Without tie bar (fallback)
-        ("a\u{026a}", "I"),        // aɪ -> I
-        ("a\u{028a}", "W"),        // aʊ -> W
-        ("d\u{0292}", "\u{02A4}"), // dʒ -> ʤ
-        ("e\u{026a}", "A"),        // eɪ -> A
-        ("t\u{0283}", "\u{02A7}"), // tʃ -> ʧ
-        ("\u{0254}\u{026a}", "Y"), // ɔɪ -> Y
-        ("o\u{028a}", "O"),        // oʊ -> O
-        // Syllabic patterns
-        ("\u{0294}\u{02cc}n\u{0329}", "t\u{1d4a}n"), // ʔˌn̩ -> tᵊn
-        ("\u{0294}n", "t\u{1d4a}n"),                 // ʔn -> tᵊn
-        ("\u{0259}\u{0361}l", "\u{1d4a}l"),          // ə͡l -> ᵊl
-        ("\u{0259}l", "\u{1d4a}l"),                  // əl -> ᵊl (no tie)
-        // R-colored
-        ("\u{025a}", "\u{0259}\u{0279}"), // ɚ -> əɹ
-        // US English specifics
-        ("\u{025c}\u{02d0}\u{0279}", "\u{025c}\u{0279}"), // ɜːɹ -> ɜɹ
-        ("\u{025c}\u{02d0}", "\u{025c}\u{0279}"),         // ɜː -> ɜɹ
-        ("\u{026a}\u{0259}", "i\u{0259}"),                // ɪə -> iə
-        // Single-char
-        ("e", "A"),        // bare e -> A
-        ("r", "\u{0279}"), // r -> ɹ
-        ("x", "k"),
-        ("\u{00e7}", "k"),        // ç -> k
-        ("\u{0250}", "\u{0259}"), // ɐ -> ə
-        ("\u{026c}", "l"),        // ɬ -> l
-        ("\u{0294}", "t"),        // ʔ -> t
-        ("o", "\u{0254}"),        // o -> ɔ
-        ("\u{027e}", "T"),        // ɾ -> T
-    ];
-
-    let mut result = ipa.to_string();
-
-    // Remove combining tilde
-    result = result.replace('\u{0303}', "");
-
-    // Remove remaining palatalization marker
-    result = result.replace('\u{02b2}', "");
-
-    // Apply E2M replacements
-    for &(from, to) in E2M {
-        result = result.replace(from, to);
-    }
-
-    // Remove length marks (US English)
-    result = result.replace('\u{02d0}', "");
-
-    // Remove syllabic marker (any remaining)
-    result = result.replace('\u{0329}', "");
-
-    result
-}
-
 // ============================================================================
 // Utilities
 // ============================================================================
@@ -1358,15 +922,15 @@ fn generate_gaussian_noise(n: usize, seed: u64) -> Vec<f32> {
     let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
     let mut vals = Vec::with_capacity(n);
     while vals.len() + 1 < n {
-        let u1: f32 = rand::Rng::random_range(&mut rng, f32::EPSILON..1.0);
-        let u2: f32 = rand::Rng::random_range(&mut rng, 0.0f32..std::f32::consts::TAU);
+        let u1: f32 = rand::RngExt::random_range(&mut rng, f32::EPSILON..1.0);
+        let u2: f32 = rand::RngExt::random_range(&mut rng, 0.0f32..std::f32::consts::TAU);
         let r = (-2.0 * u1.ln()).sqrt();
         vals.push(r * u2.cos());
         vals.push(r * u2.sin());
     }
     if vals.len() < n {
-        let u1: f32 = rand::Rng::random_range(&mut rng, f32::EPSILON..1.0);
-        let u2: f32 = rand::Rng::random_range(&mut rng, 0.0f32..std::f32::consts::TAU);
+        let u1: f32 = rand::RngExt::random_range(&mut rng, f32::EPSILON..1.0);
+        let u2: f32 = rand::RngExt::random_range(&mut rng, 0.0f32..std::f32::consts::TAU);
         vals.push((-2.0 * u1.ln()).sqrt() * u2.cos());
     }
     vals

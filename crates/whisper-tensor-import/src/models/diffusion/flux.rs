@@ -1,3 +1,6 @@
+use crate::models::diffusion::sd_common::{
+    CastingWeightManager, build_causal_mask, cos_op, sin_op,
+};
 use crate::onnx_graph::WeightStorageStrategy;
 use crate::onnx_graph::operators::{
     Add, Concat, Constant, Gather, LayerNormalization, MatMul, Mul, RMSNormalization,
@@ -11,7 +14,6 @@ use crate::onnx_graph::tensor::{
     TensorDataValue,
 };
 use crate::onnx_graph::weights::WeightManager;
-use crate::sd_common::{CastingWeightManager, build_causal_mask, cos_op, sin_op};
 use prost::Message;
 
 type TensorPair = (Arc<dyn Tensor>, Arc<dyn Tensor>);
@@ -896,7 +898,11 @@ pub fn build_clip_l_pooled(
     let mut hidden: Arc<dyn Tensor> = x;
     for i in 0..CLIP_NUM_LAYERS {
         let layer_wm = wm.prefix(&format!("encoder.layers.{i}"));
-        hidden = crate::sd15::clip_encoder_layer(&layer_wm, hidden, causal_mask.clone())?;
+        hidden = crate::models::diffusion::sd15::clip_encoder_layer(
+            &layer_wm,
+            hidden,
+            causal_mask.clone(),
+        )?;
     }
 
     // Final layer norm

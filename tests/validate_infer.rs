@@ -24,10 +24,9 @@ fn validate_infer_for_onnx_dir(dir: &Path) {
 
     let model_bytes = std::fs::read(&model_path).unwrap();
     let rng = &mut rand::rng();
-    let (graph, tensor_store) =
-        SymbolicGraphMutator::from_onnx_bytes(&model_bytes, rng, None)
-            .unwrap()
-            .get_inner();
+    let (graph, tensor_store) = SymbolicGraphMutator::from_onnx_bytes(&model_bytes, rng, None)
+        .unwrap()
+        .get_inner();
 
     // Load test data set 0 -- use tensor names from protobuf
     let test_data_dir = dir.join("test_data_set_0");
@@ -68,7 +67,8 @@ fn validate_infer_for_onnx_dir(dir: &Path) {
     );
 
     assert_eq!(
-        report.failure_count, 0,
+        report.failure_count,
+        0,
         "Infer validation failures for {}:\n{}",
         dir.display(),
         report

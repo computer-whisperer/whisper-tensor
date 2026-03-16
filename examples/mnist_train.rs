@@ -15,6 +15,7 @@
 /// If files are not found, generates synthetic data for testing the pipeline.
 use std::collections::HashMap;
 
+use rand::RngExt;
 use whisper_tensor::backends::eval_backend::EvalBackend;
 use whisper_tensor::dtype::DType;
 use whisper_tensor::graph::GlobalId;

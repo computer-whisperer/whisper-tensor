@@ -6,12 +6,12 @@ pub fn get_spirv_datatype(
     dtype: DType,
 ) -> Result<rspirv::spirv::Word, VulkanError> {
     Ok(match dtype {
-        DType::F64 => b.type_float(64),
-        DType::F32 => b.type_float(32),
-        DType::BF16 => b.type_float(16),
-        DType::F16 => b.type_float(16),
-        DType::F8E4M3 => b.type_float(8),
-        DType::F8E5M2 => b.type_float(8),
+        DType::F64 => b.type_float(64, None),
+        DType::F32 => b.type_float(32, None),
+        DType::BF16 => b.type_float(16, None),
+        DType::F16 => b.type_float(16, None),
+        DType::F8E4M3 => b.type_float(8, None),
+        DType::F8E5M2 => b.type_float(8, None),
         DType::I64 => b.type_int(64, 1),
         DType::U64 => b.type_int(64, 0),
         DType::I32 => b.type_int(32, 1),
@@ -29,7 +29,7 @@ pub fn cast_bf16_to_f32(
     b: &mut rspirv::dr::Builder,
     input: rspirv::spirv::Word,
 ) -> rspirv::spirv::Word {
-    let f32_t = b.type_float(32);
+    let f32_t = b.type_float(32, None);
     let u32_t = b.type_int(32, 0);
 
     let c16 = b.constant_bit32(u32_t, 16);
@@ -82,7 +82,7 @@ pub fn spirv_standard_cast(
                         Ok(b.convert_f_to_u(output_data_type, None, input).unwrap())
                     }
                     DType::BOOL => {
-                        let f32_type = b.type_float(32);
+                        let f32_type = b.type_float(32, None);
                         let const_zero = b.constant_bit32(f32_type, 0.0f32.to_bits());
                         let const_zero = b.f_convert(input_data_type, None, const_zero).unwrap();
                         Ok(
@@ -162,7 +162,7 @@ pub fn spirv_standard_cast(
                 | DType::F8E5M2
                 | DType::F32
                 | DType::F64 => {
-                    let f32_type = b.type_float(32);
+                    let f32_type = b.type_float(32, None);
                     let const_zero = b.constant_bit32(f32_type, 0.0f32.to_bits());
                     let const_one = b.constant_bit32(f32_type, 1.0f32.to_bits());
                     let tmp_out = b

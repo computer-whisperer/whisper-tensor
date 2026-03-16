@@ -11,6 +11,7 @@ use typenum::P1;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReduceMax {
     global_id: GlobalId,
+    pub(crate) label: Option<String>,
     output: GlobalId,
     data: GlobalId,
     axes: Option<GlobalId>,
@@ -38,9 +39,22 @@ impl ReduceMax {
         noop_with_empty_axes: bool,
         rng: &mut impl rand::Rng,
     ) -> GlobalId {
+        Self::push_new_with_label(graph, data, axes, keepdims, noop_with_empty_axes, None, rng)
+    }
+
+    pub fn push_new_with_label(
+        graph: &mut MilliOpGraph,
+        data: GlobalId,
+        axes: Option<GlobalId>,
+        keepdims: bool,
+        noop_with_empty_axes: bool,
+        label: Option<String>,
+        rng: &mut impl rand::Rng,
+    ) -> GlobalId {
         let output = graph.get_new_tensor_id(rng);
         let node = Self {
             global_id: GlobalId::new(rng),
+            label,
             output,
             data,
             axes,
@@ -126,8 +140,12 @@ impl MilliOp for ReduceMax {
 
         // Try per-dim shape inference first.
         if let Some(out_dims) = super::infer_reduce_output_shape(
-            data_info, self.axes, self.keepdims, self.noop_with_empty_axes,
-            known_inputs, symbolic_resolver,
+            data_info,
+            self.axes,
+            self.keepdims,
+            self.noop_with_empty_axes,
+            known_inputs,
+            symbolic_resolver,
         ) {
             let out_info = TensorInfo::from_dtype_and_shape_scalars(out_dtype, &out_dims);
             return Ok(Box::new([(self.output, out_info)].into_iter()));
@@ -136,9 +154,13 @@ impl MilliOp for ReduceMax {
         // Fallback: rank-only inference.
         let num_axes: Option<usize> = if let Some(ax_id) = self.axes {
             known_inputs.get(&ax_id).and_then(|ax_info| {
-                ax_info.rank_if_known().and_then(|_| ax_info.dim_if_known(0).map(|n| n as usize))
+                ax_info
+                    .rank_if_known()
+                    .and_then(|_| ax_info.dim_if_known(0).map(|n| n as usize))
             })
-        } else { None };
+        } else {
+            None
+        };
 
         let out_rank: ScalarInfoTyped<u32> = match data_info.rank() {
             ScalarInfoTyped::Numeric(input_rank) => {
@@ -157,14 +179,14 @@ impl MilliOp for ReduceMax {
                 } else if self.keepdims {
                     ScalarInfoTyped::Numeric(input_rank)
                 } else {
-                    ScalarInfoTyped::Symbolic(
-                        crate::symbolic_scalar::SymbolicScalarTyped::new(symbolic_resolver),
-                    )
+                    ScalarInfoTyped::Symbolic(crate::symbolic_scalar::SymbolicScalarTyped::new(
+                        symbolic_resolver,
+                    ))
                 }
             }
-            _ => ScalarInfoTyped::Symbolic(
-                crate::symbolic_scalar::SymbolicScalarTyped::new(symbolic_resolver),
-            ),
+            _ => ScalarInfoTyped::Symbolic(crate::symbolic_scalar::SymbolicScalarTyped::new(
+                symbolic_resolver,
+            )),
         };
 
         let first_elem = crate::scalar_info::ScalarInfo::Symbolic(

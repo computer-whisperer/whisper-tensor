@@ -10,7 +10,7 @@ use rspirv::dr::Operand;
 use rspirv::dr::Operand::LiteralBit32;
 use rspirv::spirv;
 use rspirv::spirv::{
-    BuiltIn, Capability, Decoration, ExecutionMode, ExecutionModel, GLOp, SelectionControl,
+    BuiltIn, Capability, Decoration, ExecutionMode, ExecutionModel, GlslStd450Op, SelectionControl,
     StorageClass,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -927,7 +927,7 @@ impl<R: Rank> VulkanTensor<R> {
                             data_type,
                             None,
                             glsl,
-                            GLOp::FMax as u32,
+                            GlslStd450Op::FMax as u32,
                             [rspirv::dr::Operand::IdRef(a), rspirv::dr::Operand::IdRef(b)],
                         )
                         .unwrap()),
@@ -936,7 +936,7 @@ impl<R: Rank> VulkanTensor<R> {
                             data_type,
                             None,
                             glsl,
-                            GLOp::SMax as u32,
+                            GlslStd450Op::SMax as u32,
                             [rspirv::dr::Operand::IdRef(a), rspirv::dr::Operand::IdRef(b)],
                         )
                         .unwrap()),
@@ -945,7 +945,7 @@ impl<R: Rank> VulkanTensor<R> {
                             data_type,
                             None,
                             glsl,
-                            GLOp::UMax as u32,
+                            GlslStd450Op::UMax as u32,
                             [rspirv::dr::Operand::IdRef(a), rspirv::dr::Operand::IdRef(b)],
                         )
                         .unwrap()),
@@ -975,7 +975,7 @@ impl<R: Rank> VulkanTensor<R> {
                             data_type,
                             None,
                             glsl,
-                            GLOp::FMin as u32,
+                            GlslStd450Op::FMin as u32,
                             [rspirv::dr::Operand::IdRef(a), rspirv::dr::Operand::IdRef(b)],
                         )
                         .unwrap()),
@@ -984,7 +984,7 @@ impl<R: Rank> VulkanTensor<R> {
                             data_type,
                             None,
                             glsl,
-                            GLOp::SMin as u32,
+                            GlslStd450Op::SMin as u32,
                             [rspirv::dr::Operand::IdRef(a), rspirv::dr::Operand::IdRef(b)],
                         )
                         .unwrap()),
@@ -993,7 +993,7 @@ impl<R: Rank> VulkanTensor<R> {
                             data_type,
                             None,
                             glsl,
-                            GLOp::UMin as u32,
+                            GlslStd450Op::UMin as u32,
                             [rspirv::dr::Operand::IdRef(a), rspirv::dr::Operand::IdRef(b)],
                         )
                         .unwrap()),
@@ -1162,7 +1162,7 @@ impl<R: Rank> VulkanTensor<R> {
             vulkan_immediate_executor,
             19,
             |builder, a, b, input_0_dtype, input_1_dtype, output_dtype| {
-                let f32_t = builder.type_float(32);
+                let f32_t = builder.type_float(32, None);
                 let bool_t = builder.type_bool();
                 let i32_t = builder.type_int(32, 1);
                 let glsl = builder.ext_inst_import("GLSL.std.450");
@@ -1176,7 +1176,7 @@ impl<R: Rank> VulkanTensor<R> {
                                     output_data_type,
                                     None,
                                     glsl,
-                                    GLOp::Pow as u32,
+                                    GlslStd450Op::Pow as u32,
                                     [a.into(), b.into()],
                                 )
                                 .unwrap();
@@ -1185,7 +1185,7 @@ impl<R: Rank> VulkanTensor<R> {
                                     output_data_type,
                                     None,
                                     glsl,
-                                    GLOp::FAbs as u32,
+                                    GlslStd450Op::FAbs as u32,
                                     [a.into()],
                                 )
                                 .unwrap();
@@ -1194,14 +1194,20 @@ impl<R: Rank> VulkanTensor<R> {
                                     output_data_type,
                                     None,
                                     glsl,
-                                    GLOp::Pow as u32,
+                                    GlslStd450Op::Pow as u32,
                                     [a_abs.into(), b.into()],
                                 )
                                 .unwrap();
                             // classify b in f32
                             let b32 = builder.f_convert(f32_t, None, b).unwrap();
                             let btrunc = builder
-                                .ext_inst(f32_t, None, glsl, GLOp::Trunc as u32, [b32.into()])
+                                .ext_inst(
+                                    f32_t,
+                                    None,
+                                    glsl,
+                                    GlslStd450Op::Trunc as u32,
+                                    [b32.into()],
+                                )
                                 .unwrap();
                             let is_int = builder.f_ord_equal(bool_t, None, b32, btrunc).unwrap();
 
@@ -1241,7 +1247,7 @@ impl<R: Rank> VulkanTensor<R> {
                                     output_data_type,
                                     None,
                                     glsl,
-                                    GLOp::Pow as u32,
+                                    GlslStd450Op::Pow as u32,
                                     [
                                         rspirv::dr::Operand::IdRef(a),
                                         rspirv::dr::Operand::IdRef(exp),
@@ -1256,7 +1262,7 @@ impl<R: Rank> VulkanTensor<R> {
                                     output_data_type,
                                     None,
                                     glsl,
-                                    GLOp::Pow as u32,
+                                    GlslStd450Op::Pow as u32,
                                     [
                                         rspirv::dr::Operand::IdRef(a),
                                         rspirv::dr::Operand::IdRef(exp),
@@ -1268,7 +1274,7 @@ impl<R: Rank> VulkanTensor<R> {
                     },
                     DType::I64 | DType::I32 | DType::I16 | DType::I8 => match input_1_dtype {
                         DType::BF16 | DType::F16 | DType::F32 | DType::F64 => {
-                            let f32_t = builder.type_float(32);
+                            let f32_t = builder.type_float(32, None);
                             let base = builder.convert_s_to_f(f32_t, None, a).unwrap();
                             let exp = builder.f_convert(f32_t, None, b).unwrap();
                             let result = builder
@@ -1276,7 +1282,7 @@ impl<R: Rank> VulkanTensor<R> {
                                     f32_t,
                                     None,
                                     glsl,
-                                    GLOp::Pow as u32,
+                                    GlslStd450Op::Pow as u32,
                                     [
                                         rspirv::dr::Operand::IdRef(base),
                                         rspirv::dr::Operand::IdRef(exp),
@@ -1288,7 +1294,7 @@ impl<R: Rank> VulkanTensor<R> {
                                 .unwrap())
                         }
                         DType::U64 | DType::U32 | DType::U16 | DType::U8 => {
-                            let f32_t = builder.type_float(32);
+                            let f32_t = builder.type_float(32, None);
                             let base = builder.convert_s_to_f(f32_t, None, a).unwrap();
                             let exp = builder.convert_u_to_f(f32_t, None, b).unwrap();
                             let result = builder
@@ -1296,7 +1302,7 @@ impl<R: Rank> VulkanTensor<R> {
                                     f32_t,
                                     None,
                                     glsl,
-                                    GLOp::Pow as u32,
+                                    GlslStd450Op::Pow as u32,
                                     [
                                         rspirv::dr::Operand::IdRef(base),
                                         rspirv::dr::Operand::IdRef(exp),
@@ -1308,7 +1314,7 @@ impl<R: Rank> VulkanTensor<R> {
                                 .unwrap())
                         }
                         DType::I64 | DType::I32 | DType::I16 | DType::I8 => {
-                            let f32_t = builder.type_float(32);
+                            let f32_t = builder.type_float(32, None);
                             let base = builder.convert_s_to_f(f32_t, None, a).unwrap();
                             let exp = builder.convert_s_to_f(f32_t, None, b).unwrap();
                             let result = builder
@@ -1316,7 +1322,7 @@ impl<R: Rank> VulkanTensor<R> {
                                     f32_t,
                                     None,
                                     glsl,
-                                    GLOp::Pow as u32,
+                                    GlslStd450Op::Pow as u32,
                                     [
                                         rspirv::dr::Operand::IdRef(base),
                                         rspirv::dr::Operand::IdRef(exp),

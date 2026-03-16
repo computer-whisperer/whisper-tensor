@@ -1,12 +1,12 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
 use tokio::sync::{RwLock, watch};
+use whisper_tensor::DynRank;
 use whisper_tensor::compiler::CompiledProgram;
 use whisper_tensor::loader::{ConfigValues, Loader};
 use whisper_tensor::model::Model;
 use whisper_tensor::numeric_tensor::NumericTensor;
 use whisper_tensor::symbolic_graph::tensor_store::TensorStoreTensorId;
-use whisper_tensor::DynRank;
 
 use crate::{
     CurrentInterfacesReportEntry, CurrentModelsAndInterfacesReport, CurrentModelsReportEntry,
@@ -215,18 +215,25 @@ impl ModelServer {
 #[cfg(feature = "import")]
 pub fn default_loaders() -> Vec<Box<dyn Loader>> {
     use whisper_tensor_import::loaders::{
-        AutoLoader, FluxLoader, KokoroLoader, OnnxLoader, PiperLoader, Rwkv7Loader, SD15Loader,
-        TransformersLoader,
+        AutoLoader, F5TtsLoader, FluxLoader, GgufLoader, KokoroLoader, OnnxLoader, PiperLoader,
+        Rwkv7Loader, SD2Loader, SD15Loader, SD35Loader, SDXLLoader, TransformersLoader,
+        WhisperLoader,
     };
     vec![
         Box::new(AutoLoader),
         Box::new(OnnxLoader),
         Box::new(TransformersLoader),
+        Box::new(GgufLoader),
         Box::new(Rwkv7Loader),
+        Box::new(WhisperLoader),
         Box::new(SD15Loader),
+        Box::new(SD2Loader),
+        Box::new(SDXLLoader),
+        Box::new(SD35Loader),
         Box::new(FluxLoader),
         Box::new(KokoroLoader),
         Box::new(PiperLoader),
+        Box::new(F5TtsLoader),
     ]
 }
 
