@@ -1,6 +1,6 @@
-use super::{SlotPipEndpoint, SlotPipOwner};
+use super::{GraphLayoutPatch, GraphLayoutSlotPatch, SlotPipEndpoint, SlotPipOwner};
 use crate::app::EditableClientGraphMut;
-use whisper_tensor::graph::{GlobalId, Graph, Node};
+use whisper_tensor::graph::{GlobalId, Graph, Node, SlotDirection};
 use whisper_tensor::milli_graph::MilliOpGraph;
 use whisper_tensor::super_graph::nodes::SuperGraphNode;
 use whisper_tensor::super_graph::{SuperGraph, SuperGraphLink, SuperGraphLinkInfo};
@@ -8,8 +8,9 @@ use whisper_tensor::super_graph::{SuperGraph, SuperGraphLink, SuperGraphLinkInfo
 #[derive(Clone, Debug)]
 pub(super) struct GraphEditPlan {
     pub(super) status: String,
-    pub(super) link_global_id: GlobalId,
     pub(super) requires_layout_refresh: bool,
+    pub(super) forward_layout_patch: Option<GraphLayoutPatch>,
+    pub(super) undo_layout_patch: Option<GraphLayoutPatch>,
     pub(super) forward_command: GraphEditCommand,
     pub(super) undo_command: GraphEditCommand,
 }
@@ -272,6 +273,17 @@ fn plan_supergraph_link_drag(
         target_link.global_id()
     );
 
+    let forward_layout_patch = if requires_layout_refresh {
+        None
+    } else {
+        supergraph_layout_patch_from_ops(&forward_ops)
+    };
+    let undo_layout_patch = if requires_layout_refresh {
+        None
+    } else {
+        supergraph_layout_patch_from_ops(&undo_ops)
+    };
+
     let forward_command = GraphEditCommand::SuperGraph(SuperGraphEditCommandBatch {
         graph_path: working_path.to_vec(),
         ops: forward_ops,
@@ -283,8 +295,9 @@ fn plan_supergraph_link_drag(
 
     Ok(GraphEditPlan {
         status,
-        link_global_id: target_link.global_id(),
         requires_layout_refresh,
+        forward_layout_patch,
+        undo_layout_patch,
         forward_command,
         undo_command,
     })
@@ -494,6 +507,17 @@ fn plan_milli_graph_link_drag(
         link_global_id
     );
 
+    let forward_layout_patch = if requires_layout_refresh {
+        None
+    } else {
+        milli_layout_patch_from_ops(&forward_ops)
+    };
+    let undo_layout_patch = if requires_layout_refresh {
+        None
+    } else {
+        milli_layout_patch_from_ops(&undo_ops)
+    };
+
     let forward_command = GraphEditCommand::MilliOpGraph(MilliOpGraphEditCommandBatch {
         graph_path: working_path.to_vec(),
         ops: forward_ops,
@@ -505,11 +529,84 @@ fn plan_milli_graph_link_drag(
 
     Ok(GraphEditPlan {
         status,
-        link_global_id,
         requires_layout_refresh,
+        forward_layout_patch,
+        undo_layout_patch,
         forward_command,
         undo_command,
     })
+}
+
+fn supergraph_layout_patch_from_ops(ops: &[SuperGraphEditOp]) -> Option<GraphLayoutPatch> {
+    let mut slot_patches = Vec::new();
+    for op in ops {
+        match op {
+            SuperGraphEditOp::SetNodeInputSlot {
+                node_id,
+                slot_index,
+                link,
+            } => slot_patches.push(GraphLayoutSlotPatch {
+                owner: SlotPipOwner::Node(*node_id),
+                direction: SlotDirection::Input,
+                slot_index: *slot_index,
+                link_global_id: *link,
+            }),
+            SuperGraphEditOp::SetNodeOutputSlot {
+                node_id,
+                slot_index,
+                link,
+            } => slot_patches.push(GraphLayoutSlotPatch {
+                owner: SlotPipOwner::Node(*node_id),
+                direction: SlotDirection::Output,
+                slot_index: *slot_index,
+                link_global_id: *link,
+            }),
+            SuperGraphEditOp::RetargetGraphOutputLink { .. }
+            | SuperGraphEditOp::EnsureLinkMetadata { .. } => {}
+        }
+    }
+
+    if slot_patches.is_empty() {
+        None
+    } else {
+        Some(GraphLayoutPatch { slot_patches })
+    }
+}
+
+fn milli_layout_patch_from_ops(ops: &[MilliOpGraphEditOp]) -> Option<GraphLayoutPatch> {
+    let mut slot_patches = Vec::new();
+    for op in ops {
+        match op {
+            MilliOpGraphEditOp::SetNodeInputSlot {
+                node_id,
+                slot_index,
+                link,
+            } => slot_patches.push(GraphLayoutSlotPatch {
+                owner: SlotPipOwner::Node(*node_id),
+                direction: SlotDirection::Input,
+                slot_index: *slot_index,
+                link_global_id: *link,
+            }),
+            MilliOpGraphEditOp::SetNodeOutputSlot {
+                node_id,
+                slot_index,
+                link,
+            } => slot_patches.push(GraphLayoutSlotPatch {
+                owner: SlotPipOwner::Node(*node_id),
+                direction: SlotDirection::Output,
+                slot_index: *slot_index,
+                link_global_id: *link,
+            }),
+            MilliOpGraphEditOp::RetargetGraphOutputLink { .. }
+            | MilliOpGraphEditOp::EnsureTensor { .. } => {}
+        }
+    }
+
+    if slot_patches.is_empty() {
+        None
+    } else {
+        Some(GraphLayoutPatch { slot_patches })
+    }
 }
 
 fn apply_milli_graph_edit_command(
@@ -712,5 +809,309 @@ fn describe_endpoint(endpoint: &SlotPipEndpoint) -> String {
         SlotPipOwner::ConstantLink(link_id) => {
             format!("constant link {} slot {}", link_id, endpoint.slot_index)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::EditableClientGraphMut;
+    use egui::Pos2;
+    use whisper_tensor::graph::{Graph, SlotDirection};
+    use whisper_tensor::milli_graph::ops::SimpleUnaryOp;
+    use whisper_tensor::super_graph::SuperGraphBuilder;
+    use whisper_tensor::super_graph::nodes::{SuperGraphNode, SuperGraphNodeReportProgress};
+
+    fn endpoint(
+        owner: SlotPipOwner,
+        direction: SlotDirection,
+        slot_index: usize,
+        link_id: Option<GlobalId>,
+    ) -> SlotPipEndpoint {
+        SlotPipEndpoint {
+            owner,
+            direction,
+            slot_index,
+            link_id,
+            layout_link_id: None,
+            screen_pos: Pos2::ZERO,
+        }
+    }
+
+    #[test]
+    fn supergraph_node_slot_edit_supports_undo_and_redo() {
+        let mut rng = rand::rng();
+        let mut builder = SuperGraphBuilder::new();
+
+        let source_old = builder.new_tensor_link(&mut rng);
+        let source_new = builder.new_tensor_link(&mut rng);
+        let numerator = builder.new_tensor_link(&mut rng);
+        let denominator = builder.new_tensor_link(&mut rng);
+        let node = SuperGraphNodeReportProgress::new(source_old, numerator, denominator, &mut rng);
+        let node_id = SuperGraphNode::global_id(&node);
+        builder.add_node(node.to_any());
+
+        let mut graph = builder.build(
+            &mut rng,
+            &[
+                source_old.to_any(),
+                source_new.to_any(),
+                numerator.to_any(),
+                denominator.to_any(),
+            ],
+            &[],
+        );
+
+        let before_slot = supergraph_node_input_slot(&graph, node_id, 0).unwrap();
+        assert_eq!(before_slot, Some(source_old.global_id()));
+
+        let output_endpoint = endpoint(
+            SlotPipOwner::InputLink(source_new.global_id()),
+            SlotDirection::Output,
+            0,
+            Some(source_new.global_id()),
+        );
+        let input_endpoint = endpoint(
+            SlotPipOwner::Node(node_id),
+            SlotDirection::Input,
+            0,
+            Some(source_old.global_id()),
+        );
+
+        let plan = plan_and_apply_link_drag_edit(
+            EditableClientGraphMut::SuperGraph(&mut graph),
+            &[],
+            output_endpoint,
+            input_endpoint,
+        )
+        .unwrap();
+
+        assert!(!plan.requires_layout_refresh);
+        assert_eq!(
+            supergraph_node_input_slot(&graph, node_id, 0).unwrap(),
+            Some(source_new.global_id())
+        );
+
+        apply_graph_edit_command(
+            EditableClientGraphMut::SuperGraph(&mut graph),
+            &plan.undo_command,
+        )
+        .unwrap();
+        assert_eq!(
+            supergraph_node_input_slot(&graph, node_id, 0).unwrap(),
+            Some(source_old.global_id())
+        );
+
+        apply_graph_edit_command(
+            EditableClientGraphMut::SuperGraph(&mut graph),
+            &plan.forward_command,
+        )
+        .unwrap();
+        assert_eq!(
+            supergraph_node_input_slot(&graph, node_id, 0).unwrap(),
+            Some(source_new.global_id())
+        );
+    }
+
+    #[test]
+    fn supergraph_output_retarget_supports_undo_and_redo() {
+        let mut rng = rand::rng();
+        let mut builder = SuperGraphBuilder::new();
+
+        let old_source = builder.new_tensor_link(&mut rng);
+        let new_source = builder.new_tensor_link(&mut rng);
+        let mut graph = builder.build(
+            &mut rng,
+            &[old_source.to_any(), new_source.to_any()],
+            &[old_source.to_any()],
+        );
+
+        let output_endpoint = endpoint(
+            SlotPipOwner::InputLink(new_source.global_id()),
+            SlotDirection::Output,
+            0,
+            Some(new_source.global_id()),
+        );
+        let input_endpoint = endpoint(
+            SlotPipOwner::OutputLink(old_source.global_id()),
+            SlotDirection::Input,
+            0,
+            Some(old_source.global_id()),
+        );
+
+        let plan = plan_and_apply_link_drag_edit(
+            EditableClientGraphMut::SuperGraph(&mut graph),
+            &[],
+            output_endpoint,
+            input_endpoint,
+        )
+        .unwrap();
+
+        assert!(plan.requires_layout_refresh);
+        assert!(
+            graph
+                .output_links
+                .iter()
+                .any(|x| x.global_id() == new_source.global_id()),
+            "expected output link to retarget to new source"
+        );
+        assert!(
+            !graph
+                .output_links
+                .iter()
+                .any(|x| x.global_id() == old_source.global_id()),
+            "expected old output link to be removed"
+        );
+
+        apply_graph_edit_command(
+            EditableClientGraphMut::SuperGraph(&mut graph),
+            &plan.undo_command,
+        )
+        .unwrap();
+        assert!(
+            graph
+                .output_links
+                .iter()
+                .any(|x| x.global_id() == old_source.global_id()),
+            "expected undo to restore old output link"
+        );
+        assert!(
+            !graph
+                .output_links
+                .iter()
+                .any(|x| x.global_id() == new_source.global_id()),
+            "expected undo to remove new output link"
+        );
+
+        apply_graph_edit_command(
+            EditableClientGraphMut::SuperGraph(&mut graph),
+            &plan.forward_command,
+        )
+        .unwrap();
+        assert!(
+            graph
+                .output_links
+                .iter()
+                .any(|x| x.global_id() == new_source.global_id()),
+            "expected redo to restore new output link"
+        );
+    }
+
+    #[test]
+    fn milli_node_slot_edit_supports_undo_and_redo() {
+        let mut rng = rand::rng();
+        let external_a = GlobalId::new(&mut rng);
+        let external_b = GlobalId::new(&mut rng);
+        let (mut graph, input_map) = MilliOpGraph::new([external_a, external_b], &mut rng);
+        let internal_a = input_map[&external_a];
+        let internal_b = input_map[&external_b];
+
+        let _out = SimpleUnaryOp::neg(&mut graph, internal_a, &mut rng);
+        let node_id = Graph::node_ids(&graph).next().unwrap();
+
+        let output_endpoint = endpoint(
+            SlotPipOwner::InputLink(internal_b),
+            SlotDirection::Output,
+            0,
+            Some(internal_b),
+        );
+        let input_endpoint = endpoint(
+            SlotPipOwner::Node(node_id),
+            SlotDirection::Input,
+            0,
+            Some(internal_a),
+        );
+
+        let plan = plan_and_apply_link_drag_edit(
+            EditableClientGraphMut::MilliOpGraph(&mut graph),
+            &[],
+            output_endpoint,
+            input_endpoint,
+        )
+        .unwrap();
+
+        assert!(!plan.requires_layout_refresh);
+        assert_eq!(
+            milli_graph_node_input_slot(&graph, node_id, 0).unwrap(),
+            Some(internal_b)
+        );
+
+        apply_graph_edit_command(
+            EditableClientGraphMut::MilliOpGraph(&mut graph),
+            &plan.undo_command,
+        )
+        .unwrap();
+        assert_eq!(
+            milli_graph_node_input_slot(&graph, node_id, 0).unwrap(),
+            Some(internal_a)
+        );
+
+        apply_graph_edit_command(
+            EditableClientGraphMut::MilliOpGraph(&mut graph),
+            &plan.forward_command,
+        )
+        .unwrap();
+        assert_eq!(
+            milli_graph_node_input_slot(&graph, node_id, 0).unwrap(),
+            Some(internal_b)
+        );
+    }
+
+    #[test]
+    fn milli_output_retarget_supports_undo_and_redo() {
+        let mut rng = rand::rng();
+        let external_old = GlobalId::new(&mut rng);
+        let external_new = GlobalId::new(&mut rng);
+        let (mut graph, input_map) = MilliOpGraph::new([external_old, external_new], &mut rng);
+        let old_internal = input_map[&external_old];
+        let new_internal = input_map[&external_new];
+        graph.set_outputs(vec![old_internal]);
+
+        let output_endpoint = endpoint(
+            SlotPipOwner::InputLink(new_internal),
+            SlotDirection::Output,
+            0,
+            Some(new_internal),
+        );
+        let input_endpoint = endpoint(
+            SlotPipOwner::OutputLink(old_internal),
+            SlotDirection::Input,
+            0,
+            Some(old_internal),
+        );
+
+        let plan = plan_and_apply_link_drag_edit(
+            EditableClientGraphMut::MilliOpGraph(&mut graph),
+            &[],
+            output_endpoint,
+            input_endpoint,
+        )
+        .unwrap();
+
+        assert!(plan.requires_layout_refresh);
+        assert!(
+            Graph::output_link_ids(&graph).any(|(_, internal_id)| internal_id == new_internal),
+            "expected output retarget to new internal link"
+        );
+
+        apply_graph_edit_command(
+            EditableClientGraphMut::MilliOpGraph(&mut graph),
+            &plan.undo_command,
+        )
+        .unwrap();
+        assert!(
+            Graph::output_link_ids(&graph).any(|(_, internal_id)| internal_id == old_internal),
+            "expected undo to restore old internal output link"
+        );
+
+        apply_graph_edit_command(
+            EditableClientGraphMut::MilliOpGraph(&mut graph),
+            &plan.forward_command,
+        )
+        .unwrap();
+        assert!(
+            Graph::output_link_ids(&graph).any(|(_, internal_id)| internal_id == new_internal),
+            "expected redo to restore new internal output link"
+        );
     }
 }

@@ -1,4 +1,5 @@
 mod actions_panel;
+mod edit_interaction_ui;
 mod editing;
 mod graph_layout;
 mod helpers;

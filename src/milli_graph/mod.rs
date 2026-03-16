@@ -671,27 +671,33 @@ impl MilliOpGraph {
         });
     }
 
+    fn ensure_output_map_with_ordering_defaults(&mut self) -> &mut HashMap<GlobalId, GlobalId> {
+        if self.output_map.is_none() {
+            self.output_map = Some(HashMap::new());
+        }
+
+        let output_map = self.output_map.as_mut().unwrap();
+        if let Some(output_ordering) = &self.output_ordering {
+            let mut mapped_external_ids = output_map.values().copied().collect::<HashSet<_>>();
+            for external_id in output_ordering {
+                if !mapped_external_ids.contains(external_id) {
+                    output_map.insert(*external_id, *external_id);
+                    mapped_external_ids.insert(*external_id);
+                }
+            }
+        }
+
+        output_map
+    }
+
     pub fn retarget_output_internal_link(
         &mut self,
         old_internal_id: GlobalId,
         new_internal_id: GlobalId,
     ) -> Result<bool, String> {
-        if self.output_map.is_none() {
-            let mut output_map = HashMap::new();
-            if let Some(output_ordering) = &self.output_ordering {
-                for external_id in output_ordering {
-                    output_map.insert(*external_id, *external_id);
-                }
-            }
-            self.output_map = Some(output_map);
-        }
-
         self.ensure_tensor_with_id(new_internal_id);
 
-        let output_map = self
-            .output_map
-            .as_mut()
-            .ok_or_else(|| "output_map is not configured".to_string())?;
+        let output_map = self.ensure_output_map_with_ordering_defaults();
         let Some(external_id) = output_map.remove(&old_internal_id) else {
             return Err(format!("missing graph output link {}", old_internal_id));
         };
@@ -4591,5 +4597,66 @@ mod tests {
         let mut backend = EvalBackend::NDArray;
         let result = graph.eval(&HashMap::new(), &mut (), &mut backend);
         assert!(matches!(result, Err(MilliOpGraphError::InvalidGraph(_))));
+    }
+
+    #[test]
+    fn retarget_output_internal_link_uses_output_ordering_identity_fallback() {
+        let mut rng = rand::rng();
+        let mut graph = MilliOpGraph::new_empty(&mut rng);
+        let old_internal = graph.add_input(&mut rng);
+        let new_internal = graph.add_input(&mut rng);
+        graph.set_outputs(vec![old_internal]);
+
+        // Simulate a partially-populated map loaded from legacy/edited state:
+        // ordering lists an output, but the explicit output_map entry is missing.
+        if let Some(output_map) = graph.output_map.as_mut() {
+            output_map.clear();
+        }
+
+        let changed = graph
+            .retarget_output_internal_link(old_internal, new_internal)
+            .unwrap();
+        assert!(changed);
+        assert!(
+            graph.output_link_ids().any(|(external_id, internal_id)| {
+                external_id == old_internal && internal_id == new_internal
+            }),
+            "expected output ordering external id to now map to new internal id"
+        );
+    }
+
+    #[test]
+    fn retarget_output_internal_link_preserves_existing_mapping_on_conflict() {
+        let mut rng = rand::rng();
+        let mut graph = MilliOpGraph::new_empty(&mut rng);
+        let old_internal = graph.add_input(&mut rng);
+        let new_internal = graph.add_input(&mut rng);
+        let external_old = GlobalId::new(&mut rng);
+        let external_new = GlobalId::new(&mut rng);
+        graph.set_output_map([(old_internal, external_old), (new_internal, external_new)]);
+
+        let err = graph
+            .retarget_output_internal_link(old_internal, new_internal)
+            .unwrap_err();
+        assert!(
+            err.contains("already mapped"),
+            "expected conflict error, got: {err}"
+        );
+        assert_eq!(
+            graph
+                .output_map
+                .as_ref()
+                .and_then(|map| map.get(&old_internal)),
+            Some(&external_old),
+            "old mapping should be preserved after failed retarget"
+        );
+        assert_eq!(
+            graph
+                .output_map
+                .as_ref()
+                .and_then(|map| map.get(&new_internal)),
+            Some(&external_new),
+            "new mapping should remain unchanged after failed retarget"
+        );
     }
 }

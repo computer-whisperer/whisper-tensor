@@ -466,184 +466,23 @@ impl GraphExplorerApp {
                                         self.explorer_selection = Some(global_id);
                                     }
 
-                                    let slot_owner = match current_node_data[&node_id].node_type {
-                                        GraphLayoutNodeType::GraphNode(graph_node_id) => {
-                                            Some(SlotPipOwner::Node(graph_node_id))
-                                        }
-                                        GraphLayoutNodeType::InputLinkNode(link_id) => {
-                                            Some(SlotPipOwner::InputLink(link_id))
-                                        }
-                                        GraphLayoutNodeType::OutputLinkNode(link_id) => {
-                                            Some(SlotPipOwner::OutputLink(link_id))
-                                        }
-                                        GraphLayoutNodeType::ConstantLinkNode(link_id) => {
-                                            Some(SlotPipOwner::ConstantLink(link_id))
-                                        }
-                                        GraphLayoutNodeType::ConnectionByNameSrc(_)
-                                        | GraphLayoutNodeType::ConnectionByNameDest(_) => None,
-                                    };
-                                    if can_edit_links
-                                        && let Some(slot_owner) = slot_owner
-                                    {
-                                        let node_center = node_bounding_boxes[&node_id].center();
-                                        let slot_pip_radius = 4.0f32;
-                                        let slot_pip_rect_radius = 8.0f32;
-                                        let interaction_sense = Sense::click_and_drag();
-
-                                        for (slot_index, offset) in
-                                            node_io_connections[&node_id].inputs.iter().enumerate()
-                                        {
-                                            let center = node_center + *offset;
-                                            let maybe_layout_link = current_node_data[&node_id]
-                                                .inputs
-                                                .get(slot_index)
-                                                .copied()
-                                                .flatten();
-                                            let maybe_link = maybe_layout_link.and_then(|layout_link| {
-                                                link_data.get(&layout_link).map(|x| x.global_id)
-                                            });
-                                            let endpoint = SlotPipEndpoint {
-                                                owner: slot_owner,
-                                                direction: SlotDirection::Input,
-                                                slot_index,
-                                                link_id: maybe_link,
-                                                layout_link_id: maybe_layout_link,
-                                                screen_pos: center,
-                                            };
-
-                                            let pip_rect = Rect::from_center_size(
-                                                center,
-                                                Vec2::splat(slot_pip_rect_radius * 2.0),
-                                            );
-                                            let pip_resp = ui.interact(
-                                                pip_rect,
-                                                ui.id().with((
-                                                    "slot_pip",
-                                                    global_id,
-                                                    0u8,
-                                                    slot_index,
-                                                )),
-                                                interaction_sense,
-                                            );
-
-                                            if pip_resp.drag_started() {
-                                                nodes_with_active_slot_drag.insert(node_id);
-                                                self.link_drag_controller
-                                                    .begin_drag(working_path.clone(), endpoint);
-                                            }
-                                            if pip_resp.dragged() {
-                                                nodes_with_active_slot_drag.insert(node_id);
-                                            }
-                                            if pip_resp.hovered() {
-                                                self.link_drag_controller.set_hover_target(
-                                                    working_path.as_slice(),
-                                                    endpoint,
-                                                );
-                                            }
-
-                                            let is_drag_source = self
-                                                .link_drag_controller
-                                                .is_drag_source(working_path.as_slice(), endpoint);
-                                            let fill_color = if is_drag_source {
-                                                Color32::from_rgb(255, 197, 48)
-                                            } else if maybe_link.is_some() {
-                                                Color32::from_rgb(98, 190, 250)
-                                            } else {
-                                                Color32::from_rgb(76, 84, 97)
-                                            };
-                                            let stroke_color = if pip_resp.hovered() {
-                                                Color32::from_rgb(236, 244, 255)
-                                            } else {
-                                                Color32::from_gray(12)
-                                            };
-                                            ui.painter().circle_filled(
-                                                center,
-                                                slot_pip_radius,
-                                                fill_color,
-                                            );
-                                            ui.painter().circle_stroke(
-                                                center,
-                                                slot_pip_radius,
-                                                Stroke::new(1.0, stroke_color),
-                                            );
-                                        }
-
-                                        for (slot_index, offset) in
-                                            node_io_connections[&node_id].outputs.iter().enumerate()
-                                        {
-                                            let center = node_center + *offset;
-                                            let maybe_layout_link = current_node_data[&node_id]
-                                                .outputs
-                                                .get(slot_index)
-                                                .copied()
-                                                .flatten();
-                                            let maybe_link = maybe_layout_link.and_then(|layout_link| {
-                                                link_data.get(&layout_link).map(|x| x.global_id)
-                                            });
-                                            let endpoint = SlotPipEndpoint {
-                                                owner: slot_owner,
-                                                direction: SlotDirection::Output,
-                                                slot_index,
-                                                link_id: maybe_link,
-                                                layout_link_id: maybe_layout_link,
-                                                screen_pos: center,
-                                            };
-
-                                            let pip_rect = Rect::from_center_size(
-                                                center,
-                                                Vec2::splat(slot_pip_rect_radius * 2.0),
-                                            );
-                                            let pip_resp = ui.interact(
-                                                pip_rect,
-                                                ui.id().with((
-                                                    "slot_pip",
-                                                    global_id,
-                                                    1u8,
-                                                    slot_index,
-                                                )),
-                                                interaction_sense,
-                                            );
-
-                                            if pip_resp.drag_started() {
-                                                nodes_with_active_slot_drag.insert(node_id);
-                                                self.link_drag_controller
-                                                    .begin_drag(working_path.clone(), endpoint);
-                                            }
-                                            if pip_resp.dragged() {
-                                                nodes_with_active_slot_drag.insert(node_id);
-                                            }
-                                            if pip_resp.hovered() {
-                                                self.link_drag_controller.set_hover_target(
-                                                    working_path.as_slice(),
-                                                    endpoint,
-                                                );
-                                            }
-
-                                            let is_drag_source = self
-                                                .link_drag_controller
-                                                .is_drag_source(working_path.as_slice(), endpoint);
-                                            let fill_color = if is_drag_source {
-                                                Color32::from_rgb(255, 197, 48)
-                                            } else if maybe_link.is_some() {
-                                                Color32::from_rgb(95, 219, 140)
-                                            } else {
-                                                Color32::from_rgb(76, 84, 97)
-                                            };
-                                            let stroke_color = if pip_resp.hovered() {
-                                                Color32::from_rgb(236, 244, 255)
-                                            } else {
-                                                Color32::from_gray(12)
-                                            };
-                                            ui.painter().circle_filled(
-                                                center,
-                                                slot_pip_radius,
-                                                fill_color,
-                                            );
-                                            ui.painter().circle_stroke(
-                                                center,
-                                                slot_pip_radius,
-                                                Stroke::new(1.0, stroke_color),
-                                            );
+                                    if can_edit_links {
+                                        let node_has_active_slot_drag =
+                                            edit_interaction_ui::render_node_slot_pips(
+                                            &mut self.link_drag_controller,
+                                            ui,
+                                            working_path.as_slice(),
+                                            global_id,
+                                            &current_node_data[&node_id].node_type,
+                                            node_bounding_boxes[&node_id].center(),
+                                            &node_io_connections[&node_id].inputs,
+                                            &node_io_connections[&node_id].outputs,
+                                            &current_node_data[&node_id].inputs,
+                                            &current_node_data[&node_id].outputs,
+                                            &link_data,
+                                        );
+                                        if node_has_active_slot_drag {
+                                            nodes_with_active_slot_drag.insert(node_id);
                                         }
                                     }
 
@@ -798,54 +637,15 @@ impl GraphExplorerApp {
                                     }
                                 }
 
-                                if let Some(source_endpoint) = self
-                                    .link_drag_controller
-                                    .source_for_graph(working_path.as_slice())
+                                if let Some((source_endpoint, target_endpoint)) =
+                                    edit_interaction_ui::render_pending_link_drag_preview(
+                                        &mut self.link_drag_controller,
+                                        ui,
+                                        working_path.as_slice(),
+                                    )
                                 {
-                                    if let Some(pointer_pos_global) =
-                                        ui.input(|x| x.pointer.interact_pos())
-                                    {
-                                        let pointer_pos = ui
-                                            .ctx()
-                                            .layer_transform_from_global(ui.layer_id())
-                                            .map_or(pointer_pos_global, |from_global| {
-                                                from_global * pointer_pos_global
-                                            });
-                                        let points = [
-                                            source_endpoint.screen_pos,
-                                            egui::pos2(
-                                                source_endpoint.screen_pos.x + 40.0,
-                                                source_endpoint.screen_pos.y,
-                                            ),
-                                            egui::pos2(pointer_pos.x - 40.0, pointer_pos.y),
-                                            pointer_pos,
-                                        ];
-                                        let preview_stroke = Stroke {
-                                            width: 2.0,
-                                            color: Color32::from_rgb(255, 197, 48),
-                                        };
-                                        ui.painter().add(CubicBezierShape::from_points_stroke(
-                                            points,
-                                            false,
-                                            Color32::TRANSPARENT,
-                                            preview_stroke,
-                                        ));
-                                    }
-
-                                    let pointer_released =
-                                        ui.input(|x| x.pointer.primary_released());
-                                    if let Some((source_endpoint, target_endpoint)) = self
-                                        .link_drag_controller
-                                        .finish_if_released(
-                                            working_path.as_slice(),
-                                            pointer_released,
-                                        )
-                                    {
-                                        pending_link_edit_request =
-                                            Some((source_endpoint, target_endpoint));
-                                    } else if !pointer_released {
-                                        ui.ctx().request_repaint_after(Duration::from_millis(20));
-                                    }
+                                    pending_link_edit_request =
+                                        Some((source_endpoint, target_endpoint));
                                 }
                             });
                             self.model_view_scene_rects

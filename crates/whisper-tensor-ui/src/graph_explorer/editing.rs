@@ -27,10 +27,29 @@ pub(super) struct SlotPipEndpoint {
     pub(super) screen_pos: Pos2,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct GraphLayoutSlotPatch {
+    pub(super) owner: SlotPipOwner,
+    pub(super) direction: SlotDirection,
+    pub(super) slot_index: usize,
+    pub(super) link_global_id: Option<GlobalId>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(super) struct GraphLayoutPatch {
+    pub(super) slot_patches: Vec<GraphLayoutSlotPatch>,
+}
+
+impl GraphLayoutPatch {
+    pub(super) fn is_empty(&self) -> bool {
+        self.slot_patches.is_empty()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct LinkEditApplyResult {
     pub(super) status: String,
-    pub(super) link_global_id: GlobalId,
+    pub(super) layout_patch: Option<GraphLayoutPatch>,
     pub(super) requires_layout_refresh: bool,
     pub(super) history_entry: Option<GraphEditHistoryEntry>,
 }
@@ -38,6 +57,10 @@ pub(super) struct LinkEditApplyResult {
 #[derive(Clone, Debug)]
 pub(super) struct GraphEditHistoryEntry {
     pub(super) label: String,
+    pub(super) graph_path: Vec<GlobalId>,
+    pub(super) requires_layout_refresh: bool,
+    pub(super) undo_layout_patch: Option<GraphLayoutPatch>,
+    pub(super) redo_layout_patch: Option<GraphLayoutPatch>,
     pub(super) undo_command: GraphEditCommand,
     pub(super) redo_command: GraphEditCommand,
 }
@@ -83,9 +106,9 @@ impl GraphExplorerApp {
         }
     }
 
-    pub(super) fn invalidate_graph_view_cache(&mut self) {
-        self.graph_layouts.clear();
-        self.model_view_scene_rects.clear();
+    pub(super) fn invalidate_graph_view_cache_for_path(&mut self, graph_path: &[GlobalId]) {
+        self.graph_layouts.remove(graph_path);
+        self.model_view_scene_rects.remove(graph_path);
         self.link_drag_controller.clear();
         self.pending_link_edit_request = None;
     }
@@ -130,102 +153,48 @@ impl GraphExplorerApp {
             Err(err) => Err(err.to_string()),
         }?;
 
+        let redo_layout_patch = plan.forward_layout_patch.clone();
         let history_entry = GraphEditHistoryEntry {
             label: plan.status.clone(),
+            graph_path: working_path.to_vec(),
+            requires_layout_refresh: plan.requires_layout_refresh,
+            undo_layout_patch: plan.undo_layout_patch,
+            redo_layout_patch: redo_layout_patch.clone(),
             undo_command: plan.undo_command,
             redo_command: plan.forward_command,
         };
 
         Ok(LinkEditApplyResult {
             status: plan.status,
-            link_global_id: plan.link_global_id,
+            layout_patch: redo_layout_patch,
             requires_layout_refresh: plan.requires_layout_refresh,
             history_entry: Some(history_entry),
         })
     }
 
-    pub(super) fn apply_link_drag_edit_to_layout(
+    pub(super) fn apply_layout_patch_to_layout(
         graph_layout: &mut GraphLayout,
-        source: SlotPipEndpoint,
-        target: SlotPipEndpoint,
-        link_global_id: GlobalId,
+        patch: &GraphLayoutPatch,
     ) -> Result<(), String> {
-        let (output_endpoint, input_endpoint) = match (source.direction, target.direction) {
-            (SlotDirection::Output, SlotDirection::Input) => (source, target),
-            (SlotDirection::Input, SlotDirection::Output) => (target, source),
-            _ => {
-                return Err(
-                    "Drag must connect an output slot to an input slot (or vice versa)."
-                        .to_string(),
-                );
-            }
-        };
-
-        let layout_link_id = output_endpoint
-            .layout_link_id
-            .filter(|_| output_endpoint.link_id == Some(link_global_id))
-            .or_else(|| {
-                input_endpoint
-                    .layout_link_id
-                    .filter(|_| input_endpoint.link_id == Some(link_global_id))
-            })
-            .unwrap_or_else(|| graph_layout.ensure_link_id_for_global(link_global_id));
-
-        match output_endpoint.owner {
-            SlotPipOwner::Node(_) | SlotPipOwner::InputLink(_) | SlotPipOwner::ConstantLink(_) => {}
-            SlotPipOwner::OutputLink(link_id) => {
-                return Err(format!(
-                    "Graph output link {} cannot be used as a source endpoint",
-                    link_id
-                ));
-            }
-        }
-
-        match input_endpoint.owner {
-            SlotPipOwner::Node(_) | SlotPipOwner::OutputLink(_) => {}
-            SlotPipOwner::InputLink(link_id) => {
-                return Err(format!(
-                    "Graph input link {} cannot be used as an input endpoint",
-                    link_id
-                ));
-            }
-            SlotPipOwner::ConstantLink(link_id) => {
-                return Err(format!(
-                    "Constant link {} cannot be used as an input endpoint",
-                    link_id
-                ));
-            }
-        }
-
-        let output_node_type = graph_layout_node_type_for_slot_owner(output_endpoint.owner);
-        graph_layout
-            .set_slot_link(
-                &output_node_type,
-                SlotDirection::Output,
-                output_endpoint.slot_index,
-                Some(layout_link_id),
-            )
-            .map_err(|err| {
-                format!(
-                    "Failed to set layout output slot {} for {:?}: {err}",
-                    output_endpoint.slot_index, output_node_type
+        for slot_patch in &patch.slot_patches {
+            let node_type = graph_layout_node_type_for_slot_owner(slot_patch.owner);
+            let layout_link = slot_patch
+                .link_global_id
+                .map(|link_global_id| graph_layout.ensure_link_id_for_global(link_global_id));
+            graph_layout
+                .set_slot_link(
+                    &node_type,
+                    slot_patch.direction,
+                    slot_patch.slot_index,
+                    layout_link,
                 )
-            })?;
-
-        let input_node_type = graph_layout_node_type_for_slot_owner(input_endpoint.owner);
-        graph_layout
-            .set_slot_link(
-                &input_node_type,
-                SlotDirection::Input,
-                input_endpoint.slot_index,
-                Some(layout_link_id),
-            )
-            .map_err(|err| {
-                format!(
-                    "Failed to set layout input slot {} for {:?}: {err}",
-                    input_endpoint.slot_index, input_node_type
-                )
-            })?;
+                .map_err(|err| {
+                    format!(
+                        "Failed to set layout {:?} slot {} for {:?}: {err}",
+                        slot_patch.direction, slot_patch.slot_index, node_type
+                    )
+                })?;
+        }
 
         graph_layout.rebuild_connectivity();
         Ok(())

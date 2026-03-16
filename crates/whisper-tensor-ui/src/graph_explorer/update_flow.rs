@@ -49,7 +49,7 @@ impl GraphExplorerApp {
                 Ok(result) => {
                     let LinkEditApplyResult {
                         status,
-                        link_global_id,
+                        layout_patch,
                         requires_layout_refresh,
                         history_entry,
                     } = result;
@@ -64,15 +64,15 @@ impl GraphExplorerApp {
                     } else {
                         None
                     };
-                    if !should_relayout {
+                    if !should_relayout
+                        && let Some(layout_patch) = layout_patch.as_ref()
+                        && !layout_patch.is_empty()
+                    {
                         match self.graph_layouts.get_mut(&working_path) {
                             Some(Ok(graph_layout)) => {
-                                if let Err(err) = Self::apply_link_drag_edit_to_layout(
-                                    graph_layout,
-                                    source_endpoint,
-                                    target_endpoint,
-                                    link_global_id,
-                                ) {
+                                if let Err(err) =
+                                    Self::apply_layout_patch_to_layout(graph_layout, layout_patch)
+                                {
                                     should_relayout = true;
                                     relayout_reason = Some(err);
                                 }
@@ -83,15 +83,12 @@ impl GraphExplorerApp {
                                     "Cached layout was already invalid before edit: {err}"
                                 ));
                             }
-                            None => {
-                                should_relayout = true;
-                            }
+                            None => {}
                         }
                     }
 
                     if should_relayout {
-                        self.graph_layouts.remove(&working_path);
-                        self.model_view_scene_rects.remove(&working_path);
+                        self.invalidate_graph_view_cache_for_path(&working_path);
                         if let Some(reason) = relayout_reason {
                             self.actions_status =
                                 Some(format!("{} (layout refresh fallback: {reason})", status));
@@ -112,10 +109,54 @@ impl GraphExplorerApp {
             match history_action {
                 PendingHistoryAction::Undo => {
                     if let Some(entry) = self.undo_history.pop() {
+                        let graph_path = entry.graph_path.clone();
+                        let mut should_relayout = entry.requires_layout_refresh;
+                        let mut relayout_reason = if should_relayout {
+                            Some("graph I/O endpoint identity changed".to_string())
+                        } else {
+                            None
+                        };
+
                         match self.apply_edit_command(loaded_models, &entry.undo_command) {
                             Ok(()) => {
-                                self.invalidate_graph_view_cache();
-                                self.actions_status = Some(format!("Undo: {}", entry.label));
+                                if !should_relayout
+                                    && let Some(layout_patch) = entry.undo_layout_patch.as_ref()
+                                    && !layout_patch.is_empty()
+                                {
+                                    match self.graph_layouts.get_mut(&graph_path) {
+                                        Some(Ok(graph_layout)) => {
+                                            if let Err(err) = Self::apply_layout_patch_to_layout(
+                                                graph_layout,
+                                                layout_patch,
+                                            ) {
+                                                should_relayout = true;
+                                                relayout_reason = Some(err);
+                                            }
+                                        }
+                                        Some(Err(err)) => {
+                                            should_relayout = true;
+                                            relayout_reason = Some(format!(
+                                                "Cached layout was already invalid before undo: {err}"
+                                            ));
+                                        }
+                                        None => {}
+                                    }
+                                }
+                                if should_relayout {
+                                    self.invalidate_graph_view_cache_for_path(&graph_path);
+                                } else {
+                                    self.link_drag_controller.clear();
+                                    self.pending_link_edit_request = None;
+                                }
+
+                                if let Some(reason) = relayout_reason {
+                                    self.actions_status = Some(format!(
+                                        "Undo: {} (layout refresh fallback: {reason})",
+                                        entry.label
+                                    ));
+                                } else {
+                                    self.actions_status = Some(format!("Undo: {}", entry.label));
+                                }
                                 self.redo_history.push(entry);
                                 if self.redo_history.len() > MAX_GRAPH_UNDO_HISTORY {
                                     self.redo_history.drain(..1);
@@ -134,10 +175,55 @@ impl GraphExplorerApp {
                 }
                 PendingHistoryAction::Redo => {
                     if let Some(entry) = self.redo_history.pop() {
+                        let graph_path = entry.graph_path.clone();
+                        let mut should_relayout = entry.requires_layout_refresh;
+                        let mut relayout_reason = if should_relayout {
+                            Some("graph I/O endpoint identity changed".to_string())
+                        } else {
+                            None
+                        };
+
                         match self.apply_edit_command(loaded_models, &entry.redo_command) {
                             Ok(()) => {
-                                self.invalidate_graph_view_cache();
-                                self.actions_status = Some(format!("Redo: {}", entry.label));
+                                if !should_relayout
+                                    && let Some(layout_patch) = entry.redo_layout_patch.as_ref()
+                                    && !layout_patch.is_empty()
+                                {
+                                    match self.graph_layouts.get_mut(&graph_path) {
+                                        Some(Ok(graph_layout)) => {
+                                            if let Err(err) = Self::apply_layout_patch_to_layout(
+                                                graph_layout,
+                                                layout_patch,
+                                            ) {
+                                                should_relayout = true;
+                                                relayout_reason = Some(err);
+                                            }
+                                        }
+                                        Some(Err(err)) => {
+                                            should_relayout = true;
+                                            relayout_reason = Some(format!(
+                                                "Cached layout was already invalid before redo: {err}"
+                                            ));
+                                        }
+                                        None => {}
+                                    }
+                                }
+
+                                if should_relayout {
+                                    self.invalidate_graph_view_cache_for_path(&graph_path);
+                                } else {
+                                    self.link_drag_controller.clear();
+                                    self.pending_link_edit_request = None;
+                                }
+
+                                if let Some(reason) = relayout_reason {
+                                    self.actions_status = Some(format!(
+                                        "Redo: {} (layout refresh fallback: {reason})",
+                                        entry.label
+                                    ));
+                                } else {
+                                    self.actions_status = Some(format!("Redo: {}", entry.label));
+                                }
                                 self.undo_history.push(entry);
                                 if self.undo_history.len() > MAX_GRAPH_UNDO_HISTORY {
                                     self.undo_history.drain(..1);
