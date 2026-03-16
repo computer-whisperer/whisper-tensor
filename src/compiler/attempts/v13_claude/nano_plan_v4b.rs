@@ -1142,6 +1142,38 @@ fn build_single_span(
         });
     }
 
+    // Step 4b: Safety net — verify all atoms that will be needed in step 5 are
+    // mappable. Pre-compute which main-graph atoms each slice's compute group will
+    // need (via InputRef resolution + reduce extension + Affine base adjustment),
+    // then check which atoms are NOT yet in main_to_local AND won't be covered by
+    // compute groups in this span.
+    //
+    // For atoms from compute groups in this span: they'll be added to main_to_local
+    // during step 5 before any consumer processes them (because span_slices are in
+    // topological order). We pre-compute their atom ranges.
+    //
+    // For atoms NOT from any compute group or literal in this span: these must be
+    // external inputs. If they weren't caught in step 3, add them now.
+    let missing_externals = find_missing_external_atoms(
+        span_slices, groups, &main_to_local,
+    );
+    for (gi, offset, count) in missing_externals {
+        let main_base = groups[gi].base_id.offset(offset);
+        let local_base = span_graph.push_group(
+            count,
+            ScalarOp::Literal(crate::numeric_scalar::NumericScalar::F32(0.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
+        main_to_local.insert_range(main_base, local_base, count);
+        input_mappings.push(AtomMapping {
+            main_base,
+            span_base: local_base,
+            count,
+        });
+    }
+
     // Step 5: Add compute groups with remapped InputRefs.
     let mut output_mappings: Vec<AtomMapping> = Vec::new();
 
@@ -1194,10 +1226,78 @@ fn build_single_span(
         }
     }
 
+    // ─── Validation: verify all InputRefs resolve within the span ─────────────
+    validate_span_internal_refs(&span_graph, phase_idx, lane_idx);
+
     Span {
         graph: span_graph,
         inputs: input_mappings,
         outputs: output_mappings,
+    }
+}
+
+/// Validate that every InputRef in a span graph references atoms that exist
+/// within the span graph, including reduce-extended accesses and IndirectLoad table_base.
+fn validate_span_internal_refs(graph: &NanoGraph, phase_idx: usize, lane_idx: usize) {
+    let num_atoms = graph.num_atoms();
+    for (gi, group) in graph.groups().iter().enumerate() {
+        if matches!(group.op, ScalarOp::Literal(_)) && group.inputs.is_empty() {
+            continue;
+        }
+
+        let (reduce_count, reduce_stride) = match &group.op {
+            ScalarOp::ReduceSum {
+                reduce_count,
+                reduce_stride,
+                ..
+            }
+            | ScalarOp::ReduceMax {
+                reduce_count,
+                reduce_stride,
+                ..
+            } if *reduce_count > 1 && *reduce_stride != 0 => (*reduce_count, *reduce_stride),
+            _ => (1, 0),
+        };
+
+        for (inp_idx, input) in group.inputs.iter().enumerate() {
+            // Sample-check a few atoms for efficiency (checking all can be O(n) per group).
+            let check_points = if group.count <= 16 {
+                (0..group.count).collect::<Vec<_>>()
+            } else {
+                vec![0, group.count / 4, group.count / 2, 3 * group.count / 4, group.count - 1]
+            };
+            for &i in &check_points {
+                let base = input.resolve(i, 0);
+                if base.0 >= num_atoms {
+                    panic!(
+                        "Span validation failed (phase {} lane {}): group {} (base={}, op={:?}, count={}) \
+                         input {} at offset {}: resolves to atom {} which is >= span size {}",
+                        phase_idx, lane_idx, gi, group.base_id.0,
+                        group.op, group.count, inp_idx, i, base.0, num_atoms,
+                    );
+                }
+                for k in 1..reduce_count {
+                    let ext = AtomId((base.0 as i64 + k as i64 * reduce_stride) as u64);
+                    if ext.0 >= num_atoms {
+                        panic!(
+                            "Span validation failed (phase {} lane {}): group {} (base={}, op={:?}) \
+                             input {} offset {} reduce step k={}: atom {} >= span size {}",
+                            phase_idx, lane_idx, gi, group.base_id.0,
+                            group.op, inp_idx, i, k, ext.0, num_atoms,
+                        );
+                    }
+                }
+            }
+        }
+
+        if let ScalarOp::IndirectLoad { table_base, .. } = &group.op {
+            if table_base.0 >= num_atoms {
+                panic!(
+                    "Span validation failed (phase {} lane {}): group {} IndirectLoad table_base {} >= span size {}",
+                    phase_idx, lane_idx, gi, table_base.0, num_atoms,
+                );
+            }
+        }
     }
 }
 
@@ -1573,6 +1673,185 @@ fn remap_inputs_for_slice(
         .collect()
 }
 
+/// Find any main-graph atoms that will be needed during step 5 (InputRef remapping)
+/// but are not yet in main_to_local and won't be covered by compute group slices.
+/// Returns merged (group_idx, offset, count) ranges to add as additional external inputs.
+fn find_missing_external_atoms(
+    span_slices: &[SpanSlice],
+    groups: &[AtomGroup],
+    main_to_local: &RangeAtomMap,
+) -> Vec<(usize, u64, u64)> {
+    // Pre-compute atom ranges for all compute slices. Sort for binary search.
+    let mut compute_atom_ranges: Vec<(u64, u64)> = Vec::new(); // (main_base, end)
+    for slice in span_slices.iter() {
+        let g = &groups[slice.group_idx];
+        let main_base = g.base_id.0 + slice.atom_offset;
+        compute_atom_ranges.push((main_base, main_base + slice.atom_count));
+    }
+    compute_atom_ranges.sort_by_key(|&(lo, _)| lo);
+
+    let atom_available = |atom: u64| -> bool {
+        // In main_to_local (from literals or external inputs)?
+        if main_to_local.get(AtomId(atom)).is_some() {
+            return true;
+        }
+        // In a compute slice range (will be added during step 5)?
+        let idx = compute_atom_ranges.partition_point(|&(lo, _)| lo <= atom);
+        if idx > 0 {
+            let (lo, hi) = compute_atom_ranges[idx - 1];
+            if atom >= lo && atom < hi { return true; }
+        }
+        false
+    };
+
+    let mut missing_ranges: Vec<(usize, u64, u64)> = Vec::new();
+
+    for slice in span_slices.iter() {
+        let group = &groups[slice.group_idx];
+        let (reduce_count, reduce_stride) = match &group.op {
+            ScalarOp::ReduceSum { reduce_count, reduce_stride, .. }
+            | ScalarOp::ReduceMax { reduce_count, reduce_stride, .. }
+                if *reduce_count > 1 && *reduce_stride != 0 =>
+            {
+                (*reduce_count, *reduce_stride)
+            }
+            _ => (1, 0),
+        };
+
+        // Check group-level ranges from resolve_input_to_group_ranges.
+        for input in &group.inputs {
+            let ref_ranges = resolve_input_to_group_ranges(
+                input,
+                slice.atom_offset,
+                slice.atom_count,
+                reduce_count,
+                reduce_stride,
+                groups,
+            );
+            for (ref_gi, range_lo, range_hi) in ref_ranges {
+                let g = &groups[ref_gi];
+                let g_lo = g.base_id.0;
+                let g_hi = g_lo + g.count;
+                let clamped_lo = range_lo.max(g_lo);
+                let clamped_hi = range_hi.min(g_hi);
+                if clamped_lo >= clamped_hi { continue; }
+
+                // Sample-check several atoms across the range.
+                let check_atoms: Vec<u64> = if clamped_hi - clamped_lo <= 8 {
+                    (clamped_lo..clamped_hi).collect()
+                } else {
+                    let len = clamped_hi - clamped_lo;
+                    vec![
+                        clamped_lo,
+                        clamped_lo + len / 4,
+                        clamped_lo + len / 2,
+                        clamped_lo + 3 * len / 4,
+                        clamped_hi - 1,
+                    ]
+                };
+
+                if check_atoms.iter().any(|&a| !atom_available(a)) {
+                    missing_ranges.push((ref_gi, clamped_lo - g_lo, clamped_hi - clamped_lo));
+                }
+            }
+        }
+
+        // Check the specific atoms that remap_single_input will look up.
+        for input in &group.inputs {
+            let atoms_to_lookup = get_remap_lookup_atoms(input, slice.atom_offset, slice.atom_count);
+            for atom in atoms_to_lookup {
+                if !atom_available(atom.0) {
+                    if let Some(ref_gi) = find_group_idx(groups, atom) {
+                        let g = &groups[ref_gi];
+                        missing_ranges.push((ref_gi, atom.0 - g.base_id.0, 1));
+                    }
+                }
+            }
+        }
+
+        // IndirectLoad table_base.
+        if let ScalarOp::IndirectLoad { table_base, .. } = &group.op {
+            if !atom_available(table_base.0) {
+                if let Some(ref_gi) = find_group_idx(groups, *table_base) {
+                    missing_ranges.push((ref_gi, 0, groups[ref_gi].count));
+                }
+            }
+        }
+    }
+
+    if missing_ranges.is_empty() {
+        return vec![];
+    }
+
+    // Merge and deduplicate. Filter out ranges fully covered by compute slices.
+    let merged = merge_group_ranges(&mut missing_ranges);
+    merged
+        .into_iter()
+        .filter(|&(gi, offset, count)| {
+            let main_base = groups[gi].base_id.0 + offset;
+            let main_end = main_base + count;
+            // Skip if fully covered by a single compute slice.
+            !compute_atom_ranges.iter().any(|&(lo, hi)| lo <= main_base && main_end <= hi)
+        })
+        .collect()
+}
+
+/// Get the specific main-graph atoms that remap_single_input will look up
+/// for a given InputRef and slice parameters.
+fn get_remap_lookup_atoms(
+    input: &InputRef,
+    atom_offset: u64,
+    atom_count: u64,
+) -> Vec<AtomId> {
+    match input {
+        InputRef::Broadcast(id) => vec![*id],
+
+        InputRef::Affine { base, stride } => {
+            let new_base = AtomId(base.0.wrapping_add((*stride as i64 * atom_offset as i64) as u64));
+            vec![new_base]
+        }
+
+        InputRef::StridedBroadcast { base, stride, repeat } => {
+            let block_idx = (atom_offset / repeat) as i64;
+            let new_base = AtomId(base.0.wrapping_add((stride * block_idx) as u64));
+            let offset_in_block = atom_offset % repeat;
+            if offset_in_block == 0 {
+                vec![new_base]
+            } else {
+                // Misaligned split — remap_single_input will resolve each atom individually.
+                let mut atoms = Vec::with_capacity(atom_count as usize);
+                for i in 0..atom_count {
+                    atoms.push(input.resolve(atom_offset + i, 0));
+                }
+                atoms
+            }
+        }
+
+        InputRef::Modular { base, .. } => vec![*base],
+
+        InputRef::SymAffine { base, stride_i, .. } => {
+            let new_base = AtomId(base.0.wrapping_add((*stride_i as i64 * atom_offset as i64) as u64));
+            vec![new_base]
+        }
+
+        InputRef::Explicit(ids) => {
+            let start = atom_offset as usize;
+            let end = ((atom_offset + atom_count) as usize).min(ids.len());
+            ids[start..end].to_vec()
+        }
+    }
+}
+
+/// Look up a main-graph atom ID in the span's atom map, panicking with context on failure.
+fn remap_atom(atom_map: &RangeAtomMap, main_id: AtomId, context: &str) -> AtomId {
+    atom_map.get(main_id).unwrap_or_else(|| {
+        panic!(
+            "InputRef remap failed: main-graph atom {} not in span atom map ({})",
+            main_id.0, context
+        )
+    })
+}
+
 /// Remap a single InputRef for a slice.
 fn remap_single_input(
     input: &InputRef,
@@ -1582,13 +1861,18 @@ fn remap_single_input(
     atom_map: &RangeAtomMap,
 ) -> InputRef {
     match input {
-        InputRef::Broadcast(id) => InputRef::Broadcast(atom_map.get(*id).unwrap_or(*id)),
+        InputRef::Broadcast(id) => {
+            InputRef::Broadcast(remap_atom(atom_map, *id, "Broadcast"))
+        }
 
         InputRef::Affine { base, stride } => {
             let new_base_raw =
                 AtomId(base.0.wrapping_add((*stride as i64 * atom_offset as i64) as u64));
             InputRef::Affine {
-                base: atom_map.get(new_base_raw).unwrap_or(new_base_raw),
+                base: remap_atom(atom_map, new_base_raw, &format!(
+                    "Affine base={} stride={} offset={}",
+                    base.0, stride, atom_offset
+                )),
                 stride: *stride,
             }
         }
@@ -1603,7 +1887,10 @@ fn remap_single_input(
             let offset_in_block = atom_offset % repeat;
             if offset_in_block == 0 {
                 InputRef::StridedBroadcast {
-                    base: atom_map.get(new_base_raw).unwrap_or(new_base_raw),
+                    base: remap_atom(atom_map, new_base_raw, &format!(
+                        "StridedBroadcast base={} stride={} repeat={} offset={}",
+                        base.0, stride, repeat, atom_offset
+                    )),
                     stride: *stride,
                     repeat: *repeat,
                 }
@@ -1613,7 +1900,10 @@ fn remap_single_input(
                 let mut ids = Vec::with_capacity(atom_count as usize);
                 for i in 0..atom_count {
                     let main_id = input.resolve(atom_offset + i, 0);
-                    ids.push(atom_map.get(main_id).unwrap_or(main_id));
+                    ids.push(remap_atom(atom_map, main_id, &format!(
+                        "StridedBroadcast(misaligned) base={} i={}",
+                        base.0, atom_offset + i
+                    )));
                 }
                 InputRef::Explicit(ids)
             }
@@ -1624,7 +1914,10 @@ fn remap_single_input(
             stride,
             modulus,
         } => InputRef::Modular {
-            base: atom_map.get(*base).unwrap_or(*base),
+            base: remap_atom(atom_map, *base, &format!(
+                "Modular base={} stride={} modulus={}",
+                base.0, stride, modulus
+            )),
             stride: *stride,
             modulus: *modulus,
         },
@@ -1637,7 +1930,10 @@ fn remap_single_input(
             let new_base_raw =
                 AtomId(base.0.wrapping_add((*stride_i as i64 * atom_offset as i64) as u64));
             InputRef::SymAffine {
-                base: atom_map.get(new_base_raw).unwrap_or(new_base_raw),
+                base: remap_atom(atom_map, new_base_raw, &format!(
+                    "SymAffine base={} stride_i={} stride_k={} offset={}",
+                    base.0, stride_i, stride_k, atom_offset
+                )),
                 stride_i: *stride_i,
                 stride_k: *stride_k,
             }
@@ -1654,7 +1950,11 @@ fn remap_single_input(
             InputRef::Explicit(
                 slice
                     .iter()
-                    .map(|id| atom_map.get(*id).unwrap_or(*id))
+                    .enumerate()
+                    .map(|(j, id)| remap_atom(atom_map, *id, &format!(
+                        "Explicit[{}] atom={}",
+                        start + j, id.0
+                    )))
                     .collect(),
             )
         }
@@ -1668,7 +1968,10 @@ fn remap_op(op: &ScalarOp, atom_map: &RangeAtomMap) -> ScalarOp {
             table_base,
             output_dtype,
         } => ScalarOp::IndirectLoad {
-            table_base: atom_map.get(*table_base).unwrap_or(*table_base),
+            table_base: remap_atom(atom_map, *table_base, &format!(
+                "IndirectLoad table_base={}",
+                table_base.0
+            )),
             output_dtype: *output_dtype,
         },
         other => other.clone(),
@@ -3297,6 +3600,755 @@ mod tests {
 
         assert!(g.validate().is_empty());
         let plan = plan_spans(&g, 4);
+        verify_span_plan(&g, &plan);
+        verify_output_coverage(&g, &plan);
+        verify_input_availability(&plan, &g);
+        verify_phase_independence(&plan);
+        validate_all_spans_self_contained(&plan);
+    }
+
+    /// Build a graph with matmul + Gather (IndirectLoad) + downstream Div.
+    /// This exercises all three patterns from the GPT-2 bugs:
+    /// - StridedBroadcast Mul + ReduceSum (matmul)
+    /// - IndirectLoad (Gather)
+    /// - Broadcast literal in a downstream Div
+    fn build_matmul_gather_div(m: u64, k: u64, n: u64) -> NanoGraph {
+        let mut g = NanoGraph::new();
+
+        // Matmul: C[M,N] = A[M,K] * B[K,N]
+        let a_base = g.push_group(
+            m * k,
+            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
+        let b_base = g.push_group(
+            k * n,
+            ScalarOp::Literal(NumericScalar::F32(2.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
+        let mut mul_bases = Vec::new();
+        for row in 0..m {
+            let a_row = AtomId(a_base.0 + row * k);
+            let mul = g.push_group(
+                k * n,
+                ScalarOp::Binary {
+                    op: ScalarBinOp::Mul,
+                    compute_dtype: DType::F32,
+                    output_dtype: DType::F32,
+                },
+                vec![],
+                vec![],
+                vec![
+                    InputRef::StridedBroadcast {
+                        base: a_row,
+                        stride: 1,
+                        repeat: n,
+                    },
+                    InputRef::Affine {
+                        base: b_base,
+                        stride: 1,
+                    },
+                ],
+            );
+            mul_bases.push(mul);
+        }
+        let mut red_bases = Vec::new();
+        for row in 0..m {
+            let red = g.push_group(
+                n,
+                ScalarOp::ReduceSum {
+                    reduce_count: k,
+                    reduce_stride: n as i64,
+                    compute_dtype: DType::F32,
+                    output_dtype: DType::F32,
+                },
+                vec![],
+                vec![],
+                vec![InputRef::Affine {
+                    base: mul_bases[row as usize],
+                    stride: 1,
+                }],
+            );
+            red_bases.push(red);
+        }
+
+        // Gather/IndirectLoad on the matmul output
+        let total_out = m * n;
+        let indices = g.push_group(
+            total_out,
+            ScalarOp::Literal(NumericScalar::I64(0)),
+            vec![],
+            vec![],
+            vec![],
+        );
+        let gather = g.push_group(
+            total_out,
+            ScalarOp::IndirectLoad {
+                table_base: red_bases[0],
+                output_dtype: DType::F32,
+            },
+            vec![],
+            vec![],
+            vec![InputRef::Affine {
+                base: indices,
+                stride: 1,
+            }],
+        );
+
+        // Downstream Div with broadcast literal
+        let divisor = g.push_atom(
+            ScalarOp::Literal(NumericScalar::F32(42.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
+        let div_result = g.push_group(
+            total_out,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Div,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![],
+            vec![],
+            vec![
+                InputRef::Affine {
+                    base: gather,
+                    stride: 1,
+                },
+                InputRef::Broadcast(divisor),
+            ],
+        );
+
+        for i in 0..total_out {
+            g.outputs.push(div_result.offset(i));
+        }
+        g
+    }
+
+    /// Large multi-phase: matmul with large-enough reduce output that gets
+    /// split across lanes, forcing a phase boundary for the downstream Div.
+    fn build_large_multi_phase(m: u64, k: u64, n: u64) -> NanoGraph {
+        let mut g = NanoGraph::new();
+        let a_base = g.push_group(
+            m * k,
+            ScalarOp::Literal(NumericScalar::F32(1.5)),
+            vec![],
+            vec![],
+            vec![],
+        );
+        let b_base = g.push_group(
+            k * n,
+            ScalarOp::Literal(NumericScalar::F32(0.5)),
+            vec![],
+            vec![],
+            vec![],
+        );
+
+        // One large Mul group (all rows combined).
+        let mul = g.push_group(
+            m * k * n,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Mul,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![],
+            vec![],
+            vec![
+                InputRef::StridedBroadcast {
+                    base: a_base,
+                    stride: 1,
+                    repeat: n,
+                },
+                InputRef::Modular {
+                    base: b_base,
+                    stride: 1,
+                    modulus: k * n,
+                },
+            ],
+        );
+
+        // One large ReduceSum group (all rows combined).
+        let red = g.push_group(
+            m * n,
+            ScalarOp::ReduceSum {
+                reduce_count: k,
+                reduce_stride: n as i64,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![],
+            vec![],
+            vec![InputRef::Affine {
+                base: mul,
+                stride: 1,
+            }],
+        );
+
+        // Div by broadcast literal — should be in a later phase when red is split.
+        let divisor = g.push_atom(
+            ScalarOp::Literal(NumericScalar::F32(7.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
+        let div_result = g.push_group(
+            m * n,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Div,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![],
+            vec![],
+            vec![
+                InputRef::Affine {
+                    base: red,
+                    stride: 1,
+                },
+                InputRef::Broadcast(divisor),
+            ],
+        );
+
+        for i in 0..m * n {
+            g.outputs.push(div_result.offset(i));
+        }
+        g
+    }
+
+    #[test]
+    fn test_matmul_gather_div() {
+        let g = build_matmul_gather_div(4, 8, 4);
+        assert!(g.validate().is_empty(), "graph validation: {:?}", g.validate());
+        for lanes in [1, 2, 4, 8] {
+            let plan = plan_spans(&g, lanes);
+            verify_span_plan(&g, &plan);
+            verify_output_coverage(&g, &plan);
+            verify_input_availability(&plan, &g);
+            verify_phase_independence(&plan);
+            validate_all_spans_self_contained(&plan);
+        }
+    }
+
+    #[test]
+    fn test_matmul_gather_div_large() {
+        let g = build_matmul_gather_div(16, 32, 16);
+        assert!(g.validate().is_empty(), "graph validation: {:?}", g.validate());
+        for lanes in [4, 8] {
+            let plan = plan_spans(&g, lanes);
+            verify_span_plan(&g, &plan);
+            verify_output_coverage(&g, &plan);
+            verify_input_availability(&plan, &g);
+            verify_phase_independence(&plan);
+            validate_all_spans_self_contained(&plan);
+        }
+    }
+
+    #[test]
+    fn test_large_multi_phase_div() {
+        // Large enough reduce output (128x128 = 16384) that it gets split across 8 lanes.
+        // The Div group needs ALL of the reduce output (AllRows via Affine) AND
+        // a Broadcast to a literal. This forces a phase boundary.
+        let g = build_large_multi_phase(128, 16, 128);
+        assert!(g.validate().is_empty(), "graph validation: {:?}", g.validate());
+        let plan = plan_spans(&g, 8);
+        plan.print_summary();
+        verify_span_plan(&g, &plan);
+        verify_output_coverage(&g, &plan);
+        verify_input_availability(&plan, &g);
+        verify_phase_independence(&plan);
+        validate_all_spans_self_contained(&plan);
+        // Should have at least 2 phases (Mul+Red in phase 0, Div in phase 1).
+        assert!(
+            plan.phases.len() >= 2,
+            "Expected >= 2 phases, got {}",
+            plan.phases.len()
+        );
+    }
+
+    /// Span-level evaluation: build a span plan, evaluate each span, and verify results
+    /// match the full graph evaluation.
+    #[test]
+    fn test_span_eval_correctness() {
+        // Simple matmul + div that should produce known results.
+        let g = build_large_multi_phase(4, 4, 4);
+        assert!(g.validate().is_empty());
+        let plan = plan_spans(&g, 4);
+
+        // Evaluate full graph.
+        let full_atoms = g.num_atoms() as usize;
+        let mut full_buf = vec![0.0f32; full_atoms];
+        for group in g.groups() {
+            if let ScalarOp::Literal(s) = &group.op {
+                let val = s.to_f64() as f32;
+                for i in 0..group.count {
+                    full_buf[(group.base_id.0 + i) as usize] = val;
+                }
+            }
+        }
+        // Evaluate non-literal groups in order.
+        for group in g.groups() {
+            if matches!(&group.op, ScalarOp::Literal(_)) { continue; }
+            for i in 0..group.count {
+                let aidx = (group.base_id.0 + i) as usize;
+                let val = match &group.op {
+                    ScalarOp::Literal(_) => continue,
+                    ScalarOp::Binary { op, .. } => {
+                        let a = full_buf[group.inputs[0].resolve(i, 0).0 as usize];
+                        let b = full_buf[group.inputs[1].resolve(i, 0).0 as usize];
+                        match op {
+                            ScalarBinOp::Add => a + b,
+                            ScalarBinOp::Mul => a * b,
+                            ScalarBinOp::Div => a / b,
+                            _ => panic!("unexpected op"),
+                        }
+                    }
+                    ScalarOp::ReduceSum { reduce_count, reduce_stride, .. } => {
+                        let base = group.inputs[0].resolve(i, 0);
+                        let mut acc = 0.0f32;
+                        for k in 0..*reduce_count {
+                            let src = (base.0 as i64 + k as i64 * reduce_stride) as usize;
+                            acc += full_buf[src];
+                        }
+                        acc
+                    }
+                    _ => panic!("unexpected op in test graph"),
+                };
+                full_buf[aidx] = val;
+            }
+        }
+
+        // Evaluate via span plan.
+        let mut shared = vec![0.0f32; full_atoms];
+        // Fill literals.
+        for group in g.groups() {
+            if let ScalarOp::Literal(s) = &group.op {
+                let val = s.to_f64() as f32;
+                for i in 0..group.count {
+                    shared[(group.base_id.0 + i) as usize] = val;
+                }
+            }
+        }
+        // Execute spans.
+        for phase in &plan.phases {
+            for span in &phase.spans {
+                if span.graph.num_groups() == 0 { continue; }
+                let sn = span.graph.num_atoms() as usize;
+                let mut sbuf = vec![0.0f32; sn];
+                // Fill span literals.
+                for sg in span.graph.groups() {
+                    if let ScalarOp::Literal(s) = &sg.op {
+                        let val = s.to_f64() as f32;
+                        for i in 0..sg.count {
+                            sbuf[(sg.base_id.0 + i) as usize] = val;
+                        }
+                    }
+                }
+                // Copy inputs.
+                for mapping in &span.inputs {
+                    let src = mapping.main_base.0 as usize;
+                    let dst = mapping.span_base.0 as usize;
+                    let count = mapping.count as usize;
+                    sbuf[dst..dst + count].copy_from_slice(&shared[src..src + count]);
+                }
+                // Evaluate.
+                for sg in span.graph.groups() {
+                    if matches!(&sg.op, ScalarOp::Literal(_)) { continue; }
+                    for i in 0..sg.count {
+                        let aidx = (sg.base_id.0 + i) as usize;
+                        let val = match &sg.op {
+                            ScalarOp::Literal(_) => continue,
+                            ScalarOp::Binary { op, .. } => {
+                                let a_idx = sg.inputs[0].resolve(i, 0).0 as usize;
+                                let b_idx = sg.inputs[1].resolve(i, 0).0 as usize;
+                                assert!(a_idx < sn, "Binary input A index {} >= span size {}", a_idx, sn);
+                                assert!(b_idx < sn, "Binary input B index {} >= span size {}", b_idx, sn);
+                                let a = sbuf[a_idx];
+                                let b = sbuf[b_idx];
+                                match op {
+                                    ScalarBinOp::Add => a + b,
+                                    ScalarBinOp::Mul => a * b,
+                                    ScalarBinOp::Div => {
+                                        assert!(b != 0.0, "div by zero at span atom {}", aidx);
+                                        a / b
+                                    }
+                                    _ => panic!("unexpected op"),
+                                }
+                            }
+                            ScalarOp::ReduceSum { reduce_count, reduce_stride, .. } => {
+                                let base = sg.inputs[0].resolve(i, 0);
+                                let mut acc = 0.0f32;
+                                for k in 0..*reduce_count {
+                                    let src = (base.0 as i64 + k as i64 * reduce_stride) as usize;
+                                    assert!(src < sn, "ReduceSum access {} >= span size {}", src, sn);
+                                    acc += sbuf[src];
+                                }
+                                acc
+                            }
+                            _ => panic!("unexpected op"),
+                        };
+                        sbuf[aidx] = val;
+                    }
+                }
+                // Copy outputs.
+                for mapping in &span.outputs {
+                    let src = mapping.span_base.0 as usize;
+                    let dst = mapping.main_base.0 as usize;
+                    let count = mapping.count as usize;
+                    shared[dst..dst + count].copy_from_slice(&sbuf[src..src + count]);
+                }
+            }
+        }
+
+        // Compare outputs.
+        for &out_atom in &g.outputs {
+            let full_val = full_buf[out_atom.0 as usize];
+            let span_val = shared[out_atom.0 as usize];
+            assert!(
+                (full_val - span_val).abs() < 1e-4,
+                "Output atom {} mismatch: full={} span={}",
+                out_atom.0, full_val, span_val
+            );
+        }
+    }
+
+    /// Softmax-like pattern: Exp → ReduceSum (row sums) → Div (broadcast row sum)
+    /// This mimics GPT-2 attention softmax.
+    fn build_softmax_pattern(num_rows: u64, row_len: u64) -> NanoGraph {
+        let mut g = NanoGraph::new();
+        let total = num_rows * row_len;
+
+        // Input data (simulates attention scores).
+        let data = g.push_group(
+            total,
+            ScalarOp::Literal(NumericScalar::F32(0.5)),
+            vec![],
+            vec![],
+            vec![],
+        );
+
+        // Exp(data)
+        let exp = g.push_group(
+            total,
+            ScalarOp::Unary {
+                op: ScalarUnaryOp::Exp,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![],
+            vec![],
+            vec![InputRef::Affine {
+                base: data,
+                stride: 1,
+            }],
+        );
+
+        // ReduceSum: one sum per row.
+        // Atom i reads exp[i*row_len], exp[i*row_len + 1], ..., exp[i*row_len + row_len-1]
+        // = Affine { base: exp, stride: row_len } with reduce_count=row_len, reduce_stride=1
+        // Wait, that's not right. Let me think again.
+        //
+        // Actually: ReduceSum atom i should compute sum(exp[i*row_len .. (i+1)*row_len]).
+        // Input: Affine { base: exp, stride: 1 } maps atom i to exp + i.
+        // But the reduce needs to sum row_len elements starting at exp[i*row_len].
+        // So: input = Affine { base: exp, stride: row_len }, reduce_count = row_len, reduce_stride = 1.
+        // But wait, that means atom i reads exp[i*row_len + k] for k in 0..row_len.
+        // The InputRef resolves i to exp + i*row_len. Then reduce extends by k*1.
+        // That's exp[i*row_len], exp[i*row_len + 1], ..., exp[i*row_len + row_len - 1].
+        // But this requires a *Affine stride=row_len* not stride=1.
+        //
+        // Actually in the real lowering, reduce just reads contiguously from the input.
+        // reduce_stride=1 means each step adds 1 to the address.
+        // InputRef Affine stride=1 means input atom i maps to base+i.
+        // So ReduceSum atom i reads: (base + i) + k for k in 0..reduce_count.
+        // = base + i, base + i + 1, ..., base + i + reduce_count - 1.
+        //
+        // For per-row sums with row_len items per row:
+        // ReduceSum count = num_rows atoms. Atom i (row i) needs:
+        // exp[i*row_len], exp[i*row_len+1], ..., exp[i*row_len + row_len - 1].
+        // So InputRef: Affine { base: exp + 0, stride: row_len }
+        //    (atom i → exp + i*row_len)
+        // reduce_count = row_len, reduce_stride = 1.
+        let row_sums = g.push_group(
+            num_rows,
+            ScalarOp::ReduceSum {
+                reduce_count: row_len,
+                reduce_stride: 1,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![],
+            vec![],
+            vec![InputRef::Affine {
+                base: exp,
+                stride: row_len as i32,
+            }],
+        );
+
+        // Div: exp[i] / row_sums[i / row_len]
+        // Input 0: Affine { base: exp, stride: 1 }
+        // Input 1: StridedBroadcast { base: row_sums, stride: 1, repeat: row_len }
+        //   (each row sum is broadcast to row_len positions)
+        let softmax = g.push_group(
+            total,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Div,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![],
+            vec![],
+            vec![
+                InputRef::Affine {
+                    base: exp,
+                    stride: 1,
+                },
+                InputRef::StridedBroadcast {
+                    base: row_sums,
+                    stride: 1,
+                    repeat: row_len,
+                },
+            ],
+        );
+
+        for i in 0..total {
+            g.outputs.push(softmax.offset(i));
+        }
+        g
+    }
+
+    #[test]
+    fn test_softmax_pattern_small() {
+        let g = build_softmax_pattern(4, 8);
+        assert!(g.validate().is_empty(), "graph validation: {:?}", g.validate());
+        for lanes in [1, 2, 4] {
+            let plan = plan_spans(&g, lanes);
+            verify_span_plan(&g, &plan);
+            verify_output_coverage(&g, &plan);
+            verify_input_availability(&plan, &g);
+            verify_phase_independence(&plan);
+            validate_all_spans_self_contained(&plan);
+        }
+    }
+
+    #[test]
+    fn test_softmax_pattern_large() {
+        // Total Exp atoms: 12 * 128 * 128 = 196608 > DUPLICATION_THRESHOLD (65536).
+        // This forces multi-phase execution: Exp (phase 0), ReduceSum+Div (phase 1+).
+        let g = build_softmax_pattern(12 * 128, 128);
+        assert!(g.validate().is_empty(), "graph validation: {:?}", g.validate());
+        let plan = plan_spans(&g, 8);
+        plan.print_summary();
+        verify_span_plan(&g, &plan);
+        verify_output_coverage(&g, &plan);
+        verify_input_availability(&plan, &g);
+        verify_phase_independence(&plan);
+        validate_all_spans_self_contained(&plan);
+    }
+
+    /// Layer-norm-like pattern followed by a matmul — multi-phase chain.
+    fn build_layernorm_matmul(batch: u64, hidden: u64, out_dim: u64) -> NanoGraph {
+        let mut g = NanoGraph::new();
+        let total = batch * hidden;
+
+        // Input data.
+        let data = g.push_group(
+            total,
+            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
+
+        // Mean: reduce over hidden dim per batch element.
+        let mean = g.push_group(
+            batch,
+            ScalarOp::ReduceSum {
+                reduce_count: hidden,
+                reduce_stride: 1,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![],
+            vec![],
+            vec![InputRef::Affine {
+                base: data,
+                stride: hidden as i32,
+            }],
+        );
+
+        // Divisor for mean: 1/hidden.
+        let divisor_lit = g.push_atom(
+            ScalarOp::Literal(NumericScalar::F32(1.0 / hidden as f32)),
+            vec![],
+            vec![],
+            vec![],
+        );
+
+        // Scaled mean: mean * (1/hidden).
+        let scaled_mean = g.push_group(
+            batch,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Mul,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![],
+            vec![],
+            vec![
+                InputRef::Affine {
+                    base: mean,
+                    stride: 1,
+                },
+                InputRef::Broadcast(divisor_lit),
+            ],
+        );
+
+        // Subtract mean: data[i] - scaled_mean[i / hidden].
+        let centered = g.push_group(
+            total,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Sub,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![],
+            vec![],
+            vec![
+                InputRef::Affine {
+                    base: data,
+                    stride: 1,
+                },
+                InputRef::StridedBroadcast {
+                    base: scaled_mean,
+                    stride: 1,
+                    repeat: hidden,
+                },
+            ],
+        );
+
+        // Weight tensor for matmul: [hidden, out_dim].
+        let weight = g.push_group(
+            hidden * out_dim,
+            ScalarOp::Literal(NumericScalar::F32(0.01)),
+            vec![],
+            vec![],
+            vec![],
+        );
+
+        // Matmul: centered[batch, hidden] @ weight[hidden, out_dim].
+        // Per row: Mul group = hidden * out_dim atoms.
+        let mut mul_bases = Vec::new();
+        for row in 0..batch {
+            let row_base = AtomId(centered.0 + row * hidden);
+            let mul = g.push_group(
+                hidden * out_dim,
+                ScalarOp::Binary {
+                    op: ScalarBinOp::Mul,
+                    compute_dtype: DType::F32,
+                    output_dtype: DType::F32,
+                },
+                vec![],
+                vec![],
+                vec![
+                    InputRef::StridedBroadcast {
+                        base: row_base,
+                        stride: 1,
+                        repeat: out_dim,
+                    },
+                    InputRef::Affine {
+                        base: weight,
+                        stride: 1,
+                    },
+                ],
+            );
+            mul_bases.push(mul);
+        }
+
+        let mut red_bases = Vec::new();
+        for row in 0..batch {
+            let red = g.push_group(
+                out_dim,
+                ScalarOp::ReduceSum {
+                    reduce_count: hidden,
+                    reduce_stride: out_dim as i64,
+                    compute_dtype: DType::F32,
+                    output_dtype: DType::F32,
+                },
+                vec![],
+                vec![],
+                vec![InputRef::Affine {
+                    base: mul_bases[row as usize],
+                    stride: 1,
+                }],
+            );
+            red_bases.push(red);
+        }
+
+        // Bias add with broadcast.
+        let bias = g.push_group(
+            out_dim,
+            ScalarOp::Literal(NumericScalar::F32(0.1)),
+            vec![],
+            vec![],
+            vec![],
+        );
+        let result = g.push_group(
+            batch * out_dim,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Add,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![],
+            vec![],
+            vec![
+                InputRef::Affine {
+                    base: red_bases[0],
+                    stride: 1,
+                },
+                InputRef::Modular {
+                    base: bias,
+                    stride: 1,
+                    modulus: out_dim,
+                },
+            ],
+        );
+
+        for i in 0..batch * out_dim {
+            g.outputs.push(result.offset(i));
+        }
+        g
+    }
+
+    #[test]
+    fn test_layernorm_matmul() {
+        let g = build_layernorm_matmul(16, 64, 32);
+        assert!(g.validate().is_empty(), "graph validation: {:?}", g.validate());
+        for lanes in [1, 4, 8] {
+            let plan = plan_spans(&g, lanes);
+            verify_span_plan(&g, &plan);
+            verify_output_coverage(&g, &plan);
+            verify_input_availability(&plan, &g);
+            verify_phase_independence(&plan);
+            validate_all_spans_self_contained(&plan);
+        }
+    }
+
+    #[test]
+    fn test_layernorm_matmul_large() {
+        // batch=256, hidden=256 = 65536 data atoms. Each Mul group = 256*128=32768.
+        // With 256 rows of Mul groups, total Mul atoms > DUPLICATION_THRESHOLD.
+        // This forces multi-phase execution.
+        let g = build_layernorm_matmul(256, 256, 128);
+        assert!(g.validate().is_empty(), "graph validation: {:?}", g.validate());
+        let plan = plan_spans(&g, 8);
+        plan.print_summary();
         verify_span_plan(&g, &plan);
         verify_output_coverage(&g, &plan);
         verify_input_availability(&plan, &g);
