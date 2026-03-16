@@ -807,9 +807,55 @@ fn build_span(
         let local_op = remap_op_range(&group.op, &main_to_local);
 
         let local_base = span_graph.push_group(
-            atom_count, local_op,
-            group.sym_dims.clone(), group.reduce_dims.clone(), local_inputs,
+            atom_count, local_op.clone(),
+            group.sym_dims.clone(), group.reduce_dims.clone(), local_inputs.clone(),
         );
+
+        // Verify all InputRef targets (including reduce-extended atoms) exist.
+        #[cfg(debug_assertions)]
+        {
+            let (dbg_reduce_count, dbg_reduce_stride) = match &local_op {
+                ScalarOp::ReduceSum { reduce_count, reduce_stride, .. }
+                | ScalarOp::ReduceMax { reduce_count, reduce_stride, .. }
+                    if *reduce_count > 1 && *reduce_stride != 0 =>
+                    (*reduce_count, *reduce_stride),
+                _ => (1, 0i64),
+            };
+
+            for (inp_idx, input) in local_inputs.iter().enumerate() {
+                let check_offsets = if atom_count <= 3 {
+                    (0..atom_count).collect::<Vec<_>>()
+                } else {
+                    vec![0, atom_count / 2, atom_count - 1]
+                };
+                for &off in &check_offsets {
+                    let base = input.resolve(off, 0);
+                    debug_assert!(
+                        span_graph.contains_atom(base),
+                        "build_span: group {} (base={}, op={:?}, offset={}, count={}) \
+                         input {} offset {}: resolves to {} which doesn't exist in span",
+                        gi, group.base_id, group.op, atom_offset, atom_count,
+                        inp_idx, off, base,
+                    );
+                    for k in 1..dbg_reduce_count {
+                        let ext = AtomId((base.0 as i64 + k as i64 * dbg_reduce_stride) as u64);
+                        debug_assert!(
+                            span_graph.contains_atom(ext),
+                            "build_span: group {} (base={}, op={:?}) input {} offset {} \
+                             reduce k={}: atom {} doesn't exist in span",
+                            gi, group.base_id, group.op, inp_idx, off, k, ext,
+                        );
+                    }
+                }
+            }
+            if let ScalarOp::IndirectLoad { table_base, .. } = &local_op {
+                debug_assert!(
+                    span_graph.contains_atom(*table_base),
+                    "build_span: group {} (IndirectLoad) table_base {} not in span",
+                    gi, table_base,
+                );
+            }
+        }
 
         let main_base = AtomId(group.base_id.0 + atom_offset);
         main_to_local.insert_range(main_base, local_base, atom_count);
@@ -889,9 +935,14 @@ fn collect_external_ranges(
         false
     };
 
+    // Only skip groups that are already present in the span (inlined literals).
+    // Do NOT skip small literal groups that weren't inlined — they need to be
+    // declared as external inputs. The old code assumed collect_literal_deps
+    // found all literal dependencies, but it can miss groups referenced through
+    // indirect paths (e.g., ReduceSum stride extensions, or groups whose
+    // InputRefs don't obviously reach the literal).
     let should_skip = |gi: usize| -> bool {
         inlined_literals.contains(&gi)
-            || (is_literal[gi] && all_groups[gi].count < LITERAL_INLINE_THRESHOLD)
     };
 
     let (is_reduce, reduce_count, reduce_stride) = match &group.op {
@@ -1775,6 +1826,157 @@ mod tests {
         }
     }
 
+    /// Build a graph with IndirectLoad (Gather-like) pattern.
+    ///
+    /// Creates:
+    /// - indices: Literal group (count=num_indices) — the indices
+    /// - stride_lit: Literal atom (count=1) — the stride constant D_total
+    /// - mul: Binary::Mul group (count=out_count) — indices[i/D] * D_total
+    /// - col_offsets: Literal group (count=out_count) — column offsets 0,1,2,...,D-1 repeated
+    /// - add: Binary::Add group (count=out_count) — mul + col_offset
+    /// - data_table: Literal group (count=table_size) — the lookup table
+    /// - indirect: IndirectLoad group (count=out_count) — load from data_table
+    fn build_indirect_load_pattern(num_indices: u64, d_total: u64, table_size: u64) -> NanoGraph {
+        let mut g = NanoGraph::new();
+
+        // Indices (runtime values, here just constant for test)
+        let indices = g.push_group(
+            num_indices,
+            ScalarOp::Literal(NumericScalar::I64(0)),
+            vec![], vec![], vec![],
+        );
+
+        // Stride literal (single atom)
+        let stride_lit = g.push_atom(
+            ScalarOp::Literal(NumericScalar::I64(d_total as i64)),
+            vec![], vec![], vec![],
+        );
+
+        let out_count = num_indices * d_total;
+
+        // Mul group: indices[i / D_total] * D_total
+        let mut mul_ids = Vec::with_capacity(out_count as usize);
+        for flat in 0..out_count {
+            let row = flat / d_total;
+            mul_ids.push(indices.offset(row));
+        }
+        let mul_base = g.push_group(
+            out_count,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Mul,
+                compute_dtype: DType::I64,
+                output_dtype: DType::I64,
+            },
+            vec![], vec![],
+            vec![
+                InputRef::Explicit(mul_ids),
+                InputRef::Broadcast(stride_lit),
+            ],
+        );
+
+        // Column offset literals
+        let col_offsets = g.push_group(
+            out_count,
+            ScalarOp::Literal(NumericScalar::I64(0)),
+            vec![], vec![], vec![],
+        );
+
+        // Add group: mul + col_offset
+        let add_base = g.push_group(
+            out_count,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Add,
+                compute_dtype: DType::I64,
+                output_dtype: DType::I64,
+            },
+            vec![], vec![],
+            vec![
+                InputRef::Affine { base: mul_base, stride: 1 },
+                InputRef::Affine { base: col_offsets, stride: 1 },
+            ],
+        );
+
+        // Data table (the embedding weights)
+        let data_table = g.push_group(
+            table_size,
+            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            vec![], vec![], vec![],
+        );
+
+        // IndirectLoad group
+        let indirect = g.push_group(
+            out_count,
+            ScalarOp::IndirectLoad {
+                table_base: data_table,
+                output_dtype: DType::F32,
+            },
+            vec![], vec![],
+            vec![InputRef::Affine { base: add_base, stride: 1 }],
+        );
+
+        for i in 0..out_count {
+            g.outputs.push(indirect.offset(i));
+        }
+        g
+    }
+
+    /// Validate that every non-literal group in every span has all its
+    /// InputRef targets (including reduce-extended atoms) and IndirectLoad
+    /// table_base atoms present in the span graph.
+    fn validate_all_spans_self_contained(plan: &SpanPlan) {
+        for (phase_idx, phase) in plan.phases.iter().enumerate() {
+            for (lane_idx, span) in phase.spans.iter().enumerate() {
+                let groups = span.graph.groups();
+                for (gi, group) in groups.iter().enumerate() {
+                    if matches!(group.op, ScalarOp::Literal(_)) && group.inputs.is_empty() {
+                        continue;
+                    }
+
+                    // Get reduce parameters if applicable.
+                    let (reduce_count, reduce_stride) = match &group.op {
+                        ScalarOp::ReduceSum { reduce_count, reduce_stride, .. }
+                        | ScalarOp::ReduceMax { reduce_count, reduce_stride, .. }
+                            if *reduce_count > 1 && *reduce_stride != 0 =>
+                            (*reduce_count, *reduce_stride),
+                        _ => (1, 0),
+                    };
+
+                    for (inp_idx, input) in group.inputs.iter().enumerate() {
+                        for i in 0..group.count {
+                            let base = input.resolve(i, 0);
+                            assert!(
+                                span.graph.contains_atom(base),
+                                "Phase {} lane {} group {} (base={}, op={:?}) input {} offset {}: \
+                                 references atom {} which doesn't exist in span graph",
+                                phase_idx, lane_idx,
+                                gi, group.base_id, group.op, inp_idx, i, base,
+                            );
+                            // Also check reduce-extended atoms.
+                            for k in 1..reduce_count {
+                                let ext_atom = AtomId((base.0 as i64 + k as i64 * reduce_stride) as u64);
+                                assert!(
+                                    span.graph.contains_atom(ext_atom),
+                                    "Phase {} lane {} group {} (base={}, op={:?}) input {} offset {} \
+                                     reduce step k={}: references atom {} which doesn't exist in span graph",
+                                    phase_idx, lane_idx,
+                                    gi, group.base_id, group.op, inp_idx, i, k, ext_atom,
+                                );
+                            }
+                        }
+                    }
+                    if let ScalarOp::IndirectLoad { table_base, .. } = &group.op {
+                        assert!(
+                            span.graph.contains_atom(*table_base),
+                            "Phase {} lane {} group {} (base={}, IndirectLoad): \
+                             table_base {} doesn't exist in span graph",
+                            phase_idx, lane_idx, gi, group.base_id, table_base,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     // ─── Test cases ──────────────────────────────────────────────────────
 
     #[test]
@@ -1884,7 +2086,256 @@ mod tests {
             verify_output_coverage(&graph, &plan);
             verify_input_availability(&plan, &graph);
             verify_phase_independence(&plan);
+            validate_all_spans_self_contained(&plan);
             println!("  {}: {} phases, {} lanes", name, plan.phases.len(), plan.num_lanes);
+        }
+    }
+
+    #[test]
+    fn test_indirect_load_single_lane() {
+        // Simple: 4 indices, D_total=8, table_size=256
+        let g = build_indirect_load_pattern(4, 8, 256);
+        assert!(g.validate().is_empty(), "graph validation failed");
+        let plan = plan_execution_spans(&g, 1);
+        verify_span_plan(&g, &plan);
+        verify_output_coverage(&g, &plan);
+        validate_all_spans_self_contained(&plan);
+    }
+
+    #[test]
+    fn test_indirect_load_multi_lane() {
+        // 8 indices, D_total=4, table_size=128, across 4 lanes
+        let g = build_indirect_load_pattern(8, 4, 128);
+        assert!(g.validate().is_empty(), "graph validation failed");
+        let plan = plan_execution_spans(&g, 4);
+        verify_span_plan(&g, &plan);
+        verify_output_coverage(&g, &plan);
+        verify_input_availability(&plan, &g);
+        verify_phase_independence(&plan);
+        validate_all_spans_self_contained(&plan);
+    }
+
+    #[test]
+    fn test_indirect_load_large_table() {
+        // Large table (> LITERAL_INLINE_THRESHOLD), should become external input
+        let g = build_indirect_load_pattern(4, 8, 2048);
+        assert!(g.validate().is_empty(), "graph validation failed");
+        let plan = plan_execution_spans(&g, 4);
+        verify_span_plan(&g, &plan);
+        verify_output_coverage(&g, &plan);
+        verify_input_availability(&plan, &g);
+        verify_phase_independence(&plan);
+        validate_all_spans_self_contained(&plan);
+    }
+
+    #[test]
+    fn test_indirect_load_gpt2_like() {
+        // GPT-2-like pattern: large out_count, table, and multi-lane
+        // vocab_size * d_model = 50257 * 768 for real GPT-2
+        // Using smaller values that still exercise the same code paths:
+        // - col_offsets count > LITERAL_INLINE_THRESHOLD (1024)
+        // - table_size > LITERAL_INLINE_THRESHOLD
+        let g = build_indirect_load_pattern(16, 128, 4096);
+        assert!(g.validate().is_empty(), "graph validation failed");
+        let plan = plan_execution_spans(&g, 8);
+        verify_span_plan(&g, &plan);
+        verify_output_coverage(&g, &plan);
+        verify_input_availability(&plan, &g);
+        verify_phase_independence(&plan);
+        validate_all_spans_self_contained(&plan);
+    }
+
+    /// Build a graph with a multi-phase dependency chain that includes
+    /// small literal constants used in later phases.
+    ///
+    /// Phase 0: mul groups (split across lanes) → ReduceSum (all-rows, forces phase break)
+    /// Phase 1: div_result = reduce_result / divisor_literal
+    ///
+    /// The divisor_literal is small (count=1) and is only needed in phase 1.
+    /// It must be either inlined into phase 1's spans or declared as external input.
+    fn build_multi_phase_with_literals(m: u64, k: u64, n: u64) -> NanoGraph {
+        let mut g = NanoGraph::new();
+
+        // Matmul: A[m,k] * B[k,n] → mul groups → reduce → result[m,n]
+        let a_base = g.push_group(m * k, ScalarOp::Literal(NumericScalar::F32(1.0)), vec![], vec![], vec![]);
+        let b_base = g.push_group(k * n, ScalarOp::Literal(NumericScalar::F32(1.0)), vec![], vec![], vec![]);
+
+        let mut mul_bases = Vec::new();
+        for row in 0..m {
+            let a_row = AtomId(a_base.0 + row * k);
+            let mul = g.push_group(
+                k * n,
+                ScalarOp::Binary { op: ScalarBinOp::Mul, compute_dtype: DType::F32, output_dtype: DType::F32 },
+                vec![], vec![],
+                vec![
+                    InputRef::StridedBroadcast { base: a_row, stride: 1, repeat: n },
+                    InputRef::Affine { base: b_base, stride: 1 },
+                ],
+            );
+            mul_bases.push(mul);
+        }
+        let mut red_bases = Vec::new();
+        for row in 0..m {
+            let red = g.push_group(
+                n,
+                ScalarOp::ReduceSum { reduce_count: k, reduce_stride: n as i64, compute_dtype: DType::F32, output_dtype: DType::F32 },
+                vec![], vec![],
+                vec![InputRef::Affine { base: mul_bases[row as usize], stride: 1 }],
+            );
+            red_bases.push(red);
+        }
+
+        // Now: divisor literal (small, count=1) — needed in a LATER phase
+        let divisor = g.push_atom(
+            ScalarOp::Literal(NumericScalar::I64(42)),
+            vec![], vec![], vec![],
+        );
+
+        // Division by divisor — depends on reduce results (phase 1+)
+        let total_out = m * n;
+        let div_result = g.push_group(
+            total_out,
+            ScalarOp::Binary {
+                op: ScalarBinOp::Div,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![], vec![],
+            vec![
+                InputRef::Affine { base: red_bases[0], stride: 1 },
+                InputRef::Broadcast(divisor),
+            ],
+        );
+
+        for i in 0..total_out {
+            g.outputs.push(div_result.offset(i));
+        }
+        g
+    }
+
+    #[test]
+    fn test_multi_phase_literal_dependency() {
+        // After matmul reduces (phase boundary), the division by a small literal
+        // is in a different phase. The divisor literal (count=1) must be present
+        // in the later phase's span.
+        let g = build_multi_phase_with_literals(8, 4, 4);
+        assert!(g.validate().is_empty(), "graph validation failed");
+        let plan = plan_execution_spans(&g, 4);
+        plan.print_summary();
+        assert!(plan.phases.len() >= 2, "Expected multi-phase, got {}", plan.phases.len());
+        verify_span_plan(&g, &plan);
+        verify_output_coverage(&g, &plan);
+        verify_input_availability(&plan, &g);
+        verify_phase_independence(&plan);
+        validate_all_spans_self_contained(&plan);
+    }
+
+    /// Build a graph where a ReduceSum's strided access extends beyond the
+    /// InputRef's basic range into adjacent literal groups.
+    ///
+    /// Layout in the NanoGraph:
+    ///   group 0: data_part0 (count=n, Literal F32)  <-- InputRef base
+    ///   group 1: literal_adjacent (count=n, Literal I64(stride_val))
+    ///   group 2: data_part1 (count=n, Literal F32)
+    ///   ... more data parts to cover the full reduce range ...
+    ///
+    /// ReduceSum(count=n, reduce_count=K, reduce_stride=n):
+    ///   For atom i, reads: base+i, base+i+n, base+i+2n, base+i+3n, ...
+    ///   The access at base+i+n lands in literal_adjacent.
+    ///
+    /// collect_literal_deps uses resolve_all_referenced_groups which computes
+    /// the InputRef range as [base, base+n-1], missing literal_adjacent.
+    /// collect_external_ranges uses resolve_input_to_group_ranges with reduce
+    /// params, computing range [base, base+n*K-1], finding literal_adjacent.
+    /// But should_skip incorrectly skips it because it's a small literal.
+    fn build_reduce_extends_into_literal(n: u64) -> NanoGraph {
+        let mut g = NanoGraph::new();
+
+        // Data part 0: the InputRef base points here.
+        let data0 = g.push_group(
+            n,
+            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            vec![], vec![], vec![],
+        );
+
+        // Adjacent literal: the reduce stride sweeps through here.
+        // This is the group that gets missed.
+        let lit_adj = g.push_group(
+            n,
+            ScalarOp::Literal(NumericScalar::I64(42)),
+            vec![], vec![], vec![],
+        );
+
+        // Data part 1: continue the data range.
+        let data1 = g.push_group(
+            n,
+            ScalarOp::Literal(NumericScalar::F32(2.0)),
+            vec![], vec![], vec![],
+        );
+
+        // Data part 2
+        let _data2 = g.push_group(
+            n,
+            ScalarOp::Literal(NumericScalar::F32(3.0)),
+            vec![], vec![], vec![],
+        );
+
+        // ReduceSum: n outputs, reduce_count=4, reduce_stride=n.
+        // For atom i: reads data0+i, lit_adj+i, data1+i, data2+i
+        // The InputRef is Affine { base: data0, stride: 1 }
+        // resolve_all_referenced_groups: range [data0, data0+n-1] → only data0
+        // resolve_input_to_group_ranges with reduce: range [data0, data0+4n-1]
+        //   → data0, lit_adj, data1, data2
+        let reduce_out = g.push_group(
+            n,
+            ScalarOp::ReduceSum {
+                reduce_count: 4,
+                reduce_stride: n as i64,
+                compute_dtype: DType::F32,
+                output_dtype: DType::F32,
+            },
+            vec![], vec![],
+            vec![InputRef::Affine { base: data0, stride: 1 }],
+        );
+
+        for i in 0..n {
+            g.outputs.push(reduce_out.offset(i));
+        }
+        g
+    }
+
+    #[test]
+    fn test_reduce_stride_into_adjacent_literal() {
+        // The ReduceSum strides through data0, lit_adj, data1, data2.
+        // Without the fix, lit_adj would be missed:
+        // - collect_literal_deps sees only data0 (basic InputRef range)
+        // - collect_external_ranges finds lit_adj but should_skip skips it
+        //   because it's a small literal that wasn't inlined
+        // With the fix, should_skip only skips actually-inlined groups.
+        let g = build_reduce_extends_into_literal(8);
+        assert!(g.validate().is_empty(), "graph validation failed");
+        let plan = plan_execution_spans(&g, 2);
+        verify_span_plan(&g, &plan);
+        verify_output_coverage(&g, &plan);
+        validate_all_spans_self_contained(&plan);
+    }
+
+    #[test]
+    fn test_all_configs_self_contained() {
+        // Run self-contained validation on all existing test configs
+        let configs: Vec<(&str, NanoGraph, usize)> = vec![
+            ("matmul_4x8x4_4lanes", build_matmul(4, 8, 4), 4),
+            ("matmul_8x4x4_8lanes", build_matmul(8, 4, 4), 8),
+            ("chain_mono_4lanes", build_matmul_chain(4, 4, 4, 4, 4), 4),
+            ("elementwise_4lanes", build_elementwise(1024), 4),
+            ("allrows_chain_4lanes", build_allrows_chain(256), 4),
+            ("cross_lane", build_cross_lane_pattern(3072, 49152), 8),
+        ];
+
+        for (name, graph, lanes) in configs {
+            assert!(graph.validate().is_empty(), "{}: graph validation failed", name);
+            let plan = plan_execution_spans(&graph, lanes);
+            validate_all_spans_self_contained(&plan);
         }
     }
 }

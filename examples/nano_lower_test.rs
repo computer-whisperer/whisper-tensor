@@ -397,6 +397,56 @@ fn main() {
                 }
                 eprintln!("    Buffer filled: {:.1}s", t0.elapsed().as_secs_f64());
 
+                // Pre-eval: check all span graphs have resolvable InputRefs
+                let t_check = Instant::now();
+                let mut input_errors = 0usize;
+                for (phase_idx, phase) in plan.phases.iter().enumerate() {
+                    for (lane_idx, span) in phase.spans.iter().enumerate() {
+                        let sg = span.graph.groups();
+                        let span_max = span.graph.num_atoms();
+                        // Build set of atom ranges in this span
+                        for group in sg {
+                            for input in &group.inputs {
+                                // Check first and last atom resolve within span
+                                for test_i in [0u64, group.count.saturating_sub(1)] {
+                                    let resolved = input.resolve(test_i, 0);
+                                    if resolved.0 >= span_max {
+                                        input_errors += 1;
+                                        if input_errors <= 5 {
+                                            let op = format!("{:?}", group.op).chars().take_while(|c| *c != ' ' && *c != '{').collect::<String>();
+                                            println!("    SPAN INPUT ERROR: phase {}/lane {}: group base={:?} ({}) atom {} resolves to {:?} (max={})",
+                                                phase_idx, lane_idx, group.base_id, op, test_i, resolved, span_max);
+                                        }
+                                    }
+                                }
+                                // Also check reduce stride if applicable
+                                match &group.op {
+                                    ScalarOp::ReduceSum { reduce_count, reduce_stride, .. }
+                                    | ScalarOp::ReduceMax { reduce_count, reduce_stride, .. } => {
+                                        if *reduce_count > 0 && *reduce_stride != 0 {
+                                            let base = input.resolve(0, 0);
+                                            let last = (base.0 as i64 + (*reduce_count as i64 - 1) * reduce_stride) as u64;
+                                            if last >= span_max {
+                                                input_errors += 1;
+                                                if input_errors <= 5 {
+                                                    let op = format!("{:?}", group.op).chars().take_while(|c| *c != ' ' && *c != '{').collect::<String>();
+                                                    println!("    SPAN REDUCE ERROR: phase {}/lane {}: group base={:?} ({}) reduce reaches atom {} (max={})",
+                                                        phase_idx, lane_idx, group.base_id, op, last, span_max);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+                println!("    Span input check: {} errors ({:.1}ms)", input_errors, t_check.elapsed().as_secs_f64() * 1e3);
+                if input_errors > 0 {
+                    println!("    SKIPPING eval due to span input errors");
+                } else {
+
                 // Execute each phase's spans using NanoEval
                 let t0 = Instant::now();
                 for (phase_idx, phase) in plan.phases.iter().enumerate() {
@@ -469,6 +519,7 @@ fn main() {
                 } else {
                     println!("    SPAN EVAL: MISMATCH");
                 }
+                } // end else (no input errors)
             }
         }
     }
