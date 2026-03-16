@@ -124,9 +124,9 @@ fn main() {
 
     let which = std::env::var("SPAN_PLANNER").unwrap_or("all".to_string());
     if which == "c" {
-        use whisper_tensor::compiler::attempts::v13_claude::nano_plan_spans_c;
+        use whisper_tensor::compiler::attempts::v13_claude::plan::spans_c;
         let t0 = Instant::now();
-        let plan = nano_plan_spans_c::plan_execution_spans(&result.graph, num_lanes);
+        let plan = spans_c::plan_execution_spans(&result.graph, num_lanes);
         let elapsed = t0.elapsed();
         let ss: Vec<Vec<SS>> = plan
             .phases
@@ -289,9 +289,9 @@ fn main() {
         }
     }
     if which == "v4c" {
-        use whisper_tensor::compiler::attempts::v13_claude::nano_plan_v4c;
+        use whisper_tensor::compiler::attempts::v13_claude::plan::v4c;
         let t0 = Instant::now();
-        let plan = nano_plan_v4c::plan_execution_spans(&result.graph, num_lanes);
+        let plan = v4c::plan_execution_spans(&result.graph, num_lanes);
         let elapsed = t0.elapsed();
         let ss: Vec<Vec<SS>> = plan
             .phases

@@ -1,10 +1,3 @@
-#![allow(
-    clippy::all,
-    dead_code,
-    unreachable_patterns,
-    unused_variables,
-    unused_imports
-)]
 //! Span-based partitioner v4c: Closure-first span construction.
 //!
 //! Previous attempts (v3a-v3d) all tried variants of "assign groups to lanes/phases,
@@ -39,6 +32,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
+use super::{AtomMapping, Phase, Span, SpanPlan};
 use crate::nano_graph::{AtomGroup, AtomId, InputRef, NanoGraph, ScalarOp};
 
 /// Literal groups with fewer atoms than this are duplicated into spans.
@@ -47,41 +41,6 @@ const LITERAL_INLINE_THRESHOLD: u64 = 1024;
 /// Compute groups with fewer atoms than this threshold may be duplicated
 /// across lanes to avoid introducing a phase boundary.
 const DUPLICATION_THRESHOLD: u64 = 65536;
-
-// ─── Public types ────────────────────────────────────────────────────────────
-
-/// A contiguous range of atoms mapped between main graph and span graph.
-#[derive(Debug, Clone)]
-pub struct AtomMapping {
-    pub main_base: AtomId,
-    pub span_base: AtomId,
-    pub count: u64,
-}
-
-/// A self-contained computation unit: one lane's work in one phase.
-pub struct Span {
-    /// Self-contained NanoGraph for this span's computation.
-    pub graph: NanoGraph,
-    /// Contiguous ranges of atoms this span reads from the shared buffer.
-    pub inputs: Vec<AtomMapping>,
-    /// Contiguous ranges of atoms this span writes back to the shared buffer.
-    pub outputs: Vec<AtomMapping>,
-    /// Main↔span mapping for inlined literal groups (needed to feed
-    /// numeric_overrides into NanoEval during execution).
-    pub literal_mappings: Vec<AtomMapping>,
-}
-
-/// One phase of execution (between two barriers).
-pub struct Phase {
-    /// One span per lane. Empty spans are possible for idle lanes.
-    pub spans: Vec<Span>,
-}
-
-/// The full span-based execution plan.
-pub struct SpanPlan {
-    pub num_lanes: usize,
-    pub phases: Vec<Phase>,
-}
 
 // ─── Public API ──────────────────────────────────────────────────────────────
 

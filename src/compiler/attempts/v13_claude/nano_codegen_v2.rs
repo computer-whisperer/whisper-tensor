@@ -24,7 +24,7 @@ use crate::nano_graph::{
     AtomGroup, AtomId, InputRef, NanoGraph, ScalarBinOp, ScalarOp, ScalarUnaryOp,
 };
 
-use super::nano_plan_v2c::{ExecutionPlan, LaneWork, Phase};
+use super::plan::v2c::{ExecutionPlan, LaneWork, Phase};
 
 // ---- Math function wrappers (extern "C" for Cranelift calls) ----
 // Reuse the same external functions as nano_codegen.rs. We re-declare them here
@@ -1180,7 +1180,7 @@ mod tests {
         use crate::numeric_tensor::NumericTensor;
         use crate::tensor_info::TensorInfo;
 
-        use super::super::nano_plan_v2c::plan_execution;
+        use super::super::plan::v2c::plan_execution;
 
         let mut rng = rand::rng();
         let (mut milli, _) = MilliOpGraph::new(std::iter::empty(), &mut rng);
@@ -1261,7 +1261,7 @@ mod tests {
         use crate::numeric_tensor::NumericTensor;
         use crate::tensor_info::TensorInfo;
 
-        use super::super::nano_plan_v2c::plan_execution;
+        use super::super::plan::v2c::plan_execution;
 
         let mut rng = rand::rng();
         let (mut milli, _) = MilliOpGraph::new(std::iter::empty(), &mut rng);
@@ -1331,7 +1331,7 @@ mod tests {
         use crate::numeric_tensor::NumericTensor;
         use crate::tensor_info::TensorInfo;
 
-        use super::super::nano_plan_v2c::plan_execution;
+        use super::super::plan::v2c::plan_execution;
 
         let mut rng = rand::rng();
         let (mut milli, _) = MilliOpGraph::new(std::iter::empty(), &mut rng);
@@ -1460,7 +1460,7 @@ mod tests {
         use crate::numeric_tensor::NumericTensor;
         use crate::tensor_info::TensorInfo;
 
-        use super::super::nano_plan_v2c::plan_execution;
+        use super::super::plan::v2c::plan_execution;
 
         let mut rng = rand::rng();
         let (mut milli, _) = MilliOpGraph::new(std::iter::empty(), &mut rng);
@@ -1520,7 +1520,7 @@ mod tests {
         use crate::numeric_tensor::NumericTensor;
         use crate::tensor_info::TensorInfo;
 
-        use super::super::nano_plan_v2c::plan_execution;
+        use super::super::plan::v2c::plan_execution;
 
         let mut rng = rand::rng();
         let (mut milli, _) = MilliOpGraph::new(std::iter::empty(), &mut rng);
@@ -1583,7 +1583,7 @@ mod tests {
         use crate::tensor_info::TensorInfo;
 
         use super::super::nano_codegen::CompiledPipeline;
-        use super::super::nano_plan_v2c::plan_execution;
+        use super::super::plan::v2c::plan_execution;
 
         let mut rng = rand::rng();
         let (mut milli, _) = MilliOpGraph::new(std::iter::empty(), &mut rng);
@@ -1683,7 +1683,7 @@ mod tests {
         use crate::tensor_info::TensorInfo;
 
         use super::super::nano_codegen::CompiledPipeline;
-        use super::super::nano_plan_v2c::plan_execution;
+        use super::super::plan::v2c::plan_execution;
 
         let mut rng = rand::rng();
         let (mut milli, _) = MilliOpGraph::new(std::iter::empty(), &mut rng);
@@ -1786,7 +1786,7 @@ mod tests {
         use crate::tensor_info::TensorInfo;
 
         use super::super::nano_codegen::CompiledPipeline;
-        use super::super::nano_plan_v2c::plan_execution;
+        use super::super::plan::v2c::plan_execution;
 
         let mut rng = rand::rng();
         let (mut milli, _) = MilliOpGraph::new(std::iter::empty(), &mut rng);
@@ -2147,7 +2147,7 @@ mod tests {
         use crate::numeric_tensor::NumericTensor;
         use crate::tensor_info::TensorInfo;
 
-        use super::super::nano_plan_v2c::plan_execution;
+        use super::super::plan::v2c::plan_execution;
 
         // --- Step 1: Build a 2-layer MLP ---
         // Layer 1: A(8x16) @ B(16x32) -> exp activation
@@ -2670,7 +2670,7 @@ mod tests {
         use crate::tensor_info::TensorInfo;
 
         use super::super::nano_codegen::CompiledPipeline;
-        use super::super::nano_plan_v2c::plan_execution;
+        use super::super::plan::v2c::plan_execution;
 
         let mut rng = rand::rng();
         let (mut milli, _) = MilliOpGraph::new(std::iter::empty(), &mut rng);

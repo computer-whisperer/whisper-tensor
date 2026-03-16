@@ -1,10 +1,3 @@
-#![allow(
-    clippy::all,
-    dead_code,
-    unreachable_patterns,
-    unused_variables,
-    unused_imports
-)]
 //! Lane+barrier execution planner v2c: Row-Slice Lane Planner with group splitting.
 //!
 //! Key innovations over previous attempts:
