@@ -461,7 +461,7 @@ impl GraphExplorerApp {
     ) -> Option<LoadedModelId> {
         if let Some(symbolic_graph) = graph.as_any().downcast_ref::<SymbolicGraph>() {
             let target_id = <SymbolicGraph as Graph>::global_id(symbolic_graph);
-            for (&model_id, model_graph) in &loaded_models.loaded_models {
+            for (&model_id, model_graph) in &loaded_models.server_graphs.symbolic_graphs {
                 if <SymbolicGraph as Graph>::global_id(model_graph) == target_id {
                     return Some(model_id);
                 }
@@ -1369,16 +1369,7 @@ impl GraphExplorerApp {
         server_request_manager: &mut ServerRequestManager,
     ) {
         // Get root graph based on selection
-        let root_graph: Option<&dyn GraphDyn> = match self.root_selection {
-            GraphRootSubjectSelection::Model(model_id) => loaded_models
-                .loaded_models
-                .get(&model_id)
-                .map(|g| g as &dyn GraphDyn),
-            GraphRootSubjectSelection::Interface(interface_id) => loaded_models
-                .current_interfaces
-                .get(&interface_id)
-                .map(|iface| iface.interface.get_super_graph() as &dyn GraphDyn),
-        };
+        let root_graph = loaded_models.root_graph(self.root_selection);
 
         let Some(root_graph) = root_graph else {
             return;

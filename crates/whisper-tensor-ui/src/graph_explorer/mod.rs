@@ -2,7 +2,7 @@ mod graph_layout;
 pub mod inspect_windows;
 mod tensor_swatch;
 
-use crate::app::{InterfaceId, LoadedModels, LoadedTokenizers};
+use crate::app::{ClientGraphId, InterfaceId, LoadedModels, LoadedTokenizers};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::audio_io::pick_audio_file_native;
 #[cfg(target_arch = "wasm32")]
@@ -64,10 +64,12 @@ use whisper_tensor::DynRank;
 use whisper_tensor::backends::ndarray_backend::NDArrayNumericTensor;
 use whisper_tensor::dtype::DType;
 use whisper_tensor::graph::{GlobalId, Graph, GraphDyn};
+use whisper_tensor::graph_format::{MILLI_OP_GRAPH_FILE_EXTENSION, SUPER_GRAPH_FILE_EXTENSION};
 use whisper_tensor::interfaces::{
     AnyInterface, ImageGenerationInterface, KokoroVoiceEmbedding, TTSInputConfig,
 };
 use whisper_tensor::metadata::TokenizerInfo;
+use whisper_tensor::milli_graph::MilliOpGraph;
 use whisper_tensor::scalar_info::ScalarInfoTyped;
 use whisper_tensor::super_graph::nodes::SuperGraphAnyNode;
 use whisper_tensor::super_graph::{SuperGraph, SuperGraphLink};
@@ -103,8 +105,9 @@ impl Default for GraphExplorerSettings {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum GraphRootSubjectSelection {
-    Model(LoadedModelId),
-    Interface(InterfaceId),
+    ServerModel(LoadedModelId),
+    ServerInterface(InterfaceId),
+    ClientGraph(ClientGraphId),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -244,6 +247,7 @@ pub(crate) struct GraphExplorerApp {
     rendered_tensor_swatches: HashMap<Vec<GlobalId>, TextureHandle>,
     tensors_in_view: HashSet<Vec<GlobalId>>,
     nodes_in_view: HashSet<Vec<GlobalId>>,
+    actions_status: Option<String>,
     error_popup: Option<String>,
     pub(crate) show_profiling_window: bool,
 }
@@ -495,11 +499,14 @@ pub(crate) fn get_inner_graph<'a>(
         match node {
             SuperGraphAnyNode::ModelExecution(model_execution) => {
                 let local_model_id = model_execution.symbolic_graph_id;
-                if let GraphRootSubjectSelection::Interface(interface_id) = root_selection
-                    && let Some(interface) = loaded_models.current_interfaces.get(&interface_id)
+                if let GraphRootSubjectSelection::ServerInterface(interface_id) = root_selection
+                    && let Some(interface) = loaded_models
+                        .server_graphs
+                        .current_interfaces
+                        .get(&interface_id)
                     && let Some(model_id) = interface.model_ids.get(local_model_id)
                 {
-                    if let Some(model) = loaded_models.loaded_models.get(model_id) {
+                    if let Some(model) = loaded_models.server_graphs.symbolic_graphs.get(model_id) {
                         return LoadableGraphState::Loaded(model);
                     } else {
                         return LoadableGraphState::Unloaded(*model_id);
@@ -545,6 +552,7 @@ impl GraphExplorerApp {
             rendered_tensor_swatches: HashMap::new(),
             nodes_in_view: HashSet::new(),
             tensors_in_view: HashSet::new(),
+            actions_status: None,
             error_popup: None,
             show_profiling_window: false,
         }
@@ -900,6 +908,81 @@ impl GraphExplorerApp {
         }
     }
 
+    fn render_graph_actions_panel(
+        &mut self,
+        ui: &mut Ui,
+        working_graph: &dyn GraphDyn,
+        working_path: &[GlobalId],
+    ) {
+        ui.vertical(|ui| {
+            ui.label(egui::RichText::new("Actions").size(11.0).strong());
+
+            let export_result = if let Some(super_graph) =
+                <dyn Any>::downcast_ref::<SuperGraph>(working_graph.as_any())
+            {
+                let default_filename = graph_export_default_filename(
+                    "super_graph",
+                    SUPER_GRAPH_FILE_EXTENSION,
+                    working_path,
+                );
+                let clicked = ui
+                    .button("Export SuperGraph")
+                    .on_hover_text(format!("Write {default_filename}"))
+                    .clicked();
+                if clicked {
+                    match super_graph.to_cbor_bytes() {
+                        Ok(bytes) => Some(export_graph_bytes(&default_filename, &bytes)),
+                        Err(err) => Some(Err(format!("failed to encode SuperGraph: {err}"))),
+                    }
+                } else {
+                    None
+                }
+            } else if let Some(milli_op_graph) =
+                <dyn Any>::downcast_ref::<MilliOpGraph>(working_graph.as_any())
+            {
+                let default_filename = graph_export_default_filename(
+                    "milli_op_graph",
+                    MILLI_OP_GRAPH_FILE_EXTENSION,
+                    working_path,
+                );
+                let clicked = ui
+                    .button("Export MilliOpGraph")
+                    .on_hover_text(format!("Write {default_filename}"))
+                    .clicked();
+                if clicked {
+                    match milli_op_graph.to_cbor_bytes() {
+                        Ok(bytes) => Some(export_graph_bytes(&default_filename, &bytes)),
+                        Err(err) => Some(Err(format!("failed to encode MilliOpGraph: {err}"))),
+                    }
+                } else {
+                    None
+                }
+            } else {
+                ui.label(
+                    egui::RichText::new("No export available for this graph type.").size(11.0),
+                );
+                None
+            };
+
+            if let Some(result) = export_result {
+                match result {
+                    Ok(status) => {
+                        self.actions_status = Some(status);
+                    }
+                    Err(err) => {
+                        let full_error = format!("Export failed: {err}");
+                        self.actions_status = Some(full_error.clone());
+                        self.error_popup = Some(full_error);
+                    }
+                }
+            }
+
+            if let Some(status) = &self.actions_status {
+                ui.label(egui::RichText::new(status).size(11.0));
+            }
+        });
+    }
+
     pub(crate) fn update(
         &mut self,
         state: &mut GraphExplorerSettings,
@@ -933,10 +1016,13 @@ impl GraphExplorerApp {
             self.inspect_window_tensor_subscription_returns.clear();
             self.inspect_window_tensor_subscriptions.clear();
             self.inspect_windows.clear();
+            self.actions_status = None;
         }
 
-        let do_interface_panel =
-            matches!(self.root_selection, GraphRootSubjectSelection::Interface(_));
+        let do_interface_panel = matches!(
+            self.root_selection,
+            GraphRootSubjectSelection::ServerInterface(_)
+        );
         let available_height = ui.available_size_before_wrap().y;
         let interface_panel_height = if do_interface_panel {
             // Keep graph view dominant while still reserving enough room for controls.
@@ -948,22 +1034,12 @@ impl GraphExplorerApp {
         let mut graph_breadcrumb_items: Option<Vec<(String, Vec<GlobalId>)>> = None;
 
         // Find the graph we are working with
-        let root_graph: Option<&dyn GraphDyn> = match self.root_selection {
-            GraphRootSubjectSelection::Model(model_id) => {
-                let res = loaded_models
-                    .loaded_models
-                    .get(&model_id)
-                    .map(|x| x as &dyn GraphDyn);
-                if res.is_none() {
-                    models_to_load.insert(model_id);
-                }
-                res
-            }
-            GraphRootSubjectSelection::Interface(interface_id) => loaded_models
-                .current_interfaces
-                .get(&interface_id)
-                .map(|interface| interface.interface.get_super_graph() as &dyn GraphDyn),
-        };
+        let root_graph = loaded_models.root_graph(self.root_selection);
+        if let GraphRootSubjectSelection::ServerModel(model_id) = self.root_selection
+            && root_graph.is_none()
+        {
+            models_to_load.insert(model_id);
+        }
 
         // Profiling window
         if self.show_profiling_window {
@@ -1012,6 +1088,9 @@ impl GraphExplorerApp {
                 None
             }
         };
+        let export_actions_graph_and_path = graph_and_path
+            .as_ref()
+            .map(|(graph, path)| (*graph, path.clone()));
         if let Some((working_graph, working_path)) = graph_and_path {
             if let Some(root_graph) = root_graph {
                 graph_breadcrumb_items = Some(self.build_graph_breadcrumb_items(
@@ -1486,8 +1565,11 @@ impl GraphExplorerApp {
         } else {
             ui.label("No graph selected");
         }
-        if let GraphRootSubjectSelection::Interface(interface_id) = self.root_selection
-            && let Some(interface) = loaded_models.current_interfaces.get(&interface_id)
+        if let GraphRootSubjectSelection::ServerInterface(interface_id) = self.root_selection
+            && let Some(interface) = loaded_models
+                .server_graphs
+                .current_interfaces
+                .get(&interface_id)
         {
             egui::ScrollArea::vertical()
                 .id_salt(("graph_interface_panel", interface_id))
@@ -3172,7 +3254,7 @@ impl GraphExplorerApp {
             });
         }
 
-        if let GraphRootSubjectSelection::Interface(interface_id) = self.root_selection
+        if let GraphRootSubjectSelection::ServerInterface(interface_id) = self.root_selection
             && let Some(graph_rect) = graph_pane_rect
             && let Some(progress_state) = self.interface_progress_widget_state(interface_id)
             && !progress_state.is_empty()
@@ -3223,17 +3305,44 @@ impl GraphExplorerApp {
             });
         }
 
+        if let Some((working_graph, working_path)) = &export_actions_graph_and_path
+            && let Some(graph_rect) = graph_pane_rect
+        {
+            egui::Area::new(egui::Id::new((
+                "graph_actions_overlay",
+                self.root_selection,
+            )))
+            .order(egui::Order::Foreground)
+            .pivot(egui::Align2::RIGHT_TOP)
+            .fixed_pos(graph_rect.right_top() + vec2(-10.0, 10.0))
+            .show(ui.ctx(), |ui| {
+                egui::Frame::default()
+                    .stroke(ui.visuals().window_stroke)
+                    .inner_margin(egui::Margin::same(6))
+                    .show(ui, |ui| {
+                        ui.set_max_width(360.0);
+                        self.render_graph_actions_panel(ui, *working_graph, working_path);
+                    });
+            });
+        }
+
         // Prompt model loading
 
         for model_id in models_to_load {
-            if !loaded_models.loaded_models.contains_key(&model_id)
-                && loaded_models.currently_requesting_model.is_none()
+            if !loaded_models
+                .server_graphs
+                .symbolic_graphs
+                .contains_key(&model_id)
+                && loaded_models
+                    .server_graphs
+                    .currently_requesting_model
+                    .is_none()
             {
                 log::info!("Loading model: {}", model_id);
                 server_request_manager
                     .send(WebsocketClientServerMessage::GetModelGraph(model_id))
                     .unwrap();
-                loaded_models.currently_requesting_model = Some(model_id);
+                loaded_models.server_graphs.currently_requesting_model = Some(model_id);
             }
         }
     }
@@ -3275,6 +3384,35 @@ fn selected_kokoro_voice<'a>(
         return Some(voice);
     }
     voices.first()
+}
+
+fn graph_export_default_filename(base: &str, extension: &str, working_path: &[GlobalId]) -> String {
+    if working_path.is_empty() {
+        format!("{base}.{extension}")
+    } else {
+        format!("{base}_depth_{}.{}", working_path.len(), extension)
+    }
+}
+
+fn export_graph_bytes(default_filename: &str, bytes: &[u8]) -> Result<String, String> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        trigger_browser_download(default_filename, bytes, "application/cbor")
+            .map_err(|err| format!("browser download failed: {err:?}"))?;
+        Ok(format!("Downloaded {default_filename}"))
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let Some(path) = rfd::FileDialog::new()
+            .set_file_name(default_filename)
+            .save_file()
+        else {
+            return Ok("Export canceled".to_string());
+        };
+        std::fs::write(&path, bytes)
+            .map_err(|err| format!("failed to write {}: {err}", path.display()))?;
+        Ok(format!("Saved {}", path.display()))
+    }
 }
 
 fn save_image_to_download(color_image: &ColorImage) {

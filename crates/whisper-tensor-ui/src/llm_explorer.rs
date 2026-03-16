@@ -126,7 +126,7 @@ impl LLMExplorerApp {
 
         // Find llm interfaces
         let mut llm_interfaces = HashMap::new();
-        for (&interface_id, interface) in &loaded_models.current_interfaces {
+        for (&interface_id, interface) in &loaded_models.server_graphs.current_interfaces {
             match &interface.interface {
                 AnyInterface::TextInferenceTokensInLogitOutInterface(_) => {
                     llm_interfaces.insert(interface.interface_name.clone(), interface_id);
@@ -163,7 +163,10 @@ impl LLMExplorerApp {
         });
 
         let interface = if let Some(selected_model_id) = &self.llm_explorer_selected_interface_id {
-            loaded_models.current_interfaces.get(selected_model_id)
+            loaded_models
+                .server_graphs
+                .current_interfaces
+                .get(selected_model_id)
         } else {
             None
         };
