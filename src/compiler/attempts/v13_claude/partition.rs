@@ -167,13 +167,29 @@ impl std::fmt::Display for PartitionCost {
         writeln!(f, "  {} kernels", self.num_kernels)?;
         writeln!(f, "  total traffic: {} values", self.total_traffic)?;
         writeln!(f, "  total compute: {} ops", self.total_compute)?;
-        writeln!(f, "  overall intensity: {:.2} ops/transfer", self.overall_intensity)?;
+        writeln!(
+            f,
+            "  overall intensity: {:.2} ops/transfer",
+            self.overall_intensity
+        )?;
 
         // Summarize kernel cost distribution.
         if !self.kernel_costs.is_empty() {
-            let max_traffic = self.kernel_costs.iter().map(|k| k.estimated_traffic).max().unwrap();
-            let max_peak = self.kernel_costs.iter().map(|k| k.peak_liveness).max().unwrap();
-            let min_intensity = self.kernel_costs.iter()
+            let max_traffic = self
+                .kernel_costs
+                .iter()
+                .map(|k| k.estimated_traffic)
+                .max()
+                .unwrap();
+            let max_peak = self
+                .kernel_costs
+                .iter()
+                .map(|k| k.peak_liveness)
+                .max()
+                .unwrap();
+            let min_intensity = self
+                .kernel_costs
+                .iter()
                 .map(|k| k.arithmetic_intensity)
                 .filter(|i| i.is_finite())
                 .fold(f64::INFINITY, f64::min);

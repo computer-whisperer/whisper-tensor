@@ -115,7 +115,10 @@ impl InputRef {
                 modulus,
             } => {
                 let wrapped = i % modulus;
-                AtomId(base.0.wrapping_add((*stride as i64 * wrapped as i64) as u64))
+                AtomId(
+                    base.0
+                        .wrapping_add((*stride as i64 * wrapped as i64) as u64),
+                )
             }
         }
     }
@@ -134,7 +137,7 @@ impl InputRef {
             InputRef::SymAffine { .. } => count as usize, // lower bound; actual depends on k range
             InputRef::StridedBroadcast { repeat, .. } => {
                 // Each block of `repeat` atoms shares one source.
-                ((count + repeat - 1) / repeat) as usize
+                count.div_ceil(*repeat) as usize
             }
             InputRef::Modular { modulus, .. } => *modulus as usize,
         }

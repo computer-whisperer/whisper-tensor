@@ -194,14 +194,13 @@ impl CompiledPipeline {
         // Set up Cranelift.
         let mut flag_builder = settings::builder();
         flag_builder.set("opt_level", "speed").unwrap();
-        let isa_builder = cranelift_native::builder()
-            .map_err(|e| format!("cranelift native ISA: {}", e))?;
+        let isa_builder =
+            cranelift_native::builder().map_err(|e| format!("cranelift native ISA: {}", e))?;
         let isa = isa_builder
             .finish(settings::Flags::new(flag_builder))
             .map_err(|e| format!("ISA finish: {}", e))?;
 
-        let mut jit_builder =
-            JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        let mut jit_builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
 
         // Register math function symbols.
         jit_builder.symbol("v13_expf", v13_expf as *const u8);
@@ -300,8 +299,7 @@ impl CompiledPipeline {
         // Execute kernels.
         let values_ptr = values.as_mut_ptr();
         for &func_ptr in &self.kernel_ptrs {
-            let func: unsafe extern "C" fn(*mut f32) =
-                unsafe { std::mem::transmute(func_ptr) };
+            let func: unsafe extern "C" fn(*mut f32) = unsafe { std::mem::transmute(func_ptr) };
             unsafe { func(values_ptr) };
         }
 
@@ -330,8 +328,7 @@ impl CompiledPipeline {
         // Execute.
         let values_ptr = values.as_mut_ptr();
         for &func_ptr in &self.kernel_ptrs {
-            let func: unsafe extern "C" fn(*mut f32) =
-                unsafe { std::mem::transmute(func_ptr) };
+            let func: unsafe extern "C" fn(*mut f32) = unsafe { std::mem::transmute(func_ptr) };
             unsafe { func(values_ptr) };
         }
 
@@ -345,8 +342,7 @@ impl CompiledPipeline {
         assert!(values.len() >= self.num_atoms);
         let values_ptr = values.as_mut_ptr();
         for &func_ptr in &self.kernel_ptrs {
-            let func: unsafe extern "C" fn(*mut f32) =
-                unsafe { std::mem::transmute(func_ptr) };
+            let func: unsafe extern "C" fn(*mut f32) = unsafe { std::mem::transmute(func_ptr) };
             unsafe { func(values_ptr) };
         }
     }
@@ -392,8 +388,8 @@ impl CompiledPipeline {
 
             let mut flag_builder = settings::builder();
             flag_builder.set("opt_level", "speed").unwrap();
-            let isa_builder = cranelift_native::builder()
-                .map_err(|e| format!("cranelift native ISA: {}", e))?;
+            let isa_builder =
+                cranelift_native::builder().map_err(|e| format!("cranelift native ISA: {}", e))?;
             let isa = isa_builder
                 .finish(settings::Flags::new(flag_builder))
                 .map_err(|e| format!("ISA finish: {}", e))?;
@@ -634,7 +630,13 @@ fn emit_group_body(
         } => {
             // Load source, apply output rounding, store.
             let src_val = load_input_ref(
-                builder, module, &group.inputs[0], values_ptr, i_val, i_const, table_counter,
+                builder,
+                module,
+                &group.inputs[0],
+                values_ptr,
+                i_val,
+                i_const,
+                table_counter,
             )?;
             let rounded = emit_output_round(builder, module, math, src_val, *output_dtype);
             store_atom(builder, values_ptr, base_id, i_val, i_const, rounded);
@@ -647,10 +649,22 @@ fn emit_group_body(
             output_dtype,
         } => {
             let a = load_input_ref(
-                builder, module, &group.inputs[0], values_ptr, i_val, i_const, table_counter,
+                builder,
+                module,
+                &group.inputs[0],
+                values_ptr,
+                i_val,
+                i_const,
+                table_counter,
             )?;
             let b = load_input_ref(
-                builder, module, &group.inputs[1], values_ptr, i_val, i_const, table_counter,
+                builder,
+                module,
+                &group.inputs[1],
+                values_ptr,
+                i_val,
+                i_const,
+                table_counter,
             )?;
             let result = emit_binop(builder, module, math, *op, a, b)?;
             let rounded = emit_output_round(builder, module, math, result, *output_dtype);
@@ -664,7 +678,13 @@ fn emit_group_body(
             output_dtype,
         } => {
             let x = load_input_ref(
-                builder, module, &group.inputs[0], values_ptr, i_val, i_const, table_counter,
+                builder,
+                module,
+                &group.inputs[0],
+                values_ptr,
+                i_val,
+                i_const,
+                table_counter,
             )?;
             let result = emit_unop(builder, module, math, *op, x)?;
             let rounded = emit_output_round(builder, module, math, result, *output_dtype);
@@ -677,13 +697,31 @@ fn emit_group_body(
             output_dtype,
         } => {
             let cond = load_input_ref(
-                builder, module, &group.inputs[0], values_ptr, i_val, i_const, table_counter,
+                builder,
+                module,
+                &group.inputs[0],
+                values_ptr,
+                i_val,
+                i_const,
+                table_counter,
             )?;
             let x = load_input_ref(
-                builder, module, &group.inputs[1], values_ptr, i_val, i_const, table_counter,
+                builder,
+                module,
+                &group.inputs[1],
+                values_ptr,
+                i_val,
+                i_const,
+                table_counter,
             )?;
             let y = load_input_ref(
-                builder, module, &group.inputs[2], values_ptr, i_val, i_const, table_counter,
+                builder,
+                module,
+                &group.inputs[2],
+                values_ptr,
+                i_val,
+                i_const,
+                table_counter,
             )?;
             let zero = builder.ins().f32const(0.0);
             let is_nonzero = builder.ins().fcmp(
@@ -698,18 +736,47 @@ fn emit_group_body(
         }
 
         ScalarOp::ReduceSum { output_dtype, .. } => emit_reduce(
-            builder, module, group, graph, values_ptr, i_val, i_const, math, var_counter,
-            table_counter, true, *output_dtype,
+            builder,
+            module,
+            group,
+            graph,
+            values_ptr,
+            i_val,
+            i_const,
+            math,
+            var_counter,
+            table_counter,
+            true,
+            *output_dtype,
         ),
 
         ScalarOp::ReduceMax { output_dtype, .. } => emit_reduce(
-            builder, module, group, graph, values_ptr, i_val, i_const, math, var_counter,
-            table_counter, false, *output_dtype,
+            builder,
+            module,
+            group,
+            graph,
+            values_ptr,
+            i_val,
+            i_const,
+            math,
+            var_counter,
+            table_counter,
+            false,
+            *output_dtype,
         ),
 
-        ScalarOp::IndirectLoad { table_base, output_dtype } => {
+        ScalarOp::IndirectLoad {
+            table_base,
+            output_dtype,
+        } => {
             let idx_f32 = load_input_ref(
-                builder, module, &group.inputs[0], values_ptr, i_val, i_const, table_counter,
+                builder,
+                module,
+                &group.inputs[0],
+                values_ptr,
+                i_val,
+                i_const,
+                table_counter,
             )?;
             let idx_i64 = builder.ins().fcvt_to_sint(types::I64, idx_f32);
             let table_base_val = builder.ins().iconst(types::I64, table_base.0 as i64);
@@ -742,8 +809,16 @@ fn emit_reduce(
 ) -> Result<(), String> {
     // Extract reduce_count and reduce_stride from the op.
     let (reduce_count, reduce_stride) = match &group.op {
-        ScalarOp::ReduceSum { reduce_count, reduce_stride, .. } => (*reduce_count, *reduce_stride),
-        ScalarOp::ReduceMax { reduce_count, reduce_stride, .. } => (*reduce_count, *reduce_stride),
+        ScalarOp::ReduceSum {
+            reduce_count,
+            reduce_stride,
+            ..
+        } => (*reduce_count, *reduce_stride),
+        ScalarOp::ReduceMax {
+            reduce_count,
+            reduce_stride,
+            ..
+        } => (*reduce_count, *reduce_stride),
         _ => return Err("emit_reduce called on non-reduce op".to_string()),
     };
 
@@ -761,18 +836,25 @@ fn emit_reduce(
 
     // Compute the base index for this atom's input (at k=0).
     let base_idx = match &group.inputs[0] {
-        InputRef::Affine { base: input_base, stride } => {
-            match i_val {
-                Some(iv) => {
-                    let si = builder.ins().imul_imm(iv, *stride as i64);
-                    builder.ins().iadd_imm(si, input_base.0 as i64)
-                }
-                None => {
-                    builder.ins().iconst(types::I64, input_base.0 as i64 + (*stride as i64) * (i_const as i64))
-                }
+        InputRef::Affine {
+            base: input_base,
+            stride,
+        } => match i_val {
+            Some(iv) => {
+                let si = builder.ins().imul_imm(iv, *stride as i64);
+                builder.ins().iadd_imm(si, input_base.0 as i64)
             }
+            None => builder.ins().iconst(
+                types::I64,
+                input_base.0 as i64 + (*stride as i64) * (i_const as i64),
+            ),
+        },
+        _ => {
+            return Err(format!(
+                "Reduce input must be Affine, got {:?}",
+                group.inputs[0]
+            ));
         }
-        _ => return Err(format!("Reduce input must be Affine, got {:?}", group.inputs[0])),
     };
 
     // K loop variable.
@@ -860,12 +942,9 @@ fn load_input_ref(
             // Fixed offset, same for all i.
             let byte_offset = (atom_id.0 as i64) * 4;
             if byte_offset <= i32::MAX as i64 {
-                Ok(builder.ins().load(
-                    types::F32,
-                    MemFlags::new(),
-                    values_ptr,
-                    byte_offset as i32,
-                ))
+                Ok(builder
+                    .ins()
+                    .load(types::F32, MemFlags::new(), values_ptr, byte_offset as i32))
             } else {
                 let offset = builder.ins().iconst(types::I64, byte_offset);
                 let addr = builder.ins().iadd(values_ptr, offset);
@@ -922,10 +1001,7 @@ fn load_input_ref(
                 .declare_data(&data_name, Linkage::Local, false, false)
                 .map_err(|e| format!("declare explicit table: {}", e))?;
             let mut data_desc = cranelift_module::DataDescription::new();
-            let bytes: Vec<u8> = ids
-                .iter()
-                .flat_map(|id| id.0.to_le_bytes())
-                .collect();
+            let bytes: Vec<u8> = ids.iter().flat_map(|id| id.0.to_le_bytes()).collect();
             data_desc.define(bytes.into_boxed_slice());
             module
                 .define_data(data_id, &data_desc)
@@ -969,7 +1045,11 @@ fn load_input_ref(
             Ok(builder.ins().load(types::F32, MemFlags::new(), addr, 0))
         }
 
-        InputRef::StridedBroadcast { base, stride, repeat } => {
+        InputRef::StridedBroadcast {
+            base,
+            stride,
+            repeat,
+        } => {
             // atom_idx = base + stride * (i / repeat)
             let atom_idx = match i_val {
                 Some(iv) => {
@@ -996,7 +1076,11 @@ fn load_input_ref(
             Ok(builder.ins().load(types::F32, MemFlags::new(), addr, 0))
         }
 
-        InputRef::Modular { base, stride, modulus } => {
+        InputRef::Modular {
+            base,
+            stride,
+            modulus,
+        } => {
             // atom_idx = base + stride * (i % modulus)
             let atom_idx = match i_val {
                 Some(iv) => {
@@ -1039,11 +1123,9 @@ fn load_input_ref_with_k(
             // atom_idx = base + stride_i * i + stride_k * k
             let si = match i_val {
                 Some(iv) => builder.ins().imul_imm(iv, *stride_i as i64),
-                None => {
-                    builder
-                        .ins()
-                        .iconst(types::I64, (*stride_i as i64) * (i_const as i64))
-                }
+                None => builder
+                    .ins()
+                    .iconst(types::I64, (*stride_i as i64) * (i_const as i64)),
             };
             let sk = builder.ins().imul_imm(k_val, *stride_k as i64);
             let idx = builder.ins().iadd(si, sk);
@@ -1054,9 +1136,19 @@ fn load_input_ref_with_k(
         }
 
         // For non-SymAffine inputs in a reduce context, k doesn't affect the address.
-        InputRef::Broadcast(_) | InputRef::Affine { .. } | InputRef::Explicit(_) | InputRef::StridedBroadcast { .. } | InputRef::Modular { .. } => {
-            load_input_ref(builder, module, input, values_ptr, i_val, i_const, table_counter)
-        }
+        InputRef::Broadcast(_)
+        | InputRef::Affine { .. }
+        | InputRef::Explicit(_)
+        | InputRef::StridedBroadcast { .. }
+        | InputRef::Modular { .. } => load_input_ref(
+            builder,
+            module,
+            input,
+            values_ptr,
+            i_val,
+            i_const,
+            table_counter,
+        ),
     }
 }
 
@@ -1073,9 +1165,7 @@ fn store_atom(
 ) {
     let atom_idx = match i_val {
         Some(iv) => builder.ins().iadd_imm(iv, base_id as i64),
-        None => builder
-            .ins()
-            .iconst(types::I64, (base_id + i_const) as i64),
+        None => builder.ins().iconst(types::I64, (base_id + i_const) as i64),
     };
     let byte_offset = builder.ins().imul_imm(atom_idx, 4);
     let addr = builder.ins().iadd(values_ptr, byte_offset);
@@ -1098,19 +1188,16 @@ fn emit_binop(
         ScalarBinOp::Mul => builder.ins().fmul(a, b),
         ScalarBinOp::Div => builder.ins().fdiv(a, b),
         ScalarBinOp::Max => {
-            let cmp = builder.ins().fcmp(
-                cranelift_codegen::ir::condcodes::FloatCC::GreaterThan,
-                a,
-                b,
-            );
+            let cmp =
+                builder
+                    .ins()
+                    .fcmp(cranelift_codegen::ir::condcodes::FloatCC::GreaterThan, a, b);
             builder.ins().select(cmp, a, b)
         }
         ScalarBinOp::Min => {
-            let cmp = builder.ins().fcmp(
-                cranelift_codegen::ir::condcodes::FloatCC::LessThan,
-                a,
-                b,
-            );
+            let cmp = builder
+                .ins()
+                .fcmp(cranelift_codegen::ir::condcodes::FloatCC::LessThan, a, b);
             builder.ins().select(cmp, a, b)
         }
         ScalarBinOp::Pow => {
@@ -1124,55 +1211,88 @@ fn emit_binop(
             builder.inst_results(call)[0]
         }
         ScalarBinOp::Equal => {
-            let cmp = builder.ins().fcmp(cranelift_codegen::ir::condcodes::FloatCC::Equal, a, b);
+            let cmp = builder
+                .ins()
+                .fcmp(cranelift_codegen::ir::condcodes::FloatCC::Equal, a, b);
             let one = builder.ins().f32const(1.0);
             let zero = builder.ins().f32const(0.0);
             builder.ins().select(cmp, one, zero)
         }
         ScalarBinOp::Greater => {
-            let cmp = builder.ins().fcmp(cranelift_codegen::ir::condcodes::FloatCC::GreaterThan, a, b);
+            let cmp =
+                builder
+                    .ins()
+                    .fcmp(cranelift_codegen::ir::condcodes::FloatCC::GreaterThan, a, b);
             let one = builder.ins().f32const(1.0);
             let zero = builder.ins().f32const(0.0);
             builder.ins().select(cmp, one, zero)
         }
         ScalarBinOp::GreaterOrEqual => {
-            let cmp = builder.ins().fcmp(cranelift_codegen::ir::condcodes::FloatCC::GreaterThanOrEqual, a, b);
+            let cmp = builder.ins().fcmp(
+                cranelift_codegen::ir::condcodes::FloatCC::GreaterThanOrEqual,
+                a,
+                b,
+            );
             let one = builder.ins().f32const(1.0);
             let zero = builder.ins().f32const(0.0);
             builder.ins().select(cmp, one, zero)
         }
         ScalarBinOp::Less => {
-            let cmp = builder.ins().fcmp(cranelift_codegen::ir::condcodes::FloatCC::LessThan, a, b);
+            let cmp = builder
+                .ins()
+                .fcmp(cranelift_codegen::ir::condcodes::FloatCC::LessThan, a, b);
             let one = builder.ins().f32const(1.0);
             let zero = builder.ins().f32const(0.0);
             builder.ins().select(cmp, one, zero)
         }
         ScalarBinOp::LessOrEqual => {
-            let cmp = builder.ins().fcmp(cranelift_codegen::ir::condcodes::FloatCC::LessThanOrEqual, a, b);
+            let cmp = builder.ins().fcmp(
+                cranelift_codegen::ir::condcodes::FloatCC::LessThanOrEqual,
+                a,
+                b,
+            );
             let one = builder.ins().f32const(1.0);
             let zero = builder.ins().f32const(0.0);
             builder.ins().select(cmp, one, zero)
         }
         ScalarBinOp::And => {
             let zero = builder.ins().f32const(0.0);
-            let a_nz = builder.ins().fcmp(cranelift_codegen::ir::condcodes::FloatCC::NotEqual, a, zero);
-            let b_nz = builder.ins().fcmp(cranelift_codegen::ir::condcodes::FloatCC::NotEqual, b, zero);
+            let a_nz =
+                builder
+                    .ins()
+                    .fcmp(cranelift_codegen::ir::condcodes::FloatCC::NotEqual, a, zero);
+            let b_nz =
+                builder
+                    .ins()
+                    .fcmp(cranelift_codegen::ir::condcodes::FloatCC::NotEqual, b, zero);
             let both = builder.ins().band(a_nz, b_nz);
             let one = builder.ins().f32const(1.0);
             builder.ins().select(both, one, zero)
         }
         ScalarBinOp::Or => {
             let zero = builder.ins().f32const(0.0);
-            let a_nz = builder.ins().fcmp(cranelift_codegen::ir::condcodes::FloatCC::NotEqual, a, zero);
-            let b_nz = builder.ins().fcmp(cranelift_codegen::ir::condcodes::FloatCC::NotEqual, b, zero);
+            let a_nz =
+                builder
+                    .ins()
+                    .fcmp(cranelift_codegen::ir::condcodes::FloatCC::NotEqual, a, zero);
+            let b_nz =
+                builder
+                    .ins()
+                    .fcmp(cranelift_codegen::ir::condcodes::FloatCC::NotEqual, b, zero);
             let either = builder.ins().bor(a_nz, b_nz);
             let one = builder.ins().f32const(1.0);
             builder.ins().select(either, one, zero)
         }
         ScalarBinOp::Xor => {
             let zero = builder.ins().f32const(0.0);
-            let a_nz = builder.ins().fcmp(cranelift_codegen::ir::condcodes::FloatCC::NotEqual, a, zero);
-            let b_nz = builder.ins().fcmp(cranelift_codegen::ir::condcodes::FloatCC::NotEqual, b, zero);
+            let a_nz =
+                builder
+                    .ins()
+                    .fcmp(cranelift_codegen::ir::condcodes::FloatCC::NotEqual, a, zero);
+            let b_nz =
+                builder
+                    .ins()
+                    .fcmp(cranelift_codegen::ir::condcodes::FloatCC::NotEqual, b, zero);
             let x = builder.ins().bxor(a_nz, b_nz);
             let one = builder.ins().f32const(1.0);
             builder.ins().select(x, one, zero)
@@ -1267,7 +1387,11 @@ mod tests {
 
         eprintln!(
             "[{}] interp: {:?}, compile: {:?}, jit_exec: {:?}, atoms: {}",
-            label, interp_time, compile_time, jit_time, graph.num_atoms()
+            label,
+            interp_time,
+            compile_time,
+            jit_time,
+            graph.num_atoms()
         );
 
         // Compare all atoms.
@@ -1490,10 +1614,7 @@ mod tests {
             },
             vec![],
             vec![],
-            vec![
-                InputRef::Explicit(a_refs),
-                InputRef::Explicit(b_refs),
-            ],
+            vec![InputRef::Explicit(a_refs), InputRef::Explicit(b_refs)],
         );
 
         let c = g.push_group(
@@ -1653,10 +1774,7 @@ mod tests {
             },
             vec![],
             vec![],
-            vec![InputRef::Affine {
-                base: a,
-                stride: 0,
-            }],
+            vec![InputRef::Affine { base: a, stride: 0 }],
         );
 
         g.outputs.push(c);
@@ -1904,10 +2022,7 @@ mod tests {
             },
             vec![],
             vec![],
-            vec![InputRef::Affine {
-                base: a,
-                stride: 0,
-            }],
+            vec![InputRef::Affine { base: a, stride: 0 }],
         );
 
         g.outputs.push(c);
@@ -2000,13 +2115,13 @@ mod tests {
     /// Integration test: build via lowering (milli -> nano), compile, compare.
     #[test]
     fn test_lowered_add() {
+        use crate::DynRank;
         use crate::backends::eval_backend::EvalBackend;
         use crate::graph::{GlobalId, Graph};
         use crate::milli_graph::MilliOpGraph;
         use crate::nano_graph::lower::lower_with_info;
         use crate::numeric_tensor::NumericTensor;
         use crate::tensor_info::TensorInfo;
-        use crate::DynRank;
 
         let mut rng = rand::rng();
         let (mut milli, _) = MilliOpGraph::new(std::iter::empty(), &mut rng);
@@ -2014,8 +2129,7 @@ mod tests {
         let b = milli.add_input(&mut rng);
         let c = crate::milli_graph::ops::SimpleBinary::add(&mut milli, a, b, &mut rng);
 
-        let a_tensor =
-            NumericTensor::from_vec_shape(vec![1.0f32, 2.0, 3.0, 4.0], vec![4]).unwrap();
+        let a_tensor = NumericTensor::from_vec_shape(vec![1.0f32, 2.0, 3.0, 4.0], vec![4]).unwrap();
         let b_tensor =
             NumericTensor::from_vec_shape(vec![10.0f32, 20.0, 30.0, 40.0], vec![4]).unwrap();
 
@@ -2050,13 +2164,13 @@ mod tests {
     /// Integration test: lowered matmul through the full pipeline.
     #[test]
     fn test_lowered_matmul() {
+        use crate::DynRank;
         use crate::backends::eval_backend::EvalBackend;
         use crate::graph::{GlobalId, Graph};
         use crate::milli_graph::MilliOpGraph;
         use crate::nano_graph::lower::lower_with_info;
         use crate::numeric_tensor::NumericTensor;
         use crate::tensor_info::TensorInfo;
-        use crate::DynRank;
 
         let mut rng = rand::rng();
         let (mut milli, _) = MilliOpGraph::new(std::iter::empty(), &mut rng);
@@ -2070,16 +2184,12 @@ mod tests {
             &mut rng,
         );
 
-        let a_tensor = NumericTensor::from_vec_shape(
-            vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
-            vec![2, 3],
-        )
-        .unwrap();
-        let b_tensor = NumericTensor::from_vec_shape(
-            vec![1.0f32, 0.0, 0.0, 1.0, 1.0, 1.0],
-            vec![3, 2],
-        )
-        .unwrap();
+        let a_tensor =
+            NumericTensor::from_vec_shape(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3])
+                .unwrap();
+        let b_tensor =
+            NumericTensor::from_vec_shape(vec![1.0f32, 0.0, 0.0, 1.0, 1.0, 1.0], vec![3, 2])
+                .unwrap();
 
         let mut info_inputs = HashMap::new();
         info_inputs.insert(a, TensorInfo::from(a_tensor.clone()));
@@ -2114,18 +2224,22 @@ mod tests {
     #[test]
     fn test_partitioned_matmul() {
         use crate::backends::eval_backend::EvalBackend;
+        use crate::compiler::attempts::v13_claude::nano_part_creative::partition_nanograph;
         use crate::milli_graph::MilliOpGraph;
         use crate::nano_graph::lower::lower_with_info;
         use crate::numeric_tensor::NumericTensor;
         use crate::tensor_info::TensorInfo;
-        use crate::compiler::attempts::v13_claude::nano_part_creative::partition_nanograph;
 
         let mut rng = rand::rng();
         let (mut milli, _) = MilliOpGraph::new(std::iter::empty(), &mut rng);
         let a = milli.add_input(&mut rng);
         let b = milli.add_input(&mut rng);
         let _c = crate::milli_graph::ops::MatMul::push_new_default_precision(
-            &mut milli, a, b, DType::F32, &mut rng,
+            &mut milli,
+            a,
+            b,
+            DType::F32,
+            &mut rng,
         );
 
         let a_data: Vec<f32> = (0..24).map(|i| (i as f32) * 0.1 + 0.5).collect();
@@ -2181,7 +2295,14 @@ mod tests {
                 max_err_atom = i as u64;
             }
         }
-        println!("Max abs error (partitioned vs whole): {} at atom {}", max_err, max_err_atom);
-        assert!(max_err < 1e-5, "Partitioned execution diverged: max_err={}", max_err);
+        println!(
+            "Max abs error (partitioned vs whole): {} at atom {}",
+            max_err, max_err_atom
+        );
+        assert!(
+            max_err < 1e-5,
+            "Partitioned execution diverged: max_err={}",
+            max_err
+        );
     }
 }

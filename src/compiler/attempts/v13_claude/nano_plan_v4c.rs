@@ -1,4 +1,10 @@
-#![allow(clippy::all, dead_code, unreachable_patterns, unused_variables, unused_imports)]
+#![allow(
+    clippy::all,
+    dead_code,
+    unreachable_patterns,
+    unused_variables,
+    unused_imports
+)]
 //! Span-based partitioner v4c: Closure-first span construction.
 //!
 //! Previous attempts (v3a-v3d) all tried variants of "assign groups to lanes/phases,
@@ -122,8 +128,14 @@ pub fn plan_execution_spans(graph: &NanoGraph, num_lanes: usize) -> SpanPlan {
     // of a splittable producer. "Splittable" means the producer will be split
     // across lanes (it's a compute group with enough atoms to warrant splitting,
     // and it has lane-aligned access patterns).
-    let phase_assignments =
-        assign_phases(&topo_order, &producers, groups, &is_literal, &depths, num_lanes);
+    let phase_assignments = assign_phases(
+        &topo_order,
+        &producers,
+        groups,
+        &is_literal,
+        &depths,
+        num_lanes,
+    );
 
     let num_phases = phase_assignments.iter().copied().max().unwrap_or(0) + 1;
 
@@ -416,9 +428,7 @@ fn input_ref_range(input: &InputRef, count: u64, op: &ScalarOp) -> (u64, u64) {
             let hi = ids.iter().map(|id| id.0).max().unwrap_or(0) + 1;
             (lo, hi)
         }
-        InputRef::SymAffine {
-            base, stride_i, ..
-        } => {
+        InputRef::SymAffine { base, stride_i, .. } => {
             let last = base.0 as i64 + *stride_i as i64 * (count as i64 - 1);
             let lo = (base.0 as i64).min(last) as u64;
             let hi = (base.0 as i64).max(last) as u64 + 1;
@@ -537,7 +547,8 @@ fn assign_lanes(
             } else if group.count <= DUPLICATION_THRESHOLD {
                 // Small enough to duplicate if needed.
                 // For now, assign to lane 0 unless a producer gives us a hint.
-                let preferred_lane = find_preferred_lane(gi, producers, &group_lane_info, num_lanes);
+                let preferred_lane =
+                    find_preferred_lane(gi, producers, &group_lane_info, num_lanes);
                 assignments.push(WorkAssignment {
                     group_idx: gi,
                     lane: preferred_lane,
@@ -548,7 +559,8 @@ fn assign_lanes(
                 group_lane_info[gi] = Some(preferred_lane);
             } else {
                 // Large, unsplittable group. Assign to the least-loaded lane.
-                let preferred_lane = find_preferred_lane(gi, producers, &group_lane_info, num_lanes);
+                let preferred_lane =
+                    find_preferred_lane(gi, producers, &group_lane_info, num_lanes);
                 assignments.push(WorkAssignment {
                     group_idx: gi,
                     lane: preferred_lane,
@@ -807,7 +819,8 @@ fn build_single_span(
     //   been caught by fix_same_phase_violations)
 
     // Determine which groups are "in this span" as compute groups.
-    let span_compute_set: HashSet<usize> = span_compute_groups.iter().map(|&(gi, _, _)| gi).collect();
+    let span_compute_set: HashSet<usize> =
+        span_compute_groups.iter().map(|&(gi, _, _)| gi).collect();
 
     // Collect ALL transitive dependencies (group-level BFS).
     let mut needed_groups: BTreeSet<usize> = BTreeSet::new();
@@ -838,7 +851,8 @@ fn build_single_span(
 
         // Literal groups referenced by InputRefs (not in producers list).
         for input in &group.inputs {
-            let lit_groups = resolve_literal_producer_groups(input, group.count, groups, is_literal);
+            let lit_groups =
+                resolve_literal_producer_groups(input, group.count, groups, is_literal);
             for pi in lit_groups {
                 needed_groups.insert(pi);
             }
@@ -904,12 +918,8 @@ fn build_single_span(
         } else {
             // Compute group not in this span → external input.
             // Determine which range we actually need.
-            let range = compute_needed_range_from_span(
-                gi,
-                &span_compute_groups,
-                groups,
-                is_literal,
-            );
+            let range =
+                compute_needed_range_from_span(gi, &span_compute_groups, groups, is_literal);
             if let Some((off, cnt)) = range {
                 let entry = external_groups.entry(gi).or_insert((off, cnt));
                 // Extend range if needed.
@@ -1078,9 +1088,8 @@ fn collect_external_ranges_for_group(
         _ => (false, 0, 0),
     };
 
-    let is_in_span = |gi: usize| -> bool {
-        span_compute_set.contains(&gi) || inlined_literals.contains(&gi)
-    };
+    let is_in_span =
+        |gi: usize| -> bool { span_compute_set.contains(&gi) || inlined_literals.contains(&gi) };
 
     for input in &group.inputs {
         let referenced = resolve_input_to_group_ranges(
@@ -1182,9 +1191,7 @@ fn resolve_producer_groups(input: &InputRef, count: u64, groups: &[AtomGroup]) -
             }
             result
         }
-        InputRef::SymAffine {
-            base, stride_i, ..
-        } => {
+        InputRef::SymAffine { base, stride_i, .. } => {
             if count == 0 {
                 return vec![];
             }
@@ -1266,9 +1273,7 @@ fn resolve_producer_groups_with_reduce(
             let hi = base + max_reduce_ext;
             find_groups_in_range(groups, lo as u64, hi as u64)
         }
-        InputRef::SymAffine {
-            base, stride_i, ..
-        } => {
+        InputRef::SymAffine { base, stride_i, .. } => {
             let first_base = base.0 as i64;
             let last_base = base.0 as i64 + *stride_i as i64 * (count as i64 - 1);
             let lo = first_base.min(last_base) + min_reduce_ext;
@@ -1525,8 +1530,10 @@ fn remap_single_input(
     match input {
         InputRef::Broadcast(id) => InputRef::Broadcast(atom_map.get(*id).unwrap_or(*id)),
         InputRef::Affine { base, stride } => {
-            let new_base_raw =
-                AtomId(base.0.wrapping_add((*stride as i64 * atom_offset as i64) as u64));
+            let new_base_raw = AtomId(
+                base.0
+                    .wrapping_add((*stride as i64 * atom_offset as i64) as u64),
+            );
             InputRef::Affine {
                 base: atom_map.get(new_base_raw).unwrap_or(new_base_raw),
                 stride: *stride,
@@ -1571,8 +1578,10 @@ fn remap_single_input(
             stride_i,
             stride_k,
         } => {
-            let new_base_raw =
-                AtomId(base.0.wrapping_add((*stride_i as i64 * atom_offset as i64) as u64));
+            let new_base_raw = AtomId(
+                base.0
+                    .wrapping_add((*stride_i as i64 * atom_offset as i64) as u64),
+            );
             InputRef::SymAffine {
                 base: atom_map.get(new_base_raw).unwrap_or(new_base_raw),
                 stride_i: *stride_i,
@@ -1889,11 +1898,7 @@ mod tests {
     fn test_unary_chain() {
         let (g, _, _) = test_graphs::unary_chain(
             256,
-            &[
-                ScalarUnaryOp::Exp,
-                ScalarUnaryOp::Neg,
-                ScalarUnaryOp::Tanh,
-            ],
+            &[ScalarUnaryOp::Exp, ScalarUnaryOp::Neg, ScalarUnaryOp::Tanh],
         );
         let plan = plan_execution_spans(&g, 4);
         verify_plan(&g, &plan);

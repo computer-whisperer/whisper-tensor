@@ -1,3 +1,4 @@
+#![allow(clippy::all, dead_code, unused_variables, unused_imports)]
 //! Evaluation metrics for partition quality.
 //!
 //! Given a NanoGraph and a PartitionResult, compute metrics that let us
@@ -38,13 +39,27 @@ pub struct PartitionMetrics {
 impl std::fmt::Display for PartitionMetrics {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "Partition Metrics:")?;
-        writeln!(f, "  {} kernels, {} atoms", self.num_kernels, self.total_atoms)?;
-        writeln!(f, "  {} total transfers ({} unique materialized values)",
-            self.total_transfers, self.unique_materialized)?;
-        writeln!(f, "  max working set: {} values (budget: {})",
-            self.max_working_set, self.cache_capacity)?;
+        writeln!(
+            f,
+            "  {} kernels, {} atoms",
+            self.num_kernels, self.total_atoms
+        )?;
+        writeln!(
+            f,
+            "  {} total transfers ({} unique materialized values)",
+            self.total_transfers, self.unique_materialized
+        )?;
+        writeln!(
+            f,
+            "  max working set: {} values (budget: {})",
+            self.max_working_set, self.cache_capacity
+        )?;
         if self.kernels_over_budget > 0 {
-            writeln!(f, "  WARNING: {} kernels exceed cache budget!", self.kernels_over_budget)?;
+            writeln!(
+                f,
+                "  WARNING: {} kernels exceed cache budget!",
+                self.kernels_over_budget
+            )?;
         }
         // Arithmetic intensity: total compute ops / total memory ops
         if self.total_transfers > 0 {
@@ -95,7 +110,9 @@ pub fn evaluate(graph: &NanoGraph, result: &PartitionResult) -> PartitionMetrics
                 let source_atoms: Vec<AtomId> = match input_ref {
                     InputRef::SymAffine { .. } => {
                         // Find the reduce_dim bound to know k range.
-                        let k_max = group.reduce_dims.iter()
+                        let k_max = group
+                            .reduce_dims
+                            .iter()
                             .filter_map(|sd| graph.sym_dim_bounds.get(sd))
                             .next()
                             .copied()
@@ -123,14 +140,22 @@ pub fn evaluate(graph: &NanoGraph, result: &PartitionResult) -> PartitionMetrics
 
     // Compute working set per kernel.
     // Working set = atoms produced in this kernel + external inputs needed.
-    let kernel_working_sets: Vec<usize> = result.kernels.iter().enumerate().map(|(ki, kernel)| {
-        let internal: usize = kernel.atom_ranges.iter().map(|r| r.count as usize).sum();
-        let external = kernel_ext_inputs[ki].len();
-        internal + external
-    }).collect();
+    let kernel_working_sets: Vec<usize> = result
+        .kernels
+        .iter()
+        .enumerate()
+        .map(|(ki, kernel)| {
+            let internal: usize = kernel.atom_ranges.iter().map(|r| r.count as usize).sum();
+            let external = kernel_ext_inputs[ki].len();
+            internal + external
+        })
+        .collect();
 
     let max_working_set = kernel_working_sets.iter().copied().max().unwrap_or(0);
-    let kernels_over_budget = kernel_working_sets.iter().filter(|&&ws| ws > cache_capacity).count();
+    let kernels_over_budget = kernel_working_sets
+        .iter()
+        .filter(|&&ws| ws > cache_capacity)
+        .count();
 
     PartitionMetrics {
         num_kernels,

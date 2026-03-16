@@ -114,7 +114,10 @@ impl TensorAtomMapInfo {
         let mut indices = vec![0u64; self.known_dims.len()];
         let mut rem = flat;
         for (i, &rm_stride) in row_major.iter().enumerate() {
-            if rm_stride > 0 { indices[i] = rem / rm_stride; rem %= rm_stride; }
+            if rm_stride > 0 {
+                indices[i] = rem / rm_stride;
+                rem %= rm_stride;
+            }
         }
         if !self.segments.is_empty() {
             let (concat_dim, _, _, _, _) = &self.segments[0];
@@ -193,15 +196,48 @@ type DimClassification = (Vec<DimKind>, Vec<u64>, Vec<SymDim>, u64);
 
 impl TensorAtomMap {
     /// Create a simple (non-segmented) tensor atom map.
-    fn simple(base_id: AtomId, count: u64, layout: Vec<DimKind>, known_strides: Vec<u64>, sym_dims: Vec<SymDim>) -> Self {
-        Self { base_id, count, layout, known_strides, sym_dims, segments: vec![] }
+    fn simple(
+        base_id: AtomId,
+        count: u64,
+        layout: Vec<DimKind>,
+        known_strides: Vec<u64>,
+        sym_dims: Vec<SymDim>,
+    ) -> Self {
+        Self {
+            base_id,
+            count,
+            layout,
+            known_strides,
+            sym_dims,
+            segments: vec![],
+        }
     }
 
     /// Create a segmented tensor atom map (for Concat).
-    fn segmented(count: u64, layout: Vec<DimKind>, sym_dims: Vec<SymDim>, segments: Vec<ConcatSegment>) -> Self {
-        let base_id = if segments.is_empty() { AtomId(0) } else { segments[0].base_id };
-        let known_strides = if segments.is_empty() { vec![] } else { segments[0].known_strides.clone() };
-        Self { base_id, count, layout, known_strides, sym_dims, segments }
+    fn segmented(
+        count: u64,
+        layout: Vec<DimKind>,
+        sym_dims: Vec<SymDim>,
+        segments: Vec<ConcatSegment>,
+    ) -> Self {
+        let base_id = if segments.is_empty() {
+            AtomId(0)
+        } else {
+            segments[0].base_id
+        };
+        let known_strides = if segments.is_empty() {
+            vec![]
+        } else {
+            segments[0].known_strides.clone()
+        };
+        Self {
+            base_id,
+            count,
+            layout,
+            known_strides,
+            sym_dims,
+            segments,
+        }
     }
 
     /// Compute row-major strides from known dim sizes.
@@ -220,9 +256,16 @@ impl TensorAtomMap {
 
     /// Get the known dim sizes from the layout.
     fn known_dims(&self) -> Vec<u64> {
-        self.layout.iter().filter_map(|d| {
-            if let DimKind::Known(s) = d { Some(*s) } else { None }
-        }).collect()
+        self.layout
+            .iter()
+            .filter_map(|d| {
+                if let DimKind::Known(s) = d {
+                    Some(*s)
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     /// Map logical element index to AtomId using strides.
@@ -258,7 +301,10 @@ impl TensorAtomMap {
                 }
             }
             // Shouldn't happen if segments cover the full concat dim.
-            panic!("Concat segment not found for index {} on dim {}", concat_idx, concat_dim);
+            panic!(
+                "Concat segment not found for index {} on dim {}",
+                concat_idx, concat_dim
+            );
         }
 
         // Simple view: use base_id + physical strides.
@@ -306,7 +352,10 @@ fn lower_inner(
 ) -> Result<LowerResult, LowerError> {
     let t0 = std::time::Instant::now();
     let all_infos = graph.infer_all(inputs)?;
-    eprintln!("  [lower] infer_all: {:.1}ms", t0.elapsed().as_secs_f64() * 1e3);
+    eprintln!(
+        "  [lower] infer_all: {:.1}ms",
+        t0.elapsed().as_secs_f64() * 1e3
+    );
     let mut ctx = LowerCtx::new();
 
     // Register all tensors that exist before ops run (graph inputs + inferred
@@ -331,7 +380,12 @@ fn lower_inner(
         };
         ctx.lower_op(op, &all_infos);
     }
-    eprintln!("  [lower] ops: {:.1}ms ({} groups, {} atoms)", t1.elapsed().as_secs_f64() * 1e3, ctx.nano.num_groups(), ctx.nano.num_atoms());
+    eprintln!(
+        "  [lower] ops: {:.1}ms ({} groups, {} atoms)",
+        t1.elapsed().as_secs_f64() * 1e3,
+        ctx.nano.num_groups(),
+        ctx.nano.num_atoms()
+    );
 
     // Collect outputs. Try get_outputs() first; if empty, scan all tensors
     // in the tensor_map that aren't consumed by any op (terminal tensors).
@@ -360,9 +414,19 @@ fn lower_inner(
                     sym_dims: tam.sym_dims.clone(),
                     known_strides: tam.known_strides.clone(),
                     known_dims: tam.known_dims(),
-                    segments: tam.segments.iter().map(|s| {
-                        (s.concat_dim, s.start, s.size, s.base_id, s.known_strides.clone())
-                    }).collect(),
+                    segments: tam
+                        .segments
+                        .iter()
+                        .map(|s| {
+                            (
+                                s.concat_dim,
+                                s.start,
+                                s.size,
+                                s.base_id,
+                                s.known_strides.clone(),
+                            )
+                        })
+                        .collect(),
                 },
             )
         })
@@ -416,7 +480,11 @@ fn lower_inner(
         }
     }
 
-    eprintln!("  [lower] numeric_overrides: {:.1}ms ({} entries)", t2.elapsed().as_secs_f64() * 1e3, numeric_overrides.len());
+    eprintln!(
+        "  [lower] numeric_overrides: {:.1}ms ({} entries)",
+        t2.elapsed().as_secs_f64() * 1e3,
+        numeric_overrides.len()
+    );
 
     // Merge synthetic overrides (e.g., column offsets from Gather lowering).
     for (k, v) in ctx.synthetic_overrides {
@@ -563,7 +631,12 @@ impl LowerCtx {
         // Segmented producers (concat): always build via atom_id_for_element
         // since they can't be expressed as a single Affine/Broadcast pattern.
         if !producer.segments.is_empty() {
-            return self.build_segmented_input_ref(consumer, producer, consumer_info, producer_info);
+            return self.build_segmented_input_ref(
+                consumer,
+                producer,
+                consumer_info,
+                producer_info,
+            );
         }
 
         // Same count + same known shape → stride 1.
@@ -702,7 +775,7 @@ impl LowerCtx {
         let mut ids = Vec::with_capacity(consumer.count as usize);
         let c_strides = &consumer.known_strides;
 
-        for flat_c in 0..consumer.count as u64 {
+        for flat_c in 0..consumer.count {
             // Decompose flat_c into known-dim indices.
             let mut c_indices = vec![0u64; c_known_sizes.len()];
             let mut rem = flat_c;
@@ -754,9 +827,9 @@ impl LowerCtx {
 
         // Check for Affine: constant stride.
         let stride = ids[1].0 as i64 - ids[0].0 as i64;
-        let is_affine = ids.windows(2).all(|w| {
-            (w[1].0 as i64 - w[0].0 as i64) == stride
-        });
+        let is_affine = ids
+            .windows(2)
+            .all(|w| (w[1].0 as i64 - w[0].0 as i64) == stride);
         if is_affine {
             return InputRef::Affine {
                 base: ids[0],
@@ -770,15 +843,13 @@ impl LowerCtx {
         while (repeat as usize) < ids.len() && ids[repeat as usize].0 == ids[0].0 {
             repeat += 1;
         }
-        if repeat > 1 && ids.len() as u64 % repeat == 0 {
+        if repeat > 1 && (ids.len() as u64).is_multiple_of(repeat) {
             let num_blocks = ids.len() as u64 / repeat;
             if num_blocks > 1 {
                 let block_stride = ids[repeat as usize].0 as i64 - ids[0].0 as i64;
                 let is_strided_broadcast = (0..num_blocks).all(|b| {
                     let expected_base = ids[0].0 as i64 + block_stride * b as i64;
-                    (0..repeat).all(|r| {
-                        ids[(b * repeat + r) as usize].0 as i64 == expected_base
-                    })
+                    (0..repeat).all(|r| ids[(b * repeat + r) as usize].0 as i64 == expected_base)
                 });
                 if is_strided_broadcast {
                     return InputRef::StridedBroadcast {
@@ -793,19 +864,31 @@ impl LowerCtx {
         // Check for Modular: ids[i] = ids[i % period] for some period.
         // Try small periods that divide the length.
         let len = ids.len();
-        'modular: for period in [2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256,
-                                  384, 512, 768, 1024, 1536, 2048, 2304, 3072, 4096] {
-            if period >= len || len % period != 0 { continue; }
+        'modular: for period in [
+            2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024, 1536,
+            2048, 2304, 3072, 4096,
+        ] {
+            if period >= len || !len.is_multiple_of(period) {
+                continue;
+            }
             // Check if the pattern repeats with this period
-            let matches = ids.iter().enumerate().all(|(i, id)| id.0 == ids[i % period].0);
-            if !matches { continue; }
+            let matches = ids
+                .iter()
+                .enumerate()
+                .all(|(i, id)| id.0 == ids[i % period].0);
+            if !matches {
+                continue;
+            }
             // Found a repeating period — check if the period itself is Affine
             let inner_stride = if period >= 2 {
                 ids[1].0 as i64 - ids[0].0 as i64
-            } else { 0 };
-            let inner_is_affine = period < 2 || ids[..period].windows(2).all(|w| {
-                (w[1].0 as i64 - w[0].0 as i64) == inner_stride
-            });
+            } else {
+                0
+            };
+            let inner_is_affine = period < 2
+                || ids[..period]
+                    .windows(2)
+                    .all(|w| (w[1].0 as i64 - w[0].0 as i64) == inner_stride);
             if inner_is_affine {
                 return InputRef::Modular {
                     base: ids[0],
@@ -832,8 +915,16 @@ impl LowerCtx {
         let c_rank = consumer_info.rank_if_known().unwrap_or(0);
         let p_rank = producer_info.rank_if_known().unwrap_or(0);
 
-        let c_known_sizes: Vec<u64> = consumer.layout.iter()
-            .filter_map(|d| if let DimKind::Known(s) = d { Some(*s) } else { None })
+        let c_known_sizes: Vec<u64> = consumer
+            .layout
+            .iter()
+            .filter_map(|d| {
+                if let DimKind::Known(s) = d {
+                    Some(*s)
+                } else {
+                    None
+                }
+            })
             .collect();
         let p_known_sizes = producer.known_dims();
 
@@ -841,23 +932,47 @@ impl LowerCtx {
 
         let c_known_indices: Vec<Option<usize>> = {
             let mut ki = 0;
-            consumer.layout.iter().map(|d| {
-                if matches!(d, DimKind::Known(_)) { let idx = ki; ki += 1; Some(idx) } else { None }
-            }).collect()
+            consumer
+                .layout
+                .iter()
+                .map(|d| {
+                    if matches!(d, DimKind::Known(_)) {
+                        let idx = ki;
+                        ki += 1;
+                        Some(idx)
+                    } else {
+                        None
+                    }
+                })
+                .collect()
         };
         let p_known_indices: Vec<Option<usize>> = {
             let mut ki = 0;
-            producer.layout.iter().map(|d| {
-                if matches!(d, DimKind::Known(_)) { let idx = ki; ki += 1; Some(idx) } else { None }
-            }).collect()
+            producer
+                .layout
+                .iter()
+                .map(|d| {
+                    if matches!(d, DimKind::Known(_)) {
+                        let idx = ki;
+                        ki += 1;
+                        Some(idx)
+                    } else {
+                        None
+                    }
+                })
+                .collect()
         };
 
         let mut c_to_p_known: Vec<Option<usize>> = vec![None; c_known_sizes.len()];
         for (c_orig, c_known_idx) in c_known_indices.iter().enumerate() {
             let Some(c_ki) = *c_known_idx else { continue };
-            if c_orig < offset { continue; }
+            if c_orig < offset {
+                continue;
+            }
             let p_orig = c_orig - offset;
-            if p_orig >= p_rank { continue; }
+            if p_orig >= p_rank {
+                continue;
+            }
             if let Some(p_ki) = p_known_indices[p_orig] {
                 c_to_p_known[c_ki] = Some(p_ki);
             }
@@ -866,18 +981,24 @@ impl LowerCtx {
         let c_strides = &consumer.known_strides;
         let mut ids = Vec::with_capacity(consumer.count as usize);
 
-        for flat_c in 0..consumer.count as u64 {
+        for flat_c in 0..consumer.count {
             let mut c_indices = vec![0u64; c_known_sizes.len()];
             let mut rem = flat_c;
             for (i, &stride) in c_strides.iter().enumerate() {
-                if stride > 0 { c_indices[i] = rem / stride; rem %= stride; }
+                if stride > 0 {
+                    c_indices[i] = rem / stride;
+                    rem %= stride;
+                }
             }
 
             let mut p_indices = vec![0u64; p_known_sizes.len()];
             for (c_ki, &p_ki_opt) in c_to_p_known.iter().enumerate() {
                 if let Some(p_ki) = p_ki_opt {
-                    if p_known_sizes[p_ki] == 1 { p_indices[p_ki] = 0; }
-                    else { p_indices[p_ki] = c_indices[c_ki]; }
+                    if p_known_sizes[p_ki] == 1 {
+                        p_indices[p_ki] = 0;
+                    } else {
+                        p_indices[p_ki] = c_indices[c_ki];
+                    }
                 }
             }
 
@@ -1050,34 +1171,54 @@ impl LowerCtx {
                 output_dtype: dt,
             },
             WhichSimpleBinaryOp::Equal => ScalarOp::Binary {
-                op: ScalarBinOp::Equal, compute_dtype: dt, output_dtype: dt,
+                op: ScalarBinOp::Equal,
+                compute_dtype: dt,
+                output_dtype: dt,
             },
             WhichSimpleBinaryOp::Greater => ScalarOp::Binary {
-                op: ScalarBinOp::Greater, compute_dtype: dt, output_dtype: dt,
+                op: ScalarBinOp::Greater,
+                compute_dtype: dt,
+                output_dtype: dt,
             },
             WhichSimpleBinaryOp::GreaterOrEqual => ScalarOp::Binary {
-                op: ScalarBinOp::GreaterOrEqual, compute_dtype: dt, output_dtype: dt,
+                op: ScalarBinOp::GreaterOrEqual,
+                compute_dtype: dt,
+                output_dtype: dt,
             },
             WhichSimpleBinaryOp::Less => ScalarOp::Binary {
-                op: ScalarBinOp::Less, compute_dtype: dt, output_dtype: dt,
+                op: ScalarBinOp::Less,
+                compute_dtype: dt,
+                output_dtype: dt,
             },
             WhichSimpleBinaryOp::LessOrEqual => ScalarOp::Binary {
-                op: ScalarBinOp::LessOrEqual, compute_dtype: dt, output_dtype: dt,
+                op: ScalarBinOp::LessOrEqual,
+                compute_dtype: dt,
+                output_dtype: dt,
             },
             WhichSimpleBinaryOp::And => ScalarOp::Binary {
-                op: ScalarBinOp::And, compute_dtype: dt, output_dtype: dt,
+                op: ScalarBinOp::And,
+                compute_dtype: dt,
+                output_dtype: dt,
             },
             WhichSimpleBinaryOp::Or => ScalarOp::Binary {
-                op: ScalarBinOp::Or, compute_dtype: dt, output_dtype: dt,
+                op: ScalarBinOp::Or,
+                compute_dtype: dt,
+                output_dtype: dt,
             },
             WhichSimpleBinaryOp::Xor | WhichSimpleBinaryOp::BitwiseXor => ScalarOp::Binary {
-                op: ScalarBinOp::Xor, compute_dtype: dt, output_dtype: dt,
+                op: ScalarBinOp::Xor,
+                compute_dtype: dt,
+                output_dtype: dt,
             },
             WhichSimpleBinaryOp::BitwiseAnd => ScalarOp::Binary {
-                op: ScalarBinOp::And, compute_dtype: dt, output_dtype: dt,
+                op: ScalarBinOp::And,
+                compute_dtype: dt,
+                output_dtype: dt,
             },
             WhichSimpleBinaryOp::BitwiseOr => ScalarOp::Binary {
-                op: ScalarBinOp::Or, compute_dtype: dt, output_dtype: dt,
+                op: ScalarBinOp::Or,
+                compute_dtype: dt,
+                output_dtype: dt,
             },
         };
 
@@ -1088,7 +1229,13 @@ impl LowerCtx {
         let count = count.max(1);
         let strides = TensorAtomMap::compute_strides(&known_dims);
 
-        let out_tmp = TensorAtomMap::simple(AtomId(0), count, layout.clone(), strides.clone(), sym_dims.clone());
+        let out_tmp = TensorAtomMap::simple(
+            AtomId(0),
+            count,
+            layout.clone(),
+            strides.clone(),
+            sym_dims.clone(),
+        );
 
         let a_info = all_infos.get(&a_id);
         let b_info = all_infos.get(&b_id);
@@ -1196,7 +1343,13 @@ impl LowerCtx {
 
         self.tensor_map.insert(
             out_id,
-            TensorAtomMap::simple(base_id, in_map.count, in_map.layout.clone(), in_map.known_strides.clone(), in_map.sym_dims.clone()),
+            TensorAtomMap::simple(
+                base_id,
+                in_map.count,
+                in_map.layout.clone(),
+                in_map.known_strides.clone(),
+                in_map.sym_dims.clone(),
+            ),
         );
     }
 
@@ -1246,7 +1399,13 @@ impl LowerCtx {
 
         self.tensor_map.insert(
             out_id,
-            TensorAtomMap::simple(base_id, in_map.count, in_map.layout.clone(), in_map.known_strides.clone(), in_map.sym_dims.clone()),
+            TensorAtomMap::simple(
+                base_id,
+                in_map.count,
+                in_map.layout.clone(),
+                in_map.known_strides.clone(),
+                in_map.sym_dims.clone(),
+            ),
         );
     }
 
@@ -1297,7 +1456,13 @@ impl LowerCtx {
 
         self.tensor_map.insert(
             out_id,
-            TensorAtomMap::simple(base_id, in_map.count, in_map.layout.clone(), in_map.known_strides.clone(), in_map.sym_dims.clone()),
+            TensorAtomMap::simple(
+                base_id,
+                in_map.count,
+                in_map.layout.clone(),
+                in_map.known_strides.clone(),
+                in_map.sym_dims.clone(),
+            ),
         );
     }
 
@@ -1336,13 +1501,12 @@ impl LowerCtx {
             }
         };
 
-        let Some((out_layout, out_known_dims, out_sym_dims, out_count)) =
+        let Some((out_layout, out_known_dims, _out_sym_dims, _out_count)) =
             self.classify_dims(out_info)
         else {
             self.lower_as_boundary_named(t, all_infos, "Transpose");
             return;
         };
-        let out_count = out_count.max(1);
 
         // Build full permutation (handling None=reverse, partial perms, negative indices).
         let full_perm: Vec<usize> = match t.perm() {
@@ -1385,7 +1549,7 @@ impl LowerCtx {
             })
             .collect();
         let in_strides = TensorAtomMap::compute_strides(&in_known_sizes);
-        let out_strides = TensorAtomMap::compute_strides(&out_known_dims);
+        let _out_strides = TensorAtomMap::compute_strides(&out_known_dims);
 
         // We need to map between original dim indices and known-dim indices.
         // For now, assume all dims are known (symbolic dims in transpose would
@@ -1423,7 +1587,13 @@ impl LowerCtx {
 
         self.tensor_map.insert(
             out_id,
-            TensorAtomMap::simple(in_map.base_id, in_map.count, transposed_layout, transposed_strides, in_map.sym_dims.clone()),
+            TensorAtomMap::simple(
+                in_map.base_id,
+                in_map.count,
+                transposed_layout,
+                transposed_strides,
+                in_map.sym_dims.clone(),
+            ),
         );
     }
 
@@ -1451,7 +1621,13 @@ impl LowerCtx {
             // Atom-count preserving: just re-register with new layout.
             self.tensor_map.insert(
                 out_id,
-                TensorAtomMap::simple(in_map.base_id, count, layout, TensorAtomMap::compute_strides(&known_dims), sym_dims),
+                TensorAtomMap::simple(
+                    in_map.base_id,
+                    count,
+                    layout,
+                    TensorAtomMap::compute_strides(&known_dims),
+                    sym_dims,
+                ),
             );
         } else {
             self.register_boundary(out_id, out_info, "ViewOp");
@@ -1487,10 +1663,22 @@ impl LowerCtx {
         if count == in_map.count {
             self.tensor_map.insert(
                 out_id,
-                TensorAtomMap::simple(in_map.base_id, count, layout, TensorAtomMap::compute_strides(&known_dims), sym_dims),
+                TensorAtomMap::simple(
+                    in_map.base_id,
+                    count,
+                    layout,
+                    TensorAtomMap::compute_strides(&known_dims),
+                    sym_dims,
+                ),
             );
         } else {
-            let out_tmp = TensorAtomMap::simple(AtomId(0), count, layout.clone(), TensorAtomMap::compute_strides(&known_dims), sym_dims.clone());
+            let out_tmp = TensorAtomMap::simple(
+                AtomId(0),
+                count,
+                layout.clone(),
+                TensorAtomMap::compute_strides(&known_dims),
+                sym_dims.clone(),
+            );
             let input_ref =
                 self.compute_input_ref(&out_tmp, &in_map, out_info, in_info.unwrap_or(out_info));
 
@@ -1508,7 +1696,13 @@ impl LowerCtx {
 
             self.tensor_map.insert(
                 out_id,
-                TensorAtomMap::simple(base_id, count, layout, TensorAtomMap::compute_strides(&known_dims), sym_dims),
+                TensorAtomMap::simple(
+                    base_id,
+                    count,
+                    layout,
+                    TensorAtomMap::compute_strides(&known_dims),
+                    sym_dims,
+                ),
             );
         }
     }
@@ -1542,7 +1736,13 @@ impl LowerCtx {
         let count = count.max(1);
         let strides = TensorAtomMap::compute_strides(&known_dims);
 
-        let out_tmp = TensorAtomMap::simple(AtomId(0), count, layout.clone(), strides.clone(), sym_dims.clone());
+        let out_tmp = TensorAtomMap::simple(
+            AtomId(0),
+            count,
+            layout.clone(),
+            strides.clone(),
+            sym_dims.clone(),
+        );
 
         let a_info = all_infos.get(&a_id);
         let b_info = all_infos.get(&b_id);
@@ -1601,7 +1801,13 @@ impl LowerCtx {
         let count = count.max(1);
         let strides = TensorAtomMap::compute_strides(&known_dims);
 
-        let out_tmp = TensorAtomMap::simple(AtomId(0), count, layout.clone(), strides.clone(), sym_dims.clone());
+        let out_tmp = TensorAtomMap::simple(
+            AtomId(0),
+            count,
+            layout.clone(),
+            strides.clone(),
+            sym_dims.clone(),
+        );
 
         let cond_info = all_infos.get(&cond_id);
         let x_info = all_infos.get(&x_id);
@@ -1709,7 +1915,13 @@ impl LowerCtx {
         let inp0_known: Vec<u64> = input_maps[0]
             .layout
             .iter()
-            .filter_map(|d| if let DimKind::Known(s) = d { Some(*s) } else { None })
+            .filter_map(|d| {
+                if let DimKind::Known(s) = d {
+                    Some(*s)
+                } else {
+                    None
+                }
+            })
             .collect();
         let inp0_rowmajor = TensorAtomMap::compute_strides(&inp0_known);
 
@@ -1727,7 +1939,13 @@ impl LowerCtx {
             if contiguous {
                 self.tensor_map.insert(
                     out_id,
-                    TensorAtomMap::simple(input_maps[0].base_id, out_count, out_layout, TensorAtomMap::compute_strides(&out_known_dims), out_sym_dims),
+                    TensorAtomMap::simple(
+                        input_maps[0].base_id,
+                        out_count,
+                        out_layout,
+                        TensorAtomMap::compute_strides(&out_known_dims),
+                        out_sym_dims,
+                    ),
                 );
                 return;
             }
@@ -1851,7 +2069,13 @@ impl LowerCtx {
             let base_offset = offset_along_axis * in_map.known_strides[split_known_idx];
             self.tensor_map.insert(
                 out_id,
-                TensorAtomMap::simple(in_map.base_id.offset(base_offset), out_count, out_layout, TensorAtomMap::compute_strides(&out_known_dims), out_sym_dims),
+                TensorAtomMap::simple(
+                    in_map.base_id.offset(base_offset),
+                    out_count,
+                    out_layout,
+                    TensorAtomMap::compute_strides(&out_known_dims),
+                    out_sym_dims,
+                ),
             );
             return;
         }
@@ -1862,7 +2086,13 @@ impl LowerCtx {
         let base_offset = offset_along_axis * in_map.known_strides[split_known_idx];
         self.tensor_map.insert(
             out_id,
-            TensorAtomMap::simple(in_map.base_id.offset(base_offset), out_count, out_layout, in_map.known_strides.clone(), out_sym_dims),
+            TensorAtomMap::simple(
+                in_map.base_id.offset(base_offset),
+                out_count,
+                out_layout,
+                in_map.known_strides.clone(),
+                out_sym_dims,
+            ),
         );
     }
 
@@ -2052,12 +2282,18 @@ impl LowerCtx {
             let all_positive_steps = known_steps.iter().all(|&s| s > 0);
             if all_positive_steps {
                 let mut base_offset: u64 = 0;
-                for ki in 0..in_known.len() {
-                    base_offset += known_starts[ki] as u64 * in_map.known_strides[ki];
+                for (&start, &stride) in known_starts.iter().zip(in_map.known_strides.iter()) {
+                    base_offset += start as u64 * stride;
                 }
                 self.tensor_map.insert(
                     out_id,
-                    TensorAtomMap::simple(in_map.base_id.offset(base_offset), out_count, out_layout, TensorAtomMap::compute_strides(&out_known_dims), out_sym_dims),
+                    TensorAtomMap::simple(
+                        in_map.base_id.offset(base_offset),
+                        out_count,
+                        out_layout,
+                        TensorAtomMap::compute_strides(&out_known_dims),
+                        out_sym_dims,
+                    ),
                 );
                 return;
             }
@@ -2075,7 +2311,13 @@ impl LowerCtx {
             }
             self.tensor_map.insert(
                 out_id,
-                TensorAtomMap::simple(in_map.base_id.offset(base_offset), out_count, out_layout, out_phys_strides, out_sym_dims),
+                TensorAtomMap::simple(
+                    in_map.base_id.offset(base_offset),
+                    out_count,
+                    out_layout,
+                    out_phys_strides,
+                    out_sym_dims,
+                ),
             );
             return;
         }
@@ -2248,7 +2490,7 @@ impl LowerCtx {
         // The number of row groups: batch_known_product * (M if known, else 1).
         let m_groups = m_known.unwrap_or(1);
         let num_row_groups = (batch_known_product * m_groups) as usize;
-        let n_u64 = n as u64;
+        let n_u64 = n;
 
         // For each row group, compute the A and B base offsets within their atoms.
         // A's known dims: [...batch_known, (M if known), K]
@@ -2271,7 +2513,7 @@ impl LowerCtx {
         // The ReduceSum groups still have count=N and use SymAffine with
         // stride_k = N to hop between k-blocks within the merged Mul group.
         let mut mul_base_id = None;
-        let k_u64 = k as u64;
+        let k_u64 = k;
         let merged_mul_count = k_u64 * n_u64;
 
         for g in 0..num_row_groups {
@@ -2316,13 +2558,9 @@ impl LowerCtx {
             }
 
             // A[m, 0] — base of this row's A elements
-            let a_row_base = a_map
-                .base_id
-                .offset(a_offset);
+            let a_row_base = a_map.base_id.offset(a_offset);
             // B[0, 0] — base of B for this batch
-            let b_base = b_map
-                .base_id
-                .offset(b_offset);
+            let b_base = b_map.base_id.offset(b_offset);
 
             // Input 0: StridedBroadcast over A elements, each repeated N times
             // A atoms have stride = a_strides[a_k_known_idx] between successive k values
@@ -2394,7 +2632,13 @@ impl LowerCtx {
 
         self.tensor_map.insert(
             out_id,
-            TensorAtomMap::simple(base_id, out_count, out_layout, TensorAtomMap::compute_strides(&out_known_dims), out_sym_dims),
+            TensorAtomMap::simple(
+                base_id,
+                out_count,
+                out_layout,
+                TensorAtomMap::compute_strides(&out_known_dims),
+                out_sym_dims,
+            ),
         );
     }
 
@@ -2451,7 +2695,13 @@ impl LowerCtx {
             );
             self.tensor_map.insert(
                 out_id,
-                TensorAtomMap::simple(base_id, count, layout, TensorAtomMap::compute_strides(&known_dims), sym_dims),
+                TensorAtomMap::simple(
+                    base_id,
+                    count,
+                    layout,
+                    TensorAtomMap::compute_strides(&known_dims),
+                    sym_dims,
+                ),
             );
             return;
         } else {
@@ -2560,7 +2810,7 @@ impl LowerCtx {
         // For each output atom, decompose into non-reduced dims, then compute
         // the input flat index (with reduced dim = 0).
         let mut base_ids = Vec::with_capacity(out_count as usize);
-        for flat_out in 0..out_count as u64 {
+        for flat_out in 0..out_count {
             // Decompose flat_out into output known-dim indices.
             let mut out_indices = vec![0u64; out_known.len()];
             let mut rem = flat_out;
@@ -2587,7 +2837,7 @@ impl LowerCtx {
             for (i, &stride) in in_strides.iter().enumerate() {
                 in_flat += in_indices[i] * stride;
             }
-            base_ids.push(in_flat as u64);
+            base_ids.push(in_flat);
         }
 
         // Check if the base_ids form a simple affine pattern.
@@ -2650,7 +2900,13 @@ impl LowerCtx {
 
         self.tensor_map.insert(
             out_id,
-            TensorAtomMap::simple(base_id, out_count, out_layout, TensorAtomMap::compute_strides(&out_known_dims_full), out_sym_dims),
+            TensorAtomMap::simple(
+                base_id,
+                out_count,
+                out_layout,
+                TensorAtomMap::compute_strides(&out_known_dims_full),
+                out_sym_dims,
+            ),
         );
     }
 
@@ -2757,7 +3013,13 @@ impl LowerCtx {
         // Update tensor_map to point to the divided result.
         self.tensor_map.insert(
             out_id,
-            TensorAtomMap::simple(base_id, sum_map.count, sum_map.layout, sum_map.known_strides, sum_map.sym_dims),
+            TensorAtomMap::simple(
+                base_id,
+                sum_map.count,
+                sum_map.layout,
+                sum_map.known_strides,
+                sum_map.sym_dims,
+            ),
         );
     }
 
@@ -2778,16 +3040,12 @@ impl LowerCtx {
         let out_id = g.output_id();
 
         // If both inputs are fully numeric (constant-folded), treat as constant.
-        let all_numeric = [data_id, indices_id].iter().all(|id| {
-            all_infos
-                .get(id)
-                .is_some_and(|i| i.as_numeric().is_some())
-        });
-        if all_numeric {
-            if let Some(out_info) = all_infos.get(&out_id) {
-                self.register_input(out_id, out_info);
-                return;
-            }
+        let all_numeric = [data_id, indices_id]
+            .iter()
+            .all(|id| all_infos.get(id).is_some_and(|i| i.as_numeric().is_some()));
+        if all_numeric && let Some(out_info) = all_infos.get(&out_id) {
+            self.register_input(out_id, out_info);
+            return;
         }
 
         let Some(data_map) = self.tensor_map.get(&data_id).cloned() else {
@@ -2806,7 +3064,7 @@ impl LowerCtx {
             self.lower_as_boundary_named(g, all_infos, "Gather");
             return;
         };
-        let Some(indices_info) = all_infos.get(&indices_id) else {
+        let Some(_indices_info) = all_infos.get(&indices_id) else {
             self.lower_as_boundary_named(g, all_infos, "Gather");
             return;
         };
@@ -2920,7 +3178,7 @@ impl LowerCtx {
 
             // Simple case: indices_map.count == 1, sym_dims present
             // Output should have count == D_total, same sym_dims
-            if indices_map.count != 1 || out_count as u64 != d_total {
+            if indices_map.count != 1 || out_count != d_total {
                 self.lower_as_boundary_named(g, all_infos, "Gather");
                 return;
             }
@@ -2947,7 +3205,7 @@ impl LowerCtx {
             // Step 3: Add group — D_total atoms, each adds its column offset j
             // Column offsets: 0, 1, 2, ..., D_total-1
             let col_offsets_base = self.nano.push_group(
-                d_total as u64,
+                d_total,
                 ScalarOp::Literal(NumericScalar::F32(0.0)),
                 vec![],
                 vec![],
@@ -3000,15 +3258,13 @@ impl LowerCtx {
             // in it via ctx synthetic overrides.
 
             // I'll add a synthetic_overrides map to LowerCtx and merge at the end.
-            for j in 0..d_total as u64 {
-                self.synthetic_overrides.insert(
-                    col_offsets_base.0 + j,
-                    NumericScalar::F32(j as f32),
-                );
+            for j in 0..d_total {
+                self.synthetic_overrides
+                    .insert(col_offsets_base.0 + j, NumericScalar::F32(j as f32));
             }
 
             let add_id = self.nano.push_group(
-                d_total as u64,
+                d_total,
                 ScalarOp::Binary {
                     op: ScalarBinOp::Add,
                     compute_dtype: DType::F32,
@@ -3027,7 +3283,7 @@ impl LowerCtx {
 
             // Step 4: IndirectLoad group — D_total atoms, each loads from data table
             let base_id = self.nano.push_group(
-                d_total as u64,
+                d_total,
                 ScalarOp::IndirectLoad {
                     table_base: data_map.base_id,
                     output_dtype: out_dt,
@@ -3043,11 +3299,11 @@ impl LowerCtx {
             let out_strides = TensorAtomMap::compute_strides(&out_known_dims);
             self.tensor_map.insert(
                 out_id,
-                TensorAtomMap::simple(base_id, d_total as u64, out_layout, out_strides, out_sym_dims),
+                TensorAtomMap::simple(base_id, d_total, out_layout, out_strides, out_sym_dims),
             );
         } else {
             // Indices are fully known (constant). out_count = indices_count * D_total.
-            let _indices_count = indices_map.count as u64;
+            let _indices_count = indices_map.count;
 
             // Build the indices InputRef: for output atom `flat`, row = flat / D_total
             let indices_ref = if d_total == 1 {
@@ -3059,7 +3315,7 @@ impl LowerCtx {
             } else {
                 // For each output flat index, the row is flat / D_total
                 let mut ids = Vec::with_capacity(out_count as usize);
-                for flat in 0..out_count as u64 {
+                for flat in 0..out_count {
                     let row = flat / d_total;
                     ids.push(indices_map.base_id.offset(row));
                 }
@@ -3088,11 +3344,9 @@ impl LowerCtx {
                 vec![],
             );
             for flat in 0..out_count {
-                let col = (flat as u64) % d_total;
-                self.synthetic_overrides.insert(
-                    col_offsets_base.0 + flat,
-                    NumericScalar::F32(col as f32),
-                );
+                let col = flat % d_total;
+                self.synthetic_overrides
+                    .insert(col_offsets_base.0 + flat, NumericScalar::F32(col as f32));
             }
 
             // Add group: mul_result + column_offset
@@ -3526,10 +3780,7 @@ mod tests {
                 InputRef::StridedBroadcast { repeat, .. } => {
                     assert_eq!(*repeat, 16, "StridedBroadcast repeat should be N=16");
                 }
-                other => panic!(
-                    "Expected StridedBroadcast for input 0, got {:?}",
-                    other
-                ),
+                other => panic!("Expected StridedBroadcast for input 0, got {:?}", other),
             }
             // Input 1 should be Affine with stride=1.
             match &g.inputs[1] {
@@ -3552,8 +3803,7 @@ mod tests {
             |graph, rng| {
                 let data = graph.add_input(rng);
                 let indices = graph.add_input(rng);
-                let out =
-                    crate::milli_graph::ops::Gather::push_new(graph, data, indices, 0, rng);
+                let out = crate::milli_graph::ops::Gather::push_new(graph, data, indices, 0, rng);
                 (vec![data, indices], vec![out])
             },
             vec![
@@ -3577,19 +3827,19 @@ mod tests {
         check_integrity(
             |graph, rng| {
                 let data = graph.add_input(rng);
-                let out0 = crate::milli_graph::ops::Split::push_new(
-                    graph, data, None, 0, Some(2), 0, rng,
-                );
-                let out1 = crate::milli_graph::ops::Split::push_new(
-                    graph, data, None, 0, Some(2), 1, rng,
-                );
+                let out0 =
+                    crate::milli_graph::ops::Split::push_new(graph, data, None, 0, Some(2), 0, rng);
+                let out1 =
+                    crate::milli_graph::ops::Split::push_new(graph, data, None, 0, Some(2), 1, rng);
                 (vec![data], vec![out0, out1])
             },
-            vec![NumericTensor::from_vec_shape(
-                vec![1.0f32, 2., 3., 4., 5., 6., 7., 8., 9., 10., 11., 12.],
-                vec![4, 3],
-            )
-            .unwrap()],
+            vec![
+                NumericTensor::from_vec_shape(
+                    vec![1.0f32, 2., 3., 4., 5., 6., 7., 8., 9., 10., 11., 12.],
+                    vec![4, 3],
+                )
+                .unwrap(),
+            ],
         );
 
         // Verify no Identity groups were created.
@@ -3597,23 +3847,39 @@ mod tests {
         let (mut milli, _) = MilliOpGraph::new(std::iter::empty(), &mut rng);
         let data = milli.add_input(&mut rng);
         let _out0 = crate::milli_graph::ops::Split::push_new(
-            &mut milli, data, None, 0, Some(2), 0, &mut rng,
+            &mut milli,
+            data,
+            None,
+            0,
+            Some(2),
+            0,
+            &mut rng,
         );
         let _out1 = crate::milli_graph::ops::Split::push_new(
-            &mut milli, data, None, 0, Some(2), 1, &mut rng,
+            &mut milli,
+            data,
+            None,
+            0,
+            Some(2),
+            1,
+            &mut rng,
         );
-        let tensor: NumericTensor<DynRank> = NumericTensor::from_vec_shape(
-            vec![1.0f32; 12],
-            vec![4, 3],
-        )
-        .unwrap();
+        let tensor: NumericTensor<DynRank> =
+            NumericTensor::from_vec_shape(vec![1.0f32; 12], vec![4, 3]).unwrap();
         let mut info = std::collections::HashMap::new();
         info.insert(data, TensorInfo::from(tensor));
         let result = super::lower_with_info(&milli, &info).unwrap();
-        let identity_count = result.graph.groups().iter().filter(|g| {
-            matches!(&g.op, crate::nano_graph::ops::ScalarOp::Identity { .. })
-        }).count();
-        assert_eq!(identity_count, 0, "Split should be zero-cost (no Identity groups), got {}", identity_count);
+        let identity_count = result
+            .graph
+            .groups()
+            .iter()
+            .filter(|g| matches!(&g.op, crate::nano_graph::ops::ScalarOp::Identity { .. }))
+            .count();
+        assert_eq!(
+            identity_count, 0,
+            "Split should be zero-cost (no Identity groups), got {}",
+            identity_count
+        );
     }
 
     #[test]
@@ -3622,19 +3888,16 @@ mod tests {
         check_integrity(
             |graph, rng| {
                 let data = graph.add_input(rng);
-                let out0 = crate::milli_graph::ops::Split::push_new(
-                    graph, data, None, 1, Some(2), 0, rng,
-                );
-                let out1 = crate::milli_graph::ops::Split::push_new(
-                    graph, data, None, 1, Some(2), 1, rng,
-                );
+                let out0 =
+                    crate::milli_graph::ops::Split::push_new(graph, data, None, 1, Some(2), 0, rng);
+                let out1 =
+                    crate::milli_graph::ops::Split::push_new(graph, data, None, 1, Some(2), 1, rng);
                 (vec![data], vec![out0, out1])
             },
-            vec![NumericTensor::from_vec_shape(
-                (1..=12).map(|v| v as f32).collect(),
-                vec![2, 6],
-            )
-            .unwrap()],
+            vec![
+                NumericTensor::from_vec_shape((1..=12).map(|v| v as f32).collect(), vec![2, 6])
+                    .unwrap(),
+            ],
         );
     }
 
@@ -3645,12 +3908,10 @@ mod tests {
         check_integrity(
             |graph, rng| {
                 let data = graph.add_input(rng);
-                let out0 = crate::milli_graph::ops::Split::push_new(
-                    graph, data, None, 0, Some(2), 0, rng,
-                );
-                let out1 = crate::milli_graph::ops::Split::push_new(
-                    graph, data, None, 0, Some(2), 1, rng,
-                );
+                let out0 =
+                    crate::milli_graph::ops::Split::push_new(graph, data, None, 0, Some(2), 0, rng);
+                let out1 =
+                    crate::milli_graph::ops::Split::push_new(graph, data, None, 0, Some(2), 1, rng);
                 let sum = crate::milli_graph::ops::SimpleBinary::add(graph, out0, out1, rng);
                 (vec![data], vec![sum])
             },
@@ -3680,11 +3941,10 @@ mod tests {
                 );
                 (vec![data], vec![out])
             },
-            vec![NumericTensor::from_vec_shape(
-                vec![10.0f32, 20., 30., 40., 50., 60.],
-                vec![6],
-            )
-            .unwrap()],
+            vec![
+                NumericTensor::from_vec_shape(vec![10.0f32, 20., 30., 40., 50., 60.], vec![6])
+                    .unwrap(),
+            ],
         );
     }
 
@@ -3711,15 +3971,20 @@ mod tests {
                     rng,
                 );
                 let out = crate::milli_graph::ops::Slice::push_new(
-                    graph, data, starts, ends, None, Some(axes), rng,
+                    graph,
+                    data,
+                    starts,
+                    ends,
+                    None,
+                    Some(axes),
+                    rng,
                 );
                 (vec![data], vec![out])
             },
-            vec![NumericTensor::from_vec_shape(
-                (1..=12).map(|v| v as f32).collect(),
-                vec![3, 4],
-            )
-            .unwrap()],
+            vec![
+                NumericTensor::from_vec_shape((1..=12).map(|v| v as f32).collect(), vec![3, 4])
+                    .unwrap(),
+            ],
         );
     }
 
@@ -3750,12 +4015,10 @@ mod tests {
                     NDArrayNumericTensor::<DynRank>::from_vec_shape(vec![4i64], &vec![1]).unwrap(),
                     rng,
                 );
-                let out0 = crate::milli_graph::ops::Slice::push_new(
-                    graph, data, s0, e0, None, None, rng,
-                );
-                let out1 = crate::milli_graph::ops::Slice::push_new(
-                    graph, data, s1, e1, None, None, rng,
-                );
+                let out0 =
+                    crate::milli_graph::ops::Slice::push_new(graph, data, s0, e0, None, None, rng);
+                let out1 =
+                    crate::milli_graph::ops::Slice::push_new(graph, data, s1, e1, None, None, rng);
                 let sum = crate::milli_graph::ops::SimpleBinary::add(graph, out0, out1, rng);
                 (vec![data], vec![sum])
             },
@@ -3788,15 +4051,20 @@ mod tests {
                     rng,
                 );
                 let out = crate::milli_graph::ops::Slice::push_new(
-                    graph, data, starts, ends, None, Some(axes), rng,
+                    graph,
+                    data,
+                    starts,
+                    ends,
+                    None,
+                    Some(axes),
+                    rng,
                 );
                 (vec![data], vec![out])
             },
-            vec![NumericTensor::from_vec_shape(
-                (1..=12).map(|v| v as f32).collect(),
-                vec![3, 4],
-            )
-            .unwrap()],
+            vec![
+                NumericTensor::from_vec_shape((1..=12).map(|v| v as f32).collect(), vec![3, 4])
+                    .unwrap(),
+            ],
         );
     }
 
@@ -3825,9 +4093,12 @@ mod tests {
         let mut info = std::collections::HashMap::new();
         info.insert(data, TensorInfo::from(tensor));
         let result = super::lower_with_info(&milli, &info).unwrap();
-        let identity_count = result.graph.groups().iter().filter(|g| {
-            matches!(&g.op, crate::nano_graph::ops::ScalarOp::Identity { .. })
-        }).count();
+        let identity_count = result
+            .graph
+            .groups()
+            .iter()
+            .filter(|g| matches!(&g.op, crate::nano_graph::ops::ScalarOp::Identity { .. }))
+            .count();
         assert_eq!(
             identity_count, 0,
             "Slice on outermost axis should be zero-cost (no Identity groups), got {}",
@@ -3842,22 +4113,18 @@ mod tests {
         check_integrity(
             |graph, rng| {
                 let data = graph.add_input(rng);
-                let out0 = crate::milli_graph::ops::Split::push_new(
-                    graph, data, None, 0, Some(2), 0, rng,
-                );
-                let out1 = crate::milli_graph::ops::Split::push_new(
-                    graph, data, None, 0, Some(2), 1, rng,
-                );
-                let cat = crate::milli_graph::ops::Concat::push_new(
-                    graph, vec![out0, out1], 0, rng,
-                );
+                let out0 =
+                    crate::milli_graph::ops::Split::push_new(graph, data, None, 0, Some(2), 0, rng);
+                let out1 =
+                    crate::milli_graph::ops::Split::push_new(graph, data, None, 0, Some(2), 1, rng);
+                let cat =
+                    crate::milli_graph::ops::Concat::push_new(graph, vec![out0, out1], 0, rng);
                 (vec![data], vec![cat])
             },
-            vec![NumericTensor::from_vec_shape(
-                vec![10.0f32, 20., 30., 40., 50., 60.],
-                vec![6],
-            )
-            .unwrap()],
+            vec![
+                NumericTensor::from_vec_shape(vec![10.0f32, 20., 30., 40., 50., 60.], vec![6])
+                    .unwrap(),
+            ],
         );
     }
 
@@ -3868,9 +4135,7 @@ mod tests {
             |graph, rng| {
                 let a = graph.add_input(rng);
                 let b = graph.add_input(rng);
-                let cat = crate::milli_graph::ops::Concat::push_new(
-                    graph, vec![a, b], 0, rng,
-                );
+                let cat = crate::milli_graph::ops::Concat::push_new(graph, vec![a, b], 0, rng);
                 (vec![a, b], vec![cat])
             },
             vec![
@@ -3891,8 +4156,7 @@ mod tests {
             |graph, rng| {
                 let data = graph.add_input(rng);
                 let indices = graph.add_input(rng);
-                let out =
-                    crate::milli_graph::ops::Gather::push_new(graph, data, indices, 0, rng);
+                let out = crate::milli_graph::ops::Gather::push_new(graph, data, indices, 0, rng);
                 (vec![data, indices], vec![out])
             },
             vec![

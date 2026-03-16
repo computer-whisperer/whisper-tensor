@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::Instant;
 
+use whisper_tensor::DynRank;
 use whisper_tensor::compiler::interpret_milli_graph;
 use whisper_tensor::compiler::op_census;
 use whisper_tensor::dtype::DType;
@@ -17,7 +18,6 @@ use whisper_tensor::nano_graph::lower;
 use whisper_tensor::numeric_scalar::NumericScalar;
 use whisper_tensor::numeric_tensor::NumericTensor;
 use whisper_tensor::tensor_info::TensorInfo;
-use whisper_tensor::DynRank;
 use whisper_tensor_import::identify_and_load;
 use whisper_tensor_import::onnx_graph::WeightStorageStrategy;
 
@@ -73,7 +73,10 @@ fn main() {
     for (name, (dtype, shape_dims)) in &input_info {
         let shape: Vec<u64> = shape_dims.iter().map(|d| d.unwrap_or(4)).collect();
         let num_elements: u64 = shape.iter().product();
-        println!("  Input '{}': {:?} {:?} ({} elements)", name, dtype, shape, num_elements);
+        println!(
+            "  Input '{}': {:?} {:?} ({} elements)",
+            name, dtype, shape, num_elements
+        );
 
         let tensor: NumericTensor<DynRank> = match dtype {
             DType::I64 => {
@@ -116,14 +119,22 @@ fn main() {
     let t_milli = Instant::now();
     let milli_outputs = interpret_milli_graph(&milli_graph, &milli_inputs).unwrap();
     let milli_elapsed = t_milli.elapsed();
-    println!("  Milli interpreter completed in {:.1}s", milli_elapsed.as_secs_f64());
+    println!(
+        "  Milli interpreter completed in {:.1}s",
+        milli_elapsed.as_secs_f64()
+    );
     println!("  Output tensors: {}", milli_outputs.len());
 
     // Print output shapes.
     for (id, tensor) in &milli_outputs {
         let shape: Vec<u64> = tensor.shape().to_vec();
-        println!("    Output {:?}: {:?} {:?} ({} elements)",
-            id, tensor.dtype(), shape, tensor.num_elements());
+        println!(
+            "    Output {:?}: {:?} {:?} ({} elements)",
+            id,
+            tensor.dtype(),
+            shape,
+            tensor.num_elements()
+        );
     }
 
     // ---- Lower to NanoGraph ----
@@ -185,21 +196,36 @@ fn main() {
             if has_explicit {
                 explicit_groups += 1;
                 total_explicit_entries += group_explicit_entries;
-                let op_name = format!("{:?}", group.op).chars().take_while(|c| *c != ' ' && *c != '{').collect::<String>();
+                let op_name = format!("{:?}", group.op)
+                    .chars()
+                    .take_while(|c| *c != ' ' && *c != '{')
+                    .collect::<String>();
                 let entry = explicit_by_op.entry(op_name).or_default();
                 entry.0 += 1;
                 entry.1 += group_explicit_entries;
             }
         }
         println!("\n=== Explicit InputRef Diagnostic ===");
-        println!("  Groups with Explicit: {} / {}", explicit_groups, groups.len());
-        println!("  Total Explicit entries: {} ({:.1} MB at 8 bytes each)",
-            total_explicit_entries, total_explicit_entries as f64 * 8.0 / (1024.0 * 1024.0));
+        println!(
+            "  Groups with Explicit: {} / {}",
+            explicit_groups,
+            groups.len()
+        );
+        println!(
+            "  Total Explicit entries: {} ({:.1} MB at 8 bytes each)",
+            total_explicit_entries,
+            total_explicit_entries as f64 * 8.0 / (1024.0 * 1024.0)
+        );
         let mut sorted: Vec<_> = explicit_by_op.into_iter().collect();
         sorted.sort_by(|a, b| b.1.1.cmp(&a.1.1));
         for (op, (groups, entries)) in &sorted {
-            println!("    {}: {} groups, {} entries ({:.1} MB)",
-                op, groups, entries, *entries as f64 * 8.0 / (1024.0 * 1024.0));
+            println!(
+                "    {}: {} groups, {} entries ({:.1} MB)",
+                op,
+                groups,
+                entries,
+                *entries as f64 * 8.0 / (1024.0 * 1024.0)
+            );
         }
     }
 
@@ -218,23 +244,37 @@ fn main() {
     let nano_feasible = buffer_gb <= max_buffer_gb;
 
     if !nano_feasible {
-        println!("  SKIPPING nano execution: buffer ({:.1} GB) exceeds {:.0} GB limit", buffer_gb, max_buffer_gb);
-        println!("  To run, need a machine with at least {:.0} GB RAM", buffer_gb * 1.5);
+        println!(
+            "  SKIPPING nano execution: buffer ({:.1} GB) exceeds {:.0} GB limit",
+            buffer_gb, max_buffer_gb
+        );
+        println!(
+            "  To run, need a machine with at least {:.0} GB RAM",
+            buffer_gb * 1.5
+        );
     } else {
         println!("  Buffer fits in memory, proceeding with nano execution");
 
         // Build nano inputs:
         // 1. Start with numeric_overrides (weights, constants)
         let mut nano_inputs: HashMap<u64, NumericScalar> = result.numeric_overrides.clone();
-        println!("  Numeric overrides (weights/constants): {} atoms", nano_inputs.len());
+        println!(
+            "  Numeric overrides (weights/constants): {} atoms",
+            nano_inputs.len()
+        );
 
         // 2. Add user input tensor values using tensor_map
         let mut user_input_atoms = 0u64;
         let mut backend = whisper_tensor::backends::eval_backend::EvalBackend::NDArray;
         for (name, (_dtype, _shape_dims)) in &input_info {
-            let Some(id) = tensors_by_name.get(name) else { continue };
+            let Some(id) = tensors_by_name.get(name) else {
+                continue;
+            };
             let Some(tam) = result.tensor_map.get(id) else {
-                println!("    WARNING: input '{}' ({:?}) not found in tensor_map", name, id);
+                println!(
+                    "    WARNING: input '{}' ({:?}) not found in tensor_map",
+                    name, id
+                );
                 continue;
             };
 
@@ -246,8 +286,12 @@ fn main() {
             let v: Vec<f32> = nd.try_into().unwrap();
 
             if v.len() != tam.count as usize {
-                println!("    WARNING: input '{}' has {} elements but tensor_map says {} atoms",
-                    name, v.len(), tam.count);
+                println!(
+                    "    WARNING: input '{}' has {} elements but tensor_map says {} atoms",
+                    name,
+                    v.len(),
+                    tam.count
+                );
                 continue;
             }
 
@@ -265,7 +309,10 @@ fn main() {
                 nano_inputs.insert(atom_id, scalar);
             }
             user_input_atoms += tam.count;
-            println!("    Input '{}': {} atoms at base {:?}", name, tam.count, tam.base_id);
+            println!(
+                "    Input '{}': {} atoms at base {:?}",
+                name, tam.count, tam.base_id
+            );
         }
         println!("  User input atoms: {}", user_input_atoms);
         println!("  Total input atoms: {}", nano_inputs.len());
@@ -277,7 +324,10 @@ fn main() {
         let t_nano = Instant::now();
         let nano_outputs = execute_nanograph_naive(&result.graph, &nano_inputs);
         let nano_elapsed = t_nano.elapsed();
-        println!("  Nano interpreter completed in {:.1}s", nano_elapsed.as_secs_f64());
+        println!(
+            "  Nano interpreter completed in {:.1}s",
+            nano_elapsed.as_secs_f64()
+        );
 
         // ---- Step 3: Compare outputs ----
         println!("\n=== Step 4: Output Comparison ===");
@@ -303,22 +353,35 @@ fn main() {
                 // Try the external ID as a fallback
                 let Some(tam) = result.tensor_map.get(ext_id) else {
                     comparison_errors.push(format!(
-                        "Output {:?} (internal {:?}) not found in tensor_map", ext_id, internal_id
+                        "Output {:?} (internal {:?}) not found in tensor_map",
+                        ext_id, internal_id
                     ));
                     continue;
                 };
                 compare_tensor_with_nano(
-                    ext_id, milli_tensor, tam, &nano_outputs,
-                    &mut total_compared, &mut max_abs_error, &mut max_rel_error,
-                    &mut backend, &mut comparison_errors,
+                    ext_id,
+                    milli_tensor,
+                    tam,
+                    &nano_outputs,
+                    &mut total_compared,
+                    &mut max_abs_error,
+                    &mut max_rel_error,
+                    &mut backend,
+                    &mut comparison_errors,
                 );
                 continue;
             };
 
             compare_tensor_with_nano(
-                ext_id, milli_tensor, tam, &nano_outputs,
-                &mut total_compared, &mut max_abs_error, &mut max_rel_error,
-                &mut backend, &mut comparison_errors,
+                ext_id,
+                milli_tensor,
+                tam,
+                &nano_outputs,
+                &mut total_compared,
+                &mut max_abs_error,
+                &mut max_rel_error,
+                &mut backend,
+                &mut comparison_errors,
             );
         }
 
@@ -350,7 +413,7 @@ fn main() {
 
     // ---- Step 5: Partitioner (runs regardless of nano execution feasibility) ----
     println!("\n=== Step 5: Partitioner ===");
-    use whisper_tensor::compiler::attempts::v13_claude::nano_part_b::partition_nanograph;
+    use whisper_tensor::compiler::attempts::v13_claude::nano_part_creative::partition_nanograph;
 
     let t_part = Instant::now();
     let partition = partition_nanograph(&result.graph, 8);
@@ -364,7 +427,7 @@ fn main() {
     let mut kernel_sizes: Vec<u64> = partition
         .kernel_groups
         .iter()
-        .map(|kg| kg.iter().map(|&gi| groups[gi].count).sum())
+        .map(|kg| kg.iter().map(|&gi| groups[gi].count).sum::<u64>())
         .collect();
     kernel_sizes.sort_unstable_by(|a, b| b.cmp(a));
 
@@ -396,14 +459,16 @@ fn main() {
     // Per-kernel analysis
     println!("\n  === Per-kernel breakdown ===");
     for (ki, kg) in partition.kernel_groups.iter().enumerate() {
-        let total_atoms: u64 = kg.iter().map(|&gi| groups[gi].count).sum();
+        let total_atoms: u64 = kg.iter().map(|&gi| groups[gi].count).sum::<u64>();
 
         // Op breakdown
         let mut op_counts: HashMap<String, usize> = HashMap::new();
         let mut explicit_entries = 0u64;
         for &gi in kg {
             let op_name = format!("{:?}", groups[gi].op)
-                .chars().take_while(|c| *c != ' ' && *c != '{' && *c != '(').collect::<String>();
+                .chars()
+                .take_while(|c| *c != ' ' && *c != '{' && *c != '(')
+                .collect::<String>();
             *op_counts.entry(op_name).or_default() += 1;
             for input in &groups[gi].inputs {
                 if let whisper_tensor::nano_graph::InputRef::Explicit(ids) = input {
@@ -413,10 +478,12 @@ fn main() {
         }
         let mut sorted_ops: Vec<_> = op_counts.into_iter().collect();
         sorted_ops.sort_by(|a, b| b.1.cmp(&a.1));
-        let op_summary: String = sorted_ops.iter()
+        let op_summary: String = sorted_ops
+            .iter()
             .take(5)
             .map(|(op, count)| format!("{}x{}", count, op))
-            .collect::<Vec<_>>().join(", ");
+            .collect::<Vec<_>>()
+            .join(", ");
 
         // Dependencies: which other kernels does this kernel read from?
         let mut reads_from: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
@@ -430,10 +497,15 @@ fn main() {
                     InputRef::SymAffine { base, .. } => vec![*base],
                     InputRef::Explicit(ids) => {
                         let mut s = vec![];
-                        if !ids.is_empty() { s.push(ids[0]); }
-                        if ids.len() > 1 { s.push(ids[ids.len() - 1]); }
+                        if !ids.is_empty() {
+                            s.push(ids[0]);
+                        }
+                        if ids.len() > 1 {
+                            s.push(ids[ids.len() - 1]);
+                        }
                         s
                     }
+                    InputRef::Modular { base, .. } => vec![*base],
                 };
                 for id in sample_atoms {
                     if let Some(src_gi) = find_group_idx(id) {
@@ -450,8 +522,16 @@ fn main() {
         let min_gi = kg.iter().copied().min().unwrap_or(0);
         let max_gi = kg.iter().copied().max().unwrap_or(0);
 
-        println!("  kernel {:>2}: {:>6} groups [{:>5}..{:>5}], {:>12} atoms, {:>8} explicit, reads_from={:?}",
-            ki, kg.len(), min_gi, max_gi, total_atoms, explicit_entries, reads_from);
+        println!(
+            "  kernel {:>2}: {:>6} groups [{:>5}..{:>5}], {:>12} atoms, {:>8} explicit, reads_from={:?}",
+            ki,
+            kg.len(),
+            min_gi,
+            max_gi,
+            total_atoms,
+            explicit_entries,
+            reads_from
+        );
         println!("            ops: {}", op_summary);
     }
 
@@ -460,7 +540,10 @@ fn main() {
     {
         let f32_buffer_gb = num_atoms as f64 * 4.0 / (1024.0 * 1024.0 * 1024.0);
         println!("\n=== Step 6: JIT Codegen Execution ===");
-        println!("  f32 buffer: {:.1} GB ({} atoms × 4 bytes)", f32_buffer_gb, num_atoms);
+        println!(
+            "  f32 buffer: {:.1} GB ({} atoms × 4 bytes)",
+            f32_buffer_gb, num_atoms
+        );
 
         if f32_buffer_gb > 120.0 {
             println!("  SKIPPING: f32 buffer too large ({:.1} GB)", f32_buffer_gb);
@@ -492,8 +575,12 @@ fn main() {
                     // Fill user input values directly into buffer
                     let mut backend = whisper_tensor::backends::eval_backend::EvalBackend::NDArray;
                     for (name, (_dtype, _shape_dims)) in &input_info {
-                        let Some(id) = tensors_by_name.get(name) else { continue };
-                        let Some(tam) = result.tensor_map.get(id) else { continue };
+                        let Some(id) = tensors_by_name.get(name) else {
+                            continue;
+                        };
+                        let Some(tam) = result.tensor_map.get(id) else {
+                            continue;
+                        };
                         let tensor = &milli_inputs[id];
                         let f32_tensor = tensor.cast(DType::F32, &mut backend).unwrap();
                         let flat = f32_tensor.flatten().unwrap();
@@ -524,7 +611,9 @@ fn main() {
 
                     for (ext_id, milli_tensor) in &milli_outputs {
                         let internal_id = reverse_output_map.get(ext_id).unwrap_or(ext_id);
-                        let tam = result.tensor_map.get(internal_id)
+                        let tam = result
+                            .tensor_map
+                            .get(internal_id)
                             .or_else(|| result.tensor_map.get(ext_id));
                         let Some(tam) = tam else {
                             println!("    Output {:?}: not in tensor_map", ext_id);
@@ -539,19 +628,27 @@ fn main() {
                         let mut local_max_abs = 0.0f64;
                         for (i, &milli_val) in milli_vals.iter().enumerate() {
                             let atom_idx = (tam.base_id.0 + i as u64) as usize;
-                            if atom_idx >= values.len() { break; }
+                            if atom_idx >= values.len() {
+                                break;
+                            }
                             let jit_val = values[atom_idx];
                             let abs_err = (milli_val - jit_val).abs() as f64;
                             local_max_abs = local_max_abs.max(abs_err);
                             let rel_err = if milli_val.abs() > 1e-8 {
                                 abs_err / milli_val.abs() as f64
-                            } else { 0.0 };
+                            } else {
+                                0.0
+                            };
                             max_rel_error = max_rel_error.max(rel_err);
                             total_compared += 1;
                         }
                         max_abs_error = max_abs_error.max(local_max_abs);
-                        println!("    Output {:?}: {} elems, max_abs_err={:.6e}",
-                            ext_id, milli_vals.len(), local_max_abs);
+                        println!(
+                            "    Output {:?}: {} elems, max_abs_err={:.6e}",
+                            ext_id,
+                            milli_vals.len(),
+                            local_max_abs
+                        );
                     }
 
                     println!("  Elements compared: {}", total_compared);
@@ -613,7 +710,9 @@ fn compare_tensor_with_nano(
     if milli_values.len() != tam.count as usize {
         comparison_errors.push(format!(
             "Output {:?}: milli has {} elements but tensor_map has {} atoms",
-            ext_id, milli_values.len(), tam.count
+            ext_id,
+            milli_values.len(),
+            tam.count
         ));
         return;
     }
@@ -626,7 +725,8 @@ fn compare_tensor_with_nano(
         let atom_id = tam.base_id.0 + i as u64;
         let Some(nano_scalar) = nano_outputs.get(&atom_id) else {
             comparison_errors.push(format!(
-                "Output {:?}: atom {} not found in nano outputs", ext_id, atom_id
+                "Output {:?}: atom {} not found in nano outputs",
+                ext_id, atom_id
             ));
             return;
         };
@@ -644,8 +744,10 @@ fn compare_tensor_with_nano(
         compared += 1;
     }
 
-    println!("    Output {:?}: {} elements, max_abs_err={:.6e}, max_rel_err={:.6e}",
-        ext_id, compared, local_max_abs, local_max_rel);
+    println!(
+        "    Output {:?}: {} elements, max_abs_err={:.6e}, max_rel_err={:.6e}",
+        ext_id, compared, local_max_abs, local_max_rel
+    );
 
     *total_compared += compared;
     *max_abs_error = max_abs_error.max(local_max_abs);

@@ -144,7 +144,10 @@ fn topo_sort_kernels(
             for &input in &op.inputs {
                 // Skip source ops — they are pre-evaluated and available
                 // to all kernels without creating a dependency.
-                if matches!(dag.ops[input as usize].kind, OpKind::Input | OpKind::Literal) {
+                if matches!(
+                    dag.ops[input as usize].kind,
+                    OpKind::Input | OpKind::Literal
+                ) {
                     continue;
                 }
                 if !kernel_set.contains(&input) {
@@ -383,13 +386,9 @@ pub fn run_pipeline(
             op_kernel[op as usize] = ki;
         }
     }
-    let execution_groups =
-        topo_sort_kernels(dag, &partition, &op_kernel, partition.kernels.len());
+    let execution_groups = topo_sort_kernels(dag, &partition, &op_kernel, partition.kernels.len());
     // Flatten groups into a flat execution order for the result.
-    let execution_order: Vec<usize> = execution_groups
-        .into_iter()
-        .flatten()
-        .collect();
+    let execution_order: Vec<usize> = execution_groups.into_iter().flatten().collect();
 
     PipelineResult {
         outputs,
@@ -437,7 +436,12 @@ mod tests {
         // Validate partition.
         let partition = Creative3Partitioner.partition(dag, &config);
         let errors = partition.validate(dag);
-        assert!(errors.is_empty(), "{}: partition invalid: {:?}", name, errors);
+        assert!(
+            errors.is_empty(),
+            "{}: partition invalid: {:?}",
+            name,
+            errors
+        );
 
         // Check error tolerance.
         assert!(
@@ -457,7 +461,7 @@ mod tests {
         let mut inputs = HashMap::new();
         // A[i] = i, B[i] = 100 + i
         for i in 0..64u32 {
-            inputs.insert(i, i as f32);           // A[i]
+            inputs.insert(i, i as f32); // A[i]
             inputs.insert(64 + i, 100.0 + i as f32); // B[i]
         }
 
@@ -675,7 +679,11 @@ mod tests {
         // The execution order should contain each kernel exactly once.
         let mut seen: HashSet<usize> = HashSet::new();
         for &ki in &result.execution_order {
-            assert!(seen.insert(ki), "kernel {} appears twice in execution order", ki);
+            assert!(
+                seen.insert(ki),
+                "kernel {} appears twice in execution order",
+                ki
+            );
         }
         assert_eq!(seen.len(), result.num_kernels);
     }

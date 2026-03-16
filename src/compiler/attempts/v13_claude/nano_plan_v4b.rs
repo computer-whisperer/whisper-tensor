@@ -1,4 +1,10 @@
-#![allow(clippy::all, dead_code, unreachable_patterns, unused_variables, unused_imports)]
+#![allow(
+    clippy::all,
+    dead_code,
+    unreachable_patterns,
+    unused_variables,
+    unused_imports
+)]
 //! Span-based partitioner v4b: Group-level DAG with transitive dependency closure.
 //!
 //! Design principles (learned from 15+ failed attempts):
@@ -526,10 +532,7 @@ fn assign_phases_and_lanes(
             // Try to co-locate with AllRows producers that are also whole.
             let mut preferred_lane: Option<usize> = None;
             for &(pi, kind) in &dep_class[gi] {
-                if kind == DepKind::AllRows
-                    && !is_split[pi]
-                    && group_phase[pi] == group_phase[gi]
-                {
+                if kind == DepKind::AllRows && !is_split[pi] && group_phase[pi] == group_phase[gi] {
                     if let LaneAssignment::Whole(lane) = &group_lane[pi] {
                         preferred_lane = Some(*lane);
                         break;
@@ -661,8 +664,7 @@ fn build_span_plan(
 
     // For each span (phase, lane), collect work items and resolve transitive deps.
     // This is where we handle duplication with full transitive closure.
-    let mut phase_lane_work: Vec<Vec<Vec<usize>>> =
-        vec![vec![Vec::new(); num_lanes]; num_phases];
+    let mut phase_lane_work: Vec<Vec<Vec<usize>>> = vec![vec![Vec::new(); num_lanes]; num_phases];
 
     for (wi, item) in work_items.iter().enumerate() {
         phase_lane_work[item.phase][item.lane].push(wi);
@@ -816,12 +818,7 @@ fn build_span_plan(
                         if !is_literal[pi]
                             && !needed.contains(&pi)
                             && group_phase[pi] >= phase
-                            && !is_range_covered_in_span(
-                                &span_coverage,
-                                pi,
-                                0,
-                                groups[pi].count,
-                            )
+                            && !is_range_covered_in_span(&span_coverage, pi, 0, groups[pi].count)
                         {
                             needed.insert(pi);
                             queue.push_back(pi);
@@ -849,8 +846,7 @@ fn build_span_plan(
     work_items.extend(all_duplicates);
 
     // Rebuild phase_lane_work with duplicates.
-    let mut phase_lane_work: Vec<Vec<Vec<usize>>> =
-        vec![vec![Vec::new(); num_lanes]; num_phases];
+    let mut phase_lane_work: Vec<Vec<Vec<usize>>> = vec![vec![Vec::new(); num_lanes]; num_phases];
     for (wi, item) in work_items.iter().enumerate() {
         phase_lane_work[item.phase][item.lane].push(wi);
     }
@@ -914,10 +910,7 @@ fn build_span_plan(
         phases.push(Phase { spans });
     }
 
-    SpanPlan {
-        num_lanes,
-        phases,
-    }
+    SpanPlan { num_lanes, phases }
 }
 
 /// Work item: a slice of a group assigned to a specific phase/lane.
@@ -1549,7 +1542,8 @@ fn resolve_input_producer_groups(
     reduce_stride: i64,
     groups: &[AtomGroup],
 ) -> Vec<usize> {
-    let ranges = resolve_input_to_group_ranges(input, 0, count, reduce_count, reduce_stride, groups);
+    let ranges =
+        resolve_input_to_group_ranges(input, 0, count, reduce_count, reduce_stride, groups);
     let mut result: BTreeSet<usize> = BTreeSet::new();
     for (gi, _, _) in ranges {
         result.insert(gi);
@@ -1585,8 +1579,10 @@ fn remap_single_input(
         InputRef::Broadcast(id) => InputRef::Broadcast(atom_map.get(*id).unwrap_or(*id)),
 
         InputRef::Affine { base, stride } => {
-            let new_base_raw =
-                AtomId(base.0.wrapping_add((*stride as i64 * atom_offset as i64) as u64));
+            let new_base_raw = AtomId(
+                base.0
+                    .wrapping_add((*stride as i64 * atom_offset as i64) as u64),
+            );
             InputRef::Affine {
                 base: atom_map.get(new_base_raw).unwrap_or(new_base_raw),
                 stride: *stride,
@@ -1634,8 +1630,10 @@ fn remap_single_input(
             stride_i,
             stride_k,
         } => {
-            let new_base_raw =
-                AtomId(base.0.wrapping_add((*stride_i as i64 * atom_offset as i64) as u64));
+            let new_base_raw = AtomId(
+                base.0
+                    .wrapping_add((*stride_i as i64 * atom_offset as i64) as u64),
+            );
             InputRef::SymAffine {
                 base: atom_map.get(new_base_raw).unwrap_or(new_base_raw),
                 stride_i: *stride_i,
@@ -1680,7 +1678,9 @@ fn remap_sym_dims(
     dims: &[crate::nano_graph::SymDim],
     remap: &HashMap<crate::nano_graph::SymDim, crate::nano_graph::SymDim>,
 ) -> Vec<crate::nano_graph::SymDim> {
-    dims.iter().map(|d| remap.get(d).copied().unwrap_or(*d)).collect()
+    dims.iter()
+        .map(|d| remap.get(d).copied().unwrap_or(*d))
+        .collect()
 }
 
 // ─── Group/atom lookup helpers ───────────────────────────────────────────────
@@ -2146,14 +2146,8 @@ mod tests {
             vec![],
             vec![],
             vec![
-                InputRef::Affine {
-                    base: a,
-                    stride: 1,
-                },
-                InputRef::Affine {
-                    base: b,
-                    stride: 1,
-                },
+                InputRef::Affine { base: a, stride: 1 },
+                InputRef::Affine { base: b, stride: 1 },
             ],
         );
         for i in 0..count {
@@ -2195,10 +2189,7 @@ mod tests {
             },
             vec![],
             vec![],
-            vec![InputRef::Affine {
-                base: a,
-                stride: 1,
-            }],
+            vec![InputRef::Affine { base: a, stride: 1 }],
         );
         let c = g.push_group(
             count,
@@ -2209,10 +2200,7 @@ mod tests {
             },
             vec![],
             vec![],
-            vec![InputRef::Affine {
-                base: b,
-                stride: 1,
-            }],
+            vec![InputRef::Affine { base: b, stride: 1 }],
         );
         for i in 0..count {
             g.outputs.push(AtomId(c.0 + i));
@@ -2339,10 +2327,7 @@ mod tests {
             },
             vec![],
             vec![],
-            vec![
-                InputRef::Explicit(mul_ids),
-                InputRef::Broadcast(stride_lit),
-            ],
+            vec![InputRef::Explicit(mul_ids), InputRef::Broadcast(stride_lit)],
         );
 
         let col_offsets = g.push_group(
@@ -2579,10 +2564,7 @@ mod tests {
             },
             vec![],
             vec![],
-            vec![
-                InputRef::Broadcast(lit_x),
-                InputRef::Broadcast(lit_y),
-            ],
+            vec![InputRef::Broadcast(lit_x), InputRef::Broadcast(lit_y)],
         );
 
         // Large group that broadcasts scalar.
@@ -2650,10 +2632,7 @@ mod tests {
             },
             vec![],
             vec![],
-            vec![InputRef::Affine {
-                base: a,
-                stride: 1,
-            }],
+            vec![InputRef::Affine { base: a, stride: 1 }],
         );
         let c = g.push_group(
             count,
@@ -2664,10 +2643,7 @@ mod tests {
             },
             vec![],
             vec![],
-            vec![InputRef::Affine {
-                base: a,
-                stride: 1,
-            }],
+            vec![InputRef::Affine { base: a, stride: 1 }],
         );
         let d = g.push_group(
             count,
@@ -2679,14 +2655,8 @@ mod tests {
             vec![],
             vec![],
             vec![
-                InputRef::Affine {
-                    base: b,
-                    stride: 1,
-                },
-                InputRef::Affine {
-                    base: c,
-                    stride: 1,
-                },
+                InputRef::Affine { base: b, stride: 1 },
+                InputRef::Affine { base: c, stride: 1 },
             ],
         );
         for i in 0..count {
@@ -2778,8 +2748,7 @@ mod tests {
             let mut output_ranges: Vec<(u64, u64)> = Vec::new();
             for span in &phase.spans {
                 for mapping in &span.outputs {
-                    output_ranges
-                        .push((mapping.main_base.0, mapping.main_base.0 + mapping.count));
+                    output_ranges.push((mapping.main_base.0, mapping.main_base.0 + mapping.count));
                 }
             }
             for (lane_idx, span) in phase.spans.iter().enumerate() {
@@ -2790,7 +2759,12 @@ mod tests {
                         assert!(
                             in_lo >= out_hi || out_lo >= in_hi,
                             "Phase {} lane {}: input [{}, {}) overlaps output [{}, {})",
-                            phase_idx, lane_idx, in_lo, in_hi, out_lo, out_hi
+                            phase_idx,
+                            lane_idx,
+                            in_lo,
+                            in_hi,
+                            out_lo,
+                            out_hi
                         );
                     }
                 }
@@ -3064,11 +3038,7 @@ mod tests {
             ("elementwise_4lanes", build_elementwise(1024), 4),
             ("elementwise_8lanes", build_elementwise(8192), 8),
             ("allrows_chain_4lanes", build_allrows_chain(256), 4),
-            (
-                "cross_lane",
-                build_cross_lane_pattern(3072, 49152),
-                8,
-            ),
+            ("cross_lane", build_cross_lane_pattern(3072, 49152), 8),
             ("broadcast_dep", build_broadcast_dependency(), 4),
             ("diamond_256", build_diamond(256), 4),
             ("diamond_1024", build_diamond(1024), 8),

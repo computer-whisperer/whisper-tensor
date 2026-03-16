@@ -1,4 +1,10 @@
-#![allow(clippy::all, dead_code, unreachable_patterns, unused_variables, unused_imports)]
+#![allow(
+    clippy::all,
+    dead_code,
+    unreachable_patterns,
+    unused_variables,
+    unused_imports
+)]
 //! Lane+barrier execution planner v2c: Row-Slice Lane Planner with group splitting.
 //!
 //! Key innovations over previous attempts:
@@ -124,10 +130,7 @@ pub fn plan_execution(graph: &NanoGraph, num_lanes: usize) -> ExecutionPlan {
         &producers,
     );
 
-    ExecutionPlan {
-        num_lanes,
-        phases,
-    }
+    ExecutionPlan { num_lanes, phases }
 }
 
 // ─── Group dependency graph ──────────────────────────────────────────────────
@@ -158,13 +161,23 @@ fn build_group_deps(groups: &[AtomGroup]) -> (Vec<Vec<usize>>, Vec<Vec<usize>>) 
 
         // 2. ReduceSum/ReduceMax: the strided access extends beyond the InputRef range.
         match &group.op {
-            ScalarOp::ReduceSum { reduce_count, reduce_stride, .. }
-            | ScalarOp::ReduceMax { reduce_count, reduce_stride, .. }
-                if *reduce_count > 1 && *reduce_stride != 0 =>
-            {
+            ScalarOp::ReduceSum {
+                reduce_count,
+                reduce_stride,
+                ..
+            }
+            | ScalarOp::ReduceMax {
+                reduce_count,
+                reduce_stride,
+                ..
+            } if *reduce_count > 1 && *reduce_stride != 0 => {
                 for input in &group.inputs {
                     let prods = resolve_producer_groups_with_reduce(
-                        input, group.count, *reduce_count, *reduce_stride, groups,
+                        input,
+                        group.count,
+                        *reduce_count,
+                        *reduce_stride,
+                        groups,
                     );
                     for pi in prods {
                         if pi != gi {
@@ -198,9 +211,7 @@ fn build_group_deps(groups: &[AtomGroup]) -> (Vec<Vec<usize>>, Vec<Vec<usize>>) 
 /// Find all groups that produce atoms referenced by an InputRef.
 fn resolve_producer_groups(input: &InputRef, count: u64, groups: &[AtomGroup]) -> Vec<usize> {
     match input {
-        InputRef::Broadcast(atom_id) => {
-            find_group_idx(groups, *atom_id).into_iter().collect()
-        }
+        InputRef::Broadcast(atom_id) => find_group_idx(groups, *atom_id).into_iter().collect(),
         InputRef::Affine { base, stride } => {
             if count == 0 {
                 return vec![];
@@ -482,7 +493,8 @@ fn identify_row_families(
                             // Check structural similarity: same op discriminant, same count.
                             let my_op = std::mem::discriminant(&groups[gi].op);
                             let my_count = groups[gi].count;
-                            let similar_count = siblings.iter()
+                            let similar_count = siblings
+                                .iter()
                                 .filter(|&&ci| {
                                     std::mem::discriminant(&groups[ci].op) == my_op
                                         && groups[ci].count == my_count
@@ -601,8 +613,7 @@ fn is_allrows_chain_lane_local_samephase(
                 // producer's range. Lane-local if each same-phase AllRows
                 // producer has count = ceil(consumer_count / repeat).
                 for &pi in &same_phase_allrows {
-                    let expected_prod_atoms =
-                        (consumer_count + repeat - 1) / repeat;
+                    let expected_prod_atoms = (consumer_count + repeat - 1) / repeat;
                     if groups[pi].count != expected_prod_atoms {
                         return false;
                     }
@@ -646,7 +657,11 @@ fn is_allrows_chain_lane_local_samephase(
                 // reads would cross lane boundaries.
                 let has_same_phase_allrows_input = consumer.inputs.iter().any(|inp| {
                     let prods = resolve_producer_groups_with_reduce(
-                        inp, consumer_count, *reduce_count, *reduce_stride, groups,
+                        inp,
+                        consumer_count,
+                        *reduce_count,
+                        *reduce_stride,
+                        groups,
                     );
                     prods.iter().any(|&pi| {
                         !is_literal[pi]
@@ -754,7 +769,12 @@ fn compute_phase_assignment(
             // All same-phase non-literal producers are AllRows, consumer is AllRows.
             // Check if the access pattern from same-phase AllRows producers is lane-local.
             !is_allrows_chain_lane_local_samephase(
-                gi, groups, row_families, is_literal, &group_phase, max_prod_phase,
+                gi,
+                groups,
+                row_families,
+                is_literal,
+                &group_phase,
+                max_prod_phase,
             )
         } else if has_all_rows && same_phase_families.is_empty() {
             // Consumer is not AllRows (e.g. Row) reading from AllRows at same phase
@@ -767,8 +787,8 @@ fn compute_phase_assignment(
         // from any Row producer at same phase, it's cross-lane: the Row
         // producer is on one specific lane, but other lanes of the consumer
         // also need that data.
-        let allrows_consumer_reads_row = row_families[gi] == RowFamily::AllRows
-            && distinct_row_families >= 1;
+        let allrows_consumer_reads_row =
+            row_families[gi] == RowFamily::AllRows && distinct_row_families >= 1;
 
         let needs_barrier = distinct_row_families > 1
             || (has_all_rows && distinct_row_families >= 1)
@@ -782,7 +802,12 @@ fn compute_phase_assignment(
         }
     }
 
-    let num_phases = group_phase.iter().copied().max().map(|m| m + 1).unwrap_or(1);
+    let num_phases = group_phase
+        .iter()
+        .copied()
+        .max()
+        .map(|m| m + 1)
+        .unwrap_or(1);
     (group_phase, num_phases)
 }
 
@@ -820,10 +845,20 @@ fn validate_phase_ordering(
                          reads from producer group {} (phase {}, family {:?}, op {:?}), \
                          but producer is in a LATER phase! \
                          Group {} base_id={}, count={}; Producer {} base_id={}, count={}",
-                        gi, my_phase, row_families[gi], std::mem::discriminant(&groups[gi].op),
-                        pi, group_phase[pi], row_families[pi], std::mem::discriminant(&groups[pi].op),
-                        gi, groups[gi].base_id.0, groups[gi].count,
-                        pi, groups[pi].base_id.0, groups[pi].count,
+                        gi,
+                        my_phase,
+                        row_families[gi],
+                        std::mem::discriminant(&groups[gi].op),
+                        pi,
+                        group_phase[pi],
+                        row_families[pi],
+                        std::mem::discriminant(&groups[pi].op),
+                        gi,
+                        groups[gi].base_id.0,
+                        groups[gi].count,
+                        pi,
+                        groups[pi].base_id.0,
+                        groups[pi].count,
                     );
                 }
             }
@@ -831,14 +866,24 @@ fn validate_phase_ordering(
 
         // Check 2: ReduceSum/ReduceMax strided access extends the read range.
         match &group.op {
-            ScalarOp::ReduceSum { reduce_count, reduce_stride, .. }
-            | ScalarOp::ReduceMax { reduce_count, reduce_stride, .. }
-                if *reduce_count > 1 && *reduce_stride != 0 =>
-            {
+            ScalarOp::ReduceSum {
+                reduce_count,
+                reduce_stride,
+                ..
+            }
+            | ScalarOp::ReduceMax {
+                reduce_count,
+                reduce_stride,
+                ..
+            } if *reduce_count > 1 && *reduce_stride != 0 => {
                 for input in &group.inputs {
                     // Compute the FULL accessed range including reduce strides.
                     let extended_prods = resolve_producer_groups_with_reduce(
-                        input, group.count, *reduce_count, *reduce_stride, groups,
+                        input,
+                        group.count,
+                        *reduce_count,
+                        *reduce_stride,
+                        groups,
                     );
                     for pi in extended_prods {
                         if pi == gi || is_literal[pi] {
@@ -850,10 +895,18 @@ fn validate_phase_ordering(
                                  reads from group {} (phase {}) via reduce stride access. \
                                  reduce_count={}, reduce_stride={}. \
                                  Group {} base_id={}, count={}; Producer {} base_id={}, count={}",
-                                gi, my_phase, pi, group_phase[pi],
-                                reduce_count, reduce_stride,
-                                gi, groups[gi].base_id.0, groups[gi].count,
-                                pi, groups[pi].base_id.0, groups[pi].count,
+                                gi,
+                                my_phase,
+                                pi,
+                                group_phase[pi],
+                                reduce_count,
+                                reduce_stride,
+                                gi,
+                                groups[gi].base_id.0,
+                                groups[gi].count,
+                                pi,
+                                groups[pi].base_id.0,
+                                groups[pi].count,
                             );
                         }
                     }
@@ -873,9 +926,16 @@ fn validate_phase_ordering(
                         "Phase ordering violation (IndirectLoad table_base): group {} (phase {}) \
                          reads from table group {} (phase {}) via IndirectLoad. \
                          Group {} base_id={}, count={}; Table group {} base_id={}, count={}",
-                        gi, my_phase, pi, group_phase[pi],
-                        gi, groups[gi].base_id.0, groups[gi].count,
-                        pi, groups[pi].base_id.0, groups[pi].count,
+                        gi,
+                        my_phase,
+                        pi,
+                        group_phase[pi],
+                        gi,
+                        groups[gi].base_id.0,
+                        groups[gi].count,
+                        pi,
+                        groups[pi].base_id.0,
+                        groups[pi].count,
                     );
                 }
             }
@@ -907,7 +967,11 @@ fn resolve_producer_groups_with_reduce(
             let hi = first_base.max(last_base) + max_reduce_ext;
             find_groups_in_range(groups, lo as u64, hi as u64)
         }
-        InputRef::StridedBroadcast { base, stride, repeat } => {
+        InputRef::StridedBroadcast {
+            base,
+            stride,
+            repeat,
+        } => {
             let first_block = 0i64;
             let last_block = ((count - 1) / repeat) as i64;
             let first_read = base.0 as i64 + stride * first_block;
@@ -1126,7 +1190,11 @@ impl UnionFind {
 impl ExecutionPlan {
     /// Print summary statistics about the plan.
     pub fn print_summary(&self, groups: &[AtomGroup]) {
-        println!("ExecutionPlan: {} lanes, {} phases", self.num_lanes, self.phases.len());
+        println!(
+            "ExecutionPlan: {} lanes, {} phases",
+            self.num_lanes,
+            self.phases.len()
+        );
 
         let is_literal: Vec<bool> = groups
             .iter()
@@ -1153,11 +1221,7 @@ impl ExecutionPlan {
                 .min()
                 .unwrap_or(0);
 
-            let groups_in_phase: usize = phase
-                .lane_work
-                .iter()
-                .map(|lane| lane.len())
-                .sum();
+            let groups_in_phase: usize = phase.lane_work.iter().map(|lane| lane.len()).sum();
 
             for lane in &phase.lane_work {
                 for w in lane {
@@ -1844,10 +1908,11 @@ mod tests {
 
             for (lane_idx, lane_work) in phase.lane_work.iter().enumerate() {
                 for work in lane_work {
-                    atom_to_lane
-                        .entry(work.group_idx)
-                        .or_default()
-                        .push((work.atom_offset, work.atom_count, lane_idx));
+                    atom_to_lane.entry(work.group_idx).or_default().push((
+                        work.atom_offset,
+                        work.atom_count,
+                        lane_idx,
+                    ));
                 }
             }
 
@@ -1879,12 +1944,17 @@ mod tests {
                                         if prod_lane != lane_idx {
                                             panic!(
                                                 "Phase {}: group {} slice [{},+{}) (lane {}) reads atoms [{},{}) from group {} (lane {}, slice [{},+{})) - cross-lane dependency!",
-                                                phase_idx, work.group_idx,
-                                                work.atom_offset, work.atom_count,
+                                                phase_idx,
+                                                work.group_idx,
+                                                work.atom_offset,
+                                                work.atom_count,
                                                 lane_idx,
-                                                prod_lo, prod_hi,
-                                                prod_gi, prod_lane,
-                                                prod_offset, prod_count,
+                                                prod_lo,
+                                                prod_hi,
+                                                prod_gi,
+                                                prod_lane,
+                                                prod_offset,
+                                                prod_count,
                                             );
                                         }
                                     }
@@ -1895,10 +1965,16 @@ mod tests {
 
                     // For ReduceSum/ReduceMax, also check the strided access.
                     match &group.op {
-                        ScalarOp::ReduceSum { reduce_count, reduce_stride, .. }
-                        | ScalarOp::ReduceMax { reduce_count, reduce_stride, .. }
-                            if *reduce_count > 1 && *reduce_stride != 0 =>
-                        {
+                        ScalarOp::ReduceSum {
+                            reduce_count,
+                            reduce_stride,
+                            ..
+                        }
+                        | ScalarOp::ReduceMax {
+                            reduce_count,
+                            reduce_stride,
+                            ..
+                        } if *reduce_count > 1 && *reduce_stride != 0 => {
                             // Each atom i in [atom_offset..atom_offset+atom_count)
                             // reads from input at resolved_base(i) + k*reduce_stride
                             // for k in 0..reduce_count.
@@ -1921,11 +1997,15 @@ mod tests {
                                                 if prod_lane != lane_idx {
                                                     panic!(
                                                         "Phase {}: group {} (ReduceSum) slice [{},+{}) (lane {}) reads atoms [{},{}) from group {} (lane {}) - cross-lane dependency!",
-                                                        phase_idx, work.group_idx,
-                                                        work.atom_offset, work.atom_count,
+                                                        phase_idx,
+                                                        work.group_idx,
+                                                        work.atom_offset,
+                                                        work.atom_count,
                                                         lane_idx,
-                                                        prod_lo, prod_hi,
-                                                        prod_gi, prod_lane,
+                                                        prod_lo,
+                                                        prod_hi,
+                                                        prod_gi,
+                                                        prod_lane,
                                                     );
                                                 }
                                             }
@@ -1974,16 +2054,23 @@ mod tests {
                 let hi = first_read.max(last_read) as u64 + 1;
                 // Find producer groups in this range.
                 let prods = find_groups_in_range(groups, lo, hi);
-                prods.into_iter().map(|gi| {
-                    let g = &groups[gi];
-                    let g_lo = g.base_id.0;
-                    let g_hi = g_lo + g.count;
-                    let overlap_lo = lo.max(g_lo) - g_lo;
-                    let overlap_hi = hi.min(g_hi) - g_lo;
-                    (gi, overlap_lo, overlap_hi)
-                }).collect()
+                prods
+                    .into_iter()
+                    .map(|gi| {
+                        let g = &groups[gi];
+                        let g_lo = g.base_id.0;
+                        let g_hi = g_lo + g.count;
+                        let overlap_lo = lo.max(g_lo) - g_lo;
+                        let overlap_hi = hi.min(g_hi) - g_lo;
+                        (gi, overlap_lo, overlap_hi)
+                    })
+                    .collect()
             }
-            InputRef::StridedBroadcast { base, stride, repeat } => {
+            InputRef::StridedBroadcast {
+                base,
+                stride,
+                repeat,
+            } => {
                 let first_block = first_i / repeat;
                 let last_block = last_i / repeat;
                 let first_read = base.0 as i64 + *stride * first_block as i64;
@@ -1991,29 +2078,39 @@ mod tests {
                 let lo = first_read.min(last_read) as u64;
                 let hi = first_read.max(last_read) as u64 + 1;
                 let prods = find_groups_in_range(groups, lo, hi);
-                prods.into_iter().map(|gi| {
-                    let g = &groups[gi];
-                    let g_lo = g.base_id.0;
-                    let g_hi = g_lo + g.count;
-                    let overlap_lo = lo.max(g_lo) - g_lo;
-                    let overlap_hi = hi.min(g_hi) - g_lo;
-                    (gi, overlap_lo, overlap_hi)
-                }).collect()
+                prods
+                    .into_iter()
+                    .map(|gi| {
+                        let g = &groups[gi];
+                        let g_lo = g.base_id.0;
+                        let g_hi = g_lo + g.count;
+                        let overlap_lo = lo.max(g_lo) - g_lo;
+                        let overlap_hi = hi.min(g_hi) - g_lo;
+                        (gi, overlap_lo, overlap_hi)
+                    })
+                    .collect()
             }
-            InputRef::Modular { base, stride, modulus } => {
+            InputRef::Modular {
+                base,
+                stride,
+                modulus,
+            } => {
                 // Modular wraps, so the full range of the modulus is accessed.
                 let lo = base.0;
                 let span = (*stride as i64).unsigned_abs() * (*modulus - 1);
                 let hi = lo + span + 1;
                 let prods = find_groups_in_range(groups, lo, hi);
-                prods.into_iter().map(|gi| {
-                    let g = &groups[gi];
-                    let g_lo = g.base_id.0;
-                    let g_hi = g_lo + g.count;
-                    let overlap_lo = lo.max(g_lo) - g_lo;
-                    let overlap_hi = hi.min(g_hi) - g_lo;
-                    (gi, overlap_lo, overlap_hi)
-                }).collect()
+                prods
+                    .into_iter()
+                    .map(|gi| {
+                        let g = &groups[gi];
+                        let g_lo = g.base_id.0;
+                        let g_hi = g_lo + g.count;
+                        let overlap_lo = lo.max(g_lo) - g_lo;
+                        let overlap_hi = hi.min(g_hi) - g_lo;
+                        (gi, overlap_lo, overlap_hi)
+                    })
+                    .collect()
             }
             InputRef::Explicit(ids) => {
                 // Check only the atoms in our slice.
@@ -2029,9 +2126,16 @@ mod tests {
                         }
                     }
                 }
-                result.into_iter().map(|(gi, (lo, hi))| (gi, lo, hi)).collect()
+                result
+                    .into_iter()
+                    .map(|(gi, (lo, hi))| (gi, lo, hi))
+                    .collect()
             }
-            InputRef::SymAffine { base, stride_i, stride_k: _ } => {
+            InputRef::SymAffine {
+                base,
+                stride_i,
+                stride_k: _,
+            } => {
                 // SymAffine for sym_dim k: we don't know k at plan time.
                 // Conservative: compute range for stride_i only.
                 let first_read = base.0 as i64 + *stride_i as i64 * first_i as i64;
@@ -2039,14 +2143,17 @@ mod tests {
                 let lo = first_read.min(last_read) as u64;
                 let hi = first_read.max(last_read) as u64 + 1;
                 let prods = find_groups_in_range(groups, lo, hi);
-                prods.into_iter().map(|gi| {
-                    let g = &groups[gi];
-                    let g_lo = g.base_id.0;
-                    let g_hi = g_lo + g.count;
-                    let overlap_lo = lo.max(g_lo) - g_lo;
-                    let overlap_hi = hi.min(g_hi) - g_lo;
-                    (gi, overlap_lo, overlap_hi)
-                }).collect()
+                prods
+                    .into_iter()
+                    .map(|gi| {
+                        let g = &groups[gi];
+                        let g_lo = g.base_id.0;
+                        let g_hi = g_lo + g.count;
+                        let overlap_lo = lo.max(g_lo) - g_lo;
+                        let overlap_hi = hi.min(g_hi) - g_lo;
+                        (gi, overlap_lo, overlap_hi)
+                    })
+                    .collect()
             }
         }
     }
@@ -2081,14 +2188,17 @@ mod tests {
                 let lo = (min_base + min_stride_offset) as u64;
                 let hi = (max_base + max_stride_offset) as u64 + 1;
                 let prods = find_groups_in_range(groups, lo, hi);
-                prods.into_iter().map(|gi| {
-                    let g = &groups[gi];
-                    let g_lo = g.base_id.0;
-                    let g_hi = g_lo + g.count;
-                    let overlap_lo = lo.max(g_lo) - g_lo;
-                    let overlap_hi = hi.min(g_hi) - g_lo;
-                    (gi, overlap_lo, overlap_hi)
-                }).collect()
+                prods
+                    .into_iter()
+                    .map(|gi| {
+                        let g = &groups[gi];
+                        let g_lo = g.base_id.0;
+                        let g_hi = g_lo + g.count;
+                        let overlap_lo = lo.max(g_lo) - g_lo;
+                        let overlap_hi = hi.min(g_hi) - g_lo;
+                        (gi, overlap_lo, overlap_hi)
+                    })
+                    .collect()
             }
             _ => {
                 // For non-Affine inputs with ReduceSum, be conservative:
@@ -2378,18 +2488,42 @@ mod tests {
         let n = 4u64;
 
         // Matmul 1: push all Muls, then all Reds.
-        let a1 = g.push_group(m * k, ScalarOp::Literal(NumericScalar::F32(1.0)), vec![], vec![], vec![]);
-        let b1 = g.push_group(k * n, ScalarOp::Literal(NumericScalar::F32(1.0)), vec![], vec![], vec![]);
+        let a1 = g.push_group(
+            m * k,
+            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
+        let b1 = g.push_group(
+            k * n,
+            ScalarOp::Literal(NumericScalar::F32(1.0)),
+            vec![],
+            vec![],
+            vec![],
+        );
 
         let mut mul1_bases = Vec::new();
         for row in 0..m {
             let mul = g.push_group(
                 k * n,
-                ScalarOp::Binary { op: ScalarBinOp::Mul, compute_dtype: DType::F32, output_dtype: DType::F32 },
-                vec![], vec![],
+                ScalarOp::Binary {
+                    op: ScalarBinOp::Mul,
+                    compute_dtype: DType::F32,
+                    output_dtype: DType::F32,
+                },
+                vec![],
+                vec![],
                 vec![
-                    InputRef::StridedBroadcast { base: AtomId(a1.0 + row * k), stride: 1, repeat: n },
-                    InputRef::Affine { base: b1, stride: 1 },
+                    InputRef::StridedBroadcast {
+                        base: AtomId(a1.0 + row * k),
+                        stride: 1,
+                        repeat: n,
+                    },
+                    InputRef::Affine {
+                        base: b1,
+                        stride: 1,
+                    },
                 ],
             );
             mul1_bases.push(mul);
@@ -2398,9 +2532,18 @@ mod tests {
         for row in 0..m {
             let red = g.push_group(
                 n,
-                ScalarOp::ReduceSum { reduce_count: k, reduce_stride: n as i64, compute_dtype: DType::F32, output_dtype: DType::F32 },
-                vec![], vec![],
-                vec![InputRef::Affine { base: mul1_bases[row as usize], stride: 1 }],
+                ScalarOp::ReduceSum {
+                    reduce_count: k,
+                    reduce_stride: n as i64,
+                    compute_dtype: DType::F32,
+                    output_dtype: DType::F32,
+                },
+                vec![],
+                vec![],
+                vec![InputRef::Affine {
+                    base: mul1_bases[row as usize],
+                    stride: 1,
+                }],
             );
             prev_reduce_bases.push(red);
         }
@@ -2410,22 +2553,45 @@ mod tests {
             // Monolithic elementwise (reads all M ReduceSum outputs contiguously).
             let act = g.push_group(
                 m * n,
-                ScalarOp::Unary { op: ScalarUnaryOp::Tanh, compute_dtype: DType::F32, output_dtype: DType::F32 },
-                vec![], vec![],
-                vec![InputRef::Affine { base: prev_reduce_bases[0], stride: 1 }],
+                ScalarOp::Unary {
+                    op: ScalarUnaryOp::Tanh,
+                    compute_dtype: DType::F32,
+                    output_dtype: DType::F32,
+                },
+                vec![],
+                vec![],
+                vec![InputRef::Affine {
+                    base: prev_reduce_bases[0],
+                    stride: 1,
+                }],
             );
 
-            let b = g.push_group(n * n, ScalarOp::Literal(NumericScalar::F32(1.0)), vec![], vec![], vec![]);
+            let b = g.push_group(
+                n * n,
+                ScalarOp::Literal(NumericScalar::F32(1.0)),
+                vec![],
+                vec![],
+                vec![],
+            );
 
             // Push all Muls, then all Reds.
             let mut mul_bases = Vec::new();
             for row in 0..m {
                 let mul = g.push_group(
                     n * n,
-                    ScalarOp::Binary { op: ScalarBinOp::Mul, compute_dtype: DType::F32, output_dtype: DType::F32 },
-                    vec![], vec![],
+                    ScalarOp::Binary {
+                        op: ScalarBinOp::Mul,
+                        compute_dtype: DType::F32,
+                        output_dtype: DType::F32,
+                    },
+                    vec![],
+                    vec![],
                     vec![
-                        InputRef::StridedBroadcast { base: AtomId(act.0 + row * n), stride: 1, repeat: n },
+                        InputRef::StridedBroadcast {
+                            base: AtomId(act.0 + row * n),
+                            stride: 1,
+                            repeat: n,
+                        },
                         InputRef::Affine { base: b, stride: 1 },
                     ],
                 );
@@ -2435,9 +2601,18 @@ mod tests {
             for row in 0..m {
                 let red = g.push_group(
                     n,
-                    ScalarOp::ReduceSum { reduce_count: n, reduce_stride: n as i64, compute_dtype: DType::F32, output_dtype: DType::F32 },
-                    vec![], vec![],
-                    vec![InputRef::Affine { base: mul_bases[row as usize], stride: 1 }],
+                    ScalarOp::ReduceSum {
+                        reduce_count: n,
+                        reduce_stride: n as i64,
+                        compute_dtype: DType::F32,
+                        output_dtype: DType::F32,
+                    },
+                    vec![],
+                    vec![],
+                    vec![InputRef::Affine {
+                        base: mul_bases[row as usize],
+                        stride: 1,
+                    }],
                 );
                 new_reduce_bases.push(red);
             }
@@ -2461,8 +2636,15 @@ mod tests {
 
         // 3 matmuls with 2 monolithic elementwise between them:
         // Each elementwise creates a barrier on each side = 5 potential phases.
-        assert!(plan.phases.len() >= 3, "Three matmul chain should have >= 3 phases");
-        assert!(plan.phases.len() <= 10, "Should have <= 10 phases, got {}", plan.phases.len());
+        assert!(
+            plan.phases.len() >= 3,
+            "Three matmul chain should have >= 3 phases"
+        );
+        assert!(
+            plan.phases.len() <= 10,
+            "Should have <= 10 phases, got {}",
+            plan.phases.len()
+        );
     }
 
     #[test]
@@ -2536,7 +2718,9 @@ mod tests {
         let lit = g.push_group(
             count,
             ScalarOp::Literal(NumericScalar::F32(1.0)),
-            vec![], vec![], vec![],
+            vec![],
+            vec![],
+            vec![],
         );
         let a = g.push_group(
             count,
@@ -2545,8 +2729,12 @@ mod tests {
                 compute_dtype: DType::F32,
                 output_dtype: DType::F32,
             },
-            vec![], vec![],
-            vec![InputRef::Affine { base: lit, stride: 1 }],
+            vec![],
+            vec![],
+            vec![InputRef::Affine {
+                base: lit,
+                stride: 1,
+            }],
         );
         let b = g.push_group(
             count,
@@ -2555,7 +2743,8 @@ mod tests {
                 compute_dtype: DType::F32,
                 output_dtype: DType::F32,
             },
-            vec![], vec![],
+            vec![],
+            vec![],
             vec![InputRef::Affine { base: a, stride: 1 }],
         );
         let c = g.push_group(
@@ -2565,7 +2754,8 @@ mod tests {
                 compute_dtype: DType::F32,
                 output_dtype: DType::F32,
             },
-            vec![], vec![],
+            vec![],
+            vec![],
             vec![InputRef::Affine { base: b, stride: 1 }],
         );
         for i in 0..count {
@@ -2586,7 +2776,8 @@ mod tests {
         verify_phase_independence(&g, &plan);
 
         assert_eq!(
-            plan.phases.len(), 1,
+            plan.phases.len(),
+            1,
             "AllRows chain should be 1 phase, got {}",
             plan.phases.len()
         );
@@ -2605,7 +2796,9 @@ mod tests {
         let lit = g.push_group(
             count,
             ScalarOp::Literal(NumericScalar::F32(1.0)),
-            vec![], vec![], vec![],
+            vec![],
+            vec![],
+            vec![],
         );
         let a = g.push_group(
             count,
@@ -2614,8 +2807,12 @@ mod tests {
                 compute_dtype: DType::F32,
                 output_dtype: DType::F32,
             },
-            vec![], vec![],
-            vec![InputRef::Affine { base: lit, stride: 1 }],
+            vec![],
+            vec![],
+            vec![InputRef::Affine {
+                base: lit,
+                stride: 1,
+            }],
         );
         // Broadcast from first element of a (which is AllRows) → needs barrier
         let b = g.push_group(
@@ -2625,7 +2822,8 @@ mod tests {
                 compute_dtype: DType::F32,
                 output_dtype: DType::F32,
             },
-            vec![], vec![],
+            vec![],
+            vec![],
             vec![
                 InputRef::Affine { base: a, stride: 1 },
                 InputRef::Broadcast(a), // Broadcast from AllRows
@@ -2663,7 +2861,9 @@ mod tests {
         let lit = g.push_group(
             count,
             ScalarOp::Literal(NumericScalar::F32(1.0)),
-            vec![], vec![], vec![],
+            vec![],
+            vec![],
+            vec![],
         );
 
         // A: AllRows group (count) → phase 0
@@ -2674,8 +2874,12 @@ mod tests {
                 compute_dtype: DType::F32,
                 output_dtype: DType::F32,
             },
-            vec![], vec![],
-            vec![InputRef::Affine { base: lit, stride: 1 }],
+            vec![],
+            vec![],
+            vec![InputRef::Affine {
+                base: lit,
+                stride: 1,
+            }],
         );
 
         // mean: AllRows ReduceSum (small_count, reduce_count=count/small_count)
@@ -2688,7 +2892,8 @@ mod tests {
                 compute_dtype: DType::F32,
                 output_dtype: DType::F32,
             },
-            vec![], vec![],
+            vec![],
+            vec![],
             vec![InputRef::Affine { base: a, stride: 1 }],
         );
 
@@ -2701,7 +2906,8 @@ mod tests {
                 compute_dtype: DType::F32,
                 output_dtype: DType::F32,
             },
-            vec![], vec![],
+            vec![],
+            vec![],
             vec![
                 InputRef::Affine { base: a, stride: 1 },
                 InputRef::Broadcast(mean),
@@ -2717,7 +2923,8 @@ mod tests {
                 compute_dtype: DType::F32,
                 output_dtype: DType::F32,
             },
-            vec![], vec![],
+            vec![],
+            vec![],
             vec![InputRef::Affine { base: b, stride: 1 }],
         );
 
@@ -2793,12 +3000,16 @@ mod tests {
         let lit_a = g.push_group(
             8,
             ScalarOp::Literal(NumericScalar::F32(1.0)),
-            vec![], vec![], vec![],
+            vec![],
+            vec![],
+            vec![],
         );
         let lit_b = g.push_group(
             8,
             ScalarOp::Literal(NumericScalar::F32(2.0)),
-            vec![], vec![], vec![],
+            vec![],
+            vec![],
+            vec![],
         );
 
         // Two "rows" of Mul (same literal signature → Row families)
@@ -2809,10 +3020,18 @@ mod tests {
                 compute_dtype: DType::F32,
                 output_dtype: DType::F32,
             },
-            vec![], vec![],
+            vec![],
+            vec![],
             vec![
-                InputRef::StridedBroadcast { base: AtomId(lit_a.0), stride: 1, repeat: 4 },
-                InputRef::Affine { base: lit_b, stride: 1 },
+                InputRef::StridedBroadcast {
+                    base: AtomId(lit_a.0),
+                    stride: 1,
+                    repeat: 4,
+                },
+                InputRef::Affine {
+                    base: lit_b,
+                    stride: 1,
+                },
             ],
         );
         let mul1 = g.push_group(
@@ -2822,10 +3041,18 @@ mod tests {
                 compute_dtype: DType::F32,
                 output_dtype: DType::F32,
             },
-            vec![], vec![],
+            vec![],
+            vec![],
             vec![
-                InputRef::StridedBroadcast { base: AtomId(lit_a.0 + 2), stride: 1, repeat: 4 },
-                InputRef::Affine { base: lit_b, stride: 1 },
+                InputRef::StridedBroadcast {
+                    base: AtomId(lit_a.0 + 2),
+                    stride: 1,
+                    repeat: 4,
+                },
+                InputRef::Affine {
+                    base: lit_b,
+                    stride: 1,
+                },
             ],
         );
 
@@ -2838,8 +3065,12 @@ mod tests {
                 compute_dtype: DType::F32,
                 output_dtype: DType::F32,
             },
-            vec![], vec![],
-            vec![InputRef::Affine { base: mul0, stride: 1 }],
+            vec![],
+            vec![],
+            vec![InputRef::Affine {
+                base: mul0,
+                stride: 1,
+            }],
         );
         let red1 = g.push_group(
             4,
@@ -2849,8 +3080,12 @@ mod tests {
                 compute_dtype: DType::F32,
                 output_dtype: DType::F32,
             },
-            vec![], vec![],
-            vec![InputRef::Affine { base: mul1, stride: 1 }],
+            vec![],
+            vec![],
+            vec![InputRef::Affine {
+                base: mul1,
+                stride: 1,
+            }],
         );
 
         // Phase 1: monolithic elementwise that reads from BOTH row reduces (AllRows).
@@ -2863,8 +3098,12 @@ mod tests {
                 compute_dtype: DType::F32,
                 output_dtype: DType::F32,
             },
-            vec![], vec![],
-            vec![InputRef::Affine { base: red0, stride: 1 }],
+            vec![],
+            vec![],
+            vec![InputRef::Affine {
+                base: red0,
+                stride: 1,
+            }],
         );
 
         // mono_b: depends on mono_a via Broadcast (reads ONE atom from mono_a).
@@ -2876,9 +3115,13 @@ mod tests {
                 compute_dtype: DType::F32,
                 output_dtype: DType::F32,
             },
-            vec![], vec![],
+            vec![],
+            vec![],
             vec![
-                InputRef::Affine { base: mono_a, stride: 1 },
+                InputRef::Affine {
+                    base: mono_a,
+                    stride: 1,
+                },
                 InputRef::Broadcast(mono_a), // Broadcast from AllRows → barrier
             ],
         );
@@ -2900,8 +3143,12 @@ mod tests {
                 compute_dtype: DType::F32,
                 output_dtype: DType::F32,
             },
-            vec![], vec![],
-            vec![InputRef::Affine { base: mono_a, stride: 1 }],
+            vec![],
+            vec![],
+            vec![InputRef::Affine {
+                base: mono_a,
+                stride: 1,
+            }],
         );
 
         for i in 0..4 {
@@ -2933,7 +3180,10 @@ mod tests {
         }
 
         let mono_b_gi = groups.iter().position(|grp| grp.base_id == mono_b).unwrap();
-        let reduce_gi = groups.iter().position(|grp| grp.base_id == reduce_cross).unwrap();
+        let reduce_gi = groups
+            .iter()
+            .position(|grp| grp.base_id == reduce_cross)
+            .unwrap();
 
         let mono_b_phase = group_phase_from_plan[&mono_b_gi];
         let reduce_phase = group_phase_from_plan[&reduce_gi];
@@ -2944,7 +3194,10 @@ mod tests {
             reduce_phase >= mono_b_phase,
             "ReduceSum group (gi={}, phase={}) reads atoms from mono_b (gi={}, phase={}) \
              via strided reduce access, but is placed in an earlier phase!",
-            reduce_gi, reduce_phase, mono_b_gi, mono_b_phase,
+            reduce_gi,
+            reduce_phase,
+            mono_b_gi,
+            mono_b_phase,
         );
     }
 }

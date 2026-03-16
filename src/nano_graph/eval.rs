@@ -52,22 +52,22 @@ impl NanoEval {
                 let atom_idx = group.base_id.0 + i;
 
                 if is_reduce {
-                    let (reduce_count, reduce_stride, compute_dtype, output_dtype) =
-                        match &group.op {
-                            ScalarOp::ReduceSum {
-                                reduce_count,
-                                reduce_stride,
-                                compute_dtype,
-                                output_dtype,
-                            } => (*reduce_count, *reduce_stride, *compute_dtype, *output_dtype),
-                            ScalarOp::ReduceMax {
-                                reduce_count,
-                                reduce_stride,
-                                compute_dtype,
-                                output_dtype,
-                            } => (*reduce_count, *reduce_stride, *compute_dtype, *output_dtype),
-                            _ => unreachable!(),
-                        };
+                    let (reduce_count, reduce_stride, compute_dtype, output_dtype) = match &group.op
+                    {
+                        ScalarOp::ReduceSum {
+                            reduce_count,
+                            reduce_stride,
+                            compute_dtype,
+                            output_dtype,
+                        } => (*reduce_count, *reduce_stride, *compute_dtype, *output_dtype),
+                        ScalarOp::ReduceMax {
+                            reduce_count,
+                            reduce_stride,
+                            compute_dtype,
+                            output_dtype,
+                        } => (*reduce_count, *reduce_stride, *compute_dtype, *output_dtype),
+                        _ => unreachable!(),
+                    };
 
                     let mut acc = match &group.op {
                         ScalarOp::ReduceSum { .. } => NumericScalar::zero_of(compute_dtype),
@@ -77,8 +77,7 @@ impl NanoEval {
 
                     let base = group.inputs[0].resolve(i, 0);
                     for k in 0..reduce_count {
-                        let src_idx =
-                            (base.0 as i64 + k as i64 * reduce_stride) as u64;
+                        let src_idx = (base.0 as i64 + k as i64 * reduce_stride) as u64;
                         let val = values[src_idx as usize].cast_to(compute_dtype);
                         acc = match &group.op {
                             ScalarOp::ReduceSum { .. } => acc.add(&val),
@@ -131,14 +130,62 @@ impl NanoEval {
                                 ScalarBinOp::Min => a.scalar_min(&b),
                                 ScalarBinOp::Mod => a.modulo(&b),
                                 ScalarBinOp::Pow => a.pow(&b),
-                                ScalarBinOp::Equal => if a.to_f64() == b.to_f64() { NumericScalar::F32(1.0) } else { NumericScalar::F32(0.0) },
-                                ScalarBinOp::Greater => if a.to_f64() > b.to_f64() { NumericScalar::F32(1.0) } else { NumericScalar::F32(0.0) },
-                                ScalarBinOp::GreaterOrEqual => if a.to_f64() >= b.to_f64() { NumericScalar::F32(1.0) } else { NumericScalar::F32(0.0) },
-                                ScalarBinOp::Less => if a.to_f64() < b.to_f64() { NumericScalar::F32(1.0) } else { NumericScalar::F32(0.0) },
-                                ScalarBinOp::LessOrEqual => if a.to_f64() <= b.to_f64() { NumericScalar::F32(1.0) } else { NumericScalar::F32(0.0) },
-                                ScalarBinOp::And => if a.to_f64() != 0.0 && b.to_f64() != 0.0 { NumericScalar::F32(1.0) } else { NumericScalar::F32(0.0) },
-                                ScalarBinOp::Or => if a.to_f64() != 0.0 || b.to_f64() != 0.0 { NumericScalar::F32(1.0) } else { NumericScalar::F32(0.0) },
-                                ScalarBinOp::Xor => if (a.to_f64() != 0.0) ^ (b.to_f64() != 0.0) { NumericScalar::F32(1.0) } else { NumericScalar::F32(0.0) },
+                                ScalarBinOp::Equal => {
+                                    if a.to_f64() == b.to_f64() {
+                                        NumericScalar::F32(1.0)
+                                    } else {
+                                        NumericScalar::F32(0.0)
+                                    }
+                                }
+                                ScalarBinOp::Greater => {
+                                    if a.to_f64() > b.to_f64() {
+                                        NumericScalar::F32(1.0)
+                                    } else {
+                                        NumericScalar::F32(0.0)
+                                    }
+                                }
+                                ScalarBinOp::GreaterOrEqual => {
+                                    if a.to_f64() >= b.to_f64() {
+                                        NumericScalar::F32(1.0)
+                                    } else {
+                                        NumericScalar::F32(0.0)
+                                    }
+                                }
+                                ScalarBinOp::Less => {
+                                    if a.to_f64() < b.to_f64() {
+                                        NumericScalar::F32(1.0)
+                                    } else {
+                                        NumericScalar::F32(0.0)
+                                    }
+                                }
+                                ScalarBinOp::LessOrEqual => {
+                                    if a.to_f64() <= b.to_f64() {
+                                        NumericScalar::F32(1.0)
+                                    } else {
+                                        NumericScalar::F32(0.0)
+                                    }
+                                }
+                                ScalarBinOp::And => {
+                                    if a.to_f64() != 0.0 && b.to_f64() != 0.0 {
+                                        NumericScalar::F32(1.0)
+                                    } else {
+                                        NumericScalar::F32(0.0)
+                                    }
+                                }
+                                ScalarBinOp::Or => {
+                                    if a.to_f64() != 0.0 || b.to_f64() != 0.0 {
+                                        NumericScalar::F32(1.0)
+                                    } else {
+                                        NumericScalar::F32(0.0)
+                                    }
+                                }
+                                ScalarBinOp::Xor => {
+                                    if (a.to_f64() != 0.0) ^ (b.to_f64() != 0.0) {
+                                        NumericScalar::F32(1.0)
+                                    } else {
+                                        NumericScalar::F32(0.0)
+                                    }
+                                }
                             };
                             result.cast_to(*output_dtype)
                         }

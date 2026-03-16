@@ -17,13 +17,29 @@ use whisper_tensor_import::onnx_graph::WeightStorageStrategy;
 
 macro_rules! validate_v4_plan {
     ($name:expr, $plan:expr, $graph:expr) => {{
-        let raw: Vec<Vec<(&NanoGraph, Vec<(u64, u64)>, Vec<(u64, u64)>)>> = $plan.phases.iter().map(|phase| {
-            phase.spans.iter().map(|span| {
-                let inputs: Vec<(u64, u64)> = span.inputs.iter().map(|m| (m.main_base.0, m.count)).collect();
-                let outputs: Vec<(u64, u64)> = span.outputs.iter().map(|m| (m.main_base.0, m.count)).collect();
-                (&span.graph as &NanoGraph, inputs, outputs)
-            }).collect()
-        }).collect();
+        let raw: Vec<Vec<(&NanoGraph, Vec<(u64, u64)>, Vec<(u64, u64)>)>> = $plan
+            .phases
+            .iter()
+            .map(|phase| {
+                phase
+                    .spans
+                    .iter()
+                    .map(|span| {
+                        let inputs: Vec<(u64, u64)> = span
+                            .inputs
+                            .iter()
+                            .map(|m| (m.main_base.0, m.count))
+                            .collect();
+                        let outputs: Vec<(u64, u64)> = span
+                            .outputs
+                            .iter()
+                            .map(|m| (m.main_base.0, m.count))
+                            .collect();
+                        (&span.graph as &NanoGraph, inputs, outputs)
+                    })
+                    .collect()
+            })
+            .collect();
         validate_span_topology_raw($name, &raw, $graph);
     }};
 }
@@ -79,7 +95,8 @@ fn main() {
 
     // ---- Lower (graph only, skip numeric_overrides) ----
     let t0 = Instant::now();
-    let result = whisper_tensor::nano_graph::lower::lower_graph_only(&milli_graph, &all_infos).unwrap();
+    let result =
+        whisper_tensor::nano_graph::lower::lower_graph_only(&milli_graph, &all_infos).unwrap();
     eprintln!("lower_graph_only: {:.1}s", t0.elapsed().as_secs_f64());
 
     let stats = result.graph.stats();
@@ -93,11 +110,16 @@ fn main() {
         }
         let mut sorted: Vec<_> = counts.into_iter().collect();
         sorted.sort_by(|a, b| b.1.cmp(&a.1));
-        for (kind, count) in sorted { println!("  {:>4}x  {}", count, kind); }
+        for (kind, count) in sorted {
+            println!("  {:>4}x  {}", count, kind);
+        }
     }
 
     // ---- Span-Based Execution Plans ----
-    let num_lanes = std::env::var("NUM_LANES").ok().and_then(|s| s.parse().ok()).unwrap_or(8);
+    let num_lanes = std::env::var("NUM_LANES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8);
     println!("\n=== Span-Based Plans (num_lanes={}) ===", num_lanes);
 
     let which = std::env::var("SPAN_PLANNER").unwrap_or("all".to_string());
@@ -106,9 +128,21 @@ fn main() {
         let t0 = Instant::now();
         let plan = nano_plan_spans_a::plan_execution(&result.graph, num_lanes);
         let elapsed = t0.elapsed();
-        let ss: Vec<Vec<SS>> = plan.phases.iter().map(|p| p.spans.iter().map(|s| SS {
-            ng: s.graph.num_groups(), na: s.graph.num_atoms(), ni: s.inputs.len(), no: s.outputs.len(),
-        }).collect()).collect();
+        let ss: Vec<Vec<SS>> = plan
+            .phases
+            .iter()
+            .map(|p| {
+                p.spans
+                    .iter()
+                    .map(|s| SS {
+                        ng: s.graph.num_groups(),
+                        na: s.graph.num_atoms(),
+                        ni: s.inputs.len(),
+                        no: s.outputs.len(),
+                    })
+                    .collect()
+            })
+            .collect();
         print_span_summary("spans_a", &ss, plan.num_lanes, elapsed);
     }
     if which == "b" || which == "all" {
@@ -116,9 +150,21 @@ fn main() {
         let t0 = Instant::now();
         let plan = nano_plan_spans_b::plan_spans(&result.graph, num_lanes);
         let elapsed = t0.elapsed();
-        let ss: Vec<Vec<SS>> = plan.phases.iter().map(|p| p.spans.iter().map(|s| SS {
-            ng: s.graph.num_groups(), na: s.graph.num_atoms(), ni: s.inputs.len(), no: s.outputs.len(),
-        }).collect()).collect();
+        let ss: Vec<Vec<SS>> = plan
+            .phases
+            .iter()
+            .map(|p| {
+                p.spans
+                    .iter()
+                    .map(|s| SS {
+                        ng: s.graph.num_groups(),
+                        na: s.graph.num_atoms(),
+                        ni: s.inputs.len(),
+                        no: s.outputs.len(),
+                    })
+                    .collect()
+            })
+            .collect();
         print_span_summary("spans_b", &ss, plan.num_lanes, elapsed);
     }
     if which == "c" || which == "all" {
@@ -126,9 +172,21 @@ fn main() {
         let t0 = Instant::now();
         let plan = nano_plan_spans_c::plan_execution_spans(&result.graph, num_lanes);
         let elapsed = t0.elapsed();
-        let ss: Vec<Vec<SS>> = plan.phases.iter().map(|p| p.spans.iter().map(|s| SS {
-            ng: s.graph.num_groups(), na: s.graph.num_atoms(), ni: s.inputs.len(), no: s.outputs.len(),
-        }).collect()).collect();
+        let ss: Vec<Vec<SS>> = plan
+            .phases
+            .iter()
+            .map(|p| {
+                p.spans
+                    .iter()
+                    .map(|s| SS {
+                        ng: s.graph.num_groups(),
+                        na: s.graph.num_atoms(),
+                        ni: s.inputs.len(),
+                        no: s.outputs.len(),
+                    })
+                    .collect()
+            })
+            .collect();
         print_span_summary("spans_c", &ss, plan.num_lanes, elapsed);
 
         // Topology validation (O(groups), not O(atoms))
@@ -164,8 +222,10 @@ fn main() {
                     if !range_contains(&produced_ranges, mapping.main_base.0) {
                         errors += 1;
                         if errors <= 10 {
-                            println!("  SPAN VIOLATION: phase {}/lane {}: input base {:?} (count={}) not available",
-                                phase_idx, lane_idx, mapping.main_base, mapping.count);
+                            println!(
+                                "  SPAN VIOLATION: phase {}/lane {}: input base {:?} (count={}) not available",
+                                phase_idx, lane_idx, mapping.main_base, mapping.count
+                            );
                             // Trace producer group for diagnostics
                             let main_groups = result.graph.groups();
                             let atom_val = mapping.main_base.0;
@@ -173,19 +233,28 @@ fn main() {
                             if idx > 0 {
                                 let g = &main_groups[idx - 1];
                                 if atom_val < g.base_id.0 + g.count {
-                                    let op_str = format!("{:?}", g.op).chars().take(60).collect::<String>();
+                                    let op_str =
+                                        format!("{:?}", g.op).chars().take(60).collect::<String>();
                                     let mut in_phase = "not in any output".to_string();
                                     for (pi, ph) in plan.phases.iter().enumerate() {
                                         for sp in &ph.spans {
                                             for om in &sp.outputs {
-                                                if om.main_base.0 <= atom_val && atom_val < om.main_base.0 + om.count {
+                                                if om.main_base.0 <= atom_val
+                                                    && atom_val < om.main_base.0 + om.count
+                                                {
                                                     in_phase = format!("phase {}", pi);
                                                 }
                                             }
                                         }
                                     }
-                                    println!("    group_idx={} base={:?} count={} op={} [{}]",
-                                        idx - 1, g.base_id, g.count, op_str, in_phase);
+                                    println!(
+                                        "    group_idx={} base={:?} count={} op={} [{}]",
+                                        idx - 1,
+                                        g.base_id,
+                                        g.count,
+                                        op_str,
+                                        in_phase
+                                    );
                                 }
                             }
                         }
@@ -205,19 +274,34 @@ fn main() {
                             Err(0) => None,
                             Err(i) => {
                                 let candidate = i - 1;
-                                if src.0 < span_groups[candidate].base_id.0 + span_groups[candidate].count {
+                                if src.0
+                                    < span_groups[candidate].base_id.0
+                                        + span_groups[candidate].count
+                                {
                                     Some(candidate)
-                                } else { None }
+                                } else {
+                                    None
+                                }
                             }
                         };
                         if let Some(src_gi) = src_gi {
-                            if src_gi > gi && !matches!(&span_groups[src_gi].op, ScalarOp::Literal(_)) {
+                            if src_gi > gi
+                                && !matches!(&span_groups[src_gi].op, ScalarOp::Literal(_))
+                            {
                                 errors += 1;
                                 if errors <= 10 {
-                                    let op = format!("{:?}", group.op).chars().take_while(|c| *c != ' ' && *c != '{').collect::<String>();
-                                    let src_op = format!("{:?}", span_groups[src_gi].op).chars().take_while(|c| *c != ' ' && *c != '{').collect::<String>();
-                                    println!("  SPAN TOPO VIOLATION: phase {}/lane {}: group {} ({}) reads from later group {} ({})",
-                                        phase_idx, lane_idx, gi, op, src_gi, src_op);
+                                    let op = format!("{:?}", group.op)
+                                        .chars()
+                                        .take_while(|c| *c != ' ' && *c != '{')
+                                        .collect::<String>();
+                                    let src_op = format!("{:?}", span_groups[src_gi].op)
+                                        .chars()
+                                        .take_while(|c| *c != ' ' && *c != '{')
+                                        .collect::<String>();
+                                    println!(
+                                        "  SPAN TOPO VIOLATION: phase {}/lane {}: group {} ({}) reads from later group {} ({})",
+                                        phase_idx, lane_idx, gi, op, src_gi, src_op
+                                    );
                                 }
                             }
                         }
@@ -236,9 +320,16 @@ fn main() {
 
         let val_time = t_val.elapsed();
         if errors == 0 {
-            println!("    TOPOLOGY: VALID ({:.1}ms)", val_time.as_secs_f64() * 1e3);
+            println!(
+                "    TOPOLOGY: VALID ({:.1}ms)",
+                val_time.as_secs_f64() * 1e3
+            );
         } else {
-            println!("    TOPOLOGY: {} VIOLATIONS ({:.1}ms)", errors, val_time.as_secs_f64() * 1e3);
+            println!(
+                "    TOPOLOGY: {} VIOLATIONS ({:.1}ms)",
+                errors,
+                val_time.as_secs_f64() * 1e3
+            );
         }
     }
     if which == "v3c" || which == "all" {
@@ -246,9 +337,21 @@ fn main() {
         let t0 = Instant::now();
         let plan = nano_plan_v3c::plan_execution_spans(&result.graph, num_lanes);
         let elapsed = t0.elapsed();
-        let ss: Vec<Vec<SS>> = plan.phases.iter().map(|p| p.spans.iter().map(|s| SS {
-            ng: s.graph.num_groups(), na: s.graph.num_atoms(), ni: s.inputs.len(), no: s.outputs.len(),
-        }).collect()).collect();
+        let ss: Vec<Vec<SS>> = plan
+            .phases
+            .iter()
+            .map(|p| {
+                p.spans
+                    .iter()
+                    .map(|s| SS {
+                        ng: s.graph.num_groups(),
+                        na: s.graph.num_atoms(),
+                        ni: s.inputs.len(),
+                        no: s.outputs.len(),
+                    })
+                    .collect()
+            })
+            .collect();
         print_span_summary("v3c", &ss, plan.num_lanes, elapsed);
 
         // Topology validation (same as spans_c)
@@ -279,27 +382,38 @@ fn main() {
                     if !range_contains(&produced_ranges, mapping.main_base.0) {
                         errors += 1;
                         if errors <= 10 {
-                            println!("  V3C VIOLATION: phase {}/lane {}: input base {:?} (count={}) not available",
-                                phase_idx, lane_idx, mapping.main_base, mapping.count);
+                            println!(
+                                "  V3C VIOLATION: phase {}/lane {}: input base {:?} (count={}) not available",
+                                phase_idx, lane_idx, mapping.main_base, mapping.count
+                            );
                             let main_groups = result.graph.groups();
                             let atom_val = mapping.main_base.0;
                             let idx = main_groups.partition_point(|g| g.base_id.0 <= atom_val);
                             if idx > 0 {
                                 let g = &main_groups[idx - 1];
                                 if atom_val < g.base_id.0 + g.count {
-                                    let op_str = format!("{:?}", g.op).chars().take(60).collect::<String>();
+                                    let op_str =
+                                        format!("{:?}", g.op).chars().take(60).collect::<String>();
                                     let mut in_phase = "not in any output".to_string();
                                     for (pi, ph) in plan.phases.iter().enumerate() {
                                         for sp in &ph.spans {
                                             for om in &sp.outputs {
-                                                if om.main_base.0 <= atom_val && atom_val < om.main_base.0 + om.count {
+                                                if om.main_base.0 <= atom_val
+                                                    && atom_val < om.main_base.0 + om.count
+                                                {
                                                     in_phase = format!("phase {}", pi);
                                                 }
                                             }
                                         }
                                     }
-                                    println!("    group_idx={} base={:?} count={} op={} [{}]",
-                                        idx - 1, g.base_id, g.count, op_str, in_phase);
+                                    println!(
+                                        "    group_idx={} base={:?} count={} op={} [{}]",
+                                        idx - 1,
+                                        g.base_id,
+                                        g.count,
+                                        op_str,
+                                        in_phase
+                                    );
                                 }
                             }
                         }
@@ -316,19 +430,34 @@ fn main() {
                             Err(0) => None,
                             Err(i) => {
                                 let candidate = i - 1;
-                                if src.0 < span_groups[candidate].base_id.0 + span_groups[candidate].count {
+                                if src.0
+                                    < span_groups[candidate].base_id.0
+                                        + span_groups[candidate].count
+                                {
                                     Some(candidate)
-                                } else { None }
+                                } else {
+                                    None
+                                }
                             }
                         };
                         if let Some(src_gi) = src_gi {
-                            if src_gi > gi && !matches!(&span_groups[src_gi].op, ScalarOp::Literal(_)) {
+                            if src_gi > gi
+                                && !matches!(&span_groups[src_gi].op, ScalarOp::Literal(_))
+                            {
                                 errors += 1;
                                 if errors <= 10 {
-                                    let op = format!("{:?}", group.op).chars().take_while(|c| *c != ' ' && *c != '{').collect::<String>();
-                                    let src_op = format!("{:?}", span_groups[src_gi].op).chars().take_while(|c| *c != ' ' && *c != '{').collect::<String>();
-                                    println!("  V3C TOPO VIOLATION: phase {}/lane {}: group {} ({}) reads from later group {} ({})",
-                                        phase_idx, lane_idx, gi, op, src_gi, src_op);
+                                    let op = format!("{:?}", group.op)
+                                        .chars()
+                                        .take_while(|c| *c != ' ' && *c != '{')
+                                        .collect::<String>();
+                                    let src_op = format!("{:?}", span_groups[src_gi].op)
+                                        .chars()
+                                        .take_while(|c| *c != ' ' && *c != '{')
+                                        .collect::<String>();
+                                    println!(
+                                        "  V3C TOPO VIOLATION: phase {}/lane {}: group {} ({}) reads from later group {} ({})",
+                                        phase_idx, lane_idx, gi, op, src_gi, src_op
+                                    );
                                 }
                             }
                         }
@@ -346,9 +475,16 @@ fn main() {
 
         let val_time = t_val.elapsed();
         if errors == 0 {
-            println!("    V3C TOPOLOGY: VALID ({:.1}ms)", val_time.as_secs_f64() * 1e3);
+            println!(
+                "    V3C TOPOLOGY: VALID ({:.1}ms)",
+                val_time.as_secs_f64() * 1e3
+            );
         } else {
-            println!("    V3C TOPOLOGY: {} VIOLATIONS ({:.1}ms)", errors, val_time.as_secs_f64() * 1e3);
+            println!(
+                "    V3C TOPOLOGY: {} VIOLATIONS ({:.1}ms)",
+                errors,
+                val_time.as_secs_f64() * 1e3
+            );
         }
         // ---- Span-by-span eval using trusted NanoEval ----
         if std::env::var("EVAL_SPANS").ok().as_deref() == Some("1") {
@@ -359,13 +495,18 @@ fn main() {
 
             // Need full lower for numeric_overrides
             let t0 = Instant::now();
-            let full_result = whisper_tensor::nano_graph::lower::lower_with_info(&milli_graph, &all_infos).unwrap();
+            let full_result =
+                whisper_tensor::nano_graph::lower::lower_with_info(&milli_graph, &all_infos)
+                    .unwrap();
             eprintln!("    Full lower: {:.1}s", t0.elapsed().as_secs_f64());
 
             // Shared f32 buffer (30GB for GPT-2)
             let num_main_atoms = result.graph.num_atoms() as usize;
             let f32_buffer_gb = num_main_atoms as f64 * 4.0 / (1024.0 * 1024.0 * 1024.0);
-            println!("    Shared buffer: {:.1} GB ({} atoms)", f32_buffer_gb, num_main_atoms);
+            println!(
+                "    Shared buffer: {:.1} GB ({} atoms)",
+                f32_buffer_gb, num_main_atoms
+            );
 
             if f32_buffer_gb > 120.0 {
                 println!("    SKIPPING: buffer too large");
@@ -382,7 +523,10 @@ fn main() {
                 let sym_graph2 = model.get_symbolic_graph();
                 let tensor_store2 = model.get_tensor_store();
                 let initialized2 = sym_graph2.get_initialized_tensors(tensor_store2);
-                let mut milli_inputs2: HashMap<GlobalId, whisper_tensor::numeric_tensor::NumericTensor<whisper_tensor::DynRank>> = HashMap::new();
+                let mut milli_inputs2: HashMap<
+                    GlobalId,
+                    whisper_tensor::numeric_tensor::NumericTensor<whisper_tensor::DynRank>,
+                > = HashMap::new();
                 for (id, tensor) in initialized2 {
                     milli_inputs2.insert(id, tensor);
                 }
@@ -392,12 +536,16 @@ fn main() {
                     if let Some(id) = tensors_by_name.get(name) {
                         let data: Vec<i64> = (0..numel as i64).collect();
                         let tensor = whisper_tensor::numeric_tensor::NumericTensor::from_vec_shape(
-                            data, shape.iter().map(|&s| s as usize).collect()
-                        ).unwrap();
+                            data,
+                            shape.iter().map(|&s| s as usize).collect(),
+                        )
+                        .unwrap();
                         milli_inputs2.insert(*id, tensor.clone());
                         // Also fill shared buffer
                         if let Some(tam) = full_result.tensor_map.get(id) {
-                            let f32_t = tensor.cast(whisper_tensor::dtype::DType::F32, &mut backend_eval).unwrap();
+                            let f32_t = tensor
+                                .cast(whisper_tensor::dtype::DType::F32, &mut backend_eval)
+                                .unwrap();
                             let flat = f32_t.flatten().unwrap();
                             let nd = flat.to_ndarray().unwrap();
                             let v: Vec<f32> = nd.try_into().unwrap();
@@ -426,25 +574,56 @@ fn main() {
                                     if resolved.0 >= span_max {
                                         input_errors += 1;
                                         if input_errors <= 5 {
-                                            let op = format!("{:?}", group.op).chars().take_while(|c| *c != ' ' && *c != '{').collect::<String>();
-                                            println!("    SPAN INPUT ERROR: phase {}/lane {}: group base={:?} ({}) atom {} resolves to {:?} (max={})",
-                                                phase_idx, lane_idx, group.base_id, op, test_i, resolved, span_max);
+                                            let op = format!("{:?}", group.op)
+                                                .chars()
+                                                .take_while(|c| *c != ' ' && *c != '{')
+                                                .collect::<String>();
+                                            println!(
+                                                "    SPAN INPUT ERROR: phase {}/lane {}: group base={:?} ({}) atom {} resolves to {:?} (max={})",
+                                                phase_idx,
+                                                lane_idx,
+                                                group.base_id,
+                                                op,
+                                                test_i,
+                                                resolved,
+                                                span_max
+                                            );
                                         }
                                     }
                                 }
                                 // Also check reduce stride if applicable
                                 match &group.op {
-                                    ScalarOp::ReduceSum { reduce_count, reduce_stride, .. }
-                                    | ScalarOp::ReduceMax { reduce_count, reduce_stride, .. } => {
+                                    ScalarOp::ReduceSum {
+                                        reduce_count,
+                                        reduce_stride,
+                                        ..
+                                    }
+                                    | ScalarOp::ReduceMax {
+                                        reduce_count,
+                                        reduce_stride,
+                                        ..
+                                    } => {
                                         if *reduce_count > 0 && *reduce_stride != 0 {
                                             let base = input.resolve(0, 0);
-                                            let last = (base.0 as i64 + (*reduce_count as i64 - 1) * reduce_stride) as u64;
+                                            let last = (base.0 as i64
+                                                + (*reduce_count as i64 - 1) * reduce_stride)
+                                                as u64;
                                             if last >= span_max {
                                                 input_errors += 1;
                                                 if input_errors <= 5 {
-                                                    let op = format!("{:?}", group.op).chars().take_while(|c| *c != ' ' && *c != '{').collect::<String>();
-                                                    println!("    SPAN REDUCE ERROR: phase {}/lane {}: group base={:?} ({}) reduce reaches atom {} (max={})",
-                                                        phase_idx, lane_idx, group.base_id, op, last, span_max);
+                                                    let op = format!("{:?}", group.op)
+                                                        .chars()
+                                                        .take_while(|c| *c != ' ' && *c != '{')
+                                                        .collect::<String>();
+                                                    println!(
+                                                        "    SPAN REDUCE ERROR: phase {}/lane {}: group base={:?} ({}) reduce reaches atom {} (max={})",
+                                                        phase_idx,
+                                                        lane_idx,
+                                                        group.base_id,
+                                                        op,
+                                                        last,
+                                                        span_max
+                                                    );
                                                 }
                                             }
                                         }
@@ -455,83 +634,109 @@ fn main() {
                         }
                     }
                 }
-                println!("    Span input check: {} errors ({:.1}ms)", input_errors, t_check.elapsed().as_secs_f64() * 1e3);
+                println!(
+                    "    Span input check: {} errors ({:.1}ms)",
+                    input_errors,
+                    t_check.elapsed().as_secs_f64() * 1e3
+                );
                 if input_errors > 0 {
                     println!("    SKIPPING eval due to span input errors");
                 } else {
-
-                // Execute each phase's spans using NanoEval
-                let t0 = Instant::now();
-                for (phase_idx, phase) in plan.phases.iter().enumerate() {
-                    for (lane_idx, span) in phase.spans.iter().enumerate() {
-                        if span.graph.num_groups() == 0 { continue; }
-
-                        // Build overrides for this span from shared buffer
-                        let mut span_overrides: HashMap<u64, NumericScalar> = HashMap::new();
-                        for mapping in &span.inputs {
-                            for i in 0..mapping.count {
-                                let main_atom = mapping.main_base.0 + i;
-                                let span_atom = mapping.span_base.0 + i;
-                                span_overrides.insert(span_atom, NumericScalar::F32(shared[main_atom as usize]));
+                    // Execute each phase's spans using NanoEval
+                    let t0 = Instant::now();
+                    for (phase_idx, phase) in plan.phases.iter().enumerate() {
+                        for (lane_idx, span) in phase.spans.iter().enumerate() {
+                            if span.graph.num_groups() == 0 {
+                                continue;
                             }
-                        }
 
-                        // Eval the span
-                        let span_result = NanoEval::eval(&span.graph, &span_overrides);
+                            // Build overrides for this span from shared buffer
+                            let mut span_overrides: HashMap<u64, NumericScalar> = HashMap::new();
+                            for mapping in &span.inputs {
+                                for i in 0..mapping.count {
+                                    let main_atom = mapping.main_base.0 + i;
+                                    let span_atom = mapping.span_base.0 + i;
+                                    span_overrides.insert(
+                                        span_atom,
+                                        NumericScalar::F32(shared[main_atom as usize]),
+                                    );
+                                }
+                            }
 
-                        // Write outputs back to shared buffer
-                        for mapping in &span.outputs {
-                            for i in 0..mapping.count {
-                                let span_atom = mapping.span_base.0 + i;
-                                let main_atom = mapping.main_base.0 + i;
-                                shared[main_atom as usize] = span_result.get(whisper_tensor::nano_graph::AtomId(span_atom)) as f32;
+                            // Eval the span
+                            let span_result = NanoEval::eval(&span.graph, &span_overrides);
+
+                            // Write outputs back to shared buffer
+                            for mapping in &span.outputs {
+                                for i in 0..mapping.count {
+                                    let span_atom = mapping.span_base.0 + i;
+                                    let main_atom = mapping.main_base.0 + i;
+                                    shared[main_atom as usize] = span_result
+                                        .get(whisper_tensor::nano_graph::AtomId(span_atom))
+                                        as f32;
+                                }
                             }
                         }
                     }
-                }
-                let eval_time = t0.elapsed();
-                println!("    Span eval: {:.1}s ({} phases)", eval_time.as_secs_f64(), plan.phases.len());
+                    let eval_time = t0.elapsed();
+                    println!(
+                        "    Span eval: {:.1}s ({} phases)",
+                        eval_time.as_secs_f64(),
+                        plan.phases.len()
+                    );
 
-                // Compare against milli interpreter
-                let t0 = Instant::now();
-                let milli_outputs = whisper_tensor::compiler::interpret_milli_graph(&milli_graph, &milli_inputs2).unwrap();
-                eprintln!("    Milli interpreter: {:.1}s", t0.elapsed().as_secs_f64());
+                    // Compare against milli interpreter
+                    let t0 = Instant::now();
+                    let milli_outputs = whisper_tensor::compiler::interpret_milli_graph(
+                        &milli_graph,
+                        &milli_inputs2,
+                    )
+                    .unwrap();
+                    eprintln!("    Milli interpreter: {:.1}s", t0.elapsed().as_secs_f64());
 
-                let reverse_output_map: HashMap<GlobalId, GlobalId> = milli_graph
-                    .output_map.as_ref()
-                    .map(|m| m.iter().map(|(&int, &ext)| (ext, int)).collect())
-                    .unwrap_or_default();
+                    let reverse_output_map: HashMap<GlobalId, GlobalId> = milli_graph
+                        .output_map
+                        .as_ref()
+                        .map(|m| m.iter().map(|(&int, &ext)| (ext, int)).collect())
+                        .unwrap_or_default();
 
-                let mut max_abs_error: f64 = 0.0;
-                let mut total_compared = 0u64;
-                for (ext_id, milli_tensor) in &milli_outputs {
-                    let internal_id = reverse_output_map.get(ext_id).unwrap_or(ext_id);
-                    let tam = full_result.tensor_map.get(internal_id)
-                        .or_else(|| full_result.tensor_map.get(ext_id));
-                    let Some(tam) = tam else { continue };
+                    let mut max_abs_error: f64 = 0.0;
+                    let mut total_compared = 0u64;
+                    for (ext_id, milli_tensor) in &milli_outputs {
+                        let internal_id = reverse_output_map.get(ext_id).unwrap_or(ext_id);
+                        let tam = full_result
+                            .tensor_map
+                            .get(internal_id)
+                            .or_else(|| full_result.tensor_map.get(ext_id));
+                        let Some(tam) = tam else { continue };
 
-                    let f32_tensor = milli_tensor.cast(whisper_tensor::dtype::DType::F32, &mut backend_eval).unwrap();
-                    let flat = f32_tensor.flatten().unwrap();
-                    let nd = flat.to_ndarray().unwrap();
-                    let milli_vals: Vec<f32> = nd.try_into().unwrap();
+                        let f32_tensor = milli_tensor
+                            .cast(whisper_tensor::dtype::DType::F32, &mut backend_eval)
+                            .unwrap();
+                        let flat = f32_tensor.flatten().unwrap();
+                        let nd = flat.to_ndarray().unwrap();
+                        let milli_vals: Vec<f32> = nd.try_into().unwrap();
 
-                    let mut local_max = 0.0f64;
-                    for (i, &milli_val) in milli_vals.iter().enumerate() {
-                        let atom_id = tam.atom_id_for_element(i as u64);
-                        let span_val = shared[atom_id.0 as usize];
-                        let err = (milli_val - span_val).abs() as f64;
-                        local_max = local_max.max(err);
-                        total_compared += 1;
+                        let mut local_max = 0.0f64;
+                        for (i, &milli_val) in milli_vals.iter().enumerate() {
+                            let atom_id = tam.atom_id_for_element(i as u64);
+                            let span_val = shared[atom_id.0 as usize];
+                            let err = (milli_val - span_val).abs() as f64;
+                            local_max = local_max.max(err);
+                            total_compared += 1;
+                        }
+                        max_abs_error = max_abs_error.max(local_max);
                     }
-                    max_abs_error = max_abs_error.max(local_max);
-                }
 
-                println!("    Compared {} elements, max_abs_error={:.6e}", total_compared, max_abs_error);
-                if max_abs_error < 1e-2 {
-                    println!("    SPAN EVAL: PASS");
-                } else {
-                    println!("    SPAN EVAL: MISMATCH");
-                }
+                    println!(
+                        "    Compared {} elements, max_abs_error={:.6e}",
+                        total_compared, max_abs_error
+                    );
+                    if max_abs_error < 1e-2 {
+                        println!("    SPAN EVAL: PASS");
+                    } else {
+                        println!("    SPAN EVAL: MISMATCH");
+                    }
                 } // end else (no input errors)
             }
         }
@@ -541,9 +746,21 @@ fn main() {
         let t0 = Instant::now();
         let plan = nano_plan_v4a::plan_spans(&result.graph, num_lanes);
         let elapsed = t0.elapsed();
-        let ss: Vec<Vec<SS>> = plan.phases.iter().map(|p| p.spans.iter().map(|s| SS {
-            ng: s.graph.num_groups(), na: s.graph.num_atoms(), ni: s.inputs.len(), no: s.outputs.len(),
-        }).collect()).collect();
+        let ss: Vec<Vec<SS>> = plan
+            .phases
+            .iter()
+            .map(|p| {
+                p.spans
+                    .iter()
+                    .map(|s| SS {
+                        ng: s.graph.num_groups(),
+                        na: s.graph.num_atoms(),
+                        ni: s.inputs.len(),
+                        no: s.outputs.len(),
+                    })
+                    .collect()
+            })
+            .collect();
         print_span_summary("v4a", &ss, plan.num_lanes, elapsed);
         validate_v4_plan!("v4a", plan, &result.graph);
     }
@@ -552,9 +769,21 @@ fn main() {
         let t0 = Instant::now();
         let plan = nano_plan_v4b::plan_spans(&result.graph, num_lanes);
         let elapsed = t0.elapsed();
-        let ss: Vec<Vec<SS>> = plan.phases.iter().map(|p| p.spans.iter().map(|s| SS {
-            ng: s.graph.num_groups(), na: s.graph.num_atoms(), ni: s.inputs.len(), no: s.outputs.len(),
-        }).collect()).collect();
+        let ss: Vec<Vec<SS>> = plan
+            .phases
+            .iter()
+            .map(|p| {
+                p.spans
+                    .iter()
+                    .map(|s| SS {
+                        ng: s.graph.num_groups(),
+                        na: s.graph.num_atoms(),
+                        ni: s.inputs.len(),
+                        no: s.outputs.len(),
+                    })
+                    .collect()
+            })
+            .collect();
         print_span_summary("v4b", &ss, plan.num_lanes, elapsed);
         validate_v4_plan!("v4b", plan, &result.graph);
     }
@@ -563,9 +792,21 @@ fn main() {
         let t0 = Instant::now();
         let plan = nano_plan_v4c::plan_execution_spans(&result.graph, num_lanes);
         let elapsed = t0.elapsed();
-        let ss: Vec<Vec<SS>> = plan.phases.iter().map(|p| p.spans.iter().map(|s| SS {
-            ng: s.graph.num_groups(), na: s.graph.num_atoms(), ni: s.inputs.len(), no: s.outputs.len(),
-        }).collect()).collect();
+        let ss: Vec<Vec<SS>> = plan
+            .phases
+            .iter()
+            .map(|p| {
+                p.spans
+                    .iter()
+                    .map(|s| SS {
+                        ng: s.graph.num_groups(),
+                        na: s.graph.num_atoms(),
+                        ni: s.inputs.len(),
+                        no: s.outputs.len(),
+                    })
+                    .collect()
+            })
+            .collect();
         print_span_summary("v4c", &ss, plan.num_lanes, elapsed);
         validate_v4_plan!("v4c", plan, &result.graph);
     }
@@ -574,9 +815,21 @@ fn main() {
         let t0 = Instant::now();
         let plan = nano_plan_spans_d::plan_spans(&result.graph, num_lanes);
         let elapsed = t0.elapsed();
-        let ss: Vec<Vec<SS>> = plan.phases.iter().map(|p| p.spans.iter().map(|s| SS {
-            ng: s.graph.num_groups(), na: s.graph.num_atoms(), ni: s.inputs.len(), no: s.outputs.len(),
-        }).collect()).collect();
+        let ss: Vec<Vec<SS>> = plan
+            .phases
+            .iter()
+            .map(|p| {
+                p.spans
+                    .iter()
+                    .map(|s| SS {
+                        ng: s.graph.num_groups(),
+                        na: s.graph.num_atoms(),
+                        ni: s.inputs.len(),
+                        no: s.outputs.len(),
+                    })
+                    .collect()
+            })
+            .collect();
         print_span_summary("spans_d", &ss, plan.num_lanes, elapsed);
     }
     if which == "v3d" || which == "all" {
@@ -584,9 +837,21 @@ fn main() {
         let t0 = Instant::now();
         let plan = nano_plan_v3d::plan_spans(&result.graph, num_lanes);
         let elapsed = t0.elapsed();
-        let ss: Vec<Vec<SS>> = plan.phases.iter().map(|p| p.spans.iter().map(|s| SS {
-            ng: s.graph.num_groups(), na: s.graph.num_atoms(), ni: s.inputs.len(), no: s.outputs.len(),
-        }).collect()).collect();
+        let ss: Vec<Vec<SS>> = plan
+            .phases
+            .iter()
+            .map(|p| {
+                p.spans
+                    .iter()
+                    .map(|s| SS {
+                        ng: s.graph.num_groups(),
+                        na: s.graph.num_atoms(),
+                        ni: s.inputs.len(),
+                        no: s.outputs.len(),
+                    })
+                    .collect()
+            })
+            .collect();
         print_span_summary("v3d", &ss, plan.num_lanes, elapsed);
 
         // Topology validation
@@ -617,8 +882,10 @@ fn main() {
                     if !range_contains(&produced_ranges, mapping.main_base.0) {
                         errors += 1;
                         if errors <= 10 {
-                            println!("  V3D VIOLATION: phase {}/lane {}: input base {:?} (count={}) not available",
-                                phase_idx, lane_idx, mapping.main_base, mapping.count);
+                            println!(
+                                "  V3D VIOLATION: phase {}/lane {}: input base {:?} (count={}) not available",
+                                phase_idx, lane_idx, mapping.main_base, mapping.count
+                            );
                         }
                     }
                 }
@@ -633,19 +900,34 @@ fn main() {
                             Err(0) => None,
                             Err(i) => {
                                 let candidate = i - 1;
-                                if src.0 < span_groups[candidate].base_id.0 + span_groups[candidate].count {
+                                if src.0
+                                    < span_groups[candidate].base_id.0
+                                        + span_groups[candidate].count
+                                {
                                     Some(candidate)
-                                } else { None }
+                                } else {
+                                    None
+                                }
                             }
                         };
                         if let Some(src_gi) = src_gi {
-                            if src_gi > gi && !matches!(&span_groups[src_gi].op, ScalarOp::Literal(_)) {
+                            if src_gi > gi
+                                && !matches!(&span_groups[src_gi].op, ScalarOp::Literal(_))
+                            {
                                 errors += 1;
                                 if errors <= 10 {
-                                    let op = format!("{:?}", group.op).chars().take_while(|c| *c != ' ' && *c != '{').collect::<String>();
-                                    let src_op = format!("{:?}", span_groups[src_gi].op).chars().take_while(|c| *c != ' ' && *c != '{').collect::<String>();
-                                    println!("  V3D TOPO VIOLATION: phase {}/lane {}: group {} ({}) reads from later group {} ({})",
-                                        phase_idx, lane_idx, gi, op, src_gi, src_op);
+                                    let op = format!("{:?}", group.op)
+                                        .chars()
+                                        .take_while(|c| *c != ' ' && *c != '{')
+                                        .collect::<String>();
+                                    let src_op = format!("{:?}", span_groups[src_gi].op)
+                                        .chars()
+                                        .take_while(|c| *c != ' ' && *c != '{')
+                                        .collect::<String>();
+                                    println!(
+                                        "  V3D TOPO VIOLATION: phase {}/lane {}: group {} ({}) reads from later group {} ({})",
+                                        phase_idx, lane_idx, gi, op, src_gi, src_op
+                                    );
                                 }
                             }
                         }
@@ -663,14 +945,26 @@ fn main() {
 
         let val_time = t_val.elapsed();
         if errors == 0 {
-            println!("    TOPOLOGY: VALID ({:.1}ms)", val_time.as_secs_f64() * 1e3);
+            println!(
+                "    TOPOLOGY: VALID ({:.1}ms)",
+                val_time.as_secs_f64() * 1e3
+            );
         } else {
-            println!("    TOPOLOGY: {} VIOLATIONS ({:.1}ms)", errors, val_time.as_secs_f64() * 1e3);
+            println!(
+                "    TOPOLOGY: {} VIOLATIONS ({:.1}ms)",
+                errors,
+                val_time.as_secs_f64() * 1e3
+            );
         }
     }
 }
 
-struct SS { ng: usize, na: u64, ni: usize, no: usize }
+struct SS {
+    ng: usize,
+    na: u64,
+    ni: usize,
+    no: usize,
+}
 
 /// Span topology validation using extracted data.
 fn validate_span_topology_raw(
@@ -706,15 +1000,19 @@ fn validate_span_topology_raw(
 
     for (pi, phase) in phases.iter().enumerate() {
         for (li, (sg, inputs, _outputs)) in phase.iter().enumerate() {
-            if sg.num_groups() == 0 { continue; }
+            if sg.num_groups() == 0 {
+                continue;
+            }
 
             // Check inputs are available
             for &(main_base, count) in inputs {
                 if !range_contains(&produced_ranges, main_base) {
                     input_errors += 1;
                     if input_errors <= 5 {
-                        println!("    {} INPUT ERR: phase {}/lane {}: main atom {} (count={}) not available",
-                            name, pi, li, main_base, count);
+                        println!(
+                            "    {} INPUT ERR: phase {}/lane {}: main atom {} (count={}) not available",
+                            name, pi, li, main_base, count
+                        );
                     }
                 }
             }
@@ -723,31 +1021,63 @@ fn validate_span_topology_raw(
             let span_groups = sg.groups();
             let span_bases: Vec<u64> = span_groups.iter().map(|g| g.base_id.0).collect();
             for (gi, group) in span_groups.iter().enumerate() {
-                if matches!(&group.op, ScalarOp::Literal(_)) { continue; }
+                if matches!(&group.op, ScalarOp::Literal(_)) {
+                    continue;
+                }
                 for input in &group.inputs {
                     let resolved = input.resolve(0, 0);
                     if resolved.0 >= sg.num_atoms() {
                         resolve_errors += 1;
                         if resolve_errors <= 3 {
-                            let op = format!("{:?}", group.op).chars().take_while(|c| *c != ' ' && *c != '{').collect::<String>();
-                            println!("    {} RESOLVE ERR: phase {}/lane {}: group {} ({}) resolves to {} (max={})",
-                                name, pi, li, gi, op, resolved.0, sg.num_atoms());
+                            let op = format!("{:?}", group.op)
+                                .chars()
+                                .take_while(|c| *c != ' ' && *c != '{')
+                                .collect::<String>();
+                            println!(
+                                "    {} RESOLVE ERR: phase {}/lane {}: group {} ({}) resolves to {} (max={})",
+                                name,
+                                pi,
+                                li,
+                                gi,
+                                op,
+                                resolved.0,
+                                sg.num_atoms()
+                            );
                         }
                     }
                 }
                 // Check ReduceSum stride
                 match &group.op {
-                    ScalarOp::ReduceSum { reduce_count, reduce_stride, .. }
-                    | ScalarOp::ReduceMax { reduce_count, reduce_stride, .. } => {
+                    ScalarOp::ReduceSum {
+                        reduce_count,
+                        reduce_stride,
+                        ..
+                    }
+                    | ScalarOp::ReduceMax {
+                        reduce_count,
+                        reduce_stride,
+                        ..
+                    } => {
                         if *reduce_count > 0 && *reduce_stride != 0 {
                             let base = group.inputs[0].resolve(0, 0);
-                            let last = (base.0 as i64 + (*reduce_count as i64 - 1) * reduce_stride) as u64;
+                            let last =
+                                (base.0 as i64 + (*reduce_count as i64 - 1) * reduce_stride) as u64;
                             if last >= sg.num_atoms() {
                                 resolve_errors += 1;
                                 if resolve_errors <= 3 {
-                                    let op = format!("{:?}", group.op).chars().take_while(|c| *c != ' ' && *c != '{').collect::<String>();
-                                    println!("    {} REDUCE ERR: phase {}/lane {}: {} reaches atom {} (max={})",
-                                        name, pi, li, op, last, sg.num_atoms());
+                                    let op = format!("{:?}", group.op)
+                                        .chars()
+                                        .take_while(|c| *c != ' ' && *c != '{')
+                                        .collect::<String>();
+                                    println!(
+                                        "    {} REDUCE ERR: phase {}/lane {}: {} reaches atom {} (max={})",
+                                        name,
+                                        pi,
+                                        li,
+                                        op,
+                                        last,
+                                        sg.num_atoms()
+                                    );
                                 }
                             }
                         }
@@ -768,36 +1098,76 @@ fn validate_span_topology_raw(
     let total = input_errors + topo_errors + resolve_errors;
     let elapsed = t0.elapsed();
     if total == 0 {
-        println!("    {} TOPOLOGY: VALID ({:.1}ms)", name, elapsed.as_secs_f64() * 1e3);
+        println!(
+            "    {} TOPOLOGY: VALID ({:.1}ms)",
+            name,
+            elapsed.as_secs_f64() * 1e3
+        );
     } else {
-        println!("    {} TOPOLOGY: {} errors ({} input, {} resolve) ({:.1}ms)",
-            name, total, input_errors, resolve_errors, elapsed.as_secs_f64() * 1e3);
+        println!(
+            "    {} TOPOLOGY: {} errors ({} input, {} resolve) ({:.1}ms)",
+            name,
+            total,
+            input_errors,
+            resolve_errors,
+            elapsed.as_secs_f64() * 1e3
+        );
     }
 }
 
 // Old macro/function definitions removed (moved to top of file)
 
-fn print_span_summary(name: &str, phases: &[Vec<SS>], num_lanes: usize, elapsed: std::time::Duration) {
+fn print_span_summary(
+    name: &str,
+    phases: &[Vec<SS>],
+    num_lanes: usize,
+    elapsed: std::time::Duration,
+) {
     let num_phases = phases.len();
     let total_spans: usize = phases.iter().map(|p| p.len()).sum();
     let total_groups: usize = phases.iter().flat_map(|p| p.iter()).map(|s| s.ng).sum();
     let total_atoms: u64 = phases.iter().flat_map(|p| p.iter()).map(|s| s.na).sum();
-    let empty_spans: usize = phases.iter().flat_map(|p| p.iter()).filter(|s| s.ng == 0).count();
+    let empty_spans: usize = phases
+        .iter()
+        .flat_map(|p| p.iter())
+        .filter(|s| s.ng == 0)
+        .count();
 
     let mut max_imbalance: f64 = 0.0;
     for phase in phases {
         let lane_atoms: Vec<u64> = phase.iter().map(|s| s.na).collect();
         let mx = lane_atoms.iter().copied().max().unwrap_or(0);
-        let mn = lane_atoms.iter().copied().filter(|&a| a > 0).min().unwrap_or(1);
-        if mn > 0 { max_imbalance = max_imbalance.max(mx as f64 / mn as f64); }
+        let mn = lane_atoms
+            .iter()
+            .copied()
+            .filter(|&a| a > 0)
+            .min()
+            .unwrap_or(1);
+        if mn > 0 {
+            max_imbalance = max_imbalance.max(mx as f64 / mn as f64);
+        }
     }
 
     let total_inputs: usize = phases.iter().flat_map(|p| p.iter()).map(|s| s.ni).sum();
     let total_outputs: usize = phases.iter().flat_map(|p| p.iter()).map(|s| s.no).sum();
 
-    println!("  [{}] {:.1}ms, {} lanes, {} phases, {} spans ({} empty)",
-        name, elapsed.as_secs_f64() * 1e3, num_lanes, num_phases, total_spans, empty_spans);
-    println!("    {} groups, {:.1}B atoms, max_imbalance={:.1}x",
-        total_groups, total_atoms as f64 / 1e9, max_imbalance);
-    println!("    total_inputs={}, total_outputs={}", total_inputs, total_outputs);
+    println!(
+        "  [{}] {:.1}ms, {} lanes, {} phases, {} spans ({} empty)",
+        name,
+        elapsed.as_secs_f64() * 1e3,
+        num_lanes,
+        num_phases,
+        total_spans,
+        empty_spans
+    );
+    println!(
+        "    {} groups, {:.1}B atoms, max_imbalance={:.1}x",
+        total_groups,
+        total_atoms as f64 / 1e9,
+        max_imbalance
+    );
+    println!(
+        "    total_inputs={}, total_outputs={}",
+        total_inputs, total_outputs
+    );
 }

@@ -24,7 +24,7 @@ pub mod nano_plan_v3c;
 pub mod nano_plan_v3d;
 pub mod nano_plan_v4a;
 pub mod nano_plan_v4b;
+pub mod nano_plan_v4c;
 pub mod partition;
 pub mod simple_dag;
 pub mod test_graphs;
-pub mod nano_plan_v4c;

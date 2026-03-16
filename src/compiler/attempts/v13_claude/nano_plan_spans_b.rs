@@ -1,4 +1,10 @@
-#![allow(clippy::all, dead_code, unreachable_patterns, unused_variables, unused_imports)]
+#![allow(
+    clippy::all,
+    dead_code,
+    unreachable_patterns,
+    unused_variables,
+    unused_imports
+)]
 //! Span-based partitioner: emits self-contained NanoGraphs for parallel execution.
 //!
 //! Instead of tracking sub-ranges of the original graph, this partitioner emits
@@ -119,7 +125,8 @@ pub fn plan_spans(graph: &NanoGraph, num_lanes: usize) -> SpanPlan {
     );
 
     // Step 4: Assign groups to (phase, lane) spans.
-    let root_to_lane = compute_root_lane_map(groups, num_lanes, &is_literal, &row_families, &producers);
+    let root_to_lane =
+        compute_root_lane_map(groups, num_lanes, &is_literal, &row_families, &producers);
     let span_assignments = assign_spans(
         groups,
         num_lanes,
@@ -704,7 +711,12 @@ fn compute_phase_assignment(
         }
     }
 
-    let num_phases = group_phase.iter().copied().max().map(|m| m + 1).unwrap_or(1);
+    let num_phases = group_phase
+        .iter()
+        .copied()
+        .max()
+        .map(|m| m + 1)
+        .unwrap_or(1);
     (group_phase, num_phases)
 }
 
@@ -765,8 +777,7 @@ fn assign_spans(
     root_to_lane: &HashMap<usize, usize>,
 ) -> Vec<Vec<Vec<SpanWork>>> {
     let n = groups.len();
-    let mut assignments: Vec<Vec<Vec<SpanWork>>> =
-        vec![vec![Vec::new(); num_lanes]; num_phases];
+    let mut assignments: Vec<Vec<Vec<SpanWork>>> = vec![vec![Vec::new(); num_lanes]; num_phases];
 
     for phase_idx in 0..num_phases {
         let phase_groups: Vec<usize> = (0..n)
@@ -830,8 +841,7 @@ fn assign_spans(
 
         // Sort each lane's work by (group_idx, offset) for determinism.
         for lane in 0..num_lanes {
-            assignments[phase_idx][lane]
-                .sort_by_key(|w| (w.group_idx, w.atom_offset));
+            assignments[phase_idx][lane].sort_by_key(|w| (w.group_idx, w.atom_offset));
         }
     }
 
@@ -877,7 +887,6 @@ fn compute_span_outputs(
 
     span_outputs
 }
-
 
 // ─── NanoGraph extraction ────────────────────────────────────────────────────
 
@@ -933,23 +942,35 @@ struct RangeAtomMap {
     ranges: Vec<(u64, u64, u64)>, // (main_base, span_base, count)
 }
 impl RangeAtomMap {
-    fn new() -> Self { Self { ranges: Vec::new() } }
+    fn new() -> Self {
+        Self { ranges: Vec::new() }
+    }
     fn insert_range(&mut self, main_base: u64, span_base: u64, count: u64) {
         self.ranges.push((main_base, span_base, count));
     }
-    fn sort(&mut self) { self.ranges.sort_by_key(|&(base, _, _)| base); }
+    fn sort(&mut self) {
+        self.ranges.sort_by_key(|&(base, _, _)| base);
+    }
     fn get(&self, main_id: u64) -> Option<AtomId> {
         let idx = self.ranges.partition_point(|&(base, _, _)| base <= main_id);
-        if idx == 0 { return None; }
+        if idx == 0 {
+            return None;
+        }
         let (base, span_base, count) = self.ranges[idx - 1];
         let offset = main_id.wrapping_sub(base);
-        if offset < count { Some(AtomId(span_base + offset)) } else { None }
+        if offset < count {
+            Some(AtomId(span_base + offset))
+        } else {
+            None
+        }
     }
 }
 
 /// Merge overlapping/adjacent ranges.
 fn merge_group_ranges_b(ranges: &mut Vec<(usize, u64, u64)>) -> Vec<(usize, u64, u64)> {
-    if ranges.is_empty() { return vec![]; }
+    if ranges.is_empty() {
+        return vec![];
+    }
     ranges.sort_by_key(|&(gi, off, _)| (gi, off));
     let mut merged: Vec<(usize, u64, u64)> = Vec::new();
     for &(gi, off, count) in ranges.iter() {
@@ -1009,8 +1030,14 @@ fn extract_single_span(
         let group = &groups[work.group_idx];
         // Find producer groups for this work item.
         collect_needed_groups_b(
-            group, work.atom_offset, work.atom_count, groups, is_literal,
-            &included_groups, &mut needed_literals, &mut external_ranges,
+            group,
+            work.atom_offset,
+            work.atom_count,
+            groups,
+            is_literal,
+            &included_groups,
+            &mut needed_literals,
+            &mut external_ranges,
         );
     }
 
@@ -1020,8 +1047,11 @@ fn extract_single_span(
         let lit_group = &groups[lit_gi];
         if lit_group.count < LITERAL_INLINE_THRESHOLD {
             let local_base = span_graph.push_group(
-                lit_group.count, lit_group.op.clone(),
-                lit_group.sym_dims.clone(), lit_group.reduce_dims.clone(), vec![],
+                lit_group.count,
+                lit_group.op.clone(),
+                lit_group.sym_dims.clone(),
+                lit_group.reduce_dims.clone(),
+                vec![],
             );
             atom_map.insert_range(lit_group.base_id.0, local_base.0, lit_group.count);
             inlined_literals.insert(lit_gi);
@@ -1039,7 +1069,9 @@ fn extract_single_span(
         let local_base = span_graph.push_group(
             count,
             ScalarOp::Literal(crate::numeric_scalar::NumericScalar::F32(0.0)),
-            vec![], vec![], vec![],
+            vec![],
+            vec![],
+            vec![],
         );
         atom_map.insert_range(main_base, local_base.0, count);
         input_mappings.push(AtomMapping {
@@ -1058,12 +1090,14 @@ fn extract_single_span(
 
     for work in &sorted_works {
         let group = &groups[work.group_idx];
-        let remapped_inputs = remap_inputs_b(
-            &group.inputs, work.atom_count, work.atom_offset, &atom_map,
-        );
+        let remapped_inputs =
+            remap_inputs_b(&group.inputs, work.atom_count, work.atom_offset, &atom_map);
         let local_base = span_graph.push_group(
-            work.atom_count, group.op.clone(),
-            group.sym_dims.clone(), group.reduce_dims.clone(), remapped_inputs,
+            work.atom_count,
+            group.op.clone(),
+            group.sym_dims.clone(),
+            group.reduce_dims.clone(),
+            remapped_inputs,
         );
         let main_base = group.base_id.0 + work.atom_offset;
         atom_map.insert_range(main_base, local_base.0, work.atom_count);
@@ -1133,13 +1167,23 @@ fn collect_needed_groups_b(
 
     // Reduce strided access.
     match &group.op {
-        ScalarOp::ReduceSum { reduce_count, reduce_stride, .. }
-        | ScalarOp::ReduceMax { reduce_count, reduce_stride, .. }
-            if *reduce_count > 1 && *reduce_stride != 0 =>
-        {
+        ScalarOp::ReduceSum {
+            reduce_count,
+            reduce_stride,
+            ..
+        }
+        | ScalarOp::ReduceMax {
+            reduce_count,
+            reduce_stride,
+            ..
+        } if *reduce_count > 1 && *reduce_stride != 0 => {
             for input in &group.inputs {
                 let range = compute_input_read_range_with_reduce(
-                    input, atom_offset, atom_count, *reduce_count, *reduce_stride,
+                    input,
+                    atom_offset,
+                    atom_count,
+                    *reduce_count,
+                    *reduce_stride,
                 );
                 if let Some((lo, hi)) = range {
                     for (gi, g) in all_groups.iter().enumerate() {
@@ -1218,13 +1262,23 @@ fn collect_needed_groups_b(
             }
             // Also check reduce stride.
             match &group.op {
-                ScalarOp::ReduceSum { reduce_count, reduce_stride, .. }
-                | ScalarOp::ReduceMax { reduce_count, reduce_stride, .. }
-                    if *reduce_count > 1 && *reduce_stride != 0 =>
-                {
+                ScalarOp::ReduceSum {
+                    reduce_count,
+                    reduce_stride,
+                    ..
+                }
+                | ScalarOp::ReduceMax {
+                    reduce_count,
+                    reduce_stride,
+                    ..
+                } if *reduce_count > 1 && *reduce_stride != 0 => {
                     for input in &group.inputs {
                         let range = compute_input_read_range_with_reduce(
-                            input, atom_offset, atom_count, *reduce_count, *reduce_stride,
+                            input,
+                            atom_offset,
+                            atom_count,
+                            *reduce_count,
+                            *reduce_stride,
                         );
                         if let Some((lo, hi)) = range {
                             let g_lo = prod.base_id.0;
@@ -1253,14 +1307,27 @@ fn compute_input_read_range(input: &InputRef, offset: u64, count: u64) -> Option
 }
 
 fn compute_input_read_range_with_reduce(
-    input: &InputRef, offset: u64, count: u64,
-    reduce_count: u64, reduce_stride: i64,
+    input: &InputRef,
+    offset: u64,
+    count: u64,
+    reduce_count: u64,
+    reduce_stride: i64,
 ) -> Option<(u64, u64)> {
-    if count == 0 { return None; }
+    if count == 0 {
+        return None;
+    }
     let first = input.resolve(offset, 0).0 as i64;
     let last = input.resolve(offset + count - 1, 0).0 as i64;
-    let min_reduce = if reduce_count > 1 { 0i64.min(reduce_stride * (reduce_count as i64 - 1)) } else { 0 };
-    let max_reduce = if reduce_count > 1 { 0i64.max(reduce_stride * (reduce_count as i64 - 1)) } else { 0 };
+    let min_reduce = if reduce_count > 1 {
+        0i64.min(reduce_stride * (reduce_count as i64 - 1))
+    } else {
+        0
+    };
+    let max_reduce = if reduce_count > 1 {
+        0i64.max(reduce_stride * (reduce_count as i64 - 1))
+    } else {
+        0
+    };
     let lo = first.min(last) + min_reduce;
     let hi = first.max(last) + max_reduce + 1;
     Some((lo as u64, hi as u64))
@@ -1268,18 +1335,25 @@ fn compute_input_read_range_with_reduce(
 
 /// Remap InputRefs using RangeAtomMap.
 fn remap_inputs_b(
-    inputs: &[InputRef], count: u64, offset: u64, atom_map: &RangeAtomMap,
+    inputs: &[InputRef],
+    count: u64,
+    offset: u64,
+    atom_map: &RangeAtomMap,
 ) -> Vec<InputRef> {
-    inputs.iter().map(|input| remap_single_input_b(input, count, offset, atom_map)).collect()
+    inputs
+        .iter()
+        .map(|input| remap_single_input_b(input, count, offset, atom_map))
+        .collect()
 }
 
 fn remap_single_input_b(
-    input: &InputRef, count: u64, offset: u64, atom_map: &RangeAtomMap,
+    input: &InputRef,
+    count: u64,
+    offset: u64,
+    atom_map: &RangeAtomMap,
 ) -> InputRef {
     match input {
-        InputRef::Broadcast(id) => {
-            InputRef::Broadcast(atom_map.get(id.0).unwrap_or(*id))
-        }
+        InputRef::Broadcast(id) => InputRef::Broadcast(atom_map.get(id.0).unwrap_or(*id)),
         InputRef::Affine { base, stride } => {
             let new_base_raw = base.0.wrapping_add((*stride as i64 * offset as i64) as u64);
             InputRef::Affine {
@@ -1287,7 +1361,11 @@ fn remap_single_input_b(
                 stride: *stride,
             }
         }
-        InputRef::StridedBroadcast { base, stride, repeat } => {
+        InputRef::StridedBroadcast {
+            base,
+            stride,
+            repeat,
+        } => {
             let block_idx = (offset / repeat) as i64;
             let new_base_raw = base.0.wrapping_add((stride * block_idx) as u64);
             let new_offset_in_block = offset % repeat;
@@ -1306,15 +1384,23 @@ fn remap_single_input_b(
                 InputRef::Explicit(ids)
             }
         }
-        InputRef::Modular { base, stride, modulus } => {
-            InputRef::Modular {
-                base: atom_map.get(base.0).unwrap_or(*base),
-                stride: *stride,
-                modulus: *modulus,
-            }
-        }
-        InputRef::SymAffine { base, stride_i, stride_k } => {
-            let new_base_raw = base.0.wrapping_add((*stride_i as i64 * offset as i64) as u64);
+        InputRef::Modular {
+            base,
+            stride,
+            modulus,
+        } => InputRef::Modular {
+            base: atom_map.get(base.0).unwrap_or(*base),
+            stride: *stride,
+            modulus: *modulus,
+        },
+        InputRef::SymAffine {
+            base,
+            stride_i,
+            stride_k,
+        } => {
+            let new_base_raw = base
+                .0
+                .wrapping_add((*stride_i as i64 * offset as i64) as u64);
             InputRef::SymAffine {
                 base: atom_map.get(new_base_raw).unwrap_or(AtomId(new_base_raw)),
                 stride_i: *stride_i,
@@ -1324,9 +1410,16 @@ fn remap_single_input_b(
         InputRef::Explicit(ids) => {
             let start = offset as usize;
             let end = (offset + count) as usize;
-            let slice = if end <= ids.len() { &ids[start..end] } else { &ids[start..] };
+            let slice = if end <= ids.len() {
+                &ids[start..end]
+            } else {
+                &ids[start..]
+            };
             InputRef::Explicit(
-                slice.iter().map(|id| atom_map.get(id.0).unwrap_or(*id)).collect(),
+                slice
+                    .iter()
+                    .map(|id| atom_map.get(id.0).unwrap_or(*id))
+                    .collect(),
             )
         }
     }
@@ -1461,17 +1554,13 @@ fn remap_single_input(
             // Original: atom i in group reads base + stride * i.
             // Sliced: atom j in sub-group reads base + stride * (offset + j).
             // = (base + stride * offset) + stride * j.
-            let new_base_raw =
-                base.0.wrapping_add((*stride as i64 * offset as i64) as u64);
-            let local_base = atom_map
-                .get(&new_base_raw)
-                .copied()
-                .unwrap_or_else(|| {
-                    panic!(
-                        "Unmapped atom {} in Affine (base={}, stride={}, offset={})",
-                        new_base_raw, base.0, stride, offset
-                    )
-                });
+            let new_base_raw = base.0.wrapping_add((*stride as i64 * offset as i64) as u64);
+            let local_base = atom_map.get(&new_base_raw).copied().unwrap_or_else(|| {
+                panic!(
+                    "Unmapped atom {} in Affine (base={}, stride={}, offset={})",
+                    new_base_raw, base.0, stride, offset
+                )
+            });
 
             // Check if stride=1 and all atoms are contiguous in the local graph.
             // This is the common case for elementwise chains.
@@ -1525,10 +1614,9 @@ fn remap_single_input(
             let ids: Vec<AtomId> = (0..count)
                 .map(|j| {
                     let raw = (new_base_raw as i64 + *stride as i64 * j as i64) as u64;
-                    atom_map
-                        .get(&raw)
-                        .copied()
-                        .unwrap_or_else(|| panic!("Unmapped atom {} in Affine explicit fallback", raw))
+                    atom_map.get(&raw).copied().unwrap_or_else(|| {
+                        panic!("Unmapped atom {} in Affine explicit fallback", raw)
+                    })
                 })
                 .collect();
             InputRef::Explicit(ids)
@@ -1548,8 +1636,7 @@ fn remap_single_input(
 
             if offset % repeat == 0 {
                 let block_offset = offset / repeat;
-                let new_base_raw =
-                    (base.0 as i64 + stride * block_offset as i64) as u64;
+                let new_base_raw = (base.0 as i64 + stride * block_offset as i64) as u64;
                 let local_base = atom_map.get(&new_base_raw).copied().unwrap_or_else(|| {
                     panic!(
                         "Unmapped atom {} in StridedBroadcast aligned (base={}, stride={}, offset={}, repeat={})",
@@ -1582,10 +1669,12 @@ fn remap_single_input(
             let ids: Vec<AtomId> = (0..count)
                 .map(|j| {
                     let raw = input.resolve(offset + j, 0).0;
-                    atom_map
-                        .get(&raw)
-                        .copied()
-                        .unwrap_or_else(|| panic!("Unmapped atom {} in StridedBroadcast explicit fallback", raw))
+                    atom_map.get(&raw).copied().unwrap_or_else(|| {
+                        panic!(
+                            "Unmapped atom {} in StridedBroadcast explicit fallback",
+                            raw
+                        )
+                    })
                 })
                 .collect();
             InputRef::Explicit(ids)
@@ -1628,10 +1717,9 @@ fn remap_single_input(
             let ids: Vec<AtomId> = (0..count)
                 .map(|j| {
                     let raw = input.resolve(offset + j, 0).0;
-                    atom_map
-                        .get(&raw)
-                        .copied()
-                        .unwrap_or_else(|| panic!("Unmapped atom {} in Modular explicit fallback", raw))
+                    atom_map.get(&raw).copied().unwrap_or_else(|| {
+                        panic!("Unmapped atom {} in Modular explicit fallback", raw)
+                    })
                 })
                 .collect();
             InputRef::Explicit(ids)
@@ -1657,19 +1745,17 @@ fn remap_single_input(
             // SymAffine: atom i reads base + stride_i * i + stride_k * k.
             // Sliced: atom j reads base + stride_i * (offset + j) + stride_k * k
             // = (base + stride_i * offset) + stride_i * j + stride_k * k.
-            let new_base_raw =
-                base.0.wrapping_add((*stride_i as i64 * offset as i64) as u64);
+            let new_base_raw = base
+                .0
+                .wrapping_add((*stride_i as i64 * offset as i64) as u64);
             let local_base = atom_map
                 .get(&new_base_raw)
                 .copied()
-                .unwrap_or_else(|| {
-                    panic!("Unmapped atom {} in SymAffine", new_base_raw)
-                });
+                .unwrap_or_else(|| panic!("Unmapped atom {} in SymAffine", new_base_raw));
 
             // Check stride_i preservation.
             if count > 1 {
-                let next_raw =
-                    (new_base_raw as i64 + *stride_i as i64) as u64;
+                let next_raw = (new_base_raw as i64 + *stride_i as i64) as u64;
                 if let Some(&next_local) = atom_map.get(&next_raw) {
                     let local_stride_i = (next_local.0 as i64 - local_base.0 as i64) as i32;
                     return InputRef::SymAffine {
@@ -1701,16 +1787,9 @@ impl SpanPlan {
         );
 
         for (pi, phase) in self.phases.iter().enumerate() {
-            let lane_groups: Vec<usize> = phase
-                .spans
-                .iter()
-                .map(|s| s.graph.num_groups())
-                .collect();
-            let lane_atoms: Vec<u64> = phase
-                .spans
-                .iter()
-                .map(|s| s.graph.num_atoms())
-                .collect();
+            let lane_groups: Vec<usize> =
+                phase.spans.iter().map(|s| s.graph.num_groups()).collect();
+            let lane_atoms: Vec<u64> = phase.spans.iter().map(|s| s.graph.num_atoms()).collect();
             let total_groups: usize = lane_groups.iter().sum();
             let total_atoms: u64 = lane_atoms.iter().sum();
             let total_inputs: usize = phase.spans.iter().map(|s| s.inputs.len()).sum();
@@ -1790,19 +1869,28 @@ mod tests {
     /// NanoGraph resolves to an atom within that NanoGraph.
     fn assert_spans_self_contained(plan: &SpanPlan) {
         let errors = plan.validate();
-        assert!(errors.is_empty(), "Span validation errors:\n{}", errors.join("\n"));
+        assert!(
+            errors.is_empty(),
+            "Span validation errors:\n{}",
+            errors.join("\n")
+        );
     }
-
-
 
     /// Validate independence: within a phase, no span reads atoms produced
     /// by another span in the same phase.
     fn assert_phase_independence(plan: &SpanPlan) {
         for (pi, phase) in plan.phases.iter().enumerate() {
             // Collect output ranges per span.
-            let span_output_ranges: Vec<Vec<(u64, u64)>> = phase.spans.iter().map(|span| {
-                span.outputs.iter().map(|m| (m.main_base.0, m.main_base.0 + m.count)).collect()
-            }).collect();
+            let span_output_ranges: Vec<Vec<(u64, u64)>> = phase
+                .spans
+                .iter()
+                .map(|span| {
+                    span.outputs
+                        .iter()
+                        .map(|m| (m.main_base.0, m.main_base.0 + m.count))
+                        .collect()
+                })
+                .collect();
 
             // Check: no span's inputs overlap another span's outputs in the same phase.
             for (li, span) in phase.spans.iter().enumerate() {
@@ -1810,12 +1898,16 @@ mod tests {
                     let in_lo = input_mapping.main_base.0;
                     let in_hi = in_lo + input_mapping.count;
                     for (other_li, other_ranges) in span_output_ranges.iter().enumerate() {
-                        if other_li == li { continue; }
+                        if other_li == li {
+                            continue;
+                        }
                         for &(out_lo, out_hi) in other_ranges {
                             assert!(
                                 in_lo >= out_hi || out_lo >= in_hi,
                                 "Phase {} Lane {} reads atoms from Lane {} in same phase",
-                                pi, li, other_li
+                                pi,
+                                li,
+                                other_li
                             );
                         }
                     }
@@ -2086,8 +2178,7 @@ mod tests {
 
     #[test]
     fn test_correctness_elementwise_add() {
-        let (g, a_base, b_base, c_base) =
-            test_graphs::elementwise_binary(64, ScalarBinOp::Add);
+        let (g, a_base, b_base, c_base) = test_graphs::elementwise_binary(64, ScalarBinOp::Add);
 
         // Set up inputs: A[i] = i, B[i] = 100+i.
         let mut inputs = HashMap::new();
@@ -2180,7 +2271,9 @@ mod tests {
             inputs.insert(b_base.0 + i as u64, NumericScalar::F32(v));
         }
         // C = [[1,2,3,4],[5,6,7,8],[9,10,11,12]]
-        let c_vals = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0];
+        let c_vals = [
+            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+        ];
         for (i, &v) in c_vals.iter().enumerate() {
             inputs.insert(c_base.0 + i as u64, NumericScalar::F32(v));
         }
@@ -2257,10 +2350,7 @@ mod tests {
                         stride: 1,
                         repeat: n,
                     },
-                    InputRef::Affine {
-                        base: b,
-                        stride: 1,
-                    },
+                    InputRef::Affine { base: b, stride: 1 },
                 ],
             );
             mul_bases.push(mul_base);
@@ -2298,7 +2388,9 @@ mod tests {
             inputs.insert(a.0 + i as u64, NumericScalar::F32(v));
         }
         // B = [[1,2,3,4],[5,6,7,8],[9,10,11,12]]
-        let b_vals = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0];
+        let b_vals = [
+            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+        ];
         for (i, &v) in b_vals.iter().enumerate() {
             inputs.insert(b.0 + i as u64, NumericScalar::F32(v));
         }
@@ -2386,7 +2478,12 @@ mod tests {
                 .collect();
 
             let max = lane_atoms.iter().copied().max().unwrap_or(0);
-            let min = lane_atoms.iter().copied().filter(|&a| a > 0).min().unwrap_or(0);
+            let min = lane_atoms
+                .iter()
+                .copied()
+                .filter(|&a| a > 0)
+                .min()
+                .unwrap_or(0);
 
             if max > 0 {
                 let ratio = max as f64 / min.max(1) as f64;

@@ -1,4 +1,10 @@
-#![allow(clippy::all, dead_code, unreachable_patterns, unused_variables, unused_imports)]
+#![allow(
+    clippy::all,
+    dead_code,
+    unreachable_patterns,
+    unused_variables,
+    unused_imports
+)]
 //! Span-based NanoGraph partitioner v4a: edge-classification + O(groups) span build.
 //!
 //! Combines the correct algorithm from v3a (edge classification before phase assignment)
@@ -96,7 +102,9 @@ impl RangeAtomMap {
 
     fn get(&self, main_id: AtomId) -> Option<AtomId> {
         debug_assert!(self.sorted, "RangeAtomMap must be sorted before lookup");
-        let idx = self.ranges.partition_point(|&(base, _, _)| base <= main_id.0);
+        let idx = self
+            .ranges
+            .partition_point(|&(base, _, _)| base <= main_id.0);
         if idx == 0 {
             return None;
         }
@@ -263,7 +271,9 @@ fn is_affine_lane_aligned(
             continue;
         }
         let read_lo = base.0.wrapping_add((stride as i64 * c_lo as i64) as u64);
-        let read_hi = base.0.wrapping_add((stride as i64 * (c_hi - 1) as i64) as u64);
+        let read_hi = base
+            .0
+            .wrapping_add((stride as i64 * (c_hi - 1) as i64) as u64);
         let (read_min, read_max) = if stride >= 0 {
             (read_lo, read_hi)
         } else {
@@ -976,7 +986,11 @@ fn sliced_input_ref_range(
             let hi = first.max(last) + max_reduce_ext + 1;
             (lo as u64, hi as u64)
         }
-        InputRef::StridedBroadcast { base, stride, repeat } => {
+        InputRef::StridedBroadcast {
+            base,
+            stride,
+            repeat,
+        } => {
             let first_block = atom_offset / repeat;
             let last_block = (atom_offset + atom_count - 1) / repeat;
             let first_read = base.0 as i64 + *stride * first_block as i64;
@@ -985,7 +999,11 @@ fn sliced_input_ref_range(
             let hi = first_read.max(last_read) + max_reduce_ext + 1;
             (lo as u64, hi as u64)
         }
-        InputRef::Modular { base, stride, modulus } => {
+        InputRef::Modular {
+            base,
+            stride,
+            modulus,
+        } => {
             if *modulus == 0 {
                 return (0, 0);
             }
@@ -1018,11 +1036,7 @@ fn sliced_input_ref_range(
                 lo = lo.min(id_lo);
                 hi = hi.max(id_hi);
             }
-            if lo > hi {
-                (0, 0)
-            } else {
-                (lo, hi)
-            }
+            if lo > hi { (0, 0) } else { (lo, hi) }
         }
     }
 }
@@ -1061,8 +1075,7 @@ fn adjust_input_ref_for_slice(
         InputRef::Broadcast(id) => InputRef::Broadcast(*id),
 
         InputRef::Affine { base, stride } => {
-            let new_base =
-                AtomId(base.0.wrapping_add((*stride as i64 * offset as i64) as u64));
+            let new_base = AtomId(base.0.wrapping_add((*stride as i64 * offset as i64) as u64));
             InputRef::Affine {
                 base: new_base,
                 stride: *stride,
@@ -1076,8 +1089,7 @@ fn adjust_input_ref_for_slice(
         } => {
             if offset % repeat == 0 {
                 let block_offset = offset / repeat;
-                let new_base =
-                    AtomId(base.0.wrapping_add((*stride * block_offset as i64) as u64));
+                let new_base = AtomId(base.0.wrapping_add((*stride * block_offset as i64) as u64));
                 InputRef::StridedBroadcast {
                     base: new_base,
                     stride: *stride,
@@ -1113,7 +1125,10 @@ fn adjust_input_ref_for_slice(
                 let ids: Vec<AtomId> = (0..count)
                     .map(|j| {
                         let wrapped = (offset + j) % modulus;
-                        AtomId(base.0.wrapping_add((*stride as i64 * wrapped as i64) as u64))
+                        AtomId(
+                            base.0
+                                .wrapping_add((*stride as i64 * wrapped as i64) as u64),
+                        )
                     })
                     .collect();
                 InputRef::Explicit(ids)
@@ -1131,8 +1146,10 @@ fn adjust_input_ref_for_slice(
             stride_i,
             stride_k,
         } => {
-            let new_base =
-                AtomId(base.0.wrapping_add((*stride_i as i64 * offset as i64) as u64));
+            let new_base = AtomId(
+                base.0
+                    .wrapping_add((*stride_i as i64 * offset as i64) as u64),
+            );
             InputRef::SymAffine {
                 base: new_base,
                 stride_i: *stride_i,
@@ -1195,9 +1212,11 @@ fn remap_one_input_ref(input: &InputRef, atom_map: &RangeAtomMap) -> InputRef {
             stride_k: *stride_k,
         },
 
-        InputRef::Explicit(ids) => {
-            InputRef::Explicit(ids.iter().map(|id| atom_map.get(*id).unwrap_or(*id)).collect())
-        }
+        InputRef::Explicit(ids) => InputRef::Explicit(
+            ids.iter()
+                .map(|id| atom_map.get(*id).unwrap_or(*id))
+                .collect(),
+        ),
     }
 }
 
@@ -1526,7 +1545,10 @@ pub fn validate_span_plan(plan: &SpanPlan, graph: &NanoGraph) -> Vec<String> {
             if out_lo > covered_up_to {
                 errors.push(format!(
                     "Compute atoms [{}, {}) from group {} (base={}) not output by any span",
-                    covered_up_to, out_lo.min(g_hi), gi, group.base_id
+                    covered_up_to,
+                    out_lo.min(g_hi),
+                    gi,
+                    group.base_id
                 ));
             }
             covered_up_to = covered_up_to.max(out_hi);
@@ -2116,10 +2138,7 @@ mod tests {
             },
             vec![],
             vec![],
-            vec![InputRef::Affine {
-                base: a,
-                stride: 1,
-            }],
+            vec![InputRef::Affine { base: a, stride: 1 }],
         );
 
         let c = g.push_group(
@@ -2131,10 +2150,7 @@ mod tests {
             },
             vec![],
             vec![],
-            vec![InputRef::Affine {
-                base: a,
-                stride: 1,
-            }],
+            vec![InputRef::Affine { base: a, stride: 1 }],
         );
 
         let d = g.push_group(
@@ -2147,14 +2163,8 @@ mod tests {
             vec![],
             vec![],
             vec![
-                InputRef::Affine {
-                    base: b,
-                    stride: 1,
-                },
-                InputRef::Affine {
-                    base: c,
-                    stride: 1,
-                },
+                InputRef::Affine { base: b, stride: 1 },
+                InputRef::Affine { base: c, stride: 1 },
             ],
         );
         g.outputs = vec![d];
@@ -2306,8 +2316,14 @@ mod tests {
     fn test_output_atom_count_matches_compute() {
         // Multiple different graph patterns, verify coverage.
         let test_cases: Vec<(NanoGraph, &str)> = vec![
-            (test_graphs::elementwise_binary(512, ScalarBinOp::Add).0, "elem_add"),
-            (test_graphs::unary_chain(128, &[ScalarUnaryOp::Neg, ScalarUnaryOp::Exp]).0, "unary_chain"),
+            (
+                test_graphs::elementwise_binary(512, ScalarBinOp::Add).0,
+                "elem_add",
+            ),
+            (
+                test_graphs::unary_chain(128, &[ScalarUnaryOp::Neg, ScalarUnaryOp::Exp]).0,
+                "unary_chain",
+            ),
             (test_graphs::broadcast_add(256).0, "broadcast_add"),
             (test_graphs::matmul(4, 3, 5).0, "matmul_4x3x5"),
             (test_graphs::matmul_chain(4, 4, 4, 4, 4).0, "matmul_chain"),

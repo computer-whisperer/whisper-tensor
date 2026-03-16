@@ -95,30 +95,6 @@ name = "super_graph_test_3"
 path = "examples/super_graph_test_3.rs"
 required-features = ["vulkan"]
 
-[[example]]
-name = "compiler_test"
-path = "examples/compiler_test.rs"
-required-features = ["cranelift"]
-
-[[example]]
-name = "v8_model_test"
-path = "examples/v8_model_test.rs"
-required-features = ["cranelift"]
-
-[[example]]
-name = "v9_model_test"
-path = "examples/v9_model_test.rs"
-required-features = ["cranelift"]
-
-[[example]]
-name = "v9_scaling"
-path = "examples/v9_scaling.rs"
-required-features = ["cranelift"]
-
-[[example]]
-name = "compiler_residual_block_bench"
-path = "examples/compiler_residual_block_bench.rs"
-required-features = ["cranelift"]
 
 [[example]]
 name = "matmul_perf_test"
