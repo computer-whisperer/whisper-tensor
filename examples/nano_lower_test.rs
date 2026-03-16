@@ -1328,7 +1328,86 @@ fn validate_span_topology_raw(
             for &(main_base, count) in inputs {
                 if !range_contains(&produced_ranges, main_base) {
                     input_errors += 1;
-                    if input_errors <= 5 {
+                    if input_errors == 1 {
+                        println!(
+                            "    {} INPUT ERR: phase {}/lane {}: main atom {} (count={}) not available",
+                            name, pi, li, main_base, count
+                        );
+                        // Trace: find which main-graph group contains this atom
+                        let og = original.groups();
+                        let idx = og.partition_point(|g| g.base_id.0 <= main_base);
+                        if idx > 0 {
+                            let g = &og[idx - 1];
+                            if main_base < g.base_id.0 + g.count {
+                                let off = main_base - g.base_id.0;
+                                println!("      main group {} base={} count={} offset_in_group={}",
+                                    idx - 1, g.base_id.0, g.count, off);
+                                println!("      op: {:?}", g.op);
+                                for (ii, inp) in g.inputs.iter().enumerate() {
+                                    let r0 = inp.resolve(0, 0);
+                                    let rl = inp.resolve(g.count - 1, 0);
+                                    let inp_str = match inp {
+                                        InputRef::Explicit(ids) => {
+                                            let mut unique: Vec<u64> = ids.iter().map(|id| id.0).collect();
+                                            unique.sort();
+                                            unique.dedup();
+                                            let sample: Vec<u64> = unique.iter().take(20).copied().collect();
+                                            format!("Explicit(len={}, {} unique, sample={:?})", ids.len(), unique.len(), sample)
+                                        }
+                                        other => format!("{:?}", other),
+                                    };
+                                    println!("      input {}: {}  resolves [0]={} [last]={}", ii, inp_str, r0.0, rl.0);
+                                    // Find which groups the input atoms come from
+                                    let pi2 = og.partition_point(|g2| g2.base_id.0 <= r0.0);
+                                    if pi2 > 0 {
+                                        let pg = &og[pi2 - 1];
+                                        if r0.0 < pg.base_id.0 + pg.count {
+                                            println!("        -> first atom from group {} base={} count={} op={:?}",
+                                                pi2 - 1, pg.base_id.0, pg.count,
+                                                std::mem::discriminant(&pg.op));
+                                        }
+                                    }
+                                    // Also check where the unique atoms actually live
+                                    if let InputRef::Explicit(ids) = inp {
+                                        let mut unique: Vec<u64> = ids.iter().map(|id| id.0).collect();
+                                        unique.sort();
+                                        unique.dedup();
+                                        let mut groups_hit: Vec<(usize, u64, u64)> = vec![];
+                                        for &a in &unique {
+                                            let pi3 = og.partition_point(|g2| g2.base_id.0 <= a);
+                                            if pi3 > 0 {
+                                                let pg = &og[pi3 - 1];
+                                                if a < pg.base_id.0 + pg.count {
+                                                    if groups_hit.last().map(|&(gi, _, _)| gi) != Some(pi3 - 1) {
+                                                        groups_hit.push((pi3 - 1, pg.base_id.0, pg.count));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        println!("        -> atoms span {} groups: {:?}", groups_hit.len(), groups_hit);
+                                    }
+                                }
+                                // Also: find who READS from this group
+                                println!("      consumers of group {}:", idx - 1);
+                                for (ci, cg) in og.iter().enumerate() {
+                                    for (ii, cinp) in cg.inputs.iter().enumerate() {
+                                        let r0 = cinp.resolve(0, 0);
+                                        let rl = cinp.resolve(cg.count.saturating_sub(1), 0);
+                                        if (r0.0 >= g.base_id.0 && r0.0 < g.base_id.0 + g.count)
+                                            || (rl.0 >= g.base_id.0 && rl.0 < g.base_id.0 + g.count)
+                                        {
+                                            println!("        group {} (base={} count={} op={:?}) input {}",
+                                                ci, cg.base_id.0, cg.count,
+                                                std::mem::discriminant(&cg.op), ii);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // Show what this span's compute groups are (from outputs)
+                        let outputs_list: Vec<_> = _outputs.iter().take(5).collect();
+                        println!("      span outputs (first 5): {:?}", outputs_list);
+                    } else if input_errors <= 5 {
                         println!(
                             "    {} INPUT ERR: phase {}/lane {}: main atom {} (count={}) not available",
                             name, pi, li, main_base, count

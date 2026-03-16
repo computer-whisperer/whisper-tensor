@@ -253,6 +253,46 @@ impl NanoGraph {
         base
     }
 
+    /// Allocate space for a group without filling in its fields yet.
+    /// Returns the base AtomId. The group is initially a no-op Literal placeholder.
+    /// Call `fill_placeholder` to set the actual op and inputs.
+    pub fn alloc_placeholder(&mut self, count: u64) -> AtomId {
+        let base_id = self.alloc_ids(count);
+        self.groups.push(AtomGroup {
+            base_id,
+            count,
+            op: ScalarOp::Literal(crate::numeric_scalar::NumericScalar::F32(0.0)),
+            sym_dims: vec![],
+            reduce_dims: vec![],
+            inputs: vec![],
+        });
+        base_id
+    }
+
+    /// Fill in a previously allocated placeholder group.
+    /// The `base_id` must match one returned by `alloc_placeholder`.
+    pub fn fill_placeholder(
+        &mut self,
+        base_id: AtomId,
+        count: u64,
+        op: ScalarOp,
+        sym_dims: Vec<SymDim>,
+        reduce_dims: Vec<SymDim>,
+        inputs: Vec<InputRef>,
+    ) {
+        let idx = self
+            .groups
+            .iter()
+            .position(|g| g.base_id == base_id)
+            .expect("fill_placeholder: base_id not found");
+        let g = &mut self.groups[idx];
+        debug_assert_eq!(g.count, count, "fill_placeholder: count mismatch");
+        g.op = op;
+        g.sym_dims = sym_dims;
+        g.reduce_dims = reduce_dims;
+        g.inputs = inputs;
+    }
+
     /// Add an atom group to the graph. Returns the base AtomId.
     pub fn push_group(
         &mut self,
@@ -396,52 +436,119 @@ impl NanoGraph {
     }
 
     /// Validate structural invariants. Returns a list of errors.
+    /// Validate the NanoGraph structure. Runs in O(groups), not O(atoms).
+    ///
+    /// Checks:
+    /// - All InputRefs resolve to existing atoms (sample-checked: first, last, mid)
+    /// - Topological ordering: inputs only reference earlier groups (no self/forward refs)
+    /// - Reduce stride ranges stay within earlier groups
+    /// - Explicit InputRef length matches group count
+    /// - Input count matches op expectation
     pub fn validate(&self) -> Vec<String> {
         let mut errors = Vec::new();
 
         for (gi, group) in self.groups.iter().enumerate() {
-            // Verify input refs resolve to existing atoms.
             for (inp_idx, input) in group.inputs.iter().enumerate() {
-                match input {
-                    InputRef::SymAffine { .. } => {
-                        // Determine k values to validate: always k=0, plus k_max-1
-                        // if we can find a bound from the group's reduce_dims.
-                        let k_max = group
-                            .reduce_dims
-                            .iter()
-                            .filter_map(|sd| self.sym_dim_bounds.get(sd).copied())
-                            .next();
-                        let mut k_vals = vec![0u64];
-                        if let Some(km) = k_max
-                            && km > 1
-                        {
-                            k_vals.push(km - 1);
-                        }
-                        for &k in &k_vals {
-                            for i in 0..group.count {
-                                let source = input.resolve(i, k);
-                                if !self.contains_atom(source) {
-                                    errors.push(format!(
-                                        "Group {} (base={}) input {} atom offset {} k={}: references nonexistent atom {}",
-                                        gi, group.base_id, inp_idx, i, k, source
-                                    ));
-                                    break;
-                                }
-                            }
+                // Determine k values to check for SymAffine.
+                let k_vals: Vec<u64> = if matches!(input, InputRef::SymAffine { .. }) {
+                    let k_max = group
+                        .reduce_dims
+                        .iter()
+                        .filter_map(|sd| self.sym_dim_bounds.get(sd).copied())
+                        .next();
+                    let mut v = vec![0u64];
+                    if let Some(km) = k_max
+                        && km > 1
+                    {
+                        v.push(km - 1);
+                    }
+                    v
+                } else {
+                    vec![0u64]
+                };
+
+                // Sample positions: first, last, and middle.
+                let sample_positions: Vec<u64> = if group.count <= 3 {
+                    (0..group.count).collect()
+                } else {
+                    vec![0, group.count / 2, group.count - 1]
+                };
+
+                // For Explicit, also check unique atoms that might span multiple groups.
+                let extra_positions: Vec<u64> = if let InputRef::Explicit(ids) = input {
+                    // Find positions where the atom ID jumps (different source groups).
+                    let mut extras = Vec::new();
+                    let mut prev_gi = None;
+                    for (i, id) in ids.iter().enumerate() {
+                        let cur_gi = self.find_group_idx(*id);
+                        if cur_gi != prev_gi {
+                            extras.push(i as u64);
+                            prev_gi = cur_gi;
                         }
                     }
-                    _ => {
-                        for i in 0..group.count {
-                            let source = input.resolve(i, 0);
-                            if !self.contains_atom(source) {
+                    extras
+                } else {
+                    vec![]
+                };
+
+                for &k in &k_vals {
+                    for &i in sample_positions.iter().chain(extra_positions.iter()) {
+                        if i >= group.count {
+                            continue;
+                        }
+                        let source = input.resolve(i, k);
+
+                        // Check existence.
+                        if !self.contains_atom(source) {
+                            errors.push(format!(
+                                "Group {} (base={}) input {} atom {} k={}: references nonexistent atom {}",
+                                gi, group.base_id, inp_idx, i, k, source
+                            ));
+                            break;
+                        }
+
+                        // Check topological ordering: source must be in an earlier group.
+                        if let Some(src_gi) = self.find_group_idx(source) {
+                            if src_gi >= gi {
                                 errors.push(format!(
-                                    "Group {} (base={}) input {} atom offset {}: references nonexistent atom {}",
-                                    gi, group.base_id, inp_idx, i, source
+                                    "Group {} (base={}) input {} atom {}: references group {} (base={}) — not earlier (self/forward reference)",
+                                    gi, group.base_id, inp_idx, i,
+                                    src_gi, self.groups[src_gi].base_id,
                                 ));
                                 break;
                             }
                         }
                     }
+                }
+
+                // For reduce ops, check the reduce-strided access range.
+                match &group.op {
+                    ScalarOp::ReduceSum { reduce_count, reduce_stride, .. }
+                    | ScalarOp::ReduceMax { reduce_count, reduce_stride, .. }
+                        if *reduce_count > 1 && *reduce_stride != 0 =>
+                    {
+                        // Check from first and last consumer atom.
+                        for &i in &[0u64, group.count.saturating_sub(1)] {
+                            let base_atom = input.resolve(i, 0);
+                            let last_k_atom = AtomId(
+                                (base_atom.0 as i64 + (*reduce_count as i64 - 1) * reduce_stride) as u64,
+                            );
+                            if !self.contains_atom(last_k_atom) {
+                                errors.push(format!(
+                                    "Group {} (base={}) input {}: reduce stride from atom {} reaches nonexistent atom {}",
+                                    gi, group.base_id, inp_idx, i, last_k_atom,
+                                ));
+                            } else if let Some(src_gi) = self.find_group_idx(last_k_atom) {
+                                if src_gi >= gi {
+                                    errors.push(format!(
+                                        "Group {} (base={}) input {}: reduce stride reaches group {} which is not earlier",
+                                        gi, group.base_id, inp_idx, src_gi,
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
                 }
 
                 // Explicit refs must have correct length.
@@ -450,10 +557,7 @@ impl NanoGraph {
                 {
                     errors.push(format!(
                         "Group {} input {}: Explicit has {} entries but group has {} atoms",
-                        gi,
-                        inp_idx,
-                        ids.len(),
-                        group.count
+                        gi, inp_idx, ids.len(), group.count
                     ));
                 }
             }

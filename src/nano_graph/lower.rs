@@ -387,6 +387,17 @@ fn lower_inner(
         ctx.nano.num_atoms()
     );
 
+    // Validate the graph structure (catch degenerate/self-referencing groups).
+    let validation_errors = ctx.nano.validate();
+    if !validation_errors.is_empty() {
+        eprintln!("  [lower] NanoGraph validation: {} errors", validation_errors.len());
+        for (i, err) in validation_errors.iter().enumerate() {
+            if i < 5 {
+                eprintln!("    {}", err);
+            }
+        }
+    }
+
     // Collect outputs. Try get_outputs() first; if empty, scan all tensors
     // in the tensor_map that aren't consumed by any op (terminal tensors).
     let output_ids = graph.get_outputs();
