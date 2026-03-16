@@ -1928,14 +1928,31 @@ fn remap_single_input(
             base,
             stride,
             modulus,
-        } => InputRef::Modular {
-            base: remap_atom(atom_map, *base, &format!(
-                "Modular base={} stride={} modulus={}",
-                base.0, stride, modulus
-            )),
-            stride: *stride,
-            modulus: *modulus,
-        },
+        } => {
+            if atom_offset % modulus == 0 {
+                // Aligned: modular pattern preserved, just remap base
+                InputRef::Modular {
+                    base: remap_atom(atom_map, *base, &format!(
+                        "Modular base={} stride={} modulus={}",
+                        base.0, stride, modulus
+                    )),
+                    stride: *stride,
+                    modulus: *modulus,
+                }
+            } else {
+                // Misaligned split: (atom_offset + i) % modulus != i % modulus
+                // Fall back to explicit enumeration
+                let mut ids = Vec::with_capacity(atom_count as usize);
+                for i in 0..atom_count {
+                    let main_id = input.resolve(atom_offset + i, 0);
+                    ids.push(remap_atom(atom_map, main_id, &format!(
+                        "Modular-explicit i={} base={} stride={} modulus={}",
+                        i, base.0, stride, modulus
+                    )));
+                }
+                InputRef::Explicit(ids)
+            }
+        }
 
         InputRef::SymAffine {
             base,

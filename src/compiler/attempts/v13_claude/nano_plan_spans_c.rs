@@ -1094,10 +1094,20 @@ fn remap_single_input_range(
             }
         }
         InputRef::Modular { base, stride, modulus } => {
-            InputRef::Modular {
-                base: atom_map.get(*base).unwrap_or(*base),
-                stride: *stride,
-                modulus: *modulus,
+            if atom_offset % modulus == 0 {
+                InputRef::Modular {
+                    base: atom_map.get(*base).unwrap_or(*base),
+                    stride: *stride,
+                    modulus: *modulus,
+                }
+            } else {
+                // Misaligned split: fall back to explicit
+                let mut ids = Vec::with_capacity(atom_count as usize);
+                for i in 0..atom_count {
+                    let main_id = input.resolve(atom_offset + i, 0);
+                    ids.push(atom_map.get(main_id).unwrap_or(main_id));
+                }
+                InputRef::Explicit(ids)
             }
         }
         InputRef::SymAffine { base, stride_i, stride_k } => {
@@ -1594,27 +1604,20 @@ fn remap_single_input(
         InputRef::Modular { base, stride, modulus } => {
             // Modular: atom i reads base + stride * (i % modulus).
             // For sub-range: atom j reads base + stride * ((atom_offset + j) % modulus).
-            // This doesn't simplify nicely, so remap the base and keep the pattern.
-            // The modular pattern accesses the same set of atoms regardless of offset.
+            // When atom_offset % modulus == 0, the pattern is unchanged (just remap base).
+            // When misaligned, the phase shift means we must fall back to explicit.
             let local_base = main_to_local
                 .get(base)
                 .copied()
                 .unwrap_or(*base);
-            if is_full {
+            if atom_offset % modulus == 0 {
                 InputRef::Modular {
                     base: local_base,
                     stride: *stride,
                     modulus: *modulus,
                 }
             } else {
-                // For sub-ranges, we need to shift the modular pattern.
-                // atom j -> base + stride * ((atom_offset + j) % modulus)
-                // This is still Modular but the offset changes the starting phase.
-                // Since the modular wrap accesses all modulus atoms anyway,
-                // we can keep it but we need to verify the local mapping is correct.
-                // Actually, for Modular, the base and all modular atoms are already
-                // in main_to_local. Just remap the base.
-                // But the offset shifts the access pattern. We should use Explicit.
+                // Misaligned split: fall back to explicit
                 let mut ids = Vec::with_capacity(atom_count as usize);
                 for j in 0..atom_count {
                     let main_atom = input.resolve(atom_offset + j, 0);

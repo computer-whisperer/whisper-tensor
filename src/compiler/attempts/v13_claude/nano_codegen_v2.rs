@@ -1021,11 +1021,7 @@ fn emit_unop(
 ) -> Result<Value, String> {
     Ok(match op {
         ScalarUnaryOp::Neg => builder.ins().fneg(x),
-        ScalarUnaryOp::Abs => {
-            let func_ref = module.declare_func_in_func(math.fabsf, builder.func);
-            let call = builder.ins().call(func_ref, &[x]);
-            builder.inst_results(call)[0]
-        }
+        ScalarUnaryOp::Abs => builder.ins().fabs(x),
         ScalarUnaryOp::Exp => {
             let func_ref = module.declare_func_in_func(math.expf, builder.func);
             let call = builder.ins().call(func_ref, &[x]);
@@ -1036,11 +1032,7 @@ fn emit_unop(
             let call = builder.ins().call(func_ref, &[x]);
             builder.inst_results(call)[0]
         }
-        ScalarUnaryOp::Sqrt => {
-            let func_ref = module.declare_func_in_func(math.sqrtf, builder.func);
-            let call = builder.ins().call(func_ref, &[x]);
-            builder.inst_results(call)[0]
-        }
+        ScalarUnaryOp::Sqrt => builder.ins().sqrt(x),
         ScalarUnaryOp::Reciprocal => {
             let one = builder.ins().f32const(1.0);
             builder.ins().fdiv(one, x)
@@ -1050,16 +1042,8 @@ fn emit_unop(
             let call = builder.ins().call(func_ref, &[x]);
             builder.inst_results(call)[0]
         }
-        ScalarUnaryOp::Floor => {
-            let func_ref = module.declare_func_in_func(math.floorf, builder.func);
-            let call = builder.ins().call(func_ref, &[x]);
-            builder.inst_results(call)[0]
-        }
-        ScalarUnaryOp::Ceil => {
-            let func_ref = module.declare_func_in_func(math.ceilf, builder.func);
-            let call = builder.ins().call(func_ref, &[x]);
-            builder.inst_results(call)[0]
-        }
+        ScalarUnaryOp::Floor => builder.ins().floor(x),
+        ScalarUnaryOp::Ceil => builder.ins().ceil(x),
     })
 }
 

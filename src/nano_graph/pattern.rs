@@ -401,16 +401,27 @@ impl NanoGraph {
             for (inp_idx, input) in group.inputs.iter().enumerate() {
                 match input {
                     InputRef::SymAffine { .. } => {
-                        // SymAffine depends on k — validate at k=0 only
-                        // (full validation would need sym_dim_bounds).
-                        for i in 0..group.count {
-                            let source = input.resolve(i, 0);
-                            if !self.contains_atom(source) {
-                                errors.push(format!(
-                                    "Group {} (base={}) input {} atom offset {} k=0: references nonexistent atom {}",
-                                    gi, group.base_id, inp_idx, i, source
-                                ));
-                                break;
+                        // Determine k values to validate: always k=0, plus k_max-1
+                        // if we can find a bound from the group's reduce_dims.
+                        let k_max = group.reduce_dims.iter()
+                            .filter_map(|sd| self.sym_dim_bounds.get(sd).copied())
+                            .next();
+                        let mut k_vals = vec![0u64];
+                        if let Some(km) = k_max {
+                            if km > 1 {
+                                k_vals.push(km - 1);
+                            }
+                        }
+                        for &k in &k_vals {
+                            for i in 0..group.count {
+                                let source = input.resolve(i, k);
+                                if !self.contains_atom(source) {
+                                    errors.push(format!(
+                                        "Group {} (base={}) input {} atom offset {} k={}: references nonexistent atom {}",
+                                        gi, group.base_id, inp_idx, i, k, source
+                                    ));
+                                    break;
+                                }
                             }
                         }
                     }

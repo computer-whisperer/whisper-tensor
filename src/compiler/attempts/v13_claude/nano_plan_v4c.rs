@@ -109,11 +109,7 @@ pub fn plan_execution_spans(graph: &NanoGraph, num_lanes: usize) -> SpanPlan {
     // Step 3: Topological sort.
     let topo_order = topological_sort(n, &producers, &is_literal);
 
-    // Step 4: Compute "depth" for each group (longest path from any source).
-    // This establishes a partial ordering that respects all dependencies.
-    let depths = compute_depths(&topo_order, &producers, &is_literal, n);
-
-    // Step 5: Determine which groups are "full-width consumers" — they need
+    // Step 4: Determine which groups are "full-width consumers" — they need
     // ALL atoms from a producer that will be split across lanes. These create
     // mandatory phase boundaries: the producer must complete on all lanes
     // before the consumer can start.
@@ -123,7 +119,7 @@ pub fn plan_execution_spans(graph: &NanoGraph, num_lanes: usize) -> SpanPlan {
     // across lanes (it's a compute group with enough atoms to warrant splitting,
     // and it has lane-aligned access patterns).
     let phase_assignments =
-        assign_phases(&topo_order, &producers, groups, &is_literal, &depths, num_lanes);
+        assign_phases(&topo_order, &producers, groups, &is_literal, num_lanes);
 
     let num_phases = phase_assignments.iter().copied().max().unwrap_or(0) + 1;
 
@@ -252,29 +248,6 @@ fn topological_sort(n: usize, producers: &[Vec<usize>], is_literal: &[bool]) -> 
     order
 }
 
-// ─── Depth computation ───────────────────────────────────────────────────────
-
-fn compute_depths(
-    topo_order: &[usize],
-    producers: &[Vec<usize>],
-    is_literal: &[bool],
-    n: usize,
-) -> Vec<usize> {
-    let mut depths = vec![0usize; n];
-    for &gi in topo_order {
-        if is_literal[gi] {
-            continue;
-        }
-        let max_prod_depth = producers[gi]
-            .iter()
-            .map(|&pi| depths[pi] + 1)
-            .max()
-            .unwrap_or(0);
-        depths[gi] = max_prod_depth;
-    }
-    depths
-}
-
 // ─── Phase assignment ────────────────────────────────────────────────────────
 
 /// Assign each compute group to a phase.
@@ -295,7 +268,6 @@ fn assign_phases(
     producers: &[Vec<usize>],
     groups: &[AtomGroup],
     is_literal: &[bool],
-    depths: &[usize],
     num_lanes: usize,
 ) -> Vec<usize> {
     let n = groups.len();
@@ -416,6 +388,8 @@ fn input_ref_range(input: &InputRef, count: u64, op: &ScalarOp) -> (u64, u64) {
             let hi = ids.iter().map(|id| id.0).max().unwrap_or(0) + 1;
             (lo, hi)
         }
+        // NOTE: stride_k not accounted for — SymAffine is not produced by current lowering.
+        // If SymAffine is ever used, this must expand the range by stride_k * k_max.
         InputRef::SymAffine {
             base, stride_i, ..
         } => {
@@ -515,7 +489,7 @@ fn assign_lanes(
             let group = &groups[gi];
 
             // Check if this group should be split.
-            if group.count > num_lanes as u64 && can_split_evenly(group, num_lanes) {
+            if group.count > num_lanes as u64 {
                 // Split across lanes.
                 let chunk = (group.count + num_lanes as u64 - 1) / num_lanes as u64;
                 for lane in 0..num_lanes {
@@ -582,16 +556,6 @@ fn assign_lanes(
     );
 
     assignments
-}
-
-/// Check if a group can be split evenly across lanes.
-fn can_split_evenly(group: &AtomGroup, num_lanes: usize) -> bool {
-    // ReduceSum/ReduceMax with reduce_stride: can split along the output
-    // dimension (count), but each output atom's reduction is self-contained.
-    // Elementwise: trivially splittable.
-    // Groups with Explicit InputRefs: harder to split (but still possible
-    // by slicing the explicit vec).
-    true
 }
 
 /// Find a preferred lane for a group based on its producers.
@@ -888,39 +852,16 @@ fn build_single_span(
     // 4. Compute groups NOT in this span → external input
 
     let mut inlined_literals: BTreeSet<usize> = BTreeSet::new();
-    let mut external_groups: BTreeMap<usize, (u64, u64)> = BTreeMap::new(); // gi -> (offset, count)
 
     for &gi in &needed_groups {
         if span_compute_set.contains(&gi) {
             continue; // Already in span as compute.
         }
-        if is_literal[gi] {
-            if groups[gi].count < LITERAL_INLINE_THRESHOLD {
-                inlined_literals.insert(gi);
-            } else {
-                // Large literal → external input (full range).
-                external_groups.insert(gi, (0, groups[gi].count));
-            }
-        } else {
-            // Compute group not in this span → external input.
-            // Determine which range we actually need.
-            let range = compute_needed_range_from_span(
-                gi,
-                &span_compute_groups,
-                groups,
-                is_literal,
-            );
-            if let Some((off, cnt)) = range {
-                let entry = external_groups.entry(gi).or_insert((off, cnt));
-                // Extend range if needed.
-                let new_lo = entry.0.min(off);
-                let new_hi = (entry.0 + entry.1).max(off + cnt);
-                *entry = (new_lo, new_hi - new_lo);
-            } else {
-                // Need full group.
-                external_groups.insert(gi, (0, groups[gi].count));
-            }
+        if is_literal[gi] && groups[gi].count < LITERAL_INLINE_THRESHOLD {
+            inlined_literals.insert(gi);
         }
+        // Non-inlined groups (large literals + external compute) are handled
+        // by the refined_external pass below, which computes exact ranges.
     }
 
     // Also need to find external ranges for compute groups in the span that read
@@ -1038,17 +979,6 @@ fn build_single_span(
 }
 
 /// Compute the range of a producer group that's needed by the span's compute groups.
-fn compute_needed_range_from_span(
-    prod_gi: usize,
-    span_compute: &[(usize, u64, u64)],
-    groups: &[AtomGroup],
-    is_literal: &[bool],
-) -> Option<(u64, u64)> {
-    // For now, return None (full range). A more precise implementation would
-    // trace each InputRef to determine the exact sub-range needed.
-    None
-}
-
 /// Collect external input ranges for a single compute group in the span.
 fn collect_external_ranges_for_group(
     group: &AtomGroup,
@@ -1182,6 +1112,8 @@ fn resolve_producer_groups(input: &InputRef, count: u64, groups: &[AtomGroup]) -
             }
             result
         }
+        // NOTE: stride_k not accounted for — SymAffine is not produced by current lowering.
+        // If SymAffine is ever used, this must expand the range by stride_k * k_max.
         InputRef::SymAffine {
             base, stride_i, ..
         } => {
@@ -1266,6 +1198,8 @@ fn resolve_producer_groups_with_reduce(
             let hi = base + max_reduce_ext;
             find_groups_in_range(groups, lo as u64, hi as u64)
         }
+        // NOTE: stride_k not accounted for — SymAffine is not produced by current lowering.
+        // If SymAffine is ever used, this must expand the range by stride_k * k_max.
         InputRef::SymAffine {
             base, stride_i, ..
         } => {
@@ -1401,6 +1335,8 @@ fn resolve_input_to_group_ranges(
                 result.push((gi, lo, hi));
             }
         }
+        // NOTE: stride_k not accounted for — SymAffine is not produced by current lowering.
+        // If SymAffine is ever used, this must expand the range by stride_k * k_max.
         InputRef::SymAffine {
             base,
             stride_i,
@@ -1561,11 +1497,25 @@ fn remap_single_input(
             base,
             stride,
             modulus,
-        } => InputRef::Modular {
-            base: atom_map.get(*base).unwrap_or(*base),
-            stride: *stride,
-            modulus: *modulus,
-        },
+        } => {
+            if atom_offset % modulus == 0 {
+                // Aligned: modular pattern preserved, just remap base
+                InputRef::Modular {
+                    base: atom_map.get(*base).unwrap_or(*base),
+                    stride: *stride,
+                    modulus: *modulus,
+                }
+            } else {
+                // Misaligned split: (atom_offset + i) % modulus != i % modulus
+                // Fall back to explicit enumeration
+                let mut ids = Vec::with_capacity(atom_count as usize);
+                for i in 0..atom_count {
+                    let main_id = input.resolve(atom_offset + i, 0);
+                    ids.push(atom_map.get(main_id).unwrap_or(main_id));
+                }
+                InputRef::Explicit(ids)
+            }
+        }
         InputRef::SymAffine {
             base,
             stride_i,
