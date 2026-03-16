@@ -7,6 +7,5 @@
 pub mod nano_codegen;
 #[cfg(feature = "cranelift")]
 pub mod nano_codegen_v2;
-pub mod nano_part_creative;
 pub mod plan;
 pub mod test_graphs;
