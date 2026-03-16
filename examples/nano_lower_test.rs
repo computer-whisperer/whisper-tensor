@@ -523,6 +523,36 @@ fn main() {
             }
         }
     }
+    if which == "v4a" || which == "all_v4" {
+        use whisper_tensor::compiler::attempts::v13_claude::nano_plan_v4a;
+        let t0 = Instant::now();
+        let plan = nano_plan_v4a::plan_spans(&result.graph, num_lanes);
+        let elapsed = t0.elapsed();
+        let ss: Vec<Vec<SS>> = plan.phases.iter().map(|p| p.spans.iter().map(|s| SS {
+            ng: s.graph.num_groups(), na: s.graph.num_atoms(), ni: s.inputs.len(), no: s.outputs.len(),
+        }).collect()).collect();
+        print_span_summary("v4a", &ss, plan.num_lanes, elapsed);
+    }
+    if which == "v4b" || which == "all_v4" {
+        use whisper_tensor::compiler::attempts::v13_claude::nano_plan_v4b;
+        let t0 = Instant::now();
+        let plan = nano_plan_v4b::plan_spans(&result.graph, num_lanes);
+        let elapsed = t0.elapsed();
+        let ss: Vec<Vec<SS>> = plan.phases.iter().map(|p| p.spans.iter().map(|s| SS {
+            ng: s.graph.num_groups(), na: s.graph.num_atoms(), ni: s.inputs.len(), no: s.outputs.len(),
+        }).collect()).collect();
+        print_span_summary("v4b", &ss, plan.num_lanes, elapsed);
+    }
+    if which == "v4c" || which == "all_v4" {
+        use whisper_tensor::compiler::attempts::v13_claude::nano_plan_v4c;
+        let t0 = Instant::now();
+        let plan = nano_plan_v4c::plan_execution_spans(&result.graph, num_lanes);
+        let elapsed = t0.elapsed();
+        let ss: Vec<Vec<SS>> = plan.phases.iter().map(|p| p.spans.iter().map(|s| SS {
+            ng: s.graph.num_groups(), na: s.graph.num_atoms(), ni: s.inputs.len(), no: s.outputs.len(),
+        }).collect()).collect();
+        print_span_summary("v4c", &ss, plan.num_lanes, elapsed);
+    }
     if which == "d" || which == "all" {
         use whisper_tensor::compiler::attempts::v13_claude::nano_plan_spans_d;
         let t0 = Instant::now();
