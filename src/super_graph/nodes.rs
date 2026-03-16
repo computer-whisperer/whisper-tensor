@@ -4,7 +4,9 @@ use crate::backends::eval_backend::EvalBackend;
 use crate::backends::ndarray_backend::NDArrayNumericTensor;
 use crate::compiler::CompiledProgramObserver;
 use crate::dtype::DType;
-use crate::graph::{GlobalId, Graph, Node, NodeMetadata, Property, PropertyValue};
+use crate::graph::{
+    GlobalId, Graph, Node, NodeMetadata, NodeSlotEditError, Property, PropertyValue, SlotDirection,
+};
 use crate::metadata::TokenizerInfo;
 use crate::milli_graph::MilliOpGraph;
 use crate::milli_graph::observer::MilliOpGraphObserver;
@@ -43,6 +45,28 @@ pub trait SuperGraphNode {
     }
     fn output_slots(&self) -> Box<dyn Iterator<Item = Option<SuperGraphAnyLink>> + '_> {
         Box::new(self.outputs().map(Some))
+    }
+    fn set_input_slot(
+        &mut self,
+        slot_index: usize,
+        _link: Option<GlobalId>,
+    ) -> Result<(), NodeSlotEditError> {
+        Err(NodeSlotEditError::unsupported(
+            self.op_kind(),
+            SlotDirection::Input,
+            slot_index,
+        ))
+    }
+    fn set_output_slot(
+        &mut self,
+        slot_index: usize,
+        _link: Option<GlobalId>,
+    ) -> Result<(), NodeSlotEditError> {
+        Err(NodeSlotEditError::unsupported(
+            self.op_kind(),
+            SlotDirection::Output,
+            slot_index,
+        ))
     }
     fn global_id(&self) -> GlobalId;
 
@@ -88,6 +112,22 @@ impl<T: SuperGraphNode> Node for T {
             <Self as SuperGraphNode>::output_slots(self).map(|x| x.map(|link| link.global_id())),
         )
     }
+
+    fn set_input_slot(
+        &mut self,
+        slot_index: usize,
+        link: Option<GlobalId>,
+    ) -> Result<(), NodeSlotEditError> {
+        <Self as SuperGraphNode>::set_input_slot(self, slot_index, link)
+    }
+
+    fn set_output_slot(
+        &mut self,
+        slot_index: usize,
+        link: Option<GlobalId>,
+    ) -> Result<(), NodeSlotEditError> {
+        <Self as SuperGraphNode>::set_output_slot(self, slot_index, link)
+    }
 }
 
 fn require_node_link(
@@ -98,6 +138,23 @@ fn require_node_link(
     maybe_link.ok_or_else(|| {
         SuperGraphError::MissingLinkError(format!(": {node_kind} missing link '{field_name}'"))
     })
+}
+
+fn set_slot_link(link: Option<GlobalId>, kind: SuperGraphLinkKind) -> Option<SuperGraphLink> {
+    link.map(|global_id| SuperGraphLink::with_global_id(global_id, kind))
+}
+
+fn set_slot_link_like(
+    link: Option<GlobalId>,
+    like: Option<SuperGraphLink>,
+    op_kind: &str,
+    direction: SlotDirection,
+    slot_index: usize,
+) -> Result<Option<SuperGraphLink>, NodeSlotEditError> {
+    let kind = like.map(|x| x.kind()).ok_or_else(|| {
+        NodeSlotEditError::missing_slot_kind(op_kind.to_string(), direction, slot_index)
+    })?;
+    Ok(set_slot_link(link, kind))
 }
 
 fn tensor_bool_scalar(value: bool) -> Result<NumericTensor<DynRank>, SuperGraphError> {
@@ -3218,6 +3275,840 @@ impl SuperGraphNode for SuperGraphAnyNode {
     delegate!(label() -> Option<String>);
     delegate!(inputs() -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_>);
     delegate!(outputs() -> Box<dyn Iterator<Item = SuperGraphAnyLink> + '_>);
+    fn input_slots(&self) -> Box<dyn Iterator<Item = Option<SuperGraphAnyLink>> + '_> {
+        let slots = match self {
+            SuperGraphAnyNode::ModelExecution(node) => {
+                let mut slots = node
+                    .tensor_inputs
+                    .iter()
+                    .map(|(link, _)| link.map(|x| x.to_any()))
+                    .collect::<Vec<_>>();
+                slots.push(node.tensor_map.map(|x| x.to_any()));
+                slots
+            }
+            SuperGraphAnyNode::TokenizerLoad(_) => Vec::new(),
+            SuperGraphAnyNode::TokenizerEncode(node) => vec![
+                node.tokenizer.map(|x| x.to_any()),
+                node.text_input.map(|x| x.to_any()),
+            ],
+            SuperGraphAnyNode::TokenizerDecode(node) => vec![
+                node.tokenizer.map(|x| x.to_any()),
+                node.tensor_input.map(|x| x.to_any()),
+            ],
+            SuperGraphAnyNode::TextToPhonemes(node) => vec![node.text_input.map(|x| x.to_any())],
+            SuperGraphAnyNode::PiperPhonemesToTensor(node) => {
+                vec![node.phonemes_input.map(|x| x.to_any())]
+            }
+            SuperGraphAnyNode::KokoroPhonemesToTensor(node) => {
+                vec![node.phonemes_input.map(|x| x.to_any())]
+            }
+            SuperGraphAnyNode::F5TextToTensor(node) => vec![node.text_input.map(|x| x.to_any())],
+            SuperGraphAnyNode::TensorToImage(node) => vec![node.tensor_input.map(|x| x.to_any())],
+            SuperGraphAnyNode::TensorToAudioClip(node) => {
+                vec![node.tensor_input.map(|x| x.to_any())]
+            }
+            SuperGraphAnyNode::AudioClipToTensor(node) => {
+                vec![node.audio_input.map(|x| x.to_any())]
+            }
+            SuperGraphAnyNode::AudioClipToMelSpectrogram(node) => {
+                vec![node.audio_input.map(|x| x.to_any())]
+            }
+            SuperGraphAnyNode::MilliOpGraph(node) => node
+                .graph
+                .input_link_ids()
+                .map(|(id, _)| Some(SuperGraphLink::tensor(id).to_any()))
+                .collect::<Vec<_>>(),
+            SuperGraphAnyNode::Scan(node) => {
+                let mut slots = Vec::new();
+                slots.push(node.iteration_count.map(|x| x.to_any()));
+                slots.extend(
+                    node.simple_inputs
+                        .iter()
+                        .map(|(outer, _)| outer.map(|x| x.to_any())),
+                );
+                slots.extend(
+                    node.state_links
+                        .iter()
+                        .map(|(outer, _, _)| outer.map(|x| x.to_any())),
+                );
+                slots.extend(
+                    node.scan_inputs
+                        .iter()
+                        .map(|(outer, _, _)| outer.map(|x| x.to_any())),
+                );
+                slots
+            }
+            SuperGraphAnyNode::ReportProgress(node) => vec![
+                node.tier_input.map(|x| x.to_any()),
+                node.numerator_input.map(|x| x.to_any()),
+                node.denominator_input.map(|x| x.to_any()),
+            ],
+            SuperGraphAnyNode::RNNCacheWrite(node) => {
+                let mut slots = vec![
+                    node.key_input.map(|x| x.to_any()),
+                    node.tokens_input.map(|x| x.to_any()),
+                ];
+                slots.extend(
+                    node.state_inputs
+                        .iter()
+                        .map(|(_, link)| link.map(|x| x.to_any())),
+                );
+                slots
+            }
+            SuperGraphAnyNode::RNNCacheRead(node) => {
+                let mut slots = vec![
+                    node.key_input.map(|x| x.to_any()),
+                    node.tokens_input.map(|x| x.to_any()),
+                ];
+                slots.extend(
+                    node.default_state_inputs
+                        .iter()
+                        .map(|(_, link)| link.map(|x| x.to_any())),
+                );
+                slots
+            }
+            SuperGraphAnyNode::TensorCacheRead(node) => vec![
+                node.key_input.map(|x| x.to_any()),
+                node.default_input.map(|x| x.to_any()),
+            ],
+            SuperGraphAnyNode::TensorCacheWrite(node) => vec![
+                node.key_input.map(|x| x.to_any()),
+                node.value_input.map(|x| x.to_any()),
+                node.write_enable_input.map(|x| x.to_any()),
+            ],
+            SuperGraphAnyNode::TensorPackCacheRead(node) => {
+                let mut slots = vec![node.key_input.map(|x| x.to_any())];
+                slots.extend(
+                    node.default_value_inputs
+                        .iter()
+                        .map(|(_, link)| link.map(|x| x.to_any())),
+                );
+                slots
+            }
+            SuperGraphAnyNode::TensorPackCacheWrite(node) => {
+                let mut slots = vec![
+                    node.key_input.map(|x| x.to_any()),
+                    node.write_enable_input.map(|x| x.to_any()),
+                ];
+                slots.extend(
+                    node.value_inputs
+                        .iter()
+                        .map(|(_, link)| link.map(|x| x.to_any())),
+                );
+                slots
+            }
+        };
+        Box::new(slots.into_iter())
+    }
+    fn output_slots(&self) -> Box<dyn Iterator<Item = Option<SuperGraphAnyLink>> + '_> {
+        let slots = match self {
+            SuperGraphAnyNode::ModelExecution(node) => node
+                .tensor_outputs
+                .iter()
+                .map(|(_, link)| link.map(|x| x.to_any()))
+                .collect::<Vec<_>>(),
+            SuperGraphAnyNode::TokenizerLoad(node) => vec![node.output.map(|x| x.to_any())],
+            SuperGraphAnyNode::TokenizerEncode(node) => {
+                vec![node.tensor_output.map(|x| x.to_any())]
+            }
+            SuperGraphAnyNode::TokenizerDecode(node) => vec![node.text_output.map(|x| x.to_any())],
+            SuperGraphAnyNode::TextToPhonemes(node) => {
+                vec![node.phonemes_output.map(|x| x.to_any())]
+            }
+            SuperGraphAnyNode::PiperPhonemesToTensor(node) => vec![
+                node.token_ids_output.map(|x| x.to_any()),
+                node.input_lengths_output.map(|x| x.to_any()),
+            ],
+            SuperGraphAnyNode::KokoroPhonemesToTensor(node) => {
+                vec![node.token_ids_output.map(|x| x.to_any())]
+            }
+            SuperGraphAnyNode::F5TextToTensor(node) => {
+                vec![node.token_ids_output.map(|x| x.to_any())]
+            }
+            SuperGraphAnyNode::TensorToImage(node) => vec![node.image_output.map(|x| x.to_any())],
+            SuperGraphAnyNode::TensorToAudioClip(node) => {
+                vec![node.audio_output.map(|x| x.to_any())]
+            }
+            SuperGraphAnyNode::AudioClipToTensor(node) => {
+                vec![node.tensor_output.map(|x| x.to_any())]
+            }
+            SuperGraphAnyNode::AudioClipToMelSpectrogram(node) => {
+                vec![node.tensor_output.map(|x| x.to_any())]
+            }
+            SuperGraphAnyNode::MilliOpGraph(node) => node
+                .graph
+                .output_link_ids()
+                .map(|(id, _)| Some(SuperGraphLink::tensor(id).to_any()))
+                .collect::<Vec<_>>(),
+            SuperGraphAnyNode::Scan(node) => {
+                let mut slots = Vec::new();
+                slots.extend(
+                    node.simple_outputs
+                        .iter()
+                        .map(|(_, outer)| outer.map(|x| x.to_any())),
+                );
+                slots.extend(
+                    node.scan_outputs
+                        .iter()
+                        .map(|(_, outer, _)| outer.map(|x| x.to_any())),
+                );
+                slots
+            }
+            SuperGraphAnyNode::ReportProgress(_) => Vec::new(),
+            SuperGraphAnyNode::RNNCacheWrite(_) => Vec::new(),
+            SuperGraphAnyNode::RNNCacheRead(node) => {
+                let mut slots = vec![node.tokens_output.map(|x| x.to_any())];
+                slots.extend(
+                    node.state_outputs
+                        .iter()
+                        .map(|(_, link)| link.map(|x| x.to_any())),
+                );
+                slots
+            }
+            SuperGraphAnyNode::TensorCacheRead(node) => vec![
+                node.value_output.map(|x| x.to_any()),
+                node.hit_output.map(|x| x.to_any()),
+            ],
+            SuperGraphAnyNode::TensorCacheWrite(_) => Vec::new(),
+            SuperGraphAnyNode::TensorPackCacheRead(node) => {
+                let mut slots = node
+                    .value_outputs
+                    .iter()
+                    .map(|(_, link)| link.map(|x| x.to_any()))
+                    .collect::<Vec<_>>();
+                slots.push(node.hit_output.map(|x| x.to_any()));
+                slots
+            }
+            SuperGraphAnyNode::TensorPackCacheWrite(_) => Vec::new(),
+        };
+        Box::new(slots.into_iter())
+    }
+    fn set_input_slot(
+        &mut self,
+        slot_index: usize,
+        link: Option<GlobalId>,
+    ) -> Result<(), NodeSlotEditError> {
+        match self {
+            SuperGraphAnyNode::ModelExecution(node) => {
+                let slot_count = node.tensor_inputs.len() + 1;
+                if slot_index < node.tensor_inputs.len() {
+                    node.tensor_inputs[slot_index].0 =
+                        set_slot_link(link, SuperGraphLinkKind::Tensor);
+                    Ok(())
+                } else if slot_index == node.tensor_inputs.len() {
+                    node.tensor_map = set_slot_link(link, SuperGraphLinkKind::TensorMap);
+                    Ok(())
+                } else {
+                    Err(NodeSlotEditError::invalid_slot_index(
+                        "Model Execution".to_string(),
+                        SlotDirection::Input,
+                        slot_index,
+                        slot_count,
+                    ))
+                }
+            }
+            SuperGraphAnyNode::TokenizerLoad(_) => Err(NodeSlotEditError::invalid_slot_index(
+                "Tokenizer Load".to_string(),
+                SlotDirection::Input,
+                slot_index,
+                0,
+            )),
+            SuperGraphAnyNode::TokenizerEncode(node) => match slot_index {
+                0 => {
+                    node.tokenizer = set_slot_link(link, SuperGraphLinkKind::Tokenizer);
+                    Ok(())
+                }
+                1 => {
+                    node.text_input = set_slot_link(link, SuperGraphLinkKind::String);
+                    Ok(())
+                }
+                _ => Err(NodeSlotEditError::invalid_slot_index(
+                    "Tokenizer Encode".to_string(),
+                    SlotDirection::Input,
+                    slot_index,
+                    2,
+                )),
+            },
+            SuperGraphAnyNode::TokenizerDecode(node) => match slot_index {
+                0 => {
+                    node.tokenizer = set_slot_link(link, SuperGraphLinkKind::Tokenizer);
+                    Ok(())
+                }
+                1 => {
+                    node.tensor_input = set_slot_link(link, SuperGraphLinkKind::Tensor);
+                    Ok(())
+                }
+                _ => Err(NodeSlotEditError::invalid_slot_index(
+                    "Tokenizer Decode".to_string(),
+                    SlotDirection::Input,
+                    slot_index,
+                    2,
+                )),
+            },
+            SuperGraphAnyNode::TextToPhonemes(node) => match slot_index {
+                0 => {
+                    node.text_input = set_slot_link(link, SuperGraphLinkKind::String);
+                    Ok(())
+                }
+                _ => Err(NodeSlotEditError::invalid_slot_index(
+                    "TextToPhonemes".to_string(),
+                    SlotDirection::Input,
+                    slot_index,
+                    1,
+                )),
+            },
+            SuperGraphAnyNode::PiperPhonemesToTensor(node) => match slot_index {
+                0 => {
+                    node.phonemes_input = set_slot_link(link, SuperGraphLinkKind::String);
+                    Ok(())
+                }
+                _ => Err(NodeSlotEditError::invalid_slot_index(
+                    "PiperPhonemesToTensor".to_string(),
+                    SlotDirection::Input,
+                    slot_index,
+                    1,
+                )),
+            },
+            SuperGraphAnyNode::KokoroPhonemesToTensor(node) => match slot_index {
+                0 => {
+                    node.phonemes_input = set_slot_link(link, SuperGraphLinkKind::String);
+                    Ok(())
+                }
+                _ => Err(NodeSlotEditError::invalid_slot_index(
+                    "KokoroPhonemesToTensor".to_string(),
+                    SlotDirection::Input,
+                    slot_index,
+                    1,
+                )),
+            },
+            SuperGraphAnyNode::F5TextToTensor(node) => match slot_index {
+                0 => {
+                    node.text_input = set_slot_link(link, SuperGraphLinkKind::String);
+                    Ok(())
+                }
+                _ => Err(NodeSlotEditError::invalid_slot_index(
+                    "F5TextToTensor".to_string(),
+                    SlotDirection::Input,
+                    slot_index,
+                    1,
+                )),
+            },
+            SuperGraphAnyNode::TensorToImage(node) => match slot_index {
+                0 => {
+                    node.tensor_input = set_slot_link(link, SuperGraphLinkKind::Tensor);
+                    Ok(())
+                }
+                _ => Err(NodeSlotEditError::invalid_slot_index(
+                    "TensorToImage".to_string(),
+                    SlotDirection::Input,
+                    slot_index,
+                    1,
+                )),
+            },
+            SuperGraphAnyNode::TensorToAudioClip(node) => match slot_index {
+                0 => {
+                    node.tensor_input = set_slot_link(link, SuperGraphLinkKind::Tensor);
+                    Ok(())
+                }
+                _ => Err(NodeSlotEditError::invalid_slot_index(
+                    "TensorToAudioClip".to_string(),
+                    SlotDirection::Input,
+                    slot_index,
+                    1,
+                )),
+            },
+            SuperGraphAnyNode::AudioClipToTensor(node) => match slot_index {
+                0 => {
+                    node.audio_input = set_slot_link(link, SuperGraphLinkKind::AudioClip);
+                    Ok(())
+                }
+                _ => Err(NodeSlotEditError::invalid_slot_index(
+                    "AudioClipToTensor".to_string(),
+                    SlotDirection::Input,
+                    slot_index,
+                    1,
+                )),
+            },
+            SuperGraphAnyNode::AudioClipToMelSpectrogram(node) => match slot_index {
+                0 => {
+                    node.audio_input = set_slot_link(link, SuperGraphLinkKind::AudioClip);
+                    Ok(())
+                }
+                _ => Err(NodeSlotEditError::invalid_slot_index(
+                    "AudioClipToMelSpectrogram".to_string(),
+                    SlotDirection::Input,
+                    slot_index,
+                    1,
+                )),
+            },
+            SuperGraphAnyNode::MilliOpGraph(_) => Err(NodeSlotEditError::unsupported(
+                "MilliOpGraph".to_string(),
+                SlotDirection::Input,
+                slot_index,
+            )),
+            SuperGraphAnyNode::Scan(node) => {
+                let mut remaining = slot_index;
+                if remaining == 0 {
+                    node.iteration_count = set_slot_link(link, SuperGraphLinkKind::Tensor);
+                    return Ok(());
+                }
+                remaining -= 1;
+
+                if remaining < node.simple_inputs.len() {
+                    let (outer, inner) = &mut node.simple_inputs[remaining];
+                    let like = (*inner).or(*outer);
+                    *outer =
+                        set_slot_link_like(link, like, "Scan", SlotDirection::Input, slot_index)?;
+                    return Ok(());
+                }
+                remaining -= node.simple_inputs.len();
+
+                if remaining < node.state_links.len() {
+                    let (outer, inner, iter_output) = &mut node.state_links[remaining];
+                    let like = (*inner).or(*iter_output).or(*outer);
+                    *outer =
+                        set_slot_link_like(link, like, "Scan", SlotDirection::Input, slot_index)?;
+                    return Ok(());
+                }
+                remaining -= node.state_links.len();
+
+                if remaining < node.scan_inputs.len() {
+                    let (outer, inner, _) = &mut node.scan_inputs[remaining];
+                    let like = (*inner).or(*outer);
+                    *outer =
+                        set_slot_link_like(link, like, "Scan", SlotDirection::Input, slot_index)?;
+                    return Ok(());
+                }
+
+                let slot_count =
+                    1 + node.simple_inputs.len() + node.state_links.len() + node.scan_inputs.len();
+                Err(NodeSlotEditError::invalid_slot_index(
+                    "Scan".to_string(),
+                    SlotDirection::Input,
+                    slot_index,
+                    slot_count,
+                ))
+            }
+            SuperGraphAnyNode::ReportProgress(node) => match slot_index {
+                0 => {
+                    node.tier_input = set_slot_link(link, SuperGraphLinkKind::Tensor);
+                    Ok(())
+                }
+                1 => {
+                    node.numerator_input = set_slot_link(link, SuperGraphLinkKind::Tensor);
+                    Ok(())
+                }
+                2 => {
+                    node.denominator_input = set_slot_link(link, SuperGraphLinkKind::Tensor);
+                    Ok(())
+                }
+                _ => Err(NodeSlotEditError::invalid_slot_index(
+                    "ReportProgress".to_string(),
+                    SlotDirection::Input,
+                    slot_index,
+                    3,
+                )),
+            },
+            SuperGraphAnyNode::RNNCacheWrite(node) => {
+                let slot_count = 2 + node.state_inputs.len();
+                if slot_index == 0 {
+                    node.key_input = set_slot_link(link, SuperGraphLinkKind::Hash);
+                    Ok(())
+                } else if slot_index == 1 {
+                    node.tokens_input = set_slot_link(link, SuperGraphLinkKind::Tensor);
+                    Ok(())
+                } else {
+                    let i = slot_index - 2;
+                    if i < node.state_inputs.len() {
+                        node.state_inputs[i].1 = set_slot_link(link, SuperGraphLinkKind::Tensor);
+                        Ok(())
+                    } else {
+                        Err(NodeSlotEditError::invalid_slot_index(
+                            "RNNCacheWrite".to_string(),
+                            SlotDirection::Input,
+                            slot_index,
+                            slot_count,
+                        ))
+                    }
+                }
+            }
+            SuperGraphAnyNode::RNNCacheRead(node) => {
+                let slot_count = 2 + node.default_state_inputs.len();
+                if slot_index == 0 {
+                    node.key_input = set_slot_link(link, SuperGraphLinkKind::Hash);
+                    Ok(())
+                } else if slot_index == 1 {
+                    node.tokens_input = set_slot_link(link, SuperGraphLinkKind::Tensor);
+                    Ok(())
+                } else {
+                    let i = slot_index - 2;
+                    if i < node.default_state_inputs.len() {
+                        node.default_state_inputs[i].1 =
+                            set_slot_link(link, SuperGraphLinkKind::Tensor);
+                        Ok(())
+                    } else {
+                        Err(NodeSlotEditError::invalid_slot_index(
+                            "RNNCacheRead".to_string(),
+                            SlotDirection::Input,
+                            slot_index,
+                            slot_count,
+                        ))
+                    }
+                }
+            }
+            SuperGraphAnyNode::TensorCacheRead(node) => match slot_index {
+                0 => {
+                    node.key_input = set_slot_link(link, SuperGraphLinkKind::Hash);
+                    Ok(())
+                }
+                1 => {
+                    node.default_input = set_slot_link(link, SuperGraphLinkKind::Tensor);
+                    Ok(())
+                }
+                _ => Err(NodeSlotEditError::invalid_slot_index(
+                    "TensorCacheRead".to_string(),
+                    SlotDirection::Input,
+                    slot_index,
+                    2,
+                )),
+            },
+            SuperGraphAnyNode::TensorCacheWrite(node) => match slot_index {
+                0 => {
+                    node.key_input = set_slot_link(link, SuperGraphLinkKind::Hash);
+                    Ok(())
+                }
+                1 => {
+                    node.value_input = set_slot_link(link, SuperGraphLinkKind::Tensor);
+                    Ok(())
+                }
+                2 => {
+                    node.write_enable_input = set_slot_link(link, SuperGraphLinkKind::Tensor);
+                    Ok(())
+                }
+                _ => Err(NodeSlotEditError::invalid_slot_index(
+                    "TensorCacheWrite".to_string(),
+                    SlotDirection::Input,
+                    slot_index,
+                    3,
+                )),
+            },
+            SuperGraphAnyNode::TensorPackCacheRead(node) => {
+                let slot_count = 1 + node.default_value_inputs.len();
+                if slot_index == 0 {
+                    node.key_input = set_slot_link(link, SuperGraphLinkKind::Hash);
+                    Ok(())
+                } else {
+                    let i = slot_index - 1;
+                    if i < node.default_value_inputs.len() {
+                        node.default_value_inputs[i].1 =
+                            set_slot_link(link, SuperGraphLinkKind::Tensor);
+                        Ok(())
+                    } else {
+                        Err(NodeSlotEditError::invalid_slot_index(
+                            "TensorPackCacheRead".to_string(),
+                            SlotDirection::Input,
+                            slot_index,
+                            slot_count,
+                        ))
+                    }
+                }
+            }
+            SuperGraphAnyNode::TensorPackCacheWrite(node) => {
+                let slot_count = 2 + node.value_inputs.len();
+                if slot_index == 0 {
+                    node.key_input = set_slot_link(link, SuperGraphLinkKind::Hash);
+                    Ok(())
+                } else if slot_index == 1 {
+                    node.write_enable_input = set_slot_link(link, SuperGraphLinkKind::Tensor);
+                    Ok(())
+                } else {
+                    let i = slot_index - 2;
+                    if i < node.value_inputs.len() {
+                        node.value_inputs[i].1 = set_slot_link(link, SuperGraphLinkKind::Tensor);
+                        Ok(())
+                    } else {
+                        Err(NodeSlotEditError::invalid_slot_index(
+                            "TensorPackCacheWrite".to_string(),
+                            SlotDirection::Input,
+                            slot_index,
+                            slot_count,
+                        ))
+                    }
+                }
+            }
+        }
+    }
+    fn set_output_slot(
+        &mut self,
+        slot_index: usize,
+        link: Option<GlobalId>,
+    ) -> Result<(), NodeSlotEditError> {
+        match self {
+            SuperGraphAnyNode::ModelExecution(node) => {
+                let slot_count = node.tensor_outputs.len();
+                if slot_index < node.tensor_outputs.len() {
+                    node.tensor_outputs[slot_index].1 =
+                        set_slot_link(link, SuperGraphLinkKind::Tensor);
+                    Ok(())
+                } else {
+                    Err(NodeSlotEditError::invalid_slot_index(
+                        "Model Execution".to_string(),
+                        SlotDirection::Output,
+                        slot_index,
+                        slot_count,
+                    ))
+                }
+            }
+            SuperGraphAnyNode::TokenizerLoad(node) => match slot_index {
+                0 => {
+                    node.output = set_slot_link(link, SuperGraphLinkKind::Tokenizer);
+                    Ok(())
+                }
+                _ => Err(NodeSlotEditError::invalid_slot_index(
+                    "Tokenizer Load".to_string(),
+                    SlotDirection::Output,
+                    slot_index,
+                    1,
+                )),
+            },
+            SuperGraphAnyNode::TokenizerEncode(node) => match slot_index {
+                0 => {
+                    node.tensor_output = set_slot_link(link, SuperGraphLinkKind::Tensor);
+                    Ok(())
+                }
+                _ => Err(NodeSlotEditError::invalid_slot_index(
+                    "Tokenizer Encode".to_string(),
+                    SlotDirection::Output,
+                    slot_index,
+                    1,
+                )),
+            },
+            SuperGraphAnyNode::TokenizerDecode(node) => match slot_index {
+                0 => {
+                    node.text_output = set_slot_link(link, SuperGraphLinkKind::String);
+                    Ok(())
+                }
+                _ => Err(NodeSlotEditError::invalid_slot_index(
+                    "Tokenizer Decode".to_string(),
+                    SlotDirection::Output,
+                    slot_index,
+                    1,
+                )),
+            },
+            SuperGraphAnyNode::TextToPhonemes(node) => match slot_index {
+                0 => {
+                    node.phonemes_output = set_slot_link(link, SuperGraphLinkKind::String);
+                    Ok(())
+                }
+                _ => Err(NodeSlotEditError::invalid_slot_index(
+                    "TextToPhonemes".to_string(),
+                    SlotDirection::Output,
+                    slot_index,
+                    1,
+                )),
+            },
+            SuperGraphAnyNode::PiperPhonemesToTensor(node) => match slot_index {
+                0 => {
+                    node.token_ids_output = set_slot_link(link, SuperGraphLinkKind::Tensor);
+                    Ok(())
+                }
+                1 => {
+                    node.input_lengths_output = set_slot_link(link, SuperGraphLinkKind::Tensor);
+                    Ok(())
+                }
+                _ => Err(NodeSlotEditError::invalid_slot_index(
+                    "PiperPhonemesToTensor".to_string(),
+                    SlotDirection::Output,
+                    slot_index,
+                    2,
+                )),
+            },
+            SuperGraphAnyNode::KokoroPhonemesToTensor(node) => match slot_index {
+                0 => {
+                    node.token_ids_output = set_slot_link(link, SuperGraphLinkKind::Tensor);
+                    Ok(())
+                }
+                _ => Err(NodeSlotEditError::invalid_slot_index(
+                    "KokoroPhonemesToTensor".to_string(),
+                    SlotDirection::Output,
+                    slot_index,
+                    1,
+                )),
+            },
+            SuperGraphAnyNode::F5TextToTensor(node) => match slot_index {
+                0 => {
+                    node.token_ids_output = set_slot_link(link, SuperGraphLinkKind::Tensor);
+                    Ok(())
+                }
+                _ => Err(NodeSlotEditError::invalid_slot_index(
+                    "F5TextToTensor".to_string(),
+                    SlotDirection::Output,
+                    slot_index,
+                    1,
+                )),
+            },
+            SuperGraphAnyNode::TensorToImage(node) => match slot_index {
+                0 => {
+                    node.image_output = set_slot_link(link, SuperGraphLinkKind::Image);
+                    Ok(())
+                }
+                _ => Err(NodeSlotEditError::invalid_slot_index(
+                    "TensorToImage".to_string(),
+                    SlotDirection::Output,
+                    slot_index,
+                    1,
+                )),
+            },
+            SuperGraphAnyNode::TensorToAudioClip(node) => match slot_index {
+                0 => {
+                    node.audio_output = set_slot_link(link, SuperGraphLinkKind::AudioClip);
+                    Ok(())
+                }
+                _ => Err(NodeSlotEditError::invalid_slot_index(
+                    "TensorToAudioClip".to_string(),
+                    SlotDirection::Output,
+                    slot_index,
+                    1,
+                )),
+            },
+            SuperGraphAnyNode::AudioClipToTensor(node) => match slot_index {
+                0 => {
+                    node.tensor_output = set_slot_link(link, SuperGraphLinkKind::Tensor);
+                    Ok(())
+                }
+                _ => Err(NodeSlotEditError::invalid_slot_index(
+                    "AudioClipToTensor".to_string(),
+                    SlotDirection::Output,
+                    slot_index,
+                    1,
+                )),
+            },
+            SuperGraphAnyNode::AudioClipToMelSpectrogram(node) => match slot_index {
+                0 => {
+                    node.tensor_output = set_slot_link(link, SuperGraphLinkKind::Tensor);
+                    Ok(())
+                }
+                _ => Err(NodeSlotEditError::invalid_slot_index(
+                    "AudioClipToMelSpectrogram".to_string(),
+                    SlotDirection::Output,
+                    slot_index,
+                    1,
+                )),
+            },
+            SuperGraphAnyNode::MilliOpGraph(_) => Err(NodeSlotEditError::unsupported(
+                "MilliOpGraph".to_string(),
+                SlotDirection::Output,
+                slot_index,
+            )),
+            SuperGraphAnyNode::Scan(node) => {
+                let mut remaining = slot_index;
+                if remaining < node.simple_outputs.len() {
+                    let (inner, outer) = &mut node.simple_outputs[remaining];
+                    let like = (*inner).or(*outer);
+                    *outer =
+                        set_slot_link_like(link, like, "Scan", SlotDirection::Output, slot_index)?;
+                    return Ok(());
+                }
+                remaining -= node.simple_outputs.len();
+
+                if remaining < node.scan_outputs.len() {
+                    let (inner, outer, _) = &mut node.scan_outputs[remaining];
+                    let like = (*inner).or(*outer);
+                    *outer =
+                        set_slot_link_like(link, like, "Scan", SlotDirection::Output, slot_index)?;
+                    return Ok(());
+                }
+
+                let slot_count = node.simple_outputs.len() + node.scan_outputs.len();
+                Err(NodeSlotEditError::invalid_slot_index(
+                    "Scan".to_string(),
+                    SlotDirection::Output,
+                    slot_index,
+                    slot_count,
+                ))
+            }
+            SuperGraphAnyNode::ReportProgress(_) => Err(NodeSlotEditError::invalid_slot_index(
+                "ReportProgress".to_string(),
+                SlotDirection::Output,
+                slot_index,
+                0,
+            )),
+            SuperGraphAnyNode::RNNCacheWrite(_) => Err(NodeSlotEditError::invalid_slot_index(
+                "RNNCacheWrite".to_string(),
+                SlotDirection::Output,
+                slot_index,
+                0,
+            )),
+            SuperGraphAnyNode::RNNCacheRead(node) => {
+                let slot_count = 1 + node.state_outputs.len();
+                if slot_index == 0 {
+                    node.tokens_output = set_slot_link(link, SuperGraphLinkKind::Tensor);
+                    Ok(())
+                } else {
+                    let i = slot_index - 1;
+                    if i < node.state_outputs.len() {
+                        node.state_outputs[i].1 = set_slot_link(link, SuperGraphLinkKind::Tensor);
+                        Ok(())
+                    } else {
+                        Err(NodeSlotEditError::invalid_slot_index(
+                            "RNNCacheRead".to_string(),
+                            SlotDirection::Output,
+                            slot_index,
+                            slot_count,
+                        ))
+                    }
+                }
+            }
+            SuperGraphAnyNode::TensorCacheRead(node) => match slot_index {
+                0 => {
+                    node.value_output = set_slot_link(link, SuperGraphLinkKind::Tensor);
+                    Ok(())
+                }
+                1 => {
+                    node.hit_output = set_slot_link(link, SuperGraphLinkKind::Tensor);
+                    Ok(())
+                }
+                _ => Err(NodeSlotEditError::invalid_slot_index(
+                    "TensorCacheRead".to_string(),
+                    SlotDirection::Output,
+                    slot_index,
+                    2,
+                )),
+            },
+            SuperGraphAnyNode::TensorCacheWrite(_) => Err(NodeSlotEditError::invalid_slot_index(
+                "TensorCacheWrite".to_string(),
+                SlotDirection::Output,
+                slot_index,
+                0,
+            )),
+            SuperGraphAnyNode::TensorPackCacheRead(node) => {
+                let slot_count = node.value_outputs.len() + 1;
+                if slot_index < node.value_outputs.len() {
+                    node.value_outputs[slot_index].1 =
+                        set_slot_link(link, SuperGraphLinkKind::Tensor);
+                    Ok(())
+                } else if slot_index == node.value_outputs.len() {
+                    node.hit_output = set_slot_link(link, SuperGraphLinkKind::Tensor);
+                    Ok(())
+                } else {
+                    Err(NodeSlotEditError::invalid_slot_index(
+                        "TensorPackCacheRead".to_string(),
+                        SlotDirection::Output,
+                        slot_index,
+                        slot_count,
+                    ))
+                }
+            }
+            SuperGraphAnyNode::TensorPackCacheWrite(_) => {
+                Err(NodeSlotEditError::invalid_slot_index(
+                    "TensorPackCacheWrite".to_string(),
+                    SlotDirection::Output,
+                    slot_index,
+                    0,
+                ))
+            }
+        }
+    }
     delegate!(global_id() -> GlobalId);
 }
 

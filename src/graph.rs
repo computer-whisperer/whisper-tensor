@@ -220,6 +220,30 @@ pub trait Node {
     fn output_slot_labels(&self) -> Box<dyn Iterator<Item = Option<String>> + '_> {
         Box::new(self.output_slots().map(|_| None))
     }
+    /// Replace an input slot link by index. `None` disconnects the slot.
+    fn set_input_slot(
+        &mut self,
+        slot_index: usize,
+        _link: Option<GlobalId>,
+    ) -> Result<(), NodeSlotEditError> {
+        Err(NodeSlotEditError::unsupported(
+            self.op_kind().as_ref().to_string(),
+            SlotDirection::Input,
+            slot_index,
+        ))
+    }
+    /// Replace an output slot link by index. `None` disconnects the slot.
+    fn set_output_slot(
+        &mut self,
+        slot_index: usize,
+        _link: Option<GlobalId>,
+    ) -> Result<(), NodeSlotEditError> {
+        Err(NodeSlotEditError::unsupported(
+            self.op_kind().as_ref().to_string(),
+            SlotDirection::Output,
+            slot_index,
+        ))
+    }
     /// Optional label for debugging.
     fn label(&self) -> Option<String> {
         None
@@ -243,6 +267,18 @@ pub trait NodeDyn {
     fn input_slot_labels(&self) -> Box<dyn Iterator<Item = Option<String>> + '_>;
     /// Optional display labels aligned with output slot indices.
     fn output_slot_labels(&self) -> Box<dyn Iterator<Item = Option<String>> + '_>;
+    /// Replace an input slot link by index. `None` disconnects the slot.
+    fn set_input_slot(
+        &mut self,
+        slot_index: usize,
+        link: Option<GlobalId>,
+    ) -> Result<(), NodeSlotEditError>;
+    /// Replace an output slot link by index. `None` disconnects the slot.
+    fn set_output_slot(
+        &mut self,
+        slot_index: usize,
+        link: Option<GlobalId>,
+    ) -> Result<(), NodeSlotEditError>;
     /// Optional label for debugging.
     fn label(&self) -> Option<String>;
 }
@@ -282,6 +318,22 @@ impl<N: Node> NodeDyn for N {
 
     fn output_slot_labels(&self) -> Box<dyn Iterator<Item = Option<String>> + '_> {
         self.output_slot_labels()
+    }
+
+    fn set_input_slot(
+        &mut self,
+        slot_index: usize,
+        link: Option<GlobalId>,
+    ) -> Result<(), NodeSlotEditError> {
+        <N as Node>::set_input_slot(self, slot_index, link)
+    }
+
+    fn set_output_slot(
+        &mut self,
+        slot_index: usize,
+        link: Option<GlobalId>,
+    ) -> Result<(), NodeSlotEditError> {
+        <N as Node>::set_output_slot(self, slot_index, link)
     }
 }
 
@@ -375,6 +427,58 @@ impl<G: Graph + 'static> GraphDyn for G {
 pub enum SlotDirection {
     Input,
     Output,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NodeSlotEditError {
+    Unsupported {
+        op_kind: String,
+        direction: SlotDirection,
+        slot_index: usize,
+    },
+    InvalidSlotIndex {
+        op_kind: String,
+        direction: SlotDirection,
+        slot_index: usize,
+        slot_count: usize,
+    },
+    MissingSlotKind {
+        op_kind: String,
+        direction: SlotDirection,
+        slot_index: usize,
+    },
+}
+
+impl NodeSlotEditError {
+    pub fn unsupported(op_kind: String, direction: SlotDirection, slot_index: usize) -> Self {
+        Self::Unsupported {
+            op_kind,
+            direction,
+            slot_index,
+        }
+    }
+
+    pub fn invalid_slot_index(
+        op_kind: String,
+        direction: SlotDirection,
+        slot_index: usize,
+        slot_count: usize,
+    ) -> Self {
+        Self::InvalidSlotIndex {
+            op_kind,
+            direction,
+            slot_index,
+            slot_count,
+        }
+    }
+
+    pub fn missing_slot_kind(op_kind: String, direction: SlotDirection, slot_index: usize) -> Self {
+        Self::MissingSlotKind {
+            op_kind,
+            direction,
+            slot_index,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
