@@ -45,6 +45,14 @@ impl NanoEval {
         let mut values: Vec<NumericScalar> = vec![NumericScalar::F32(0.0); num_atoms];
         let mut nan_reported = false;
 
+        // Pre-populate values from overrides (covers input tensor atoms
+        // which are not in any group, plus any explicit overrides).
+        for (&idx, val) in overrides {
+            if (idx as usize) < num_atoms {
+                values[idx as usize] = val.clone();
+            }
+        }
+
         for (group_idx, group) in graph.groups().iter().enumerate() {
             let is_reduce = group.op.is_reduce();
 

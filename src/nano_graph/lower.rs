@@ -485,13 +485,9 @@ impl LowerCtx {
     /// the tensor data from `all_infos`.
     fn register_input(&mut self, id: GlobalId, info: &TensorInfo) {
         let Some((layout, known_dims, sym_dims, count)) = self.classify_dims(info) else {
-            // Unknown rank — register a single placeholder atom.
-            let base_id = self.nano.push_atom(
-                ScalarOp::Literal(NumericScalar::F32(0.0)),
-                vec![],
-                vec![],
-                vec![],
-            );
+            // Unknown rank — register a single atom.
+            let dt = info.dtype();
+            let base_id = self.nano.add_input_tensor(id, 1, dt);
             self.tensor_map.insert(
                 id,
                 TensorAtomMap::simple(base_id, 1, vec![], vec![], vec![]),
@@ -501,15 +497,9 @@ impl LowerCtx {
 
         let strides = TensorAtomMap::compute_strides(&known_dims);
         let count = count.max(1);
+        let dt = info.dtype();
 
-        // Placeholder Literal group — actual values supplied by executor.
-        let base_id = self.nano.push_group(
-            count,
-            ScalarOp::Literal(NumericScalar::F32(0.0)),
-            sym_dims.clone(),
-            vec![],
-            vec![],
-        );
+        let base_id = self.nano.add_input_tensor(id, count, dt);
 
         self.tensor_map.insert(
             id,

@@ -9,6 +9,8 @@
 //! `AtomGroup`s. Groups are a convenience — every atom could exist standalone
 //! without changing semantics. The grouping never limits what can be expressed.
 
+use crate::dtype::DType;
+use crate::graph::GlobalId;
 use crate::nano_graph::ops::ScalarOp;
 use std::collections::HashMap;
 
@@ -197,11 +199,30 @@ impl AtomGroup {
     }
 }
 
+/// An external tensor mapped into the graph's AtomId space.
+/// The executor uses this to know where to load tensor data.
+#[derive(Debug, Clone)]
+pub struct InputTensor {
+    /// The milli-graph tensor ID.
+    pub tensor_id: GlobalId,
+    /// First AtomId allocated for this tensor.
+    pub base_id: AtomId,
+    /// Number of atoms (elements) in the tensor.
+    pub count: u64,
+    /// Element dtype.
+    pub dtype: DType,
+}
+
 /// The compressed scalar DAG for an entire computation.
 #[derive(Default)]
 pub struct NanoGraph {
     groups: Vec<AtomGroup>,
     next_atom_id: u64,
+    /// External input tensors mapped into the AtomId space.
+    /// These are NOT groups — they occupy atom IDs that compute groups
+    /// reference via InputRefs, but they have no ScalarOp. The executor
+    /// fills these ranges from the TensorStore or user-provided data.
+    pub input_tensors: Vec<InputTensor>,
     /// Named symbolic dimensions (e.g., "batch" → SymDim(0)).
     pub sym_dim_names: HashMap<String, SymDim>,
     /// Known upper bounds for symbolic dimensions. A SymDim with a known bound
@@ -241,6 +262,20 @@ impl NanoGraph {
         let sd = self.sym_dim(name);
         self.sym_dim_bounds.insert(sd, bound);
         sd
+    }
+
+    /// Reserve an AtomId range for an external input tensor.
+    /// Returns the base AtomId. No group is created — the executor fills
+    /// these atoms from the TensorStore or user data at runtime.
+    pub fn add_input_tensor(&mut self, tensor_id: GlobalId, count: u64, dtype: DType) -> AtomId {
+        let base_id = self.alloc_ids(count);
+        self.input_tensors.push(InputTensor {
+            tensor_id,
+            base_id,
+            count,
+            dtype,
+        });
+        base_id
     }
 
     /// Allocate `count` contiguous AtomIds. Returns the base id.
@@ -351,9 +386,14 @@ impl NanoGraph {
         })
     }
 
-    /// Check if an AtomId exists in any group.
+    /// Check if an AtomId exists in any group or input tensor range.
     pub fn contains_atom(&self, id: AtomId) -> bool {
-        self.find_group_idx(id).is_some()
+        if self.find_group_idx(id).is_some() {
+            return true;
+        }
+        self.input_tensors.iter().any(|inp| {
+            id.0 >= inp.base_id.0 && id.0 < inp.base_id.0 + inp.count
+        })
     }
 
     /// Iterate all groups in insertion order.
