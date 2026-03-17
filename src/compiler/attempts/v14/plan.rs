@@ -2,12 +2,8 @@
 
 use std::collections::HashMap;
 
-use crate::dtype::DType;
 use crate::graph::GlobalId;
-use crate::milli_graph::MilliOpGraph;
-use crate::nano_graph::lower::{self, LowerResult};
-use crate::nano_graph::{AtomId, NanoGraph};
-use crate::tensor_info::TensorInfo;
+use crate::nano_graph::lower::LowerResult;
 
 use super::types::*;
 

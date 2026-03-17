@@ -1148,7 +1148,7 @@ mod tests {
             .map(|(&k, &v)| (k, NumericScalar::F32(v)))
             .collect();
         let t0 = std::time::Instant::now();
-        let interp = NanoEval::eval(graph, &overrides_ns);
+        let interp = NanoEval::eval_with_overrides(graph, &overrides_ns);
         let interp_time = t0.elapsed();
 
         // Compile the plan.
@@ -1913,7 +1913,7 @@ mod tests {
             .iter()
             .map(|(&k, &v)| (k, NumericScalar::F32(v)))
             .collect();
-        let reference = NanoEval::eval(graph, &overrides_ns);
+        let reference = NanoEval::eval_with_overrides(graph, &overrides_ns);
 
         // --- Step 4: Generate v2c plan with 4 lanes ---
         let plan = plan_execution(graph, 4);

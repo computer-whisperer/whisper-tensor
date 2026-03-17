@@ -517,12 +517,6 @@ impl LowerCtx {
             return;
         }
 
-        if scalars.len() != count {
-            eprintln!(
-                "[register_constant] WARNING: tensor {:?} has {} scalars but classify_dims count={} (known_dims={:?})",
-                id, scalars.len(), count, known_dims
-            );
-        }
         let n = scalars.len().min(count);
 
         // Create Literal groups, coalescing runs of identical values.

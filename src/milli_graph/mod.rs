@@ -1020,8 +1020,7 @@ impl MilliOpGraph {
                 Err(MilliOpGraphError::UnableToInfer) => {
                     // Op couldn't infer — insert Minimal entries for outputs
                     // so downstream ops at least know the dtype.
-                    // (Uncomment for debugging cascade issues.)
-                    // eprintln!("[infer-fail] {} inputs=[...]", op.op_kind());
+                    // eprintln!("[infer-fail] {}", op.op_kind());
                     for out_id in op.outputs() {
                         known.entry(out_id).or_insert_with(|| {
                             TensorInfo::Minimal(MinimalTensor::new(

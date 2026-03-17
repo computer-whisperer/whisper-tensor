@@ -89,9 +89,23 @@ fn main() {
         }
     }
     let initialized = sym_graph.get_initialized_tensors(tensor_store);
-    for (id, tensor) in initialized {
-        all_infos.insert(id, TensorInfo::from(tensor));
+    let mut n_full = 0usize;
+    let mut n_shape_only = 0usize;
+    for (id, tensor) in &initialized {
+        if tensor.num_elements() <= 1024 {
+            // Small constants (axes, indices, shape values): keep full data
+            // so infer_all can resolve Shape/Gather/Reshape ops.
+            all_infos.insert(*id, TensorInfo::from(tensor.clone()));
+            n_full += 1;
+        } else {
+            // Large weight matrices: shape+dtype only.
+            let shape: Vec<u64> = tensor.shape().to_vec();
+            let dtype = tensor.dtype();
+            all_infos.insert(*id, TensorInfo::from_dtype_and_shape(dtype, &shape));
+            n_shape_only += 1;
+        }
     }
+    println!("Tensor info: {} full (small constants), {} shape-only (weights)", n_full, n_shape_only);
 
     // ---- Lower ----
     let t0 = Instant::now();

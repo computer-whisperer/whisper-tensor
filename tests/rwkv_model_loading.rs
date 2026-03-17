@@ -518,7 +518,7 @@ fn rwkv01b_nano_graph_integrity() {
 
     // ---- Eval NanoGraph ----
     let t0 = std::time::Instant::now();
-    let nano_eval = NanoEval::eval_debug(&result.graph, &overrides);
+    let nano_eval = NanoEval::eval_with_overrides_debug(&result.graph, &overrides);
     eprintln!("  Nano eval done in {:.1}s", t0.elapsed().as_secs_f64());
 
     // ---- Compare ALL intermediate tensors ----

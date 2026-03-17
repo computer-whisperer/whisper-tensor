@@ -301,7 +301,7 @@ fn main() {
         use whisper_tensor::nano_graph::eval::NanoEval;
 
         let t_nano = Instant::now();
-        let nano_eval = NanoEval::eval(&result.graph, &nano_inputs);
+        let nano_eval = NanoEval::eval_with_overrides(&result.graph, &nano_inputs);
         // Build lookup for output tensor atoms (compare_tensor_with_nano
         // looks up atoms by base_id + offset from TensorAtomMapInfo).
         let mut nano_outputs: HashMap<u64, NumericScalar> = HashMap::new();
