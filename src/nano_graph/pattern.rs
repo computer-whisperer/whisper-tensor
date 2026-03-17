@@ -540,10 +540,16 @@ impl NanoGraph {
 
             // Reduce ops access additional atoms via stride.
             match &group.op {
-                ScalarOp::ReduceSum { reduce_count, reduce_stride, .. }
-                | ScalarOp::ReduceMax { reduce_count, reduce_stride, .. }
-                    if *reduce_count > 1 && *reduce_stride != 0 =>
-                {
+                ScalarOp::ReduceSum {
+                    reduce_count,
+                    reduce_stride,
+                    ..
+                }
+                | ScalarOp::ReduceMax {
+                    reduce_count,
+                    reduce_stride,
+                    ..
+                } if *reduce_count > 1 && *reduce_stride != 0 => {
                     for input in &group.inputs {
                         let first = input.resolve(group.atom_offset, 0);
                         let last = input.resolve(group.atom_offset + group.count - 1, 0);
@@ -563,10 +569,10 @@ impl NanoGraph {
             }
 
             // IndirectLoad table reference.
-            if let ScalarOp::IndirectLoad { table_base, .. } = &group.op {
-                if let Some(pi) = self.groups.find_index(table_base.0) {
-                    seen.insert(pi);
-                }
+            if let ScalarOp::IndirectLoad { table_base, .. } = &group.op
+                && let Some(pi) = self.groups.find_index(table_base.0)
+            {
+                seen.insert(pi);
             }
 
             seen.remove(&gi);
@@ -613,7 +619,11 @@ impl NanoGraph {
                 let hi = first.0.max(last.0);
                 self.insert_groups_in_id_range(lo, hi, out);
             }
-            InputRef::Modular { base, stride, modulus } => {
+            InputRef::Modular {
+                base,
+                stride,
+                modulus,
+            } => {
                 let a = base.0;
                 let b = (base.0 as i64 + *stride as i64 * (*modulus as i64 - 1)) as u64;
                 self.insert_groups_in_id_range(a.min(b), a.max(b), out);
@@ -643,17 +653,15 @@ impl NanoGraph {
         let groups = self.groups.values();
         if let Some(first_gi) = self.groups.find_index(lo) {
             out.insert(first_gi);
-            for gi in (first_gi + 1)..groups.len() {
-                if groups[gi].base_id.0 > hi {
+            for (gi, group) in groups.iter().enumerate().skip(first_gi + 1) {
+                if group.base_id.0 > hi {
                     break;
                 }
                 out.insert(gi);
             }
-        } else {
+        } else if let Some(gi) = self.groups.find_index(hi) {
             // lo might be in an input_tensor range; try hi.
-            if let Some(gi) = self.groups.find_index(hi) {
-                out.insert(gi);
-            }
+            out.insert(gi);
         }
     }
 
@@ -731,43 +739,50 @@ impl NanoGraph {
                         }
 
                         // Check topological ordering: source must be in an earlier group.
-                        if let Some(src_gi) = self.groups.find_index(source.0) {
-                            if src_gi >= gi {
-                                errors.push(format!(
-                                    "Group {} (base={}) input {} atom {}: references group {} (base={}) — not earlier (self/forward reference)",
-                                    gi, group.base_id, inp_idx, i,
-                                    src_gi, groups[src_gi].base_id,
-                                ));
-                                break;
-                            }
+                        if let Some(src_gi) = self.groups.find_index(source.0)
+                            && src_gi >= gi
+                        {
+                            errors.push(format!(
+                                "Group {} (base={}) input {} atom {}: references group {} (base={}) — not earlier (self/forward reference)",
+                                gi, group.base_id, inp_idx, i,
+                                src_gi, groups[src_gi].base_id,
+                            ));
+                            break;
                         }
                     }
                 }
 
                 // For reduce ops, check the reduce-strided access range.
                 match &group.op {
-                    ScalarOp::ReduceSum { reduce_count, reduce_stride, .. }
-                    | ScalarOp::ReduceMax { reduce_count, reduce_stride, .. }
-                        if *reduce_count > 1 && *reduce_stride != 0 =>
-                    {
+                    ScalarOp::ReduceSum {
+                        reduce_count,
+                        reduce_stride,
+                        ..
+                    }
+                    | ScalarOp::ReduceMax {
+                        reduce_count,
+                        reduce_stride,
+                        ..
+                    } if *reduce_count > 1 && *reduce_stride != 0 => {
                         // Check from first and last consumer atom.
                         for &i in &[0u64, group.count.saturating_sub(1)] {
                             let base_atom = input.resolve(i + group.atom_offset, 0);
                             let last_k_atom = AtomId(
-                                (base_atom.0 as i64 + (*reduce_count as i64 - 1) * reduce_stride) as u64,
+                                (base_atom.0 as i64 + (*reduce_count as i64 - 1) * reduce_stride)
+                                    as u64,
                             );
                             if !self.contains_atom(last_k_atom) {
                                 errors.push(format!(
                                     "Group {} (base={}) input {}: reduce stride from atom {} reaches nonexistent atom {}",
                                     gi, group.base_id, inp_idx, i, last_k_atom,
                                 ));
-                            } else if let Some(src_gi) = self.groups.find_index(last_k_atom.0) {
-                                if src_gi >= gi {
-                                    errors.push(format!(
-                                        "Group {} (base={}) input {}: reduce stride reaches group {} which is not earlier",
-                                        gi, group.base_id, inp_idx, src_gi,
-                                    ));
-                                }
+                            } else if let Some(src_gi) = self.groups.find_index(last_k_atom.0)
+                                && src_gi >= gi
+                            {
+                                errors.push(format!(
+                                    "Group {} (base={}) input {}: reduce stride reaches group {} which is not earlier",
+                                    gi, group.base_id, inp_idx, src_gi,
+                                ));
                             }
                         }
                     }
@@ -780,7 +795,10 @@ impl NanoGraph {
                 {
                     errors.push(format!(
                         "Group {} input {}: Explicit has {} entries but group has {} atoms",
-                        gi, inp_idx, ids.len(), group.count
+                        gi,
+                        inp_idx,
+                        ids.len(),
+                        group.count
                     ));
                 }
             }

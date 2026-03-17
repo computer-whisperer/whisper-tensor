@@ -80,6 +80,7 @@ impl Default for AppState {
 pub(crate) type InterfaceId = u32;
 pub(crate) type ClientGraphId = u32;
 
+#[allow(dead_code)]
 pub(crate) enum ClientLoadedGraphData {
     Super(Box<SuperGraph>),
     MilliOp(Box<MilliOpGraph>),
@@ -183,11 +184,13 @@ pub(crate) struct ServerGraphCatalog {
 }
 
 #[derive(Default)]
+#[allow(dead_code)]
 pub(crate) struct ClientGraphCatalog {
     next_graph_id: ClientGraphId,
     pub(crate) graphs: HashMap<ClientGraphId, ClientLoadedGraphEntry>,
 }
 
+#[allow(dead_code)]
 impl ClientGraphCatalog {
     pub(crate) fn insert_graph(
         &mut self,
@@ -372,6 +375,7 @@ impl WebUIApp {
         }
     }
 
+    #[allow(dead_code)]
     fn decode_client_graph_bytes(bytes: &[u8]) -> Result<ClientLoadedGraphData, String> {
         let super_res = SuperGraph::from_cbor_bytes(bytes);
         if let Ok(graph) = super_res {

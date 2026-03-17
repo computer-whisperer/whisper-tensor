@@ -1289,12 +1289,16 @@ mod tests {
         );
 
         // 2x3 * 3x2 = 2x2 matmul
-        let a_tensor =
-            NumericTensor::<crate::DynRank>::from_vec_shape(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3])
-                .unwrap();
-        let b_tensor =
-            NumericTensor::<crate::DynRank>::from_vec_shape(vec![1.0f32, 0.0, 0.0, 1.0, 1.0, 1.0], vec![3, 2])
-                .unwrap();
+        let a_tensor = NumericTensor::<crate::DynRank>::from_vec_shape(
+            vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
+            vec![2, 3],
+        )
+        .unwrap();
+        let b_tensor = NumericTensor::<crate::DynRank>::from_vec_shape(
+            vec![1.0f32, 0.0, 0.0, 1.0, 1.0, 1.0],
+            vec![3, 2],
+        )
+        .unwrap();
 
         let mut info_inputs = HashMap::new();
         info_inputs.insert(a, TensorInfo::from(a_tensor.clone()));
@@ -1353,7 +1357,8 @@ mod tests {
 
         let a_tensor = NumericTensor::<crate::DynRank>::from_vec_shape(a_data, vec![4, 6]).unwrap();
         let b_tensor = NumericTensor::<crate::DynRank>::from_vec_shape(b_data, vec![6, 8]).unwrap();
-        let bias_tensor = NumericTensor::<crate::DynRank>::from_vec_shape(bias_data, vec![4, 8]).unwrap();
+        let bias_tensor =
+            NumericTensor::<crate::DynRank>::from_vec_shape(bias_data, vec![4, 8]).unwrap();
         let c_tensor = NumericTensor::<crate::DynRank>::from_vec_shape(c_data, vec![8, 3]).unwrap();
 
         let mut info_inputs = HashMap::new();
@@ -1494,8 +1499,10 @@ mod tests {
 
         let a_data: Vec<f32> = (0..512).map(|i| ((i as f32) * 0.01).sin()).collect();
         let b_data: Vec<f32> = (0..512).map(|i| ((i as f32) * 0.02).cos()).collect();
-        let a_tensor = NumericTensor::<crate::DynRank>::from_vec_shape(a_data, vec![16, 32]).unwrap();
-        let b_tensor = NumericTensor::<crate::DynRank>::from_vec_shape(b_data, vec![32, 16]).unwrap();
+        let a_tensor =
+            NumericTensor::<crate::DynRank>::from_vec_shape(a_data, vec![16, 32]).unwrap();
+        let b_tensor =
+            NumericTensor::<crate::DynRank>::from_vec_shape(b_data, vec![32, 16]).unwrap();
 
         let mut info_inputs = HashMap::new();
         info_inputs.insert(a, TensorInfo::from(a_tensor.clone()));
@@ -1548,8 +1555,10 @@ mod tests {
 
         let x_data: Vec<f32> = (0..128).map(|i| ((i as f32) * 0.07).sin() + 1.0).collect();
         let w_data: Vec<f32> = (0..192).map(|i| ((i as f32) * 0.03).cos() * 0.5).collect();
-        let x_tensor = NumericTensor::<crate::DynRank>::from_vec_shape(x_data, vec![8, 16]).unwrap();
-        let w_tensor = NumericTensor::<crate::DynRank>::from_vec_shape(w_data, vec![16, 12]).unwrap();
+        let x_tensor =
+            NumericTensor::<crate::DynRank>::from_vec_shape(x_data, vec![8, 16]).unwrap();
+        let w_tensor =
+            NumericTensor::<crate::DynRank>::from_vec_shape(w_data, vec![16, 12]).unwrap();
 
         let mut info_inputs = HashMap::new();
         info_inputs.insert(x, TensorInfo::from(x_tensor.clone()));
@@ -1602,9 +1611,12 @@ mod tests {
         let w1_data: Vec<f32> = (0..256).map(|i| ((i as f32) * 0.02).cos() * 0.3).collect();
         let w2_data: Vec<f32> = (0..128).map(|i| ((i as f32) * 0.04).sin() * 0.2).collect();
 
-        let x_tensor = NumericTensor::<crate::DynRank>::from_vec_shape(x_data, vec![8, 16]).unwrap();
-        let w1_tensor = NumericTensor::<crate::DynRank>::from_vec_shape(w1_data, vec![16, 16]).unwrap();
-        let w2_tensor = NumericTensor::<crate::DynRank>::from_vec_shape(w2_data, vec![16, 8]).unwrap();
+        let x_tensor =
+            NumericTensor::<crate::DynRank>::from_vec_shape(x_data, vec![8, 16]).unwrap();
+        let w1_tensor =
+            NumericTensor::<crate::DynRank>::from_vec_shape(w1_data, vec![16, 16]).unwrap();
+        let w2_tensor =
+            NumericTensor::<crate::DynRank>::from_vec_shape(w2_data, vec![16, 8]).unwrap();
 
         let mut info_inputs = HashMap::new();
         info_inputs.insert(x, TensorInfo::from(x_tensor.clone()));
@@ -1864,9 +1876,12 @@ mod tests {
             .map(|i| ((i as f32) * 0.041).sin() * 0.1)
             .collect();
 
-        let a_tensor = NumericTensor::<crate::DynRank>::from_vec_shape(a_data, vec![m1, k1]).unwrap();
-        let b_tensor = NumericTensor::<crate::DynRank>::from_vec_shape(b_data, vec![k1, n1]).unwrap();
-        let c_tensor = NumericTensor::<crate::DynRank>::from_vec_shape(c_data, vec![k2, n2]).unwrap();
+        let a_tensor =
+            NumericTensor::<crate::DynRank>::from_vec_shape(a_data, vec![m1, k1]).unwrap();
+        let b_tensor =
+            NumericTensor::<crate::DynRank>::from_vec_shape(b_data, vec![k1, n1]).unwrap();
+        let c_tensor =
+            NumericTensor::<crate::DynRank>::from_vec_shape(c_data, vec![k2, n2]).unwrap();
 
         let mut info_inputs = HashMap::new();
         info_inputs.insert(a_id, TensorInfo::from(a_tensor.clone()));
@@ -2368,11 +2383,16 @@ mod tests {
         let w2_data = mk_data(d_ff * d_model);
         let bias2_data = mk_data(d_model);
 
-        let x_tensor = NumericTensor::<crate::DynRank>::from_vec_shape(x_data, vec![seq, d_model]).unwrap();
-        let w1_tensor = NumericTensor::<crate::DynRank>::from_vec_shape(w1_data, vec![d_model, d_ff]).unwrap();
-        let bias1_tensor = NumericTensor::<crate::DynRank>::from_vec_shape(bias1_data, vec![d_ff]).unwrap();
-        let w2_tensor = NumericTensor::<crate::DynRank>::from_vec_shape(w2_data, vec![d_ff, d_model]).unwrap();
-        let bias2_tensor = NumericTensor::<crate::DynRank>::from_vec_shape(bias2_data, vec![d_model]).unwrap();
+        let x_tensor =
+            NumericTensor::<crate::DynRank>::from_vec_shape(x_data, vec![seq, d_model]).unwrap();
+        let w1_tensor =
+            NumericTensor::<crate::DynRank>::from_vec_shape(w1_data, vec![d_model, d_ff]).unwrap();
+        let bias1_tensor =
+            NumericTensor::<crate::DynRank>::from_vec_shape(bias1_data, vec![d_ff]).unwrap();
+        let w2_tensor =
+            NumericTensor::<crate::DynRank>::from_vec_shape(w2_data, vec![d_ff, d_model]).unwrap();
+        let bias2_tensor =
+            NumericTensor::<crate::DynRank>::from_vec_shape(bias2_data, vec![d_model]).unwrap();
 
         let mut info_inputs = HashMap::new();
         info_inputs.insert(x, TensorInfo::from(x_tensor.clone()));

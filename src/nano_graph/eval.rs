@@ -11,9 +11,9 @@
 
 use std::collections::HashMap;
 
+use crate::DynRank;
 use crate::backends::ndarray_backend::numeric_tensor::NDArrayNumericTensor;
 use crate::numeric_scalar::NumericScalar;
-use crate::DynRank;
 
 use super::ops::{ScalarBinOp, ScalarOp, ScalarUnaryOp};
 use super::pattern::{AtomId, NanoGraph};
@@ -29,10 +29,7 @@ impl NanoEval {
     /// Each `(AtomId, tensor)` pair fills a contiguous atom range starting at
     /// the given AtomId with the tensor's flattened elements. Typically these
     /// correspond to the graph's `input_tensors` entries (weights, user inputs).
-    pub fn eval(
-        graph: &NanoGraph,
-        inputs: &[(AtomId, &NDArrayNumericTensor<DynRank>)],
-    ) -> Self {
+    pub fn eval(graph: &NanoGraph, inputs: &[(AtomId, &NDArrayNumericTensor<DynRank>)]) -> Self {
         let num_atoms = graph.num_atoms() as usize;
         let mut values: Vec<NumericScalar> = vec![NumericScalar::F32(0.0); num_atoms];
 
@@ -47,10 +44,7 @@ impl NanoEval {
     ///
     /// `overrides` maps atom index → NumericScalar for input atoms.
     /// Kept for backward compatibility with existing tests and v13 code.
-    pub fn eval_with_overrides(
-        graph: &NanoGraph,
-        overrides: &HashMap<u64, NumericScalar>,
-    ) -> Self {
+    pub fn eval_with_overrides(graph: &NanoGraph, overrides: &HashMap<u64, NumericScalar>) -> Self {
         Self::eval_with_overrides_inner(graph, overrides, false)
     }
 
@@ -431,10 +425,10 @@ pub fn eval_efficient(
         }
 
         // IndirectLoad table reference.
-        if let ScalarOp::IndirectLoad { table_base, .. } = &group.op {
-            if let Some(pi) = graph.find_group_idx(*table_base) {
-                seen.insert(pi);
-            }
+        if let ScalarOp::IndirectLoad { table_base, .. } = &group.op
+            && let Some(pi) = graph.find_group_idx(*table_base)
+        {
+            seen.insert(pi);
         }
 
         seen.remove(&gi);
@@ -472,7 +466,7 @@ pub fn eval_efficient(
         if remaining[gi] == 0 && !matches!(&group.op, ScalarOp::Literal(_)) {
             // Check if any output range needs this group — if remaining is 0
             // and we already marked outputs, this group is truly dead.
-            producers.get(gi).map(|_| {}); // keep producers vec in sync
+            let _ = producers.get(gi); // keep producers vec in sync
             continue;
         }
 
@@ -508,8 +502,7 @@ pub fn eval_efficient(
 
                 let base_atom = group.inputs[0].resolve(ri, 0);
                 for k in 0..reduce_count {
-                    let src_id =
-                        AtomId((base_atom.0 as i64 + k as i64 * reduce_stride) as u64);
+                    let src_id = AtomId((base_atom.0 as i64 + k as i64 * reduce_stride) as u64);
                     let val = lookup_atom(src_id, graph, &group_buffers, &input_buffers)
                         .cast_to(compute_dtype);
                     acc = match &group.op {
@@ -603,8 +596,8 @@ pub fn eval_efficient(
                         output_dtype,
                     } => {
                         let src = group.inputs[0].resolve(ri, 0);
-                        let index = lookup_atom(src, graph, &group_buffers, &input_buffers)
-                            .to_f64() as u64;
+                        let index =
+                            lookup_atom(src, graph, &group_buffers, &input_buffers).to_f64() as u64;
                         let table_atom = AtomId(table_base.0 + index);
                         lookup_atom(table_atom, graph, &group_buffers, &input_buffers)
                             .cast_to(*output_dtype)
@@ -633,12 +626,7 @@ pub fn eval_efficient(
             let mut scalars = Vec::with_capacity(range.count as usize);
             for offset in 0..range.count {
                 let atom_id = AtomId(range.base.0 + offset);
-                scalars.push(lookup_atom(
-                    atom_id,
-                    graph,
-                    &group_buffers,
-                    &input_buffers,
-                ));
+                scalars.push(lookup_atom(atom_id, graph, &group_buffers, &input_buffers));
             }
             scalars_to_tensor(&scalars, range.dtype)
         })
@@ -656,14 +644,12 @@ fn lookup_atom(
     if let Some(gi) = graph.find_group_idx(atom_id) {
         let group = &graph.groups()[gi];
         let offset = (atom_id.0 - group.base_id.0) as usize;
-        return group_buffers[gi]
-            .as_ref()
-            .unwrap_or_else(|| {
-                panic!(
-                    "group {} (base={}) buffer already freed when reading atom {}",
-                    gi, group.base_id, atom_id
-                )
-            })[offset]
+        return group_buffers[gi].as_ref().unwrap_or_else(|| {
+            panic!(
+                "group {} (base={}) buffer already freed when reading atom {}",
+                gi, group.base_id, atom_id
+            )
+        })[offset]
             .clone();
     }
     // Try input tensors.
@@ -685,31 +671,29 @@ fn eval_binop(op: &ScalarBinOp, a: &NumericScalar, b: &NumericScalar) -> Numeric
         ScalarBinOp::Mod => a.modulo(b),
         ScalarBinOp::Pow => a.pow(b),
         ScalarBinOp::Equal => NumericScalar::F32(if a.to_f64() == b.to_f64() { 1.0 } else { 0.0 }),
-        ScalarBinOp::Greater => {
-            NumericScalar::F32(if a.to_f64() > b.to_f64() { 1.0 } else { 0.0 })
-        }
+        ScalarBinOp::Greater => NumericScalar::F32(if a.to_f64() > b.to_f64() { 1.0 } else { 0.0 }),
         ScalarBinOp::GreaterOrEqual => {
             NumericScalar::F32(if a.to_f64() >= b.to_f64() { 1.0 } else { 0.0 })
         }
-        ScalarBinOp::Less => {
-            NumericScalar::F32(if a.to_f64() < b.to_f64() { 1.0 } else { 0.0 })
-        }
+        ScalarBinOp::Less => NumericScalar::F32(if a.to_f64() < b.to_f64() { 1.0 } else { 0.0 }),
         ScalarBinOp::LessOrEqual => {
             NumericScalar::F32(if a.to_f64() <= b.to_f64() { 1.0 } else { 0.0 })
         }
-        ScalarBinOp::And => {
-            NumericScalar::F32(if a.to_f64() != 0.0 && b.to_f64() != 0.0 { 1.0 } else { 0.0 })
-        }
-        ScalarBinOp::Or => {
-            NumericScalar::F32(if a.to_f64() != 0.0 || b.to_f64() != 0.0 { 1.0 } else { 0.0 })
-        }
-        ScalarBinOp::Xor => NumericScalar::F32(
-            if (a.to_f64() != 0.0) ^ (b.to_f64() != 0.0) {
-                1.0
-            } else {
-                0.0
-            },
-        ),
+        ScalarBinOp::And => NumericScalar::F32(if a.to_f64() != 0.0 && b.to_f64() != 0.0 {
+            1.0
+        } else {
+            0.0
+        }),
+        ScalarBinOp::Or => NumericScalar::F32(if a.to_f64() != 0.0 || b.to_f64() != 0.0 {
+            1.0
+        } else {
+            0.0
+        }),
+        ScalarBinOp::Xor => NumericScalar::F32(if (a.to_f64() != 0.0) ^ (b.to_f64() != 0.0) {
+            1.0
+        } else {
+            0.0
+        }),
     }
 }
 
@@ -789,16 +773,14 @@ fn insert_groups_in_range_static(
     let groups = graph.groups();
     if let Some(first_gi) = graph.find_group_idx(AtomId(lo)) {
         out.insert(first_gi);
-        for gi in (first_gi + 1)..groups.len() {
-            if groups[gi].base_id.0 > hi {
+        for (gi, group) in groups.iter().enumerate().skip(first_gi + 1) {
+            if group.base_id.0 > hi {
                 break;
             }
             out.insert(gi);
         }
-    } else {
-        if let Some(gi) = graph.find_group_idx(AtomId(hi)) {
-            out.insert(gi);
-        }
+    } else if let Some(gi) = graph.find_group_idx(AtomId(hi)) {
+        out.insert(gi);
     }
 }
 
@@ -1035,7 +1017,9 @@ mod tests {
     use ndarray::{ArcArray, IxDyn};
 
     fn make_f32_tensor(data: &[f32]) -> NDArrayNumericTensor<DynRank> {
-        NDArrayNumericTensor::F32(ArcArray::from_shape_vec(IxDyn(&[data.len()]), data.to_vec()).unwrap())
+        NDArrayNumericTensor::F32(
+            ArcArray::from_shape_vec(IxDyn(&[data.len()]), data.to_vec()).unwrap(),
+        )
     }
 
     /// Build a small graph: input → mul(2) → add(bias) → output.
@@ -1067,7 +1051,10 @@ mod tests {
             vec![],
             vec![],
             vec![
-                InputRef::Affine { base: inp, stride: 1 },
+                InputRef::Affine {
+                    base: inp,
+                    stride: 1,
+                },
                 InputRef::Broadcast(two),
             ],
         );
@@ -1092,8 +1079,14 @@ mod tests {
             vec![],
             vec![],
             vec![
-                InputRef::Affine { base: mul, stride: 1 },
-                InputRef::Affine { base: bias, stride: 1 },
+                InputRef::Affine {
+                    base: mul,
+                    stride: 1,
+                },
+                InputRef::Affine {
+                    base: bias,
+                    stride: 1,
+                },
             ],
         );
 
@@ -1191,7 +1184,10 @@ mod tests {
             },
             vec![],
             vec![],
-            vec![InputRef::Affine { base: inp, stride: 1 }],
+            vec![InputRef::Affine {
+                base: inp,
+                stride: 1,
+            }],
         );
 
         let exp = g.push_group(
@@ -1203,7 +1199,10 @@ mod tests {
             },
             vec![],
             vec![],
-            vec![InputRef::Affine { base: neg, stride: 1 }],
+            vec![InputRef::Affine {
+                base: neg,
+                stride: 1,
+            }],
         );
 
         // Dead branch: not consumed by anything, not in outputs.

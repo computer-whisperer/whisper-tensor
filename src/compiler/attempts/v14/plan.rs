@@ -31,10 +31,7 @@ pub fn plan_trivial(
         .collect();
 
     // The single span's outputs = model output atom ranges.
-    let span_outputs: Vec<AtomRange> = model_outputs
-        .iter()
-        .map(|om| om.range.clone())
-        .collect();
+    let span_outputs: Vec<AtomRange> = model_outputs.iter().map(|om| om.range.clone()).collect();
 
     let span = Span {
         graph: result.graph.clone(),
@@ -45,9 +42,7 @@ pub fn plan_trivial(
     ExecutionPlan {
         graph: result.graph,
         tensor_map,
-        phases: vec![Phase {
-            spans: vec![span],
-        }],
+        phases: vec![Phase { spans: vec![span] }],
         model_outputs,
     }
 }

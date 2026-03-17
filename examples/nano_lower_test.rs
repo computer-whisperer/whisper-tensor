@@ -105,12 +105,14 @@ fn main() {
             n_shape_only += 1;
         }
     }
-    println!("Tensor info: {} full (small constants), {} shape-only (weights)", n_full, n_shape_only);
+    println!(
+        "Tensor info: {} full (small constants), {} shape-only (weights)",
+        n_full, n_shape_only
+    );
 
     // ---- Lower ----
     let t0 = Instant::now();
-    let result =
-        whisper_tensor::nano_graph::lower::lower(&milli_graph, &all_infos).unwrap();
+    let result = whisper_tensor::nano_graph::lower::lower(&milli_graph, &all_infos).unwrap();
     eprintln!("lower: {:.1}s", t0.elapsed().as_secs_f64());
 
     let stats = result.graph.stats();

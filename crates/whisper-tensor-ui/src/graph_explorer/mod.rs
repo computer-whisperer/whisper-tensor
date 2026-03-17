@@ -34,8 +34,6 @@ use egui::{
     TextureHandle, Ui, UiBuilder, Vec2, vec2,
 };
 #[cfg(target_arch = "wasm32")]
-use wasm_bindgen::JsCast;
-#[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::wasm_bindgen;
 
 #[cfg(target_arch = "wasm32")]

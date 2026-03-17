@@ -308,7 +308,8 @@ fn is_lane_proportional(consumer: &AtomGroup, producer: &AtomGroup, num_lanes: u
             continue;
         }
         let p_lo = prod_base + lane as u64 * producer_chunk;
-        let p_hi = p_lo + producer_chunk.min(producer.count.saturating_sub(lane as u64 * producer_chunk));
+        let p_hi =
+            p_lo + producer_chunk.min(producer.count.saturating_sub(lane as u64 * producer_chunk));
 
         for input in &consumer.inputs {
             let (ref_lo, ref_hi) = input_ref_range(input, consumer.count, &consumer.op);
@@ -807,11 +808,10 @@ fn build_single_span(
         span_compute_groups.iter().map(|&(gi, _, _)| gi).collect();
     // Map group_idx -> (atom_offset, atom_count) for the slice assigned to this span.
     // A group may be split across lanes, so only a portion is computed here.
-    let span_compute_slices: HashMap<usize, (u64, u64)> =
-        span_compute_groups
-            .iter()
-            .map(|&(gi, off, cnt)| (gi, (off, cnt)))
-            .collect();
+    let span_compute_slices: HashMap<usize, (u64, u64)> = span_compute_groups
+        .iter()
+        .map(|&(gi, off, cnt)| (gi, (off, cnt)))
+        .collect();
 
     // Collect ALL transitive dependencies (group-level BFS).
     let mut needed_groups: BTreeSet<usize> = BTreeSet::new();

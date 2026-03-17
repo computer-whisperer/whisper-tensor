@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::nano_graph::{AtomGroup, AtomId, InputRef, NanoGraph, ScalarOp};
 
-use super::{v2c, AtomMapping, Phase, Span, SpanPlan};
+use super::{AtomMapping, Phase, Span, SpanPlan, v2c};
 
 /// Literal groups with fewer atoms than this are duplicated into spans.
 /// Larger literals (weight matrices) become external inputs instead.

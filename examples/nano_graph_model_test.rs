@@ -403,7 +403,6 @@ fn main() {
         println!("  NanoGraph lowering: {:.3}s", lower_elapsed.as_secs_f64());
         println!("  Nano interpreter:  {:.3}s", nano_elapsed.as_secs_f64());
     }
-
 }
 
 fn compare_tensor_with_nano(

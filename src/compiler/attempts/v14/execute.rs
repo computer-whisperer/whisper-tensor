@@ -6,11 +6,11 @@
 
 use std::collections::HashMap;
 
+use crate::DynRank;
 use crate::backends::ndarray_backend::numeric_tensor::NDArrayNumericTensor;
 use crate::graph::GlobalId;
-use crate::nano_graph::eval::eval_efficient;
 use crate::nano_graph::AtomId;
-use crate::DynRank;
+use crate::nano_graph::eval::eval_efficient;
 
 use super::types::*;
 
@@ -121,18 +121,10 @@ fn make_zeros(count: usize, dtype: crate::dtype::DType) -> NDArrayNumericTensor<
     use ndarray::{ArcArray, IxDyn};
     let shape = IxDyn(&[count]);
     match dtype {
-        crate::dtype::DType::F32 => {
-            NDArrayNumericTensor::F32(ArcArray::zeros(shape))
-        }
-        crate::dtype::DType::F64 => {
-            NDArrayNumericTensor::F64(ArcArray::zeros(shape))
-        }
-        crate::dtype::DType::I64 => {
-            NDArrayNumericTensor::I64(ArcArray::zeros(shape))
-        }
-        crate::dtype::DType::I32 => {
-            NDArrayNumericTensor::I32(ArcArray::zeros(shape))
-        }
+        crate::dtype::DType::F32 => NDArrayNumericTensor::F32(ArcArray::zeros(shape)),
+        crate::dtype::DType::F64 => NDArrayNumericTensor::F64(ArcArray::zeros(shape)),
+        crate::dtype::DType::I64 => NDArrayNumericTensor::I64(ArcArray::zeros(shape)),
+        crate::dtype::DType::I32 => NDArrayNumericTensor::I32(ArcArray::zeros(shape)),
         _other => {
             // Fallback to F32 zeros for uncommon dtypes.
             NDArrayNumericTensor::F32(ArcArray::zeros(shape))

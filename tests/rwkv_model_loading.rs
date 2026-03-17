@@ -435,10 +435,8 @@ fn rwkv01b_nano_graph_integrity() {
 
     let mut overrides: HashMap<u64, NumericScalar> = HashMap::new();
     // All tensors (weights + inputs) keyed by external ID.
-    let all_tensors: Vec<(&GlobalId, &NumericTensor<DynRank>)> = weight_tensors
-        .iter()
-        .chain(input_tensors.iter())
-        .collect();
+    let all_tensors: Vec<(&GlobalId, &NumericTensor<DynRank>)> =
+        weight_tensors.iter().chain(input_tensors.iter()).collect();
     for (ext_id, tensor) in all_tensors {
         let Some(&int_id) = milli.input_map.get(ext_id) else {
             continue;

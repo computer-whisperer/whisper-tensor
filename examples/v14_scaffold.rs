@@ -156,19 +156,16 @@ fn main() {
     println!("\n=== Tensor Map ===");
     println!("  Weights:  {} tensors, {} atoms", n_weight, weight_atoms);
     println!("  Inputs:   {} tensors, {} atoms", n_input, input_atoms);
-    println!("  Computed: {} tensors, {} atoms", n_computed, computed_atoms);
+    println!(
+        "  Computed: {} tensors, {} atoms",
+        n_computed, computed_atoms
+    );
     println!("  Total atom ID space: {}", result.graph.num_atoms());
 
     // ── Step 6: Build model outputs ──────────────────────────────────────────
 
-    let model_outputs = build_model_outputs(
-        &milli_graph,
-        &result.tensor_map,
-    );
-    println!(
-        "\n=== Model Outputs ({}) ===",
-        model_outputs.len()
-    );
+    let model_outputs = build_model_outputs(&milli_graph, &result.tensor_map);
+    println!("\n=== Model Outputs ({}) ===", model_outputs.len());
     for out in &model_outputs {
         println!(
             "  {:?}: base={} count={} {:?}",
@@ -184,17 +181,31 @@ fn main() {
 
     let total_groups = liveness.len();
     let dead_groups = liveness.iter().filter(|g| g.use_count == 0).count();
-    let dead_atoms: u64 = liveness.iter().filter(|g| g.use_count == 0).map(|g| g.count).sum();
+    let dead_atoms: u64 = liveness
+        .iter()
+        .filter(|g| g.use_count == 0)
+        .map(|g| g.count)
+        .sum();
     let max_use = liveness.iter().map(|g| g.use_count).max().unwrap_or(0);
     let single_use = liveness.iter().filter(|g| g.use_count == 1).count();
-    let single_use_atoms: u64 = liveness.iter().filter(|g| g.use_count == 1).map(|g| g.count).sum();
+    let single_use_atoms: u64 = liveness
+        .iter()
+        .filter(|g| g.use_count == 1)
+        .map(|g| g.count)
+        .sum();
     let multi_use = liveness.iter().filter(|g| g.use_count > 1).count();
     let total_atoms: u64 = liveness.iter().map(|g| g.count).sum();
 
     println!("\n=== Liveness ===");
     println!("  Groups: {}", total_groups);
-    println!("  Dead (use_count=0): {} groups, {} atoms", dead_groups, dead_atoms);
-    println!("  Single-use (use_count=1): {} groups, {} atoms", single_use, single_use_atoms);
+    println!(
+        "  Dead (use_count=0): {} groups, {} atoms",
+        dead_groups, dead_atoms
+    );
+    println!(
+        "  Single-use (use_count=1): {} groups, {} atoms",
+        single_use, single_use_atoms
+    );
     println!("  Multi-use (use_count>1): {} groups", multi_use);
     println!("  Max use count: {}", max_use);
     println!("  Total compute atoms: {}", total_atoms);
@@ -214,9 +225,9 @@ fn main() {
 
     // ── Step 8: Build shared inputs ────────────────────────────────────────
 
+    use whisper_tensor::backends::eval_backend::EvalBackend;
     use whisper_tensor::backends::ndarray_backend::numeric_tensor::NDArrayNumericTensor;
     use whisper_tensor::compiler::attempts::v14::execute;
-    use whisper_tensor::backends::eval_backend::EvalBackend;
     use whisper_tensor::nano_graph::AtomId;
     use whisper_tensor::numeric_tensor::NumericTensor;
 
@@ -325,10 +336,17 @@ fn main() {
         }
     }
 
-    println!("\n=== NanoGraph Eval ({} input tensors) ===", exec_inputs.len());
+    println!(
+        "\n=== NanoGraph Eval ({} input tensors) ===",
+        exec_inputs.len()
+    );
     let t0 = Instant::now();
     let nano_outputs = execute::execute(&exec_plan, exec_inputs);
-    println!("  Executed in {:.1}s, {} outputs", t0.elapsed().as_secs_f64(), nano_outputs.len());
+    println!(
+        "  Executed in {:.1}s, {} outputs",
+        t0.elapsed().as_secs_f64(),
+        nano_outputs.len()
+    );
 
     // ── Step 11: Compare outputs ────────────────────────────────────────────
 
