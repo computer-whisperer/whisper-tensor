@@ -92,6 +92,7 @@ pub struct LowerResult {
 pub struct TensorAtomMapInfo {
     pub base_id: AtomId,
     pub count: u64,
+    pub dtype: DType,
     pub sym_dims: Vec<SymDim>,
     pub known_strides: Vec<u64>,
     pub known_dims: Vec<u64>,
@@ -149,6 +150,8 @@ struct TensorAtomMap {
     base_id: AtomId,
     /// Total number of atoms (product of known dims).
     count: u64,
+    /// Data type of this tensor.
+    dtype: DType,
     /// The full tensor layout: one entry per dim, preserving original order.
     layout: Vec<DimKind>,
     /// Physical strides for the known dims into the atom buffer.
@@ -191,6 +194,7 @@ impl TensorAtomMap {
     fn simple(
         base_id: AtomId,
         count: u64,
+        dtype: DType,
         layout: Vec<DimKind>,
         known_strides: Vec<u64>,
         sym_dims: Vec<SymDim>,
@@ -198,6 +202,7 @@ impl TensorAtomMap {
         Self {
             base_id,
             count,
+            dtype,
             layout,
             known_strides,
             sym_dims,
@@ -208,6 +213,7 @@ impl TensorAtomMap {
     /// Create a segmented tensor atom map (for Concat).
     fn segmented(
         count: u64,
+        dtype: DType,
         layout: Vec<DimKind>,
         sym_dims: Vec<SymDim>,
         segments: Vec<ConcatSegment>,
@@ -225,6 +231,7 @@ impl TensorAtomMap {
         Self {
             base_id,
             count,
+            dtype,
             layout,
             known_strides,
             sym_dims,
@@ -389,6 +396,7 @@ pub fn lower(
                 TensorAtomMapInfo {
                     base_id: tam.base_id,
                     count: tam.count,
+                    dtype: tam.dtype,
                     sym_dims: tam.sym_dims.clone(),
                     known_strides: tam.known_strides.clone(),
                     known_dims: tam.known_dims(),
@@ -476,6 +484,78 @@ impl LowerCtx {
         self.nano.sym_dim(&name)
     }
 
+    /// Register a known-value constant as Literal groups.
+    ///
+    /// Extracts scalar values from the TensorInfo and creates Literal groups.
+    /// Runs of identical values are coalesced into single groups. If the
+    /// TensorInfo has no numeric data, falls back to `register_input`.
+    fn register_constant(&mut self, id: GlobalId, info: &TensorInfo) {
+        let Some(numeric) = info.as_numeric() else {
+            self.register_input(id, info);
+            return;
+        };
+
+        let Some((layout, known_dims, sym_dims, count)) = self.classify_dims(info) else {
+            self.register_input(id, info);
+            return;
+        };
+
+        let strides = TensorAtomMap::compute_strides(&known_dims);
+        let count = count.max(1) as usize;
+        let dt = info.dtype();
+
+        // Extract flat scalar values from the tensor.
+        let nd = numeric.to_ndarray().unwrap();
+        let flat = nd.flatten();
+        let n_elems = flat.num_elements();
+        let scalars: Vec<NumericScalar> = (0..n_elems)
+            .map(|i| flat.get(&[i as u64]).unwrap())
+            .collect();
+
+        if scalars.is_empty() {
+            self.register_input(id, info);
+            return;
+        }
+
+        // Truncate or extend to match count (shouldn't differ, but be safe).
+        let n = scalars.len().min(count);
+
+        // Create Literal groups, coalescing runs of identical values.
+        let mut base_id = None;
+        let mut i = 0;
+        while i < n {
+            // Find run of identical values.
+            let run_val = &scalars[i];
+            let mut run_len = 1;
+            while i + run_len < n && scalars[i + run_len] == *run_val {
+                run_len += 1;
+            }
+            let gid = self.nano.push_group(
+                run_len as u64,
+                ScalarOp::Literal(run_val.clone()),
+                sym_dims.clone(),
+                vec![],
+                vec![],
+            );
+            if base_id.is_none() {
+                base_id = Some(gid);
+            }
+            i += run_len;
+        }
+
+        self.tensor_map.insert(
+            id,
+            TensorAtomMap::simple(
+                base_id.unwrap(),
+                n as u64,
+                dt,
+                layout,
+                strides,
+                sym_dims,
+            ),
+        );
+    }
+
     /// Register a graph input as leaf atoms.
     ///
     /// Creates Literal groups with placeholder value 0.0. For external inputs
@@ -490,7 +570,7 @@ impl LowerCtx {
             let base_id = self.nano.add_input_tensor(id, 1, dt);
             self.tensor_map.insert(
                 id,
-                TensorAtomMap::simple(base_id, 1, vec![], vec![], vec![]),
+                TensorAtomMap::simple(base_id, 1, dt, vec![], vec![], vec![]),
             );
             return;
         };
@@ -503,13 +583,14 @@ impl LowerCtx {
 
         self.tensor_map.insert(
             id,
-            TensorAtomMap::simple(base_id, count, layout, strides, sym_dims),
+            TensorAtomMap::simple(base_id, count, dt, layout, strides, sym_dims),
         );
     }
 
     /// Register a tensor as a boundary (opaque) group.
     /// Boundary atoms are leaves — they use Literal(0) with no inputs.
     fn register_boundary(&mut self, output_id: GlobalId, info: &TensorInfo, _op_kind: &str) {
+        let dt = info.dtype();
         let Some((layout, known_dims, sym_dims, count)) = self.classify_dims(info) else {
             let base_id = self.nano.push_atom(
                 ScalarOp::Literal(NumericScalar::F32(0.0)),
@@ -519,7 +600,7 @@ impl LowerCtx {
             );
             self.tensor_map.insert(
                 output_id,
-                TensorAtomMap::simple(base_id, 1, vec![], vec![], vec![]),
+                TensorAtomMap::simple(base_id, 1, dt, vec![], vec![], vec![]),
             );
             return;
         };
@@ -537,7 +618,7 @@ impl LowerCtx {
 
         self.tensor_map.insert(
             output_id,
-            TensorAtomMap::simple(base_id, count, layout, strides, sym_dims),
+            TensorAtomMap::simple(base_id, count, dt, layout, strides, sym_dims),
         );
     }
 
@@ -960,7 +1041,7 @@ impl LowerCtx {
             AnyMilliOp::Constant(c) => {
                 let out_id = Node::outputs(c).next().unwrap();
                 if let Some(info) = all_infos.get(&out_id) {
-                    self.register_input(out_id, info);
+                    self.register_constant(out_id, info);
                 } else {
                     self.register_opaque(out_id);
                 }
@@ -968,7 +1049,7 @@ impl LowerCtx {
             AnyMilliOp::ConstantOfShape(c) => {
                 let out_id = Node::outputs(c).next().unwrap();
                 if let Some(info) = all_infos.get(&out_id) {
-                    self.register_input(out_id, info);
+                    self.register_constant(out_id, info);
                 } else {
                     self.register_opaque(out_id);
                 }
@@ -976,7 +1057,7 @@ impl LowerCtx {
             AnyMilliOp::Shape(s) => {
                 let out_id = Node::outputs(s).next().unwrap();
                 if let Some(info) = all_infos.get(&out_id) {
-                    self.register_input(out_id, info);
+                    self.register_constant(out_id, info);
                 } else {
                     self.register_opaque(out_id);
                 }
@@ -1029,7 +1110,7 @@ impl LowerCtx {
                 for out_id in other.outputs() {
                     if let Some(info) = all_infos.get(&out_id) {
                         if all_numeric {
-                            self.register_input(out_id, info);
+                            self.register_constant(out_id, info);
                         } else {
                             self.register_boundary(out_id, info, &op_kind);
                         }
@@ -1167,6 +1248,7 @@ impl LowerCtx {
         let out_tmp = TensorAtomMap::simple(
             AtomId(0),
             count,
+            dt,
             layout.clone(),
             strides.clone(),
             sym_dims.clone(),
@@ -1189,7 +1271,7 @@ impl LowerCtx {
 
         self.tensor_map.insert(
             out_id,
-            TensorAtomMap::simple(base_id, count, layout, strides, sym_dims),
+            TensorAtomMap::simple(base_id, count, dt, layout, strides, sym_dims),
         );
     }
 
@@ -1281,6 +1363,7 @@ impl LowerCtx {
             TensorAtomMap::simple(
                 base_id,
                 in_map.count,
+                dt,
                 in_map.layout.clone(),
                 in_map.known_strides.clone(),
                 in_map.sym_dims.clone(),
@@ -1337,6 +1420,7 @@ impl LowerCtx {
             TensorAtomMap::simple(
                 base_id,
                 in_map.count,
+                dt,
                 in_map.layout.clone(),
                 in_map.known_strides.clone(),
                 in_map.sym_dims.clone(),
@@ -1394,6 +1478,7 @@ impl LowerCtx {
             TensorAtomMap::simple(
                 base_id,
                 in_map.count,
+                out_dt,
                 in_map.layout.clone(),
                 in_map.known_strides.clone(),
                 in_map.sym_dims.clone(),
@@ -1525,6 +1610,7 @@ impl LowerCtx {
             TensorAtomMap::simple(
                 in_map.base_id,
                 in_map.count,
+                out_info.dtype(),
                 transposed_layout,
                 transposed_strides,
                 in_map.sym_dims.clone(),
@@ -1559,6 +1645,7 @@ impl LowerCtx {
                 TensorAtomMap::simple(
                     in_map.base_id,
                     count,
+                    out_info.dtype(),
                     layout,
                     TensorAtomMap::compute_strides(&known_dims),
                     sym_dims,
@@ -1595,12 +1682,14 @@ impl LowerCtx {
         };
         let count = count.max(1);
 
+        let dt = out_info.dtype();
         if count == in_map.count {
             self.tensor_map.insert(
                 out_id,
                 TensorAtomMap::simple(
                     in_map.base_id,
                     count,
+                    dt,
                     layout,
                     TensorAtomMap::compute_strides(&known_dims),
                     sym_dims,
@@ -1610,6 +1699,7 @@ impl LowerCtx {
             let out_tmp = TensorAtomMap::simple(
                 AtomId(0),
                 count,
+                dt,
                 layout.clone(),
                 TensorAtomMap::compute_strides(&known_dims),
                 sym_dims.clone(),
@@ -1617,7 +1707,6 @@ impl LowerCtx {
             let input_ref =
                 self.compute_input_ref(&out_tmp, &in_map, out_info, in_info.unwrap_or(out_info));
 
-            let dt = out_info.dtype();
             let base_id = self.nano.push_group(
                 count,
                 ScalarOp::Identity {
@@ -1634,6 +1723,7 @@ impl LowerCtx {
                 TensorAtomMap::simple(
                     base_id,
                     count,
+                    dt,
                     layout,
                     TensorAtomMap::compute_strides(&known_dims),
                     sym_dims,
@@ -1671,9 +1761,11 @@ impl LowerCtx {
         let count = count.max(1);
         let strides = TensorAtomMap::compute_strides(&known_dims);
 
+        let dt = out_info.dtype();
         let out_tmp = TensorAtomMap::simple(
             AtomId(0),
             count,
+            dt,
             layout.clone(),
             strides.clone(),
             sym_dims.clone(),
@@ -1686,7 +1778,6 @@ impl LowerCtx {
         let input_b =
             self.compute_input_ref(&out_tmp, &b_map, out_info, b_info.unwrap_or(out_info));
 
-        let dt = out_info.dtype();
         let base_id = self.nano.push_group(
             count,
             ScalarOp::Binary {
@@ -1701,7 +1792,7 @@ impl LowerCtx {
 
         self.tensor_map.insert(
             out_id,
-            TensorAtomMap::simple(base_id, count, layout, strides, sym_dims),
+            TensorAtomMap::simple(base_id, count, dt, layout, strides, sym_dims),
         );
     }
 
@@ -1736,9 +1827,11 @@ impl LowerCtx {
         let count = count.max(1);
         let strides = TensorAtomMap::compute_strides(&known_dims);
 
+        let dt = out_info.dtype();
         let out_tmp = TensorAtomMap::simple(
             AtomId(0),
             count,
+            dt,
             layout.clone(),
             strides.clone(),
             sym_dims.clone(),
@@ -1754,7 +1847,6 @@ impl LowerCtx {
         let input_y =
             self.compute_input_ref(&out_tmp, &y_map, out_info, y_info.unwrap_or(out_info));
 
-        let dt = out_info.dtype();
         let base_id = self.nano.push_group(
             count,
             ScalarOp::Select {
@@ -1768,7 +1860,7 @@ impl LowerCtx {
 
         self.tensor_map.insert(
             out_id,
-            TensorAtomMap::simple(base_id, count, layout, strides, sym_dims),
+            TensorAtomMap::simple(base_id, count, dt, layout, strides, sym_dims),
         );
     }
 
@@ -1877,6 +1969,7 @@ impl LowerCtx {
                     TensorAtomMap::simple(
                         input_maps[0].base_id,
                         out_count,
+                        out_info.dtype(),
                         out_layout,
                         TensorAtomMap::compute_strides(&out_known_dims),
                         out_sym_dims,
@@ -1903,7 +1996,7 @@ impl LowerCtx {
 
         self.tensor_map.insert(
             out_id,
-            TensorAtomMap::segmented(out_count, out_layout, out_sym_dims, segments),
+            TensorAtomMap::segmented(out_count, out_info.dtype(), out_layout, out_sym_dims, segments),
         );
     }
 
@@ -1999,6 +2092,7 @@ impl LowerCtx {
 
         // Zero-cost split for outermost axis with row-major strides:
         // output atoms are a contiguous sub-range.
+        let out_dt = out_info.dtype();
         let in_rowmajor = TensorAtomMap::compute_strides(&in_known);
         if split_known_idx == 0 && in_map.known_strides == in_rowmajor {
             let base_offset = offset_along_axis * in_map.known_strides[split_known_idx];
@@ -2007,6 +2101,7 @@ impl LowerCtx {
                 TensorAtomMap::simple(
                     in_map.base_id.offset(base_offset),
                     out_count,
+                    out_dt,
                     out_layout,
                     TensorAtomMap::compute_strides(&out_known_dims),
                     out_sym_dims,
@@ -2024,6 +2119,7 @@ impl LowerCtx {
             TensorAtomMap::simple(
                 in_map.base_id.offset(base_offset),
                 out_count,
+                out_dt,
                 out_layout,
                 in_map.known_strides.clone(),
                 out_sym_dims,
@@ -2212,6 +2308,7 @@ impl LowerCtx {
             out_rowmajor[k] == expected
         });
 
+        let slice_dt = out_info.dtype();
         if contiguous {
             // All steps must be positive for simple offset-based addressing.
             let all_positive_steps = known_steps.iter().all(|&s| s > 0);
@@ -2225,6 +2322,7 @@ impl LowerCtx {
                     TensorAtomMap::simple(
                         in_map.base_id.offset(base_offset),
                         out_count,
+                        slice_dt,
                         out_layout,
                         TensorAtomMap::compute_strides(&out_known_dims),
                         out_sym_dims,
@@ -2249,6 +2347,7 @@ impl LowerCtx {
                 TensorAtomMap::simple(
                     in_map.base_id.offset(base_offset),
                     out_count,
+                    slice_dt,
                     out_layout,
                     out_phys_strides,
                     out_sym_dims,
@@ -2570,6 +2669,7 @@ impl LowerCtx {
             TensorAtomMap::simple(
                 base_id,
                 out_count,
+                out_dtype,
                 out_layout,
                 TensorAtomMap::compute_strides(&out_known_dims),
                 out_sym_dims,
@@ -2633,6 +2733,7 @@ impl LowerCtx {
                 TensorAtomMap::simple(
                     base_id,
                     count,
+                    dt,
                     layout,
                     TensorAtomMap::compute_strides(&known_dims),
                     sym_dims,
@@ -2838,6 +2939,7 @@ impl LowerCtx {
             TensorAtomMap::simple(
                 base_id,
                 out_count,
+                out_dt,
                 out_layout,
                 TensorAtomMap::compute_strides(&out_known_dims_full),
                 out_sym_dims,
@@ -2951,6 +3053,7 @@ impl LowerCtx {
             TensorAtomMap::simple(
                 base_id,
                 sum_map.count,
+                out_dt,
                 sum_map.layout,
                 sum_map.known_strides,
                 sum_map.sym_dims,
@@ -2979,7 +3082,7 @@ impl LowerCtx {
             .iter()
             .all(|id| all_infos.get(id).is_some_and(|i| i.as_numeric().is_some()));
         if all_numeric && let Some(out_info) = all_infos.get(&out_id) {
-            self.register_input(out_id, out_info);
+            self.register_constant(out_id, out_info);
             return;
         }
 
@@ -3193,7 +3296,7 @@ impl LowerCtx {
             let out_strides = TensorAtomMap::compute_strides(&out_known_dims);
             self.tensor_map.insert(
                 out_id,
-                TensorAtomMap::simple(base_id, d_total, out_layout, out_strides, out_sym_dims),
+                TensorAtomMap::simple(base_id, d_total, out_dt, out_layout, out_strides, out_sym_dims),
             );
         } else {
             // Indices are fully known (constant). out_count = indices_count * D_total.
@@ -3287,7 +3390,7 @@ impl LowerCtx {
             let out_strides = TensorAtomMap::compute_strides(&out_known_dims);
             self.tensor_map.insert(
                 out_id,
-                TensorAtomMap::simple(base_id, out_count, out_layout, out_strides, out_sym_dims),
+                TensorAtomMap::simple(base_id, out_count, out_dt, out_layout, out_strides, out_sym_dims),
             );
         }
     }
@@ -3370,7 +3473,7 @@ impl LowerCtx {
         );
         self.tensor_map.insert(
             id,
-            TensorAtomMap::simple(base_id, 1, vec![], vec![], vec![]),
+            TensorAtomMap::simple(base_id, 1, DType::F32, vec![], vec![], vec![]),
         );
     }
 }
@@ -3460,7 +3563,7 @@ mod tests {
         }
 
         // Eval NanoGraph.
-        let nano_eval = NanoEval::eval(&result.graph, &overrides);
+        let nano_eval = NanoEval::eval_with_overrides(&result.graph, &overrides);
 
         // Compare outputs.
         for out_id in &output_ids {

@@ -13,6 +13,7 @@ pub mod metadata;
 pub mod milli_graph;
 pub mod model;
 pub mod nano_graph;
+pub mod range_map;
 pub mod numeric_scalar;
 pub mod numeric_tensor;
 pub mod numeric_tensor_typed;
