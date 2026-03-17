@@ -807,18 +807,29 @@ impl LowerCtx {
             }
 
             // Convert producer dim indices to an atom ID.
-            // Use row-major strides to get a logical element index, then
-            // atom_id_for_element to convert to an AtomId (handles segments
-            // and non-contiguous layouts).
-            let mut flat_p = 0u64;
-            for (i, &stride) in p_row_major.iter().enumerate() {
-                flat_p += p_indices[i] * stride;
+            // Use physical strides directly to compute offset into the
+            // producer's atom space. This correctly handles:
+            //  - Row-major producers (physical strides = row-major)
+            //  - Transposed producers (physical strides = permuted row-major)
+            //  - Non-contiguous slice producers (physical strides from
+            //    larger source tensor; offset may exceed `count` but the
+            //    resulting AtomId correctly references the source atoms)
+            //
+            // For segmented (concat) producers, fall back to
+            // atom_id_for_element which handles the segment lookup.
+            if !producer.segments.is_empty() {
+                let mut flat_p = 0u64;
+                for (i, &stride) in p_row_major.iter().enumerate() {
+                    flat_p += p_indices[i] * stride;
+                }
+                ids.push(producer.atom_id_for_element(flat_p));
+            } else {
+                let mut offset = 0u64;
+                for (i, &stride) in p_strides.iter().enumerate() {
+                    offset += p_indices[i] * stride;
+                }
+                ids.push(producer.base_id.offset(offset));
             }
-            debug_assert!(flat_p < producer.count,
-                "broadcast mapped to element {} but producer only has {} elements",
-                flat_p, producer.count);
-
-            ids.push(producer.atom_id_for_element(flat_p));
         }
 
         // Try to compress the Explicit table into a simpler InputRef pattern.
@@ -1273,6 +1284,29 @@ impl LowerCtx {
         );
     }
 
+    /// Build an InputRef for a pointwise (element-by-element) read of a tensor.
+    ///
+    /// For row-major tensors this returns `Affine { base, stride: 1 }`.
+    /// For non-row-major tensors (transposed views, non-contiguous slices)
+    /// this builds an Explicit mapping so each output atom reads the
+    /// correct source atom.
+    fn pointwise_input_ref(in_map: &TensorAtomMap) -> InputRef {
+        let known_dims = in_map.known_dims();
+        let row_major = TensorAtomMap::compute_strides(&known_dims);
+        if in_map.known_strides == row_major || in_map.count <= 1 {
+            InputRef::Affine {
+                base: in_map.base_id,
+                stride: 1,
+            }
+        } else {
+            let mut ids = Vec::with_capacity(in_map.count as usize);
+            for flat in 0..in_map.count {
+                ids.push(in_map.atom_id_for_element(flat));
+            }
+            Self::compress_explicit(ids)
+        }
+    }
+
     fn lower_simple_unary(
         &mut self,
         un: &crate::milli_graph::ops::SimpleUnaryOp,
@@ -1345,15 +1379,15 @@ impl LowerCtx {
             }
         };
 
+        let known_dims = in_map.known_dims();
+        let input_ref = Self::pointwise_input_ref(&in_map);
+
         let base_id = self.nano.push_group(
             in_map.count,
             scalar_op,
             in_map.sym_dims.clone(),
             vec![],
-            vec![InputRef::Affine {
-                base: in_map.base_id,
-                stride: 1,
-            }],
+            vec![input_ref],
         );
 
         self.tensor_map.insert(
@@ -1363,7 +1397,7 @@ impl LowerCtx {
                 in_map.count,
                 dt,
                 in_map.layout.clone(),
-                in_map.known_strides.clone(),
+                TensorAtomMap::compute_strides(&known_dims),
                 in_map.sym_dims.clone(),
             ),
         );
@@ -1395,6 +1429,9 @@ impl LowerCtx {
             vec![],
         );
 
+        let known_dims = in_map.known_dims();
+        let input_ref = Self::pointwise_input_ref(&in_map);
+
         let base_id = self.nano.push_group(
             in_map.count,
             ScalarOp::Binary {
@@ -1405,10 +1442,7 @@ impl LowerCtx {
             in_map.sym_dims.clone(),
             vec![],
             vec![
-                InputRef::Affine {
-                    base: in_map.base_id,
-                    stride: 1,
-                },
+                input_ref,
                 InputRef::Broadcast(min_id),
             ],
         );
@@ -1420,7 +1454,7 @@ impl LowerCtx {
                 in_map.count,
                 dt,
                 in_map.layout.clone(),
-                in_map.known_strides.clone(),
+                TensorAtomMap::compute_strides(&known_dims),
                 in_map.sym_dims.clone(),
             ),
         );
@@ -1457,6 +1491,9 @@ impl LowerCtx {
         }
 
         // Dtype differs — emit an Identity group for the cast.
+        let known_dims = in_map.known_dims();
+        let input_ref = Self::pointwise_input_ref(&in_map);
+
         let base_id = self.nano.push_group(
             in_map.count,
             ScalarOp::Identity {
@@ -1465,12 +1502,10 @@ impl LowerCtx {
             },
             in_map.sym_dims.clone(),
             vec![],
-            vec![InputRef::Affine {
-                base: in_map.base_id,
-                stride: 1,
-            }],
+            vec![input_ref],
         );
 
+        // The output has freshly allocated atoms in row-major order.
         self.tensor_map.insert(
             out_id,
             TensorAtomMap::simple(
@@ -1478,7 +1513,7 @@ impl LowerCtx {
                 in_map.count,
                 out_dt,
                 in_map.layout.clone(),
-                in_map.known_strides.clone(),
+                TensorAtomMap::compute_strides(&known_dims),
                 in_map.sym_dims.clone(),
             ),
         );
@@ -2713,6 +2748,7 @@ impl LowerCtx {
             };
             let count = count.max(1);
             let dt = out_info.dtype();
+            let input_ref = Self::pointwise_input_ref(&in_map);
             let base_id = self.nano.push_group(
                 count,
                 ScalarOp::Identity {
@@ -2721,10 +2757,7 @@ impl LowerCtx {
                 },
                 sym_dims.clone(),
                 vec![],
-                vec![InputRef::Affine {
-                    base: in_map.base_id,
-                    stride: 1,
-                }],
+                vec![input_ref],
             );
             self.tensor_map.insert(
                 out_id,
